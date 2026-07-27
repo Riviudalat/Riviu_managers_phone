@@ -1,0 +1,10 @@
+{
+  "displayName": "Riviumanagersphone",
+  "bundleId": "com.riviu.managersphone.agent",
+  "ipa": "Riviumanagersphone.ipa",
+  "protocol": {
+    "wdaPort": 8100,
+    "mjpegPort": 9100,
+    "note": "Branding only \u2014 WebDriverAgent HTTP/MJPEG protocol unchanged"
+  }
+}

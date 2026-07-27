@@ -1,0 +1,37 @@
+[package]
+name = "riviu-managers-phone"
+version = "0.1.0"
+description = "Riviumanagersphone — iPhone device farm"
+authors = ["Riviu"]
+edition = "2021"
+rust-version = "1.77.2"
+default-run = "riviu-managers-phone"
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+serde_json = { workspace = true }
+serde = { workspace = true }
+log = "0.4"
+tauri = { version = "2.11.3", features = [] }
+tauri-plugin-log = "2"
+tauri-plugin-dialog = "2"
+tokio = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+base64 = { workspace = true }
+dirs = { workspace = true }
+parking_lot = { workspace = true }
+riviu-core = { workspace = true }
+riviu-ios-driver = { workspace = true }
+riviu-signing = { workspace = true }
+riviu-script-engine = { workspace = true }
+
+[features]
+default = []

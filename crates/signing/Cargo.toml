@@ -1,0 +1,16 @@
+[package]
+name = "riviu-signing"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+riviu-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+keyring = "3"
+async-trait = "0.1"

@@ -1,0 +1,17 @@
+/target
+**/*.rs.bk
+.DS_Store
+apps/desktop/dist
+apps/desktop/src-tauri/target
+apps/desktop/node_modules
+*.db
+.idea
+.vscode
+.claude/
+*.db-journal
+.env
+.env.*
+sidecars/wda/DerivedData/
+sidecars/wda/build_payload/
+**/xcuserdata/
+**/*.xcuserstate
