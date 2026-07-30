@@ -7,8 +7,11 @@ use uuid::Uuid;
 
 use crate::types::{JobRecord, JobStatus, JobStepRecord, StepStatus};
 
+mod flow_runs;
 mod flows;
 mod migrations;
+
+pub use flow_runs::{AttemptTransitionPatch, FlowStateConflict};
 
 pub struct Database {
     path: PathBuf,

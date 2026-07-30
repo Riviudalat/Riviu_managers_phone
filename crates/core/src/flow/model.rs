@@ -301,6 +301,183 @@ pub struct FlowArtifactRecord {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "camelCase")]
+pub enum FlowAttemptState {
+    Queued,
+    IntentCommitted,
+    EffectDispatched,
+    Verifying,
+    Succeeded,
+    FailedBeforeDispatch,
+    FailedVerified,
+    Uncertain,
+    Cancelled,
+    Interrupted,
+}
+
+impl FlowAttemptState {
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded
+                | Self::FailedBeforeDispatch
+                | Self::FailedVerified
+                | Self::Uncertain
+                | Self::Cancelled
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "camelCase")]
+pub enum FlowAggregateState {
+    Queued,
+    Running,
+    Succeeded,
+    Partial,
+    Failed,
+    Cancelled,
+}
+
+impl FlowAggregateState {
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Partial | Self::Failed | Self::Cancelled
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "camelCase")]
+pub enum FlowDeviceRunState {
+    Queued,
+    Preflight,
+    Running,
+    Succeeded,
+    Failed,
+    Skipped,
+    Cancelled,
+}
+
+impl FlowDeviceRunState {
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Skipped | Self::Cancelled
+        )
+    }
+
+    pub fn is_success(self) -> bool {
+        self == Self::Succeeded
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "camelCase", deny_unknown_fields)]
+pub enum FlowTargetSelection {
+    One { udid: String },
+    Selected { udids: Vec<String> },
+    AllEligible,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FlowSelectionSnapshot {
+    pub requested: FlowTargetSelection,
+    pub target_udids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FlowErrorRecord {
+    pub code: String,
+    pub message: String,
+    pub node_id: Option<NodeId>,
+    pub field: Option<String>,
+    pub udid: Option<String>,
+    pub attempt_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FlowContextReleaseProof {
+    pub udid: String,
+    pub owner: crate::DeviceWorkOwner,
+    pub had_session: bool,
+    pub had_stream: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FlowRunRecord {
+    pub id: Uuid,
+    pub flow_id: FlowId,
+    pub flow_revision: u64,
+    pub plan_sha256: String,
+    pub selection: FlowSelectionSnapshot,
+    pub state: FlowAggregateState,
+    pub event_revision: u64,
+    pub error: Option<FlowErrorRecord>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FlowDeviceRunRecord {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub udid: String,
+    pub state: FlowDeviceRunState,
+    pub capability_snapshot: Option<crate::DeviceCapabilitySnapshot>,
+    pub release_proof: Option<FlowContextReleaseProof>,
+    pub error: Option<FlowErrorRecord>,
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FlowNodeAttemptRecord {
+    pub id: Uuid,
+    pub device_run_id: Uuid,
+    pub node_id: NodeId,
+    pub action_kind: ActionKind,
+    pub attempt_no: u32,
+    pub side_effect_class: SideEffectClass,
+    pub state: FlowAttemptState,
+    pub canonical_input: Option<Value>,
+    pub evidence_baseline: Option<Value>,
+    pub evidence_result: Option<Value>,
+    pub retry_allowed: bool,
+    pub error: Option<FlowErrorRecord>,
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FlowEventRecord {
+    pub id: i64,
+    pub run_id: Uuid,
+    pub revision: u64,
+    pub kind: String,
+    pub payload: Value,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FlowRunDetail {
+    pub run: FlowRunRecord,
+    pub device_runs: Vec<FlowDeviceRunRecord>,
+    pub attempts: Vec<FlowNodeAttemptRecord>,
+    pub artifacts: Vec<FlowArtifactRecord>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, thiserror::Error)]
 #[serde(rename_all = "camelCase")]
 #[error("expected revision {expected}, actual revision {actual}")]

@@ -407,7 +407,7 @@ fn validate_generated_relative_path(
     artifact_id: Uuid,
     expected_attempt_id: Option<Uuid>,
     kind: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(Uuid, Uuid, Uuid)> {
     ensure!(!relative.is_absolute(), "artifact path must be relative");
     let components = relative
         .components()
@@ -461,6 +461,23 @@ fn validate_generated_relative_path(
     ensure!(
         components[3] == format!("{artifact_id}.{expected_extension}"),
         "artifact file name is not canonical"
+    );
+    Ok((run_id, device_run_id, attempt_id))
+}
+
+pub(crate) fn validate_artifact_record_relative_path(
+    relative: &str,
+    run_id: Uuid,
+    device_run_id: Uuid,
+    attempt_id: Uuid,
+    artifact_id: Uuid,
+    kind: &str,
+) -> anyhow::Result<()> {
+    let observed =
+        validate_generated_relative_path(Path::new(relative), artifact_id, Some(attempt_id), kind)?;
+    ensure!(
+        observed == (run_id, device_run_id, attempt_id),
+        "artifact path ownership mismatch"
     );
     Ok(())
 }

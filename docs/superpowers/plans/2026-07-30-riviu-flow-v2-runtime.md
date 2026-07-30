@@ -332,7 +332,7 @@ git commit -m "feat(flow): publish contained crash-consistent artifacts"
 - Modify: `crates/core/src/flow/model.rs`
 - Test: `crates/core/src/db/flow_runs.rs`
 
-- [ ] **Step 1: Write transition tests**
+- [x] **Step 1: Write transition tests**
 
 Test run creation with exact selection snapshot, independent device states, the full legal attempt transition graph, rejection of skipped transitions, commit of `IntentCommitted` before `EffectDispatched`, atomic artifact-row plus `Succeeded`, monotonic event revisions, and startup classification of every nonterminal state.
 
@@ -353,6 +353,7 @@ fn an_attempt_cannot_skip_the_committed_intent_boundary() {
         FlowAttemptState::IntentCommitted,
         AttemptTransitionPatch {
             canonical_input: Some(serde_json::json!({"point":{"x":10,"y":20}})),
+            evidence_baseline: Some(serde_json::json!({"kind":"none"})),
             ..Default::default()
         },
     ).expect("commit intent");
@@ -360,7 +361,7 @@ fn an_attempt_cannot_skip_the_committed_intent_boundary() {
 }
 ```
 
-- [ ] **Step 2: Run tests red**
+- [x] **Step 2: Run tests red**
 
 ```powershell
 cargo test -p riviu-core db::flow_runs -- --nocapture
@@ -368,7 +369,7 @@ cargo test -p riviu-core db::flow_runs -- --nocapture
 
 Expected: FAIL because run projections and repository operations are absent.
 
-- [ ] **Step 3: Add durable enums and projections**
+- [x] **Step 3: Add durable enums and projections**
 
 Add exact serde camelCase enums to `model.rs`:
 
@@ -526,10 +527,11 @@ Add `is_terminal()` to attempt/device/aggregate states and `is_success()` to
 `FlowDeviceRunState`; the F3 integration test uses those methods. Store enums with
 their serde camelCase spelling exactly as migration 2's `CHECK` values.
 
-- [ ] **Step 4: Implement repository transitions**
+- [x] **Step 4: Implement repository transitions**
 
 In `flow_runs.rs`, implement `create_flow_run`, `create_flow_device_run`,
-`create_flow_attempt`, `list_flow_runs`, `get_flow_run`, `transition_attempt`,
+`transition_flow_device_run`, `create_flow_attempt`, `list_flow_runs`,
+`get_flow_run`, `transition_attempt`,
 `record_nonterminal_attempt_error`,
 `publish_artifact_and_succeed`, `record_retry_safe_reconciliation`,
 `mark_device_terminal`, `recompute_run_projection`, and `load_nonterminal_attempts`.
@@ -562,6 +564,13 @@ signature contract, not a semicolon-only Rust `impl`:
         &self,
         run_id: uuid::Uuid,
         udid: &str,
+    ) -> anyhow::Result<FlowDeviceRunRecord>;
+    pub fn transition_flow_device_run(
+        &self,
+        device_run_id: uuid::Uuid,
+        expected: FlowDeviceRunState,
+        next: FlowDeviceRunState,
+        capability_snapshot: Option<DeviceCapabilitySnapshot>,
     ) -> anyhow::Result<FlowDeviceRunRecord>;
     pub fn create_flow_attempt(
         &self,
@@ -610,6 +619,12 @@ signature contract, not a semicolon-only Rust `impl`:
     pub fn load_nonterminal_attempts(&self) -> anyhow::Result<Vec<FlowNodeAttemptRecord>>;
 ```
 
+`transition_flow_device_run` accepts only `Queued -> Preflight` without a
+snapshot and `Preflight -> Running` with a snapshot. The transition and exact
+capability snapshot are persisted with the event before action execution starts.
+Initial attempt creation and every effect boundary require that persisted Running
+state and snapshot. Frozen target UDIDs use canonical lexical order.
+
 Validate list limits as 1..=200. Every mutating transaction increments the parent
 run event_revision and inserts its flow_events row before commit. Implement
 append_flow_event as a private helper receiving the current rusqlite Transaction;
@@ -618,6 +633,15 @@ Generic transitions never write retry_safe. record_retry_safe_reconciliation acc
 only an idempotentSet attempt already in failedVerified, persists the re-read proof,
 sets retry_safe=1, and appends the event in the same transaction. Artifact publication
 requires artifact.attempt_id to equal its argument and Verifying to be the current state.
+Its relative path must also match the canonical run/device/attempt/artifact ownership
+tuple. Success evidence is bound to the committed process PID or frame
+generation/baseline hash, not only to the compiled postcondition kind.
+`FailedVerified` requires a typed `FlowErrorRecord` bound to the exact attempt; if a
+mismatch result is also stored, it must use the exact evidence envelope, the compiled
+postcondition kind, and `matched=false`; its target/baseline/locator must remain bound
+and its measurement must actually fail the postcondition. Read-back rejects a terminal
+verified failure whose bound diagnostic disappeared or whose proof merely claims a
+mismatch over a successful measurement.
 `record_nonterminal_attempt_error` performs a guarded same-state update only for
 `IntentCommitted`, `EffectDispatched`, or `Verifying`, increments the event revision,
 and never makes a retry decision. It exists so an infrastructure failure can be
@@ -651,7 +675,7 @@ fn legal_transition(from: FlowAttemptState, to: FlowAttemptState) -> bool {
 }
 ```
 
-`transition_attempt` additionally receives `SideEffectClass`. It permits
+`transition_attempt` derives the pinned `SideEffectClass` from the immutable plan. It permits
 `Interrupted` from dispatched/verifying states only for `SideEffectClass::None`;
 it likewise permits `Cancelled` from those states only for `SideEffectClass::None`;
 otherwise cancellation or restart must persist `Uncertain`. It permits
@@ -663,8 +687,19 @@ device succeeded and every other device is `Succeeded` or `Skipped`; `Partial` w
 at least one succeeded and another failed/cancelled; `Cancelled` when every
 non-skipped device cancelled; otherwise terminal `Failed`. `Skipped` never hides a
 failure and a run with zero non-skipped devices is `Failed` with `NoEligibleDevice`.
+Only an unattempted `Queued` or `Preflight` device from an `AllEligible` selection may
+become `Skipped`; a selected, running, or previously attempted device may not.
+Device failure may retain Queued successor attempts for a later single-device retry,
+but no active attempt may survive release on any terminal device. Device success requires a qualified
+Running snapshot and the latest attempt for every compiled node to be Succeeded.
+Any device error carrying an attempt ID must identify the latest terminal failed
+attempt for that node. Retry reopening requires a Failed device whose persisted error
+identifies the exact retryable attempt. Read paths and recompute validate canonical
+plan bytes, the revision hash, a contiguous event ledger, full release proofs, attempt
+attribution, skipped-device rules, terminal attempt inactivity, artifact ownership,
+and evidence before publishing an aggregate state or returning startup recovery work.
 
-- [ ] **Step 5: Run tests and commit**
+- [x] **Step 5: Run tests and commit**
 
 ```powershell
 cargo fmt --all

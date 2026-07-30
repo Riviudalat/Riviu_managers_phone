@@ -803,6 +803,63 @@ idempotent va startup reconcile stale staging, missing/hash mismatch cung orphan
 `.quarantine`. `FlowArtifactRecord` nam trong model dung chung de Task 3 ghi DB cung
 mot type, khong tao projection artifact thu hai.
 
+F1.3 da implement durable run repository trong `crates/core/src/db/flow_runs.rs`.
+Moi mutation run/device/attempt/artifact mo mot `IMMEDIATE` transaction rieng, tang
+`flow_runs.event_revision` va chen `flow_events` trong cung transaction. `get_flow_run`
+doc run/device/attempt/artifact trong mot deferred snapshot de khong tra projection
+bi rach. Read-back recompute plan hash, doi chieu exact compiled node/action/side
+effect, canonical raw `compiled_json`, revision-row hash va event ledger lien tuc
+`1..=event_revision`; DB drift phai fail closed. Frozen `target_udids` luon sort
+lexicographic. Tap/Swipe/Type Text sau dispatch chi duoc
+`Uncertain`, tru khi exact proof cho thay request chua toi device.
+Device run chi di `Queued -> Preflight` khi chua co snapshot, sau do
+`Preflight -> Running` khi capability snapshot da duoc persist cung event. Attempt
+dau tien va moi effect boundary chi duoc qua khi device dang `Running` voi snapshot.
+
+Khong bypass cac durable boundary sau:
+
+- `Queued -> IntentCommitted` bat buoc ghi canonical input va typed baseline; hai
+  field nay bat bien neu attempt read-only duoc `Interrupted -> Queued` de reclaim.
+- Evidence thanh cong chi duoc ghi moi tai `Verifying -> Succeeded`, phai co exact
+  envelope `kind/matched/observedSha256/measurement`, `matched=true`, dung kind va
+  identity/threshold cua compiled postcondition. Process proof phai bind `oldPid`
+  vao process baseline; frame proof phai bind exact `generation` + `baselineSha256`.
+  Screenshot khong di qua transition generic: chi `publish_artifact_and_succeed`
+  duoc chen artifact row + `Succeeded` atomic; path phai la exact canonical
+  `run/device/attempt/artifact.ext`, label/format/hash phai khop compiled Screenshot.
+- `Verifying -> FailedVerified` bat buoc co typed `FlowErrorRecord` mang exact
+  `attemptId`; read-back thieu diagnostic nay phai fail closed. Neu cung luu evidence
+  thi envelope phai dung compiled postcondition, `matched=false`, bind exact
+  baseline/locator/target va measurement phai thuc su khong dat postcondition; khong
+  duoc chi tu khai false tren mot proof dang thanh cong.
+- Proof transport non-delivery la exact JSON
+  `{"kind":"transportNonDelivery","requestReachedDevice":false}`. Khong them key,
+  khong suy tu timeout/ACK.
+- Baseline JSON release-1 la exact typed object: `none` chi co `kind`; `process` co
+  `kind,bundleId,pid` (`pid` null hoac so duong); `frame` co
+  `kind,generation,jpegSha256,imageWidth,imageHeight,rgbBase64`, trong do RGB decode
+  phai dung `width*height*3`. Doi schema nay phai doi repository + verifier + test
+  cung luc, khong de runtime tu tao Value khac contract.
+- `retry_safe` chi tu 0 thanh 1 mot lan cho `failedVerified` + `idempotentSet`, bang
+  proof read-back `matched=false` dung compiled target. Terminate bat buoc exact
+  bundle va post-PID = pre-effect PID da commit; proof duoc ghi cung event. Retry tao
+  attempt number ke tiep; `create_flow_attempt` chi reopen sau khi attempt truoc
+  thuc su `retryAllowed`, device dang `Failed`, error cua device tro dung attempt do,
+  va release proof owner `Script` da duoc persist. Release proof cu nam trong
+  `deviceRunTerminal` event truoc khi row projection duoc clear de reopen.
+- Run projection chi duoc recompute khi tap device row khop exact frozen target
+  snapshot. Thieu mot device khong duoc bao `Succeeded`; zero non-skipped la
+  `Failed/NoEligibleDevice`. Device terminal bat buoc co release proof owner `Script`
+  va khong con attempt active; successor `Queued` duoc giu lai de retry tiep tuc.
+  Rieng `Succeeded` chi tu device `Running` co snapshot, khong con successor, va
+  latest attempt cua moi compiled node deu `Succeeded`. Error co `attemptId` phai
+  tro dung terminal failed attempt **moi nhat cua node** tren chinh device. `Skipped`
+  chi hop le cho selection `AllEligible`, khi device con `Queued`/`Preflight` va chua
+  co attempt; khong duoc doi device `Running` thanh skipped de che loi. Recompute doc
+  full projection, khong doc rieng raw state. `get_flow_run`, recompute va startup
+  loader deu phai mirror cac guard nay; moi device terminal deu cam attempt active
+  con sot lai.
+
 DB da co transaction migration runner trong `crates/core/src/db/migrations.rs`.
 `schema_migrations` version 1 ghi nhan exact pre-Flow schema; version 2 tao bay bang
 Flow va cac index. DB legacy khong co ledger chi duoc bootstrap khi rong hoac khop
