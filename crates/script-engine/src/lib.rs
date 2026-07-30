@@ -1,5 +1,8 @@
 //! JSON automation script parse / validate / helpers.
 
+pub mod flow;
+pub use flow::*;
+
 use riviu_core::AutomationScript;
 use thiserror::Error;
 
