@@ -6,6 +6,7 @@ pub mod device_control;
 pub mod device_work;
 pub mod driver;
 pub mod events;
+pub mod flow;
 pub mod frame_source;
 pub mod human_behavior;
 pub mod job_queue;
@@ -34,6 +35,7 @@ pub use driver::{
     UnsupportedCapability,
 };
 pub use events::{AppEvent, EventBus};
+pub use flow::*;
 pub use frame_source::{Frame, FrameSource, FrameStream, NullFrameSource};
 pub use job_queue::JobQueue;
 pub use nurture::NurtureEngine;
