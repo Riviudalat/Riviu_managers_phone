@@ -18,7 +18,7 @@
 - Modify: `crates/ios-driver/src/stream.rs`
 - Test: `crates/ios-driver/src/stream.rs`
 
-- [ ] **Step 1: Write failing generation tests**
+- [x] **Step 1: Write failing generation tests**
 
 Add tests proving a generation subscriber never emits a buffered frame from
 generation N after `clear_and_advance`, immediately reports the N -> N+1 advance,
@@ -44,7 +44,7 @@ async fn generation_subscription_rejects_buffered_old_frames() {
 }
 ```
 
-- [ ] **Step 2: Run tests red**
+- [x] **Step 2: Run tests red**
 
 ```powershell
 cargo test -p riviu-ios-driver stream::tests::generation -- --nocapture
@@ -52,7 +52,7 @@ cargo test -p riviu-ios-driver stream::tests::generation -- --nocapture
 
 Expected: FAIL because generation-aware traits are absent.
 
-- [ ] **Step 3: Define the generation-aware core contract**
+- [x] **Step 3: Define the generation-aware core contract**
 
 Append to `frame_source.rs`:
 
@@ -89,7 +89,7 @@ pub trait GenerationFrameSource: FrameSource {
 Export all four types from `crates/core/src/lib.rs`. Do not add a default
 implementation that falls back to unqualified `latest()`.
 
-- [ ] **Step 4: Implement StreamHub generation fan-out**
+- [x] **Step 4: Implement StreamHub generation fan-out**
 
 Add a second broadcast sender carrying a private `HubGenerationEvent` enum with
 `Frame { udid, generation, bytes }` and `Advanced { udid, generation }` variants.
@@ -182,7 +182,7 @@ latest cache. The advance marker is part of the public behavioral contract: a
 subscriber for an invalidated generation must become observable immediately even
 when no frame from the replacement stream has arrived.
 
-- [ ] **Step 5: Run tests and commit**
+- [x] **Step 5: Run tests and commit**
 
 ```powershell
 cargo fmt --all

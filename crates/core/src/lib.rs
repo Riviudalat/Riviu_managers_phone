@@ -36,7 +36,10 @@ pub use driver::{
 };
 pub use events::{AppEvent, EventBus};
 pub use flow::*;
-pub use frame_source::{Frame, FrameSource, FrameStream, NullFrameSource};
+pub use frame_source::{
+    Frame, FrameSource, FrameStream, GenerationFrame, GenerationFrameEvent, GenerationFrameSource,
+    GenerationFrameStream, NullFrameSource,
+};
 pub use job_queue::JobQueue;
 pub use nurture::NurtureEngine;
 pub use registry::DeviceRegistry;

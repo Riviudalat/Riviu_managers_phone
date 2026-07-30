@@ -4,7 +4,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use image::{ImageBuffer, Rgb};
 use parking_lot::RwLock;
-use riviu_core::{Frame, FrameSource, FrameStream};
+use riviu_core::{
+    Frame, FrameSource, FrameStream, GenerationFrame, GenerationFrameEvent, GenerationFrameSource,
+    GenerationFrameStream,
+};
 use tokio::sync::broadcast;
 
 pub fn jpeg_quality(quality: &riviu_core::StreamQuality) -> u8 {
@@ -41,6 +44,20 @@ pub fn encode_rgb_jpeg(
 pub struct StreamHub {
     state: Arc<RwLock<HubState>>,
     tx: broadcast::Sender<(String, Frame)>,
+    generation_tx: broadcast::Sender<HubGenerationEvent>,
+}
+
+#[derive(Clone)]
+enum HubGenerationEvent {
+    Frame {
+        udid: String,
+        generation: u64,
+        bytes: Frame,
+    },
+    Advanced {
+        udid: String,
+        generation: u64,
+    },
 }
 
 #[derive(Default)]
@@ -52,17 +69,25 @@ struct HubState {
 impl StreamHub {
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(256);
+        let (generation_tx, _) = broadcast::channel(256);
         Self {
             state: Arc::new(RwLock::new(HubState::default())),
             tx,
+            generation_tx,
         }
     }
 
     pub fn publish(&self, udid: &str, jpeg: Vec<u8>) {
         let frame: Frame = Arc::new(jpeg);
         let mut state = self.state.write();
+        let generation = state.generations.get(udid).copied().unwrap_or(0);
         state.latest.insert(udid.to_string(), frame.clone());
-        let _ = self.tx.send((udid.to_string(), frame));
+        let _ = self.tx.send((udid.to_string(), frame.clone()));
+        let _ = self.generation_tx.send(HubGenerationEvent::Frame {
+            udid: udid.to_string(),
+            generation,
+            bytes: frame,
+        });
     }
 
     pub(crate) fn generation(&self, udid: &str) -> u64 {
@@ -82,7 +107,12 @@ impl StreamHub {
             return false;
         }
         state.latest.insert(udid.to_string(), frame.clone());
-        let _ = self.tx.send((udid.to_string(), frame));
+        let _ = self.tx.send((udid.to_string(), frame.clone()));
+        let _ = self.generation_tx.send(HubGenerationEvent::Frame {
+            udid: udid.to_string(),
+            generation,
+            bytes: frame,
+        });
         true
     }
 
@@ -100,7 +130,12 @@ impl StreamHub {
         let generation = state.generations.entry(udid.to_string()).or_default();
         let old_generation = *generation;
         *generation = generation.checked_add(1).unwrap_or(1);
-        (old_generation, *generation)
+        let new_generation = *generation;
+        let _ = self.generation_tx.send(HubGenerationEvent::Advanced {
+            udid: udid.to_string(),
+            generation: new_generation,
+        });
+        (old_generation, new_generation)
     }
 
     /// Raw subscription to every device's frames. Prefer [`FrameSource::subscribe`]
@@ -120,6 +155,69 @@ impl Default for StreamHub {
 struct HubStream {
     udid: String,
     rx: broadcast::Receiver<(String, Frame)>,
+}
+
+struct HubGenerationStream {
+    udid: String,
+    generation: u64,
+    state: Arc<RwLock<HubState>>,
+    rx: broadcast::Receiver<HubGenerationEvent>,
+}
+
+#[async_trait]
+impl GenerationFrameStream for HubGenerationStream {
+    async fn next(&mut self) -> GenerationFrameEvent {
+        loop {
+            let actual = self
+                .state
+                .read()
+                .generations
+                .get(&self.udid)
+                .copied()
+                .unwrap_or(0);
+            if actual > self.generation {
+                return GenerationFrameEvent::Advanced {
+                    expected: self.generation,
+                    actual,
+                };
+            }
+
+            match self.rx.recv().await {
+                Ok(HubGenerationEvent::Frame {
+                    udid,
+                    generation,
+                    bytes,
+                }) if udid == self.udid && generation == self.generation => {
+                    let actual = self
+                        .state
+                        .read()
+                        .generations
+                        .get(&self.udid)
+                        .copied()
+                        .unwrap_or(0);
+                    if actual > self.generation {
+                        return GenerationFrameEvent::Advanced {
+                            expected: self.generation,
+                            actual,
+                        };
+                    }
+                    return GenerationFrameEvent::Frame(GenerationFrame { generation, bytes });
+                }
+                Ok(HubGenerationEvent::Advanced { udid, generation })
+                    if udid == self.udid && generation > self.generation =>
+                {
+                    return GenerationFrameEvent::Advanced {
+                        expected: self.generation,
+                        actual: generation,
+                    };
+                }
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => {
+                    return GenerationFrameEvent::Closed;
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -152,11 +250,95 @@ impl FrameSource for StreamHub {
     }
 }
 
+impl GenerationFrameSource for StreamHub {
+    fn subscribe_generation(&self, udid: &str, generation: u64) -> Box<dyn GenerationFrameStream> {
+        Box::new(HubGenerationStream {
+            udid: udid.to_string(),
+            generation,
+            state: self.state.clone(),
+            rx: self.generation_tx.subscribe(),
+        })
+    }
+
+    fn latest_in_generation(&self, udid: &str, generation: u64) -> Option<GenerationFrame> {
+        let state = self.state.read();
+        (state.generations.get(udid).copied().unwrap_or(0) == generation)
+            .then(|| state.latest.get(udid).cloned())
+            .flatten()
+            .map(|bytes| GenerationFrame { generation, bytes })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
+    use riviu_core::{GenerationFrameEvent, GenerationFrameSource};
+
     use super::*;
+
+    #[tokio::test]
+    async fn generation_subscription_rejects_buffered_old_frames() {
+        let hub = StreamHub::new();
+        let old = hub.generation("fixture");
+        let mut old_stream = hub.subscribe_generation("fixture", old);
+        assert!(hub.publish_if_current("fixture", old, vec![1, 2, 3]));
+
+        let (_, new) = hub.clear_and_advance("fixture");
+
+        assert!(hub.latest_in_generation("fixture", old).is_none());
+        assert_eq!(
+            old_stream.next().await,
+            GenerationFrameEvent::Advanced {
+                expected: old,
+                actual: new,
+            }
+        );
+        assert!(hub.publish_if_current("fixture", new, vec![9, 8, 7]));
+        let latest = hub.latest_in_generation("fixture", new).expect("new frame");
+        assert_eq!(&*latest.bytes, &[9, 8, 7]);
+    }
+
+    #[tokio::test]
+    async fn generation_subscription_reports_an_already_missed_advance() {
+        let hub = StreamHub::new();
+        let old = hub.generation("fixture");
+        let (_, new) = hub.clear_and_advance("fixture");
+        let mut old_stream = hub.subscribe_generation("fixture", old);
+
+        assert_eq!(
+            old_stream.next().await,
+            GenerationFrameEvent::Advanced {
+                expected: old,
+                actual: new,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn generation_subscription_qualifies_raw_publish_with_current_generation() {
+        let hub = StreamHub::new();
+        let generation = hub.generation("fixture");
+        let mut stream = hub.subscribe_generation("fixture", generation);
+
+        hub.publish("fixture", vec![4, 5, 6]);
+
+        let GenerationFrameEvent::Frame(frame) = stream.next().await else {
+            panic!("expected a generation-qualified frame");
+        };
+        assert_eq!(frame.generation, generation);
+        assert_eq!(&*frame.bytes, &[4, 5, 6]);
+    }
+
+    #[tokio::test]
+    async fn generation_subscription_reports_closed_instead_of_hanging() {
+        let hub = StreamHub::new();
+        let generation = hub.generation("fixture");
+        let mut stream = hub.subscribe_generation("fixture", generation);
+        drop(hub);
+
+        assert_eq!(stream.next().await, GenerationFrameEvent::Closed);
+    }
 
     #[tokio::test]
     async fn a_subscriber_only_sees_its_own_device() {

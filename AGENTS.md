@@ -784,6 +784,9 @@ ACK transport khong phai evidence. Node can frame phai reserve exact stream capa
 inject `FrameSource` va van giu session-truoc-MJPEG.
 `clear_and_advance` phai phat event generation moi; verifier generation cu fail ngay
 `StaleGeneration`, co deadline + cancellation, khong doi frame moi vo han.
+F1.1 da them `GenerationFrameSource`/`GenerationFrameStream` trong core va fan-out
+rieng trong `StreamHub`: frame chi duoc tra khi dung exact generation; subscriber cu
+nhan `Advanced` ngay ca khi con frame buffered, hub dong tra `Closed` thay vi treo.
 Flow Screenshot phai publish frame tu exact owned stream generation + hash artifact,
 khong goi WDA `GET /screenshot`.
 

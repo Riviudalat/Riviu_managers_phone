@@ -40,6 +40,33 @@ pub trait FrameSource: Send + Sync {
     fn latest(&self, udid: &str) -> Option<Frame>;
 }
 
+/// One frame qualified by the exact stream generation that produced it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenerationFrame {
+    pub generation: u64,
+    pub bytes: Frame,
+}
+
+/// Observable outcome from a generation-qualified stream subscription.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GenerationFrameEvent {
+    Frame(GenerationFrame),
+    Advanced { expected: u64, actual: u64 },
+    Closed,
+}
+
+#[async_trait]
+pub trait GenerationFrameStream: Send {
+    async fn next(&mut self) -> GenerationFrameEvent;
+}
+
+/// Generation-qualified access for evidence that must not cross a stream restart.
+pub trait GenerationFrameSource: FrameSource {
+    fn subscribe_generation(&self, udid: &str, generation: u64) -> Box<dyn GenerationFrameStream>;
+
+    fn latest_in_generation(&self, udid: &str, generation: u64) -> Option<GenerationFrame>;
+}
+
 /// A source that never produces frames — used when no stream is available so
 /// callers can degrade instead of branching on `Option<Arc<dyn FrameSource>>`.
 pub struct NullFrameSource;
