@@ -1,6 +1,8 @@
+pub mod artifact_store;
 pub mod catalog;
 pub mod model;
 
+pub use artifact_store::*;
 pub use catalog::*;
 pub use model::*;
 

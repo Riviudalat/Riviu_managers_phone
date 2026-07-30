@@ -288,6 +288,19 @@ pub struct FlowRevisionRecord {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowArtifactRecord {
+    pub id: Uuid,
+    pub attempt_id: Uuid,
+    pub relative_path: String,
+    pub label: String,
+    pub kind: String,
+    pub size: u64,
+    pub sha256: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, thiserror::Error)]
 #[serde(rename_all = "camelCase")]
 #[error("expected revision {expected}, actual revision {actual}")]

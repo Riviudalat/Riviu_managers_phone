@@ -796,6 +796,12 @@ reconcile thanh proved success/proved non-delivery/`Uncertain`. Khong retry
 temp -> validate/hash -> atomic rename -> DB transaction va reconcile orphan khi mo
 app. Flow shutdown phai stop + join het worker truoc
 `DeviceControlPlane::shutdown_cleanup()`.
+F1.2 da implement `FlowArtifactStore`: label chi la metadata, path gom bon thanh
+phan UUID canonical; staging va final deu nam trong mot root da canonicalize. Store
+kiem exact JPEG/PNG decode, `sync_all` file staging, hash/size truoc rename, rollback
+idempotent va startup reconcile stale staging, missing/hash mismatch cung orphan vao
+`.quarantine`. `FlowArtifactRecord` nam trong model dung chung de Task 3 ghi DB cung
+mot type, khong tao projection artifact thu hai.
 
 DB da co transaction migration runner trong `crates/core/src/db/migrations.rs`.
 `schema_migrations` version 1 ghi nhan exact pre-Flow schema; version 2 tao bay bang

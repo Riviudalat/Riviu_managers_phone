@@ -201,7 +201,7 @@ Expected: old-generation frames are never observable through the Flow contract.
 - Modify: `crates/core/src/flow/mod.rs`
 - Test: `crates/core/src/flow/artifact_store.rs`
 
-- [ ] **Step 1: Write failing containment and failpoint tests**
+- [x] **Step 1: Write failing containment and failpoint tests**
 
 Cover labels `../x`, `a/b`, `CON`, control bytes, and unsupported extensions. Cover valid JPEG/PNG decode, hash/size, temp-file cleanup, rename success, simulated DB rejection cleanup, stale temp cleanup, orphan final quarantine, and missing/hash-mismatched committed files.
 
@@ -236,7 +236,7 @@ fn artifact_labels_never_become_paths() {
 }
 ```
 
-- [ ] **Step 2: Run tests red**
+- [x] **Step 2: Run tests red**
 
 ```powershell
 cargo test -p riviu-core flow::artifact_store -- --nocapture
@@ -244,7 +244,7 @@ cargo test -p riviu-core flow::artifact_store -- --nocapture
 
 Expected: FAIL because `FlowArtifactStore` is absent.
 
-- [ ] **Step 3: Add artifact types**
+- [x] **Step 3: Add artifact types**
 
 Reuse the `sha2` dependency added by F0. Define:
 
@@ -268,7 +268,7 @@ pub struct FlowArtifactStore {
 }
 ```
 
-- [ ] **Step 4: Implement prepare, publish, rollback, and reconcile**
+- [x] **Step 4: Implement prepare, publish, rollback, and reconcile**
 
 `prepare_image(run_id, device_run_id, attempt_id, label, bytes)` must create
 `<root>/.staging/<uuid>.tmp`, write and `sync_all`, decode with
@@ -315,7 +315,7 @@ successful itself.
 
 Use canonicalized parent checks before every rename/remove; no method accepts an absolute destination or a user label.
 
-- [ ] **Step 5: Run tests and commit**
+- [x] **Step 5: Run tests and commit**
 
 ```powershell
 cargo fmt --all
