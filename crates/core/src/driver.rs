@@ -1,7 +1,24 @@
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 
+use thiserror::Error;
+
+use crate::device_capabilities::{
+    validate_clipboard_read_limit, AgentInstallProof, DeviceCapabilitySnapshot,
+};
+use crate::stream_budget::StreamStopProof;
+use crate::types::{ActiveAppIdentity, InteractionSessionKind, StreamStartProof};
 use crate::types::{DeviceInfo, SwipeGesture, TapPoint};
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("capability {capability} is not supported by this driver")]
+pub struct UnsupportedCapability {
+    pub capability: &'static str,
+}
+
+fn unsupported<T>(capability: &'static str) -> anyhow::Result<T> {
+    Err(UnsupportedCapability { capability }.into())
+}
 
 /// Why a UI command failed. The nurture engine's recovery ladder turns on this
 /// distinction: a rejected command means the runner is alive and only the
@@ -78,6 +95,29 @@ pub fn ui_error_kind(err: &anyhow::Error) -> UiErrorKind {
 
 #[async_trait]
 pub trait DeviceDriver: Send + Sync {
+    async fn inspect_interaction_device(
+        &self,
+        _udid: &str,
+    ) -> anyhow::Result<DeviceCapabilitySnapshot> {
+        unsupported("inspectInteractionDevice")
+    }
+    async fn repair_agent_install_only(&self, _udid: &str) -> anyhow::Result<AgentInstallProof> {
+        unsupported("repairAgentInstallOnly")
+    }
+    async fn stop_owned_stream(&self, _udid: &str) -> anyhow::Result<StreamStopProof> {
+        unsupported("stopOwnedStream")
+    }
+    async fn start_stream_after_session(&self, _udid: &str) -> anyhow::Result<StreamStartProof> {
+        unsupported("startStreamAfterSession")
+    }
+    async fn start_interaction_session(
+        &self,
+        _udid: &str,
+        _bundle_id: &str,
+        _kind: InteractionSessionKind,
+    ) -> anyhow::Result<Box<dyn UiSession>> {
+        unsupported("startInteractionSession")
+    }
     async fn list_devices(&self) -> anyhow::Result<Vec<DeviceInfo>>;
     async fn refresh_device(&self, udid: &str) -> anyhow::Result<DeviceInfo>;
     async fn install_app(&self, udid: &str, path: &Path) -> anyhow::Result<()>;
@@ -166,6 +206,22 @@ pub trait UiSession: Send + Sync {
     /// Bundle id of the frontmost app (`GET /wda/activeAppInfo`). Default: unsupported.
     async fn active_app_bundle(&self) -> anyhow::Result<String> {
         anyhow::bail!("active_app_bundle not supported")
+    }
+    async fn open_url(&self, _url: &str) -> anyhow::Result<()> {
+        unsupported("openUrl")
+    }
+    async fn set_clipboard(&self, _content_type: &str, _bytes: &[u8]) -> anyhow::Result<()> {
+        unsupported("setClipboard")
+    }
+    async fn get_clipboard(
+        &self,
+        maximum_decoded_bytes: usize,
+    ) -> anyhow::Result<(String, Vec<u8>)> {
+        validate_clipboard_read_limit(maximum_decoded_bytes)?;
+        unsupported("getClipboard")
+    }
+    async fn active_app_identity(&self) -> anyhow::Result<ActiveAppIdentity> {
+        unsupported("activeAppIdentity")
     }
     /// Raw screen capture via the UI channel (WDA `GET /screenshot`).
     /// Cheap (~0.3s over USB) unlike the pymobiledevice3 path.

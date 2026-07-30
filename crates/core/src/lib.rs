@@ -1,6 +1,7 @@
 //! Riviu core types, device registry, job queue, and persistence.
 
 pub mod db;
+pub mod device_capabilities;
 pub mod device_work;
 pub mod driver;
 pub mod events;
@@ -16,11 +17,14 @@ pub mod screen_watch;
 pub mod stream_budget;
 pub mod types;
 
+pub use device_capabilities::*;
 pub use device_work::{
     DeviceBusy, DeviceWorkAcquireError, DeviceWorkCoordinator, DeviceWorkLease, DeviceWorkOwner,
     DeviceWorkTokenError,
 };
-pub use driver::{ui_error_kind, DeviceDriver, UiError, UiErrorKind, UiSession};
+pub use driver::{
+    ui_error_kind, DeviceDriver, UiError, UiErrorKind, UiSession, UnsupportedCapability,
+};
 pub use events::{AppEvent, EventBus};
 pub use frame_source::{Frame, FrameSource, FrameStream, NullFrameSource};
 pub use job_queue::JobQueue;
@@ -30,6 +34,6 @@ pub use screen::{ScreenKind, ScreenObservation};
 pub use screen_watch::{ScreenWatcher, WatchStats};
 pub use stream_budget::{
     BackgroundStreamLease, ForegroundStreamReservation, ForegroundTransfer, StreamBudgetError,
-    StreamBudgetManager, StreamStopProof, StreamStopRequest,
+    StreamBudgetManager, StreamStopRequest,
 };
 pub use types::*;

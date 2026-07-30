@@ -4,6 +4,28 @@ use uuid::Uuid;
 
 pub const STREAM_FPS: u32 = 24;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum InteractionSessionKind {
+    Ordinary,
+    FreshText,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveAppIdentity {
+    pub bundle_id: String,
+    pub pid: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamStartProof {
+    pub generation: u64,
+    pub first_frame_observed: bool,
+    pub stream_url: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ConnectionKind {
