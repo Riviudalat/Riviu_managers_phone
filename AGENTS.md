@@ -859,10 +859,19 @@ orientation; runtime mismatch phai fail truoc dispatch. Terminate App nam ngoai
 catalog o F0, roi duoc bat trong F1 sau khi bounded DVT terminate, read-only process
 query, exact bundle proof, Python contract test va Rust ownership/integration test deu
 PASS. Legacy va Flow deu phai di qua cung `DeviceControlPlane` lock theo UDID; recovery
-chi `ReadProcess`, khong kill lai de doan retry. F0.1 model/catalog, F0.2 compiler,
-F0.3 legacy importer va F0.4 migration runner da commit; F0.5 immutable revisions da
-co optimistic/concurrency/integrity tests. Buoc tiep theo la F0.6 full foundation
-gate; runtime F1 chua duoc bat.
+chi `ReadProcess`, khong kill lai de doan retry.
+
+Foundation F0 da dong ngay 30/07/2026. Source/verification commit range bao gom tu
+`c5308d3c3878b0e40f8de925ad5fe3de632e1f08` through
+`e98da9c880a23082bf51379516c155d615df99f4`; rollback van la
+`805056790d890046384ad7a578cc34a99088e799`, khong day baseline theo implementation.
+Gate da PASS `cargo fmt --all -- --check`, `cargo test --workspace` (377 passed,
+1 ignored fixture writer), `cargo clippy --workspace --all-targets -- -D warnings`
+va `git diff --check`. F0 van cam `Terminate`, moi TikTok/domain node va moi Flow
+runtime/device dispatch; catalog chi co foundation release-1 da kiem chung. Gate tiep
+theo la F1 tai
+`docs/superpowers/plans/2026-07-30-riviu-flow-v2-runtime.md`; khong bat F2/F3 truoc
+khi F1 co checkpoint rieng.
 
 Projection attempt co `retryAllowed` do backend tinh tu durable state va proof
 reconciler. Frontend chi an/hien nut theo field nay; khong tu suy retry tu action

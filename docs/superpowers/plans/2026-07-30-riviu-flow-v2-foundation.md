@@ -19,7 +19,7 @@
 - Modify: `crates/core/src/lib.rs`
 - Modify: `crates/core/Cargo.toml`
 
-- [ ] **Step 1: Write serialization and catalog tests**
+- [x] **Step 1: Write serialization and catalog tests**
 
 Create `crates/core/src/flow/mod.rs` with the module declarations and these tests:
 
@@ -73,7 +73,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run:
 
@@ -83,7 +83,7 @@ cargo test -p riviu-core flow::tests -- --nocapture
 
 Expected: FAIL because `flow`, `FlowDocumentV2`, and the catalog types do not exist.
 
-- [ ] **Step 3: Implement the model**
+- [x] **Step 3: Implement the model**
 
 Add `sha2 = { workspace = true }` to `crates/core/Cargo.toml`. Create
 `crates/core/src/flow/model.rs` with these public types and derives:
@@ -468,7 +468,7 @@ Add a test with a complete `DeviceCapabilitySnapshot`: the same snapshot hashes
 identically twice; changing target app build, iOS version, orientation, or one
 pixel dimension changes the hash; absent/non-finite geometry returns an error.
 
-- [ ] **Step 4: Implement the release-1 catalog**
+- [x] **Step 4: Implement the release-1 catalog**
 
 Create `crates/core/src/flow/catalog.rs`. Define `ActionDefinition` with `kind`,
 `schema_version`, `label`, backend-owned `disabled_reason`, `category`,
@@ -693,7 +693,7 @@ pub fn contracts(kind: ActionKind) -> (ResourceClass, SideEffectClass, EvidenceR
 }
 ```
 
-- [ ] **Step 5: Export Flow types and run the tests**
+- [x] **Step 5: Export Flow types and run the tests**
 
 Add `pub mod flow;` and `pub use flow::*;` to `crates/core/src/lib.rs`.
 
@@ -706,7 +706,7 @@ cargo test -p riviu-core flow::tests -- --nocapture
 
 Expected: 4 passed, 0 failed.
 
-- [ ] **Step 6: Commit Task 1**
+- [x] **Step 6: Commit Task 1**
 
 ```powershell
 git add crates/core/Cargo.toml crates/core/src/flow crates/core/src/lib.rs
@@ -720,7 +720,7 @@ git commit -m "feat(flow): add versioned graph model and catalog"
 - Modify: `crates/script-engine/src/lib.rs`
 - Modify: `crates/script-engine/Cargo.toml`
 
-- [ ] **Step 1: Add failing compiler tests**
+- [x] **Step 1: Add failing compiler tests**
 
 In `crates/script-engine/src/flow.rs`, add tests for: valid Start -> Launch -> End; duplicate node IDs; missing End; cycle; disconnected node; invalid port; non-finite canvas/config coordinates; Wait 60,001; Tap with point and selector; XPath/predicate; missing Tap evidence; generic Tap with whole-frame digest evidence; and deterministic hashes after node/edge/layout reordering.
 
@@ -795,7 +795,7 @@ fn layout_and_input_order_do_not_change_plan_hash() {
 }
 ```
 
-- [ ] **Step 2: Run tests red**
+- [x] **Step 2: Run tests red**
 
 ```powershell
 cargo test -p riviu-script-engine flow -- --nocapture
@@ -803,7 +803,7 @@ cargo test -p riviu-script-engine flow -- --nocapture
 
 Expected: FAIL because `compile_flow` and `FlowCompileError` do not exist.
 
-- [ ] **Step 3: Add compiler dependencies and error types**
+- [x] **Step 3: Add compiler dependencies and error types**
 
 Add `sha2 = { workspace = true }` to `crates/script-engine/Cargo.toml`.
 
@@ -829,7 +829,7 @@ pub struct CompiledRevision {
 }
 ```
 
-- [ ] **Step 4: Implement validation and linear ordering**
+- [x] **Step 4: Implement validation and linear ordering**
 
 Implement `compile_flow(document: &FlowDocumentV2, catalog: &[ActionDefinition]) -> Result<CompiledRevision, Vec<FlowCompileError>>`. Validate in the design order, collect node-scoped errors, and return no plan when any error exists. Use `BTreeMap`/`BTreeSet` for identity and ordering. Require exactly one Start and End, one incoming/outgoing flow edge for executable nodes, Start with no incoming, End with no outgoing, and a walk from `entry_node_id` that visits every node exactly once.
 
@@ -903,7 +903,7 @@ uppercase/non-hex cases; for every config's unknown field; for non-object config
 and for both/neither Tap target modes. These tests are the executable proof that the
 manual backend validator and the published schema accept the same boundary values.
 
-- [ ] **Step 5: Implement evidence and context planning**
+- [x] **Step 5: Implement evidence and context planning**
 
 Validate the postcondition against the catalog's exact `allowed_evidence` list. In
 particular, reject whole-frame digest, accessibility lookup, and qualified predicates
@@ -950,7 +950,7 @@ as Wait or Terminate does not need Launch; Terminate carries its own exact bundl
 Later Launch nodes may foreground another app only after the context is already
 upgraded.
 
-- [ ] **Step 6: Use shared canonical serialization and hashing**
+- [x] **Step 6: Use shared canonical serialization and hashing**
 
 Call F0 Task 1's `canonical_compiled_plan_json` and `compiled_plan_sha256`; do not
 create a second canonicalizer in script-engine. The canonical stored JSON contains
@@ -969,7 +969,7 @@ let sha256 = compiled_plan_sha256(&plan).map_err(|error|
 Ok(CompiledRevision { plan, canonical_json, sha256 })
 ```
 
-- [ ] **Step 7: Export and run tests green**
+- [x] **Step 7: Export and run tests green**
 
 Add `pub mod flow;` and `pub use flow::*;` to `crates/script-engine/src/lib.rs`.
 
@@ -980,7 +980,7 @@ cargo test -p riviu-script-engine flow -- --nocapture
 
 Expected: all compiler tests pass; the two layout/order variants have identical SHA-256.
 
-- [ ] **Step 8: Commit Task 2**
+- [x] **Step 8: Commit Task 2**
 
 ```powershell
 git add crates/script-engine crates/core/src/flow
@@ -993,7 +993,7 @@ git commit -m "feat(flow): compile linear graphs into deterministic plans"
 - Modify: `crates/script-engine/src/flow.rs`
 - Test: `crates/script-engine/src/flow.rs`
 
-- [ ] **Step 1: Write failing import tests**
+- [x] **Step 1: Write failing import tests**
 
 Test a supported Launch -> Wait -> Screenshot -> Home script and assert a
 straight-line graph with automatic evidence. Add separate tests asserting exact
@@ -1024,7 +1024,7 @@ fn legacy_import_accepts_only_semantics_preserving_steps() {
 }
 ```
 
-- [ ] **Step 2: Run the import tests red**
+- [x] **Step 2: Run the import tests red**
 
 ```powershell
 cargo test -p riviu-script-engine legacy_import -- --nocapture
@@ -1032,7 +1032,7 @@ cargo test -p riviu-script-engine legacy_import -- --nocapture
 
 Expected: FAIL because `import_legacy_v1` is absent.
 
-- [ ] **Step 3: Implement result and diagnostic types**
+- [x] **Step 3: Implement result and diagnostic types**
 
 ```rust
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1052,7 +1052,7 @@ pub struct LegacyImportResult {
 }
 ```
 
-- [ ] **Step 4: Implement conservative import**
+- [x] **Step 4: Implement conservative import**
 
 Map Launch to `ActiveAppEquals`, Screenshot to `ArtifactDecodedAndHashed`, and Home
 to `ActiveAppEquals { bundle_id: "com.apple.springboard" }`. Preserve Wait and
@@ -1116,7 +1116,7 @@ Use Task 1's `validate_artifact_label`, which is also reused by
 Tap/Swipe to `GeometryRequired`, Type Text to `EvidenceRequired`, and invalid
 Screenshot labels to `ArtifactLabelInvalid`.
 
-- [ ] **Step 5: Run tests and commit**
+- [x] **Step 5: Run tests and commit**
 
 ```powershell
 cargo fmt --all
@@ -1134,7 +1134,7 @@ Expected: import tests pass and unsupported shapes have stable node-scoped codes
 - Modify: `crates/core/src/db.rs`
 - Test: `crates/core/src/db/migrations.rs`
 
-- [ ] **Step 1: Write migration tests against a populated legacy database**
+- [x] **Step 1: Write migration tests against a populated legacy database**
 
 Create a fixture with the exact current tables and one row in `scripts`, `jobs`, `settings`, and `device_meta`. Test first open, second open, an unknown partial schema, and an injected migration failure. Assert legacy row bytes are unchanged and `schema_migrations` contains versions 1 and 2 only after success.
 
@@ -1219,7 +1219,7 @@ inserting a `flow_device_runs` row with a missing `run_id`; assert SQLite return
 foreign-key violation. This proves enforcement is active outside the migration
 connection.
 
-- [ ] **Step 2: Run tests red**
+- [x] **Step 2: Run tests red**
 
 ```powershell
 cargo test -p riviu-core db::migrations -- --nocapture
@@ -1227,7 +1227,7 @@ cargo test -p riviu-core db::migrations -- --nocapture
 
 Expected: FAIL because the migration ledger and runner are absent.
 
-- [ ] **Step 3: Add the migration runner**
+- [x] **Step 3: Add the migration runner**
 
 In `db.rs`, declare `mod migrations;`, enable foreign keys on every connection, and
 replace the batch in `Database::migrate` with:
@@ -1266,7 +1266,7 @@ On an existing ledger, require contiguous known versions and exact migration nam
 fail closed on a gap, renamed entry, duplicate logical name, or version newer than
 this binary before running any SQL.
 
-- [ ] **Step 4: Add Flow schema migration 2**
+- [x] **Step 4: Add Flow schema migration 2**
 
 Create all seven Flow tables from the design with `TEXT` UUIDs, `INTEGER` revisions/attempts, foreign keys, `CHECK` constraints for hashes/statuses, and indexes on document update, run update, device-run state, attempt state, artifacts by attempt, and events by aggregate/revision. The migration must use `CREATE TABLE`, not `IF NOT EXISTS`, because the ledger controls exactly-once execution.
 
@@ -1394,7 +1394,7 @@ Migration 1 is the current pre-Flow table batch byte-for-byte, including the gue
 admin seed for a new empty database. Legacy recognition compares table names,
 columns, primary keys, and unique constraints, not only the table-name set.
 
-- [ ] **Step 5: Run migration tests and full DB tests**
+- [x] **Step 5: Run migration tests and full DB tests**
 
 ```powershell
 cargo fmt --all
@@ -1404,7 +1404,7 @@ cargo test -p riviu-core db -- --nocapture
 
 Expected: populated upgrade, rollback failpoint, reopen, and unknown-schema tests pass.
 
-- [ ] **Step 6: Commit Task 4**
+- [x] **Step 6: Commit Task 4**
 
 ```powershell
 git add crates/core/src/db.rs crates/core/src/db/migrations.rs
@@ -1419,7 +1419,7 @@ git commit -m "feat(flow): add transactional database migrations"
 - Modify: `crates/core/src/flow/model.rs`
 - Test: `crates/core/src/db/flows.rs`
 
-- [ ] **Step 1: Write repository tests**
+- [x] **Step 1: Write repository tests**
 
 Test create revision 1, optimistic save revision 2, stale expected-revision conflict, list ordering, get exact revision, archive, hash mismatch rejection, and proof that editing canvas position changes authoring JSON but preserves a compiler-provided plan hash.
 
@@ -1482,7 +1482,7 @@ fn immutable_revision_save_rejects_a_stale_writer() {
 }
 ```
 
-- [ ] **Step 2: Run tests red**
+- [x] **Step 2: Run tests red**
 
 ```powershell
 cargo test -p riviu-core db::flows -- --nocapture
@@ -1490,7 +1490,7 @@ cargo test -p riviu-core db::flows -- --nocapture
 
 Expected: FAIL because Flow repository methods do not exist.
 
-- [ ] **Step 3: Define persisted projections**
+- [x] **Step 3: Define persisted projections**
 
 Add these projections to `model.rs`:
 
@@ -1522,7 +1522,7 @@ pub struct RevisionConflict {
 }
 ```
 
-- [ ] **Step 4: Implement transactional repository methods**
+- [x] **Step 4: Implement transactional repository methods**
 
 Declare `mod flows;` in `db.rs`. In `flows.rs`, implement on `Database`:
 
@@ -1547,7 +1547,7 @@ with `plan_hash`; store `canonical_compiled_plan_json(compiled)` verbatim in
 `compiled_json` before inserting the immutable revision and updating the document
 projection. `expected_revision=None` is valid only when the flow ID does not exist.
 
-- [ ] **Step 5: Run repository and workspace tests**
+- [x] **Step 5: Run repository and workspace tests**
 
 ```powershell
 cargo fmt --all
@@ -1558,7 +1558,7 @@ cargo test --workspace
 
 Expected: all tests pass with legacy rows still readable.
 
-- [ ] **Step 6: Commit Task 5**
+- [x] **Step 6: Commit Task 5**
 
 ```powershell
 git add crates/core/src/db crates/core/src/flow/model.rs
@@ -1571,7 +1571,7 @@ git commit -m "feat(flow): persist immutable compiled revisions"
 - Modify: `AGENTS.md`
 - Modify: `docs/superpowers/plans/2026-07-30-riviu-flow-v2-foundation.md`
 
-- [ ] **Step 1: Run the full gate**
+- [x] **Step 1: Run the full gate**
 
 ```powershell
 cargo fmt --all -- --check
@@ -1582,7 +1582,7 @@ git diff --check
 
 Expected: every command exits 0.
 
-- [ ] **Step 2: Record F0 and commit**
+- [x] **Step 2: Record F0 and commit**
 
 Mark all F0 checkboxes complete. Append the F0 commit range, test counts, disabled Terminate/TikTok/runtime nodes, next plan path, and rollback commit to `AGENTS.md`.
 
