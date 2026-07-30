@@ -944,10 +944,11 @@ After folding resources, set `initial_bundle_id` from the first executable Launc
 App. Every plan with `requires_ui_session=true` must have Launch App as its first
 executable node; otherwise return `UiSessionTargetRequired`. This covers Home-only,
 Assert Visible, Tap, Swipe, Type Text, and Screenshot plans rather than only stream
-plans. Reject a second Launch App before the initial session upgrade. A pure
-desktop/bridge plan such as Wait or Terminate does not need Launch; Terminate carries
-its own exact bundle ID. Runtime may foreground another app only after the context
-is already upgraded.
+plans. The first Launch App is the only node consumed by the initial session upgrade
+and must not be dispatched again by the generic loop. A pure desktop/bridge plan such
+as Wait or Terminate does not need Launch; Terminate carries its own exact bundle ID.
+Later Launch nodes may foreground another app only after the context is already
+upgraded.
 
 - [ ] **Step 6: Use shared canonical serialization and hashing**
 
