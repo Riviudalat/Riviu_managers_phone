@@ -186,7 +186,7 @@ pub fn contracts(
             RetryPolicy::BeforeDispatchOnly,
         ),
         ActionKind::Wait => (
-            ResourceClass::Bridge,
+            ResourceClass::PureDesktop,
             SideEffectClass::None,
             EvidenceRequirement::None,
             ReconciliationPolicy::None,

@@ -13,9 +13,9 @@ use riviu_core::{
     DeviceCapabilitySnapshot, DeviceDriver, DeviceInfo, DeviceStatus, FrameSource,
     GuardedClipboardOperation, GuardedClipboardOutput, GuardedClipboardProgress,
     GuardedClipboardTransition, InstalledAgentIdentity, InstalledTargetIdentity,
-    InteractionSessionKind, ProcessAbsenceProof, QualifiedElementLocator, StreamStartProof,
-    StreamStopProof, SwipeGesture, TapPoint, TileStreamState, UiCapabilities, UiError, UiErrorKind,
-    UiSession, MAX_INTERACTION_CLIPBOARD_BYTES, STREAM_FPS,
+    InteractionSessionKind, ProcessAbsenceProof, QualifiedElementLocator, StreamHandoffProof,
+    StreamStartProof, StreamStopProof, SwipeGesture, TapPoint, TileStreamState, UiCapabilities,
+    UiError, UiErrorKind, UiSession, MAX_INTERACTION_CLIPBOARD_BYTES, STREAM_FPS,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -429,27 +429,29 @@ impl PmdIosDriver {
         self.streams.clone()
     }
 
-    async fn inspect_interaction_device_using(
+    async fn inspect_device_for_target_using(
         &self,
         udid: &str,
+        target_bundle_id: &str,
         transport: InteractionInspectionTransport<'_>,
     ) -> anyhow::Result<DeviceCapabilitySnapshot> {
         self.artifact()?
             .verify_checksum()
             .context("selected Agent artifact failed integrity verification")?;
-        self.inspect_interaction_device_verified_using(udid, transport)
+        self.inspect_device_for_target_verified_using(udid, target_bundle_id, transport)
             .await
     }
 
-    async fn inspect_interaction_device_verified_using(
+    async fn inspect_device_for_target_verified_using(
         &self,
         udid: &str,
+        target_bundle_id: &str,
         transport: InteractionInspectionTransport<'_>,
     ) -> anyhow::Result<DeviceCapabilitySnapshot> {
         let artifact = self.artifact()?;
         let args = interaction_inspection_args(
             udid,
-            INTERACTION_TARGET_BUNDLE_ID,
+            target_bundle_id,
             &artifact.manifest.bundle_id,
             transport,
         );
@@ -458,7 +460,7 @@ impl PmdIosDriver {
         parse_interaction_inspection(
             value,
             udid,
-            INTERACTION_TARGET_BUNDLE_ID,
+            target_bundle_id,
             artifact,
             transport.active_transport(),
         )
@@ -474,8 +476,9 @@ impl PmdIosDriver {
         if host.trim().is_empty() || port == 0 {
             anyhow::bail!("RSD inspection endpoint must include a host and non-zero port");
         }
-        self.inspect_interaction_device_using(
+        self.inspect_device_for_target_using(
             udid,
+            INTERACTION_TARGET_BUNDLE_ID,
             InteractionInspectionTransport::Rsd { host, port },
         )
         .await
@@ -1604,8 +1607,9 @@ impl InstallOnlyRuntime for PmdInstallOnlyRuntime<'_> {
         {
             Some(
                 self.driver
-                    .inspect_interaction_device_verified_using(
+                    .inspect_device_for_target_verified_using(
                         udid,
+                        INTERACTION_TARGET_BUNDLE_ID,
                         InteractionInspectionTransport::LegacyUsbmux,
                     )
                     .await?
@@ -2396,7 +2400,10 @@ impl DeviceDriver for PmdIosDriver {
         })
     }
 
-    async fn confirm_interaction_stream_stopped(&self, udid: &str) -> anyhow::Result<()> {
+    async fn confirm_interaction_stream_stopped(
+        &self,
+        udid: &str,
+    ) -> anyhow::Result<StreamHandoffProof> {
         let slot = self.slots.get(udid);
         let owned = slot.owned.lock().await;
         if owned.stream.is_some() {
@@ -2406,17 +2413,38 @@ impl DeviceDriver for PmdIosDriver {
             anyhow::bail!("interaction handoff still has a cached session");
         }
 
-        self.interaction_lifecycle
-            .record_stopped(udid, self.streams.generation(udid));
-        Ok(())
+        let generation = self.streams.generation(udid);
+        self.interaction_lifecycle.record_stopped(udid, generation);
+        Ok(StreamHandoffProof { generation })
+    }
+
+    async fn read_active_app_bundle(&self, udid: &str) -> anyhow::Result<String> {
+        let client =
+            self.sessions.lock().get(udid).cloned().ok_or_else(|| {
+                anyhow::anyhow!("active-app reconciliation has no cached session")
+            })?;
+        client.active_app_bundle().await.map_err(anyhow::Error::new)
     }
 
     async fn inspect_interaction_device(
         &self,
         udid: &str,
     ) -> anyhow::Result<DeviceCapabilitySnapshot> {
-        self.inspect_interaction_device_using(udid, InteractionInspectionTransport::LegacyUsbmux)
+        self.inspect_device_for_target(udid, INTERACTION_TARGET_BUNDLE_ID)
             .await
+    }
+
+    async fn inspect_device_for_target(
+        &self,
+        udid: &str,
+        target_bundle_id: &str,
+    ) -> anyhow::Result<DeviceCapabilitySnapshot> {
+        self.inspect_device_for_target_using(
+            udid,
+            target_bundle_id,
+            InteractionInspectionTransport::LegacyUsbmux,
+        )
+        .await
     }
 
     async fn set_negotiated_interaction_capabilities(
@@ -2646,6 +2674,17 @@ impl DeviceDriver for PmdIosDriver {
                 && self.profile.backend == WdaBackend::RtMmo,
             target_bundle_id: bundle_id.to_string(),
         }))
+    }
+
+    async fn foreground_target_app_and_start_interaction_session(
+        &self,
+        udid: &str,
+        bundle_id: &str,
+        kind: InteractionSessionKind,
+    ) -> anyhow::Result<Box<dyn UiSession>> {
+        // interaction_session_locked owns the required bootstrap -> foreground ->
+        // fresh-session order, so invoking launch_app separately would double-launch.
+        self.start_interaction_session(udid, bundle_id, kind).await
     }
 
     async fn start_ui_session(&self, udid: &str) -> anyhow::Result<Box<dyn UiSession>> {
@@ -3588,7 +3627,7 @@ print(json.dumps({'ok': True, 'note': 'terminate best-effort'}), flush=True)
     fn interaction_inspection_args_are_read_only() {
         let args = interaction_inspection_args(
             "fixture-udid",
-            "com.ss.iphone.ugc.Ame",
+            "com.apple.Preferences",
             "com.mrph.svc",
             InteractionInspectionTransport::LegacyUsbmux,
         );
@@ -3600,7 +3639,7 @@ print(json.dumps({'ok': True, 'note': 'terminate best-effort'}), flush=True)
                 "--udid",
                 "fixture-udid",
                 "--target-bundle-id",
-                "com.ss.iphone.ugc.Ame",
+                "com.apple.Preferences",
                 "--agent-bundle-id",
                 "com.mrph.svc",
             ]
@@ -3901,7 +3940,7 @@ print(json.dumps({'ok': True, 'note': 'terminate best-effort'}), flush=True)
     }
 
     #[tokio::test]
-    async fn interaction_fresh_text_rejects_stock_without_foreground_side_effects() {
+    async fn combined_interaction_fresh_text_rejects_stock_without_foreground_side_effects() {
         let driver = stock_driver();
         driver
             .stop_owned_stream("fixture-udid")
@@ -3909,7 +3948,7 @@ print(json.dumps({'ok': True, 'note': 'terminate best-effort'}), flush=True)
             .expect("explicit stop");
 
         let error = match driver
-            .start_interaction_session(
+            .foreground_target_app_and_start_interaction_session(
                 "fixture-udid",
                 INTERACTION_TARGET_BUNDLE_ID,
                 InteractionSessionKind::FreshText,

@@ -999,6 +999,63 @@ can cho Settings SearchField da co trong Gate B/C. XPath, predicate va class cha
 van bi cam. Profile stock khong advertise read-back va tuyet doi khong nang
 `snapshotMaxDepth` de co gang tim element.
 
+F1 Task 6 checkpoint ngay 31/07/2026: executor nam o
+`crates/core/src/flow/executor.rs`, ownership wrapper nam o
+`crates/core/src/flow/device_context.rs`. Plan co device resource chi acquire mot owner
+`Script` va chi nang don dieu `Exclusive -> Session -> Streaming -> Closed`; khong
+close/reacquire giua node. Plan compiler-valid `Start -> Wait -> End` la target-free,
+khong acquire device/inspect target va persist typed target-free preflight + release
+proof `hadSession=false/hadStream=false`. Launch dau tien di qua atomic
+`foreground_target_app_and_start_interaction_session` dung mot lan; Pmd va Mock
+override contract nay de backend chi foreground mot lan truoc khi tao ordinary/fresh
+session. Control-plane hien can exact capacity reservation truoc moi UI session, ke ca
+plan khong doc frame; MJPEG van chi start sau session va reservation duoc giu den khi
+close.
+
+Executor persist target-qualified preflight gom exact `DeviceCapabilitySnapshot`,
+`AgentStatus` da dung de derive static capability IDs va chinh tap capability IDs.
+No persist `IntentCommitted` + typed baseline truoc effect, doi chieu frame decode voi
+`QualifiedGeometry.pixelWidth/pixelHeight`, roi check lai generation/geometry ngay
+truoc coordinate dispatch. Deadline evidence 5 giay duoc reset sau khi bootstrap
+session/stream xong. Config/action kind lech phai fail truoc device effect; ACK
+gesture/text khong thanh success neu verifier khong match. Assert Visible dung fresh
+read-back session nhung khong bat stream; request read-only fail thanh
+`FailedVerified`, khong thanh `Uncertain`. Wait kiem cancellation moi toi da 250 ms.
+Bridge-only Terminate dung process proof va khong doi geometry UI. Moi close thanh
+cong phai tra `ContextReleaseProof` cua worker;
+`clean_ticket` invalidate session sau khi dung stream de close dung mot lan. Executor
+kiem cancellation/deadline ngay truoc va sau read-only process baseline; cancellation
+trong sidecar read khong duoc persist `EffectDispatched` hay goi Terminate sau khi read
+tra ve. Khong boc request dang chay bang `tokio::time::timeout`. Executor
+recompute canonical execution SHA-256 va khop exact `flow_runs.plan_sha256` truoc khi
+acquire device; cung flow ID/revision nhung canonical execution hash khac phai fail
+`RunIdentityMismatch` khi device run van `Queued`.
+
+Public `start_reserved_stream` van giu cleanup bat dong bo cua caller cu. Rieng Flow
+dung recoverable upgrade va `StreamHandoffProof`: generation duoc ghi ngay truoc
+session, nen ca direct start error/cancel va missing first frame deu stop exact
+generation, close session va release capacity qua worker. Backend co the clear StreamHub
+va tang generation truoc khi tra direct start error; nhanh dong bo nay phai lay lai
+non-destructive handoff proof va cap nhat ticket bang exact post-cleanup generation.
+Cancellation/partial-live van giu generation cu; chi stop proof sai moi quarantine.
+Capacity reserve fail sau `Running` phai khoi phuc/close exclusive context
+va persist terminal release proof. Neu setup session/stream cua Launch dau tien loi,
+attempt giu nonterminal diagnostic o `EffectDispatched`, doc active app mot lan de
+phan loai `Succeeded`, proved non-delivery `FailedVerified` + retry-safe, hoac
+`Uncertain`; khong relaunch.
+
+Snapshot metadata hien tai cua `PmdIosDriver::inspect_device_for_target` chua co
+protected-auth proof va `QualifiedGeometry`, nen UI Flow tren Pmd that co chu y fail
+closed o preflight. Them nua, park MJPEG cua Pmd ha cached Agent state tu `Ready` ve
+`Starting`; khong doc cache sau park roi tu nang no lai thanh ready. Khong
+hard-code/fabricate cac proof nay va khong goi generic preflight tao session/stream.
+Buoc noi desktop/live sau phai cap runtime-qualified, target-bound snapshot co auth +
+geometry va dinh nghia readiness truoc/sau park ro rang truoc khi dispatch;
+bridge-only Terminate van chay duoc voi snapshot metadata. Task 6 moi la core
+executor/control-plane, chua wire desktop command hay startup recovery cua Task 7.
+Khong gan bundle gia cho plan target-free va khong dua direct driver handle ra ngoai
+typed Flow ownership.
+
 ---
 
 ## 4. Chạy và test

@@ -13,12 +13,11 @@ use super::Database;
 use crate::flow::artifact_store::validate_artifact_record_relative_path;
 use crate::{
     canonical_compiled_plan_json, compiled_plan_sha256, contracts, validate_artifact_label,
-    CompiledActionConfig, CompiledFlowNode, CompiledFlowPlanV2, DeviceCapabilitySnapshot,
-    DeviceWorkOwner, EvidenceKind, EvidenceRequirement, EvidenceSpec, FlowAggregateState,
-    FlowArtifactRecord, FlowAttemptState, FlowContextReleaseProof, FlowDeviceRunRecord,
-    FlowDeviceRunState, FlowErrorRecord, FlowNodeAttemptRecord, FlowRevisionRecord, FlowRunDetail,
-    FlowRunRecord, FlowSelectionSnapshot, FlowTargetSelection, RetryPolicy, SideEffectClass,
-    FLOW_SCHEMA_VERSION,
+    CompiledActionConfig, CompiledFlowNode, CompiledFlowPlanV2, DeviceWorkOwner, EvidenceKind,
+    EvidenceRequirement, EvidenceSpec, FlowAggregateState, FlowArtifactRecord, FlowAttemptState,
+    FlowCapabilitySnapshot, FlowContextReleaseProof, FlowDeviceRunRecord, FlowDeviceRunState,
+    FlowErrorRecord, FlowNodeAttemptRecord, FlowRevisionRecord, FlowRunDetail, FlowRunRecord,
+    FlowSelectionSnapshot, FlowTargetSelection, RetryPolicy, SideEffectClass, FLOW_SCHEMA_VERSION,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -166,8 +165,11 @@ impl Database {
         device_run_id: Uuid,
         expected: FlowDeviceRunState,
         next: FlowDeviceRunState,
-        capability_snapshot: Option<DeviceCapabilitySnapshot>,
+        capability_snapshot: Option<FlowCapabilitySnapshot>,
     ) -> anyhow::Result<FlowDeviceRunRecord> {
+        if let Some(snapshot) = capability_snapshot.as_ref() {
+            snapshot.validate().map_err(anyhow::Error::msg)?;
+        }
         let legal = matches!(
             (expected, next, capability_snapshot.is_some()),
             (
@@ -197,6 +199,15 @@ impl Database {
             expected,
             current.state
         );
+        if let Some(agent_status) = capability_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.agent_status.as_ref())
+        {
+            ensure!(
+                agent_status.udid == current.udid,
+                "Flow AgentStatus UDID does not match its device run"
+            );
+        }
         let snapshot_json = encode_optional_json(capability_snapshot.as_ref())?;
         let now = now_text();
         let changed = transaction.execute(
@@ -2208,7 +2219,7 @@ struct AttemptIdentity {
     run_id: Uuid,
     udid: String,
     device_state: FlowDeviceRunState,
-    capability_snapshot: Option<DeviceCapabilitySnapshot>,
+    capability_snapshot: Option<FlowCapabilitySnapshot>,
     state: FlowAttemptState,
     action_kind: crate::ActionKind,
     node: CompiledFlowNode,
@@ -2663,10 +2674,19 @@ impl FlowDeviceRunRow {
     fn into_record(self) -> anyhow::Result<FlowDeviceRunRecord> {
         validate_udid(&self.udid)?;
         let state: FlowDeviceRunState = parse_enum_name(&self.state, "Flow device-run state")?;
-        let capability_snapshot = decode_optional_json::<DeviceCapabilitySnapshot>(
+        let capability_snapshot = decode_optional_json::<FlowCapabilitySnapshot>(
             self.capability_snapshot_json,
             "Flow capability snapshot",
         )?;
+        if let Some(snapshot) = capability_snapshot.as_ref() {
+            snapshot.validate().map_err(anyhow::Error::msg)?;
+            if let Some(agent_status) = snapshot.agent_status.as_ref() {
+                ensure!(
+                    agent_status.udid == self.udid,
+                    "persisted Flow AgentStatus UDID mismatch"
+                );
+            }
+        }
         ensure!(
             match state {
                 FlowDeviceRunState::Queued | FlowDeviceRunState::Preflight => {
@@ -2995,10 +3015,10 @@ mod tests {
         compiled_plan_sha256, ActionKind, ActiveTransport, CompiledActionConfig, CompiledFlowNode,
         CompiledFlowPlanV2, ContextPlan, DeviceCapabilitySnapshot, DeviceWorkOwner,
         EvidenceBaseline, FlowAggregateState, FlowArtifactRecord, FlowAttemptState,
-        FlowContextReleaseProof, FlowDeviceRunState, FlowDocumentV2, FlowErrorRecord,
-        FlowSelectionSnapshot, FlowTargetSelection, InstalledAgentIdentity,
-        InstalledTargetIdentity, QualifiedGeometry, ScreenOrientation, SideEffectClass,
-        FLOW_SCHEMA_VERSION,
+        FlowCapabilitySnapshot, FlowContextReleaseProof, FlowDeviceRunState, FlowDocumentV2,
+        FlowErrorRecord, FlowPreflightScope, FlowSelectionSnapshot, FlowTargetSelection,
+        InstalledAgentIdentity, InstalledTargetIdentity, QualifiedGeometry, ScreenOrientation,
+        SideEffectClass, FLOW_SCHEMA_VERSION,
     };
 
     fn database_fixture() -> (Database, PathBuf) {
@@ -3118,8 +3138,8 @@ mod tests {
             .expect("qualify running device")
     }
 
-    fn capability_snapshot() -> DeviceCapabilitySnapshot {
-        DeviceCapabilitySnapshot {
+    fn capability_snapshot() -> FlowCapabilitySnapshot {
+        let device = DeviceCapabilitySnapshot {
             installed_agent: InstalledAgentIdentity {
                 bundle_id: "com.mrph.svc".into(),
                 version: "1.0".into(),
@@ -3149,6 +3169,14 @@ mod tests {
                 scale_y: 1.0,
                 orientation: ScreenOrientation::Portrait,
             }),
+        };
+        FlowCapabilitySnapshot {
+            scope: FlowPreflightScope::TargetQualified {
+                bundle_id: device.target_app.bundle_id.clone(),
+            },
+            device: Some(device),
+            agent_status: None,
+            capability_ids: BTreeSet::from(["app.launch".to_string()]),
         }
     }
 

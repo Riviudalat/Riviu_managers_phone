@@ -75,6 +75,26 @@ pub struct DeviceReleaseProof {
     pub next_generation: u64,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextReleaseProof {
+    pub udid: String,
+    pub owner: DeviceWorkOwner,
+    pub had_session: bool,
+    pub had_stream: bool,
+}
+
+impl From<DeviceReleaseProof> for ContextReleaseProof {
+    fn from(proof: DeviceReleaseProof) -> Self {
+        Self {
+            udid: proof.udid,
+            owner: proof.owner,
+            had_session: true,
+            had_stream: true,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum InteractionAcquireResult {
     Acquired(DeviceExclusiveContext),
@@ -339,7 +359,22 @@ impl DeviceControlPlane {
         &self,
         context: DeviceExclusiveContext,
     ) -> Result<(DeviceExclusiveContext, UiCapacityReservation), DeviceControlError> {
-        self.validate_exclusive(&context)?;
+        self.try_reserve_ui_capacity(context)
+            .await
+            .map_err(|failure| failure.error)
+    }
+
+    pub(crate) async fn try_reserve_ui_capacity(
+        &self,
+        context: DeviceExclusiveContext,
+    ) -> Result<(DeviceExclusiveContext, UiCapacityReservation), CapacityContextUpgradeFailure>
+    {
+        if let Err(error) = self.validate_exclusive(&context) {
+            return Err(CapacityContextUpgradeFailure {
+                context: Some(context),
+                error,
+            });
+        }
         let reserved = self.submit_reserve(context).await?;
         let (context, raw_reservation) = reserved.into_parts();
         let reservation = UiCapacityReservation {
@@ -371,6 +406,23 @@ impl DeviceControlPlane {
             .await
             .map_err(|error| driver_error(lease.udid(), "inspectInteractionDevice", error))?;
         Ok(snapshot)
+    }
+
+    pub async fn inspect_flow_device(
+        &self,
+        context: &DeviceExclusiveContext,
+        target_bundle_id: &str,
+    ) -> Result<DeviceCapabilitySnapshot, DeviceControlError> {
+        let lease = self.validate_exclusive(context)?;
+        if target_bundle_id.is_empty() || target_bundle_id.trim() != target_bundle_id {
+            return Err(DeviceControlError::InvalidContext {
+                reason: "Flow target bundle ID must be non-empty and exact",
+            });
+        }
+        self.driver
+            .inspect_device_for_target(lease.udid(), target_bundle_id)
+            .await
+            .map_err(|error| driver_error(lease.udid(), "inspectFlowDevice", error))
     }
 
     /// Applies capabilities only from a complete runtime snapshot collected
@@ -519,6 +571,17 @@ impl DeviceControlPlane {
             .map_err(|error| driver_error(lease.udid(), "inspectAppProcess", error))
     }
 
+    pub(crate) async fn read_active_app_bundle(
+        &self,
+        context: &DeviceExclusiveContext,
+    ) -> Result<String, DeviceControlError> {
+        let lease = self.validate_exclusive(context)?;
+        self.driver
+            .read_active_app_bundle(lease.udid())
+            .await
+            .map_err(|error| driver_error(lease.udid(), "readActiveAppBundle", error))
+    }
+
     pub async fn foreground_target_app(
         &self,
         context: &DeviceExclusiveContext,
@@ -544,7 +607,8 @@ impl DeviceControlPlane {
     ) -> Result<UiSessionContext, DeviceControlError> {
         let capacity_token = self.validate_interaction_capacity(&context)?;
         let udid = context.udid().to_string();
-        self.driver
+        let handoff = self
+            .driver
             .confirm_interaction_stream_stopped(&udid)
             .await
             .map_err(|error| driver_error(&udid, "confirmInteractionStreamStopped", error))?;
@@ -565,6 +629,7 @@ impl DeviceControlPlane {
             activity: context.activity.take(),
             session: Some(Arc::from(session)),
             ui_capacity_token: Some(capacity_token),
+            stream_handoff_generation: Some(handoff.generation),
         })
     }
 
@@ -586,7 +651,76 @@ impl DeviceControlPlane {
             activity: context.activity.take(),
             session: Some(Arc::from(session)),
             ui_capacity_token: None,
+            stream_handoff_generation: None,
         })
+    }
+
+    pub async fn foreground_target_app_and_start_interaction_session(
+        &self,
+        context: DeviceExclusiveContext,
+        bundle_id: &str,
+        kind: InteractionSessionKind,
+    ) -> Result<(UiSessionContext, ForegroundAppProof), DeviceControlError> {
+        self.try_foreground_target_app_and_start_interaction_session(context, bundle_id, kind)
+            .await
+            .map_err(|failure| failure.error)
+    }
+
+    pub(crate) async fn try_foreground_target_app_and_start_interaction_session(
+        &self,
+        mut context: DeviceExclusiveContext,
+        bundle_id: &str,
+        kind: InteractionSessionKind,
+    ) -> Result<(UiSessionContext, ForegroundAppProof), SessionContextUpgradeFailure> {
+        let capacity_token = match self.validate_interaction_capacity(&context) {
+            Ok(token) => token,
+            Err(error) => return Err(SessionContextUpgradeFailure { context, error }),
+        };
+        let udid = context.udid().to_string();
+        let handoff = match self.driver.confirm_interaction_stream_stopped(&udid).await {
+            Ok(proof) => proof,
+            Err(error) => {
+                return Err(SessionContextUpgradeFailure {
+                    context,
+                    error: driver_error(&udid, "confirmFlowStreamStopped", error),
+                })
+            }
+        };
+        if let Err(error) = self.validate_interaction_capacity(&context) {
+            return Err(SessionContextUpgradeFailure { context, error });
+        }
+        let session = match self
+            .driver
+            .foreground_target_app_and_start_interaction_session(&udid, bundle_id, kind)
+            .await
+        {
+            Ok(session) => session,
+            Err(error) => {
+                return Err(SessionContextUpgradeFailure {
+                    context,
+                    error: driver_error(&udid, "foregroundTargetAppAndStartSession", error),
+                });
+            }
+        };
+        if let Err(error) = self.validate_interaction_capacity(&context) {
+            self.driver.invalidate_ui_session(&udid);
+            return Err(SessionContextUpgradeFailure { context, error });
+        }
+        let proof = ForegroundAppProof {
+            udid,
+            bundle_id: bundle_id.to_string(),
+        };
+        Ok((
+            UiSessionContext {
+                plane_id: self.plane_id,
+                lease: context.lease.take(),
+                activity: context.activity.take(),
+                session: Some(Arc::from(session)),
+                ui_capacity_token: Some(capacity_token),
+                stream_handoff_generation: Some(handoff.generation),
+            },
+            proof,
+        ))
     }
 
     pub fn session(
@@ -603,16 +737,39 @@ impl DeviceControlPlane {
             })
     }
 
+    pub fn close_exclusive_context(
+        &self,
+        mut context: DeviceExclusiveContext,
+    ) -> Result<ContextReleaseProof, DeviceControlError> {
+        let lease = self.validate_exclusive(&context)?;
+        let proof = ContextReleaseProof {
+            udid: lease.udid().to_string(),
+            owner: lease.owner(),
+            had_session: false,
+            had_stream: false,
+        };
+        context.activity.take();
+        context.lease.take();
+        Ok(proof)
+    }
+
     pub fn close_session_context(
         &self,
         mut context: UiSessionContext,
-    ) -> Result<(), DeviceControlError> {
-        let udid = self.validate_session(&context)?.udid().to_string();
+    ) -> Result<ContextReleaseProof, DeviceControlError> {
+        let lease = self.validate_session(&context)?;
+        let udid = lease.udid().to_string();
+        let proof = ContextReleaseProof {
+            udid: udid.clone(),
+            owner: lease.owner(),
+            had_session: true,
+            had_stream: false,
+        };
         self.driver.invalidate_ui_session(&udid);
         context.session.take();
         context.activity.take();
         context.lease.take();
-        Ok(())
+        Ok(proof)
     }
 
     pub async fn foreground_session_app(
@@ -885,6 +1042,30 @@ impl DeviceControlPlane {
         })
     }
 
+    pub async fn terminate_streaming_app(
+        &self,
+        context: &UiWithStreamContext,
+        bundle_id: &str,
+    ) -> Result<ProcessAbsenceProof, DeviceControlError> {
+        let lease = self.validate_stream(context)?;
+        self.driver
+            .terminate_app(lease.udid(), bundle_id)
+            .await
+            .map_err(|error| driver_error(lease.udid(), "terminateStreamingApp", error))
+    }
+
+    pub async fn inspect_streaming_app_process(
+        &self,
+        context: &UiWithStreamContext,
+        bundle_id: &str,
+    ) -> Result<AppProcessState, DeviceControlError> {
+        let lease = self.validate_stream(context)?;
+        self.driver
+            .inspect_app_process(lease.udid(), bundle_id)
+            .await
+            .map_err(|error| driver_error(lease.udid(), "inspectStreamingAppProcess", error))
+    }
+
     pub async fn recover_streaming_session(
         &self,
         context: &mut UiWithStreamContext,
@@ -943,30 +1124,95 @@ impl DeviceControlPlane {
 
     pub async fn start_reserved_stream(
         &self,
+        context: UiSessionContext,
+        capacity: UiCapacityReservation,
+    ) -> Result<UiWithStreamContext, DeviceControlError> {
+        self.start_reserved_stream_internal(context, capacity)
+            .await
+            .map_err(|failure| failure.error)
+    }
+
+    pub(crate) async fn try_start_reserved_stream(
+        &self,
+        context: UiSessionContext,
+        capacity: UiCapacityReservation,
+    ) -> Result<UiWithStreamContext, StreamContextUpgradeFailure> {
+        self.start_reserved_stream_internal(context, capacity).await
+    }
+
+    async fn start_reserved_stream_internal(
+        &self,
         mut context: UiSessionContext,
         mut capacity: UiCapacityReservation,
-    ) -> Result<UiWithStreamContext, DeviceControlError> {
-        let lease = self.validate_session(&context)?;
+    ) -> Result<UiWithStreamContext, StreamContextUpgradeFailure> {
+        let lease = match self.validate_session(&context) {
+            Ok(lease) => lease,
+            Err(error) => {
+                context.ui_capacity_token = None;
+                return Err(StreamContextUpgradeFailure {
+                    context: Some(context),
+                    failed_start: None,
+                    error,
+                });
+            }
+        };
         if capacity.plane_id != self.plane_id {
-            return Err(DeviceControlError::InvalidContext {
-                reason: "stream capacity belongs to another control plane",
+            context.ui_capacity_token = None;
+            return Err(StreamContextUpgradeFailure {
+                context: Some(context),
+                failed_start: None,
+                error: DeviceControlError::InvalidContext {
+                    reason: "stream capacity belongs to another control plane",
+                },
             });
         }
-        let reservation =
-            capacity
-                .reservation
-                .as_ref()
-                .ok_or(DeviceControlError::InvalidContext {
+        let Some(reservation) = capacity.reservation.as_ref() else {
+            context.ui_capacity_token = None;
+            return Err(StreamContextUpgradeFailure {
+                context: Some(context),
+                failed_start: None,
+                error: DeviceControlError::InvalidContext {
                     reason: "stream capacity has been consumed",
-                })?;
-        self.validate_reservation(lease, reservation)?;
+                },
+            });
+        };
+        if let Err(error) = self.validate_reservation(lease, reservation) {
+            context.ui_capacity_token = None;
+            return Err(StreamContextUpgradeFailure {
+                context: Some(context),
+                failed_start: None,
+                error,
+            });
+        }
         if context.ui_capacity_token != Some(reservation.token()) {
-            return Err(DeviceControlError::InvalidContext {
-                reason: "session and stream capacity reservations do not match",
+            context.ui_capacity_token = None;
+            return Err(StreamContextUpgradeFailure {
+                context: Some(context),
+                failed_start: None,
+                error: DeviceControlError::InvalidContext {
+                    reason: "session and stream capacity reservations do not match",
+                },
             });
         }
         let udid = lease.udid().to_string();
-        self.streams.mark_running(reservation.token())?;
+        let Some(handoff_generation) = context.stream_handoff_generation else {
+            context.ui_capacity_token = None;
+            return Err(StreamContextUpgradeFailure {
+                context: Some(context),
+                failed_start: None,
+                error: DeviceControlError::InvalidContext {
+                    reason: "session has no exact stream handoff generation",
+                },
+            });
+        };
+        if let Err(error) = self.streams.mark_running(reservation.token()) {
+            context.ui_capacity_token = None;
+            return Err(StreamContextUpgradeFailure {
+                context: Some(context),
+                failed_start: None,
+                error: error.into(),
+            });
+        }
         let reservation = capacity
             .reservation
             .take()
@@ -988,23 +1234,58 @@ impl DeviceControlPlane {
                     .session
                     .take()
                     .expect("validated context has a session"),
-                expected_generation: None,
+                expected_generation: Some(handoff_generation),
             }),
             cleanup: cleanup.clone(),
         };
 
-        let proof = self
-            .driver
-            .start_stream_after_session(&udid)
-            .await
-            .map_err(|error| driver_error(&udid, "startStreamAfterSession", error))?;
-        pending
-            .ticket
-            .as_mut()
-            .expect("pending stream ticket remains armed")
-            .expected_generation = Some(proof.generation);
+        let proof = match self.driver.start_stream_after_session(&udid).await {
+            Ok(proof) => proof,
+            Err(error) => {
+                if let Ok(handoff) = self.driver.confirm_interaction_stream_stopped(&udid).await {
+                    if handoff.generation >= handoff_generation {
+                        pending
+                            .ticket
+                            .as_mut()
+                            .expect("failed stream start retains its cleanup ticket")
+                            .expected_generation = Some(handoff.generation);
+                    }
+                }
+                let error = driver_error(&udid, "startStreamAfterSession", error);
+                return Err(StreamContextUpgradeFailure {
+                    context: None,
+                    failed_start: Some(FailedStreamStartContext {
+                        plane_id: self.plane_id,
+                        pending: Some(pending),
+                    }),
+                    error,
+                });
+            }
+        };
+        if proof.generation != handoff_generation {
+            return Err(StreamContextUpgradeFailure {
+                context: None,
+                failed_start: Some(FailedStreamStartContext {
+                    plane_id: self.plane_id,
+                    pending: Some(pending),
+                }),
+                error: DeviceControlError::StopProofMismatch {
+                    udid,
+                    expected: handoff_generation,
+                    actual: proof.generation,
+                },
+            });
+        }
         if !proof.first_frame_observed {
-            return Err(DeviceControlError::FirstFrameMissing { udid });
+            let error = DeviceControlError::FirstFrameMissing { udid: udid.clone() };
+            return Err(StreamContextUpgradeFailure {
+                context: None,
+                failed_start: Some(FailedStreamStartContext {
+                    plane_id: self.plane_id,
+                    pending: Some(pending),
+                }),
+                error,
+            });
         }
         let ticket = pending
             .ticket
@@ -1030,6 +1311,45 @@ impl DeviceControlPlane {
         let ticket = context
             .take_ticket()
             .expect("validated streaming context has a cleanup ticket");
+        self.close_cleanup_ticket(ticket).await
+    }
+
+    pub(crate) fn failed_stream_session(
+        &self,
+        context: &FailedStreamStartContext,
+    ) -> Result<Arc<dyn UiSession>, DeviceControlError> {
+        if context.plane_id != self.plane_id {
+            return Err(DeviceControlError::InvalidContext {
+                reason: "failed stream context belongs to another control plane",
+            });
+        }
+        Ok(context.session())
+    }
+
+    pub(crate) async fn close_failed_stream_start(
+        &self,
+        mut context: FailedStreamStartContext,
+    ) -> Result<ContextReleaseProof, DeviceControlError> {
+        if context.plane_id != self.plane_id {
+            return Err(DeviceControlError::InvalidContext {
+                reason: "failed stream context belongs to another control plane",
+            });
+        }
+        let mut pending = context
+            .pending
+            .take()
+            .expect("live failed stream context retains pending ownership");
+        let ticket = pending
+            .ticket
+            .take()
+            .expect("live failed stream context retains its cleanup ticket");
+        self.close_cleanup_ticket(ticket).await.map(Into::into)
+    }
+
+    async fn close_cleanup_ticket(
+        &self,
+        ticket: DeviceCleanupTicket,
+    ) -> Result<DeviceReleaseProof, DeviceControlError> {
         let (response_tx, response_rx) = oneshot::channel();
         if let Err(error) = self.cleanup_tx.send(WorkerCommand::Close {
             ticket,
@@ -1272,8 +1592,13 @@ impl DeviceControlPlane {
     async fn submit_reserve(
         &self,
         context: DeviceExclusiveContext,
-    ) -> Result<ReservedUiCapacity, DeviceControlError> {
-        self.ensure_running()?;
+    ) -> Result<ReservedUiCapacity, CapacityContextUpgradeFailure> {
+        if let Err(error) = self.ensure_running() {
+            return Err(CapacityContextUpgradeFailure {
+                context: Some(context),
+                error,
+            });
+        }
         let (response_tx, response_rx) = oneshot::channel();
         let command = WorkerCommand::Reserve {
             context,
@@ -1281,13 +1606,19 @@ impl DeviceControlPlane {
         };
         if let Err(error) = self.cleanup_tx.send(command) {
             if let WorkerCommand::Reserve { context, .. } = error.0 {
-                drop(context);
+                return Err(CapacityContextUpgradeFailure {
+                    context: Some(context),
+                    error: DeviceControlError::CleanupWorkerClosed,
+                });
             }
-            return Err(DeviceControlError::CleanupWorkerClosed);
+            unreachable!("send failure retains the Reserve command");
         }
         response_rx
             .await
-            .map_err(|_| DeviceControlError::CleanupWorkerClosed)?
+            .map_err(|_| CapacityContextUpgradeFailure {
+                context: None,
+                error: DeviceControlError::CleanupWorkerClosed,
+            })?
     }
 }
 
@@ -1328,6 +1659,16 @@ pub struct DeviceExclusiveContext {
     ui_capacity_token: Option<Uuid>,
 }
 
+pub(crate) struct SessionContextUpgradeFailure {
+    pub(crate) context: DeviceExclusiveContext,
+    pub(crate) error: DeviceControlError,
+}
+
+pub(crate) struct CapacityContextUpgradeFailure {
+    pub(crate) context: Option<DeviceExclusiveContext>,
+    pub(crate) error: DeviceControlError,
+}
+
 impl DeviceExclusiveContext {
     pub fn udid(&self) -> &str {
         self.lease
@@ -1361,6 +1702,29 @@ pub struct UiSessionContext {
     activity: Option<ContextActivityPermit>,
     session: Option<Arc<dyn UiSession>>,
     ui_capacity_token: Option<Uuid>,
+    stream_handoff_generation: Option<u64>,
+}
+
+pub(crate) struct StreamContextUpgradeFailure {
+    pub(crate) context: Option<UiSessionContext>,
+    pub(crate) failed_start: Option<FailedStreamStartContext>,
+    pub(crate) error: DeviceControlError,
+}
+
+pub(crate) struct FailedStreamStartContext {
+    plane_id: Uuid,
+    pending: Option<PendingStreamStart>,
+}
+
+impl FailedStreamStartContext {
+    fn session(&self) -> Arc<dyn UiSession> {
+        self.pending
+            .as_ref()
+            .and_then(|pending| pending.ticket.as_ref())
+            .expect("live failed stream start retains its cleanup ticket")
+            .session
+            .clone()
+    }
 }
 
 /// Cancellation-safe ownership of a foreground stream slot before a producer
@@ -1645,7 +2009,7 @@ enum WorkerCommand {
     },
     Reserve {
         context: DeviceExclusiveContext,
-        response: oneshot::Sender<Result<ReservedUiCapacity, DeviceControlError>>,
+        response: oneshot::Sender<Result<ReservedUiCapacity, CapacityContextUpgradeFailure>>,
     },
     StartBackground {
         ticket: BackgroundCleanupTicket,
@@ -1993,6 +2357,7 @@ async fn run_cleanup_worker(
                     let _operation = operation_locks.lock_one(ticket.lease.udid()).await;
                     match clean_ticket(&driver, &streams, &mut ticket).await {
                         Ok(proof) => {
+                            drop(ticket);
                             let _ = response.send(Ok(proof));
                         }
                         Err(error) => {
@@ -2173,7 +2538,7 @@ async fn process_reserve(
     operation_locks: &Arc<DeviceOperationLocks>,
     capacity_gate: &Arc<tokio::sync::Mutex<()>>,
     context: DeviceExclusiveContext,
-    response: oneshot::Sender<Result<ReservedUiCapacity, DeviceControlError>>,
+    response: oneshot::Sender<Result<ReservedUiCapacity, CapacityContextUpgradeFailure>>,
 ) {
     match reserve_context(
         driver,
@@ -2192,8 +2557,16 @@ async fn process_reserve(
         Err(failure) => {
             if failure.quarantine {
                 quarantined.push_context(failure.context);
+                let _ = response.send(Err(CapacityContextUpgradeFailure {
+                    context: None,
+                    error: failure.error,
+                }));
+            } else {
+                let _ = response.send(Err(CapacityContextUpgradeFailure {
+                    context: Some(failure.context),
+                    error: failure.error,
+                }));
             }
-            let _ = response.send(Err(failure.error));
         }
     }
 }
@@ -2639,6 +3012,7 @@ async fn clean_ticket(
         });
     }
     streams.complete_stop(stop, proof)?;
+    driver.invalidate_ui_session(&udid);
 
     Ok(DeviceReleaseProof {
         udid,
@@ -2680,6 +3054,7 @@ mod tests {
         guarded_clipboard_cleanup_started_early: AtomicBool,
         termination_calls: Mutex<Vec<String>>,
         inspection_snapshot: Mutex<Option<DeviceCapabilitySnapshot>>,
+        inspected_targets: Mutex<Vec<String>>,
         inspection_fails: AtomicBool,
         configured_ui: Mutex<Vec<UiCapabilities>>,
         confirm_stopped_calls: AtomicUsize,
@@ -2716,6 +3091,7 @@ mod tests {
                 guarded_clipboard_cleanup_started_early: AtomicBool::new(false),
                 termination_calls: Mutex::new(Vec::new()),
                 inspection_snapshot: Mutex::new(None),
+                inspected_targets: Mutex::new(Vec::new()),
                 inspection_fails: AtomicBool::new(false),
                 configured_ui: Mutex::new(Vec::new()),
                 confirm_stopped_calls: AtomicUsize::new(0),
@@ -2936,6 +3312,23 @@ mod tests {
                 .ok_or_else(|| anyhow::anyhow!("fixture inspection snapshot missing"))
         }
 
+        async fn inspect_device_for_target(
+            &self,
+            _udid: &str,
+            target_bundle_id: &str,
+        ) -> anyhow::Result<DeviceCapabilitySnapshot> {
+            self.inspected_targets
+                .lock()
+                .push(target_bundle_id.to_string());
+            let mut snapshot = self
+                .inspection_snapshot
+                .lock()
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("fixture inspection snapshot missing"))?;
+            snapshot.target_app.bundle_id = target_bundle_id.to_string();
+            Ok(snapshot)
+        }
+
         async fn set_negotiated_interaction_capabilities(
             &self,
             _udid: &str,
@@ -2975,9 +3368,14 @@ mod tests {
             })
         }
 
-        async fn confirm_interaction_stream_stopped(&self, _udid: &str) -> anyhow::Result<()> {
+        async fn confirm_interaction_stream_stopped(
+            &self,
+            _udid: &str,
+        ) -> anyhow::Result<crate::StreamHandoffProof> {
             self.confirm_stopped_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+            Ok(crate::StreamHandoffProof {
+                generation: self.stop_generation.load(Ordering::SeqCst),
+            })
         }
 
         async fn start_stream_after_session(
@@ -3258,6 +3656,99 @@ mod tests {
             clipboard_contract_id: None,
         };
         (snapshot, qualification)
+    }
+
+    #[tokio::test]
+    async fn flow_inspection_is_target_qualified_without_mutating_interaction_capabilities() {
+        let driver = Arc::new(TestDriver::default());
+        let (snapshot, _) = capability_fixture();
+        driver.set_inspection_snapshot(snapshot);
+        let control = control_plane(driver.clone(), 1);
+        let context = control
+            .try_acquire_exclusive("iphone-a", DeviceWorkOwner::Script)
+            .await
+            .expect("Flow exclusive context");
+
+        let inspected = control
+            .inspect_flow_device(&context, "com.apple.Preferences")
+            .await
+            .expect("target-qualified inspection");
+
+        assert_eq!(inspected.target_app.bundle_id, "com.apple.Preferences");
+        assert_eq!(
+            driver.inspected_targets.lock().as_slice(),
+            &["com.apple.Preferences"]
+        );
+        assert!(driver.configured_ui.lock().is_empty());
+        control
+            .close_exclusive_context(context)
+            .expect("close Flow exclusive context");
+        control.shutdown_cleanup().await.expect("control shutdown");
+    }
+
+    #[tokio::test]
+    async fn flow_inspection_rejects_blank_target_before_driver_io() {
+        let driver = Arc::new(TestDriver::default());
+        let control = control_plane(driver.clone(), 1);
+        let context = control
+            .try_acquire_exclusive("iphone-a", DeviceWorkOwner::Script)
+            .await
+            .expect("Flow exclusive context");
+
+        control
+            .inspect_flow_device(&context, "  ")
+            .await
+            .expect_err("blank target must fail closed");
+
+        assert!(driver.inspected_targets.lock().is_empty());
+        control
+            .close_exclusive_context(context)
+            .expect("close Flow exclusive context");
+        control.shutdown_cleanup().await.expect("control shutdown");
+    }
+
+    #[tokio::test]
+    async fn explicit_context_close_reports_the_highest_acquired_level() {
+        let driver = Arc::new(TestDriver::default());
+        let control = control_plane(driver, 1);
+        let exclusive = control
+            .try_acquire_exclusive("iphone-a", DeviceWorkOwner::Script)
+            .await
+            .expect("exclusive context");
+        let exclusive_proof = control
+            .close_exclusive_context(exclusive)
+            .expect("close exclusive context");
+        assert_eq!(
+            exclusive_proof,
+            ContextReleaseProof {
+                udid: "iphone-a".to_string(),
+                owner: DeviceWorkOwner::Script,
+                had_session: false,
+                had_stream: false,
+            }
+        );
+
+        let exclusive = control
+            .try_acquire_exclusive("iphone-a", DeviceWorkOwner::Script)
+            .await
+            .expect("replacement exclusive context");
+        let session = control
+            .start_owned_ui_session(exclusive)
+            .await
+            .expect("session context");
+        let session_proof = control
+            .close_session_context(session)
+            .expect("close session context");
+        assert_eq!(
+            session_proof,
+            ContextReleaseProof {
+                udid: "iphone-a".to_string(),
+                owner: DeviceWorkOwner::Script,
+                had_session: true,
+                had_stream: false,
+            }
+        );
+        control.shutdown_cleanup().await.expect("control shutdown");
     }
 
     #[tokio::test]
@@ -3859,7 +4350,6 @@ mod tests {
     async fn shared_device_owner_missing_first_frame_still_requires_exact_stop_generation() {
         let driver = Arc::new(TestDriver::default());
         driver.omit_first_frame();
-        driver.set_stop_generation(6);
         let control = control_plane(driver.clone(), 1);
         let exclusive = control
             .try_acquire_exclusive("iphone-a", crate::DeviceWorkOwner::Interaction)
@@ -3887,6 +4377,7 @@ mod tests {
             DeviceControlError::FirstFrameMissing { .. }
         ));
         driver.wait_for_stop().await;
+        driver.set_stop_generation(6);
         driver.complete_stop();
         timeout(TEST_TIMEOUT, async {
             while control.cleanup_quarantine_count() == 0 {
@@ -4241,7 +4732,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_device_owner_cancelling_stream_start_never_accepts_unmatched_stop_proof() {
+    async fn shared_device_owner_cancelling_stream_start_uses_exact_handoff_stop_proof() {
         let driver = Arc::new(TestDriver::default());
         driver.block_stream_start();
         let work = Arc::new(crate::DeviceWorkCoordinator::new());
@@ -4279,17 +4770,18 @@ mod tests {
         driver.wait_for_stop().await;
         driver.complete_stop();
         timeout(TEST_TIMEOUT, async {
-            while control.cleanup_quarantine_count() == 0 {
-                tokio::task::yield_now().await;
+            loop {
+                match work.try_acquire("iphone-a", crate::DeviceWorkOwner::Repair) {
+                    Ok(replacement) => break replacement,
+                    Err(_) => tokio::task::yield_now().await,
+                }
             }
         })
         .await
-        .expect("unknown start generation must remain quarantined");
+        .expect("handoff-qualified cleanup releases the cancelled stream start");
 
-        assert_eq!(streams.reserved_capacity(), 1);
-        assert!(work
-            .try_acquire("iphone-a", crate::DeviceWorkOwner::Repair)
-            .is_err());
+        assert_eq!(streams.reserved_capacity(), 0);
+        assert_eq!(control.cleanup_quarantine_count(), 0);
     }
 
     #[tokio::test]

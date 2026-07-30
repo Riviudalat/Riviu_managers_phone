@@ -724,7 +724,8 @@ fn context_plan(nodes: impl Iterator<Item = ActionKind>) -> ContextPlan {
             ResourceClass::UiSession | ResourceClass::UiWithStream
         );
         plan.requires_stream |= resource == ResourceClass::UiWithStream;
-        plan.requires_fresh_text_session |= kind == ActionKind::TypeText;
+        plan.requires_fresh_text_session |=
+            matches!(kind, ActionKind::TypeText | ActionKind::AssertVisible);
     }
     plan
 }
@@ -1327,6 +1328,25 @@ mod tests {
     }
 
     #[test]
+    fn assert_visible_requests_a_fresh_readback_session_without_a_stream() {
+        let assertion = FlowNode::new(
+            ActionKind::AssertVisible,
+            json!({"accessibilityId": "SearchField"}),
+        );
+        let document = linear_document(vec![
+            start(),
+            launch("com.apple.Preferences"),
+            assertion,
+            end(),
+        ]);
+
+        let compiled = compile(&document).expect("Assert Visible flow");
+        assert!(compiled.plan.context_plan.requires_ui_session);
+        assert!(compiled.plan.context_plan.requires_fresh_text_session);
+        assert!(!compiled.plan.context_plan.requires_stream);
+    }
+
+    #[test]
     fn type_text_bounds_and_exact_read_back_are_enforced() {
         for (length, accepted) in [(0, false), (1, true), (4_096, true), (4_097, false)] {
             let text = "x".repeat(length);
@@ -1591,7 +1611,11 @@ mod tests {
             FlowNode::new(ActionKind::Wait, json!({ "durationMs": 1 })),
             end(),
         ]);
-        assert!(compile(&wait_only).is_ok());
+        let compiled = compile(&wait_only).expect("target-free Wait flow");
+        assert!(!compiled.plan.context_plan.requires_exclusive);
+        assert!(!compiled.plan.context_plan.requires_ui_session);
+        assert!(!compiled.plan.context_plan.requires_stream);
+        assert_eq!(compiled.plan.context_plan.initial_bundle_id, None);
     }
 
     #[test]

@@ -409,6 +409,62 @@ pub struct FlowContextReleaseProof {
     pub had_stream: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum FlowPreflightScope {
+    TargetFree,
+    TargetQualified { bundle_id: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FlowCapabilitySnapshot {
+    pub scope: FlowPreflightScope,
+    pub device: Option<crate::DeviceCapabilitySnapshot>,
+    pub agent_status: Option<crate::AgentStatus>,
+    pub capability_ids: BTreeSet<String>,
+}
+
+impl FlowCapabilitySnapshot {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self
+            .capability_ids
+            .iter()
+            .any(|id| id.is_empty() || id.trim() != id || id.chars().any(char::is_control))
+        {
+            return Err("Flow capability ID is invalid");
+        }
+        match (&self.scope, &self.device, &self.agent_status) {
+            (FlowPreflightScope::TargetFree, None, None) if self.capability_ids.is_empty() => {
+                Ok(())
+            }
+            (FlowPreflightScope::TargetFree, _, _) => {
+                Err("target-free Flow preflight cannot claim a target or capability")
+            }
+            (FlowPreflightScope::TargetQualified { bundle_id }, Some(device), agent_status)
+                if !bundle_id.is_empty()
+                    && bundle_id.trim() == bundle_id
+                    && !bundle_id.chars().any(char::is_control)
+                    && device.target_app.bundle_id == *bundle_id
+                    && agent_status.as_ref().is_none_or(|status| {
+                        !status.udid.is_empty()
+                            && status.udid.trim() == status.udid
+                            && status.features.iter().all(|feature| {
+                                !feature.is_empty()
+                                    && feature.trim() == feature
+                                    && !feature.chars().any(char::is_control)
+                            })
+                    }) =>
+            {
+                Ok(())
+            }
+            (FlowPreflightScope::TargetQualified { .. }, _, _) => {
+                Err("target-qualified Flow preflight must bind its exact device target")
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FlowRunRecord {
@@ -431,7 +487,7 @@ pub struct FlowDeviceRunRecord {
     pub run_id: Uuid,
     pub udid: String,
     pub state: FlowDeviceRunState,
-    pub capability_snapshot: Option<crate::DeviceCapabilitySnapshot>,
+    pub capability_snapshot: Option<FlowCapabilitySnapshot>,
     pub release_proof: Option<FlowContextReleaseProof>,
     pub error: Option<FlowErrorRecord>,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,

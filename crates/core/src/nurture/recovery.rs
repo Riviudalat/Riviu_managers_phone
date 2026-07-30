@@ -204,7 +204,8 @@ mod tests {
     use crate::driver::{DeviceDriver, UiError};
     use crate::frame_source::NullFrameSource;
     use crate::types::{
-        DeviceInfo, InteractionSessionKind, StreamStartProof, SwipeGesture, TapPoint,
+        DeviceInfo, InteractionSessionKind, StreamHandoffProof, StreamStartProof, SwipeGesture,
+        TapPoint,
     };
     use crate::StreamStopProof;
 
@@ -264,8 +265,13 @@ mod tests {
             })
         }
 
-        async fn confirm_interaction_stream_stopped(&self, _udid: &str) -> anyhow::Result<()> {
-            Ok(())
+        async fn confirm_interaction_stream_stopped(
+            &self,
+            _udid: &str,
+        ) -> anyhow::Result<StreamHandoffProof> {
+            Ok(StreamHandoffProof {
+                generation: self.generation.load(Ordering::Relaxed) as u64,
+            })
         }
 
         async fn start_interaction_session(

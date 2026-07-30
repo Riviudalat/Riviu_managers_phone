@@ -13,8 +13,9 @@ use riviu_core::{
     ActiveTransport, AgentInstallProof, AgentSettings, AgentState, AgentStatus, AppProcessState,
     ConnectionKind, DeviceCapabilitySnapshot, DeviceDriver, DeviceInfo, DeviceStatus,
     InstalledAgentIdentity, InstalledTargetIdentity, InteractionSessionKind, ProcessAbsenceProof,
-    QualifiedElementLocator, QualifiedGeometry, ScreenOrientation, StreamStartProof,
-    StreamStopProof, SwipeGesture, TapPoint, TileStreamState, UiSession, STREAM_FPS,
+    QualifiedElementLocator, QualifiedGeometry, ScreenOrientation, StreamHandoffProof,
+    StreamStartProof, StreamStopProof, SwipeGesture, TapPoint, TileStreamState, UiSession,
+    STREAM_FPS,
 };
 use tokio::sync::{oneshot, RwLock};
 use tokio::task::JoinHandle;
@@ -367,6 +368,15 @@ impl MockIosDriver {
             geometry,
         })
     }
+
+    fn target_snapshot(
+        udid: &str,
+        target_bundle_id: &str,
+    ) -> anyhow::Result<DeviceCapabilitySnapshot> {
+        let mut snapshot = Self::interaction_snapshot(udid)?;
+        snapshot.target_app.bundle_id = target_bundle_id.to_string();
+        Ok(snapshot)
+    }
 }
 
 impl Default for MockIosDriver {
@@ -582,6 +592,14 @@ impl DeviceDriver for MockIosDriver {
         Self::interaction_snapshot(udid)
     }
 
+    async fn inspect_device_for_target(
+        &self,
+        udid: &str,
+        target_bundle_id: &str,
+    ) -> anyhow::Result<DeviceCapabilitySnapshot> {
+        Self::target_snapshot(udid, target_bundle_id)
+    }
+
     async fn repair_agent_install_only(&self, udid: &str) -> anyhow::Result<AgentInstallProof> {
         if self.mock_repair_failures.read().contains(udid) {
             anyhow::bail!("mock Agent install-only auth failed");
@@ -617,13 +635,16 @@ impl DeviceDriver for MockIosDriver {
         })
     }
 
-    async fn confirm_interaction_stream_stopped(&self, udid: &str) -> anyhow::Result<()> {
+    async fn confirm_interaction_stream_stopped(
+        &self,
+        udid: &str,
+    ) -> anyhow::Result<StreamHandoffProof> {
         if self.mock_stream_producers.lock().contains_key(udid) {
             anyhow::bail!("interaction handoff still owns an MJPEG producer");
         }
-        self.interaction_lifecycle
-            .record_stopped(udid, self.streams.generation(udid));
-        Ok(())
+        let generation = self.streams.generation(udid);
+        self.interaction_lifecycle.record_stopped(udid, generation);
+        Ok(StreamHandoffProof { generation })
     }
 
     async fn start_interaction_session(
@@ -661,6 +682,15 @@ impl DeviceDriver for MockIosDriver {
             supports_accessibility_readback: kind == InteractionSessionKind::FreshText,
             window_size_calls: self.window_size_calls.clone(),
         }))
+    }
+
+    async fn foreground_target_app_and_start_interaction_session(
+        &self,
+        udid: &str,
+        bundle_id: &str,
+        kind: InteractionSessionKind,
+    ) -> anyhow::Result<Box<dyn UiSession>> {
+        self.start_interaction_session(udid, bundle_id, kind).await
     }
 
     async fn start_stream_after_session(&self, udid: &str) -> anyhow::Result<StreamStartProof> {
@@ -803,6 +833,9 @@ impl DeviceDriver for MockIosDriver {
     }
 
     async fn launch_app(&self, _udid: &str, _bundle_id: &str) -> anyhow::Result<()> {
+        self.interaction_calls
+            .lock()
+            .push("foreground target via bridge");
         Ok(())
     }
 
@@ -1398,6 +1431,58 @@ mod tests {
                 .expect("idempotent absent terminate")
                 .old_pid,
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn target_qualified_inspection_preserves_the_requested_bundle() {
+        let driver = MockIosDriver::new();
+
+        let snapshot = driver
+            .inspect_device_for_target("MOCK-IPHONE-01", "com.apple.Preferences")
+            .await
+            .expect("target-qualified mock inspection");
+
+        assert_eq!(snapshot.target_app.bundle_id, "com.apple.Preferences");
+        assert_eq!(snapshot.product_type, "iPhone10,1");
+        assert!(snapshot.protected_auth_ready);
+    }
+
+    #[tokio::test]
+    async fn direct_mock_launch_records_the_bridge_foreground() {
+        let driver = MockIosDriver::new();
+
+        driver
+            .launch_app("MOCK-IPHONE-01", "com.apple.Preferences")
+            .await
+            .expect("mock bridge launch");
+
+        assert_eq!(
+            driver.interaction_calls.lock().as_slice(),
+            ["foreground target via bridge"]
+        );
+    }
+
+    #[tokio::test]
+    async fn combined_mock_session_foregrounds_the_target_once() {
+        let driver = MockIosDriver::new();
+        driver
+            .confirm_interaction_stream_stopped("MOCK-IPHONE-01")
+            .await
+            .expect("idle interaction handoff");
+
+        driver
+            .foreground_target_app_and_start_interaction_session(
+                "MOCK-IPHONE-01",
+                "com.apple.Preferences",
+                InteractionSessionKind::Ordinary,
+            )
+            .await
+            .expect("combined mock foreground and session");
+
+        assert_eq!(
+            driver.interaction_calls.lock().as_slice(),
+            ["foreground TikTok", "create/attach approved session"]
         );
     }
 }

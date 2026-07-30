@@ -13,7 +13,7 @@ use crate::flow::QualifiedElementLocator;
 use crate::stream_budget::StreamStopProof;
 use crate::types::{
     ActiveAppIdentity, AgentSettings, AgentStatus, DeviceInfo, InteractionSessionKind,
-    StreamStartProof, SwipeGesture, TapPoint,
+    StreamHandoffProof, StreamStartProof, SwipeGesture, TapPoint,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -202,6 +202,13 @@ pub trait DeviceDriver: Send + Sync {
     ) -> anyhow::Result<DeviceCapabilitySnapshot> {
         unsupported("inspectInteractionDevice")
     }
+    async fn inspect_device_for_target(
+        &self,
+        _udid: &str,
+        _target_bundle_id: &str,
+    ) -> anyhow::Result<DeviceCapabilitySnapshot> {
+        unsupported("inspectDeviceForTarget")
+    }
     async fn set_negotiated_interaction_capabilities(
         &self,
         _udid: &str,
@@ -225,8 +232,14 @@ pub trait DeviceDriver: Send + Sync {
     /// Confirms that the per-device driver owns no MJPEG producer and records
     /// the current generation as the session handoff point. This must not stop
     /// or start a producer.
-    async fn confirm_interaction_stream_stopped(&self, _udid: &str) -> anyhow::Result<()> {
+    async fn confirm_interaction_stream_stopped(
+        &self,
+        _udid: &str,
+    ) -> anyhow::Result<StreamHandoffProof> {
         unsupported("confirmInteractionStreamStopped")
+    }
+    async fn read_active_app_bundle(&self, _udid: &str) -> anyhow::Result<String> {
+        unsupported("readActiveAppBundle")
     }
     async fn start_interaction_session(
         &self,
@@ -235,6 +248,18 @@ pub trait DeviceDriver: Send + Sync {
         _kind: InteractionSessionKind,
     ) -> anyhow::Result<Box<dyn UiSession>> {
         unsupported("startInteractionSession")
+    }
+    /// Performs the first durable Flow Launch effect and creates its session.
+    /// Backends whose fresh-session bootstrap foregrounds the Agent override
+    /// this method so the target application is foregrounded exactly once.
+    async fn foreground_target_app_and_start_interaction_session(
+        &self,
+        udid: &str,
+        bundle_id: &str,
+        kind: InteractionSessionKind,
+    ) -> anyhow::Result<Box<dyn UiSession>> {
+        self.launch_app(udid, bundle_id).await?;
+        self.start_interaction_session(udid, bundle_id, kind).await
     }
     #[allow(clippy::too_many_arguments)]
     async fn guarded_clipboard_transition(
