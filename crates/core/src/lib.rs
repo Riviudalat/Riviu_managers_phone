@@ -13,6 +13,7 @@ pub mod registry;
 pub mod screen;
 pub mod screen_match;
 pub mod screen_watch;
+pub mod stream_budget;
 pub mod types;
 
 pub use device_work::{
@@ -27,4 +28,8 @@ pub use nurture::NurtureEngine;
 pub use registry::DeviceRegistry;
 pub use screen::{ScreenKind, ScreenObservation};
 pub use screen_watch::{ScreenWatcher, WatchStats};
+pub use stream_budget::{
+    BackgroundStreamLease, ForegroundStreamReservation, ForegroundTransfer, StreamBudgetError,
+    StreamBudgetManager, StreamStopProof, StreamStopRequest,
+};
 pub use types::*;
