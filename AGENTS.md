@@ -804,6 +804,16 @@ ledger row chi commit cung schema. Khong quay lai batch migration
 phai bat foreign keys va busy timeout; migrate connection con bat WAL. Upgrade khong
 seed lai hay ghi lai row cua exact legacy DB.
 
+Flow authoring persistence nam trong `crates/core/src/db/flows.rs`. Moi save tao mot
+row `flow_revisions` bat bien trong `IMMEDIATE` transaction, so
+`expected_revision` voi projection hien tai truoc khi validate payload, va chi chap
+nhan document + compiled plan cung `flow_id`/next revision. Repository recompute
+execution SHA-256, luu exact canonical compiled JSON va khong tu tang/sua object tu
+compiler. `expected_revision=None` chi tao ID moi; stale writer tra typed
+`RevisionConflict`. Read-back phai kiem lai schema/identity/canonical JSON/hash;
+khong hydrate record DB bi hong. Layout-only revision co authoring JSON moi nhung giu
+nguyen execution hash.
+
 TikTok campaign khong duoc ha thanh chuoi tap generic.
 `InteractionCampaignEngine` hien chua co implementation; node TikTok release sau chi
 duoc them sau khi engine/public facade + G0-G3 da implement va qualify. Flow
@@ -849,9 +859,10 @@ orientation; runtime mismatch phai fail truoc dispatch. Terminate App nam ngoai
 catalog o F0, roi duoc bat trong F1 sau khi bounded DVT terminate, read-only process
 query, exact bundle proof, Python contract test va Rust ownership/integration test deu
 PASS. Legacy va Flow deu phai di qua cung `DeviceControlPlane` lock theo UDID; recovery
-chi `ReadProcess`, khong kill lai de doan retry. F0.1 model/catalog, F0.2 compiler va
-F0.3 legacy importer da commit; F0.4 migration runner da co test rollback/upgrade/
-ledger drift/FK. Buoc foundation tiep theo la F0.5 immutable Flow revisions.
+chi `ReadProcess`, khong kill lai de doan retry. F0.1 model/catalog, F0.2 compiler,
+F0.3 legacy importer va F0.4 migration runner da commit; F0.5 immutable revisions da
+co optimistic/concurrency/integrity tests. Buoc tiep theo la F0.6 full foundation
+gate; runtime F1 chua duoc bat.
 
 Projection attempt co `retryAllowed` do backend tinh tu durable state va proof
 reconciler. Frontend chi an/hien nut theo field nay; khong tu suy retry tu action

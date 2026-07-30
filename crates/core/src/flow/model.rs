@@ -271,6 +271,33 @@ pub struct CompiledFlowPlanV2 {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct FlowSummary {
+    pub id: FlowId,
+    pub name: String,
+    pub latest_revision: u64,
+    pub archived: bool,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowRevisionRecord {
+    pub document: FlowDocumentV2,
+    pub compiled_plan: CompiledFlowPlanV2,
+    pub plan_hash: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, thiserror::Error)]
+#[serde(rename_all = "camelCase")]
+#[error("expected revision {expected}, actual revision {actual}")]
+pub struct RevisionConflict {
+    pub expected: u64,
+    pub actual: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct CompiledFlowNode {
     pub id: NodeId,
     pub kind: ActionKind,

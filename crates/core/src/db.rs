@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::types::{JobRecord, JobStatus, JobStepRecord, StepStatus};
 
+mod flows;
 mod migrations;
 
 pub struct Database {
