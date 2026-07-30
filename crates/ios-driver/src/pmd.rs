@@ -13,9 +13,9 @@ use riviu_core::{
     DeviceCapabilitySnapshot, DeviceDriver, DeviceInfo, DeviceStatus, FrameSource,
     GuardedClipboardOperation, GuardedClipboardOutput, GuardedClipboardProgress,
     GuardedClipboardTransition, InstalledAgentIdentity, InstalledTargetIdentity,
-    InteractionSessionKind, ProcessAbsenceProof, StreamStartProof, StreamStopProof, SwipeGesture,
-    TapPoint, TileStreamState, UiCapabilities, UiError, UiErrorKind, UiSession,
-    MAX_INTERACTION_CLIPBOARD_BYTES, STREAM_FPS,
+    InteractionSessionKind, ProcessAbsenceProof, QualifiedElementLocator, StreamStartProof,
+    StreamStopProof, SwipeGesture, TapPoint, TileStreamState, UiCapabilities, UiError, UiErrorKind,
+    UiSession, MAX_INTERACTION_CLIPBOARD_BYTES, STREAM_FPS,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -1930,6 +1930,7 @@ struct PmdUiSession {
     client: WdaClient,
     mjpeg_url: String,
     supports_text_input: bool,
+    supports_accessibility_readback: bool,
     target_bundle_id: String,
 }
 
@@ -1987,6 +1988,24 @@ impl UiSession for PmdUiSession {
 
     fn supports_text_input(&self) -> bool {
         self.supports_text_input
+    }
+
+    async fn read_text(
+        &self,
+        locator: &QualifiedElementLocator,
+        request_timeout: Duration,
+    ) -> anyhow::Result<String> {
+        if !self.supports_accessibility_readback {
+            anyhow::bail!("qualified accessibility read-back is unavailable");
+        }
+        self.client
+            .read_text(locator, request_timeout)
+            .await
+            .map_err(anyhow::Error::new)
+    }
+
+    fn supports_accessibility_readback(&self) -> bool {
+        self.supports_accessibility_readback
     }
 
     async fn home(&self) -> anyhow::Result<()> {
@@ -2623,6 +2642,8 @@ impl DeviceDriver for PmdIosDriver {
             mjpeg_url: WdaClient::mjpeg_url(&self.wda_host, self.profile.mjpeg_port),
             supports_text_input: kind == InteractionSessionKind::FreshText
                 && self.profile.backend == WdaBackend::RtMmo,
+            supports_accessibility_readback: kind == InteractionSessionKind::FreshText
+                && self.profile.backend == WdaBackend::RtMmo,
             target_bundle_id: bundle_id.to_string(),
         }))
     }
@@ -2652,6 +2673,7 @@ impl DeviceDriver for PmdIosDriver {
             client,
             mjpeg_url: WdaClient::mjpeg_url(&self.wda_host, self.profile.mjpeg_port),
             supports_text_input: false,
+            supports_accessibility_readback: false,
             target_bundle_id: INTERACTION_TARGET_BUNDLE_ID.to_string(),
         }))
     }
@@ -2686,6 +2708,7 @@ impl DeviceDriver for PmdIosDriver {
             client,
             mjpeg_url: WdaClient::mjpeg_url(&self.wda_host, self.profile.mjpeg_port),
             supports_text_input: self.profile.backend == WdaBackend::RtMmo,
+            supports_accessibility_readback: self.profile.backend == WdaBackend::RtMmo,
             target_bundle_id: bundle_id.to_string(),
         }))
     }
@@ -3459,17 +3482,21 @@ print(json.dumps({'ok': True, 'note': 'terminate best-effort'}), flush=True)
             client: WdaClient::new_with_profile("127.0.0.1", 18100, "fixture", profile.clone()),
             mjpeg_url: String::new(),
             supports_text_input: false,
+            supports_accessibility_readback: false,
             target_bundle_id: INTERACTION_TARGET_BUNDLE_ID.to_string(),
         };
         let fresh = PmdUiSession {
             client: WdaClient::new_with_profile("127.0.0.1", 18100, "fixture", profile),
             mjpeg_url: String::new(),
             supports_text_input: true,
+            supports_accessibility_readback: true,
             target_bundle_id: INTERACTION_TARGET_BUNDLE_ID.to_string(),
         };
 
         assert!(!ordinary.supports_text_input());
+        assert!(!ordinary.supports_accessibility_readback());
         assert!(fresh.supports_text_input());
+        assert!(fresh.supports_accessibility_readback());
     }
 
     #[test]

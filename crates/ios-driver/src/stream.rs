@@ -52,6 +52,7 @@ enum HubGenerationEvent {
     Frame {
         udid: String,
         generation: u64,
+        sequence: u64,
         bytes: Frame,
     },
     Advanced {
@@ -64,6 +65,7 @@ enum HubGenerationEvent {
 struct HubState {
     latest: HashMap<String, Frame>,
     generations: HashMap<String, u64>,
+    sequences: HashMap<String, u64>,
 }
 
 impl StreamHub {
@@ -81,11 +83,13 @@ impl StreamHub {
         let frame: Frame = Arc::new(jpeg);
         let mut state = self.state.write();
         let generation = state.generations.get(udid).copied().unwrap_or(0);
+        let sequence = next_frame_sequence(&mut state, udid);
         state.latest.insert(udid.to_string(), frame.clone());
         let _ = self.tx.send((udid.to_string(), frame.clone()));
         let _ = self.generation_tx.send(HubGenerationEvent::Frame {
             udid: udid.to_string(),
             generation,
+            sequence,
             bytes: frame,
         });
     }
@@ -106,11 +110,13 @@ impl StreamHub {
         if generation != current {
             return false;
         }
+        let sequence = next_frame_sequence(&mut state, udid);
         state.latest.insert(udid.to_string(), frame.clone());
         let _ = self.tx.send((udid.to_string(), frame.clone()));
         let _ = self.generation_tx.send(HubGenerationEvent::Frame {
             udid: udid.to_string(),
             generation,
+            sequence,
             bytes: frame,
         });
         true
@@ -127,6 +133,7 @@ impl StreamHub {
     pub(crate) fn clear_and_advance(&self, udid: &str) -> (u64, u64) {
         let mut state = self.state.write();
         state.latest.remove(udid);
+        state.sequences.remove(udid);
         let generation = state.generations.entry(udid.to_string()).or_default();
         let old_generation = *generation;
         *generation = generation.checked_add(1).unwrap_or(1);
@@ -186,6 +193,7 @@ impl GenerationFrameStream for HubGenerationStream {
                 Ok(HubGenerationEvent::Frame {
                     udid,
                     generation,
+                    sequence,
                     bytes,
                 }) if udid == self.udid && generation == self.generation => {
                     let actual = self
@@ -201,7 +209,11 @@ impl GenerationFrameStream for HubGenerationStream {
                             actual,
                         };
                     }
-                    return GenerationFrameEvent::Frame(GenerationFrame { generation, bytes });
+                    return GenerationFrameEvent::Frame(GenerationFrame {
+                        generation,
+                        sequence,
+                        bytes,
+                    });
                 }
                 Ok(HubGenerationEvent::Advanced { udid, generation })
                     if udid == self.udid && generation > self.generation =>
@@ -262,11 +274,23 @@ impl GenerationFrameSource for StreamHub {
 
     fn latest_in_generation(&self, udid: &str, generation: u64) -> Option<GenerationFrame> {
         let state = self.state.read();
-        (state.generations.get(udid).copied().unwrap_or(0) == generation)
-            .then(|| state.latest.get(udid).cloned())
-            .flatten()
-            .map(|bytes| GenerationFrame { generation, bytes })
+        if state.generations.get(udid).copied().unwrap_or(0) != generation {
+            return None;
+        }
+        Some(GenerationFrame {
+            generation,
+            sequence: state.sequences.get(udid).copied()?,
+            bytes: state.latest.get(udid).cloned()?,
+        })
     }
+}
+
+fn next_frame_sequence(state: &mut HubState, udid: &str) -> u64 {
+    let sequence = state.sequences.entry(udid.to_string()).or_default();
+    *sequence = sequence
+        .checked_add(1)
+        .expect("a stream generation cannot publish u64::MAX frames");
+    *sequence
 }
 
 #[cfg(test)]
@@ -327,7 +351,23 @@ mod tests {
             panic!("expected a generation-qualified frame");
         };
         assert_eq!(frame.generation, generation);
+        assert_eq!(frame.sequence, 1);
         assert_eq!(&*frame.bytes, &[4, 5, 6]);
+    }
+
+    #[tokio::test]
+    async fn fresh_generation_subscription_only_yields_post_subscription_frames() {
+        let hub = StreamHub::new();
+        let generation = hub.generation("fixture");
+        hub.publish("fixture", vec![1]);
+        let mut stream = hub.subscribe_generation("fixture", generation);
+        hub.publish("fixture", vec![2]);
+
+        let GenerationFrameEvent::Frame(frame) = stream.next().await else {
+            panic!("expected post-subscription frame");
+        };
+        assert_eq!(frame.sequence, 2);
+        assert_eq!(&*frame.bytes, &[2]);
     }
 
     #[tokio::test]

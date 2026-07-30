@@ -5,8 +5,9 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONNECTION};
 use reqwest::Client;
 use riviu_core::{
     is_valid_protected_route_path, validate_clipboard_read_limit, ActiveAppIdentity,
-    ClipboardAccessMode, ProtectedRouteContract, RouteMethod, RouteScope, SwipeGesture, TapPoint,
-    UiCapabilities, UiError, UiErrorKind, MAX_INTERACTION_CLIPBOARD_BYTES, OPEN_URL_TIMEOUT_MS,
+    ClipboardAccessMode, ElementLocatorStrategy, ProtectedRouteContract, QualifiedElementLocator,
+    RouteMethod, RouteScope, SwipeGesture, TapPoint, UiCapabilities, UiError, UiErrorKind,
+    MAX_INTERACTION_CLIPBOARD_BYTES, OPEN_URL_TIMEOUT_MS,
 };
 use serde_json::json;
 
@@ -779,7 +780,14 @@ impl WdaClient {
                 interaction_contract_error(label, format!("response is not UTF-8: {error}"))
             })?
         } else {
-            resp.text().await.unwrap_or_default()
+            resp.text().await.map_err(|error| {
+                let kind = if error.is_timeout() {
+                    UiErrorKind::Timeout
+                } else {
+                    UiErrorKind::Transport
+                };
+                UiError::new(kind, label, format!("{url}: {error}"))
+            })?
         };
         if !status.is_success() {
             let parsed = serde_json::from_str::<serde_json::Value>(&text).ok();
@@ -1272,6 +1280,92 @@ impl WdaClient {
         Ok(())
     }
 
+    pub async fn read_text(
+        &self,
+        locator: &QualifiedElementLocator,
+        request_timeout: Duration,
+    ) -> Result<String, UiError> {
+        if locator.value.trim().is_empty() || locator.value.trim() != locator.value {
+            return Err(UiError::new(
+                UiErrorKind::Http,
+                "element.readText",
+                "qualified locator value is invalid",
+            ));
+        }
+        let deadline = Instant::now().checked_add(request_timeout).ok_or_else(|| {
+            UiError::new(
+                UiErrorKind::Timeout,
+                "element.readText",
+                "read-back deadline overflow",
+            )
+        })?;
+        let using = match locator.strategy {
+            ElementLocatorStrategy::AccessibilityId => "accessibility id",
+            ElementLocatorStrategy::ClassName => "class name",
+        };
+        let lookup_url = self.session_url("/element")?;
+        let response = self
+            .send(
+                Method::Post,
+                &lookup_url,
+                "element.readText.find",
+                Some(&json!({"using": using, "value": locator.value})),
+                remaining_readback_timeout(deadline, "element.readText.find")?,
+            )
+            .await?;
+        let legacy = response
+            .pointer("/value/ELEMENT")
+            .and_then(|value| value.as_str());
+        let w3c = response
+            .pointer("/value/element-6066-11e4-a52e-4f735466cecf")
+            .and_then(|value| value.as_str());
+        let element_id = match (legacy, w3c) {
+            (Some(legacy), Some(w3c)) if legacy != w3c => {
+                return Err(UiError::new(
+                    UiErrorKind::Http,
+                    "element.readText.find",
+                    "element response contains conflicting identifiers",
+                ));
+            }
+            (Some(value), _) | (_, Some(value))
+                if !value.is_empty()
+                    && value.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
+                    }) =>
+            {
+                value
+            }
+            _ => {
+                return Err(UiError::new(
+                    UiErrorKind::Http,
+                    "element.readText.find",
+                    "element identifier is missing or invalid",
+                ));
+            }
+        };
+        let text_url = self.session_url(&format!("/element/{element_id}/text"))?;
+        let response = self
+            .send(
+                Method::Get,
+                &text_url,
+                "element.readText.get",
+                None,
+                remaining_readback_timeout(deadline, "element.readText.get")?,
+            )
+            .await?;
+        response
+            .get("value")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                UiError::new(
+                    UiErrorKind::Http,
+                    "element.readText.get",
+                    "text response value is not a string",
+                )
+            })
+    }
+
     pub async fn health(&self) -> Result<bool, UiError> {
         let url = format!("{}/status", self.base);
         Ok(self
@@ -1654,6 +1748,19 @@ fn outcome_of(kind: UiErrorKind) -> Outcome {
     }
 }
 
+fn remaining_readback_timeout(deadline: Instant, label: &str) -> Result<Duration, UiError> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| {
+            UiError::new(
+                UiErrorKind::Timeout,
+                label,
+                "qualified text read-back deadline expired",
+            )
+        })
+}
+
 /// Does this WDA error mean the session id is no longer valid?
 fn is_session_gone(w3c_error: &str, message: &str) -> bool {
     let hay = format!("{w3c_error} {message}").to_lowercase();
@@ -1667,9 +1774,9 @@ mod tests {
     use super::*;
     use base64::Engine as _;
     use riviu_core::{
-        ClipboardAccessMode, ClipboardCapability, OpenUrlCapability, ProtectedRouteContract,
-        QualifiedGeometry, RouteMethod, RouteScope, ScreenOrientation, TargetIdentityCapability,
-        UiCapabilities,
+        ClipboardAccessMode, ClipboardCapability, ElementLocatorStrategy, OpenUrlCapability,
+        ProtectedRouteContract, QualifiedElementLocator, QualifiedGeometry, RouteMethod,
+        RouteScope, ScreenOrientation, TargetIdentityCapability, UiCapabilities,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -1837,6 +1944,94 @@ mod tests {
             let _ = tx.send(requests);
         });
         (port, rx)
+    }
+
+    async fn delayed_scripted_server(
+        responses: Vec<(&'static str, Duration)>,
+    ) -> (u16, tokio::sync::oneshot::Receiver<Vec<String>>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind delayed test server");
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (body, delay) in responses {
+                let (mut socket, _) = listener.accept().await.expect("accept delayed request");
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 2048];
+                loop {
+                    let count = socket.read(&mut chunk).await.expect("read delayed request");
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                requests.push(String::from_utf8_lossy(&request).into_owned());
+                tokio::time::sleep(delay).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+            let _ = tx.send(requests);
+        });
+        (port, rx)
+    }
+
+    async fn readback_body_stall_server(delay: Duration) -> u16 {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind body-stall server");
+        let port = listener.local_addr().expect("body-stall address").port();
+        tokio::spawn(async move {
+            for response in [
+                Some(r#"{"value":{"element-6066-11e4-a52e-4f735466cecf":"element-1"}}"#),
+                None,
+            ] {
+                let (mut socket, _) = listener.accept().await.expect("accept read-back request");
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 2048];
+                loop {
+                    let count = socket
+                        .read(&mut chunk)
+                        .await
+                        .expect("read read-back request");
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                if let Some(body) = response {
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    socket
+                        .write_all(response.as_bytes())
+                        .await
+                        .expect("write lookup response");
+                } else {
+                    socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 32\r\nConnection: close\r\n\r\n",
+                        )
+                        .await
+                        .expect("write stalled response headers");
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        });
+        port
     }
 
     async fn one_status_server(
@@ -2078,6 +2273,125 @@ mod tests {
             let client = interaction_client(port, RouteScope::Sessionless);
             assert!(client.active_app_identity().await.is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn qualified_text_readback_uses_one_exact_element_lookup_then_get_text() {
+        for (strategy, using, element_response) in [
+            (
+                ElementLocatorStrategy::AccessibilityId,
+                "accessibility id",
+                r#"{"value":{"element-6066-11e4-a52e-4f735466cecf":"element-1"}}"#,
+            ),
+            (
+                ElementLocatorStrategy::ClassName,
+                "class name",
+                r#"{"value":{"ELEMENT":"element-1"}}"#,
+            ),
+        ] {
+            let (port, requests) = scripted_server(vec![
+                element_response,
+                r#"{"value":"Tiếng Việt chính xác"}"#,
+            ])
+            .await;
+            let client = interaction_client(port, RouteScope::Sessionless);
+            let locator = QualifiedElementLocator {
+                strategy,
+                value: "SearchField".into(),
+            };
+
+            let value = client
+                .read_text(&locator, Duration::from_secs(1))
+                .await
+                .expect("qualified text");
+
+            assert_eq!(value, "Tiếng Việt chính xác");
+            let requests = requests.await.expect("captured read-back requests");
+            assert_eq!(requests.len(), 2);
+            assert!(requests[0].starts_with("POST /session/fixture-session/element HTTP/1.1"));
+            let lookup_body = requests[0].split_once("\r\n\r\n").unwrap().1;
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(lookup_body).unwrap(),
+                json!({"using": using, "value": "SearchField"})
+            );
+            assert!(requests[1]
+                .starts_with("GET /session/fixture-session/element/element-1/text HTTP/1.1"));
+        }
+    }
+
+    #[tokio::test]
+    async fn qualified_text_readback_rejects_ambiguous_ids_and_non_string_text() {
+        for responses in [
+            vec![r#"{"value":{"ELEMENT":"legacy","element-6066-11e4-a52e-4f735466cecf":"w3c"}}"#],
+            vec![
+                r#"{"value":{"element-6066-11e4-a52e-4f735466cecf":"element-1"}}"#,
+                r#"{"value":42}"#,
+            ],
+        ] {
+            let (port, _) = scripted_server(responses).await;
+            let client = interaction_client(port, RouteScope::Sessionless);
+            let error = client
+                .read_text(
+                    &QualifiedElementLocator {
+                        strategy: ElementLocatorStrategy::AccessibilityId,
+                        value: "SearchField".into(),
+                    },
+                    Duration::from_secs(1),
+                )
+                .await
+                .expect_err("invalid read-back response");
+            assert_eq!(error.kind, UiErrorKind::Http);
+        }
+    }
+
+    #[tokio::test]
+    async fn qualified_text_readback_recomputes_one_deadline_before_get_text() {
+        let (port, requests) = delayed_scripted_server(vec![
+            (
+                r#"{"value":{"element-6066-11e4-a52e-4f735466cecf":"element-1"}}"#,
+                Duration::from_millis(40),
+            ),
+            (r#"{"value":"late"}"#, Duration::from_millis(80)),
+        ])
+        .await;
+        let client = interaction_client(port, RouteScope::Sessionless);
+        let started = Instant::now();
+
+        let error = client
+            .read_text(
+                &QualifiedElementLocator {
+                    strategy: ElementLocatorStrategy::AccessibilityId,
+                    value: "SearchField".into(),
+                },
+                Duration::from_millis(100),
+            )
+            .await
+            .expect_err("second request must use only the remaining deadline");
+
+        assert_eq!(error.kind, UiErrorKind::Timeout);
+        assert!(started.elapsed() < Duration::from_millis(180));
+        let requests = tokio::time::timeout(Duration::from_millis(250), requests)
+            .await
+            .expect("delayed server completion")
+            .expect("captured delayed requests");
+        assert_eq!(requests.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn qualified_text_readback_preserves_timeout_while_reading_response_body() {
+        let port = readback_body_stall_server(Duration::from_millis(200)).await;
+        let client = interaction_client(port, RouteScope::Sessionless);
+        let error = client
+            .read_text(
+                &QualifiedElementLocator {
+                    strategy: ElementLocatorStrategy::AccessibilityId,
+                    value: "SearchField".into(),
+                },
+                Duration::from_millis(60),
+            )
+            .await
+            .expect_err("stalled response body must remain a timeout");
+        assert_eq!(error.kind, UiErrorKind::Timeout);
     }
 
     #[tokio::test]

@@ -13,8 +13,8 @@ use riviu_core::{
     ActiveTransport, AgentInstallProof, AgentSettings, AgentState, AgentStatus, AppProcessState,
     ConnectionKind, DeviceCapabilitySnapshot, DeviceDriver, DeviceInfo, DeviceStatus,
     InstalledAgentIdentity, InstalledTargetIdentity, InteractionSessionKind, ProcessAbsenceProof,
-    QualifiedGeometry, ScreenOrientation, StreamStartProof, StreamStopProof, SwipeGesture,
-    TapPoint, TileStreamState, UiSession, STREAM_FPS,
+    QualifiedElementLocator, QualifiedGeometry, ScreenOrientation, StreamStartProof,
+    StreamStopProof, SwipeGesture, TapPoint, TileStreamState, UiSession, STREAM_FPS,
 };
 use tokio::sync::{oneshot, RwLock};
 use tokio::task::JoinHandle;
@@ -62,6 +62,7 @@ pub struct MockIosDriver {
     devices: Arc<RwLock<Vec<DeviceInfo>>>,
     streams: StreamHub,
     taps: Arc<Mutex<HashMap<String, Vec<TapPoint>>>>,
+    typed_text: Arc<Mutex<HashMap<String, String>>>,
     agent_settings: Arc<SyncRwLock<AgentSettings>>,
     agent_statuses: Arc<SyncRwLock<HashMap<String, AgentStatus>>>,
     agent_preflight_calls: Arc<AtomicUsize>,
@@ -133,6 +134,7 @@ impl MockIosDriver {
             devices: Arc::new(RwLock::new(devices)),
             streams: streams.clone(),
             taps: Arc::new(Mutex::new(HashMap::new())),
+            typed_text: Arc::new(Mutex::new(HashMap::new())),
             agent_settings: Arc::new(SyncRwLock::new(AgentSettings::default())),
             agent_statuses: Arc::new(SyncRwLock::new(HashMap::new())),
             agent_preflight_calls: Arc::new(AtomicUsize::new(0)),
@@ -419,7 +421,9 @@ fn render_mock_frame(name: &str, index: usize, tick: u64) -> anyhow::Result<Vec<
 struct MockUiSession {
     udid: String,
     taps: Arc<Mutex<HashMap<String, Vec<TapPoint>>>>,
+    typed_text: Arc<Mutex<HashMap<String, String>>>,
     supports_text_input: bool,
+    supports_accessibility_readback: bool,
     window_size_calls: Arc<AtomicUsize>,
 }
 
@@ -439,12 +443,40 @@ impl UiSession for MockUiSession {
         Ok(())
     }
 
-    async fn type_text(&self, _text: &str) -> anyhow::Result<()> {
+    async fn type_text(&self, text: &str) -> anyhow::Result<()> {
+        self.typed_text
+            .lock()
+            .insert(self.udid.clone(), text.to_string());
         Ok(())
     }
 
     fn supports_text_input(&self) -> bool {
         self.supports_text_input
+    }
+
+    async fn read_text(
+        &self,
+        locator: &QualifiedElementLocator,
+        _request_timeout: Duration,
+    ) -> anyhow::Result<String> {
+        anyhow::ensure!(
+            self.supports_accessibility_readback,
+            "mock accessibility read-back is unavailable"
+        );
+        anyhow::ensure!(
+            !locator.value.trim().is_empty() && locator.value.trim() == locator.value,
+            "mock locator is invalid"
+        );
+        Ok(self
+            .typed_text
+            .lock()
+            .get(&self.udid)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    fn supports_accessibility_readback(&self) -> bool {
+        self.supports_accessibility_readback
     }
 
     async fn home(&self) -> anyhow::Result<()> {
@@ -624,7 +656,9 @@ impl DeviceDriver for MockIosDriver {
         Ok(Box::new(MockUiSession {
             udid: udid.to_string(),
             taps: self.taps.clone(),
+            typed_text: self.typed_text.clone(),
             supports_text_input: kind == InteractionSessionKind::FreshText,
+            supports_accessibility_readback: kind == InteractionSessionKind::FreshText,
             window_size_calls: self.window_size_calls.clone(),
         }))
     }
@@ -803,7 +837,9 @@ impl DeviceDriver for MockIosDriver {
         Ok(Box::new(MockUiSession {
             udid: udid.to_string(),
             taps: self.taps.clone(),
+            typed_text: self.typed_text.clone(),
             supports_text_input: false,
+            supports_accessibility_readback: false,
             window_size_calls: self.window_size_calls.clone(),
         }))
     }
@@ -818,7 +854,9 @@ impl DeviceDriver for MockIosDriver {
         Ok(Box::new(MockUiSession {
             udid: udid.to_string(),
             taps: self.taps.clone(),
+            typed_text: self.typed_text.clone(),
             supports_text_input: true,
+            supports_accessibility_readback: true,
             window_size_calls: self.window_size_calls.clone(),
         }))
     }
@@ -850,7 +888,7 @@ impl DeviceDriver for MockIosDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use riviu_core::InteractionSessionKind;
+    use riviu_core::{ElementLocatorStrategy, InteractionSessionKind};
 
     async fn wait_for_mock_frame(driver: &MockIosDriver, udid: &str) -> riviu_core::Frame {
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -1034,7 +1072,26 @@ mod tests {
         assert_eq!(driver.fresh_text_session_calls(), 1);
         assert_eq!(driver.stream_restart_calls(), 1);
         assert!(!ordinary.supports_text_input());
+        assert!(!ordinary.supports_accessibility_readback());
         assert!(fresh.supports_text_input());
+        assert!(fresh.supports_accessibility_readback());
+        fresh
+            .type_text("Tiếng Việt chính xác")
+            .await
+            .expect("mock type text");
+        assert_eq!(
+            fresh
+                .read_text(
+                    &QualifiedElementLocator {
+                        strategy: ElementLocatorStrategy::AccessibilityId,
+                        value: "SearchField".into(),
+                    },
+                    Duration::from_secs(1),
+                )
+                .await
+                .expect("mock read text"),
+            "Tiếng Việt chính xác"
+        );
     }
 
     #[tokio::test]

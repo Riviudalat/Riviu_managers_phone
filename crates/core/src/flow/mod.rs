@@ -1,9 +1,15 @@
 pub mod artifact_store;
+#[allow(dead_code)]
+pub(crate) mod cancellation;
 pub mod catalog;
+#[allow(dead_code)]
+pub mod evidence;
 pub mod model;
 
 pub use artifact_store::*;
+pub(crate) use cancellation::FlowCancellation;
 pub use catalog::*;
+pub use evidence::*;
 pub use model::*;
 
 #[cfg(test)]

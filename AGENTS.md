@@ -958,9 +958,32 @@ khi F1 co checkpoint rieng.
 
 F1 Task 4 checkpoint ngay 31/07/2026: Python app-control tests PASS 10/10; Rust Pmd
 tests PASS 33/33; DeviceControl PASS 33/33; JobQueue PASS 3/3; core Flow PASS 46/46;
-toan bo Python sidecar PASS 42/42; script-engine Flow PASS 23/23. Khong lam lai bounded terminate/parser/
-ownership/catalog o task sau. Task 6 phai dung proof va read-only process route nay de
-persist evidence/reconcile, khong them duong terminate rieng.
+toan bo Python sidecar PASS 42/42; script-engine Flow PASS 23/23. Khong lam lai
+bounded terminate/parser/ownership/catalog o task sau. Task 6 phai dung proof va
+read-only process route nay de persist evidence/reconcile, khong them duong terminate
+rieng.
+
+F1 Task 5 checkpoint ngay 31/07/2026: evidence tests PASS 15/15; WDA PASS 32/32;
+mock PASS 15/15; Pmd PASS 33/33. `FlowCancellation` trong `flow` la primitive duy
+nhat cho Task 6/7; khong tao token executor rieng. Frame baseline persist exact
+generation + SHA-256 JPEG + width/height + RGB base64 va verifier chi dung
+`GenerationFrameSource`. Moi `GenerationFrame` co sequence tang don dieu trong mot
+generation; postcondition chup watermark khi verifier bat dau sau effect va chi nhan
+frame co sequence moi hon, khong dung cached frame truoc verifier. Baseline phai recheck
+generation sau decode; generation advance tra `StaleGeneration`, stream dong tra
+`StreamClosed`. ACK gesture/keys khong duoc doi thanh success neu evidence khong match.
+Process proof phai khop exact bundle va pre-effect PID; proof sai la invalid/uncertain,
+read-only same PID dung retry-safe schema `bundleId/pid/preEffectPid`, PID moi la
+uncertain. Ca success va retry-safe process envelope da duoc test qua transition DB that.
+
+Qualified read-back chi advertise tren session `FreshText` cua profile RT-MMO. WDA
+chi POST singular `/element` voi exact `accessibility id|class name`, chap nhan W3C
+hoac legacy element ID neu khong mau thuan, sau do GET exact `/element/{id}/text`.
+Hai request dung chung mot absolute deadline va moi request tu tinh remaining timeout;
+loi khi doc response body phai giu `UiErrorKind::Timeout`; khong boc request bang
+`tokio::time::timeout`. Stock/ordinary session van false va `snapshotMaxDepth=1`
+khong thay doi. Task 6 phai check live flag truoc dispatch
+`accessibility.visible|accessibility.readText`, khong tao session implicit.
 
 Projection attempt co `retryAllowed` do backend tinh tu durable state va proof
 reconciler. Frontend chi an/hien nut theo field nay; khong tu suy retry tu action

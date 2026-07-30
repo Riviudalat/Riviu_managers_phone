@@ -2994,10 +2994,11 @@ mod tests {
     use crate::{
         compiled_plan_sha256, ActionKind, ActiveTransport, CompiledActionConfig, CompiledFlowNode,
         CompiledFlowPlanV2, ContextPlan, DeviceCapabilitySnapshot, DeviceWorkOwner,
-        FlowAggregateState, FlowArtifactRecord, FlowAttemptState, FlowContextReleaseProof,
-        FlowDeviceRunState, FlowDocumentV2, FlowErrorRecord, FlowSelectionSnapshot,
-        FlowTargetSelection, InstalledAgentIdentity, InstalledTargetIdentity, QualifiedGeometry,
-        ScreenOrientation, SideEffectClass, FLOW_SCHEMA_VERSION,
+        EvidenceBaseline, FlowAggregateState, FlowArtifactRecord, FlowAttemptState,
+        FlowContextReleaseProof, FlowDeviceRunState, FlowDocumentV2, FlowErrorRecord,
+        FlowSelectionSnapshot, FlowTargetSelection, InstalledAgentIdentity,
+        InstalledTargetIdentity, QualifiedGeometry, ScreenOrientation, SideEffectClass,
+        FLOW_SCHEMA_VERSION,
     };
 
     fn database_fixture() -> (Database, PathBuf) {
@@ -4178,6 +4179,77 @@ mod tests {
             .expect("frame proof matches committed generation");
         cleanup(&process_path);
         cleanup(&frame_path);
+    }
+
+    #[test]
+    fn typed_process_evidence_round_trips_through_durable_transition_contracts() {
+        let spec = EvidenceSpec::ProcessAbsent {
+            bundle_id: "com.example.fixture".to_string(),
+        };
+        let baseline = EvidenceBaseline::Process {
+            bundle_id: "com.example.fixture".to_string(),
+            pid: Some(42),
+        };
+
+        let (success_db, success_path, _, success_attempt, _) = attempt_fixture(
+            ActionKind::TerminateApp,
+            CompiledActionConfig::TerminateApp {
+                bundle_id: "com.example.fixture".to_string(),
+            },
+            SideEffectClass::IdempotentSet,
+        );
+        set_attempt_state(&success_db, success_attempt, FlowAttemptState::Verifying);
+        let success = crate::verify_process_absence(
+            &spec,
+            &baseline,
+            &crate::ProcessAbsenceProof {
+                bundle_id: "com.example.fixture".to_string(),
+                old_pid: Some(42),
+            },
+        )
+        .expect("typed process success");
+        success_db
+            .transition_attempt(
+                success_attempt,
+                FlowAttemptState::Verifying,
+                FlowAttemptState::Succeeded,
+                AttemptTransitionPatch {
+                    evidence_result: Some(
+                        serde_json::to_value(success).expect("serialize process success"),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .expect("persist typed process success");
+
+        let (retry_db, retry_path, _, retry_attempt, _) = attempt_fixture(
+            ActionKind::TerminateApp,
+            CompiledActionConfig::TerminateApp {
+                bundle_id: "com.example.fixture".to_string(),
+            },
+            SideEffectClass::IdempotentSet,
+        );
+        set_attempt_state(&retry_db, retry_attempt, FlowAttemptState::FailedVerified);
+        let non_delivery = crate::evaluate_process_state(
+            &spec,
+            &baseline,
+            &crate::AppProcessState {
+                bundle_id: "com.example.fixture".to_string(),
+                pid: Some(42),
+                running: true,
+            },
+        )
+        .expect("typed process non-delivery");
+        let retryable = retry_db
+            .record_retry_safe_reconciliation(
+                retry_attempt,
+                serde_json::to_value(non_delivery).expect("serialize process non-delivery"),
+            )
+            .expect("persist typed retry-safe process evidence");
+        assert!(retryable.retry_allowed);
+
+        cleanup(&success_path);
+        cleanup(&retry_path);
     }
 
     #[test]

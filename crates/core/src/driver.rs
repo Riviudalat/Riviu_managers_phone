@@ -9,6 +9,7 @@ use crate::device_capabilities::{
     validate_clipboard_read_limit, AgentInstallProof, ClipboardAccessMode,
     DeviceCapabilitySnapshot, UiCapabilities,
 };
+use crate::flow::QualifiedElementLocator;
 use crate::stream_budget::StreamStopProof;
 use crate::types::{
     ActiveAppIdentity, AgentSettings, AgentStatus, DeviceInfo, InteractionSessionKind,
@@ -387,6 +388,16 @@ pub trait UiSession: Send + Sync {
     }
     async fn active_app_identity(&self) -> anyhow::Result<ActiveAppIdentity> {
         unsupported("activeAppIdentity")
+    }
+    async fn read_text(
+        &self,
+        _locator: &QualifiedElementLocator,
+        _request_timeout: std::time::Duration,
+    ) -> anyhow::Result<String> {
+        unsupported("readText")
+    }
+    fn supports_accessibility_readback(&self) -> bool {
+        false
     }
     /// Raw screen capture via the UI channel (WDA `GET /screenshot`).
     /// Cheap (~0.3s over USB) unlike the pymobiledevice3 path.

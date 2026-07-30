@@ -44,6 +44,10 @@ pub trait FrameSource: Send + Sync {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GenerationFrame {
     pub generation: u64,
+    /// Monotonic within one generation. A fresh evidence subscription uses
+    /// this as a watermark so buffered pre-verification frames cannot prove a
+    /// later device effect.
+    pub sequence: u64,
     pub bytes: Frame,
 }
 
@@ -62,6 +66,8 @@ pub trait GenerationFrameStream: Send {
 
 /// Generation-qualified access for evidence that must not cross a stream restart.
 pub trait GenerationFrameSource: FrameSource {
+    /// Subscribe after the source's current frame watermark. Implementations
+    /// must never yield an older buffered frame as a newly published event.
     fn subscribe_generation(&self, udid: &str, generation: u64) -> Box<dyn GenerationFrameStream>;
 
     fn latest_in_generation(&self, udid: &str, generation: u64) -> Option<GenerationFrame>;
