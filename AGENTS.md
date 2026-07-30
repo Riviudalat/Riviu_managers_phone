@@ -754,8 +754,9 @@ Flow keo-tha se khong gan canvas truc tiep vao `JobQueue` v1. Authoring dung gra
 schema v2 voi node/edge/layout, Rust compile thanh immutable execution plan, va
 runtime luu progress rieng theo `flow_run -> device_run -> node_attempt`. Release dau
 chi cho mot duong tuyen tinh. Import JSON v1 chi bao dam supported subset; wait >60s,
-XPath/predicate, target xung dot, terminate chua qualify va action thieu evidence phai
-tra typed diagnostic, khong tu doi semantics. Graph storage duoc giu ngay tu dau cho
+XPath/predicate, target xung dot, Terminate truoc gate F1 va action thieu evidence phai
+tra typed diagnostic, khong tu doi semantics. Sau gate F1, Terminate dung config
+bundle typed + bang chung `ProcessAbsent`. Graph storage duoc giu ngay tu dau cho
 `If`/`Repeat`, TikTok action va dependency nhieu may ve sau.
 
 Do `riviu-script-engine` dang phu thuoc `riviu-core`, Flow model va compiled IR phai
@@ -769,11 +770,20 @@ React chi so huu draft/layout. Validation, action catalog, capability/resource
 contract, canonical hash, persistence, retry va execution deu thuoc Rust. Canvas dung
 `@xyflow/react`; node khong duoc expose raw HTTP/WDA/shell. Moi device segment chi
 giu mot `DeviceControlPlane` context va khong giu lease may A trong khi cho may B.
+Authoring config la JSON theo schema, nhung compiler bat buoc doi sang
+`CompiledActionConfig` typed; runtime khong parse lai authoring `serde_json::Value`.
+Canonical compiled JSON van chua revision; execution hash bo duy nhat top-level
+revision, nen save chi doi layout/revision giu nguyen hash con config/action version/
+context/capability/flow ID van lam hash doi.
+Import `@xyflow/react/dist/style.css` trong `main.tsx` truoc `index.css` de CSS Riviu
+la lop override cuoi; khong chen CSS import sau cac rule trong `index.css`.
 Release 1 giu mot ownership chain/device, chi upgrade
 `Exclusive -> UiSession -> UiWithStream`, khong close/reacquire giua cac node phu
 thuoc. Tap/swipe/type va moi side effect chi `Succeeded` sau typed postcondition;
 ACK transport khong phai evidence. Node can frame phai reserve exact stream capacity,
 inject `FrameSource` va van giu session-truoc-MJPEG.
+`clear_and_advance` phai phat event generation moi; verifier generation cu fail ngay
+`StaleGeneration`, co deadline + cancellation, khong doi frame moi vo han.
 Flow Screenshot phai publish frame tu exact owned stream generation + hash artifact,
 khong goi WDA `GET /screenshot`.
 
@@ -797,8 +807,50 @@ phai duoc implement + verify truoc khi vao action catalog; syslog de ngoai Flow 
 1 cho toi khi os_trace path that co contract/live test.
 
 Thiet ke day du:
-`docs/superpowers/specs/2026-07-30-riviu-flow-v2-design.md`. Chua co implementation;
-agent tiep theo phai lap implementation plan sau khi spec duoc user review.
+`docs/superpowers/specs/2026-07-30-riviu-flow-v2-design.md`. User da duyet thiet ke;
+implementation duoc chia thanh bon gate bat buoc F0 Foundation -> F1 Runtime -> F2
+Desktop -> F3 Acceptance tai:
+
+- `docs/superpowers/plans/2026-07-30-riviu-flow-v2-roadmap.md`;
+- `docs/superpowers/plans/2026-07-30-riviu-flow-v2-foundation.md`;
+- `docs/superpowers/plans/2026-07-30-riviu-flow-v2-runtime.md`;
+- `docs/superpowers/plans/2026-07-30-riviu-flow-v2-desktop.md`;
+- `docs/superpowers/plans/2026-07-30-riviu-flow-v2-acceptance.md`.
+
+Commit chua checkpoint ke hoach nay la rollback baseline truoc F0. Ngay truoc source
+edit dau tien, worktree phai sach, dat `RIVIU_PRE_F0_COMMIT=$(git rev-parse HEAD)`
+va ghi full hash vao checkpoint F0; cac handoff F1-F3 giu nguyen hash do, khong
+day baseline tien theo implementation commit.
+
+Khong bat dau gate sau khi gate truoc chua commit va qua day du lenh verify. Moi Flow
+can UI session bat buoc co Launch App la executable node dau tien de compiler co
+target bundle truoc fresh/ordinary session va MJPEG. Launch dau tien la mot durable
+attempt: intent/effect -> foreground dung mot lan -> session -> stream neu can ->
+verify; no khong duoc dispatch lai trong loop. Pure bridge Wait/Terminate khong can
+Launch; Terminate tu mang exact bundle ID.
+Coordinate picker chi giu frame hien co trong bo nho, acquire `ManualControl` de lay
+exact capability/geometry cho bundle cua Launch App dau tien, roi release; no khong tao stream/session va khong goi WDA
+screenshot. Point luu full `QualifiedGeometry` profile digest, kich thuoc anh va
+orientation; runtime mismatch phai fail truoc dispatch. Terminate App nam ngoai
+catalog o F0, roi duoc bat trong F1 sau khi bounded DVT terminate, read-only process
+query, exact bundle proof, Python contract test va Rust ownership/integration test deu
+PASS. Legacy va Flow deu phai di qua cung `DeviceControlPlane` lock theo UDID; recovery
+chi `ReadProcess`, khong kill lai de doan retry. Gate tiep theo la F0; chua co source
+Flow implementation o checkpoint nay.
+
+Projection attempt co `retryAllowed` do backend tinh tu durable state va proof
+reconciler. Frontend chi an/hien nut theo field nay; khong tu suy retry tu action
+name. `Uncertain` Tap/Swipe/Type Text luon false. `retry_safe` mac dinh 0 trong DB
+va chi transaction reconciler cua idempotent-set moi duoc set 1 kem event proof.
+
+Trong mot release compatibility, page Flow giu tab `Legacy` mount nguyen
+`ScriptsPanel` + `ScheduleBlock`, va Jobs JSON runner van truy cap duoc. Rollback
+chi tat Flow UI/commands; khong downgrade DB va khong xoa/ghi lai legacy row.
+
+Text read-back Flow chi cho locator union `accessibilityId|className`; `className`
+can cho Settings SearchField da co trong Gate B/C. XPath, predicate va class chain
+van bi cam. Profile stock khong advertise read-back va tuyet doi khong nang
+`snapshotMaxDepth` de co gang tim element.
 
 ---
 

@@ -1,6 +1,6 @@
 # Riviu Flow V2 Visual Automation Design
 
-**Status:** Proposed for user review on 30/07/2026
+**Status:** Approved by user on 30/07/2026
 
 ## 1. Context
 
@@ -142,6 +142,7 @@ struct ActionDefinition {
     kind: ActionKind,
     schema_version: u32,
     label: String,
+    disabled_reason: Option<String>,
     category: ActionCategory,
     config_schema: serde_json::Value,
     input_ports: Vec<PortDefinition>,
@@ -162,10 +163,12 @@ requirements. The UI may show a provisional disabled reason from the latest devi
 snapshot, but the fresh run-time preflight is authoritative.
 
 The action registry never publishes secrets, route tokens, private WDA paths, or
-proxy passwords. It publishes capability identifiers and form schemas only.
+proxy passwords. It publishes capability identifiers and form schemas only. A
+backend-owned `disabled_reason` is the sole producer for provisional palette
+disablement; the frontend never derives capability policy from an action name.
 
 Approved evidence variants for release 1 are typed contracts such as
-`ActiveAppEquals`, `FrameDigestChanged`, `QualifiedFramePredicate`,
+`ActiveAppEquals`, `ProcessAbsent`, `FrameDigestChanged`, `QualifiedFramePredicate`,
 `AccessibilityVisible`, `TextReadBackEquals`, and `ArtifactDecodedAndHashed`.
 Tap, Swipe, and Type Text require a pre-action frame plus an action-specific
 postcondition from `FrameSource`; Type Text additionally requires exact read-back or
@@ -197,17 +200,31 @@ in order:
 10. deterministic canonical serialization and SHA-256 plan hash.
 
 The compiler produces `CompiledFlowPlanV2`, which contains no canvas positions.
-It contains canonical nodes, execution order, its monotonic `ContextPlan`,
-validated configs, action-definition versions, and required capability IDs.
+It contains canonical nodes, execution order, its monotonic `ContextPlan`, typed
+`CompiledActionConfig` values (never raw authoring JSON), action-definition versions,
+and required capability IDs.
 Device selection is a typed `flow_run` input, not part of the reusable flow
 revision. Its `One`, `Selected`, or `AllEligible` policy is resolved when a run
 starts, then exact UDIDs are persisted as the immutable run selection snapshot.
-Exact UDIDs are not embedded in the saved plan hash. The saved revision, compiled
-bytes, and hash are immutable for a run.
+Exact UDIDs are not embedded in the saved plan hash. Canonical stored compiled bytes
+include the assigned revision. The execution hash uses the same canonical material
+with only that top-level revision omitted, so layout-only saves and otherwise
+identical execution at a later revision retain the same hash; flow ID, typed config,
+action-definition versions, context, and capability IDs remain covered. The saved
+revision, compiled bytes, and hash are immutable for a run.
 
-Release 1 rejects XPath and predicate selectors because the current executor only
-implements accessibility ID. It does not silently ignore unsupported selector
-fields or choose one of conflicting point/selector inputs.
+Every plan requiring a UI session must have Launch App as its first executable node
+so target-qualified preflight and session creation are defined. Wait and the
+bridge-only Terminate App may run without Launch because Terminate carries its own
+bundle ID. The first Launch is executed exactly once through the ordinary durable
+attempt sequence; session and optional stream startup occur after its effect dispatch
+and before its active-app verification.
+
+Release 1 rejects XPath, predicate, and class-chain selectors. Generic Tap and
+Assert Visible retain accessibility ID; qualified text read-back additionally
+permits the exact WDA `class name` strategy already exercised by the Settings gate.
+It does not silently ignore unsupported selector fields or choose one of conflicting
+point/selector inputs.
 
 ## 8. Persistence
 
@@ -272,10 +289,13 @@ action that cannot run through the upgraded context must appear before the upgra
 or compilation fails.
 
 When any node requires frame evidence, stream capacity is reserved while the
-exclusive context is held, the approved UI session starts first, and MJPEG starts
-only afterward. `FlowRuntime` receives the core `FrameSource` contract and binds it
-to that exact `UiWithStreamContext`; it does not poll WDA screenshots. Every exit
-path closes the highest context exactly once and persists release proof.
+exclusive context is held. The first Launch attempt then commits intent/effect,
+foregrounds exactly once, starts the approved UI session, and only afterward starts
+MJPEG. `FlowRuntime` receives the core `FrameSource` contract and binds it to that
+exact `UiWithStreamContext`; it does not poll WDA screenshots. Generation advance is
+an explicit stream event that immediately invalidates an old verifier. Every frame
+wait has cancellation plus an absolute deadline. Every exit path closes the highest
+context exactly once and persists release proof.
 
 Release-1 `Wait` is an in-chain UI delay capped at 60 seconds, so another workflow
 cannot change the screen between dependent gestures. Longer delays belong to the
@@ -305,7 +325,9 @@ Tauri exit first rejects new work and calls `nurture.begin_shutdown()`,
 `flows.stop_all()`, and `jobs.stop_all()`. It then stops the background sampler,
 awaits `flows.shutdown()` to join every Flow worker, awaits `jobs.shutdown()`, and
 only then calls `DeviceControlPlane::shutdown_cleanup()`. No Flow task may outlive
-control-plane cleanup.
+control-plane cleanup. All operation requests have local deadlines; Flow shutdown
+also has a 30-second join deadline and aborts then joins any task still violating
+those contracts before control cleanup proceeds.
 
 ## 10. Side Effects, Retry, And Cancellation
 
@@ -365,9 +387,10 @@ author/text locator provides unique live proof.
 
 Use the maintained `@xyflow/react` package as a controlled canvas. Riviu owns all
 custom node rendering and styling; no generated UI kit is required. The required
-React Flow stylesheet is imported once in `index.css`, after existing global styles.
-The canvas parent has a stable constrained height so loading, selection, and node
-labels cannot resize the tool surface.
+React Flow stylesheet is imported once from `main.tsx` before Riviu's `index.css`,
+so the project styles remain the final override. The canvas parent has a stable
+constrained height so loading, selection, and node labels cannot resize the tool
+surface.
 
 The Automation page becomes one work-focused surface:
 
@@ -399,7 +422,7 @@ Add typed commands:
 - `flow_list_runs`, `flow_get_run`
 
 All mutating commands return typed serializable errors with `code`, `message`, and
-optional `nodeId`, `field`, `deviceId`, or `attemptId`. They do not return formatted
+optional `nodeId`, `field`, existing `udid`, or `attemptId`. They do not return formatted
 Rust error chains to the UI.
 
 `FlowUpdated` and `FlowRunUpdated` events carry identifiers and monotonically
@@ -431,6 +454,13 @@ Terminate App appears in the action catalog:
 2. verify the process is absent or the app state changed as specified;
 3. return a typed error on unsupported or ambiguous outcomes;
 4. add Python contract tests and Rust integration tests.
+
+After these gates pass, Terminate is a typed release-1 action with
+`ProcessAbsent { bundle_id }` evidence and read-only process reconciliation. It uses
+the same per-UDID `DeviceControlPlane` ownership as legacy jobs; recovery may query
+process state but never issue another kill merely to decide whether retry is safe.
+The attempt persists the pre-effect PID: absence after dispatch proves success, the
+same positive PID proves non-delivery, and a different positive PID is uncertain.
 
 Syslog is not a release-1 flow node. The Diagnostics product path must implement a
 real bounded os_trace relay before a future syslog node can be advertised.
