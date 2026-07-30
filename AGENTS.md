@@ -748,6 +748,58 @@ thi bat buoc co contract ID canonical, khong duoc sinh `:set`/`:get` tu ID rong.
 Fixture HTTP Gate 0 tren Windows phai doc het POST body truoc khi tra 401; dong socket
 voi request bytes chua doc co the bien response auth dung thanh `WinError 10053`.
 
+### 3.14 Flow V2 visual automation design (30/07/2026)
+
+Flow keo-tha se khong gan canvas truc tiep vao `JobQueue` v1. Authoring dung graph
+schema v2 voi node/edge/layout, Rust compile thanh immutable execution plan, va
+runtime luu progress rieng theo `flow_run -> device_run -> node_attempt`. Release dau
+chi cho mot duong tuyen tinh. Import JSON v1 chi bao dam supported subset; wait >60s,
+XPath/predicate, target xung dot, terminate chua qualify va action thieu evidence phai
+tra typed diagnostic, khong tu doi semantics. Graph storage duoc giu ngay tu dau cho
+`If`/`Repeat`, TikTok action va dependency nhieu may ve sau.
+
+Do `riviu-script-engine` dang phu thuoc `riviu-core`, Flow model va compiled IR phai
+nam trong `riviu-core::flow::model`; parser/compiler nam trong script-engine va
+runtime core chi doc compiled type cua core. Khong tao dependency nguoc tu core sang
+script-engine. Lua chon `One`/`Selected`/`AllEligible` la typed input cua `flow_run`,
+khong nam trong revision; exact UDID duoc resolve + snapshot luc start run va khong
+dong vao plan hash.
+
+React chi so huu draft/layout. Validation, action catalog, capability/resource
+contract, canonical hash, persistence, retry va execution deu thuoc Rust. Canvas dung
+`@xyflow/react`; node khong duoc expose raw HTTP/WDA/shell. Moi device segment chi
+giu mot `DeviceControlPlane` context va khong giu lease may A trong khi cho may B.
+Release 1 giu mot ownership chain/device, chi upgrade
+`Exclusive -> UiSession -> UiWithStream`, khong close/reacquire giua cac node phu
+thuoc. Tap/swipe/type va moi side effect chi `Succeeded` sau typed postcondition;
+ACK transport khong phai evidence. Node can frame phai reserve exact stream capacity,
+inject `FrameSource` va van giu session-truoc-MJPEG.
+Flow Screenshot phai publish frame tu exact owned stream generation + hash artifact,
+khong goi WDA `GET /screenshot`.
+
+Attempt state phai commit intent truoc effect; nonterminal effect khi restart phai
+reconcile thanh proved success/proved non-delivery/`Uncertain`. Khong retry
+`Uncertain` tap/swipe/type. Artifact dung path UUID nam trong managed root, publish
+temp -> validate/hash -> atomic rename -> DB transaction va reconcile orphan khi mo
+app. Flow shutdown phai stop + join het worker truoc
+`DeviceControlPlane::shutdown_cleanup()`. DB hien chua co version ledger; Flow scope
+phai them transaction migration runner va test upgrade populated legacy DB.
+
+TikTok campaign khong duoc ha thanh chuoi tap generic.
+`InteractionCampaignEngine` hien chua co implementation; node TikTok release sau chi
+duoc them sau khi engine/public facade + G0-G3 da implement va qualify. Flow
+A-comment/B-reply chi mo khi output A la artifact co comment identity da qualify;
+text/handle don thuan khong phai identity proof.
+
+`sidecars/pymobiledevice3/riviu_pmd.py` hien co hai false product surfaces: `terminate`
+chi tra best-effort success ma chua terminate, `syslog` chi tra sample text. Terminate
+phai duoc implement + verify truoc khi vao action catalog; syslog de ngoai Flow release
+1 cho toi khi os_trace path that co contract/live test.
+
+Thiet ke day du:
+`docs/superpowers/specs/2026-07-30-riviu-flow-v2-design.md`. Chua co implementation;
+agent tiep theo phai lap implementation plan sau khi spec duoc user review.
+
 ---
 
 ## 4. Chạy và test
