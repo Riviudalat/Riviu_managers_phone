@@ -22,6 +22,19 @@ pub struct UnsupportedCapability {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessAbsenceProof {
+    pub bundle_id: String,
+    pub old_pid: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppProcessState {
+    pub bundle_id: String,
+    pub pid: Option<u64>,
+    pub running: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuardedClipboardOperation {
     Set {
         content_type: String,
@@ -238,6 +251,16 @@ pub trait DeviceDriver: Send + Sync {
     fn supports_text_comments(&self) -> bool {
         false
     }
+    fn supports_verified_app_termination(&self) -> bool {
+        false
+    }
+    async fn inspect_app_process(
+        &self,
+        _udid: &str,
+        _bundle_id: &str,
+    ) -> anyhow::Result<AppProcessState> {
+        unsupported("inspectAppProcess")
+    }
     async fn list_devices(&self) -> anyhow::Result<Vec<DeviceInfo>>;
     async fn refresh_device(&self, udid: &str) -> anyhow::Result<DeviceInfo>;
     async fn install_app(&self, udid: &str, path: &Path) -> anyhow::Result<()>;
@@ -245,7 +268,11 @@ pub trait DeviceDriver: Send + Sync {
     async fn screenshot(&self, udid: &str, dest: &Path) -> anyhow::Result<PathBuf>;
     async fn syslog_tail(&self, udid: &str, lines: usize) -> anyhow::Result<String>;
     async fn launch_app(&self, udid: &str, bundle_id: &str) -> anyhow::Result<()>;
-    async fn terminate_app(&self, udid: &str, bundle_id: &str) -> anyhow::Result<()>;
+    async fn terminate_app(
+        &self,
+        udid: &str,
+        bundle_id: &str,
+    ) -> anyhow::Result<ProcessAbsenceProof>;
     async fn reboot(&self, udid: &str) -> anyhow::Result<()>;
     /// Creates only a control session. Implementations must not start, stop, or
     /// replace an MJPEG producer; stream lifecycle belongs to DeviceControlPlane.

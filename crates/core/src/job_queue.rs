@@ -524,8 +524,15 @@ mod tests {
             Ok(())
         }
 
-        async fn terminate_app(&self, _udid: &str, _bundle_id: &str) -> anyhow::Result<()> {
-            Ok(())
+        async fn terminate_app(
+            &self,
+            _udid: &str,
+            bundle_id: &str,
+        ) -> anyhow::Result<crate::ProcessAbsenceProof> {
+            Ok(crate::ProcessAbsenceProof {
+                bundle_id: bundle_id.to_string(),
+                old_pid: None,
+            })
         }
 
         async fn reboot(&self, _udid: &str) -> anyhow::Result<()> {

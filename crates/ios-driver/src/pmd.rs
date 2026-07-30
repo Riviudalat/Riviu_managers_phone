@@ -9,12 +9,12 @@ use async_trait::async_trait;
 use parking_lot::{Mutex, RwLock};
 use riviu_core::{
     validate_clipboard_read_limit, ActiveAppIdentity, ActiveTransport, AgentInstallProof,
-    AgentSettings, AgentState, AgentStatus, ClipboardAccessMode, ConnectionKind,
+    AgentSettings, AgentState, AgentStatus, AppProcessState, ClipboardAccessMode, ConnectionKind,
     DeviceCapabilitySnapshot, DeviceDriver, DeviceInfo, DeviceStatus, FrameSource,
     GuardedClipboardOperation, GuardedClipboardOutput, GuardedClipboardProgress,
     GuardedClipboardTransition, InstalledAgentIdentity, InstalledTargetIdentity,
-    InteractionSessionKind, StreamStartProof, StreamStopProof, SwipeGesture, TapPoint,
-    TileStreamState, UiCapabilities, UiError, UiErrorKind, UiSession,
+    InteractionSessionKind, ProcessAbsenceProof, StreamStartProof, StreamStopProof, SwipeGesture,
+    TapPoint, TileStreamState, UiCapabilities, UiError, UiErrorKind, UiSession,
     MAX_INTERACTION_CLIPBOARD_BYTES, STREAM_FPS,
 };
 use serde::Deserialize;
@@ -38,6 +38,8 @@ const WDA_LOCAL_PORT_BASE: u16 = 18100;
 /// Distinct WDA-control tunnels, one per device. Room for a large phone farm.
 const WDA_LOCAL_PORT_SPAN: u16 = 64;
 const SIDECAR_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
+const PMD_SIDECAR_PROTOCOL_VERSION: u64 = 2;
+const VERIFIED_PROCESS_CONTROL_CONTRACT: &str = "verifiedProcessControl";
 const INTERACTION_DRIVER_ADAPTER_VERSION: &str = "interaction-v1";
 const INTERACTION_TARGET_BUNDLE_ID: &str = "com.ss.iphone.ugc.Ame";
 const RTMMO_TOKEN_ENV: &str = "RIVIU_RTMMO_TOKEN";
@@ -291,10 +293,36 @@ fn runtime_for_target(
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SidecarPingResponse {
+    ok: bool,
+    pymobiledevice3: bool,
+    sidecar_protocol_version: u64,
+    contracts: Vec<String>,
+}
+
+fn verified_process_control_from_ping(stdout: &[u8], command_succeeded: bool) -> bool {
+    if !command_succeeded {
+        return false;
+    }
+    let Ok(response) = serde_json::from_slice::<SidecarPingResponse>(stdout) else {
+        return false;
+    };
+    response.ok
+        && response.pymobiledevice3
+        && response.sidecar_protocol_version == PMD_SIDECAR_PROTOCOL_VERSION
+        && response
+            .contracts
+            .iter()
+            .any(|contract| contract == VERIFIED_PROCESS_CONTROL_CONTRACT)
+}
+
 #[derive(Clone)]
 pub struct PmdIosDriver {
     python: PathBuf,
     script: PathBuf,
+    verified_app_termination: bool,
     streams: StreamHub,
     wda_host: String,
     profile: WdaProfile,
@@ -335,10 +363,13 @@ impl PmdIosDriver {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
+        let verified_app_termination =
+            verified_process_control_from_ping(&output.stdout, output.status.success());
         let (profile, artifact, settings) = runtime_for_target(&config.target)?;
         let driver = Self::build(
             python,
             script,
+            verified_app_termination,
             profile,
             artifact,
             settings,
@@ -358,6 +389,7 @@ impl PmdIosDriver {
         Ok(Self::build(
             PathBuf::from("python3"),
             PathBuf::new(),
+            false,
             profile,
             artifact,
             settings,
@@ -368,6 +400,7 @@ impl PmdIosDriver {
     fn build(
         python: PathBuf,
         script: PathBuf,
+        verified_app_termination: bool,
         profile: WdaProfile,
         artifact: Option<AgentArtifact>,
         agent_settings: AgentSettings,
@@ -376,6 +409,7 @@ impl PmdIosDriver {
         Self {
             python,
             script,
+            verified_app_termination,
             streams: StreamHub::new(),
             wda_host: "127.0.0.1".into(),
             profile,
@@ -2075,6 +2109,95 @@ impl UiSession for PmdUiSession {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProcessAbsencePayload {
+    ok: bool,
+    bundle_id: String,
+    #[serde(deserialize_with = "deserialize_optional_positive_pid")]
+    old_pid: Option<u64>,
+    running: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AppProcessPayload {
+    ok: bool,
+    bundle_id: String,
+    #[serde(deserialize_with = "deserialize_optional_positive_pid")]
+    pid: Option<u64>,
+    running: bool,
+}
+
+fn deserialize_optional_positive_pid<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let pid = Option::<u64>::deserialize(deserializer)?;
+    if pid == Some(0) {
+        return Err(serde::de::Error::custom("PID must be positive"));
+    }
+    Ok(pid)
+}
+
+fn require_exact_fields(value: &serde_json::Value, expected: &[&str]) -> anyhow::Result<()> {
+    let object = value
+        .as_object()
+        .context("sidecar process response must be a JSON object")?;
+    if object.len() != expected.len() || expected.iter().any(|field| !object.contains_key(*field)) {
+        anyhow::bail!(
+            "sidecar process response must contain exactly: {}",
+            expected.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn parse_process_absence_proof(
+    value: serde_json::Value,
+    expected_bundle_id: &str,
+) -> anyhow::Result<ProcessAbsenceProof> {
+    require_exact_fields(&value, &["ok", "bundleId", "oldPid", "running"])?;
+    let payload: ProcessAbsencePayload =
+        serde_json::from_value(value).context("decode verified terminate response")?;
+    if !payload.ok {
+        anyhow::bail!("sidecar did not confirm termination");
+    }
+    if payload.bundle_id != expected_bundle_id {
+        anyhow::bail!("sidecar terminate response bundle does not match request");
+    }
+    if payload.running {
+        anyhow::bail!("sidecar terminate response still reports a running process");
+    }
+    Ok(ProcessAbsenceProof {
+        bundle_id: payload.bundle_id,
+        old_pid: payload.old_pid,
+    })
+}
+
+fn parse_app_process_state(
+    value: serde_json::Value,
+    expected_bundle_id: &str,
+) -> anyhow::Result<AppProcessState> {
+    require_exact_fields(&value, &["ok", "bundleId", "pid", "running"])?;
+    let payload: AppProcessPayload =
+        serde_json::from_value(value).context("decode app process response")?;
+    if !payload.ok {
+        anyhow::bail!("sidecar did not confirm process state");
+    }
+    if payload.bundle_id != expected_bundle_id {
+        anyhow::bail!("sidecar process response bundle does not match request");
+    }
+    if payload.running != payload.pid.is_some() {
+        anyhow::bail!("sidecar process response has inconsistent running and pid fields");
+    }
+    Ok(AppProcessState {
+        bundle_id: payload.bundle_id,
+        pid: payload.pid,
+        running: payload.running,
+    })
+}
+
 #[async_trait]
 impl DeviceDriver for PmdIosDriver {
     fn agent_settings(&self) -> AgentSettings {
@@ -2308,6 +2431,23 @@ impl DeviceDriver for PmdIosDriver {
         self.profile.backend == WdaBackend::RtMmo
     }
 
+    fn supports_verified_app_termination(&self) -> bool {
+        self.verified_app_termination
+    }
+
+    async fn inspect_app_process(
+        &self,
+        udid: &str,
+        bundle_id: &str,
+    ) -> anyhow::Result<AppProcessState> {
+        let slot = self.slots.get(udid);
+        let _owned = slot.owned.lock().await;
+        let value = self
+            .run_json(&["app-process", "--udid", udid, "--bundle-id", bundle_id])
+            .await?;
+        parse_app_process_state(value, bundle_id)
+    }
+
     async fn list_devices(&self) -> anyhow::Result<Vec<DeviceInfo>> {
         if self.script.as_os_str().is_empty() {
             return Ok(Vec::new());
@@ -2449,10 +2589,17 @@ impl DeviceDriver for PmdIosDriver {
         self.launch_app_locked(udid, bundle_id).await
     }
 
-    async fn terminate_app(&self, udid: &str, bundle_id: &str) -> anyhow::Result<()> {
-        self.run_json(&["terminate", "--udid", udid, "--bundle-id", bundle_id])
+    async fn terminate_app(
+        &self,
+        udid: &str,
+        bundle_id: &str,
+    ) -> anyhow::Result<ProcessAbsenceProof> {
+        let slot = self.slots.get(udid);
+        let _owned = slot.owned.lock().await;
+        let value = self
+            .run_json(&["terminate", "--udid", udid, "--bundle-id", bundle_id])
             .await?;
-        Ok(())
+        parse_process_absence_proof(value, bundle_id)
     }
 
     async fn reboot(&self, udid: &str) -> anyhow::Result<()> {
@@ -2667,6 +2814,54 @@ mod tests {
     };
     use std::collections::VecDeque;
 
+    struct LegacyTerminateSidecarFixture {
+        root: PathBuf,
+        args_path: PathBuf,
+    }
+
+    impl LegacyTerminateSidecarFixture {
+        fn new(ping_payload: serde_json::Value, ping_exit_code: i32) -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("fixture clock after epoch")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "riviu-legacy-terminate-sidecar-{}-{nonce}",
+                std::process::id()
+            ));
+            let sidecar_dir = root.join("pymobiledevice3");
+            std::fs::create_dir_all(&sidecar_dir).expect("create legacy sidecar fixture");
+            let script = sidecar_dir.join("riviu_pmd.py");
+            let args_path = sidecar_dir.join("riviu_pmd.args.json");
+            let source = r#"import json
+import pathlib
+import sys
+
+if sys.argv[1:] == ['ping']:
+    print(json.dumps(json.loads('__PING_PAYLOAD__')), flush=True)
+    raise SystemExit(__PING_EXIT__)
+
+pathlib.Path(__file__).with_suffix('.args.json').write_text(
+    json.dumps(sys.argv[1:]), encoding='utf-8'
+)
+print(json.dumps({'ok': True, 'note': 'terminate best-effort'}), flush=True)
+"#
+            .replace(
+                "__PING_PAYLOAD__",
+                &serde_json::to_string(&ping_payload).expect("serialize fixture ping"),
+            )
+            .replace("__PING_EXIT__", &ping_exit_code.to_string());
+            std::fs::write(&script, source).expect("write legacy sidecar fixture");
+            Self { root, args_path }
+        }
+    }
+
+    impl Drop for LegacyTerminateSidecarFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
     struct FixtureClipboardRuntime {
         calls: Vec<&'static str>,
         identities: VecDeque<ActiveAppIdentity>,
@@ -2761,6 +2956,258 @@ mod tests {
                 first_frame_observed: true,
                 stream_url: "fixture://fresh-generation-10".to_string(),
             },
+        }
+    }
+
+    #[test]
+    fn terminate_protocol_requires_exact_verified_process_absence() {
+        let running = parse_process_absence_proof(
+            serde_json::json!({
+                "ok": true,
+                "bundleId": "com.fixture.app",
+                "oldPid": 42,
+                "running": false,
+            }),
+            "com.fixture.app",
+        )
+        .expect("verified process absence");
+        assert_eq!(running.bundle_id, "com.fixture.app");
+        assert_eq!(running.old_pid, Some(42));
+
+        let absent = parse_process_absence_proof(
+            serde_json::json!({
+                "ok": true,
+                "bundleId": "com.fixture.app",
+                "oldPid": null,
+                "running": false,
+            }),
+            "com.fixture.app",
+        )
+        .expect("already absent process");
+        assert_eq!(absent.old_pid, None);
+
+        for invalid in [
+            serde_json::json!({"ok": true, "note": "terminate best-effort"}),
+            serde_json::json!({
+                "ok": true,
+                "bundleId": "com.fixture.app",
+                "running": false,
+            }),
+            serde_json::json!({
+                "ok": true,
+                "bundleId": "com.fixture.app",
+                "oldPid": 0,
+                "running": false,
+            }),
+            serde_json::json!({
+                "ok": true,
+                "bundleId": "com.fixture.app",
+                "oldPid": true,
+                "running": false,
+            }),
+            serde_json::json!({
+                "ok": true,
+                "bundleId": "com.fixture.other",
+                "oldPid": 42,
+                "running": false,
+            }),
+            serde_json::json!({
+                "ok": true,
+                "bundleId": "com.fixture.app",
+                "oldPid": 42,
+                "running": true,
+            }),
+            serde_json::json!({
+                "ok": true,
+                "bundleId": "com.fixture.app",
+                "oldPid": 42,
+                "running": false,
+                "extra": true,
+            }),
+        ] {
+            assert!(
+                parse_process_absence_proof(invalid, "com.fixture.app").is_err(),
+                "invalid terminate payload must be rejected"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn terminate_driver_rejects_the_legacy_best_effort_sidecar_payload() {
+        let fixture = LegacyTerminateSidecarFixture::new(
+            serde_json::json!({ "ok": true, "pymobiledevice3": true }),
+            0,
+        );
+        let driver = PmdIosDriver::probe(&DriverConfig {
+            sidecar_root: fixture.root.clone(),
+            state_dir: fixture.root.join("state"),
+            target: DriverTarget::LegacyStock,
+        })
+        .await
+        .expect("probe legacy sidecar");
+
+        assert!(!driver.supports_verified_app_termination());
+
+        let error = DeviceDriver::terminate_app(&driver, "fixture-udid", "com.fixture.app")
+            .await
+            .expect_err("legacy best-effort payload must not prove termination");
+
+        assert!(
+            error
+                .to_string()
+                .contains("sidecar process response must contain exactly"),
+            "unexpected protocol error: {error:#}"
+        );
+        let args: Vec<String> = serde_json::from_slice(
+            &std::fs::read(&fixture.args_path).expect("read fixture sidecar argv"),
+        )
+        .expect("decode fixture sidecar argv");
+        assert_eq!(
+            args,
+            [
+                "terminate",
+                "--udid",
+                "fixture-udid",
+                "--bundle-id",
+                "com.fixture.app",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_process_control_requires_a_versioned_ready_ping_handshake() {
+        let cases = [
+            (
+                serde_json::json!({
+                    "ok": true,
+                    "pymobiledevice3": true,
+                    "sidecarProtocolVersion": 2,
+                    "contracts": ["verifiedProcessControl"],
+                }),
+                0,
+                true,
+            ),
+            (
+                serde_json::json!({ "ok": true, "pymobiledevice3": true }),
+                0,
+                false,
+            ),
+            (
+                serde_json::json!({
+                    "ok": true,
+                    "pymobiledevice3": true,
+                    "sidecarProtocolVersion": 1,
+                    "contracts": ["verifiedProcessControl"],
+                }),
+                0,
+                false,
+            ),
+            (
+                serde_json::json!({
+                    "ok": true,
+                    "pymobiledevice3": true,
+                    "sidecarProtocolVersion": 2,
+                    "contracts": [],
+                }),
+                0,
+                false,
+            ),
+            (
+                serde_json::json!({
+                    "ok": true,
+                    "pymobiledevice3": false,
+                    "sidecarProtocolVersion": 2,
+                    "contracts": [],
+                }),
+                2,
+                false,
+            ),
+        ];
+
+        for (ping, exit_code, expected) in cases {
+            let fixture = LegacyTerminateSidecarFixture::new(ping, exit_code);
+            let driver = PmdIosDriver::probe(&DriverConfig {
+                sidecar_root: fixture.root.clone(),
+                state_dir: fixture.root.join("state"),
+                target: DriverTarget::LegacyStock,
+            })
+            .await
+            .expect("probe fixture sidecar");
+            assert_eq!(driver.supports_verified_app_termination(), expected);
+        }
+    }
+
+    #[test]
+    fn app_process_protocol_requires_exact_consistent_state() {
+        let running = parse_app_process_state(
+            serde_json::json!({
+                "ok": true,
+                "bundleId": "com.fixture.app",
+                "pid": 42,
+                "running": true,
+            }),
+            "com.fixture.app",
+        )
+        .expect("running process state");
+        assert_eq!(running.bundle_id, "com.fixture.app");
+        assert_eq!(running.pid, Some(42));
+        assert!(running.running);
+
+        let absent = parse_app_process_state(
+            serde_json::json!({
+                "ok": true,
+                "bundleId": "com.fixture.app",
+                "pid": null,
+                "running": false,
+            }),
+            "com.fixture.app",
+        )
+        .expect("absent process state");
+        assert_eq!(absent.pid, None);
+        assert!(!absent.running);
+
+        for invalid in [
+            serde_json::json!({
+                "ok": true,
+                "bundleId": "com.fixture.app",
+                "running": false,
+            }),
+            serde_json::json!({
+                "ok": true,
+                "bundleId": "com.fixture.app",
+                "pid": 0,
+                "running": true,
+            }),
+            serde_json::json!({
+                "ok": true,
+                "bundleId": "com.fixture.app",
+                "pid": null,
+                "running": true,
+            }),
+            serde_json::json!({
+                "ok": true,
+                "bundleId": "com.fixture.app",
+                "pid": 42,
+                "running": false,
+            }),
+            serde_json::json!({
+                "ok": false,
+                "bundleId": "com.fixture.app",
+                "pid": null,
+                "running": false,
+            }),
+            serde_json::json!({
+                "ok": true,
+                "bundleId": "com.fixture.app",
+                "pid": null,
+                "running": false,
+                "extra": true,
+            }),
+        ] {
+            assert!(
+                parse_app_process_state(invalid, "com.fixture.app").is_err(),
+                "invalid process inspection payload must be rejected"
+            );
         }
     }
 

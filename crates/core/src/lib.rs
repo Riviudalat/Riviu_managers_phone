@@ -30,9 +30,9 @@ pub use device_work::{
     DeviceWorkTokenError,
 };
 pub use driver::{
-    ui_error_kind, DeviceDriver, GuardedClipboardOperation, GuardedClipboardOutput,
-    GuardedClipboardProgress, GuardedClipboardTransition, UiError, UiErrorKind, UiSession,
-    UnsupportedCapability,
+    ui_error_kind, AppProcessState, DeviceDriver, GuardedClipboardOperation,
+    GuardedClipboardOutput, GuardedClipboardProgress, GuardedClipboardTransition,
+    ProcessAbsenceProof, UiError, UiErrorKind, UiSession, UnsupportedCapability,
 };
 pub use events::{AppEvent, EventBus};
 pub use flow::*;

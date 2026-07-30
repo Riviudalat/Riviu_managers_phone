@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -10,12 +10,12 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::{
-    AgentInstallProof, AgentSettings, AgentStatus, BackgroundStreamLease, ClipboardAccessMode,
-    DeviceBusy, DeviceCapabilityRegistry, DeviceCapabilitySnapshot, DeviceControllerCapabilities,
-    DeviceDriver, DeviceInfo, DeviceWorkCoordinator, DeviceWorkLease, DeviceWorkOwner,
-    ForegroundStreamReservation, GuardedClipboardOperation, GuardedClipboardOutput,
-    GuardedClipboardProgress, InteractionSessionKind, StreamBudgetError, StreamBudgetManager,
-    StreamStartProof, StreamStopProof, UiSession,
+    AgentInstallProof, AgentSettings, AgentStatus, AppProcessState, BackgroundStreamLease,
+    ClipboardAccessMode, DeviceBusy, DeviceCapabilityRegistry, DeviceCapabilitySnapshot,
+    DeviceControllerCapabilities, DeviceDriver, DeviceInfo, DeviceWorkCoordinator, DeviceWorkLease,
+    DeviceWorkOwner, ForegroundStreamReservation, GuardedClipboardOperation,
+    GuardedClipboardOutput, GuardedClipboardProgress, InteractionSessionKind, ProcessAbsenceProof,
+    StreamBudgetError, StreamBudgetManager, StreamStartProof, StreamStopProof, UiSession,
 };
 
 #[derive(Debug, Error)]
@@ -229,6 +229,14 @@ impl DeviceControlPlane {
 
     pub fn supports_text_comments(&self) -> bool {
         self.driver.supports_text_comments()
+    }
+
+    pub fn driver_contract_ids(&self) -> BTreeSet<String> {
+        let mut contracts = BTreeSet::new();
+        if self.driver.supports_verified_app_termination() {
+            contracts.insert("verifiedProcessControl".to_string());
+        }
+        contracts
     }
 
     pub fn requires_fresh_text_session(&self) -> bool {
@@ -491,12 +499,24 @@ impl DeviceControlPlane {
         &self,
         context: &DeviceExclusiveContext,
         bundle_id: &str,
-    ) -> Result<(), DeviceControlError> {
+    ) -> Result<ProcessAbsenceProof, DeviceControlError> {
         let lease = self.validate_exclusive(context)?;
         self.driver
             .terminate_app(lease.udid(), bundle_id)
             .await
             .map_err(|error| driver_error(lease.udid(), "terminateApp", error))
+    }
+
+    pub async fn inspect_app_process(
+        &self,
+        context: &DeviceExclusiveContext,
+        bundle_id: &str,
+    ) -> Result<AppProcessState, DeviceControlError> {
+        let lease = self.validate_exclusive(context)?;
+        self.driver
+            .inspect_app_process(lease.udid(), bundle_id)
+            .await
+            .map_err(|error| driver_error(lease.udid(), "inspectAppProcess", error))
     }
 
     pub async fn foreground_target_app(
@@ -615,12 +635,24 @@ impl DeviceControlPlane {
         &self,
         context: &UiSessionContext,
         bundle_id: &str,
-    ) -> Result<(), DeviceControlError> {
+    ) -> Result<ProcessAbsenceProof, DeviceControlError> {
         let lease = self.validate_session(context)?;
         self.driver
             .terminate_app(lease.udid(), bundle_id)
             .await
             .map_err(|error| driver_error(lease.udid(), "terminateSessionApp", error))
+    }
+
+    pub async fn inspect_session_app_process(
+        &self,
+        context: &UiSessionContext,
+        bundle_id: &str,
+    ) -> Result<AppProcessState, DeviceControlError> {
+        let lease = self.validate_session(context)?;
+        self.driver
+            .inspect_app_process(lease.udid(), bundle_id)
+            .await
+            .map_err(|error| driver_error(lease.udid(), "inspectSessionAppProcess", error))
     }
 
     pub async fn session_screenshot(
@@ -2646,6 +2678,7 @@ mod tests {
         guarded_clipboard_calls: AtomicUsize,
         guarded_clipboard_completions: AtomicUsize,
         guarded_clipboard_cleanup_started_early: AtomicBool,
+        termination_calls: Mutex<Vec<String>>,
         inspection_snapshot: Mutex<Option<DeviceCapabilitySnapshot>>,
         inspection_fails: AtomicBool,
         configured_ui: Mutex<Vec<UiCapabilities>>,
@@ -2657,6 +2690,7 @@ mod tests {
         block_streams: AtomicBool,
         block_background_streams: AtomicBool,
         block_guarded_clipboard: AtomicBool,
+        block_terminations: AtomicBool,
         session_started: Notify,
         allow_session: Semaphore,
         stream_started: Notify,
@@ -2665,6 +2699,7 @@ mod tests {
         allow_background_stream: Semaphore,
         guarded_clipboard_stopped: Notify,
         allow_guarded_clipboard: Semaphore,
+        allow_termination: Semaphore,
         stop_started: Notify,
         allow_stop: Semaphore,
     }
@@ -2679,6 +2714,7 @@ mod tests {
                 guarded_clipboard_calls: AtomicUsize::new(0),
                 guarded_clipboard_completions: AtomicUsize::new(0),
                 guarded_clipboard_cleanup_started_early: AtomicBool::new(false),
+                termination_calls: Mutex::new(Vec::new()),
                 inspection_snapshot: Mutex::new(None),
                 inspection_fails: AtomicBool::new(false),
                 configured_ui: Mutex::new(Vec::new()),
@@ -2690,6 +2726,7 @@ mod tests {
                 block_streams: AtomicBool::new(false),
                 block_background_streams: AtomicBool::new(false),
                 block_guarded_clipboard: AtomicBool::new(false),
+                block_terminations: AtomicBool::new(false),
                 session_started: Notify::new(),
                 allow_session: Semaphore::new(0),
                 stream_started: Notify::new(),
@@ -2698,6 +2735,7 @@ mod tests {
                 allow_background_stream: Semaphore::new(0),
                 guarded_clipboard_stopped: Notify::new(),
                 allow_guarded_clipboard: Semaphore::new(0),
+                allow_termination: Semaphore::new(0),
                 stop_started: Notify::new(),
                 allow_stop: Semaphore::new(0),
             }
@@ -2802,6 +2840,36 @@ mod tests {
         fn complete_background_stream_start(&self) {
             self.allow_background_stream.add_permits(1);
         }
+
+        fn block_termination(&self) {
+            self.block_terminations.store(true, Ordering::SeqCst);
+        }
+
+        async fn wait_for_termination_count(&self, expected: usize) {
+            timeout(TEST_TIMEOUT, async {
+                while self.termination_count() < expected {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("expected app terminations should begin independently");
+        }
+
+        fn termination_count(&self) -> usize {
+            self.termination_calls.lock().len()
+        }
+
+        fn termination_count_for(&self, udid: &str) -> usize {
+            self.termination_calls
+                .lock()
+                .iter()
+                .filter(|called_udid| called_udid.as_str() == udid)
+                .count()
+        }
+
+        fn complete_terminations(&self, count: usize) {
+            self.allow_termination.add_permits(count);
+        }
     }
 
     struct TestSession;
@@ -2839,6 +2907,22 @@ mod tests {
 
     #[async_trait]
     impl crate::DeviceDriver for TestDriver {
+        fn supports_verified_app_termination(&self) -> bool {
+            true
+        }
+
+        async fn inspect_app_process(
+            &self,
+            _udid: &str,
+            bundle_id: &str,
+        ) -> anyhow::Result<AppProcessState> {
+            Ok(AppProcessState {
+                bundle_id: bundle_id.to_string(),
+                pid: Some(42),
+                running: true,
+            })
+        }
+
         async fn inspect_interaction_device(
             &self,
             _udid: &str,
@@ -3047,8 +3131,24 @@ mod tests {
             Ok(())
         }
 
-        async fn terminate_app(&self, _udid: &str, _bundle_id: &str) -> anyhow::Result<()> {
-            Ok(())
+        async fn terminate_app(
+            &self,
+            udid: &str,
+            bundle_id: &str,
+        ) -> anyhow::Result<ProcessAbsenceProof> {
+            self.termination_calls.lock().push(udid.to_string());
+            if self.block_terminations.load(Ordering::SeqCst) {
+                let permit = self
+                    .allow_termination
+                    .acquire()
+                    .await
+                    .expect("test termination semaphore remains open");
+                permit.forget();
+            }
+            Ok(ProcessAbsenceProof {
+                bundle_id: bundle_id.to_string(),
+                old_pid: Some(42),
+            })
         }
 
         async fn reboot(&self, _udid: &str) -> anyhow::Result<()> {
@@ -4352,5 +4452,92 @@ mod tests {
 
         assert_eq!(streams.reserved_capacity(), 0);
         assert_eq!(lifecycle.outstanding(), 0);
+    }
+
+    #[tokio::test]
+    async fn verified_termination_is_serialized_per_udid_but_not_across_devices() {
+        let driver = Arc::new(TestDriver::default());
+        driver.block_termination();
+        let control = Arc::new(control_plane(driver.clone(), 1));
+        assert_eq!(
+            control.driver_contract_ids(),
+            std::collections::BTreeSet::from(["verifiedProcessControl".to_string()])
+        );
+
+        let legacy_exclusive = control
+            .acquire_exclusive("iphone-a", DeviceWorkOwner::Script)
+            .await
+            .expect("legacy exclusive context");
+        let legacy_session = control
+            .start_owned_ui_session(legacy_exclusive)
+            .await
+            .expect("legacy session context");
+        let legacy_control = control.clone();
+        let legacy = tokio::spawn(async move {
+            let proof = legacy_control
+                .terminate_session_app(&legacy_session, "com.fixture.app")
+                .await
+                .expect("legacy terminate");
+            legacy_control
+                .close_session_context(legacy_session)
+                .expect("close legacy session");
+            proof
+        });
+        driver.wait_for_termination_count(1).await;
+
+        let flow_control = control.clone();
+        let same_device = tokio::spawn(async move {
+            let context = flow_control
+                .acquire_exclusive("iphone-a", DeviceWorkOwner::Script)
+                .await
+                .expect("queued Flow context");
+            let state = flow_control
+                .inspect_app_process(&context, "com.fixture.app")
+                .await
+                .expect("owned process inspection");
+            assert_eq!(state.pid, Some(42));
+            flow_control
+                .terminate_app(&context, "com.fixture.app")
+                .await
+                .expect("Flow terminate")
+        });
+
+        let other_control = control.clone();
+        let other_device = tokio::spawn(async move {
+            let context = other_control
+                .acquire_exclusive("iphone-b", DeviceWorkOwner::Script)
+                .await
+                .expect("independent Flow context");
+            other_control
+                .terminate_app(&context, "com.fixture.app")
+                .await
+                .expect("independent terminate")
+        });
+
+        driver.wait_for_termination_count(2).await;
+        tokio::time::sleep(QUICK_WAIT).await;
+        assert_eq!(driver.termination_count(), 2);
+        assert_eq!(driver.termination_count_for("iphone-a"), 1);
+        assert_eq!(driver.termination_count_for("iphone-b"), 1);
+
+        driver.complete_terminations(2);
+        driver.wait_for_termination_count(3).await;
+        driver.complete_terminations(1);
+
+        let legacy_proof = timeout(TEST_TIMEOUT, legacy)
+            .await
+            .expect("legacy terminate finishes")
+            .expect("legacy task");
+        assert_eq!(legacy_proof.old_pid, Some(42));
+        timeout(TEST_TIMEOUT, same_device)
+            .await
+            .expect("same-device Flow terminate finishes")
+            .expect("same-device task");
+        timeout(TEST_TIMEOUT, other_device)
+            .await
+            .expect("other-device Flow terminate finishes")
+            .expect("other-device task");
+
+        control.shutdown_cleanup().await.expect("control cleanup");
     }
 }

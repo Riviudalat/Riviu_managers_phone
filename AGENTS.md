@@ -4,7 +4,7 @@
 > hay danh sách "đừng làm lại" thì cập nhật ngay trong cùng lần thay đổi đó.
 > File này là thứ đầu tiên agent sau đọc.
 >
-> Cập nhật lần cuối: 30/07/2026.
+> Cập nhật lần cuối: 31/07/2026.
 
 ---
 
@@ -886,10 +886,25 @@ duoc them sau khi engine/public facade + G0-G3 da implement va qualify. Flow
 A-comment/B-reply chi mo khi output A la artifact co comment identity da qualify;
 text/handle don thuan khong phai identity proof.
 
-`sidecars/pymobiledevice3/riviu_pmd.py` hien co hai false product surfaces: `terminate`
-chi tra best-effort success ma chua terminate, `syslog` chi tra sample text. Terminate
-phai duoc implement + verify truoc khi vao action catalog; syslog de ngoai Flow release
-1 cho toi khi os_trace path that co contract/live test.
+`terminate` khong con la false-success surface. Sidecar dung bounded DVT
+`ProcessControl`: doc PID duong hien tai, kill dung PID do mot lan, poll den khi bundle
+absent va tra exact `{ok,bundleId,oldPid,running}`; moi await cua operation/cleanup deu
+co deadline rieng. `app-process` dung cung bounded setup/cleanup nhung chi doc, khong
+kill. Rust chi nhan exact bon field, bundle phai khop, PID phai null hoac so duong va
+`running == pid.is_some()`; payload best-effort cu, field thieu/thua, PID 0/sai kieu va
+state mau thuan deu la protocol error. `ProcessAbsenceProof` va `AppProcessState` la
+typed contract; `supports_verified_app_termination` mac dinh false. Pmd chi advertise
+sau `ping` thanh cong voi `pymobiledevice3=true`, exact
+`pymobiledevice3==10.1.0`, import duoc async `DvtProvider` + `ProcessControl`,
+`sidecarProtocolVersion=2` va exact contract `verifiedProcessControl`; exit 2,
+dependency thieu/sai version/sai API, sidecar cu/degraded hoac handshake sai deu fail
+closed. Mock phai bat explicit.
+`DeviceControlPlane::driver_contract_ids()` chi cong bo `verifiedProcessControl` theo
+capability nay. Legacy JobQueue va Flow deu di qua context owned cua cung control-plane
+lock theo UDID; khong goi sidecar truc tiep.
+
+`syslog` van chi tra sample text, nen de ngoai Flow release 1 cho toi khi os_trace path
+that co contract/live test.
 
 Thiet ke day du:
 `docs/superpowers/specs/2026-07-30-riviu-flow-v2-design.md`. User da duyet thiet ke;
@@ -921,11 +936,13 @@ Launch; Terminate tu mang exact bundle ID.
 Coordinate picker chi giu frame hien co trong bo nho, acquire `ManualControl` de lay
 exact capability/geometry cho bundle cua Launch App dau tien, roi release; no khong tao stream/session va khong goi WDA
 screenshot. Point luu full `QualifiedGeometry` profile digest, kich thuoc anh va
-orientation; runtime mismatch phai fail truoc dispatch. Terminate App nam ngoai
-catalog o F0, roi duoc bat trong F1 sau khi bounded DVT terminate, read-only process
-query, exact bundle proof, Python contract test va Rust ownership/integration test deu
-PASS. Legacy va Flow deu phai di qua cung `DeviceControlPlane` lock theo UDID; recovery
-chi `ReadProcess`, khong kill lai de doan retry.
+orientation; runtime mismatch phai fail truoc dispatch. Terminate App da duoc bat trong
+release-one catalog o F1 voi config exact bundle, resource Bridge, side effect
+IdempotentSet, evidence ProcessAbsent, reconciliation ReadProcess va retry
+IdempotentAfterRead. Compiler va legacy importer deu tao typed Terminate; raw HTTP/WDA/
+Shell van bi gate. Recovery chi duoc `ReadProcess`, khong kill hoac redispatch de doan
+retry: absent la ProcessAbsent, cung positive PID baseline la non-delivery, PID duong
+khac la Uncertain.
 
 Foundation F0 da dong ngay 30/07/2026. Source/verification commit range bao gom tu
 `c5308d3c3878b0e40f8de925ad5fe3de632e1f08` through
@@ -938,6 +955,12 @@ runtime/device dispatch; catalog chi co foundation release-1 da kiem chung. Gate
 theo la F1 tai
 `docs/superpowers/plans/2026-07-30-riviu-flow-v2-runtime.md`; khong bat F2/F3 truoc
 khi F1 co checkpoint rieng.
+
+F1 Task 4 checkpoint ngay 31/07/2026: Python app-control tests PASS 10/10; Rust Pmd
+tests PASS 33/33; DeviceControl PASS 33/33; JobQueue PASS 3/3; core Flow PASS 46/46;
+toan bo Python sidecar PASS 42/42; script-engine Flow PASS 23/23. Khong lam lai bounded terminate/parser/
+ownership/catalog o task sau. Task 6 phai dung proof va read-only process route nay de
+persist evidence/reconcile, khong them duong terminate rieng.
 
 Projection attempt co `retryAllowed` do backend tinh tu durable state va proof
 reconciler. Frontend chi an/hien nut theo field nay; khong tu suy retry tu action

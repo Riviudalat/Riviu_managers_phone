@@ -164,10 +164,10 @@ pub fn compile_flow(
                 Some("position"),
             ));
         }
-        if !f0_feature_enabled(node.kind) {
+        if !release_one_feature_enabled(node.kind) {
             errors.push(FlowCompileError::node(
                 "FeatureNotEnabled",
-                format!("{:?} is not enabled in F0", node.kind),
+                format!("{:?} is not enabled in release one", node.kind),
                 node.id,
                 Some("kind"),
             ));
@@ -295,7 +295,7 @@ pub fn compile_flow(
 
     let mut compiled_nodes = BTreeMap::new();
     for (&node_id, node) in &nodes {
-        if !f0_feature_enabled(node.kind) {
+        if !release_one_feature_enabled(node.kind) {
             continue;
         }
         let Some(definition) = definitions.get(&node.kind) else {
@@ -404,10 +404,10 @@ pub fn compile_flow(
     })
 }
 
-fn f0_feature_enabled(kind: ActionKind) -> bool {
+fn release_one_feature_enabled(kind: ActionKind) -> bool {
     !matches!(
         kind,
-        ActionKind::TerminateApp | ActionKind::RawHttp | ActionKind::RawWda | ActionKind::Shell
+        ActionKind::RawHttp | ActionKind::RawWda | ActionKind::Shell
     )
 }
 
@@ -841,6 +841,13 @@ pub fn import_legacy_v1(script: &AutomationScript) -> LegacyImportResult {
                         bundle_id: bundle_id.clone(),
                     }),
                 ),
+                ScriptAction::TerminateApp { bundle_id } => push_node(
+                    ActionKind::TerminateApp,
+                    serde_json::json!({ "bundleId": bundle_id }),
+                    Some(EvidenceSpec::ProcessAbsent {
+                        bundle_id: bundle_id.clone(),
+                    }),
+                ),
                 ScriptAction::Wait { milliseconds } if (1..=60_000).contains(milliseconds) => {
                     push_node(
                         ActionKind::Wait,
@@ -951,11 +958,9 @@ fn diagnostic_for_legacy_step(index: usize, step: &ScriptAction) -> LegacyImport
             "legacy Wait must be between 1 and 60000 milliseconds",
             "milliseconds",
         ),
-        ScriptAction::TerminateApp { .. } => (
-            "FeatureNotEnabled",
-            "Terminate App is not enabled until F1 process verification passes",
-            "action",
-        ),
+        ScriptAction::TerminateApp { .. } => {
+            unreachable!("TerminateApp is handled before legacy diagnostics")
+        }
         ScriptAction::Tap {
             selector: Some(_),
             point: Some(_),
@@ -1089,6 +1094,14 @@ mod tests {
     fn launch(bundle_id: &str) -> FlowNode {
         let mut node = FlowNode::new(ActionKind::LaunchApp, json!({ "bundleId": bundle_id }));
         node.postcondition = Some(EvidenceSpec::ActiveAppEquals {
+            bundle_id: bundle_id.into(),
+        });
+        node
+    }
+
+    fn terminate(bundle_id: &str) -> FlowNode {
+        let mut node = FlowNode::new(ActionKind::TerminateApp, json!({ "bundleId": bundle_id }));
+        node.postcondition = Some(EvidenceSpec::ProcessAbsent {
             bundle_id: bundle_id.into(),
         });
         node
@@ -1582,40 +1595,52 @@ mod tests {
     }
 
     #[test]
-    fn raw_and_terminate_actions_are_not_enabled_in_f0() {
-        for kind in [
-            ActionKind::TerminateApp,
-            ActionKind::RawHttp,
-            ActionKind::RawWda,
-            ActionKind::Shell,
-        ] {
+    fn verified_terminate_is_a_bridge_only_compiled_action() {
+        let compiled = compile(&linear_document(vec![
+            start(),
+            terminate("com.example.fixture"),
+            end(),
+        ]))
+        .expect("verified Terminate compiles without a UI launch");
+        assert_eq!(compiled.plan.context_plan.initial_bundle_id, None);
+        assert!(compiled.plan.context_plan.requires_exclusive);
+        assert!(!compiled.plan.context_plan.requires_ui_session);
+        assert!(!compiled.plan.context_plan.requires_stream);
+        assert!(matches!(
+            compiled.plan.nodes[&compiled.plan.execution_order[1]].config,
+            CompiledActionConfig::TerminateApp { ref bundle_id }
+                if bundle_id == "com.example.fixture"
+        ));
+        assert!(compiled
+            .plan
+            .required_capabilities
+            .contains("app.terminate"));
+    }
+
+    #[test]
+    fn raw_actions_are_not_enabled_in_release_one() {
+        for kind in [ActionKind::RawHttp, ActionKind::RawWda, ActionKind::Shell] {
             let document = linear_document(vec![start(), FlowNode::new(kind, json!({})), end()]);
             assert_error(&document, "FeatureNotEnabled");
         }
     }
 
     #[test]
-    fn f0_feature_gate_cannot_be_bypassed_by_an_injected_catalog_definition() {
-        for kind in [ActionKind::TerminateApp, ActionKind::RawHttp] {
-            let mut catalog = release_one_catalog();
-            let mut injected = catalog[0].clone();
-            injected.kind = kind;
-            injected.disabled_reason = None;
-            catalog.push(injected);
+    fn release_feature_gate_cannot_be_bypassed_by_an_injected_raw_definition() {
+        let kind = ActionKind::RawHttp;
+        let mut catalog = release_one_catalog();
+        let mut injected = catalog[0].clone();
+        injected.kind = kind;
+        injected.disabled_reason = None;
+        catalog.push(injected);
 
-            let mut node = FlowNode::new(kind, json!({ "bundleId": "com.example.fixture" }));
-            if kind == ActionKind::TerminateApp {
-                node.postcondition = Some(EvidenceSpec::ProcessAbsent {
-                    bundle_id: "com.example.fixture".into(),
-                });
-            }
-            let document = linear_document(vec![start(), node, end()]);
-            let errors = compile_flow(&document, &catalog).expect_err("F0 feature gate");
-            assert!(
-                errors.iter().any(|error| error.code == "FeatureNotEnabled"),
-                "{kind:?}: {errors:?}"
-            );
-        }
+        let node = FlowNode::new(kind, json!({ "bundleId": "com.example.fixture" }));
+        let document = linear_document(vec![start(), node, end()]);
+        let errors = compile_flow(&document, &catalog).expect_err("release feature gate");
+        assert!(
+            errors.iter().any(|error| error.code == "FeatureNotEnabled"),
+            "{kind:?}: {errors:?}"
+        );
     }
 
     #[test]
@@ -1626,6 +1651,9 @@ mod tests {
             steps: vec![
                 ScriptAction::LaunchApp {
                     bundle_id: "com.apple.Preferences".into(),
+                },
+                ScriptAction::TerminateApp {
+                    bundle_id: "com.example.background".into(),
                 },
                 ScriptAction::Wait { milliseconds: 20 },
                 ScriptAction::Screenshot {
@@ -1638,8 +1666,8 @@ mod tests {
         let imported = import_legacy_v1(&script);
         assert!(imported.diagnostics.is_empty());
         let document = imported.document.expect("supported document");
-        assert_eq!(document.nodes.len(), 6);
-        assert_eq!(document.edges.len(), 5);
+        assert_eq!(document.nodes.len(), 7);
+        assert_eq!(document.edges.len(), 6);
         assert_eq!(document.entry_node_id, document.nodes[0].id);
         assert_eq!(
             document
@@ -1650,6 +1678,7 @@ mod tests {
             vec![
                 ActionKind::Start,
                 ActionKind::LaunchApp,
+                ActionKind::TerminateApp,
                 ActionKind::Wait,
                 ActionKind::Screenshot,
                 ActionKind::Home,
@@ -1665,6 +1694,7 @@ mod tests {
             vec![
                 json!({}),
                 json!({ "bundleId": "com.apple.Preferences" }),
+                json!({ "bundleId": "com.example.background" }),
                 json!({ "durationMs": 20 }),
                 json!({ "label": "settings", "format": "jpeg" }),
                 json!({}),
@@ -1681,6 +1711,9 @@ mod tests {
                 None,
                 Some(EvidenceSpec::ActiveAppEquals {
                     bundle_id: "com.apple.Preferences".into(),
+                }),
+                Some(EvidenceSpec::ProcessAbsent {
+                    bundle_id: "com.example.background".into(),
                 }),
                 None,
                 Some(EvidenceSpec::ArtifactDecodedAndHashed),
@@ -1716,13 +1749,6 @@ mod tests {
                 },
                 "WaitOutOfRange",
                 Some("milliseconds"),
-            ),
-            (
-                ScriptAction::TerminateApp {
-                    bundle_id: "com.apple.Preferences".into(),
-                },
-                "FeatureNotEnabled",
-                Some("action"),
             ),
             (
                 ScriptAction::AssertVisible {

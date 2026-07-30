@@ -50,7 +50,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_never_exposes_raw_transport_actions_or_terminate() {
+    fn catalog_exposes_verified_terminate_but_never_raw_transport_actions() {
         let catalog = release_one_catalog();
         assert_eq!(
             catalog.iter().map(|entry| entry.kind).collect::<Vec<_>>(),
@@ -58,6 +58,7 @@ mod tests {
                 ActionKind::Start,
                 ActionKind::End,
                 ActionKind::LaunchApp,
+                ActionKind::TerminateApp,
                 ActionKind::Wait,
                 ActionKind::Tap,
                 ActionKind::Swipe,
@@ -71,9 +72,21 @@ mod tests {
             entry.kind,
             ActionKind::RawHttp | ActionKind::RawWda | ActionKind::Shell
         )));
-        assert!(catalog
+        let terminate = catalog
             .iter()
-            .all(|entry| entry.kind != ActionKind::TerminateApp));
+            .find(|entry| entry.kind == ActionKind::TerminateApp)
+            .expect("verified Terminate definition");
+        assert_eq!(terminate.required_capabilities, ["app.terminate"]);
+        assert_eq!(terminate.resource_class, ResourceClass::Bridge);
+        assert_eq!(terminate.side_effect_class, SideEffectClass::IdempotentSet);
+        assert_eq!(terminate.evidence_requirement, EvidenceRequirement::Process);
+        assert_eq!(terminate.allowed_evidence, [EvidenceKind::ProcessAbsent]);
+        assert_eq!(
+            terminate.reconciliation_policy,
+            ReconciliationPolicy::ReadProcess
+        );
+        assert_eq!(terminate.retry_policy, RetryPolicy::IdempotentAfterRead);
+        assert!(terminate.disabled_reason.is_none());
         assert!(catalog.iter().all(|entry| entry.disabled_reason.is_none()));
     }
 
@@ -347,6 +360,13 @@ mod tests {
                 ActionCategory::App,
                 10_000,
                 vec![EvidenceKind::ActiveAppEquals],
+            ),
+            (
+                ActionKind::TerminateApp,
+                "Terminate App",
+                ActionCategory::App,
+                10_000,
+                vec![EvidenceKind::ProcessAbsent],
             ),
             (
                 ActionKind::Wait,

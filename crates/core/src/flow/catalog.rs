@@ -249,6 +249,7 @@ pub fn release_one_catalog() -> Vec<ActionDefinition> {
         ActionKind::Start,
         ActionKind::End,
         ActionKind::LaunchApp,
+        ActionKind::TerminateApp,
         ActionKind::Wait,
         ActionKind::Tap,
         ActionKind::Swipe,

@@ -914,7 +914,11 @@ mod tests {
             unreachable!("driver is not used by do_comment")
         }
 
-        async fn terminate_app(&self, _udid: &str, _bundle_id: &str) -> anyhow::Result<()> {
+        async fn terminate_app(
+            &self,
+            _udid: &str,
+            _bundle_id: &str,
+        ) -> anyhow::Result<crate::ProcessAbsenceProof> {
             unreachable!("driver is not used by do_comment")
         }
 

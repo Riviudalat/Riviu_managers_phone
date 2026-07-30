@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,11 +10,11 @@ use chrono::{Duration as ChronoDuration, Utc};
 use image::{ImageBuffer, Rgb};
 use parking_lot::{Mutex, RwLock as SyncRwLock};
 use riviu_core::{
-    ActiveTransport, AgentInstallProof, AgentSettings, AgentState, AgentStatus, ConnectionKind,
-    DeviceCapabilitySnapshot, DeviceDriver, DeviceInfo, DeviceStatus, InstalledAgentIdentity,
-    InstalledTargetIdentity, InteractionSessionKind, QualifiedGeometry, ScreenOrientation,
-    StreamStartProof, StreamStopProof, SwipeGesture, TapPoint, TileStreamState, UiSession,
-    STREAM_FPS,
+    ActiveTransport, AgentInstallProof, AgentSettings, AgentState, AgentStatus, AppProcessState,
+    ConnectionKind, DeviceCapabilitySnapshot, DeviceDriver, DeviceInfo, DeviceStatus,
+    InstalledAgentIdentity, InstalledTargetIdentity, InteractionSessionKind, ProcessAbsenceProof,
+    QualifiedGeometry, ScreenOrientation, StreamStartProof, StreamStopProof, SwipeGesture,
+    TapPoint, TileStreamState, UiSession, STREAM_FPS,
 };
 use tokio::sync::{oneshot, RwLock};
 use tokio::task::JoinHandle;
@@ -77,6 +77,8 @@ pub struct MockIosDriver {
     mock_stream_failures: Arc<SyncRwLock<HashSet<String>>>,
     mock_static_streams: Arc<SyncRwLock<HashSet<String>>>,
     mock_stream_producers: Arc<Mutex<HashMap<String, MockStreamProducer>>>,
+    mock_verified_app_termination: Arc<AtomicBool>,
+    mock_app_processes: Arc<SyncRwLock<HashMap<(String, String), u64>>>,
 }
 
 impl MockIosDriver {
@@ -146,6 +148,8 @@ impl MockIosDriver {
             mock_stream_failures: Arc::new(SyncRwLock::new(HashSet::new())),
             mock_static_streams: Arc::new(SyncRwLock::new(HashSet::new())),
             mock_stream_producers: Arc::new(Mutex::new(HashMap::new())),
+            mock_verified_app_termination: Arc::new(AtomicBool::new(false)),
+            mock_app_processes: Arc::new(SyncRwLock::new(HashMap::new())),
         }
     }
 
@@ -278,6 +282,22 @@ impl MockIosDriver {
             streams.insert(udid.to_string());
         } else {
             streams.remove(udid);
+        }
+    }
+
+    pub fn set_mock_verified_app_termination(&self, supported: bool) {
+        self.mock_verified_app_termination
+            .store(supported, Ordering::SeqCst);
+    }
+
+    pub fn set_mock_app_process(&self, udid: &str, bundle_id: &str, pid: Option<u64>) {
+        assert!(pid != Some(0), "mock app PID must be positive");
+        let key = (udid.to_string(), bundle_id.to_string());
+        let mut processes = self.mock_app_processes.write();
+        if let Some(pid) = pid {
+            processes.insert(key, pid);
+        } else {
+            processes.remove(&key);
         }
     }
 
@@ -654,6 +674,30 @@ impl DeviceDriver for MockIosDriver {
         true
     }
 
+    fn supports_verified_app_termination(&self) -> bool {
+        self.mock_verified_app_termination.load(Ordering::SeqCst)
+    }
+
+    async fn inspect_app_process(
+        &self,
+        udid: &str,
+        bundle_id: &str,
+    ) -> anyhow::Result<AppProcessState> {
+        if !self.supports_verified_app_termination() {
+            anyhow::bail!("verified app termination is disabled for this mock driver");
+        }
+        let pid = self
+            .mock_app_processes
+            .read()
+            .get(&(udid.to_string(), bundle_id.to_string()))
+            .copied();
+        Ok(AppProcessState {
+            bundle_id: bundle_id.to_string(),
+            pid,
+            running: pid.is_some(),
+        })
+    }
+
     fn requires_fresh_text_session(&self) -> bool {
         true
     }
@@ -728,8 +772,22 @@ impl DeviceDriver for MockIosDriver {
         Ok(())
     }
 
-    async fn terminate_app(&self, _udid: &str, _bundle_id: &str) -> anyhow::Result<()> {
-        Ok(())
+    async fn terminate_app(
+        &self,
+        udid: &str,
+        bundle_id: &str,
+    ) -> anyhow::Result<ProcessAbsenceProof> {
+        if !self.supports_verified_app_termination() {
+            anyhow::bail!("verified app termination is disabled for this mock driver");
+        }
+        let old_pid = self
+            .mock_app_processes
+            .write()
+            .remove(&(udid.to_string(), bundle_id.to_string()));
+        Ok(ProcessAbsenceProof {
+            bundle_id: bundle_id.to_string(),
+            old_pid,
+        })
     }
 
     async fn reboot(&self, udid: &str) -> anyhow::Result<()> {
@@ -1232,5 +1290,57 @@ mod tests {
             .lock()
             .iter()
             .any(|call| call.contains("restore")));
+    }
+
+    #[tokio::test]
+    async fn verified_process_control_is_explicit_and_preserves_pid_state() {
+        let driver = MockIosDriver::new();
+        let udid = "MOCK-IPHONE-01";
+        let bundle_id = "com.fixture.app";
+
+        assert!(!driver.supports_verified_app_termination());
+        assert!(driver.inspect_app_process(udid, bundle_id).await.is_err());
+        assert!(driver.terminate_app(udid, bundle_id).await.is_err());
+        driver.set_mock_verified_app_termination(true);
+        driver.set_mock_app_process(udid, bundle_id, Some(42));
+        assert!(driver.supports_verified_app_termination());
+        assert_eq!(
+            driver
+                .inspect_app_process(udid, bundle_id)
+                .await
+                .expect("running process"),
+            riviu_core::AppProcessState {
+                bundle_id: bundle_id.to_string(),
+                pid: Some(42),
+                running: true,
+            }
+        );
+
+        assert_eq!(
+            driver
+                .terminate_app(udid, bundle_id)
+                .await
+                .expect("verified terminate"),
+            riviu_core::ProcessAbsenceProof {
+                bundle_id: bundle_id.to_string(),
+                old_pid: Some(42),
+            }
+        );
+        assert_eq!(
+            driver
+                .inspect_app_process(udid, bundle_id)
+                .await
+                .expect("absent after terminate")
+                .pid,
+            None
+        );
+        assert_eq!(
+            driver
+                .terminate_app(udid, bundle_id)
+                .await
+                .expect("idempotent absent terminate")
+                .old_pid,
+            None
+        );
     }
 }

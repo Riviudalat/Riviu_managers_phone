@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import importlib.metadata
 import io
 import json
 import os
@@ -19,6 +20,11 @@ import sys
 import time
 from pathlib import Path
 from typing import Optional
+
+
+SIDECAR_PROTOCOL_VERSION = 2
+PYMOBILEDEVICE3_PROCESS_CONTROL_VERSION = "10.1.0"
+VERIFIED_PROCESS_CONTROL_CONTRACT = "verifiedProcessControl"
 
 
 def _windows_kill_on_close_job(process: subprocess.Popen):
@@ -130,9 +136,36 @@ def try_import():
         return False
 
 
+def verified_process_control_ready() -> bool:
+    try:
+        if (
+            importlib.metadata.version("pymobiledevice3")
+            != PYMOBILEDEVICE3_PROCESS_CONTROL_VERSION
+        ):
+            return False
+        from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
+        from pymobiledevice3.services.dvt.instruments.process_control import (
+            ProcessControl,
+        )
+
+        return isinstance(DvtProvider, type) and isinstance(ProcessControl, type)
+    except Exception:  # pragma: no cover - dependency shape varies by host
+        return False
+
+
 def cmd_ping(_: argparse.Namespace) -> int:
     ok = try_import()
-    emit({"ok": True, "pymobiledevice3": ok})
+    process_control_ready = ok and verified_process_control_ready()
+    emit(
+        {
+            "ok": True,
+            "pymobiledevice3": ok,
+            "sidecarProtocolVersion": SIDECAR_PROTOCOL_VERSION,
+            "contracts": (
+                [VERIFIED_PROCESS_CONTROL_CONTRACT] if process_control_ready else []
+            ),
+        }
+    )
     return 0 if ok else 2
 
 
@@ -785,9 +818,163 @@ async def _launch_app_with_environment(
         await lockdown.close()
 
 
+TERMINATE_TIMEOUT_SECONDS = 5.0
+TERMINATE_CLEANUP_TIMEOUT_SECONDS = 0.5
+TERMINATE_POLL_SECONDS = 0.1
+
+
+async def _await_before(deadline: float, operation):
+    remaining = deadline - asyncio.get_running_loop().time()
+    if remaining <= 0:
+        raise TimeoutError("app process-control deadline expired")
+    try:
+        return await asyncio.wait_for(operation(), timeout=remaining)
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError("app process-control deadline expired") from exc
+
+
+def _checked_process_pid(value) -> Optional[int]:
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        or value > (1 << 64) - 1
+    ):
+        raise RuntimeError("process lookup returned an invalid PID")
+    if value == 0:
+        return None
+    return value
+
+
+async def _with_bounded_process_control(udid: str, operation):
+    if not try_import():
+        raise RuntimeError("pymobiledevice3 not installed")
+    from pymobiledevice3.lockdown import create_using_usbmux
+    from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
+    from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + TERMINATE_TIMEOUT_SECONDS
+    lockdown = None
+    dvt_context = None
+    process_context = None
+    dvt_entered = False
+    process_entered = False
+    error_info = (None, None, None)
+    try:
+        lockdown = await _await_before(
+            deadline, lambda: create_using_usbmux(serial=udid)
+        )
+        dvt_context = DvtProvider(lockdown)
+        dvt = await _await_before(deadline, dvt_context.__aenter__)
+        dvt_entered = True
+        process_context = ProcessControl(dvt)
+        process_control = await _await_before(deadline, process_context.__aenter__)
+        process_entered = True
+        return await operation(process_control, deadline)
+    except BaseException as error:
+        error_info = (type(error), error, error.__traceback__)
+        raise
+    finally:
+        cleanup_deadline = loop.time() + TERMINATE_CLEANUP_TIMEOUT_SECONDS
+        cleanup_operations = []
+        if process_entered:
+            cleanup_operations.append(
+                lambda: process_context.__aexit__(*error_info)
+            )
+        if dvt_entered:
+            cleanup_operations.append(lambda: dvt_context.__aexit__(*error_info))
+        if lockdown is not None:
+            cleanup_operations.append(lockdown.close)
+
+        cleanup_errors = []
+        for cleanup in cleanup_operations:
+            try:
+                await _await_before(cleanup_deadline, cleanup)
+            except BaseException as cleanup_error:
+                cleanup_errors.append(cleanup_error)
+        if cleanup_errors and error_info[1] is None:
+            raise cleanup_errors[0]
+        if cleanup_errors:
+            print(f"app process cleanup error: {cleanup_errors[0]}", file=sys.stderr)
+
+
+async def _inspect_app_process(udid: str, bundle_id: str) -> dict:
+    async def inspect(process_control, deadline: float) -> dict:
+        raw_pid = await _await_before(
+            deadline,
+            lambda: process_control.process_identifier_for_bundle_identifier(
+                bundle_id
+            ),
+        )
+        pid = _checked_process_pid(raw_pid)
+        return {
+            "ok": True,
+            "bundleId": bundle_id,
+            "pid": pid,
+            "running": pid is not None,
+        }
+
+    return await _with_bounded_process_control(udid, inspect)
+
+
+async def _terminate_app_verified(udid: str, bundle_id: str) -> dict:
+    async def terminate(process_control, deadline: float) -> dict:
+        raw_pid = await _await_before(
+            deadline,
+            lambda: process_control.process_identifier_for_bundle_identifier(
+                bundle_id
+            ),
+        )
+        old_pid = _checked_process_pid(raw_pid)
+        if old_pid is None:
+            return {
+                "ok": True,
+                "bundleId": bundle_id,
+                "oldPid": None,
+                "running": False,
+            }
+
+        await _await_before(deadline, lambda: process_control.kill(old_pid))
+        while True:
+            raw_current = await _await_before(
+                deadline,
+                lambda: process_control.process_identifier_for_bundle_identifier(
+                    bundle_id
+                ),
+            )
+            if _checked_process_pid(raw_current) is None:
+                return {
+                    "ok": True,
+                    "bundleId": bundle_id,
+                    "oldPid": old_pid,
+                    "running": False,
+                }
+            await _await_before(
+                deadline, lambda: asyncio.sleep(TERMINATE_POLL_SECONDS)
+            )
+
+    return await _with_bounded_process_control(udid, terminate)
+
+
 def cmd_terminate(args: argparse.Namespace) -> int:
-    emit({"ok": True, "note": "terminate best-effort"})
-    return 0
+    try:
+        emit(asyncio.run(_terminate_app_verified(args.udid, args.bundle_id)))
+        return 0
+    except Exception as exc:
+        emit({"ok": False, "error": str(exc)})
+        return 1
+
+
+def cmd_app_process(args: argparse.Namespace) -> int:
+    try:
+        emit(asyncio.run(_inspect_app_process(args.udid, args.bundle_id)))
+        return 0
+    except Exception as exc:
+        emit({"ok": False, "error": str(exc)})
+        return 1
 
 
 def cmd_reboot(args: argparse.Namespace) -> int:
@@ -1507,6 +1694,10 @@ def main() -> int:
     p.add_argument("--udid", required=True)
     p.add_argument("--bundle-id", required=True)
 
+    p = sub.add_parser("app-process")
+    p.add_argument("--udid", required=True)
+    p.add_argument("--bundle-id", required=True)
+
     p = sub.add_parser("reboot")
     p.add_argument("--udid", required=True)
 
@@ -1560,6 +1751,7 @@ def main() -> int:
         "syslog": cmd_syslog,
         "launch": cmd_launch,
         "terminate": cmd_terminate,
+        "app-process": cmd_app_process,
         "reboot": cmd_reboot,
         "tunnel": cmd_tunnel,
         "start-wda": cmd_start_wda,
