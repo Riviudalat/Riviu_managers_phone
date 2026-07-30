@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use riviu_core::{
-    canonical_compiled_plan_json, compiled_plan_sha256, contracts, validate_artifact_label,
-    ActionDefinition, ActionKind, CompiledActionConfig, CompiledFlowNode, CompiledFlowPlanV2,
-    CompiledTapTarget, ContextPlan, EvidenceKind, EvidenceRequirement, EvidenceSpec,
-    FlowDocumentV2, ImageCoordinateTarget, NodeId, QualifiedElementLocator, ResourceClass,
-    FLOW_SCHEMA_VERSION,
+    canonical_compiled_plan_json, compiled_plan_sha256, contracts, release_one_catalog,
+    validate_artifact_label, ActionDefinition, ActionKind, AutomationScript, CanvasPoint,
+    CompiledActionConfig, CompiledFlowNode, CompiledFlowPlanV2, CompiledTapTarget, ContextPlan,
+    EvidenceKind, EvidenceRequirement, EvidenceSpec, FlowDocumentV2, FlowEdge, FlowNode,
+    FlowViewport, ImageCoordinateTarget, NodeId, QualifiedElementLocator, ResourceClass,
+    ScriptAction, FLOW_SCHEMA_VERSION,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -784,12 +785,275 @@ fn sort_errors(errors: &mut [FlowCompileError]) {
     });
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyImportDiagnostic {
+    pub step_index: usize,
+    pub code: String,
+    pub message: String,
+    pub field: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyImportResult {
+    pub document: Option<FlowDocumentV2>,
+    pub diagnostics: Vec<LegacyImportDiagnostic>,
+}
+
+pub fn import_legacy_v1(script: &AutomationScript) -> LegacyImportResult {
+    if script.version != 1 {
+        return LegacyImportResult {
+            document: None,
+            diagnostics: vec![LegacyImportDiagnostic {
+                step_index: 0,
+                code: "UnsupportedVersion".into(),
+                message: format!("legacy script version {} is unsupported", script.version),
+                field: Some("version".into()),
+            }],
+        };
+    }
+
+    let mut diagnostics = Vec::new();
+    let mut nodes = Vec::with_capacity(script.steps.len() + 2);
+    let mut start = FlowNode::new(ActionKind::Start, serde_json::json!({}));
+    start.position = CanvasPoint { x: 0.0, y: 80.0 };
+    let entry_node_id = start.id;
+    nodes.push(start);
+
+    {
+        let mut push_node = |kind, config, postcondition| {
+            let mut node = FlowNode::new(kind, config);
+            node.position = CanvasPoint {
+                x: (nodes.len() as f64) * 220.0,
+                y: 80.0,
+            };
+            node.postcondition = postcondition;
+            nodes.push(node);
+        };
+
+        for (index, step) in script.steps.iter().enumerate() {
+            match step {
+                ScriptAction::LaunchApp { bundle_id } => push_node(
+                    ActionKind::LaunchApp,
+                    serde_json::json!({ "bundleId": bundle_id }),
+                    Some(EvidenceSpec::ActiveAppEquals {
+                        bundle_id: bundle_id.clone(),
+                    }),
+                ),
+                ScriptAction::Wait { milliseconds } if (1..=60_000).contains(milliseconds) => {
+                    push_node(
+                        ActionKind::Wait,
+                        serde_json::json!({ "durationMs": milliseconds }),
+                        None,
+                    );
+                }
+                ScriptAction::Screenshot { name }
+                    if validate_artifact_label(name, "jpeg").is_ok() =>
+                {
+                    push_node(
+                        ActionKind::Screenshot,
+                        serde_json::json!({ "label": name, "format": "jpeg" }),
+                        Some(EvidenceSpec::ArtifactDecodedAndHashed),
+                    );
+                }
+                ScriptAction::Home => push_node(
+                    ActionKind::Home,
+                    serde_json::json!({}),
+                    Some(EvidenceSpec::ActiveAppEquals {
+                        bundle_id: "com.apple.springboard".into(),
+                    }),
+                ),
+                ScriptAction::AssertVisible { selector }
+                    if selector
+                        .accessibility_id
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty())
+                        && selector.xpath.is_none()
+                        && selector.predicate.is_none() =>
+                {
+                    push_node(
+                        ActionKind::AssertVisible,
+                        serde_json::json!({
+                            "accessibilityId": selector.accessibility_id.as_deref().unwrap_or_default()
+                        }),
+                        None,
+                    );
+                }
+                unsupported => diagnostics.push(diagnostic_for_legacy_step(index, unsupported)),
+            }
+        }
+    }
+
+    if !diagnostics.is_empty() {
+        return LegacyImportResult {
+            document: None,
+            diagnostics,
+        };
+    }
+
+    let mut end = FlowNode::new(ActionKind::End, serde_json::json!({}));
+    end.position = CanvasPoint {
+        x: (nodes.len() as f64) * 220.0,
+        y: 80.0,
+    };
+    nodes.push(end);
+    let edges = nodes
+        .windows(2)
+        .map(|pair| FlowEdge::flow(pair[0].id, pair[1].id))
+        .collect();
+    let document = FlowDocumentV2 {
+        schema_version: FLOW_SCHEMA_VERSION,
+        id: uuid::Uuid::new_v4(),
+        name: script.name.clone(),
+        revision: 0,
+        entry_node_id,
+        nodes,
+        edges,
+        viewport: FlowViewport::default(),
+    };
+    if let Err(compile_errors) = compile_flow(&document, &release_one_catalog()) {
+        let step_by_node: BTreeMap<_, _> = document
+            .nodes
+            .iter()
+            .skip(1)
+            .take(script.steps.len())
+            .enumerate()
+            .map(|(index, node)| (node.id, index))
+            .collect();
+        diagnostics.extend(compile_errors.into_iter().map(|error| {
+            LegacyImportDiagnostic {
+                step_index: error
+                    .node_id
+                    .and_then(|node_id| step_by_node.get(&node_id).copied())
+                    .unwrap_or(0),
+                code: error.code,
+                message: error.message,
+                field: error.field,
+            }
+        }));
+        sort_legacy_diagnostics(&mut diagnostics);
+        return LegacyImportResult {
+            document: None,
+            diagnostics,
+        };
+    }
+    LegacyImportResult {
+        document: Some(document),
+        diagnostics,
+    }
+}
+
+fn diagnostic_for_legacy_step(index: usize, step: &ScriptAction) -> LegacyImportDiagnostic {
+    let (code, message, field) = match step {
+        ScriptAction::Wait { .. } => (
+            "WaitOutOfRange",
+            "legacy Wait must be between 1 and 60000 milliseconds",
+            "milliseconds",
+        ),
+        ScriptAction::TerminateApp { .. } => (
+            "FeatureNotEnabled",
+            "Terminate App is not enabled until F1 process verification passes",
+            "action",
+        ),
+        ScriptAction::Tap {
+            selector: Some(_),
+            point: Some(_),
+        } => (
+            "UnsupportedSelector",
+            "legacy Tap cannot preserve both selector and point semantics",
+            "selector",
+        ),
+        ScriptAction::Tap {
+            selector: Some(selector),
+            point: None,
+        } if selector.xpath.is_some()
+            || selector.predicate.is_some()
+            || selector
+                .accessibility_id
+                .as_deref()
+                .is_none_or(str::is_empty) =>
+        {
+            (
+                "UnsupportedSelector",
+                "legacy Tap selector is not supported",
+                "selector",
+            )
+        }
+        ScriptAction::Tap {
+            selector: Some(_),
+            point: None,
+        } => (
+            "EvidenceRequired",
+            "legacy Tap has no qualified postcondition",
+            "postcondition",
+        ),
+        ScriptAction::Tap {
+            selector: None,
+            point: Some(_),
+        } => (
+            "GeometryRequired",
+            "legacy Tap coordinates have no qualified geometry profile",
+            "point",
+        ),
+        ScriptAction::Tap {
+            selector: None,
+            point: None,
+        } => (
+            "EvidenceRequired",
+            "legacy Tap has neither a target nor qualified evidence",
+            "postcondition",
+        ),
+        ScriptAction::Swipe { .. } => (
+            "GeometryRequired",
+            "legacy Swipe coordinates have no qualified geometry profile",
+            "gesture",
+        ),
+        ScriptAction::TypeText { .. } => (
+            "EvidenceRequired",
+            "legacy Type Text has no read-back target",
+            "readBackLocator",
+        ),
+        ScriptAction::Screenshot { .. } => (
+            "ArtifactLabelInvalid",
+            "legacy Screenshot label is not portable",
+            "name",
+        ),
+        ScriptAction::AssertVisible { .. } => (
+            "UnsupportedSelector",
+            "Assert Visible requires exactly one non-empty accessibility ID",
+            "selector",
+        ),
+        ScriptAction::LaunchApp { .. } | ScriptAction::Home => (
+            "LegacyShapeUnsupported",
+            "legacy action shape cannot be imported",
+            "action",
+        ),
+    };
+    LegacyImportDiagnostic {
+        step_index: index,
+        code: code.into(),
+        message: message.into(),
+        field: Some(field.into()),
+    }
+}
+
+fn sort_legacy_diagnostics(diagnostics: &mut [LegacyImportDiagnostic]) {
+    diagnostics.sort_by(|left, right| {
+        left.step_index
+            .cmp(&right.step_index)
+            .then_with(|| left.code.cmp(&right.code))
+            .then_with(|| left.field.cmp(&right.field))
+            .then_with(|| left.message.cmp(&right.message))
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use riviu_core::{
-        release_one_catalog, ActionKind, CanvasPoint, CompiledActionConfig, EvidenceSpec,
-        FlowDocumentV2, FlowEdge, FlowNode, FlowViewport, ImageCoordinateTarget,
-        FLOW_SCHEMA_VERSION,
+        release_one_catalog, ActionKind, AutomationScript, CanvasPoint, CompiledActionConfig,
+        ElementSelector, EvidenceSpec, FlowDocumentV2, FlowEdge, FlowNode, FlowViewport,
+        ImageCoordinateTarget, ScriptAction, SwipeGesture, TapPoint, FLOW_SCHEMA_VERSION,
     };
     use serde_json::{json, Value};
     use uuid::Uuid;
@@ -1350,6 +1614,327 @@ mod tests {
             assert!(
                 errors.iter().any(|error| error.code == "FeatureNotEnabled"),
                 "{kind:?}: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_import_accepts_only_semantics_preserving_steps() {
+        let script = AutomationScript {
+            version: 1,
+            name: "Fixture".into(),
+            steps: vec![
+                ScriptAction::LaunchApp {
+                    bundle_id: "com.apple.Preferences".into(),
+                },
+                ScriptAction::Wait { milliseconds: 20 },
+                ScriptAction::Screenshot {
+                    name: "settings".into(),
+                },
+                ScriptAction::Home,
+            ],
+        };
+        let original = serde_json::to_value(&script).expect("source JSON");
+        let imported = import_legacy_v1(&script);
+        assert!(imported.diagnostics.is_empty());
+        let document = imported.document.expect("supported document");
+        assert_eq!(document.nodes.len(), 6);
+        assert_eq!(document.edges.len(), 5);
+        assert_eq!(document.entry_node_id, document.nodes[0].id);
+        assert_eq!(
+            document
+                .nodes
+                .iter()
+                .map(|node| node.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                ActionKind::Start,
+                ActionKind::LaunchApp,
+                ActionKind::Wait,
+                ActionKind::Screenshot,
+                ActionKind::Home,
+                ActionKind::End,
+            ]
+        );
+        assert_eq!(
+            document
+                .nodes
+                .iter()
+                .map(|node| node.config.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                json!({}),
+                json!({ "bundleId": "com.apple.Preferences" }),
+                json!({ "durationMs": 20 }),
+                json!({ "label": "settings", "format": "jpeg" }),
+                json!({}),
+                json!({}),
+            ]
+        );
+        assert_eq!(
+            document
+                .nodes
+                .iter()
+                .map(|node| node.postcondition.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                None,
+                Some(EvidenceSpec::ActiveAppEquals {
+                    bundle_id: "com.apple.Preferences".into(),
+                }),
+                None,
+                Some(EvidenceSpec::ArtifactDecodedAndHashed),
+                Some(EvidenceSpec::ActiveAppEquals {
+                    bundle_id: "com.apple.springboard".into(),
+                }),
+                None,
+            ]
+        );
+        for (edge, pair) in document.edges.iter().zip(document.nodes.windows(2)) {
+            assert_eq!(edge.source_node_id, pair[0].id);
+            assert_eq!(edge.source_port, "flow");
+            assert_eq!(edge.target_node_id, pair[1].id);
+            assert_eq!(edge.target_port, "flow");
+        }
+        assert_eq!(
+            serde_json::to_value(&script).expect("unchanged source JSON"),
+            original
+        );
+    }
+
+    #[test]
+    fn legacy_import_reports_stable_diagnostics_and_returns_no_partial_document() {
+        let cases = vec![
+            (
+                ScriptAction::Wait { milliseconds: 0 },
+                "WaitOutOfRange",
+                Some("milliseconds"),
+            ),
+            (
+                ScriptAction::Wait {
+                    milliseconds: 60_001,
+                },
+                "WaitOutOfRange",
+                Some("milliseconds"),
+            ),
+            (
+                ScriptAction::TerminateApp {
+                    bundle_id: "com.apple.Preferences".into(),
+                },
+                "FeatureNotEnabled",
+                Some("action"),
+            ),
+            (
+                ScriptAction::AssertVisible {
+                    selector: ElementSelector {
+                        accessibility_id: None,
+                        xpath: Some("//XCUIElementTypeButton".into()),
+                        predicate: None,
+                    },
+                },
+                "UnsupportedSelector",
+                Some("selector"),
+            ),
+            (
+                ScriptAction::AssertVisible {
+                    selector: ElementSelector {
+                        accessibility_id: None,
+                        xpath: None,
+                        predicate: Some("label == 'OK'".into()),
+                    },
+                },
+                "UnsupportedSelector",
+                Some("selector"),
+            ),
+            (
+                ScriptAction::Tap {
+                    selector: Some(ElementSelector {
+                        accessibility_id: Some("Button".into()),
+                        xpath: None,
+                        predicate: None,
+                    }),
+                    point: Some(TapPoint { x: 1.0, y: 2.0 }),
+                },
+                "UnsupportedSelector",
+                Some("selector"),
+            ),
+            (
+                ScriptAction::Tap {
+                    selector: Some(ElementSelector {
+                        accessibility_id: Some("Button".into()),
+                        xpath: None,
+                        predicate: None,
+                    }),
+                    point: None,
+                },
+                "EvidenceRequired",
+                Some("postcondition"),
+            ),
+            (
+                ScriptAction::Tap {
+                    selector: None,
+                    point: Some(TapPoint { x: 1.0, y: 2.0 }),
+                },
+                "GeometryRequired",
+                Some("point"),
+            ),
+            (
+                ScriptAction::Swipe {
+                    gesture: SwipeGesture {
+                        from: TapPoint { x: 1.0, y: 2.0 },
+                        to: TapPoint { x: 2.0, y: 1.0 },
+                        duration_ms: 200,
+                    },
+                },
+                "GeometryRequired",
+                Some("gesture"),
+            ),
+            (
+                ScriptAction::TypeText { value: "x".into() },
+                "EvidenceRequired",
+                Some("readBackLocator"),
+            ),
+            (
+                ScriptAction::Screenshot {
+                    name: "../bad".into(),
+                },
+                "ArtifactLabelInvalid",
+                Some("name"),
+            ),
+        ];
+
+        for (index, (step, code, field)) in cases.into_iter().enumerate() {
+            let script = AutomationScript {
+                version: 1,
+                name: "Fixture".into(),
+                steps: vec![step],
+            };
+            let imported = import_legacy_v1(&script);
+            assert!(imported.document.is_none(), "{code}");
+            assert_eq!(imported.diagnostics.len(), 1, "{code}");
+            let diagnostic = &imported.diagnostics[0];
+            assert_eq!(diagnostic.step_index, 0, "case {index}");
+            assert_eq!(diagnostic.code, code, "case {index}");
+            assert_eq!(diagnostic.field.as_deref(), field, "case {index}");
+        }
+    }
+
+    #[test]
+    fn legacy_import_reports_non_finite_coordinates_without_serializing_them() {
+        for point in [
+            TapPoint {
+                x: f64::NAN,
+                y: 1.0,
+            },
+            TapPoint {
+                x: 1.0,
+                y: f64::INFINITY,
+            },
+        ] {
+            let script = AutomationScript {
+                version: 1,
+                name: "Fixture".into(),
+                steps: vec![ScriptAction::Tap {
+                    selector: None,
+                    point: Some(point),
+                }],
+            };
+            let imported = import_legacy_v1(&script);
+            assert!(imported.document.is_none());
+            assert_eq!(imported.diagnostics[0].code, "GeometryRequired");
+        }
+    }
+
+    #[test]
+    fn legacy_import_never_returns_a_document_that_the_release_compiler_rejects() {
+        let invalid_scripts = [
+            AutomationScript {
+                version: 1,
+                name: "Missing launch".into(),
+                steps: vec![ScriptAction::Screenshot {
+                    name: "capture".into(),
+                }],
+            },
+            AutomationScript {
+                version: 1,
+                name: "Empty bundle".into(),
+                steps: vec![ScriptAction::LaunchApp {
+                    bundle_id: String::new(),
+                }],
+            },
+            AutomationScript {
+                version: 1,
+                name: "Long selector".into(),
+                steps: vec![
+                    ScriptAction::LaunchApp {
+                        bundle_id: "com.apple.Preferences".into(),
+                    },
+                    ScriptAction::AssertVisible {
+                        selector: ElementSelector {
+                            accessibility_id: Some("a".repeat(513)),
+                            xpath: None,
+                            predicate: None,
+                        },
+                    },
+                ],
+            },
+        ];
+        for script in invalid_scripts {
+            let imported = import_legacy_v1(&script);
+            assert!(imported.document.is_none(), "{}", script.name);
+            assert!(!imported.diagnostics.is_empty(), "{}", script.name);
+        }
+
+        let valid = AutomationScript {
+            version: 1,
+            name: "Valid assert".into(),
+            steps: vec![
+                ScriptAction::LaunchApp {
+                    bundle_id: "com.apple.Preferences".into(),
+                },
+                ScriptAction::AssertVisible {
+                    selector: ElementSelector {
+                        accessibility_id: Some("Search".into()),
+                        xpath: None,
+                        predicate: None,
+                    },
+                },
+            ],
+        };
+        let imported = import_legacy_v1(&valid);
+        let document = imported.document.expect("valid imported document");
+        assert!(compile(&document).is_ok());
+    }
+
+    #[test]
+    fn legacy_import_orders_compiler_diagnostics_by_source_step() {
+        let script = AutomationScript {
+            version: 1,
+            name: "Two invalid supported shapes".into(),
+            steps: vec![
+                ScriptAction::LaunchApp {
+                    bundle_id: String::new(),
+                },
+                ScriptAction::AssertVisible {
+                    selector: ElementSelector {
+                        accessibility_id: Some("a".repeat(513)),
+                        xpath: None,
+                        predicate: None,
+                    },
+                },
+            ],
+        };
+
+        for _ in 0..64 {
+            let imported = import_legacy_v1(&script);
+            assert!(imported.document.is_none());
+            assert_eq!(
+                imported
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.step_index)
+                    .collect::<Vec<_>>(),
+                vec![0, 1]
             );
         }
     }
