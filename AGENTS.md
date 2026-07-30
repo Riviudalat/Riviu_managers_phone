@@ -822,6 +822,11 @@ edit dau tien, worktree phai sach, dat `RIVIU_PRE_F0_COMMIT=$(git rev-parse HEAD
 va ghi full hash vao checkpoint F0; cac handoff F1-F3 giu nguyen hash do, khong
 day baseline tien theo implementation commit.
 
+Checkpoint pre-F0 da khoa ngay 30/07/2026 tai
+`805056790d890046384ad7a578cc34a99088e799`; baseline Rust workspace va desktop
+Vitest deu PASS tren worktree sach truoc source edit. Moi handoff F0-F3 phai lap lai
+dung full hash nay lam rollback commit.
+
 Khong bat dau gate sau khi gate truoc chua commit va qua day du lenh verify. Moi Flow
 can UI session bat buoc co Launch App la executable node dau tien de compiler co
 target bundle truoc fresh/ordinary session va MJPEG. Launch dau tien la mot durable
