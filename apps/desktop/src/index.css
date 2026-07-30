@@ -83,3 +83,134 @@ button {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+.settings-section {
+  padding: 1rem 0;
+  border-top: 1px solid var(--line);
+}
+
+.settings-section:first-of-type {
+  padding-top: 0.25rem;
+  border-top: 0;
+}
+
+.settings-section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.settings-section-heading p {
+  margin: 0.25rem 0 0;
+}
+
+.agent-runtime-meta {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.4fr) minmax(90px, 0.5fr) minmax(220px, 1fr);
+  gap: 0.75rem 1.25rem;
+  margin: 0.9rem 0;
+}
+
+.agent-runtime-meta div {
+  min-width: 0;
+}
+
+.agent-runtime-meta dt {
+  margin-bottom: 0.2rem;
+  color: var(--text-3);
+  font-size: 0.72rem;
+}
+
+.agent-runtime-meta dd {
+  margin: 0;
+  color: var(--text-1);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.panel label.agent-toggle {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0 0 0.9rem;
+  font-weight: 500;
+}
+
+.panel label.agent-toggle input {
+  width: auto;
+  margin: 0;
+  accent-color: var(--primary);
+}
+
+.agent-status-table {
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.agent-status-head,
+.agent-status-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.5fr) 118px 112px 52px 58px 62px 172px;
+  align-items: center;
+  column-gap: 0.6rem;
+  min-width: 830px;
+  padding: 0.5rem 0.65rem;
+}
+
+.agent-status-head {
+  background: var(--bg-muted);
+  color: var(--text-3);
+  font-size: 0.72rem;
+  font-weight: 600;
+  border-bottom: 1px solid var(--line);
+}
+
+.agent-status-row {
+  color: var(--text-2);
+  font-size: 0.78rem;
+}
+
+.agent-status-row + .agent-status-row {
+  border-top: 1px solid var(--line);
+}
+
+.agent-device-name {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.agent-device-name strong,
+.agent-device-name small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-device-name small {
+  color: var(--text-3);
+}
+
+.agent-status-actions {
+  display: grid;
+  grid-template-columns: repeat(2, 80px);
+  gap: 0.4rem;
+}
+
+.agent-status-actions button {
+  width: 80px;
+  min-height: 30px;
+  padding: 0.3rem 0.45rem;
+  font-size: 0.76rem;
+}
+
+@media (max-width: 760px) {
+  .agent-runtime-meta {
+    grid-template-columns: 1fr;
+  }
+}

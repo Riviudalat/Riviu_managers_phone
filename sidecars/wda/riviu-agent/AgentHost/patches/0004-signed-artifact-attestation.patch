@@ -1,0 +1,22 @@
+diff --git a/WebDriverAgentRunner/Info.plist b/WebDriverAgentRunner/Info.plist
+--- a/WebDriverAgentRunner/Info.plist
++++ b/WebDriverAgentRunner/Info.plist
+@@ -15,6 +15,18 @@
+ 	<string>6.0</string>
+ 	<key>CFBundleName</key>
+ 	<string>$(PRODUCT_NAME)</string>
++	<key>RiviuAgentSourceSHA256</key>
++	<string>$(RIVIU_AGENT_SOURCE_SHA256)</string>
++	<key>RiviuAgentXcconfigSHA256</key>
++	<string>$(RIVIU_AGENT_XCCONFIG_SHA256)</string>
++	<key>RiviuAgentProtocolVersion</key>
++	<integer>2</integer>
++	<key>RiviuAgentObjectiveCUnitTests</key>
++	<string>$(RIVIU_AGENT_OBJECTIVE_C_UNIT_TESTS)</string>
++	<key>RiviuAgentXcodeVersion</key>
++	<string>$(RIVIU_AGENT_XCODE_VERSION)</string>
++	<key>RiviuAgentXcodeBuild</key>
++	<string>$(RIVIU_AGENT_XCODE_BUILD)</string>
+ 	<key>CFBundlePackageType</key>
+ 	<string>BNDL</string>
+ 	<key>CFBundleShortVersionString</key>

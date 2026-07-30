@@ -567,6 +567,36 @@ button:disabled {
   color: var(--text-2);
   font-weight: 600;
 }
+.dev-window-stream-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.dev-window-stream-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #9ca3af;
+  flex-shrink: 0;
+}
+.dev-window-stream-state.is-live .dev-window-stream-dot {
+  background: #16a34a;
+}
+.dev-window-stream-state.is-sampling .dev-window-stream-dot {
+  background: #f97316;
+}
+.dev-window-stream-state.is-stale .dev-window-stream-dot {
+  background: #d97706;
+}
+.dev-window-stream-state.is-error .dev-window-stream-dot {
+  background: #dc2626;
+}
+.dev-window-foot > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .screen-only {
   margin: 0 auto;

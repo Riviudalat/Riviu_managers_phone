@@ -243,6 +243,17 @@ impl DeviceCapabilityQualification {
             require_sha256("clipboard.liveReportSha256", &clipboard.live_report_sha256)?;
         }
 
+        match (
+            self.ui.clipboard.as_ref(),
+            self.clipboard_contract_id.as_deref(),
+        ) {
+            (Some(_), Some(contract_id)) => {
+                require_nonempty("clipboardContractId", contract_id)?;
+            }
+            (None, None) => {}
+            _ => return Err(invalid("clipboardContractId")),
+        }
+
         if let Some(identity) = &self.ui.target_identity_copy_link {
             let open_url = self
                 .ui
@@ -390,7 +401,7 @@ impl ProtectedRouteContract {
         ] {
             require_nonempty(&format!("{prefix}.{suffix}"), value)?;
         }
-        if !self.path.starts_with('/')
+        if !is_valid_protected_route_path(&self.path)
             || self.auth_header_name.len() > 64
             || !self.auth_header_name.starts_with("X-")
             || !self.auth_header_name.ends_with("-Token")
@@ -405,6 +416,14 @@ impl ProtectedRouteContract {
         }
         Ok(())
     }
+}
+
+pub fn is_valid_protected_route_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.starts_with('/')
+        && !path.starts_with("//")
+        && !path.contains("..")
+        && !path.contains(['?', '#', '{', '}'])
 }
 
 impl QualifiedGeometry {
@@ -724,6 +743,18 @@ mod tests {
         let mut bad = fixture_qualification();
         bad.ui.open_url.as_mut().unwrap().route.auth_header_name = "Bearer fixture-secret".into();
         cases.push(bad);
+
+        for path in [
+            "//host/path",
+            "/wda/../url",
+            "/wda/url?x=1",
+            "/wda/url#part",
+            "/wda/{id}",
+        ] {
+            let mut bad = fixture_qualification();
+            bad.ui.open_url.as_mut().unwrap().route.path = path.into();
+            cases.push(bad);
+        }
 
         let mut bad = fixture_qualification();
         bad.ui.clipboard.as_mut().unwrap().maximum_decoded_bytes = 65_535;

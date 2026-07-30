@@ -46,6 +46,17 @@ pub enum DeviceStatus {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TileStreamState {
+    Live,
+    Sampling,
+    #[default]
+    Parked,
+    Stale,
+    Error,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceInfo {
@@ -59,7 +70,40 @@ pub struct DeviceInfo {
     pub wda_ready: bool,
     pub wda_expires_at: Option<DateTime<Utc>>,
     pub stream_url: Option<String>,
+    #[serde(default)]
+    pub tile_stream_state: TileStreamState,
     pub last_error: Option<String>,
+}
+
+#[cfg(test)]
+mod device_info_tests {
+    use super::*;
+
+    #[test]
+    fn tile_stream_state_serializes_in_camel_case_and_defaults_to_parked() {
+        assert_eq!(
+            serde_json::to_value(TileStreamState::Sampling).expect("serialize tile state"),
+            serde_json::json!("sampling")
+        );
+        assert_eq!(TileStreamState::default(), TileStreamState::Parked);
+
+        let decoded: DeviceInfo = serde_json::from_value(serde_json::json!({
+            "udid": "fixture",
+            "name": "fixture",
+            "model": "fixture",
+            "iosVersion": "fixture",
+            "connection": "mock",
+            "status": "ready",
+            "battery": null,
+            "wdaReady": true,
+            "wdaExpiresAt": null,
+            "streamUrl": null,
+            "lastError": null
+        }))
+        .expect("decode legacy device payload");
+
+        assert_eq!(decoded.tile_stream_state, TileStreamState::Parked);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,11 +136,17 @@ pub struct ElementSelector {
 #[serde(tag = "action", rename_all = "camelCase")]
 pub enum ScriptAction {
     #[serde(rename_all = "camelCase")]
-    LaunchApp { bundle_id: String },
+    LaunchApp {
+        bundle_id: String,
+    },
     #[serde(rename_all = "camelCase")]
-    TerminateApp { bundle_id: String },
+    TerminateApp {
+        bundle_id: String,
+    },
     #[serde(rename_all = "camelCase")]
-    Wait { milliseconds: u64 },
+    Wait {
+        milliseconds: u64,
+    },
     #[serde(rename_all = "camelCase")]
     Tap {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -105,14 +155,22 @@ pub enum ScriptAction {
         point: Option<TapPoint>,
     },
     #[serde(rename_all = "camelCase")]
-    Swipe { gesture: SwipeGesture },
+    Swipe {
+        gesture: SwipeGesture,
+    },
     #[serde(rename_all = "camelCase")]
-    TypeText { value: String },
+    TypeText {
+        value: String,
+    },
     #[serde(rename_all = "camelCase")]
-    Screenshot { name: String },
+    Screenshot {
+        name: String,
+    },
     Home,
     #[serde(rename_all = "camelCase")]
-    AssertVisible { selector: ElementSelector },
+    AssertVisible {
+        selector: ElementSelector,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,6 +267,72 @@ impl Default for StreamSettings {
 pub struct AppleIdConfig {
     pub email: String,
     pub has_password: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSettings {
+    #[serde(default = "default_true")]
+    pub auto_repair: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for AgentSettings {
+    fn default() -> Self {
+        Self { auto_repair: true }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentState {
+    Unknown,
+    Missing,
+    RepairRequired,
+    Starting,
+    Ready,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStatus {
+    pub udid: String,
+    pub state: AgentState,
+    pub artifact_id: String,
+    pub artifact_version: String,
+    pub bundle_id: String,
+    pub protocol_version: u32,
+    pub features: Vec<String>,
+    pub installed_version: Option<String>,
+    pub installed_build: Option<String>,
+    pub auth_ready: bool,
+    pub mjpeg_ready: bool,
+    pub session_ready: bool,
+    pub message: Option<String>,
+}
+
+impl AgentStatus {
+    pub fn unknown(udid: impl Into<String>) -> Self {
+        Self {
+            udid: udid.into(),
+            state: AgentState::Unknown,
+            artifact_id: String::new(),
+            artifact_version: String::new(),
+            bundle_id: String::new(),
+            protocol_version: 0,
+            features: Vec::new(),
+            installed_version: None,
+            installed_build: None,
+            auth_ready: false,
+            mjpeg_ready: false,
+            session_ready: false,
+            message: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -4,7 +4,7 @@
 > hay danh sách "đừng làm lại" thì cập nhật ngay trong cùng lần thay đổi đó.
 > File này là thứ đầu tiên agent sau đọc.
 >
-> Cập nhật lần cuối: 26/07/2026.
+> Cập nhật lần cuối: 30/07/2026.
 
 ---
 
@@ -25,7 +25,8 @@ docs/                  Báo cáo live test
 
 Thiết bị đang dùng để test: iPhone 8 · iOS 16.7.15 · UDID
 `a99f4bd9f877b2a0e3682ee24fd1c68f75ba6982` · TikTok `com.ss.iphone.ugc.Ame` ·
-WDA runner `com.riviu.managersphone.agent.xctrunner`.
+WDA stock `com.riviu.managersphone.agent.xctrunner`; backend bình luận chữ dùng
+RT-MMO standalone `com.mrph.svc`.
 
 ---
 
@@ -43,7 +44,7 @@ OK, `POST /session` vẫn OK trong ~5 ms, nhưng **mọi lệnh session-scoped t
 
 Xem `crates/ios-driver/src/wda.rs::session_capabilities()`.
 
-### 2.2 PHẢI prime session trước mọi lệnh khác
+### 2.2 Stock WDA PHẢI prime session trước mọi lệnh khác
 
 Ngay sau `POST /session`, gửi `POST /session/{id}/appium/settings` với
 `snapshotMaxDepth: 1`. Không prime → lệnh hierarchy đầu tiên treo → runner kẹt.
@@ -53,7 +54,7 @@ Ngay sau `POST /session`, gửi `POST /session/{id}/appium/settings` với
 
 Xem `wda.rs::prime_session()`.
 
-### 2.3 `snapshotMaxDepth` PHẢI là 1
+### 2.3 `snapshotMaxDepth` của stock WDA PHẢI là 1
 
 Đặt 20 hoặc 50 → lệnh kế tiếp treo ngay (đã thử cả hai). Đây là ràng buộc cứng.
 Hệ quả: **không dùng được element finding** (TikTok không lộ TextField/TextView ở
@@ -61,8 +62,12 @@ depth 1), và ô nhập bình luận không focus được (xem §5).
 
 ### 2.4 Thứ tự khởi động: session TRƯỚC, stream SAU
 
-`run_session` tạo + prime WDA session rồi mới `ensure_stream`. MJPEG server nằm
-cùng agent; bật stream trước làm lệnh session đầu tiên treo.
+Stock: `run_session` tạo + prime WDA session rồi mới `ensure_stream`. RT-MMO
+không prime; phiên có comment phải đi đúng chuỗi đã live-confirm ngày 28/07:
+**bootstrap agent mới -> foreground TikTok -> `POST /session` mới -> stream**.
+MJPEG vẫn luôn đứng sau session. RT-MMO dùng mode `mjpeg` bắt buộc và chỉ báo
+stream sẵn sàng sau frame đầu tiên; không fallback âm thầm sang DVT screenshot.
+Bật stream trước làm lệnh session đầu tiên treo.
 
 ### 2.5 Không bọc request WDA bằng `tokio::time::timeout`
 
@@ -93,6 +98,63 @@ suốt các vòng test cũ.
 tidevice -u <UDID> kill notes.3u
 ```
 
+### 2.9.1 Windows phải sở hữu cả cây tiến trình bằng Job Object
+
+`TerminateProcess` / `Child::start_kill()` chỉ dừng đúng process cha; Python và
+`tidevice relay` có thể tiếp tục giữ usbmux/port sau khi desktop bị force-stop.
+Desktop và `live_nurture_test` phải gọi
+`riviu_ios_driver::install_process_tree_guard()` trước khi spawn bất kỳ child nào.
+Guard gắn process root vào Windows Job Object có
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; `riviu_pmd.py wda-proxy` đồng thời giữ một
+Job Object lồng cho riêng relay. Không dựa vào signal handler Python để dọn child
+trên Windows. Registry thu hồi lần chạy sau vẫn phải kiểm tra PID + command-line
+fingerprint; nhánh Windows dùng CIM và chỉ terminate process object đã khớp.
+
+### 2.10 RT-MMO là backend riêng, không trộn với stock WDA
+
+`crates/ios-driver/src/wda.rs::WdaProfile` chọn đúng một profile cho toàn bộ vòng
+đời. RT-MMO dùng bundle `com.mrph.svc`, control `8906`, MJPEG `9093`; nó không
+prime `snapshotMaxDepth` và không gọi `/wda/window/size` (endpoint này trả 404).
+Liveness/reuse thường có thể attach session từ `GET /status`, nhưng **job bật
+comment không được reuse đường đó**: status session vẫn gesture được nhưng có thể
+ACK `/wda/keys` mà bỏ chữ. `start_fresh_text_session()` giữ relay USB, dừng stream
+cũ, bootstrap riêng agent, foreground TikTok, rồi `POST /session` mới.
+
+`RIVIU_WDA_BACKEND=rt-mmo` bắt buộc có `RIVIU_RTMMO_TOKEN`; thiếu token phải báo
+lỗi cấu hình, không được rơi ngầm về stock. Token truyền sang sidecar bằng
+environment, không nằm trong argv, registry, source hay trace. Mọi request RT-MMO
+phải có `X-RT-Token`. Agent được launch qua `ProcessControl.launch(environment=...)`,
+không qua `tidevice -e FARM_KEY:...` vì cách đó lộ token trong OS process argv.
+Alias `rtmmo`, khoảng trắng bao quanh và mọi giá trị backend không hợp lệ đều
+phải được parser xử lý/đẩy lỗi nhất quán; chỉ unset, `auto`, hoặc `stock` mới được
+phép degraded khi probe sidecar lỗi. Stream và control luôn dùng cùng profile.
+
+Gesture RT-MMO phải dùng sessionless `POST /wda/swipe`; tap là swipe lệch 1 px
+với `delay=0.05`. Không dùng W3C `/session/{sid}/actions`: live test 28/07/2026
+đo được touch đầu timeout 10 s hai lần rồi làm session biến mất. Profile stock
+vẫn giữ `/actions` vì ràng buộc quiescence của stock WDA khác RT-MMO.
+
+Sidecar launch RT-MMO bằng app launch với đủ `USE_PORT=8906`,
+`MJPEG_SERVER_PORT=9093`, `FARM_KEY=<token>`. `ensure_stream` luôn attach session
+trước khi mở MJPEG, kể cả khi được gọi từ initial device scan của desktop. Sau
+**mọi** cold launch/restart và trước khi reuse/emit ready, phải gọi route bảo vệ
+`/wda/locked` để xác thực token; `/status` được miễn auth nên không phải bằng
+chứng. Đồng thời port MJPEG `9093` phải mở; control-only hoặc sai auth phải
+relaunch có giới hạn với đủ env.
+
+Mọi app launch từ sidecar cũng đi trực tiếp qua pymobiledevice3 DVT; không spawn
+`tidevice launch` rồi để child tiếp tục chạy sau khi Rust đã hết deadline.
+Sidecar pin `pymobiledevice3==10.1.0`: code dùng async `DvtProvider` /
+`ProcessControl` của API này, không tương thích dòng 4.x/5.x sync. Nếu lần launch
+RT đầu không bind/auth/MJPEG, phải kill đúng `com.mrph.svc`, chờ port 8906 đóng,
+rồi mới launch lần hai để env mới thực sự được áp dụng.
+
+Khi stream hiện tại còn sống, `ensure_stream` trả reuse ngay và **không** probe
+session stock bằng `/window/size`; false-negative ở probe đó có thể tạo session
+mới trong lúc MJPEG đang chạy và vi phạm session-trước-stream. Mỗi stream reader
+giữ một generation; `clear()` tăng generation nên reader cũ dù còn byte buffered
+cũng không được publish frame sang cache/broadcast của stream mới.
+
 ---
 
 ## 3. Kiến trúc
@@ -100,7 +162,7 @@ tidevice -u <UDID> kill notes.3u
 ### 3.1 Đọc màn hình qua frame stream, không qua WDA
 
 ```
-iPhone MJPEG :9100 ──usbmux──► riviu_pmd.py stream ──stdout──► StreamHub
+iPhone MJPEG :9100/:9093 ──usbmux──► riviu_pmd.py stream ──stdout──► StreamHub
                                                                    │
                                             FrameSource (trait ở core)
                                                      ├──► ScreenWatcher (đóng popup)
@@ -173,13 +235,518 @@ Engine cũng phải chờ watcher ở loại này chứ đừng vuốt (`watcher
 
 `supervisor.rs` — mỗi UDID một async lock; spawn relay / start runner / recycle /
 launch app đều nằm trong lock, nên job thứ hai bị queue thay vì tạo relay thứ hai.
-`ProcessRegistry` ghi PID ra đĩa để lần chạy sau thu hồi được child mồ côi.
+`ProcessRegistry` ghi PID ra đĩa để lần chạy sau thu hồi được child mồ côi. Trên
+Windows, process root còn nằm trong kill-on-close Job Object; proxy Python dùng
+Job Object lồng để relay cũng chết khi chỉ proxy bị force-stop.
+
+`DeviceControlPlane` la owner duy nhat cua UI lifecycle va stream budget. Moi
+destructive await (park/preempt/start-stop stream/close context) phai do worker
+so huu tu truoc await; huy task caller chi lam rot response, khong huy request dang
+chay. Worker dispatch song song theo lock tung UDID, con chon capacity/victim dung
+capacity gate va khoa target + victim sau khi revalidate. Khong quay lai mot worker
+global await tuan tu vi stop bi ket tren may A se chan sai may B/C. Background
+reserve phai atomic voi foreground owner/FIFO waiter; background start, stop va
+shutdown drain deu phai giu exact stream token/proof, failure thi quarantine.
+
+Thu tu desktop Exit bat buoc: `nurture.stop_all()` + `jobs.stop_all()`, dung/join
+background sampler, `jobs.shutdown()` de danh thuc Wait va join Script task, sau do
+moi `control.shutdown_cleanup()`. Khong boc WDA request bang timeout de ep JobQueue
+dung; cancellation chi danh thuc Wait/acquire an toan, request WDA dang chay tu ket
+thuc theo deadline cua chinh request.
 
 ### 3.6 Nhịp hành vi
 
 `human_behavior.rs::MoodCycle` — mỗi "mood" kéo dài vài video:
 `Skimming` (lướt, không tương tác) → `Liking` (tim nhiều) → `Chatty` (bình luận).
 Xác suất cấu hình được nhân theo mood nên trung bình phiên vẫn bám cấu hình.
+
+### 3.7 Roadmap điều khiển iPhone thống nhất (chốt 28/07/2026)
+
+Kiến trúc đích là **một sản phẩm Riviu, hai engine đang hoạt động**:
+
+- `Riviu Agent` trên iPhone: stream, gesture, text, clipboard và UI automation.
+- `Riviu Device Bridge` trên desktop: usbmux/lockdown/DVT/RSD, app, media/file,
+  device info, log, reboot và backup/restore.
+
+Không dồn lockdown/backup vào IPA và không dồn lifecycle UI vào sidecar. Một
+`DeviceController` với lock theo UDID, capability snapshot và typed error sẽ phối
+hợp hai kênh. Product flow cuối chỉ có một `RiviuAgent.ipa`; WDA stock được giữ
+tạm như rollback artifact trong giai đoạn chuyển đổi, không còn là fallback im
+lặng cho job cần text.
+
+Đời iPhone/iOS mới phải được xử lý bằng capability negotiation và transport
+adapter (`LegacyUsbmuxTransport`, `RsdTransport`), không hard-code model. Agent
+health phải công bố `agentVersion`, `protocolVersion` và `features`; release
+manifest ánh xạ dải iOS/Xcode sang artifact đã test, có checksum và rollback N-1.
+
+MDM/supervision là **phase sau** nhưng đã dành interface `AdminControl`: remote
+erase, clear passcode, restrictions, OS update policy, ADE và Activation Lock
+escrow. Phase hiện tại triển khai Agent + Device Bridge, tương ứng gần đầy đủ
+quyền vận hành qua USB. Thiết kế đầy đủ:
+`docs/superpowers/specs/2026-07-28-riviu-unified-iphone-control-design.md`.
+
+### 3.8 Hướng bỏ phụ thuộc RT-MMO (chốt 29/07/2026)
+
+Đã chọn hướng **source-equivalent reconstruction**: dùng một commit Appium WDA
+được pin làm baseline, phân tích Mach-O/DWARF/Objective-C metadata và hành vi live
+của RT-MMO để viết source Riviu theo các contract có test. Không patch/rebrand
+binary rồi gọi đó là source của Riviu, và không reverse toàn bộ desktop EXE trước.
+
+Artifact `RiviuAgent.ipa` hiện tại phải giữ nguyên như production oracle + rollback
+cho tới khi candidate do Riviu build vượt đủ gate: standalone bootstrap, protected
+auth, fresh session trước MJPEG, native gesture, clipboard/Unicode và bình luận chữ
+TikTok có frame xác nhận. HTTP 200 từ `/wda/keys` không phải bằng chứng text thành
+công. Candidate chưa qua gate text không được quảng bá feature `text` và desktop
+không được tự chuyển sang nó.
+
+Source đích nằm riêng dưới `sidecars/wda/riviu-agent/`. Oracle ghi WDA `15.1.4`,
+còn `sidecars/wda/WebDriverAgent/` hiện là stock `16.0.0`; baseline 15.1.4 phải
+được pin/extract vào cache riêng, không ghi đè cây stock. Forensic tooling/report
+nằm ở `tools/rtmmo-re/` và `docs/re/rtmmo-agent/`, luôn ghi SHA-256 và redact
+token/UDID. Mac là build/sign authority; binary production không được overwrite
+trong lúc A/B test.
+
+Thiết kế chi tiết:
+`docs/superpowers/specs/2026-07-29-riviu-agent-source-reconstruction-design.md`.
+
+- Gate A forensic inventory đã **PASS**; Project 2 chỉ được dùng các delta và
+  bằng chứng đã version trong `docs/re/rtmmo-agent/`. Xem `gate-a.md` trước khi
+  sửa standalone host hoặc WDA baseline.
+- Oracle đo được 4 Mach-O ARM64: outer executable là FAT container một slice;
+  ba runtime image có `cryptId=0`, còn `MH_DSYM` không có encryption load
+  command (`cryptId=null`). Đừng biến command vắng mặt của dSYM thành lỗi Gate.
+- WDA `15.1.4` đã được verify integrity và extract riêng dưới ignored
+  `target/rtmmo-re/baselines/package`; stock WDA `16.0.0` vẫn giữ nguyên.
+- Gate phải recompute inventory trực tiếp từ IPA truyền bằng `--ipa`, bắt buộc
+  khớp tuyệt đối file inventory, rồi recompute delta từ đúng npm tarball đã
+  verify, so source tree theo byte và ràng buộc đồng thời SHA-256
+  tarball/source/inventory; không chấp nhận report chỉ tự khai version/gitHead.
+  Các lệnh `baseline-diff`/`gate-a` bắt buộc giữ `--archive`; `gate-a` còn bắt
+  buộc giữ `--ipa` và bộ ba `--baseline-source`/`--baseline-archive`/
+  `--baseline-lock`.
+- Inventory lọc ObjC class/selector khỏi control byte/type encoding, chỉ lưu
+  Mach-O symbol có dynamic scope (không tính private extern), cùng DWARF function
+  ranges + line table. Route contract có 8 typed entry và
+  static inventory chỉ xác nhận đủ 8 **path**; method/auth/session/body vẫn là
+  contract assertion cho tới khi contract test/live probe riêng xác nhận. Không
+  gọi `path-confirmed` là runtime parity.
+- `verify-redaction` phải quét cả raw bytes lẫn decoded JSON leaf, reject duplicate
+  key; `ArchiveData` không được derive/debug-print raw IPA entry bytes.
+- Runtime image đã stripped, dSYM chỉ còn ba hàm runner. Gate A không tuyên bố đã
+  phục hồi feature call graph và Project 2 phải thêm contract/probe trước khi sửa
+  một delta theo feature; không suy diễn call edge từ tên selector.
+
+### 3.9 Project 2 Riviu Agent candidate (checkpoint Windows 29/07/2026)
+
+Source candidate nam o `sidecars/wda/riviu-agent/` theo mo hinh pinned overlay:
+`Scripts/prepare.py` verify npm tarball WDA 15.1.4, baseline digest
+`f40eadb1e1d9872ad5a0574a5146cdbf5e0d04768ccb1f1701b289d50e4ee8f8`, roi
+apply dung thu tu nam patch co SHA-256 trong `baseline-lock.json`. Source sinh ra
+chi nam trong ignored `target/riviu-agent/source`; khong vendor de len Git va khong
+sua `sidecars/wda/WebDriverAgent/` stock 16.0.0.
+Digest sau patch phai dung
+`2ca158cde4b2307957670680a6cd136b6c360d6f175303f1d012f7488e82c4cc`;
+`prepare.py` khoa `git -c core.autocrlf=false` de giu LF cua upstream. Khong tai
+sinh patch voi line-ending churn lam delta Objective-C thanh thay toan file.
+Digest tinh moi regular file va canonical mode (`0644` hoac `0755`), gom ca
+`project.pbxproj`, build config, `.plist` va executable bit cua build script;
+khong duoc thu hep source attestation ve mot danh sach suffix hoac bo mode. Tren
+POSIX, prepare phai dat mode that tu tar de `embed-runner-icon.sh` chay duoc.
+
+Candidate protocol v2 dung `RIVIU_AGENT_TOKEN` (toi thieu 32 byte UTF-8), header
+`X-Riviu-Token`, control `8916`, MJPEG `9094`. Chi exact `GET /status` duoc mien
+auth. Protected health tra `agentVersion=0.1.0`, `protocolVersion=2`, logical
+`375x667` va feature dung bon muc `stream/tap/swipe/clipboard`; Project 2 tuyet
+doi chua advertise `text` hoac `pushMedia`.
+
+Sessionless `/wda/tap` va `/wda/swipe` cua candidate dung truc tiep
+`XCPointerEventPath` -> `XCSynthesizedEventRecord` ->
+`FBXCTestDaemonsProxy.synthesizeEventWithRecord:timeout:error:`. Orientation lay
+tu `XCUIDevice.sharedDevice.orientation` va map local, khong query active app/AX.
+Synthesis co deadline 5 giay va phai kiem ca callback error lan BOOL result; body
+khong phai exact dictionary hoac number khong finite tra invalid-argument. Khong
+doi hai handler nay ve `/actions`, `XCUICoordinate`,
+`pressForDuration:thenDragToCoordinate:` hoac `fb_waitUntilStable`; cac duong
+high-level do da biet co the wedge TikTok. Route element legacy van thuoc baseline,
+khong phai candidate native route.
+
+Patch stream bind MJPEG vao loopback, doc header toi da 8192 byte trong 5 giay va
+bat buoc cung `X-Riviu-Token` truoc khi nhan client. Health chi advertise `stream`
+va `state=ready` khi MJPEG bind thanh cong; bind loi phai tra feature con lai voi
+`state=degraded`. Build gate chay Objective-C target `UnitTests` truoc runner
+`build-for-testing` va chi khi thanh cong moi ghi `objectiveCUnitTests=PASS` vao
+candidate manifest.
+
+Patch 4 khai bao truc tiep sau key attestation trong embedded
+`WebDriverAgentRunner.xctest/Info.plist`: source SHA-256, xcconfig SHA-256,
+protocol `<integer>2</integer>`, Objective-C test `PASS`, Xcode version va Xcode
+build. Nam string lay tu explicit
+xcodebuild setting voi `INFOPLIST_EXPAND_BUILD_SETTINGS=YES`; khong dung custom
+`INFOPLIST_KEY_RiviuAgent*` vi target upstream dung plist san va Xcode khong tao
+arbitrary key theo cach do. Build chi chap nhan runner bundle exact
+`com.riviu.managersphone.agent.xctrunner`; xcconfig phai khop digest khoa
+`2bed5a711927df27a86b2e2f7237bad99406b3cbbf5fccb09f8ce03fc58f53ae`;
+manifest phai derive sau field tu app da codesign verify, khong tu khai lai tu
+command-line. Build rehash full source va xcconfig sau Objective-C unit test, sau
+runner build va sau runtime finalization; thay doi giua chung phai fail.
+Voi Xcode >=26, truoc packaging phai co du `Testing.framework/Testing`,
+`_Testing_Foundation.framework/_Testing_Foundation`, `lib_TestingInterop.dylib`
+va `libXCTestSwiftSupport.dylib`. Hai dependency device thieu duoc copy tu active
+iPhoneOS platform; sau do sign dependencies -> xctest -> outer app va chay lai
+`codesign --verify --deep --strict`. Khong duoc silently package closure thieu.
+Patch 5 ep runtime clipboard set/get dung exact schema cua `control-v2.json`.
+
+Probe Gate B/C o `Scripts/probe_gate_bc.py` dung pymobiledevice3 10.1.0 + Pillow
+11.3.0. Probe bat buoc nhan candidate manifest, verify manifest/source/xcconfig/
+IPA SHA-256,
+uninstall exact bundle, fresh-install IPA va doi chieu installed bundle/version/
+build/payload/executable/signer truoc launch. DVT
+`ProcessControl.launch(environment=...)` truyen token, `USE_IP=127.0.0.1`,
+`USE_PORT`, `MJPEG_SERVER_PORT` va `WDA_PRODUCT_BUNDLE_IDENTIFIER`; token khong nam
+trong raw manifest, decompressed IPA, prepared source, locked xcconfig, argv,
+guarded log hay report. Preflight phai recompute xcconfig SHA-256 va khop manifest
+truoc khi tinh bang chung `xcconfigTokenScanClean`; subprocess Rust verify evidence
+phai nhan ban sao environment da xoa `RIVIU_AGENT_TOKEN`.
+Control relay mo truoc de health + fresh session, con MJPEG
+relay va reader chi mo sau session.
+
+Nguong live co dinh, khong duoc ha qua CLI: 5 cold launch, 50 tap, 20 swipe va
+300 giay stream. Fixture luon la `FIXTURE_ONLY`, khong bao gio PASS. MJPEG phai
+auth 401/401/200, decode JPEG that, >=1 FPS, max gap <=2 giay, reconnect <=1 va
+health + active-session check moi 5 giay. Moi cycle phai <=5 giay, completion gap
+<=5.5 giay va schedule lateness <=0.5 giay; khong duoc catch-up count sau stall.
+Gesture dung mean luma delta tren vung
+Settings da dinh nghia so voi frame control khong action; khong polling
+`GET /screenshot`. Unicode probe phai focus + clear Settings SearchField, go
+`/wda/keys`, roi GET text read-back byte/noi dung dung; HTTP ACK khong du.
+Clipboard chi duoc do sau khi foreground candidate bang `kill_existing=false`,
+xac nhan PID truoc/sau khong doi va `/wda/activeAppInfo` tra dung candidate bundle
+voi cung PID; ACK khi Settings con foreground khong phai bang chung clipboard.
+Moi cold launch phai co witness process cu bien mat, hai port dong va DVT launch
+tra PID moi on dinh. Lookup PID sau protected health, fresh session va JPEG dau
+phai van dung PID launch; truoc vong ke hoac cleanup cuoi, terminate phai tra lai
+dung PID da xac nhan. Nam PID fingerprint phai khac nhau. JSON va hai gate Markdown
+publish theo transaction co rollback, khong de lai evidence tron neu replace loi.
+Report JSON/Markdown chi publish sau `rtmmo-re verify-redaction`, va cleanup phai
+dung sampler/relay, terminate candidate, xac nhan ca hai device port da dong.
+Project 2 chua noi candidate vao desktop nen khong danh PASS cho soft/hard runtime
+recovery: moi control/session fault lam Gate C fail; budget recovery thuoc Project
+4. O phase nay chi MJPEG reader duoc reconnect co gioi han toi da mot lan.
+
+Trang thai hien tai: source/contract/build/probe fixture tren Windows da PASS;
+B0, Gate B va Gate C van `PENDING_MAC_DEVICE`. HTTP port hoac `/status` 200 khong
+chung minh automation readiness. B0 can 5 cold plain-launch co protected health,
+fresh automation session va JPEG dau tien theo dung thu tu. Cho toi luc gate live
+dat, desktop khong chuyen candidate va production `sidecars/wda/RiviuAgent.ipa` +
+`agent-manifest.json` phai giu nguyen (SHA-256 lan luot
+`8a24847099495ff70b998522692c43f00dd16b90f698bda6953a73f5d33002ea` va
+`e98a549af4c061556effd36424e7732219e1a6d262bcf1f259279975024b6e1a`). Xem
+`docs/superpowers/specs/2026-07-29-riviu-agent-standalone-control-parity-design.md`
+va `docs/re/riviu-agent/`.
+
+### 3.10 Handoff bat buoc khi mo du an tren Mac
+
+Agent tiep nhan tren Mac phai tiep tuc dung checkpoint Project 2 hien tai, khong
+lap lai forensic/Gate A va khong ghi de production IPA. Muc tieu dau tien la build
+candidate, chay B0/Gate B/Gate C tren iPhone that, roi moi danh gia text/comment.
+
+```bash
+cd <REPO_ROOT>
+export PATH="$HOME/Library/Python/3.9/bin:$PATH"
+export UDID=<DEVICE_UDID>
+export TEAM_ID=<APPLE_DEVELOPER_TEAM_ID>
+
+python3 -m pip install -r sidecars/wda/riviu-agent/requirements-mac.txt
+
+# Cache nay la ignored; neu copy workspace sang Mac ma thieu thi lay dung npm tarball.
+mkdir -p target/rtmmo-re/baselines
+test -f target/rtmmo-re/baselines/appium-webdriveragent-15.1.4.tgz || \
+  npm pack appium-webdriveragent@15.1.4 \
+    --pack-destination target/rtmmo-re/baselines
+test "$(shasum -a 256 target/rtmmo-re/baselines/appium-webdriveragent-15.1.4.tgz | awk '{print $1}')" = \
+  "0c52fc0dcc6f837287be02a593d96d8ef28563c90b4d41f629830e84878f6bbb"
+
+# Desktop, harness va moi XCTest runner khac phai dung truoc live gate.
+tidevice -u "$UDID" kill notes.3u || true
+tidevice -u "$UDID" kill com.mrph.svc || true
+tidevice -u "$UDID" kill com.riviu.managersphone.agent.xctrunner || true
+
+python3 sidecars/wda/riviu-agent/Scripts/build_candidate.py \
+  --udid "$UDID" --team-id "$TEAM_ID"
+
+RIVIU_AGENT_TOKEN="$(openssl rand -hex 32)" \
+python3 sidecars/wda/riviu-agent/Scripts/probe_gate_bc.py \
+  --udid "$UDID" \
+  --manifest target/riviu-agent/artifacts/0.1.0/candidate-manifest.json
+
+cargo run -q -p rtmmo-re -- verify-redaction \
+  --input docs/re/riviu-agent/candidate-probes.json \
+  --input docs/re/riviu-agent/gate-b.md \
+  --input docs/re/riviu-agent/gate-c.md
+```
+
+Khong ha cac nguong live qua CLI. Ket qua chap nhan phai co environment
+`LIVE_MAC_DEVICE`, `gateB=PASS`, `gateC=PASS`, `gateStatus=PASS`, 5 PID witness
+khac nhau va cleanup sach. Neu mot gate fail, giu production artifact, sua dung
+failure dau tien va chay lai toan bo probe.
+
+Ngay ca khi B/C PASS, candidate van chua duoc goi la thay the day du RT-MMO:
+feature list van chi co `stream/tap/swipe/clipboard`. Buoc ke tiep tren Mac la them
+gate TikTok comment end-to-end: foreground link/video fixture, fresh session truoc
+MJPEG, focus composer, Unicode read-back/armed-send frame, tap Send va frame xac
+nhan comment da gui. Chi sau khi gate nay PASS moi advertise `text`, noi candidate
+vao desktop o Project 4 va thay production artifact theo transaction co rollback.
+
+### 3.11 Proxy/supervision checkpoint (29/07/2026)
+
+iPhone test hien tai da duoc doc truc tiep qua MobileConfiguration:
+`IsSupervised=false`, `ConfigurationSource=0`, `OrderedIdentifiers=[]` va khong co
+configuration profile. Proxy trong desktop hien chi la CRUD/export cau hinh; chua
+co bang chung proxy da duoc ap len iPhone va chua co verify public IP/rollback.
+
+Duong chinh thong de ap proxy HTTP toan may la payload
+`com.apple.proxy.http.global`. Payload nay can thiet bi duoc quan ly va Apple chi
+ho tro voi Automated Device Enrollment; supervision phai duoc thiet lap trong luc
+prepare/activation va thuong doi hoi xoa, prepare lai may. Tham khao:
+`https://support.apple.com/en-euro/guide/deployment/dep7ba46fcd/web` va
+`https://support.apple.com/en-ca/guide/apple-configurator-mac/apd9e4f64088/mac`.
+
+Khong duoc bao `applied` tren may hien tai. Capability snapshot phai cong bo ro
+`proxyApply=unsupported_unsupervised`; apply/test/rollback chi chay khi thiet bi da
+supervised/enrolled. Neu ve sau chon VPN/Network Extension thi coi do la mot engine
+rieng, can entitlement va gate live rieng, khong tron voi export proxy hien co.
+
+Quyet dinh san pham ngay 29/07/2026: **giu nguyen du lieu va trang thai cac may
+hien tai; khong erase/prepare lai fleet cho phase Tuong tac**. Nuoi account, mo link
+TikTok, xem/tim/follow/comment/save/share, dieu phoi nhieu may va quan ly account
+van di qua Riviu Agent + Device Bridge, khong phu thuoc supervision. Proxy phase
+hien tai chi gom kho cau hinh, gan proxy cho device/account, kiem tra endpoint va
+trang thai `manual_required`; khong tu khai da ap proxy he thong.
+
+De phase sau cac tinh nang can supervision/MDM: Global HTTP Proxy hoac Always On
+VPN, cai app im lang, kiosk/restriction, bat buoc cap nhat iOS, Lost Mode, restart/
+shutdown tu xa va Activation Lock escrow/bypass. Remote wipe/clear passcode co the
+la lenh MDM tren mot so enrollment khong supervised, nhung fleet hien tai cung chua
+enroll MDM; khong dua chung vao phase Tuong tac.
+
+Day la danh sach deferred day du cho roadmap hien tai: moi quan tri khi khong cam
+USB (device lock, wipe, clear passcode), Wi-Fi/profile im lang, Global HTTP Proxy,
+Always On VPN, silent managed-app install/remove, Single App Mode/kiosk, restriction
+va Home Screen policy, OS update policy, Lost Mode, remote restart/shutdown va
+Activation Lock. Khong tao menu, stub command hay dependency MDM cho cac muc nay
+trong phase hien tai; chi giu `AdminControl` interface va capability typed de noi
+lai ve sau. Supervision cung khong mo quyen doc password, keychain, du lieu sandbox
+cua TikTok hay full filesystem; khong ghi cac quyen do vao product scope.
+
+### 3.12 TikTok Interaction Campaign (reviewed design 29/07/2026)
+
+Thiet ke o
+`docs/superpowers/specs/2026-07-29-tiktok-interaction-campaign-design.md`. Phase nay
+tao `InteractionCampaignEngine` rieng, actor `device:<udid>:default`, hai mode
+`All/RoundRobin`, campaign default + override tung link, run-now/one-time va
+partial-and-continue. Chi video/photo post duoc chay; profile/LIVE/music/shop/search
+va short link khong resolve ra video/photo phai bi reject typed.
+Schema/planner duoc de san cho nhieu account tren mot may, nhung phase nay
+`interaction_list_accounts`, AllOnline, preview/start/schedule chi expose binding
+`is_default=1`. Explicit non-default phai thanh `AccountSwitchUnsupported` va zero
+device work; chua co account-switch capability thi khong duoc chay slot thu hai.
+
+Copy Link khong con la action `Off/Required/Probability`: no la identity precondition
+bat buoc va phai hien ro tren UI. Moi assignment phai set clipboard sentinel, mo
+Share -> Copy Link, resolve lai neu clipboard la short URL, roi so ca `contentId` va
+post kind. Read-back ro nhung sai/stale thi `TargetUnverified`; khong biet tap/read da
+xay ra chua thi `Uncertain`; ca hai deu khong chay side effect.
+Moi `TargetIdentityCopyLink` attempt giu `identity_copy_intent` append-only; assignment
+giu `current_identity_attempt_no` + intent projection va phai update cung transaction.
+Truoc tap Copy Link phai persist `issued`; cung attempt do khong duoc tap lai.
+Crash/read-back mo ho la `Uncertain/TargetIdentityAmbiguous`, tach khoi deterministic
+`Failed/TargetUnverified`. Operator Retry Failed chi append attempt Pending/None moi
+sau identity Confirmed hoac terminal pre-Copy co intent van None; khong reset/reuse
+row cu. Moi identity attempt co toi da hai Opening attempt trong cung run, va restart
+khong tu dong resume mot Opening dang chay.
+Retry transaction chi duoc reopen assignment/campaign terminal
+`Partial|Failed|Interrupted`, dua actor bi anh huong ve `Eligible`, va phai giu moi
+assignment/action/actor da thanh cong khong doi. `Succeeded`, `Uncertain`,
+`Cancelled` va skipped khong duoc reopen.
+Clipboard cu chi giu bounded trong RAM; evidence chi hash/length/type. Nhanh fail/
+cancel phai restore, startup chi clear sentinel co namespace cua Riviu. Clipboard
+capability phai cong bo `TargetBackgroundSafe` hoac `AgentForegroundRequired`; mode
+thu hai phai foreground Agent/TikTok co PID/bundle proof va tao final fresh text
+session sau lan switch cuoi. Gate 0 gom locator Share/Copy Link, clipboard va
+`openUrl`; HTTP ACK hay feature `clipboard` trong manifest khong du.
+Gate 0 chi qualify transport/geometry/reference Copy Link contract. No khong duoc
+map `TargetIdentityCopyLink` hoac Watch thanh production Ready; exact tuple con phai
+co `interaction_runtime` cua Gate G2, duoc tao tu live report cua chinh Rust
+executor identity/Watch. Thieu key nay thi start/schedule fail closed truoc lease.
+
+`DeviceWorkCoordinator` la owner duy nhat cho Nurture/Interaction/Script/Repair,
+manual tap/swipe/type/home, Group Sync va Open on Device. Moi MJPEG producer, ke ca
+tile nen, phai giu permit cua cung `StreamBudgetManager`; mac dinh 1, hard max 2.
+Interaction lay `DeviceExclusive` truoc, stop stream nen cung UDID, inspect/repair
+khong giu stream capacity, roi atomic revoke + retag mot background permit thanh
+`UiWithStream`; foreground demand phai preempt sampler nen va budget=1 khong duoc tu
+deadlock. Lifecycle dung `repair_install_only_locked`: chi install khi app thieu/
+metadata lech, verify auth nhung khong tao session/MJPEG; auth/session/stream fail
+khong reinstall. Truoc khi uninstall/install, owned stream bat buoc da duoc dung qua
+`stop_owned_stream`; install-only fail closed thay vi tu clear producer ben ngoai
+`StreamBudgetManager`. Primitive stop nay cung invalidate cached session cu truoc
+install-only inspection; session Interaction moi chi duoc tao sau foreground. Identity
+tra ve phai khop bundle/version/build cua cung lan
+metadata inspection truoc khi launch + protected health duoc chap nhan. Sau do moi
+foreground TikTok -> session dung profile -> MJPEG -> frame dau. Khong goi
+`preflight_agent()`/`repair_agent_locked()` generic trong path nay vi hai path do tu
+dung readiness session + stream va pha fresh-text sequence.
+`StreamStopProof.child_stopped=true` chi duoc emit sau khi exact owned child da exit
+trong bounded wait; timeout phai giu ownership va proof unconfirmed de quota khong bi
+tha som. Ordinary Interaction chi dung protected relay ma install-only vua xac nhan,
+khong cold-launch Agent sau khi TikTok foreground. FreshText tren stock fail closed.
+AgentStatus lan luot la session-pending sau stop, stream-pending sau session va Ready
+chi sau JPEG dau tien decode thanh cong.
+
+SQLite la nguon runnable work duy nhat; in-memory channel chi wake dispatcher. Queue,
+claim, state va revision phai commit truoc worker. Sau crash chi job con hoan toan
+`Queued`/`WaitingCapacity` moi tu resume; campaign da vao `Preparing` phai freeze de
+manual retry, intent side effect da commit thanh `Uncertain`, phan con lai
+`Interrupted`. Comment phai prepare + persist exact text truoc khi type; Comment,
+Repost va Direct Message phai persist `effect_intent=issued` truoc final tap.
+Hai `TextNotArmed` lien tiep phai recovery trong cung lease: stop stream, tang
+generation, fresh text session, MJPEG frame dau va swap dong thoi executor/watcher
+session handle; `TextNotSent` la `Uncertain`, khong retry.
+
+Khong sua production IPA/manifest de them `openUrl`. Capability driver phai bind vao
+artifact/protocol/driver/transport/iOS/TikTok build/layout/detector/clipboard mode/
+point geometry/orientation tuple. Inspect phai doc TikTok metadata + transport tu
+Device Bridge. Manifest `375x667` khong phai runtime proof; chua qualify profile moi
+thi fail closed ngoai exact 375x667 portrait, khong tap toa do iPhone 8 len may moi.
+`inspect-device-capabilities` chi duoc mo lockdown/RSD provider va mot lan
+InstallationProxy `get_apps` cho TikTok + Agent. Phai verify lai SHA-256 IPA truoc
+sidecar I/O, lay UDID tu provider (khong echo input), hash signer identity o bien
+Rust va fail closed khi app/identity thieu. Metadata inspect luon tra
+`protected_auth_ready=false`, `geometry=None`; proof auth va geometry phai den tu
+buoc protected runtime rieng, khong lay lai `AgentStatus` cache. Lockdown inspection
+bat buoc `autopair=false`, khong tao pairing state/Trust prompt. RSD host/port la
+mot cap typed, thieu mot nua thi reject va moi provider da tao phai close ca khi
+connect/inventory loi.
+Gate 0 trait path hien chi tu chon legacy usbmux cho fixture iOS 16; helper RSD la
+primitive endpoint tuong minh, chua phai auto-selection qua `Arc<dyn DeviceDriver>`.
+Khong advertise RSD end-to-end cho toi khi transport adapter theo UDID so huu va
+truyen endpoint vao control plane.
+Project 2 candidate chua tu dong thay RT-MMO. Direct Message/OCR, Save va Repost chi
+expose sau fixture + live gate.
+Moi capability G2/G4 chi duoc promote sau full regression. Promotion phai giu mot
+snapshot registry goc xuyen suot, rollback neu focused check/package/staging/commit
+loi, va chi seal transaction sau commit; nhieu action khong duoc overwrite snapshot.
+Proxy hien dung `device_meta.proxy_id` lam nguon mutable duy nhat; thay proxy/revision
+phai xoa endpoint/manual confirmation cu. Chi CRUD/assign/desktop endpoint check +
+`manual_required`; khong dua MDM deferred o section 3.11 vao phase nay.
+
+### 3.13 Interaction Gate 0 checkpoint Windows (30/07/2026)
+
+G0.1-G0.11 da xong phan source/fixture; G0.12 van `PENDING_MAC_DEVICE`. Production
+`interaction-capabilities.json` bat buoc giu `qualifications: []` cho toi khi exact
+Mac/device report PASS duoc review va hash. Khong tao `interaction_start`, khong map
+Watch/`TargetIdentityCopyLink` thanh Ready va khong suy capability tu feature list
+trong manifest. HTTP adapter trong moi production `WdaProfile` khoi tao deny-all;
+chi exact registry tuple moi duoc gan route contract.
+
+Probe chinh la `tools/interaction-gate0/probe.py`; fixture hien co 37 test va
+`vision_ocr.swift`. Live probe chi chay legacy usbmux tren fixture iPhone 8/iOS 16,
+cold-witness PID Agent cu bien mat + hai device port dong, uninstall/fresh-install
+dung IPA da hash va doi chieu payload/executable/signer truoc khi launch. Probe pin
+exact `pymobiledevice3==10.1.0` + `Pillow==11.3.0`, foreground TikTok, protected
+`POST /session`, sau do moi mo relay/reader MJPEG. Reader giu mot connection unbounded
+cho mot generation, reject `Content-Length`, EOF, frame freeze, geometry drift va
+gap >2 giay. Moi `/url`/tap lay sequence boundary sau khi correct-auth response xong;
+chi frame strict-newer moi duoc lam evidence. Khong quay lai `_read_first_jpeg` lap
+ket noi hoac dung `latest_frame_sequence` cu lam action boundary.
+
+Geometry Gate 0 lay physical width/height/scale tu MobileGestalt voi `autopair=false`,
+orientation tu protected sessionless `/wda/deviceOrientation`, roi doi chieu exact
+frame `750x1334` -> logical `375x667` portrait truoc moi tap. Tuyet doi khong dung
+`/window/size`, session-scoped orientation, element lookup/click, WDA screenshot hay
+bat ky TikTok AX hierarchy nao trong probe RT-MMO; cac route do da biet 404/wedge.
+
+Share duoc do tu chuoi glyph trang tren frame cung generation. Share sheet moi duoc
+OCR bang macOS Vision revision 3, accurate, `en-US` + `vi-VN`, language correction,
+confidence >=0.55; phai co dung mot Copy Link match. Hai tap deu la protected
+sessionless `/wda/swipe` lech 1 point, va moi route exercised phai tu ghi bang chung
+missing/wrong/correct auth `401/401/200` tren chinh request dung. `GET /status` chi la
+session-id witness, khong phai protected readiness.
+Neu fail sau khi mo Share sheet, cleanup phai tap ngoai sheet va xac nhan rail feed
+tro lai truoc khi dung stream. Ke ca correct-auth tap Share timeout cung phai danh
+dau sheet co the da mo; cleanup lay frame strict-newer roi moi quyet dinh dismiss,
+khong duoc tin frame cache truoc tap. Final health cung lay sequence boundary sau
+session/PID/geometry check va chi chap nhan frame moi con tuoi <=2 giay. Short link
+chi duoc resolve HTTPS trong exact host TikTok, moi redirect deu validate va counter
+stateful toi da nam hop.
+
+Truoc live probe, clipboard iPhone fixture phai la exact plaintext
+`RIVIU_GATE0_CLIPBOARD_FIXTURE_V1`; gia tri khac fail truoc write. Evidence/cleanup
+chi tuyen bo restore controlled plaintext bytes, khong tuyen bo snapshot duoc moi
+rich pasteboard representation. Day la fixture precondition, khong ha thanh restore
+"toan bo clipboard" khi API oracle chi qualify schema plaintext.
+
+Probe phai doi chieu executable trong installed app voi `Payload/<app>/Info.plist`
+cua IPA da hash, hash signer identity, va publish du artifact/Agent/adapter/transport/
+iOS/TikTok/clipboard/geometry/detector/layout/route-contract tuple. Raw token, UDID,
+clipboard cu va ba target URL khong duoc vao report. Clipboard cu phai restore ca khi
+case PASS; cleanup chay het reader -> relay -> generation invalidate -> exact PID
+terminate -> local/device port proof, loi bat ky buoc nao lam gate FAIL.
+
+Report pair dung journal co prior/staged SHA-256, fsync, verify ca hai destination
+truoc commit va recovery ngay dau `main`; process chet giua hai replace phai rollback
+byte-exact truoc device work. Production IPA/manifest van phai khop
+`8a24847099495ff70b998522692c43f00dd16b90f698bda6953a73f5d33002ea` va
+`e98a549af4c061556effd36424e7732219e1a6d262bcf1f259279975024b6e1a`.
+
+Len Mac: dong desktop/harness/3uTools, cai pymobiledevice3 10.1.0 + Pillow 11.3.0,
+giu may unlocked/TikTok signed-in, chay exact command trong
+`docs/re/interaction-gate0/README.md`. Neu mot route, PID, frame, OCR, restore,
+cleanup hay tuple field khong chac chan thi giu registry rong va ghi typed failure;
+khong ha nguong hoac them bypass CLI.
+
+Review integration 30/07 con khoa cac invariant sau. `NurtureRuntime` reserve mot
+stop token/UDID va `begin_shutdown` atomically chan start moi truoc khi signal tat ca;
+stop trong thoi gian stagger va stop da set truoc `run_session` phai ket thuc job voi
+0 session/0 stream. Guarded clipboard production phai di qua `DeviceControlPlane`:
+background mode giu generation; Agent-foreground mode chuyen ticket cho per-UDID
+cleanup worker **truoc** destructive await. Caller cancel chi mat response; worker van
+phai restore target, final session, replacement stream roi cleanup dung generation.
+Loi truoc stop tra lai context cu; loi sau stop phai cleanup/quarantine theo progress.
+Hard recycle khong duoc tang generation o giua hai stop proof; proof thu hai phai co
+`old_generation` bang `new_generation` cua proof truoc.
+
+`AppState` phai truyen exact registry tu `DriverBundle` vao `DeviceControlPlane`.
+Moi lan metadata inspect phai xoa capability da negotiate ve deny-all va **khong** tu
+gan route: PMD metadata co chu dich `protected_auth_ready=false`, `geometry=None`.
+Chi `negotiate_interaction_capabilities` voi complete runtime snapshot trong cung
+exclusive context moi duoc gan exact-match `UiCapabilities` vao profile theo UDID.
+Inspect fail, repair/reinstall, session hoac stream da ton tai deu khong duoc giu/doi
+capability cu. Desktop Agent Preflight/Repair chi dung install-only readiness; khong
+duoc goi generic path tao session/MJPEG ngoai `StreamBudgetManager`.
+
+`DeviceExclusiveContext` chi nhan exact UI capacity token sau khi `complete_transfer`
+thanh cong. `start_interaction_session` phai doi chieu token van con live va dung UDID
+trong `StreamBudgetManager`; marker lich su hoac reservation da drop khong duoc phep
+tao session. Token duoc mang sang `UiSessionContext` va phai khop capacity khi start
+stream. Sau do control moi goi `confirm_interaction_stream_stopped`: primitive nay chi
+giu slot lock, reject neu con owned MJPEG producer/cached session va ghi current
+generation lam lifecycle handoff; no khong duoc stop/start process hay tang generation.
+Nho vay ca truong hop khong co background victim van co stop witness truoc session ma
+khong tao cancellation window bang mot destructive stop thu hai.
+
+`prepare_device` va desktop fallback phai dung ngay neu install-only repair loi; khong
+duoc roi sang generic prepare. `JobQueue` bat buoc theo thu tu install-only ->
+session-only -> steps, khong tao MJPEG. Moi loi sau khi session duoc tao, gom ca lay
+session va tao artifact directory, van phai dong `UiSessionContext` dong bo de
+invalidate cached session truoc khi tra loi; drop context don thuan khong du.
+
+Registry parser, schema va HTTP adapter dung chung `is_valid_protected_route_path`,
+khong cho `//`, `..`, query, fragment hay template brace lot qua parse roi moi fail
+luc gui. Root `liveReportSha256` phai la lowercase SHA-256 doc lap; clipboard co route
+thi bat buoc co contract ID canonical, khong duoc sinh `:set`/`:get` tu ID rong.
+Fixture HTTP Gate 0 tren Windows phai doc het POST body truoc khi tra 401; dong socket
+voi request bytes chua doc co the bien response auth dung thanh `WinError 10053`.
 
 ---
 
@@ -188,7 +755,7 @@ Xác suất cấu hình được nhân theo mood nên trung bình phiên vẫn b
 ```bash
 export PATH="$HOME/Library/Python/3.9/bin:$PATH"
 
-cargo test --workspace                     # 65 test, ~2 s
+cargo test --workspace                     # toàn bộ Rust workspace
 cargo build -p riviu-managers-phone --bin live_nurture_test --release
 
 # dọn trước khi test thật
@@ -197,6 +764,9 @@ tidevice -u <UDID> kill com.riviu.managersphone.agent.xctrunner
 tidevice -u <UDID> launch com.ss.iphone.ugc.Ame
 
 RIVIU_AI_API_KEY=<key> \
+RIVIU_WDA_BACKEND=rt-mmo \
+RIVIU_RTMMO_TOKEN=<token> \
+RIVIU_RTMMO_IPA=<path-to-current-RiviuAgent.ipa> \
 RIVIU_FRAME_DUMP=/tmp/riviu-frames/run \
 RIVIU_WDA_TRACE=/tmp/riviu-live/trace.jsonl \
 ./target/release/live_nurture_test --udid <UDID> \
@@ -211,6 +781,9 @@ RIVIU_WDA_TRACE=/tmp/riviu-live/trace.jsonl \
 | Biến | Tác dụng |
 |---|---|
 | `RIVIU_AI_API_KEY` | Key cho API bình luận. **Không bao giờ hard-code vào repo.** |
+| `RIVIU_WDA_BACKEND` | Chỉ đọc ở harness. Desktop bỏ qua biến này và luôn dùng Unified Agent; `stock` chỉ là rollback/debug tường minh. |
+| `RIVIU_RTMMO_TOKEN` | Desktop chỉ nhập một lần vào OS credential store; harness đọc ở biên binary. **Không hard-code hoặc đọc biến này trong driver library.** |
+| `RIVIU_RTMMO_IPA` | Chỉ là override cho harness. Desktop dùng `sidecars/wda/agent-manifest.json` + `RiviuAgent.ipa` và bắt buộc khớp SHA-256. |
 | `RIVIU_FRAME_DUMP` | Thư mục dump frame mỗi khi phân loại màn hình đổi — công cụ chính để hiệu chỉnh detector |
 | `RIVIU_WDA_TRACE` | JSONL mọi request WDA (endpoint, ms, outcome) |
 | `RIVIU_PROXY_LOG` | stderr của `wda-proxy`, dùng khi relay chết bất thường |
@@ -316,9 +889,62 @@ tidevice -u <UDID> xctest -B com.riviu.managersphone.agent.xctrunner
 
 ---
 
-## 5. Vấn đề đang mở
+## 5. Trạng thái bình luận
 
-### 5.1 Bình luận: gõ được text nhưng không focus được ô nhập ❌
+### 5.1 Bình luận chữ qua RT-MMO: ĐÃ LIVE XÁC NHẬN
+
+Ngày 28/07/2026 đã nối xong đường text end-to-end trong code:
+
+- `wda.rs`: profile RT-MMO, header auth cho mọi request, logical size 375×667,
+  không probe endpoint thiếu; text job dùng `POST /session` mới sau khi TikTok đã
+  foreground. Nếu build không cho POST mới fallback session tự tạo từ `/status`.
+- `pmd.rs` + `riviu_pmd.py`: chọn đúng một backend; launch app với đủ ba env;
+  relay `8906`, stream `9093`; retry launch có giới hạn; token qua environment;
+  kiểm tra/cài IPA từ `RIVIU_RTMMO_IPA` khi bundle thiếu. Chế độ
+  `--bootstrap-only` restart agent text mà không sinh relay thứ hai.
+- `nurture/actions.rs`: sinh vision comment trước khi mở UI, pool là fallback;
+  tap input `(120,640)` qua native tap, `/wda/keys` nhận một phần tử chứa cả câu;
+  chỉ tap Gửi
+  khi drawer ban đầu đúng `Open` và một **frame mới** chuyển `Open -> SendArmed`;
+  chỉ tăng counter/ghi DB khi frame trở lại `CommentDrawer::Open` (nút đã tắt).
+  Nếu drawer đã `SendArmed` trước lúc gõ thì đó là draft cũ: đóng và bỏ lượt,
+  tuyệt đối không append/gửi rồi gán nhầm nội dung mới.
+- `UiSession::supports_text_input()`: RT-MMO đi đường chữ; stock giữ nguyên emoji
+  fallback. Một lượt RT đã gõ nhưng không armed sẽ đóng UI và bỏ lượt, không trộn
+  thêm emoji vào draft có thể còn sót.
+- Recovery cứng chỉ dành cho `UiErrorKind::Transport`; session/timeout chỉ thử
+  session mềm, không recycle agent vì health probe. Với job comment, cả soft/hard
+  recovery đều dựng fresh text session, **mở lại MJPEG thành công**, rồi mới thay
+  đồng thời session của feed + watcher. Fresh RT session đã dừng stream cũ; bỏ
+  bước `ensure_stream` ở recovery sẽ làm engine chạy tiếp mà không có frame producer.
+
+Đã bundle/cài/trust release `idbagent.ipa` hợp lệ (SHA-256
+`8A24847099495FF70B998522692C43F00DD16B90F698BDA6953A73F5D33002EA`). Hai IPA
+trong `C:\RouterMMO iOS\resources\` có cert hết hiệu lực (`0xe8008018`), đừng thay
+bản bundle bằng chúng.
+
+Live proof 28/07/2026 trên máy test:
+
+- probe ASCII: comment `Hay qua ban oi`, count `2 -> 3`, ảnh
+  `%LOCALAPPDATA%\Temp\riviu-live\manual-comment-probe-20260728-1601\12-sent.png`;
+- probe Unicode: comment `Hay quá 🔥`, count `6 -> 7`, ảnh
+  `%LOCALAPPDATA%\Temp\riviu-live\ordered-unicode-probe\03-sent.png`;
+- harness chạy đúng product path tự bootstrap: `comments=1`, log
+  `đã gửi bình luận chữ (xác nhận nút gửi tắt)`, không request lỗi, artifact
+  `%LOCALAPPDATA%\Temp\riviu-live\harness-comment-product-fix-20260728-172255`.
+- sau hardening DVT env/strict MJPEG/recovery: harness 2 video gửi `comments=1`,
+  fresh session 8 ms, `keys` 623 ms, 0 request lỗi, 0 recovery, artifact
+  `%LOCALAPPDATA%\Temp\riviu-live\final-comment-20260728-182428`.
+- bản release cuối sau generation/retry/stock-order hardening, chạy
+  `--steady chatty`: 3 video gửi **2 bình luận chữ**, cả hai xác nhận nút Gửi tắt,
+  `keys` 418–536 ms, 0 recovery, artifact
+  `%LOCALAPPDATA%\Temp\riviu-live\final-chatty-20260728-185724`.
+
+Comment thứ hai của vòng harness bị video đổi sang LIVE đúng lúc tap rồi bật modal
+chính sách; frame dump xác nhận đây là chuyển màn hình, không phải text session
+regression. Không nới invariant frame để đếm lượt đó.
+
+#### Lịch sử điều tra stock WDA (giữ lại để không thử lại)
 
 Đã chạy được: sinh comment vision (bám đúng nội dung video), pool fallback, mở
 drawer, đóng drawer an toàn. **Chưa được**: tap vào ô "Thêm bình luận…" không bật
@@ -353,7 +979,7 @@ Chạy một fan-out nghiên cứu (5 agent) rồi test LIVE từng hướng. K�
 Kết luận "text đóng cửa" bên dưới là SAI vì tôi chỉ test qua WDA STOCK của mình.
 Thực tế **2/3 máy (05101fdb, e561b690) đã cài sẵn `com.mrph.svc` = "RT-MMO 1"** —
 chính là WDA vá idbagent mà TOOL TIKTOK dùng, chạy trên **port 8906**, header
-`X-RT-Token: RTmmo-2f9K4xPq7vL5sT1bW8nZ6hJ3`. Đã xác nhận: nó nhận `POST /session`
+`X-RT-Token: <token>`. Đã xác nhận: nó nhận `POST /session`
 và `POST /wda/keys` trả OK (WDA này khiến TikTok CHẤP NHẬN keystroke — khác stock).
 Đối chiếu mã nguồn TOOL TIKTOK (`scripts/tiktok/shared/wda_interact.py`):
 - tap ô input **(120,640)** — GIỐNG HỆT ta; gõ qua **`/wda/keys {value:list(text)}`**.
@@ -363,9 +989,9 @@ và `POST /wda/keys` trả OK (WDA này khiến TikTok CHẤP NHẬN keystroke �
   chặn POST /session; build 15.1.4 này vẫn cho POST /session — dùng làm fallback).
 - Layout A (đã có comment): tap ô input để mở bàn phím. Layout B (chưa có comment):
   bàn phím hiện luôn.
-Việc còn lại là ENGINEERING: quản lý vòng đời RT-MMO WDA (nó chập chờn khi tự lái;
-TOOL TIKTOK có `modules/wda_manager.py` giữ nó sống) + route typing qua 8906 trong
-engine. `a99f4bd9` CHƯA có RT-MMO → cần cài (cần idbagent.ipa/csc-native-ios.ipa).
+Phần engineering này đã hoàn tất ngày 28/07/2026 trong `wda.rs`, `pmd.rs`,
+`riviu_pmd.py` và `nurture/actions.rs`; lịch sử dưới đây chỉ là bằng chứng dẫn tới
+thiết kế hiện tại.
 
 **Chi tiết RT-MMO binary (đo trực tiếp trên 05101fdb):** bundle `com.mrph.svc`,
 app name `csc-native-ios.app`, executable `WebDriverAgentRunner-Runner`, ký
@@ -394,32 +1020,36 @@ KHÔNG khả thi trong nỗ lực hợp lý.
 
 **‼️ CÔNG THỨC ĐẦY ĐỦ điều khiển RT-MMO WDA (từ repo `github.com/cattfan/cloneroutermmoios`
 — clone RouterMMO của chính user, có `re/findings.md` + `crates/wda`):**
-- **idbagent.ipa PUBLIC**: `github.com/okeroxy/idbagent/releases` (cài lên máy nào
-  cũng được vì enterprise-signed; hoặc lấy từ `C:\RouterMMO iOS\resources\`).
-- **Launch PHẢI kèm ENV** (nếu không, agent chập chờn/không bind — đây là lý do
-  mọi lần trước tôi launch thiếu env bị flaky):
-  `tidevice -u <UDID> launch com.mrph.svc -e USE_PORT:8906 -e MJPEG_SERVER_PORT:9093 -e FARM_KEY:<token>`
-  (tidevice `-e` truyền env OK; go-ios `ios launch --env=...` cũng được). Cần
-  Developer Mode + DDI mount (`tidevice developer`).
-- **Session**: poll `GET /status` lấy sessionId (RT-MMO tự tạo); fallback
-  `POST /session {"capabilities":{"firstMatch":[{}],"alwaysMatch":{}}}`.
-- **Tap = W3C `/session/{sid}/actions`** (pointer finger1: pointerMove→Down→pause
-  50→Up). `wda_tap` thử `/wda/tap` trước rồi fallback /actions. (Clone dùng
-  /actions làm chính; TOOL TIKTOK dùng /wda/swipe 1px — cả hai đều được tuỳ build.)
-- **Gõ = `POST /session/{sid}/wda/keys {"value":[<từng ký tự>]}`** (đã xác nhận
-  trả OK trên máy). `wda/setPasteboard`/`getPasteboard` cũng có.
-- **Header `X-RT-Token: RTmmo-2f9K4xPq7vL5sT1bW8nZ6hJ3` mọi request.**
+- **idbagent.ipa PUBLIC**: `github.com/okeroxy/idbagent/releases`. Luôn kiểm tra
+  release mới: cert enterprise của bản cũ có thể hết hiệu lực. Nếu signing team
+  đổi, uninstall đúng bundle cũ rồi cài sạch; sau đó trust profile thủ công.
+- **Launch PHẢI kèm ENV** `USE_PORT=8906`, `MJPEG_SERVER_PORT=9093`,
+  `FARM_KEY=<token>` (thiếu env làm agent chập chờn/không bind). Production sidecar
+  truyền dict env trực tiếp qua pymobiledevice3 DVT `ProcessControl.launch`; không
+  đưa token vào argv của CLI con. Cần Developer Mode + DDI mount (`tidevice developer`).
+- Sau kill/restart, port control cũ phải đóng trong cửa sổ bounded; không đóng thì
+  fail bootstrap, không launch đè rồi nhận nhầm readiness của process cũ.
+- **Session**: liveness/reuse thường poll `GET /status`. Riêng text job phải
+  foreground TikTok rồi `POST /session {"capabilities":{"firstMatch":[{}]}}`;
+  chỉ fallback status khi build trả đúng HTTP 404/405/501 chặn POST. Lỗi 401/500,
+  response thiếu session id, transport hay timeout phải fail phiên mới, không
+  attach một status session có thể đã stale.
+- **Tap/swipe = sessionless `POST /wda/swipe`** với `delay/fromX/fromY/toX/toY`;
+  tap dùng delta 1 px. Không fallback W3C `/actions` cho build RT-MMO hiện tại.
+- **Gõ = `POST /session/{sid}/wda/keys {"value":["<cả câu>"]}`**. List từng ký
+  tự có thể ACK mà không chèn; payload cả câu đã xác nhận bằng frame trên máy.
+  `wda/setPasteboard`/`getPasteboard` cũng có.
+- **Header `X-RT-Token: <token>` mọi request.**
 - **Màn hình**: RT-MMO KHÔNG dùng `/screenshot` tin cậy (dùng MJPEG :9093) và
   KHÔNG có `/wda/window/size` (404). Quan sát bằng MJPEG :9093 hoặc `tidevice
   screenshot` (kênh DVT riêng).
-- **Toạ độ**: cần đo lại điểm vs pixel cho build này (window/size 404 nên chưa
-  chốt; TOOL TIKTOK dùng điểm 375×667). Engine đã có dò rail per-frame — tái dùng.
+- **Toạ độ**: logical 375×667; input đã live-chốt `(120,640)`. Engine dò rail
+  per-frame cho icon bình luận; không hard-code layout rail.
 - **CẢNH BÁO acc**: automation nhiều làm TikTok bật popup "Trạng thái tài khoản"
   (acc có nguy cơ) — cần tiết chế nhịp + xử lý popup này như các popup khác.
 
-**Xác nhận đã đủ để implement** (chưa chụp được 1 lần "chữ trong ô" của riêng tôi
-do nhiễu trạng thái máy: WDA chập chờn, popup acc-risk, video đổi, toạ độ chưa
-chốt — nhưng clone của user LÀM ĐƯỢC trọn vẹn nên cơ chế không còn nghi ngờ).
+**Đã xác nhận end-to-end** bằng ảnh chữ trong ô, nút Gửi armed, comment hiện trong
+list và harness production tăng counter; xem live proof ở §5.1.
 
 **ĐÃ GIẢI MÃ bí ẩn "bàn phím hiện 1 lần" (2026-07-27, probe_a1/a2):** bàn phím
 iOS QWERTY **luôn hiện** trong lúc long-press ô nhập (đo A1: **6/6** lần mở được
@@ -432,8 +1062,8 @@ không dựng bàn phím nhập-liệu thường trực. ⇒ **gõ phím theo to
 không có bàn phím nhập-liệu nào trụ đủ lâu để tap phím. TikTok đặt `inputView`
 của ô comment = panel emoji riêng; bàn phím hệ thống không bao giờ thành input
 thường trực qua WDA stock. Cùng với `/wda/keys` bị bỏ qua và dán bị chặn → **text
-comment đóng cửa hoàn toàn trên iOS 16.7.x**, chỉ mở khi có WDA vá (idbagent +
-TrollStore) trên máy iOS ≤16.6.1.
+comment đóng cửa hoàn toàn **qua stock WDA** trên iOS 16.7.x. RT-MMO standalone
+enterprise-signed là đường đang chạy; không cần TrollStore trên máy test này.
 
 **Kết luận sau khi điều tra tới đáy**: TikTok **chặn accessibility**, nên đường
 gõ text của WDA bị khoá ở tầng app — không phải lỗi code của ta. Trên máy iOS
@@ -546,7 +1176,7 @@ trên nền sáng trong vùng panel) rồi tap tâm blob.
 
 | Nguồn | Nội dung |
 |---|---|
-| `scripts/tiktok/shared/wda_session.py:59-61` | `'X-RT-Token': 'RTmmo-2f9K4xPq7vL5sT1bW8nZ6hJ3'` — *"Token cứng WDA build RT-MMO (idbagent.ipa Jun 2026)"* |
+| `scripts/tiktok/shared/wda_session.py:59-61` | `X-RT-Token: <token>` — token của build RT-MMO, giữ ngoài repo. |
 | `wda_session.py:39` | `device_port: int = 8906` — **không phải 8100** |
 | `modules/wda_manager.py:129` | `8906,   # WDA idbagent/TrollStore (confirmed — binary default)` |
 | `modules/wda_client_fixed.py:155` | *"Build này check X-RT-Token header trên mọi endpoint trừ /status, /health, /wda/healthcheck"* |
@@ -561,15 +1191,10 @@ chỉ Apple Development), nên agent đó làm được những việc WDA thư�
 Dự án này build **Appium WebDriverAgent 16.0.0 gốc**, ký bằng chứng chỉ Apple
 Development thường, chạy port 8100. Đó là toàn bộ khác biệt. **Không phải lỗi code.**
 
-Máy test hiện tại (`tidevice applist`) chỉ có `com.riviu.managersphone.agent.xctrunner`
-— **chưa có TrollStore, chưa có idbagent**. Nên chạy TOOL TIKTOK trên máy này sẽ
-fail ngay ở bước kết nối (không có gì lắng nghe ở 8906).
-
-**Đường để có comment text:** cài agent vá đó (TrollStore + idbagent/dairack), rồi
-trỏ driver sang port 8906 + thêm header `X-RT-Token`. Engine hiện tại dùng lại được
-gần như nguyên vẹn — chỉ đổi `AGENT_BUNDLE`, port, và header trong `wda.rs`.
-Ràng buộc: TrollStore phụ thuộc phiên bản iOS; máy này iOS 16.7.15 cần kiểm tra
-xem có cài được không.
+Đoạn kết luận cũ "máy chưa có idbagent/TrollStore" đã hết hiệu lực: máy hiện có
+RT-MMO enterprise-signed `com.mrph.svc`, chạy standalone trên iOS 16.7.15 và đã
+gửi comment chữ như live proof ở đầu mục. Không quay lại hướng TrollStore hay tự
+build WDA vá.
 
 ### ĐÃ SHIP: bình luận bằng emoji do AI chọn ✅
 
@@ -738,3 +1363,66 @@ Fixture hiện có: `feed-iphone8.jpg`, `feed-iphone8-b.jpg`, `feed-rail-variant
 - **Cửa sổ xác nhận phải tính theo tốc độ stream thật** (~7 FPS, chỉ đẩy khi đổi).
   Cửa sổ quá gắt làm hành động thật bị báo thất bại rồi lặp lại — với vuốt thì
   hậu quả là nhảy mất video.
+
+---
+
+## 8. Unified Agent Runtime (28/07/2026)
+
+> Mục này thay thế mọi kết luận cũ trong §5 nói rằng text comment phải hạ iOS,
+> dùng TrollStore hoặc chỉ còn emoji. Các kết luận đó chỉ đúng với stock WDA;
+> runtime sản phẩm hiện dùng agent `com.mrph.svc` đã kiểm chứng text comment thật.
+
+- Desktop resolve `DriverConfig` một lần tại composition root. `crates/ios-driver`
+  không được đọc `RIVIU_WDA_BACKEND`, `RIVIU_RTMMO_TOKEN` hoặc
+  `RIVIU_RTMMO_IPA`; stock không phải fallback của desktop.
+- Artifact chính là `sidecars/wda/RiviuAgent.ipa`, mô tả bởi
+  `agent-manifest.json`. Luôn kiểm tra SHA-256 trước mọi lần cài. Stock
+  `Riviumanagersphone.ipa` chỉ còn là rollback/debug artifact.
+- Artifact RT-MMO đã chốt là release `777wealth.app` cập nhật ngày `2026-07-24`,
+  SHA-256 `8a24847099495ff70b998522692c43f00dd16b90f698bda6953a73f5d33002ea`, profile
+  enterprise Beijing `chuvendor` hết hạn `2027-07-24`. Ngày 28/07 đã live-pass
+  install, launch, protected `/wda/locked` và MJPEG trên iPhone 8 iOS 16.7.15.
+- Không dùng bản Wuhan `csc-native-ios.app`, SHA-256
+  `628b4b3b36dbe2fa1e4c753d1d7b004443d00c829bf8581a28101ab499b7cb5a`: identity
+  đã bị thu hồi và install trả `0xe8008018`, dù profile ghi hạn `2026-08-07`.
+- Build hiện dùng token RT-MMO cố định: `FARM_KEY` tuỳ ý vẫn bị protected endpoint
+  từ chối. Lần chạy desktop đầu phải nhận `RIVIU_RTMMO_TOKEN` đúng một lần rồi
+  migrate vào OS credential account `agent-auth-token`; không sinh token ngẫu nhiên,
+  không ghi token vào manifest, SQLite, frontend hoặc log. Một env token tường minh,
+  không rỗng phải ghi đè keyring cũ để phục hồi máy từng lưu token sai; không có env
+  thì desktop/harness đọc lại keyring.
+- Token agent nằm trong credential store native của hệ điều hành, account
+  `agent-auth-token`. SQLite chỉ lưu `agent.settings.v1` với `autoRepair`.
+- Mỗi UDID có `AgentStatus` cache và dùng cùng slot lock với relay/session/stream.
+  Generic health command `agent_preflight` vẫn phải kiểm tra metadata cài đặt,
+  protected auth, session và frame MJPEG; không được khôi phục cache boolean kiểu
+  "đã thấy bundle là xong". Rieng Interaction execution khong goi command nay:
+  no dung non-mutating inspect + atomic foreground/session/MJPEG transition o §3.12
+  de khong tao session/stream truoc fresh-text sequence.
+- Metadata chỉ khớp artifact khi đồng thời đúng bundle/version/build, payload app
+  `777wealth.app` và signer identity trong manifest. Bản Wuhan có cùng
+  `com.mrph.svc` / `1.0` / `1` nhưng payload/signer khác nên bắt buộc repair.
+- Repair dừng stream trước, xoá session, dừng relay, chỉ gỡ đúng bundle trong
+  manifest, kiểm checksum rồi mới cài và dựng lại theo thứ tự session-trước-stream.
+  Auto-repair chỉ chạy khi app thiếu hoặc metadata artifact lệch; lỗi protected auth,
+  session hay MJPEG không được reinstall lặp. Background poll backoff 30 giây rồi
+  thử dựng lại transport khi state `Error`; state `Missing` / `RepairRequired` chỉ
+  tiếp tục sau lần Check/Repair tường minh.
+- Ordinary unified session chỉ điều khiển màn hình và phải báo
+  `supports_text_input=false`. Chỉ fresh session tạo sau khi TikTok foreground mới
+  báo `true`. Nếu fresh transition lỗi, xoá trạng thái nửa chừng và phục hồi ordinary
+  session + stream theo best effort trước khi trả lỗi gốc.
+- Desktop expose `agent_get_settings`, `agent_save_settings`, `agent_list_statuses`,
+  `agent_preflight`, `agent_repair` và `agent_bulk_repair`. Nút Agent của sản phẩm
+  phải gọi nhóm lệnh này; các lệnh re-sign Apple ID/stock chỉ dành cho rollback/debug
+  và không cung cấp text comment tin cậy.
+- Nurture job có `commentProb > 0` phải generic-preflight toàn bộ UDID trước khi báo
+  started. Interaction comment job dung atomic inspect/foreground/fresh-session/
+  MJPEG path o §3.12, khong goi generic preflight. Ca hai engine phai chan neu
+  driver/session khong quang ba text capability; khong tu roi ve emoji fallback.
+- Hai kết quả `TextNotArmed` liên tiếp phải dựng fresh text session mới, mở lại stream
+  rồi thay đồng thời session của feed và watcher. `TextNotSent` không được retry vì
+  trạng thái gửi là mơ hồ.
+- Milestone hiện tại chỉ hoàn thiện runtime Agent hợp nhất và text comment. Các phase
+  2-6 của capability control plane vẫn chưa triển khai; MDM/full fleet policy thuộc
+  phase 3 và được để lại cho kế hoạch sau.

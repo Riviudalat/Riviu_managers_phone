@@ -198,7 +198,8 @@ impl ScreenWatcher {
     /// Run until `stop` is set. Each device gets its own task, its own stop
     /// flag and its own cooldown state, so devices never share watcher state.
     pub async fn run(self) {
-        self.run_suppressible(Arc::new(AtomicBool::new(false))).await
+        self.run_suppressible(Arc::new(AtomicBool::new(false)))
+            .await
     }
 
     /// As [`Self::run`], but the caller can suspend *acting* while it drives a
@@ -226,13 +227,12 @@ impl ScreenWatcher {
                 }
                 // A stopped session must not leave this task parked forever on
                 // a stream that will never produce another frame.
-                let frame = match tokio::time::timeout(Duration::from_millis(500), stream.next())
-                    .await
-                {
-                    Ok(Some(f)) => f,
-                    Ok(None) => break,
-                    Err(_) => continue,
-                };
+                let frame =
+                    match tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
+                        Ok(Some(f)) => f,
+                        Ok(None) => break,
+                        Err(_) => continue,
+                    };
                 self.stats.frames_seen.fetch_add(1, Ordering::Relaxed);
 
                 if last_analyzed.map_or(false, |t| t.elapsed() < min_gap) {
@@ -588,7 +588,11 @@ mod tests {
         let mut b = a.clone();
         assert_eq!(digest(&a), digest(&b));
         b[2048] = 9;
-        assert_ne!(digest(&a), digest(&b), "a changed frame must be re-analysed");
+        assert_ne!(
+            digest(&a),
+            digest(&b),
+            "a changed frame must be re-analysed"
+        );
     }
 
     #[test]

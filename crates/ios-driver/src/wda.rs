@@ -1,10 +1,16 @@
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use reqwest::header::{HeaderMap, HeaderValue, CONNECTION};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONNECTION};
 use reqwest::Client;
-use riviu_core::{SwipeGesture, TapPoint, UiError, UiErrorKind};
+use riviu_core::{
+    is_valid_protected_route_path, validate_clipboard_read_limit, ActiveAppIdentity,
+    ClipboardAccessMode, ProtectedRouteContract, RouteMethod, RouteScope, SwipeGesture, TapPoint,
+    UiCapabilities, UiError, UiErrorKind, MAX_INTERACTION_CLIPBOARD_BYTES, OPEN_URL_TIMEOUT_MS,
+};
 use serde_json::json;
 
+use crate::config::{AgentToken, UnifiedAgentConfig};
 use crate::telemetry::{self, Outcome};
 
 /// Session caps with **no** `bundleId`. WDA with `bundleId=com.apple.springboard`
@@ -48,6 +54,262 @@ const GESTURE_TIMEOUT: Duration = Duration::from_secs(10);
 /// with 2 s gaps covers the ~45 s self-clearing stall seen in a live run,
 /// without waiting out a genuinely dead runner.
 const PRIME_ATTEMPTS: u32 = 4;
+const CLIPBOARD_RESPONSE_OVERHEAD_BYTES: usize = 4 * 1024;
+const INTERACTION_RESPONSE_LIMIT_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WdaBackend {
+    Stock,
+    RtMmo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaunchKind {
+    XcTest,
+    Application,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionStrategy {
+    CreateThenPrime,
+    StatusThenCreate,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WdaProfile {
+    pub backend: WdaBackend,
+    pub bundle_id: String,
+    pub device_port: u16,
+    pub mjpeg_port: u16,
+    pub auth_token: Option<AgentToken>,
+    pub logical_size: (f64, f64),
+    pub agent_ipa: Option<PathBuf>,
+    pub features: Vec<String>,
+    pub launch_kind: LaunchKind,
+    pub session_strategy: SessionStrategy,
+    interaction_http: Option<InteractionHttpAdapter>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct InteractionHttpAdapter {
+    capabilities: UiCapabilities,
+    active_app_route: Option<ProtectedRouteContract>,
+}
+
+#[derive(Clone, Copy)]
+struct SendOptions<'a> {
+    timeout: Duration,
+    auth: Option<(&'a str, &'a str)>,
+    response_limit: Option<usize>,
+}
+
+impl WdaProfile {
+    pub(crate) fn unified(config: &UnifiedAgentConfig) -> Self {
+        let manifest = &config.artifact.manifest;
+        Self {
+            backend: WdaBackend::RtMmo,
+            bundle_id: manifest.bundle_id.clone(),
+            device_port: manifest.control_port,
+            mjpeg_port: manifest.mjpeg_port,
+            auth_token: Some(config.token.clone()),
+            logical_size: (
+                f64::from(manifest.logical_width),
+                f64::from(manifest.logical_height),
+            ),
+            agent_ipa: Some(config.artifact.ipa_path.clone()),
+            features: manifest.features.clone(),
+            launch_kind: LaunchKind::Application,
+            session_strategy: SessionStrategy::StatusThenCreate,
+            interaction_http: None,
+        }
+        .with_interaction_capabilities(UiCapabilities::default())
+        .expect("the deny-all interaction adapter is valid")
+    }
+
+    pub(crate) fn stock() -> Self {
+        Self {
+            backend: WdaBackend::Stock,
+            bundle_id: "com.riviu.managersphone.agent.xctrunner".to_string(),
+            device_port: 8100,
+            mjpeg_port: 9100,
+            auth_token: None,
+            logical_size: (375.0, 667.0),
+            agent_ipa: None,
+            features: vec!["stream".to_string(), "tap".to_string(), "swipe".to_string()],
+            launch_kind: LaunchKind::XcTest,
+            session_strategy: SessionStrategy::CreateThenPrime,
+            interaction_http: None,
+        }
+        .with_interaction_capabilities(UiCapabilities::default())
+        .expect("the deny-all interaction adapter is valid")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rt_mmo(auth_token: String) -> Self {
+        Self {
+            backend: WdaBackend::RtMmo,
+            bundle_id: "com.mrph.svc".to_string(),
+            device_port: 8906,
+            mjpeg_port: 9093,
+            auth_token: Some(AgentToken::new(auth_token).expect("non-empty RT-MMO fixture token")),
+            logical_size: (375.0, 667.0),
+            agent_ipa: Some(PathBuf::from("RiviuAgent.ipa")),
+            features: vec![
+                "stream".to_string(),
+                "tap".to_string(),
+                "swipe".to_string(),
+                "text".to_string(),
+            ],
+            launch_kind: LaunchKind::Application,
+            session_strategy: SessionStrategy::StatusThenCreate,
+            interaction_http: None,
+        }
+        .with_interaction_capabilities(UiCapabilities::default())
+        .expect("the deny-all interaction adapter is valid")
+    }
+
+    pub(crate) fn with_interaction_capabilities(
+        mut self,
+        capabilities: UiCapabilities,
+    ) -> Result<Self, UiError> {
+        self.interaction_http = Some(InteractionHttpAdapter::try_new(capabilities)?);
+        Ok(self)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn configured_interaction_capabilities(&self) -> &UiCapabilities {
+        &self
+            .interaction_http
+            .as_ref()
+            .expect("every WDA profile has an interaction adapter")
+            .capabilities
+    }
+
+    #[cfg(test)]
+    fn try_interaction_fixture(token: &str, capabilities: UiCapabilities) -> Result<Self, UiError> {
+        let mut profile = Self::stock();
+        profile.auth_token = Some(AgentToken::new(token).map_err(|error| {
+            interaction_contract_error("interaction.fixture", error.to_string())
+        })?);
+        profile.with_interaction_capabilities(capabilities)
+    }
+
+    #[cfg(test)]
+    fn interaction_fixture(token: &str, capabilities: UiCapabilities) -> Self {
+        Self::try_interaction_fixture(token, capabilities).expect("valid interaction fixture")
+    }
+}
+
+impl InteractionHttpAdapter {
+    fn try_new(capabilities: UiCapabilities) -> Result<Self, UiError> {
+        if let Some(open_url) = capabilities.open_url.as_ref() {
+            validate_interaction_route(
+                &open_url.route,
+                RouteMethod::Post,
+                "open-url-body-v1",
+                true,
+            )?;
+            if open_url.target_bundle_id.trim().is_empty()
+                || open_url.target_bundle_id != open_url.target_bundle_id.trim()
+            {
+                return Err(interaction_contract_error(
+                    "openUrl",
+                    "target bundle id is blank or non-canonical",
+                ));
+            }
+        }
+
+        if let Some(clipboard) = capabilities.clipboard.as_ref() {
+            validate_interaction_route(
+                &clipboard.set_route,
+                RouteMethod::Post,
+                "clipboard-set-base64-v1",
+                false,
+            )?;
+            validate_interaction_route(
+                &clipboard.get_route,
+                RouteMethod::Post,
+                "clipboard-get-base64-v1",
+                false,
+            )?;
+            if clipboard.maximum_decoded_bytes as usize != MAX_INTERACTION_CLIPBOARD_BYTES {
+                return Err(interaction_contract_error(
+                    "clipboard",
+                    "maximum decoded bytes must be exactly 65536",
+                ));
+            }
+        }
+
+        let active_app_route =
+            if let Some(identity) = capabilities.target_identity_copy_link.as_ref() {
+                let open_url = capabilities.open_url.as_ref().ok_or_else(|| {
+                    interaction_contract_error("activeAppInfo", "open URL contract is missing")
+                })?;
+                let clipboard = capabilities.clipboard.as_ref().ok_or_else(|| {
+                    interaction_contract_error("activeAppInfo", "clipboard contract is missing")
+                })?;
+                let auth_header_name = &open_url.route.auth_header_name;
+                if clipboard.set_route.auth_header_name != *auth_header_name
+                    || clipboard.get_route.auth_header_name != *auth_header_name
+                    || identity.open_url_contract_id != open_url.route.contract_id
+                {
+                    return Err(interaction_contract_error(
+                        "activeAppInfo",
+                        "identity references or protected auth headers do not match",
+                    ));
+                }
+                Some(ProtectedRouteContract {
+                    contract_id: "interaction-active-app-info-v1".to_string(),
+                    method: RouteMethod::Get,
+                    scope: RouteScope::Sessionless,
+                    path: "/wda/activeAppInfo".to_string(),
+                    auth_header_name: auth_header_name.clone(),
+                    body_schema_id: "active-app-info-v1".to_string(),
+                    request_timeout_ms: OPEN_URL_TIMEOUT_MS,
+                })
+            } else {
+                None
+            };
+
+        Ok(Self {
+            capabilities,
+            active_app_route,
+        })
+    }
+}
+
+fn validate_interaction_route(
+    route: &ProtectedRouteContract,
+    expected_method: RouteMethod,
+    expected_schema: &str,
+    require_exact_open_timeout: bool,
+) -> Result<(), UiError> {
+    if route.contract_id.trim().is_empty()
+        || route.method != expected_method
+        || route.body_schema_id != expected_schema
+        || !is_valid_protected_route_path(&route.path)
+        || !route.auth_header_name.starts_with("X-")
+        || !route.auth_header_name.ends_with("-Token")
+        || !route
+            .auth_header_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        || route.request_timeout_ms == 0
+        || route.request_timeout_ms > OPEN_URL_TIMEOUT_MS
+        || (require_exact_open_timeout && route.request_timeout_ms != OPEN_URL_TIMEOUT_MS)
+        || HeaderName::from_bytes(route.auth_header_name.as_bytes()).is_err()
+    {
+        return Err(interaction_contract_error(
+            &route.contract_id,
+            "unknown or invalid protected route contract",
+        ));
+    }
+    Ok(())
+}
+
+fn interaction_contract_error(label: &str, message: impl Into<String>) -> UiError {
+    UiError::new(UiErrorKind::Other, format!("interaction.{label}"), message)
+}
 
 #[derive(Clone)]
 pub struct WdaClient {
@@ -56,10 +318,15 @@ pub struct WdaClient {
     port: u16,
     udid: String,
     session_id: Option<String>,
+    profile: WdaProfile,
 }
 
 impl WdaClient {
     pub fn new(host: &str, port: u16, udid: &str) -> Self {
+        Self::new_with_profile(host, port, udid, WdaProfile::stock())
+    }
+
+    pub(crate) fn new_with_profile(host: &str, port: u16, udid: &str, profile: WdaProfile) -> Self {
         let mut headers = HeaderMap::new();
         headers.insert(CONNECTION, HeaderValue::from_static("close"));
         Self {
@@ -77,6 +344,7 @@ impl WdaClient {
             port,
             udid: udid.to_string(),
             session_id: None,
+            profile,
         }
     }
 
@@ -94,6 +362,25 @@ impl WdaClient {
 
     /// Cheap probe so a cached session isn't reused after the device dropped it.
     pub async fn session_alive(&self) -> bool {
+        if self.profile.session_strategy == SessionStrategy::StatusThenCreate {
+            let Some(expected) = self.session_id.as_deref() else {
+                return false;
+            };
+            let url = format!("{}/status", self.base);
+            return self
+                .send(
+                    Method::Get,
+                    &url,
+                    "status.session",
+                    None,
+                    Duration::from_secs(5),
+                )
+                .await
+                .ok()
+                .and_then(|value| session_id_from(&value).map(str::to_string))
+                .as_deref()
+                == Some(expected);
+        }
         let Ok(url) = self.session_url("/window/size") else {
             return false;
         };
@@ -109,6 +396,51 @@ impl WdaClient {
     }
 
     pub async fn create_session(&mut self) -> Result<(), UiError> {
+        if self.profile.session_strategy == SessionStrategy::StatusThenCreate {
+            let status_url = format!("{}/status", self.base);
+            if let Ok(status) = self
+                .send(
+                    Method::Get,
+                    &status_url,
+                    "status.session",
+                    None,
+                    Duration::from_secs(5),
+                )
+                .await
+            {
+                if let Some(sid) = session_id_from(&status) {
+                    self.session_id = Some(sid.to_string());
+                    return Ok(());
+                }
+            }
+
+            let url = format!("{}/session", self.base);
+            let body = json!({
+                "capabilities": {
+                    "firstMatch": [{}],
+                    "alwaysMatch": {},
+                }
+            });
+            let resp = self
+                .send(
+                    Method::Post,
+                    &url,
+                    "session.create",
+                    Some(&body),
+                    Duration::from_secs(20),
+                )
+                .await?;
+            let sid = session_id_from(&resp).ok_or_else(|| {
+                UiError::new(
+                    UiErrorKind::Http,
+                    "session.create",
+                    format!("session id missing: {resp}"),
+                )
+            })?;
+            self.session_id = Some(sid.to_string());
+            return Ok(());
+        }
+
         let url = format!("{}/session", self.base);
         // No bundleId — do not launch/activate SpringBoard (that locks→Home).
         let resp = self
@@ -141,6 +473,65 @@ impl WdaClient {
             ));
         }
         Ok(())
+    }
+
+    /// Start a new RT-MMO automation session after the target app is already
+    /// foreground. Reattaching the session advertised by `/status` keeps
+    /// gestures alive but can leave `/wda/keys` acknowledging text it drops.
+    pub async fn create_fresh_session(&mut self) -> Result<(), UiError> {
+        if self.profile.session_strategy != SessionStrategy::StatusThenCreate {
+            return self.create_session().await;
+        }
+
+        let url = format!("{}/session", self.base);
+        let body = json!({"capabilities":{"firstMatch":[{}]}});
+        let create_error = match self
+            .send(
+                Method::Post,
+                &url,
+                "session.create_fresh",
+                Some(&body),
+                Duration::from_secs(20),
+            )
+            .await
+        {
+            Ok(resp) => {
+                if let Some(sid) = session_id_from(&resp).map(str::to_string) {
+                    self.session_id = Some(sid);
+                    return Ok(());
+                }
+                UiError::new(
+                    UiErrorKind::Http,
+                    "session.create_fresh",
+                    format!("session id missing: {resp}"),
+                )
+            }
+            Err(error) => error,
+        };
+
+        // Some RT-MMO builds reject POST /session and self-create one. Keep
+        // those builds usable, but only after the fresh-session request was
+        // attempted for builds that support it.
+        if may_attach_status_after_fresh_create_error(&create_error) {
+            let status_url = format!("{}/status", self.base);
+            if let Ok(status) = self
+                .send(
+                    Method::Get,
+                    &status_url,
+                    "status.session_fallback",
+                    None,
+                    Duration::from_secs(5),
+                )
+                .await
+            {
+                if let Some(sid) = session_id_from(&status).map(str::to_string) {
+                    self.session_id = Some(sid);
+                    return Ok(());
+                }
+            }
+        }
+
+        Err(create_error)
     }
 
     /// Send one cheap session command before anything else touches the
@@ -230,6 +621,67 @@ impl WdaClient {
         result
     }
 
+    async fn send_protected_route(
+        &self,
+        route: &ProtectedRouteContract,
+        label: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<serde_json::Value, UiError> {
+        self.send_protected_route_bounded(
+            route,
+            label,
+            body,
+            Some(INTERACTION_RESPONSE_LIMIT_BYTES),
+        )
+        .await
+    }
+
+    async fn send_protected_route_bounded(
+        &self,
+        route: &ProtectedRouteContract,
+        label: &str,
+        body: Option<&serde_json::Value>,
+        response_limit: Option<usize>,
+    ) -> Result<serde_json::Value, UiError> {
+        let method = match route.method {
+            RouteMethod::Get => Method::Get,
+            RouteMethod::Post => Method::Post,
+        };
+        let url = self.render_interaction_url(route)?;
+        let token = self.profile.auth_token.as_ref().ok_or_else(|| {
+            interaction_contract_error(label, "protected auth token is unavailable")
+        })?;
+        let timeout = Duration::from_millis(u64::from(route.request_timeout_ms));
+        let started = Instant::now();
+        let result = self
+            .send_inner_with_options(
+                method,
+                &url,
+                label,
+                body,
+                SendOptions {
+                    timeout,
+                    auth: Some((&route.auth_header_name, token.expose())),
+                    response_limit,
+                },
+            )
+            .await;
+        let ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+        let outcome = match &result {
+            Ok(_) => Outcome::Ok,
+            Err(error) => outcome_of(error.kind),
+        };
+        telemetry::record(&self.udid, label, ms, outcome);
+        result
+    }
+
+    fn render_interaction_url(&self, route: &ProtectedRouteContract) -> Result<String, UiError> {
+        match route.scope {
+            RouteScope::Sessionless => Ok(format!("{}{}", self.base, route.path)),
+            RouteScope::Session => self.session_url(&route.path),
+        }
+    }
+
     async fn send_inner(
         &self,
         method: Method,
@@ -238,15 +690,64 @@ impl WdaClient {
         body: Option<&serde_json::Value>,
         timeout: Duration,
     ) -> Result<serde_json::Value, UiError> {
+        let auth = self
+            .profile
+            .auth_token
+            .as_ref()
+            .map(|token| ("X-RT-Token", token.expose()));
+        self.send_inner_with_auth(method, url, label, body, timeout, auth)
+            .await
+    }
+
+    async fn send_inner_with_auth(
+        &self,
+        method: Method,
+        url: &str,
+        label: &str,
+        body: Option<&serde_json::Value>,
+        timeout: Duration,
+        auth: Option<(&str, &str)>,
+    ) -> Result<serde_json::Value, UiError> {
+        self.send_inner_with_options(
+            method,
+            url,
+            label,
+            body,
+            SendOptions {
+                timeout,
+                auth,
+                response_limit: None,
+            },
+        )
+        .await
+    }
+
+    async fn send_inner_with_options(
+        &self,
+        method: Method,
+        url: &str,
+        label: &str,
+        body: Option<&serde_json::Value>,
+        options: SendOptions<'_>,
+    ) -> Result<serde_json::Value, UiError> {
         let mut req = match method {
             Method::Get => self.http.get(url),
             Method::Post => self.http.post(url),
         };
-        req = req.timeout(timeout);
+        req = req.timeout(options.timeout);
+        if let Some((name, value)) = options.auth {
+            let name = HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+                interaction_contract_error(label, format!("invalid auth header: {error}"))
+            })?;
+            let value = HeaderValue::from_str(value).map_err(|error| {
+                interaction_contract_error(label, format!("invalid auth value: {error}"))
+            })?;
+            req = req.header(name, value);
+        }
         if let Some(b) = body {
             req = req.header("Content-Type", "application/json").json(b);
         }
-        let resp = req.send().await.map_err(|e| {
+        let mut resp = req.send().await.map_err(|e| {
             let kind = if e.is_timeout() {
                 UiErrorKind::Timeout
             } else {
@@ -256,7 +757,30 @@ impl WdaClient {
         })?;
 
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let text = if let Some(limit) = options.response_limit {
+            let mut bytes = Vec::with_capacity(limit.min(16 * 1024));
+            while let Some(chunk) = resp.chunk().await.map_err(|error| {
+                let kind = if error.is_timeout() {
+                    UiErrorKind::Timeout
+                } else {
+                    UiErrorKind::Transport
+                };
+                UiError::new(kind, label, format!("{url}: {error}"))
+            })? {
+                if bytes.len().saturating_add(chunk.len()) > limit {
+                    return Err(interaction_contract_error(
+                        label,
+                        format!("HTTP response exceeds {limit} bytes"),
+                    ));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            String::from_utf8(bytes).map_err(|error| {
+                interaction_contract_error(label, format!("response is not UTF-8: {error}"))
+            })?
+        } else {
+            resp.text().await.unwrap_or_default()
+        };
         if !status.is_success() {
             let parsed = serde_json::from_str::<serde_json::Value>(&text).ok();
             let w3c_error = parsed
@@ -332,7 +856,11 @@ impl WdaClient {
                 .timeout(Duration::from_secs(25))
                 .build()
                 .map_err(|e| UiError::new(UiErrorKind::Other, "screenshot", e.to_string()))?;
-            let resp = client.get(&url).send().await.map_err(|e| {
+            let mut request = client.get(&url);
+            if let Some(token) = self.profile.auth_token.as_ref() {
+                request = request.header("X-RT-Token", token.expose());
+            }
+            let resp = request.send().await.map_err(|e| {
                 let kind = if e.is_timeout() {
                     UiErrorKind::Timeout
                 } else {
@@ -368,6 +896,9 @@ impl WdaClient {
     }
 
     pub async fn window_size(&self) -> Result<(f64, f64), UiError> {
+        if self.profile.backend == WdaBackend::RtMmo {
+            return Ok(self.profile.logical_size);
+        }
         let url = self.session_url("/window/size")?;
         let resp = self
             .send(
@@ -433,6 +964,28 @@ impl WdaClient {
         })
     }
 
+    async fn rt_mmo_native_swipe(
+        &self,
+        from_x: f64,
+        from_y: f64,
+        to_x: f64,
+        to_y: f64,
+        delay: f64,
+        endpoint: &'static str,
+    ) -> Result<(), UiError> {
+        let url = format!("{}/wda/swipe", self.base);
+        let body = json!({
+            "delay": delay,
+            "fromX": from_x,
+            "fromY": from_y,
+            "toX": to_x,
+            "toY": to_y,
+        });
+        self.send(Method::Post, &url, endpoint, Some(&body), GESTURE_TIMEOUT)
+            .await?;
+        Ok(())
+    }
+
     /// Tap at a logical point.
     ///
     /// PRIMARY is W3C `/actions`, for the same reason swipe uses it: it posts
@@ -447,6 +1000,13 @@ impl WdaClient {
     pub async fn tap(&self, point: TapPoint) -> Result<(), UiError> {
         let x = point.x.round();
         let y = point.y.round();
+        if self.profile.backend == WdaBackend::RtMmo {
+            // RT-MMO exposes this native endpoint sessionless. W3C actions
+            // wedge its automation session after the first TikTok touch.
+            return self
+                .rt_mmo_native_swipe(x, y, x + 1.0, y + 1.0, 0.05, "tap.native-swipe")
+                .await;
+        }
         let body = Self::pointer_action(json!([
             { "type": "pointerMove", "duration": 0, "x": x, "y": y },
             { "type": "pointerDown", "button": 0 },
@@ -495,6 +1055,18 @@ impl WdaClient {
     /// interaction and which therefore focuses text fields. See
     /// `UiSession::tap_native`.
     pub async fn tap_native(&self, point: TapPoint) -> Result<(), UiError> {
+        if self.profile.backend == WdaBackend::RtMmo {
+            let url = format!("{}/wda/tap", self.base);
+            self.send(
+                Method::Post,
+                &url,
+                "tap.native",
+                Some(&json!({ "x": point.x.round(), "y": point.y.round() })),
+                GESTURE_TIMEOUT,
+            )
+            .await?;
+            return Ok(());
+        }
         let url = self.session_url("/wda/tap")?;
         self.send(
             Method::Post,
@@ -513,6 +1085,12 @@ impl WdaClient {
         let tx = gesture.to.x.round();
         let ty = gesture.to.y.round();
         let duration = (gesture.duration_ms as f64 / 1000.0).clamp(0.05, 2.0);
+
+        if self.profile.backend == WdaBackend::RtMmo {
+            return self
+                .rt_mmo_native_swipe(fx, fy, tx, ty, duration.clamp(0.08, 0.35), "swipe.native")
+                .await;
+        }
 
         // PRIMARY: W3C /actions. `/wda/dragfromtoforduration` uses an
         // XCUICoordinate drag, which waits for app quiescence; TikTok's feed
@@ -566,8 +1144,12 @@ impl WdaClient {
             return Ok(());
         }
         let url = self.session_url("/wda/keys")?;
+        let value = match self.profile.backend {
+            WdaBackend::RtMmo => vec![text.to_string()],
+            WdaBackend::Stock => text.chars().map(|c| c.to_string()).collect(),
+        };
         let body = json!({
-            "value": text.chars().map(|c| c.to_string()).collect::<Vec<_>>(),
+            "value": value,
         });
         self.send(
             Method::Post,
@@ -652,8 +1234,14 @@ impl WdaClient {
                         .and_then(|v| v.as_str());
                     if let Some(element_id) = element_id {
                         let click = self.session_url(&format!("/element/{element_id}/click"))?;
-                        self.send(Method::Post, &click, "element.click", Some(&json!({})), short)
-                            .await?;
+                        self.send(
+                            Method::Post,
+                            &click,
+                            "element.click",
+                            Some(&json!({})),
+                            short,
+                        )
+                        .await?;
                         return Ok(());
                     }
                     last = Some(UiError::new(
@@ -665,8 +1253,9 @@ impl WdaClient {
                 Err(e) => last = Some(e),
             }
         }
-        Err(last
-            .unwrap_or_else(|| UiError::new(UiErrorKind::Http, "element.find", "element not found")))
+        Err(last.unwrap_or_else(|| {
+            UiError::new(UiErrorKind::Http, "element.find", "element not found")
+        }))
     }
 
     pub async fn assert_visible(&self, accessibility_id: &str) -> Result<(), UiError> {
@@ -692,17 +1281,27 @@ impl WdaClient {
     }
 
     /// Liveness probe. Deliberately **not** a reason to recycle the runner:
-    /// `/status` false-negatives under USB load, and killing a live agent on
-    /// that signal cost 2–3 minutes per occurrence in live test #9. Only a
-    /// failed gesture with a transport error justifies touching the transport.
+    /// Stock `/status` false-negatives under USB load, and killing a live agent
+    /// on that signal cost 2–3 minutes per occurrence in live test #9. RT-MMO
+    /// uses its protected endpoint so a stale/wrong local listener is not
+    /// adopted as the selected agent. Only a failed gesture with a transport
+    /// error justifies touching the transport.
     pub async fn health_quick(&self) -> bool {
-        let url = format!("{}/status", self.base);
+        let (path, label) = if self.profile.backend == WdaBackend::RtMmo {
+            ("/wda/locked", "wda.locked")
+        } else {
+            ("/status", "status")
+        };
+        let url = format!("{}{path}", self.base);
         if self
-            .send(Method::Get, &url, "status", None, Duration::from_secs(4))
+            .send(Method::Get, &url, label, None, Duration::from_secs(4))
             .await
             .is_ok()
         {
             return true;
+        }
+        if self.profile.backend == WdaBackend::RtMmo {
+            return false;
         }
         let Ok(url) = self.session_url("/window/size") else {
             return false;
@@ -716,6 +1315,239 @@ impl WdaClient {
         )
         .await
         .is_ok()
+    }
+
+    pub async fn open_url(&self, url: &str) -> Result<(), UiError> {
+        self.open_url_with_idle_timeout(url, 0).await
+    }
+
+    async fn open_url_with_idle_timeout(
+        &self,
+        url: &str,
+        idle_timeout_ms: u32,
+    ) -> Result<(), UiError> {
+        if idle_timeout_ms != 0 {
+            return Err(interaction_contract_error(
+                "openUrl",
+                "idleTimeoutMs must be zero",
+            ));
+        }
+        if !url.starts_with("https://") || url.trim() != url {
+            return Err(interaction_contract_error(
+                "openUrl",
+                "only canonical HTTPS URLs are accepted",
+            ));
+        }
+        let capability = self
+            .profile
+            .interaction_http
+            .as_ref()
+            .and_then(|adapter| adapter.capabilities.open_url.as_ref())
+            .ok_or_else(|| interaction_contract_error("openUrl", "capability is unsupported"))?;
+        let body = json!({
+            "url": url,
+            "bundleId": capability.target_bundle_id,
+            "idleTimeoutMs": idle_timeout_ms,
+        });
+        self.send_protected_route(&capability.route, "interaction.openUrl", Some(&body))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_clipboard(&self, content_type: &str, bytes: &[u8]) -> Result<(), UiError> {
+        self.set_clipboard_for_mode(
+            ClipboardAccessMode::TargetBackgroundSafe,
+            content_type,
+            bytes,
+        )
+        .await
+    }
+
+    pub(crate) async fn set_clipboard_agent_foregrounded(
+        &self,
+        content_type: &str,
+        bytes: &[u8],
+    ) -> Result<(), UiError> {
+        self.set_clipboard_for_mode(
+            ClipboardAccessMode::AgentForegroundRequired,
+            content_type,
+            bytes,
+        )
+        .await
+    }
+
+    async fn set_clipboard_for_mode(
+        &self,
+        expected_mode: ClipboardAccessMode,
+        content_type: &str,
+        bytes: &[u8],
+    ) -> Result<(), UiError> {
+        use base64::Engine as _;
+
+        if content_type.trim().is_empty() || content_type.trim() != content_type {
+            return Err(interaction_contract_error(
+                "setClipboard",
+                "content type is blank or non-canonical",
+            ));
+        }
+        let capability = self
+            .profile
+            .interaction_http
+            .as_ref()
+            .and_then(|adapter| adapter.capabilities.clipboard.as_ref())
+            .ok_or_else(|| {
+                interaction_contract_error("setClipboard", "capability is unsupported")
+            })?;
+        if capability.mode != expected_mode {
+            return Err(interaction_contract_error(
+                "setClipboard",
+                "clipboard mode does not match the active lifecycle transition",
+            ));
+        }
+        if bytes.len() > capability.maximum_decoded_bytes as usize {
+            return Err(interaction_contract_error(
+                "setClipboard",
+                "clipboard value exceeds the qualified decoded-byte limit",
+            ));
+        }
+        let body = json!({
+            "content": base64::engine::general_purpose::STANDARD.encode(bytes),
+            "contentType": content_type,
+        });
+        self.send_protected_route(
+            &capability.set_route,
+            "interaction.setClipboard",
+            Some(&body),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_clipboard(
+        &self,
+        maximum_decoded_bytes: usize,
+    ) -> Result<(String, Vec<u8>), UiError> {
+        self.get_clipboard_for_mode(
+            ClipboardAccessMode::TargetBackgroundSafe,
+            maximum_decoded_bytes,
+        )
+        .await
+    }
+
+    pub(crate) async fn get_clipboard_agent_foregrounded(
+        &self,
+        maximum_decoded_bytes: usize,
+    ) -> Result<(String, Vec<u8>), UiError> {
+        self.get_clipboard_for_mode(
+            ClipboardAccessMode::AgentForegroundRequired,
+            maximum_decoded_bytes,
+        )
+        .await
+    }
+
+    async fn get_clipboard_for_mode(
+        &self,
+        expected_mode: ClipboardAccessMode,
+        maximum_decoded_bytes: usize,
+    ) -> Result<(String, Vec<u8>), UiError> {
+        use base64::Engine as _;
+
+        validate_clipboard_read_limit(maximum_decoded_bytes)
+            .map_err(|error| interaction_contract_error("getClipboard", error.to_string()))?;
+        let capability = self
+            .profile
+            .interaction_http
+            .as_ref()
+            .and_then(|adapter| adapter.capabilities.clipboard.as_ref())
+            .ok_or_else(|| {
+                interaction_contract_error("getClipboard", "capability is unsupported")
+            })?;
+        if capability.mode != expected_mode {
+            return Err(interaction_contract_error(
+                "getClipboard",
+                "clipboard mode does not match the active lifecycle transition",
+            ));
+        }
+        let qualified_limit = capability.maximum_decoded_bytes as usize;
+        let limit = maximum_decoded_bytes.min(qualified_limit);
+        let maximum_encoded_len = limit.saturating_add(2) / 3 * 4;
+        let body = json!({"contentType": "plaintext"});
+        let response = self
+            .send_protected_route_bounded(
+                &capability.get_route,
+                "interaction.getClipboard",
+                Some(&body),
+                Some(maximum_encoded_len.saturating_add(CLIPBOARD_RESPONSE_OVERHEAD_BYTES)),
+            )
+            .await?;
+        let encoded = response
+            .get("value")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                interaction_contract_error("getClipboard", "response is missing base64 value")
+            })?;
+        if encoded.len() > maximum_encoded_len {
+            return Err(interaction_contract_error(
+                "getClipboard",
+                "encoded clipboard value exceeds the caller limit",
+            ));
+        }
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|error| {
+                interaction_contract_error(
+                    "getClipboard",
+                    format!("invalid base64 response: {error}"),
+                )
+            })?;
+        if decoded.len() > limit {
+            return Err(interaction_contract_error(
+                "getClipboard",
+                "decoded clipboard value exceeds the caller limit",
+            ));
+        }
+        Ok(("plaintext".to_string(), decoded))
+    }
+
+    pub async fn active_app_identity(&self) -> Result<ActiveAppIdentity, UiError> {
+        let route = self
+            .profile
+            .interaction_http
+            .as_ref()
+            .and_then(|adapter| adapter.active_app_route.as_ref())
+            .ok_or_else(|| {
+                interaction_contract_error("activeAppInfo", "capability is unsupported")
+            })?;
+        let response = self
+            .send_protected_route(route, "interaction.activeAppInfo", None)
+            .await?;
+        let value = response.get("value").ok_or_else(|| {
+            interaction_contract_error("activeAppInfo", "response value is missing")
+        })?;
+        let bundle_id = value
+            .get("bundleId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty() && value.trim() == *value)
+            .ok_or_else(|| interaction_contract_error("activeAppInfo", "bundleId is missing"))?;
+        let pid = value
+            .get("pid")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|pid| *pid > 0)
+            .ok_or_else(|| interaction_contract_error("activeAppInfo", "pid is missing"))?;
+        Ok(ActiveAppIdentity {
+            bundle_id: bundle_id.to_string(),
+            pid,
+        })
+    }
+
+    #[cfg(test)]
+    fn interaction_request_timeout(&self) -> Result<Duration, UiError> {
+        self.profile
+            .interaction_http
+            .as_ref()
+            .and_then(|adapter| adapter.capabilities.open_url.as_ref())
+            .map(|capability| Duration::from_millis(u64::from(capability.route.request_timeout_ms)))
+            .ok_or_else(|| interaction_contract_error("openUrl", "capability is unsupported"))
     }
 
     /// Bundle id of the frontmost application.
@@ -793,6 +1625,26 @@ enum Method {
     Post,
 }
 
+fn session_id_from(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("sessionId")
+        .or_else(|| value.pointer("/value/sessionId"))
+        .and_then(|v| v.as_str())
+        .filter(|sid| !sid.is_empty() && *sid != "0")
+}
+
+fn may_attach_status_after_fresh_create_error(error: &UiError) -> bool {
+    if error.kind != UiErrorKind::Http {
+        return false;
+    }
+    error
+        .message
+        .strip_prefix("HTTP ")
+        .and_then(|message| message.split_whitespace().next())
+        .and_then(|status| status.parse::<u16>().ok())
+        .is_some_and(|status| matches!(status, 404 | 405 | 501))
+}
+
 fn outcome_of(kind: UiErrorKind) -> Outcome {
     match kind {
         UiErrorKind::Transport => Outcome::Transport,
@@ -813,6 +1665,875 @@ fn is_session_gone(w3c_error: &str, message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
+    use riviu_core::{
+        ClipboardAccessMode, ClipboardCapability, OpenUrlCapability, ProtectedRouteContract,
+        QualifiedGeometry, RouteMethod, RouteScope, ScreenOrientation, TargetIdentityCapability,
+        UiCapabilities,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const FIXTURE_TOKEN: &str = "fixture-protected-token";
+
+    fn interaction_route(
+        contract_id: &str,
+        scope: RouteScope,
+        path: &str,
+        schema: &str,
+    ) -> ProtectedRouteContract {
+        ProtectedRouteContract {
+            contract_id: contract_id.to_string(),
+            method: RouteMethod::Post,
+            scope,
+            path: path.to_string(),
+            auth_header_name: "X-Fixture-Token".to_string(),
+            body_schema_id: schema.to_string(),
+            request_timeout_ms: 10_000,
+        }
+    }
+
+    fn interaction_capabilities(scope: RouteScope) -> UiCapabilities {
+        UiCapabilities {
+            open_url: Some(OpenUrlCapability {
+                route: interaction_route(
+                    "fixture-open-url-v1",
+                    scope,
+                    "/fixture/url",
+                    "open-url-body-v1",
+                ),
+                target_bundle_id: "com.ss.iphone.ugc.Ame".to_string(),
+                live_report_sha256: "22".repeat(32),
+            }),
+            clipboard: Some(ClipboardCapability {
+                mode: ClipboardAccessMode::TargetBackgroundSafe,
+                set_route: interaction_route(
+                    "fixture-clipboard-set-v1",
+                    scope,
+                    "/fixture/clipboard/set",
+                    "clipboard-set-base64-v1",
+                ),
+                get_route: interaction_route(
+                    "fixture-clipboard-get-v1",
+                    scope,
+                    "/fixture/clipboard/get",
+                    "clipboard-get-base64-v1",
+                ),
+                maximum_decoded_bytes: 65_536,
+                live_report_sha256: "22".repeat(32),
+            }),
+            target_identity_copy_link: Some(TargetIdentityCapability {
+                open_url_contract_id: "fixture-open-url-v1".to_string(),
+                clipboard_contract_id: "fixture-clipboard-v1".to_string(),
+                share_detector_version: "fixture-share-v1".to_string(),
+                copy_link_detector_version: "fixture-copy-link-v1".to_string(),
+                detector_set_sha256: "11".repeat(32),
+                layout_id: "fixture-layout-v1".to_string(),
+                geometry: QualifiedGeometry {
+                    logical_width: 375.0,
+                    logical_height: 667.0,
+                    pixel_width: 750,
+                    pixel_height: 1334,
+                    scale_x: 2.0,
+                    scale_y: 2.0,
+                    orientation: ScreenOrientation::Portrait,
+                },
+                live_report_sha256: "22".repeat(32),
+            }),
+        }
+    }
+
+    fn interaction_client(port: u16, scope: RouteScope) -> WdaClient {
+        let profile =
+            WdaProfile::interaction_fixture(FIXTURE_TOKEN, interaction_capabilities(scope));
+        let mut client = WdaClient::new_with_profile("127.0.0.1", port, "fixture", profile);
+        client.session_id = Some("fixture-session".to_string());
+        client
+    }
+
+    async fn one_response_server(
+        body: &'static str,
+    ) -> (u16, tokio::sync::oneshot::Receiver<String>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind test server");
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 2048];
+            loop {
+                let n = socket.read(&mut chunk).await.expect("read request");
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..n]);
+                if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let _ = tx.send(String::from_utf8_lossy(&request).into_owned());
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+        (port, rx)
+    }
+
+    async fn scripted_server(
+        bodies: Vec<&'static str>,
+    ) -> (u16, tokio::sync::oneshot::Receiver<Vec<String>>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind test server");
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for body in bodies {
+                let (mut socket, _) = listener.accept().await.expect("accept request");
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 2048];
+                loop {
+                    let n = socket.read(&mut chunk).await.expect("read request");
+                    if n == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..n]);
+                    let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + 4 + content_length {
+                        break;
+                    }
+                }
+                requests.push(String::from_utf8_lossy(&request).into_owned());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write response");
+            }
+            let _ = tx.send(requests);
+        });
+        (port, rx)
+    }
+
+    async fn one_status_server(
+        status: &'static str,
+        body: &'static str,
+    ) -> (u16, tokio::sync::oneshot::Receiver<String>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind test server");
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 2048];
+            loop {
+                let n = socket.read(&mut chunk).await.expect("read request");
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..n]);
+                let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            let _ = tx.send(String::from_utf8_lossy(&request).into_owned());
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+        (port, rx)
+    }
+
+    async fn stalling_server(delay: Duration) -> u16 {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind test server");
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = [0u8; 2048];
+            let _ = socket.read(&mut request).await.expect("read request");
+            tokio::time::sleep(delay).await;
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn interaction_http_contract_open_url_is_exact_and_profile_scoped() {
+        for (scope, expected_path) in [
+            (RouteScope::Sessionless, "/fixture/url"),
+            (RouteScope::Session, "/session/fixture-session/fixture/url"),
+        ] {
+            let (port, requests) = scripted_server(vec![r#"{"value":null}"#]).await;
+            let client = interaction_client(port, scope);
+
+            client
+                .open_url("https://www.tiktok.com/@fixture/video/123")
+                .await
+                .expect("qualified URL request");
+
+            let requests = requests.await.expect("captured request");
+            let request = &requests[0];
+            assert!(
+                request.starts_with(&format!("POST {expected_path} HTTP/1.1")),
+                "{request}"
+            );
+            let lower = request.to_ascii_lowercase();
+            assert!(
+                lower.contains("x-fixture-token: fixture-protected-token"),
+                "{request}"
+            );
+            assert!(!lower.contains("x-rt-token:"), "{request}");
+            let (_, body) = request.split_once("\r\n\r\n").unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(body).unwrap(),
+                json!({
+                    "url": "https://www.tiktok.com/@fixture/video/123",
+                    "bundleId": "com.ss.iphone.ugc.Ame",
+                    "idleTimeoutMs": 0,
+                })
+            );
+            assert_eq!(
+                client.interaction_request_timeout().unwrap(),
+                Duration::from_secs(10)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn interaction_http_contract_clipboard_uses_exact_base64_schema_and_bound() {
+        for (scope, prefix) in [
+            (RouteScope::Sessionless, ""),
+            (RouteScope::Session, "/session/fixture-session"),
+        ] {
+            let encoded = base64::engine::general_purpose::STANDARD.encode("xin chao".as_bytes());
+            let response: &'static str =
+                Box::leak(json!({"value": encoded}).to_string().into_boxed_str());
+            let (port, requests) = scripted_server(vec![r#"{"value":null}"#, response]).await;
+            let client = interaction_client(port, scope);
+
+            client
+                .set_clipboard("plaintext", "xin chao".as_bytes())
+                .await
+                .expect("set clipboard");
+            let (content_type, bytes) = client.get_clipboard(65_536).await.expect("get clipboard");
+
+            assert_eq!(content_type, "plaintext");
+            assert_eq!(bytes, "xin chao".as_bytes());
+            let requests = requests.await.expect("captured requests");
+            assert!(
+                requests[0].starts_with(&format!("POST {prefix}/fixture/clipboard/set HTTP/1.1"))
+            );
+            assert!(
+                requests[1].starts_with(&format!("POST {prefix}/fixture/clipboard/get HTTP/1.1"))
+            );
+            for request in &requests {
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("x-fixture-token: fixture-protected-token"),
+                    "{request}"
+                );
+            }
+            let set_body = requests[0].split_once("\r\n\r\n").unwrap().1;
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(set_body).unwrap(),
+                json!({
+                    "content": base64::engine::general_purpose::STANDARD.encode("xin chao"),
+                    "contentType": "plaintext",
+                })
+            );
+            let get_body = requests[1].split_once("\r\n\r\n").unwrap().1;
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(get_body).unwrap(),
+                json!({"contentType": "plaintext"})
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn interaction_http_contract_agent_clipboard_route_requires_guarded_primitive() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"agent-value");
+        let response: &'static str =
+            Box::leak(json!({"value": encoded}).to_string().into_boxed_str());
+        let (port, requests) = scripted_server(vec![r#"{"value":null}"#, response]).await;
+        let mut capabilities = interaction_capabilities(RouteScope::Sessionless);
+        capabilities.clipboard.as_mut().unwrap().mode =
+            ClipboardAccessMode::AgentForegroundRequired;
+        let profile = WdaProfile::interaction_fixture(FIXTURE_TOKEN, capabilities);
+        let client = WdaClient::new_with_profile("127.0.0.1", port, "fixture", profile);
+
+        assert!(client
+            .set_clipboard("plaintext", b"must-not-send-directly")
+            .await
+            .is_err());
+        client
+            .set_clipboard_agent_foregrounded("plaintext", b"agent-value")
+            .await
+            .expect("guarded set primitive");
+        assert_eq!(
+            client
+                .get_clipboard_agent_foregrounded(65_536)
+                .await
+                .expect("guarded get primitive")
+                .1,
+            b"agent-value"
+        );
+
+        let requests = requests.await.expect("captured guarded requests");
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("POST /fixture/clipboard/set HTTP/1.1"));
+        assert!(requests[1].starts_with("POST /fixture/clipboard/get HTTP/1.1"));
+    }
+
+    #[tokio::test]
+    async fn interaction_http_contract_rejects_invalid_and_oversized_clipboard_values() {
+        for response in [
+            r#"{"value":"%%%not-base64%%%"}"#.to_string(),
+            json!({"value": base64::engine::general_purpose::STANDARD.encode(vec![7u8; 65_537])})
+                .to_string(),
+            json!({"value": "A".repeat(100_000)}).to_string(),
+        ] {
+            let response: &'static str = Box::leak(response.into_boxed_str());
+            let (port, _) = scripted_server(vec![response]).await;
+            let client = interaction_client(port, RouteScope::Sessionless);
+            assert!(client.get_clipboard(65_536).await.is_err());
+        }
+
+        let client = interaction_client(9, RouteScope::Sessionless);
+        assert!(client.get_clipboard(65_537).await.is_err());
+        assert!(client
+            .set_clipboard("plaintext", &vec![0u8; 65_537])
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn interaction_http_contract_active_app_identity_requires_bundle_and_positive_pid() {
+        let (port, requests) = scripted_server(vec![
+            r#"{"value":{"bundleId":"com.ss.iphone.ugc.Ame","pid":1234}}"#,
+        ])
+        .await;
+        let client = interaction_client(port, RouteScope::Sessionless);
+
+        let identity = client.active_app_identity().await.expect("active identity");
+
+        assert_eq!(identity.bundle_id, "com.ss.iphone.ugc.Ame");
+        assert_eq!(identity.pid, 1234);
+        let requests = requests.await.expect("captured request");
+        assert!(requests[0].starts_with("GET /wda/activeAppInfo HTTP/1.1"));
+        assert!(requests[0]
+            .to_ascii_lowercase()
+            .contains("x-fixture-token: fixture-protected-token"));
+
+        for response in [
+            r#"{"value":{"bundleId":"com.ss.iphone.ugc.Ame","pid":0}}"#,
+            r#"{"value":{"bundleId":"com.ss.iphone.ugc.Ame"}}"#,
+        ] {
+            let (port, _) = scripted_server(vec![response]).await;
+            let client = interaction_client(port, RouteScope::Sessionless);
+            assert!(client.active_app_identity().await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn interaction_http_contract_clipboard_and_identity_fail_closed_on_auth() {
+        let mut missing_auth = WdaProfile::interaction_fixture(
+            FIXTURE_TOKEN,
+            interaction_capabilities(RouteScope::Sessionless),
+        );
+        missing_auth.auth_token = None;
+        let client = WdaClient::new_with_profile("127.0.0.1", 9, "fixture", missing_auth);
+        assert!(client.set_clipboard("plaintext", b"fixture").await.is_err());
+        assert!(client.active_app_identity().await.is_err());
+
+        let (port, request) = one_status_server(
+            "401 Unauthorized",
+            r#"{"value":{"error":"unauthorized","message":"bad token"}}"#,
+        )
+        .await;
+        let profile = WdaProfile::interaction_fixture(
+            "wrong-fixture-token",
+            interaction_capabilities(RouteScope::Sessionless),
+        );
+        let client = WdaClient::new_with_profile("127.0.0.1", port, "fixture", profile);
+        let error = client
+            .set_clipboard("plaintext", b"fixture")
+            .await
+            .expect_err("wrong clipboard auth must be rejected");
+        assert_eq!(error.kind, UiErrorKind::Http);
+        assert!(request
+            .await
+            .expect("captured clipboard request")
+            .to_ascii_lowercase()
+            .contains("x-fixture-token: wrong-fixture-token"));
+
+        let (port, request) = one_status_server(
+            "401 Unauthorized",
+            r#"{"value":{"error":"unauthorized","message":"bad token"}}"#,
+        )
+        .await;
+        let profile = WdaProfile::interaction_fixture(
+            "wrong-fixture-token",
+            interaction_capabilities(RouteScope::Sessionless),
+        );
+        let client = WdaClient::new_with_profile("127.0.0.1", port, "fixture", profile);
+        let error = client
+            .active_app_identity()
+            .await
+            .expect_err("wrong identity auth must be rejected");
+        assert_eq!(error.kind, UiErrorKind::Http);
+        assert!(request
+            .await
+            .expect("captured identity request")
+            .to_ascii_lowercase()
+            .contains("x-fixture-token: wrong-fixture-token"));
+    }
+
+    #[tokio::test]
+    async fn interaction_http_contract_uses_request_local_deadline() {
+        let port = stalling_server(Duration::from_millis(500)).await;
+        let mut capabilities = interaction_capabilities(RouteScope::Sessionless);
+        let clipboard = capabilities.clipboard.as_mut().expect("clipboard fixture");
+        clipboard.set_route.request_timeout_ms = 50;
+        clipboard.get_route.request_timeout_ms = 50;
+        let profile = WdaProfile::interaction_fixture(FIXTURE_TOKEN, capabilities);
+        let client = WdaClient::new_with_profile("127.0.0.1", port, "fixture", profile);
+        let started = Instant::now();
+
+        let error = client
+            .set_clipboard("plaintext", b"fixture")
+            .await
+            .expect_err("stalled request must hit its route-local deadline");
+
+        assert_eq!(error.kind, UiErrorKind::Timeout);
+        assert!(started.elapsed() < Duration::from_millis(400));
+    }
+
+    #[tokio::test]
+    async fn interaction_http_contract_fails_closed_for_missing_or_unknown_contracts() {
+        let mut no_open = interaction_capabilities(RouteScope::Sessionless);
+        no_open.open_url = None;
+        no_open.target_identity_copy_link = None;
+        let profile = WdaProfile::interaction_fixture(FIXTURE_TOKEN, no_open);
+        let client = WdaClient::new_with_profile("127.0.0.1", 9, "fixture", profile);
+        assert!(client.open_url("https://example.invalid").await.is_err());
+
+        let mut unknown = interaction_capabilities(RouteScope::Sessionless);
+        unknown.open_url.as_mut().unwrap().route.body_schema_id = "unknown-schema".into();
+        assert!(WdaProfile::try_interaction_fixture(FIXTURE_TOKEN, unknown).is_err());
+
+        let mut wrong_method = interaction_capabilities(RouteScope::Sessionless);
+        wrong_method.open_url.as_mut().unwrap().route.method = RouteMethod::Get;
+        assert!(WdaProfile::try_interaction_fixture(FIXTURE_TOKEN, wrong_method).is_err());
+
+        let client = interaction_client(9, RouteScope::Sessionless);
+        assert!(client
+            .open_url_with_idle_timeout("https://example.invalid", 1)
+            .await
+            .is_err());
+
+        let profile = WdaProfile::interaction_fixture(
+            FIXTURE_TOKEN,
+            interaction_capabilities(RouteScope::Session),
+        );
+        let client = WdaClient::new_with_profile("127.0.0.1", 9, "fixture", profile);
+        let error = client
+            .open_url("https://example.invalid")
+            .await
+            .expect_err("session route without a session must fail before HTTP");
+        assert_eq!(error.kind, UiErrorKind::Session);
+    }
+
+    #[tokio::test]
+    async fn interaction_http_contract_auth_errors_and_open_failure_have_no_fallback() {
+        let (port, request) = one_status_server(
+            "401 Unauthorized",
+            r#"{"value":{"error":"unauthorized","message":"bad token"}}"#,
+        )
+        .await;
+        let profile = WdaProfile::interaction_fixture(
+            "wrong-fixture-token",
+            interaction_capabilities(RouteScope::Sessionless),
+        );
+        let client = WdaClient::new_with_profile("127.0.0.1", port, "fixture", profile);
+        let error = client
+            .open_url("https://www.tiktok.com/@fixture/video/123")
+            .await
+            .expect_err("wrong auth must be rejected");
+        assert_eq!(error.kind, UiErrorKind::Http);
+        let request = request.await.expect("captured request");
+        assert!(request.starts_with("POST /fixture/url HTTP/1.1"));
+
+        let (port, request) = one_status_server(
+            "500 Internal Server Error",
+            r#"{"value":{"error":"unknown error","message":"open failed"}}"#,
+        )
+        .await;
+        let client = interaction_client(port, RouteScope::Sessionless);
+        assert!(client
+            .open_url("https://www.tiktok.com/@fixture/video/123")
+            .await
+            .is_err());
+        let request = request.await.expect("single captured request");
+        assert!(request.starts_with("POST /fixture/url HTTP/1.1"));
+        assert!(!request.contains("Safari"));
+
+        let mut profile = WdaProfile::interaction_fixture(
+            FIXTURE_TOKEN,
+            interaction_capabilities(RouteScope::Sessionless),
+        );
+        profile.auth_token = None;
+        let client = WdaClient::new_with_profile("127.0.0.1", 9, "fixture", profile);
+        assert!(client
+            .open_url("https://www.tiktok.com/@fixture/video/123")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn interaction_http_contract_production_rt_profile_stays_unsupported() {
+        let profile = WdaProfile::rt_mmo("production-fixture-token".to_string());
+        let client = WdaClient::new_with_profile("127.0.0.1", 9, "fixture", profile);
+
+        assert!(client
+            .open_url("https://www.tiktok.com/@fixture/video/123")
+            .await
+            .is_err());
+        assert!(client.set_clipboard("plaintext", b"fixture").await.is_err());
+        assert!(client.get_clipboard(65_536).await.is_err());
+        assert!(client.active_app_identity().await.is_err());
+    }
+
+    #[test]
+    fn rt_mmo_profile_keeps_control_stream_and_launch_on_one_agent() {
+        let profile = WdaProfile::rt_mmo("test-token".to_string());
+
+        assert_eq!(profile.backend, WdaBackend::RtMmo);
+        assert_eq!(profile.bundle_id, "com.mrph.svc");
+        assert_eq!(profile.device_port, 8906);
+        assert_eq!(profile.mjpeg_port, 9093);
+        assert_eq!(
+            profile.auth_token.as_ref().map(AgentToken::expose),
+            Some("test-token")
+        );
+        assert_eq!(profile.logical_size, (375.0, 667.0));
+        assert_eq!(profile.launch_kind, LaunchKind::Application);
+        assert_eq!(profile.session_strategy, SessionStrategy::StatusThenCreate);
+        assert!(!format!("{profile:?}").contains("test-token"));
+    }
+
+    #[tokio::test]
+    async fn rt_mmo_attaches_status_session_with_auth_and_without_post_or_prime() {
+        let (port, request) = one_response_server(r#"{"value":{"sessionId":"sid-status"}}"#).await;
+        let profile = WdaProfile::rt_mmo("test-token".to_string());
+        let mut client = WdaClient::new_with_profile("127.0.0.1", port, "udid-a", profile);
+
+        client.create_session().await.expect("attach session");
+
+        let request = request.await.expect("captured request");
+        assert!(request.starts_with("GET /status HTTP/1.1"), "{request}");
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("x-rt-token: test-token"),
+            "{request}"
+        );
+        assert_eq!(client.session_id.as_deref(), Some("sid-status"));
+    }
+
+    #[tokio::test]
+    async fn rt_mmo_creates_session_only_when_status_has_no_session_id() {
+        let (port, requests) = scripted_server(vec![
+            r#"{"value":{"ready":true}}"#,
+            r#"{"sessionId":"sid-created","value":{}}"#,
+        ])
+        .await;
+        let profile = WdaProfile::rt_mmo("test-token".to_string());
+        let mut client = WdaClient::new_with_profile("127.0.0.1", port, "udid-a", profile);
+
+        client
+            .create_session()
+            .await
+            .expect("create fallback session");
+
+        let requests = requests.await.expect("captured requests");
+        assert_eq!(requests.len(), 2, "{requests:#?}");
+        assert!(requests[0].starts_with("GET /status HTTP/1.1"));
+        assert!(requests[1].starts_with("POST /session HTTP/1.1"));
+        let (_, body) = requests[1].split_once("\r\n\r\n").unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(body).unwrap(),
+            json!({"capabilities":{"firstMatch":[{}],"alwaysMatch":{}}})
+        );
+        assert!(requests.iter().all(|request| request
+            .to_ascii_lowercase()
+            .contains("x-rt-token: test-token")));
+        assert_eq!(client.session_id.as_deref(), Some("sid-created"));
+    }
+
+    #[tokio::test]
+    async fn rt_mmo_screenshot_request_keeps_the_auth_header() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"png");
+        let body: &'static str = Box::leak(
+            serde_json::json!({"value": encoded})
+                .to_string()
+                .into_boxed_str(),
+        );
+        let (port, request) = one_response_server(body).await;
+        let profile = WdaProfile::rt_mmo("test-token".to_string());
+        let client = WdaClient::new_with_profile("127.0.0.1", port, "udid-a", profile);
+
+        assert_eq!(client.screenshot_png().await.unwrap(), b"png");
+
+        let request = request.await.expect("captured request");
+        assert!(request.starts_with("GET /screenshot HTTP/1.1"), "{request}");
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("x-rt-token: test-token"),
+            "{request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rt_mmo_fresh_text_session_posts_exact_payload_before_status() {
+        let (port, request) = one_response_server(r#"{"sessionId":"sid-fresh","value":{}}"#).await;
+        let profile = WdaProfile::rt_mmo("test-token".to_string());
+        let mut client = WdaClient::new_with_profile("127.0.0.1", port, "udid-a", profile);
+
+        client
+            .create_fresh_session()
+            .await
+            .expect("create fresh session");
+
+        let request = request.await.expect("captured request");
+        assert!(request.starts_with("POST /session HTTP/1.1"), "{request}");
+        let (_, body) = request.split_once("\r\n\r\n").unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(body).unwrap(),
+            json!({"capabilities":{"firstMatch":[{}]}})
+        );
+        assert_eq!(client.session_id.as_deref(), Some("sid-fresh"));
+    }
+
+    #[test]
+    fn fresh_session_status_fallback_is_limited_to_agent_rejection() {
+        for message in [
+            "HTTP 404 Not Found: unknown command",
+            "HTTP 405 Method Not Allowed",
+            "HTTP 501 Not Implemented",
+        ] {
+            assert!(may_attach_status_after_fresh_create_error(&UiError::new(
+                UiErrorKind::Http,
+                "session.create_fresh",
+                message,
+            )));
+        }
+        for message in [
+            "HTTP 401 Unauthorized",
+            "HTTP 500 Internal Server Error",
+            "session id missing: {}",
+        ] {
+            assert!(
+                !may_attach_status_after_fresh_create_error(&UiError::new(
+                    UiErrorKind::Http,
+                    "session.create_fresh",
+                    message,
+                )),
+                "{message} must not attach a stale status session"
+            );
+        }
+        for kind in [
+            UiErrorKind::Transport,
+            UiErrorKind::Timeout,
+            UiErrorKind::Session,
+            UiErrorKind::Other,
+        ] {
+            assert!(
+                !may_attach_status_after_fresh_create_error(&UiError::new(
+                    kind,
+                    "session.create_fresh",
+                    "request failed",
+                )),
+                "{kind:?} must not attach a potentially stale status session"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rt_mmo_taps_use_sessionless_native_swipe() {
+        let (port, requests) =
+            scripted_server(vec![r#"{"value":null}"#, r#"{"value":null}"#]).await;
+        let profile = WdaProfile::rt_mmo("test-token".to_string());
+        let mut client = WdaClient::new_with_profile("127.0.0.1", port, "udid-a", profile);
+        client.session_id = Some("sid-attached".to_string());
+
+        client.tap(TapPoint { x: 120.2, y: 639.8 }).await.unwrap();
+        client
+            .tap_native(TapPoint { x: 337.0, y: 307.0 })
+            .await
+            .unwrap();
+
+        let requests = requests.await.expect("captured requests");
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[0].starts_with("POST /wda/swipe HTTP/1.1"),
+            "{}",
+            requests[0]
+        );
+        assert!(
+            requests[1].starts_with("POST /wda/tap HTTP/1.1"),
+            "{}",
+            requests[1]
+        );
+        for request in &requests {
+            assert!(!request.contains("/actions"), "{request}");
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("x-rt-token: test-token"));
+        }
+        let (_, first_body) = requests[0].split_once("\r\n\r\n").unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(first_body).unwrap(),
+            json!({"delay":0.05,"fromX":120.0,"fromY":640.0,"toX":121.0,"toY":641.0})
+        );
+        let (_, second_body) = requests[1].split_once("\r\n\r\n").unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(second_body).unwrap(),
+            json!({"x":337.0,"y":307.0})
+        );
+    }
+
+    #[tokio::test]
+    async fn rt_mmo_types_whole_text_as_one_value_token() {
+        let (port, request) = one_response_server(r#"{"value":null}"#).await;
+        let profile = WdaProfile::rt_mmo("test-token".to_string());
+        let mut client = WdaClient::new_with_profile("127.0.0.1", port, "udid-a", profile);
+        client.session_id = Some("sid-attached".to_string());
+
+        client.type_text("Hay qua ban oi").await.unwrap();
+
+        let request = request.await.expect("captured request");
+        assert!(
+            request.starts_with("POST /session/sid-attached/wda/keys HTTP/1.1"),
+            "{request}"
+        );
+        let (_, body) = request.split_once("\r\n\r\n").unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(body).unwrap(),
+            json!({"value":["Hay qua ban oi"]})
+        );
+    }
+
+    #[tokio::test]
+    async fn rt_mmo_feed_swipe_uses_sessionless_native_endpoint() {
+        let (port, request) = one_response_server(r#"{"value":null}"#).await;
+        let profile = WdaProfile::rt_mmo("test-token".to_string());
+        let mut client = WdaClient::new_with_profile("127.0.0.1", port, "udid-a", profile);
+        client.session_id = Some("sid-attached".to_string());
+
+        client
+            .swipe(SwipeGesture {
+                from: TapPoint { x: 180.0, y: 530.0 },
+                to: TapPoint { x: 180.0, y: 180.0 },
+                duration_ms: 300,
+            })
+            .await
+            .unwrap();
+
+        let request = request.await.expect("captured request");
+        assert!(request.starts_with("POST /wda/swipe HTTP/1.1"), "{request}");
+        assert!(!request.contains("/actions"), "{request}");
+        let (_, body) = request.split_once("\r\n\r\n").unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(body).unwrap(),
+            json!({"delay":0.3,"fromX":180.0,"fromY":530.0,"toX":180.0,"toY":180.0})
+        );
+    }
+
+    #[tokio::test]
+    async fn rt_mmo_uses_logical_size_without_probing_missing_window_endpoint() {
+        let profile = WdaProfile::rt_mmo("test-token".to_string());
+        let client = WdaClient::new_with_profile("127.0.0.1", 9, "udid-a", profile);
+
+        assert_eq!(client.window_size().await.unwrap(), (375.0, 667.0));
+        let point = client.to_points(375.0, 667.0, 750.0, 1334.0).await.unwrap();
+        assert_eq!(point.x, 187.5);
+        assert_eq!(point.y, 333.5);
+    }
+
+    #[tokio::test]
+    async fn rt_mmo_cached_session_liveness_uses_status_not_window_size() {
+        let (port, request) = one_response_server(r#"{"sessionId":"sid-status"}"#).await;
+        let profile = WdaProfile::rt_mmo("test-token".to_string());
+        let mut client = WdaClient::new_with_profile("127.0.0.1", port, "udid-a", profile);
+        client.session_id = Some("sid-status".to_string());
+
+        assert!(client.session_alive().await);
+
+        let request = request.await.expect("captured request");
+        assert!(request.starts_with("GET /status HTTP/1.1"), "{request}");
+    }
+
+    #[tokio::test]
+    async fn rt_mmo_transport_readiness_uses_the_protected_route() {
+        let (port, request) = one_response_server(r#"{"value":false}"#).await;
+        let profile = WdaProfile::rt_mmo("test-token".to_string());
+        let client = WdaClient::new_with_profile("127.0.0.1", port, "udid-a", profile);
+
+        assert!(client.health_quick().await);
+
+        let request = request.await.expect("captured request");
+        assert!(request.starts_with("GET /wda/locked HTTP/1.1"), "{request}");
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("x-rt-token: test-token"));
+    }
 
     #[test]
     fn nurture_session_omits_bundle_id_to_avoid_homescreen_flash() {
@@ -829,7 +2550,9 @@ mod tests {
         assert!(caps
             .pointer("/capabilities/alwaysMatch/appium:autoDismissAlerts")
             .is_none());
-        assert!(caps.pointer("/desiredCapabilities/autoDismissAlerts").is_none());
+        assert!(caps
+            .pointer("/desiredCapabilities/autoDismissAlerts")
+            .is_none());
         assert!(caps
             .pointer("/capabilities/alwaysMatch/defaultAlertAction")
             .is_none());
@@ -840,8 +2563,16 @@ mod tests {
     /// "Invalid locator requested" and the lookup never runs.
     #[test]
     fn locator_strategies_use_raw_wda_names() {
-        for name in ["predicate string", "class chain", "class name", "accessibility id"] {
-            assert!(!name.starts_with("-ios "), "{name} carries the Appium prefix");
+        for name in [
+            "predicate string",
+            "class chain",
+            "class name",
+            "accessibility id",
+        ] {
+            assert!(
+                !name.starts_with("-ios "),
+                "{name} carries the Appium prefix"
+            );
         }
     }
 
@@ -852,7 +2583,10 @@ mod tests {
             "",
             "A session is either terminated or not started"
         ));
-        assert!(!is_session_gone("no such element", "unable to find element"));
+        assert!(!is_session_gone(
+            "no such element",
+            "unable to find element"
+        ));
         assert!(!is_session_gone("", "HTTP 500"));
     }
 

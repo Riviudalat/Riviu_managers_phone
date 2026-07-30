@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  agentBulkRepair,
+  agentListStatuses,
   authSession,
-  bulkResignWda,
   getStreamSettings,
   listenRiviuEvents,
   listDevices,
@@ -10,6 +11,7 @@ import {
   refreshDevices,
   setStreamSettings,
 } from "./api";
+import { summarizeBulkRepair } from "./agentStatus";
 import { DeviceTile } from "./components/DeviceTile";
 import { FilterToolbar, type ViewMode } from "./components/FilterToolbar";
 import { FocusStream } from "./components/FocusStream";
@@ -40,6 +42,7 @@ import type {
   PageId,
   StreamSettings,
 } from "./types";
+import { markDeviceFrameLive } from "./types";
 import "./App.css";
 
 const PAGE_TITLE: Partial<Record<PageId, string>> = {
@@ -138,6 +141,7 @@ function App() {
       }
       if (p.type === "streamFrame" && typeof p.udid === "string") {
         pushFrame(p.udid as string, String(p.jpegBase64 ?? ""));
+        setDevices((prev) => markDeviceFrameLive(prev, p.udid as string));
       }
     }).then((fn) => {
       unlisten = fn;
@@ -288,14 +292,26 @@ function App() {
                 onInstall={async () => {
                   const targets = selected.length
                     ? selected
-                    : devices.map((d) => d.udid);
+                    : devices
+                        .filter((device) => device.status !== "disconnected")
+                        .map((device) => device.udid);
                   if (!targets.length) {
                     window.alert("Chưa có thiết bị");
                     return;
                   }
-                  const results = await bulkResignWda(targets);
-                  await reload();
-                  window.alert(results.join("\n") || `Agent: ${targets.length} máy`);
+                  const scope = selected.length ? "đã chọn" : "đang kết nối";
+                  if (!window.confirm(`Sửa Riviu Agent trên ${targets.length} máy ${scope}?`)) {
+                    return;
+                  }
+                  const repaired = await agentBulkRepair(targets);
+                  const [, refreshed] = await Promise.all([
+                    reload(),
+                    agentListStatuses(targets),
+                  ]);
+                  const summary = summarizeBulkRepair(
+                    refreshed.length ? refreshed : repaired,
+                  );
+                  window.alert(`${summary.heading}\n${summary.message}`);
                 }}
                 onSync={() => setGroupMode((v) => !v)}
                 onRefresh={async () => {
@@ -325,8 +341,8 @@ function App() {
 
               {!!devices.length && !devices.some((d) => d.wdaReady) && (
                 <div className="banner">
-                  Stream cần WDA. Chọn máy rồi bấm <strong>Start</strong> hoặc{" "}
-                  <strong>Agent</strong>. Bấm vào màn hình nhỏ để phóng to.
+                  Stream chưa sẵn sàng. Chọn máy rồi bấm <strong>Agent</strong> để kiểm
+                  tra và sửa Riviu Agent.
                 </div>
               )}
 
@@ -499,7 +515,7 @@ function App() {
             />
           )}
           {page === "api" && <ApiPage />}
-          {page === "settings" && <SettingsPanel />}
+          {page === "settings" && <SettingsPanel devices={devices} />}
         </div>
       </div>
 

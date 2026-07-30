@@ -338,6 +338,44 @@ impl StreamBudgetManager {
         })
     }
 
+    pub(crate) fn preview_foreground_victim(
+        &self,
+        udid: &str,
+    ) -> Result<Option<String>, StreamBudgetError> {
+        let state = self.inner.lock();
+        let target_record = state
+            .by_udid
+            .get(udid)
+            .and_then(|token| state.records.get(token));
+        if let Some(record) = target_record {
+            if matches!(
+                record.state,
+                ProducerState::BackgroundReserved | ProducerState::BackgroundRunning
+            ) {
+                return Ok(Some(record.udid.clone()));
+            }
+            if !matches!(record.state, ProducerState::FailedBackoff { .. }) {
+                return Err(StreamBudgetError::AlreadyReserved {
+                    udid: udid.to_string(),
+                    state: record.state.name(),
+                });
+            }
+        }
+
+        if state.reserved_capacity() < self.configured_limit {
+            return Ok(None);
+        }
+        let victim = state
+            .oldest_background_token()
+            .and_then(|token| state.records.get(&token))
+            .map(|record| record.udid.clone());
+        victim
+            .ok_or(StreamBudgetError::CapacityExhausted {
+                limit: self.configured_limit,
+            })
+            .map(Some)
+    }
+
     pub fn complete_transfer(
         &self,
         transfer: ForegroundTransfer,

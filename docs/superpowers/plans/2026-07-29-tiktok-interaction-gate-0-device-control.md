@@ -414,6 +414,13 @@ Expected JSON keys:
     "bundleId": "com.ss.iphone.ugc.Ame",
     "version": "TARGET_VERSION",
     "build": "TARGET_BUILD"
+  },
+  "agentApp": {
+    "bundleId": "AGENT_BUNDLE_ID",
+    "version": "AGENT_BUNDLE_VERSION",
+    "build": "AGENT_BUNDLE_BUILD",
+    "executableName": "AGENT_EXECUTABLE",
+    "signerIdentity": "AGENT_SIGNER_IDENTITY"
   }
 }
 ```
@@ -427,7 +434,18 @@ cargo test -p riviu-ios-driver interaction_inspect -- --nocapture
 
 - [ ] **Step 3: Implement metadata inspection**
 
-Reuse `InstallationProxyService.get_apps` for TikTok metadata and current lockdown/RSD selection for `ActiveTransport`. Do not put the token in argv or output. Geometry is `Unproven` here unless a protected runtime contract supplies bounds/orientation; the manifest's `375x667` is not proof.
+Reuse one `InstallationProxyService.get_apps` call for TikTok and installed-Agent
+metadata and the current lockdown/RSD selection for `ActiveTransport`. Verify the
+selected IPA checksum before emitting a snapshot. The sidecar reports the UDID from
+the connected provider, and Rust rejects a different UDID, a missing/null app, blank
+identity fields, or unknown response fields. Hash the installed signer identity at
+the Rust boundary. Legacy lockdown inspection must set `autopair=false`, so inspect
+cannot create pairing state or a Trust prompt. Do not put the token in argv or output. This metadata-only command
+always returns `protected_auth_ready=false` and `geometry=None`; those proofs come
+from separate protected runtime operations. The manifest's `375x667` is not proof.
+The Gate 0 `DeviceDriver` path selects legacy usbmux for the current iOS 16 fixture.
+RSD is an explicit low-level endpoint primitive only; a later per-UDID transport
+adapter must own and pass that endpoint before the control plane can select RSD.
 
 - [ ] **Step 4: Implement mock snapshots and negative dimensions**
 
@@ -502,18 +520,22 @@ git commit -m "feat(driver): add install-only interaction repair"
 
 - [ ] **Step 1: Write lifecycle order tests**
 
-Cover ordinary and fresh-text modes. The required log is:
+Cover ordinary and fresh-text modes. The ordinary-mode log is:
 
 ```text
 stop old producer
 clear/increment generation
 foreground TikTok
-bootstrap fresh Agent only when profile requires it
 create/attach approved session
 reserve stream generation
 start MJPEG
 first decoded frame
 ```
+
+Fresh-text keeps the live-confirmed RT-MMO order from `AGENTS.md` because bootstrap
+foregrounds the Agent: `stop old producer -> clear/increment generation -> bootstrap
+fresh Agent -> foreground TikTok -> POST /session new -> reserve stream generation ->
+start MJPEG -> first decoded frame`. Do not move bootstrap after foreground TikTok.
 
 The tests must fail if generic preflight, generic repair, window-size probing, or stream-before-session occurs.
 
@@ -525,7 +547,20 @@ cargo test -p riviu-ios-driver interaction_lifecycle -- --nocapture
 
 - [ ] **Step 3: Implement explicit primitives**
 
-`stop_owned_stream` must stop the exact child, wait boundedly, call `StreamHub::clear`, and return `{ old_generation, new_generation, child_stopped: true }`. `start_stream_after_session` requires a driver-held session and a foreground reservation token; it must not create or probe a session itself.
+`stop_owned_stream` must stop the exact child, wait boundedly, invalidate the old
+driver-held session, call `StreamHub::clear`, and return
+`{ old_generation, new_generation, child_stopped: true }`. Session invalidation is
+required before the subsequent install-only check; that path rejects any live
+producer/session instead of mutating it outside the control plane.
+`start_stream_after_session` requires a driver-held session and a foreground
+reservation token; it must not create or probe a session itself.
+`child_stopped=true` is valid only after the owned child exits within the bounded
+wait; a timed-out child remains owned and returns an unconfirmed proof so stream
+capacity cannot be released. Ordinary mode requires the protected relay established
+by install-only readiness to still be live before foregrounding TikTok; it must not
+cold-launch the Agent afterward. Fresh-text on a non-unified profile fails closed.
+Readiness status moves to session-pending after stop, stream-pending after session,
+and `Ready` only after the first JPEG decodes.
 
 Do not reuse `fresh_text_session_locked` error recovery as-is because it restores an ordinary session and stream. Add an Interaction variant whose failure cleanup tears down the failed transition without opening a replacement producer.
 

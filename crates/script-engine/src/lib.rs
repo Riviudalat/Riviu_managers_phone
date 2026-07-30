@@ -28,7 +28,9 @@ pub fn validate(script: &AutomationScript) -> Result<(), ScriptError> {
         return Err(ScriptError::Validation("script name required".into()));
     }
     if script.steps.is_empty() {
-        return Err(ScriptError::Validation("script needs at least one step".into()));
+        return Err(ScriptError::Validation(
+            "script needs at least one step".into(),
+        ));
     }
     Ok(())
 }

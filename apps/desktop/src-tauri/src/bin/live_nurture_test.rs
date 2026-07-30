@@ -20,8 +20,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use riviu_core::db::Database;
-use riviu_core::{NurtureEngine, NurtureSettings};
-use riviu_ios_driver::{create_driver, telemetry};
+use riviu_core::{
+    AgentSettings, DeviceControlPlane, DeviceWorkCoordinator, NurtureEngine, NurtureSettings,
+    StreamBudgetManager,
+};
+use riviu_ios_driver::{
+    create_driver, telemetry, AgentArtifact, AgentToken, DriverConfig, DriverTarget,
+    UnifiedAgentConfig,
+};
+use riviu_signing::CredentialStore;
 
 struct Args {
     udid: String,
@@ -95,6 +102,7 @@ fn parse_args() -> Result<Args, String> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    riviu_ios_driver::install_process_tree_guard()?;
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
@@ -110,10 +118,16 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&artifacts)?;
     let db = Arc::new(Database::open(data.join("riviu.db"))?);
 
-    let bundle = create_driver(root.join("pymobiledevice3")).await;
+    let agent_settings = db.get_agent_settings()?;
+    let bundle = create_driver(resolve_driver_config(&root, &data, agent_settings)?).await?;
+    let control = Arc::new(DeviceControlPlane::new(
+        bundle.driver,
+        Arc::new(DeviceWorkCoordinator::new()),
+        Arc::new(StreamBudgetManager::default()),
+    ));
     let engine = NurtureEngine::new(
         db,
-        bundle.driver,
+        control.clone(),
         Arc::new(bundle.streams.clone()),
         artifacts,
     );
@@ -167,7 +181,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let started = Instant::now();
-    let status = engine
+    let status = match engine
         .run_session(
             &args.udid,
             settings,
@@ -185,7 +199,14 @@ async fn main() -> anyhow::Result<()> {
                 );
             },
         )
-        .await?;
+        .await
+    {
+        Ok(status) => status,
+        Err(error) => {
+            control.shutdown_cleanup().await?;
+            return Err(error);
+        }
+    };
     let elapsed = started.elapsed();
 
     eprintln!("\n──────── WDA latency ────────");
@@ -220,7 +241,10 @@ async fn main() -> anyhow::Result<()> {
     );
 
     if let Some(path) = &args.jsonl {
-        write_jsonl(path, &args, &status, elapsed, slow_ms)?;
+        if let Err(error) = write_jsonl(path, &args, &status, elapsed, slow_ms) {
+            control.shutdown_cleanup().await?;
+            return Err(error);
+        }
         eprintln!("JSONL: {}", path.display());
     }
 
@@ -229,17 +253,23 @@ async fn main() -> anyhow::Result<()> {
         .iter()
         .filter(|(k, _, _)| k == "hard_recycle" || k == "relay_restart")
         .count();
-    if status.videos_done == 0 {
+    let exit_code = if status.videos_done == 0 {
         eprintln!("KHÔNG ĐẠT: 0 video");
-        std::process::exit(2);
-    }
-    if status.last_message.starts_with("failed") || status.last_message.starts_with("partial") {
+        2
+    } else if status.last_message.starts_with("failed")
+        || status.last_message.starts_with("partial")
+    {
         eprintln!("KHÔNG ĐẠT: phiên kết thúc không trọn vẹn");
-        std::process::exit(2);
-    }
-    if recoveries > 1 {
+        2
+    } else if recoveries > 1 {
         eprintln!("KHÔNG ĐẠT: {recoveries} lần recovery nặng");
-        std::process::exit(2);
+        2
+    } else {
+        0
+    };
+    control.shutdown_cleanup().await?;
+    if exit_code != 0 {
+        std::process::exit(exit_code);
     }
     Ok(())
 }
@@ -270,7 +300,11 @@ fn write_jsonl(
         })
     )?;
     for l in telemetry::summary_lines() {
-        writeln!(f, "{}", serde_json::json!({ "kind": "endpoint", "line": l }))?;
+        writeln!(
+            f,
+            "{}",
+            serde_json::json!({ "kind": "endpoint", "line": l })
+        )?;
     }
     for (k, detail, ms) in telemetry::events() {
         writeln!(
@@ -292,4 +326,43 @@ fn resolve_sidecar_root() -> PathBuf {
         .join("sidecars")
         .canonicalize()
         .unwrap_or_else(|_| manifest.join("../../../sidecars"))
+}
+
+fn resolve_driver_config(
+    sidecar_root: &std::path::Path,
+    state_dir: &std::path::Path,
+    settings: AgentSettings,
+) -> anyhow::Result<DriverConfig> {
+    let target = if std::env::var("RIVIU_MOCK_DEVICES")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        DriverTarget::Mock
+    } else if std::env::var("RIVIU_WDA_BACKEND")
+        .map(|value| value.trim().eq_ignore_ascii_case("stock"))
+        .unwrap_or(false)
+    {
+        DriverTarget::LegacyStock
+    } else {
+        let credentials = CredentialStore::system()?;
+        let env_token = std::env::var("RIVIU_RTMMO_TOKEN").ok();
+        let token = credentials.agent_token_or_create(env_token.as_deref())?;
+        let mut artifact =
+            AgentArtifact::load(sidecar_root.join("wda").join("agent-manifest.json"))?;
+        if let Some(path) = std::env::var_os("RIVIU_RTMMO_IPA") {
+            artifact.ipa_path = PathBuf::from(path);
+        }
+        artifact.verify_checksum()?;
+        DriverTarget::Real(UnifiedAgentConfig {
+            token: AgentToken::new(token)?,
+            artifact,
+            settings,
+        })
+    };
+
+    Ok(DriverConfig {
+        sidecar_root: sidecar_root.to_path_buf(),
+        state_dir: state_dir.to_path_buf(),
+        target,
+    })
 }

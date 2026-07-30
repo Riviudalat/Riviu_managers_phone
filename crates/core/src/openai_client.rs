@@ -176,10 +176,7 @@ pub async fn generate_vision_comment(
 /// A batch of generic comments, generated once per session as the fallback for
 /// when the vision call fails. Returns the built-in pool if the API is
 /// unavailable, so this never fails the session.
-pub async fn generate_comment_pool(
-    settings: &NurtureSettings,
-    count: usize,
-) -> (Vec<String>, f64) {
+pub async fn generate_comment_pool(settings: &NurtureSettings, count: usize) -> (Vec<String>, f64) {
     let count = count.clamp(5, 60);
     let max_words = settings.max_comment_words.max(4) as usize;
     let directions: Vec<&str> = settings
@@ -216,11 +213,10 @@ pub async fn generate_comment_pool(
 
 /// A reaction the engine can actually post on this stack.
 ///
-/// TikTok's comment box refuses every synthesized keystroke (see AGENTS.md), so
-/// text cannot be typed with a stock WebDriverAgent. The emoji panel *is*
-/// reachable, so the model picks a reaction that fits the video instead and the
-/// engine taps that cell. Each entry is a position in the panel's grid, which
-/// is located per frame rather than assumed.
+/// Stock WebDriverAgent gets a successful key ACK that TikTok ignores. Its
+/// fallback uses this menu to pick a reaction; RT-MMO sessions take the text
+/// path instead. Each entry is a position in the panel's grid, located from the
+/// current frame rather than assumed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmojiReaction {
     /// Row in the emoji grid, 0-based from the top of the full grid.
@@ -234,12 +230,36 @@ pub struct EmojiReaction {
 /// The menu the model chooses from. Positions measured on the live panel:
 /// row 0 = 😀😄😁😆😅😂🤣, row 1 = ☺️😊😇🙂🙃😉😌, row 2 = 😍😋😛😝😜🤪🧐.
 pub const EMOJI_MENU: [EmojiReaction; 6] = [
-    EmojiReaction { row: 0, col: 5, label: "😂 buồn cười" },
-    EmojiReaction { row: 2, col: 0, label: "😍 thích/đẹp" },
-    EmojiReaction { row: 0, col: 1, label: "😄 vui" },
-    EmojiReaction { row: 1, col: 1, label: "😊 dễ thương" },
-    EmojiReaction { row: 2, col: 4, label: "😜 lầy/nghịch" },
-    EmojiReaction { row: 1, col: 6, label: "😌 chill" },
+    EmojiReaction {
+        row: 0,
+        col: 5,
+        label: "😂 buồn cười",
+    },
+    EmojiReaction {
+        row: 2,
+        col: 0,
+        label: "😍 thích/đẹp",
+    },
+    EmojiReaction {
+        row: 0,
+        col: 1,
+        label: "😄 vui",
+    },
+    EmojiReaction {
+        row: 1,
+        col: 1,
+        label: "😊 dễ thương",
+    },
+    EmojiReaction {
+        row: 2,
+        col: 4,
+        label: "😜 lầy/nghịch",
+    },
+    EmojiReaction {
+        row: 1,
+        col: 6,
+        label: "😌 chill",
+    },
 ];
 
 /// Ask the model which reaction suits this video. Falls back to a random pick
@@ -403,11 +423,25 @@ fn sanitize_comment(raw: &str, max_words: usize) -> Option<String> {
 /// Offline fallback so a session can still comment with no API at all.
 fn builtin_pool() -> Vec<String> {
     [
-        "Hay quá 🔥", "đỉnh thật", "xem lại lần 2 rồi 😭", "ôi trời ơi",
-        "chill quá", "ủa thật không", "bao giờ ra phần 2", "lưu lại xem sau",
-        "relate quá đi", "vibe quá", "ghim lại xem sau", "làm theo ngay thôi",
-        "xem mãi không chán", "đúng quá bạn ơi", "clip này hay ghê",
-        "mình cũng vậy 😭", "thích cái này", "không thể tin nổi", "đỉnh vậy 👏",
+        "Hay quá 🔥",
+        "đỉnh thật",
+        "xem lại lần 2 rồi 😭",
+        "ôi trời ơi",
+        "chill quá",
+        "ủa thật không",
+        "bao giờ ra phần 2",
+        "lưu lại xem sau",
+        "relate quá đi",
+        "vibe quá",
+        "ghim lại xem sau",
+        "làm theo ngay thôi",
+        "xem mãi không chán",
+        "đúng quá bạn ơi",
+        "clip này hay ghê",
+        "mình cũng vậy 😭",
+        "thích cái này",
+        "không thể tin nổi",
+        "đỉnh vậy 👏",
         "nhạc gì vậy bạn?",
     ]
     .iter()

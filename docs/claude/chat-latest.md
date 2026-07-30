@@ -1136,7 +1136,7 @@ Tìm ra nguyên nhân cuối cùng rồi — và nó nằm ngay trong source c�
 
 | Nguồn | Nội dung |
 |---|---|
-| `wda_session.py:59` | `'X-RT-Token': 'RTmmo-2f9K4xPq7vL5sT1bW8nZ6hJ3'` — *"Token cứng WDA build **RT-MMO** (**idbagent.ipa** Jun 2026)"* |
+| `wda_session.py:59` | `'X-RT-Token': '<redacted-rt-token>'` — *"Token cứng WDA build **RT-MMO** (**idbagent.ipa** Jun 2026)"* |
 | `wda_session.py:39` | `device_port = **8906**` — không phải 8100 |
 | `wda_manager.py:129` | `8906, # WDA **idbagent/TrollStore** (confirmed — binary default)` |
 | `wda_client_fixed.py:155` | *"Build này check X-RT-Token header trên mọi endpoint"* |
@@ -1387,7 +1387,7 @@ The user's requests evolved across the session:
 - **Typed UI errors** (`UiErrorKind::{Transport, Timeout, Session, Http, Other}`) driving a budgeted recovery ladder
 - **Per-UDID supervisor** with `DeviceSlot` async lock + `ProcessRegistry` (PID + fingerprint on disk)
 - **Mood cycle** (`Skimming`/`Liking`/`Chatty`) for bursty-but-coherent behaviour
-- **TOOL TIKTOK uses a patched WDA**: `idbagent.ipa`/`dairack.ipa` "RT-MMO" build, **port 8906**, header `X-RT-Token: RTmmo-2f9K4xPq7vL5sT1bW8nZ6hJ3`, installed via **TrollStore**
+- **TOOL TIKTOK uses a patched WDA**: `idbagent.ipa`/`dairack.ipa` "RT-MMO" build, **port 8906**, header `X-RT-Token: <redacted-rt-token>`, installed via **TrollStore**
 - **Raw WDA locator names have no `-ios ` prefix** (`"predicate string"`, `"class chain"`)
 - vilao.ai OpenAI-compatible gateway for vision comments
 

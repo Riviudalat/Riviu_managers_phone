@@ -1,0 +1,24 @@
+{
+  "artifactId": "riviu-agent-ios-rtmmo-20260728",
+  "artifactVersion": "2026.07.28.3",
+  "bundleId": "com.mrph.svc",
+  "bundleVersion": "1.0",
+  "bundleBuild": "1",
+  "payloadApp": "777wealth.app",
+  "signerIdentity": "iPhone Distribution: Beijing Hfvast Technology Co. ,ltd.",
+  "protocolVersion": 1,
+  "ipa": "RiviuAgent.ipa",
+  "sha256": "8a24847099495ff70b998522692c43f00dd16b90f698bda6953a73f5d33002ea",
+  "controlPort": 8906,
+  "mjpegPort": 9093,
+  "logicalWidth": 375,
+  "logicalHeight": 667,
+  "features": [
+    "stream",
+    "tap",
+    "swipe",
+    "text",
+    "clipboard",
+    "pushMedia"
+  ]
+}

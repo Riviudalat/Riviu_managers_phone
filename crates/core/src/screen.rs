@@ -506,7 +506,13 @@ fn region_colourfulness(img: &RgbImage, x0: f64, y0: f64, x1: f64, y1: f64) -> f
 pub fn compose_bar_visible(img: &RgbImage) -> (bool, f64, f64, f64) {
     let (cr, cg, cb) = region_rgb(img, PLUS_CYAN_X.0, PLUS_BAND.0, PLUS_CYAN_X.1, PLUS_BAND.1);
     let cyan = (cb - cr).min(cg - cr);
-    let (wr, wg, wb) = region_rgb(img, PLUS_WHITE_X.0, PLUS_BAND.0, PLUS_WHITE_X.1, PLUS_BAND.1);
+    let (wr, wg, wb) = region_rgb(
+        img,
+        PLUS_WHITE_X.0,
+        PLUS_BAND.0,
+        PLUS_WHITE_X.1,
+        PLUS_BAND.1,
+    );
     let white = wr.min(wg).min(wb);
     let (pr, pg, pb) = region_rgb(img, PLUS_PINK_X.0, PLUS_BAND.0, PLUS_PINK_X.1, PLUS_BAND.1);
     let pink = (pr - pg).min(pr - pb);
@@ -673,10 +679,7 @@ pub fn find_emoji_grid(img: &RgbImage) -> Vec<EmojiRow> {
                     if gap > (0.012 * w as f64) as u32 {
                         let end = x - gap;
                         if end > s && end - s >= (0.02 * w as f64) as u32 {
-                            cells.push((
-                                (s + end) as f64 / 2.0 / w as f64,
-                                mid as f64 / h as f64,
-                            ));
+                            cells.push(((s + end) as f64 / 2.0 / w as f64, mid as f64 / h as f64));
                         }
                         run = None;
                     }
@@ -905,16 +908,14 @@ pub fn like_redness(img: &RgbImage) -> f64 {
 
 /// Send button centre, once the keyboard is up (322, 425 logical).
 pub const SEND_BUTTON: (f64, f64) = (322.0 / 375.0, 425.0 / 667.0);
-/// Comment input field, tapped to raise the keyboard (120, 640 logical).
+/// Comment input field, live-verified at (120, 640) logical on iPhone 8.
 pub const COMMENT_INPUT: (f64, f64) = (120.0 / 375.0, 640.0 / 667.0);
 /// A point above the drawer; tapping it dismisses the drawer (180, 100).
 pub const DRAWER_DISMISS: (f64, f64) = (180.0 / 375.0, 100.0 / 667.0);
 
-/// The emoji/sticker icon in the comment drawer's bottom bar.
-///
-/// This — not the "Thêm bình luận…" pill — is what opens TikTok's real comment
-/// composer. Tapping the pill does nothing a synthetic touch can act on; the
-/// icon is an ordinary button and responds. Measured at (299, 639) logical.
+/// The emoji/sticker icon used by the stock-WDA fallback. Stock synthetic taps
+/// cannot focus the "Thêm bình luận…" pill, while RT-MMO uses `COMMENT_INPUT`
+/// for text. Measured at (299, 639) logical.
 pub const DRAWER_EMOJI_ICON: (f64, f64) = (299.0 / 375.0, 639.0 / 667.0);
 
 /// Send arrow inside the composer (337, 307 logical). Light pink while the
@@ -1004,6 +1005,12 @@ mod tests {
     /// iPhone 8 @2x, the geometry every measured constant here came from.
     const W: u32 = 750;
     const H: u32 = 1334;
+
+    #[test]
+    fn comment_input_uses_verified_iphone_8_field_center() {
+        assert!((COMMENT_INPUT.0 * 375.0 - 120.0).abs() < f64::EPSILON);
+        assert!((COMMENT_INPUT.1 * 667.0 - 640.0).abs() < f64::EPSILON);
+    }
 
     /// Dark "video" pixels — textured, since a flat fill has no variance to
     /// correlate against and would pass any test for free.
@@ -1099,7 +1106,10 @@ mod tests {
                 assert!((x - 0.924).abs() < 0.02, "x {x}");
                 assert!((y - 0.566).abs() < 0.02, "y {y}");
             }
-            other => panic!("expected a closable sheet, got {other:?} ({})", obs.debug_line()),
+            other => panic!(
+                "expected a closable sheet, got {other:?} ({})",
+                obs.debug_line()
+            ),
         }
     }
 

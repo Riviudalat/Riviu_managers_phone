@@ -127,14 +127,20 @@ impl ProcessRegistry {
             let (Some(pid), Some(udid), Some(role), Some(fingerprint)) = (
                 item.get("pid").and_then(|v| v.as_u64()),
                 item.get("udid").and_then(|v| v.as_str()),
-                item.get("role").and_then(|v| v.as_str()).and_then(Role::from_str),
+                item.get("role")
+                    .and_then(|v| v.as_str())
+                    .and_then(Role::from_str),
                 item.get("fingerprint").and_then(|v| v.as_str()),
             ) else {
                 continue;
             };
             let pid = pid as u32;
             if kill_if_matches(pid, fingerprint).await {
-                reclaimed.push(format!("{} {} pid={pid}", &udid[..8.min(udid.len())], role.as_str()));
+                reclaimed.push(format!(
+                    "{} {} pid={pid}",
+                    &udid[..8.min(udid.len())],
+                    role.as_str()
+                ));
             }
         }
         // Whatever survived is not ours to chase; start from a clean sheet.
@@ -145,6 +151,7 @@ impl ProcessRegistry {
 
 /// Kill `pid`, but only after confirming its command line still contains
 /// `fingerprint`. PIDs get reused; a stale record must never kill a stranger.
+#[cfg(not(windows))]
 async fn kill_if_matches(pid: u32, fingerprint: &str) -> bool {
     let Ok(out) = Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "command="])
@@ -157,13 +164,46 @@ async fn kill_if_matches(pid: u32, fingerprint: &str) -> bool {
     if cmdline.trim().is_empty() || !cmdline.contains(fingerprint) {
         return false;
     }
-    let _ = Command::new("kill")
-        .arg(pid.to_string())
-        .output()
-        .await;
+    let _ = Command::new("kill").arg(pid.to_string()).output().await;
     // Give it a moment to release the port before anyone rebinds.
     tokio::time::sleep(std::time::Duration::from_millis(600)).await;
     true
+}
+
+#[cfg(windows)]
+async fn kill_if_matches(pid: u32, fingerprint: &str) -> bool {
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+
+    // Keep both the comparison and termination in one CIM operation. The
+    // fingerprint arrives via the environment, so quoting cannot turn it into
+    // PowerShell source. Invoke-CimMethod targets the exact process object that
+    // supplied the matching command line.
+    const SCRIPT: &str = r#"
+$process = Get-CimInstance Win32_Process -Filter ("ProcessId = " + $env:RIVIU_OWNED_PID)
+if ($null -eq $process -or $null -eq $process.CommandLine) { exit 3 }
+if (-not $process.CommandLine.Contains($env:RIVIU_OWNED_FINGERPRINT)) { exit 4 }
+$result = Invoke-CimMethod -InputObject $process -MethodName Terminate
+if ($result.ReturnValue -ne 0) { exit 5 }
+"#;
+
+    let mut command = Command::new("powershell.exe");
+    command
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            SCRIPT,
+        ])
+        .env("RIVIU_OWNED_PID", pid.to_string())
+        .env("RIVIU_OWNED_FINGERPRINT", fingerprint)
+        .creation_flags(CREATE_NO_WINDOW);
+    let killed = matches!(command.output().await, Ok(output) if output.status.success());
+    if killed {
+        // Give usbmux and the TCP port a deterministic release window.
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    }
+    killed
 }
 
 /// A child process this app owns, deregistered from the on-disk record when it
@@ -205,12 +245,25 @@ impl OwnedChild {
         }
     }
 
-    pub async fn shutdown(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.start_kill();
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
+    pub async fn shutdown_confirmed(&mut self) -> bool {
+        let Some(child) = self.child.as_mut() else {
+            self.registry.forget(&self.udid, self.role);
+            return true;
+        };
+        let _ = child.start_kill();
+        let stopped = matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await,
+            Ok(Ok(_))
+        );
+        if stopped {
+            self.child.take();
+            self.registry.forget(&self.udid, self.role);
         }
-        self.registry.forget(&self.udid, self.role);
+        stopped
+    }
+
+    pub async fn shutdown(&mut self) {
+        let _ = self.shutdown_confirmed().await;
     }
 }
 
@@ -265,9 +318,56 @@ mod tests {
     use super::*;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("riviu-supervisor-test-{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        dir
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "riviu-supervisor-test-{name}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    #[cfg(windows)]
+    fn sleeping_child() -> Child {
+        Command::new("powershell.exe")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 30",
+            ])
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn sleeping child")
+    }
+
+    #[cfg(unix)]
+    fn sleeping_child() -> Child {
+        Command::new("sh")
+            .args(["-c", "sleep 30"])
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn sleeping child")
+    }
+
+    #[tokio::test]
+    async fn owned_child_reports_a_confirmed_bounded_shutdown() {
+        let dir = temp_dir("confirmed-shutdown");
+        let registry = ProcessRegistry::new(dir.clone());
+        let child = sleeping_child();
+        let mut owned =
+            OwnedChild::adopt(&registry, "udid-a", Role::Stream, child, "sleeping-fixture");
+
+        assert!(owned.shutdown_confirmed().await);
+        assert!(owned.has_exited());
+        let records: Vec<serde_json::Value> = serde_json::from_slice(
+            &std::fs::read(dir.join("owned-processes.json")).expect("read empty registry"),
+        )
+        .expect("parse empty registry");
+        assert!(records.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -318,6 +418,7 @@ mod tests {
         let text = std::fs::read_to_string(dir.join("owned-processes.json")).unwrap();
         assert!(!text.contains("4242"), "{text}");
         assert!(text.contains("4243"), "{text}");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// The fingerprint check is the safety net against killing a stranger that
@@ -341,5 +442,36 @@ mod tests {
             !dir.join("owned-processes.json").exists(),
             "the record file is cleared once reclaim has run"
         );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_matching_pid_is_terminated_on_windows() {
+        let fingerprint = format!(
+            "riviu-supervisor-kill-fixture-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let command = format!("Start-Sleep -Seconds 30 # {fingerprint}");
+        let mut child = Command::new("powershell.exe")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &command,
+            ])
+            .spawn()
+            .expect("spawn sleeping fixture");
+        let pid = child.id().expect("fixture pid");
+
+        assert!(kill_if_matches(pid, &fingerprint).await);
+        tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+            .await
+            .expect("matching process was not terminated")
+            .expect("wait for matching process");
     }
 }

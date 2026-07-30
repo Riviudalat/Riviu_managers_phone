@@ -190,6 +190,27 @@ impl DeviceWorkCoordinator {
             }),
         }
     }
+
+    pub fn current_owner(&self, udid: &str) -> Option<DeviceWorkOwner> {
+        self.state
+            .existing_device(udid)
+            .and_then(|device| device.metadata.lock().busy_owner())
+    }
+
+    pub(crate) fn with_idle_device<T>(
+        &self,
+        udid: &str,
+        operation: impl FnOnce() -> T,
+    ) -> Result<T, DeviceWorkOwner> {
+        let device = self.state.device(udid);
+        let metadata = device.metadata.lock();
+        if let Some(owner) = metadata.busy_owner() {
+            return Err(owner);
+        }
+        let result = operation();
+        drop(metadata);
+        Ok(result)
+    }
 }
 
 pub struct DeviceWorkLease {
@@ -590,6 +611,21 @@ mod tests {
                 "udid": "iphone-a",
                 "requestedOwner": "groupSync",
             })
+        );
+    }
+
+    #[test]
+    fn current_owner_reports_the_front_waiter_during_handoff() {
+        let coordinator = DeviceWorkCoordinator::new();
+        let device = coordinator.state.device("iphone-a");
+        device.metadata.lock().waiters.push_back(WaitingWork {
+            id: Uuid::new_v4(),
+            owner: DeviceWorkOwner::Nurture,
+        });
+
+        assert_eq!(
+            coordinator.current_owner("iphone-a"),
+            Some(DeviceWorkOwner::Nurture)
         );
     }
 }

@@ -12,11 +12,17 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use riviu_core::db::Database;
-use riviu_core::{NurtureEngine, NurtureSettings};
-use riviu_ios_driver::create_driver;
+use riviu_core::{
+    AgentSettings, DeviceControlPlane, DeviceWorkCoordinator, NurtureEngine, NurtureSettings,
+    StreamBudgetManager,
+};
+use riviu_ios_driver::{
+    create_driver, AgentArtifact, AgentToken, DriverConfig, DriverTarget, UnifiedAgentConfig,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    riviu_ios_driver::install_process_tree_guard()?;
     let mut udid = String::new();
     let mut videos: u32 = 3;
     let mut watch_min = 3.0_f64;
@@ -34,20 +40,40 @@ async fn main() -> anyhow::Result<()> {
             "--udid" => udid = args.next().unwrap_or_default(),
             "--videos" => videos = args.next().and_then(|s| s.parse().ok()).unwrap_or(videos),
             "--watch-min" => {
-                watch_min = args.next().and_then(|s| s.parse().ok()).unwrap_or(watch_min)
+                watch_min = args
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(watch_min)
             }
             "--watch-max" => {
-                watch_max = args.next().and_then(|s| s.parse().ok()).unwrap_or(watch_max)
+                watch_max = args
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(watch_max)
             }
-            "--like" => like_prob = args.next().and_then(|s| s.parse().ok()).unwrap_or(like_prob),
+            "--like" => {
+                like_prob = args
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(like_prob)
+            }
             "--comment" => {
-                comment_prob = args.next().and_then(|s| s.parse().ok()).unwrap_or(comment_prob)
+                comment_prob = args
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(comment_prob)
             }
             "--follow" => {
-                follow_prob = args.next().and_then(|s| s.parse().ok()).unwrap_or(follow_prob)
+                follow_prob = args
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(follow_prob)
             }
             "--frenzy" => {
-                frenzy_prob = args.next().and_then(|s| s.parse().ok()).unwrap_or(frenzy_prob)
+                frenzy_prob = args
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(frenzy_prob)
             }
             "--max-secs" => max_secs = args.next().and_then(|s| s.parse().ok()).unwrap_or(max_secs),
             "--bundle" => bundle = args.next().unwrap_or(bundle),
@@ -55,10 +81,11 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let sidecar = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../sidecars/pymobiledevice3")
+    let sidecar_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../sidecars")
         .canonicalize()?;
-    let bundle_drv = create_driver(sidecar).await;
+    let state_dir = std::env::temp_dir().join("riviu-ios-driver-live");
+    let bundle_drv = create_driver(resolve_driver_config(&sidecar_root, &state_dir)?).await?;
     let devices = bundle_drv.driver.list_devices().await?;
     if devices.is_empty() {
         anyhow::bail!("no iPhone connected");
@@ -132,16 +159,21 @@ async fn main() -> anyhow::Result<()> {
     // The engine starts the stream itself: it reads the screen from MJPEG
     // frames rather than from WDA screenshots, and the per-device supervisor
     // makes sure only one stream and one relay exist for this UDID.
+    let control = Arc::new(DeviceControlPlane::new(
+        bundle_drv.driver,
+        Arc::new(DeviceWorkCoordinator::new()),
+        Arc::new(StreamBudgetManager::default()),
+    ));
     let engine = NurtureEngine::new(
         db,
-        bundle_drv.driver.clone(),
+        control.clone(),
         Arc::new(bundle_drv.streams.clone()),
         tmp.join("artifacts"),
     );
     let stop = Arc::new(AtomicBool::new(false));
 
     let started = Instant::now();
-    let status = engine
+    let status_result = engine
         .run_session(
             &udid,
             settings,
@@ -162,7 +194,9 @@ async fn main() -> anyhow::Result<()> {
                 let _ = std::io::stdout().flush();
             },
         )
-        .await?;
+        .await;
+    control.shutdown_cleanup().await?;
+    let status = status_result?;
 
     println!("---- RESULT ----");
     println!(
@@ -182,4 +216,35 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("nurture live FAIL: {}", status.last_message);
     }
     Ok(())
+}
+
+fn resolve_driver_config(
+    sidecar_root: &std::path::Path,
+    state_dir: &std::path::Path,
+) -> anyhow::Result<DriverConfig> {
+    let target = if std::env::var("RIVIU_WDA_BACKEND")
+        .map(|value| value.trim().eq_ignore_ascii_case("stock"))
+        .unwrap_or(false)
+    {
+        DriverTarget::LegacyStock
+    } else {
+        let token = std::env::var("RIVIU_RTMMO_TOKEN")?;
+        let mut artifact =
+            AgentArtifact::load(sidecar_root.join("wda").join("agent-manifest.json"))?;
+        if let Some(path) = std::env::var_os("RIVIU_RTMMO_IPA") {
+            artifact.ipa_path = PathBuf::from(path);
+        }
+        artifact.verify_checksum()?;
+        DriverTarget::Real(UnifiedAgentConfig {
+            token: AgentToken::new(token)?,
+            artifact,
+            settings: AgentSettings::default(),
+        })
+    };
+
+    Ok(DriverConfig {
+        sidecar_root: sidecar_root.to_path_buf(),
+        state_dir: state_dir.to_path_buf(),
+        target,
+    })
 }

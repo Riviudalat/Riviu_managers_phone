@@ -8,6 +8,35 @@ export type DeviceStatus =
   | "busy"
   | "error";
 
+export type TileStreamState = "live" | "sampling" | "parked" | "stale" | "error";
+
+const TILE_STREAM_LABELS: Record<TileStreamState, string> = {
+  live: "Live",
+  sampling: "Sampling",
+  parked: "Parked",
+  stale: "Stale",
+  error: "Error",
+};
+
+export function tileStreamStateView(
+  state: TileStreamState | undefined,
+  hasFrame: boolean,
+  hasError: boolean,
+): { state: TileStreamState; label: string } {
+  const resolved = state ?? (hasError ? "error" : hasFrame ? "live" : "parked");
+  return { state: resolved, label: TILE_STREAM_LABELS[resolved] };
+}
+
+export function markDeviceFrameLive(devices: DeviceInfo[], udid: string): DeviceInfo[] {
+  let changed = false;
+  const next = devices.map((device) => {
+    if (device.udid !== udid || device.tileStreamState === "live") return device;
+    changed = true;
+    return { ...device, tileStreamState: "live" as const };
+  });
+  return changed ? next : devices;
+}
+
 export interface DeviceInfo {
   udid: string;
   name: string;
@@ -19,6 +48,7 @@ export interface DeviceInfo {
   wdaReady: boolean;
   wdaExpiresAt?: string | null;
   streamUrl?: string | null;
+  tileStreamState?: TileStreamState;
   lastError?: string | null;
 }
 
@@ -57,6 +87,41 @@ export interface JobRecord {
 export interface AppleIdConfig {
   email: string;
   hasPassword: boolean;
+}
+
+export type AgentState =
+  | "unknown"
+  | "missing"
+  | "repairRequired"
+  | "starting"
+  | "ready"
+  | "error";
+
+export interface AgentSettings {
+  autoRepair: boolean;
+}
+
+export interface AgentStatus {
+  udid: string;
+  state: AgentState;
+  artifactId: string;
+  artifactVersion: string;
+  bundleId: string;
+  protocolVersion: number;
+  features: string[];
+  installedVersion: string | null;
+  installedBuild: string | null;
+  authReady: boolean;
+  mjpegReady: boolean;
+  sessionReady: boolean;
+  message: string | null;
+}
+
+export interface AgentRuntimeView {
+  settings: AgentSettings;
+  tokenConfigured: boolean;
+  activeArtifactId: string;
+  activeArtifactVersion: string;
 }
 
 export type PageId =

@@ -1,5 +1,9 @@
 //! Free Apple ID signing helpers (anisette-based free signing via sidecar).
 
+pub mod credentials;
+
+pub use credentials::{CredentialBackend, CredentialStore};
+
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -8,9 +12,7 @@ use riviu_core::{AppleIdConfig, WdaStatus};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-const SERVICE: &str = "riviu-managers-phone";
-const ACCOUNT_USER: &str = "apple-id-email";
-const ACCOUNT_PASS: &str = "apple-id-password";
+use credentials::{APPLE_EMAIL_ACCOUNT, APPLE_PASSWORD_ACCOUNT};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,45 +34,50 @@ pub struct SignResult {
 #[derive(Clone)]
 pub struct SigningService {
     sidecar: PathBuf,
+    credentials: CredentialStore,
 }
 
 impl SigningService {
-    pub fn new(sidecar_dir: PathBuf) -> Self {
+    pub fn new(sidecar_dir: PathBuf) -> anyhow::Result<Self> {
+        Ok(Self::with_credentials(
+            sidecar_dir,
+            CredentialStore::system()?,
+        ))
+    }
+
+    pub fn with_credentials(sidecar_dir: PathBuf, credentials: CredentialStore) -> Self {
         Self {
             sidecar: sidecar_dir.join("riviu_signer.py"),
+            credentials,
         }
     }
 
     pub fn save_apple_id(&self, email: &str, password: &str) -> anyhow::Result<()> {
-        let user = keyring::Entry::new(SERVICE, ACCOUNT_USER)?;
-        let pass = keyring::Entry::new(SERVICE, ACCOUNT_PASS)?;
-        user.set_password(email)?;
-        pass.set_password(password)?;
+        self.credentials.set(APPLE_EMAIL_ACCOUNT, email)?;
+        self.credentials.set(APPLE_PASSWORD_ACCOUNT, password)?;
         Ok(())
     }
 
     pub fn clear_apple_id(&self) -> anyhow::Result<()> {
-        let user = keyring::Entry::new(SERVICE, ACCOUNT_USER)?;
-        let pass = keyring::Entry::new(SERVICE, ACCOUNT_PASS)?;
-        let _ = user.delete_credential();
-        let _ = pass.delete_credential();
+        self.credentials.delete(APPLE_EMAIL_ACCOUNT)?;
+        self.credentials.delete(APPLE_PASSWORD_ACCOUNT)?;
         Ok(())
     }
 
-    pub fn apple_id_config(&self) -> AppleIdConfig {
-        let email = keyring::Entry::new(SERVICE, ACCOUNT_USER)
-            .ok()
-            .and_then(|e| e.get_password().ok())
+    pub fn apple_id_config(&self) -> anyhow::Result<AppleIdConfig> {
+        let email = self
+            .credentials
+            .get(APPLE_EMAIL_ACCOUNT)?
             .unwrap_or_default();
-        let has_password = keyring::Entry::new(SERVICE, ACCOUNT_PASS)
-            .ok()
-            .and_then(|e| e.get_password().ok())
+        let has_password = self
+            .credentials
+            .get(APPLE_PASSWORD_ACCOUNT)?
             .map(|p| !p.is_empty())
             .unwrap_or(false);
-        AppleIdConfig {
+        Ok(AppleIdConfig {
             email,
             has_password,
-        }
+        })
     }
 
     pub async fn sign_and_install_wda(
@@ -78,21 +85,19 @@ impl SigningService {
         udid: &str,
         wda_source: &Path,
     ) -> anyhow::Result<SignResult> {
-        let cfg = self.apple_id_config();
+        let cfg = self.apple_id_config()?;
         let email = if cfg.email.is_empty() {
             "xcode-account@local".to_string()
         } else {
             cfg.email
         };
-        let password = keyring::Entry::new(SERVICE, ACCOUNT_PASS)
-            .ok()
-            .and_then(|e| e.get_password().ok())
+        let password = self
+            .credentials
+            .get(APPLE_PASSWORD_ACCOUNT)?
             .unwrap_or_else(|| "xcode-managed".into());
 
         if !self.sidecar.exists() {
-            anyhow::bail!(
-                "Thiếu sidecar signer. Kiểm tra sidecars/signer/riviu_signer.py"
-            );
+            anyhow::bail!("Thiếu sidecar signer. Kiểm tra sidecars/signer/riviu_signer.py");
         }
 
         let output = Command::new("python3")

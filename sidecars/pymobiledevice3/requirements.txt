@@ -1,1 +1,2 @@
-pymobiledevice3>=4.0.0
+pymobiledevice3==10.1.0
+tidevice>=0.12.11

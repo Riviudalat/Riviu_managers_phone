@@ -2,6 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AnalyticsSummary,
+  AgentRuntimeView,
+  AgentSettings,
+  AgentStatus,
   AppLibraryItem,
   AppleIdConfig,
   AuthSession,
@@ -177,6 +180,30 @@ export async function resignWda(udid: string) {
 
 export async function bulkResignWda(udids: string[]) {
   return invoke<string[]>("bulk_resign_wda", { udids });
+}
+
+export async function agentGetSettings() {
+  return invoke<AgentRuntimeView>("agent_get_settings");
+}
+
+export async function agentSaveSettings(settings: AgentSettings) {
+  return invoke<AgentRuntimeView>("agent_save_settings", { settings });
+}
+
+export async function agentListStatuses(udids: string[]) {
+  return invoke<AgentStatus[]>("agent_list_statuses", { udids });
+}
+
+export async function agentPreflight(udid: string) {
+  return invoke<AgentStatus>("agent_preflight", { udid });
+}
+
+export async function agentRepair(udid: string) {
+  return invoke<AgentStatus>("agent_repair", { udid });
+}
+
+export async function agentBulkRepair(udids: string[]) {
+  return invoke<AgentStatus[]>("agent_bulk_repair", { udids });
 }
 
 export async function driverMode() {

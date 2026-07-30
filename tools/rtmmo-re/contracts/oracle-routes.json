@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "routes": [
+    {"method":"GET","path":"/status","auth":"exempt","session":"none","evidence":"crates/ios-driver/src/wda.rs"},
+    {"method":"GET","path":"/wda/locked","auth":"protected","session":"none","evidence":"sidecars/pymobiledevice3/riviu_pmd.py"},
+    {"method":"POST","path":"/session","auth":"protected","session":"none","requestBody":{"required":["capabilities","capabilities.firstMatch"],"properties":{"capabilities":"object","capabilities.firstMatch":"array"}},"evidence":"crates/ios-driver/src/wda.rs"},
+    {"method":"DELETE","path":"/session/{sessionId}","auth":"protected","session":"required","evidence":"sidecars/pymobiledevice3/riviu_pmd.py"},
+    {"method":"POST","path":"/wda/swipe","auth":"protected","session":"none","requestBody":{"required":["delay","fromX","fromY","toX","toY"],"properties":{"delay":"number","fromX":"number","fromY":"number","toX":"number","toY":"number"}},"evidence":"crates/ios-driver/src/wda.rs"},
+    {"method":"POST","path":"/wda/tap","auth":"protected","session":"none","requestBody":{"required":["x","y"],"properties":{"x":"number","y":"number"}},"evidence":"crates/ios-driver/src/wda.rs"},
+    {"method":"POST","path":"/session/{sessionId}/wda/keys","auth":"protected","session":"required","requestBody":{"required":["value"],"properties":{"value":"array"}},"evidence":"crates/ios-driver/src/wda.rs"},
+    {"method":"GET","path":"/screenshot","auth":"protected","session":"none","evidence":"crates/ios-driver/src/wda.rs"}
+  ]
+}

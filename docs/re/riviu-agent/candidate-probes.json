@@ -1,0 +1,25 @@
+{
+  "environment": "WINDOWS_SOURCE_CHECKPOINT",
+  "gateB": "PENDING_MAC_DEVICE",
+  "gateC": "PENDING_MAC_DEVICE",
+  "gateStatus": "PENDING_MAC_DEVICE",
+  "generatedAt": null,
+  "measurements": null,
+  "schemaVersion": 2,
+  "sourceVerification": {
+    "baselineSourceSha256": "f40eadb1e1d9872ad5a0574a5146cdbf5e0d04768ccb1f1701b289d50e4ee8f8",
+    "canonicalFileModes": [
+      "0644",
+      "0755"
+    ],
+    "outputSourceSha256": "2ca158cde4b2307957670680a6cd136b6c360d6f175303f1d012f7488e82c4cc",
+    "patchCount": 5,
+    "status": "PASS",
+    "xcconfigSha256": "2bed5a711927df27a86b2e2f7237bad99406b3cbbf5fccb09f8ce03fc58f53ae"
+  },
+  "productionArtifactVerification": {
+    "ipaSha256": "8a24847099495ff70b998522692c43f00dd16b90f698bda6953a73f5d33002ea",
+    "manifestSha256": "e98a549af4c061556effd36424e7732219e1a6d262bcf1f259279975024b6e1a",
+    "status": "UNCHANGED"
+  }
+}

@@ -1,0 +1,828 @@
+{
+  "schemaVersion": 1,
+  "identity": {
+    "agentVersion": "0.1.0",
+    "protocolVersion": 2,
+    "features": [
+      "stream",
+      "tap",
+      "swipe",
+      "clipboard"
+    ],
+    "logicalSize": {
+      "width": 375,
+      "height": 667
+    }
+  },
+  "network": {
+    "controlPort": 8916,
+    "mjpegPort": 9094,
+    "mjpeg": {
+      "bindInterface": "localhost",
+      "loopbackOnly": true,
+      "request": {
+        "method": "GET",
+        "path": "/"
+      },
+      "authentication": {
+        "required": true,
+        "header": "X-Riviu-Token",
+        "comparison": "constantTimeUtf8Bytes",
+        "statusExpectations": {
+          "missing": 401,
+          "wrong": 401,
+          "correct": 200
+        }
+      }
+    }
+  },
+  "authentication": {
+    "tokenEnvironment": "RIVIU_AGENT_TOKEN",
+    "header": "X-Riviu-Token",
+    "minimumTokenBits": 256,
+    "tokenValueEmbedded": false,
+    "comparison": "constantTimeUtf8Bytes",
+    "exemptions": [
+      {
+        "method": "GET",
+        "path": "/status"
+      }
+    ],
+    "statusExpectations": {
+      "missing": 401,
+      "wrong": 401,
+      "correct": 200
+    }
+  },
+  "lifecycle": {
+    "targetForegroundBeforeFreshSession": true,
+    "freshSessionBeforeMjpegConnect": true,
+    "firstValidJpegDefinesStreamReady": true,
+    "clipboardProbeAgentForegroundPidStable": true,
+    "clipboardProbeAgentForegroundIdentityVerified": true,
+    "clipboardRuntimeSchemaValidation": true,
+    "gestureSurfaceBundle": "com.apple.Preferences",
+    "resetGestureSurfaceBeforeSession": true,
+    "liveProbeFreshSessionRequest": {
+      "requiredField": "capabilities.firstMatch",
+      "minimumItems": 1,
+      "enforcement": "policy"
+    }
+  },
+  "httpStatus": {
+    "invalidBody": 400,
+    "authFailure": 401,
+    "success": 200
+  },
+  "wdaResponseEnvelope": {
+    "type": "object",
+    "required": [
+      "value"
+    ],
+    "properties": {
+      "sessionId": {
+        "oneOf": [
+          {
+            "type": "string",
+            "minLength": 1
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "additionalProperties": true
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/status",
+      "auth": "exempt",
+      "session": "none",
+      "identityKey": "riviuAgent",
+      "responseSchema": {
+        "type": "object",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "type": "object",
+            "required": [
+              "riviuAgent"
+            ],
+            "properties": {
+              "riviuAgent": {
+                "type": "object",
+                "required": [
+                  "agentVersion",
+                  "protocolVersion",
+                  "features",
+                  "logicalWidth",
+                  "logicalHeight",
+                  "state"
+                ],
+                "properties": {
+                  "agentVersion": {
+                    "type": "string",
+                    "const": "0.1.0"
+                  },
+                  "protocolVersion": {
+                    "type": "integer",
+                    "const": 2
+                  },
+                  "features": {
+                    "const": [
+                      "stream",
+                      "tap",
+                      "swipe",
+                      "clipboard"
+                    ]
+                  },
+                  "logicalWidth": {
+                    "type": "integer",
+                    "const": 375
+                  },
+                  "logicalHeight": {
+                    "type": "integer",
+                    "const": 667
+                  },
+                  "state": {
+                    "type": "string",
+                    "const": "ready"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      },
+      "successStatus": 200
+    },
+    {
+      "method": "GET",
+      "path": "/riviu/health",
+      "auth": "protected",
+      "session": "none",
+      "responseSchema": {
+        "type": "object",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "type": "object",
+            "required": [
+              "agentVersion",
+              "protocolVersion",
+              "features",
+              "logicalWidth",
+              "logicalHeight",
+              "state"
+            ],
+            "properties": {
+              "agentVersion": {
+                "type": "string",
+                "const": "0.1.0"
+              },
+              "protocolVersion": {
+                "type": "integer",
+                "const": 2
+              },
+              "features": {
+                "type": "array"
+              },
+              "logicalWidth": {
+                "type": "integer",
+                "const": 375
+              },
+              "logicalHeight": {
+                "type": "integer",
+                "const": 667
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "ready",
+                  "degraded"
+                ]
+              }
+            },
+            "oneOf": [
+              {
+                "properties": {
+                  "features": {
+                    "const": [
+                      "stream",
+                      "tap",
+                      "swipe",
+                      "clipboard"
+                    ]
+                  },
+                  "state": {
+                    "const": "ready"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "features": {
+                    "const": [
+                      "tap",
+                      "swipe",
+                      "clipboard"
+                    ]
+                  },
+                  "state": {
+                    "const": "degraded"
+                  }
+                }
+              }
+            ],
+            "additionalProperties": false
+          },
+          "sessionId": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "responseExamples": {
+        "ready": {
+          "value": {
+            "agentVersion": "0.1.0",
+            "protocolVersion": 2,
+            "features": [
+              "stream",
+              "tap",
+              "swipe",
+              "clipboard"
+            ],
+            "logicalWidth": 375,
+            "logicalHeight": 667,
+            "state": "ready"
+          }
+        },
+        "degraded": {
+          "value": {
+            "agentVersion": "0.1.0",
+            "protocolVersion": 2,
+            "features": [
+              "tap",
+              "swipe",
+              "clipboard"
+            ],
+            "logicalWidth": 375,
+            "logicalHeight": 667,
+            "state": "degraded"
+          }
+        }
+      },
+      "successStatus": 200
+    },
+    {
+      "method": "GET",
+      "path": "/wda/locked",
+      "auth": "protected",
+      "session": "none",
+      "responseSchema": {
+        "type": "object",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "type": "boolean"
+          }
+        }
+      },
+      "successStatus": 200
+    },
+    {
+      "method": "POST",
+      "path": "/session",
+      "auth": "protected",
+      "session": "none",
+      "fresh": true,
+      "requestSchema": {
+        "type": "object",
+        "required": [
+          "capabilities"
+        ],
+        "properties": {
+          "capabilities": {
+            "type": "object",
+            "properties": {
+              "firstMatch": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "responseSchema": {
+        "type": "object",
+        "required": [
+          "sessionId",
+          "value"
+        ],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "value": {
+            "type": "object"
+          }
+        }
+      },
+      "successStatus": 200
+    },
+    {
+      "method": "GET",
+      "path": "/session/{sessionId}",
+      "auth": "protected",
+      "session": "required",
+      "purpose": "activeSessionControlProbe",
+      "pathParameters": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "responseSchema": {
+        "type": "object",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "type": "object"
+          },
+          "sessionId": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "successStatus": 200
+    },
+    {
+      "method": "DELETE",
+      "path": "/session/{sessionId}",
+      "auth": "protected",
+      "session": "required",
+      "pathParameters": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "successStatus": 200
+    },
+    {
+      "method": "POST",
+      "path": "/wda/tap",
+      "auth": "protected",
+      "session": "none",
+      "requestSchema": {
+        "type": "object",
+        "required": [
+          "x",
+          "y"
+        ],
+        "properties": {
+          "x": {
+            "type": "number",
+            "finite": true
+          },
+          "y": {
+            "type": "number",
+            "finite": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "successStatus": 200
+    },
+    {
+      "method": "POST",
+      "path": "/wda/swipe",
+      "auth": "protected",
+      "session": "none",
+      "requestSchema": {
+        "type": "object",
+        "required": [
+          "fromX",
+          "fromY",
+          "toX",
+          "toY",
+          "delay"
+        ],
+        "properties": {
+          "fromX": {
+            "type": "number",
+            "finite": true
+          },
+          "fromY": {
+            "type": "number",
+            "finite": true
+          },
+          "toX": {
+            "type": "number",
+            "finite": true
+          },
+          "toY": {
+            "type": "number",
+            "finite": true
+          },
+          "delay": {
+            "type": "number",
+            "finite": true,
+            "minimum": 0,
+            "maximum": 5
+          }
+        },
+        "additionalProperties": false
+      },
+      "successStatus": 200
+    },
+    {
+      "method": "POST",
+      "path": "/wda/setPasteboard",
+      "auth": "protected",
+      "session": "none",
+      "requestSchema": {
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "type": "string",
+            "encoding": "base64",
+            "decoderOptions": [
+              "ignoreUnknownCharacters"
+            ]
+          },
+          "contentType": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "successStatus": 200
+    },
+    {
+      "method": "POST",
+      "path": "/wda/getPasteboard",
+      "auth": "protected",
+      "session": "none",
+      "requestSchema": {
+        "type": "object",
+        "required": [],
+        "properties": {
+          "contentType": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "responseSchema": {
+        "type": "object",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "type": "string",
+            "encoding": "base64",
+            "byteExact": true
+          },
+          "sessionId": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "successStatus": 200
+    },
+    {
+      "method": "GET",
+      "path": "/screenshot",
+      "auth": "protected",
+      "session": "none",
+      "purpose": "diagnosticOnly",
+      "responseSchema": {
+        "type": "object",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "type": "string",
+            "encoding": "base64"
+          }
+        }
+      },
+      "successStatus": 200
+    },
+    {
+      "method": "POST",
+      "path": "/session/{sessionId}/element",
+      "auth": "protected",
+      "session": "required",
+      "purpose": "probeElementLookupOnly",
+      "pathParameters": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "requestSchema": {
+        "type": "object",
+        "required": [
+          "using",
+          "value"
+        ],
+        "properties": {
+          "using": {
+            "type": "string",
+            "minLength": 1
+          },
+          "value": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "responseSchema": {
+        "type": "object",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "type": "object",
+            "required": [
+              "element-6066-11e4-a52e-4f735466cecf",
+              "ELEMENT"
+            ],
+            "properties": {
+              "element-6066-11e4-a52e-4f735466cecf": {
+                "type": "string",
+                "minLength": 1
+              },
+              "ELEMENT": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      },
+      "successStatus": 200
+    },
+    {
+      "method": "GET",
+      "path": "/session/{sessionId}/wda/activeAppInfo",
+      "auth": "protected",
+      "session": "required",
+      "purpose": "settingsActiveProbeOnly",
+      "pathParameters": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "responseSchema": {
+        "type": "object",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "type": "object",
+            "required": [
+              "bundleId",
+              "pid"
+            ],
+            "properties": {
+              "bundleId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "pid": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          }
+        }
+      },
+      "successStatus": 200
+    },
+    {
+      "method": "GET",
+      "path": "/session/{sessionId}/element/{elementId}/rect",
+      "auth": "protected",
+      "session": "required",
+      "purpose": "gestureSemanticProbeOnly",
+      "pathParameters": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "elementId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "responseSchema": {
+        "type": "object",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "type": "object",
+            "required": [
+              "x",
+              "y",
+              "width",
+              "height"
+            ],
+            "properties": {
+              "x": {"type": "number", "finite": true},
+              "y": {"type": "number", "finite": true},
+              "width": {"type": "number", "finite": true, "exclusiveMinimum": 0},
+              "height": {"type": "number", "finite": true, "exclusiveMinimum": 0}
+            }
+          }
+        }
+      },
+      "successStatus": 200
+    },
+    {
+      "method": "GET",
+      "path": "/session/{sessionId}/element/{elementId}/attribute/value",
+      "auth": "protected",
+      "session": "required",
+      "purpose": "gestureSemanticProbeOnly",
+      "pathParameters": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "elementId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "responseSchema": {
+        "type": "object",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "type": "string",
+            "enum": ["0", "1"]
+          }
+        }
+      },
+      "successStatus": 200
+    },
+    {
+      "method": "POST",
+      "path": "/session/{sessionId}/element/{elementId}/click",
+      "auth": "protected",
+      "session": "required",
+      "purpose": "unicodeReadbackProbeOnly",
+      "pathParameters": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "elementId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "requestSchema": {
+        "type": "object",
+        "maxProperties": 0,
+        "additionalProperties": false
+      },
+      "successStatus": 200
+    },
+    {
+      "method": "POST",
+      "path": "/session/{sessionId}/element/{elementId}/clear",
+      "auth": "protected",
+      "session": "required",
+      "purpose": "unicodeReadbackProbeOnly",
+      "pathParameters": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "elementId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "requestSchema": {
+        "type": "object",
+        "maxProperties": 0,
+        "additionalProperties": false
+      },
+      "successStatus": 200
+    },
+    {
+      "method": "GET",
+      "path": "/session/{sessionId}/element/{elementId}/text",
+      "auth": "protected",
+      "session": "required",
+      "purpose": "unicodeReadbackProbeOnly",
+      "pathParameters": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "elementId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "responseSchema": {
+        "type": "object",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "successStatus": 200
+    },
+    {
+      "method": "POST",
+      "path": "/session/{sessionId}/wda/keys",
+      "auth": "protected",
+      "session": "required",
+      "purpose": "unicodeReadbackProbeOnly",
+      "pathParameters": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "requestSchema": {
+        "type": "object",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "successStatus": 200
+    }
+  ]
+}

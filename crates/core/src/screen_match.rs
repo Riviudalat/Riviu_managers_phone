@@ -125,7 +125,8 @@ impl Integrals {
     }
 
     fn window(&self, table: &[f64], x: usize, y: usize, w: usize, h: usize) -> f64 {
-        table[(y + h) * self.stride + x + w] - table[y * self.stride + x + w]
+        table[(y + h) * self.stride + x + w]
+            - table[y * self.stride + x + w]
             - table[(y + h) * self.stride + x]
             + table[y * self.stride + x]
     }

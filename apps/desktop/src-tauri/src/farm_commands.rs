@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
 use riviu_core::{
-    AnalyticsSummary, AppLibraryItem, AuthSession, DeviceGroup, DeviceMeta, MaterialItem,
-    OpLog, ProxyConfig, PublishTask, ScheduleItem, LocalUser,
+    AnalyticsSummary, AppLibraryItem, AuthSession, DeviceGroup, DeviceMeta, DeviceWorkOwner,
+    LocalUser, MaterialItem, OpLog, ProxyConfig, PublishTask, ScheduleItem,
 };
 use riviu_script_engine::parse_script;
 use tauri::State;
@@ -218,18 +218,20 @@ pub async fn push_material(
         .find(|m| m.id == material_id)
         .ok_or_else(|| "material not found".to_string())?;
     // Best-effort: copy into artifacts push staging and attempt sidecar afc push.
+    let context = state
+        .control
+        .try_acquire_exclusive(&udid, DeviceWorkOwner::Repair)
+        .await
+        .map_err(err)?;
     let msg = match state
-        .driver
-        .install_app(&udid, &PathBuf::from(&item.path))
+        .control
+        .install_app(&context, &PathBuf::from(&item.path))
         .await
     {
         Ok(()) => format!("Pushed/installed {} to {udid}", item.name),
         Err(e) => {
             // Non-ipa materials: stage path for manual transfer
-            let staged = state
-                .artifacts_dir
-                .join("push-staging")
-                .join(&udid);
+            let staged = state.artifacts_dir.join("push-staging").join(&udid);
             std::fs::create_dir_all(&staged).map_err(err)?;
             let dest = staged.join(&item.name);
             std::fs::copy(&item.path, &dest).map_err(err)?;
@@ -313,9 +315,14 @@ pub async fn install_library_app(
         .into_iter()
         .find(|a| a.id == app_id)
         .ok_or_else(|| "app not found".to_string())?;
+    let context = state
+        .control
+        .try_acquire_exclusive(&udid, DeviceWorkOwner::Repair)
+        .await
+        .map_err(err)?;
     state
-        .driver
-        .install_app(&udid, &PathBuf::from(&item.path))
+        .control
+        .install_app(&context, &PathBuf::from(&item.path))
         .await
         .map_err(err)?;
     log(&state, "app.install", &format!("{udid}:{}", item.name));
@@ -393,7 +400,10 @@ pub async fn create_publish_task(
 }
 
 #[tauri::command]
-pub fn list_op_logs(state: State<'_, AppState>, limit: Option<usize>) -> Result<Vec<OpLog>, String> {
+pub fn list_op_logs(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<OpLog>, String> {
     state.db.list_op_logs(limit.unwrap_or(100)).map_err(err)
 }
 

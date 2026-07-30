@@ -1,0 +1,252 @@
+diff --git a/WebDriverAgentLib/Commands/FBSessionCommands.m b/WebDriverAgentLib/Commands/FBSessionCommands.m
+index c567381ab86d4f81b936f156322bb234cb78616a..90a9b8b91d72906573dab29636096ce3ad944e6d 100644
+--- a/WebDriverAgentLib/Commands/FBSessionCommands.m
++++ b/WebDriverAgentLib/Commands/FBSessionCommands.m
+@@ -45,6 +45,7 @@
+     [[FBRoute GET:@""] respondWithTarget:self action:@selector(handleGetActiveSession:)],
+     [[FBRoute DELETE:@""] respondWithTarget:self action:@selector(handleDeleteSession:)],
+     [[FBRoute GET:@"/status"].withoutSession respondWithTarget:self action:@selector(handleGetStatus:)],
++    [[FBRoute GET:@"/riviu/health"].withoutSession respondWithTarget:self action:@selector(handleGetRiviuHealth:)],
+ 
+     // Health check might modify simulator state so it should only be called in-between testing sessions
+     [[FBRoute GET:@"/wda/healthcheck"].withoutSession respondWithTarget:self action:@selector(handleGetHealthCheck:)],
+@@ -209,11 +210,29 @@
+           @"ip" : [XCUIDevice sharedDevice].fb_wifiIPAddress ?: [NSNull null]
+         },
+       @"build" : buildInfo.copy,
++      @"riviuAgent": self.riviuAgentIdentity,
+       @"device": [self.class deviceNameByUserInterfaceIdiom:[UIDevice currentDevice].userInterfaceIdiom]
+     }
+   );
+ }
+ 
+++ (id<FBResponsePayload>)handleGetRiviuHealth:(FBRouteRequest *)request
++{
++  return FBResponseWithObject(self.riviuAgentIdentity);
++}
++
+++ (NSDictionary<NSString *, id> *)riviuAgentIdentity
++{
++  return @{
++    @"agentVersion": @"0.1.0",
++    @"protocolVersion": @2,
++    @"features": @[@"stream", @"tap", @"swipe", @"clipboard"],
++    @"logicalWidth": @375,
++    @"logicalHeight": @667,
++    @"state": @"ready",
++  };
++}
++
+ + (id<FBResponsePayload>)handleGetHealthCheck:(FBRouteRequest *)request
+ {
+   if (![[XCUIDevice sharedDevice] fb_healthCheckWithApplication:[XCUIApplication fb_activeApplication]]) {
+diff --git a/WebDriverAgentLib/Routing/FBWebServer.h b/WebDriverAgentLib/Routing/FBWebServer.h
+index 34bca6515dcfd6e9a4fed27c821f6e342a39deb6..9c2552d9a8e44e4f3a5cd55eac23dfb67e4dead0 100644
+--- a/WebDriverAgentLib/Routing/FBWebServer.h
++++ b/WebDriverAgentLib/Routing/FBWebServer.h
+@@ -13,6 +13,17 @@
+ 
+ NS_ASSUME_NONNULL_BEGIN
+ 
++FOUNDATION_EXPORT NSString *const FBRiviuAgentTokenEnvironmentName;
++FOUNDATION_EXPORT NSString *const FBRiviuAgentTokenHeaderName;
++
++FOUNDATION_EXPORT NSData *FBRiviuRequireAgentToken(NSDictionary<NSString *, id> *environment);
++FOUNDATION_EXPORT BOOL FBRiviuConstantTimeDataEqual(NSData *expected, NSData *provided);
++FOUNDATION_EXPORT BOOL FBRiviuRequestIsAuthenticationExempt(NSString *method, NSString *path);
++FOUNDATION_EXPORT BOOL FBRiviuRequestIsAuthorized(NSString *method,
++                                                  NSString *path,
++                                                  nullable NSString *providedToken,
++                                                  NSData *expectedToken);
++
+ /**
+  HTTP and USB service wrapper, handling requests and responses
+  */
+diff --git a/WebDriverAgentLib/Routing/FBWebServer.m b/WebDriverAgentLib/Routing/FBWebServer.m
+index 5d4d835353fab4490fa01c2894e4c634b5fbbaf2..161836b9bc888396f5b12d780827e354dfe4a4d4 100644
+--- a/WebDriverAgentLib/Routing/FBWebServer.m
++++ b/WebDriverAgentLib/Routing/FBWebServer.m
+@@ -10,6 +10,8 @@
+ 
+ #import "RoutingConnection.h"
+ #import "RoutingHTTPServer.h"
++#import "HTTPDataResponse.h"
++#import "HTTPMessage.h"
+ 
+ #import "FBCommandHandler.h"
+ #import "FBErrorBuilder.h"
+@@ -27,12 +29,97 @@
+ 
+ static NSString *const FBServerURLBeginMarker = @"ServerURLHere->";
+ static NSString *const FBServerURLEndMarker = @"<-ServerURLHere";
++NSString *const FBRiviuAgentTokenEnvironmentName = @"RIVIU_AGENT_TOKEN";
++NSString *const FBRiviuAgentTokenHeaderName = @"X-Riviu-Token";
++
++static NSData *FBRiviuAgentTokenData;
++
++NSData *FBRiviuRequireAgentToken(NSDictionary<NSString *, id> *environment)
++{
++  id rawToken = environment[FBRiviuAgentTokenEnvironmentName];
++  if (![rawToken isKindOfClass:NSString.class] ||
++      [(NSString *)rawToken stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].length == 0) {
++    @throw [NSException exceptionWithName:NSInternalInconsistencyException
++                                   reason:@"RIVIU_AGENT_TOKEN must be set before the control server starts"
++                                 userInfo:nil];
++  }
++  NSData *tokenData = [(NSString *)rawToken dataUsingEncoding:NSUTF8StringEncoding];
++  if (tokenData.length < 32) {
++    @throw [NSException exceptionWithName:NSInternalInconsistencyException
++                                   reason:@"RIVIU_AGENT_TOKEN must contain at least 256 bits"
++                                 userInfo:nil];
++  }
++  return tokenData;
++}
++
++BOOL FBRiviuConstantTimeDataEqual(NSData *expected, NSData *provided)
++{
++  const NSUInteger expectedLength = expected.length;
++  const NSUInteger providedLength = provided.length;
++  const uint8_t *expectedBytes = expected.bytes;
++  const uint8_t *providedBytes = provided.bytes;
++  NSUInteger difference = expectedLength ^ providedLength;
++  for (NSUInteger index = 0; index < expectedLength; index++) {
++    const uint8_t providedByte = index < providedLength ? providedBytes[index] : 0;
++    difference |= expectedBytes[index] ^ providedByte;
++  }
++  return difference == 0;
++}
++
++BOOL FBRiviuRequestIsAuthenticationExempt(NSString *method, NSString *path)
++{
++  return [method isEqualToString:@"GET"] && [path isEqualToString:@"/status"];
++}
++
++BOOL FBRiviuRequestIsAuthorized(NSString *method,
++                                NSString *path,
++                                NSString *providedToken,
++                                NSData *expectedToken)
++{
++  if (FBRiviuRequestIsAuthenticationExempt(method, path)) {
++    return YES;
++  }
++  NSData *providedData = [providedToken dataUsingEncoding:NSUTF8StringEncoding] ?: NSData.data;
++  return FBRiviuConstantTimeDataEqual(expectedToken, providedData);
++}
++
++@interface FBRiviuUnauthorizedResponse : HTTPDataResponse
++@end
++
++@implementation FBRiviuUnauthorizedResponse
++
++- (NSInteger)status
++{
++  return 401;
++}
++
++- (NSDictionary *)httpHeaders
++{
++  return @{
++    @"Content-Type": @"application/json; charset=utf-8",
++    @"Connection": @"close",
++  };
++}
++
++@end
+ 
+ @interface FBHTTPConnection : RoutingConnection
+ @end
+ 
+ @implementation FBHTTPConnection
+ 
++- (NSObject<HTTPResponse> *)httpResponseForMethod:(NSString *)method URI:(NSString *)path
++{
++  NSString *requestPath = request.url.path ?: path;
++  NSString *providedToken = [request headerField:FBRiviuAgentTokenHeaderName];
++  if (!FBRiviuRequestIsAuthorized(method, requestPath, providedToken, FBRiviuAgentTokenData)) {
++    NSData *body = [@"{\"value\":{\"error\":\"unauthorized\",\"message\":\"Authentication required\",\"stacktrace\":\"\"}}"
++                    dataUsingEncoding:NSUTF8StringEncoding];
++    return [[FBRiviuUnauthorizedResponse alloc] initWithData:body];
++  }
++  return [super httpResponseForMethod:method URI:path];
++}
++
+ - (void)handleResourceNotFound
+ {
+   [FBLogger logFmt:@"Received request for %@ which we do not handle", self.requestURI];
+@@ -92,11 +179,12 @@ static NSString *const FBServerURLEndMarker = @"<-ServerURLHere";
+ 
+ - (void)startHTTPServer
+ {
++  FBRiviuAgentTokenData = FBRiviuRequireAgentToken(NSProcessInfo.processInfo.environment);
+   self.server = [[RoutingHTTPServer alloc] init];
+   [self.server setRouteQueue:dispatch_get_main_queue()];
+   [self.server setDefaultHeader:@"Server" value:@"WebDriverAgent/1.0"];
+   [self.server setDefaultHeader:@"Access-Control-Allow-Origin" value:@"*"];
+-  [self.server setDefaultHeader:@"Access-Control-Allow-Headers" value:@"Content-Type, X-Requested-With"];
++  [self.server setDefaultHeader:@"Access-Control-Allow-Headers" value:@"Content-Type, X-Requested-With, X-Riviu-Token"];
+   [self.server setConnectionClass:[FBHTTPConnection self]];
+ 
+   [self registerRouteHandlers:[self.class collectCommandHandlerClasses]];
+diff --git a/WebDriverAgentTests/UnitTests/FBRouteTests.m b/WebDriverAgentTests/UnitTests/FBRouteTests.m
+index 5dede0c5f292ea0924f4309af1af7afe8b62007d..dcfcaf3fb28a22ebb930763210d682726b653ee1 100644
+--- a/WebDriverAgentTests/UnitTests/FBRouteTests.m
++++ b/WebDriverAgentTests/UnitTests/FBRouteTests.m
+@@ -9,6 +9,12 @@
+ #import <XCTest/XCTest.h>
+ 
+ #import "FBRoute.h"
++#import "FBSessionCommands.h"
++#import "FBWebServer.h"
++
++@interface FBSessionCommands (RiviuAgentTests)
+++ (NSDictionary<NSString *, id> *)riviuAgentIdentity;
++@end
+ 
+ @class RouteResponse;
+ 
+@@ -121,6 +127,45 @@
+   XCTAssertEqualObjects(route.path, @"/");
+ }
+ 
++- (void)testRiviuStatusRouteIsTheOnlyAuthenticationExemption
++{
++  XCTAssertTrue(FBRiviuRequestIsAuthenticationExempt(@"GET", @"/status"));
++  XCTAssertFalse(FBRiviuRequestIsAuthenticationExempt(@"POST", @"/status"));
++  XCTAssertFalse(FBRiviuRequestIsAuthenticationExempt(@"GET", @"/session/status"));
++  XCTAssertFalse(FBRiviuRequestIsAuthenticationExempt(@"GET", @"/riviu/health"));
++}
++
++- (void)testRiviuAuthenticationTruthTable
++{
++  NSData *expected = [@"test-token" dataUsingEncoding:NSUTF8StringEncoding];
++  XCTAssertTrue(FBRiviuRequestIsAuthorized(@"GET", @"/status", nil, expected));
++  XCTAssertFalse(FBRiviuRequestIsAuthorized(@"GET", @"/riviu/health", nil, expected));
++  XCTAssertFalse(FBRiviuRequestIsAuthorized(@"GET", @"/riviu/health", @"fail-token", expected));
++  XCTAssertFalse(FBRiviuRequestIsAuthorized(@"GET", @"/riviu/health", @"short", expected));
++  XCTAssertTrue(FBRiviuRequestIsAuthorized(@"GET", @"/riviu/health", @"test-token", expected));
++}
++
++- (void)testRiviuTokenIsRequiredBeforeBind
++{
++  XCTAssertThrowsSpecificNamed(FBRiviuRequireAgentToken(@{}), NSException, NSInternalInconsistencyException);
++  XCTAssertThrowsSpecificNamed(FBRiviuRequireAgentToken(@{FBRiviuAgentTokenEnvironmentName: @"  "}), NSException, NSInternalInconsistencyException);
++  XCTAssertThrowsSpecificNamed(FBRiviuRequireAgentToken(@{FBRiviuAgentTokenEnvironmentName: @"short-token"}), NSException, NSInternalInconsistencyException);
++  NSString *token = @"01234567890123456789012345678901";
++  XCTAssertEqualObjects(FBRiviuRequireAgentToken(@{FBRiviuAgentTokenEnvironmentName: token}),
++                        [token dataUsingEncoding:NSUTF8StringEncoding]);
++}
++
++- (void)testRiviuIdentityPayload
++{
++  NSDictionary<NSString *, id> *identity = FBSessionCommands.riviuAgentIdentity;
++  XCTAssertEqualObjects(identity[@"agentVersion"], @"0.1.0");
++  XCTAssertEqualObjects(identity[@"protocolVersion"], @2);
++  XCTAssertEqualObjects(identity[@"features"], (@[@"stream", @"tap", @"swipe", @"clipboard"]));
++  XCTAssertEqualObjects(identity[@"logicalWidth"], @375);
++  XCTAssertEqualObjects(identity[@"logicalHeight"], @667);
++  XCTAssertEqualObjects(identity[@"state"], @"ready");
++}
++
+ + (id<FBResponsePayload>)dummyHandler:(FBRouteRequest *)request
+ {
+   return nil;

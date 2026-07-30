@@ -1,4 +1,5 @@
 import { memo, useRef, useState } from "react";
+import { tileStreamStateView } from "../types";
 import type { DeviceInfo, TileSize } from "../types";
 import { deviceSwipe, deviceTap, groupInput } from "../api";
 import { useDeviceFrame } from "../frameStore";
@@ -112,6 +113,11 @@ function DeviceTileInner({
   const [ratio, setRatio] = useState(DEFAULT_H / DEFAULT_W);
   const width = TILE_W[tileSize];
   const status = statusText(device);
+  const streamState = tileStreamStateView(
+    device.tileStreamState,
+    Boolean(frame),
+    Boolean(device.lastError),
+  );
 
   return (
     <article
@@ -206,7 +212,13 @@ function DeviceTileInner({
       </div>
 
       <footer className="dev-window-foot">
-        <span>{status}</span>
+        <span
+          className={`dev-window-stream-state is-${streamState.state}`}
+          title={`Stream: ${streamState.label}; device: ${status}`}
+        >
+          <span aria-hidden="true" className="dev-window-stream-dot" />
+          {streamState.label}
+        </span>
         <span>{device.connection.toUpperCase()}</span>
         <span>
           {device.model} · {device.iosVersion}

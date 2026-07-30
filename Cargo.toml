@@ -6,6 +6,7 @@ members = [
   "crates/ios-driver",
   "crates/signing",
   "crates/script-engine",
+  "tools/rtmmo-re",
 ]
 
 [workspace.package]
@@ -28,6 +29,7 @@ parking_lot = "0.12"
 dirs = "6"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 base64 = "0.22"
+sha2 = "0.10"
 riviu-core = { path = "crates/core" }
 riviu-ios-driver = { path = "crates/ios-driver" }
 riviu-signing = { path = "crates/signing" }

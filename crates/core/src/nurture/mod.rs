@@ -20,26 +20,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-
 mod actions;
 mod recovery;
 
-pub use recovery::Outcome;
 use actions::{CommentResult, LikeResult};
-use recovery::{Budget, HARD_RECOVERY_BUDGET};
+use recovery::Budget;
+pub use recovery::Outcome;
 
 use crate::db::Database;
-use crate::driver::{ui_error_kind, DeviceDriver, UiErrorKind, UiSession};
+use crate::device_control::{DeviceControlPlane, UiWithStreamContext};
+use crate::driver::{ui_error_kind, UiError, UiErrorKind, UiSession};
 use crate::frame_source::FrameSource;
 use crate::human_behavior::{
-    in_night_window, roll_feed_action_in_mood, roll_follow_in_mood, FeedAction,
-    HumanBehavior, MoodCycle,
+    in_night_window, roll_feed_action_in_mood, roll_follow_in_mood, FeedAction, HumanBehavior,
+    MoodCycle,
 };
 use crate::openai_client::generate_comment_pool;
 use crate::screen::{self, ActionRail, ScreenKind};
 use crate::screen_watch::{ScreenWatcher, SessionHandle};
-use crate::types::{NurtureSessionStatus, NurtureSettings};
-
+use crate::types::{InteractionSessionKind, NurtureSessionStatus, NurtureSettings};
+use crate::DeviceWorkOwner;
 
 /// How long to wait for the frame to change before calling a swipe blocked.
 ///
@@ -48,11 +48,67 @@ use crate::types::{NurtureSessionStatus, NurtureSettings};
 /// 15-minute run showed 115 swipes for 47 confirmed advances before this was
 /// widened.
 pub(super) const SWIPE_SETTLE: Duration = Duration::from_millis(2_400);
+const TEXT_NOT_ARMED_REFRESH_THRESHOLD: u8 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommentRecoveryAction {
+    None,
+    RefreshFreshSession,
+    DoNotRetry,
+}
+
+fn must_stop_before_next_feed_iteration(
+    action: CommentRecoveryAction,
+    advanced_to_next_video: bool,
+) -> bool {
+    action == CommentRecoveryAction::DoNotRetry && !advanced_to_next_video
+}
+
+#[derive(Default)]
+struct TextCommentHealth {
+    text_not_armed_streak: u8,
+}
+
+impl TextCommentHealth {
+    fn observe(&mut self, result: CommentResult) -> CommentRecoveryAction {
+        match result {
+            CommentResult::TextNotArmed => {
+                self.text_not_armed_streak = self.text_not_armed_streak.saturating_add(1);
+                if self.text_not_armed_streak >= TEXT_NOT_ARMED_REFRESH_THRESHOLD {
+                    CommentRecoveryAction::RefreshFreshSession
+                } else {
+                    CommentRecoveryAction::None
+                }
+            }
+            CommentResult::TextSent(_) => {
+                self.text_not_armed_streak = 0;
+                CommentRecoveryAction::None
+            }
+            CommentResult::TextNotSent => {
+                self.text_not_armed_streak = 0;
+                CommentRecoveryAction::DoNotRetry
+            }
+            _ => {
+                self.text_not_armed_streak = 0;
+                CommentRecoveryAction::None
+            }
+        }
+    }
+
+    fn fresh_session_installed(&mut self) {
+        self.text_not_armed_streak = 0;
+    }
+
+    #[cfg(test)]
+    fn text_not_armed_streak(&self) -> u8 {
+        self.text_not_armed_streak
+    }
+}
 
 #[derive(Clone)]
 pub struct NurtureEngine {
     pub db: Arc<Database>,
-    pub driver: Arc<dyn DeviceDriver>,
+    pub control: Arc<DeviceControlPlane>,
     pub frames: Arc<dyn FrameSource>,
     pub artifacts_dir: PathBuf,
 }
@@ -60,16 +116,34 @@ pub struct NurtureEngine {
 impl NurtureEngine {
     pub fn new(
         db: Arc<Database>,
-        driver: Arc<dyn DeviceDriver>,
+        control: Arc<DeviceControlPlane>,
         frames: Arc<dyn FrameSource>,
         artifacts_dir: PathBuf,
     ) -> Self {
         Self {
             db,
-            driver,
+            control,
             frames,
             artifacts_dir,
         }
+    }
+
+    async fn open_ui_context(
+        &self,
+        udid: &str,
+        bundle_id: &str,
+        kind: InteractionSessionKind,
+    ) -> Result<UiWithStreamContext, crate::DeviceControlError> {
+        let exclusive = self
+            .control
+            .acquire_exclusive(udid, DeviceWorkOwner::Nurture)
+            .await?;
+        let (exclusive, capacity) = self.control.reserve_ui_capacity(exclusive).await?;
+        let session = self
+            .control
+            .start_interaction_session(exclusive, bundle_id, kind)
+            .await?;
+        self.control.start_reserved_stream(session, capacity).await
     }
 
     pub(super) fn tiktok_bundle(settings: &NurtureSettings) -> &str {
@@ -166,6 +240,21 @@ impl NurtureEngine {
             on_status(status.clone());
         };
 
+        if stop.load(Ordering::Acquire) {
+            status.running = false;
+            report(&mut status, "stopped before device start".to_string());
+            return Ok(status);
+        }
+
+        if settings.comment_prob > 0 && !self.control.supports_text_comments() {
+            report(
+                &mut status,
+                "failed — Riviu Agent chưa có kênh bình luận chữ; chạy Agent Repair".into(),
+            );
+            status.running = false;
+            return Ok(status);
+        }
+
         // Order matters: the WDA session is created and primed **before** the
         // MJPEG stream is started.
         //
@@ -178,50 +267,51 @@ impl NurtureEngine {
         //
         // One session per device; the supervisor reuses a healthy relay and
         // runner rather than starting a second one.
-        let cached = self.driver.ui_session_cached(udid).await;
+        let bundle_id = Self::tiktok_bundle(&settings).to_string();
+        let fresh_text_session =
+            settings.comment_prob > 0 && self.control.requires_fresh_text_session();
+        let session_kind = if fresh_text_session {
+            InteractionSessionKind::FreshText
+        } else {
+            InteractionSessionKind::Ordinary
+        };
+        let cached = false;
         report(
             &mut status,
-            if cached {
+            if fresh_text_session {
+                "chuẩn bị RT-MMO text session mới".into()
+            } else if cached {
                 "WDA đã có — reuse".into()
             } else {
                 "khởi động WDA mới".to_string()
             },
         );
-        // A wedged runner answers /status but executes nothing, so session
-        // creation now fails loudly rather than handing back a dead session.
-        // One recycle at start-up is worth it: the alternative is a whole run
-        // of timeouts.
-        let session: Arc<dyn UiSession> = match self.driver.start_ui_session(udid).await {
-            Ok(s) => Arc::from(s),
+        // Session creation can transiently fail while the relay settles. Retry
+        // by dropping only the cached session; startup probes are not evidence
+        // that the transport itself is wedged.
+        let first_session = self.open_ui_context(udid, &bundle_id, session_kind).await;
+        let mut ui_context = match first_session {
+            Ok(context) => context,
             Err(first) => {
                 report(
                     &mut status,
-                    format!("WDA không dùng được ({first}) — recycle runner rồi thử lại"),
+                    format!("WDA chưa tạo được session ({first}) — thử session mới"),
                 );
-                self.driver.recycle_ui_transport(udid).await;
-                match tokio::time::timeout(
-                    HARD_RECOVERY_BUDGET,
-                    self.driver.start_ui_session(udid),
-                )
-                .await
-                {
-                    Ok(Ok(s)) => {
-                        report(&mut status, "WDA đã dựng lại".into());
-                        Arc::from(s)
+                let second_session = self.open_ui_context(udid, &bundle_id, session_kind).await;
+                match second_session {
+                    Ok(context) => {
+                        report(&mut status, "WDA đã tạo session mới".into());
+                        context
                     }
-                    Ok(Err(e)) => {
+                    Err(e) => {
                         report(&mut status, format!("failed — không mở được WDA: {e}"));
-                        status.running = false;
-                        return Ok(status);
-                    }
-                    Err(_) => {
-                        report(&mut status, "failed — hết thời gian dựng lại WDA".into());
                         status.running = false;
                         return Ok(status);
                     }
                 }
             }
         };
+        let mut session = self.control.streaming_session(&ui_context)?;
 
         let screen_size = match session.window_size().await {
             Ok(sz) if sz.0 > 0.0 && sz.1 > 0.0 => sz,
@@ -230,11 +320,6 @@ impl NurtureEngine {
 
         // Now the agent is warm, attach the stream that the watcher reads.
         report(&mut status, "mở stream màn hình".into());
-        if let Err(e) = self.driver.ensure_stream(udid).await {
-            report(&mut status, format!("failed — không mở được stream: {e}"));
-            status.running = false;
-            return Ok(status);
-        }
         if self
             .wait_for_frame(udid, Duration::from_secs(20), &stop, |_| true)
             .await
@@ -258,11 +343,24 @@ impl NurtureEngine {
 
         // TikTok forward only if the frame says we are not already there.
         if already_on_tiktok {
-            report(&mut status, "TikTok đã mở sẵn — reuse, không khởi động lại".into());
+            report(
+                &mut status,
+                "TikTok đã mở sẵn — reuse, không khởi động lại".into(),
+            );
         } else {
-            report(&mut status, "TikTok chưa ở foreground — đưa lên trước".into());
+            report(
+                &mut status,
+                "TikTok chưa ở foreground — đưa lên trước".into(),
+            );
             let brought = self
-                .bring_tiktok_foreground(udid, session.as_ref(), &settings, &gestures, &stop)
+                .bring_tiktok_foreground(
+                    udid,
+                    &ui_context,
+                    session.as_ref(),
+                    &settings,
+                    &gestures,
+                    &stop,
+                )
                 .await;
             match brought {
                 Ok(true) => report(&mut status, "đã bring TikTok foreground".into()),
@@ -308,6 +406,7 @@ impl NurtureEngine {
             settings.pause_swipe,
         );
         let mut budget = Budget::new();
+        let mut text_health = TextCommentHealth::default();
         // `steady_mood` pins the cycle for feature tests; a normal run varies.
         let mut moods = match settings.steady_mood.as_str() {
             "chatty" => MoodCycle::fixed(crate::human_behavior::Mood::Chatty),
@@ -444,6 +543,7 @@ impl NurtureEngine {
             }
 
             human.note_action();
+            let mut comment_recovery_action = CommentRecoveryAction::None;
             match roll_feed_action_in_mood(settings.like_prob, settings.comment_prob, mood) {
                 FeedAction::Like => {
                     report(&mut status, "thả tim".into());
@@ -474,7 +574,19 @@ impl NurtureEngine {
                             report(&mut status, msg.clone());
                             last_error = Some(msg);
                             if !self
-                                .recover(udid, &handle, &mut budget, &e, &mut status, &on_status)
+                                .recover(
+                                    udid,
+                                    &bundle_id,
+                                    fresh_text_session,
+                                    &mut ui_context,
+                                    &mut session,
+                                    &handle,
+                                    &mut budget,
+                                    &mut text_health,
+                                    &e,
+                                    &mut status,
+                                    &on_status,
+                                )
                                 .await
                             {
                                 outcome = Outcome::Failed;
@@ -500,14 +612,72 @@ impl NurtureEngine {
                         .await;
                     suppress.store(false, Ordering::Relaxed);
                     match res {
-                        Ok(CommentResult::Sent(usd)) => {
-                            status.comments += 1;
-                            status.session_usd += usd;
-                            report(&mut status, "đã gửi cảm xúc (xác nhận nút gửi tắt)".into());
-                        }
-                        Ok(other) => {
-                            let msg = format!("bỏ qua bình luận: {}", other.reason());
-                            report(&mut status, msg);
+                        Ok(result) => {
+                            comment_recovery_action = text_health.observe(result);
+                            match result {
+                                CommentResult::TextSent(usd) => {
+                                    status.comments += 1;
+                                    status.session_usd += usd;
+                                    report(
+                                        &mut status,
+                                        "đã gửi bình luận chữ (xác nhận nút gửi tắt)".into(),
+                                    );
+                                }
+                                CommentResult::EmojiSent(usd) => {
+                                    status.comments += 1;
+                                    status.session_usd += usd;
+                                    report(
+                                        &mut status,
+                                        "đã gửi bình luận emoji (xác nhận nút gửi tắt)".into(),
+                                    );
+                                }
+                                CommentResult::TextNotSent => report(
+                                    &mut status,
+                                    "bỏ qua bình luận: đã bấm Gửi nhưng chưa xác nhận được; không retry vì trạng thái giao nhận mơ hồ"
+                                        .into(),
+                                ),
+                                other => {
+                                    let msg = format!("bỏ qua bình luận: {}", other.reason());
+                                    report(&mut status, msg);
+                                }
+                            }
+
+                            if comment_recovery_action == CommentRecoveryAction::RefreshFreshSession
+                            {
+                                report(
+                                    &mut status,
+                                    "nút Gửi không sáng 2 lượt liên tiếp — làm mới text session"
+                                        .into(),
+                                );
+                                let error = anyhow::Error::new(UiError::new(
+                                    UiErrorKind::Session,
+                                    "comment.text_not_armed",
+                                    "two consecutive frame-confirmed non-arming results",
+                                ));
+                                if !self
+                                    .recover(
+                                        udid,
+                                        &bundle_id,
+                                        true,
+                                        &mut ui_context,
+                                        &mut session,
+                                        &handle,
+                                        &mut budget,
+                                        &mut text_health,
+                                        &error,
+                                        &mut status,
+                                        &on_status,
+                                    )
+                                    .await
+                                {
+                                    last_error = Some(
+                                        "không làm mới được text session sau 2 lượt không armed"
+                                            .into(),
+                                    );
+                                    outcome = Outcome::Failed;
+                                    break 'feed;
+                                }
+                            }
                         }
                         Err(e) => {
                             let msg = format!("bình luận thất bại: {}", describe(&e));
@@ -515,7 +685,19 @@ impl NurtureEngine {
                             last_error = Some(msg);
                             if ui_error_kind(&e) != UiErrorKind::Other
                                 && !self
-                                    .recover(udid, &handle, &mut budget, &e, &mut status, &on_status)
+                                    .recover(
+                                        udid,
+                                        &bundle_id,
+                                        fresh_text_session,
+                                        &mut ui_context,
+                                        &mut session,
+                                        &handle,
+                                        &mut budget,
+                                        &mut text_health,
+                                        &e,
+                                        &mut status,
+                                        &on_status,
+                                    )
                                     .await
                             {
                                 outcome = Outcome::Failed;
@@ -543,7 +725,19 @@ impl NurtureEngine {
                         report(&mut status, msg.clone());
                         last_error = Some(msg);
                         if !self
-                            .recover(udid, &handle, &mut budget, &e, &mut status, &on_status)
+                            .recover(
+                                udid,
+                                &bundle_id,
+                                fresh_text_session,
+                                &mut ui_context,
+                                &mut session,
+                                &handle,
+                                &mut budget,
+                                &mut text_health,
+                                &e,
+                                &mut status,
+                                &on_status,
+                            )
                             .await
                         {
                             outcome = Outcome::Failed;
@@ -556,11 +750,13 @@ impl NurtureEngine {
             sleep_interruptible(Duration::from_millis(human.think_pause_ms()), &stop).await;
 
             report(&mut status, "vuốt video tiếp".into());
+            let mut advanced_to_next_video = false;
             match self
                 .do_swipe(udid, session.as_ref(), &gestures, screen_size, false, &stop)
                 .await
             {
                 Ok(true) => {
+                    advanced_to_next_video = true;
                     status.videos_done += 1;
                     on_status(status.clone());
                 }
@@ -574,6 +770,7 @@ impl NurtureEngine {
                         .await
                     {
                         Ok(true) => {
+                            advanced_to_next_video = true;
                             status.videos_done += 1;
                             on_status(status.clone());
                         }
@@ -586,7 +783,19 @@ impl NurtureEngine {
                             report(&mut status, msg.clone());
                             last_error = Some(msg);
                             if !self
-                                .recover(udid, &handle, &mut budget, &e, &mut status, &on_status)
+                                .recover(
+                                    udid,
+                                    &bundle_id,
+                                    fresh_text_session,
+                                    &mut ui_context,
+                                    &mut session,
+                                    &handle,
+                                    &mut budget,
+                                    &mut text_health,
+                                    &e,
+                                    &mut status,
+                                    &on_status,
+                                )
                                 .await
                             {
                                 outcome = Outcome::Failed;
@@ -600,13 +809,40 @@ impl NurtureEngine {
                     report(&mut status, msg.clone());
                     last_error = Some(msg);
                     if !self
-                        .recover(udid, &handle, &mut budget, &e, &mut status, &on_status)
+                        .recover(
+                            udid,
+                            &bundle_id,
+                            fresh_text_session,
+                            &mut ui_context,
+                            &mut session,
+                            &handle,
+                            &mut budget,
+                            &mut text_health,
+                            &e,
+                            &mut status,
+                            &on_status,
+                        )
                         .await
                     {
                         outcome = Outcome::Failed;
                         break 'feed;
                     }
                 }
+            }
+            if must_stop_before_next_feed_iteration(comment_recovery_action, advanced_to_next_video)
+            {
+                let message =
+                    "dừng trước lượt feed kế tiếp: chưa xác nhận rời video có trạng thái gửi mơ hồ"
+                        .to_string();
+                report(&mut status, message.clone());
+                last_error = Some(message);
+                hit_video_cap = false;
+                outcome = if status.videos_done == 0 {
+                    Outcome::Failed
+                } else {
+                    Outcome::Partial
+                };
+                break 'feed;
             }
             sleep_interruptible(Duration::from_millis(human.after_swipe_pause_ms()), &stop).await;
         }
@@ -641,6 +877,15 @@ impl NurtureEngine {
             } else if status.videos_done < 3 && last_error.is_some() {
                 outcome = Outcome::Partial;
             }
+        }
+
+        if let Err(error) = self.control.close_ui_context(ui_context).await {
+            outcome = if status.videos_done == 0 {
+                Outcome::Failed
+            } else {
+                Outcome::Partial
+            };
+            last_error = Some(format!("device cleanup failed: {error}"));
         }
 
         let elapsed = started.elapsed();
@@ -680,6 +925,7 @@ impl NurtureEngine {
     async fn bring_tiktok_foreground(
         &self,
         udid: &str,
+        context: &UiWithStreamContext,
         session: &dyn UiSession,
         settings: &NurtureSettings,
         gestures: &tokio::sync::Mutex<()>,
@@ -696,7 +942,9 @@ impl NurtureEngine {
             }
         }
         // The driver serialises this against the relay on the device lock.
-        self.driver.launch_app(udid, bundle).await?;
+        self.control
+            .foreground_streaming_app(context, bundle)
+            .await?;
         sleep_interruptible(Duration::from_millis(2_000), stop).await;
         Ok(true)
     }
@@ -742,6 +990,168 @@ pub(super) async fn sleep_interruptible(dur: Duration, stop: &AtomicBool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::AtomicUsize;
+
+    use crate::frame_source::NullFrameSource;
+    use crate::types::DeviceInfo;
+    use crate::DeviceDriver;
+
+    #[derive(Default)]
+    struct MissingTextDriver {
+        session_calls: AtomicUsize,
+        stream_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl DeviceDriver for MissingTextDriver {
+        async fn list_devices(&self) -> anyhow::Result<Vec<DeviceInfo>> {
+            Ok(Vec::new())
+        }
+
+        async fn refresh_device(&self, _udid: &str) -> anyhow::Result<DeviceInfo> {
+            anyhow::bail!("unused")
+        }
+
+        async fn install_app(&self, _udid: &str, _path: &Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn uninstall_app(&self, _udid: &str, _bundle_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn screenshot(&self, _udid: &str, _dest: &Path) -> anyhow::Result<PathBuf> {
+            anyhow::bail!("unused")
+        }
+
+        async fn syslog_tail(&self, _udid: &str, _lines: usize) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+
+        async fn launch_app(&self, _udid: &str, _bundle_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn terminate_app(&self, _udid: &str, _bundle_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn reboot(&self, _udid: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn start_ui_session(&self, _udid: &str) -> anyhow::Result<Box<dyn UiSession>> {
+            self.session_calls.fetch_add(1, Ordering::Relaxed);
+            anyhow::bail!("session must not start")
+        }
+
+        async fn start_interaction_session(
+            &self,
+            _udid: &str,
+            _bundle_id: &str,
+            _kind: InteractionSessionKind,
+        ) -> anyhow::Result<Box<dyn UiSession>> {
+            self.session_calls.fetch_add(1, Ordering::Relaxed);
+            anyhow::bail!("interaction session must not start")
+        }
+
+        async fn start_stream_after_session(
+            &self,
+            _udid: &str,
+        ) -> anyhow::Result<crate::StreamStartProof> {
+            self.stream_calls.fetch_add(1, Ordering::Relaxed);
+            anyhow::bail!("stream must not start")
+        }
+
+        async fn ensure_stream(&self, _udid: &str) -> anyhow::Result<String> {
+            self.stream_calls.fetch_add(1, Ordering::Relaxed);
+            anyhow::bail!("stream must not start")
+        }
+
+        async fn prepare_device(&self, _udid: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn comment_enabled_job_stops_before_feed_when_text_capability_is_missing() {
+        let driver = Arc::new(MissingTextDriver::default());
+        let control = Arc::new(DeviceControlPlane::new(
+            driver.clone(),
+            Arc::new(crate::DeviceWorkCoordinator::new()),
+            Arc::new(crate::StreamBudgetManager::default()),
+        ));
+        let db_path =
+            std::env::temp_dir().join(format!("riviu-missing-text-{}.db", uuid::Uuid::new_v4()));
+        let engine = NurtureEngine::new(
+            Arc::new(Database::open(&db_path).expect("test database")),
+            control,
+            Arc::new(NullFrameSource),
+            std::env::temp_dir(),
+        );
+        let mut settings = NurtureSettings::default();
+        settings.comment_prob = 1;
+
+        let final_status = engine
+            .run_session(
+                "missing-text-device",
+                settings,
+                Arc::new(AtomicBool::new(false)),
+                Some(Duration::from_millis(1)),
+                |_| {},
+            )
+            .await
+            .expect("capability failure is reported as a terminal session status");
+
+        assert!(!final_status.running);
+        assert!(final_status.last_message.contains("Agent Repair"));
+        assert_eq!(driver.session_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(driver.stream_calls.load(Ordering::Relaxed), 0);
+
+        drop(engine);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn pre_stopped_job_never_opens_a_device_session_or_stream() {
+        let driver = Arc::new(MissingTextDriver::default());
+        let control = Arc::new(DeviceControlPlane::new(
+            driver.clone(),
+            Arc::new(crate::DeviceWorkCoordinator::new()),
+            Arc::new(crate::StreamBudgetManager::default()),
+        ));
+        let db_path =
+            std::env::temp_dir().join(format!("riviu-pre-stopped-{}.db", uuid::Uuid::new_v4()));
+        let engine = NurtureEngine::new(
+            Arc::new(Database::open(&db_path).expect("test database")),
+            control,
+            Arc::new(NullFrameSource),
+            std::env::temp_dir(),
+        );
+        let stop = Arc::new(AtomicBool::new(true));
+
+        let mut settings = NurtureSettings::default();
+        settings.comment_prob = 0;
+        let final_status = engine
+            .run_session(
+                "pre-stopped-device",
+                settings,
+                stop,
+                Some(Duration::from_millis(1)),
+                |_| {},
+            )
+            .await
+            .expect("pre-stopped run is a clean terminal result");
+
+        assert!(!final_status.running);
+        assert_eq!(driver.session_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(driver.stream_calls.load(Ordering::Relaxed), 0);
+
+        drop(engine);
+        let _ = std::fs::remove_file(db_path);
+    }
 
     #[test]
     fn a_session_that_processed_nothing_is_not_done() {
@@ -788,5 +1198,68 @@ mod tests {
         b[4096] = 4;
         assert_ne!(frame_digest(&a), frame_digest(&b));
     }
-}
 
+    #[tokio::test]
+    async fn two_consecutive_text_not_armed_results_refresh_the_fresh_session() {
+        let mut health = TextCommentHealth::default();
+
+        assert_eq!(
+            health.observe(CommentResult::TextNotArmed),
+            CommentRecoveryAction::None
+        );
+        assert_eq!(
+            health.observe(CommentResult::TextNotArmed),
+            CommentRecoveryAction::RefreshFreshSession
+        );
+
+        health.fresh_session_installed();
+        assert_eq!(health.text_not_armed_streak(), 0);
+    }
+
+    #[tokio::test]
+    async fn successful_text_comment_resets_the_non_armed_streak() {
+        let mut health = TextCommentHealth::default();
+        assert_eq!(
+            health.observe(CommentResult::TextNotArmed),
+            CommentRecoveryAction::None
+        );
+
+        assert_eq!(
+            health.observe(CommentResult::TextSent(0.0)),
+            CommentRecoveryAction::None
+        );
+        assert_eq!(
+            health.observe(CommentResult::TextNotArmed),
+            CommentRecoveryAction::None,
+            "a successful post must break the non-arming streak"
+        );
+
+        assert_eq!(
+            health.observe(CommentResult::NoDrawer),
+            CommentRecoveryAction::None
+        );
+        assert_eq!(
+            health.observe(CommentResult::TextNotArmed),
+            CommentRecoveryAction::None,
+            "any intervening comment outcome must break a consecutive streak"
+        );
+    }
+
+    #[tokio::test]
+    async fn text_not_sent_is_not_retried_because_delivery_is_ambiguous() {
+        let mut health = TextCommentHealth::default();
+
+        assert_eq!(
+            health.observe(CommentResult::TextNotSent),
+            CommentRecoveryAction::DoNotRetry
+        );
+        assert!(must_stop_before_next_feed_iteration(
+            CommentRecoveryAction::DoNotRetry,
+            false
+        ));
+        assert!(!must_stop_before_next_feed_iteration(
+            CommentRecoveryAction::DoNotRetry,
+            true
+        ));
+    }
+}

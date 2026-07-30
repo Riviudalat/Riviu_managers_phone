@@ -14,8 +14,16 @@ chrono = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true }
 base64 = { workspace = true }
+sha2 = { workspace = true }
 async-trait = "0.1"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 bytes = "1"
 parking_lot = { workspace = true }
-dirs = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }

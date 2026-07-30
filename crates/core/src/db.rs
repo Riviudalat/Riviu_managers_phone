@@ -244,7 +244,9 @@ impl Database {
     pub fn list_scripts(&self) -> anyhow::Result<Vec<(String, String)>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT name, body_json FROM scripts ORDER BY name")?;
-        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -364,13 +366,14 @@ impl Database {
         let mut stmt =
             conn.prepare("SELECT id, name, color, created_at FROM groups ORDER BY name")?;
         let groups: Vec<(String, String, String, String)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
             .filter_map(|r| r.ok())
             .collect();
         let mut out = Vec::new();
         for (id, name, color, created_at) in groups {
-            let mut mstmt =
-                conn.prepare("SELECT udid FROM group_members WHERE group_id = ?1")?;
+            let mut mstmt = conn.prepare("SELECT udid FROM group_members WHERE group_id = ?1")?;
             let udids: Vec<String> = mstmt
                 .query_map(params![id], |row| row.get(0))?
                 .filter_map(|r| r.ok())
@@ -393,7 +396,10 @@ impl Database {
                ON CONFLICT(id) DO UPDATE SET name=excluded.name, color=excluded.color"#,
             params![group.id, group.name, group.color, group.created_at],
         )?;
-        conn.execute("DELETE FROM group_members WHERE group_id = ?1", params![group.id])?;
+        conn.execute(
+            "DELETE FROM group_members WHERE group_id = ?1",
+            params![group.id],
+        )?;
         for udid in &group.udids {
             conn.execute(
                 "INSERT OR IGNORE INTO group_members (group_id, udid) VALUES (?1,?2)",
@@ -651,7 +657,12 @@ impl Database {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    pub fn register_user(&self, email: &str, password: &str, role: &str) -> anyhow::Result<crate::types::LocalUser> {
+    pub fn register_user(
+        &self,
+        email: &str,
+        password: &str,
+        role: &str,
+    ) -> anyhow::Result<crate::types::LocalUser> {
         let conn = self.conn()?;
         let user = crate::types::LocalUser {
             id: Uuid::new_v4().to_string(),
@@ -666,7 +677,11 @@ impl Database {
         Ok(user)
     }
 
-    pub fn login_user(&self, email: &str, password: &str) -> anyhow::Result<Option<crate::types::LocalUser>> {
+    pub fn login_user(
+        &self,
+        email: &str,
+        password: &str,
+    ) -> anyhow::Result<Option<crate::types::LocalUser>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, email, role, created_at, password_hash FROM users WHERE email = ?1",
@@ -743,6 +758,21 @@ impl Database {
         settings: &crate::types::NurtureSettings,
     ) -> anyhow::Result<()> {
         self.set_setting("nurture.settings", &serde_json::to_string(settings)?)
+    }
+
+    pub fn get_agent_settings(&self) -> anyhow::Result<crate::types::AgentSettings> {
+        match self.get_setting("agent.settings.v1")? {
+            Some(raw) => serde_json::from_str(&raw)
+                .context("invalid JSON in stored setting agent.settings.v1"),
+            None => Ok(crate::types::AgentSettings::default()),
+        }
+    }
+
+    pub fn save_agent_settings(
+        &self,
+        settings: &crate::types::AgentSettings,
+    ) -> anyhow::Result<()> {
+        self.set_setting("agent.settings.v1", &serde_json::to_string(settings)?)
     }
 
     pub fn add_nurture_comment_cost(
@@ -851,5 +881,48 @@ pub fn step_label(status: &StepStatus) -> &'static str {
         StepStatus::Succeeded => "succeeded",
         StepStatus::Failed => "failed",
         StepStatus::Skipped => "skipped",
+    }
+}
+
+#[cfg(test)]
+mod agent_settings_tests {
+    use super::*;
+    use crate::types::AgentSettings;
+
+    fn fixture() -> (Database, PathBuf) {
+        let path =
+            std::env::temp_dir().join(format!("riviu-agent-settings-test-{}.db", Uuid::new_v4()));
+        (Database::open(&path).expect("open fixture database"), path)
+    }
+
+    #[test]
+    fn agent_settings_round_trip_without_secret_fields() {
+        let (db, path) = fixture();
+        let settings = AgentSettings { auto_repair: false };
+
+        db.save_agent_settings(&settings).expect("save settings");
+
+        assert_eq!(db.get_agent_settings().expect("load settings"), settings);
+        let raw = db
+            .get_setting("agent.settings.v1")
+            .expect("read raw setting")
+            .expect("stored setting");
+        assert_eq!(raw, r#"{"autoRepair":false}"#);
+        assert!(!raw.to_ascii_lowercase().contains("token"));
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    #[test]
+    fn invalid_agent_settings_json_is_not_silently_defaulted() {
+        let (db, path) = fixture();
+        db.set_setting("agent.settings.v1", "{not-json")
+            .expect("store malformed fixture");
+
+        let error = db
+            .get_agent_settings()
+            .expect_err("malformed settings must fail");
+
+        assert!(error.to_string().contains("agent.settings.v1"));
+        std::fs::remove_file(path).expect("remove fixture database");
     }
 }

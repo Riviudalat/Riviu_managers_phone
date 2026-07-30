@@ -4,9 +4,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use riviu_core::{NurtureEngine, NurtureSessionStatus, NurtureSettings};
+use riviu_core::{
+    DeviceControlPlane, DeviceWorkOwner, NurtureEngine, NurtureSessionStatus, NurtureSettings,
+};
 use tauri::{AppHandle, Emitter, State};
 
+use crate::command_error::CommandError;
 use crate::state::AppState;
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -78,11 +81,15 @@ pub async fn nurture_start(
     state: State<'_, AppState>,
     udids: Vec<String>,
     duration_minutes: Option<u32>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, CommandError> {
     if udids.is_empty() {
         return Err("Chưa chọn thiết bị".into());
     }
-    let settings = state.db.get_nurture_settings().map_err(err)?;
+    let settings = state
+        .db
+        .get_nurture_settings()
+        .map_err(CommandError::operation)?;
+    preflight_comment_job(&state.control, &udids, &settings).await?;
     let started = state
         .nurture
         .start_many(
@@ -94,6 +101,43 @@ pub async fn nurture_start(
         )
         .await;
     Ok(started)
+}
+
+async fn preflight_comment_job(
+    control: &DeviceControlPlane,
+    udids: &[String],
+    settings: &NurtureSettings,
+) -> Result<(), CommandError> {
+    if settings.comment_prob == 0 {
+        return Ok(());
+    }
+
+    let mut failures = Vec::new();
+    for udid in udids {
+        let context = control
+            .try_acquire_exclusive(udid, DeviceWorkOwner::Nurture)
+            .await
+            .map_err(CommandError::from)?;
+        match control.preflight_agent(&context).await {
+            Ok(status) if status.auth_ready => {}
+            Ok(status) => failures.push(format!(
+                "{udid}: {}",
+                status
+                    .message
+                    .unwrap_or_else(|| format!("trạng thái {:?}", status.state))
+            )),
+            Err(error) => failures.push(format!("{udid}: {error}")),
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(CommandError::operation(format!(
+            "Riviu Agent chưa sẵn sàng cho bình luận chữ: {}. Chạy Agent Repair rồi thử lại.",
+            failures.join("; ")
+        )))
+    }
 }
 
 #[tauri::command]
@@ -114,15 +158,23 @@ pub struct NurtureRuntime {
 }
 
 struct NurtureRuntimeInner {
-    stops: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    runs: Mutex<NurtureRuns>,
     status: Mutex<HashMap<String, NurtureSessionStatus>>,
+}
+
+struct NurtureRuns {
+    accepting_starts: bool,
+    stops: HashMap<String, Arc<AtomicBool>>,
 }
 
 impl NurtureRuntime {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(NurtureRuntimeInner {
-                stops: Mutex::new(HashMap::new()),
+                runs: Mutex::new(NurtureRuns {
+                    accepting_starts: true,
+                    stops: HashMap::new(),
+                }),
                 status: Mutex::new(HashMap::new()),
             }),
         }
@@ -137,14 +189,57 @@ impl NurtureRuntime {
     }
 
     pub fn stop(&self, udid: &str) {
-        if let Some(flag) = self.inner.stops.lock().get(udid) {
+        if let Some(flag) = self.inner.runs.lock().stops.get(udid) {
             flag.store(true, Ordering::Relaxed);
         }
     }
 
     pub fn stop_all(&self) {
-        for flag in self.inner.stops.lock().values() {
+        for flag in self.inner.runs.lock().stops.values() {
             flag.store(true, Ordering::Relaxed);
+        }
+    }
+
+    pub fn begin_shutdown(&self) {
+        let mut runs = self.inner.runs.lock();
+        runs.accepting_starts = false;
+        for flag in runs.stops.values() {
+            flag.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn reserve_start(&self, udid: &str) -> Option<Arc<AtomicBool>> {
+        let mut runs = self.inner.runs.lock();
+        if !runs.accepting_starts || runs.stops.contains_key(udid) {
+            return None;
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        runs.stops.insert(udid.to_string(), stop.clone());
+        Some(stop)
+    }
+
+    fn finish_start(&self, udid: &str, stop: &Arc<AtomicBool>) {
+        let mut runs = self.inner.runs.lock();
+        if runs
+            .stops
+            .get(udid)
+            .is_some_and(|current| Arc::ptr_eq(current, stop))
+        {
+            runs.stops.remove(udid);
+        }
+    }
+
+    async fn wait_stagger_or_stop(stop: &AtomicBool, duration: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + duration;
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                return true;
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            tokio::time::sleep((deadline - now).min(Duration::from_millis(100))).await;
         }
     }
 
@@ -158,14 +253,9 @@ impl NurtureRuntime {
     ) -> Vec<String> {
         let mut started = Vec::new();
         for (idx, udid) in udids.into_iter().enumerate() {
-            {
-                let map = self.inner.status.lock();
-                if map.get(&udid).map(|s| s.running).unwrap_or(false) {
-                    continue;
-                }
-            }
-            let stop = Arc::new(AtomicBool::new(false));
-            self.inner.stops.lock().insert(udid.clone(), stop.clone());
+            let Some(stop) = self.reserve_start(&udid) else {
+                continue;
+            };
             let initial = NurtureSessionStatus {
                 udid: udid.clone(),
                 running: true,
@@ -183,6 +273,7 @@ impl NurtureRuntime {
             let settings = settings.clone();
             let app2 = app.clone();
             let udid_clone = udid.clone();
+            let task_stop = stop.clone();
             let min = settings.stagger_delay_min.min(settings.stagger_delay_max);
             let max = settings.stagger_delay_max.max(settings.stagger_delay_min);
             let stagger = if idx == 0 {
@@ -194,44 +285,58 @@ impl NurtureRuntime {
             };
 
             tauri::async_runtime::spawn(async move {
-                if stagger > 0 {
-                    tokio::time::sleep(Duration::from_secs(stagger as u64)).await;
-                }
-                let result = engine
-                    .run_session(
-                        &udid_clone,
-                        settings,
-                        stop,
-                        max_duration,
-                        |st| {
-                            runtime.set_status(st.clone());
-                            let _ = app2.emit(
-                                "riviu://event",
-                                serde_json::json!({
-                                    "type": "nurtureStatus",
-                                    "status": st,
-                                }),
-                            );
-                        },
-                    )
-                    .await;
-                let final_status = match result {
-                    Ok(mut s) => {
-                        s.running = false;
-                        s
-                    }
-                    Err(e) => NurtureSessionStatus {
-                        udid: udid_clone,
+                let stopped_before_start =
+                    Self::wait_stagger_or_stop(&task_stop, Duration::from_secs(stagger as u64))
+                        .await;
+                let final_status = if stopped_before_start || task_stop.load(Ordering::Acquire) {
+                    NurtureSessionStatus {
+                        udid: udid_clone.clone(),
                         running: false,
                         videos_done: 0,
                         likes: 0,
                         comments: 0,
                         follows: 0,
-                        last_message: format!("error: {e}"),
+                        last_message: "stopped before start".to_string(),
                         session_usd: 0.0,
-                    },
+                    }
+                } else {
+                    match engine
+                        .run_session(
+                            &udid_clone,
+                            settings,
+                            task_stop.clone(),
+                            max_duration,
+                            |st| {
+                                runtime.set_status(st.clone());
+                                let _ = app2.emit(
+                                    "riviu://event",
+                                    serde_json::json!({
+                                        "type": "nurtureStatus",
+                                        "status": st,
+                                    }),
+                                );
+                            },
+                        )
+                        .await
+                    {
+                        Ok(mut status) => {
+                            status.running = false;
+                            status
+                        }
+                        Err(error) => NurtureSessionStatus {
+                            udid: udid_clone.clone(),
+                            running: false,
+                            videos_done: 0,
+                            likes: 0,
+                            comments: 0,
+                            follows: 0,
+                            last_message: format!("error: {error}"),
+                            session_usd: 0.0,
+                        },
+                    }
                 };
                 runtime.set_status(final_status.clone());
+                runtime.finish_start(&udid_clone, &task_stop);
                 let _ = app2.emit(
                     "riviu://event",
                     serde_json::json!({
@@ -249,5 +354,104 @@ impl NurtureRuntime {
 impl Default for NurtureRuntime {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use riviu_core::{
+        AgentState, DeviceControlPlane, DeviceDriver, DeviceWorkCoordinator, StreamBudgetManager,
+    };
+    use riviu_ios_driver::MockIosDriver;
+
+    #[test]
+    fn concurrent_starts_reserve_exactly_one_stop_token_per_device() {
+        let runtime = NurtureRuntime::new();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let runtime = runtime.clone();
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                runtime.reserve_start("same-device")
+            }));
+        }
+        barrier.wait();
+        let reservations = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("reservation worker"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            reservations.iter().filter(|value| value.is_some()).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn shutdown_atomically_blocks_new_starts_and_signals_existing_tokens() {
+        let runtime = NurtureRuntime::new();
+        let active = runtime.reserve_start("active").expect("active token");
+
+        runtime.begin_shutdown();
+
+        assert!(active.load(Ordering::Relaxed));
+        assert!(runtime.reserve_start("late").is_none());
+    }
+
+    #[tokio::test]
+    async fn stop_interrupts_stagger_before_a_device_session_can_start() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let waiter_stop = stop.clone();
+        let waiter = tokio::spawn(async move {
+            NurtureRuntime::wait_stagger_or_stop(&waiter_stop, Duration::from_secs(30)).await
+        });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        stop.store(true, Ordering::Relaxed);
+
+        assert!(tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("stagger stop should be observed promptly")
+            .expect("stagger waiter"));
+    }
+
+    #[tokio::test]
+    async fn comment_job_with_unready_agent_is_rejected_before_it_is_reported_started() {
+        let driver = MockIosDriver::new();
+        for udid in ["needs-repair-a", "needs-repair-b"] {
+            let mut status = driver.cached_agent_status(udid);
+            status.state = AgentState::RepairRequired;
+            status.message = Some("agent version does not match manifest".to_string());
+            driver.set_mock_agent_status(status);
+        }
+        let control = DeviceControlPlane::new(
+            Arc::new(driver.clone()),
+            Arc::new(DeviceWorkCoordinator::new()),
+            Arc::new(StreamBudgetManager::default()),
+        );
+        let runtime = NurtureRuntime::new();
+        let mut settings = NurtureSettings::default();
+        settings.comment_prob = 1;
+
+        let error = preflight_comment_job(
+            &control,
+            &["needs-repair-a".to_string(), "needs-repair-b".to_string()],
+            &settings,
+        )
+        .await
+        .expect_err("an unready text agent must reject the whole command");
+
+        assert!(error.message.contains("needs-repair-a"));
+        assert!(error.message.contains("needs-repair-b"));
+        assert!(error.message.contains("Agent Repair"));
+        assert!(runtime.list_status().is_empty());
+        assert_eq!(
+            driver.agent_preflight_calls(),
+            0,
+            "comment preflight must use install-only readiness"
+        );
     }
 }

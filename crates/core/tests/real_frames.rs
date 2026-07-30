@@ -34,14 +34,13 @@ fn feed_frames() -> Vec<(&'static str, image::RgbImage)> {
 #[test]
 fn real_feed_frames_are_classified_as_the_feed() {
     for (name, img) in feed_frames() {
-        assert_eq!(img.width(), 750, "{name} is not the @2x capture we measured");
-        let obs = screen::classify(&img, Some(LOGICAL_W));
         assert_eq!(
-            obs.kind,
-            ScreenKind::Feed,
-            "{name}: {}",
-            obs.debug_line()
+            img.width(),
+            750,
+            "{name} is not the @2x capture we measured"
         );
+        let obs = screen::classify(&img, Some(LOGICAL_W));
+        assert_eq!(obs.kind, ScreenKind::Feed, "{name}: {}", obs.debug_line());
     }
 }
 
@@ -69,11 +68,10 @@ fn a_sheet_over_a_real_feed_is_found_and_located() {
             img.put_pixel(x, y, image::Rgb([252, 252, 252]));
         }
     }
-    let glyph = image::open(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/tiktok_close_x.png"),
-    )
-    .unwrap()
-    .to_rgb8();
+    let glyph =
+        image::open(Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/tiktok_close_x.png"))
+            .unwrap()
+            .to_rgb8();
     image::imageops::overlay(&mut img, &glyph, 673, 735);
 
     let obs = screen::classify(&img, Some(LOGICAL_W));
@@ -83,7 +81,10 @@ fn a_sheet_over_a_real_feed_is_found_and_located() {
             assert!((x * w as f64 - 693.0).abs() < 8.0, "x {x} ({score:.3})");
             assert!((y * h as f64 - 755.0).abs() < 8.0, "y {y} ({score:.3})");
         }
-        other => panic!("expected a closable sheet, got {other:?} ({})", obs.debug_line()),
+        other => panic!(
+            "expected a closable sheet, got {other:?} ({})",
+            obs.debug_line()
+        ),
     }
 }
 
@@ -177,7 +178,11 @@ fn a_liked_heart_reads_red_and_an_unliked_one_does_not() {
         "a liked heart measured {liked_redness:.1}; the engine would like it again"
     );
 
-    for name in ["feed-iphone8.jpg", "feed-iphone8-b.jpg", "feed-rail-variant.png"] {
+    for name in [
+        "feed-iphone8.jpg",
+        "feed-iphone8-b.jpg",
+        "feed-rail-variant.png",
+    ] {
         let img = load(name);
         let redness = screen::like_redness_at(&img, &rail);
         assert!(
@@ -202,7 +207,10 @@ fn classification_stays_fast_enough_for_the_watcher() {
         let _ = screen::classify(&img, Some(LOGICAL_W));
     }
     let per_frame = started.elapsed() / runs;
-    println!("classify: {:?}/frame (feed, compose bar visible)", per_frame);
+    println!(
+        "classify: {:?}/frame (feed, compose bar visible)",
+        per_frame
+    );
 
     // The feed path short-circuits on the compose bar, so it must be very fast.
     assert!(
@@ -223,7 +231,10 @@ fn classification_stays_fast_enough_for_the_watcher() {
         let _ = screen::classify(&bare, Some(LOGICAL_W));
     }
     let per_frame = started.elapsed() / runs;
-    println!("classify: {:?}/frame (no compose bar — full template match)", per_frame);
+    println!(
+        "classify: {:?}/frame (no compose bar — full template match)",
+        per_frame
+    );
     assert!(
         per_frame < std::time::Duration::from_millis(400),
         "template-match classification took {per_frame:?}/frame"

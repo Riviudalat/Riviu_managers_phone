@@ -9,6 +9,8 @@ apps/desktop/node_modules
 .vscode
 .claude/
 *.db-journal
+__pycache__/
+*.py[cod]
 .env
 .env.*
 sidecars/wda/DerivedData/

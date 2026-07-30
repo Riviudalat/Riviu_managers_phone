@@ -171,7 +171,11 @@ impl HumanBehavior {
     }
 
     fn tod_mult(&self) -> f64 {
-        let hour = chrono::Local::now().format("%H").to_string().parse::<u32>().unwrap_or(12);
+        let hour = chrono::Local::now()
+            .format("%H")
+            .to_string()
+            .parse::<u32>()
+            .unwrap_or(12);
         match hour {
             6..=8 => 1.2,
             9..=11 => 0.95,
@@ -248,7 +252,11 @@ pub fn in_night_window(start: u32, end: u32) -> bool {
     if start == end {
         return false;
     }
-    let hour = chrono::Local::now().format("%H").to_string().parse::<u32>().unwrap_or(12);
+    let hour = chrono::Local::now()
+        .format("%H")
+        .to_string()
+        .parse::<u32>()
+        .unwrap_or(12);
     if start < end {
         hour >= start && hour < end
     } else {
@@ -381,7 +389,9 @@ impl MoodCycle {
 
 /// Roll a feed action using the configured probabilities scaled by mood.
 pub fn roll_feed_action_in_mood(like_prob: u32, comment_prob: u32, mood: Mood) -> FeedAction {
-    let like = ((like_prob as f64) * mood.like_mult()).round().clamp(0.0, 100.0) as u32;
+    let like = ((like_prob as f64) * mood.like_mult())
+        .round()
+        .clamp(0.0, 100.0) as u32;
     let comment = ((comment_prob as f64) * mood.comment_mult())
         .round()
         .clamp(0.0, 100.0) as u32;

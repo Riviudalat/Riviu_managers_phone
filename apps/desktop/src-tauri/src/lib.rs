@@ -1,14 +1,19 @@
+mod agent_commands;
+mod agent_runtime;
+mod command_error;
 mod commands;
 mod farm_commands;
 mod nurture_commands;
 mod state;
 
 use state::AppState;
-use tauri::Manager;
+use tauri::{Manager, RunEvent};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    riviu_ios_driver::install_process_tree_guard()
+        .expect("failed to establish process-tree ownership");
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -20,7 +25,8 @@ pub fn run() {
             }
 
             let handle = app.handle().clone();
-            let state = tauri::async_runtime::block_on(AppState::bootstrap())
+            let resource_dir = app.path().resource_dir().ok();
+            let state = tauri::async_runtime::block_on(AppState::bootstrap(resource_dir))
                 .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
             state.spawn_background_tasks(handle.clone());
             handle.manage(state);
@@ -28,6 +34,12 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            agent_commands::agent_get_settings,
+            agent_commands::agent_save_settings,
+            agent_commands::agent_list_statuses,
+            agent_commands::agent_preflight,
+            agent_commands::agent_repair,
+            agent_commands::agent_bulk_repair,
             commands::list_devices,
             commands::refresh_devices,
             commands::prepare_device,
@@ -93,6 +105,25 @@ pub fn run() {
             nurture_commands::nurture_start,
             nurture_commands::nurture_stop,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|handle, event| {
+        if !matches!(event, RunEvent::Exit) {
+            return;
+        }
+        let state = handle.state::<AppState>();
+        state.nurture.begin_shutdown();
+        state.jobs.stop_all();
+        let control = state.control.clone();
+        if let Err(error) = tauri::async_runtime::block_on(state.shutdown_background_sampler()) {
+            log::error!("background sampler shutdown failed: {error:#}");
+        }
+        if let Err(error) = tauri::async_runtime::block_on(state.jobs.shutdown()) {
+            log::error!("job queue shutdown failed: {error:#}");
+        }
+        if let Err(error) = tauri::async_runtime::block_on(control.shutdown_cleanup()) {
+            log::error!("device cleanup shutdown failed: {error}");
+        }
+    });
 }

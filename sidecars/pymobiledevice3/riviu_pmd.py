@@ -12,11 +12,104 @@ import asyncio
 import contextlib
 import io
 import json
+import os
 import struct
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Optional
+
+
+def _windows_kill_on_close_job(process: subprocess.Popen):
+    """Keep a relay child tied to this proxy even if the proxy is force-killed."""
+    if sys.platform != "win32":
+        return None
+
+    import ctypes
+    from ctypes import wintypes
+
+    class JobObjectBasicLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong),
+            ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class IoCounters(ctypes.Structure):
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_ulonglong),
+            ("WriteOperationCount", ctypes.c_ulonglong),
+            ("OtherOperationCount", ctypes.c_ulonglong),
+            ("ReadTransferCount", ctypes.c_ulonglong),
+            ("WriteTransferCount", ctypes.c_ulonglong),
+            ("OtherTransferCount", ctypes.c_ulonglong),
+        ]
+
+    class JobObjectExtendedLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", JobObjectBasicLimitInformation),
+            ("IoInfo", IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        return None
+
+    info = JobObjectExtendedLimitInformation()
+    info.BasicLimitInformation.LimitFlags = 0x00002000
+    configured = kernel32.SetInformationJobObject(
+        job,
+        9,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+    )
+    child_handle = getattr(process, "_handle", None)
+    assigned = child_handle is not None and kernel32.AssignProcessToJobObject(
+        job, wintypes.HANDLE(child_handle)
+    )
+    if not configured or not assigned:
+        kernel32.CloseHandle(job)
+        return None
+    return job
+
+
+def _windows_close_handle(handle) -> None:
+    if sys.platform != "win32" or handle is None:
+        return
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle(handle)
 
 
 def emit(obj) -> None:
@@ -105,6 +198,116 @@ def cmd_install(args: argparse.Namespace) -> int:
 
     asyncio.run(_run())
     emit({"ok": True})
+    return 0
+
+
+def cmd_is_installed(args: argparse.Namespace) -> int:
+    if not try_import():
+        print("pymobiledevice3 not installed", file=sys.stderr)
+        return 1
+    from pymobiledevice3.services.installation_proxy import InstallationProxyService
+    from pymobiledevice3.lockdown import create_using_usbmux
+
+    async def _run() -> Optional[dict]:
+        lockdown = await create_using_usbmux(serial=args.udid)
+        try:
+            async with InstallationProxyService(lockdown=lockdown) as proxy:
+                apps = await proxy.get_apps(bundle_identifiers=[args.bundle_id])
+                return apps.get(args.bundle_id)
+        finally:
+            await lockdown.close()
+
+    app = asyncio.run(_run())
+    emit(
+        {
+            "ok": True,
+            "installed": app is not None,
+            "bundleId": args.bundle_id,
+            "version": app.get("CFBundleShortVersionString") if app else None,
+            "build": app.get("CFBundleVersion") if app else None,
+            "applicationType": app.get("ApplicationType") if app else None,
+            "path": app.get("Path") if app else None,
+            "signerIdentity": app.get("SignerIdentity") if app else None,
+        }
+    )
+    return 0
+
+
+def _interaction_app_identity(bundle_id: str, app: Optional[dict], *, agent: bool):
+    if app is None:
+        return None
+    identity = {
+        "bundleId": bundle_id,
+        "version": app.get("CFBundleShortVersionString"),
+        "build": app.get("CFBundleVersion"),
+    }
+    if agent:
+        identity.update(
+            {
+                "executableName": app.get("CFBundleExecutable"),
+                "signerIdentity": app.get("SignerIdentity"),
+            }
+        )
+    return identity
+
+
+def cmd_inspect_device_capabilities(args: argparse.Namespace) -> int:
+    """Read device and installed-app identity without starting runtime services."""
+    if not try_import():
+        print("pymobiledevice3 not installed", file=sys.stderr)
+        return 1
+    from pymobiledevice3.services.installation_proxy import InstallationProxyService
+
+    async def _run() -> dict:
+        has_rsd_host = args.rsd_host is not None
+        has_rsd_port = args.rsd_port is not None
+        if has_rsd_host != has_rsd_port:
+            raise ValueError("rsd-host and rsd-port must be provided together")
+
+        provider = None
+        try:
+            if has_rsd_host:
+                from pymobiledevice3.remote.remote_service_discovery import (
+                    RemoteServiceDiscoveryService,
+                )
+
+                provider = RemoteServiceDiscoveryService((args.rsd_host, args.rsd_port))
+                await provider.connect()
+                transport = "rsdTransport"
+            else:
+                from pymobiledevice3.lockdown import create_using_usbmux
+
+                provider = await create_using_usbmux(serial=args.udid, autopair=False)
+                transport = "legacyUsbmuxTransport"
+
+            provider_udid = getattr(provider, "udid", None)
+            if not provider_udid:
+                raise RuntimeError("metadata provider did not report a UDID")
+            bundle_ids = [args.target_bundle_id, args.agent_bundle_id]
+            async with InstallationProxyService(lockdown=provider) as proxy:
+                apps = await proxy.get_apps(bundle_identifiers=bundle_ids)
+            return {
+                "ok": True,
+                "udid": provider_udid,
+                "productType": getattr(provider, "product_type", None),
+                "iosVersion": getattr(provider, "product_version", None),
+                "transport": transport,
+                "targetApp": _interaction_app_identity(
+                    args.target_bundle_id,
+                    apps.get(args.target_bundle_id),
+                    agent=False,
+                ),
+                "agentApp": _interaction_app_identity(
+                    args.agent_bundle_id,
+                    apps.get(args.agent_bundle_id),
+                    agent=True,
+                ),
+            }
+        finally:
+            if provider is not None:
+                await provider.close()
+
+    emit(asyncio.run(_run()))
     return 0
 
 
@@ -235,6 +438,45 @@ async def _wait_device_port(udid: str, port: int, timeout: float = 45.0) -> bool
                 pass
         await asyncio.sleep(0.25)
     return False
+
+
+def _rt_auth_request(token: str) -> bytes:
+    return (
+        "GET /wda/locked HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        f"X-RT-Token: {token}\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode()
+
+
+def _http_response_is_ok(first_chunk: bytes) -> bool:
+    status_line = first_chunk.split(b"\r\n", 1)[0]
+    parts = status_line.split()
+    return len(parts) >= 2 and parts[1] == b"200"
+
+
+async def _device_http_ready(udid: str, port: int, token: str, timeout: float = 3.0) -> bool:
+    """Validate a token-protected RT-MMO route directly over usbmux."""
+    from pymobiledevice3 import usbmux
+
+    device = await usbmux.select_device(udid)
+    if device is None:
+        return False
+    sock = None
+    try:
+        sock = await device.connect(port)
+        sock.setblocking(False)
+        loop = asyncio.get_running_loop()
+        request = _rt_auth_request(token)
+        await asyncio.wait_for(loop.sock_sendall(sock, request), timeout=timeout)
+        first = await asyncio.wait_for(loop.sock_recv(sock, 4096), timeout=timeout)
+        return _http_response_is_ok(first)
+    except Exception:
+        return False
+    finally:
+        if sock is not None:
+            with contextlib.suppress(Exception):
+                sock.close()
 
 
 async def _start_wda_xctest(udid: str, bundle_id: str) -> asyncio.Task:
@@ -436,6 +678,7 @@ async def _stream_auto(
     mode: str,
     wda_bundle: str,
     mjpeg_port: int,
+    wda_port: int = 8100,
 ) -> None:
     """Prefer WDA MJPEG (smooth); fall back to lockdown screenshots (~1 FPS).
 
@@ -446,7 +689,7 @@ async def _stream_auto(
     use_mjpeg = mode in ("auto", "mjpeg")
     if use_mjpeg:
         ready = await _wait_device_port(udid, mjpeg_port, timeout=3.0)
-        if not ready and await _wait_device_port(udid, 8100, timeout=1.0):
+        if not ready and await _wait_device_port(udid, wda_port, timeout=1.0):
             # WDA HTTP up but MJPEG port not open yet — brief wait.
             ready = await _wait_device_port(udid, mjpeg_port, timeout=8.0)
         if ready:
@@ -462,7 +705,7 @@ async def _stream_auto(
                     raise
         elif mode == "mjpeg":
             raise RuntimeError(
-                "WDA MJPEG (port 9100) unreachable.\n"
+                f"WDA MJPEG (port {mjpeg_port}) unreachable.\n"
                 "Trust developer on iPhone, keep Riviumanagersphone installed, "
                 "then Prepare again."
             )
@@ -490,6 +733,7 @@ def cmd_stream(args: argparse.Namespace) -> int:
                 args.mode,
                 args.wda_bundle,
                 args.mjpeg_port,
+                getattr(args, "wda_port", 8100),
             )
         )
         return 0
@@ -506,50 +750,39 @@ def cmd_syslog(args: argparse.Namespace) -> int:
 
 
 def cmd_launch(args: argparse.Namespace) -> int:
-    """Launch an app by bundle id. Prefer tidevice (stable); fall back to DVT."""
-    tidevice = _which("tidevice")
-    if tidevice:
-        try:
-            proc = subprocess.run(
-                [tidevice, "-u", args.udid, "launch", args.bundle_id],
-                capture_output=True,
-                text=True,
-                timeout=25,
-            )
-            if proc.returncode == 0:
-                emit({"ok": True, "via": "tidevice", "stdout": (proc.stdout or "").strip()[:120]})
-                return 0
-            # keep going to DVT fallback with this error noted
-            tidevice_err = (proc.stderr or proc.stdout or f"exit {proc.returncode}").strip()
-        except Exception as exc:
-            tidevice_err = str(exc)
-    else:
-        tidevice_err = "tidevice not found"
-
-    if not try_import():
-        emit({"ok": False, "error": f"launch failed ({tidevice_err}); pymobiledevice3 missing"})
+    """Launch an app through the same bounded DVT path used by RT-MMO."""
+    try:
+        asyncio.run(_launch_app_with_environment(args.udid, args.bundle_id, {}))
+        emit({"ok": True, "via": "dvt"})
+        return 0
+    except Exception as exc:
+        emit({"ok": False, "error": f"dvt: {exc}"})
         return 1
+
+
+async def _launch_app_with_environment(
+    udid: str,
+    bundle_id: str,
+    environment: dict[str, str],
+) -> int:
+    """Launch through DVT so environment secrets never enter child argv."""
+    if not try_import():
+        raise RuntimeError("pymobiledevice3 not installed")
     from pymobiledevice3.lockdown import create_using_usbmux
     from pymobiledevice3.services.dvt.instruments.process_control import ProcessControl
     from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
 
-    async def _run() -> None:
-        lockdown = await create_using_usbmux(serial=args.udid)
-        try:
-            async with DvtProvider(lockdown) as dvt:
-                # ProcessControl must share the connected DVT channel.
-                pc = ProcessControl(dvt)
-                await pc.launch(args.bundle_id)
-        finally:
-            await lockdown.close()
-
+    lockdown = await create_using_usbmux(serial=udid)
     try:
-        asyncio.run(_run())
-        emit({"ok": True, "via": "dvt"})
-        return 0
-    except Exception as exc:
-        emit({"ok": False, "error": f"tidevice: {tidevice_err}; dvt: {exc}"})
-        return 1
+        async with DvtProvider(lockdown) as dvt:
+            async with ProcessControl(dvt) as process_control:
+                return await process_control.launch(
+                    bundle_id,
+                    kill_existing=False,
+                    environment=environment,
+                )
+    finally:
+        await lockdown.close()
 
 
 def cmd_terminate(args: argparse.Namespace) -> int:
@@ -641,9 +874,20 @@ def cmd_start_wda(args: argparse.Namespace) -> int:
 
 
 def _which(name: str) -> Optional[str]:
+    import site
     from shutil import which
 
-    return which(name)
+    resolved = which(name)
+    if resolved or sys.platform != "win32":
+        return resolved
+
+    scripts_dir = Path(site.getusersitepackages()).parent / "Scripts"
+    candidates = [name] if Path(name).suffix else [f"{name}.exe", f"{name}.cmd", name]
+    for candidate in candidates:
+        executable = scripts_dir / candidate
+        if executable.is_file():
+            return str(executable)
+    return None
 
 
 def cmd_wda_forward(args: argparse.Namespace) -> int:
@@ -838,30 +1082,72 @@ def _tune_mjpeg_http(local_port: int, fps: int = 24, quality: int = 55) -> None:
 
 
 def cmd_wda_proxy(args: argparse.Namespace) -> int:
-    """Long-lived control plane: USB relay to WDA :8100 (start XCTest only if needed).
-
-    Reuses an already-running WDA (e.g. from the MJPEG stream) — never kill a
-    foreign xctest on exit. Avoids tidevice wdaproxy which relaunches WDA mid-session.
-    Pass --restart-wda after a wedged session: /status may still answer while
-    gestures are dead, so reuse would leave nurture stuck.
-    """
+    """Own one backend-specific WDA relay and bootstrap its agent when needed."""
     import signal
 
     tidevice = _which("tidevice")
     if not tidevice:
         emit({"ok": False, "error": "tidevice not found — pip install -U tidevice"})
         return 1
+
+    backend = getattr(args, "backend", "stock")
+    rt_mmo = backend == "rt-mmo"
     local = int(args.local_port)
-    bundle = args.bundle_id
+    requested_bundle = getattr(args, "bundle_id", None)
+    if rt_mmo and requested_bundle in (None, "com.riviu.managersphone.agent.xctrunner"):
+        bundle = "com.mrph.svc"
+    else:
+        bundle = requested_bundle or "com.riviu.managersphone.agent.xctrunner"
+    requested_device_port = getattr(args, "device_port", None)
+    device_port = int(
+        requested_device_port
+        if requested_device_port is not None
+        else (8906 if rt_mmo else 8100)
+    )
+    requested_mjpeg_port = getattr(args, "mjpeg_port", None)
+    mjpeg_port = int(
+        requested_mjpeg_port
+        if requested_mjpeg_port is not None
+        else (9093 if rt_mmo else 9100)
+    )
+    token = str(getattr(args, "token", "") or "")
     udid = args.udid
     restart = bool(getattr(args, "restart_wda", False))
+    bootstrap_only = bool(getattr(args, "bootstrap_only", False))
+
+    if rt_mmo and not token:
+        emit(
+            {
+                "ok": False,
+                "error": "RT-MMO requires RIVIU_RTMMO_TOKEN for FARM_KEY and HTTP readiness",
+            }
+        )
+        return 1
+    if bootstrap_only and not rt_mmo:
+        emit({"ok": False, "error": "--bootstrap-only is only valid for RT-MMO"})
+        return 1
+
     xctest = None
     relay = None
+    relay_job = None
     own_xctest = False
     cleaned = False
 
     async def wait_port(timeout: float) -> bool:
-        return await _wait_device_port(udid, 8100, timeout=timeout)
+        return await _wait_device_port(udid, device_port, timeout=timeout)
+
+    async def wait_mjpeg(timeout: float) -> bool:
+        return await _wait_device_port(udid, mjpeg_port, timeout=timeout)
+
+    def wait_until_port_closes(attempts: int = 6) -> bool:
+        for _ in range(attempts):
+            try:
+                if not asyncio.run(wait_port(1.5)):
+                    return True
+            except Exception:
+                return False
+            time.sleep(1.0)
+        return False
 
     def _stop(proc: Optional[subprocess.Popen]) -> None:
         if proc is None or proc.poll() is not None:
@@ -873,8 +1159,13 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
             proc.kill()
 
     def _kill_agent_bundle() -> None:
-        """Best-effort tear-down of a zombie WDA runner still holding :8100."""
-        for name in (bundle, "com.facebook.WebDriverAgentRunner.xctrunner"):
+        """Best-effort tear-down of the selected agent before an explicit restart."""
+        names = (
+            (bundle,)
+            if rt_mmo
+            else (bundle, "com.facebook.WebDriverAgentRunner.xctrunner")
+        )
+        for name in names:
             try:
                 subprocess.run(
                     [tidevice, "-u", udid, "kill", name],
@@ -885,11 +1176,13 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
                 pass
 
     def cleanup(_signum=None, _frame=None) -> None:
-        nonlocal cleaned
+        nonlocal cleaned, relay_job
         if cleaned:
             return
         cleaned = True
         _stop(relay)
+        _windows_close_handle(relay_job)
+        relay_job = None
         # Only tear down XCTest we started — leave stream's WDA alone.
         if own_xctest:
             _stop(xctest)
@@ -904,9 +1197,32 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
     except Exception:
         already = False
 
+    if rt_mmo and already and not restart:
+        try:
+            complete_runtime = asyncio.run(wait_mjpeg(3.0)) and asyncio.run(
+                _device_http_ready(udid, device_port, token, timeout=3.0)
+            )
+        except Exception:
+            complete_runtime = False
+        if not complete_runtime:
+            # A control-only agent was launched without the required runtime
+            # environment. Reusing it makes the stream fall back to ~1 FPS and
+            # leaves frame-based action confirmation unreliable.
+            _kill_agent_bundle()
+            if not wait_until_port_closes():
+                emit(
+                    {
+                        "ok": False,
+                        "error": f"RT-MMO device port {device_port} did not close after kill",
+                    }
+                )
+                return 1
+            time.sleep(2.0)
+            already = False
+
     if restart:
-        # Recovery path. Always kill the runner bundle, even when :8100 is
-        # already closed: the failure this exists for is a runner whose XCTest
+        # Recovery path. Always kill the selected runner bundle, even when its
+        # port is already closed: the failure this exists for is a runner whose XCTest
         # thread is blocked, and that process can be stuck with its port shut.
         # Only killing "if the port is open" left those alive, and the next
         # `tidevice xctest` then timed out waiting for a port the zombie owned.
@@ -915,49 +1231,144 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
         # connection, and hammering it left the channel busy so the following
         # `tidevice xctest` could not start at all.
         _kill_agent_bundle()
-        deadline = time.monotonic() + 12
-        while time.monotonic() < deadline:
-            try:
-                if not asyncio.run(wait_port(1.5)):
-                    break
-            except Exception:
-                break
-            time.sleep(1.0)
+        if not wait_until_port_closes():
+            emit(
+                {
+                    "ok": False,
+                    "error": f"RT-MMO device port {device_port} did not close after kill",
+                }
+            )
+            return 1
         # Let iOS reap the process before asking for a new one.
         time.sleep(2.0)
         already = False
 
     if not already:
-        # Stream may own WDA later; we only start if nothing is listening.
-        xctest = subprocess.Popen(
-            [tidevice, "-u", udid, "xctest", "-B", bundle],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        own_xctest = True
-        try:
-            # A cold start after a kill can take a while on this device; the
-            # recovery path needs the longer window or it gives up just before
-            # the runner comes up.
-            ok = asyncio.run(wait_port(75.0 if restart else 55.0))
-        except Exception:
+        if rt_mmo:
+            launch_environment = {
+                "USE_PORT": str(device_port),
+                "MJPEG_SERVER_PORT": str(mjpeg_port),
+                "FARM_KEY": token,
+            }
             ok = False
-        if not ok:
-            cleanup()
-            emit({"ok": False, "error": "timeout chờ WDA trên device:8100 (xctest)"})
-            return 1
-        # If another process already owns the runner, our xctest may exit with 0
-        # while :8100 stays up — treat as reuse, don't fail the proxy.
-        if xctest.poll() is not None:
-            own_xctest = False
-            xctest = None
+            last_launch_error = ""
+            # Some installations need one second launch after the first app
+            # process exits before binding HTTP. Keep this bounded at one retry.
+            for attempt in range(2):
+                try:
+                    asyncio.run(
+                        _launch_app_with_environment(
+                            udid,
+                            bundle,
+                            launch_environment,
+                        )
+                    )
+                except Exception as exc:
+                    last_launch_error = str(exc)
+                try:
+                    ok = asyncio.run(wait_port(35.0))
+                except Exception as exc:
+                    last_launch_error = str(exc)
+                    ok = False
+                if ok:
+                    try:
+                        ok = asyncio.run(
+                            _device_http_ready(
+                                udid,
+                                device_port,
+                                token,
+                                timeout=3.0,
+                            )
+                        )
+                    except Exception as exc:
+                        last_launch_error = str(exc)
+                        ok = False
+                    if not ok and not last_launch_error:
+                        last_launch_error = "protected /wda/locked auth probe failed"
+                if ok:
+                    try:
+                        ok = asyncio.run(wait_mjpeg(15.0))
+                    except Exception as exc:
+                        last_launch_error = str(exc)
+                        ok = False
+                    if not ok:
+                        last_launch_error = (
+                            f"RT-MMO MJPEG port {mjpeg_port} did not open"
+                        )
+                if ok:
+                    break
+                if attempt == 0:
+                    _kill_agent_bundle()
+                    if not wait_until_port_closes():
+                        last_launch_error = (
+                            f"RT-MMO device port {device_port} did not close before retry"
+                        )
+                        break
+                    time.sleep(2.0)
+            if not ok:
+                cleanup()
+                detail = f": {last_launch_error}" if last_launch_error else ""
+                emit(
+                    {
+                        "ok": False,
+                        "error": f"timeout waiting for RT-MMO on device:{device_port}{detail}",
+                    }
+                )
+                return 1
+        else:
+            # Stream may own stock WDA later; start XCTest only when :8100 is absent.
+            xctest = subprocess.Popen(
+                [tidevice, "-u", udid, "xctest", "-B", bundle],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            own_xctest = True
+            try:
+                # A cold start after a kill can take a while on this device; the
+                # recovery path needs the longer window or it gives up just before
+                # the runner comes up.
+                ok = asyncio.run(wait_port(75.0 if restart else 55.0))
+            except Exception:
+                ok = False
+            if not ok:
+                cleanup()
+                emit({"ok": False, "error": "timeout chờ WDA trên device:8100 (xctest)"})
+                return 1
+            # If another process already owns the runner, our xctest may exit with 0
+            # while :8100 stays up — treat as reuse, don't fail the proxy.
+            if xctest.poll() is not None:
+                own_xctest = False
+                xctest = None
+
+    if bootstrap_only:
+        emit(
+            {
+                "ok": True,
+                "udid": udid,
+                "devicePort": device_port,
+                "mjpegPort": mjpeg_port,
+                "backend": backend,
+                "bundleId": bundle,
+                "restarted": restart,
+                "bootstrapOnly": True,
+            }
+        )
+        cleanup()
+        return 0
 
     relay = subprocess.Popen(
-        [tidevice, "-u", udid, "relay", str(local), "8100"],
+        [tidevice, "-u", udid, "relay", str(local), str(device_port)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    if sys.platform == "win32":
+        relay_job = _windows_kill_on_close_job(relay)
+        if relay_job is None:
+            cleanup()
+            emit({"ok": False, "error": "failed to own relay with a Windows Job Object"})
+            return 1
 
+    readiness_path = "/wda/locked" if rt_mmo else "/status"
     deadline = time.monotonic() + 25
     ready = False
     while time.monotonic() < deadline:
@@ -982,9 +1393,12 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
         try:
             import urllib.request
 
-            with urllib.request.urlopen(
-                f"http://127.0.0.1:{local}/status", timeout=1.5
-            ) as resp:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{local}{readiness_path}", method="GET"
+            )
+            if rt_mmo:
+                request.add_header("X-RT-Token", token)
+            with urllib.request.urlopen(request, timeout=1.5) as resp:
                 if resp.status == 200:
                     ready = True
                     break
@@ -993,7 +1407,12 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
 
     if not ready:
         cleanup()
-        emit({"ok": False, "error": "relay up nhưng WDA /status không trả lời"})
+        emit(
+            {
+                "ok": False,
+                "error": f"relay up but WDA {readiness_path} did not return HTTP 200",
+            }
+        )
         return 1
 
     emit(
@@ -1001,6 +1420,9 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
             "ok": True,
             "udid": udid,
             "localPort": local,
+            "devicePort": device_port,
+            "mjpegPort": mjpeg_port,
+            "backend": backend,
             "via": "tidevice-relay" + ("+xctest" if own_xctest else "-reuse"),
             "bundleId": bundle,
             "ownedXctest": own_xctest,
@@ -1033,6 +1455,20 @@ def main() -> int:
     p.add_argument("--udid", required=True)
     p.add_argument("--ipa", required=True)
 
+    p = sub.add_parser("is-installed")
+    p.add_argument("--udid", required=True)
+    p.add_argument("--bundle-id", required=True)
+
+    p = sub.add_parser("inspect-device-capabilities")
+    p.add_argument("--udid", required=True)
+    p.add_argument(
+        "--target-bundle-id",
+        default="com.ss.iphone.ugc.Ame",
+    )
+    p.add_argument("--agent-bundle-id", required=True)
+    p.add_argument("--rsd-host", default=None)
+    p.add_argument("--rsd-port", type=int, default=None)
+
     p = sub.add_parser("uninstall")
     p.add_argument("--udid", required=True)
     p.add_argument("--bundle-id", required=True)
@@ -1057,6 +1493,7 @@ def main() -> int:
         default="com.riviu.managersphone.agent.xctrunner",
     )
     p.add_argument("--mjpeg-port", type=int, default=9100)
+    p.add_argument("--wda-port", type=int, default=8100)
 
     p = sub.add_parser("syslog")
     p.add_argument("--udid", required=True)
@@ -1091,14 +1528,23 @@ def main() -> int:
     p = sub.add_parser("wda-proxy")
     p.add_argument("--udid", required=True)
     p.add_argument("--local-port", type=int, default=18100)
+    p.add_argument("--backend", choices=["stock", "rt-mmo"], default="stock")
+    p.add_argument("--device-port", type=int, default=None)
+    p.add_argument("--mjpeg-port", type=int, default=None)
+    p.set_defaults(token=os.environ.get("RIVIU_RTMMO_TOKEN", ""))
     p.add_argument(
         "--bundle-id",
-        default="com.riviu.managersphone.agent.xctrunner",
+        default=None,
     )
     p.add_argument(
         "--restart-wda",
         action="store_true",
         help="Kill existing WDA runner before start (recovery from wedged /status)",
+    )
+    p.add_argument(
+        "--bootstrap-only",
+        action="store_true",
+        help="Prepare the RT-MMO agent and exit without starting a local relay",
     )
 
     args = parser.parse_args()
@@ -1106,6 +1552,8 @@ def main() -> int:
         "ping": cmd_ping,
         "list": cmd_list,
         "install": cmd_install,
+        "is-installed": cmd_is_installed,
+        "inspect-device-capabilities": cmd_inspect_device_capabilities,
         "uninstall": cmd_uninstall,
         "screenshot": cmd_screenshot,
         "stream": cmd_stream,

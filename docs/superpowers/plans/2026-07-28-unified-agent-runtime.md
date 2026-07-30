@@ -8,6 +8,12 @@
 
 **Tech Stack:** Rust 2021, Tokio, Tauri 2, React 19, TypeScript 6, SQLite/rusqlite, keyring 3 native backends, Python 3/pymobiledevice3, Vitest, NSIS.
 
+> **Implementation correction (2026-07-28):** The shipped RT-MMO artifact accepts
+> its fixed artifact token, so the random-token steps in the original draft are
+> superseded. A nonblank `RIVIU_RTMMO_TOKEN` imports or replaces the native-keyring
+> value; an empty keyring without that one-time value is a configuration error.
+> Installed identity also includes payload app + signer, not only bundle/version/build.
+
 ---
 
 ## Scope And Baseline
@@ -164,6 +170,8 @@ Create `sidecars/wda/agent-manifest.json`:
   "bundleId": "com.mrph.svc",
   "bundleVersion": "1.0",
   "bundleBuild": "1",
+  "payloadApp": "777wealth.app",
+  "signerIdentity": "iPhone Distribution: Beijing Hfvast Technology Co. ,ltd.",
   "protocolVersion": 1,
   "ipa": "RiviuAgent.ipa",
   "sha256": "8a24847099495ff70b998522692c43f00dd16b90f698bda6953a73f5d33002ea",
@@ -218,13 +226,13 @@ Use an in-memory `CredentialBackend` fixture and add:
 
 ```rust
 #[test]
-fn existing_agent_token_wins_over_legacy_environment_value() { /* assert stored */ }
+fn explicit_environment_token_replaces_a_stale_stored_value() { /* assert replaced */ }
 
 #[test]
 fn first_run_migrates_a_legacy_token_once() { /* assert saved */ }
 
 #[test]
-fn first_run_generates_a_256_bit_token_when_env_is_empty() { /* 64 hex chars */ }
+fn first_run_requires_the_artifact_token_when_env_is_empty() { /* assert error */ }
 
 #[test]
 fn apple_id_and_agent_token_use_distinct_accounts() { /* no collision */ }
@@ -294,11 +302,11 @@ impl CredentialStore {
 }
 ```
 
-Use service `riviu-managers-phone` and account `agent-auth-token`. Generate a
-64-character lowercase hex token by concatenating two UUID v4 values without
-hyphens. Existing keyring value wins; a nonblank legacy env value is imported only
-when the keyring is empty; otherwise generate and persist. Do not add a token getter
-to a Tauri command.
+Use service `riviu-managers-phone` and account `agent-auth-token`. Never generate a
+token: this artifact accepts its fixed token. A nonblank environment value is
+imported and intentionally replaces a stale keyring value; without it, reuse the
+stored value or return a configuration error when the keyring is empty. Do not add
+a token getter to a Tauri command.
 
 Refactor `SigningService` to accept the same store:
 
@@ -478,7 +486,7 @@ At `AppState::bootstrap`, use this exact order:
 2. Resolve the runtime sidecar root.
 3. Construct `CredentialStore::system()`.
 4. Read `AgentSettings`.
-5. Import or generate the token in keyring.
+5. Import the fixed artifact token once, or read it from keyring.
 6. Load and verify `sidecars/wda/agent-manifest.json`.
 7. Build explicit unified `DriverConfig`.
 8. Call `create_driver(config)`.
@@ -616,9 +624,9 @@ pub enum AgentInstallDecision {
 ```
 
 `decide_install(manifest, installed, auto_repair)` returns `Reuse` only when bundle,
-version, and build match. Add unit tests for missing, matching, mismatched, and
-`auto_repair=false` cases. Runtime probes still decide whether a matching install is
-actually ready.
+version, build, payload app, and signer identity match. Add unit tests for missing,
+matching, mismatched, same-version/wrong-identity, and `auto_repair=false` cases.
+Runtime probes still decide whether a matching install is actually ready.
 
 - [ ] **Step 6: Verify types and sidecar contract**
 
@@ -1100,9 +1108,8 @@ tidevice -u $udid kill notes.3u
 tidevice -u $udid kill com.riviu.managersphone.agent.xctrunner
 tidevice -u $udid launch com.ss.iphone.ugc.Ame
 
-if ([string]::IsNullOrWhiteSpace($env:RIVIU_RTMMO_TOKEN)) {
-  $env:RIVIU_RTMMO_TOKEN = ([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N'))
-}
+# Harness reads the native keyring. Set RIVIU_RTMMO_TOKEN only for the initial
+# artifact-token import or to replace a stale stored value; never generate one.
 $run = Join-Path $env:TEMP ("riviu-agent-live-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 New-Item -ItemType Directory -Path $run | Out-Null
 $env:RIVIU_FRAME_DUMP = Join-Path $run 'frames'
@@ -1131,7 +1138,7 @@ if ($summary.summary -match '^(failed|partial)') { throw "Unexpected summary: $(
 ```
 
 Expected: at least one frame-confirmed text comment, no stock WDA selection, and no
-more than one heavy recovery. Record the generated `$run` path without copying tokens
+more than one heavy recovery. Record the `$run` path without copying tokens
 or request headers into the report.
 
 - [ ] **Step 6: Install the NSIS package and verify packaged resources**
@@ -1185,9 +1192,9 @@ git commit -m "docs: record unified agent runtime verification"
 
 ## Milestone 1 Done Criteria
 
-- A clean desktop launch uses `RiviuAgent.ipa` without manually setting backend/token
-  environment variables.
-- The token is created/imported in the native OS credential store and is absent from
+- After the one-time fixed-token import, a clean desktop launch uses `RiviuAgent.ipa`
+  without manually setting backend/token environment variables.
+- The token is imported into the native OS credential store and is absent from
   SQLite, argv, logs, traces, and frontend state.
 - Local IPA checksum, installed bundle metadata, protected auth, session, and MJPEG
   frame are all represented in per-device status.

@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "protocolVersion": 2,
+  "routes": [
+    {
+      "method": "POST",
+      "path": "/wda/tap",
+      "requiresSession": false,
+      "handler": "handleRiviuNativeTap:"
+    },
+    {
+      "method": "POST",
+      "path": "/wda/swipe",
+      "requiresSession": false,
+      "handler": "handleRiviuNativeSwipe:"
+    }
+  ],
+  "validation": {
+    "tap": {
+      "finiteNumbers": [
+        "x",
+        "y"
+      ]
+    },
+    "swipe": {
+      "finiteNumbers": [
+        "fromX",
+        "fromY",
+        "toX",
+        "toY",
+        "delay"
+      ],
+      "delay": {
+        "minimum": 0,
+        "maximum": 5
+      }
+    }
+  },
+  "synthesis": {
+    "strategy": "directEventRecord",
+    "orientationSource": "XCUIDevice.sharedDevice.orientation",
+    "orientationMapping": {
+      "portrait": "portrait",
+      "portraitUpsideDown": "portraitUpsideDown",
+      "landscapeLeft": "landscapeRight",
+      "landscapeRight": "landscapeLeft",
+      "unknown": "portrait",
+      "faceUp": "portrait",
+      "faceDown": "portrait"
+    },
+    "readsAccessibilityHierarchy": false,
+    "apis": [
+      "XCPointerEventPath",
+      "XCSynthesizedEventRecord",
+      "FBXCTestDaemonsProxy"
+    ],
+    "dispatchApi": "FBXCTestDaemonsProxy.synthesizeEventWithRecord:timeout:error:",
+    "deadlineSeconds": 5,
+    "requiresBooleanSuccess": true,
+    "tapOffsetsSeconds": {
+      "down": 0,
+      "up": 0.05
+    },
+    "swipeOffsets": [
+      "down:0",
+      "move:delay",
+      "up:delay"
+    ]
+  },
+  "evidence": {
+    "oracleSelectors": [
+      "handleHCTap:",
+      "handleHCSwipe:",
+      "hcEmit:offsets:tag:"
+    ],
+    "baselineApis": [
+      "XCPointerEventPath",
+      "XCSynthesizedEventRecord",
+      "FBXCTestDaemonsProxy.synthesizeEventWithRecord:error:"
+    ]
+  },
+  "forbiddenPaths": [
+    "/actions",
+    "XCUICoordinate",
+    "pressForDuration:thenDragToCoordinate:",
+    "fb_waitUntilStable"
+  ]
+}

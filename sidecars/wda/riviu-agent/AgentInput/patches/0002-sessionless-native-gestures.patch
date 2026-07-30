@@ -1,0 +1,321 @@
+diff --git a/WebDriverAgentLib/Commands/FBElementCommands.m b/WebDriverAgentLib/Commands/FBElementCommands.m
+index 3efaf9ab236864d1f68f3d4c73146ef71d9da42a..3ca9cde80b5bceb99ca9e3ca00873a7b8030f775 100644
+--- a/WebDriverAgentLib/Commands/FBElementCommands.m
++++ b/WebDriverAgentLib/Commands/FBElementCommands.m
+@@ -8,6 +8,9 @@
+ 
+ #import "FBElementCommands.h"
+ 
++#import <CoreFoundation/CoreFoundation.h>
++#import <math.h>
++
+ #import "FBConfiguration.h"
+ #import "FBKeyboard.h"
+ #import "FBRoute.h"
+@@ -39,6 +42,9 @@
+ #import "XCUIElement.h"
+ #import "XCUIElementQuery.h"
+ #import "FBXCodeCompatibility.h"
++#import "FBXCTestDaemonsProxy.h"
++#import "XCPointerEventPath.h"
++#import "XCSynthesizedEventRecord.h"
+ 
+ @interface FBElementCommands ()
+ @end
+@@ -75,7 +81,7 @@
+     [[FBRoute POST:@"/wda/element/:uuid/focuse"] respondWithTarget:self action:@selector(handleFocuse:)],
+ #else
+     [[FBRoute POST:@"/wda/element/:uuid/swipe"] respondWithTarget:self action:@selector(handleSwipe:)],
+-    [[FBRoute POST:@"/wda/swipe"] respondWithTarget:self action:@selector(handleSwipe:)],
++    [[FBRoute POST:@"/wda/swipe"].withoutSession respondWithTarget:self action:@selector(handleRiviuNativeSwipe:)],
+ 
+     [[FBRoute POST:@"/wda/element/:uuid/pinch"] respondWithTarget:self action:@selector(handlePinch:)],
+     [[FBRoute POST:@"/wda/pinch"] respondWithTarget:self action:@selector(handlePinch:)],
+@@ -112,7 +118,7 @@
+     [[FBRoute POST:@"/wda/forceTouch"] respondWithTarget:self action:@selector(handleForceTouch:)],
+ 
+     [[FBRoute POST:@"/wda/element/:uuid/tap"] respondWithTarget:self action:@selector(handleTap:)],
+-    [[FBRoute POST:@"/wda/tap"] respondWithTarget:self action:@selector(handleTap:)],
++    [[FBRoute POST:@"/wda/tap"].withoutSession respondWithTarget:self action:@selector(handleRiviuNativeTap:)],
+ 
+     [[FBRoute POST:@"/wda/pickerwheel/:uuid/select"] respondWithTarget:self action:@selector(handleWheelSelect:)],
+ #endif
+@@ -472,6 +478,118 @@
+   return FBResponseWithOK();
+ }
+ 
+++ (BOOL)riviuReadFiniteNumber:(id)candidate result:(double *)result
++{
++  if (![candidate isKindOfClass:NSNumber.class] ||
++      CFGetTypeID((__bridge CFTypeRef)candidate) == CFBooleanGetTypeID()) {
++    return NO;
++  }
++  double value = [candidate doubleValue];
++  if (!isfinite(value)) {
++    return NO;
++  }
++  if (nil != result) {
++    *result = value;
++  }
++  return YES;
++}
++
+++ (BOOL)riviuArguments:(NSDictionary<NSString *, id> *)arguments
++     containExactlyKeys:(NSArray<NSString *> *)keys
++{
++  if (![arguments isKindOfClass:NSDictionary.class]) {
++    return NO;
++  }
++  return [[NSSet setWithArray:arguments.allKeys] isEqualToSet:[NSSet setWithArray:keys]];
++}
++
+++ (id<FBResponsePayload>)riviuInvalidNativeInput:(NSString *)message
++{
++  return FBResponseWithStatus([FBCommandStatus invalidArgumentErrorWithMessage:message traceback:nil]);
++}
++
+++ (UIInterfaceOrientation)riviuInterfaceOrientation
++{
++  switch (XCUIDevice.sharedDevice.orientation) {
++    case UIDeviceOrientationPortrait:
++      return UIInterfaceOrientationPortrait;
++    case UIDeviceOrientationPortraitUpsideDown:
++      return UIInterfaceOrientationPortraitUpsideDown;
++    case UIDeviceOrientationLandscapeLeft:
++      return UIInterfaceOrientationLandscapeRight;
++    case UIDeviceOrientationLandscapeRight:
++      return UIInterfaceOrientationLandscapeLeft;
++    case UIDeviceOrientationUnknown:
++    case UIDeviceOrientationFaceUp:
++    case UIDeviceOrientationFaceDown:
++    default:
++      return UIInterfaceOrientationPortrait;
++  }
++}
++
+++ (id<FBResponsePayload>)handleRiviuNativeTap:(FBRouteRequest *)request
++{
++  double x;
++  double y;
++  if (![self riviuArguments:request.arguments containExactlyKeys:@[@"x", @"y"]] ||
++      ![self riviuReadFiniteNumber:request.arguments[@"x"] result:&x] ||
++      ![self riviuReadFiniteNumber:request.arguments[@"y"] result:&y]) {
++    return [self riviuInvalidNativeInput:@"Tap requires exactly finite numeric x and y arguments"];
++  }
++
++  XCPointerEventPath *eventPath = [[XCPointerEventPath alloc]
++                                   initForTouchAtPoint:CGPointMake((CGFloat)x, (CGFloat)y)
++                                   offset:0.0];
++  [eventPath liftUpAtOffset:0.05];
++  XCSynthesizedEventRecord *eventRecord = [[XCSynthesizedEventRecord alloc]
++                                           initWithName:@"Riviu native tap"
++                                           interfaceOrientation:self.riviuInterfaceOrientation];
++  [eventRecord addPointerEventPath:eventPath];
++  NSError *error = nil;
++  if (![FBXCTestDaemonsProxy synthesizeEventWithRecord:eventRecord timeout:5.0 error:&error]) {
++    NSString *message = error.localizedDescription ?: @"Native tap synthesis failed";
++    return FBResponseWithStatus([FBCommandStatus invalidElementStateErrorWithMessage:message
++                                                                           traceback:nil]);
++  }
++  return FBResponseWithOK();
++}
++
+++ (id<FBResponsePayload>)handleRiviuNativeSwipe:(FBRouteRequest *)request
++{
++  NSArray<NSString *> *keys = @[@"fromX", @"fromY", @"toX", @"toY", @"delay"];
++  double fromX;
++  double fromY;
++  double toX;
++  double toY;
++  double delay;
++  if (![self riviuArguments:request.arguments containExactlyKeys:keys] ||
++      ![self riviuReadFiniteNumber:request.arguments[@"fromX"] result:&fromX] ||
++      ![self riviuReadFiniteNumber:request.arguments[@"fromY"] result:&fromY] ||
++      ![self riviuReadFiniteNumber:request.arguments[@"toX"] result:&toX] ||
++      ![self riviuReadFiniteNumber:request.arguments[@"toY"] result:&toY] ||
++      ![self riviuReadFiniteNumber:request.arguments[@"delay"] result:&delay] ||
++      delay < 0.0 || delay > 5.0) {
++    return [self riviuInvalidNativeInput:@"Swipe requires finite from/to coordinates and delay in [0, 5]"];
++  }
++
++  XCPointerEventPath *eventPath = [[XCPointerEventPath alloc]
++                                   initForTouchAtPoint:CGPointMake((CGFloat)fromX, (CGFloat)fromY)
++                                   offset:0.0];
++  [eventPath moveToPoint:CGPointMake((CGFloat)toX, (CGFloat)toY) atOffset:delay];
++  [eventPath liftUpAtOffset:delay];
++  XCSynthesizedEventRecord *eventRecord = [[XCSynthesizedEventRecord alloc]
++                                           initWithName:@"Riviu native swipe"
++                                           interfaceOrientation:self.riviuInterfaceOrientation];
++  [eventRecord addPointerEventPath:eventPath];
++  NSError *error = nil;
++  if (![FBXCTestDaemonsProxy synthesizeEventWithRecord:eventRecord timeout:5.0 error:&error]) {
++    NSString *message = error.localizedDescription ?: @"Native swipe synthesis failed";
++    return FBResponseWithStatus([FBCommandStatus invalidElementStateErrorWithMessage:message
++                                                                           traceback:nil]);
++  }
++  return FBResponseWithOK();
++}
++
+ + (id<FBResponsePayload>)handlePinch:(FBRouteRequest *)request
+ {
+   XCUIElement *element = [self targetFromRequest:request];
+diff --git a/WebDriverAgentLib/Utilities/FBXCTestDaemonsProxy.h b/WebDriverAgentLib/Utilities/FBXCTestDaemonsProxy.h
+index 41514a5cd28061261cf6565ae14a91967f28579b..b4d829f38d699419ae5b396362f9ee2acacb956e 100644
+--- a/WebDriverAgentLib/Utilities/FBXCTestDaemonsProxy.h
++++ b/WebDriverAgentLib/Utilities/FBXCTestDaemonsProxy.h
+@@ -26,6 +26,10 @@ NS_ASSUME_NONNULL_BEGIN
+ + (BOOL)synthesizeEventWithRecord:(XCSynthesizedEventRecord *)record
+                             error:(NSError *__autoreleasing*)error;
+ 
+++ (BOOL)synthesizeEventWithRecord:(XCSynthesizedEventRecord *)record
++                          timeout:(NSTimeInterval)timeout
++                            error:(NSError *__autoreleasing*)error;
++
+ + (BOOL)openURL:(NSURL *)url usingApplication:(NSString *)bundleId error:(NSError **)error;
+ + (BOOL)openDefaultApplicationForURL:(NSURL *)url error:(NSError **)error;
+ 
+diff --git a/WebDriverAgentLib/Utilities/FBXCTestDaemonsProxy.m b/WebDriverAgentLib/Utilities/FBXCTestDaemonsProxy.m
+index e1ced2be1d5089b0304fe9edc17c3f335e5b55dd..e6bf50b5129506f69f64b83a18f42c068f6f6f30 100644
+--- a/WebDriverAgentLib/Utilities/FBXCTestDaemonsProxy.m
++++ b/WebDriverAgentLib/Utilities/FBXCTestDaemonsProxy.m
+@@ -9,6 +9,7 @@
+ #import "FBXCTestDaemonsProxy.h"
+ 
+ #import <objc/runtime.h>
++#import <stdatomic.h>
+ 
+ #import "FBConfiguration.h"
+ #import "FBErrorBuilder.h"
+@@ -104,28 +105,48 @@ static void swizzledLaunchApp(id self, SEL _cmd, NSString *path, NSString *bundl
+ 
+ + (BOOL)synthesizeEventWithRecord:(XCSynthesizedEventRecord *)record error:(NSError *__autoreleasing*)error
+ {
+-  __block NSError *innerError = nil;
+-  [FBRunLoopSpinner spinUntilCompletion:^(void(^completion)(void)){
+-    void (^errorHandler)(NSError *) = ^(NSError *invokeError) {
+-      if (nil != invokeError) {
+-        innerError = invokeError;
+-      }
+-      completion();
+-    };
++  return [self synthesizeEventWithRecord:record timeout:60.0 error:error];
++}
+ 
+-    XCEventGeneratorHandler handlerBlock = ^(XCSynthesizedEventRecord *innerRecord, NSError *invokeError) {
+-      errorHandler(invokeError);
+-    };
+-    [[XCUIDevice.sharedDevice eventSynthesizer] synthesizeEvent:record completion:(id)^(BOOL result, NSError *invokeError) {
+-      handlerBlock(record, invokeError);
+-    }];
+++ (BOOL)synthesizeEventWithRecord:(XCSynthesizedEventRecord *)record
++                          timeout:(NSTimeInterval)timeout
++                            error:(NSError *__autoreleasing*)error
++{
++  __block volatile atomic_bool didFinish = false;
++  __block BOOL eventSucceeded = NO;
++  __block NSError *innerError = nil;
++  [[XCUIDevice.sharedDevice eventSynthesizer]
++   synthesizeEvent:record
++   completion:(id)^(BOOL result, NSError *invokeError) {
++    eventSucceeded = result;
++    innerError = invokeError;
++    atomic_store(&didFinish, true);
+   }];
++
++  NSError *timeoutError = nil;
++  BOOL completed = [[[[FBRunLoopSpinner new]
++                      timeout:timeout]
++                     timeoutErrorMessage:@"Event synthesis timed out"]
++                    spinUntilTrue:^BOOL{
++    return atomic_load(&didFinish);
++  } error:&timeoutError];
++  if (!completed) {
++    return [[[[FBErrorBuilder builder]
++              withDescription:@"Event synthesis timed out"]
++             withInnerError:timeoutError]
++            buildError:error];
++  }
+   if (nil != innerError) {
+     if (error) {
+       *error = innerError;
+     }
+     return NO;
+   }
++  if (!eventSucceeded) {
++    return [[[FBErrorBuilder builder]
++             withDescription:@"Event synthesis returned an unsuccessful result"]
++            buildError:error];
++  }
+   return YES;
+ }
+ 
+diff --git a/WebDriverAgentTests/UnitTests/FBRouteTests.m b/WebDriverAgentTests/UnitTests/FBRouteTests.m
+index dcfcaf3fb28a22ebb930763210d682726b653ee1..9a24d260fd0a43cec235f04239479771ab843194 100644
+--- a/WebDriverAgentTests/UnitTests/FBRouteTests.m
++++ b/WebDriverAgentTests/UnitTests/FBRouteTests.m
+@@ -7,7 +7,9 @@
+  */
+ 
+ #import <XCTest/XCTest.h>
++#import <math.h>
+ 
++#import "FBElementCommands.h"
+ #import "FBRoute.h"
+ #import "FBSessionCommands.h"
+ #import "FBWebServer.h"
+@@ -16,6 +18,12 @@
+ + (NSDictionary<NSString *, id> *)riviuAgentIdentity;
+ @end
+ 
++@interface FBElementCommands (RiviuAgentTests)
+++ (BOOL)riviuReadFiniteNumber:(id)candidate result:(double *)result;
+++ (BOOL)riviuArguments:(id)arguments
++     containExactlyKeys:(NSArray<NSString *> *)keys;
++@end
++
+ @class RouteResponse;
+ 
+ @interface FBHandlerMock : NSObject
+@@ -166,6 +174,42 @@
+   XCTAssertEqualObjects(identity[@"state"], @"ready");
+ }
+ 
++- (void)testRiviuNativeGestureRoutesDoNotRequireSession
++{
++  NSMutableDictionary<NSString *, FBRoute *> *routes = [NSMutableDictionary dictionary];
++  for (FBRoute *route in FBElementCommands.routes) {
++    if ([route.path isEqualToString:@"/wda/tap"] || [route.path isEqualToString:@"/wda/swipe"]) {
++      routes[route.path] = route;
++    }
++  }
++  XCTAssertEqual(routes.count, 2);
++  XCTAssertEqualObjects([routes[@"/wda/tap"] valueForKey:@"requiresSession"], @NO);
++  XCTAssertEqualObjects([routes[@"/wda/swipe"] valueForKey:@"requiresSession"], @NO);
++  XCTAssertEqualObjects(NSStringFromSelector((SEL)[[routes[@"/wda/tap"] valueForKey:@"action"] pointerValue]),
++                        @"handleRiviuNativeTap:");
++  XCTAssertEqualObjects(NSStringFromSelector((SEL)[[routes[@"/wda/swipe"] valueForKey:@"action"] pointerValue]),
++                        @"handleRiviuNativeSwipe:");
++}
++
++- (void)testRiviuNativeInputNumberValidation
++{
++  double result = 0.0;
++  XCTAssertTrue([FBElementCommands riviuReadFiniteNumber:@12.5 result:&result]);
++  XCTAssertEqualWithAccuracy(result, 12.5, 0.000001);
++  XCTAssertFalse([FBElementCommands riviuReadFiniteNumber:@YES result:&result]);
++  XCTAssertFalse([FBElementCommands riviuReadFiniteNumber:@"12.5" result:&result]);
++  XCTAssertFalse([FBElementCommands riviuReadFiniteNumber:@(NAN) result:&result]);
++  XCTAssertFalse([FBElementCommands riviuReadFiniteNumber:@(INFINITY) result:&result]);
++}
++
++- (void)testRiviuNativeInputRequiresAnExactDictionaryBody
++{
++  NSArray<NSString *> *keys = @[@"x", @"y"];
++  XCTAssertTrue([FBElementCommands riviuArguments:@{@"x": @1, @"y": @2} containExactlyKeys:keys]);
++  XCTAssertFalse([FBElementCommands riviuArguments:@{@"x": @1, @"y": @2, @"z": @3} containExactlyKeys:keys]);
++  XCTAssertFalse([FBElementCommands riviuArguments:(id)@[] containExactlyKeys:keys]);
++}
++
+ + (id<FBResponsePayload>)dummyHandler:(FBRouteRequest *)request
+ {
+   return nil;

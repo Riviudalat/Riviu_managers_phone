@@ -1,19 +1,93 @@
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use parking_lot::Mutex;
 use thiserror::Error;
 
 use crate::device_capabilities::{
-    validate_clipboard_read_limit, AgentInstallProof, DeviceCapabilitySnapshot,
+    validate_clipboard_read_limit, AgentInstallProof, ClipboardAccessMode,
+    DeviceCapabilitySnapshot, UiCapabilities,
 };
 use crate::stream_budget::StreamStopProof;
-use crate::types::{ActiveAppIdentity, InteractionSessionKind, StreamStartProof};
-use crate::types::{DeviceInfo, SwipeGesture, TapPoint};
+use crate::types::{
+    ActiveAppIdentity, AgentSettings, AgentStatus, DeviceInfo, InteractionSessionKind,
+    StreamStartProof, SwipeGesture, TapPoint,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("capability {capability} is not supported by this driver")]
 pub struct UnsupportedCapability {
     pub capability: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardedClipboardOperation {
+    Set {
+        content_type: String,
+        bytes: Vec<u8>,
+    },
+    Get {
+        maximum_decoded_bytes: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardedClipboardOutput {
+    Written,
+    Value {
+        content_type: String,
+        bytes: Vec<u8>,
+    },
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GuardedClipboardProgress {
+    state: Arc<Mutex<GuardedClipboardProgressState>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct GuardedClipboardProgressState {
+    stop: Option<StreamStopProof>,
+    stream: Option<StreamStartProof>,
+}
+
+impl GuardedClipboardProgress {
+    pub fn record_stop(&self, proof: StreamStopProof) {
+        self.state.lock().stop = Some(proof);
+    }
+
+    pub fn record_stream(&self, proof: StreamStartProof) {
+        self.state.lock().stream = Some(proof);
+    }
+
+    pub fn snapshot(&self) -> (Option<StreamStopProof>, Option<StreamStartProof>) {
+        let state = self.state.lock();
+        (state.stop, state.stream.clone())
+    }
+}
+
+pub struct GuardedClipboardTransition {
+    pub output: GuardedClipboardOutput,
+    pub stop: Option<StreamStopProof>,
+    pub agent: Option<ActiveAppIdentity>,
+    pub target: ActiveAppIdentity,
+    pub final_session: Option<Box<dyn UiSession>>,
+    pub stream: Option<StreamStartProof>,
+}
+
+impl std::fmt::Debug for GuardedClipboardTransition {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GuardedClipboardTransition")
+            .field("output", &self.output)
+            .field("stop", &self.stop)
+            .field("agent", &self.agent)
+            .field("target", &self.target)
+            .field("has_final_session", &self.final_session.is_some())
+            .field("stream", &self.stream)
+            .finish()
+    }
 }
 
 fn unsupported<T>(capability: &'static str) -> anyhow::Result<T> {
@@ -95,11 +169,35 @@ pub fn ui_error_kind(err: &anyhow::Error) -> UiErrorKind {
 
 #[async_trait]
 pub trait DeviceDriver: Send + Sync {
+    fn agent_settings(&self) -> AgentSettings {
+        AgentSettings::default()
+    }
+    fn set_agent_settings(&self, _settings: AgentSettings) {}
+    fn cached_agent_status(&self, udid: &str) -> AgentStatus {
+        AgentStatus::unknown(udid)
+    }
+    async fn preflight_agent(&self, udid: &str) -> anyhow::Result<AgentStatus> {
+        Ok(self.cached_agent_status(udid))
+    }
+    async fn repair_agent(&self, _udid: &str) -> anyhow::Result<AgentStatus> {
+        anyhow::bail!("agent repair is not supported by this driver")
+    }
     async fn inspect_interaction_device(
         &self,
         _udid: &str,
     ) -> anyhow::Result<DeviceCapabilitySnapshot> {
         unsupported("inspectInteractionDevice")
+    }
+    async fn set_negotiated_interaction_capabilities(
+        &self,
+        _udid: &str,
+        capabilities: UiCapabilities,
+    ) -> anyhow::Result<()> {
+        if capabilities == UiCapabilities::default() {
+            Ok(())
+        } else {
+            unsupported("setNegotiatedInteractionCapabilities")
+        }
     }
     async fn repair_agent_install_only(&self, _udid: &str) -> anyhow::Result<AgentInstallProof> {
         unsupported("repairAgentInstallOnly")
@@ -110,6 +208,12 @@ pub trait DeviceDriver: Send + Sync {
     async fn start_stream_after_session(&self, _udid: &str) -> anyhow::Result<StreamStartProof> {
         unsupported("startStreamAfterSession")
     }
+    /// Confirms that the per-device driver owns no MJPEG producer and records
+    /// the current generation as the session handoff point. This must not stop
+    /// or start a producer.
+    async fn confirm_interaction_stream_stopped(&self, _udid: &str) -> anyhow::Result<()> {
+        unsupported("confirmInteractionStreamStopped")
+    }
     async fn start_interaction_session(
         &self,
         _udid: &str,
@@ -117,6 +221,21 @@ pub trait DeviceDriver: Send + Sync {
         _kind: InteractionSessionKind,
     ) -> anyhow::Result<Box<dyn UiSession>> {
         unsupported("startInteractionSession")
+    }
+    async fn guarded_clipboard_transition(
+        &self,
+        _udid: &str,
+        _agent_bundle_id: &str,
+        _target_bundle_id: &str,
+        _final_session_kind: InteractionSessionKind,
+        _mode: ClipboardAccessMode,
+        _operation: GuardedClipboardOperation,
+        _progress: GuardedClipboardProgress,
+    ) -> anyhow::Result<GuardedClipboardTransition> {
+        unsupported("guardedClipboardTransition")
+    }
+    fn supports_text_comments(&self) -> bool {
+        false
     }
     async fn list_devices(&self) -> anyhow::Result<Vec<DeviceInfo>>;
     async fn refresh_device(&self, udid: &str) -> anyhow::Result<DeviceInfo>;
@@ -127,17 +246,35 @@ pub trait DeviceDriver: Send + Sync {
     async fn launch_app(&self, udid: &str, bundle_id: &str) -> anyhow::Result<()>;
     async fn terminate_app(&self, udid: &str, bundle_id: &str) -> anyhow::Result<()>;
     async fn reboot(&self, udid: &str) -> anyhow::Result<()>;
+    /// Creates only a control session. Implementations must not start, stop, or
+    /// replace an MJPEG producer; stream lifecycle belongs to DeviceControlPlane.
     async fn start_ui_session(&self, udid: &str) -> anyhow::Result<Box<dyn UiSession>>;
+    /// Whether comment-enabled jobs need the target app foregrounded before a
+    /// newly-created trusted text session. Stock WDA keeps its existing order.
+    fn requires_fresh_text_session(&self) -> bool {
+        false
+    }
+    /// Prepare a text-capable UI session for `bundle_id`. Backends without a
+    /// special text lifecycle use the ordinary session path.
+    async fn start_fresh_text_session(
+        &self,
+        udid: &str,
+        _bundle_id: &str,
+    ) -> anyhow::Result<Box<dyn UiSession>> {
+        self.start_ui_session(udid).await
+    }
     /// Is a usable UI session already cached for this device? Callers use it
     /// only to report honestly whether they reused an agent or started one.
     async fn ui_session_cached(&self, _udid: &str) -> bool {
         false
     }
     /// Drop cached WDA session so the next `start_ui_session` opens a fresh one.
-    async fn invalidate_ui_session(&self, _udid: &str) {}
+    fn invalidate_ui_session(&self, _udid: &str) {}
     /// Hard-recycle USB relay + device WDA runner (wedged Agent recovery).
     async fn recycle_ui_transport(&self, _udid: &str) {}
     async fn ensure_stream(&self, udid: &str) -> anyhow::Result<String>;
+    /// Legacy preparation hook. This must remain install/auth-only and must not
+    /// create a control session or MJPEG producer.
     async fn prepare_device(&self, udid: &str) -> anyhow::Result<()>;
 }
 
@@ -156,13 +293,7 @@ pub trait UiSession: Send + Sync {
     }
     async fn swipe(&self, gesture: SwipeGesture) -> anyhow::Result<()>;
     /// Tap using coordinates in stream/screenshot pixel space.
-    async fn tap_image(
-        &self,
-        x: f64,
-        y: f64,
-        image_w: f64,
-        image_h: f64,
-    ) -> anyhow::Result<()> {
+    async fn tap_image(&self, x: f64, y: f64, image_w: f64, image_h: f64) -> anyhow::Result<()> {
         let _ = (image_w, image_h);
         self.tap(TapPoint { x, y }).await
     }
@@ -184,6 +315,12 @@ pub trait UiSession: Send + Sync {
         .await
     }
     async fn type_text(&self, text: &str) -> anyhow::Result<()>;
+    /// Whether this session's text injection is accepted by the foreground
+    /// app. Stock XCTest WDA reports successful key requests that TikTok drops;
+    /// the standalone RT-MMO backend supplies the trusted text channel.
+    fn supports_text_input(&self) -> bool {
+        false
+    }
     async fn home(&self) -> anyhow::Result<()>;
     async fn find_and_tap(&self, accessibility_id: &str) -> anyhow::Result<()>;
     async fn assert_visible(&self, accessibility_id: &str) -> anyhow::Result<()>;

@@ -1,0 +1,105 @@
+diff --git a/WebDriverAgentLib/Commands/FBCustomCommands.m b/WebDriverAgentLib/Commands/FBCustomCommands.m
+index 4c4803f..c8c110e 100644
+--- a/WebDriverAgentLib/Commands/FBCustomCommands.m
++++ b/WebDriverAgentLib/Commands/FBCustomCommands.m
+@@ -241,8 +241,39 @@
+ }
+ 
+ #if !TARGET_OS_TV
+++ (BOOL)riviuPasteboardArguments:(id)arguments validForSet:(BOOL)isSet
++{
++  if (![arguments isKindOfClass:NSDictionary.class]) {
++    return NO;
++  }
++  NSDictionary *body = (NSDictionary *)arguments;
++  NSSet<NSString *> *allowedKeys = isSet
++    ? [NSSet setWithArray:@[@"content", @"contentType"]]
++    : [NSSet setWithObject:@"contentType"];
++  if (![[NSSet setWithArray:body.allKeys] isSubsetOfSet:allowedKeys]) {
++    return NO;
++  }
++  id contentType = body[@"contentType"];
++  if (nil != contentType &&
++      (![contentType isKindOfClass:NSString.class] || [(NSString *)contentType length] == 0)) {
++    return NO;
++  }
++  if (!isSet) {
++    return YES;
++  }
++  id encodedContent = body[@"content"];
++  if (![encodedContent isKindOfClass:NSString.class]) {
++    return NO;
++  }
++  return nil != [[NSData alloc] initWithBase64EncodedString:(NSString *)encodedContent
++                                                    options:NSDataBase64DecodingIgnoreUnknownCharacters];
++}
++
+ + (id<FBResponsePayload>)handleSetPasteboard:(FBRouteRequest *)request
+ {
++  if (![self riviuPasteboardArguments:request.arguments validForSet:YES]) {
++    return FBResponseWithStatus([FBCommandStatus invalidArgumentErrorWithMessage:@"Pasteboard request body does not match the Riviu control contract" traceback:nil]);
++  }
+   NSString *contentType = request.arguments[@"contentType"] ?: @"plaintext";
+   NSData *content = [[NSData alloc] initWithBase64EncodedString:(NSString *)request.arguments[@"content"]
+                                                         options:NSDataBase64DecodingIgnoreUnknownCharacters];
+@@ -258,6 +289,9 @@
+ 
+ + (id<FBResponsePayload>)handleGetPasteboard:(FBRouteRequest *)request
+ {
++  if (![self riviuPasteboardArguments:request.arguments validForSet:NO]) {
++    return FBResponseWithStatus([FBCommandStatus invalidArgumentErrorWithMessage:@"Pasteboard request body does not match the Riviu control contract" traceback:nil]);
++  }
+   NSString *contentType = request.arguments[@"contentType"] ?: @"plaintext";
+   NSError *error;
+   id result = [FBPasteboard dataForType:contentType error:&error];
+diff --git a/WebDriverAgentTests/UnitTests/FBRouteTests.m b/WebDriverAgentTests/UnitTests/FBRouteTests.m
+index f9ee2cc..81dac8d 100644
+--- a/WebDriverAgentTests/UnitTests/FBRouteTests.m
++++ b/WebDriverAgentTests/UnitTests/FBRouteTests.m
+@@ -10,6 +10,7 @@
+ #import <math.h>
+ 
+ #import "FBElementCommands.h"
++#import "FBCustomCommands.h"
+ #import "FBRoute.h"
+ #import "FBSessionCommands.h"
+ #import "FBWebServer.h"
+@@ -24,6 +25,10 @@
+      containExactlyKeys:(NSArray<NSString *> *)keys;
+ @end
+ 
++@interface FBCustomCommands (RiviuAgentTests)
+++ (BOOL)riviuPasteboardArguments:(id)arguments validForSet:(BOOL)isSet;
++@end
++
+ @class RouteResponse;
+ 
+ @interface FBHandlerMock : NSObject
+@@ -220,6 +225,27 @@
+   XCTAssertFalse([FBElementCommands riviuArguments:(id)@[] containExactlyKeys:keys]);
+ }
+ 
++- (void)testRiviuPasteboardSetRequiresExactSchema
++{
++  XCTAssertTrue([FBCustomCommands riviuPasteboardArguments:@{@"content": @"SGVsbG8="} validForSet:YES]);
++  XCTAssertTrue([FBCustomCommands riviuPasteboardArguments:@{@"content": @"SGVsbG8=", @"contentType": @"plaintext"} validForSet:YES]);
++  XCTAssertFalse([FBCustomCommands riviuPasteboardArguments:@{} validForSet:YES]);
++  XCTAssertFalse([FBCustomCommands riviuPasteboardArguments:@{@"content": @1} validForSet:YES]);
++  XCTAssertFalse([FBCustomCommands riviuPasteboardArguments:@{@"content": @"SGVsbG8=", @"extra": @1} validForSet:YES]);
++  XCTAssertFalse([FBCustomCommands riviuPasteboardArguments:@{@"content": @"SGVsbG8=", @"contentType": @""} validForSet:YES]);
++  XCTAssertFalse([FBCustomCommands riviuPasteboardArguments:(id)@[] validForSet:YES]);
++}
++
++- (void)testRiviuPasteboardGetRequiresExactSchema
++{
++  XCTAssertTrue([FBCustomCommands riviuPasteboardArguments:@{} validForSet:NO]);
++  XCTAssertTrue([FBCustomCommands riviuPasteboardArguments:@{@"contentType": @"plaintext"} validForSet:NO]);
++  XCTAssertFalse([FBCustomCommands riviuPasteboardArguments:@{@"content": @"SGVsbG8="} validForSet:NO]);
++  XCTAssertFalse([FBCustomCommands riviuPasteboardArguments:@{@"contentType": @1} validForSet:NO]);
++  XCTAssertFalse([FBCustomCommands riviuPasteboardArguments:@{@"extra": @1} validForSet:NO]);
++  XCTAssertFalse([FBCustomCommands riviuPasteboardArguments:(id)@[] validForSet:NO]);
++}
++
+ + (id<FBResponsePayload>)dummyHandler:(FBRouteRequest *)request
+ {
+   return nil;

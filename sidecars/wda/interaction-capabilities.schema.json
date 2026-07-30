@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://riviu.local/schemas/interaction-capabilities.schema.json",
+  "title": "Riviu Interaction Capability Registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "driverAdapterVersion", "qualifications"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "driverAdapterVersion": { "const": "interaction-v1" },
+    "qualifications": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/qualification" }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "scope",
+        "path",
+        "authHeaderName",
+        "bodySchemaId",
+        "requestTimeoutMs"
+      ],
+      "properties": {
+        "method": { "enum": ["get", "post"] },
+        "scope": { "enum": ["sessionless", "session"] },
+        "path": {
+          "type": "string",
+          "pattern": "^/(?!/)(?!.*\\.\\.)(?!.*[?#{}]).*$",
+          "minLength": 1
+        },
+        "authHeaderName": {
+          "type": "string",
+          "pattern": "^X-[A-Za-z0-9-]*-Token$",
+          "maxLength": 64
+        },
+        "bodySchemaId": { "type": "string", "minLength": 1 },
+        "requestTimeoutMs": { "type": "integer", "minimum": 1, "maximum": 10000 }
+      }
+    },
+    "geometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "logicalWidth",
+        "logicalHeight",
+        "pixelWidth",
+        "pixelHeight",
+        "scaleX",
+        "scaleY",
+        "orientation"
+      ],
+      "properties": {
+        "logicalWidth": { "const": 375.0 },
+        "logicalHeight": { "const": 667.0 },
+        "pixelWidth": { "type": "integer", "minimum": 1 },
+        "pixelHeight": { "type": "integer", "minimum": 1 },
+        "scaleX": { "type": "number", "exclusiveMinimum": 0 },
+        "scaleY": { "type": "number", "exclusiveMinimum": 0 },
+        "orientation": { "const": "portrait" }
+      }
+    },
+    "base": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agentArtifactSha256",
+        "agentBundleId",
+        "agentBundleVersion",
+        "agentBundleBuild",
+        "agentExecutableName",
+        "agentSignerIdentitySha256",
+        "agentVersion",
+        "protocolVersion",
+        "transport",
+        "productType",
+        "iosMinInclusive",
+        "iosMaxInclusive",
+        "tiktokBundleId",
+        "tiktokVersion",
+        "tiktokBuild",
+        "geometry"
+      ],
+      "properties": {
+        "agentArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "agentBundleId": { "type": "string", "minLength": 1 },
+        "agentBundleVersion": { "type": "string", "minLength": 1 },
+        "agentBundleBuild": { "type": "string", "minLength": 1 },
+        "agentExecutableName": { "type": "string", "minLength": 1 },
+        "agentSignerIdentitySha256": { "$ref": "#/$defs/sha256" },
+        "agentVersion": { "type": "string", "minLength": 1 },
+        "protocolVersion": { "type": "integer", "minimum": 1 },
+        "transport": {
+          "enum": ["legacyUsbmuxTransport", "rsdTransport", "mock"]
+        },
+        "productType": { "type": "string", "minLength": 1 },
+        "iosMinInclusive": { "type": "string", "pattern": "^[0-9]+(?:\\.[0-9]+){0,3}$" },
+        "iosMaxInclusive": { "type": "string", "pattern": "^[0-9]+(?:\\.[0-9]+){0,3}$" },
+        "tiktokBundleId": { "type": "string", "minLength": 1 },
+        "tiktokVersion": { "type": "string", "minLength": 1 },
+        "tiktokBuild": { "type": "string", "minLength": 1 },
+        "geometry": { "$ref": "#/$defs/geometry" }
+      }
+    },
+    "openUrl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contractId",
+        "method",
+        "scope",
+        "path",
+        "authHeaderName",
+        "bodySchemaId",
+        "requestTimeoutMs",
+        "targetBundleId"
+      ],
+      "properties": {
+        "contractId": { "type": "string", "minLength": 1 },
+        "method": { "const": "post" },
+        "scope": { "enum": ["sessionless", "session"] },
+        "path": {
+          "type": "string",
+          "pattern": "^/(?!/)(?!.*\\.\\.)(?!.*[?#{}]).*$",
+          "minLength": 1
+        },
+        "authHeaderName": {
+          "type": "string",
+          "pattern": "^X-[A-Za-z0-9-]*-Token$",
+          "maxLength": 64
+        },
+        "bodySchemaId": { "const": "open-url-body-v1" },
+        "requestTimeoutMs": { "const": 10000 },
+        "targetBundleId": { "type": "string", "minLength": 1 }
+      }
+    },
+    "clipboard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contractId", "mode", "setRoute", "getRoute", "maximumDecodedBytes"],
+      "properties": {
+        "contractId": { "type": "string", "minLength": 1 },
+        "mode": { "enum": ["targetBackgroundSafe", "agentForegroundRequired"] },
+        "setRoute": {
+          "allOf": [
+            { "$ref": "#/$defs/route" },
+            {
+              "properties": {
+                "method": { "const": "post" },
+                "bodySchemaId": { "const": "clipboard-set-base64-v1" }
+              }
+            }
+          ]
+        },
+        "getRoute": {
+          "allOf": [
+            { "$ref": "#/$defs/route" },
+            {
+              "properties": {
+                "method": { "const": "post" },
+                "bodySchemaId": { "const": "clipboard-get-base64-v1" }
+              }
+            }
+          ]
+        },
+        "maximumDecodedBytes": { "const": 65536 }
+      }
+    },
+    "targetIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "openUrlContractId",
+        "clipboardContractId",
+        "shareDetectorVersion",
+        "copyLinkDetectorVersion",
+        "detectorSetSha256",
+        "layoutId"
+      ],
+      "properties": {
+        "openUrlContractId": { "type": "string", "minLength": 1 },
+        "clipboardContractId": { "type": "string", "minLength": 1 },
+        "shareDetectorVersion": { "type": "string", "minLength": 1 },
+        "copyLinkDetectorVersion": { "type": "string", "minLength": 1 },
+        "detectorSetSha256": { "$ref": "#/$defs/sha256" },
+        "layoutId": { "type": "string", "minLength": 1 }
+      }
+    },
+    "qualification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["qualificationId", "environment", "base", "liveReportSha256"],
+      "properties": {
+        "qualificationId": { "type": "string", "minLength": 1 },
+        "environment": { "enum": ["FIXTURE_ONLY", "LIVE_MAC_DEVICE"] },
+        "base": { "$ref": "#/$defs/base" },
+        "openUrl": { "$ref": "#/$defs/openUrl" },
+        "clipboard": { "$ref": "#/$defs/clipboard" },
+        "targetIdentityCopyLink": { "$ref": "#/$defs/targetIdentity" },
+        "liveReportSha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}
