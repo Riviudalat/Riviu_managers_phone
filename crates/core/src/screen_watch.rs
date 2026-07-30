@@ -108,11 +108,11 @@ impl WatchStats {
             popups_detected: self.popups_detected.load(Ordering::Relaxed),
             popups_closed: closed,
             popups_unresolved: self.popups_unresolved.load(Ordering::Relaxed),
-            mean_close_ms: if closed == 0 {
-                0
-            } else {
-                self.close_latency_ms_total.load(Ordering::Relaxed) / closed
-            },
+            mean_close_ms: self
+                .close_latency_ms_total
+                .load(Ordering::Relaxed)
+                .checked_div(closed)
+                .unwrap_or(0),
         }
     }
 }
@@ -235,7 +235,7 @@ impl ScreenWatcher {
                     };
                 self.stats.frames_seen.fetch_add(1, Ordering::Relaxed);
 
-                if last_analyzed.map_or(false, |t| t.elapsed() < min_gap) {
+                if last_analyzed.is_some_and(|t| t.elapsed() < min_gap) {
                     continue;
                 }
                 // A motionless feed re-sends identical bytes; decoding them
@@ -341,7 +341,7 @@ impl ScreenWatcher {
         cooldown_until: &mut Option<Instant>,
     ) {
         // Still inside the post-tap animation window: say nothing, do nothing.
-        if cooldown_until.map_or(false, |t| Instant::now() < t) {
+        if cooldown_until.is_some_and(|t| Instant::now() < t) {
             return;
         }
         // A popup that outlived its confirmation window is retried, up to a cap.
@@ -547,7 +547,7 @@ impl FrameDump {
             path
         });
         Self {
-            dir: dir,
+            dir,
             written: AtomicU32::new(0),
             last_kind: RwLock::new(""),
         }

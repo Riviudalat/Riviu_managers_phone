@@ -132,18 +132,20 @@ async fn main() -> anyhow::Result<()> {
         artifacts,
     );
 
-    let mut settings = NurtureSettings::default();
-    settings.num_videos = args.videos;
-    settings.num_rounds = args.rounds;
-    settings.like_prob = args.like_prob;
-    settings.comment_prob = args.comment_prob;
-    settings.follow_prob = args.follow_prob;
-    settings.frenzy_prob = 0;
-    settings.watch_min = args.watch_min;
-    settings.watch_max = args.watch_max;
-    settings.night_start = 0;
-    settings.night_end = 0;
-    settings.steady_mood = args.steady.clone();
+    let mut settings = NurtureSettings {
+        num_videos: args.videos,
+        num_rounds: args.rounds,
+        like_prob: args.like_prob,
+        comment_prob: args.comment_prob,
+        follow_prob: args.follow_prob,
+        frenzy_prob: 0,
+        watch_min: args.watch_min,
+        watch_max: args.watch_max,
+        night_start: 0,
+        night_end: 0,
+        steady_mood: args.steady.clone(),
+        ..Default::default()
+    };
     // Comments need a key; take it from the environment so it is never in the
     // repo or in a shell history line.
     if let Ok(key) = std::env::var("RIVIU_AI_API_KEY") {

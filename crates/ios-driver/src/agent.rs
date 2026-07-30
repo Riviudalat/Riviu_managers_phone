@@ -66,10 +66,10 @@ pub fn decide_install(
         };
     };
 
-    let installed_payload = installed.path.as_deref().and_then(|path| {
-        path.rsplit(|character| character == '/' || character == '\\')
-            .find(|part| !part.is_empty())
-    });
+    let installed_payload = installed
+        .path
+        .as_deref()
+        .and_then(|path| path.rsplit(['/', '\\']).find(|part| !part.is_empty()));
     let matches = installed.bundle_id == manifest.bundle_id
         && installed.version.as_deref() == Some(manifest.bundle_version.as_str())
         && installed.build.as_deref() == Some(manifest.bundle_build.as_str())

@@ -106,23 +106,25 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(tmp.join("artifacts"))?;
     let db = Arc::new(Database::open(tmp.join("live.db"))?);
 
-    let mut settings = NurtureSettings::default();
-    settings.bundle_id = bundle;
-    settings.num_videos = videos;
-    settings.num_rounds = 4;
-    settings.watch_min = watch_min;
-    settings.watch_max = watch_max;
-    settings.like_prob = like_prob;
-    settings.comment_prob = comment_prob;
-    settings.follow_prob = follow_prob;
-    settings.frenzy_prob = frenzy_prob;
-    settings.fatigue = false;
-    settings.time_of_day = false;
-    settings.pause_swipe = false;
-    settings.night_start = 0;
-    settings.night_end = 0;
-    settings.recover_delay_min = 0;
-    settings.recover_delay_max = 0;
+    let mut settings = NurtureSettings {
+        bundle_id: bundle,
+        num_videos: videos,
+        num_rounds: 4,
+        watch_min,
+        watch_max,
+        like_prob,
+        comment_prob,
+        follow_prob,
+        frenzy_prob,
+        fatigue: false,
+        time_of_day: false,
+        pause_swipe: false,
+        night_start: 0,
+        night_end: 0,
+        recover_delay_min: 0,
+        recover_delay_max: 0,
+        ..Default::default()
+    };
     if let Ok(k) = std::env::var("RIVIU_NURTURE_API_KEY") {
         if !k.trim().is_empty() {
             settings.api_key = k;

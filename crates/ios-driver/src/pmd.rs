@@ -958,7 +958,7 @@ impl PmdIosDriver {
 
         // Reuse a live relay. Transient /status blips right after an app launch
         // must NOT tear it down — that is what used to spawn a second relay.
-        let proxy_alive = owned.proxy.as_mut().map_or(false, |c| !c.has_exited());
+        let proxy_alive = owned.proxy.as_mut().is_some_and(|c| !c.has_exited());
         if owned.wda_port == Some(port) && proxy_alive && !owned.force_restart {
             for _ in 0..4 {
                 if self.wda_http_reachable(port).await {

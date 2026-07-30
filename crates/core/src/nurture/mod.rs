@@ -427,7 +427,7 @@ impl NurtureEngine {
                 hit_video_cap = false;
                 break;
             }
-            if max_duration.map_or(false, |max| started.elapsed() >= max) {
+            if max_duration.is_some_and(|max| started.elapsed() >= max) {
                 hit_video_cap = false;
                 break;
             }
@@ -1091,8 +1091,10 @@ mod tests {
             Arc::new(NullFrameSource),
             std::env::temp_dir(),
         );
-        let mut settings = NurtureSettings::default();
-        settings.comment_prob = 1;
+        let settings = NurtureSettings {
+            comment_prob: 1,
+            ..Default::default()
+        };
 
         let final_status = engine
             .run_session(
@@ -1132,8 +1134,10 @@ mod tests {
         );
         let stop = Arc::new(AtomicBool::new(true));
 
-        let mut settings = NurtureSettings::default();
-        settings.comment_prob = 0;
+        let settings = NurtureSettings {
+            comment_prob: 0,
+            ..Default::default()
+        };
         let final_status = engine
             .run_session(
                 "pre-stopped-device",
@@ -1171,9 +1175,7 @@ mod tests {
         let judge = |videos: u32, cap: u32, hit_cap: bool, err: bool| {
             if videos == 0 {
                 Outcome::Failed
-            } else if hit_cap && videos < cap / 2 {
-                Outcome::Partial
-            } else if videos < 3 && err {
+            } else if (hit_cap && videos < cap / 2) || (videos < 3 && err) {
                 Outcome::Partial
             } else {
                 Outcome::Done

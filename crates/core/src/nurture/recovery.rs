@@ -74,6 +74,7 @@ impl Budget {
 impl NurtureEngine {
     /// Spend recovery budget on a failed gesture. Returns false when the
     /// session cannot continue.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn recover(
         &self,
         _udid: &str,
@@ -118,7 +119,7 @@ impl NurtureEngine {
                 let stream: anyhow::Result<()> = Ok(());
                 match stream {
                     Ok(()) => {
-                        let recovered: Arc<dyn UiSession> = Arc::from(s);
+                        let recovered: Arc<dyn UiSession> = s;
                         *session = recovered.clone();
                         handle.set(recovered);
                         if fresh_text_session {
@@ -169,7 +170,7 @@ impl NurtureEngine {
         budget.spent += hard_started.elapsed();
         match hard {
             Ok(s) => {
-                let recovered: Arc<dyn UiSession> = Arc::from(s);
+                let recovered: Arc<dyn UiSession> = s;
                 *session = recovered.clone();
                 handle.set(recovered);
                 if fresh_text_session {
@@ -476,8 +477,10 @@ mod tests {
             text_health.observe(super::super::CommentResult::TextNotArmed),
             super::super::CommentRecoveryAction::None
         );
-        let mut settings = crate::types::NurtureSettings::default();
-        settings.bundle_id = "   ".into();
+        let settings = crate::types::NurtureSettings {
+            bundle_id: "   ".into(),
+            ..Default::default()
+        };
         let bundle_id = NurtureEngine::tiktok_bundle(&settings);
 
         assert!(

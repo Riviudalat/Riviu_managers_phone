@@ -1031,7 +1031,7 @@ mod tests {
                     }
                     _ => {
                         if let Ok(transfer) = budget.begin_foreground_transfer(
-                            &format!("foreground-{seed}-{step}"),
+                            format!("foreground-{seed}-{step}"),
                             DeviceWorkOwner::Interaction,
                         ) {
                             let proof = if transfer.revoked_udid().is_some() {

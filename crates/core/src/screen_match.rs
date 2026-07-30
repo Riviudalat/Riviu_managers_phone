@@ -59,7 +59,7 @@ pub fn find_template(haystack: &GrayImage, needle: &GrayImage) -> Option<Match> 
             image::imageops::resize(needle, nw, nh, FilterType::Triangle)
         };
         if let Some(m) = correlate(haystack, &scaled) {
-            if best.map_or(true, |b| m.score > b.score) {
+            if best.is_none_or(|b| m.score > b.score) {
                 best = Some(m);
             }
         }
@@ -235,7 +235,7 @@ fn correlate(haystack: &GrayImage, needle_img: &GrayImage) -> Option<Match> {
                 let Some(score) = score_at(haystack, &integ, &needle, x, y) else {
                     continue;
                 };
-                if best.map_or(true, |b| score > b.score) {
+                if best.is_none_or(|b| score > b.score) {
                     best = Some(Match {
                         score,
                         cx: x as f64 + needle.w as f64 / 2.0,
@@ -257,7 +257,7 @@ fn exhaustive(haystack: &GrayImage, needle: &Needle) -> Option<Match> {
             let Some(score) = score_at(haystack, &integ, needle, x, y) else {
                 continue;
             };
-            if best.map_or(true, |b| score > b.score) {
+            if best.is_none_or(|b| score > b.score) {
                 best = Some(Match {
                     score,
                     cx: x as f64 + needle.w as f64 / 2.0,

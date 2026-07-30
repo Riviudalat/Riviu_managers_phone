@@ -433,8 +433,10 @@ mod tests {
             Arc::new(StreamBudgetManager::default()),
         );
         let runtime = NurtureRuntime::new();
-        let mut settings = NurtureSettings::default();
-        settings.comment_prob = 1;
+        let settings = NurtureSettings {
+            comment_prob: 1,
+            ..Default::default()
+        };
 
         let error = preflight_comment_job(
             &control,

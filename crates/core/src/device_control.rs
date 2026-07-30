@@ -649,6 +649,7 @@ impl DeviceControlPlane {
             })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn set_streaming_clipboard(
         &self,
         context: &mut UiWithStreamContext,
@@ -1854,6 +1855,7 @@ impl Drop for PendingStreamStart {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_cleanup_worker(
     mut rx: mpsc::UnboundedReceiver<WorkerCommand>,
     driver: Arc<dyn DeviceDriver>,
@@ -2130,6 +2132,7 @@ async fn park_context(
     Ok(context)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_reserve(
     driver: &Arc<dyn DeviceDriver>,
     streams: &Arc<StreamBudgetManager>,

@@ -852,7 +852,7 @@ pub fn find_system_alert(img: &RgbImage) -> Option<(f64, f64, f64)> {
         if panel >= ALERT_PANEL_MIN && backdrop <= ALERT_BACKDROP_MAX && blue >= ALERT_BLUE_MIN {
             if let Some(x) = dismissive_button_x(&blue_cols, w) {
                 let cy = (y0 + y1) as f64 / 2.0 / h as f64;
-                if best.map_or(true, |(_, _, b)| blue > b) {
+                if best.is_none_or(|(_, _, b)| blue > b) {
                     best = Some((x, cy, blue));
                 }
             }
@@ -1076,7 +1076,7 @@ mod tests {
     fn no_close_button_on_a_plain_feed() {
         let m = find_close_button(&feed_backdrop(), Some(375.0));
         assert!(
-            m.map_or(true, |(_, _, s)| s < CLOSE_X_THRESHOLD),
+            m.is_none_or(|(_, _, s)| s < CLOSE_X_THRESHOLD),
             "feed matched the ✕: {m:?}"
         );
     }
@@ -1087,7 +1087,7 @@ mod tests {
         // outside CLOSE_X_REGION, so it must not become a tap target.
         let screen = sheet_scene(0, (10, 10));
         let m = find_close_button(&screen, Some(375.0));
-        assert!(m.map_or(true, |(_, _, s)| s < CLOSE_X_THRESHOLD), "{m:?}");
+        assert!(m.is_none_or(|(_, _, s)| s < CLOSE_X_THRESHOLD), "{m:?}");
     }
 
     #[test]

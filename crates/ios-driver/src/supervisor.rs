@@ -232,7 +232,7 @@ impl OwnedChild {
             pid,
             role,
             udid: udid.to_string(),
-            child: Some(child.into()),
+            child: Some(child),
             registry: registry.clone(),
         }
     }

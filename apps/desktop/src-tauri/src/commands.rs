@@ -319,6 +319,7 @@ pub async fn device_home(state: State<'_, AppState>, udid: String) -> Result<(),
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn group_input(
     state: State<'_, AppState>,
     udids: Vec<String>,

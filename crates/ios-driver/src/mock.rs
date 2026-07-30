@@ -127,7 +127,7 @@ impl MockIosDriver {
             },
         ];
         let streams = StreamHub::new();
-        let driver = Self {
+        Self {
             devices: Arc::new(RwLock::new(devices)),
             streams: streams.clone(),
             taps: Arc::new(Mutex::new(HashMap::new())),
@@ -146,8 +146,7 @@ impl MockIosDriver {
             mock_stream_failures: Arc::new(SyncRwLock::new(HashSet::new())),
             mock_static_streams: Arc::new(SyncRwLock::new(HashSet::new())),
             mock_stream_producers: Arc::new(Mutex::new(HashMap::new())),
-        };
-        driver
+        }
     }
 
     fn start_mock_stream_producer(&self, udid: &str, generation: u64) -> anyhow::Result<bool> {
@@ -841,16 +840,17 @@ mod tests {
             .await
             .expect("reuse mock stream");
 
-        let producers = driver.mock_stream_producers.lock();
-        assert_eq!(producers.len(), 1);
-        assert_eq!(
-            producers
-                .get("MOCK-IPHONE-01")
-                .map(|producer| producer.generation),
-            Some(generation)
-        );
+        {
+            let producers = driver.mock_stream_producers.lock();
+            assert_eq!(producers.len(), 1);
+            assert_eq!(
+                producers
+                    .get("MOCK-IPHONE-01")
+                    .map(|producer| producer.generation),
+                Some(generation)
+            );
+        }
         assert_eq!(driver.streams.generation("MOCK-IPHONE-01"), generation);
-        drop(producers);
         driver
             .stop_owned_stream("MOCK-IPHONE-01")
             .await

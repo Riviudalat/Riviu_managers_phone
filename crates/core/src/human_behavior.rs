@@ -360,6 +360,7 @@ impl MoodCycle {
 
     /// The mood for this video, advancing the cycle. Returns `(mood, changed)`
     /// so the caller can log a transition once rather than every video.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> (Mood, bool) {
         if self.remaining == 0 {
             self.roll();

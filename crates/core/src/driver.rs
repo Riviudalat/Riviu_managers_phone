@@ -222,6 +222,7 @@ pub trait DeviceDriver: Send + Sync {
     ) -> anyhow::Result<Box<dyn UiSession>> {
         unsupported("startInteractionSession")
     }
+    #[allow(clippy::too_many_arguments)]
     async fn guarded_clipboard_transition(
         &self,
         _udid: &str,

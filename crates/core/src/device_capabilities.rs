@@ -680,7 +680,8 @@ mod tests {
             .target_identity_copy_link
             .is_some());
 
-        let mutations: Vec<Box<dyn Fn(&mut DeviceCapabilitySnapshot)>> = vec![
+        type SnapshotMutation = Box<dyn Fn(&mut DeviceCapabilitySnapshot)>;
+        let mutations: Vec<SnapshotMutation> = vec![
             Box::new(|v| v.selected_artifact_sha256 = SHA_D.into()),
             Box::new(|v| v.installed_agent.bundle_id.push_str(".changed")),
             Box::new(|v| v.installed_agent.version.push_str(".changed")),
