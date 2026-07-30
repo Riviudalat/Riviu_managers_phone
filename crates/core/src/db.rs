@@ -7,6 +7,8 @@ use uuid::Uuid;
 
 use crate::types::{JobRecord, JobStatus, JobStepRecord, StepStatus};
 
+mod migrations;
+
 pub struct Database {
     path: PathBuf,
 }
@@ -28,151 +30,16 @@ impl Database {
     }
 
     fn conn(&self) -> anyhow::Result<Connection> {
-        Ok(Connection::open(&self.path)?)
+        let connection = Connection::open(&self.path)?;
+        connection.pragma_update(None, "foreign_keys", "ON")?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        Ok(connection)
     }
 
     fn migrate(&self) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS jobs (
-              id TEXT PRIMARY KEY,
-              script_name TEXT NOT NULL,
-              udids_json TEXT NOT NULL,
-              status TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL,
-              steps_json TEXT NOT NULL,
-              error TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS scripts (
-              id TEXT PRIMARY KEY,
-              name TEXT NOT NULL UNIQUE,
-              body_json TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS settings (
-              key TEXT PRIMARY KEY,
-              value TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS device_meta (
-              udid TEXT PRIMARY KEY,
-              notes TEXT NOT NULL DEFAULT '',
-              tags_json TEXT NOT NULL DEFAULT '[]',
-              group_id TEXT,
-              proxy_id TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS groups (
-              id TEXT PRIMARY KEY,
-              name TEXT NOT NULL,
-              color TEXT NOT NULL DEFAULT '#FF6A00',
-              created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS group_members (
-              group_id TEXT NOT NULL,
-              udid TEXT NOT NULL,
-              PRIMARY KEY (group_id, udid)
-            );
-
-            CREATE TABLE IF NOT EXISTS proxies (
-              id TEXT PRIMARY KEY,
-              name TEXT NOT NULL,
-              proxy_type TEXT NOT NULL DEFAULT 'http',
-              host TEXT NOT NULL,
-              port INTEGER NOT NULL,
-              username TEXT NOT NULL DEFAULT '',
-              password TEXT NOT NULL DEFAULT '',
-              notes TEXT NOT NULL DEFAULT ''
-            );
-
-            CREATE TABLE IF NOT EXISTS materials (
-              id TEXT PRIMARY KEY,
-              name TEXT NOT NULL,
-              path TEXT NOT NULL,
-              kind TEXT NOT NULL,
-              size INTEGER NOT NULL DEFAULT 0,
-              created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS apps_library (
-              id TEXT PRIMARY KEY,
-              name TEXT NOT NULL,
-              path TEXT NOT NULL,
-              bundle_id TEXT NOT NULL DEFAULT '',
-              version TEXT NOT NULL DEFAULT '',
-              created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS schedules (
-              id TEXT PRIMARY KEY,
-              name TEXT NOT NULL,
-              script_name TEXT NOT NULL,
-              udids_json TEXT NOT NULL,
-              every_minutes INTEGER NOT NULL DEFAULT 60,
-              enabled INTEGER NOT NULL DEFAULT 1,
-              last_run_at TEXT,
-              next_run_at TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS publish_tasks (
-              id TEXT PRIMARY KEY,
-              name TEXT NOT NULL,
-              script_name TEXT NOT NULL,
-              material_ids_json TEXT NOT NULL,
-              udids_json TEXT NOT NULL,
-              status TEXT NOT NULL,
-              created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS op_logs (
-              id TEXT PRIMARY KEY,
-              action TEXT NOT NULL,
-              detail TEXT NOT NULL,
-              created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS users (
-              id TEXT PRIMARY KEY,
-              email TEXT NOT NULL UNIQUE,
-              password_hash TEXT NOT NULL,
-              role TEXT NOT NULL DEFAULT 'admin',
-              created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS nurture_comment_costs (
-              id TEXT PRIMARY KEY,
-              udid TEXT NOT NULL,
-              model TEXT NOT NULL,
-              base_url_host TEXT NOT NULL,
-              prompt_tokens INTEGER NOT NULL DEFAULT 0,
-              completion_tokens INTEGER NOT NULL DEFAULT 0,
-              usd REAL NOT NULL DEFAULT 0,
-              preview TEXT NOT NULL DEFAULT '',
-              created_at TEXT NOT NULL
-            );
-            "#,
-        )?;
-        // Seed guest admin if empty
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?;
-        if count == 0 {
-            let now = Utc::now().to_rfc3339();
-            conn.execute(
-                "INSERT INTO users (id, email, password_hash, role, created_at) VALUES (?1,?2,?3,?4,?5)",
-                params![
-                    Uuid::new_v4().to_string(),
-                    "guest@local",
-                    "guest",
-                    "admin",
-                    now
-                ],
-            )?;
-        }
-        Ok(())
+        let mut conn = self.conn()?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        migrations::run(&mut conn)
     }
 
     pub fn save_job(&self, job: &JobRecord) -> anyhow::Result<()> {

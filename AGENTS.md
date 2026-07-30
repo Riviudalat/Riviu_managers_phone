@@ -792,8 +792,17 @@ reconcile thanh proved success/proved non-delivery/`Uncertain`. Khong retry
 `Uncertain` tap/swipe/type. Artifact dung path UUID nam trong managed root, publish
 temp -> validate/hash -> atomic rename -> DB transaction va reconcile orphan khi mo
 app. Flow shutdown phai stop + join het worker truoc
-`DeviceControlPlane::shutdown_cleanup()`. DB hien chua co version ledger; Flow scope
-phai them transaction migration runner va test upgrade populated legacy DB.
+`DeviceControlPlane::shutdown_cleanup()`.
+
+DB da co transaction migration runner trong `crates/core/src/db/migrations.rs`.
+`schema_migrations` version 1 ghi nhan exact pre-Flow schema; version 2 tao bay bang
+Flow va cac index. DB legacy khong co ledger chi duoc bootstrap khi rong hoac khop
+chinh xac table/column/PK/unique fingerprint; partial/unknown schema phai tra
+`UnknownLegacySchema` truoc khi tao ledger. Tung migration co transaction rieng va
+ledger row chi commit cung schema. Khong quay lai batch migration
+`CREATE TABLE IF NOT EXISTS` cho version moi. Moi connection tao qua `Database::conn`
+phai bat foreign keys va busy timeout; migrate connection con bat WAL. Upgrade khong
+seed lai hay ghi lai row cua exact legacy DB.
 
 TikTok campaign khong duoc ha thanh chuoi tap generic.
 `InteractionCampaignEngine` hien chua co implementation; node TikTok release sau chi
@@ -840,8 +849,9 @@ orientation; runtime mismatch phai fail truoc dispatch. Terminate App nam ngoai
 catalog o F0, roi duoc bat trong F1 sau khi bounded DVT terminate, read-only process
 query, exact bundle proof, Python contract test va Rust ownership/integration test deu
 PASS. Legacy va Flow deu phai di qua cung `DeviceControlPlane` lock theo UDID; recovery
-chi `ReadProcess`, khong kill lai de doan retry. Gate tiep theo la F0; chua co source
-Flow implementation o checkpoint nay.
+chi `ReadProcess`, khong kill lai de doan retry. F0.1 model/catalog, F0.2 compiler va
+F0.3 legacy importer da commit; F0.4 migration runner da co test rollback/upgrade/
+ledger drift/FK. Buoc foundation tiep theo la F0.5 immutable Flow revisions.
 
 Projection attempt co `retryAllowed` do backend tinh tu durable state va proof
 reconciler. Frontend chi an/hien nut theo field nay; khong tu suy retry tu action
