@@ -47,6 +47,19 @@ jobs:
             sidecars/pymobiledevice3/requirements-build.txt
             sidecars/pymobiledevice3/requirements-lock.txt
 
+      - name: Create isolated Python build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          venv="${RUNNER_TEMP}/riviu-desktop-venv"
+          python -m venv "$venv"
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            echo "$venv/Scripts" >> "$GITHUB_PATH"
+          else
+            echo "$venv/bin" >> "$GITHUB_PATH"
+          fi
+          echo "VIRTUAL_ENV=$venv" >> "$GITHUB_ENV"
+
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -73,7 +86,8 @@ jobs:
       - name: Install Python dependencies
         shell: pwsh
         run: |
-          python -m pip install --disable-pip-version-check -r sidecars/pymobiledevice3/requirements-build.txt
+          python -c "import sys; assert sys.prefix != sys.base_prefix, 'quality Python must be isolated'"
+          python -m pip install --disable-pip-version-check --only-binary=cryptography -r sidecars/pymobiledevice3/requirements-build.txt
           python -m pip check
 
       - name: Install frontend dependencies
@@ -152,6 +166,19 @@ jobs:
             sidecars/pymobiledevice3/requirements-build.txt
             sidecars/pymobiledevice3/requirements-lock.txt
 
+      - name: Create isolated Python build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          venv="${RUNNER_TEMP}/riviu-desktop-venv"
+          python -m venv "$venv"
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            echo "$venv/Scripts" >> "$GITHUB_PATH"
+          else
+            echo "$venv/bin" >> "$GITHUB_PATH"
+          fi
+          echo "VIRTUAL_ENV=$venv" >> "$GITHUB_ENV"
+
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -181,7 +208,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install --disable-pip-version-check -r sidecars/pymobiledevice3/requirements-build.txt
+          python -c "import sys; assert sys.prefix != sys.base_prefix, 'build Python must be isolated'"
+          python -m pip install --disable-pip-version-check --only-binary=cryptography -r sidecars/pymobiledevice3/requirements-build.txt
           python -m pip check
           npm ci --prefix apps/desktop
 
@@ -224,6 +252,7 @@ jobs:
             --runtime target/desktop-sidecar/riviu-pmd \
             --tauri-config target/tauri-sidecar.conf.json \
             --production-baseline target/production-wda-inputs.json \
+            --source-commit "${GITHUB_SHA}" \
             --output "target/desktop-ci/${{ matrix.label }}"
           git diff --exit-code -- \
             sidecars/wda/RiviuAgent.ipa \
@@ -271,6 +300,7 @@ jobs:
         run: |
           python scripts/collect_desktop_ci_artifacts.py verify-release \
             --root release-artifacts \
+            --source-commit "${GITHUB_SHA}" \
             --labels windows-x64 macos-arm64 macos-x64
 
       - name: Create immutable GitHub release
@@ -280,6 +310,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          expected_commit="$(git rev-parse 'HEAD^{commit}')"
+          if [[ "$expected_commit" != "$GITHUB_SHA" ]]; then
+            echo "Checked-out commit $expected_commit does not match workflow SHA $GITHUB_SHA" >&2
+            exit 1
+          fi
+          remote_refs="$(git ls-remote --exit-code --tags origin \
+            "refs/tags/${GITHUB_REF_NAME}" \
+            "refs/tags/${GITHUB_REF_NAME}^{}")"
+          remote_object=""
+          remote_peeled=""
+          while read -r object ref; do
+            if [[ "$ref" == "refs/tags/${GITHUB_REF_NAME}^{}" ]]; then
+              remote_peeled="$object"
+            elif [[ "$ref" == "refs/tags/${GITHUB_REF_NAME}" ]]; then
+              remote_object="$object"
+            fi
+          done <<< "$remote_refs"
+          remote_commit="${remote_peeled:-$remote_object}"
+          if [[ -z "$remote_commit" || "$remote_commit" != "$expected_commit" ]]; then
+            echo "Remote tag $GITHUB_REF_NAME resolves to $remote_commit, expected $expected_commit" >&2
+            exit 1
+          fi
           mapfile -d '' assets < <(find release-artifacts -type f -print0 | sort -z)
           if (( ${#assets[@]} == 0 )); then
             echo "No verified release assets found" >&2

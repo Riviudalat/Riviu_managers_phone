@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -863,7 +864,56 @@ def verify_windows_package(
     return evidence
 
 
-def dmg_is_mounted_at(mount_point: Path) -> bool:
+@dataclass(frozen=True)
+class DmgAttachment:
+    image_path: Path
+    dev_entry: str
+
+
+def parse_dmg_attachments(
+    payload: object, image_path: Path
+) -> set[DmgAttachment]:
+    if not isinstance(payload, dict):
+        raise ArtifactError("hdiutil info plist root must be a dictionary")
+    images = payload.get("images", [])
+    if not isinstance(images, list):
+        raise ArtifactError("hdiutil info plist images must be an array")
+
+    canonical_image_path = image_path.resolve()
+    attachments: set[DmgAttachment] = set()
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        raw_image_path = image.get("image-path")
+        if (
+            not isinstance(raw_image_path, str)
+            or Path(raw_image_path).resolve() != canonical_image_path
+        ):
+            continue
+        entities = image.get("system-entities", [])
+        if not isinstance(entities, list):
+            raise ArtifactError(
+                f"hdiutil info has invalid system entities for {canonical_image_path}"
+            )
+        dev_entry = next(
+            (
+                entity["dev-entry"]
+                for entity in entities
+                if isinstance(entity, dict)
+                and isinstance(entity.get("dev-entry"), str)
+            ),
+            None,
+        )
+        if dev_entry is None:
+            raise ArtifactError(
+                f"hdiutil info has no dev-entry for attached image "
+                f"{canonical_image_path}"
+            )
+        attachments.add(DmgAttachment(canonical_image_path, dev_entry))
+    return attachments
+
+
+def inspect_dmg_attachments(image_path: Path) -> set[DmgAttachment]:
     try:
         info = subprocess.run(
             ["hdiutil", "info", "-plist"],
@@ -882,33 +932,47 @@ def dmg_is_mounted_at(mount_point: Path) -> bool:
         payload = plistlib.loads(info.stdout.encode("utf-8"))
     except plistlib.InvalidFileException as error:
         raise ArtifactError("hdiutil info returned an invalid plist") from error
+    return parse_dmg_attachments(payload, image_path)
+
+
+def parse_dmg_attach_result(
+    stdout: str, image_path: Path
+) -> tuple[DmgAttachment, list[Path]]:
+    try:
+        payload = plistlib.loads(stdout.encode("utf-8"))
+    except plistlib.InvalidFileException as error:
+        raise ArtifactError("hdiutil returned an invalid attachment plist") from error
     if not isinstance(payload, dict):
-        raise ArtifactError("hdiutil info plist root must be a dictionary")
-    images = payload.get("images", [])
-    if not isinstance(images, list):
-        raise ArtifactError("hdiutil info plist images must be an array")
-    for image in images:
-        if not isinstance(image, dict):
-            continue
-        entities = image.get("system-entities", [])
-        if not isinstance(entities, list):
-            continue
-        for entity in entities:
-            if not isinstance(entity, dict):
-                continue
-            mounted = entity.get("mount-point")
-            if isinstance(mounted, str) and Path(mounted).resolve() == mount_point:
-                return True
-    return False
+        raise ArtifactError("hdiutil attachment plist root must be a dictionary")
+    entities = payload.get("system-entities", [])
+    if not isinstance(entities, list):
+        raise ArtifactError("hdiutil attachment system entities must be an array")
+    dev_entry = next(
+        (
+            entity["dev-entry"]
+            for entity in entities
+            if isinstance(entity, dict)
+            and isinstance(entity.get("dev-entry"), str)
+        ),
+        None,
+    )
+    if dev_entry is None:
+        raise ArtifactError("hdiutil attachment plist has no dev-entry")
+    mount_points = [
+        Path(entity["mount-point"]).resolve()
+        for entity in entities
+        if isinstance(entity, dict) and isinstance(entity.get("mount-point"), str)
+    ]
+    return DmgAttachment(image_path.resolve(), dev_entry), mount_points
 
 
-def detach_dmg_with_retry(mount_point: Path) -> ArtifactError | None:
+def detach_dmg_with_retry(attachment: DmgAttachment) -> ArtifactError | None:
     last_failure = "unknown detach failure"
     for attempt in range(3):
         command = ["hdiutil", "detach"]
         if attempt == 2:
             command.append("-force")
-        command.append(str(mount_point))
+        command.append(attachment.dev_entry)
         try:
             detached = subprocess.run(
                 command,
@@ -918,10 +982,18 @@ def detach_dmg_with_retry(mount_point: Path) -> ArtifactError | None:
                 timeout=120,
             )
             if detached.returncode == 0:
-                return None
-            last_failure = detached.stderr[-1000:]
+                last_failure = "detach returned success but attachment remains"
+            else:
+                last_failure = detached.stderr[-1000:]
         except (OSError, subprocess.TimeoutExpired) as error:
             last_failure = str(error)
+        try:
+            if attachment not in inspect_dmg_attachments(attachment.image_path):
+                return None
+        except ArtifactError as error:
+            last_failure = (
+                f"{last_failure}; attachment state re-query failed: {error}"
+            )
         if attempt < 2:
             time.sleep(1)
     return ArtifactError(f"failed to detach DMG after 3 attempts: {last_failure!r}")
@@ -936,12 +1008,14 @@ def verify_macos_package(
     mount_point = Path(
         tempfile.mkdtemp(prefix="desktop-dmg-mount-", dir=bundle_dir.parent)
     ).resolve()
-    attached = False
     attach_attempted = False
+    baseline_attachments: set[DmgAttachment] = set()
+    owned_attachments: set[DmgAttachment] = set()
     evidence: dict[str, Any] | None = None
     primary_error: BaseException | None = None
     cleanup_error: ArtifactError | None = None
     try:
+        baseline_attachments = inspect_dmg_attachments(dmg_installers[0])
         attach_attempted = True
         attachment = run_checked(
             [
@@ -956,16 +1030,11 @@ def verify_macos_package(
             ],
             timeout=300,
         )
-        attached = True
-        try:
-            attach_info = plistlib.loads(attachment.stdout.encode("utf-8"))
-        except plistlib.InvalidFileException as error:
-            raise ArtifactError("hdiutil returned an invalid attachment plist") from error
-        mount_points = [
-            Path(entity["mount-point"]).resolve()
-            for entity in attach_info.get("system-entities", [])
-            if isinstance(entity, dict) and isinstance(entity.get("mount-point"), str)
-        ]
+        owned_attachment, mount_points = parse_dmg_attach_result(
+            attachment.stdout, dmg_installers[0]
+        )
+        if owned_attachment not in baseline_attachments:
+            owned_attachments.add(owned_attachment)
         if mount_points != [mount_point]:
             raise ArtifactError(
                 "DMG did not use the exact isolated mount point: "
@@ -1013,19 +1082,34 @@ def verify_macos_package(
     except BaseException as error:
         primary_error = error
     finally:
-        should_detach = attached
-        if attach_attempted and not attached:
+        cleanup_failures: list[ArtifactError] = []
+        current_attachments: set[DmgAttachment] | None = None
+        if attach_attempted:
             try:
-                should_detach = dmg_is_mounted_at(mount_point)
+                current_attachments = inspect_dmg_attachments(dmg_installers[0])
+                owned_attachments.update(
+                    current_attachments - baseline_attachments
+                )
             except ArtifactError as error:
-                cleanup_error = error
-                should_detach = True
-        if should_detach:
-            detach_error = detach_dmg_with_retry(mount_point)
-            if detach_error is None:
-                cleanup_error = None
-            else:
-                cleanup_error = detach_error
+                cleanup_failures.append(error)
+        for owned_attachment in sorted(
+            owned_attachments, key=lambda item: item.dev_entry
+        ):
+            if (
+                current_attachments is not None
+                and owned_attachment not in current_attachments
+            ):
+                continue
+            detach_error = detach_dmg_with_retry(owned_attachment)
+            if detach_error is not None:
+                cleanup_failures.append(detach_error)
+        if len(cleanup_failures) == 1:
+            cleanup_error = cleanup_failures[0]
+        elif cleanup_failures:
+            cleanup_error = ArtifactError(
+                "DMG cleanup failed: "
+                + "; ".join(str(error) for error in cleanup_failures)
+            )
         if cleanup_error is None:
             shutil.rmtree(mount_point, ignore_errors=True)
 
@@ -1065,8 +1149,18 @@ def copy_release_file(source: Path, output_dir: Path, name: str) -> dict[str, An
     }
 
 
+def validate_source_commit(value: str) -> str:
+    normalized = value.strip().lower()
+    if len(normalized) != 40 or any(
+        character not in "0123456789abcdef" for character in normalized
+    ):
+        raise ArtifactError("source commit must be an exact 40-character Git SHA")
+    return normalized
+
+
 def collect_command(args: argparse.Namespace) -> dict[str, Any]:
     target = args.target
+    source_commit = validate_source_commit(args.source_commit)
     requested_runtime_dir = args.runtime.resolve()
     bundle_dir = args.bundle_dir.resolve()
     staged_runtime_dir = (
@@ -1106,9 +1200,10 @@ def collect_command(args: argparse.Namespace) -> dict[str, Any]:
 
     artifact_manifest_name = f"{args.label}-artifact-manifest.json"
     artifact_manifest = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "label": args.label,
         "target": target,
+        "sourceCommit": source_commit,
         "runtime": {
             "manifest": runtime_manifest_name,
             "platform": runtime["platform"],
@@ -1170,6 +1265,7 @@ def parse_checksum_file(path: Path) -> list[tuple[str, str]]:
 
 def verify_release_command(args: argparse.Namespace) -> dict[str, Any]:
     root = args.root.resolve()
+    source_commit = validate_source_commit(args.source_commit)
     if not root.is_dir():
         raise ArtifactError(f"downloaded artifact directory is missing: {root}")
 
@@ -1198,6 +1294,13 @@ def verify_release_command(args: argparse.Namespace) -> dict[str, Any]:
         checksum_path = checksum_matches[0]
         manifest_path = manifest_matches[0]
         manifest = load_json(manifest_path)
+        if manifest.get("schemaVersion") != 2:
+            raise ArtifactError(f"artifact manifest schema mismatch in {manifest_path}")
+        if manifest.get("sourceCommit") != source_commit:
+            raise ArtifactError(
+                f"artifact source commit mismatch in {manifest_path}: "
+                f"expected {source_commit}, got {manifest.get('sourceCommit')!r}"
+            )
         if manifest.get("label") != label:
             raise ArtifactError(f"artifact manifest label mismatch in {manifest_path}")
         if manifest.get("target") != expected_target:
@@ -1307,6 +1410,7 @@ def verify_release_command(args: argparse.Namespace) -> dict[str, Any]:
         "ok": True,
         "command": "verify-release",
         "labels": args.labels,
+        "sourceCommit": source_commit,
         "assetCount": len(all_files),
         "verifiedFiles": verified_files,
     }
@@ -1333,11 +1437,13 @@ def parse_args() -> argparse.Namespace:
     collect.add_argument("--tauri-config", type=Path, required=True)
     collect.add_argument("--production-baseline", type=Path, required=True)
     collect.add_argument("--output", type=Path, required=True)
+    collect.add_argument("--source-commit", required=True)
     collect.set_defaults(handler=collect_command)
 
     verify_release = subparsers.add_parser("verify-release")
     verify_release.add_argument("--root", type=Path, required=True)
     verify_release.add_argument("--labels", nargs="+", required=True)
+    verify_release.add_argument("--source-commit", required=True)
     verify_release.set_defaults(handler=verify_release_command)
     return parser.parse_args()
 

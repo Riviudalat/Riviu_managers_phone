@@ -26,6 +26,7 @@ from typing import Optional
 SIDECAR_PROTOCOL_VERSION = 2
 PYMOBILEDEVICE3_PROCESS_CONTROL_VERSION = "10.1.0"
 VERIFIED_PROCESS_CONTROL_CONTRACT = "verifiedProcessControl"
+CONTRACT_DIAGNOSTICS_ENV = "RIVIU_SIDECAR_CONTRACT_DIAGNOSTICS"
 WINDOWS_CREATE_NO_WINDOW = 0x08000000
 EMBEDDED_TIDEVICE_COMMAND = "__tidevice"
 EMBEDDED_SCRIPT_COMMAND = "__script"
@@ -226,7 +227,14 @@ def verified_process_control_ready() -> bool:
         )
 
         return isinstance(DvtProvider, type) and isinstance(ProcessControl, type)
-    except Exception:  # pragma: no cover - dependency shape varies by host
+    except Exception as exc:  # pragma: no cover - dependency shape varies by host
+        if os.environ.get(CONTRACT_DIAGNOSTICS_ENV) == "1":
+            diagnostic = {
+                "contract": VERIFIED_PROCESS_CONTROL_CONTRACT,
+                "errorType": type(exc).__name__,
+                "error": str(exc)[:1000],
+            }
+            print(json.dumps(diagnostic, ensure_ascii=True), file=sys.stderr)
         return False
 
 

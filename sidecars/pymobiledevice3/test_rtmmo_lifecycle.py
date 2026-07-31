@@ -455,6 +455,14 @@ class DependencyContractTests(unittest.TestCase):
 
         self.assertIn("pymobiledevice3==10.1.0", requirements.splitlines())
 
+    def test_lock_keeps_a_binary_cryptography_wheel_for_intel_macos(self):
+        lock = Path(riviu_pmd.__file__).with_name("requirements-lock.txt").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("cryptography==48.0.0", lock.splitlines())
+        self.assertNotIn("cryptography==49.0.0", lock.splitlines())
+
 
 class _FakeResponse:
     status = 200

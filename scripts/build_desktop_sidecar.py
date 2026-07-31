@@ -139,7 +139,11 @@ def dependency_closure() -> dict[str, str]:
 
 
 def run_checked(
-    command: list[str], *, timeout: int = 900, capture_output: bool = True
+    command: list[str],
+    *,
+    timeout: int = 900,
+    capture_output: bool = True,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(
@@ -149,6 +153,7 @@ def run_checked(
             text=True,
             timeout=timeout,
             check=True,
+            env=env,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         stdout = getattr(error, "stdout", "") or ""
@@ -160,7 +165,11 @@ def run_checked(
 
 
 def smoke_runtime(entrypoint: Path) -> tuple[dict, dict]:
-    ping = run_checked([str(entrypoint), "ping"], timeout=90)
+    diagnostic_env = dict(os.environ)
+    diagnostic_env["RIVIU_SIDECAR_CONTRACT_DIAGNOSTICS"] = "1"
+    ping = run_checked(
+        [str(entrypoint), "ping"], timeout=90, env=diagnostic_env
+    )
     payload = json.loads(ping.stdout.strip().splitlines()[-1])
     required_contract = "verifiedProcessControl"
     if not (
@@ -169,7 +178,11 @@ def smoke_runtime(entrypoint: Path) -> tuple[dict, dict]:
         and payload.get("sidecarProtocolVersion") == 2
         and required_contract in payload.get("contracts", [])
     ):
-        raise RuntimeError(f"frozen sidecar ping contract failed: {payload!r}")
+        diagnostics = (ping.stderr or "")[-2000:]
+        raise RuntimeError(
+            f"frozen sidecar ping contract failed: {payload!r}; "
+            f"diagnostics={diagnostics!r}"
+        )
 
     tidevice = run_checked(
         [str(entrypoint), "__tidevice", "--version"],

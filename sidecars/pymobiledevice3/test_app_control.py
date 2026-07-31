@@ -8,6 +8,7 @@ import builtins
 import contextlib
 import io
 import json
+import os
 import sys
 import time
 import types
@@ -204,6 +205,25 @@ class AppControlTests(unittest.TestCase):
             mock.patch("builtins.__import__", side_effect=missing_process_control),
         ):
             self.assertFalse(riviu_pmd.verified_process_control_ready())
+
+        stderr = io.StringIO()
+        with (
+            mock.patch("importlib.metadata.version", return_value="10.1.0"),
+            mock.patch("builtins.__import__", side_effect=missing_process_control),
+            mock.patch.dict(
+                os.environ, {riviu_pmd.CONTRACT_DIAGNOSTICS_ENV: "1"}
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertFalse(riviu_pmd.verified_process_control_ready())
+        self.assertEqual(
+            json.loads(stderr.getvalue()),
+            {
+                "contract": "verifiedProcessControl",
+                "errorType": "ImportError",
+                "error": "missing process control",
+            },
+        )
 
     def test_verified_terminate_kills_exact_pid_and_observes_absence(self):
         with app_control_modules([42, 0]) as state:

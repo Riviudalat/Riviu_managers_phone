@@ -1398,6 +1398,19 @@ phai sap xep theo relative POSIX path ma hoa UTF-8 byte, khong dung thu tu mac d
 cua `Path`. Digest portable cua WDA source 16.0.0 la
 `74acd24fdbde2fd5ad2b73d4956217900e23461b01cf8100b2ef8cccb37cc4a0`;
 khong tai sinh lock bang native path ordering.
+Run `c918d25` da PASS Quality va macOS arm64 native package gate; macOS x64 build
+xong PyInstaller nhung ping tra `contracts=[]`. Log pip cho thay cryptography
+49.0.0 khong co Intel macOS wheel, nen runner build sdist lien ket dong toi
+`/usr/local/opt/openssl@3`; DVT import trong frozen runtime vi the khong san sang.
+Trong khi con phat hanh macOS x64, lock cryptography o 48.0.0 (universal2 wheel),
+CI phai chay trong venv rieng va dung `--only-binary=cryptography`; khong cho pip
+am tham build crypto source theo thu vien cua host. Contract smoke bat diagnostic
+chi qua `RIVIU_SIDECAR_CONTRACT_DIAGNOSTICS=1`, gioi han 1,000 ky tu moi exception
+va 2,000 ky tu khi dua vao build error; ping product mac dinh khong lo diagnostic.
+Moi native artifact manifest schema 2 phai ghi exact `sourceCommit` va release gate
+bat buoc ba manifest cung khop `GITHUB_SHA`. Ngay truoc `gh release create`, workflow
+phai peel lai remote tag (ho tro ca lightweight/annotated) va doi chieu voi checkout
+commit; `--verify-tag` mot minh khong khoa artifact vao commit da build.
 
 ---
 

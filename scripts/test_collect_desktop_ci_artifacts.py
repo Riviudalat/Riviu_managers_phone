@@ -100,14 +100,20 @@ class ArtifactContractTests(unittest.TestCase):
                 },
             )
 
-    def test_invalid_dmg_plist_still_detaches_the_owned_mountpoint(self):
+    def test_invalid_dmg_plist_preserves_primary_error_when_cleanup_fails(self):
         with tempfile.TemporaryDirectory() as temporary:
-            bundle_dir = Path(temporary) / "bundle" / "dmg"
+            root = Path(temporary)
+            bundle_dir = root / "bundle" / "dmg"
             bundle_dir.mkdir(parents=True)
             dmg = bundle_dir / "fixture.dmg"
             dmg.write_bytes(b"fixture")
+            dev_entry = "/dev/disk17"
             attachment = subprocess.CompletedProcess(
                 args=["hdiutil"], returncode=0, stdout="not-a-plist", stderr=""
+            )
+            no_attachments = self._hdiutil_info([])
+            owned_attachment = self._hdiutil_info(
+                [self._dmg_image(dmg, dev_entry)]
             )
             detach_failure = subprocess.CompletedProcess(
                 args=["hdiutil"], returncode=1, stdout="", stderr="detach failed"
@@ -116,23 +122,42 @@ class ArtifactContractTests(unittest.TestCase):
                 patch.object(artifacts, "find_installers", return_value=[dmg]),
                 patch.object(artifacts, "run_checked", return_value=attachment),
                 patch.object(
-                    artifacts.subprocess, "run", return_value=detach_failure
-                ) as detach,
+                    artifacts.subprocess,
+                    "run",
+                    side_effect=[
+                        no_attachments,
+                        owned_attachment,
+                        detach_failure,
+                        owned_attachment,
+                        detach_failure,
+                        owned_attachment,
+                        detach_failure,
+                        owned_attachment,
+                    ],
+                ) as system_command,
                 patch.object(artifacts.time, "sleep"),
             ):
                 with self.assertRaisesRegex(
                     artifacts.ArtifactError, "invalid attachment plist"
                 ) as raised:
                     artifacts.verify_macos_package(
-                        bundle_dir, "aarch64-apple-darwin", Path(temporary), {}
+                        bundle_dir, "aarch64-apple-darwin", root, {}
                     )
 
-            self.assertEqual(detach.call_count, 3)
-            self.assertIn("-force", detach.call_args.args[0])
+            detach_commands = [
+                call.args[0]
+                for call in system_command.call_args_list
+                if call.args[0][1] == "detach"
+            ]
+            self.assertEqual(len(detach_commands), 3)
+            self.assertEqual(detach_commands[0], ["hdiutil", "detach", dev_entry])
+            self.assertEqual(
+                detach_commands[-1], ["hdiutil", "detach", "-force", dev_entry]
+            )
             self.assertIsInstance(raised.exception.__cause__, artifacts.ArtifactError)
             self.assertIn("failed to detach DMG after 3 attempts", str(raised.exception.__cause__))
 
-    def test_partial_dmg_attach_discovers_and_detaches_the_mountpoint(self):
+    def test_partial_dmg_attach_without_mountpoint_detaches_new_dev_entry(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             bundle_dir = root / "bundle" / "dmg"
@@ -141,25 +166,20 @@ class ArtifactContractTests(unittest.TestCase):
             dmg.write_bytes(b"fixture")
             mount_point = root / "owned-mount"
             mount_point.mkdir()
-            info = subprocess.CompletedProcess(
-                args=["hdiutil"],
-                returncode=0,
-                stdout=artifacts.plistlib.dumps(
-                    {
-                        "images": [
-                            {
-                                "system-entities": [
-                                    {"mount-point": str(mount_point)}
-                                ]
-                            }
-                        ]
-                    }
-                ).decode("utf-8"),
-                stderr="",
+            dev_entry = "/dev/disk18"
+            no_attachments = self._hdiutil_info([])
+            partial_attachment = self._hdiutil_info(
+                [
+                    self._dmg_image(
+                        bundle_dir / "nested" / ".." / dmg.name,
+                        dev_entry,
+                    )
+                ]
             )
             detached = subprocess.CompletedProcess(
                 args=["hdiutil"], returncode=0, stdout="", stderr=""
             )
+            detached_state = self._hdiutil_info([])
             attach_error = artifacts.ArtifactError("attach command failed")
             with (
                 patch.object(artifacts, "find_installers", return_value=[dmg]),
@@ -168,7 +188,14 @@ class ArtifactContractTests(unittest.TestCase):
                     artifacts.tempfile, "mkdtemp", return_value=str(mount_point)
                 ),
                 patch.object(
-                    artifacts.subprocess, "run", side_effect=[info, detached]
+                    artifacts.subprocess,
+                    "run",
+                    side_effect=[
+                        no_attachments,
+                        partial_attachment,
+                        detached,
+                        detached_state,
+                    ],
                 ) as system_command,
             ):
                 with self.assertRaisesRegex(
@@ -179,15 +206,161 @@ class ArtifactContractTests(unittest.TestCase):
                     )
 
             self.assertIs(raised.exception, attach_error)
-            self.assertEqual(system_command.call_count, 2)
+            self.assertEqual(system_command.call_count, 4)
             self.assertEqual(
                 system_command.call_args_list[0].args[0],
                 ["hdiutil", "info", "-plist"],
             )
             self.assertEqual(
-                system_command.call_args_list[1].args[0],
-                ["hdiutil", "detach", str(mount_point.resolve())],
+                system_command.call_args_list[2].args[0],
+                ["hdiutil", "detach", dev_entry],
             )
+
+    def test_dmg_attach_at_different_mountpoint_detaches_by_dev_entry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle_dir = root / "bundle" / "dmg"
+            bundle_dir.mkdir(parents=True)
+            dmg = bundle_dir / "fixture.dmg"
+            dmg.write_bytes(b"fixture")
+            requested_mount = root / "requested-mount"
+            requested_mount.mkdir()
+            actual_mount = root / "different-mount"
+            dev_entry = "/dev/disk19"
+            attachment = subprocess.CompletedProcess(
+                args=["hdiutil"],
+                returncode=0,
+                stdout=artifacts.plistlib.dumps(
+                    {
+                        "system-entities": [
+                            {
+                                "dev-entry": dev_entry,
+                                "mount-point": str(actual_mount),
+                            }
+                        ]
+                    }
+                ).decode("utf-8"),
+                stderr="",
+            )
+            no_attachments = self._hdiutil_info([])
+            owned_attachment = self._hdiutil_info(
+                [self._dmg_image(dmg, dev_entry, actual_mount)]
+            )
+            detached = subprocess.CompletedProcess(
+                args=["hdiutil"], returncode=0, stdout="", stderr=""
+            )
+            detached_state = self._hdiutil_info([])
+            with (
+                patch.object(artifacts, "find_installers", return_value=[dmg]),
+                patch.object(artifacts, "run_checked", return_value=attachment),
+                patch.object(
+                    artifacts.tempfile, "mkdtemp", return_value=str(requested_mount)
+                ),
+                patch.object(
+                    artifacts.subprocess,
+                    "run",
+                    side_effect=[
+                        no_attachments,
+                        owned_attachment,
+                        detached,
+                        detached_state,
+                    ],
+                ) as system_command,
+            ):
+                with self.assertRaisesRegex(
+                    artifacts.ArtifactError, "exact isolated mount point"
+                ):
+                    artifacts.verify_macos_package(
+                        bundle_dir, "aarch64-apple-darwin", root, {}
+                    )
+
+            detach_commands = [
+                call.args[0]
+                for call in system_command.call_args_list
+                if call.args[0][1] == "detach"
+            ]
+            self.assertEqual(detach_commands, [["hdiutil", "detach", dev_entry]])
+
+    def test_failed_dmg_detach_accepts_confirmed_absence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            image_path = Path(temporary) / "fixture.dmg"
+            image_path.write_bytes(b"fixture")
+            attachment = artifacts.DmgAttachment(
+                image_path.resolve(), "/dev/disk20"
+            )
+            absent = self._hdiutil_info([])
+            nonzero = subprocess.CompletedProcess(
+                args=["hdiutil"], returncode=1, stdout="", stderr="busy"
+            )
+            for failure in (
+                nonzero,
+                subprocess.TimeoutExpired(["hdiutil", "detach"], 120),
+            ):
+                with self.subTest(failure=type(failure).__name__):
+                    with (
+                        patch.object(
+                            artifacts.subprocess,
+                            "run",
+                            side_effect=[failure, absent],
+                        ) as system_command,
+                        patch.object(artifacts.time, "sleep") as sleep,
+                    ):
+                        self.assertIsNone(
+                            artifacts.detach_dmg_with_retry(attachment)
+                        )
+
+                    self.assertEqual(system_command.call_count, 2)
+                    sleep.assert_not_called()
+
+    def test_successful_dmg_detach_retries_until_absence_is_confirmed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            image_path = Path(temporary) / "fixture.dmg"
+            image_path.write_bytes(b"fixture")
+            attachment = artifacts.DmgAttachment(
+                image_path.resolve(), "/dev/disk21"
+            )
+            detached = subprocess.CompletedProcess(
+                args=["hdiutil"], returncode=0, stdout="", stderr=""
+            )
+            present = self._hdiutil_info(
+                [self._dmg_image(image_path, attachment.dev_entry)]
+            )
+            absent = self._hdiutil_info([])
+            with (
+                patch.object(
+                    artifacts.subprocess,
+                    "run",
+                    side_effect=[detached, present, detached, absent],
+                ) as system_command,
+                patch.object(artifacts.time, "sleep") as sleep,
+            ):
+                self.assertIsNone(artifacts.detach_dmg_with_retry(attachment))
+
+            self.assertEqual(system_command.call_count, 4)
+            sleep.assert_called_once_with(1)
+
+    @staticmethod
+    def _dmg_image(
+        image_path: Path,
+        dev_entry: str,
+        mount_point: Path | None = None,
+    ) -> dict[str, object]:
+        entity = {"dev-entry": dev_entry}
+        if mount_point is not None:
+            entity["mount-point"] = str(mount_point)
+        return {
+            "image-path": str(image_path),
+            "system-entities": [entity],
+        }
+
+    @staticmethod
+    def _hdiutil_info(images: list[dict[str, object]]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=["hdiutil", "info", "-plist"],
+            returncode=0,
+            stdout=artifacts.plistlib.dumps({"images": images}).decode("utf-8"),
+            stderr="",
+        )
 
     def test_windows_desktop_executable_requires_a_valid_x64_pe(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -244,6 +417,17 @@ class ArtifactContractTests(unittest.TestCase):
 
         with self.assertRaisesRegex(artifacts.ArtifactError, "tag mismatch"):
             artifacts.verify_version_command(argparse.Namespace(tag="v9.9.9"))
+
+    def test_source_commit_requires_an_exact_git_object_id(self):
+        commit = "A" * 40
+        self.assertEqual(artifacts.validate_source_commit(commit), "a" * 40)
+
+        for invalid in ("a" * 39, "a" * 41, "g" * 40, "refs/heads/main"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(
+                    artifacts.ArtifactError, "exact 40-character Git SHA"
+                ):
+                    artifacts.validate_source_commit(invalid)
 
     def test_tree_attestation_includes_symlink_target_when_supported(self):
         with tempfile.TemporaryDirectory() as temporary:
