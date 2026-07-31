@@ -3028,6 +3028,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "dirs",
+ "futures-util",
  "image",
  "parking_lot",
  "rand 0.8.7",

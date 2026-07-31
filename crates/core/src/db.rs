@@ -12,6 +12,7 @@ mod flows;
 mod migrations;
 
 pub use flow_runs::{AttemptTransitionPatch, FlowStateConflict};
+pub(crate) use flow_runs::{FlowAttemptExecutionContext, FlowRecoveryRunContext};
 
 pub struct Database {
     path: PathBuf,

@@ -112,6 +112,31 @@ impl FlowDeviceContext {
         Ok(())
     }
 
+    pub(crate) async fn upgrade_existing_session(
+        &mut self,
+        control: &DeviceControlPlane,
+        bundle_id: &str,
+        kind: InteractionSessionKind,
+    ) -> Result<(), DeviceControlError> {
+        let Self::Exclusive(context) = std::mem::replace(self, Self::Closed) else {
+            return Err(DeviceControlError::InvalidContext {
+                reason: "Flow session attach requires an exclusive context",
+            });
+        };
+        let session = match control
+            .try_start_interaction_session(context, bundle_id, kind)
+            .await
+        {
+            Ok(session) => session,
+            Err(failure) => {
+                *self = Self::Exclusive(failure.context);
+                return Err(failure.error);
+            }
+        };
+        *self = Self::Session(session);
+        Ok(())
+    }
+
     pub(crate) async fn reserve_capacity(
         &mut self,
         control: &DeviceControlPlane,

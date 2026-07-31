@@ -39,6 +39,210 @@ pub struct FlowStateConflict {
     pub requested: String,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct FlowAttemptExecutionContext {
+    pub(crate) run: FlowRunRecord,
+    pub(crate) device: FlowDeviceRunRecord,
+    pub(crate) attempt: FlowNodeAttemptRecord,
+    pub(crate) plan: CompiledFlowPlanV2,
+    pub(crate) device_attempts: Vec<FlowNodeAttemptRecord>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FlowRecoveryRunContext {
+    pub(crate) run: FlowRunRecord,
+    pub(crate) plan: CompiledFlowPlanV2,
+    pub(crate) devices: Vec<FlowDeviceRunRecord>,
+    pub(crate) attempts: Vec<FlowNodeAttemptRecord>,
+    pub(crate) artifacts: Vec<FlowArtifactRecord>,
+}
+
+fn insert_flow_run(
+    transaction: &Transaction<'_>,
+    revision: &FlowRevisionRecord,
+    selection: &FlowSelectionSnapshot,
+) -> anyhow::Result<FlowRunRecord> {
+    let flow_id = revision.document.id;
+    let flow_revision = revision.document.revision;
+    let stored: Option<(String, String)> = transaction
+        .query_row(
+            "SELECT plan_sha256,compiled_json FROM flow_revisions
+             WHERE flow_id=?1 AND revision=?2",
+            params![
+                flow_id.to_string(),
+                u64_to_sql(flow_revision, "Flow run revision")?
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (stored_hash, stored_compiled_json) =
+        stored.context("Flow run revision is not persisted")?;
+    ensure!(
+        stored_hash == revision.plan_hash,
+        "Flow run revision is not the exact persisted immutable revision"
+    );
+    let stored_plan: CompiledFlowPlanV2 =
+        serde_json::from_str(&stored_compiled_json).context("parse persisted Flow run plan")?;
+    validate_persisted_plan(
+        &stored_plan,
+        &stored_compiled_json,
+        &flow_id.to_string(),
+        u64_to_sql(flow_revision, "Flow run revision")?,
+        &stored_hash,
+        &stored_hash,
+    )?;
+    ensure!(
+        stored_plan == revision.compiled_plan,
+        "Flow run compiled plan differs from its persisted revision"
+    );
+
+    let id = Uuid::new_v4();
+    let now = now_text();
+    let selection_json = serde_json::to_string(selection).context("serialize Flow selection")?;
+    transaction.execute(
+        "INSERT INTO flow_runs(
+            id,flow_id,flow_revision,plan_sha256,selection_json,state,event_revision,
+            error_json,created_at,updated_at
+         ) VALUES(?1,?2,?3,?4,?5,'queued',0,NULL,?6,?6)",
+        params![
+            id.to_string(),
+            flow_id.to_string(),
+            u64_to_sql(flow_revision, "Flow run revision")?,
+            revision.plan_hash,
+            selection_json,
+            now
+        ],
+    )?;
+    append_flow_event(
+        transaction,
+        id,
+        "runCreated",
+        &json!({
+            "flowId": flow_id,
+            "flowRevision": flow_revision,
+            "planSha256": revision.plan_hash,
+        }),
+        &now,
+    )?;
+    query_run_record(transaction, id)?.context("created Flow run disappeared")
+}
+
+fn insert_flow_device_run(
+    transaction: &Transaction<'_>,
+    run: &FlowRunRecord,
+    udid: &str,
+) -> anyhow::Result<FlowDeviceRunRecord> {
+    ensure!(
+        run.selection
+            .target_udids
+            .iter()
+            .any(|target| target == udid),
+        "device is outside the frozen Flow selection"
+    );
+    ensure!(
+        !run.state.is_terminal(),
+        "StateConflict: cannot add a device to a terminal Flow run"
+    );
+    let id = Uuid::new_v4();
+    transaction.execute(
+        "INSERT INTO flow_device_runs(
+            id,run_id,udid,state,capability_snapshot_json,release_proof_json,error_json,
+            started_at,finished_at
+         ) VALUES(?1,?2,?3,'queued',NULL,NULL,NULL,NULL,NULL)",
+        params![id.to_string(), run.id.to_string(), udid],
+    )?;
+    let now = now_text();
+    append_flow_event(
+        transaction,
+        run.id,
+        "deviceRunCreated",
+        &json!({"deviceRunId": id, "udid": udid}),
+        &now,
+    )?;
+    query_device_run_record(transaction, id)?.context("created Flow device run disappeared")
+}
+
+fn query_flow_run_detail(
+    connection: &Connection,
+    run_id: Uuid,
+) -> anyhow::Result<Option<FlowRunDetail>> {
+    let Some(run) = query_run_record(connection, run_id)? else {
+        return Ok(None);
+    };
+    validate_run_plan(connection, &run)?;
+    validate_event_ledger(connection, &run)?;
+
+    let mut device_statement = connection.prepare(
+        "SELECT id,run_id,udid,state,capability_snapshot_json,release_proof_json,
+                error_json,started_at,finished_at
+         FROM flow_device_runs WHERE run_id=?1 ORDER BY udid ASC,id ASC",
+    )?;
+    let device_rows = device_statement.query_map([run_id.to_string()], device_run_row)?;
+    let mut device_runs = Vec::new();
+    for row in device_rows {
+        device_runs.push(row?.into_record()?);
+    }
+    drop(device_statement);
+
+    let mut attempt_statement = connection.prepare(
+        "SELECT a.id,a.device_run_id,a.node_id,a.action_kind,a.attempt_no,
+                a.side_effect_class,a.state,a.canonical_input_json,
+                a.evidence_baseline_json,a.evidence_result_json,a.retry_safe,a.error_json,
+                a.started_at,a.updated_at,a.finished_at
+         FROM flow_node_attempts a
+         JOIN flow_device_runs d ON d.id=a.device_run_id
+         WHERE d.run_id=?1
+         ORDER BY a.device_run_id ASC,a.attempt_no ASC,a.node_id ASC,a.id ASC",
+    )?;
+    let attempt_rows = attempt_statement.query_map([run_id.to_string()], attempt_row)?;
+    let mut attempts = Vec::new();
+    for row in attempt_rows {
+        let attempt = row?.into_record()?;
+        validate_persisted_attempt(connection, &attempt)?;
+        attempts.push(attempt);
+    }
+    drop(attempt_statement);
+    validate_device_attempt_projection(&run, &device_runs, &attempts)?;
+    for device in &device_runs {
+        if device.state == FlowDeviceRunState::Succeeded {
+            validate_device_success_projection(connection, device)?;
+        }
+    }
+
+    let mut artifact_statement = connection.prepare(
+        "SELECT a.id,a.attempt_id,a.relative_path,a.label,a.kind,a.size,a.sha256,a.created_at
+         FROM flow_artifacts a
+         JOIN flow_node_attempts n ON n.id=a.attempt_id
+         JOIN flow_device_runs d ON d.id=n.device_run_id
+         WHERE d.run_id=?1 ORDER BY a.created_at ASC,a.id ASC",
+    )?;
+    let artifact_rows = artifact_statement.query_map([run_id.to_string()], artifact_row)?;
+    let mut artifacts = Vec::new();
+    for row in artifact_rows {
+        artifacts.push(row?.into_record()?);
+    }
+    drop(artifact_statement);
+    validate_artifact_projection(run.id, &device_runs, &attempts, &artifacts)?;
+    if run.state.is_terminal() {
+        let projection = device_runs
+            .iter()
+            .map(|device| (device.state, device.error.clone()))
+            .collect::<Vec<_>>();
+        let (expected_state, expected_error) = aggregate_projection(&projection);
+        ensure!(
+            run.state == expected_state && run.error == expected_error,
+            "persisted terminal Flow aggregate does not match its device projection"
+        );
+    }
+
+    Ok(Some(FlowRunDetail {
+        run,
+        device_runs,
+        attempts,
+        artifacts,
+    }))
+}
+
 impl Database {
     pub fn create_flow_run(
         &self,
@@ -49,72 +253,29 @@ impl Database {
         validate_revision_for_run(revision)?;
         let mut connection = self.conn()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let flow_id = revision.document.id;
-        let flow_revision = revision.document.revision;
-        let stored: Option<(String, String)> = transaction
-            .query_row(
-                "SELECT plan_sha256,compiled_json FROM flow_revisions
-                 WHERE flow_id=?1 AND revision=?2",
-                params![
-                    flow_id.to_string(),
-                    u64_to_sql(flow_revision, "Flow run revision")?
-                ],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        let (stored_hash, stored_compiled_json) =
-            stored.context("Flow run revision is not persisted")?;
-        ensure!(
-            stored_hash == revision.plan_hash,
-            "Flow run revision is not the exact persisted immutable revision"
-        );
-        let stored_plan: CompiledFlowPlanV2 =
-            serde_json::from_str(&stored_compiled_json).context("parse persisted Flow run plan")?;
-        validate_persisted_plan(
-            &stored_plan,
-            &stored_compiled_json,
-            &flow_id.to_string(),
-            u64_to_sql(flow_revision, "Flow run revision")?,
-            &stored_hash,
-            &stored_hash,
-        )?;
-        ensure!(
-            stored_plan == revision.compiled_plan,
-            "Flow run compiled plan differs from its persisted revision"
-        );
-
-        let id = Uuid::new_v4();
-        let now = now_text();
-        let selection_json =
-            serde_json::to_string(&selection).context("serialize Flow selection")?;
-        transaction.execute(
-            "INSERT INTO flow_runs(
-                id,flow_id,flow_revision,plan_sha256,selection_json,state,event_revision,
-                error_json,created_at,updated_at
-             ) VALUES(?1,?2,?3,?4,?5,'queued',0,NULL,?6,?6)",
-            params![
-                id.to_string(),
-                flow_id.to_string(),
-                u64_to_sql(flow_revision, "Flow run revision")?,
-                revision.plan_hash,
-                selection_json,
-                now
-            ],
-        )?;
-        append_flow_event(
-            &transaction,
-            id,
-            "runCreated",
-            &json!({
-                "flowId": flow_id,
-                "flowRevision": flow_revision,
-                "planSha256": revision.plan_hash,
-            }),
-            &now,
-        )?;
-        let record = query_run_record(&transaction, id)?.context("created Flow run disappeared")?;
+        let record = insert_flow_run(&transaction, revision, &selection)?;
         transaction.commit()?;
         Ok(record)
+    }
+
+    pub fn create_flow_run_with_devices(
+        &self,
+        revision: &FlowRevisionRecord,
+        selection: FlowSelectionSnapshot,
+    ) -> anyhow::Result<(FlowRunRecord, Vec<FlowDeviceRunRecord>)> {
+        validate_selection(&selection)?;
+        validate_revision_for_run(revision)?;
+        let mut connection = self.conn()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let initial_run = insert_flow_run(&transaction, revision, &selection)?;
+        let mut devices = Vec::with_capacity(selection.target_udids.len());
+        for udid in &selection.target_udids {
+            devices.push(insert_flow_device_run(&transaction, &initial_run, udid)?);
+        }
+        let run = query_run_record(&transaction, initial_run.id)?
+            .context("created aggregate Flow run disappeared")?;
+        transaction.commit()?;
+        Ok((run, devices))
     }
 
     pub fn create_flow_device_run(
@@ -127,35 +288,7 @@ impl Database {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let run = query_run_record(&transaction, run_id)?
             .with_context(|| format!("Flow run {run_id} does not exist"))?;
-        ensure!(
-            run.selection
-                .target_udids
-                .iter()
-                .any(|target| target == udid),
-            "device is outside the frozen Flow selection"
-        );
-        ensure!(
-            !run.state.is_terminal(),
-            "StateConflict: cannot add a device to a terminal Flow run"
-        );
-        let id = Uuid::new_v4();
-        transaction.execute(
-            "INSERT INTO flow_device_runs(
-                id,run_id,udid,state,capability_snapshot_json,release_proof_json,error_json,
-                started_at,finished_at
-             ) VALUES(?1,?2,?3,'queued',NULL,NULL,NULL,NULL,NULL)",
-            params![id.to_string(), run_id.to_string(), udid],
-        )?;
-        let now = now_text();
-        append_flow_event(
-            &transaction,
-            run_id,
-            "deviceRunCreated",
-            &json!({"deviceRunId": id, "udid": udid}),
-            &now,
-        )?;
-        let record = query_device_run_record(&transaction, id)?
-            .context("created Flow device run disappeared")?;
+        let record = insert_flow_device_run(&transaction, &run, udid)?;
         transaction.commit()?;
         Ok(record)
     }
@@ -422,6 +555,150 @@ impl Database {
         Ok(record)
     }
 
+    pub(crate) fn initialize_flow_device_attempts(
+        &self,
+        device_run_id: Uuid,
+    ) -> anyhow::Result<Vec<FlowNodeAttemptRecord>> {
+        let mut connection = self.conn()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let device = query_device_run_record(&transaction, device_run_id)?
+            .context("Flow device run does not exist")?;
+        ensure!(
+            device.state == FlowDeviceRunState::Running && device.capability_snapshot.is_some(),
+            "StateConflict: Flow attempts require a qualified running device"
+        );
+        let run = query_run_record(&transaction, device.run_id)?
+            .context("Flow device parent run does not exist")?;
+        ensure!(
+            !run.state.is_terminal(),
+            "StateConflict: terminal Flow run cannot initialize attempts"
+        );
+        let existing: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM flow_node_attempts WHERE device_run_id=?1",
+            [device_run_id.to_string()],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            existing == 0,
+            "StateConflict: Flow device attempts are already initialized"
+        );
+        let plan = load_validated_run_plan(&transaction, &run)?;
+        let now = now_text();
+        let mut attempt_ids = Vec::with_capacity(plan.execution_order.len());
+        for node_id in &plan.execution_order {
+            let node = plan
+                .nodes
+                .get(node_id)
+                .context("persisted Flow execution order references a missing node")?;
+            let id = Uuid::new_v4();
+            transaction.execute(
+                "INSERT INTO flow_node_attempts(
+                    id,device_run_id,node_id,action_kind,attempt_no,side_effect_class,state,
+                    canonical_input_json,evidence_baseline_json,evidence_result_json,retry_safe,
+                    error_json,started_at,updated_at,finished_at
+                 ) VALUES(?1,?2,?3,?4,1,?5,'queued',NULL,NULL,NULL,0,NULL,NULL,?6,NULL)",
+                params![
+                    id.to_string(),
+                    device_run_id.to_string(),
+                    node.id.to_string(),
+                    enum_name(node.kind)?,
+                    enum_name(contracts(node.kind).1)?,
+                    now,
+                ],
+            )?;
+            attempt_ids.push(id);
+        }
+        append_flow_event(
+            &transaction,
+            run.id,
+            "deviceAttemptsInitialized",
+            &json!({
+                "deviceRunId": device_run_id,
+                "attemptIds": attempt_ids,
+            }),
+            &now,
+        )?;
+        let mut records = Vec::with_capacity(attempt_ids.len());
+        for attempt_id in attempt_ids {
+            records.push(
+                query_attempt_record(&transaction, attempt_id)?
+                    .context("initialized Flow attempt disappeared")?,
+            );
+        }
+        transaction.commit()?;
+        Ok(records)
+    }
+
+    pub(crate) fn reopen_flow_device_for_recovery(
+        &self,
+        device_run_id: Uuid,
+    ) -> anyhow::Result<FlowDeviceRunRecord> {
+        let mut connection = self.conn()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let device = query_device_run_record(&transaction, device_run_id)?
+            .context("Flow recovery device does not exist")?;
+        ensure!(
+            matches!(
+                device.state,
+                FlowDeviceRunState::Preflight | FlowDeviceRunState::Running
+            ),
+            "StateConflict: Flow recovery requires a nonterminal started device"
+        );
+        let unsafe_attempts: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM flow_node_attempts
+             WHERE device_run_id=?1 AND state IN (
+                'intentCommitted','effectDispatched','verifying','interrupted','uncertain'
+             )",
+            [device_run_id.to_string()],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            unsafe_attempts == 0,
+            "StateConflict: Flow recovery device still has unsafe attempts"
+        );
+        let run = query_run_record(&transaction, device.run_id)?
+            .context("Flow recovery parent run disappeared")?;
+        ensure!(
+            !run.state.is_terminal(),
+            "StateConflict: terminal Flow run cannot be reclaimed"
+        );
+        let changed = transaction.execute(
+            "UPDATE flow_device_runs SET
+                state='queued',capability_snapshot_json=NULL,release_proof_json=NULL,
+                error_json=NULL,started_at=NULL,finished_at=NULL
+             WHERE id=?1 AND state=?2",
+            params![device_run_id.to_string(), enum_name(device.state)?],
+        )?;
+        ensure!(changed == 1, "StateConflict: Flow recovery device changed");
+        let active_other_devices: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM flow_device_runs
+             WHERE run_id=?1 AND id<>?2 AND state<>'queued'",
+            params![device.run_id.to_string(), device_run_id.to_string()],
+            |row| row.get(0),
+        )?;
+        let run_state = if active_other_devices == 0 {
+            FlowAggregateState::Queued
+        } else {
+            FlowAggregateState::Running
+        };
+        transaction.execute(
+            "UPDATE flow_runs SET state=?2,error_json=NULL WHERE id=?1",
+            params![device.run_id.to_string(), enum_name(run_state)?],
+        )?;
+        let now = now_text();
+        append_flow_event(
+            &transaction,
+            device.run_id,
+            "deviceRunReclaimed",
+            &json!({"deviceRunId": device_run_id}),
+            &now,
+        )?;
+        let record = query_device_run_record(&transaction, device_run_id)?
+            .context("reclaimed Flow device disappeared")?;
+        transaction.commit()?;
+        Ok(record)
+    }
+
     pub fn list_flow_runs(&self, limit: usize) -> anyhow::Result<Vec<FlowRunRecord>> {
         ensure!(
             (1..=200).contains(&limit),
@@ -447,86 +724,48 @@ impl Database {
         Ok(records)
     }
 
+    pub(crate) fn record_flow_runtime_error(
+        &self,
+        run_id: Uuid,
+        error: FlowErrorRecord,
+    ) -> anyhow::Result<FlowRunRecord> {
+        validate_error(&error)?;
+        let mut connection = self.conn()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let run = query_run_record(&transaction, run_id)?.context("Flow run does not exist")?;
+        ensure!(
+            !run.state.is_terminal(),
+            "StateConflict: terminal Flow run cannot receive a runtime error"
+        );
+        let now = now_text();
+        let changed = transaction.execute(
+            "UPDATE flow_runs SET error_json=?2,updated_at=?3
+             WHERE id=?1 AND state IN ('queued','running')",
+            params![run_id.to_string(), serde_json::to_string(&error)?, now,],
+        )?;
+        ensure!(
+            changed == 1,
+            "StateConflict: Flow runtime projection changed"
+        );
+        append_flow_event(
+            &transaction,
+            run_id,
+            "runtimeError",
+            &json!({"error": error}),
+            &now,
+        )?;
+        let record = query_run_record(&transaction, run_id)?
+            .context("Flow runtime error projection disappeared")?;
+        transaction.commit()?;
+        Ok(record)
+    }
+
     pub fn get_flow_run(&self, run_id: Uuid) -> anyhow::Result<Option<FlowRunDetail>> {
         let mut connection = self.conn()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
-        let Some(run) = query_run_record(&transaction, run_id)? else {
-            return Ok(None);
-        };
-        validate_run_plan(&transaction, &run)?;
-        validate_event_ledger(&transaction, &run)?;
-
-        let mut device_statement = transaction.prepare(
-            "SELECT id,run_id,udid,state,capability_snapshot_json,release_proof_json,
-                    error_json,started_at,finished_at
-             FROM flow_device_runs WHERE run_id=?1 ORDER BY udid ASC,id ASC",
-        )?;
-        let device_rows = device_statement.query_map([run_id.to_string()], device_run_row)?;
-        let mut device_runs = Vec::new();
-        for row in device_rows {
-            device_runs.push(row?.into_record()?);
-        }
-        drop(device_statement);
-
-        let mut attempt_statement = transaction.prepare(
-            "SELECT a.id,a.device_run_id,a.node_id,a.action_kind,a.attempt_no,
-                    a.side_effect_class,a.state,a.canonical_input_json,
-                    a.evidence_baseline_json,a.evidence_result_json,a.retry_safe,a.error_json,
-                    a.started_at,a.updated_at,a.finished_at
-             FROM flow_node_attempts a
-             JOIN flow_device_runs d ON d.id=a.device_run_id
-             WHERE d.run_id=?1
-             ORDER BY a.device_run_id ASC,a.attempt_no ASC,a.node_id ASC,a.id ASC",
-        )?;
-        let attempt_rows = attempt_statement.query_map([run_id.to_string()], attempt_row)?;
-        let mut attempts = Vec::new();
-        for row in attempt_rows {
-            let attempt = row?.into_record()?;
-            validate_persisted_attempt(&transaction, &attempt)?;
-            attempts.push(attempt);
-        }
-        drop(attempt_statement);
-        validate_device_attempt_projection(&run, &device_runs, &attempts)?;
-        for device in &device_runs {
-            if device.state == FlowDeviceRunState::Succeeded {
-                validate_device_success_projection(&transaction, device)?;
-            }
-        }
-
-        let mut artifact_statement = transaction.prepare(
-            "SELECT a.id,a.attempt_id,a.relative_path,a.label,a.kind,a.size,a.sha256,a.created_at
-             FROM flow_artifacts a
-             JOIN flow_node_attempts n ON n.id=a.attempt_id
-             JOIN flow_device_runs d ON d.id=n.device_run_id
-             WHERE d.run_id=?1 ORDER BY a.created_at ASC,a.id ASC",
-        )?;
-        let artifact_rows = artifact_statement.query_map([run_id.to_string()], artifact_row)?;
-        let mut artifacts = Vec::new();
-        for row in artifact_rows {
-            artifacts.push(row?.into_record()?);
-        }
-        drop(artifact_statement);
-        validate_artifact_projection(run.id, &device_runs, &attempts, &artifacts)?;
-        if run.state.is_terminal() {
-            let projection = device_runs
-                .iter()
-                .map(|device| (device.state, device.error.clone()))
-                .collect::<Vec<_>>();
-            let (expected_state, expected_error) = aggregate_projection(&projection);
-            ensure!(
-                run.state == expected_state && run.error == expected_error,
-                "persisted terminal Flow aggregate does not match its device projection"
-            );
-        }
-
-        let detail = FlowRunDetail {
-            run,
-            device_runs,
-            attempts,
-            artifacts,
-        };
+        let detail = query_flow_run_detail(&transaction, run_id)?;
         transaction.commit()?;
-        Ok(Some(detail))
+        Ok(detail)
     }
 
     pub fn transition_attempt(
@@ -546,6 +785,9 @@ impl Database {
         }
         if !legal_transition(expected, next) {
             return Err(state_conflict(attempt_id, expected, identity.state, next).into());
+        }
+        if expected == FlowAttemptState::Queued && next == FlowAttemptState::IntentCommitted {
+            validate_attempt_claim(&transaction, attempt_id, &identity)?;
         }
         validate_attempt_error_context(&identity, patch.error.as_ref())?;
         validate_transition_proof(&identity, expected, next, &patch)?;
@@ -765,12 +1007,33 @@ impl Database {
                 && identity.side_effect_class == SideEffectClass::IdempotentSet,
             "StateConflict: retry safety requires failedVerified idempotentSet"
         );
+        let latest_attempt_id: String = transaction.query_row(
+            "SELECT id FROM flow_node_attempts
+             WHERE device_run_id=?1 AND node_id=?2
+             ORDER BY attempt_no DESC LIMIT 1",
+            params![
+                identity.device_run_id.to_string(),
+                identity.node.id.to_string()
+            ],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            latest_attempt_id == attempt_id.to_string(),
+            "StateConflict: retry safety requires the latest Flow attempt"
+        );
+        let device = query_device_run_record(&transaction, identity.device_run_id)?
+            .context("retry-safe Flow device disappeared")?;
+        ensure!(
+            device.state == FlowDeviceRunState::Failed
+                && device.error.as_ref().and_then(|error| error.attempt_id) == Some(attempt_id),
+            "StateConflict: retry safety requires the attributed failed device"
+        );
         validate_retry_safety_evidence(&identity, &evidence_result)?;
         let now = now_text();
         let changed = transaction.execute(
             "UPDATE flow_node_attempts SET evidence_result_json=?2,retry_safe=1,updated_at=?3
              WHERE id=?1 AND state='failedVerified' AND side_effect_class='idempotentSet'
-               AND retry_safe=0",
+            ",
             params![
                 attempt_id.to_string(),
                 serde_json::to_string(&evidence_result)?,
@@ -1082,6 +1345,114 @@ impl Database {
             records.push(record);
         }
         Ok(records)
+    }
+
+    pub(crate) fn load_flow_recovery_contexts(
+        &self,
+    ) -> anyhow::Result<Vec<FlowRecoveryRunContext>> {
+        let mut connection = self.conn()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let mut statement = transaction.prepare(
+            "SELECT id FROM flow_runs
+             WHERE state IN ('queued','running')
+             ORDER BY created_at ASC,id ASC",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut run_ids = Vec::new();
+        for row in rows {
+            run_ids.push(parse_uuid(&row?, "Flow recovery run ID")?);
+        }
+        drop(statement);
+
+        let mut contexts = Vec::with_capacity(run_ids.len());
+        for run_id in run_ids {
+            let mut detail = query_flow_run_detail(&transaction, run_id)?
+                .context("nonterminal Flow recovery run disappeared")?;
+            ensure!(
+                !detail.run.state.is_terminal(),
+                "terminal Flow run leaked into recovery query"
+            );
+            let persisted_udids = detail
+                .device_runs
+                .iter()
+                .map(|device| device.udid.as_str())
+                .collect::<Vec<_>>();
+            let selected_udids = detail
+                .run
+                .selection
+                .target_udids
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            ensure!(
+                persisted_udids == selected_udids,
+                "Flow recovery device projection does not match its frozen selection"
+            );
+            let plan = load_validated_run_plan(&transaction, &detail.run)?;
+            detail.attempts.sort_by_key(|attempt| {
+                let device_index = detail
+                    .device_runs
+                    .iter()
+                    .position(|device| device.id == attempt.device_run_id)
+                    .unwrap_or(usize::MAX);
+                let node_index = plan
+                    .execution_order
+                    .iter()
+                    .position(|node_id| *node_id == attempt.node_id)
+                    .unwrap_or(usize::MAX);
+                (device_index, node_index, attempt.attempt_no, attempt.id)
+            });
+            contexts.push(FlowRecoveryRunContext {
+                run: detail.run,
+                plan,
+                devices: detail.device_runs,
+                attempts: detail.attempts,
+                artifacts: detail.artifacts,
+            });
+        }
+        transaction.commit()?;
+        Ok(contexts)
+    }
+
+    pub(crate) fn get_flow_attempt_execution_context(
+        &self,
+        attempt_id: Uuid,
+    ) -> anyhow::Result<Option<FlowAttemptExecutionContext>> {
+        let connection = self.conn()?;
+        let Some(attempt) = query_attempt_record(&connection, attempt_id)? else {
+            return Ok(None);
+        };
+        let identity = query_attempt_identity(&connection, attempt_id)?
+            .context("Flow attempt identity disappeared")?;
+        let run = query_run_record(&connection, identity.run_id)?
+            .context("Flow attempt parent run disappeared")?;
+        validate_run_plan(&connection, &run)?;
+        validate_event_ledger(&connection, &run)?;
+        let device = query_device_run_record(&connection, identity.device_run_id)?
+            .context("Flow attempt device run disappeared")?;
+        let plan = load_validated_run_plan(&connection, &run)?;
+        let mut statement = connection.prepare(
+            "SELECT id,device_run_id,node_id,action_kind,attempt_no,side_effect_class,state,
+                    canonical_input_json,evidence_baseline_json,evidence_result_json,retry_safe,
+                    error_json,started_at,updated_at,finished_at
+             FROM flow_node_attempts WHERE device_run_id=?1
+             ORDER BY attempt_no ASC,node_id ASC,id ASC",
+        )?;
+        let rows = statement.query_map([device.id.to_string()], attempt_row)?;
+        let mut device_attempts = Vec::new();
+        for row in rows {
+            let record = row?.into_record()?;
+            validate_persisted_attempt(&connection, &record)?;
+            device_attempts.push(record);
+        }
+        drop(statement);
+        Ok(Some(FlowAttemptExecutionContext {
+            run,
+            device,
+            attempt,
+            plan,
+            device_attempts,
+        }))
     }
 }
 
@@ -2221,8 +2592,10 @@ struct AttemptIdentity {
     device_state: FlowDeviceRunState,
     capability_snapshot: Option<FlowCapabilitySnapshot>,
     state: FlowAttemptState,
+    attempt_no: u32,
     action_kind: crate::ActionKind,
     node: CompiledFlowNode,
+    plan: CompiledFlowPlanV2,
     side_effect_class: SideEffectClass,
     canonical_input: Option<Value>,
     evidence_baseline: Option<Value>,
@@ -2245,6 +2618,7 @@ struct AttemptIdentityRow {
     device_state: String,
     capability_snapshot_json: Option<String>,
     state: String,
+    attempt_no: i64,
     action_kind: String,
     side_effect_class: String,
     canonical_input_json: Option<String>,
@@ -2265,7 +2639,7 @@ fn query_attempt_identity(
     let row: Option<AttemptIdentityRow> = connection
         .query_row(
             "SELECT a.device_run_id,d.run_id,d.state,d.capability_snapshot_json,
-                    a.state,a.action_kind,a.side_effect_class,
+                    a.state,a.attempt_no,a.action_kind,a.side_effect_class,
                     a.canonical_input_json,a.evidence_baseline_json,a.node_id,r.compiled_json,
                     f.flow_id,f.flow_revision,f.plan_sha256,r.plan_sha256,d.udid
              FROM flow_node_attempts a
@@ -2281,17 +2655,18 @@ fn query_attempt_identity(
                     device_state: row.get(2)?,
                     capability_snapshot_json: row.get(3)?,
                     state: row.get(4)?,
-                    action_kind: row.get(5)?,
-                    side_effect_class: row.get(6)?,
-                    canonical_input_json: row.get(7)?,
-                    evidence_baseline_json: row.get(8)?,
-                    node_id: row.get(9)?,
-                    compiled_plan_json: row.get(10)?,
-                    flow_id: row.get(11)?,
-                    flow_revision: row.get(12)?,
-                    plan_sha256: row.get(13)?,
-                    revision_plan_sha256: row.get(14)?,
-                    udid: row.get(15)?,
+                    attempt_no: row.get(5)?,
+                    action_kind: row.get(6)?,
+                    side_effect_class: row.get(7)?,
+                    canonical_input_json: row.get(8)?,
+                    evidence_baseline_json: row.get(9)?,
+                    node_id: row.get(10)?,
+                    compiled_plan_json: row.get(11)?,
+                    flow_id: row.get(12)?,
+                    flow_revision: row.get(13)?,
+                    plan_sha256: row.get(14)?,
+                    revision_plan_sha256: row.get(15)?,
+                    udid: row.get(16)?,
                 })
             },
         )
@@ -2344,8 +2719,10 @@ fn query_attempt_identity(
                 "Flow capability snapshot",
             )?,
             state,
+            attempt_no: u32::try_from(row.attempt_no).context("Flow attempt number is invalid")?,
             action_kind,
             node,
+            plan,
             side_effect_class,
             canonical_input,
             evidence_baseline,
@@ -2356,6 +2733,65 @@ fn query_attempt_identity(
         Ok(identity)
     })
     .transpose()
+}
+
+fn validate_attempt_claim(
+    transaction: &Transaction<'_>,
+    attempt_id: Uuid,
+    identity: &AttemptIdentity,
+) -> anyhow::Result<()> {
+    let latest_id: String = transaction.query_row(
+        "SELECT id FROM flow_node_attempts
+         WHERE device_run_id=?1 AND node_id=?2
+         ORDER BY attempt_no DESC LIMIT 1",
+        params![
+            identity.device_run_id.to_string(),
+            identity.node.id.to_string()
+        ],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        latest_id == attempt_id.to_string(),
+        "StateConflict: only the latest Flow attempt may claim intent"
+    );
+    let node_index = identity
+        .plan
+        .execution_order
+        .iter()
+        .position(|node_id| *node_id == identity.node.id)
+        .context("Flow attempt node is absent from execution order")?;
+    for predecessor_id in &identity.plan.execution_order[..node_index] {
+        let predecessor_state: String = transaction.query_row(
+            "SELECT state FROM flow_node_attempts
+             WHERE device_run_id=?1 AND node_id=?2
+             ORDER BY attempt_no DESC LIMIT 1",
+            params![
+                identity.device_run_id.to_string(),
+                predecessor_id.to_string()
+            ],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            parse_enum_name::<FlowAttemptState>(&predecessor_state, "predecessor state")?
+                == FlowAttemptState::Succeeded,
+            "StateConflict: Flow attempt predecessor is not succeeded"
+        );
+    }
+    let uncertain: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM flow_node_attempts
+         WHERE device_run_id=?1 AND state='uncertain'",
+        [identity.device_run_id.to_string()],
+        |row| row.get(0),
+    )?;
+    ensure!(
+        uncertain == 0,
+        "StateConflict: uncertain Flow attempt blocks new intent"
+    );
+    ensure!(
+        identity.attempt_no >= 1,
+        "StateConflict: Flow attempt number is invalid"
+    );
+    Ok(())
 }
 
 fn query_run_record(connection: &Connection, id: Uuid) -> anyhow::Result<Option<FlowRunRecord>> {
@@ -3089,6 +3525,46 @@ mod tests {
         (revision, node)
     }
 
+    fn save_two_wait_revision(
+        database: &Database,
+    ) -> (crate::FlowRevisionRecord, [CompiledFlowNode; 2]) {
+        let mut document = FlowDocumentV2::empty("Recovery aggregate fixture");
+        document.revision = 1;
+        let first = CompiledFlowNode {
+            id: Uuid::new_v4(),
+            kind: ActionKind::Wait,
+            config: CompiledActionConfig::Wait { duration_ms: 10 },
+            postcondition: None,
+        };
+        let second = CompiledFlowNode {
+            id: Uuid::new_v4(),
+            kind: ActionKind::Wait,
+            config: CompiledActionConfig::Wait { duration_ms: 20 },
+            postcondition: None,
+        };
+        let plan = CompiledFlowPlanV2 {
+            schema_version: FLOW_SCHEMA_VERSION,
+            flow_id: document.id,
+            revision: document.revision,
+            nodes: BTreeMap::from([(first.id, first.clone()), (second.id, second.clone())]),
+            execution_order: vec![first.id, second.id],
+            context_plan: ContextPlan {
+                requires_exclusive: false,
+                requires_ui_session: false,
+                requires_stream: false,
+                requires_fresh_text_session: false,
+                initial_bundle_id: None,
+            },
+            action_definition_versions: BTreeMap::from([(ActionKind::Wait, 1)]),
+            required_capabilities: BTreeSet::new(),
+        };
+        let hash = compiled_plan_sha256(&plan).expect("plan hash");
+        let revision = database
+            .save_flow_revision(None, &document, &plan, &hash)
+            .expect("save recovery revision");
+        (revision, [first, second])
+    }
+
     fn selection(udids: &[&str]) -> FlowSelectionSnapshot {
         let values = udids
             .iter()
@@ -3268,6 +3744,30 @@ mod tests {
             .expect("seed attempt state");
     }
 
+    fn fail_device_for_attempt(database: &Database, attempt_id: Uuid) {
+        let context = database
+            .get_flow_attempt_execution_context(attempt_id)
+            .expect("load failed attempt context")
+            .expect("failed attempt context");
+        let error = context
+            .attempt
+            .error
+            .clone()
+            .unwrap_or_else(|| error("FixtureFailure", Some(attempt_id)));
+        database
+            .mark_device_terminal(
+                context.device.id,
+                &[FlowDeviceRunState::Running],
+                FlowDeviceRunState::Failed,
+                Some(error),
+                release_proof(&context.device.udid),
+            )
+            .expect("terminalize failed attempt device");
+        database
+            .recompute_run_projection(context.run.id)
+            .expect("project failed attempt run");
+    }
+
     #[test]
     fn run_creation_freezes_selection_and_appends_monotonic_events() {
         let (database, path) = database_fixture();
@@ -3330,6 +3830,159 @@ mod tests {
             .expect("remove middle event");
         assert!(database.get_flow_run(run.id).is_err());
         assert!(database.list_flow_runs(10).is_err());
+        cleanup(&path);
+    }
+
+    #[test]
+    fn aggregate_run_creation_persists_the_exact_sorted_device_projection() {
+        let (database, path) = database_fixture();
+        let (revision, _) = save_revision(
+            &database,
+            ActionKind::Wait,
+            CompiledActionConfig::Wait { duration_ms: 10 },
+        );
+        let snapshot = selection(&["device-c", "device-a", "device-b"]);
+
+        let (run, devices) = database
+            .create_flow_run_with_devices(&revision, snapshot.clone())
+            .expect("create aggregate run");
+
+        assert_eq!(run.selection, snapshot);
+        assert_eq!(run.event_revision, 4);
+        assert_eq!(
+            devices
+                .iter()
+                .map(|device| device.udid.as_str())
+                .collect::<Vec<_>>(),
+            vec!["device-a", "device-b", "device-c"]
+        );
+        assert!(devices
+            .iter()
+            .all(|device| device.run_id == run.id && device.state == FlowDeviceRunState::Queued));
+
+        let stored = database
+            .get_flow_run(run.id)
+            .expect("load aggregate run")
+            .expect("aggregate run exists");
+        assert_eq!(stored.run.event_revision, 4);
+        assert_eq!(stored.device_runs, devices);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn aggregate_run_creation_rolls_back_the_run_when_any_device_insert_fails() {
+        let (database, path) = database_fixture();
+        let (revision, _) = save_revision(
+            &database,
+            ActionKind::Wait,
+            CompiledActionConfig::Wait { duration_ms: 10 },
+        );
+        database
+            .conn()
+            .expect("trigger connection")
+            .execute_batch(
+                "CREATE TRIGGER reject_device_b
+                 BEFORE INSERT ON flow_device_runs
+                 WHEN NEW.udid='device-b'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'fixture device insert failed');
+                 END;",
+            )
+            .expect("install failure trigger");
+
+        let result =
+            database.create_flow_run_with_devices(&revision, selection(&["device-a", "device-b"]));
+        assert!(result.is_err());
+
+        let connection = database.conn().expect("verification connection");
+        let run_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM flow_runs", [], |row| row.get(0))
+            .expect("count runs");
+        let device_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM flow_device_runs", [], |row| {
+                row.get(0)
+            })
+            .expect("count devices");
+        assert_eq!((run_count, device_count), (0, 0));
+        drop(connection);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn recovery_aggregate_includes_every_device_crash_boundary() {
+        let (database, path) = database_fixture();
+        let (revision, nodes) = save_two_wait_revision(&database);
+        let (run, devices) = database
+            .create_flow_run_with_devices(
+                &revision,
+                selection(&[
+                    "preflight-zero",
+                    "succeeded-not-terminal",
+                    "failed-with-successor",
+                ]),
+            )
+            .expect("create recovery aggregate");
+        let by_udid = devices
+            .iter()
+            .map(|device| (device.udid.as_str(), device.id))
+            .collect::<std::collections::HashMap<_, _>>();
+
+        database
+            .transition_flow_device_run(
+                by_udid["preflight-zero"],
+                FlowDeviceRunState::Queued,
+                FlowDeviceRunState::Preflight,
+                None,
+            )
+            .expect("seed preflight with no attempts");
+
+        ready_device(&database, by_udid["succeeded-not-terminal"]);
+        let succeeded_attempts = database
+            .initialize_flow_device_attempts(by_udid["succeeded-not-terminal"])
+            .expect("initialize succeeded attempts");
+        for attempt in &succeeded_attempts {
+            set_attempt_state(&database, attempt.id, FlowAttemptState::Succeeded);
+        }
+
+        ready_device(&database, by_udid["failed-with-successor"]);
+        let failed_attempts = database
+            .initialize_flow_device_attempts(by_udid["failed-with-successor"])
+            .expect("initialize failed attempts");
+        let first = failed_attempts
+            .iter()
+            .find(|attempt| attempt.node_id == nodes[0].id)
+            .expect("first attempt");
+        set_attempt_state(&database, first.id, FlowAttemptState::FailedVerified);
+
+        let contexts = database
+            .load_flow_recovery_contexts()
+            .expect("load recovery contexts");
+        assert_eq!(contexts.len(), 1);
+        let context = &contexts[0];
+        assert_eq!(context.run.id, run.id);
+        assert_eq!(context.plan, revision.compiled_plan);
+        assert_eq!(context.devices.len(), 3);
+        assert_eq!(context.attempts.len(), 4);
+        assert!(context.artifacts.is_empty());
+
+        let attempts_for = |udid: &str| {
+            let device_id = by_udid[udid];
+            context
+                .attempts
+                .iter()
+                .filter(|attempt| attempt.device_run_id == device_id)
+                .map(|attempt| attempt.state)
+                .collect::<Vec<_>>()
+        };
+        assert!(attempts_for("preflight-zero").is_empty());
+        assert_eq!(
+            attempts_for("succeeded-not-terminal"),
+            vec![FlowAttemptState::Succeeded, FlowAttemptState::Succeeded]
+        );
+        assert_eq!(
+            attempts_for("failed-with-successor"),
+            vec![FlowAttemptState::FailedVerified, FlowAttemptState::Queued]
+        );
         cleanup(&path);
     }
 
@@ -4258,6 +4911,7 @@ mod tests {
             SideEffectClass::IdempotentSet,
         );
         set_attempt_state(&retry_db, retry_attempt, FlowAttemptState::FailedVerified);
+        fail_device_for_attempt(&retry_db, retry_attempt);
         let non_delivery = crate::evaluate_process_state(
             &spec,
             &baseline,
@@ -4327,6 +4981,40 @@ mod tests {
                 }),
             )
             .is_err());
+        database
+            .mark_device_terminal(
+                database
+                    .get_flow_attempt_execution_context(attempt_id)
+                    .expect("load retry context")
+                    .expect("retry context")
+                    .device
+                    .id,
+                &[FlowDeviceRunState::Running],
+                FlowDeviceRunState::Failed,
+                Some(error("ProcessStillPresent", Some(attempt_id))),
+                release_proof("fixture-udid"),
+            )
+            .expect("close failed retryable device");
+        assert_eq!(
+            database
+                .recompute_run_projection(run_id)
+                .expect("terminal failed projection")
+                .state,
+            FlowAggregateState::Failed
+        );
+        assert!(database
+            .create_flow_attempt(
+                database
+                    .get_flow_attempt_execution_context(attempt_id)
+                    .expect("load retry context")
+                    .expect("retry context")
+                    .device
+                    .id,
+                &node,
+                SideEffectClass::IdempotentSet,
+                2,
+            )
+            .is_err());
         let retryable = database
             .record_retry_safe_reconciliation(
                 attempt_id,
@@ -4343,7 +5031,7 @@ mod tests {
             )
             .expect("retry-safe proof");
         assert!(retryable.retry_allowed);
-        assert!(database
+        let refreshed = database
             .record_retry_safe_reconciliation(
                 attempt_id,
                 json!({
@@ -4357,31 +5045,8 @@ mod tests {
                     }
                 }),
             )
-            .is_err());
-        assert!(database
-            .create_flow_attempt(
-                retryable.device_run_id,
-                &node,
-                SideEffectClass::IdempotentSet,
-                2,
-            )
-            .is_err());
-        database
-            .mark_device_terminal(
-                retryable.device_run_id,
-                &[FlowDeviceRunState::Running],
-                FlowDeviceRunState::Failed,
-                Some(error("ProcessStillPresent", Some(attempt_id))),
-                release_proof("fixture-udid"),
-            )
-            .expect("close failed retryable device");
-        assert_eq!(
-            database
-                .recompute_run_projection(run_id)
-                .expect("terminal failed projection")
-                .state,
-            FlowAggregateState::Failed
-        );
+            .expect("refresh retry-safe proof");
+        assert!(refreshed.retry_allowed);
         let retried = database
             .create_flow_attempt(
                 retryable.device_run_id,

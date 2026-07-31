@@ -49,6 +49,7 @@ pub(crate) struct FlowExecutionError {
     node_id: Option<NodeId>,
     attempt_id: Option<Uuid>,
     release_proof: Option<ContextReleaseProof>,
+    retry_safe_evidence: Option<Box<serde_json::Value>>,
 }
 
 impl FlowExecutionError {
@@ -63,6 +64,7 @@ impl FlowExecutionError {
             node_id: None,
             attempt_id: None,
             release_proof: None,
+            retry_safe_evidence: None,
         }
     }
 
@@ -80,6 +82,11 @@ impl FlowExecutionError {
     fn without_attribution(mut self) -> Self {
         self.node_id = None;
         self.attempt_id = None;
+        self
+    }
+
+    fn retry_safe(mut self, evidence: serde_json::Value) -> Self {
+        self.retry_safe_evidence = Some(Box::new(evidence));
         self
     }
 
@@ -191,21 +198,26 @@ impl FlowExecutor {
         }
 
         if plan.context_plan.requires_exclusive {
-            match self
+            let acquire = self
                 .deps
                 .control
-                .acquire_exclusive(&self.deps.udid, DeviceWorkOwner::Script)
-                .await
-            {
+                .acquire_exclusive(&self.deps.udid, DeviceWorkOwner::Script);
+            let cancelled = self.deps.cancellation.cancelled();
+            tokio::pin!(acquire);
+            tokio::pin!(cancelled);
+            let acquired = tokio::select! {
+                biased;
+                _ = &mut cancelled => Err(FlowExecutionError::new(
+                    "Cancelled",
+                    "flow was cancelled while waiting for device ownership",
+                )),
+                result = &mut acquire => result.map_err(FlowExecutionError::device),
+            };
+            match acquired {
                 Ok(exclusive) => context = FlowDeviceContext::Exclusive(exclusive),
                 Err(error) => {
                     return self
-                        .finish_failed(
-                            device_run_id,
-                            &mut context,
-                            &mut None,
-                            FlowExecutionError::device(error),
-                        )
+                        .finish_failed(device_run_id, &mut context, &mut None, error)
                         .await;
                 }
             }
@@ -257,6 +269,12 @@ impl FlowExecutor {
             )
             .map_err(FlowExecutionError::other)?;
 
+        let initialized_attempts = self
+            .deps
+            .database
+            .initialize_flow_device_attempts(device_run_id)
+            .map_err(FlowExecutionError::other)?;
+
         let mut reservation = None;
         if plan.context_plan.requires_ui_session {
             match context.reserve_capacity(&self.deps.control).await {
@@ -289,10 +307,20 @@ impl FlowExecutor {
                 )
             })?;
             let special_launch = first_launch_pending && node.kind == ActionKind::LaunchApp;
+            let attempt = initialized_attempts
+                .iter()
+                .find(|attempt| attempt.node_id == *node_id)
+                .ok_or_else(|| {
+                    FlowExecutionError::new(
+                        "CompiledPlanCorrupt",
+                        format!("initialized attempt is missing for node {node_id}"),
+                    )
+                })?;
             let result = self
                 .execute_node(
                     device_run_id,
                     node,
+                    attempt,
                     &plan,
                     &preflight,
                     &mut context,
@@ -320,6 +348,330 @@ impl FlowExecutor {
                 .await;
         }
 
+        let proof = context
+            .close(&self.deps.control)
+            .await
+            .map_err(FlowExecutionError::device)?;
+        drop(reservation.take());
+        self.deps
+            .database
+            .mark_device_terminal(
+                device_run_id,
+                &[FlowDeviceRunState::Running],
+                FlowDeviceRunState::Succeeded,
+                None,
+                flow_release_proof(proof),
+            )
+            .map_err(FlowExecutionError::other)?;
+        Ok(())
+    }
+
+    pub(crate) async fn resume_device(
+        &self,
+        device_run_id: Uuid,
+        plan: CompiledFlowPlanV2,
+        first_attempt_id: Uuid,
+    ) -> Result<(), FlowExecutionError> {
+        self.validate_run_identity(device_run_id, &plan)?;
+        let initial = self
+            .deps
+            .database
+            .get_flow_attempt_execution_context(first_attempt_id)
+            .map_err(FlowExecutionError::other)?
+            .ok_or_else(|| {
+                FlowExecutionError::new("RunIdentityMismatch", "retry attempt is absent")
+            })?;
+        if initial.device.id != device_run_id
+            || initial.run.id != self.deps.run_id
+            || initial.attempt.state != FlowAttemptState::Queued
+            || initial.plan != plan
+        {
+            return Err(FlowExecutionError::new(
+                "RunIdentityMismatch",
+                "retry attempt does not match its immutable run plan",
+            ));
+        }
+        if initial
+            .device_attempts
+            .iter()
+            .any(|attempt| attempt.state == FlowAttemptState::Uncertain)
+        {
+            return Err(FlowExecutionError::new(
+                "RetryNotAllowed",
+                "an uncertain device attempt blocks successor dispatch",
+            ));
+        }
+        let first_index = plan
+            .execution_order
+            .iter()
+            .position(|node_id| *node_id == initial.attempt.node_id)
+            .ok_or_else(|| {
+                FlowExecutionError::new("RunIdentityMismatch", "retry node is outside the plan")
+            })?;
+        for predecessor_id in &plan.execution_order[..first_index] {
+            let latest = initial
+                .device_attempts
+                .iter()
+                .filter(|attempt| attempt.node_id == *predecessor_id)
+                .max_by_key(|attempt| attempt.attempt_no)
+                .ok_or_else(|| {
+                    FlowExecutionError::new(
+                        "RetryNotAllowed",
+                        "retry predecessor has no durable attempt",
+                    )
+                })?;
+            if latest.state != FlowAttemptState::Succeeded {
+                return Err(FlowExecutionError::new(
+                    "RetryNotAllowed",
+                    "retry predecessor is not durably succeeded",
+                ));
+            }
+        }
+
+        let mut context = FlowDeviceContext::no_device_resources(&self.deps.udid);
+        self.deps
+            .database
+            .transition_flow_device_run(
+                device_run_id,
+                FlowDeviceRunState::Queued,
+                FlowDeviceRunState::Preflight,
+                None,
+            )
+            .map_err(FlowExecutionError::other)?;
+        if let Err(error) = validate_compiled_plan(&plan) {
+            return self
+                .finish_failed(device_run_id, &mut context, &mut None, error)
+                .await;
+        }
+
+        if plan.context_plan.requires_exclusive {
+            let acquire = self
+                .deps
+                .control
+                .acquire_exclusive(&self.deps.udid, DeviceWorkOwner::Script);
+            let cancelled = self.deps.cancellation.cancelled();
+            tokio::pin!(acquire);
+            tokio::pin!(cancelled);
+            let acquired = tokio::select! {
+                biased;
+                _ = &mut cancelled => Err(FlowExecutionError::new(
+                    "Cancelled",
+                    "flow retry was cancelled while waiting for device ownership",
+                )),
+                result = &mut acquire => result.map_err(FlowExecutionError::device),
+            };
+            match acquired {
+                Ok(exclusive) => context = FlowDeviceContext::Exclusive(exclusive),
+                Err(error) => {
+                    return self
+                        .finish_failed(device_run_id, &mut context, &mut None, error)
+                        .await;
+                }
+            }
+        }
+
+        let preflight_result = match target_bundle_id(&plan) {
+            Some(target_bundle_id) => {
+                let snapshot = match self
+                    .deps
+                    .control
+                    .inspect_flow_device(
+                        context.exclusive().map_err(FlowExecutionError::device)?,
+                        target_bundle_id,
+                    )
+                    .await
+                {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        return self
+                            .finish_failed(
+                                device_run_id,
+                                &mut context,
+                                &mut None,
+                                FlowExecutionError::device(error),
+                            )
+                            .await;
+                    }
+                };
+                self.build_preflight(&plan, target_bundle_id, snapshot)
+            }
+            None => self.build_target_free_preflight(&plan),
+        };
+        let preflight = match preflight_result {
+            Ok(preflight) => preflight,
+            Err(error) => {
+                return self
+                    .finish_failed(device_run_id, &mut context, &mut None, error)
+                    .await;
+            }
+        };
+        self.deps
+            .database
+            .transition_flow_device_run(
+                device_run_id,
+                FlowDeviceRunState::Preflight,
+                FlowDeviceRunState::Running,
+                Some(preflight.persisted_snapshot.clone()),
+            )
+            .map_err(FlowExecutionError::other)?;
+
+        let mut reservation = None;
+        if plan.context_plan.requires_ui_session {
+            match context.reserve_capacity(&self.deps.control).await {
+                Ok(capacity) => reservation = Some(capacity),
+                Err(failure) => {
+                    return self
+                        .finish_failed(
+                            device_run_id,
+                            &mut context,
+                            &mut reservation,
+                            FlowExecutionError::device(failure.error),
+                        )
+                        .await;
+                }
+            }
+        }
+
+        let prior_launch_bundle = last_launch_bundle_before(&plan, first_index);
+        let mut first_launch_pending = plan.context_plan.requires_ui_session;
+        if let Some(bundle_id) = prior_launch_bundle {
+            let observed_bundle = match context.active_app_bundle(&self.deps.control).await {
+                Ok(bundle_id) => bundle_id,
+                Err(error) => {
+                    return self
+                        .finish_failed(
+                            device_run_id,
+                            &mut context,
+                            &mut reservation,
+                            FlowExecutionError::device(error),
+                        )
+                        .await;
+                }
+            };
+            if observed_bundle != bundle_id {
+                return self
+                    .finish_failed(
+                        device_run_id,
+                        &mut context,
+                        &mut reservation,
+                        FlowExecutionError::new(
+                            "ActiveAppMismatch",
+                            format!("UI resume expected {bundle_id}, observed {observed_bundle}"),
+                        ),
+                    )
+                    .await;
+            }
+            let kind = if plan.context_plan.requires_fresh_text_session {
+                InteractionSessionKind::FreshText
+            } else {
+                InteractionSessionKind::Ordinary
+            };
+            if let Err(error) = context
+                .upgrade_existing_session(&self.deps.control, bundle_id, kind)
+                .await
+            {
+                return self
+                    .finish_failed(
+                        device_run_id,
+                        &mut context,
+                        &mut reservation,
+                        FlowExecutionError::device(error),
+                    )
+                    .await;
+            }
+            if let Err(error) = self.verify_required_live_capabilities(&plan, &context) {
+                return self
+                    .finish_failed(device_run_id, &mut context, &mut reservation, error)
+                    .await;
+            }
+            if plan.context_plan.requires_stream {
+                let capacity = reservation.take().ok_or_else(|| {
+                    FlowExecutionError::new(
+                        "ContextOrder",
+                        "retry stream capacity was not reserved before session attach",
+                    )
+                })?;
+                if let Err(mut failure) = context.upgrade_stream(&self.deps.control, capacity).await
+                {
+                    let mut error =
+                        FlowExecutionError::new("DeviceControl", failure.error.to_string());
+                    if let Some(proof) = failure
+                        .release_failed_stream(&self.deps.control)
+                        .await
+                        .map_err(FlowExecutionError::device)?
+                    {
+                        error = error.released(proof);
+                    }
+                    return self
+                        .finish_failed(device_run_id, &mut context, &mut reservation, error)
+                        .await;
+                }
+            }
+            first_launch_pending = false;
+        }
+
+        for (index, node_id) in plan.execution_order.iter().enumerate() {
+            if index < first_index {
+                continue;
+            }
+            if self.deps.cancellation.is_cancelled() {
+                let error = FlowExecutionError::new("Cancelled", "flow retry was cancelled");
+                return self
+                    .finish_failed(device_run_id, &mut context, &mut reservation, error)
+                    .await;
+            }
+            let node = plan.nodes.get(node_id).ok_or_else(|| {
+                FlowExecutionError::new(
+                    "CompiledPlanCorrupt",
+                    format!("execution order references missing node {node_id}"),
+                )
+            })?;
+            let attempt = initial
+                .device_attempts
+                .iter()
+                .filter(|attempt| attempt.node_id == *node_id)
+                .max_by_key(|attempt| attempt.attempt_no)
+                .ok_or_else(|| {
+                    FlowExecutionError::new(
+                        "RunIdentityMismatch",
+                        format!("retry successor has no attempt for node {node_id}"),
+                    )
+                })?;
+            if attempt.state == FlowAttemptState::Succeeded {
+                continue;
+            }
+            let special_launch = first_launch_pending && node.kind == ActionKind::LaunchApp;
+            let result = self
+                .execute_node(
+                    device_run_id,
+                    node,
+                    attempt,
+                    &plan,
+                    &preflight,
+                    &mut context,
+                    &mut reservation,
+                    special_launch,
+                )
+                .await;
+            if special_launch && result.is_ok() {
+                first_launch_pending = false;
+            }
+            if let Err(error) = result {
+                return self
+                    .finish_failed(device_run_id, &mut context, &mut reservation, error)
+                    .await;
+            }
+        }
+
+        if first_launch_pending {
+            let error = FlowExecutionError::new(
+                "CompiledPlanCorrupt",
+                "UI retry did not establish its target session",
+            );
+            return self
+                .finish_failed(device_run_id, &mut context, &mut reservation, error)
+                .await;
+        }
         let proof = context
             .close(&self.deps.control)
             .await
@@ -479,6 +831,7 @@ impl FlowExecutor {
         &self,
         device_run_id: Uuid,
         node: &CompiledFlowNode,
+        attempt: &super::FlowNodeAttemptRecord,
         plan: &CompiledFlowPlanV2,
         preflight: &FlowDevicePreflight,
         context: &mut FlowDeviceContext,
@@ -490,11 +843,17 @@ impl FlowExecutor {
         let baseline = self
             .capture_node_baseline(node, context, baseline_deadline)
             .await?;
-        let attempt = self
-            .deps
-            .database
-            .create_flow_attempt(device_run_id, node, contracts(node.kind).1, 1)
-            .map_err(FlowExecutionError::other)?;
+        if attempt.device_run_id != device_run_id
+            || attempt.node_id != node.id
+            || attempt.action_kind != node.kind
+            || attempt.side_effect_class != contracts(node.kind).1
+            || attempt.state != FlowAttemptState::Queued
+        {
+            return Err(FlowExecutionError::new(
+                "RunIdentityMismatch",
+                "queued Flow attempt does not match its immutable device node",
+            ));
+        }
         let attempt_id = attempt.id;
         self.deps
             .database
@@ -779,22 +1138,15 @@ impl FlowExecutor {
                 },
             )
             .map_err(FlowExecutionError::other)?;
-        self.deps
-            .database
-            .record_retry_safe_reconciliation(
-                attempt_id,
-                serde_json::json!({
-                    "kind": "activeAppEquals",
-                    "matched": false,
-                    "observedSha256": observed_sha256,
-                    "measurement": {
-                        "expectedBundleId": bundle_id,
-                        "observedBundleId": observed,
-                    },
-                }),
-            )
-            .map_err(FlowExecutionError::other)?;
-        Err(error)
+        Err(error.retry_safe(serde_json::json!({
+            "kind": "activeAppEquals",
+            "matched": false,
+            "observedSha256": observed_sha256,
+            "measurement": {
+                "expectedBundleId": bundle_id,
+                "observedBundleId": observed,
+            },
+        })))
     }
 
     async fn capture_node_baseline(
@@ -1360,6 +1712,21 @@ impl FlowExecutor {
             .artifacts
             .publish_file(&prepared)
             .map_err(FlowExecutionError::other)?;
+        if self
+            .deps
+            .frames
+            .latest_in_generation(&self.deps.udid, generation)
+            .is_none()
+        {
+            self.deps
+                .artifacts
+                .rollback_file(&prepared)
+                .map_err(FlowExecutionError::other)?;
+            return Err(FlowExecutionError::new(
+                "StaleGeneration",
+                "stream generation changed before screenshot database commit",
+            ));
+        }
         let record = FlowArtifactRecord {
             id: prepared.id,
             attempt_id,
@@ -1418,6 +1785,15 @@ impl FlowExecutor {
                 flow_release_proof(proof),
             )
             .map_err(FlowExecutionError::other)?;
+        if let (Some(attempt_id), Some(evidence)) = (
+            error.attempt_id,
+            error.retry_safe_evidence.as_deref().cloned(),
+        ) {
+            self.deps
+                .database
+                .record_retry_safe_reconciliation(attempt_id, evidence)
+                .map_err(FlowExecutionError::other)?;
+        }
         Err(error)
     }
 }
@@ -1467,6 +1843,20 @@ fn target_bundle_id(plan: &CompiledFlowPlanV2) -> Option<&str> {
             },
         }
     })
+}
+
+fn last_launch_bundle_before(plan: &CompiledFlowPlanV2, end: usize) -> Option<&str> {
+    plan.execution_order
+        .get(..end)?
+        .iter()
+        .rev()
+        .find_map(|node_id| {
+            let node = plan.nodes.get(node_id)?;
+            match &node.config {
+                CompiledActionConfig::LaunchApp { bundle_id } => Some(bundle_id.as_str()),
+                _ => None,
+            }
+        })
 }
 
 fn compiled_config_matches(node: &CompiledFlowNode) -> bool {
@@ -1664,8 +2054,8 @@ mod tests {
     use crate::db::Database;
     use crate::{
         compiled_plan_sha256, qualified_geometry_profile_id, ActionKind, ActiveTransport,
-        AgentState, AgentStatus, AppProcessState, CompiledActionConfig, CompiledFlowNode,
-        CompiledFlowPlanV2, CompiledTapTarget, ConnectionKind, ContextPlan,
+        AgentState, AgentStatus, AppProcessState, AttemptArtifactInspection, CompiledActionConfig,
+        CompiledFlowNode, CompiledFlowPlanV2, CompiledTapTarget, ConnectionKind, ContextPlan,
         DeviceCapabilitySnapshot, DeviceControlPlane, DeviceDriver, DeviceInfo, DeviceStatus,
         DeviceWorkCoordinator, DeviceWorkOwner, EvidenceSpec, FlowArtifactStore, FlowAttemptState,
         FlowCancellation, FlowDocumentV2, FlowSelectionSnapshot, FlowTargetSelection, Frame,
@@ -2326,6 +2716,34 @@ mod tests {
         fixture.shutdown().await;
     }
 
+    #[test]
+    fn ui_resume_uses_the_last_succeeded_launch_target_before_the_retried_node() {
+        let mut plan = launch_wait_plan();
+        let wait_index = plan
+            .execution_order
+            .iter()
+            .position(|node_id| plan.nodes[node_id].kind == ActionKind::Wait)
+            .expect("wait node");
+        let second_bundle = "com.example.second";
+        let second_launch = CompiledFlowNode {
+            id: Uuid::new_v4(),
+            kind: ActionKind::LaunchApp,
+            config: CompiledActionConfig::LaunchApp {
+                bundle_id: second_bundle.to_string(),
+            },
+            postcondition: Some(EvidenceSpec::ActiveAppEquals {
+                bundle_id: second_bundle.to_string(),
+            }),
+        };
+        plan.execution_order.insert(wait_index, second_launch.id);
+        plan.nodes.insert(second_launch.id, second_launch);
+
+        assert_eq!(
+            last_launch_bundle_before(&plan, wait_index + 1),
+            Some(second_bundle)
+        );
+    }
+
     #[tokio::test]
     async fn text_flow_upgrades_once_and_starts_stream_after_fresh_session() {
         let fixture = ExecutorFixture::new(text_plan(), Arc::new(FixtureFrames::new(&[40])));
@@ -2641,11 +3059,14 @@ mod tests {
             .operations()
             .iter()
             .any(|operation| operation == "startStream"));
-        assert!(!fixture
+        let type_text = fixture
             .detail()
             .attempts
-            .iter()
-            .any(|attempt| attempt.action_kind == ActionKind::TypeText));
+            .into_iter()
+            .find(|attempt| attempt.action_kind == ActionKind::TypeText)
+            .expect("durably queued Type Text successor");
+        assert_eq!(type_text.state, FlowAttemptState::Queued);
+        assert!(type_text.canonical_input.is_none());
         let proof = fixture.detail().device_runs[0]
             .release_proof
             .clone()
@@ -2749,11 +3170,14 @@ mod tests {
             .operations()
             .iter()
             .any(|operation| operation.starts_with("terminate:")));
-        assert!(!fixture
+        let terminate = fixture
             .detail()
             .attempts
-            .iter()
-            .any(|attempt| attempt.action_kind == ActionKind::TerminateApp));
+            .into_iter()
+            .find(|attempt| attempt.action_kind == ActionKind::TerminateApp)
+            .expect("durably queued Terminate attempt");
+        assert_eq!(terminate.state, FlowAttemptState::Queued);
+        assert!(terminate.canonical_input.is_none());
         assert_eq!(
             fixture.detail().device_runs[0].state,
             FlowDeviceRunState::Cancelled
@@ -2820,6 +3244,44 @@ mod tests {
         assert_eq!(
             fixture.driver.screenshot_png_calls.load(Ordering::SeqCst),
             0
+        );
+        fixture.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn screenshot_generation_advance_after_file_publish_rolls_back_before_db_commit() {
+        let frames = Arc::new(FixtureFrames::new(&[40]));
+        frames.invalidate_on_latest_call(5);
+        let fixture = ExecutorFixture::new(screenshot_plan(), frames.clone());
+
+        let error = fixture
+            .executor
+            .run_device(fixture.device_run_id, fixture.plan.clone())
+            .await
+            .expect_err("generation advance must stop screenshot publication");
+
+        assert_eq!(error.code(), "StaleGeneration");
+        let detail = fixture.detail();
+        assert!(detail.artifacts.is_empty());
+        let screenshot = detail
+            .attempts
+            .iter()
+            .find(|attempt| attempt.action_kind == ActionKind::Screenshot)
+            .expect("screenshot attempt");
+        assert_eq!(screenshot.state, FlowAttemptState::Uncertain);
+        assert_eq!(
+            fixture
+                .executor
+                .deps
+                .artifacts
+                .inspect_attempt_image(
+                    fixture.run_id,
+                    fixture.device_run_id,
+                    screenshot.id,
+                    "jpeg",
+                )
+                .expect("inspect rolled-back screenshot"),
+            AttemptArtifactInspection::Absent,
         );
         fixture.shutdown().await;
     }

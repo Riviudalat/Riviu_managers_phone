@@ -39,6 +39,24 @@ pub struct ArtifactReconciliationFailure {
     pub code: ArtifactReconciliationFailureCode,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectedAttemptArtifact {
+    pub id: Uuid,
+    pub relative_path: PathBuf,
+    pub kind: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AttemptArtifactInspection {
+    Absent,
+    Valid(InspectedAttemptArtifact),
+    AmbiguousOrInvalid,
+}
+
 #[derive(Clone)]
 pub struct FlowArtifactStore {
     root: PathBuf,
@@ -174,6 +192,120 @@ impl FlowArtifactStore {
         self.remove_managed_file_if_present(&artifact.final_path)?;
         self.remove_managed_file_if_present(&artifact.temp_path)?;
         Ok(())
+    }
+
+    pub fn inspect_attempt_image(
+        &self,
+        run_id: Uuid,
+        device_run_id: Uuid,
+        attempt_id: Uuid,
+        expected_format: &str,
+    ) -> anyhow::Result<AttemptArtifactInspection> {
+        let (image_format, extension) = expected_image_format(expected_format)?;
+        let mut directory = self.root.clone();
+        for id in [run_id, device_run_id, attempt_id] {
+            let next = directory.join(id.to_string());
+            let metadata = match fs::symlink_metadata(&next) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(AttemptArtifactInspection::Absent);
+                }
+                Err(error) => return Err(error).context("inspect attempt artifact directory"),
+            };
+            if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+                return Ok(AttemptArtifactInspection::AmbiguousOrInvalid);
+            }
+            let canonical = next
+                .canonicalize()
+                .context("canonicalize attempt artifact directory")?;
+            if canonical != next || !canonical.starts_with(&self.root) {
+                return Ok(AttemptArtifactInspection::AmbiguousOrInvalid);
+            }
+            directory = canonical;
+        }
+
+        let mut entries = fs::read_dir(&directory).context("read attempt artifact directory")?;
+        let Some(entry) = entries
+            .next()
+            .transpose()
+            .context("read attempt artifact entry")?
+        else {
+            return Ok(AttemptArtifactInspection::Absent);
+        };
+        if entries
+            .next()
+            .transpose()
+            .context("read second attempt artifact entry")?
+            .is_some()
+        {
+            return Ok(AttemptArtifactInspection::AmbiguousOrInvalid);
+        }
+
+        let file_type = entry.file_type().context("inspect attempt artifact type")?;
+        if file_type.is_symlink() || !file_type.is_file() {
+            return Ok(AttemptArtifactInspection::AmbiguousOrInvalid);
+        }
+        let path = entry.path();
+        let canonical = path
+            .canonicalize()
+            .context("canonicalize attempt artifact file")?;
+        if canonical != path || !canonical.starts_with(&self.root) {
+            return Ok(AttemptArtifactInspection::AmbiguousOrInvalid);
+        }
+
+        let file_name = match entry.file_name().to_str() {
+            Some(file_name) => file_name.to_owned(),
+            None => return Ok(AttemptArtifactInspection::AmbiguousOrInvalid),
+        };
+        let file_name_path = Path::new(&file_name);
+        let artifact_id = match file_name_path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .and_then(|value| Uuid::parse_str(value).ok())
+        {
+            Some(artifact_id) => artifact_id,
+            None => return Ok(AttemptArtifactInspection::AmbiguousOrInvalid),
+        };
+        let relative_path = PathBuf::from(run_id.to_string())
+            .join(device_run_id.to_string())
+            .join(attempt_id.to_string())
+            .join(format!("{artifact_id}.{extension}"));
+        if relative_path.file_name().and_then(|value| value.to_str()) != Some(&file_name)
+            || validate_generated_relative_path(
+                &relative_path,
+                artifact_id,
+                Some(attempt_id),
+                expected_format,
+            )
+            .ok()
+                != Some((run_id, device_run_id, attempt_id))
+        {
+            return Ok(AttemptArtifactInspection::AmbiguousOrInvalid);
+        }
+
+        let mut file = File::open(&canonical).context("open attempt artifact image")?;
+        let metadata = file.metadata().context("read attempt artifact metadata")?;
+        if !metadata.file_type().is_file() || metadata.len() == 0 {
+            return Ok(AttemptArtifactInspection::AmbiguousOrInvalid);
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .context("read attempt artifact image")?;
+        let size = u64::try_from(bytes.len()).context("attempt artifact size exceeds u64")?;
+        if size != metadata.len()
+            || image::guess_format(&bytes).ok() != Some(image_format)
+            || image::load_from_memory_with_format(&bytes, image_format).is_err()
+        {
+            return Ok(AttemptArtifactInspection::AmbiguousOrInvalid);
+        }
+
+        Ok(AttemptArtifactInspection::Valid(InspectedAttemptArtifact {
+            id: artifact_id,
+            relative_path,
+            kind: expected_format.to_string(),
+            size,
+            sha256: sha256_bytes(&bytes),
+        }))
     }
 
     pub fn reconcile(
@@ -727,6 +859,137 @@ mod tests {
         assert!(store.reconcile(&[row]).is_err());
 
         store.rollback_file(&artifact).expect("rollback staging");
+        fs::remove_dir_all(root).expect("remove artifact root");
+    }
+
+    #[test]
+    fn inspect_attempt_image_returns_exact_published_metadata_without_touching_other_artifacts() {
+        let root = temp_artifact_root();
+        let store = FlowArtifactStore::new(&root).expect("store");
+        let run_id = Uuid::from_u128(1);
+        let device_run_id = Uuid::from_u128(2);
+        let attempt_id = Uuid::from_u128(3);
+        let prepared = prepare(&store, "screen.png", "png", PNG);
+        let relative = store.publish_file(&prepared).expect("publish exact image");
+
+        let unrelated_attempt_id = Uuid::from_u128(4);
+        let unrelated = store
+            .prepare_image(
+                run_id,
+                device_run_id,
+                unrelated_attempt_id,
+                "other.png",
+                "png",
+                PNG,
+            )
+            .expect("prepare unrelated image");
+        let unrelated_relative = store
+            .publish_file(&unrelated)
+            .expect("publish unrelated image");
+
+        let inspected = store
+            .inspect_attempt_image(run_id, device_run_id, attempt_id, "png")
+            .expect("inspect attempt image");
+
+        assert_eq!(
+            inspected,
+            AttemptArtifactInspection::Valid(InspectedAttemptArtifact {
+                id: prepared.id,
+                relative_path: relative,
+                kind: "png".to_string(),
+                size: PNG.len() as u64,
+                sha256: sha256_bytes(PNG),
+            })
+        );
+        assert!(root.join(unrelated_relative).is_file());
+        assert_eq!(
+            fs::read_dir(root.join(".quarantine"))
+                .expect("read quarantine")
+                .count(),
+            0
+        );
+
+        store.rollback_file(&prepared).expect("cleanup exact image");
+        store
+            .rollback_file(&unrelated)
+            .expect("cleanup unrelated image");
+        fs::remove_dir_all(root).expect("remove artifact root");
+    }
+
+    #[test]
+    fn inspect_attempt_image_reports_absent_for_a_missing_attempt_directory() {
+        let root = temp_artifact_root();
+        let store = FlowArtifactStore::new(&root).expect("store");
+
+        assert_eq!(
+            store
+                .inspect_attempt_image(
+                    Uuid::from_u128(1),
+                    Uuid::from_u128(2),
+                    Uuid::from_u128(3),
+                    "jpeg",
+                )
+                .expect("inspect absent attempt"),
+            AttemptArtifactInspection::Absent
+        );
+
+        fs::remove_dir_all(root).expect("remove artifact root");
+    }
+
+    #[test]
+    fn inspect_attempt_image_reports_ambiguous_or_invalid_for_multiple_entries() {
+        let root = temp_artifact_root();
+        let store = FlowArtifactStore::new(&root).expect("store");
+        let first = prepare(&store, "first.png", "png", PNG);
+        let second = prepare(&store, "second.png", "png", PNG);
+        let first_relative = store.publish_file(&first).expect("publish first image");
+        let second_relative = store.publish_file(&second).expect("publish second image");
+
+        assert_eq!(
+            store
+                .inspect_attempt_image(
+                    Uuid::from_u128(1),
+                    Uuid::from_u128(2),
+                    Uuid::from_u128(3),
+                    "png",
+                )
+                .expect("inspect ambiguous attempt"),
+            AttemptArtifactInspection::AmbiguousOrInvalid
+        );
+        assert!(root.join(first_relative).is_file());
+        assert!(root.join(second_relative).is_file());
+
+        store.rollback_file(&first).expect("cleanup first image");
+        store.rollback_file(&second).expect("cleanup second image");
+        fs::remove_dir_all(root).expect("remove artifact root");
+    }
+
+    #[test]
+    fn inspect_attempt_image_rejects_a_noncanonical_or_wrong_format_image() {
+        let root = temp_artifact_root();
+        let store = FlowArtifactStore::new(&root).expect("store");
+        let attempt_directory = root
+            .join(Uuid::from_u128(1).to_string())
+            .join(Uuid::from_u128(2).to_string())
+            .join(Uuid::from_u128(3).to_string());
+        fs::create_dir_all(&attempt_directory).expect("create attempt directory");
+        let artifact_id = Uuid::new_v4();
+        let path = attempt_directory.join(format!("{artifact_id}.png"));
+        fs::write(&path, JPEG).expect("write format-mismatched image");
+
+        assert_eq!(
+            store
+                .inspect_attempt_image(
+                    Uuid::from_u128(1),
+                    Uuid::from_u128(2),
+                    Uuid::from_u128(3),
+                    "png",
+                )
+                .expect("inspect invalid attempt"),
+            AttemptArtifactInspection::AmbiguousOrInvalid
+        );
+        assert!(path.is_file());
+
         fs::remove_dir_all(root).expect("remove artifact root");
     }
 }

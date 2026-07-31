@@ -1044,6 +1044,66 @@ attempt giu nonterminal diagnostic o `EffectDispatched`, doc active app mot lan 
 phan loai `Succeeded`, proved non-delivery `FailedVerified` + retry-safe, hoac
 `Uncertain`; khong relaunch.
 
+F1 Task 7 checkpoint ngay 31/07/2026: multi-device runtime nam o
+`crates/core/src/flow/runtime.rs`. Runtime co lifecycle mot chieu
+`Recovering -> Ready -> Stopping`; cung mot admission mutex bao ve startup recovery,
+enqueue, retry va shutdown de khong spawn worker qua bien shutdown. Enqueue tao
+`flow_run` + toan bo frozen `device_run` trong mot `IMMEDIATE` transaction roi moi
+spawn. Moi device khoi tao toan bo attempt release-1 trong mot transaction; claim
+`Queued -> IntentCommitted` kiem latest attempt, tat ca predecessor `Succeeded` va
+khong co `Uncertain` tren cung device trong chinh transaction do.
+
+Startup recovery, moi run va moi retry deu co top-level Tokio task duoc runtime track;
+cac device future nam trong `join_all` cua task cha, khong detached spawn. Cancellation
+danh thuc acquire/Wait nhung khong huy WDA request dang chay. `shutdown()` chuyen
+`Stopping`, bat dau global deadline **truoc khi** doi admission, cancel, drain va join
+tat ca handle trong 30 giay. Chi sau deadline tong moi abort owned task, await handle
+da abort va persist `ShutdownDeadlineExceeded`; khong boc tung WDA request bang
+`tokio::time::timeout`. Khong doi `join_all` thanh cac child `spawn` roi lam roi
+`JoinHandle`: abort task cha hien tai cung drop toan bo device future do no so huu.
+
+Startup doc full immutable run/device/attempt/artifact aggregate truoc khi nhan run
+moi. `IntentCommitted` thanh `FailedBeforeDispatch`; read-only active attempt qua
+`Interrupted -> Queued`; queued successor chi reclaim khi predecessor latest deu
+Succeeded va device khong co Uncertain. Numeric stream generation khong co epoch nen
+khong bao gio duoc tin qua desktop restart, ke ca khi so bi reuse: Tap/Swipe frame va
+Type Text matched read-back van thanh `Uncertain`. Launch/Home chi doc active app va
+khong foreground lai. Terminate chi doc PID: absent la success, cung pre-PID la
+`FailedVerified` + proved retry-safe, PID khac la `Uncertain`; khong kill lai.
+Screenshot chi adopt exact canonical artifact cua dung run/device/attempt sau khi
+decode/format/hash pass; absent, nhieu file, symlink hoac invalid deu `Uncertain`.
+Luc chay moi, Screenshot recheck exact stream generation ca sau atomic file rename va
+ngay truoc DB publication; generation doi thi rollback ca staged/final file.
+Type Text recovery doc exact locator bang fresh-text session sau khi da xac nhan
+active app, khong foreground target.
+
+Retry idempotent-set bat buoc doc live state lai ngay truoc khi tao attempt moi;
+khong tin `retry_safe` cu. Proof chi duoc expose sau khi device da `Failed`, error
+attributed dung latest attempt va transaction `retrySafetyProved` commit. Retry chi
+reacquire mot device, skip predecessor da Succeeded va tiep tuc queued successor;
+`Uncertain` Tap/Swipe/Type Text khong co duong retry. Recovery terminal release proof
+OR resource da quan sat voi frozen `ContextPlan` de crash khong ha thap cleanup claim.
+`FlowRunUpdated` chi mang run ID + event revision da commit va runtime khong emit lui
+revision. Fresh retry proof chi gate viec tao attempt moi; attempt moi van capture
+baseline/evidence cua chinh no sau khi reacquire, khong dung proof cu lam success.
+Khi resume sau nhieu `Launch App`, phai xac nhan bundle cua Launch thanh cong gan nhat
+truoc node tiep tuc, khong mac dinh quay ve `initial_bundle_id`.
+
+Verification Task 7 hien PASS: runtime 35/35, executor 26/26, Flow DB 21/21,
+artifact store 11/11, JobQueue 3/3, DeviceControl 36/36; full `riviu-core` PASS 254
+unit (1 ignored fixture writer) + 15 real-frame tests va clippy all-targets
+`-D warnings`. Day van la core runtime checkpoint, chua wire Tauri command/startup
+composition root hay Flow React UI; F1 final gate/commit thuoc Task 8, khong tu danh
+dau F1 complete tai day.
+
+F2 composition root bat buoc goi `FlowRuntime::recover_startup()` truoc generic
+`FlowArtifactStore::reconcile()`: recovery phai co co hoi adopt exact artifact cua
+attempt nonterminal truoc khi orphan scanner quarantine file do. Global reconcile sau
+do phai nhan day du committed artifact rows, khong chi artifact cua run nonterminal.
+Event runtime hien co dam bao monotonic/post-commit o admission va khi device/recovery
+hoan tat; F2 khong duoc quang ba live per-node refresh cho toi khi co post-commit
+invalidation callback hoac polling command duoc test.
+
 Snapshot metadata hien tai cua `PmdIosDriver::inspect_device_for_target` chua co
 protected-auth proof va `QualifiedGeometry`, nen UI Flow tren Pmd that co chu y fail
 closed o preflight. Them nua, park MJPEG cua Pmd ha cached Agent state tu `Ready` ve
@@ -1052,7 +1112,8 @@ hard-code/fabricate cac proof nay va khong goi generic preflight tao session/str
 Buoc noi desktop/live sau phai cap runtime-qualified, target-bound snapshot co auth +
 geometry va dinh nghia readiness truoc/sau park ro rang truoc khi dispatch;
 bridge-only Terminate van chay duoc voi snapshot metadata. Task 6 moi la core
-executor/control-plane, chua wire desktop command hay startup recovery cua Task 7.
+executor/control-plane; Task 7 da co core startup recovery nhung chua wire desktop
+command hay composition root.
 Khong gan bundle gia cho plan target-free va khong dua direct driver handle ra ngoai
 typed Flow ownership.
 

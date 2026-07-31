@@ -1,6 +1,8 @@
 use serde::Serialize;
 use tokio::sync::broadcast;
+use uuid::Uuid;
 
+use crate::flow::FlowId;
 use crate::types::{DeviceInfo, JobRecord};
 
 #[derive(Debug, Clone, Serialize)]
@@ -14,6 +16,14 @@ pub enum AppEvent {
     },
     JobUpdated {
         job: JobRecord,
+    },
+    FlowUpdated {
+        flow_id: FlowId,
+        revision: u64,
+    },
+    FlowRunUpdated {
+        run_id: Uuid,
+        revision: u64,
     },
     StreamFrame {
         udid: String,

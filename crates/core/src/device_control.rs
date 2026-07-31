@@ -601,26 +601,54 @@ impl DeviceControlPlane {
 
     pub async fn start_interaction_session(
         &self,
-        mut context: DeviceExclusiveContext,
+        context: DeviceExclusiveContext,
         bundle_id: &str,
         kind: InteractionSessionKind,
     ) -> Result<UiSessionContext, DeviceControlError> {
-        let capacity_token = self.validate_interaction_capacity(&context)?;
-        let udid = context.udid().to_string();
-        let handoff = self
-            .driver
-            .confirm_interaction_stream_stopped(&udid)
+        self.try_start_interaction_session(context, bundle_id, kind)
             .await
-            .map_err(|error| driver_error(&udid, "confirmInteractionStreamStopped", error))?;
-        self.validate_interaction_capacity(&context)?;
-        let session = self
+            .map_err(|failure| failure.error)
+    }
+
+    pub(crate) async fn try_start_interaction_session(
+        &self,
+        mut context: DeviceExclusiveContext,
+        bundle_id: &str,
+        kind: InteractionSessionKind,
+    ) -> Result<UiSessionContext, SessionContextUpgradeFailure> {
+        let capacity_token = match self.validate_interaction_capacity(&context) {
+            Ok(token) => token,
+            Err(error) => return Err(SessionContextUpgradeFailure { context, error }),
+        };
+        let udid = context.udid().to_string();
+        let handoff = match self.driver.confirm_interaction_stream_stopped(&udid).await {
+            Ok(proof) => proof,
+            Err(error) => {
+                return Err(SessionContextUpgradeFailure {
+                    context,
+                    error: driver_error(&udid, "confirmInteractionStreamStopped", error),
+                });
+            }
+        };
+        if let Err(error) = self.validate_interaction_capacity(&context) {
+            return Err(SessionContextUpgradeFailure { context, error });
+        }
+        let session = match self
             .driver
             .start_interaction_session(&udid, bundle_id, kind)
             .await
-            .map_err(|error| driver_error(&udid, "startInteractionSession", error))?;
+        {
+            Ok(session) => session,
+            Err(error) => {
+                return Err(SessionContextUpgradeFailure {
+                    context,
+                    error: driver_error(&udid, "startInteractionSession", error),
+                });
+            }
+        };
         if let Err(error) = self.validate_interaction_capacity(&context) {
             self.driver.invalidate_ui_session(&udid);
-            return Err(error);
+            return Err(SessionContextUpgradeFailure { context, error });
         }
 
         Ok(UiSessionContext {

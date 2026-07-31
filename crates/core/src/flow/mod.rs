@@ -9,6 +9,7 @@ pub mod evidence;
 #[allow(dead_code)]
 pub(crate) mod executor;
 pub mod model;
+pub mod runtime;
 
 pub use artifact_store::*;
 pub(crate) use cancellation::FlowCancellation;
@@ -18,6 +19,7 @@ pub use evidence::*;
 #[allow(unused_imports)]
 pub(crate) use executor::*;
 pub use model::*;
+pub use runtime::*;
 
 #[cfg(test)]
 mod tests {
