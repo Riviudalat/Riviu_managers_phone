@@ -130,7 +130,11 @@ def source_tree_sha256(
     expected_executables = set(executable_paths)
     seen_files: set[str] = set()
     digest = hashlib.sha256()
-    for path in sorted(root.rglob("*")):
+    paths = sorted(
+        root.rglob("*"),
+        key=lambda path: path.relative_to(root).as_posix().encode("utf-8"),
+    )
+    for path in paths:
         relative = path.relative_to(root).as_posix()
         if path.is_symlink():
             target = os.readlink(path)

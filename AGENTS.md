@@ -1391,6 +1391,13 @@ Run diagnostic `9a64a52` bi chan truoc Mac boi integration
 mat 11.87 giay, trong khi moi SQLite read co the block toi busy-timeout 5 giay.
 Deadline cua fixture nay la 30 giay; day chi la gioi han test, khong doi timeout
 product/evidence va khong duoc ha lai 5 giay.
+Run `55fd06e` da PASS Quality gate; Mac arm64 sau do lo dung loi integrity cua
+legacy WDA source: `Path` native sort case-insensitive tren Windows nhung
+case-sensitive tren POSIX, nen cung mot tree tao hai digest. Moi source attestation
+phai sap xep theo relative POSIX path ma hoa UTF-8 byte, khong dung thu tu mac dinh
+cua `Path`. Digest portable cua WDA source 16.0.0 la
+`74acd24fdbde2fd5ad2b73d4956217900e23461b01cf8100b2ef8cccb37cc4a0`;
+khong tai sinh lock bang native path ordering.
 
 ---
 

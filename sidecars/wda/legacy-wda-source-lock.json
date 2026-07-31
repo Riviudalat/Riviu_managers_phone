@@ -11,6 +11,6 @@
   "logoSha256": "50317e87d434a0ba74f8c2498105b0a0cd74e1436634789fec076185dfbc260e",
   "package": "appium-webdriveragent",
   "schemaVersion": 2,
-  "treeSha256": "887696e94986b40082af98d4fe69b127555ba96ed0d1d5d026f834e6fdbbb9a3",
+  "treeSha256": "74acd24fdbde2fd5ad2b73d4956217900e23461b01cf8100b2ef8cccb37cc4a0",
   "version": "16.0.0"
 }

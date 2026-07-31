@@ -65,6 +65,17 @@ class PackagedSigningResourceTests(unittest.TestCase):
             self.assertEqual(crlf, lf)
             self.assertNotEqual(lf, executable)
 
+    def test_source_digest_uses_portable_posix_byte_path_order(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "Z.txt").write_bytes(b"upper\n")
+            (root / "a.txt").write_bytes(b"lower\n")
+
+            self.assertEqual(
+                build_and_install.source_tree_sha256(root),
+                "8364f8797e271a77bf059b75cbaaa269c26fb8da04d044098b608c0cbb7fe999",
+            )
+
     def test_workspace_copy_is_verified_and_stays_outside_resources(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
