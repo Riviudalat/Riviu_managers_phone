@@ -1146,9 +1146,11 @@ typed Flow ownership.
 
 ### 3.15 Main integration va trang thai san pham trung thuc (31/07/2026)
 
-Checkpoint da duoc fast-forward va push len `main` tai commit
-`89f19beeb3a48fe2352abb123d03ef0947c13fb3`; local `main`, `origin/main` va
-GitHub `refs/heads/main` da doi chieu cung SHA. Sau merge da chay lai va PASS:
+Checkpoint F0/F1 lich su da duoc fast-forward tai
+`89f19beeb3a48fe2352abb123d03ef0947c13fb3`. Flow F2 va F3 fixture/rollback sau
+do da duoc fast-forward vao `main` qua
+`9f5d2774c390fbb5b41e613ef3a03808a934e243`; dung `git rev-parse origin/main`
+de lay documentation commit moi hon neu co. Sau checkpoint F0/F1 da chay va PASS:
 `cargo test --workspace`, Python app-control 10/10, frontend Vitest 11/11,
 `npm run build`, `cargo fmt --all -- --check`, va
 `cargo clippy --workspace --all-targets -- -D warnings`. `npm run lint` exit 0,
