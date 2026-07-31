@@ -14,6 +14,17 @@ use tokio::process::Command;
 
 use credentials::{APPLE_EMAIL_ACCOUNT, APPLE_PASSWORD_ACCOUNT};
 
+fn background_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignRequest {
@@ -100,7 +111,7 @@ impl SigningService {
             anyhow::bail!("Thiếu sidecar signer. Kiểm tra sidecars/signer/riviu_signer.py");
         }
 
-        let output = Command::new("python3")
+        let output = background_command("python3")
             .arg(&self.sidecar)
             .arg("sign-install-wda")
             .arg("--udid")

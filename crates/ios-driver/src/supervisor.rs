@@ -22,7 +22,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use tokio::process::{Child, Command};
+use tokio::process::Child;
+
+#[cfg(any(not(windows), test))]
+use tokio::process::Command;
+
+#[cfg(windows)]
+use crate::process_tree::background_command;
 
 /// The processes we may own for one device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -172,8 +178,6 @@ async fn kill_if_matches(pid: u32, fingerprint: &str) -> bool {
 
 #[cfg(windows)]
 async fn kill_if_matches(pid: u32, fingerprint: &str) -> bool {
-    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
-
     // Keep both the comparison and termination in one CIM operation. The
     // fingerprint arrives via the environment, so quoting cannot turn it into
     // PowerShell source. Invoke-CimMethod targets the exact process object that
@@ -186,7 +190,7 @@ $result = Invoke-CimMethod -InputObject $process -MethodName Terminate
 if ($result.ReturnValue -ne 0) { exit 5 }
 "#;
 
-    let mut command = Command::new("powershell.exe");
+    let mut command = background_command("powershell.exe");
     command
         .args([
             "-NoLogo",
@@ -196,8 +200,7 @@ if ($result.ReturnValue -ne 0) { exit 5 }
             SCRIPT,
         ])
         .env("RIVIU_OWNED_PID", pid.to_string())
-        .env("RIVIU_OWNED_FINGERPRINT", fingerprint)
-        .creation_flags(CREATE_NO_WINDOW);
+        .env("RIVIU_OWNED_FINGERPRINT", fingerprint);
     let killed = matches!(command.output().await, Ok(output) if output.status.success());
     if killed {
         // Give usbmux and the TCP port a deterministic release window.

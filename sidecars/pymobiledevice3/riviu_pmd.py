@@ -25,6 +25,25 @@ from typing import Optional
 SIDECAR_PROTOCOL_VERSION = 2
 PYMOBILEDEVICE3_PROCESS_CONTROL_VERSION = "10.1.0"
 VERIFIED_PROCESS_CONTROL_CONTRACT = "verifiedProcessControl"
+WINDOWS_CREATE_NO_WINDOW = 0x08000000
+
+
+def _background_process_options(options: dict) -> dict:
+    """Keep console-subsystem helpers invisible under the Windows GUI app."""
+    configured = dict(options)
+    if sys.platform == "win32":
+        configured["creationflags"] = (
+            int(configured.get("creationflags", 0)) | WINDOWS_CREATE_NO_WINDOW
+        )
+    return configured
+
+
+def _background_popen(command, **options):
+    return subprocess.Popen(command, **_background_process_options(options))
+
+
+def _background_run(command, **options):
+    return subprocess.run(command, **_background_process_options(options))
 
 
 def _windows_kill_on_close_job(process: subprocess.Popen):
@@ -693,7 +712,7 @@ def _start_wda_tidevice(udid: str, bundle_id: str):
     if tidevice:
         cmd = [tidevice, "-u", udid, "xctest", "-B", bundle_id]
     try:
-        return subprocess.Popen(
+        return _background_popen(
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -1089,7 +1108,7 @@ def cmd_wda_forward(args: argparse.Namespace) -> int:
     tidevice = _which("tidevice")
     if tidevice:
         # tidevice relay LOCAL REMOTE
-        proc = subprocess.Popen(
+        proc = _background_popen(
             [tidevice, "-u", udid, "relay", str(local), str(device_port)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -1354,7 +1373,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
         )
         for name in names:
             try:
-                subprocess.run(
+                _background_run(
                     [tidevice, "-u", udid, "kill", name],
                     capture_output=True,
                     timeout=12,
@@ -1504,7 +1523,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
                 return 1
         else:
             # Stream may own stock WDA later; start XCTest only when :8100 is absent.
-            xctest = subprocess.Popen(
+            xctest = _background_popen(
                 [tidevice, "-u", udid, "xctest", "-B", bundle],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -1543,7 +1562,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
         cleanup()
         return 0
 
-    relay = subprocess.Popen(
+    relay = _background_popen(
         [tidevice, "-u", udid, "relay", str(local), str(device_port)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

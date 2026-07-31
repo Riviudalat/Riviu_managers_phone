@@ -20,13 +20,14 @@ use riviu_core::{
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 
 use crate::config::{DriverConfig, DriverTarget};
 use crate::interaction_runtime::{
     repair_install_only_locked, InstallOnlyInspection, InstallOnlyRuntime,
     InteractionLifecycleRegistry,
 };
+use crate::process_tree::background_command;
 use crate::stream::StreamHub;
 use crate::supervisor::{DeviceOwned, OwnedChild, ProcessRegistry, Role, SlotMap};
 use crate::telemetry;
@@ -350,7 +351,7 @@ impl PmdIosDriver {
             anyhow::bail!("missing sidecar script {}", script.display());
         }
         let python = find_python().await?;
-        let output = Command::new(&python)
+        let output = background_command(&python)
             .arg(&script)
             .arg("ping")
             .stdout(Stdio::piped())
@@ -490,7 +491,7 @@ impl PmdIosDriver {
                 "pymobiledevice3 sidecar not configured — install python3 + pymobiledevice3"
             );
         }
-        let mut command = Command::new(&self.python);
+        let mut command = background_command(&self.python);
         command
             .arg(&self.script)
             .args(args)
@@ -929,7 +930,7 @@ impl PmdIosDriver {
         local_port: u16,
     ) -> anyhow::Result<()> {
         let args = text_bootstrap_args(&self.profile, udid, local_port);
-        let mut command = Command::new(&self.python);
+        let mut command = background_command(&self.python);
         command
             .arg(&self.script)
             .args(&args)
@@ -1066,7 +1067,7 @@ impl PmdIosDriver {
                 .unwrap_or_else(|_| Stdio::null()),
             _ => Stdio::null(),
         };
-        let mut command = Command::new(&self.python);
+        let mut command = background_command(&self.python);
         command
             .arg(&self.script)
             .args(&args)
@@ -1204,7 +1205,7 @@ impl PmdIosDriver {
 
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
 
-        let mut child: Child = Command::new(&self.python)
+        let mut child: Child = background_command(&self.python)
             .arg(&self.script)
             .args(stream_args(&self.profile, udid))
             .stdout(Stdio::piped())
@@ -1657,7 +1658,11 @@ impl InstallOnlyRuntime for PmdInstallOnlyRuntime<'_> {
 
 async fn find_python() -> anyhow::Result<PathBuf> {
     for candidate in ["python3", "python"] {
-        if let Ok(output) = Command::new(candidate).arg("--version").output().await {
+        if let Ok(output) = background_command(candidate)
+            .arg("--version")
+            .output()
+            .await
+        {
             if output.status.success() {
                 return Ok(PathBuf::from(candidate));
             }

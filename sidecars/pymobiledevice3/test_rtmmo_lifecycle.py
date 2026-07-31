@@ -574,6 +574,36 @@ class _Harness:
 
 
 class WindowsExecutableDiscoveryTests(unittest.TestCase):
+    def test_background_process_options_hide_windows_console_and_keep_flags(self):
+        with patch.object(riviu_pmd.sys, "platform", "win32"):
+            options = riviu_pmd._background_process_options(
+                {"creationflags": 0x00000200, "cwd": "fixture"}
+            )
+
+        self.assertEqual(options["creationflags"], 0x08000200)
+        self.assertEqual(options["cwd"], "fixture")
+
+    def test_background_process_options_do_not_add_windows_flags_elsewhere(self):
+        with patch.object(riviu_pmd.sys, "platform", "darwin"):
+            options = riviu_pmd._background_process_options({"cwd": "fixture"})
+
+        self.assertEqual(options, {"cwd": "fixture"})
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows console contract")
+    def test_background_python_child_has_no_console_window(self):
+        result = riviu_pmd._background_run(
+            [
+                sys.executable,
+                "-c",
+                "import ctypes; print(int(ctypes.windll.kernel32.GetConsoleWindow() or 0))",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        self.assertEqual(result.stdout.strip(), "0")
+
     def test_tidevice_is_found_in_user_python_scripts_when_path_misses(self):
         with tempfile.TemporaryDirectory() as raw_dir:
             python_dir = Path(raw_dir) / "Python314"

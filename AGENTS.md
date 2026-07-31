@@ -110,6 +110,12 @@ Job Object lồng cho riêng relay. Không dựa vào signal handler Python đ�
 trên Windows. Registry thu hồi lần chạy sau vẫn phải kiểm tra PID + command-line
 fingerprint; nhánh Windows dùng CIM và chỉ terminate process object đã khớp.
 
+Mọi process console do desktop tạo (Python, PowerShell, tidevice) phải đi qua
+`process_tree::background_command()` hoặc wrapper `_background_popen()` /
+`_background_run()` của sidecar để gắn `CREATE_NO_WINDOW`. Không đổi sang
+`pythonw`: protocol vẫn cần stdout/stderr pipe. Thiếu cờ ở bất kỳ nhánh scan,
+stream hay recovery nào sẽ làm cửa sổ CMD nhấp nháy lặp lại trên Windows.
+
 ### 2.10 RT-MMO là backend riêng, không trộn với stock WDA
 
 `crates/ios-driver/src/wda.rs::WdaProfile` chọn đúng một profile cho toàn bộ vòng

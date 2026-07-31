@@ -5,6 +5,24 @@
 //! Job Object for Windows to release every USB relay after a crash or forced
 //! shutdown.
 
+use std::ffi::OsStr;
+
+/// Create a child command that never allocates a visible console on Windows.
+///
+/// The desktop is a GUI subsystem binary, but console-subsystem children such
+/// as Python, PowerShell and tidevice otherwise allocate their own window.
+/// Piped stdin/stdout/stderr continue to work with `CREATE_NO_WINDOW`.
+pub(crate) fn background_command(program: impl AsRef<OsStr>) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 /// Install one process-lifetime guard for the current process.
 ///
 /// On Windows the guard assigns this process to a Job Object configured with
@@ -126,6 +144,36 @@ mod tests {
     use super::*;
     use std::os::windows::io::AsRawHandle;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn background_child_has_no_console_window() {
+        const FIXTURE_ENV: &str = "RIVIU_HIDDEN_CONSOLE_FIXTURE";
+        const TEST_NAME: &str = "process_tree::tests::background_child_has_no_console_window";
+
+        if std::env::var_os(FIXTURE_ENV).is_some() {
+            use windows_sys::Win32::System::Console::GetConsoleWindow;
+
+            // SAFETY: GetConsoleWindow takes no pointers and returns either a
+            // borrowed HWND or null. The handle is only compared with null.
+            assert!(unsafe { GetConsoleWindow() }.is_null());
+            println!("RIVIU_HIDDEN_CONSOLE_CONFIRMED");
+            return;
+        }
+
+        let output = background_command(std::env::current_exe().expect("current test binary"))
+            .args(["--exact", TEST_NAME, "--nocapture", "--test-threads=1"])
+            .env(FIXTURE_ENV, "1")
+            .output()
+            .await
+            .expect("spawn hidden child fixture");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "stdout={stdout}\nstderr={stderr}");
+        assert!(
+            stdout.contains("RIVIU_HIDDEN_CONSOLE_CONFIRMED"),
+            "hidden fixture did not run: stdout={stdout}\nstderr={stderr}"
+        );
+    }
 
     #[test]
     fn closing_job_terminates_an_assigned_process() {
