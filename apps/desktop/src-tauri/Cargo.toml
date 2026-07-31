@@ -32,6 +32,8 @@ riviu-core = { workspace = true }
 riviu-ios-driver = { workspace = true }
 riviu-signing = { workspace = true }
 riviu-script-engine = { workspace = true }
+async-trait = "0.1"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [features]
 default = []

@@ -3033,6 +3033,7 @@ dependencies = [
  "parking_lot",
  "rand 0.8.7",
  "reqwest 0.12.28",
+ "riviu-script-engine",
  "rusqlite",
  "serde",
  "serde_json",
@@ -3070,9 +3071,11 @@ name = "riviu-managers-phone"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64 0.22.1",
  "chrono",
  "dirs",
+ "image",
  "log",
  "parking_lot",
  "riviu-core",

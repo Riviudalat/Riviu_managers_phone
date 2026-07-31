@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 2,
+  "id": "00000000-0000-0000-0000-000000000100",
+  "name": "Release one acceptance",
+  "revision": 1,
+  "entryNodeId": "00000000-0000-0000-0000-000000000101",
+  "nodes": [
+    {
+      "id": "00000000-0000-0000-0000-000000000101",
+      "kind": "start",
+      "position": { "x": 0.0, "y": 80.0 },
+      "config": {}
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000102",
+      "kind": "launchApp",
+      "position": { "x": 220.0, "y": 80.0 },
+      "config": { "bundleId": "com.apple.Preferences" },
+      "postcondition": {
+        "kind": "activeAppEquals",
+        "bundleId": "com.apple.Preferences"
+      }
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000103",
+      "kind": "wait",
+      "position": { "x": 440.0, "y": 80.0 },
+      "config": { "durationMs": 10 }
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000104",
+      "kind": "swipe",
+      "position": { "x": 660.0, "y": 80.0 },
+      "config": {
+        "from": {
+          "x": 187.5,
+          "y": 520.0,
+          "imageWidth": 375,
+          "imageHeight": 667,
+          "orientation": "portrait",
+          "profileId": "689551a9dbaa2e8ca25165f5b76ecaf43aa1f354551f957d3a75657105b9072b"
+        },
+        "to": {
+          "x": 187.5,
+          "y": 180.0,
+          "imageWidth": 375,
+          "imageHeight": 667,
+          "orientation": "portrait",
+          "profileId": "689551a9dbaa2e8ca25165f5b76ecaf43aa1f354551f957d3a75657105b9072b"
+        },
+        "durationMs": 450
+      },
+      "postcondition": { "kind": "frameDigestChanged", "minimumDistance": 8 }
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000105",
+      "kind": "screenshot",
+      "position": { "x": 880.0, "y": 80.0 },
+      "config": { "label": "release-one", "format": "jpeg" },
+      "postcondition": { "kind": "artifactDecodedAndHashed" }
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000106",
+      "kind": "terminateApp",
+      "position": { "x": 1100.0, "y": 80.0 },
+      "config": { "bundleId": "com.apple.Preferences" },
+      "postcondition": {
+        "kind": "processAbsent",
+        "bundleId": "com.apple.Preferences"
+      }
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000107",
+      "kind": "home",
+      "position": { "x": 1320.0, "y": 80.0 },
+      "config": {},
+      "postcondition": {
+        "kind": "activeAppEquals",
+        "bundleId": "com.apple.springboard"
+      }
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000108",
+      "kind": "end",
+      "position": { "x": 1540.0, "y": 80.0 },
+      "config": {}
+    }
+  ],
+  "edges": [
+    { "id": "00000000-0000-0000-0000-000000000201", "sourceNodeId": "00000000-0000-0000-0000-000000000101", "sourcePort": "flow", "targetNodeId": "00000000-0000-0000-0000-000000000102", "targetPort": "flow" },
+    { "id": "00000000-0000-0000-0000-000000000202", "sourceNodeId": "00000000-0000-0000-0000-000000000102", "sourcePort": "flow", "targetNodeId": "00000000-0000-0000-0000-000000000103", "targetPort": "flow" },
+    { "id": "00000000-0000-0000-0000-000000000203", "sourceNodeId": "00000000-0000-0000-0000-000000000103", "sourcePort": "flow", "targetNodeId": "00000000-0000-0000-0000-000000000104", "targetPort": "flow" },
+    { "id": "00000000-0000-0000-0000-000000000204", "sourceNodeId": "00000000-0000-0000-0000-000000000104", "sourcePort": "flow", "targetNodeId": "00000000-0000-0000-0000-000000000105", "targetPort": "flow" },
+    { "id": "00000000-0000-0000-0000-000000000205", "sourceNodeId": "00000000-0000-0000-0000-000000000105", "sourcePort": "flow", "targetNodeId": "00000000-0000-0000-0000-000000000106", "targetPort": "flow" },
+    { "id": "00000000-0000-0000-0000-000000000206", "sourceNodeId": "00000000-0000-0000-0000-000000000106", "sourcePort": "flow", "targetNodeId": "00000000-0000-0000-0000-000000000107", "targetPort": "flow" },
+    { "id": "00000000-0000-0000-0000-000000000207", "sourceNodeId": "00000000-0000-0000-0000-000000000107", "sourcePort": "flow", "targetNodeId": "00000000-0000-0000-0000-000000000108", "targetPort": "flow" }
+  ],
+  "viewport": { "x": 0.0, "y": 0.0, "zoom": 0.8 }
+}
