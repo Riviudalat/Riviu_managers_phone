@@ -1,14 +1,16 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use riviu_core::db::Database;
 use riviu_core::{
-    BackgroundStreamLease, DeviceControlPlane, DeviceRegistry, DeviceWorkCoordinator, EventBus,
-    JobQueue, NurtureEngine, StreamBudgetManager, StreamSettings, STREAM_FPS,
+    AppEvent, BackgroundStreamLease, DeviceControlPlane, DeviceRegistry, DeviceWorkCoordinator,
+    EventBus, FlowArtifactStore, FlowId, FlowRuntime, FlowRuntimeDeps, JobQueue, NurtureEngine,
+    StreamBudgetManager, StreamSettings, STREAM_FPS,
 };
 use riviu_ios_driver::{create_driver, DriverMode, DriverTarget, StreamHub};
 use riviu_signing::{CredentialStore, SigningService};
@@ -16,6 +18,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::Notify;
 
 use crate::agent_runtime::{resolve_desktop_agent_runtime, ResolvedAgentRuntime};
+use crate::command_error::CommandError;
 use crate::nurture_commands::NurtureRuntime;
 
 pub struct AppState {
@@ -25,6 +28,8 @@ pub struct AppState {
     pub streams: StreamHub,
     pub driver_mode: DriverMode,
     pub jobs: JobQueue,
+    pub flows: FlowRuntime,
+    pub flow_artifacts: FlowArtifactStore,
     pub db: Arc<Database>,
     pub signing: SigningService,
     pub agent_token_configured: bool,
@@ -35,10 +40,104 @@ pub struct AppState {
     pub legacy_wda_bundle: PathBuf,
     pub nurture: NurtureRuntime,
     pub nurture_engine: NurtureEngine,
+    pub(crate) flow_mutations: FlowMutationCoordinator,
+    command_admission: Arc<CommandAdmissionState>,
     background_stop: Arc<AtomicBool>,
     background_stopped: Arc<AtomicBool>,
     background_stopped_notify: Arc<Notify>,
     background_shutdown_error: Arc<RwLock<Option<String>>>,
+}
+
+struct CommandAdmissionState {
+    accepting_work: AtomicBool,
+    in_flight: AtomicUsize,
+    changed: Notify,
+}
+
+#[derive(Default)]
+pub(crate) struct FlowMutationCoordinator {
+    event_revision: Mutex<u64>,
+}
+
+impl FlowMutationCoordinator {
+    pub(crate) fn commit<T, E>(
+        &self,
+        events: &EventBus,
+        persist: impl FnOnce() -> Result<(T, FlowId), E>,
+    ) -> Result<T, E> {
+        let mut revision = self.event_revision.lock();
+        let (result, flow_id) = persist()?;
+        *revision = revision
+            .checked_add(1)
+            .expect("Flow invalidation revision overflow");
+        events.emit(AppEvent::FlowUpdated {
+            flow_id,
+            revision: *revision,
+        });
+        Ok(result)
+    }
+}
+
+pub(crate) struct CommandAdmission {
+    state: Arc<CommandAdmissionState>,
+}
+
+impl CommandAdmissionState {
+    fn new(accepting_work: bool) -> Self {
+        Self {
+            accepting_work: AtomicBool::new(accepting_work),
+            in_flight: AtomicUsize::new(0),
+            changed: Notify::new(),
+        }
+    }
+
+    fn start_accepting(&self) {
+        self.accepting_work.store(true, Ordering::Release);
+        self.changed.notify_waiters();
+    }
+
+    fn ensure_accepting_work(self: &Arc<Self>) -> Result<CommandAdmission, CommandError> {
+        if !self.accepting_work.load(Ordering::Acquire) {
+            return Err(CommandError::application_shutting_down());
+        }
+        self.in_flight.fetch_add(1, Ordering::AcqRel);
+        if !self.accepting_work.load(Ordering::Acquire) {
+            self.finish_one();
+            return Err(CommandError::application_shutting_down());
+        }
+        Ok(CommandAdmission {
+            state: self.clone(),
+        })
+    }
+
+    fn reject_new_work(&self) {
+        self.accepting_work.store(false, Ordering::Release);
+        self.changed.notify_waiters();
+    }
+
+    async fn wait_until_drained(&self) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.in_flight.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    fn finish_one(&self) {
+        if self.in_flight.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.changed.notify_waiters();
+        }
+    }
+}
+
+impl Drop for CommandAdmission {
+    fn drop(&mut self) {
+        self.state.finish_one();
+    }
 }
 
 struct ActiveBackgroundSample {
@@ -197,9 +296,13 @@ impl BackgroundStreamSampler {
 
 impl AppState {
     pub async fn bootstrap(resource_dir: Option<PathBuf>) -> anyhow::Result<Self> {
-        let data = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("riviu-managers-phone");
+        let mock_requested = std::env::var("RIVIU_MOCK_DEVICES")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let data = resolve_desktop_data_dir(
+            mock_requested,
+            std::env::var_os("RIVIU_MOCK_DATA_DIR").map(PathBuf::from),
+        )?;
         std::fs::create_dir_all(&data)?;
         let artifacts_dir = data.join("artifacts");
         std::fs::create_dir_all(&artifacts_dir)?;
@@ -208,9 +311,6 @@ impl AppState {
         let sidecar_root = resolve_sidecar_root(resource_dir.as_deref());
         let credentials = CredentialStore::system()?;
         let legacy_token = std::env::var("RIVIU_RTMMO_TOKEN").ok();
-        let mock_requested = std::env::var("RIVIU_MOCK_DEVICES")
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
         let ResolvedAgentRuntime {
             driver_config,
             settings: resolved_agent_settings,
@@ -263,6 +363,35 @@ impl AppState {
             artifacts_dir.clone(),
         );
 
+        // Recovery must see an authoritative initial fleet snapshot. Flow target
+        // selection and startup reconciliation both fail closed on absent devices.
+        let devices = control
+            .list_devices()
+            .await
+            .context("initial metadata device scan failed before Flow recovery")?;
+        registry.upsert_many(devices);
+
+        let command_admission = Arc::new(CommandAdmissionState::new(false));
+        let flow_artifacts = FlowArtifactStore::new(artifacts_dir.join("flows"))?;
+        let flows = FlowRuntime::new(FlowRuntimeDeps {
+            database: db.clone(),
+            events: events.clone(),
+            registry: registry.clone(),
+            control: control.clone(),
+            frames: Arc::new(bundle.streams.clone()),
+            artifacts: flow_artifacts.clone(),
+        });
+        flows.recover_startup().await?;
+        let committed_artifacts = db.list_committed_flow_artifacts()?;
+        for failure in flow_artifacts.reconcile(&committed_artifacts)? {
+            log::warn!(
+                "Flow artifact reconciliation {:?}: {}",
+                failure.code,
+                failure.artifact_id
+            );
+        }
+        command_admission.start_accepting();
+
         let state = Self {
             registry,
             events,
@@ -270,6 +399,8 @@ impl AppState {
             streams: bundle.streams,
             driver_mode: bundle.mode,
             jobs,
+            flows,
+            flow_artifacts,
             db,
             signing,
             agent_token_configured,
@@ -280,19 +411,27 @@ impl AppState {
             legacy_wda_bundle: sidecar_root.join("wda").join("Riviumanagersphone.ipa"),
             nurture: NurtureRuntime::new(),
             nurture_engine,
+            flow_mutations: FlowMutationCoordinator::default(),
+            command_admission,
             background_stop: Arc::new(AtomicBool::new(false)),
             background_stopped: Arc::new(AtomicBool::new(false)),
             background_stopped_notify: Arc::new(Notify::new()),
             background_shutdown_error: Arc::new(RwLock::new(None)),
         };
 
-        // Initial scan is metadata-only. The budgeted sampler owns every
-        // background producer after background tasks start.
-        if let Ok(devices) = state.control.list_devices().await {
-            state.registry.upsert_many(devices);
-        }
-
         Ok(state)
+    }
+
+    pub(crate) fn ensure_accepting_work(&self) -> Result<CommandAdmission, CommandError> {
+        self.command_admission.ensure_accepting_work()
+    }
+
+    pub(crate) fn reject_new_work(&self) {
+        self.command_admission.reject_new_work();
+    }
+
+    pub(crate) async fn wait_for_mutating_commands(&self) {
+        self.command_admission.wait_until_drained().await;
     }
 
     pub fn spawn_background_tasks(&self, app: AppHandle) {
@@ -427,6 +566,7 @@ impl AppState {
         // Local schedule runner
         let db = self.db.clone();
         let jobs = self.jobs.clone();
+        let command_admission = self.command_admission.clone();
         tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(30));
             loop {
@@ -448,6 +588,9 @@ impl AppState {
                     if !due {
                         continue;
                     }
+                    let Ok(_admission) = command_admission.ensure_accepting_work() else {
+                        break;
+                    };
                     if let Ok(Some(body)) = db.get_script(&s.script_name) {
                         if let Ok(script) = riviu_script_engine::parse_script(&body) {
                             let _ = jobs.enqueue(script, s.udids.clone()).await;
@@ -469,6 +612,7 @@ impl AppState {
         let nurture_engine = self.nurture_engine.clone();
         let registry = self.registry.clone();
         let app_nurture = app.clone();
+        let command_admission = self.command_admission.clone();
         tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(30));
             loop {
@@ -490,6 +634,9 @@ impl AppState {
                 if !due {
                     continue;
                 }
+                let Ok(_admission) = command_admission.ensure_accepting_work() else {
+                    break;
+                };
                 let mut udids = settings.schedule_udids.clone();
                 if udids.is_empty() {
                     udids = registry
@@ -545,6 +692,23 @@ impl AppState {
         }
         Ok(())
     }
+}
+
+fn resolve_desktop_data_dir(
+    mock_requested: bool,
+    mock_override: Option<PathBuf>,
+) -> anyhow::Result<PathBuf> {
+    if let Some(path) = mock_override {
+        anyhow::ensure!(
+            mock_requested,
+            "RIVIU_MOCK_DATA_DIR requires RIVIU_MOCK_DEVICES=1"
+        );
+        anyhow::ensure!(path.is_absolute(), "RIVIU_MOCK_DATA_DIR must be absolute");
+        return Ok(path);
+    }
+    Ok(dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("riviu-managers-phone"))
 }
 
 fn background_sample_candidate(
@@ -646,6 +810,114 @@ fn resolve_sidecar_root_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mock_data_override_is_absolute_and_never_available_to_real_devices() {
+        let absolute = std::env::temp_dir().join("riviu-mock-data-dir-fixture");
+        assert_eq!(
+            resolve_desktop_data_dir(true, Some(absolute.clone()))
+                .expect("mock override is accepted"),
+            absolute
+        );
+
+        let production_error = resolve_desktop_data_dir(false, Some(std::env::temp_dir()))
+            .expect_err("real-device startup rejects the override");
+        assert!(production_error
+            .to_string()
+            .contains("requires RIVIU_MOCK_DEVICES=1"));
+
+        let relative_error = resolve_desktop_data_dir(true, Some(PathBuf::from("fixture")))
+            .expect_err("relative override is rejected");
+        assert!(relative_error.to_string().contains("must be absolute"));
+    }
+
+    #[tokio::test]
+    async fn command_admission_drains_winner_and_rejects_shutdown_contender() {
+        let admission = Arc::new(CommandAdmissionState::new(false));
+        let startup_error = match admission.ensure_accepting_work() {
+            Ok(_) => panic!("startup must reject mutating commands"),
+            Err(error) => error,
+        };
+        assert_eq!(startup_error.code, "ApplicationShuttingDown");
+
+        admission.start_accepting();
+        let winner = admission
+            .ensure_accepting_work()
+            .expect("admit command before shutdown");
+        admission.reject_new_work();
+
+        let contender = match admission.ensure_accepting_work() {
+            Ok(_) => panic!("shutdown contender must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(contender.code, "ApplicationShuttingDown");
+
+        let drain_state = admission.clone();
+        let mut drain = tokio::spawn(async move { drain_state.wait_until_drained().await });
+        tokio::task::yield_now().await;
+        assert!(!drain.is_finished());
+
+        drop(winner);
+        tokio::time::timeout(Duration::from_secs(1), &mut drain)
+            .await
+            .expect("drain waiter completed")
+            .expect("join drain waiter");
+    }
+
+    #[tokio::test]
+    async fn shutdown_signal_releases_an_admitted_retry_before_admission_drain() {
+        let admission = Arc::new(CommandAdmissionState::new(true));
+        let permit = admission
+            .ensure_accepting_work()
+            .expect("admit retry before shutdown");
+        let (stop_sender, stop_receiver) = tokio::sync::oneshot::channel();
+        let retry = tokio::spawn(async move {
+            let _permit = permit;
+            stop_receiver.await.expect("runtime stop signal");
+        });
+
+        admission.reject_new_work();
+        stop_sender.send(()).expect("signal runtime before drain");
+        tokio::time::timeout(Duration::from_secs(1), admission.wait_until_drained())
+            .await
+            .expect("admitted retry released after runtime stop");
+        retry.await.expect("join admitted retry");
+    }
+
+    #[test]
+    fn flow_mutation_coordinator_emits_commits_in_strict_revision_order() {
+        const WRITERS: usize = 8;
+        let coordinator = Arc::new(FlowMutationCoordinator::default());
+        let events = EventBus::new(WRITERS);
+        let mut receiver = events.subscribe();
+        let barrier = Arc::new(std::sync::Barrier::new(WRITERS));
+        let handles = (0..WRITERS)
+            .map(|_| {
+                let coordinator = Arc::clone(&coordinator);
+                let events = events.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    coordinator
+                        .commit(&events, || Ok::<_, ()>(((), uuid::Uuid::nil())))
+                        .expect("commit Flow mutation")
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().expect("join Flow mutation writer");
+        }
+
+        let emitted = (0..WRITERS)
+            .map(
+                |_| match receiver.try_recv().expect("Flow mutation event") {
+                    AppEvent::FlowUpdated { revision, .. } => revision,
+                    _ => panic!("unexpected event kind"),
+                },
+            )
+            .collect::<Vec<_>>();
+        assert_eq!(emitted, (1..=WRITERS as u64).collect::<Vec<_>>());
+    }
 
     async fn sampler_fixture() -> (
         riviu_ios_driver::MockIosDriver,

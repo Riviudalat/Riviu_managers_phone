@@ -60,6 +60,36 @@ enum FlowRuntimeLifecycle {
     Stopping = 2,
 }
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum FlowRetryError {
+    #[error("RetryNotAllowed: {reason}")]
+    NotAllowed { reason: &'static str },
+    #[error("RetryAlreadyRunning: Flow retry already has a live worker")]
+    AlreadyRunning,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum FlowRuntimeError {
+    #[error("Flow run {run_id} does not exist")]
+    RunNotFound { run_id: Uuid },
+    #[error("Flow attempt {attempt_id} does not exist")]
+    AttemptNotFound { attempt_id: Uuid },
+    #[error("Flow run {run_id} has no live cancellation owner")]
+    CancellationOwnerMissing { run_id: Uuid },
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum FlowSelectionError {
+    #[error("selected devices are empty")]
+    Empty,
+    #[error("a selected device is unknown")]
+    UnknownDevice,
+    #[error("selected devices contain a duplicate")]
+    Duplicate,
+    #[error("no eligible device exists")]
+    NoEligibleDevice,
+}
+
 enum RecoveryDeviceWork {
     Initial {
         device: Box<FlowDeviceRunRecord>,
@@ -152,7 +182,7 @@ impl FlowRuntime {
             .await
             .map_err(|_| anyhow::anyhow!("Flow startup recovery worker ended without a result"))?
             .map_err(anyhow::Error::msg);
-        let completed = self.inner.tasks.lock().remove(&task_id);
+        let completed = self.retire_tracked_task(task_id);
         if let Some(task) = completed {
             task.handle
                 .await
@@ -471,18 +501,30 @@ impl FlowRuntime {
         let run_id = run.id;
         let plan = revision.compiled_plan;
         let task_cancellation = cancellation.clone();
+        let task_id = Uuid::new_v4();
+        let (registered_sender, registered_receiver) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
-            runtime
-                .run_flow(run_id, selection, devices, plan, task_cancellation)
+            registered_receiver
                 .await
+                .context("Flow run worker registration was abandoned")?;
+            let result = runtime
+                .run_flow(run_id, selection, devices, plan, task_cancellation)
+                .await;
+            runtime.inner.cancellations.lock().remove(&run_id);
+            if let Err(error) = &result {
+                tracing::error!(run_id = %run_id, error = %error, "Flow run worker failed");
+            }
+            let _ = runtime.retire_tracked_task(task_id);
+            result
         });
         self.inner.tasks.lock().insert(
-            Uuid::new_v4(),
+            task_id,
             TrackedFlowTask {
                 run_ids: BTreeSet::from([run.id]),
                 handle: task,
             },
         );
+        let _ = registered_sender.send(());
         if self.lifecycle() != FlowRuntimeLifecycle::Ready {
             cancellation.cancel();
         }
@@ -498,11 +540,11 @@ impl FlowRuntime {
             .inner
             .database
             .get_flow_run(run_id)?
-            .ok_or_else(|| anyhow::anyhow!("Flow run {run_id} does not exist"))?;
+            .ok_or(FlowRuntimeError::RunNotFound { run_id })?;
         if run.run.state.is_terminal() {
             return Ok(());
         }
-        anyhow::bail!("Flow run {run_id} has no live cancellation owner")
+        Err(FlowRuntimeError::CancellationOwnerMissing { run_id }.into())
     }
 
     pub async fn retry_attempt(&self, attempt_id: Uuid) -> anyhow::Result<FlowNodeAttemptRecord> {
@@ -512,12 +554,18 @@ impl FlowRuntime {
             .inner
             .database
             .get_flow_attempt_execution_context(attempt_id)?
-            .ok_or_else(|| anyhow::anyhow!("Flow attempt {attempt_id} does not exist"))?;
+            .ok_or(FlowRuntimeError::AttemptNotFound { attempt_id })?;
         if !context.run.state.is_terminal() || context.device.state != FlowDeviceRunState::Failed {
-            anyhow::bail!("RetryNotAllowed: attempt device is not durably failed");
+            return Err(FlowRetryError::NotAllowed {
+                reason: "attempt device is not durably failed",
+            }
+            .into());
         }
         if !retry_can_enter_reconciliation(&context.attempt) {
-            anyhow::bail!("RetryNotAllowed: attempt has no safe reconciliation path");
+            return Err(FlowRetryError::NotAllowed {
+                reason: "attempt has no safe reconciliation path",
+            }
+            .into());
         }
         if self
             .inner
@@ -525,7 +573,7 @@ impl FlowRuntime {
             .lock()
             .contains_key(&context.run.id)
         {
-            anyhow::bail!("RetryAlreadyRunning: Flow run already has a live worker");
+            return Err(FlowRetryError::AlreadyRunning.into());
         }
         let run_id = context.run.id;
         let cancellation = FlowCancellation::default();
@@ -536,22 +584,28 @@ impl FlowRuntime {
         let task_cancellation = cancellation.clone();
         let runtime = self.clone();
         let (sender, receiver) = tokio::sync::oneshot::channel();
+        let task_id = Uuid::new_v4();
+        let (registered_sender, registered_receiver) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
+            registered_receiver
+                .await
+                .context("Flow retry worker registration was abandoned")?;
             let result = runtime
                 .perform_retry_attempt(attempt_id, task_cancellation)
                 .await;
             runtime.inner.cancellations.lock().remove(&run_id);
-            let result = result.map_err(|error| format!("{error:#}"));
             let _ = sender.send(result);
+            let _ = runtime.retire_tracked_task(task_id);
             Ok(())
         });
         self.inner.tasks.lock().insert(
-            Uuid::new_v4(),
+            task_id,
             TrackedFlowTask {
                 run_ids: BTreeSet::from([run_id]),
                 handle: task,
             },
         );
+        let _ = registered_sender.send(());
         if self.lifecycle() != FlowRuntimeLifecycle::Ready {
             cancellation.cancel();
         }
@@ -559,7 +613,6 @@ impl FlowRuntime {
         receiver
             .await
             .map_err(|_| anyhow::anyhow!("Flow retry worker ended without a result"))?
-            .map_err(anyhow::Error::msg)
     }
 
     async fn perform_retry_attempt(
@@ -582,7 +635,10 @@ impl FlowRuntime {
                 .context("freshly reconciled Flow attempt disappeared")?;
         }
         if !retry_is_allowed(&context.attempt, context.attempt.retry_allowed) {
-            anyhow::bail!("RetryNotAllowed: fresh reconciliation did not prove non-delivery");
+            return Err(FlowRetryError::NotAllowed {
+                reason: "fresh reconciliation did not prove non-delivery",
+            }
+            .into());
         }
         let node = context
             .plan
@@ -696,6 +752,7 @@ impl FlowRuntime {
             }
         }
         self.inner.cancellations.lock().clear();
+        self.inner.emitted_revisions.lock().clear();
         for run_id in deadline_runs {
             if self
                 .inner
@@ -773,7 +830,6 @@ impl FlowRuntime {
         }
         let projected = self.inner.database.recompute_run_projection(run_id)?;
         self.emit_run_updated(projected.id)?;
-        self.inner.cancellations.lock().remove(&run_id);
         if let Some(error) = first_error {
             tracing::debug!(run_id = %run_id, error = %error, "Flow device completed with a persisted failure");
         }
@@ -1309,10 +1365,16 @@ impl FlowRuntime {
                 let _ = self.inner.control.close_exclusive_context(exclusive)?;
                 let observed = observed?;
                 if !observed.running && observed.pid.is_none() {
-                    anyhow::bail!("RetryNotAllowed: desired process state is already present");
+                    return Err(FlowRetryError::NotAllowed {
+                        reason: "desired process state is already present",
+                    }
+                    .into());
                 }
                 if observed.pid != pre_effect_pid || pre_effect_pid.is_none() {
-                    anyhow::bail!("RetryNotAllowed: process identity changed after failure");
+                    return Err(FlowRetryError::NotAllowed {
+                        reason: "process identity changed after failure",
+                    }
+                    .into());
                 }
                 serde_json::to_value(super::evaluate_process_state(
                     node.postcondition
@@ -1331,7 +1393,10 @@ impl FlowRuntime {
                 let _ = self.inner.control.close_exclusive_context(exclusive)?;
                 let observed = observed?;
                 if observed == *expected {
-                    anyhow::bail!("RetryNotAllowed: desired active app is already present");
+                    return Err(FlowRetryError::NotAllowed {
+                        reason: "desired active app is already present",
+                    }
+                    .into());
                 }
                 serde_json::json!({
                     "kind": "activeAppEquals",
@@ -1343,7 +1408,12 @@ impl FlowRuntime {
                     },
                 })
             }
-            _ => anyhow::bail!("RetryNotAllowed: action has no idempotent read reconciler"),
+            _ => {
+                return Err(FlowRetryError::NotAllowed {
+                    reason: "action has no idempotent read reconciler",
+                }
+                .into());
+            }
         };
         if cancellation.is_cancelled() {
             anyhow::bail!("Flow retry was cancelled after reconciliation read");
@@ -1420,6 +1490,20 @@ impl FlowRuntime {
         Ok(())
     }
 
+    fn retire_tracked_task(&self, task_id: Uuid) -> Option<TrackedFlowTask> {
+        let mut tasks = self.inner.tasks.lock();
+        let retired = tasks.remove(&task_id);
+        if let Some(task) = retired.as_ref() {
+            let mut emitted = self.inner.emitted_revisions.lock();
+            for run_id in &task.run_ids {
+                if !tasks.values().any(|other| other.run_ids.contains(run_id)) {
+                    emitted.remove(run_id);
+                }
+            }
+        }
+        retired
+    }
+
     #[cfg(test)]
     async fn wait_terminal(&self, run_id: Uuid) -> anyhow::Result<super::FlowRunDetail> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -1439,6 +1523,11 @@ impl FlowRuntime {
     #[cfg(test)]
     async fn active_task_count(&self) -> usize {
         self.inner.tasks.lock().len()
+    }
+
+    #[cfg(test)]
+    fn emitted_revision_count(&self) -> usize {
+        self.inner.emitted_revisions.lock().len()
     }
 }
 
@@ -1520,18 +1609,6 @@ fn device_is_eligible(device: Option<&crate::DeviceInfo>) -> bool {
             DeviceStatus::Connected | DeviceStatus::Ready | DeviceStatus::Busy
         )
     })
-}
-
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-enum FlowSelectionError {
-    #[error("selected devices are empty")]
-    Empty,
-    #[error("a selected device is unknown")]
-    UnknownDevice,
-    #[error("selected devices contain a duplicate")]
-    Duplicate,
-    #[error("no eligible device exists")]
-    NoEligibleDevice,
 }
 
 fn resolve_targets(
@@ -1731,6 +1808,32 @@ mod tests {
             resolve_targets(&registry, &FlowTargetSelection::AllEligible),
             Err(FlowSelectionError::NoEligibleDevice)
         ));
+    }
+
+    #[tokio::test]
+    async fn missing_cancel_and_retry_targets_return_typed_runtime_errors() {
+        let fixture = RuntimeFixture::new(&[], wait_plan(1)).await;
+        let run_id = Uuid::new_v4();
+        let run_error = fixture
+            .runtime
+            .cancel_run(run_id)
+            .expect_err("missing run must be typed");
+        assert_eq!(
+            run_error.downcast_ref::<FlowRuntimeError>(),
+            Some(&FlowRuntimeError::RunNotFound { run_id })
+        );
+
+        let attempt_id = Uuid::new_v4();
+        let attempt_error = fixture
+            .runtime
+            .retry_attempt(attempt_id)
+            .await
+            .expect_err("missing attempt must be typed");
+        assert_eq!(
+            attempt_error.downcast_ref::<FlowRuntimeError>(),
+            Some(&FlowRuntimeError::AttemptNotFound { attempt_id })
+        );
+        fixture.runtime.shutdown().await.expect("shutdown fixture");
     }
 
     #[test]
@@ -2011,6 +2114,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_run_reaps_task_and_revision_bookkeeping_before_shutdown() {
+        let fixture = RuntimeFixture::new(&["iphone-a"], wait_plan(1)).await;
+        let run = fixture
+            .runtime
+            .enqueue(
+                fixture.revision.clone(),
+                FlowTargetSelection::One {
+                    udid: "iphone-a".into(),
+                },
+            )
+            .await
+            .expect("enqueue short Flow");
+        let detail = fixture
+            .runtime
+            .wait_terminal(run.id)
+            .await
+            .expect("short Flow terminal");
+        assert_eq!(detail.run.state, FlowAggregateState::Succeeded);
+
+        fixture.wait_runtime_bookkeeping_empty().await;
+        fixture.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn shutdown_tracks_and_joins_a_retry_worker_waiting_for_device_ownership() {
         let fixture = RuntimeFixture::new(&["iphone-a"], terminate_wait_plan()).await;
         let (_run_id, _terminate_id, wait_id, _end_id) = fixture.seed_wait_retry_run();
@@ -2277,6 +2404,7 @@ mod tests {
             FlowAttemptState::Succeeded
         );
         assert_eq!(fixture.driver.terminate_calls.load(Ordering::SeqCst), 0);
+        fixture.wait_runtime_bookkeeping_empty().await;
         fixture.shutdown().await;
     }
 
@@ -3204,6 +3332,22 @@ mod tests {
                     "attempt did not reach {expected:?}"
                 );
                 tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+
+        async fn wait_runtime_bookkeeping_empty(&self) {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let tasks = self.runtime.active_task_count().await;
+                let revisions = self.runtime.emitted_revision_count();
+                if tasks == 0 && revisions == 0 {
+                    return;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "Flow runtime bookkeeping did not drain: tasks={tasks}, revisions={revisions}"
+                );
+                tokio::task::yield_now().await;
             }
         }
 

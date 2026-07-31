@@ -768,6 +768,83 @@ impl Database {
         Ok(detail)
     }
 
+    pub fn list_committed_flow_artifacts(&self) -> anyhow::Result<Vec<FlowArtifactRecord>> {
+        let mut connection = self.conn()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let expected_count: i64 =
+            transaction.query_row("SELECT COUNT(*) FROM flow_artifacts", [], |row| row.get(0))?;
+        let expected_count =
+            usize::try_from(expected_count).context("persisted Flow artifact count is invalid")?;
+
+        let mut statement = transaction.prepare(
+            "SELECT DISTINCT d.run_id
+             FROM flow_artifacts a
+             JOIN flow_node_attempts n ON n.id=a.attempt_id
+             JOIN flow_device_runs d ON d.id=n.device_run_id
+             JOIN flow_runs r ON r.id=d.run_id
+             ORDER BY d.run_id ASC",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut run_ids = Vec::new();
+        for row in rows {
+            run_ids.push(parse_uuid(&row?, "Flow artifact run ID")?);
+        }
+        drop(statement);
+
+        let mut artifacts = Vec::with_capacity(expected_count);
+        for run_id in run_ids {
+            let detail = query_flow_run_detail(&transaction, run_id)?
+                .context("Flow artifact parent run disappeared")?;
+            artifacts.extend(detail.artifacts);
+        }
+        ensure!(
+            artifacts.len() == expected_count,
+            "persisted Flow artifact ancestry is incomplete"
+        );
+        artifacts.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        transaction.commit()?;
+        Ok(artifacts)
+    }
+
+    pub fn get_flow_artifact(
+        &self,
+        artifact_id: Uuid,
+    ) -> anyhow::Result<Option<FlowArtifactRecord>> {
+        let mut connection = self.conn()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let owner_run_id: Option<Option<String>> = transaction
+            .query_row(
+                "SELECT d.run_id
+                 FROM flow_artifacts a
+                 LEFT JOIN flow_node_attempts n ON n.id=a.attempt_id
+                 LEFT JOIN flow_device_runs d ON d.id=n.device_run_id
+                 WHERE a.id=?1",
+                [artifact_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(owner_run_id) = owner_run_id else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        let owner_run_id =
+            owner_run_id.context("persisted Flow artifact ancestry is incomplete")?;
+        let owner_run_id = parse_uuid(&owner_run_id, "Flow artifact run ID")?;
+        let detail = query_flow_run_detail(&transaction, owner_run_id)?
+            .context("Flow artifact parent run disappeared")?;
+        let artifact = detail
+            .artifacts
+            .into_iter()
+            .find(|artifact| artifact.id == artifact_id)
+            .context("persisted Flow artifact disappeared from its parent projection")?;
+        transaction.commit()?;
+        Ok(Some(artifact))
+    }
+
     pub fn transition_attempt(
         &self,
         attempt_id: Uuid,
@@ -3687,6 +3764,51 @@ mod tests {
         (database, path, run.id, attempt.id, node)
     }
 
+    fn create_screenshot_artifact(
+        database: &Database,
+        udid: &str,
+        created_at: chrono::DateTime<Utc>,
+        sha256: String,
+    ) -> (Uuid, Uuid, FlowArtifactRecord) {
+        let (revision, node) = save_revision(
+            database,
+            ActionKind::Screenshot,
+            CompiledActionConfig::Screenshot {
+                label: "screen.png".to_string(),
+                format: "png".to_string(),
+            },
+        );
+        let run = database
+            .create_flow_run(&revision, selection(&[udid]))
+            .expect("create screenshot run");
+        let device = database
+            .create_flow_device_run(run.id, udid)
+            .expect("create screenshot device run");
+        ready_device(database, device.id);
+        let attempt = database
+            .create_flow_attempt(device.id, &node, SideEffectClass::ArtifactWrite, 1)
+            .expect("create screenshot attempt");
+        set_attempt_state(database, attempt.id, FlowAttemptState::Verifying);
+        let artifact_id = Uuid::new_v4();
+        let artifact = FlowArtifactRecord {
+            id: artifact_id,
+            attempt_id: attempt.id,
+            relative_path: format!(
+                "{}/{}/{}/{}.png",
+                run.id, device.id, attempt.id, artifact_id
+            ),
+            label: "screen.png".to_string(),
+            kind: "png".to_string(),
+            size: 128,
+            sha256,
+            created_at,
+        };
+        database
+            .publish_artifact_and_succeed(attempt.id, &artifact)
+            .expect("publish screenshot artifact");
+        (run.id, device.id, artifact)
+    }
+
     fn set_attempt_state(database: &Database, attempt_id: Uuid, state: FlowAttemptState) {
         let state = serde_json::to_value(state)
             .expect("state JSON")
@@ -4710,6 +4832,107 @@ mod tests {
                     .get::<_, i64>(0))
                 .expect("artifact count"),
             1
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn committed_artifact_query_covers_terminal_and_recovery_runs() {
+        let (database, path) = database_fixture();
+        let newer_time = Utc::now();
+        let older_time = newer_time - chrono::Duration::seconds(1);
+        let (terminal_run_id, terminal_device_id, terminal_artifact) =
+            create_screenshot_artifact(&database, "terminal-device", older_time, "a".repeat(64));
+        database
+            .mark_device_terminal(
+                terminal_device_id,
+                &[FlowDeviceRunState::Running],
+                FlowDeviceRunState::Succeeded,
+                None,
+                release_proof("terminal-device"),
+            )
+            .expect("terminalize screenshot device");
+        assert_eq!(
+            database
+                .recompute_run_projection(terminal_run_id)
+                .expect("project terminal screenshot run")
+                .state,
+            FlowAggregateState::Succeeded
+        );
+
+        let (_recovery_run_id, _recovery_device_id, recovery_artifact) =
+            create_screenshot_artifact(&database, "recovery-device", newer_time, "b".repeat(64));
+        let recovery_artifact_ids = database
+            .load_flow_recovery_contexts()
+            .expect("load recovery contexts")
+            .into_iter()
+            .flat_map(|context| context.artifacts)
+            .map(|artifact| artifact.id)
+            .collect::<Vec<_>>();
+        assert_eq!(recovery_artifact_ids, vec![recovery_artifact.id]);
+
+        let committed = database
+            .list_committed_flow_artifacts()
+            .expect("list every committed artifact");
+        assert_eq!(
+            committed,
+            vec![terminal_artifact.clone(), recovery_artifact.clone()]
+        );
+        assert_eq!(
+            database
+                .get_flow_artifact(terminal_artifact.id)
+                .expect("get terminal artifact"),
+            Some(terminal_artifact)
+        );
+        assert_eq!(
+            database
+                .get_flow_artifact(recovery_artifact.id)
+                .expect("get recovery artifact"),
+            Some(recovery_artifact)
+        );
+        assert_eq!(
+            database
+                .get_flow_artifact(Uuid::new_v4())
+                .expect("get missing artifact"),
+            None
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn artifact_repository_queries_reject_invalid_persisted_ancestry() {
+        let (database, path) = database_fixture();
+        let (_run_id, device_id, artifact) =
+            create_screenshot_artifact(&database, "fixture-device", Utc::now(), "c".repeat(64));
+        let invalid_path = format!(
+            "{}/{}/{}/{}.png",
+            Uuid::new_v4(),
+            device_id,
+            artifact.attempt_id,
+            artifact.id
+        );
+        database
+            .conn()
+            .expect("corruption fixture connection")
+            .execute(
+                "UPDATE flow_artifacts SET relative_path=?2 WHERE id=?1",
+                params![artifact.id.to_string(), invalid_path],
+            )
+            .expect("seed invalid artifact ancestry");
+
+        let list_error = database
+            .list_committed_flow_artifacts()
+            .expect_err("invalid ancestry must fail list");
+        assert!(
+            list_error.to_string().contains("artifact path"),
+            "unexpected list error: {list_error:#}"
+        );
+        let get_error = database
+            .get_flow_artifact(artifact.id)
+            .expect_err("invalid ancestry must fail get");
+        assert!(
+            get_error.to_string().contains("artifact path"),
+            "unexpected get error: {get_error:#}"
         );
         cleanup(&path);
     }

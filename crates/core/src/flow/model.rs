@@ -542,6 +542,19 @@ pub struct RevisionConflict {
     pub actual: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, thiserror::Error)]
+#[serde(rename_all = "camelCase")]
+#[error("flow {flow_id} does not exist")]
+pub struct FlowNotFound {
+    pub flow_id: FlowId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowArchiveMutation {
+    pub flow_id: FlowId,
+    pub document_revision: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CompiledFlowNode {

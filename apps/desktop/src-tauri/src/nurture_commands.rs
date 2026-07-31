@@ -32,6 +32,7 @@ pub fn nurture_save_settings(
             settings.like_prob, settings.comment_prob
         ));
     }
+    let _admission = state.ensure_accepting_work()?;
     let prev = state.db.get_nurture_settings().unwrap_or_default();
     state.db.save_nurture_settings(&settings).map_err(err)?;
     // When schedule is (re)enabled, schedule the next tick from now.
@@ -82,6 +83,7 @@ pub async fn nurture_start(
     udids: Vec<String>,
     duration_minutes: Option<u32>,
 ) -> Result<Vec<String>, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     if udids.is_empty() {
         return Err("Chưa chọn thiết bị".into());
     }
@@ -142,6 +144,7 @@ async fn preflight_comment_job(
 
 #[tauri::command]
 pub fn nurture_stop(state: State<'_, AppState>, udids: Vec<String>) -> Result<(), String> {
+    let _admission = state.ensure_accepting_work()?;
     if udids.is_empty() {
         state.nurture.stop_all();
     } else {

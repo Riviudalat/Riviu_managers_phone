@@ -5,8 +5,9 @@ use uuid::Uuid;
 
 use super::Database;
 use crate::{
-    canonical_compiled_plan_json, compiled_plan_sha256, CompiledFlowPlanV2, FlowDocumentV2, FlowId,
-    FlowRevisionRecord, FlowSummary, RevisionConflict, FLOW_SCHEMA_VERSION,
+    canonical_compiled_plan_json, compiled_plan_sha256, CompiledFlowPlanV2, FlowArchiveMutation,
+    FlowDocumentV2, FlowId, FlowNotFound, FlowRevisionRecord, FlowSummary, RevisionConflict,
+    FLOW_SCHEMA_VERSION,
 };
 
 impl Database {
@@ -174,15 +175,30 @@ impl Database {
     }
 
     pub fn archive_flow(&self, id: FlowId) -> anyhow::Result<()> {
-        let connection = self.conn()?;
-        let changed = connection.execute(
-            "UPDATE flow_documents SET archived=1,updated_at=?2 WHERE id=?1",
-            params![id.to_string(), timestamp()],
-        )?;
-        if changed != 1 {
-            anyhow::bail!("flow {id} not found");
-        }
-        Ok(())
+        self.archive_flow_atomic(id).map(|_| ())
+    }
+
+    pub fn archive_flow_atomic(&self, id: FlowId) -> anyhow::Result<FlowArchiveMutation> {
+        let mut connection = self.conn()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let document_revision = transaction
+            .query_row(
+                "UPDATE flow_documents SET archived=1,updated_at=?2
+                 WHERE id=?1 RETURNING latest_revision",
+                params![id.to_string(), timestamp()],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(document_revision) = document_revision else {
+            return Err(FlowNotFound { flow_id: id }.into());
+        };
+        let document_revision =
+            sql_to_revision(document_revision, "flow_documents.latest_revision")?;
+        transaction.commit()?;
+        Ok(FlowArchiveMutation {
+            flow_id: id,
+            document_revision,
+        })
     }
 }
 
@@ -622,6 +638,63 @@ mod tests {
             .expect("latest concurrent revision")
             .expect("saved concurrent revision");
         assert_eq!(latest.document.revision, 2);
+        drop(database);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn repeated_archive_returns_the_atomic_document_projection() {
+        let (database, path) = flow_database_fixture();
+        let (document, compiled, hash) = revision_one("Archive projection");
+        let first = database
+            .save_flow_revision(None, &document, &compiled, &hash)
+            .expect("save revision one");
+
+        let mut second_document = first.document.clone();
+        second_document.revision = 2;
+        second_document.name = "Archive projection v2".into();
+        let mut second_plan = first.compiled_plan.clone();
+        second_plan.revision = 2;
+        let second_hash = compiled_plan_sha256(&second_plan).expect("second revision hash");
+        database
+            .save_flow_revision(Some(1), &second_document, &second_plan, &second_hash)
+            .expect("save revision two");
+
+        let archived = database
+            .archive_flow_atomic(document.id)
+            .expect("first archive");
+        let archived_again = database
+            .archive_flow_atomic(document.id)
+            .expect("repeated archive");
+        assert_eq!(archived.flow_id, document.id);
+        assert_eq!(archived.document_revision, 2);
+        assert_eq!(archived_again, archived);
+        assert!(
+            database
+                .list_flows(true)
+                .expect("list archived Flow")
+                .into_iter()
+                .find(|flow| flow.id == document.id)
+                .expect("archived summary")
+                .archived
+        );
+
+        drop(database);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn archive_missing_flow_returns_typed_not_found() {
+        let (database, path) = flow_database_fixture();
+        let flow_id = Uuid::new_v4();
+        let error = database
+            .archive_flow_atomic(flow_id)
+            .expect_err("missing archive must fail");
+        assert_eq!(
+            error.downcast_ref::<crate::FlowNotFound>(),
+            Some(&crate::FlowNotFound { flow_id })
+        );
+
         drop(database);
         cleanup(&path);
     }

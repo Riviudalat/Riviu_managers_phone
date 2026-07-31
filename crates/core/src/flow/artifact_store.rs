@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 use super::{validate_artifact_label, FlowArtifactRecord};
 
+const MAX_READ_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PreparedArtifact {
@@ -387,6 +389,56 @@ impl FlowArtifactStore {
 
         failures.sort_by_key(|failure| (failure.artifact_id, failure.code));
         Ok(failures)
+    }
+
+    pub fn read_committed_image(&self, row: &FlowArtifactRecord) -> anyhow::Result<Vec<u8>> {
+        self.validate_label(&row.label, &row.kind)?;
+        ensure!(row.size > 0, "committed artifact has zero size");
+        ensure!(
+            row.size <= MAX_READ_ARTIFACT_BYTES,
+            "committed artifact exceeds the read limit"
+        );
+        ensure!(
+            is_lower_sha256(&row.sha256),
+            "committed artifact hash is invalid"
+        );
+
+        let relative = PathBuf::from(&row.relative_path);
+        validate_generated_relative_path(&relative, row.id, Some(row.attempt_id), &row.kind)?;
+        let path = self.root.join(relative);
+        let canonical = self.ensure_managed_file(&path)?;
+        let metadata = canonical
+            .metadata()
+            .context("read committed artifact metadata")?;
+        ensure!(
+            metadata.len() == row.size,
+            "committed artifact size mismatch"
+        );
+
+        let capacity = usize::try_from(row.size).context("artifact size exceeds usize")?;
+        let mut bytes = Vec::with_capacity(capacity);
+        File::open(&canonical)
+            .context("open committed artifact")?
+            .take(MAX_READ_ARTIFACT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .context("read committed artifact")?;
+        ensure!(
+            u64::try_from(bytes.len()).context("artifact byte length exceeds u64")? == row.size,
+            "committed artifact changed while reading"
+        );
+        ensure!(
+            sha256_bytes(&bytes) == row.sha256,
+            "committed artifact hash mismatch"
+        );
+
+        let (format, _) = expected_image_format(&row.kind)?;
+        ensure!(
+            image::guess_format(&bytes).context("detect committed artifact format")? == format,
+            "committed artifact format mismatch"
+        );
+        image::load_from_memory_with_format(&bytes, format)
+            .context("decode committed artifact image")?;
+        Ok(bytes)
     }
 
     fn validate_prepared(&self, artifact: &PreparedArtifact) -> anyhow::Result<()> {
@@ -845,6 +897,38 @@ mod tests {
         store
             .rollback_file(&prepared)
             .expect("cleanup committed file");
+        fs::remove_dir_all(root).expect("remove artifact root");
+    }
+
+    #[test]
+    fn committed_artifact_read_revalidates_exact_bytes() {
+        let root = temp_artifact_root();
+        let store = FlowArtifactStore::new(&root).expect("store");
+        let prepared = prepare(&store, "screen.png", "png", PNG);
+        let row = record(&prepared, "screen.png");
+        let relative = store.publish_file(&prepared).expect("publish committed");
+
+        assert_eq!(
+            store.read_committed_image(&row).expect("read committed"),
+            PNG
+        );
+
+        fs::write(root.join(&relative), b"changed").expect("mutate committed image");
+        assert!(store.read_committed_image(&row).is_err());
+        fs::remove_dir_all(root).expect("remove artifact root");
+    }
+
+    #[test]
+    fn committed_artifact_read_rejects_an_unmanaged_path() {
+        let root = temp_artifact_root();
+        let store = FlowArtifactStore::new(&root).expect("store");
+        let prepared = prepare(&store, "screen.png", "png", PNG);
+        let mut row = record(&prepared, "screen.png");
+        row.relative_path = "../outside.png".to_string();
+
+        assert!(store.read_committed_image(&row).is_err());
+
+        store.rollback_file(&prepared).expect("rollback staging");
         fs::remove_dir_all(root).expect("remove artifact root");
     }
 

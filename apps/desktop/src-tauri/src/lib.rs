@@ -3,6 +3,7 @@ mod agent_runtime;
 mod command_error;
 mod commands;
 mod farm_commands;
+mod flow_commands;
 mod nurture_commands;
 mod state;
 
@@ -97,6 +98,21 @@ pub fn run() {
             farm_commands::list_users,
             farm_commands::analytics_summary,
             farm_commands::api_docs,
+            flow_commands::flow_action_catalog,
+            flow_commands::flow_list,
+            flow_commands::flow_get,
+            flow_commands::flow_validate,
+            flow_commands::flow_save_revision,
+            flow_commands::flow_archive,
+            flow_commands::flow_import_legacy,
+            flow_commands::flow_export,
+            flow_commands::flow_run,
+            flow_commands::flow_cancel_run,
+            flow_commands::flow_retry_attempt,
+            flow_commands::flow_list_runs,
+            flow_commands::flow_get_run,
+            flow_commands::flow_coordinate_frame,
+            flow_commands::flow_read_artifact,
             nurture_commands::nurture_get_settings,
             nurture_commands::nurture_save_settings,
             nurture_commands::nurture_list_costs,
@@ -113,11 +129,17 @@ pub fn run() {
             return;
         }
         let state = handle.state::<AppState>();
+        state.reject_new_work();
         state.nurture.begin_shutdown();
+        state.flows.stop_all();
         state.jobs.stop_all();
+        tauri::async_runtime::block_on(state.wait_for_mutating_commands());
         let control = state.control.clone();
         if let Err(error) = tauri::async_runtime::block_on(state.shutdown_background_sampler()) {
             log::error!("background sampler shutdown failed: {error:#}");
+        }
+        if let Err(error) = tauri::async_runtime::block_on(state.flows.shutdown()) {
+            log::error!("Flow runtime shutdown failed: {error:#}");
         }
         if let Err(error) = tauri::async_runtime::block_on(state.jobs.shutdown()) {
             log::error!("job queue shutdown failed: {error:#}");
@@ -126,4 +148,128 @@ pub fn run() {
             log::error!("device cleanup shutdown failed: {error}");
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    fn command_body<'a>(source: &'a str, name: &str) -> &'a str {
+        let sync = format!("pub fn {name}");
+        let asynchronous = format!("pub async fn {name}");
+        let start = source
+            .find(&asynchronous)
+            .or_else(|| source.find(&sync))
+            .unwrap_or_else(|| panic!("missing mutating command {name}"));
+        let tail = &source[start..];
+        let end = tail.find("\n#[tauri::command]").unwrap_or(tail.len());
+        &tail[..end]
+    }
+
+    #[test]
+    fn every_mutating_command_holds_application_admission() {
+        let inventories = [
+            (
+                include_str!("commands.rs"),
+                &[
+                    "refresh_devices",
+                    "prepare_device",
+                    "install_ipa",
+                    "uninstall_app",
+                    "screenshot",
+                    "syslog",
+                    "reboot_device",
+                    "device_tap",
+                    "device_swipe",
+                    "device_type_text",
+                    "device_home",
+                    "group_input",
+                    "set_stream_settings",
+                    "run_script",
+                    "cancel_job",
+                    "save_script",
+                    "set_apple_id",
+                    "clear_apple_id",
+                    "resign_wda",
+                    "bulk_resign_wda",
+                ][..],
+            ),
+            (
+                include_str!("agent_commands.rs"),
+                &[
+                    "agent_save_settings",
+                    "agent_preflight",
+                    "agent_repair",
+                    "agent_bulk_repair",
+                ][..],
+            ),
+            (
+                include_str!("farm_commands.rs"),
+                &[
+                    "auth_session",
+                    "auth_login",
+                    "auth_register",
+                    "save_device_meta",
+                    "save_group",
+                    "delete_group",
+                    "save_proxy",
+                    "delete_proxy",
+                    "add_material",
+                    "delete_material",
+                    "push_material",
+                    "add_app_library",
+                    "delete_app_library",
+                    "install_library_app",
+                    "save_schedule",
+                    "delete_schedule",
+                    "create_publish_task",
+                ][..],
+            ),
+            (
+                include_str!("nurture_commands.rs"),
+                &["nurture_save_settings", "nurture_start", "nurture_stop"][..],
+            ),
+            (
+                include_str!("flow_commands.rs"),
+                &[
+                    "flow_save_revision",
+                    "flow_archive",
+                    "flow_run",
+                    "flow_cancel_run",
+                    "flow_retry_attempt",
+                    "flow_coordinate_frame",
+                ][..],
+            ),
+        ];
+
+        for (source, commands) in inventories {
+            for command in commands {
+                assert!(
+                    command_body(source, command).contains("ensure_accepting_work()"),
+                    "mutating command {command} bypasses application admission"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exit_order_cancels_workers_then_drains_commands_before_cleanup() {
+        let source = include_str!("lib.rs");
+        let ordered = [
+            "state.reject_new_work()",
+            "state.nurture.begin_shutdown()",
+            "state.flows.stop_all()",
+            "state.jobs.stop_all()",
+            "state.wait_for_mutating_commands()",
+            "state.shutdown_background_sampler()",
+            "state.flows.shutdown()",
+            "state.jobs.shutdown()",
+            "state.control.shutdown_cleanup()",
+        ];
+        let mut offset = 0;
+        for operation in ordered {
+            let position = source[offset..]
+                .find(operation)
+                .unwrap_or_else(|| panic!("missing shutdown operation {operation}"));
+            offset += position + operation.len();
+        }
+    }
 }

@@ -147,6 +147,7 @@ pub fn agent_save_settings(
     state: State<'_, AppState>,
     settings: AgentSettings,
 ) -> Result<AgentRuntimeView, String> {
+    let _admission = state.ensure_accepting_work()?;
     state.db.save_agent_settings(&settings).map_err(err)?;
     state.control.set_agent_settings(settings.clone());
     Ok(build_runtime_view(
@@ -170,6 +171,7 @@ pub async fn agent_preflight(
     state: State<'_, AppState>,
     udid: String,
 ) -> Result<AgentStatus, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     preflight_with_control(&state.control, &udid)
         .await
         .map_err(CommandError::from)
@@ -180,6 +182,7 @@ pub async fn agent_repair(
     state: State<'_, AppState>,
     udid: String,
 ) -> Result<AgentStatus, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     repair_with_control(&state.control, &udid)
         .await
         .map_err(CommandError::from)
@@ -190,6 +193,7 @@ pub async fn agent_bulk_repair(
     state: State<'_, AppState>,
     udids: Vec<String>,
 ) -> Result<Vec<AgentStatus>, String> {
+    let _admission = state.ensure_accepting_work()?;
     Ok(bulk_repair_with_control(&state.control, udids).await)
 }
 

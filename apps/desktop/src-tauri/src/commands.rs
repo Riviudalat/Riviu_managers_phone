@@ -87,6 +87,7 @@ pub async fn list_devices(state: State<'_, AppState>) -> Result<Vec<DeviceInfo>,
 
 #[tauri::command]
 pub async fn refresh_devices(state: State<'_, AppState>) -> Result<Vec<DeviceInfo>, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     let devices = state
         .control
         .list_devices()
@@ -101,6 +102,7 @@ pub async fn prepare_device(
     state: State<'_, AppState>,
     udid: String,
 ) -> Result<DeviceInfo, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     state
         .registry
         .set_status(&udid, riviu_core::DeviceStatus::Preparing, None);
@@ -130,6 +132,7 @@ pub async fn install_ipa(
     udid: String,
     path: String,
 ) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     let context = state
         .control
         .try_acquire_exclusive(&udid, DeviceWorkOwner::Repair)
@@ -148,6 +151,7 @@ pub async fn uninstall_app(
     udid: String,
     bundle_id: String,
 ) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     let context = state
         .control
         .try_acquire_exclusive(&udid, DeviceWorkOwner::Repair)
@@ -162,6 +166,7 @@ pub async fn uninstall_app(
 
 #[tauri::command]
 pub async fn screenshot(state: State<'_, AppState>, udid: String) -> Result<String, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     let dest = state.artifacts_dir.join("screenshots").join(format!(
         "{udid}-{}.jpg",
         chrono::Utc::now().timestamp_millis()
@@ -185,6 +190,7 @@ pub async fn syslog(
     udid: String,
     lines: Option<usize>,
 ) -> Result<String, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     let context = state
         .control
         .try_acquire_exclusive(&udid, DeviceWorkOwner::ManualControl)
@@ -199,6 +205,7 @@ pub async fn syslog(
 
 #[tauri::command]
 pub async fn reboot_device(state: State<'_, AppState>, udid: String) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     let context = state
         .control
         .try_acquire_exclusive(&udid, DeviceWorkOwner::Repair)
@@ -220,6 +227,7 @@ pub async fn device_tap(
     image_w: Option<f64>,
     image_h: Option<f64>,
 ) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     let context = open_ui_context(
         &state.control,
         &udid,
@@ -249,6 +257,7 @@ pub async fn device_swipe(
     image_w: Option<f64>,
     image_h: Option<f64>,
 ) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     let context = open_ui_context(
         &state.control,
         &udid,
@@ -280,6 +289,7 @@ pub async fn device_type_text(
     udid: String,
     text: String,
 ) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     let kind = if state.control.requires_fresh_text_session() {
         InteractionSessionKind::FreshText
     } else {
@@ -300,6 +310,7 @@ pub async fn device_type_text(
 
 #[tauri::command]
 pub async fn device_home(state: State<'_, AppState>, udid: String) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     let context = open_ui_context(
         &state.control,
         &udid,
@@ -332,6 +343,7 @@ pub async fn group_input(
     image_w: Option<f64>,
     image_h: Option<f64>,
 ) -> Result<GroupInputReport, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     if !matches!(kind.as_str(), "tap" | "swipe" | "type" | "home") {
         return Err(CommandError::operation(format!(
             "unknown group input kind: {kind}"
@@ -424,11 +436,15 @@ pub fn get_stream_settings(state: State<'_, AppState>) -> StreamSettings {
 }
 
 #[tauri::command]
-pub fn set_stream_settings(state: State<'_, AppState>, settings: StreamSettings) -> StreamSettings {
+pub fn set_stream_settings(
+    state: State<'_, AppState>,
+    settings: StreamSettings,
+) -> Result<StreamSettings, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     let mut s = settings;
     s.fps = riviu_core::STREAM_FPS;
     *state.stream_settings.write() = s.clone();
-    s
+    Ok(s)
 }
 
 #[tauri::command]
@@ -449,12 +465,14 @@ pub async fn run_script(
     script_json: String,
     udids: Vec<String>,
 ) -> Result<JobRecord, String> {
+    let _admission = state.ensure_accepting_work()?;
     let script: AutomationScript = parse_script(&script_json).map_err(err)?;
     state.jobs.enqueue(script, udids).await.map_err(err)
 }
 
 #[tauri::command]
 pub fn cancel_job(state: State<'_, AppState>, job_id: String) -> Result<(), String> {
+    let _admission = state.ensure_accepting_work()?;
     let id = uuid::Uuid::parse_str(&job_id).map_err(err)?;
     state.jobs.cancel(id);
     Ok(())
@@ -471,6 +489,7 @@ pub fn save_script(
     name: String,
     body_json: String,
 ) -> Result<(), String> {
+    let _admission = state.ensure_accepting_work()?;
     parse_script(&body_json).map_err(err)?;
     state.db.save_script(&name, &body_json).map_err(err)
 }
@@ -491,16 +510,19 @@ pub fn set_apple_id(
     email: String,
     password: String,
 ) -> Result<(), String> {
+    let _admission = state.ensure_accepting_work()?;
     state.signing.save_apple_id(&email, &password).map_err(err)
 }
 
 #[tauri::command]
 pub fn clear_apple_id(state: State<'_, AppState>) -> Result<(), String> {
+    let _admission = state.ensure_accepting_work()?;
     state.signing.clear_apple_id().map_err(err)
 }
 
 #[tauri::command]
 pub async fn resign_wda(state: State<'_, AppState>, udid: String) -> Result<String, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     // Legacy stock tooling only; this agent does not provide trusted TikTok text input.
     state
         .registry
@@ -540,6 +562,7 @@ pub async fn bulk_resign_wda(
     state: State<'_, AppState>,
     udids: Vec<String>,
 ) -> Result<Vec<String>, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     let mut contexts = Vec::with_capacity(udids.len());
     for udid in &udids {
         contexts.push(

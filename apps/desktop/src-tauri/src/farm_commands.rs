@@ -21,6 +21,7 @@ fn log(state: &AppState, action: &str, detail: &str) {
 
 #[tauri::command]
 pub fn auth_session(state: State<'_, AppState>) -> Result<AuthSession, String> {
+    let _admission = state.ensure_accepting_work()?;
     let show = std::env::var("RIVIU_SHOW_AUTH")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
@@ -38,6 +39,7 @@ pub fn auth_login(
     email: String,
     password: String,
 ) -> Result<LocalUser, String> {
+    let _admission = state.ensure_accepting_work()?;
     let user = state
         .db
         .login_user(&email, &password)
@@ -53,6 +55,7 @@ pub fn auth_register(
     email: String,
     password: String,
 ) -> Result<LocalUser, String> {
+    let _admission = state.ensure_accepting_work()?;
     let user = state
         .db
         .register_user(&email, &password, "operator")
@@ -68,6 +71,7 @@ pub fn get_device_meta(state: State<'_, AppState>, udid: String) -> Result<Devic
 
 #[tauri::command]
 pub fn save_device_meta(state: State<'_, AppState>, meta: DeviceMeta) -> Result<(), String> {
+    let _admission = state.ensure_accepting_work()?;
     state.db.upsert_device_meta(&meta).map_err(err)?;
     log(&state, "device.meta", &meta.udid);
     Ok(())
@@ -80,6 +84,7 @@ pub fn list_groups(state: State<'_, AppState>) -> Result<Vec<DeviceGroup>, Strin
 
 #[tauri::command]
 pub fn save_group(state: State<'_, AppState>, group: DeviceGroup) -> Result<DeviceGroup, String> {
+    let _admission = state.ensure_accepting_work()?;
     let mut g = group;
     if g.id.is_empty() {
         g.id = Uuid::new_v4().to_string();
@@ -95,6 +100,7 @@ pub fn save_group(state: State<'_, AppState>, group: DeviceGroup) -> Result<Devi
 
 #[tauri::command]
 pub fn delete_group(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let _admission = state.ensure_accepting_work()?;
     state.db.delete_group(&id).map_err(err)?;
     log(&state, "group.delete", &id);
     Ok(())
@@ -107,6 +113,7 @@ pub fn list_proxies(state: State<'_, AppState>) -> Result<Vec<ProxyConfig>, Stri
 
 #[tauri::command]
 pub fn save_proxy(state: State<'_, AppState>, proxy: ProxyConfig) -> Result<ProxyConfig, String> {
+    let _admission = state.ensure_accepting_work()?;
     let mut p = proxy;
     if p.id.is_empty() {
         p.id = Uuid::new_v4().to_string();
@@ -118,6 +125,7 @@ pub fn save_proxy(state: State<'_, AppState>, proxy: ProxyConfig) -> Result<Prox
 
 #[tauri::command]
 pub fn delete_proxy(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let _admission = state.ensure_accepting_work()?;
     state.db.delete_proxy(&id).map_err(err)?;
     log(&state, "proxy.delete", &id);
     Ok(())
@@ -148,6 +156,7 @@ pub fn add_material(
     source_path: String,
     name: Option<String>,
 ) -> Result<MaterialItem, String> {
+    let _admission = state.ensure_accepting_work()?;
     let src = PathBuf::from(&source_path);
     if !src.is_file() {
         return Err(format!("file not found: {source_path}"));
@@ -190,6 +199,7 @@ pub fn add_material(
 
 #[tauri::command]
 pub fn delete_material(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let _admission = state.ensure_accepting_work()?;
     if let Some(item) = state
         .db
         .list_materials()
@@ -210,6 +220,7 @@ pub async fn push_material(
     udid: String,
     material_id: String,
 ) -> Result<String, String> {
+    let _admission = state.ensure_accepting_work()?;
     let item = state
         .db
         .list_materials()
@@ -259,6 +270,7 @@ pub fn add_app_library(
     bundle_id: Option<String>,
     version: Option<String>,
 ) -> Result<AppLibraryItem, String> {
+    let _admission = state.ensure_accepting_work()?;
     let src = PathBuf::from(&source_path);
     if !src.is_file() {
         return Err(format!("IPA not found: {source_path}"));
@@ -288,6 +300,7 @@ pub fn add_app_library(
 
 #[tauri::command]
 pub fn delete_app_library(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let _admission = state.ensure_accepting_work()?;
     if let Some(item) = state
         .db
         .list_apps_library()
@@ -308,6 +321,7 @@ pub async fn install_library_app(
     udid: String,
     app_id: String,
 ) -> Result<(), String> {
+    let _admission = state.ensure_accepting_work()?;
     let item = state
         .db
         .list_apps_library()
@@ -339,6 +353,7 @@ pub fn save_schedule(
     state: State<'_, AppState>,
     schedule: ScheduleItem,
 ) -> Result<ScheduleItem, String> {
+    let _admission = state.ensure_accepting_work()?;
     let mut s = schedule;
     if s.id.is_empty() {
         s.id = Uuid::new_v4().to_string();
@@ -354,6 +369,7 @@ pub fn save_schedule(
 
 #[tauri::command]
 pub fn delete_schedule(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let _admission = state.ensure_accepting_work()?;
     state.db.delete_schedule(&id).map_err(err)?;
     log(&state, "schedule.delete", &id);
     Ok(())
@@ -372,6 +388,7 @@ pub async fn create_publish_task(
     material_ids: Vec<String>,
     udids: Vec<String>,
 ) -> Result<PublishTask, String> {
+    let _admission = state.ensure_accepting_work()?;
     let task = PublishTask {
         id: Uuid::new_v4().to_string(),
         name,
