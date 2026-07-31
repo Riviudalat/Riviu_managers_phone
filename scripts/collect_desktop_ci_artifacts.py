@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -862,6 +863,70 @@ def verify_windows_package(
     return evidence
 
 
+def dmg_is_mounted_at(mount_point: Path) -> bool:
+    try:
+        info = subprocess.run(
+            ["hdiutil", "info", "-plist"],
+            cwd=REPOSITORY_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ArtifactError(f"failed to inspect mounted DMGs: {error}") from error
+    if info.returncode != 0:
+        raise ArtifactError(
+            f"failed to inspect mounted DMGs: {info.stderr[-1000:]!r}"
+        )
+    try:
+        payload = plistlib.loads(info.stdout.encode("utf-8"))
+    except plistlib.InvalidFileException as error:
+        raise ArtifactError("hdiutil info returned an invalid plist") from error
+    if not isinstance(payload, dict):
+        raise ArtifactError("hdiutil info plist root must be a dictionary")
+    images = payload.get("images", [])
+    if not isinstance(images, list):
+        raise ArtifactError("hdiutil info plist images must be an array")
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        entities = image.get("system-entities", [])
+        if not isinstance(entities, list):
+            continue
+        for entity in entities:
+            if not isinstance(entity, dict):
+                continue
+            mounted = entity.get("mount-point")
+            if isinstance(mounted, str) and Path(mounted).resolve() == mount_point:
+                return True
+    return False
+
+
+def detach_dmg_with_retry(mount_point: Path) -> ArtifactError | None:
+    last_failure = "unknown detach failure"
+    for attempt in range(3):
+        command = ["hdiutil", "detach"]
+        if attempt == 2:
+            command.append("-force")
+        command.append(str(mount_point))
+        try:
+            detached = subprocess.run(
+                command,
+                cwd=REPOSITORY_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if detached.returncode == 0:
+                return None
+            last_failure = detached.stderr[-1000:]
+        except (OSError, subprocess.TimeoutExpired) as error:
+            last_failure = str(error)
+        if attempt < 2:
+            time.sleep(1)
+    return ArtifactError(f"failed to detach DMG after 3 attempts: {last_failure!r}")
+
+
 def verify_macos_package(
     bundle_dir: Path, target: str, runtime_dir: Path, runtime: dict[str, Any]
 ) -> dict[str, Any]:
@@ -872,10 +937,12 @@ def verify_macos_package(
         tempfile.mkdtemp(prefix="desktop-dmg-mount-", dir=bundle_dir.parent)
     ).resolve()
     attached = False
+    attach_attempted = False
     evidence: dict[str, Any] | None = None
     primary_error: BaseException | None = None
     cleanup_error: ArtifactError | None = None
     try:
+        attach_attempted = True
         attachment = run_checked(
             [
                 "hdiutil",
@@ -946,22 +1013,19 @@ def verify_macos_package(
     except BaseException as error:
         primary_error = error
     finally:
-        if attached:
+        should_detach = attached
+        if attach_attempted and not attached:
             try:
-                detached = subprocess.run(
-                    ["hdiutil", "detach", str(mount_point)],
-                    cwd=REPOSITORY_ROOT,
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
-                if detached.returncode != 0:
-                    cleanup_error = ArtifactError(
-                        "failed to detach DMG: "
-                        f"{detached.stderr[-1000:]!r}"
-                    )
-            except (OSError, subprocess.TimeoutExpired) as error:
-                cleanup_error = ArtifactError(f"failed to detach DMG: {error}")
+                should_detach = dmg_is_mounted_at(mount_point)
+            except ArtifactError as error:
+                cleanup_error = error
+                should_detach = True
+        if should_detach:
+            detach_error = detach_dmg_with_retry(mount_point)
+            if detach_error is None:
+                cleanup_error = None
+            else:
+                cleanup_error = detach_error
         if cleanup_error is None:
             shutil.rmtree(mount_point, ignore_errors=True)
 

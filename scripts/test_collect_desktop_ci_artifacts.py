@@ -98,6 +98,7 @@ class ArtifactContractTests(unittest.TestCase):
                 patch.object(
                     artifacts.subprocess, "run", return_value=detach_failure
                 ) as detach,
+                patch.object(artifacts.time, "sleep"),
             ):
                 with self.assertRaisesRegex(
                     artifacts.ArtifactError, "invalid attachment plist"
@@ -106,9 +107,67 @@ class ArtifactContractTests(unittest.TestCase):
                         bundle_dir, "aarch64-apple-darwin", Path(temporary), {}
                     )
 
-            detach.assert_called_once()
+            self.assertEqual(detach.call_count, 3)
+            self.assertIn("-force", detach.call_args.args[0])
             self.assertIsInstance(raised.exception.__cause__, artifacts.ArtifactError)
-            self.assertIn("failed to detach DMG", str(raised.exception.__cause__))
+            self.assertIn("failed to detach DMG after 3 attempts", str(raised.exception.__cause__))
+
+    def test_partial_dmg_attach_discovers_and_detaches_the_mountpoint(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle_dir = root / "bundle" / "dmg"
+            bundle_dir.mkdir(parents=True)
+            dmg = bundle_dir / "fixture.dmg"
+            dmg.write_bytes(b"fixture")
+            mount_point = root / "owned-mount"
+            mount_point.mkdir()
+            info = subprocess.CompletedProcess(
+                args=["hdiutil"],
+                returncode=0,
+                stdout=artifacts.plistlib.dumps(
+                    {
+                        "images": [
+                            {
+                                "system-entities": [
+                                    {"mount-point": str(mount_point)}
+                                ]
+                            }
+                        ]
+                    }
+                ).decode("utf-8"),
+                stderr="",
+            )
+            detached = subprocess.CompletedProcess(
+                args=["hdiutil"], returncode=0, stdout="", stderr=""
+            )
+            attach_error = artifacts.ArtifactError("attach command failed")
+            with (
+                patch.object(artifacts, "find_installers", return_value=[dmg]),
+                patch.object(artifacts, "run_checked", side_effect=attach_error),
+                patch.object(
+                    artifacts.tempfile, "mkdtemp", return_value=str(mount_point)
+                ),
+                patch.object(
+                    artifacts.subprocess, "run", side_effect=[info, detached]
+                ) as system_command,
+            ):
+                with self.assertRaisesRegex(
+                    artifacts.ArtifactError, "attach command failed"
+                ) as raised:
+                    artifacts.verify_macos_package(
+                        bundle_dir, "aarch64-apple-darwin", root, {}
+                    )
+
+            self.assertIs(raised.exception, attach_error)
+            self.assertEqual(system_command.call_count, 2)
+            self.assertEqual(
+                system_command.call_args_list[0].args[0],
+                ["hdiutil", "info", "-plist"],
+            )
+            self.assertEqual(
+                system_command.call_args_list[1].args[0],
+                ["hdiutil", "detach", str(mount_point.resolve())],
+            )
 
     def test_windows_desktop_executable_requires_a_valid_x64_pe(self):
         with tempfile.TemporaryDirectory() as temporary:

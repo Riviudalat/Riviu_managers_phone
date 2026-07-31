@@ -1357,7 +1357,9 @@ type metadata khac nhau truoc moi pack. Mac kiem architecture va
 `codesign --verify --deep --strict`. DMG verifier phai attach vao exact mountpoint
 tam do collector tao va bat dau `finally` ngay sau attach; ke ca plist/mount validation
 loi van phai detach. Neu verify va detach cung loi thi giu verify error lam loi chinh
-va chain detach error lam cause.
+va chain detach error lam cause. `attach` timeout/nonzero van phai query
+`hdiutil info -plist` theo exact mountpoint; neu da mount thi detach toi da ba lan,
+lan cuoi co `-force`.
 Khong ha gate
 thanh chi tim thay installer hoac kiem sibling `.app` ngoai DMG.
 Production IPA va canonical-LF manifest van byte-contract o section 3.15; pipeline
