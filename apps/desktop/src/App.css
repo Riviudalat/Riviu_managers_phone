@@ -256,6 +256,14 @@
   gap: 6px;
 }
 
+.flow-loading {
+  display: grid;
+  min-height: 320px;
+  place-items: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .automation-tabs {
   display: flex;
   align-items: center;

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -20,7 +21,7 @@ use riviu_core::{
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
-use tokio::process::Child;
+use tokio::process::{Child, Command};
 
 use crate::config::{DriverConfig, DriverTarget};
 use crate::interaction_runtime::{
@@ -44,6 +45,60 @@ const VERIFIED_PROCESS_CONTROL_CONTRACT: &str = "verifiedProcessControl";
 const INTERACTION_DRIVER_ADAPTER_VERSION: &str = "interaction-v1";
 const INTERACTION_TARGET_BUNDLE_ID: &str = "com.ss.iphone.ugc.Ame";
 const RTMMO_TOKEN_ENV: &str = "RIVIU_RTMMO_TOKEN";
+
+#[derive(Debug, Clone)]
+struct SidecarProgram {
+    executable: PathBuf,
+    prefix_args: Vec<OsString>,
+}
+
+impl SidecarProgram {
+    async fn resolve(sidecar_root: &Path) -> anyhow::Result<Self> {
+        let bundled = sidecar_root
+            .join("pymobiledevice3")
+            .join("runtime")
+            .join(bundled_sidecar_filename());
+        if bundled.is_file() {
+            return Ok(Self {
+                executable: bundled,
+                prefix_args: Vec::new(),
+            });
+        }
+
+        let script = sidecar_root.join("pymobiledevice3").join("riviu_pmd.py");
+        if !script.is_file() {
+            anyhow::bail!(
+                "missing bundled sidecar {} and development script {}",
+                bundled.display(),
+                script.display()
+            );
+        }
+        Ok(Self {
+            executable: find_python().await?,
+            prefix_args: vec![script.into_os_string()],
+        })
+    }
+
+    fn command(&self) -> Command {
+        let mut command = background_command(&self.executable);
+        command.args(&self.prefix_args);
+        command
+    }
+
+    fn is_bundled(&self) -> bool {
+        self.prefix_args.is_empty()
+    }
+}
+
+#[cfg(windows)]
+fn bundled_sidecar_filename() -> &'static str {
+    "riviu-pmd.exe"
+}
+
+#[cfg(not(windows))]
+fn bundled_sidecar_filename() -> &'static str {
+    "riviu-pmd"
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamReadiness {
@@ -321,8 +376,7 @@ fn verified_process_control_from_ping(stdout: &[u8], command_succeeded: bool) ->
 
 #[derive(Clone)]
 pub struct PmdIosDriver {
-    python: PathBuf,
-    script: PathBuf,
+    sidecar: Option<SidecarProgram>,
     verified_app_termination: bool,
     streams: StreamHub,
     wda_host: String,
@@ -343,16 +397,9 @@ pub struct PmdIosDriver {
 
 impl PmdIosDriver {
     pub async fn probe(config: &DriverConfig) -> anyhow::Result<Self> {
-        let script = config
-            .sidecar_root
-            .join("pymobiledevice3")
-            .join("riviu_pmd.py");
-        if !script.exists() {
-            anyhow::bail!("missing sidecar script {}", script.display());
-        }
-        let python = find_python().await?;
-        let output = background_command(&python)
-            .arg(&script)
+        let sidecar = SidecarProgram::resolve(&config.sidecar_root).await?;
+        let output = sidecar
+            .command()
             .arg("ping")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -366,10 +413,18 @@ impl PmdIosDriver {
         }
         let verified_app_termination =
             verified_process_control_from_ping(&output.stdout, output.status.success());
+        tracing::info!(
+            distribution = if sidecar.is_bundled() {
+                "bundled"
+            } else {
+                "development-python"
+            },
+            executable = %sidecar.executable.display(),
+            "resolved pymobiledevice3 sidecar"
+        );
         let (profile, artifact, settings) = runtime_for_target(&config.target)?;
         let driver = Self::build(
-            python,
-            script,
+            Some(sidecar),
             verified_app_termination,
             profile,
             artifact,
@@ -388,8 +443,7 @@ impl PmdIosDriver {
     pub fn degraded(config: &DriverConfig) -> anyhow::Result<Self> {
         let (profile, artifact, settings) = runtime_for_target(&config.target)?;
         Ok(Self::build(
-            PathBuf::from("python3"),
-            PathBuf::new(),
+            None,
             false,
             profile,
             artifact,
@@ -399,8 +453,7 @@ impl PmdIosDriver {
     }
 
     fn build(
-        python: PathBuf,
-        script: PathBuf,
+        sidecar: Option<SidecarProgram>,
         verified_app_termination: bool,
         profile: WdaProfile,
         artifact: Option<AgentArtifact>,
@@ -408,8 +461,7 @@ impl PmdIosDriver {
         state_dir: PathBuf,
     ) -> Self {
         Self {
-            python,
-            script,
+            sidecar,
             verified_app_termination,
             streams: StreamHub::new(),
             wda_host: "127.0.0.1".into(),
@@ -424,6 +476,13 @@ impl PmdIosDriver {
             agent_settings: Arc::new(RwLock::new(agent_settings)),
             artifact,
         }
+    }
+
+    fn sidecar_command(&self) -> anyhow::Result<Command> {
+        self.sidecar
+            .as_ref()
+            .map(SidecarProgram::command)
+            .context("pymobiledevice3 sidecar is not configured")
     }
 
     pub fn stream_hub(&self) -> StreamHub {
@@ -486,14 +545,13 @@ impl PmdIosDriver {
     }
 
     async fn run_json(&self, args: &[&str]) -> anyhow::Result<serde_json::Value> {
-        if self.script.as_os_str().is_empty() {
+        if self.sidecar.is_none() {
             anyhow::bail!(
                 "pymobiledevice3 sidecar not configured — install python3 + pymobiledevice3"
             );
         }
-        let mut command = background_command(&self.python);
+        let mut command = self.sidecar_command()?;
         command
-            .arg(&self.script)
             .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -930,9 +988,8 @@ impl PmdIosDriver {
         local_port: u16,
     ) -> anyhow::Result<()> {
         let args = text_bootstrap_args(&self.profile, udid, local_port);
-        let mut command = background_command(&self.python);
+        let mut command = self.sidecar_command()?;
         command
-            .arg(&self.script)
             .args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -989,7 +1046,7 @@ impl PmdIosDriver {
         udid: &str,
         owned: &mut DeviceOwned,
     ) -> anyhow::Result<u16> {
-        if self.script.as_os_str().is_empty() {
+        if self.sidecar.is_none() {
             anyhow::bail!("sidecar missing");
         }
         let port = self.port_for(udid);
@@ -1067,9 +1124,8 @@ impl PmdIosDriver {
                 .unwrap_or_else(|_| Stdio::null()),
             _ => Stdio::null(),
         };
-        let mut command = background_command(&self.python);
+        let mut command = self.sidecar_command()?;
         command
-            .arg(&self.script)
             .args(&args)
             .stdout(Stdio::piped())
             .stderr(stderr)
@@ -1196,7 +1252,7 @@ impl PmdIosDriver {
         generation: u64,
         readiness: StreamReadiness,
     ) -> anyhow::Result<bool> {
-        if self.script.as_os_str().is_empty() {
+        if self.sidecar.is_none() {
             anyhow::bail!("sidecar missing");
         }
         if owned.stream.is_some() {
@@ -1205,13 +1261,13 @@ impl PmdIosDriver {
 
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
 
-        let mut child: Child = background_command(&self.python)
-            .arg(&self.script)
+        let mut command = self.sidecar_command()?;
+        command
             .args(stream_args(&self.profile, udid))
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()?;
+            .kill_on_drop(true);
+        let mut child: Child = command.spawn()?;
 
         let mut stdout = child
             .stdout
@@ -1294,7 +1350,7 @@ impl PmdIosDriver {
         owned: &mut DeviceOwned,
     ) -> anyhow::Result<()> {
         self.interaction_lifecycle.clear(udid);
-        if self.script.as_os_str().is_empty() {
+        if self.sidecar.is_none() {
             anyhow::bail!("sidecar missing");
         }
         if owned
@@ -2501,7 +2557,7 @@ impl DeviceDriver for PmdIosDriver {
     }
 
     async fn list_devices(&self) -> anyhow::Result<Vec<DeviceInfo>> {
-        if self.script.as_os_str().is_empty() {
+        if self.sidecar.is_none() {
             return Ok(Vec::new());
         }
         let value = match self.run_json(&["list"]).await {
@@ -2927,6 +2983,37 @@ print(json.dumps({'ok': True, 'note': 'terminate best-effort'}), flush=True)
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[tokio::test]
+    async fn bundled_runtime_is_preferred_over_the_development_python_script() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("fixture clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "riviu-bundled-sidecar-{}-{nonce}",
+            std::process::id()
+        ));
+        let sidecar_dir = root.join("pymobiledevice3");
+        let runtime_dir = sidecar_dir.join("runtime");
+        std::fs::create_dir_all(&runtime_dir).expect("create bundled runtime fixture");
+        std::fs::write(
+            sidecar_dir.join("riviu_pmd.py"),
+            b"# development fallback\n",
+        )
+        .expect("write development fixture");
+        let bundled = runtime_dir.join(bundled_sidecar_filename());
+        std::fs::write(&bundled, b"fixture").expect("write bundled entrypoint fixture");
+
+        let resolved = SidecarProgram::resolve(&root)
+            .await
+            .expect("resolve bundled sidecar");
+        std::fs::remove_dir_all(&root).expect("remove bundled runtime fixture");
+
+        assert!(resolved.is_bundled());
+        assert_eq!(resolved.executable, bundled);
+        assert!(resolved.prefix_args.is_empty());
     }
 
     struct FixtureClipboardRuntime {

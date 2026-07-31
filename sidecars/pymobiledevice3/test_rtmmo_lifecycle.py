@@ -574,6 +574,91 @@ class _Harness:
 
 
 class WindowsExecutableDiscoveryTests(unittest.TestCase):
+    def test_frozen_runtime_reenters_itself_for_tidevice(self):
+        with (
+            patch.object(riviu_pmd.sys, "frozen", True, create=True),
+            patch.object(riviu_pmd.sys, "executable", "riviu-pmd-fixture"),
+        ):
+            prefix = riviu_pmd._tidevice_prefix()
+
+        self.assertEqual(prefix, ["riviu-pmd-fixture", "__tidevice"])
+
+    def test_embedded_tidevice_restores_parent_argv(self):
+        original = list(riviu_pmd.sys.argv)
+        observed = []
+
+        def tidevice_main():
+            observed.append(list(riviu_pmd.sys.argv))
+
+        with patch("tidevice.__main__.main", tidevice_main):
+            self.assertEqual(riviu_pmd._embedded_tidevice_main(["--version"]), 0)
+
+        self.assertEqual(observed, [["tidevice", "--version"]])
+        self.assertEqual(riviu_pmd.sys.argv, original)
+
+    def test_embedded_script_allowlist_is_exact(self):
+        self.assertTrue(
+            riviu_pmd._is_allowed_embedded_script(
+                Path("fixture/sidecars/signer/riviu_signer.py")
+            )
+        )
+        self.assertTrue(
+            riviu_pmd._is_allowed_embedded_script(
+                Path("fixture/sidecars/wda/build_and_install.py")
+            )
+        )
+        self.assertFalse(
+            riviu_pmd._is_allowed_embedded_script(
+                Path("fixture/sidecars/wda/prepare_branded_agent.py")
+            )
+        )
+
+    def test_frozen_embedded_script_sets_runtime_and_restores_parent_state(self):
+        original_argv = list(riviu_pmd.sys.argv)
+        observed = []
+        runtime_key = "RIVIU_EMBEDDED_PYTHON_RUNTIME"
+
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "sidecars" / "signer" / "riviu_signer.py"
+            script.parent.mkdir(parents=True)
+            script.touch()
+
+            def run_path(path, *, run_name):
+                observed.append(
+                    (
+                        path,
+                        run_name,
+                        list(riviu_pmd.sys.argv),
+                        riviu_pmd.os.environ.get(runtime_key),
+                    )
+                )
+
+            with (
+                patch.object(riviu_pmd.sys, "frozen", True, create=True),
+                patch.object(riviu_pmd.sys, "executable", "riviu-pmd-fixture"),
+                patch.dict(riviu_pmd.os.environ, {runtime_key: "parent-runtime"}),
+                patch.object(riviu_pmd.runpy, "run_path", side_effect=run_path),
+            ):
+                self.assertEqual(
+                    riviu_pmd._embedded_script_main(str(script), ["--help"]), 0
+                )
+                self.assertEqual(
+                    riviu_pmd.os.environ.get(runtime_key), "parent-runtime"
+                )
+
+        self.assertEqual(
+            observed,
+            [
+                (
+                    str(script),
+                    "__main__",
+                    [str(script), "--help"],
+                    "riviu-pmd-fixture",
+                )
+            ],
+        )
+        self.assertEqual(riviu_pmd.sys.argv, original_argv)
+
     def test_background_process_options_hide_windows_console_and_keep_flags(self):
         with patch.object(riviu_pmd.sys, "platform", "win32"):
             options = riviu_pmd._background_process_options(

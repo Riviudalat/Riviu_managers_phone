@@ -34,3 +34,10 @@ riviu-core = { path = "crates/core" }
 riviu-ios-driver = { path = "crates/ios-driver" }
 riviu-signing = { path = "crates/signing" }
 riviu-script-engine = { path = "crates/script-engine" }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = "thin"
+opt-level = 3
+strip = "symbols"

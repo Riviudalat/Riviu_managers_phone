@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -36,11 +37,33 @@ def main() -> int:
     _ = args.apple_id
     _ = args.wda
 
-    cmd = [sys.executable, str(BUILD_INSTALL), "--udid", args.udid]
+    embedded_runtime = os.environ.get("RIVIU_EMBEDDED_PYTHON_RUNTIME")
+    if embedded_runtime:
+        cmd = [
+            embedded_runtime,
+            "__script",
+            str(BUILD_INSTALL),
+            "--udid",
+            args.udid,
+        ]
+    else:
+        cmd = [sys.executable, str(BUILD_INSTALL), "--udid", args.udid]
     if args.team_id:
         cmd.extend(["--team-id", args.team_id])
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    child_environment = os.environ.copy()
+    child_environment["PYTHONUTF8"] = "1"
+    child_environment["PYTHONIOENCODING"] = "utf-8"
+    options = {
+        "capture_output": True,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "env": child_environment,
+    }
+    if sys.platform == "win32":
+        options["creationflags"] = 0x08000000
+    result = subprocess.run(cmd, **options)
     payload = None
     for line in reversed((result.stdout or "").strip().splitlines()):
         line = line.strip()
@@ -58,7 +81,7 @@ def main() -> int:
         }
 
     if not payload.get("ok"):
-        print(json.dumps(payload, ensure_ascii=False))
+        print(json.dumps(payload, ensure_ascii=True))
         return 1
 
     expires = datetime.now(timezone.utc) + timedelta(days=7)
@@ -67,7 +90,7 @@ def main() -> int:
         "message",
         "Signed and installed Riviumanagersphone agent (orange R) on device.",
     )
-    print(json.dumps(payload, ensure_ascii=False))
+    print(json.dumps(payload, ensure_ascii=True))
     return 0
 
 

@@ -28,12 +28,26 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
     "resources": {
       "../../../sidecars/pymobiledevice3/requirements.txt": "sidecars/pymobiledevice3/requirements.txt",
+      "../../../sidecars/pymobiledevice3/requirements-lock.txt": "sidecars/pymobiledevice3/requirements-lock.txt",
       "../../../sidecars/pymobiledevice3/riviu_pmd.py": "sidecars/pymobiledevice3/riviu_pmd.py",
       "../../../sidecars/signer/requirements.txt": "sidecars/signer/requirements.txt",
       "../../../sidecars/signer/riviu_signer.py": "sidecars/signer/riviu_signer.py",
+      "../../../logo.jpg": "sidecars/wda/logo.jpg",
+      "../../../sidecars/wda/AppIcon.appiconset/": "sidecars/wda/AppIcon.appiconset/",
+      "../../../sidecars/wda/WebDriverAgent/": "sidecars/wda/WebDriverAgent/",
       "../../../sidecars/wda/build_and_install.py": "sidecars/wda/build_and_install.py",
+      "../../../sidecars/wda/legacy-wda-source-lock.json": "sidecars/wda/legacy-wda-source-lock.json",
       "../../../sidecars/wda/agent-manifest.json": "sidecars/wda/agent-manifest.json",
       "../../../sidecars/wda/interaction-capabilities.json": "sidecars/wda/interaction-capabilities.json",
       "../../../sidecars/wda/interaction-capabilities.schema.json": "sidecars/wda/interaction-capabilities.schema.json",

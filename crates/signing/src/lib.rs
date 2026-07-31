@@ -45,6 +45,7 @@ pub struct SignResult {
 #[derive(Clone)]
 pub struct SigningService {
     sidecar: PathBuf,
+    sidecar_root: PathBuf,
     credentials: CredentialStore,
 }
 
@@ -57,10 +58,39 @@ impl SigningService {
     }
 
     pub fn with_credentials(sidecar_dir: PathBuf, credentials: CredentialStore) -> Self {
+        let sidecar_root = sidecar_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| sidecar_dir.clone());
         Self {
             sidecar: sidecar_dir.join("riviu_signer.py"),
+            sidecar_root,
             credentials,
         }
+    }
+
+    fn signer_command(&self) -> Command {
+        let runtime = self
+            .sidecar_root
+            .join("pymobiledevice3")
+            .join("runtime")
+            .join(if cfg!(windows) {
+                "riviu-pmd.exe"
+            } else {
+                "riviu-pmd"
+            });
+        if runtime.is_file() {
+            let mut command = background_command(&runtime);
+            command
+                .arg("__script")
+                .arg(&self.sidecar)
+                .env("RIVIU_EMBEDDED_PYTHON_RUNTIME", runtime);
+            return command;
+        }
+
+        let mut command = background_command(if cfg!(windows) { "python" } else { "python3" });
+        command.arg(&self.sidecar);
+        command
     }
 
     pub fn save_apple_id(&self, email: &str, password: &str) -> anyhow::Result<()> {
@@ -111,8 +141,8 @@ impl SigningService {
             anyhow::bail!("Thiếu sidecar signer. Kiểm tra sidecars/signer/riviu_signer.py");
         }
 
-        let output = background_command("python3")
-            .arg(&self.sidecar)
+        let output = self
+            .signer_command()
             .arg("sign-install-wda")
             .arg("--udid")
             .arg(udid)
@@ -196,5 +226,74 @@ impl SigningService {
             expires_at,
             days_remaining,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::sync::Arc;
+
+    struct EmptyCredentials;
+
+    impl CredentialBackend for EmptyCredentials {
+        fn get(&self, _account: &str) -> anyhow::Result<Option<String>> {
+            Ok(None)
+        }
+
+        fn set(&self, _account: &str, _value: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn delete(&self, _account: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn packaged_signer_prefers_the_embedded_python_runtime() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("fixture time after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "riviu-signing-runtime-{}-{nonce}",
+            std::process::id()
+        ));
+        let signer_dir = root.join("signer");
+        let runtime_dir = root.join("pymobiledevice3").join("runtime");
+        std::fs::create_dir_all(&signer_dir).expect("create signer fixture");
+        std::fs::create_dir_all(&runtime_dir).expect("create runtime fixture");
+        let signer = signer_dir.join("riviu_signer.py");
+        let runtime = runtime_dir.join(if cfg!(windows) {
+            "riviu-pmd.exe"
+        } else {
+            "riviu-pmd"
+        });
+        std::fs::write(&signer, b"# fixture\n").expect("write signer fixture");
+        std::fs::write(&runtime, b"fixture").expect("write runtime fixture");
+
+        let service = SigningService::with_credentials(
+            signer_dir,
+            CredentialStore::new(Arc::new(EmptyCredentials)),
+        );
+        let command = service.signer_command();
+        let std_command = command.as_std();
+        let args: Vec<OsString> = std_command.get_args().map(OsString::from).collect();
+        let embedded_environment = std_command
+            .get_envs()
+            .find(|(key, _)| *key == "RIVIU_EMBEDDED_PYTHON_RUNTIME")
+            .and_then(|(_, value)| value)
+            .map(PathBuf::from);
+
+        std::fs::remove_dir_all(&root).expect("remove signing fixture");
+
+        assert_eq!(std_command.get_program(), runtime.as_os_str());
+        assert_eq!(
+            args,
+            vec![OsString::from("__script"), signer.into_os_string()]
+        );
+        assert_eq!(embedded_environment.as_ref(), Some(&runtime));
     }
 }

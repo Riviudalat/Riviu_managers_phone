@@ -1,0 +1,301 @@
+name: Desktop CI/CD
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22"
+
+jobs:
+  quality:
+    name: Quality gates
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - name: Configure canonical Git checkout
+        run: git config --global core.autocrlf false
+
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            sidecars/pymobiledevice3/requirements.txt
+            sidecars/pymobiledevice3/requirements-lock.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Set up stable Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+          rustc --version --verbose
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: rust-${{ runner.os }}-${{ runner.arch }}-quality-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check -r sidecars/pymobiledevice3/requirements.txt
+          python -m pip check
+
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Check Python tooling
+        shell: pwsh
+        run: |
+          python -m py_compile scripts/build_desktop_sidecar.py scripts/collect_desktop_ci_artifacts.py scripts/test_collect_desktop_ci_artifacts.py sidecars/pymobiledevice3/pyinstaller_runtime_hook.py sidecars/signer/riviu_signer.py sidecars/wda/build_and_install.py sidecars/wda/test_build_and_install.py
+          node scripts/run_python.mjs scripts/build_desktop_sidecar.py --help
+          python scripts/collect_desktop_ci_artifacts.py verify-version
+          python -m unittest -v scripts.test_collect_desktop_ci_artifacts sidecars.pymobiledevice3.test_app_control sidecars.pymobiledevice3.test_rtmmo_lifecycle sidecars.signer.test_riviu_signer sidecars.wda.test_build_and_install
+
+      - name: Verify release tag matches application version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: python scripts/collect_desktop_ci_artifacts.py verify-version --tag "${{ github.ref_name }}"
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint Rust
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test Rust workspace
+        run: cargo test --workspace --locked -- --test-threads=1
+
+      - name: Lint frontend
+        working-directory: apps/desktop
+        run: npm run lint
+
+      - name: Test frontend
+        working-directory: apps/desktop
+        run: npm test
+
+      - name: Build frontend
+        working-directory: apps/desktop
+        run: npm run build
+
+  build:
+    name: Build ${{ matrix.label }}
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: windows-x64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            bundles: msi,nsis
+          - label: macos-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            bundles: app,dmg
+          - label: macos-x64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            bundles: app,dmg
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - name: Configure canonical Git checkout
+        run: git config --global core.autocrlf false
+
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            sidecars/pymobiledevice3/requirements.txt
+            sidecars/pymobiledevice3/requirements-build.txt
+            sidecars/pymobiledevice3/requirements-lock.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Set up stable Rust target
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add "${{ matrix.target }}"
+          rustc --version --verbose
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check -r sidecars/pymobiledevice3/requirements-build.txt
+          python -m pip check
+          npm ci --prefix apps/desktop
+
+      - name: Snapshot production WDA inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/collect_desktop_ci_artifacts.py snapshot-production \
+            --output target/production-wda-inputs.json \
+            --require-canonical-production
+
+      - name: Build and attest native sidecar runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build_desktop_sidecar.py \
+            --output target/desktop-sidecar \
+            --work target/pyinstaller-work \
+            --tauri-config target/tauri-sidecar.conf.json
+
+      - name: Build Tauri installers
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run tauri -- build --ci \
+            --target "${{ matrix.target }}" \
+            --bundles "${{ matrix.bundles }}" \
+            --config "${{ github.workspace }}/target/tauri-sidecar.conf.json" \
+            -- --locked
+
+      - name: Verify and collect release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/collect_desktop_ci_artifacts.py collect \
+            --target "${{ matrix.target }}" \
+            --label "${{ matrix.label }}" \
+            --bundle-dir "target/${{ matrix.target }}/release/bundle" \
+            --runtime target/desktop-sidecar/riviu-pmd \
+            --tauri-config target/tauri-sidecar.conf.json \
+            --production-baseline target/production-wda-inputs.json \
+            --output "target/desktop-ci/${{ matrix.label }}"
+          git diff --exit-code -- \
+            sidecars/wda/RiviuAgent.ipa \
+            sidecars/wda/Riviumanagersphone.ipa \
+            sidecars/wda/agent-manifest.json
+
+      - name: Upload ${{ matrix.label }} artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.label }}
+          path: target/desktop-ci/${{ matrix.label }}/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+  release:
+    name: Publish GitHub release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - quality
+      - build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Configure canonical Git checkout
+        run: git config --global core.autocrlf false
+
+      - name: Check out release tooling
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Download desktop artifacts
+        uses: actions/download-artifact@v5
+        with:
+          pattern: desktop-*
+          path: release-artifacts
+
+      - name: Verify release artifact set
+        run: |
+          python scripts/collect_desktop_ci_artifacts.py verify-release \
+            --root release-artifacts \
+            --labels windows-x64 macos-arm64 macos-x64
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' assets < <(find release-artifacts -type f -print0 | sort -z)
+          if (( ${#assets[@]} == 0 )); then
+            echo "No verified release assets found" >&2
+            exit 1
+          fi
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+            declare -A desired=()
+            for asset in "${assets[@]}"; do
+              desired["$(basename "$asset")"]=1
+            done
+            while IFS= read -r existing; do
+              if [[ -n "$existing" && -z "${desired[$existing]+present}" ]]; then
+                gh release delete-asset "$GITHUB_REF_NAME" "$existing" --yes
+              fi
+            done < <(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name')
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --verify-tag \
+              --generate-notes \
+              --title "$GITHUB_REF_NAME"

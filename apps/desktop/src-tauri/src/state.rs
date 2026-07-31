@@ -1210,6 +1210,10 @@ mod tests {
                 "sidecars/pymobiledevice3/requirements.txt",
             ),
             (
+                "../../../sidecars/pymobiledevice3/requirements-lock.txt",
+                "sidecars/pymobiledevice3/requirements-lock.txt",
+            ),
+            (
                 "../../../sidecars/pymobiledevice3/riviu_pmd.py",
                 "sidecars/pymobiledevice3/riviu_pmd.py",
             ),
@@ -1221,9 +1225,22 @@ mod tests {
                 "../../../sidecars/signer/riviu_signer.py",
                 "sidecars/signer/riviu_signer.py",
             ),
+            ("../../../logo.jpg", "sidecars/wda/logo.jpg"),
+            (
+                "../../../sidecars/wda/AppIcon.appiconset/",
+                "sidecars/wda/AppIcon.appiconset/",
+            ),
+            (
+                "../../../sidecars/wda/WebDriverAgent/",
+                "sidecars/wda/WebDriverAgent/",
+            ),
             (
                 "../../../sidecars/wda/build_and_install.py",
                 "sidecars/wda/build_and_install.py",
+            ),
+            (
+                "../../../sidecars/wda/legacy-wda-source-lock.json",
+                "sidecars/wda/legacy-wda-source-lock.json",
             ),
             (
                 "../../../sidecars/wda/agent-manifest.json",

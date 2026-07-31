@@ -46,7 +46,9 @@ describe("Flow page integration", () => {
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "Flow" }));
-    await user.click(screen.getByRole("button", { name: "Mark fixture dirty" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Mark fixture dirty" }),
+    );
     await user.click(screen.getByRole("button", { name: "Jobs" }));
 
     expect(confirm).toHaveBeenCalledTimes(1);
@@ -83,7 +85,9 @@ describe("Flow page integration", () => {
     fireEvent(window, cleanEvent);
     expect(cleanEvent.defaultPrevented).toBe(false);
 
-    await user.click(screen.getByRole("button", { name: "Mark fixture dirty" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Mark fixture dirty" }),
+    );
     await waitFor(() => {
       const dirtyEvent = new Event("beforeunload", { cancelable: true });
       fireEvent(window, dirtyEvent);

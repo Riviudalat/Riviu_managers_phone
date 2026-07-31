@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import {
   agentBulkRepair,
   agentListStatuses,
@@ -15,7 +15,6 @@ import { summarizeBulkRepair } from "./agentStatus";
 import { DeviceTile } from "./components/DeviceTile";
 import { FilterToolbar, type ViewMode } from "./components/FilterToolbar";
 import { FocusStream } from "./components/FocusStream";
-import { FlowWorkspace } from "./components/flow/FlowWorkspace";
 import { IconRefresh, IconUser } from "./components/Icons";
 import { JobsPanel } from "./components/JobsPanel";
 import { NurturePopup } from "./components/NurturePopup";
@@ -45,6 +44,11 @@ import type {
 } from "./types";
 import { markDeviceFrameLive } from "./types";
 import "./App.css";
+
+const FlowWorkspace = lazy(async () => {
+  const module = await import("./components/flow/FlowWorkspace");
+  return { default: module.FlowWorkspace };
+});
 
 const PAGE_TITLE: Partial<Record<PageId, string>> = {
   control: "Quản lý cửa sổ",
@@ -505,11 +509,19 @@ function App() {
                 </button>
               </div>
               {automationView === "flow" ? (
-                <FlowWorkspace
-                  devices={devices}
-                  selectedUdids={selected}
-                  onDirtyChange={setFlowDirty}
-                />
+                <Suspense
+                  fallback={(
+                    <div className="flow-loading" role="status" aria-live="polite">
+                      Đang tải Flow…
+                    </div>
+                  )}
+                >
+                  <FlowWorkspace
+                    devices={devices}
+                    selectedUdids={selected}
+                    onDirtyChange={setFlowDirty}
+                  />
+                </Suspense>
               ) : (
                 <div className="automation-legacy">
                   <ScriptsPanel

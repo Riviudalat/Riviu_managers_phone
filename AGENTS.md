@@ -1295,6 +1295,65 @@ Production `RiviuAgent.ipa` van SHA-256
 canonical-LF van
 `e98a549af4c061556effd36424e7732219e1a6d262bcf1f259279975024b6e1a`.
 
+### 3.18 Desktop self-contained packaging va CI/CD (31/07/2026)
+
+Release desktop khong duoc phu thuoc Python/pip/tidevice cua may nguoi dung.
+`scripts/build_desktop_sidecar.py` dung PyInstaller onedir de dong goi Python,
+`pymobiledevice3==10.1.0` va `tidevice==0.12.11` thanh
+`sidecars/pymobiledevice3/runtime/riviu-pmd(.exe)` trong bundle. Driver uu tien
+runtime nay; chi source/dev moi fallback sang `python3`/`python` + `riviu_pmd.py`.
+Signer cung re-enter exact runtime qua allowlist `__script`; khong dua lai hard-code
+`python3` vao packaged path. Moi child console Windows van phai giu
+`CREATE_NO_WINDOW`.
+
+PyInstaller loai IPython bang `pyinstaller_runtime_hook.py`: interactive shell cua
+pymobiledevice3 khong nam trong product. Khong loai them module theo cam tinh. Toan
+bo transitive closure bi khoa trong `requirements-lock.txt`; builder fail neu venv
+co distribution khong nam trong lock va ghi exact closure vao manifest. Moi thay doi
+dependency/hook phai PASS frozen `ping` co `verifiedProcessControl`, embedded
+tidevice, signer, signing-resource self-test va Windows structured-error JSON, sau
+do recompute runtime tree gom ca node type, POSIX mode va symlink target.
+Lan do local Windows bang Python 3.14 giam tu 162,296,882 byte/6,650 file xuong
+58,956,091 byte/734 file; `ping` khoang 0.43 giay. Khong bat Python `-OO` vi
+`pymobiledevice3`/`tidevice` co assert tham gia vao hanh vi runtime, khong chi debug.
+CI release pin Python 3.12 va artifact manifest moi la so do chinh thuc theo tung
+OS/architecture.
+
+Root release profile dung `opt-level=3`, thin LTO, mot codegen unit, abort panic va
+strip symbols de can bang runtime performance, kich thuoc va thoi gian build. Windows
+NSIS la current-user install; WebView2 dung `downloadBootstrapper` va chi tai khi
+thieu. Khong tu bundle/cai ngam Apple USB driver: Windows van can Apple Devices hoac
+Apple Mobile Device Support de co usbmux. Mac run binh thuong khong can Python;
+Xcode/Apple certificate chi la prerequisite khi rebuild/re-sign agent iPhone.
+
+Legacy re-sign source trong desktop la stock WDA 16.0.0 o
+`sidecars/wda/WebDriverAgent`, khoa boi `legacy-wda-source-lock.json` cung hash logo
+va iconset. Packaged flow khong duoc clone upstream HEAD va khong duoc build/ghi vao
+signed `.app`: `build_and_install.py` verify resource roi copy source sang
+`~/Library/Caches/com.riviu.managersphone/signing`, tach workspace bang hash UDID,
+truoc khi sua/build. Day la legacy rollback path, khong thay doi Project 2 candidate
+hoac production RT-MMO Agent.
+
+`.github/workflows/desktop-ci-cd.yml` chay quality gate roi build ba artifact native:
+Windows x64, macOS arm64 va macOS x64. Moi push `main` upload artifact 30 ngay; tag
+`v*` chi publish khi exact `v<tauri/npm/cargo version>`. CI phai administrative-
+extract MSI, silent install/uninstall NSIS va mount read-only chinh DMG duoc upload;
+sau do doi chieu full runtime/resource/production IPA va chay lai packaged smoke.
+Mac con kiem architecture va `codesign --verify --deep --strict`. Khong ha gate
+thanh chi tim thay installer hoac kiem sibling `.app` ngoai DMG.
+Production IPA va canonical-LF manifest van byte-contract o section 3.15; pipeline
+snapshot truoc build va khong duoc overwrite chung.
+
+Windows local release gate da PASS: MSI 51,753,596 byte, NSIS 40,994,174 byte;
+administrative MSI extract, NSIS silent install/uninstall, full resource/source
+tree, frozen ping, tidevice, signer, signing resource va UTF-8 error JSON deu PASS.
+Mac CI hien ky ad-hoc (`-`) de co artifact test. Chua co Developer ID/notarization
+thi khong goi DMG la ban phat hanh Gatekeeper hoan chinh; nguoi dung co the phai cho
+phep lan dau trong Privacy & Security. Them Apple signing/notarization secrets la
+phase distribution sau, khong hard-code secret vao workflow. Checkpoint nay chi
+PASS source + Windows native package; hai job Mac/DMG phai duoc theo doi sau
+commit/push dau tien truoc khi tuyen bo CI xanh tren ca Windows va Mac.
+
 ---
 
 ## 4. Chạy và test

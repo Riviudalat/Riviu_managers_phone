@@ -14,6 +14,7 @@ import importlib.metadata
 import io
 import json
 import os
+import runpy
 import struct
 import subprocess
 import sys
@@ -26,6 +27,8 @@ SIDECAR_PROTOCOL_VERSION = 2
 PYMOBILEDEVICE3_PROCESS_CONTROL_VERSION = "10.1.0"
 VERIFIED_PROCESS_CONTROL_CONTRACT = "verifiedProcessControl"
 WINDOWS_CREATE_NO_WINDOW = 0x08000000
+EMBEDDED_TIDEVICE_COMMAND = "__tidevice"
+EMBEDDED_SCRIPT_COMMAND = "__script"
 
 
 def _background_process_options(options: dict) -> dict:
@@ -44,6 +47,61 @@ def _background_popen(command, **options):
 
 def _background_run(command, **options):
     return subprocess.run(command, **_background_process_options(options))
+
+
+def _embedded_tidevice_main(arguments: list[str]) -> int:
+    """Run tidevice inside the frozen sidecar without a second Python install."""
+    from tidevice.__main__ import main as tidevice_main
+
+    previous_argv = sys.argv
+    try:
+        sys.argv = ["tidevice", *arguments]
+        result = tidevice_main()
+        return int(result or 0)
+    finally:
+        sys.argv = previous_argv
+
+
+def _is_allowed_embedded_script(path: Path) -> bool:
+    parts = path.resolve().parts
+    return len(parts) >= 3 and (
+        parts[-3:] == ("sidecars", "signer", "riviu_signer.py")
+        or parts[-3:] == ("sidecars", "wda", "build_and_install.py")
+    )
+
+
+def _embedded_script_main(script: str, arguments: list[str]) -> int:
+    """Run packaged maintenance scripts with the frozen Python runtime."""
+    script_path = Path(script)
+    if not script_path.is_file() or not _is_allowed_embedded_script(script_path):
+        print("embedded script is missing or not allowlisted", file=sys.stderr)
+        return 2
+
+    runtime_key = "RIVIU_EMBEDDED_PYTHON_RUNTIME"
+    previous_argv = sys.argv
+    previous_runtime = os.environ.get(runtime_key)
+    runtime_was_present = runtime_key in os.environ
+    frozen = bool(getattr(sys, "frozen", False))
+    try:
+        sys.argv = [str(script_path), *arguments]
+        if frozen:
+            os.environ[runtime_key] = sys.executable
+        runpy.run_path(str(script_path), run_name="__main__")
+        return 0
+    except SystemExit as exc:
+        if exc.code is None:
+            return 0
+        if isinstance(exc.code, int):
+            return exc.code
+        print(str(exc.code), file=sys.stderr)
+        return 1
+    finally:
+        sys.argv = previous_argv
+        if frozen:
+            if runtime_was_present:
+                os.environ[runtime_key] = previous_runtime or ""
+            else:
+                os.environ.pop(runtime_key, None)
 
 
 def _windows_kill_on_close_job(process: subprocess.Popen):
@@ -696,21 +754,10 @@ async def _stream_mjpeg(
 
 def _start_wda_tidevice(udid: str, bundle_id: str):
     """Launch WDA via tidevice xctest (works when DVT SSL is healthy)."""
-    import shutil
-
-    tidevice = shutil.which("tidevice")
-    cmd = [
-        sys.executable,
-        "-m",
-        "tidevice",
-        "-u",
-        udid,
-        "xctest",
-        "-B",
-        bundle_id,
-    ]
-    if tidevice:
-        cmd = [tidevice, "-u", udid, "xctest", "-B", bundle_id]
+    tidevice = _tidevice_prefix()
+    if tidevice is None:
+        return None
+    cmd = [*tidevice, "-u", udid, "xctest", "-B", bundle_id]
     try:
         return _background_popen(
             cmd,
@@ -1096,6 +1143,21 @@ def _which(name: str) -> Optional[str]:
     return None
 
 
+def _tidevice_prefix() -> Optional[list[str]]:
+    if getattr(sys, "frozen", False):
+        return [sys.executable, EMBEDDED_TIDEVICE_COMMAND]
+
+    executable = _which("tidevice")
+    if executable:
+        return [executable]
+
+    try:
+        import tidevice  # noqa: F401
+    except Exception:
+        return None
+    return [sys.executable, "-m", "tidevice"]
+
+
 def cmd_wda_forward(args: argparse.Namespace) -> int:
     """Keep USB relay alive: localhost:local_port -> device:8100.
 
@@ -1105,11 +1167,11 @@ def cmd_wda_forward(args: argparse.Namespace) -> int:
     device_port = int(args.device_port)
     udid = args.udid
 
-    tidevice = _which("tidevice")
+    tidevice = _tidevice_prefix()
     if tidevice:
         # tidevice relay LOCAL REMOTE
         proc = _background_popen(
-            [tidevice, "-u", udid, "relay", str(local), str(device_port)],
+            [*tidevice, "-u", udid, "relay", str(local), str(device_port)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -1291,7 +1353,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
     """Own one backend-specific WDA relay and bootstrap its agent when needed."""
     import signal
 
-    tidevice = _which("tidevice")
+    tidevice = _tidevice_prefix()
     if not tidevice:
         emit({"ok": False, "error": "tidevice not found — pip install -U tidevice"})
         return 1
@@ -1374,7 +1436,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
         for name in names:
             try:
                 _background_run(
-                    [tidevice, "-u", udid, "kill", name],
+                    [*tidevice, "-u", udid, "kill", name],
                     capture_output=True,
                     timeout=12,
                 )
@@ -1524,7 +1586,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
         else:
             # Stream may own stock WDA later; start XCTest only when :8100 is absent.
             xctest = _background_popen(
-                [tidevice, "-u", udid, "xctest", "-B", bundle],
+                [*tidevice, "-u", udid, "xctest", "-B", bundle],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -1563,7 +1625,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
         return 0
 
     relay = _background_popen(
-        [tidevice, "-u", udid, "relay", str(local), str(device_port)],
+        [*tidevice, "-u", udid, "relay", str(local), str(device_port)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -1650,6 +1712,11 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == EMBEDDED_TIDEVICE_COMMAND:
+        return _embedded_tidevice_main(sys.argv[2:])
+    if len(sys.argv) > 2 and sys.argv[1] == EMBEDDED_SCRIPT_COMMAND:
+        return _embedded_script_main(sys.argv[2], sys.argv[3:])
+
     parser = argparse.ArgumentParser(prog="riviu_pmd")
     sub = parser.add_subparsers(dest="cmd", required=True)
 

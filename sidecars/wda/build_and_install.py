@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import plistlib
@@ -23,19 +24,54 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
-REPO = ROOT.parents[1]
-LOGO = REPO / "logo.jpg"
-ICONSET = ROOT / "AppIcon.appiconset"
-WDA_SRC = ROOT / "WebDriverAgent"
+RESOURCE_ROOT = Path(__file__).resolve().parent
+SOURCE_TEMPLATE = RESOURCE_ROOT / "WebDriverAgent"
+SOURCE_LOCK = RESOURCE_ROOT / "legacy-wda-source-lock.json"
+PACKAGED_LOGO = RESOURCE_ROOT / "logo.jpg"
+DEVELOPMENT_LOGO = RESOURCE_ROOT.parents[1] / "logo.jpg"
+LOGO = PACKAGED_LOGO if PACKAGED_LOGO.is_file() else DEVELOPMENT_LOGO
+ICONSET = RESOURCE_ROOT / "AppIcon.appiconset"
+
+
+def _default_work_root() -> Path:
+    configured = os.environ.get("RIVIU_SIGNING_WORK_ROOT")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    if sys.platform == "darwin":
+        return (
+            Path.home()
+            / "Library"
+            / "Caches"
+            / "com.riviu.managersphone"
+            / "signing"
+        )
+    if sys.platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            return Path(local_app_data) / "RiviuManagersPhone" / "signing"
+    return Path.home() / ".cache" / "riviu-managers-phone" / "signing"
+
+
+WORK_ROOT = _default_work_root()
+BUILD_ROOT = WORK_ROOT / "unconfigured"
+WDA_SRC = BUILD_ROOT / "WebDriverAgent"
 BUNDLE_ID = "com.riviu.managersphone.agent"
 DISPLAY_NAME = "Riviumanagersphone"
-DERIVED = ROOT / "DerivedData"
+DERIVED = BUILD_ROOT / "DerivedData"
 PRODUCT_DIR = DERIVED / "Build" / "Products" / "Debug-iphoneos"
 
 
 def emit(obj: dict) -> None:
-    print(json.dumps(obj, ensure_ascii=False))
+    print(json.dumps(obj, ensure_ascii=True))
+
+
+def configure_build_workspace(udid: str) -> None:
+    global BUILD_ROOT, WDA_SRC, DERIVED, PRODUCT_DIR
+    device_key = hashlib.sha256(udid.encode("utf-8")).hexdigest()[:20]
+    BUILD_ROOT = WORK_ROOT / "devices" / device_key
+    WDA_SRC = BUILD_ROOT / "WebDriverAgent"
+    DERIVED = BUILD_ROOT / "DerivedData"
+    PRODUCT_DIR = DERIVED / "Build" / "Products" / "Debug-iphoneos"
 
 
 def run(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
@@ -78,25 +114,100 @@ def require_xcode() -> Path:
     return xcode
 
 
+def source_tree_sha256(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            target = os.readlink(path)
+            payload = target.encode("utf-8")
+            kind = b"symlink"
+        elif path.is_file():
+            payload = path.read_bytes()
+            kind = b"file"
+        else:
+            continue
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(kind)
+        digest.update(b"\0")
+        digest.update(str(len(payload)).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(payload).hexdigest().encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def verify_resource_bundle() -> dict:
+    try:
+        lock = json.loads(SOURCE_LOCK.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Invalid pinned WDA source lock: {exc}") from exc
+    expected = {
+        "schemaVersion": 1,
+        "package": "appium-webdriveragent",
+        "version": "16.0.0",
+    }
+    for key, value in expected.items():
+        if lock.get(key) != value:
+            raise RuntimeError(
+                f"Pinned WDA source lock {key} mismatch: expected {value!r}"
+            )
+    for field in ("treeSha256", "logoSha256", "iconSetTreeSha256"):
+        digest = lock.get(field)
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise RuntimeError(f"Pinned WDA source lock has an invalid {field}")
+    tree_sha256 = lock["treeSha256"]
+    if not (SOURCE_TEMPLATE / "WebDriverAgent.xcodeproj").is_dir():
+        raise RuntimeError("Pinned WebDriverAgent source is missing from app resources")
+    package = json.loads((SOURCE_TEMPLATE / "package.json").read_text(encoding="utf-8"))
+    if package.get("name") != expected["package"] or package.get("version") != expected["version"]:
+        raise RuntimeError("Pinned WebDriverAgent package identity does not match its lock")
+    actual = source_tree_sha256(SOURCE_TEMPLATE)
+    if actual != tree_sha256:
+        raise RuntimeError(
+            "Pinned WebDriverAgent source integrity mismatch: "
+            f"expected {tree_sha256}, got {actual}"
+        )
+    if not LOGO.is_file() or not ICONSET.is_dir():
+        raise RuntimeError("Pinned WDA branding assets are missing from app resources")
+    if hashlib.sha256(LOGO.read_bytes()).hexdigest() != lock["logoSha256"]:
+        raise RuntimeError("Pinned WDA logo integrity mismatch")
+    if source_tree_sha256(ICONSET) != lock["iconSetTreeSha256"]:
+        raise RuntimeError("Pinned WDA icon set integrity mismatch")
+    resource_root = RESOURCE_ROOT.resolve()
+    work_root = WORK_ROOT.resolve()
+    if work_root == resource_root or resource_root in work_root.parents:
+        raise RuntimeError("Signing work directory must be outside packaged app resources")
+    return lock
+
+
 def ensure_wda_checkout() -> None:
-    if (WDA_SRC / "WebDriverAgent.xcodeproj").exists():
-        return
-    WDA_SRC.parent.mkdir(parents=True, exist_ok=True)
-    if WDA_SRC.exists():
-        shutil.rmtree(WDA_SRC)
-    result = run(
-        [
-            "git",
-            "clone",
-            "--depth",
-            "1",
-            "https://github.com/appium/WebDriverAgent.git",
-            str(WDA_SRC),
-        ],
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"git clone WebDriverAgent failed: {result.stderr}")
+    lock = verify_resource_bundle()
+    WORK_ROOT.mkdir(parents=True, exist_ok=True)
+    work_root = WORK_ROOT.resolve()
+    destination = WDA_SRC.resolve()
+    if work_root not in destination.parents:
+        raise RuntimeError("Refusing to prepare WDA outside the signing work directory")
+
+    build_root = WDA_SRC.parent
+    temporary = build_root / f".WebDriverAgent-{os.getpid()}.tmp"
+    build_root.mkdir(parents=True, exist_ok=True)
+    for path in (temporary, WDA_SRC):
+        resolved = path.resolve()
+        if work_root not in resolved.parents:
+            raise RuntimeError("Refusing to replace a path outside the signing work directory")
+        if path.exists() or path.is_symlink():
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+    shutil.copytree(SOURCE_TEMPLATE, temporary, symlinks=True)
+    actual = source_tree_sha256(temporary)
+    if actual != lock["treeSha256"]:
+        shutil.rmtree(temporary)
+        raise RuntimeError("Copied WebDriverAgent source failed integrity verification")
+    temporary.replace(WDA_SRC)
 
 
 def sync_app_icons() -> None:
@@ -506,13 +617,13 @@ def _brand_and_resign(app: Path) -> None:
 
 def package_ipa(app: Path) -> Path:
     """Zip signed .app into IPA without renaming (rename breaks code signature)."""
-    stage = ROOT / "build_payload"
+    stage = BUILD_ROOT / "build_payload"
     if stage.exists():
         shutil.rmtree(stage)
     payload = stage / "Payload"
     payload.mkdir(parents=True)
     shutil.copytree(app, payload / app.name)
-    ipa = ROOT / "Riviumanagersphone.ipa"
+    ipa = BUILD_ROOT / "Riviumanagersphone.ipa"
     if ipa.exists():
         ipa.unlink()
     zip_path = stage / "Riviumanagersphone.zip"
@@ -581,12 +692,30 @@ async def launch_wda(udid: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--udid", required=True)
+    parser.add_argument("--udid")
     parser.add_argument("--team-id", default=None)
     parser.add_argument("--skip-launch", action="store_true")
+    parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
     try:
+        if args.self_test:
+            lock = verify_resource_bundle()
+            emit(
+                {
+                    "ok": True,
+                    "kind": "packagedSigningResources",
+                    "sourceVersion": lock["version"],
+                    "sourceTreeSha256": lock["treeSha256"],
+                    "logoSha256": lock["logoSha256"],
+                    "iconSetTreeSha256": lock["iconSetTreeSha256"],
+                    "workspaceOutsideResources": True,
+                }
+            )
+            return 0
+        if not args.udid:
+            raise RuntimeError("--udid is required unless --self-test is used")
+        configure_build_workspace(args.udid)
         require_xcode()
         ensure_wda_checkout()
         team = detect_team_id(args.team_id)
