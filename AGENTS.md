@@ -1366,9 +1366,12 @@ phase distribution sau, khong hard-code secret vao workflow. Checkpoint nay chi
 PASS source + Windows native package. Run GitHub dau tien cua commit `14fcc48` fail
 dung o quality gate do quality chi cai runtime requirements (thieu module build
 `packaging`) va WDA lock cu bam CRLF working tree; khong rerun commit do. Sau khi
-doi quality sang `requirements-build.txt` va lock canonical LF/mode, van phai theo
-doi run commit sua tiep; hai job Mac/DMG phai PASS truoc khi tuyen bo CI xanh tren
-ca Windows va Mac.
+doi quality sang `requirements-build.txt` va lock canonical LF/mode, run commit
+`19dafec` da PASS Quality va build/attest sidecar Windows. Hai job Mac dung o exact
+closure gate: pip tren ca arm64/x64 co them `apple-compress`, `loguru`, `pexpect`,
+`ptyprocess`, `jinxed`, trong khi `av` va `lzfse` chi active tren Windows. Lock da
+tach marker `darwin`/`win32` theo tap cai that nay; phai theo doi run sau ban sua
+marker va chi tuyen bo CI xanh khi Windows MSI/NSIS cung hai Mac DMG deu PASS.
 
 ---
 

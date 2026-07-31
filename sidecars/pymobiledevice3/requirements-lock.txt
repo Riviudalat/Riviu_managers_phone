@@ -5,10 +5,11 @@ annotated-doc==0.0.5
 annotated-types==0.8.0
 ansicon==1.89.0; sys_platform == "win32"
 anyio==4.14.2
+apple-compress==0.2.3; sys_platform == "darwin"
 arrow==1.4.0
 asn1==2.8.0
 asttokens==3.0.2
-av==18.0.0
+av==18.0.0; sys_platform == "win32"
 blessed==1.47.0
 bpylist2==4.1.1
 certifi==2026.7.22
@@ -42,9 +43,10 @@ ipsw-parser==1.7.3
 ipython==9.15.0
 ipython-pygments-lexers==1.1.1
 jedi==0.20.0
-jinxed==2.1.0; sys_platform == "win32"
+jinxed==2.1.0; sys_platform == "win32" or sys_platform == "darwin"
+loguru==0.7.3; sys_platform == "darwin"
 logzero==1.7.0
-lzfse==0.4.2
+lzfse==0.4.2; sys_platform == "win32"
 macholib==1.16.4; sys_platform == "darwin"
 markdown-it-py==4.2.0
 matplotlib-inline==0.2.2
@@ -54,6 +56,7 @@ packaging==26.2
 parameter-decorators==0.0.2
 parso==0.8.7
 pefile==2024.8.26; sys_platform == "win32"
+pexpect==4.9.0; sys_platform == "darwin"
 pillow==12.3.0
 plumbum==2.0.2
 pmd-net-addr==0.0.3
@@ -61,6 +64,7 @@ pmd-net-proto==0.0.3
 pmd-pytcp==0.3.0
 prompt-toolkit==3.0.53
 psutil==7.2.2
+ptyprocess==0.7.0; sys_platform == "darwin"
 pure-eval==0.2.3
 py==1.11.0
 pycparser==3.0
