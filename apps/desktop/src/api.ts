@@ -11,6 +11,18 @@ import type {
   DeviceGroup,
   DeviceInfo,
   DeviceMeta,
+  ActionDefinition,
+  CompiledRevision,
+  FlowArtifactPayload,
+  FlowCoordinateFrame,
+  FlowDocumentV2,
+  FlowNodeAttemptRecord,
+  FlowRevisionRecord,
+  FlowRunDetail,
+  FlowRunRecord,
+  FlowSummary,
+  FlowTargetSelection,
+  LegacyImportResult,
   JobRecord,
   LocalUser,
   MaterialItem,
@@ -379,4 +391,74 @@ export async function nurtureStop(udids: string[] = []) {
 
 export function listenRiviuEvents(handler: (payload: unknown) => void): Promise<UnlistenFn> {
   return listen("riviu://event", (event) => handler(event.payload));
+}
+
+export async function flowActionCatalog() {
+  return invoke<ActionDefinition[]>("flow_action_catalog");
+}
+
+export async function flowList(includeArchived = false) {
+  return invoke<FlowSummary[]>("flow_list", { includeArchived });
+}
+
+export async function flowGet(id: string, revision: number | null = null) {
+  return invoke<FlowRevisionRecord | null>("flow_get", { id, revision });
+}
+
+export async function flowValidate(document: FlowDocumentV2) {
+  return invoke<CompiledRevision>("flow_validate", { document });
+}
+
+export async function flowSaveRevision(
+  document: FlowDocumentV2,
+  expectedRevision: number | null,
+) {
+  return invoke<FlowRevisionRecord>("flow_save_revision", {
+    document,
+    expectedRevision,
+  });
+}
+
+export async function flowArchive(id: string) {
+  return invoke<void>("flow_archive", { id });
+}
+
+export async function flowImportLegacy(scriptJson: string) {
+  return invoke<LegacyImportResult>("flow_import_legacy", { scriptJson });
+}
+
+export async function flowExport(id: string, revision: number | null = null) {
+  return invoke<string>("flow_export", { id, revision });
+}
+
+export async function flowRun(
+  id: string,
+  revision: number | null,
+  selection: FlowTargetSelection,
+) {
+  return invoke<FlowRunRecord>("flow_run", { id, revision, selection });
+}
+
+export async function flowCancelRun(runId: string) {
+  return invoke<void>("flow_cancel_run", { runId });
+}
+
+export async function flowRetryAttempt(attemptId: string) {
+  return invoke<FlowNodeAttemptRecord>("flow_retry_attempt", { attemptId });
+}
+
+export async function flowListRuns(limit = 100) {
+  return invoke<FlowRunRecord[]>("flow_list_runs", { limit });
+}
+
+export async function flowGetRun(runId: string) {
+  return invoke<FlowRunDetail | null>("flow_get_run", { runId });
+}
+
+export async function flowCoordinateFrame(udid: string, bundleId: string) {
+  return invoke<FlowCoordinateFrame>("flow_coordinate_frame", { udid, bundleId });
+}
+
+export async function flowReadArtifact(artifactId: string) {
+  return invoke<FlowArtifactPayload>("flow_read_artifact", { artifactId });
 }

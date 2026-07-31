@@ -15,6 +15,7 @@ import { summarizeBulkRepair } from "./agentStatus";
 import { DeviceTile } from "./components/DeviceTile";
 import { FilterToolbar, type ViewMode } from "./components/FilterToolbar";
 import { FocusStream } from "./components/FocusStream";
+import { FlowWorkspace } from "./components/flow/FlowWorkspace";
 import { IconRefresh, IconUser } from "./components/Icons";
 import { JobsPanel } from "./components/JobsPanel";
 import { NurturePopup } from "./components/NurturePopup";
@@ -49,7 +50,7 @@ const PAGE_TITLE: Partial<Record<PageId, string>> = {
   control: "Quản lý cửa sổ",
   material: "Material",
   apps: "App center",
-  scripts: "Automation",
+  scripts: "Flow",
   jobs: "Jobs",
   sync: "Đồng bộ cửa sổ",
   publish: "Publish",
@@ -85,6 +86,29 @@ function App() {
   const [filterConn, setFilterConn] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
   const [nurtureOpen, setNurtureOpen] = useState(false);
+  const [flowDirty, setFlowDirty] = useState(false);
+  const [automationView, setAutomationView] = useState<"flow" | "legacy">("flow");
+
+  const requestPage = useCallback((next: PageId) => {
+    if (next === page) return;
+    if (flowDirty && !window.confirm("Discard unsaved Flow changes?")) return;
+    setPage(next);
+  }, [flowDirty, page]);
+
+  const requestAutomationView = useCallback((next: "flow" | "legacy") => {
+    if (next === automationView) return;
+    if (flowDirty && !window.confirm("Discard unsaved Flow changes?")) return;
+    setAutomationView(next);
+  }, [automationView, flowDirty]);
+
+  useEffect(() => {
+    if (!flowDirty) return;
+    const preventUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+    };
+    window.addEventListener("beforeunload", preventUnload);
+    return () => window.removeEventListener("beforeunload", preventUnload);
+  }, [flowDirty]);
 
   const reload = useCallback(async () => {
     try {
@@ -233,7 +257,7 @@ function App() {
         total={devices.length}
         readyCount={readyCount}
         groupMode={groupMode}
-        onPage={setPage}
+        onPage={requestPage}
         onToggleCollapse={() => setAsideCollapsed((v) => !v)}
       />
 
@@ -262,7 +286,7 @@ function App() {
           </div>
         </header>
 
-        <div className="content">
+        <div className={`content ${page === "scripts" ? "content-flow" : ""}`}>
           {bootError && (
             <div className="banner">
               Backend chưa sẵn sàng ({bootError}). Bấm Refresh.
@@ -461,21 +485,49 @@ function App() {
             />
           )}
           {page === "scripts" && (
-            <div>
-              <ScriptsPanel
-                onUseInJobs={(json) => {
-                  setJobsScriptSeed(json);
-                  setPage("jobs");
-                }}
-              />
-              <div className="panel" style={{ marginTop: 12 }}>
-                <ScheduleBlock
-                  devices={devices}
-                  selected={selected}
-                  onSelectUdids={setSelected}
-                />
+            <section className="automation-surface">
+              <div role="tablist" aria-label="Automation view" className="automation-tabs">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={automationView === "flow"}
+                  onClick={() => requestAutomationView("flow")}
+                >
+                  Flow
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={automationView === "legacy"}
+                  onClick={() => requestAutomationView("legacy")}
+                >
+                  Legacy
+                </button>
               </div>
-            </div>
+              {automationView === "flow" ? (
+                <FlowWorkspace
+                  devices={devices}
+                  selectedUdids={selected}
+                  onDirtyChange={setFlowDirty}
+                />
+              ) : (
+                <div className="automation-legacy">
+                  <ScriptsPanel
+                    onUseInJobs={(json) => {
+                      setJobsScriptSeed(json);
+                      requestPage("jobs");
+                    }}
+                  />
+                  <div className="panel automation-legacy-schedule">
+                    <ScheduleBlock
+                      devices={devices}
+                      selected={selected}
+                      onSelectUdids={setSelected}
+                    />
+                  </div>
+                </div>
+              )}
+            </section>
           )}
           {page === "jobs" && (
             <JobsPanel

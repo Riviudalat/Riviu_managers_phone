@@ -31,7 +31,7 @@ const MENU: {
     label: "Khám phá",
     children: [
       { id: "apps", label: "App center" },
-      { id: "scripts", label: "Automation" },
+      { id: "scripts", label: "Flow" },
       { id: "sync", label: "Đồng bộ cửa sổ" },
       { id: "jobs", label: "Jobs" },
     ],
