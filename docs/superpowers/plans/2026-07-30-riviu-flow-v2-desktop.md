@@ -24,7 +24,7 @@
 - Test: `apps/desktop/src-tauri/src/flow_commands.rs`
 - Test: `apps/desktop/src-tauri/src/lib.rs`
 
-- [ ] **Step 1: Write failing command and exit-order tests**
+- [x] **Step 1: Write failing command and exit-order tests**
 
 Test action catalog redaction, save revision 1, stale revision conflict with `nodeId/field` omitted, validation with node-scoped errors, legacy diagnostics, run selection serialization, retry-not-allowed, and exit order `reject new work -> drain admitted commands -> flows.stop_all -> sampler shutdown -> flows.shutdown -> jobs.shutdown -> control.shutdown_cleanup` with cancellation during acquire, Wait, and an in-flight UI call. Add deterministic barriers for a mutating command admitted immediately before shutdown and a contender arriving immediately after rejection.
 
@@ -80,7 +80,7 @@ the test module with fake components that append to one
 admission permit but before its repository mutation, so the test proves shutdown
 waits for already admitted work while a later command never reaches the repository.
 
-- [ ] **Step 2: Run tests red**
+- [x] **Step 2: Run tests red**
 
 ```powershell
 cargo test -p riviu-managers-phone flow_commands -- --nocapture
@@ -89,7 +89,7 @@ cargo test -p riviu-managers-phone exit_order -- --nocapture
 
 Expected: FAIL because Flow state and commands are absent.
 
-- [ ] **Step 3: Add structured Flow command errors**
+- [x] **Step 3: Add structured Flow command errors**
 
 Extend `CommandError` with optional `node_id`, `field`, and `attempt_id`; reuse its
 existing optional `udid` for device scope. Add constructors that preserve stable
@@ -107,7 +107,7 @@ pub field: Option<String>,
 pub attempt_id: Option<String>,
 ```
 
-- [ ] **Step 4: Compose FlowRuntime in AppState**
+- [x] **Step 4: Compose FlowRuntime in AppState**
 
 Add `pub flows: FlowRuntime`. Construct it after `JobQueue` with the existing DB, events, registry, control, `Arc::new(bundle.streams.clone())` as `GenerationFrameSource`, and `artifacts_dir.join("flows")`. Run startup artifact/attempt reconciliation before accepting commands.
 
@@ -209,7 +209,7 @@ before checking the counter is mandatory; otherwise the last permit can notify i
 the check/await gap and hang exit. Expose delegating `AppState::ensure_accepting_work`,
 `AppState::reject_new_work`, and `AppState::wait_for_mutating_commands` methods.
 
-- [ ] **Step 5: Implement typed commands**
+- [x] **Step 5: Implement typed commands**
 
 Implement these exact commands in `flow_commands.rs`:
 
@@ -275,7 +275,7 @@ and passes the compiler's canonical bytes/hash to the repository. The repository
 `IMMEDIATE` transaction remains authoritative and returns `RevisionConflict` when
 another writer advanced first. Never increment revision after hashing.
 
-- [ ] **Step 6: Enforce exit order**
+- [x] **Step 6: Enforce exit order**
 
 At `RunEvent::Exit`, call `reject_new_work()` first and await
 `wait_until_drained()` before stopping runtimes. Then call
@@ -304,7 +304,7 @@ if let Err(error) = tauri::async_runtime::block_on(state.control.shutdown_cleanu
 }
 ```
 
-- [ ] **Step 7: Run tests and commit**
+- [x] **Step 7: Run tests and commit**
 
 ```powershell
 cargo fmt --all
@@ -325,7 +325,7 @@ git commit -m "feat(flow): expose typed desktop commands"
 - Modify: `apps/desktop/src/api.ts`
 - Test: `apps/desktop/src/flowApi.test.ts`
 
-- [ ] **Step 1: Install pinned dependencies**
+- [x] **Step 1: Install pinned dependencies**
 
 Run:
 
@@ -337,7 +337,7 @@ npm --prefix apps/desktop install --save-dev --save-exact @testing-library/dom@1
 Require Node >=20.19 (the existing Vite 8 baseline). Commit the exact resolved
 versions in `package-lock.json`; do not hand-edit the lock.
 
-- [ ] **Step 2: Configure jsdom tests**
+- [x] **Step 2: Configure jsdom tests**
 
 Change `vite.config.ts` to import `defineConfig` from `vitest/config`, retain the React plugin, and add:
 
@@ -351,7 +351,7 @@ test: {
 
 In `src/test/setup.ts`, import `@testing-library/jest-dom/vitest` and stub `ResizeObserver` with observe/unobserve/disconnect methods.
 
-- [ ] **Step 3: Add exact TypeScript projections**
+- [x] **Step 3: Add exact TypeScript projections**
 
 Mirror all F0/F1 camelCase Rust models in `types.ts`. Use discriminated unions for `ActionKind`, `EvidenceSpec`, `FlowTargetSelection`, and attempt state. Define `CommandError` with optional `nodeId`, `field`, existing `udid`, and `attemptId`. No `any` is permitted in Flow types. `ActionDefinition` must include the backend-owned required nullable field `disabledReason: string | null`; do not synthesize a parallel UI-only disabled-reason map or widen it to an optional field.
 
@@ -394,7 +394,7 @@ export type FlowTargetSelection =
   | { mode: "allEligible" };
 ```
 
-- [ ] **Step 4: Add API wrappers and invocation tests**
+- [x] **Step 4: Add API wrappers and invocation tests**
 
 Add one wrapper for every command from Task 1. Mock `@tauri-apps/api/core` and assert command names and camelCase argument keys. For example:
 
@@ -487,7 +487,7 @@ it("qualifies a coordinate frame against the launch bundle", async () => {
 });
 ```
 
-- [ ] **Step 5: Run tests and commit**
+- [x] **Step 5: Run tests and commit**
 
 ```powershell
 npm --prefix apps/desktop test -- flowApi.test.ts
@@ -504,7 +504,7 @@ git commit -m "feat(flow): add typed frontend API contracts"
 - Create: `apps/desktop/src/components/flow/draftStorage.ts`
 - Create: `apps/desktop/src/components/flow/draftStorage.test.ts`
 
-- [ ] **Step 1: Write reducer tests**
+- [x] **Step 1: Write reducer tests**
 
 Cover new Start/End draft, add node between nodes, reconnect, delete executable
 node, stable IDs, duplicate with remapped flow/node/edge UUIDs, position-only edits,
@@ -575,7 +575,7 @@ it("ignores validation and save completions for an older draft epoch", () => {
 });
 ```
 
-- [ ] **Step 2: Run tests red**
+- [x] **Step 2: Run tests red**
 
 ```powershell
 npm --prefix apps/desktop test -- editorState.test.ts
@@ -583,7 +583,7 @@ npm --prefix apps/desktop test -- editorState.test.ts
 
 Expected: FAIL because the editor reducer is absent.
 
-- [ ] **Step 3: Implement domain/React mapping**
+- [x] **Step 3: Implement domain/React mapping**
 
 Define `FlowCanvasNode = Node<FlowNodeData, "flowAction">` and `FlowCanvasEdge = Edge`. Keep the domain UUID in both React and domain IDs. `toCanvas` maps positions/config; `toDocument` strips selection, measured dimensions, and React internals.
 
@@ -644,7 +644,7 @@ export function withCanvasLayout(
 }
 ```
 
-- [ ] **Step 4: Implement reducer and history**
+- [x] **Step 4: Implement reducer and history**
 
 Use this state shape:
 
@@ -718,7 +718,7 @@ rewrites every edge/entry reference through a node-ID map. `draftStorage` writes
 `null`. Debounce writes by 300 ms and clear the local draft only after an
 identity-current successful save.
 
-- [ ] **Step 5: Run tests and commit**
+- [x] **Step 5: Run tests and commit**
 
 ```powershell
 npm --prefix apps/desktop test -- editorState.test.ts
@@ -737,7 +737,7 @@ git commit -m "feat(flow): add deterministic visual draft state"
 - Create: `apps/desktop/src/components/flow/FlowActionNode.tsx`
 - Create: `apps/desktop/src/components/flow/FlowWorkspace.test.tsx`
 
-- [ ] **Step 1: Write interaction tests**
+- [x] **Step 1: Write interaction tests**
 
 Render a catalog fixture, drag Wait onto the canvas, connect Start -> Wait -> End, select/delete/reorder nodes, zoom via controls, and verify disabled actions show the backend capability reason. Assert Start/End cannot be deleted and raw action kinds never render.
 
@@ -833,7 +833,7 @@ it("uses the backend catalog disabled reason without a parallel map", () => {
 });
 ```
 
-- [ ] **Step 2: Run tests red**
+- [x] **Step 2: Run tests red**
 
 ```powershell
 npm --prefix apps/desktop test -- FlowWorkspace.test.tsx
@@ -841,7 +841,7 @@ npm --prefix apps/desktop test -- FlowWorkspace.test.tsx
 
 Expected: FAIL because workspace components are absent.
 
-- [ ] **Step 3: Implement the action palette**
+- [x] **Step 3: Implement the action palette**
 
 Group catalog entries by App, Input, Timing, and Evidence. Use native drag payload `application/riviu-flow-action` containing only the stable action kind. Render disabled entries as buttons with `disabled`, `aria-disabled`, and a title directly from `ActionDefinition.disabledReason`. The catalog response is authoritative; do not derive a second reasons prop or lookup.
 
@@ -879,7 +879,7 @@ return CATEGORY_ORDER.map((category) => (
 ));
 ```
 
-- [ ] **Step 4: Implement the controlled canvas**
+- [x] **Step 4: Implement the controlled canvas**
 
 Use `ReactFlow`, `Background`, `Controls`, and `MiniMap`; pass controlled nodes/edges and explicit change/connect handlers. Use `screenToFlowPosition` on drop. Set `nodeTypes` outside the component. Enable grid snap at `[16,16]`, fit view only on first load, and keep the parent height fixed by CSS rather than inline viewport math.
 
@@ -926,7 +926,7 @@ return (
 `screenToFlowPosition`, then dispatches one reducer action containing the new UUID,
 position, and selected/nearest edge ID. The reducer performs the atomic edge split.
 
-- [ ] **Step 5: Implement custom nodes**
+- [x] **Step 5: Implement custom nodes**
 
 Render compact nodes with one input/output flow handle, action label, concise config
 summary, error badge, and selected state. Start has output only; End has input only.
@@ -995,7 +995,7 @@ export function FlowActionNode({ data, selected }: NodeProps<FlowCanvasNode>) {
 }
 ```
 
-- [ ] **Step 6: Run tests and commit**
+- [x] **Step 6: Run tests and commit**
 
 ```powershell
 npm --prefix apps/desktop test -- FlowWorkspace.test.tsx
@@ -1016,7 +1016,7 @@ git commit -m "feat(flow): add controlled drag-and-drop canvas"
 - Create: `apps/desktop/src/components/flow/FlowInspector.test.tsx`
 - Modify: `apps/desktop/src/components/flow/FlowWorkspace.tsx`
 
-- [ ] **Step 1: Write inspector/import tests**
+- [x] **Step 1: Write inspector/import tests**
 
 Test Launch/Terminate Bundle ID, Terminate `ProcessAbsent` bundle equality, bounded
 Wait, finite Tap/Swipe inputs, mutually exclusive Tap target
@@ -1053,7 +1053,7 @@ it("stores click coordinates in original frame space", async () => {
 });
 ```
 
-- [ ] **Step 2: Run tests red**
+- [x] **Step 2: Run tests red**
 
 ```powershell
 npm --prefix apps/desktop test -- FlowInspector.test.tsx
@@ -1061,7 +1061,7 @@ npm --prefix apps/desktop test -- FlowInspector.test.tsx
 
 Expected: FAIL because inspector/dialog components are absent.
 
-- [ ] **Step 3: Implement schema-driven fields with explicit widgets**
+- [x] **Step 3: Implement schema-driven fields with explicit widgets**
 
 Render strings as text inputs, numeric bounds as number inputs, enums as select menus, binary options as checkboxes, and coordinates as paired numeric inputs. Handle each JSON-schema property type explicitly and return `UnsupportedFieldSchema` in development for unknown schema shapes. Evidence options come only from the action's backend `allowedEvidence`; `qualifiedFramePredicate` also requires a detector ID in `qualifiedDetectorIds`. Release 1 publishes no detector IDs and never accepts free-form evidence JSON.
 
@@ -1134,7 +1134,7 @@ Use dedicated `CoordinateFields` and `ReadBackLocatorFields` for their nested
 schemas so orientation is a menu, x/y are finite number inputs, profile ID is
 read-only after picking, and locator strategy is a two-option segmented control.
 
-- [ ] **Step 4: Implement backend validation mapping**
+- [x] **Step 4: Implement backend validation mapping**
 
 Debounce `flow_validate` by 250 ms after edits. Give every request a monotonically
 increasing ID plus the reducer's current flow ID and `documentEpoch`; clone the
@@ -1178,7 +1178,7 @@ useEffect(() => {
 rejection becomes one document issue `{code:"ValidationTransportFailed",
 message:String(error)}`.
 
-- [ ] **Step 5: Implement import and advanced JSON**
+- [x] **Step 5: Implement import and advanced JSON**
 
 Legacy import shows every diagnostic and applies the returned document only when it is non-null. Flow JSON import parses locally, then calls backend validation before replacing the draft. Export uses `flow_export`. The JSON dialog is diagnostic/advanced mode and never auto-saves.
 
@@ -1241,7 +1241,7 @@ Legacy import calls `flowImportLegacy(raw)` and replaces the draft only when
 `result.document !== null && result.diagnostics.length === 0`. Flow export displays
 only the string returned by `flowExport`; neither dialog invokes save.
 
-- [ ] **Step 6: Run tests and commit**
+- [x] **Step 6: Run tests and commit**
 
 ```powershell
 npm --prefix apps/desktop test -- FlowInspector.test.tsx
@@ -1259,7 +1259,7 @@ git commit -m "feat(flow): add typed inspector and import diagnostics"
 - Create: `apps/desktop/src/components/flow/FlowRunMonitor.test.tsx`
 - Modify: `apps/desktop/src/components/flow/FlowWorkspace.tsx`
 
-- [ ] **Step 1: Write run workflow tests**
+- [x] **Step 1: Write run workflow tests**
 
 Cover explicit Save revision, stale revision conflict, One/Selected/AllEligible payloads, zero target prevention, queued/running/partial terminal projection, per-device node attempts, artifacts, cancel, retry eligibility, disabled retry for Uncertain Tap/Swipe/Type, and event invalidation followed by refetch.
 
@@ -1338,7 +1338,7 @@ it("builds Selected from the existing device selection", async () => {
 });
 ```
 
-- [ ] **Step 2: Run tests red**
+- [x] **Step 2: Run tests red**
 
 ```powershell
 npm --prefix apps/desktop test -- FlowRunMonitor.test.tsx
@@ -1346,7 +1346,7 @@ npm --prefix apps/desktop test -- FlowRunMonitor.test.tsx
 
 Expected: FAIL because toolbar/dialog/monitor are absent.
 
-- [ ] **Step 3: Implement toolbar commands**
+- [x] **Step 3: Implement toolbar commands**
 
 Use Lucide Save, Play, Upload, Download, Copy, Archive, Plus, Undo2, Redo2,
 CheckCircle, and Braces icons. The toolbar includes a flow selector plus New,
@@ -1473,7 +1473,7 @@ follows Task 3's `SaveCompletedForOlderDraft` path. A `RevisionConflict` clears 
 matching save request, leaves the draft dirty, and surfaces the server's actual
 revision.
 
-- [ ] **Step 4: Implement target selection**
+- [x] **Step 4: Implement target selection**
 
 Use a segmented control for One, Selected, and All eligible. One uses a device
 select; Selected uses existing selected UDIDs; AllEligible shows only its status
@@ -1538,7 +1538,7 @@ export function FlowRunDialog({
 }
 ```
 
-- [ ] **Step 5: Implement monitor and event refresh**
+- [x] **Step 5: Implement monitor and event refresh**
 
 ```tsx
 function flowRunEvent(value: unknown): { runId: string; revision: number } | null {
@@ -1650,7 +1650,7 @@ retry permission from action names or enables Uncertain attempts.
 
 Render device rows and node attempts as a dense table, not nested cards. Show status, attempt number, duration, evidence result, artifact link, and typed error. On `flowRunUpdated`, refetch only the matching visible run when the event revision is newer.
 
-- [ ] **Step 6: Run tests and commit**
+- [x] **Step 6: Run tests and commit**
 
 ```powershell
 npm --prefix apps/desktop test -- FlowRunMonitor.test.tsx
@@ -1671,7 +1671,7 @@ git commit -m "feat(flow): add revision and run workflow"
 - Modify: `apps/desktop/src/App.css`
 - Create: `apps/desktop/src/App.test.tsx`
 
-- [ ] **Step 1: Write page integration tests**
+- [x] **Step 1: Write page integration tests**
 
 Test sidebar navigation, Flow title, preservation of legacy Jobs page, local draft
 restore, unsaved sidebar/close prompt, desktop 1440x900 containment, and narrow
@@ -1722,7 +1722,7 @@ it("prompts once before leaving a dirty Flow draft", async () => {
 
 Render the real default-exported App; do not introduce production-only fixture props.
 
-- [ ] **Step 2: Import styles in the approved order**
+- [x] **Step 2: Import styles in the approved order**
 
 In `main.tsx`:
 
@@ -1733,7 +1733,7 @@ import "./index.css";
 
 No React Flow `@import` belongs after CSS rules in `index.css`.
 
-- [ ] **Step 3: Replace the Scripts page surface**
+- [x] **Step 3: Replace the Scripts page surface**
 
 ```tsx
 const [flowDirty, setFlowDirty] = useState(false);
@@ -1810,7 +1810,7 @@ existing legacy path remains directly usable. Lift dirty state to `App`; every
 sidebar transition calls `requestPage(next)` and prompts once when dirty. Register
 and remove `beforeunload` while dirty.
 
-- [ ] **Step 4: Add stable responsive layout CSS**
+- [x] **Step 4: Add stable responsive layout CSS**
 
 ```css
 .flow-workspace {
@@ -1938,7 +1938,7 @@ state agree.
 
 Use a full-width work surface with `grid-template-columns: minmax(180px, 240px) minmax(420px, 1fr) minmax(260px, 320px)`, a fixed `min-height: 620px`, and a monitor band below. At <=1100 px, collapse the palette behind its toolbar button and use `minmax(420px, 1fr) minmax(260px, 300px)` for canvas plus inspector, with no overlap. At <=760 px, put the inspector in a modal side sheet that is closed by default; the canvas remains at least 420 px and the document may scroll inside the work surface rather than overflow the page. Use 6 px or smaller radii, neutral surfaces, existing orange/green status accents, no gradients/orbs, and no cards nested inside panels.
 
-- [ ] **Step 5: Run frontend gate and commit**
+- [x] **Step 5: Run frontend gate and commit**
 
 ```powershell
 npm --prefix apps/desktop test
@@ -1954,7 +1954,7 @@ git commit -m "feat(flow): integrate the visual automation workspace"
 - Modify: `AGENTS.md`
 - Modify: `docs/superpowers/plans/2026-07-30-riviu-flow-v2-desktop.md`
 
-- [ ] **Step 1: Run full Rust and frontend gates**
+- [x] **Step 1: Run full Rust and frontend gates**
 
 ```powershell
 cargo fmt --all -- --check
@@ -1968,7 +1968,7 @@ git diff --check
 
 Expected: every command exits 0.
 
-- [ ] **Step 2: Record and commit F2**
+- [x] **Step 2: Record and commit F2**
 
 Mark all F2 checkboxes complete. Record commit range, Rust/frontend counts, disabled nodes, next plan, and rollback commit in `AGENTS.md`.
 

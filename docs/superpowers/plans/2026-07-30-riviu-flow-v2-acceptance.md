@@ -18,7 +18,7 @@
 - Create: `docs/fixtures/flow-release-one.json`
 - Modify: `apps/desktop/src-tauri/Cargo.toml`
 
-- [ ] **Step 1: Write the failing mock release test**
+- [x] **Step 1: Write the failing mock release test**
 
 Build a fixed revision: Start -> Launch Settings -> Wait 10 ms -> Swipe ->
 Screenshot -> Terminate Settings -> Home -> End. Run it on two mock UDIDs through a
@@ -144,7 +144,7 @@ returning its typed absence proof. Never maintain a second
 hand-written snapshot or trust a profile constant without recomputing it through
 `qualified_geometry_profile_id` and comparing both Swipe endpoints before compile.
 
-- [ ] **Step 2: Run test red**
+- [x] **Step 2: Run test red**
 
 ```powershell
 cargo test -p riviu-core --test flow_release_one -- --nocapture
@@ -152,7 +152,7 @@ cargo test -p riviu-core --test flow_release_one -- --nocapture
 
 Expected: FAIL until the harness-facing runtime constructor and mock evidence frames are wired.
 
-- [ ] **Step 3: Implement the headless harness**
+- [x] **Step 3: Implement the headless harness**
 
 `live_flow_test` accepts `--flow`, repeated `--udid`, `--jsonl`, and `--mock`. It
 loads and compiles Flow JSON, saves the exact document/compiled plan/hash through
@@ -270,7 +270,7 @@ Use this exact document:
 }
 ```
 
-- [ ] **Step 4: Run mock harness and commit**
+- [x] **Step 4: Run mock harness and commit**
 
 ```powershell
 cargo test -p riviu-core --test flow_release_one -- --nocapture
@@ -289,7 +289,7 @@ Expected: exit 0 and two independent device histories.
 - Create: `apps/desktop/e2e/fixtures/tauriMock.ts`
 - Modify: `apps/desktop/package.json`
 
-- [ ] **Step 1: Add Playwright scripts and deterministic Tauri mock**
+- [x] **Step 1: Add Playwright scripts and deterministic Tauri mock**
 
 Add `test:e2e` as `playwright test`. The browser fixture installs `window.__TAURI_INTERNALS__` invoke/listener mocks before App loads and serves a stable catalog, devices, saved revisions, and run projection.
 
@@ -410,7 +410,7 @@ array for Flow list/get/save/export; compiler fixture output for validate; and a
 in-memory run/detail for run/cancel/retry/list/get. Unknown commands throw
 `Unknown mock command: <name>` so new startup dependencies cannot pass silently.
 
-- [ ] **Step 2: Write workflow checks**
+- [x] **Step 2: Write workflow checks**
 
 Test create flow, drag Wait/Tap, connect, edit properties/evidence, validate, save, choose Selected devices, run, observe independent attempts, cancel another run, import supported legacy JSON, and show unsupported diagnostics without mutating the draft.
 
@@ -461,7 +461,7 @@ test("legacy scripts and jobs remain reachable", async ({ page }) => {
 });
 ```
 
-- [ ] **Step 3: Write visual checks**
+- [x] **Step 3: Write visual checks**
 
 Capture 1440x900 and 900x700 screenshots. Assert the canvas bounding box is nonzero, at least one node is visible, palette/toolbar/inspector/monitor boxes do not overlap incoherently, longest labels fit, and no horizontal document overflow exists.
 
@@ -506,7 +506,7 @@ await expect(page).toHaveScreenshot(
 );
 ```
 
-- [ ] **Step 4: Run and commit**
+- [x] **Step 4: Run and commit**
 
 ```powershell
 npm --prefix apps/desktop exec -- playwright install chromium
@@ -674,7 +674,7 @@ Expected: F3 is `PASS` only when every node proof and cleanup assertion passes. 
 - Create: `docs/fixtures/rollback-legacy-probe.rs`
 - Create: `docs/re/flow-v2/release-1.md`
 
-- [ ] **Step 1: Run final regression**
+- [x] **Step 1: Run final regression**
 
 ```powershell
 cargo fmt --all -- --check
@@ -690,7 +690,7 @@ git diff --check
 
 On Mac additionally run the release Tauri build and launch the packaged app with mock devices before the live tuple.
 
-- [ ] **Step 2: Prove rollback**
+- [x] **Step 2: Prove rollback**
 
 Create `docs/fixtures/rollback-legacy-probe.rs`. The proof copies this test into
 `crates/script-engine/tests` in the detached pre-F0 worktree, so it is compiled
@@ -729,8 +729,7 @@ $repo = (Resolve-Path ".").Path
 $rollbackRoot = Join-Path (Split-Path $repo -Parent) ("riviu-flow-rollback-" + [guid]::NewGuid())
 $proofRoot = Join-Path $env:TEMP ("riviu-flow-rollback-" + [guid]::NewGuid())
 $fixturePath = Join-Path $proofRoot "pre-flow-v1.db"
-$rollbackData = Join-Path $proofRoot "rollback-appdata"
-$rollbackDbDir = Join-Path $rollbackData "riviu-managers-phone"
+$rollbackDbDir = Join-Path $proofRoot "rollback-data"
 $rollbackDb = Join-Path $rollbackDbDir "riviu.db"
 $cleanDb = Join-Path $proofRoot "release-migrated-clean.db"
 $probeTarget = Join-Path $rollbackRoot "crates/script-engine/tests/rollback_legacy_probe.rs"
@@ -741,13 +740,13 @@ cargo test -p riviu-core db::migrations::tests::write_populated_legacy_fixture -
 python -c 'import os,sqlite3; p=os.environ["RIVIU_LEGACY_FIXTURE_PATH"]; c=sqlite3.connect(p); c.execute("update jobs set id=? where id=?",("00000000-0000-0000-0000-000000000901","job-1")); c.commit(); c.close()'
 Copy-Item -LiteralPath $fixturePath -Destination $rollbackDb
 
-$savedAppData = $env:APPDATA
 $savedMock = $env:RIVIU_MOCK_DEVICES
+$savedMockData = $env:RIVIU_MOCK_DATA_DIR
 $oldApp = $null
 $releaseApp = $null
 try {
-  $env:APPDATA = $rollbackData
   $env:RIVIU_MOCK_DEVICES = "1"
+  $env:RIVIU_MOCK_DATA_DIR = $rollbackDbDir
 
   cargo build -p riviu-managers-phone
   $releaseApp = Start-Process -FilePath (Join-Path $repo "target/debug/riviu-managers-phone.exe") -WindowStyle Hidden -PassThru
@@ -763,6 +762,9 @@ try {
   python -c 'import os,sqlite3; src=os.environ["RIVIU_ROLLBACK_PROOF_DB"]; dst=os.environ["RIVIU_ROLLBACK_CLEAN_DB"]; a=sqlite3.connect(src); b=sqlite3.connect(dst); a.backup(b); b.close(); a.close(); c=sqlite3.connect(dst); assert c.execute("pragma integrity_check").fetchone()==("ok",); c.close(); os.replace(dst,src)'
 
   git worktree add --detach $rollbackRoot $env:RIVIU_PRE_F0_COMMIT
+  $rollbackSeam = Join-Path $repo "docs/fixtures/rollback-pre-f0-mock-data-dir.patch"
+  git -C $rollbackRoot apply --check $rollbackSeam
+  git -C $rollbackRoot apply $rollbackSeam
   New-Item -ItemType Directory -Path (Split-Path $probeTarget -Parent) -Force | Out-Null
   Copy-Item -LiteralPath (Join-Path $repo "docs/fixtures/rollback-legacy-probe.rs") -Destination $probeTarget
   Push-Location $rollbackRoot
@@ -790,14 +792,14 @@ try {
   if (Test-Path -LiteralPath $probeTarget) {
     Remove-Item -LiteralPath $probeTarget
   }
-  $env:APPDATA = $savedAppData
   $env:RIVIU_MOCK_DEVICES = $savedMock
+  $env:RIVIU_MOCK_DATA_DIR = $savedMockData
   Remove-Item Env:RIVIU_LEGACY_FIXTURE_PATH -ErrorAction SilentlyContinue
   Remove-Item Env:RIVIU_ROLLBACK_PROOF_DB -ErrorAction SilentlyContinue
   Remove-Item Env:RIVIU_ROLLBACK_CLEAN_DB -ErrorAction SilentlyContinue
 }
 
-git worktree remove $rollbackRoot
+git worktree remove --force $rollbackRoot
 ```
 
 The release binary must migrate the one copied database and complete its normal exit
@@ -808,11 +810,13 @@ desktop binary both use that same `rollbackDb`; the probe exercises the old
 `list_scripts`, v1 `parse_script`, and `list_jobs` paths, while desktop boot exercises
 legacy startup and must remain alive for five seconds. Run worktree removal only
 after those assertions; leave `proofRoot`
-in place until `release-1.md` records its hashes. No command points `APPDATA` at the
-operator's real profile. Rollback disables Flow UI/commands and reads the additive
-database in place; it never downgrades or rewrites it.
+in place until `release-1.md` records its hashes. `RIVIU_MOCK_DATA_DIR` is accepted
+only with mock devices and an absolute path. The checked-in seam patch adds the same
+fixture-only path selection to the detached pre-F0 source before it is built, so no
+command opens the operator's real profile. Rollback disables Flow UI/commands and
+reads the additive database in place; it never downgrades or rewrites it.
 
-- [ ] **Step 3: Record release scope**
+- [x] **Step 3: Record release scope**
 
 ```markdown
 # Riviu Flow V2 Release 1

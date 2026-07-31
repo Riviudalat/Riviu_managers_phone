@@ -1,0 +1,35 @@
+diff --git a/apps/desktop/src-tauri/src/state.rs b/apps/desktop/src-tauri/src/state.rs
+index cb96f72..9af1aa4 100644
+--- a/apps/desktop/src-tauri/src/state.rs
++++ b/apps/desktop/src-tauri/src/state.rs
+@@ -198,8 +198,17 @@ impl AppState {
+ impl AppState {
+     pub async fn bootstrap(resource_dir: Option<PathBuf>) -> anyhow::Result<Self> {
+-        let data = dirs::data_dir()
+-            .unwrap_or_else(|| PathBuf::from("."))
+-            .join("riviu-managers-phone");
++        let mock_requested = std::env::var("RIVIU_MOCK_DEVICES")
++            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
++            .unwrap_or(false);
++        let data = match std::env::var_os("RIVIU_MOCK_DATA_DIR").map(PathBuf::from) {
++            Some(path) if mock_requested && path.is_absolute() => path,
++            Some(_) => anyhow::bail!(
++                "RIVIU_MOCK_DATA_DIR requires RIVIU_MOCK_DEVICES=1 and an absolute path"
++            ),
++            None => dirs::data_dir()
++                .unwrap_or_else(|| PathBuf::from("."))
++                .join("riviu-managers-phone"),
++        };
+         std::fs::create_dir_all(&data)?;
+         let artifacts_dir = data.join("artifacts");
+         std::fs::create_dir_all(&artifacts_dir)?;
+@@ -208,9 +217,6 @@ impl AppState {
+         let sidecar_root = resolve_sidecar_root(resource_dir.as_deref());
+         let credentials = CredentialStore::system()?;
+         let legacy_token = std::env::var("RIVIU_RTMMO_TOKEN").ok();
+-        let mock_requested = std::env::var("RIVIU_MOCK_DEVICES")
+-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+-            .unwrap_or(false);
+         let ResolvedAgentRuntime {
+             driver_config,
+             settings: resolved_agent_settings,

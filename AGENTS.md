@@ -1163,10 +1163,10 @@ release hien tai phai duoc mo ta dung nhu sau:
 - Source Riviu Agent candidate da PASS source/contract/fixture tren Windows, nhung B0,
   Gate B va Gate C van `PENDING_MAC_DEVICE`. Candidate hien chi advertise
   `stream/tap/swipe/clipboard`; chua co `text`, chua thay day du RT-MMO.
-- Flow V2 moi dong F0/F1 core runtime. F2 Tauri composition/commands, Flow React UI,
-  runtime-qualified auth + geometry, startup recovery wiring va live invalidation
-  van chua lam; F3 acceptance cung chua chay. Vi vay app chua co visual drag/drop
-  Flow V2 hoan chinh cho nguoi dung.
+- Flow V2 da dong F0/F1/F2: Tauri composition/commands, startup recovery, React
+  drag/drop editor, exact revision save, run monitor va invalidation da co. F3
+  Rust fixture, Playwright va rollback proof da PASS voi nhan `FIXTURE_ONLY`; F3
+  live van `PENDING_MAC_DEVICE` cho toi khi Phase 4A protected-auth/geometry PASS.
 - TikTok Interaction Campaign hien moi co reviewed design, control-plane foundation
   va Gate 0 source/fixture. `InteractionCampaignEngine`, persistence, Tauri commands,
   menu/UI dan link, scheduler, G0.12 live Mac va G1-G3 van chua hoan tat. Chua duoc
@@ -1196,28 +1196,38 @@ voi editor keo tha va run monitor. Plan dieu phoi active nam o
 `docs/superpowers/plans/2026-07-31-interaction-flow-delivery.md` va la noi giai quyet
 xung dot giua cac detailed plan cu.
 
-Thu tu thuc thi: Flow F2 co the bat dau ngay tren Windows; song song, Mac dong G0.12.
-G1 Campaign core, G2 verified actions va G3 operator UI chi bat dau production path
-sau exact G0.12 live report PASS. Flow F3 mock/Playwright co the chay truoc, nhung
-F3 live van cho runtime-qualified protected auth + geometry tren Mac/iPhone.
+Trang thai thuc thi: Flow F2 va F3 mock/Playwright/rollback da dong tren Windows.
+Mac van phai dong G0.12; G1 Campaign core, G2 verified actions va G3 operator UI chi
+bat dau production path sau exact G0.12 live report PASS. Flow F3 live van cho
+runtime-qualified protected auth + geometry tren Mac/iPhone.
 
 Cac quyet dinh bat buoc cho lan trien khai nay:
 
 - Interaction dung migration version 3 tren `schema_migrations` chung da co version
-  1/2; khong tao migration ledger thu hai.
+  1/2; khong tao migration ledger thu hai. Flow F2 khong thay schema: archive tra
+  projection ngay trong cung transaction, con `FlowMutationCoordinator` tuan tu hoa
+  commit + emit va cap revision invalidation tang dan trong tung phien desktop.
+  Revision nay chi la cache hint; sau restart UI refetch projection SQLite truoc khi
+  nhan event moi. Khong them migration Flow chi de luu cache hint vi se pha rollback
+  pre-F0 va chiem version 3 da khoa cho Interaction.
 - Flow F2 pin mot bo jsdom/Testing Library/Playwright va mot test config; G3 tai su
   dung, khong tao happy-dom/Vitest/Playwright config canh tranh.
 - Initial metadata device scan phai populate registry truoc startup recovery. Sau do
   recover Flow/Interaction truoc reconcile artifact root rieng voi **toan bo**
   committed rows, khong chi run nonterminal; Exit chan admission va join ca hai
   runtime truoc `DeviceControlPlane::shutdown_cleanup()`.
-- F2 phai them executor post-commit invalidation callback hoac bounded polling cho
-  run nonterminal; event F1 hien tai chi o admission/device completion/recovery nen
-  chua du de quang ba live per-node monitor.
+- F2 da them bounded polling 750 ms cho run nonterminal va consume
+  `FlowRunUpdated`; document list/editor consume `FlowUpdated`. Khong bo cac duong
+  invalidation nay vi event F1 chi o completion/recovery khong du cho live monitor.
 - Admission gate luc Exit phai chan va drain **moi** mutating command, gom ca
   save/archive/start/schedule/cancel/retry/settings/credential/DB write/queue insert,
   khong chi command doi man hinh. Khi G1 duoc compose, test Exit phai co dispatcher +
   scheduler that; F2 chi chung minh duoc phan shutdown truoc Interaction.
+- Exit phai reject command moi, signal Nurture/Flow/Job stop, roi moi cho admission
+  drain. Doi wait va stop se deadlock khi retry dang giu admission va cho device cua
+  Nurture. Worker Flow run/retry phai dang ky `JoinHandle` qua registration barrier;
+  khi ket thuc phai retire task, cancellation va cache emitted revision truoc
+  shutdown. Khong quay lai registry chi duoc drain luc Exit.
 - Truoc F3 live phai implement va gate snapshot Pmd target-bound co protected auth,
   `QualifiedGeometry` va readiness ro rang truoc/sau park stream. Truoc G5, ca hai
   iPhone acceptance phai co G0/G2 live tuple proof; G5 khong duoc tu tao capability.
@@ -1231,6 +1241,51 @@ MDM/supervision, G4 Save/Repost/Direct Message, Flow branch/loop/cross-device va
 A-comment/B-reply van giu o deferred roadmap. Viec uu tien Interaction/Flow khong
 duoc dung de xoa hoac tuyen bo hoan tat cac muc nay. Production IPA/manifest va
 qualification registry van theo exact gate/rollback rules o cac section tren.
+
+### 3.17 Flow V2 F2 va F3 fixture checkpoint (31/07/2026)
+
+Desktop F2 da dong tren Windows qua ba implementation commit:
+
+- `13409b04201cf657c2553747f91ce3a834c408f6`: compose `FlowRuntime`, artifact
+  store, startup recovery, 15 typed Tauri commands, exact save/archive, command
+  admission va exit ordering. Initial device scan fail thi startup fail ro rang;
+  run/retry workers co registration barrier va tu retire bookkeeping.
+- `60875e7cfd1a7a25543322955c5759db9de24cad`: Flow React workspace co palette,
+  canvas keo tha, custom node, inspector, validation, undo/redo 50 entry,
+  draft restore, import/export/JSON, One/Selected/AllEligible, coordinate picker,
+  run monitor va Legacy tab. `FlowUpdated` refetch revision sach; draft dirty chi
+  refresh list va khong bi ghi de.
+- `57eb3737e9198918b81a63410da6ed3cc62652f2`: headless fixture hai device,
+  Playwright workflow va visual snapshot 1440x900/900x700.
+
+F2 khong them database migration. Ledger van exact version 1/2; Interaction giu
+version 3. `FlowMutationCoordinator` revision la invalidation hint trong mot desktop
+process; restart phai refetch SQLite. Cancel/retry missing ID tra typed
+`FlowRunNotFound`/`FlowAttemptNotFound`, khong parse error string.
+
+Final Windows gate PASS: `cargo test --workspace` (core 263 pass + 1 ignored
+fixture, ios-driver 131, desktop 40 va cac integration/doc target), workspace
+Clippy `-D warnings`, rustfmt, Vitest 71/71, frontend build, Oxlint exit 0 voi 7
+Fast Refresh warning khong chan, Playwright 6/6, Python app-control 10/10 va
+`git diff --check`. Mock harness PASS: plan SHA-256
+`88333ddcbb7ae804825e1902ad5c0a3d04431def5a947f65aabf8dae724173c4`, hai
+device, 16 attempt, 0 uncertain, 2 JPEG da verify, stream max 2/2 va cleanup
+context/stream/quarantine deu 0.
+
+Rollback proof PASS tren ban sao DB tam: release migrate v1 -> ledger exact 1/2;
+pre-F0 `805056790d890046384ad7a578cc34a99088e799` core/parser, frontend, desktop build
+va desktop boot 5 giay cung PASS, SQLite `integrity_check=ok`. Windows khong duoc
+dung `APPDATA` de co lap proof vi `dirs::data_dir()` dung Known Folder API. Dung
+`RIVIU_MOCK_DATA_DIR` chi khi `RIVIU_MOCK_DEVICES=1`, path absolute, va apply
+`docs/fixtures/rollback-pre-f0-mock-data-dir.patch` vao detached pre-F0 worktree.
+
+Bao cao checkpoint o `docs/re/flow-v2/release-1.md`. F3 live chua dong: real
+coordinate picker va Pmd UI Flow van fail-closed cho toi Phase 4A tren Mac/iPhone;
+khong tao `gate-f3.json/md`, khong ghi live PASS va khong doi production Agent.
+Production `RiviuAgent.ipa` van SHA-256
+`8a24847099495ff70b998522692c43f00dd16b90f698bda6953a73f5d33002ea`; manifest
+canonical-LF van
+`e98a549af4c061556effd36424e7732219e1a6d262bcf1f259279975024b6e1a`.
 
 ---
 

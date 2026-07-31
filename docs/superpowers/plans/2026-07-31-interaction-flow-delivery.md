@@ -220,6 +220,12 @@ new runtimes are composed.
 
 **Exit:** F3 mock/browser evidence passes; F3 itself remains pending live device.
 
+**Checkpoint 31/07/2026:** Phases 1 and 2 are PASS on Windows. Phase 3
+mock/browser evidence is PASS and labeled `FIXTURE_ONLY`; the isolated pre-F0
+rollback proof is also PASS. The Mac/iPhone portion of F3 remains open and still
+depends on Phase 4A. Interaction G0.12 and Phases 5-8 are unchanged and remain
+blocked by their documented live gates.
+
 ### Phase 4: Interaction G0.12 On Mac
 
 - Close desktop, harnesses, 3uTools, and other XCTest runners.
