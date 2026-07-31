@@ -1093,8 +1093,7 @@ Verification Task 7 hien PASS: runtime 35/35, executor 26/26, Flow DB 21/21,
 artifact store 11/11, JobQueue 3/3, DeviceControl 36/36; full `riviu-core` PASS 254
 unit (1 ignored fixture writer) + 15 real-frame tests va clippy all-targets
 `-D warnings`. Day van la core runtime checkpoint, chua wire Tauri command/startup
-composition root hay Flow React UI; F1 final gate/commit thuoc Task 8, khong tu danh
-dau F1 complete tai day.
+composition root hay Flow React UI; F1 final gate duoc ghi ngay ben duoi.
 
 F2 composition root bat buoc goi `FlowRuntime::recover_startup()` truoc generic
 `FlowArtifactStore::reconcile()`: recovery phai co co hoi adopt exact artifact cua
@@ -1103,6 +1102,34 @@ do phai nhan day du committed artifact rows, khong chi artifact cua run nontermi
 Event runtime hien co dam bao monotonic/post-commit o admission va khi device/recovery
 hoan tat; F2 khong duoc quang ba live per-node refresh cho toi khi co post-commit
 invalidation callback hoac polling command duoc test.
+
+Runtime F1 da dong ngay 31/07/2026. Implementation commit range la
+`b5ad940534a2eb75f207659d4a703cca14a220c0` through
+`60c7dfca2f0b0ba9ceb64e41485127cce29c6f90`; rollback commit van giu nguyen
+pre-F0 `805056790d890046384ad7a578cc34a99088e799`. Final gate PASS:
+`python -m unittest sidecars.pymobiledevice3.test_app_control -v` 10/10;
+`cargo fmt --all -- --check`; `cargo test --workspace` voi core 254 pass + 1
+ignored fixture writer, real-frame 15/15, iOS driver 131/131, desktop 28/28,
+script-engine 26/26 va cac signing/reconstruction suite deu PASS;
+`cargo clippy --workspace --all-targets -- -D warnings`; `git diff --check`.
+Production IPA va canonical-LF manifest van dung SHA-256
+`8a24847099495ff70b998522692c43f00dd16b90f698bda6953a73f5d33002ea` va
+`e98a549af4c061556effd36424e7732219e1a6d262bcf1f259279975024b6e1a`.
+
+Termination F1 chi dung exact typed DVT process contract: read positive PID, kill
+dung PID mot lan, poll absent trong deadline; already-absent la success. Recovery va
+retry chi dung read-only `ReadProcess`, khong kill lai; payload legacy/field thieu-thua
+hoac dependency handshake sai deu fail closed. TikTok domain nodes van khong co trong
+release-one catalog; `Comment`, `ReplyToComment`, Save, Repost va Direct Message van
+bi khoa cho toi khi `InteractionCampaignEngine` + persistence + G0-G3 va identity
+artifact gate ton tai. `RawHttp`, `RawWda` va `Shell` cung khong nam trong catalog.
+
+Gate tiep theo la Desktop F2 tai
+`docs/superpowers/plans/2026-07-30-riviu-flow-v2-desktop.md`. F2 phai wire Tauri
+commands/startup, runtime-qualified protected snapshot + geometry, Flow React UI,
+startup artifact order va live node invalidation; khong chuyen thang sang F3. Mac
+van phai chay B0/Gate B/Gate C cua Riviu Agent candidate rieng truoc khi thay production
+oracle; F1 core PASS khong thay cho live device gate.
 
 Snapshot metadata hien tai cua `PmdIosDriver::inspect_device_for_target` chua co
 protected-auth proof va `QualifiedGeometry`, nen UI Flow tren Pmd that co chu y fail

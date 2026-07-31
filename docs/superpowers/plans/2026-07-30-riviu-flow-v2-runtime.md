@@ -725,7 +725,7 @@ git commit -m "feat(flow): persist durable run and attempt states"
 - Test: `crates/core/src/job_queue.rs`
 - Test: `crates/ios-driver/src/pmd.rs`
 
-- [ ] **Step 1: Write Python tests for running and absent processes**
+- [x] **Step 1: Write Python tests for running and absent processes**
 
 Use fake `DvtProvider` and `ProcessControl` modules. Assert a running bundle resolves PID 42, calls `kill(42)` once, polls to PID 0, and emits `{ok:true, oldPid:42, running:false}`. Assert an absent bundle emits `{ok:true, oldPid:null, running:false}` without calling kill. Assert a PID that remains present until the 5-second deadline exits nonzero with `ok:false`.
 
@@ -821,7 +821,7 @@ exit, and lockdown close. With a patched 20 ms operation deadline and 10 ms clea
 deadline, every stuck test must finish in under 250 ms. Assert a cleanup fault does
 not replace the primary operation error.
 
-- [ ] **Step 2: Run tests red**
+- [x] **Step 2: Run tests red**
 
 ```powershell
 python -m unittest sidecars.pymobiledevice3.test_app_control -v
@@ -829,7 +829,7 @@ python -m unittest sidecars.pymobiledevice3.test_app_control -v
 
 Expected: FAIL because `cmd_terminate` returns the best-effort stub.
 
-- [ ] **Step 3: Implement bounded DVT termination**
+- [x] **Step 3: Implement bounded DVT termination**
 
 Add an async helper beside `_launch_app_with_environment`. One monotonic operation
 deadline covers setup, lookup, termination, and absence polling. Every await receives
@@ -916,7 +916,7 @@ those production defaults.
 
 `cmd_terminate` must `asyncio.run` this helper, emit its result, and emit `{ok:false,error}` plus return 1 on exception.
 
-- [ ] **Step 4: Make Rust require verified output and shared ownership**
+- [x] **Step 4: Make Rust require verified output and shared ownership**
 
 Change `DeviceDriver::terminate_app` to return a typed `ProcessAbsenceProof` containing
 the exact bundle ID and optional old PID. `PmdIosDriver::terminate_app` retains the
@@ -964,7 +964,7 @@ pre-effect baseline. Absent proves `ProcessAbsent`; the exact same positive PID
 proves non-delivery and may mark retry-safe; a different positive PID is
 `Uncertain`. It does not redispatch Terminate while reconciling.
 
-- [ ] **Step 5: Enable the typed Terminate action**
+- [x] **Step 5: Enable the typed Terminate action**
 
 Add the Task F0 model's Terminate definition to `release_one_catalog()` with
 `disabled_reason: None`, config `{bundleId}`, capability `app.terminate`,
@@ -986,7 +986,7 @@ diagnostic test and match arm with a semantics-preserving mapping from
 `EvidenceSpec::ProcessAbsent { bundle_id }`. Keep the original v1 JSON untouched;
 all other unsupported diagnostics stay unchanged.
 
-- [ ] **Step 6: Run tests and commit**
+- [x] **Step 6: Run tests and commit**
 
 ```powershell
 python -m unittest sidecars.pymobiledevice3.test_app_control -v
@@ -1009,7 +1009,7 @@ git commit -m "fix(device): verify app termination through DVT"
 - Modify: `crates/ios-driver/src/mock.rs`
 - Test: `crates/core/src/flow/evidence.rs`
 
-- [ ] **Step 1: Write evidence tests**
+- [x] **Step 1: Write evidence tests**
 
 Test frame region delta with the repository JPEG fixtures, stale generation
 rejection, active-app equality, Terminate `ProcessAbsent` proof with exact bundle,
@@ -1045,7 +1045,7 @@ async fn gesture_ack_without_matching_frame_evidence_is_not_success() {
 }
 ```
 
-- [ ] **Step 2: Run tests red**
+- [x] **Step 2: Run tests red**
 
 ```powershell
 cargo test -p riviu-core flow::evidence -- --nocapture
@@ -1053,7 +1053,7 @@ cargo test -p riviu-core flow::evidence -- --nocapture
 
 Expected: FAIL because evidence capture/verifiers are absent.
 
-- [ ] **Step 3: Add qualified read-back methods**
+- [x] **Step 3: Add qualified read-back methods**
 
 Add default-unsupported methods to `UiSession`:
 
@@ -1084,7 +1084,7 @@ For WDA read-back, recompute the remaining verifier duration before element look
 and again before GET text, then pass that value to `WdaClient::send`; the deadline
 stays on each request.
 
-- [ ] **Step 4: Implement baseline and verifier types**
+- [x] **Step 4: Implement baseline and verifier types**
 
 First define the shared cancellation primitive in `flow/cancellation.rs`; Task 6 and
 Task 7 reuse it rather than defining another token:
@@ -1219,7 +1219,7 @@ Add a deterministic test for each exit path: matching frame, generation advance,
 closed stream, deadline, and cancellation. Each test must complete within its own
 outer 250 ms test timeout so a verifier regression cannot hang `shutdown()`.
 
-- [ ] **Step 5: Run tests and commit**
+- [x] **Step 5: Run tests and commit**
 
 ```powershell
 cargo fmt --all
@@ -1240,7 +1240,7 @@ git commit -m "feat(flow): verify actions through typed evidence"
 - Modify: `crates/core/src/device_control.rs`
 - Test: `crates/core/src/flow/executor.rs`
 
-- [ ] **Step 1: Write typestate and ACK-without-evidence tests**
+- [x] **Step 1: Write typestate and ACK-without-evidence tests**
 
 Define a local `RecordingFlowDriver` in `flow/executor.rs`'s test module that
 implements `DeviceDriver`; core tests must not import `riviu-ios-driver` and create a
@@ -1273,7 +1273,7 @@ async fn text_flow_upgrades_once_and_starts_stream_after_fresh_session() {
 }
 ```
 
-- [ ] **Step 2: Run tests red**
+- [x] **Step 2: Run tests red**
 
 ```powershell
 cargo test -p riviu-core flow::executor -- --nocapture
@@ -1281,7 +1281,7 @@ cargo test -p riviu-core flow::executor -- --nocapture
 
 Expected: FAIL because Flow device context/executor are absent.
 
-- [ ] **Step 3: Add explicit context close support**
+- [x] **Step 3: Add explicit context close support**
 
 Add this generic control-plane proof and return it from `close_exclusive_context`
 and `close_session_context`:
@@ -1302,7 +1302,7 @@ Keep `close_ui_context` as the only streaming close path and map its existing
 generic value into Task 3's persisted `FlowContextReleaseProof`. Preserve drop
 cleanup as the panic/cancellation backstop.
 
-- [ ] **Step 4: Add target-qualified capability inspection**
+- [x] **Step 4: Add target-qualified capability inspection**
 
 Add this typed driver method without changing the existing Interaction wrapper:
 
@@ -1387,7 +1387,7 @@ accessibility IDs from this first comparison. Check each immediately after sessi
 creation and before the first node requiring that capability is moved to
 `IntentCommitted`.
 
-- [ ] **Step 5: Implement monotonic context owner**
+- [x] **Step 5: Implement monotonic context owner**
 
 ```rust
 enum FlowDeviceContext {
@@ -1422,7 +1422,7 @@ Launch attempt has persisted `EffectDispatched` and invoked
 required, otherwise Ordinary. Only after session creation succeeds may
 `start_reserved_stream` run. Do not implement downgrade.
 
-- [ ] **Step 6: Implement action execution order**
+- [x] **Step 6: Implement action execution order**
 
 For a UI-session plan, call `inspect_flow_device` under Exclusive with the compiled
 `initial_bundle_id` before any application effect; persist the snapshot and static
@@ -1561,7 +1561,7 @@ match (&node.kind, &node.config) {
 }
 ```
 
-- [ ] **Step 7: Run tests and commit**
+- [x] **Step 7: Run tests and commit**
 
 ```powershell
 cargo fmt --all
@@ -1579,7 +1579,7 @@ git commit -m "feat(flow): execute nodes through monotonic device contexts"
 - Modify: `crates/core/src/events.rs`
 - Test: `crates/core/src/flow/runtime.rs`
 
-- [ ] **Step 1: Write runtime tests**
+- [x] **Step 1: Write runtime tests**
 
 Test One failure, Selected partial, AllEligible skipped/zero eligible, two-device
 independent histories, no A lease while waiting for B, cancellation during acquire/
@@ -1630,7 +1630,7 @@ impl FlowRuntime {
 }
 ```
 
-- [ ] **Step 2: Run tests red**
+- [x] **Step 2: Run tests red**
 
 ```powershell
 cargo test -p riviu-core flow::runtime -- --nocapture
@@ -1638,7 +1638,7 @@ cargo test -p riviu-core flow::runtime -- --nocapture
 
 Expected: FAIL because `FlowRuntime` is absent.
 
-- [ ] **Step 3: Implement runtime ownership**
+- [x] **Step 3: Implement runtime ownership**
 
 Define `FlowRuntime` with `Arc<Database>`, `EventBus`, `DeviceRegistry`, `Arc<DeviceControlPlane>`, `Arc<dyn GenerationFrameSource>`, `FlowArtifactStore`, cancellation set/Notify, task map, stopping flag, and shutdown mutex. Mirror `JobQueue::stop_all`/`shutdown`, but create one task per run and one joined child per selected device. Each child acquires only its own UDID.
 
@@ -1692,7 +1692,7 @@ after no worker handle remains. This last-resort abort occurs only after the req
 deadlines should already have fired; never wrap an individual WDA request in
 `tokio::time::timeout`.
 
-- [ ] **Step 4: Implement selection and retry semantics**
+- [x] **Step 4: Implement selection and retry semantics**
 
 Resolve One/Selected from requested IDs and AllEligible from one `DeviceRegistry`
 snapshot. Reject empty/duplicate Selected IDs and unknown requested IDs. AllEligible
@@ -1772,7 +1772,7 @@ fn retry_is_allowed(
 }
 ```
 
-- [ ] **Step 5: Implement startup recovery and events**
+- [x] **Step 5: Implement startup recovery and events**
 
 Before returning FlowNodeAttemptRecord, read retry_safe and assign retry_allowed
 through retry_is_allowed. New attempts always persist retry_safe=0. Only a successful
@@ -1835,7 +1835,7 @@ FlowUpdated { flow_id: FlowId, revision: u64 },
 FlowRunUpdated { run_id: uuid::Uuid, revision: u64 },
 ```
 
-- [ ] **Step 6: Run tests and commit**
+- [x] **Step 6: Run tests and commit**
 
 ```powershell
 cargo fmt --all
@@ -1851,7 +1851,7 @@ git commit -m "feat(flow): orchestrate durable multi-device runs"
 - Modify: `AGENTS.md`
 - Modify: `docs/superpowers/plans/2026-07-30-riviu-flow-v2-runtime.md`
 
-- [ ] **Step 1: Run the full gate**
+- [x] **Step 1: Run the full gate**
 
 ```powershell
 python -m unittest sidecars.pymobiledevice3.test_app_control -v
@@ -1863,7 +1863,7 @@ git diff --check
 
 Expected: every command exits 0; production IPA/manifest hashes remain the values recorded in `AGENTS.md`.
 
-- [ ] **Step 2: Record and commit F1**
+- [x] **Step 2: Record and commit F1**
 
 Mark all F1 checkboxes complete. Record commit range, test counts, termination contract, disabled TikTok nodes, next plan, and rollback commit in `AGENTS.md`.
 
