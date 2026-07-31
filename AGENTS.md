@@ -1188,6 +1188,50 @@ them va PASS TikTok comment end-to-end. Chi sau do moi advertise `text`, wire
 candidate vao desktop va thay dong thoi IPA + manifest production bang transaction
 co rollback; khong ghi de production artifact chi vi source/build fixture PASS.
 
+### 3.16 Active priority: Interaction Campaign + Flow V2 (31/07/2026)
+
+User da chot uu tien hai nhom: (1) menu `Tương tác`, dan link, chon tat ca/tung may,
+All/RoundRobin, Run Now/Once, scheduler + durable campaign engine; (2) Flow V2 F2/F3
+voi editor keo tha va run monitor. Plan dieu phoi active nam o
+`docs/superpowers/plans/2026-07-31-interaction-flow-delivery.md` va la noi giai quyet
+xung dot giua cac detailed plan cu.
+
+Thu tu thuc thi: Flow F2 co the bat dau ngay tren Windows; song song, Mac dong G0.12.
+G1 Campaign core, G2 verified actions va G3 operator UI chi bat dau production path
+sau exact G0.12 live report PASS. Flow F3 mock/Playwright co the chay truoc, nhung
+F3 live van cho runtime-qualified protected auth + geometry tren Mac/iPhone.
+
+Cac quyet dinh bat buoc cho lan trien khai nay:
+
+- Interaction dung migration version 3 tren `schema_migrations` chung da co version
+  1/2; khong tao migration ledger thu hai.
+- Flow F2 pin mot bo jsdom/Testing Library/Playwright va mot test config; G3 tai su
+  dung, khong tao happy-dom/Vitest/Playwright config canh tranh.
+- Initial metadata device scan phai populate registry truoc startup recovery. Sau do
+  recover Flow/Interaction truoc reconcile artifact root rieng voi **toan bo**
+  committed rows, khong chi run nonterminal; Exit chan admission va join ca hai
+  runtime truoc `DeviceControlPlane::shutdown_cleanup()`.
+- F2 phai them executor post-commit invalidation callback hoac bounded polling cho
+  run nonterminal; event F1 hien tai chi o admission/device completion/recovery nen
+  chua du de quang ba live per-node monitor.
+- Admission gate luc Exit phai chan va drain **moi** mutating command, gom ca
+  save/archive/start/schedule/cancel/retry/settings/credential/DB write/queue insert,
+  khong chi command doi man hinh. Khi G1 duoc compose, test Exit phai co dispatcher +
+  scheduler that; F2 chi chung minh duoc phan shutdown truoc Interaction.
+- Truoc F3 live phai implement va gate snapshot Pmd target-bound co protected auth,
+  `QualifiedGeometry` va readiness ro rang truoc/sau park stream. Truoc G5, ca hai
+  iPhone acceptance phai co G0/G2 live tuple proof; G5 khong duoc tu tao capability.
+- Flow/Interaction command error phai map tu typed service error, khong parse chuoi
+  `anyhow`; artifact tren monitor phai co backend command validate row/path/kind/
+  size/hash, khong render link no-op hay nhan arbitrary path. F3 dung evidence theo
+  tung action, khong doi frame proof cho Launch/Home/Terminate/TypeText/Screenshot.
+
+Riviu Agent candidate thay RT-MMO, multi-account switching, proxy system apply,
+MDM/supervision, G4 Save/Repost/Direct Message, Flow branch/loop/cross-device va
+A-comment/B-reply van giu o deferred roadmap. Viec uu tien Interaction/Flow khong
+duoc dung de xoa hoac tuyen bo hoan tat cac muc nay. Production IPA/manifest va
+qualification registry van theo exact gate/rollback rules o cac section tren.
+
 ---
 
 ## 4. Chạy và test

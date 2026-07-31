@@ -724,6 +724,7 @@ identity-current successful save.
 npm --prefix apps/desktop test -- editorState.test.ts
 npm --prefix apps/desktop run build
 git add apps/desktop/src/components/flow/editorState.ts apps/desktop/src/components/flow/editorState.test.ts
+git add apps/desktop/src/components/flow/draftStorage.ts apps/desktop/src/components/flow/draftStorage.test.ts
 git commit -m "feat(flow): add deterministic visual draft state"
 ```
 
@@ -1113,8 +1114,11 @@ function SchemaField({ schema, value, onChange }: SchemaFieldProps) {
     case "number":
     case "integer":
       return <input type="number" min={schema.minimum} max={schema.maximum}
-        value={typeof value === "number" ? value : ""}
-        onChange={(event) => onChange(event.target.valueAsNumber)} />;
+        value={typeof value === "number" && Number.isFinite(value) ? value : ""}
+        onChange={(event) => {
+          const next = event.target.valueAsNumber;
+          if (Number.isFinite(next)) onChange(next);
+        }} />;
     case "boolean":
       return <input type="checkbox" checked={value === true}
         onChange={(event) => onChange(event.target.checked)} />;

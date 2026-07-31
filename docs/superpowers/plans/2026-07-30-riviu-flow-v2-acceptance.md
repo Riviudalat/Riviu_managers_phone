@@ -21,10 +21,13 @@
 - [ ] **Step 1: Write the failing mock release test**
 
 Build a fixed revision: Start -> Launch Settings -> Wait 10 ms -> Swipe ->
-Screenshot -> Terminate Settings -> Home -> End. Run it on two mock UDIDs. Assert
-independent device attempts, exact plan hash, stream budget <= configured limit,
-screenshot hashes, verified `ProcessAbsent` evidence, no WDA screenshot call, and
-both contexts released.
+Screenshot -> Terminate Settings -> Home -> End. Run it on two mock UDIDs through a
+dedicated integration-test `DeviceDriver` and frame source that expose two identical
+qualified geometry snapshots plus explicit driver-screenshot call counters. Do not
+add a core-test dependency on `riviu-ios-driver` or assume injection/counter APIs on
+`MockIosDriver`. Assert independent device attempts, exact plan hash, stream budget
+<= configured limit, screenshot hashes, verified `ProcessAbsent` evidence, zero
+legacy `DeviceDriver::screenshot` calls, and both contexts released.
 
 The integration test loads the checked-in fixture rather than rebuilding a graph
 with random UUIDs:
@@ -84,7 +87,7 @@ async fn release_one_fixture_runs_two_devices_without_shared_attempts() {
         evidence.get("kind").and_then(serde_json::Value::as_str) == Some("processAbsent")
             && evidence.get("matched").and_then(serde_json::Value::as_bool) == Some(true)
     }));
-    assert_eq!(fixture.driver.wda_screenshot_calls(), 0);
+    assert_eq!(fixture.driver.screenshot_calls(), 0);
     fixture.shutdown().await.expect("joined cleanup");
     assert_eq!(fixture.work.active_count(), 0);
 }
@@ -541,7 +544,12 @@ cargo build -p riviu-managers-phone --bin live_flow_test --release
 
 - [ ] **Step 2: Execute the fixed live sequence**
 
-Use Settings with Launch, Wait, verified Tap, verified Swipe, Type Text with exact SearchField read-back, stream Screenshot, and Home. Require pre/post generation-qualified evidence for each side effect. Inject one fixture ACK without postcondition and assert it terminates `FailedVerified`, not `Succeeded`.
+Use Settings with Launch, Wait, verified Tap, verified Swipe, Type Text with exact
+SearchField read-back, stream Screenshot, Terminate, and Home. Require the approved
+evidence per action: active-app proof for Launch/Home, generation-qualified frames
+for Tap/Swipe, exact read-back for Type Text, decoded/hash proof for Screenshot, and
+exact process absence for Terminate. Inject one fixture gesture ACK without its
+postcondition and assert it terminates `FailedVerified`, not `Succeeded`.
 
 Add `--settings-gate` to the harness. Before compiling, it briefly acquires
 `ManualControl`, calls `inspect_flow_device(..., "com.apple.Preferences")`, computes
@@ -814,7 +822,8 @@ database in place; it never downgrades or rewrites it.
 - F0 foundation: PASS, with commit and command counts recorded in AGENTS.md.
 - F1 runtime: PASS, with mock recovery, shutdown, exact DVT termination, and
   `ProcessAbsent` evidence recorded in AGENTS.md.
-- F2 desktop: PASS, with Vitest, build, lint, and Playwright counts recorded in AGENTS.md.
+- F2 desktop: PASS, with Vitest, build, and lint counts recorded in AGENTS.md.
+- F3 browser: PASS only after the Playwright workflow and visual checks pass.
 - F3 live: PASS only when docs/re/flow-v2/gate-f3.json reports PASS.
 
 ## Enabled Nodes
