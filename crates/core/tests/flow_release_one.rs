@@ -28,6 +28,7 @@ use uuid::Uuid;
 const SETTINGS: &str = "com.apple.Preferences";
 const SPRINGBOARD: &str = "com.apple.springboard";
 const MOCK_UDIDS: [&str; 2] = ["MOCK-IPHONE-01", "MOCK-IPHONE-02"];
+const TERMINAL_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const EXPECTED_PLAN_SHA256: &str =
     "88333ddcbb7ae804825e1902ad5c0a3d04431def5a947f65aabf8dae724173c4";
 
@@ -221,7 +222,7 @@ impl MockFlowRuntimeFixture {
     }
 
     async fn wait_terminal(&self, run_id: Uuid) -> anyhow::Result<FlowRunDetail> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + TERMINAL_WAIT_TIMEOUT;
         loop {
             if let Some(detail) = self.database.get_flow_run(run_id)? {
                 if detail.run.state.is_terminal() {
@@ -229,7 +230,10 @@ impl MockFlowRuntimeFixture {
                 }
             }
             if tokio::time::Instant::now() >= deadline {
-                anyhow::bail!("flow run did not become terminal before the 5 second deadline");
+                anyhow::bail!(
+                    "flow run did not become terminal before the {} second deadline",
+                    TERMINAL_WAIT_TIMEOUT.as_secs()
+                );
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

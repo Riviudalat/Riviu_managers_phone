@@ -1386,6 +1386,11 @@ Run `9fd58e9` da PASS Quality va Mac arm64 build xong PyInstaller runtime, nhung
 frozen `build_and_install.py --self-test` exit 1; wrapper cu che stdout JSON nen chua
 co failure cu the. `run_checked()` phai giu toi da 2,000 ky tu cuoi cua stdout/stderr
 trong CI error; khong quay lai `CalledProcessError` khong co diagnostic.
+Run diagnostic `9a64a52` bi chan truoc Mac boi integration
+`flow_release_one_fixture` tren Windows runner: local 2.55 giay nhung runner tai cao
+mat 11.87 giay, trong khi moi SQLite read co the block toi busy-timeout 5 giay.
+Deadline cua fixture nay la 30 giay; day chi la gioi han test, khong doi timeout
+product/evidence va khong duoc ha lai 5 giay.
 
 ---
 
