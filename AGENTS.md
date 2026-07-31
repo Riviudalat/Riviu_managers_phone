@@ -1144,6 +1144,50 @@ command hay composition root.
 Khong gan bundle gia cho plan target-free va khong dua direct driver handle ra ngoai
 typed Flow ownership.
 
+### 3.15 Main integration va trang thai san pham trung thuc (31/07/2026)
+
+Checkpoint da duoc fast-forward va push len `main` tai commit
+`89f19beeb3a48fe2352abb123d03ef0947c13fb3`; local `main`, `origin/main` va
+GitHub `refs/heads/main` da doi chieu cung SHA. Sau merge da chay lai va PASS:
+`cargo test --workspace`, Python app-control 10/10, frontend Vitest 11/11,
+`npm run build`, `cargo fmt --all -- --check`, va
+`cargo clippy --workspace --all-targets -- -D warnings`. `npm run lint` exit 0,
+con ba warning Fast Refresh o `Icons.tsx`/`SelectionStrip.tsx`, khong phai loi build.
+
+Khong duoc ket luan "tat ca tinh nang app da xong" tu checkpoint nay. Trang thai
+release hien tai phai duoc mo ta dung nhu sau:
+
+- Nuoi account va text comment qua production RT-MMO da co live proof tren iPhone 8
+  iOS 16.7.15. Luong nay van phu thuoc exact production IPA + RT-MMO token; chua co
+  live regression tren Mac cho toan bo `main` moi.
+- Source Riviu Agent candidate da PASS source/contract/fixture tren Windows, nhung B0,
+  Gate B va Gate C van `PENDING_MAC_DEVICE`. Candidate hien chi advertise
+  `stream/tap/swipe/clipboard`; chua co `text`, chua thay day du RT-MMO.
+- Flow V2 moi dong F0/F1 core runtime. F2 Tauri composition/commands, Flow React UI,
+  runtime-qualified auth + geometry, startup recovery wiring va live invalidation
+  van chua lam; F3 acceptance cung chua chay. Vi vay app chua co visual drag/drop
+  Flow V2 hoan chinh cho nguoi dung.
+- TikTok Interaction Campaign hien moi co reviewed design, control-plane foundation
+  va Gate 0 source/fixture. `InteractionCampaignEngine`, persistence, Tauri commands,
+  menu/UI dan link, scheduler, G0.12 live Mac va G1-G3 van chua hoan tat. Chua duoc
+  bao rang luong dan link -> chon tat ca/rieng le -> mo post -> tuong tac da ship.
+- Multi-account moi chi co schema/planner extension point; production van mot
+  `device:<udid>:default` tren moi may va khong co account switching.
+- Proxy chi co CRUD/assign/endpoint check + `manual_required`; may hien tai
+  unsupervised nen khong co system-wide apply/verify/rollback tu dong.
+- MDM/supervision/AdminControl, remote fleet policy va cac muc deferred o section
+  3.11 chua nam trong phase hien tai.
+
+Production artifact van phai giu byte-exact cho den khi Mac live gate dat:
+`sidecars/wda/RiviuAgent.ipa` SHA-256
+`8a24847099495ff70b998522692c43f00dd16b90f698bda6953a73f5d33002ea` va
+canonical-LF `agent-manifest.json` SHA-256
+`e98a549af4c061556effd36424e7732219e1a6d262bcf1f259279975024b6e1a`.
+Mac build candidate vao `target/riviu-agent/artifacts/0.1.0/`, chay B0/B/C, sau do
+them va PASS TikTok comment end-to-end. Chi sau do moi advertise `text`, wire
+candidate vao desktop va thay dong thoi IPA + manifest production bang transaction
+co rollback; khong ghi de production artifact chi vi source/build fixture PASS.
+
 ---
 
 ## 4. Chạy và test
