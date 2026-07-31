@@ -406,17 +406,25 @@ def build_runtime(output_root: Path, work_root: Path) -> tuple[Path, dict]:
 
 
 def write_tauri_config(path: Path, runtime_dir: Path) -> None:
-    source = runtime_dir.resolve().as_posix() + "/"
-    config: dict = {
-        "bundle": {
-            "resources": {
-                source: "sidecars/pymobiledevice3/runtime/",
+    source = runtime_dir.resolve().as_posix()
+    if sys.platform == "darwin":
+        config: dict = {
+            "bundle": {
+                "macOS": {
+                    "files": {
+                        "Resources/sidecars/pymobiledevice3/runtime": source,
+                    },
+                    "signingIdentity": os.environ.get("APPLE_SIGNING_IDENTITY", "-"),
+                }
             }
         }
-    }
-    if sys.platform == "darwin":
-        config["bundle"]["macOS"] = {
-            "signingIdentity": os.environ.get("APPLE_SIGNING_IDENTITY", "-")
+    else:
+        config = {
+            "bundle": {
+                "resources": {
+                    source + "/": "sidecars/pymobiledevice3/runtime/",
+                }
+            }
         }
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="\n") as handle:

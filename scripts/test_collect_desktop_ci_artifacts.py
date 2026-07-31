@@ -3,10 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from scripts import build_desktop_sidecar as sidecar_builder
 from scripts import collect_desktop_ci_artifacts as artifacts
 
 
@@ -31,6 +34,82 @@ def active_dependency_closure() -> dict[str, str]:
 
 
 class ArtifactContractTests(unittest.TestCase):
+    def test_runtime_overlay_preserves_macos_symlinks_and_keeps_windows_resources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            runtime.mkdir()
+
+            windows_overlay = root / "windows.json"
+            with patch.object(sidecar_builder.sys, "platform", "win32"):
+                sidecar_builder.write_tauri_config(windows_overlay, runtime)
+            windows = artifacts.verify_overlay(
+                windows_overlay, runtime, "x86_64-pc-windows-msvc"
+            )
+            self.assertEqual(
+                windows["bundle"],
+                {
+                    "resources": {
+                        runtime.resolve().as_posix() + "/": (
+                            artifacts.RUNTIME_RESOURCE_DESTINATION
+                        )
+                    }
+                },
+            )
+
+            macos_overlay = root / "macos.json"
+            with (
+                patch.object(sidecar_builder.sys, "platform", "darwin"),
+                patch.dict(os.environ, {"APPLE_SIGNING_IDENTITY": "-"}),
+            ):
+                sidecar_builder.write_tauri_config(macos_overlay, runtime)
+            macos = artifacts.verify_overlay(
+                macos_overlay, runtime, "aarch64-apple-darwin"
+            )
+            self.assertEqual(
+                macos["bundle"],
+                {
+                    "macOS": {
+                        "files": {
+                            artifacts.MACOS_RUNTIME_CONTENTS_DESTINATION: (
+                                runtime.resolve().as_posix()
+                            )
+                        },
+                        "signingIdentity": "-",
+                    }
+                },
+            )
+
+    def test_invalid_dmg_plist_still_detaches_the_owned_mountpoint(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle_dir = Path(temporary) / "bundle" / "dmg"
+            bundle_dir.mkdir(parents=True)
+            dmg = bundle_dir / "fixture.dmg"
+            dmg.write_bytes(b"fixture")
+            attachment = subprocess.CompletedProcess(
+                args=["hdiutil"], returncode=0, stdout="not-a-plist", stderr=""
+            )
+            detach_failure = subprocess.CompletedProcess(
+                args=["hdiutil"], returncode=1, stdout="", stderr="detach failed"
+            )
+            with (
+                patch.object(artifacts, "find_installers", return_value=[dmg]),
+                patch.object(artifacts, "run_checked", return_value=attachment),
+                patch.object(
+                    artifacts.subprocess, "run", return_value=detach_failure
+                ) as detach,
+            ):
+                with self.assertRaisesRegex(
+                    artifacts.ArtifactError, "invalid attachment plist"
+                ) as raised:
+                    artifacts.verify_macos_package(
+                        bundle_dir, "aarch64-apple-darwin", Path(temporary), {}
+                    )
+
+            detach.assert_called_once()
+            self.assertIsInstance(raised.exception.__cause__, artifacts.ArtifactError)
+            self.assertIn("failed to detach DMG", str(raised.exception.__cause__))
+
     def test_windows_desktop_executable_requires_a_valid_x64_pe(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

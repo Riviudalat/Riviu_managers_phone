@@ -52,6 +52,9 @@ TAURI_CARGO_MANIFEST = (
 )
 DESKTOP_PACKAGE_JSON = REPOSITORY_ROOT / "apps" / "desktop" / "package.json"
 RUNTIME_RESOURCE_DESTINATION = "sidecars/pymobiledevice3/runtime/"
+MACOS_RUNTIME_CONTENTS_DESTINATION = (
+    "Resources/" + RUNTIME_RESOURCE_DESTINATION.rstrip("/")
+)
 CANONICAL_PRODUCTION_SHA256 = {
     "sidecars/wda/RiviuAgent.ipa": (
         "8a24847099495ff70b998522692c43f00dd16b90f698bda6953a73f5d33002ea"
@@ -465,21 +468,32 @@ def verify_overlay(overlay_path: Path, runtime_dir: Path, target: str) -> dict[s
     bundle = overlay.get("bundle")
     if not isinstance(bundle, dict):
         raise ArtifactError("Tauri overlay is missing bundle configuration")
-    resources = bundle.get("resources")
-    if not isinstance(resources, dict):
-        raise ArtifactError("Tauri overlay is missing the runtime resource mapping")
-
-    expected_source = runtime_dir.resolve().as_posix() + "/"
-    if resources != {expected_source: RUNTIME_RESOURCE_DESTINATION}:
-        raise ArtifactError(
-            "Tauri overlay does not map exactly the attested runtime directory "
-            f"to {RUNTIME_RESOURCE_DESTINATION!r}"
-        )
 
     if target.endswith("apple-darwin"):
         macos = bundle.get("macOS")
         if not isinstance(macos, dict) or not macos.get("signingIdentity"):
             raise ArtifactError("macOS Tauri overlay is missing a signing identity")
+        expected_macos = {
+            "files": {
+                MACOS_RUNTIME_CONTENTS_DESTINATION: runtime_dir.resolve().as_posix()
+            },
+            "signingIdentity": macos["signingIdentity"],
+        }
+        if bundle != {"macOS": expected_macos}:
+            raise ArtifactError(
+                "macOS Tauri overlay must map the exact runtime with macOS.files "
+                "so PyInstaller symlinks are preserved"
+            )
+    else:
+        expected_source = runtime_dir.resolve().as_posix() + "/"
+        expected_bundle = {
+            "resources": {expected_source: RUNTIME_RESOURCE_DESTINATION}
+        }
+        if bundle != expected_bundle:
+            raise ArtifactError(
+                "Tauri overlay does not map exactly the attested runtime directory "
+                f"to {RUNTIME_RESOURCE_DESTINATION!r}"
+            )
     return overlay
 
 
@@ -854,23 +868,42 @@ def verify_macos_package(
     dmg_installers = [path for path in find_installers(bundle_dir, target) if path.suffix == ".dmg"]
     if len(dmg_installers) != 1:
         raise ArtifactError(f"expected exactly one DMG installer, found {len(dmg_installers)}")
-    attached = run_checked(
-        ["hdiutil", "attach", "-readonly", "-nobrowse", "-plist", str(dmg_installers[0])],
-        timeout=300,
-    )
+    mount_point = Path(
+        tempfile.mkdtemp(prefix="desktop-dmg-mount-", dir=bundle_dir.parent)
+    ).resolve()
+    attached = False
+    evidence: dict[str, Any] | None = None
+    primary_error: BaseException | None = None
+    cleanup_error: ArtifactError | None = None
     try:
-        attach_info = plistlib.loads(attached.stdout.encode("utf-8"))
-    except plistlib.InvalidFileException as error:
-        raise ArtifactError("hdiutil returned an invalid attachment plist") from error
-    mount_points = [
-        Path(entity["mount-point"])
-        for entity in attach_info.get("system-entities", [])
-        if isinstance(entity, dict) and isinstance(entity.get("mount-point"), str)
-    ]
-    if len(mount_points) != 1:
-        raise ArtifactError(f"DMG must mount exactly one volume, got {mount_points!r}")
-    mount_point = mount_points[0]
-    try:
+        attachment = run_checked(
+            [
+                "hdiutil",
+                "attach",
+                "-readonly",
+                "-nobrowse",
+                "-mountpoint",
+                str(mount_point),
+                "-plist",
+                str(dmg_installers[0]),
+            ],
+            timeout=300,
+        )
+        attached = True
+        try:
+            attach_info = plistlib.loads(attachment.stdout.encode("utf-8"))
+        except plistlib.InvalidFileException as error:
+            raise ArtifactError("hdiutil returned an invalid attachment plist") from error
+        mount_points = [
+            Path(entity["mount-point"]).resolve()
+            for entity in attach_info.get("system-entities", [])
+            if isinstance(entity, dict) and isinstance(entity.get("mount-point"), str)
+        ]
+        if mount_points != [mount_point]:
+            raise ArtifactError(
+                "DMG did not use the exact isolated mount point: "
+                f"expected {[mount_point]!r}, got {mount_points!r}"
+            )
         app_bundles = sorted(path for path in mount_point.rglob("*.app") if path.is_dir())
         if len(app_bundles) != 1:
             raise ArtifactError(
@@ -910,19 +943,37 @@ def verify_macos_package(
         evidence["sidecarArchitecture"] = expected_architecture
         evidence["codeSignature"] = "PASS"
         evidence["dmgMountedReadOnly"] = "PASS"
-        return evidence
+    except BaseException as error:
+        primary_error = error
     finally:
-        detached = subprocess.run(
-            ["hdiutil", "detach", str(mount_point)],
-            cwd=REPOSITORY_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if detached.returncode != 0:
-            raise ArtifactError(
-                f"failed to detach verified DMG: {detached.stderr[-1000:]!r}"
-            )
+        if attached:
+            try:
+                detached = subprocess.run(
+                    ["hdiutil", "detach", str(mount_point)],
+                    cwd=REPOSITORY_ROOT,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                if detached.returncode != 0:
+                    cleanup_error = ArtifactError(
+                        "failed to detach DMG: "
+                        f"{detached.stderr[-1000:]!r}"
+                    )
+            except (OSError, subprocess.TimeoutExpired) as error:
+                cleanup_error = ArtifactError(f"failed to detach DMG: {error}")
+        if cleanup_error is None:
+            shutil.rmtree(mount_point, ignore_errors=True)
+
+    if primary_error is not None:
+        if cleanup_error is not None:
+            raise primary_error.with_traceback(primary_error.__traceback__) from cleanup_error
+        raise primary_error.with_traceback(primary_error.__traceback__)
+    if cleanup_error is not None:
+        raise cleanup_error
+    if evidence is None:
+        raise ArtifactError("DMG verification produced no evidence")
+    return evidence
 
 
 def verify_packaged_bundle(

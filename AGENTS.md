@@ -1315,6 +1315,11 @@ doi chieu tap closure bang tuyet doi voi lock, khong chi ba top-level package. M
 thay doi dependency/hook phai PASS frozen `ping` co `verifiedProcessControl`, embedded
 tidevice, signer, signing-resource self-test va Windows structured-error JSON, sau
 do recompute runtime tree gom ca node type, POSIX mode va symlink target.
+Tren macOS, runtime PyInstaller bat buoc map bang `bundle.macOS.files` vao
+`Contents/Resources/sidecars/pymobiledevice3/runtime`, khong map qua generic
+`bundle.resources`: Tauri resource walker bo directory symlink va dereference file
+symlink, con macOS directory copier giu nguyen ca hai. Collector khoa exact overlay
+va so cay trong DMG de thay doi nay khong bi vo tinh quay lui.
 Lan do local Windows bang Python 3.14 giam tu 162,296,882 byte/6,650 file xuong
 58,956,091 byte/734 file; `ping` khoang 0.43 giay. Khong bat Python `-OO` vi
 `pymobiledevice3`/`tidevice` co assert tham gia vao hanh vi runtime, khong chi debug.
@@ -1349,7 +1354,10 @@ sau do doi chieu full runtime/resource/production IPA va chay lai packaged smoke
 Windows con phai tim exact desktop EXE trong ca MSI/NSIS, parse PE machine x64 va
 ghi rieng size/SHA-256 moi bundle. Khong ep hai EXE byte-equal: Tauri patch bundle
 type metadata khac nhau truoc moi pack. Mac kiem architecture va
-`codesign --verify --deep --strict`.
+`codesign --verify --deep --strict`. DMG verifier phai attach vao exact mountpoint
+tam do collector tao va bat dau `finally` ngay sau attach; ke ca plist/mount validation
+loi van phai detach. Neu verify va detach cung loi thi giu verify error lam loi chinh
+va chain detach error lam cause.
 Khong ha gate
 thanh chi tim thay installer hoac kiem sibling `.app` ngoai DMG.
 Production IPA va canonical-LF manifest van byte-contract o section 3.15; pipeline
