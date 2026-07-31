@@ -1382,6 +1382,10 @@ closure gate: pip tren ca arm64/x64 co them `apple-compress`, `loguru`, `pexpect
 `ptyprocess`, `jinxed`, trong khi `av` va `lzfse` chi active tren Windows. Lock da
 tach marker `darwin`/`win32` theo tap cai that nay; phai theo doi run sau ban sua
 marker va chi tuyen bo CI xanh khi Windows MSI/NSIS cung hai Mac DMG deu PASS.
+Run `9fd58e9` da PASS Quality va Mac arm64 build xong PyInstaller runtime, nhung
+frozen `build_and_install.py --self-test` exit 1; wrapper cu che stdout JSON nen chua
+co failure cu the. `run_checked()` phai giu toi da 2,000 ky tu cuoi cua stdout/stderr
+trong CI error; khong quay lai `CalledProcessError` khong co diagnostic.
 
 ---
 

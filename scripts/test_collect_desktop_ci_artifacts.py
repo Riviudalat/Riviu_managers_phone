@@ -34,6 +34,26 @@ def active_dependency_closure() -> dict[str, str]:
 
 
 class ArtifactContractTests(unittest.TestCase):
+    def test_sidecar_build_failure_keeps_bounded_child_diagnostics(self):
+        child_error = subprocess.CalledProcessError(
+            1,
+            ["fixture"],
+            output="prefix-" + "x" * 2500,
+            stderr="fixture stderr",
+        )
+        with patch.object(
+            sidecar_builder.subprocess, "run", side_effect=child_error
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "sidecar build command failed"
+            ) as raised:
+                sidecar_builder.run_checked(["fixture"])
+
+        message = str(raised.exception)
+        self.assertIn("fixture stderr", message)
+        self.assertNotIn("prefix-", message)
+        self.assertLess(len(message), 4200)
+
     def test_runtime_overlay_preserves_macos_symlinks_and_keeps_windows_resources(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

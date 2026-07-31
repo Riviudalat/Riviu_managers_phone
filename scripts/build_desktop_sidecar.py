@@ -141,14 +141,22 @@ def dependency_closure() -> dict[str, str]:
 def run_checked(
     command: list[str], *, timeout: int = 900, capture_output: bool = True
 ) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        command,
-        cwd=REPOSITORY_ROOT,
-        capture_output=capture_output,
-        text=True,
-        timeout=timeout,
-        check=True,
-    )
+    try:
+        return subprocess.run(
+            command,
+            cwd=REPOSITORY_ROOT,
+            capture_output=capture_output,
+            text=True,
+            timeout=timeout,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        stdout = getattr(error, "stdout", "") or ""
+        stderr = getattr(error, "stderr", "") or ""
+        raise RuntimeError(
+            f"sidecar build command failed: {command!r}; "
+            f"stdout={stdout[-2000:]!r}; stderr={stderr[-2000:]!r}"
+        ) from error
 
 
 def smoke_runtime(entrypoint: Path) -> tuple[dict, dict]:
