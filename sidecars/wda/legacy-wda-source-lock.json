@@ -1,8 +1,16 @@
 {
-  "iconSetTreeSha256": "c3a0f0800cd878bf139a8b4a73f306b2bff0c92b6e9041a6058cb98227f0d804",
+  "executablePaths": [
+    "Scripts/build.sh",
+    "Scripts/ci/build-real.sh",
+    "Scripts/ci/build-sim.sh",
+    "Scripts/embed-runner-icon.sh",
+    "WebDriverAgentLib/Vendor/CocoaAsyncSocket/GCDAsyncSocket.m",
+    "WebDriverAgentLib/Vendor/CocoaAsyncSocket/GCDAsyncUdpSocket.m"
+  ],
+  "iconSetTreeSha256": "fa29919e01da1ccdc8e61244810abaeab1f55f27d7dc49b8f02d110039a49fad",
   "logoSha256": "50317e87d434a0ba74f8c2498105b0a0cd74e1436634789fec076185dfbc260e",
   "package": "appium-webdriveragent",
-  "schemaVersion": 1,
-  "treeSha256": "1d15248036556cf587be40205284251871718e063d241122930ae9ce1629ee1c",
+  "schemaVersion": 2,
+  "treeSha256": "887696e94986b40082af98d4fe69b127555ba96ed0d1d5d026f834e6fdbbb9a3",
   "version": "16.0.0"
 }

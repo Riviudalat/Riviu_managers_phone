@@ -21,8 +21,9 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
-  PYTHON_VERSION: "3.12"
-  NODE_VERSION: "22"
+  PYTHON_VERSION: "3.12.10"
+  NODE_VERSION: "24.15.0"
+  RUST_TOOLCHAIN: "1.95.0"
 
 jobs:
   quality:
@@ -34,44 +35,45 @@ jobs:
         run: git config --global core.autocrlf false
 
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
           cache-dependency-path: |
             sidecars/pymobiledevice3/requirements.txt
+            sidecars/pymobiledevice3/requirements-build.txt
             sidecars/pymobiledevice3/requirements-lock.txt
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
 
-      - name: Set up stable Rust
+      - name: Set up pinned Rust
         shell: pwsh
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
-          rustup default stable
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --component rustfmt --component clippy
+          rustup default $env:RUST_TOOLCHAIN
           rustc --version --verbose
 
       - name: Cache Rust dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: rust-${{ runner.os }}-${{ runner.arch }}-quality-${{ hashFiles('Cargo.lock') }}
+          key: rust-${{ env.RUST_TOOLCHAIN }}-${{ runner.os }}-${{ runner.arch }}-quality-${{ hashFiles('Cargo.lock') }}
           restore-keys: rust-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install Python dependencies
         shell: pwsh
         run: |
-          python -m pip install --disable-pip-version-check -r sidecars/pymobiledevice3/requirements.txt
+          python -m pip install --disable-pip-version-check -r sidecars/pymobiledevice3/requirements-build.txt
           python -m pip check
 
       - name: Install frontend dependencies
@@ -138,10 +140,10 @@ jobs:
         run: git config --global core.autocrlf false
 
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -151,28 +153,28 @@ jobs:
             sidecars/pymobiledevice3/requirements-lock.txt
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
 
-      - name: Set up stable Rust target
+      - name: Set up pinned Rust target
         shell: bash
         run: |
           set -euo pipefail
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_TOOLCHAIN}"
           rustup target add "${{ matrix.target }}"
           rustc --version --verbose
 
       - name: Cache Rust dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          key: rust-${{ env.RUST_TOOLCHAIN }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: rust-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install build dependencies
@@ -229,7 +231,7 @@ jobs:
             sidecars/wda/agent-manifest.json
 
       - name: Upload ${{ matrix.label }} artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-${{ matrix.label }}
           path: target/desktop-ci/${{ matrix.label }}/
@@ -252,15 +254,15 @@ jobs:
         run: git config --global core.autocrlf false
 
       - name: Check out release tooling
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Download desktop artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: desktop-*
           path: release-artifacts
@@ -271,7 +273,7 @@ jobs:
             --root release-artifacts \
             --labels windows-x64 macos-arm64 macos-x64
 
-      - name: Create or update GitHub release
+      - name: Create immutable GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -284,18 +286,10 @@ jobs:
             exit 1
           fi
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
-            declare -A desired=()
-            for asset in "${assets[@]}"; do
-              desired["$(basename "$asset")"]=1
-            done
-            while IFS= read -r existing; do
-              if [[ -n "$existing" && -z "${desired[$existing]+present}" ]]; then
-                gh release delete-asset "$GITHUB_REF_NAME" "$existing" --yes
-              fi
-            done < <(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name')
-          else
-            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
-              --verify-tag \
-              --generate-notes \
-              --title "$GITHUB_REF_NAME"
+            echo "Release $GITHUB_REF_NAME already exists; publish a new version/tag instead" >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+            --verify-tag \
+            --generate-notes \
+            --title "$GITHUB_REF_NAME"

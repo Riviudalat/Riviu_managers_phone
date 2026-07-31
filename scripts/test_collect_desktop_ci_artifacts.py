@@ -10,7 +10,51 @@ from pathlib import Path
 from scripts import collect_desktop_ci_artifacts as artifacts
 
 
+def active_dependency_closure() -> dict[str, str]:
+    closure: dict[str, str] = {}
+    for raw_line in artifacts.SIDECAR_REQUIREMENTS_LOCK.read_text(
+        encoding="utf-8"
+    ).splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        requirement = artifacts.Requirement(line)
+        if requirement.marker is not None and not requirement.marker.evaluate(
+            environment=artifacts.release_marker_environment()
+        ):
+            continue
+        specifiers = list(requirement.specifier)
+        if len(specifiers) != 1 or specifiers[0].operator != "==":
+            raise AssertionError(f"test requires an exact dependency lock: {line}")
+        closure[artifacts.canonicalize_name(requirement.name)] = specifiers[0].version
+    return closure
+
+
 class ArtifactContractTests(unittest.TestCase):
+    def test_windows_desktop_executable_requires_a_valid_x64_pe(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "riviu-managers-phone.exe"
+            payload = bytearray(128)
+            payload[:2] = b"MZ"
+            payload[0x3C:0x40] = (64).to_bytes(4, "little")
+            payload[64:68] = b"PE\0\0"
+            payload[68:70] = (0x8664).to_bytes(2, "little")
+            executable.write_bytes(payload)
+
+            evidence = artifacts.verify_windows_desktop_executable(
+                root, "x86_64-pc-windows-msvc"
+            )
+            self.assertEqual(evidence["architecture"], "x86_64")
+            self.assertEqual(evidence["name"], executable.name)
+
+            payload[68:70] = (0x014C).to_bytes(2, "little")
+            executable.write_bytes(payload)
+            with self.assertRaisesRegex(artifacts.ArtifactError, "machine mismatch"):
+                artifacts.verify_windows_desktop_executable(
+                    root, "x86_64-pc-windows-msvc"
+                )
+
     def test_production_manifest_uses_the_canonical_lf_digest(self):
         self.assertEqual(
             artifacts.production_sha256(artifacts.PRODUCTION_MANIFEST),
@@ -80,11 +124,7 @@ class ArtifactContractTests(unittest.TestCase):
                     "tidevice": "0.12.11",
                     "pyinstaller": "6.21.0",
                 },
-                "dependencyClosure": {
-                    "pymobiledevice3": "10.1.0",
-                    "tidevice": "0.12.11",
-                    "pyinstaller": "6.21.0",
-                },
+                "dependencyClosure": active_dependency_closure(),
                 "entrypoint": relative,
                 "entrypointSha256": digest,
                 "sourceSha256": artifacts.sha256_file(artifacts.SIDECAR_SOURCE),
@@ -133,6 +173,20 @@ class ArtifactContractTests(unittest.TestCase):
                 runtime, "x86_64-pc-windows-msvc"
             )
             self.assertEqual(verified["treeSha256"], measured["treeSha256"])
+
+            manifest["pythonVersion"] = "3.12.11"
+            (runtime / "runtime-manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                artifacts.ArtifactError, "expected exact"
+            ):
+                artifacts.verify_runtime(runtime, "x86_64-pc-windows-msvc")
+
+            manifest["pythonVersion"] = artifacts.EXPECTED_RELEASE_PYTHON_VERSION
+            (runtime / "runtime-manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
 
             entrypoint.write_bytes(b"tampered-runtime")
             with self.assertRaisesRegex(

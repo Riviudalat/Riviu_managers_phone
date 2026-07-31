@@ -15,6 +15,8 @@ GitHub Actions:
 Artifact được giữ 30 ngày. Tag dạng `v*` (ví dụ `v0.1.0`) tạo GitHub Release và
 đính kèm toàn bộ bộ cài, manifest cùng SHA-256. Tag phải khớp chính xác version
 trong Tauri, npm và Cargo; lệch version thì pipeline dừng trước khi phát hành.
+Release đã tồn tại không bị ghi đè; muốn phát hành lại phải tăng version và tạo tag
+mới.
 
 Bộ cài đã mang sẵn Python runtime, `pymobiledevice3==10.1.0` và
 `tidevice==0.12.11`; máy người dùng không cần cài Python hay pip. Trên Windows,
@@ -33,13 +35,13 @@ Các prerequisite thuộc hệ điều hành/nhà cung cấp:
 
 ```powershell
 # Windows PowerShell
-py -3 -m pip install -r sidecars/pymobiledevice3/requirements.txt
+py -3.12 -m pip install -r sidecars/pymobiledevice3/requirements.txt
 cd apps/desktop
 npm ci
 npm run tauri:dev
 ```
 
-Trên macOS, thay `py -3` bằng `python3`; các lệnh còn lại giữ nguyên.
+Trên macOS, thay `py -3.12` bằng `python3.12`; các lệnh còn lại giữ nguyên.
 
 1. Cắm iPhone và chọn **Trust This Computer**.
 2. iOS 17+ cần tunnel `pymobiledevice3` phù hợp với phiên thiết bị.
@@ -52,18 +54,21 @@ Mock farm chỉ dùng khi phát triển: `RIVIU_MOCK_DEVICES=1`.
 
 ```powershell
 # Windows PowerShell
-py -3 -m pip install -r sidecars/pymobiledevice3/requirements-build.txt
+py -3.12 -m pip install -r sidecars/pymobiledevice3/requirements-build.txt
 cd apps/desktop
 npm ci
 npm run sidecar:build
 npm run tauri -- build --config ../../target/tauri-sidecar.conf.json
 ```
 
-Trên macOS, thay `py -3` bằng `python3`.
+Trên macOS, thay `py -3.12` bằng `python3.12`.
 
 `build_desktop_sidecar.py` tạo runtime native đúng kiến trúc, chạy smoke test và
-ghi `runtime-manifest.json`. Không commit thư mục `target/`; CI dựng lại sạch trên
-từng hệ điều hành.
+ghi `runtime-manifest.json`. Package Python không liên quan trong môi trường local
+được bỏ qua, nhưng mọi dependency đang hoạt động của runtime phải có mặt và đúng
+exact version trong lock. Bản release chính thức dùng Python 3.12.10, Node 24.15.0
+và Rust 1.95.0. Không commit thư mục `target/`; CI dựng lại sạch trên từng hệ điều
+hành.
 
 Luồng re-sign legacy trên Mac dùng source WDA 16.0.0 và asset đã khóa hash trong
 bundle, sau đó copy sang cache người dùng để build. Nó không tải source upstream

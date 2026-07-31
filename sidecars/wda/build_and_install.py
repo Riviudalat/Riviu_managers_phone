@@ -20,6 +20,7 @@ import os
 import plistlib
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -114,7 +115,20 @@ def require_xcode() -> Path:
     return xcode
 
 
-def source_tree_sha256(root: Path) -> str:
+def _canonical_file_payload(path: Path) -> bytes:
+    payload = path.read_bytes()
+    try:
+        payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return payload
+    return payload.replace(b"\r\n", b"\n")
+
+
+def source_tree_sha256(
+    root: Path, *, executable_paths: tuple[str, ...] = ()
+) -> str:
+    expected_executables = set(executable_paths)
+    seen_files: set[str] = set()
     digest = hashlib.sha256()
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root).as_posix()
@@ -122,19 +136,35 @@ def source_tree_sha256(root: Path) -> str:
             target = os.readlink(path)
             payload = target.encode("utf-8")
             kind = b"symlink"
+            mode = 0o777
         elif path.is_file():
-            payload = path.read_bytes()
+            payload = _canonical_file_payload(path)
             kind = b"file"
+            seen_files.add(relative)
+            mode = 0o755 if relative in expected_executables else 0o644
+            if os.name != "nt":
+                actual_executable = bool(stat.S_IMODE(path.stat().st_mode) & 0o111)
+                if actual_executable != (relative in expected_executables):
+                    raise RuntimeError(
+                        f"Pinned source mode mismatch for {relative}: expected {mode:o}"
+                    )
         else:
             continue
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
         digest.update(kind)
         digest.update(b"\0")
+        digest.update(f"{mode:o}".encode("ascii"))
+        digest.update(b"\0")
         digest.update(str(len(payload)).encode("ascii"))
         digest.update(b"\0")
         digest.update(hashlib.sha256(payload).hexdigest().encode("ascii"))
         digest.update(b"\n")
+    missing_executables = sorted(expected_executables - seen_files)
+    if missing_executables:
+        raise RuntimeError(
+            "Pinned executable paths are missing: " + ", ".join(missing_executables)
+        )
     return digest.hexdigest()
 
 
@@ -144,7 +174,7 @@ def verify_resource_bundle() -> dict:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"Invalid pinned WDA source lock: {exc}") from exc
     expected = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "package": "appium-webdriveragent",
         "version": "16.0.0",
     }
@@ -157,13 +187,29 @@ def verify_resource_bundle() -> dict:
         digest = lock.get(field)
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise RuntimeError(f"Pinned WDA source lock has an invalid {field}")
+    executable_paths = lock.get("executablePaths")
+    if not isinstance(executable_paths, list) or not all(
+        isinstance(path, str) for path in executable_paths
+    ):
+        raise RuntimeError("Pinned WDA source lock has invalid executablePaths")
+    if executable_paths != sorted(set(executable_paths)) or not all(
+        path
+        and Path(path).as_posix() == path
+        and not Path(path).is_absolute()
+        and ".." not in Path(path).parts
+        for path in executable_paths
+    ):
+        raise RuntimeError("Pinned WDA source lock has invalid executablePaths")
+    executable_paths_tuple = tuple(executable_paths)
     tree_sha256 = lock["treeSha256"]
     if not (SOURCE_TEMPLATE / "WebDriverAgent.xcodeproj").is_dir():
         raise RuntimeError("Pinned WebDriverAgent source is missing from app resources")
     package = json.loads((SOURCE_TEMPLATE / "package.json").read_text(encoding="utf-8"))
     if package.get("name") != expected["package"] or package.get("version") != expected["version"]:
         raise RuntimeError("Pinned WebDriverAgent package identity does not match its lock")
-    actual = source_tree_sha256(SOURCE_TEMPLATE)
+    actual = source_tree_sha256(
+        SOURCE_TEMPLATE, executable_paths=executable_paths_tuple
+    )
     if actual != tree_sha256:
         raise RuntimeError(
             "Pinned WebDriverAgent source integrity mismatch: "
@@ -203,7 +249,9 @@ def ensure_wda_checkout() -> None:
             else:
                 path.unlink()
     shutil.copytree(SOURCE_TEMPLATE, temporary, symlinks=True)
-    actual = source_tree_sha256(temporary)
+    actual = source_tree_sha256(
+        temporary, executable_paths=tuple(lock["executablePaths"])
+    )
     if actual != lock["treeSha256"]:
         shutil.rmtree(temporary)
         raise RuntimeError("Copied WebDriverAgent source failed integrity verification")
@@ -709,6 +757,7 @@ def main() -> int:
                     "sourceTreeSha256": lock["treeSha256"],
                     "logoSha256": lock["logoSha256"],
                     "iconSetTreeSha256": lock["iconSetTreeSha256"],
+                    "executablePathCount": len(lock["executablePaths"]),
                     "workspaceOutsideResources": True,
                 }
             )

@@ -43,10 +43,27 @@ class PackagedSigningResourceTests(unittest.TestCase):
         self.assertEqual(lock["version"], "16.0.0")
         self.assertEqual(
             build_and_install.source_tree_sha256(
-                build_and_install.SOURCE_TEMPLATE
+                build_and_install.SOURCE_TEMPLATE,
+                executable_paths=tuple(lock["executablePaths"]),
             ),
             lock["treeSha256"],
         )
+
+    def test_source_digest_normalizes_checkout_endings_and_binds_modes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            script = root / "script.sh"
+            script.write_bytes(b"#!/bin/sh\r\necho fixture\r\n")
+            crlf = build_and_install.source_tree_sha256(root)
+            script.write_bytes(b"#!/bin/sh\necho fixture\n")
+            lf = build_and_install.source_tree_sha256(root)
+            script.chmod(0o755)
+            executable = build_and_install.source_tree_sha256(
+                root, executable_paths=("script.sh",)
+            )
+
+            self.assertEqual(crlf, lf)
+            self.assertNotEqual(lf, executable)
 
     def test_workspace_copy_is_verified_and_stays_outside_resources(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -67,9 +84,10 @@ class PackagedSigningResourceTests(unittest.TestCase):
             lock_path.write_text(
                 json.dumps(
                     {
-                        "schemaVersion": 1,
+                        "schemaVersion": 2,
                         "package": "appium-webdriveragent",
                         "version": "16.0.0",
+                        "executablePaths": [],
                         "treeSha256": build_and_install.source_tree_sha256(source),
                         "logoSha256": build_and_install.hashlib.sha256(
                             (resources / "logo.jpg").read_bytes()

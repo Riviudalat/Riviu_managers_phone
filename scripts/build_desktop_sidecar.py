@@ -77,32 +77,64 @@ def dependency_closure() -> dict[str, str]:
             )
         locked[name] = requirement
 
-    installed: dict[str, str] = {}
+    installed_distributions: dict[str, importlib.metadata.Distribution] = {}
     for distribution in importlib.metadata.distributions():
         raw_name = distribution.metadata.get("Name")
         if not raw_name:
             continue
-        name = canonicalize_name(raw_name)
-        if name in {"pip", "wheel"}:
+        installed_distributions[canonicalize_name(raw_name)] = distribution
+
+    roots = ("pymobiledevice3", "tidevice", "pyinstaller")
+    reachable: set[str] = set()
+    pending = list(roots)
+    while pending:
+        name = pending.pop()
+        if name in reachable:
             continue
+        distribution = installed_distributions.get(name)
+        if distribution is None:
+            raise RuntimeError(f"required build dependency is missing: {name}")
+        reachable.add(name)
+        for raw_requirement in distribution.requires or ():
+            requirement = Requirement(raw_requirement)
+            if requirement.marker is not None and not requirement.marker.evaluate():
+                continue
+            dependency_name = canonicalize_name(requirement.name)
+            if dependency_name not in reachable:
+                pending.append(dependency_name)
+
+    installed: dict[str, str] = {}
+    for name in sorted(reachable):
+        distribution = installed_distributions[name]
         requirement = locked.get(name)
-        if requirement is None or (
-            requirement.marker is not None and not requirement.marker.evaluate()
-        ):
+        if requirement is None:
             raise RuntimeError(
-                f"installed build dependency {raw_name}=={distribution.version} is not active "
-                "in requirements-lock.txt"
+                f"reachable build dependency {name}=={distribution.version} "
+                "is missing from requirements-lock.txt"
+            )
+        if requirement.marker is not None and not requirement.marker.evaluate():
+            raise RuntimeError(
+                f"reachable build dependency {name} is inactive in requirements-lock.txt"
             )
         if distribution.version not in requirement.specifier:
             raise RuntimeError(
-                f"installed build dependency {raw_name}=={distribution.version} does not "
+                f"installed build dependency {name}=={distribution.version} does not "
                 f"match lock {requirement.specifier}"
             )
         installed[name] = distribution.version
 
-    for required in ("pymobiledevice3", "tidevice", "pyinstaller"):
-        if required not in installed:
-            raise RuntimeError(f"required build dependency is missing: {required}")
+    active_locked = {
+        name: requirement
+        for name, requirement in locked.items()
+        if requirement.marker is None or requirement.marker.evaluate()
+    }
+    missing = sorted(set(active_locked) - reachable)
+    unexpected = sorted(reachable - set(active_locked))
+    if missing or unexpected:
+        raise RuntimeError(
+            "reachable dependency closure does not exactly match the active lock: "
+            f"missing={missing!r}, unexpected={unexpected!r}"
+        )
     return dict(sorted(installed.items()))
 
 

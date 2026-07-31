@@ -17,6 +17,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from packaging.markers import default_environment
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
@@ -59,6 +60,7 @@ CANONICAL_PRODUCTION_SHA256 = {
         "e98a549af4c061556effd36424e7732219e1a6d262bcf1f259279975024b6e1a"
     ),
 }
+EXPECTED_RELEASE_PYTHON_VERSION = "3.12.10"
 
 TARGETS = {
     "x86_64-pc-windows-msvc": {
@@ -86,6 +88,15 @@ RELEASE_LABEL_TARGETS = {
 
 class ArtifactError(RuntimeError):
     """Raised when a build output fails its release contract."""
+
+
+def release_marker_environment() -> dict[str, str]:
+    environment = default_environment()
+    environment["python_full_version"] = EXPECTED_RELEASE_PYTHON_VERSION
+    environment["python_version"] = ".".join(
+        EXPECTED_RELEASE_PYTHON_VERSION.split(".")[:2]
+    )
+    return environment
 
 
 def sha256_file(path: Path) -> str:
@@ -293,9 +304,7 @@ def verify_production_snapshot(path: Path) -> dict[str, Any]:
     return actual
 
 
-def verify_runtime(
-    runtime_dir: Path, target: str, *, expected_python_prefix: str = "3.12."
-) -> dict[str, Any]:
+def verify_runtime(runtime_dir: Path, target: str) -> dict[str, Any]:
     target_contract = TARGETS[target]
     manifest_path = runtime_dir / "runtime-manifest.json"
     manifest = load_json(manifest_path)
@@ -314,12 +323,10 @@ def verify_runtime(
             )
 
     python_version = manifest.get("pythonVersion")
-    if not isinstance(python_version, str) or not python_version.startswith(
-        expected_python_prefix
-    ):
+    if python_version != EXPECTED_RELEASE_PYTHON_VERSION:
         raise ArtifactError(
-            "runtime Python version mismatch: expected prefix "
-            f"{expected_python_prefix!r}, got {python_version!r}"
+            "runtime Python version mismatch: expected exact "
+            f"{EXPECTED_RELEASE_PYTHON_VERSION!r}, got {python_version!r}"
         )
 
     smoke = manifest.get("smoke")
@@ -349,6 +356,7 @@ def verify_runtime(
         )
 
     active_locks: dict[str, Requirement] = {}
+    marker_environment = release_marker_environment()
     for line_number, raw_line in enumerate(
         SIDECAR_REQUIREMENTS_LOCK.read_text(encoding="utf-8").splitlines(), start=1
     ):
@@ -361,23 +369,36 @@ def verify_runtime(
             raise ArtifactError(
                 f"duplicate dependency lock entry {name!r} at line {line_number}"
             )
-        if requirement.marker is None or requirement.marker.evaluate():
+        if requirement.marker is None or requirement.marker.evaluate(
+            environment=marker_environment
+        ):
             active_locks[name] = requirement
 
     closure = manifest.get("dependencyClosure")
     if not isinstance(closure, dict) or not closure:
         raise ArtifactError("runtime dependency closure is missing")
+    canonical_closure: dict[str, str] = {}
     for raw_name, version in closure.items():
         if not isinstance(raw_name, str) or not isinstance(version, str):
             raise ArtifactError("runtime dependency closure must map names to versions")
         name = canonicalize_name(raw_name)
+        if name in canonical_closure:
+            raise ArtifactError(f"duplicate canonical runtime dependency: {name}")
         requirement = active_locks.get(name)
         if requirement is None or version not in requirement.specifier:
             raise ArtifactError(
                 f"runtime dependency {raw_name}=={version} is not locked for this platform"
             )
+        canonical_closure[name] = version
+    if set(canonical_closure) != set(active_locks):
+        missing = sorted(set(active_locks) - set(canonical_closure))
+        unexpected = sorted(set(canonical_closure) - set(active_locks))
+        raise ArtifactError(
+            "runtime dependency closure does not exactly match the active lock: "
+            f"missing={missing!r}, unexpected={unexpected!r}"
+        )
     for name, version in expected_dependencies.items():
-        if closure.get(name) != version:
+        if canonical_closure.get(name) != version:
             raise ArtifactError(
                 f"runtime dependency closure is missing {name}=={version}"
             )
@@ -682,6 +703,61 @@ def verify_packaged_resources(
     }
 
 
+def verify_windows_desktop_executable(
+    install_root: Path, target: str
+) -> dict[str, Any]:
+    try:
+        cargo_document = tomllib.loads(
+            TAURI_CARGO_MANIFEST.read_text(encoding="utf-8")
+        )
+        binary_name = cargo_document["package"]["name"]
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, KeyError) as error:
+        raise ArtifactError(f"invalid desktop Cargo binary name: {error}") from error
+    if (
+        not isinstance(binary_name, str)
+        or not binary_name
+        or Path(binary_name).name != binary_name
+    ):
+        raise ArtifactError("desktop Cargo package name must be a portable string")
+    expected_name = f"{binary_name}.exe".casefold()
+    candidates = sorted(
+        path
+        for path in install_root.rglob("*.exe")
+        if path.is_file() and path.name.casefold() == expected_name
+    )
+    if len(candidates) != 1:
+        raise ArtifactError(
+            f"installed package must contain exactly one {binary_name}.exe, "
+            f"found {len(candidates)}"
+        )
+    executable = candidates[0]
+    with executable.open("rb") as handle:
+        dos_header = handle.read(64)
+        if len(dos_header) != 64 or dos_header[:2] != b"MZ":
+            raise ArtifactError(f"desktop executable has an invalid DOS header: {executable}")
+        pe_offset = int.from_bytes(dos_header[0x3C:0x40], "little")
+        if pe_offset < 64 or pe_offset > 16 * 1024 * 1024:
+            raise ArtifactError(f"desktop executable has an invalid PE offset: {executable}")
+        handle.seek(pe_offset)
+        pe_header = handle.read(6)
+    if len(pe_header) != 6 or pe_header[:4] != b"PE\0\0":
+        raise ArtifactError(f"desktop executable has an invalid PE signature: {executable}")
+    machine = int.from_bytes(pe_header[4:6], "little")
+    expected_machines = {"x86_64-pc-windows-msvc": (0x8664, "x86_64")}
+    expected_machine, architecture = expected_machines[target]
+    if machine != expected_machine:
+        raise ArtifactError(
+            f"desktop executable machine mismatch: expected 0x{expected_machine:04x}, "
+            f"got 0x{machine:04x}"
+        )
+    return {
+        "name": executable.name,
+        "bytes": executable.stat().st_size,
+        "sha256": sha256_file(executable),
+        "architecture": architecture,
+    }
+
+
 def verify_windows_package(
     installers: list[Path], bundle_dir: Path, runtime_dir: Path, runtime: dict[str, Any]
 ) -> dict[str, Any]:
@@ -717,6 +793,9 @@ def verify_windows_package(
                 "administratively extracted MSI must contain exactly one sidecars resource root"
             )
         evidence = verify_packaged_resources(sidecars_roots[0], runtime_dir, runtime)
+        msi_desktop = verify_windows_desktop_executable(
+            extract_root, "x86_64-pc-windows-msvc"
+        )
     evidence["msiAdministrativeExtract"] = "PASS"
 
     with tempfile.TemporaryDirectory(
@@ -738,16 +817,34 @@ def verify_windows_package(
         nsis_evidence = verify_packaged_resources(
             sidecars_roots[0], runtime_dir, runtime
         )
+        nsis_desktop = verify_windows_desktop_executable(
+            install_root, "x86_64-pc-windows-msvc"
+        )
         if nsis_evidence != {
             key: evidence[key]
             for key in nsis_evidence
         }:
             raise ArtifactError("MSI and NSIS packaged resource evidence diverged")
+        for field in ("name", "architecture"):
+            if nsis_desktop[field] != msi_desktop[field]:
+                raise ArtifactError(
+                    f"MSI and NSIS desktop executable {field} values diverged"
+                )
         uninstallers = sorted(install_root.rglob("uninstall*.exe"))
         if len(uninstallers) != 1:
             raise ArtifactError("NSIS silent install did not produce one uninstaller")
         run_checked([str(uninstallers[0]), "/S"], timeout=300)
     evidence["nsisSilentInstall"] = "PASS"
+    evidence["desktopExecutable"] = "PASS"
+    evidence["desktopArchitecture"] = msi_desktop["architecture"]
+    evidence["desktopExecutableBytes"] = {
+        "msi": msi_desktop["bytes"],
+        "nsis": nsis_desktop["bytes"],
+    }
+    evidence["desktopExecutableSha256"] = {
+        "msi": msi_desktop["sha256"],
+        "nsis": nsis_desktop["sha256"],
+    }
     return evidence
 
 
@@ -1009,6 +1106,8 @@ def verify_release_command(args: argparse.Namespace) -> dict[str, Any]:
                 packaged.get("msiAdministrativeExtract") != "PASS"
                 or packaged.get("nsisSilentInstall") != "PASS"
                 or packaged.get("embeddedSignerErrorJson") != "PASS"
+                or packaged.get("desktopExecutable") != "PASS"
+                or packaged.get("desktopArchitecture") != "x86_64"
             ):
                 raise ArtifactError(
                     f"Windows installer verification gate is missing in {manifest_path}"
