@@ -518,8 +518,8 @@ class _Harness:
         self.port_calls.append((udid, port, timeout))
         return next(self.port_results)
 
-    async def device_http_ready(self, udid, port, token, timeout=3.0):
-        self.events.append(("auth", udid, port, token, timeout))
+    async def device_http_ready(self, udid, port, token, timeout=3.0, header="X-RT-Token"):
+        self.events.append(("auth", udid, port, token, timeout, header))
         return next(self.auth_results)
 
     async def launch_app_with_environment(self, udid, bundle_id, environment):
@@ -802,6 +802,32 @@ class RtMmoProxyTests(unittest.TestCase):
         )
         self.assertFalse(any("xctest" in command for command in harness.popen_commands))
 
+    def test_riviu_agent_forwards_text_capability_into_dvt_launch_environment(self):
+        harness = _Harness([False, True, True])
+        args = SimpleNamespace(
+            backend="riviu-agent",
+            local_port=18124,
+            device_port=8916,
+            mjpeg_port=9094,
+            token="TEST_TOKEN",
+            bundle_id="com.riviu.managersphone.agent.xctrunner",
+            udid="fixture-udid",
+            restart_wda=False,
+            bootstrap_only=False,
+        )
+
+        with patch.dict(riviu_pmd.os.environ, {"RIVIU_AGENT_TEXT_CAPABLE": "1"}):
+            self.assertEqual(harness.run_proxy(args=args), 0)
+
+        self.assertEqual(
+            harness.launches[0][2]["RIVIU_AGENT_TEXT_CAPABLE"],
+            "1",
+        )
+        self.assertEqual(harness.launches[0][2]["RIVIU_AGENT_TOKEN"], "TEST_TOKEN")
+        self.assertFalse(
+            any("TEST_TOKEN" in arg for command in harness.run_commands for arg in command)
+        )
+
     def test_live_rtmmo_port_is_reused_without_launch_or_kill(self):
         harness = _Harness([True, True])
 
@@ -1037,6 +1063,39 @@ class StreamControlPortTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([port for _, port, _ in port_calls], [9093, 8906, 9093])
 
+    async def test_long_lived_mjpeg_reconnects_once_after_socket_close(self):
+        wait_calls = []
+        stream_calls = []
+
+        async def wait_device_port(udid, port, timeout=45.0):
+            wait_calls.append((udid, port, timeout))
+            return True
+
+        async def stream_mjpeg(*args):
+            stream_calls.append(args)
+            if len(stream_calls) == 1:
+                raise RuntimeError("MJPEG connection closed")
+
+        with (
+            patch.object(riviu_pmd, "_wait_device_port", wait_device_port),
+            patch.object(riviu_pmd, "_stream_mjpeg", stream_mjpeg),
+            patch.object(riviu_pmd, "_free_local_port", side_effect=[18001, 18002]),
+        ):
+            await riviu_pmd._stream_auto(
+                "fixture-udid",
+                5,
+                60,
+                None,
+                "mjpeg",
+                "com.mrph.svc",
+                9093,
+                wda_port=8906,
+            )
+
+        self.assertEqual(len(stream_calls), 2)
+        self.assertEqual([call[1] for call in stream_calls], [18001, 18002])
+        self.assertEqual(wait_calls, [("fixture-udid", 9093, 3.0), ("fixture-udid", 9093, 3.0)])
+
 
 class CliTests(unittest.TestCase):
     def test_interaction_inspection_cli_passes_metadata_selection_only(self):
@@ -1124,7 +1183,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(captured[0].backend, "rt-mmo")
         self.assertEqual(captured[0].device_port, 8906)
         self.assertEqual(captured[0].mjpeg_port, 9093)
-        self.assertEqual(captured[0].token, "ENV_TOKEN")
+        self.assertEqual(captured[0].token, "")
 
     def test_wda_proxy_cli_rejects_token_in_argv(self):
         argv = [
@@ -1168,7 +1227,7 @@ class CliTests(unittest.TestCase):
             result = riviu_pmd.main()
 
         self.assertEqual(result, 0)
-        self.assertEqual(captured[0].token, "ENV_TOKEN")
+        self.assertEqual(captured[0].token, "")
 
     def test_stream_cli_parses_selected_wda_port(self):
         captured = []

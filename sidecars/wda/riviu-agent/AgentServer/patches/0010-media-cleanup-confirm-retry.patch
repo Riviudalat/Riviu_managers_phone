@@ -1,0 +1,43 @@
+--- a/WebDriverAgentLib/Commands/FBCustomCommands.m
++++ b/WebDriverAgentLib/Commands/FBCustomCommands.m
+@@ -780,22 +780,29 @@
+     dispatch_semaphore_signal(changesSemaphore);
+   }];
+   NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:45.0];
+-  NSDate *tapReady = [NSDate dateWithTimeIntervalSinceNow:0.65];
+-  BOOL confirmationTapSent = NO;
++  NSDate *tapReady = [NSDate dateWithTimeIntervalSinceNow:0.90];
++  NSDate *nextConfirmationTap = tapReady;
++  NSUInteger confirmationTapAttempts = 0;
+   while (dispatch_semaphore_wait(changesSemaphore, DISPATCH_TIME_NOW) != 0) {
+     // The asset confirmation is centered near 75% of a portrait screen. It
+     // is hosted by SpringBoard, so coordinate synthesis remains responsive
+     // even when an accessibility snapshot would block on the active app.
+-    if (!confirmationTapSent && [[NSDate date] compare:tapReady] != NSOrderedAscending) {
++    if (confirmationTapAttempts < 4 && [[NSDate date] compare:nextConfirmationTap] != NSOrderedAscending) {
+       CGSize screenSize = XCUIApplication.fb_systemApplication.wdFrame.size;
+-      if (screenSize.width > 0.0 && screenSize.height > 0.0) {
+-        NSError *tapError = nil;
+-        confirmationTapSent = [self riviuMediaTapPoint:
+-                               CGPointMake(screenSize.width * 0.68, screenSize.height * 0.745)
+-                               error:&tapError];
+-        if (!confirmationTapSent && tapError != nil) {
+-          changesError = tapError;
+-        }
++      if (screenSize.width <= 0.0 || screenSize.height <= 0.0) {
++        screenSize = UIScreen.mainScreen.bounds.size;
++      }
++      if (screenSize.width <= 0.0 || screenSize.height <= 0.0) {
++        screenSize = CGSizeMake(375.0, 667.0);
++      }
++      NSError *tapError = nil;
++      BOOL tapped = [self riviuMediaTapPoint:
++                     CGPointMake(screenSize.width * 0.68, screenSize.height * 0.745)
++                     error:&tapError];
++      confirmationTapAttempts += 1;
++      nextConfirmationTap = [NSDate dateWithTimeIntervalSinceNow:0.80];
++      if (!tapped && tapError != nil) {
++        changesError = tapError;
+       }
+     }
+     if ([[NSDate date] compare:deadline] != NSOrderedAscending) {

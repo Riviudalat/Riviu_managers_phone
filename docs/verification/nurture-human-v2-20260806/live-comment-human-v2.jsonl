@@ -1,0 +1,7 @@
+{"comments":0,"elapsed_s":127.854684708,"follows":0,"kind":"run","likes":0,"slowest_request_ms":828,"summary":"done — 3 video, 0 tim, 0 bình luận, 0 follow, 0 popup đóng, 0 recovery, 128s, kết thúc ở TikTok, lỗi cuối: bình luận thất bại: frame text source is not configured (other)","udid":"a99f4bd9f877b2a0e3682ee24fd1c68f75ba6982","usd":0.0,"videos":3}
+{"kind":"endpoint","line":"session.create             n=1    p50=7ms    p95=7ms    max=7ms    ok"}
+{"kind":"endpoint","line":"session.prime              n=1    p50=15ms   p95=15ms   max=15ms   ok"}
+{"kind":"endpoint","line":"swipe.native               n=4    p50=796ms  p95=828ms  max=828ms  ok"}
+{"kind":"endpoint","line":"tap.native-swipe           n=2    p50=448ms  p95=457ms  max=457ms  ok"}
+{"kind":"endpoint","line":"wda.locked                 n=3    p50=7ms    p95=8ms    max=8ms    ok"}
+{"detail":"ok","event":"launch_app","kind":"event","ms":740}

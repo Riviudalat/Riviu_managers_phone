@@ -388,11 +388,18 @@ class FakeAdapter:
     def mjpeg_address(self):
         return self.fixture.mjpeg.server_address
 
-    def prepare_candidate(self, artifact, _timeout):
+    def prepare_candidate(self, artifact, _timeout, *, reuse_trusted_install=False):
         self.events.append("prepare")
         self.prepared_artifact = artifact
+        self.reuse_trusted_install = reuse_trusted_install
+        self.evidence_environment = (
+            "SUPPLEMENTAL_MAC_DEVICE" if reuse_trusted_install else "FIXTURE_ONLY"
+        )
         return {
-            "freshInstall": True,
+            "freshInstall": not reuse_trusted_install,
+            "installationMode": (
+                "trusted_upgrade" if reuse_trusted_install else "fresh_install"
+            ),
             "identityMatch": True,
             "bundleId": artifact.bundle_id,
             "bundleVersion": artifact.bundle_version,
@@ -1238,6 +1245,80 @@ class ProbeGateTests(unittest.TestCase):
         self.assertEqual(UNICODE_SAMPLE, fixture.state.search_text)
         self.assertEqual(0, fixture.state.screenshot_counter)
         self.assertEqual(["cleanup", "terminate", "ports-closed"], adapter.events[-3:])
+
+    def test_manual_trust_pause_runs_after_fresh_install(self):
+        token = "t" * 32
+        with tempfile.TemporaryDirectory() as tmp, FixtureServers(token) as fixture:
+            artifact = self.probe.load_candidate_artifact(
+                self._candidate_manifest(Path(tmp))
+            )
+            adapter = FakeAdapter(fixture)
+            config = self.probe.ProbeConfig(
+                cold_launches=1,
+                tap_attempts=1,
+                swipe_attempts=1,
+                stream_seconds=0.05,
+                request_timeout=2.0,
+                action_settle_seconds=0.0,
+                wait_for_trust=True,
+            )
+            with mock.patch.object(self.probe, "wait_for_manual_trust") as pause:
+                report = self.probe.ProbeRunner(
+                    adapter=adapter,
+                    config=config,
+                    token=self.probe.SecretToken(token),
+                    artifact=artifact,
+                ).run()
+
+        pause.assert_called_once_with()
+        self.assertTrue(report["measurements"]["manualTrustPauseRequested"])
+        self.assertTrue(report["measurements"]["manualTrustPauseCompleted"])
+        self.assertEqual("FIXTURE_ONLY", report["gateStatus"])
+
+    def test_manual_trust_pause_requires_interactive_input(self):
+        with mock.patch("builtins.input", side_effect=EOFError):
+            with self.assertRaisesRegex(
+                self.probe.ProbeError, "interactive terminal"
+            ):
+                self.probe.wait_for_manual_trust()
+
+    def test_reuse_trusted_install_is_supplemental_only(self):
+        token = "u" * 32
+        with tempfile.TemporaryDirectory() as tmp, FixtureServers(token) as fixture:
+            artifact = self.probe.load_candidate_artifact(
+                self._candidate_manifest(Path(tmp))
+            )
+            adapter = FakeAdapter(fixture)
+            adapter.evidence_environment = "SUPPLEMENTAL_MAC_DEVICE"
+            config = self.probe.ProbeConfig(
+                cold_launches=1,
+                tap_attempts=1,
+                swipe_attempts=1,
+                stream_seconds=0.05,
+                request_timeout=2.0,
+                action_settle_seconds=0.0,
+                reuse_trusted_install=True,
+            )
+            report = self.probe.ProbeRunner(
+                adapter=adapter,
+                config=config,
+                token=self.probe.SecretToken(token),
+                artifact=artifact,
+            ).run()
+
+        self.assertTrue(adapter.reuse_trusted_install)
+        self.assertFalse(report["measurements"]["candidateFreshInstalled"])
+        self.assertEqual("trusted_upgrade", report["device"]["installationMode"])
+        self.assertEqual("SUPPLEMENTAL_ONLY", report["gateStatus"])
+
+    def test_trust_pause_and_reuse_modes_cannot_be_combined(self):
+        with self.assertRaisesRegex(
+            self.probe.ProbeError, "mutually exclusive"
+        ):
+            self.probe.ProbeConfig(
+                wait_for_trust=True,
+                reuse_trusted_install=True,
+            )
 
     def test_cold_launch_rejects_pid_change_before_readiness_is_counted(self):
         class RelaunchingAdapter(FakeAdapter):

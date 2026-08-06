@@ -7,20 +7,20 @@
   "archiveSha256": "0c52fc0dcc6f837287be02a593d96d8ef28563c90b4d41f629830e84878f6bbb",
   "integrity": "sha512-1tPVzIVPsBKynbTFqJyk3Hrf/FZ6kDmeP81P24hJ6q3gYHd2ljsI6OYEhINSbzxDdDmgTuWyYoUa1YtFvZC8oA==",
   "baselineSourceSha256": "f40eadb1e1d9872ad5a0574a5146cdbf5e0d04768ccb1f1701b289d50e4ee8f8",
-  "outputSourceSha256": "2ca158cde4b2307957670680a6cd136b6c360d6f175303f1d012f7488e82c4cc",
+  "outputSourceSha256": "4c7465251a31469c5b90edfb56defa988f7f80f69b1278c3027366722304d915",
   "xcconfigSha256": "2bed5a711927df27a86b2e2f7237bad99406b3cbbf5fccb09f8ce03fc58f53ae",
   "patches": [
     {
       "path": "AgentServer/patches/0001-riviu-auth-health-status.patch",
-      "sha256": "08231f5f574b172c411c071dba165c0e068799387d92510e6ad6ae22fec1c39b"
+      "sha256": "25b50a5509a312a3d94e422b00bbee3205e47f3a33e05baf19cd768ec82ce244"
     },
     {
       "path": "AgentInput/patches/0002-sessionless-native-gestures.patch",
-      "sha256": "084887ff90f61cb1fa369998c387fdd8e83bdf63136d76c937ee5e39cd2e52d7"
+      "sha256": "089bd72e3c0a8d7dddf35ee4c86042104553edf5fd0390bf91da6f740e0a9a25"
     },
     {
       "path": "AgentStream/patches/0003-authenticated-loopback-mjpeg.patch",
-      "sha256": "6baae6e2664d8028ed20f39cfb4e4e6ad044815ac222f445a2692a5b63fe30a0"
+      "sha256": "e3d3024552fc3536f89a8a0647362486a0d191f847c0b66be0c26cd35bb2e5f7"
     },
     {
       "path": "AgentHost/patches/0004-signed-artifact-attestation.patch",
@@ -28,7 +28,39 @@
     },
     {
       "path": "AgentInput/patches/0005-clipboard-contract-hardening.patch",
-      "sha256": "dc6ca70c00a86d42789718abfaa543f7c71e879128177ac3ef0df738abd34338"
+      "sha256": "9d84788ebc91268f15b8daea3e644bb92618fbb03424e98c1d3b715dd6ae4435"
+    },
+    {
+      "path": "AgentServer/patches/0006-media-prepare-contract.patch",
+      "sha256": "2f5d79da69f3d421a33f81bbad879af95ea7bfb5f0d2f64541566db55aba2b6a"
+    },
+    {
+      "path": "AgentServer/patches/0007-media-import-photos.patch",
+      "sha256": "ffa3c762a0dd155ae1124544d742250a58e0ffc1a9b111017334bd558226c67c"
+    },
+    {
+      "path": "AgentServer/patches/0008-media-cleanup-native-confirm.patch",
+      "sha256": "6d4921363303977d71414381fbd9a2f2d8b01f06d51284102d41c88adbe3d4bb"
+    },
+    {
+      "path": "AgentServer/patches/0009-media-import-native-permission-confirm.patch",
+      "sha256": "9324fb3ba7210d7e2865eb4a5e3e7df62a320f1dcc6a99f354b7aeb705b3bd09"
+    },
+    {
+      "path": "AgentServer/patches/0010-media-cleanup-confirm-retry.patch",
+      "sha256": "11eb58a7ff991a5f34cd3047ca46ecb580782d6769b91123c3f447d6be955c9f"
+    },
+    {
+      "path": "AgentServer/patches/0011-media-permission-screen-fallback.patch",
+      "sha256": "b684b21568bb23230fb52b041a0aafb0d440548eb5182f8cd8c2f10ecfda017e"
+    },
+    {
+      "path": "AgentServer/patches/0012-media-permission-use-screen-bounds.patch",
+      "sha256": "22dba933fd1814e369e2427d2153b270209bb25f0ab462e9bf743d421a2e6743"
+    },
+    {
+      "path": "AgentServer/patches/0013-media-permission-logical-tap-fallback.patch",
+      "sha256": "31567ca568c71550b130bb8054e647c83fe9453ea7a154f43c1561ea45bd1831"
     }
   ]
 }

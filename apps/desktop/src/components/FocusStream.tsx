@@ -6,10 +6,11 @@ import {
   deviceTap,
   deviceTypeText,
   groupInput,
+  latestFrame,
   rebootDevice,
   screenshot,
 } from "../api";
-import { peekFrame, useDeviceFrame } from "../frameStore";
+import { peekFrame, useDeviceFrame, useHydratedDeviceFrame } from "../frameStore";
 import {
   IconBack,
   IconCamera,
@@ -48,6 +49,7 @@ function mapToDevice(
 }
 
 export function FocusStream({ device, onClose, groupUdids, groupMode }: Props) {
+  useHydratedDeviceFrame(device.udid, latestFrame);
   const frame = useDeviceFrame(device.udid) ?? peekFrame(device.udid) ?? null;
   const [text, setText] = useState("");
   const [pinned, setPinned] = useState(true);

@@ -1,0 +1,2257 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 78001d6..eaa9af4 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -4,7 +4,7 @@
+ > hay danh sách "đừng làm lại" thì cập nhật ngay trong cùng lần thay đổi đó.
+ > File này là thứ đầu tiên agent sau đọc.
+ >
+-> Cập nhật lần cuối: 31/07/2026.
++> **Cập nhật lần cuối:** 04/08/2026.
+ 
+ ---
+ 
+@@ -210,10 +210,16 @@ lưu 444, chia sẻ 511.
+ - `run_suppressible()` cho nurture tạm dừng *hành động* khi nó tự lái luồng nhiều
+   bước (mở drawer bình luận) — vẫn phân loại để `state` luôn mới.
+ 
+-Watcher xử lý 4 loại màn hình chắn đường: `ClosableSheet` (tap ✕),
++Watcher xử lý 4 loại màn hình chắn đường: `ClosableSheet` (tap ✕, gồm cả thẻ
++khuyến mãi nổi có nút ✕ góc trái),
+ `InterestPicker` (tap nút bỏ qua), `LiveRoom` (tap ✕ — vuốt chỉ cuộn trong
+ phòng), và `SystemAlert`.
+ 
++Ngay sau khi TikTok được đưa lên foreground, nurture chờ watcher xác nhận một
++frame `Feed` (tối đa 12 giây). Vì vậy thông báo/popup đã có sẵn lúc khởi động
++được đóng trước gesture đầu tiên; watcher vẫn chạy liên tục để xử lý popup phát
++sinh giữa phiên. Không dùng `autoDismissAlerts` để làm việc này.
++
+ #### `SystemAlert` — hộp thoại của iOS, không phải của TikTok
+ 
+ Máy **không có SIM** tự bật "iPhone chưa được Kích hoạt" vài phút một lần. Nó
+@@ -342,7 +348,7 @@ Thiết kế chi tiết:
+   phục hồi feature call graph và Project 2 phải thêm contract/probe trước khi sửa
+   một delta theo feature; không suy diễn call edge từ tên selector.
+ 
+-### 3.9 Project 2 Riviu Agent candidate (checkpoint Windows 29/07/2026)
++### 3.9 Project 2 Riviu Agent candidate (checkpoint Mac 04/08/2026)
+ 
+ Source candidate nam o `sidecars/wda/riviu-agent/` theo mo hinh pinned overlay:
+ `Scripts/prepare.py` verify npm tarball WDA 15.1.4, baseline digest
+@@ -351,7 +357,7 @@ apply dung thu tu nam patch co SHA-256 trong `baseline-lock.json`. Source sinh r
+ chi nam trong ignored `target/riviu-agent/source`; khong vendor de len Git va khong
+ sua `sidecars/wda/WebDriverAgent/` stock 16.0.0.
+ Digest sau patch phai dung
+-`2ca158cde4b2307957670680a6cd136b6c360d6f175303f1d012f7488e82c4cc`;
++`c54c85ab5abafd6465dfa7f40933bf525d8016c928680d9f4153d9972115cf93`;
+ `prepare.py` khoa `git -c core.autocrlf=false` de giu LF cua upstream. Khong tai
+ sinh patch voi line-ending churn lam delta Objective-C thanh thay toan file.
+ Digest tinh moi regular file va canonical mode (`0644` hoac `0755`), gom ca
+@@ -362,8 +368,10 @@ POSIX, prepare phai dat mode that tu tar de `embed-runner-icon.sh` chay duoc.
+ Candidate protocol v2 dung `RIVIU_AGENT_TOKEN` (toi thieu 32 byte UTF-8), header
+ `X-Riviu-Token`, control `8916`, MJPEG `9094`. Chi exact `GET /status` duoc mien
+ auth. Protected health tra `agentVersion=0.1.0`, `protocolVersion=2`, logical
+-`375x667` va feature dung bon muc `stream/tap/swipe/clipboard`; Project 2 tuyet
+-doi chua advertise `text` hoac `pushMedia`.
++`375x667` va candidate mac dinh dung bon muc `stream/tap/swipe/clipboard`.
++Artifact promoted rieng `sidecars/wda/RiviuAgent-text.ipa` chi them `text` khi
++manifest da qua text gate; relay phai forward `RIVIU_AGENT_TEXT_CAPABLE=1` qua
++DVT launch. Khong advertise `pushMedia`.
+ 
+ Sessionless `/wda/tap` va `/wda/swipe` cua candidate dung truc tiep
+ `XCPointerEventPath` -> `XCSynthesizedEventRecord` ->
+@@ -435,26 +443,57 @@ dung PID da xac nhan. Nam PID fingerprint phai khac nhau. JSON va hai gate Markd
+ publish theo transaction co rollback, khong de lai evidence tron neu replace loi.
+ Report JSON/Markdown chi publish sau `rtmmo-re verify-redaction`, va cleanup phai
+ dung sampler/relay, terminate candidate, xac nhan ca hai device port da dong.
+-Project 2 chua noi candidate vao desktop nen khong danh PASS cho soft/hard runtime
+-recovery: moi control/session fault lam Gate C fail; budget recovery thuoc Project
+-4. O phase nay chi MJPEG reader duoc reconnect co gioi han toi da mot lan.
+-
+-Trang thai hien tai: source/contract/build/probe fixture tren Windows da PASS;
+-B0, Gate B va Gate C van `PENDING_MAC_DEVICE`. HTTP port hoac `/status` 200 khong
+-chung minh automation readiness. B0 can 5 cold plain-launch co protected health,
+-fresh automation session va JPEG dau tien theo dung thu tu. Cho toi luc gate live
+-dat, desktop khong chuyen candidate va production `sidecars/wda/RiviuAgent.ipa` +
+-`agent-manifest.json` phai giu nguyen (SHA-256 lan luot
++Project 2 da noi candidate vao desktop theo mot profile rieng sau khi Gate B/C
++PASS; candidate mac dinh van khoa text/comment theo feature list bon muc. Text
++duoc promote thanh artifact rieng sau mot probe TikTok co frame that, khong thay
++production oracle. Soft/hard runtime recovery van chua thuoc phase nay: moi
++control/session fault lam Gate C fail; budget recovery thuoc Project 4. O phase nay
++chi MJPEG reader duoc reconnect co gioi han toi da mot lan.
++
++Trang thai hien tai: source/contract/build/probe fixture tren Windows da PASS; Mac
++candidate build/sign va install identity tren hai iPhone that da PASS. Candidate
++IPA da co ten hien thi `Riviu Agent` va logo chu R tu `logo.jpg`, duoc kiem tra
++truoc khi ky lai. IPA candidate trong desktop la artifact rieng; production
++`sidecars/wda/RiviuAgent.ipa` va `agent-manifest.json` van giu nguyen.
++B0, Gate B va Gate C chinh thuc tren iPhone thu hai da `PASS` o buoc DVT
++plain-launch, protected health/session/JPEG va cleanup.
++Ngay 04/08/2026, evidence live ghi nhan 5/5 cold launch, 5/5 status identity,
++5/5 session, 2,852 frame trong 300 giay, max gap 0.18 giay, 50 tap, 20 swipe,
++Unicode read-back, clipboard byte-exact va cleanup sach. Trusted upgrade path
++tren ca hai iPhone van duoc giu o `SUPPLEMENTAL_ONLY`; HTTP port hoac `/status`
++200 rieng le khong chung minh automation readiness. Production artifact van duoc
++bao toan voi SHA-256:
+ `8a24847099495ff70b998522692c43f00dd16b90f698bda6953a73f5d33002ea` va
+-`e98a549af4c061556effd36424e7732219e1a6d262bcf1f259279975024b6e1a`). Xem
++`e98a549af4c061556effd36424e7732219e1a6d262bcf1f259279975024b6e1a`. Xem
+ `docs/superpowers/specs/2026-07-29-riviu-agent-standalone-control-parity-design.md`
+ va `docs/re/riviu-agent/`.
+ 
++Text gate da co bang chung TikTok that, khong dung chuoi mau: probe
++`sidecars/wda/riviu-agent/Scripts/probe_tiktok_comment.py` bat buoc nhan
++`--comment-text`, reject `Riviu test`/fixture/placeholder va doi operator xac
++nhan frame Send. Evidence build `2` o
++`docs/re/riviu-agent/tiktok-comment-build2-live.json` cung `before.jpg`,
++`drawer.jpg`, `armed.jpg`, `sent.jpg`; comment da gui la
++`Quán cà phê này dễ thương quá ạ`. Promotion tao
++`sidecars/wda/RiviuAgent-text.ipa` + `sidecars/wda/text-manifest.json` voi
++`artifactVersion=0.2.0-text`, `bundleBuild=2`, `features` gom `text`, va app rieng
++`/Applications/Riviumanagersphone Full.app` build voi `RIVIU_DEFAULT_AGENT_MODE=full`.
++Sau lan uninstall/install de kiem build `2`, device 1 da approve Apple
++Development va probe comment build `2` PASS; device 2 da cai cung IPA nhung van
++cho approve profile truoc khi lay protected health/JPEG. Khong coi HTTP 401, port
++mo, hoac evidence cua runner cu la bang chung B/C cua build moi.
++Build record, patch/diff va rollback da duoc ghi tai
++`docs/re/riviu-agent/full-build/verification.txt`,
++`docs/re/riviu-agent/full-build/full-build.diff` va
++`docs/re/riviu-agent/full-build/rollback.sh`; oracle backup nam trong
++`target/riviu-agent/rollback/production-oracle/` (ignored).
++
+ ### 3.10 Handoff bat buoc khi mo du an tren Mac
+ 
+ Agent tiep nhan tren Mac phai tiep tuc dung checkpoint Project 2 hien tai, khong
+-lap lai forensic/Gate A va khong ghi de production IPA. Muc tieu dau tien la build
+-candidate, chay B0/Gate B/Gate C tren iPhone that, roi moi danh gia text/comment.
++lap lai forensic/Gate A va khong ghi de production IPA. Candidate B0/Gate B/Gate C
++da co evidence; lan tiep theo la trust profile, xac nhan build `2` va chay lai text
++probe tren iPhone that truoc khi thay production artifact.
+ 
+ ```bash
+ cd <REPO_ROOT>
+@@ -483,7 +522,17 @@ python3 sidecars/wda/riviu-agent/Scripts/build_candidate.py \
+ RIVIU_AGENT_TOKEN="$(openssl rand -hex 32)" \
+ python3 sidecars/wda/riviu-agent/Scripts/probe_gate_bc.py \
+   --udid "$UDID" \
+-  --manifest target/riviu-agent/artifacts/0.1.0/candidate-manifest.json
++  --manifest target/riviu-agent/artifacts/0.1.0/candidate-manifest.json \
++  --wait-for-trust
++
++`--wait-for-trust` dung trong live run tuong tac: probe se dung sau fresh-install
++de Trust/Verify Apple Development profile tren iPhone, roi nhan Enter de tiep tuc.
++Flag nay khong ha nguong gate va mac dinh van tat.
++
++Neu app candidate hien tai da duoc trust, dung `--reuse-trusted-install` cho vong
++functional lap lai: installation_proxy se `Upgrade` IPA ma khong uninstall bundle,
++giu lai approval. Report se mang `SUPPLEMENTAL_MAC_DEVICE`/`SUPPLEMENTAL_ONLY`;
++Gate B/C chinh thuc van dung fresh-install mac dinh.
+ 
+ cargo run -q -p rtmmo-re -- verify-redaction \
+   --input docs/re/riviu-agent/candidate-probes.json \
+@@ -497,11 +546,12 @@ khac nhau va cleanup sach. Neu mot gate fail, giu production artifact, sua dung
+ failure dau tien va chay lai toan bo probe.
+ 
+ Ngay ca khi B/C PASS, candidate van chua duoc goi la thay the day du RT-MMO:
+-feature list van chi co `stream/tap/swipe/clipboard`. Buoc ke tiep tren Mac la them
+-gate TikTok comment end-to-end: foreground link/video fixture, fresh session truoc
++feature list mac dinh van chi co `stream/tap/swipe/clipboard`; desktop Full chi
++advertise `text` tu manifest promoted rieng. Gate TikTok comment da co frame that
++voi chuoi noi dung co nghia, nhung moi build moi phai lap lai fresh session truoc
+ MJPEG, focus composer, Unicode read-back/armed-send frame, tap Send va frame xac
+-nhan comment da gui. Chi sau khi gate nay PASS moi advertise `text`, noi candidate
+-vao desktop o Project 4 va thay production artifact theo transaction co rollback.
++nhan comment da gui truoc khi cap nhat artifact text. Production oracle van khong
++doi trong phase nay.
+ 
+ ### 3.11 Proxy/supervision checkpoint (29/07/2026)
+ 
+@@ -1168,9 +1218,13 @@ release hien tai phai duoc mo ta dung nhu sau:
+ - Nuoi account va text comment qua production RT-MMO da co live proof tren iPhone 8
+   iOS 16.7.15. Luong nay van phu thuoc exact production IPA + RT-MMO token; chua co
+   live regression tren Mac cho toan bo `main` moi.
+-- Source Riviu Agent candidate da PASS source/contract/fixture tren Windows, nhung B0,
+-  Gate B va Gate C van `PENDING_MAC_DEVICE`. Candidate hien chi advertise
+-  `stream/tap/swipe/clipboard`; chua co `text`, chua thay day du RT-MMO.
++- Source Riviu Agent candidate da PASS source/contract/fixture tren Windows; B0,
++  Gate B va Gate C tren Mac da `PASS`. Candidate da duoc noi vao desktop voi
++  profile rieng va mac dinh chi advertise `stream/tap/swipe/clipboard`. Artifact
++  `RiviuAgent-text.ipa`/Full app da co manifest `text` sau probe comment that,
++  nhung build `2` chua duoc live re-probe vi iOS dang doi trust profile. Desktop
++  macOS tao WebView sau asset setup de tranh trang trang va gioi han Keychain
++  candidate de bootstrap khong mac neu keychain dang doi user interaction.
+ - Flow V2 da dong F0/F1/F2: Tauri composition/commands, startup recovery, React
+   drag/drop editor, exact revision save, run monitor va invalidation da co. F3
+   Rust fixture, Playwright va rollback proof da PASS voi nhan `FIXTURE_ONLY`; F3
+@@ -1186,15 +1240,16 @@ release hien tai phai duoc mo ta dung nhu sau:
+ - MDM/supervision/AdminControl, remote fleet policy va cac muc deferred o section
+   3.11 chua nam trong phase hien tai.
+ 
+-Production artifact van phai giu byte-exact cho den khi Mac live gate dat:
++Production artifact van phai giu byte-exact; artifact text la promoted sidecar
++rieng va khong ghi de oracle:
+ `sidecars/wda/RiviuAgent.ipa` SHA-256
+ `8a24847099495ff70b998522692c43f00dd16b90f698bda6953a73f5d33002ea` va
+ canonical-LF `agent-manifest.json` SHA-256
+ `e98a549af4c061556effd36424e7732219e1a6d262bcf1f259279975024b6e1a`.
+-Mac build candidate vao `target/riviu-agent/artifacts/0.1.0/`, chay B0/B/C, sau do
+-them va PASS TikTok comment end-to-end. Chi sau do moi advertise `text`, wire
+-candidate vao desktop va thay dong thoi IPA + manifest production bang transaction
+-co rollback; khong ghi de production artifact chi vi source/build fixture PASS.
++Mac build candidate vao `target/riviu-agent/artifacts/0.2.0-text/`, chay lai B0/B/C
++cho build `2` sau khi trust, sau do lap lai TikTok comment end-to-end. Chi artifact
++text duoc cap nhat theo transaction co rollback; khong ghi de production artifact
++chi vi source/build fixture PASS.
+ 
+ ### 3.16 Active priority: Interaction Campaign + Flow V2 (31/07/2026)
+ 
+@@ -1297,6 +1352,34 @@ canonical-LF van
+ 
+ ### 3.18 Desktop self-contained packaging va CI/CD (31/07/2026)
+ 
++#### 3.18.1 Mac local bundle checkpoint (04/08/2026)
++
++`apps/desktop/src-tauri/tauri.conf.json` phai dat
++`bundle.macOS.signingIdentity` = `"-"` cho build local. Neu bo field nay, Tauri
++chi de linker ad-hoc signature tren executable; app co `Contents/Resources` nhung
++khong co resource seal, `codesign --verify --deep --strict` fail va Finder khong
++mo duoc. Sau moi build Mac phai kiem tra ca `.app` va DMG da mount, khong chi xem
++file ton tai. Build da verify:
++
++```text
++target/debug/bundle/macos/Riviumanagersphone.app
++target/debug/bundle/dmg/Riviumanagersphone_0.1.0_aarch64.dmg
++```
++
++Ca hai deu `codesign --verify --deep --strict` PASS; `open -W` giu process song.
++Day van la ad-hoc artifact (`TeamIdentifier` khong co), nen `spctl`/Gatekeeper
++van co the can phep lan dau; chua goi day la Developer ID/notarized release.
++Ngay 04/08, `/Applications/Riviumanagersphone.app` van la ban cu voi resource
++seal hong du du target bundle moi da dung; da thay bang bundle moi va verify lai
++ngay tai duong dan Finder. Khi user bao app van loi, kiem tra ca hai duong dan
++nay truoc khi rebuild lan nua. Ban cu duoc giu tai `/tmp` de rollback.
++
++Desktop khong duoc panic khi `RIVIU_RTMMO_TOKEN` thieu. Setup luu loi vao
++`StartupState`, frontend hien trang thai cau hinh va khoa thao tac thiet bi; no
++khong tu fallback sang stock/mock va cung khong sinh token. Token hop le van phai
++duoc dat qua environment mot lan de migrate vao native Keychain account
++`agent-auth-token`, sau do mo lai app.
++
+ Release desktop khong duoc phu thuoc Python/pip/tidevice cua may nguoi dung.
+ `scripts/build_desktop_sidecar.py` dung PyInstaller onedir de dong goi Python,
+ `pymobiledevice3==10.1.0` va `tidevice==0.12.11` thanh
+diff --git a/apps/desktop/src-tauri/build.rs b/apps/desktop/src-tauri/build.rs
+index d860e1e..8682b96 100644
+--- a/apps/desktop/src-tauri/build.rs
++++ b/apps/desktop/src-tauri/build.rs
+@@ -1,3 +1,6 @@
+ fn main() {
++    if let Ok(mode) = std::env::var("RIVIU_DEFAULT_AGENT_MODE") {
++        println!("cargo:rustc-env=RIVIU_DEFAULT_AGENT_MODE={mode}");
++    }
+     tauri_build::build()
+ }
+diff --git a/apps/desktop/src-tauri/src/agent_runtime.rs b/apps/desktop/src-tauri/src/agent_runtime.rs
+index 9d80df4..0d5d637 100644
+--- a/apps/desktop/src-tauri/src/agent_runtime.rs
++++ b/apps/desktop/src-tauri/src/agent_runtime.rs
+@@ -18,6 +18,26 @@ pub fn resolve_desktop_agent_runtime(
+     credentials: &CredentialStore,
+     legacy_token: Option<&str>,
+     mock_requested: bool,
++) -> anyhow::Result<ResolvedAgentRuntime> {
++    resolve_desktop_agent_runtime_with_candidate(
++        sidecar_root,
++        state_dir,
++        database,
++        credentials,
++        legacy_token,
++        mock_requested,
++        false,
++    )
++}
++
++pub fn resolve_desktop_agent_runtime_with_candidate(
++    sidecar_root: PathBuf,
++    state_dir: PathBuf,
++    database: &Database,
++    credentials: &CredentialStore,
++    legacy_token: Option<&str>,
++    mock_requested: bool,
++    prefer_candidate: bool,
+ ) -> anyhow::Result<ResolvedAgentRuntime> {
+     let settings = database.get_agent_settings()?;
+     if mock_requested {
+@@ -32,9 +52,46 @@ pub fn resolve_desktop_agent_runtime(
+         });
+     }
+ 
+-    let token = credentials.agent_token_or_create(legacy_token)?;
+-    let token_configured = credentials.has_agent_token()?;
+-    let artifact = AgentArtifact::load(sidecar_root.join("wda").join("agent-manifest.json"))?;
++    let backend_override = std::env::var("RIVIU_AGENT_MODE")
++        .or_else(|_| std::env::var("RIVIU_WDA_BACKEND"))
++        .unwrap_or_default();
++    let backend_override = backend_override.trim().to_ascii_lowercase();
++    let default_mode = option_env!("RIVIU_DEFAULT_AGENT_MODE").unwrap_or(if prefer_candidate {
++        "candidate"
++    } else {
++        "rt-mmo"
++    });
++    let effective_mode = if backend_override.is_empty() || backend_override == "auto" {
++        default_mode
++    } else {
++        backend_override.as_str()
++    };
++    let explicit_manifest = std::env::var_os("RIVIU_AGENT_MANIFEST").map(PathBuf::from);
++    let candidate_manifest = sidecar_root.join("wda").join("candidate-manifest.json");
++    let text_manifest = sidecar_root.join("wda").join("text-manifest.json");
++    let text_requested = matches!(effective_mode, "full" | "text" | "candidate-text");
++    let use_candidate = explicit_manifest.is_some()
++        || text_requested
++        || matches!(effective_mode, "candidate" | "riviu-agent")
++        || (prefer_candidate && effective_mode == "candidate" && candidate_manifest.is_file());
++    let manifest_path = explicit_manifest.unwrap_or_else(|| {
++        if text_requested {
++            text_manifest
++        } else if use_candidate {
++            candidate_manifest
++        } else {
++            sidecar_root.join("wda").join("agent-manifest.json")
++        }
++    });
++    let (token, token_configured) = if use_candidate {
++        let token = credentials
++            .candidate_agent_token_or_create(std::env::var("RIVIU_AGENT_TOKEN").ok().as_deref())?;
++        (token, credentials.has_candidate_agent_token()?)
++    } else {
++        let token = credentials.agent_token_or_create(legacy_token)?;
++        (token, credentials.has_agent_token()?)
++    };
++    let artifact = AgentArtifact::load(manifest_path)?;
+     artifact.verify_checksum()?;
+ 
+     let unified = UnifiedAgentConfig {
+diff --git a/apps/desktop/src/App.tsx b/apps/desktop/src/App.tsx
+index 360e4e0..0056b52 100644
+--- a/apps/desktop/src/App.tsx
++++ b/apps/desktop/src/App.tsx
+@@ -10,6 +10,7 @@ import {
+   prepareDevice,
+   refreshDevices,
+   setStreamSettings,
++  startupError,
+ } from "./api";
+ import { summarizeBulkRepair } from "./agentStatus";
+ import { DeviceTile } from "./components/DeviceTile";
+@@ -82,6 +83,7 @@ function App() {
+   });
+   const [jobsScriptSeed, setJobsScriptSeed] = useState<string | null>(null);
+   const [bootError, setBootError] = useState<string | null>(null);
++  const [startupIssue, setStartupIssue] = useState<string | null | undefined>(undefined);
+   const [user, setUser] = useState<LocalUser | null>(null);
+   const [showAuthUi, setShowAuthUi] = useState(false);
+   const [authForced, setAuthForced] = useState(false);
+@@ -131,50 +133,74 @@ function App() {
+   }, []);
+ 
+   useEffect(() => {
+-    authSession()
+-      .then((s) => {
+-        setShowAuthUi(s.showAuthUi);
+-        setUser(s.user ?? null);
+-        if (s.showAuthUi && !s.bypassed) {
+-          setPage("login");
+-        }
+-      })
+-      .catch(() => undefined);
+-    reload();
++    let cancelled = false;
+     let unlisten: (() => void) | undefined;
+-    listenRiviuEvents((payload) => {
+-      const p = payload as Record<string, unknown>;
+-      if (p.type === "devicesUpdated" && Array.isArray(p.devices)) {
+-        setDevices(p.devices as DeviceInfo[]);
+-      }
+-      if (p.type === "deviceUpdated" && p.device) {
+-        const device = p.device as DeviceInfo;
+-        setDevices((prev) => {
+-          const idx = prev.findIndex((d) => d.udid === device.udid);
+-          if (idx === -1) return [...prev, device];
+-          const next = [...prev];
+-          next[idx] = device;
+-          return next;
+-        });
+-      }
+-      if (p.type === "jobUpdated" && p.job) {
+-        const job = p.job as JobRecord;
+-        setJobs((prev) => {
+-          const idx = prev.findIndex((j) => j.id === job.id);
+-          if (idx === -1) return [job, ...prev];
+-          const next = [...prev];
+-          next[idx] = job;
+-          return next;
++
++    startupError()
++      .then((issue) => {
++        if (cancelled) return;
++        setStartupIssue(issue);
++        if (issue) return;
++
++        void authSession()
++          .then((s) => {
++            if (cancelled) return;
++            setShowAuthUi(s.showAuthUi);
++            setUser(s.user ?? null);
++            if (s.showAuthUi && !s.bypassed) {
++              setPage("login");
++            }
++          })
++          .catch(() => undefined);
++        void reload();
++        void listenRiviuEvents((payload) => {
++          const p = payload as Record<string, unknown>;
++          if (p.type === "devicesUpdated" && Array.isArray(p.devices)) {
++            setDevices(p.devices as DeviceInfo[]);
++          }
++          if (p.type === "deviceUpdated" && p.device) {
++            const device = p.device as DeviceInfo;
++            setDevices((prev) => {
++              const idx = prev.findIndex((d) => d.udid === device.udid);
++              if (idx === -1) return [...prev, device];
++              const next = [...prev];
++              next[idx] = device;
++              return next;
++            });
++          }
++          if (p.type === "jobUpdated" && p.job) {
++            const job = p.job as JobRecord;
++            setJobs((prev) => {
++              const idx = prev.findIndex((j) => j.id === job.id);
++              if (idx === -1) return [job, ...prev];
++              const next = [...prev];
++              next[idx] = job;
++              return next;
++            });
++          }
++          if (p.type === "streamFrame" && typeof p.udid === "string") {
++            pushFrame(p.udid as string, String(p.jpegBase64 ?? ""));
++            setDevices((prev) => markDeviceFrameLive(prev, p.udid as string));
++          }
++        }).then((fn) => {
++          if (cancelled) {
++            fn();
++          } else {
++            unlisten = fn;
++          }
+         });
+-      }
+-      if (p.type === "streamFrame" && typeof p.udid === "string") {
+-        pushFrame(p.udid as string, String(p.jpegBase64 ?? ""));
+-        setDevices((prev) => markDeviceFrameLive(prev, p.udid as string));
+-      }
+-    }).then((fn) => {
+-      unlisten = fn;
+-    });
+-    return () => unlisten?.();
++      })
++      .catch((error) => {
++        if (cancelled) return;
++        setStartupIssue(null);
++        setBootError(String(error));
++        void reload();
++      });
++
++    return () => {
++      cancelled = true;
++      unlisten?.();
++    };
+   }, [reload]);
+ 
+   const focusDevice = useMemo(
+@@ -227,6 +253,26 @@ function App() {
+   const authBlocking = (showAuthUi || authForced) && (page === "login" || page === "register");
+   const title = PAGE_TITLE[page] ?? page;
+ 
++  if (startupIssue) {
++    return (
++      <main className="startup-state">
++        <div className="startup-state-card">
++          <h1>Riviu Managers Phone</h1>
++          <h2>Chưa sẵn sàng khởi động</h2>
++          <p>{startupIssue}</p>
++          <p>
++            Kiểm tra cấu hình agent và Keychain của bản đang chạy, sau đó mở lại
++            app. Bản Full tự tạo credential cục bộ; bản production yêu cầu token
++            RT-MMO được cấu hình một lần.
++          </p>
++          <button type="button" className="primary" onClick={() => window.location.reload()}>
++            Thử lại
++          </button>
++        </div>
++      </main>
++    );
++  }
++
+   if (authBlocking && page === "login") {
+     return (
+       <LoginPage
+diff --git a/crates/ios-driver/src/pmd.rs b/crates/ios-driver/src/pmd.rs
+index 5836ea0..c806bd8 100644
+--- a/crates/ios-driver/src/pmd.rs
++++ b/crates/ios-driver/src/pmd.rs
+@@ -45,6 +45,7 @@ const VERIFIED_PROCESS_CONTROL_CONTRACT: &str = "verifiedProcessControl";
+ const INTERACTION_DRIVER_ADAPTER_VERSION: &str = "interaction-v1";
+ const INTERACTION_TARGET_BUNDLE_ID: &str = "com.ss.iphone.ugc.Ame";
+ const RTMMO_TOKEN_ENV: &str = "RIVIU_RTMMO_TOKEN";
++const RIVIU_AGENT_TOKEN_ENV: &str = "RIVIU_AGENT_TOKEN";
+ 
+ #[derive(Debug, Clone)]
+ struct SidecarProgram {
+@@ -272,6 +273,7 @@ fn proxy_args(
+         match profile.backend {
+             WdaBackend::Stock => "stock",
+             WdaBackend::RtMmo => "rt-mmo",
++            WdaBackend::RiviuAgent => "riviu-agent",
+         }
+         .into(),
+         "--device-port".into(),
+@@ -309,6 +311,7 @@ fn stream_args(profile: &WdaProfile, udid: &str) -> Vec<String> {
+         "--mode".into(),
+         match profile.backend {
+             WdaBackend::RtMmo => "mjpeg",
++            WdaBackend::RiviuAgent => "mjpeg",
+             WdaBackend::Stock => "auto",
+         }
+         .into(),
+@@ -325,7 +328,7 @@ fn proxy_ready_window(profile: &WdaProfile, force_restart: bool) -> Duration {
+     match (profile.backend, force_restart) {
+         // Two bounded app-launch attempts can each spend 25 s launching and
+         // 35 s waiting for the device port, plus cleanup between attempts.
+-        (WdaBackend::RtMmo, _) => Duration::from_secs(180),
++        (WdaBackend::RtMmo | WdaBackend::RiviuAgent, _) => Duration::from_secs(180),
+         (WdaBackend::Stock, true) => Duration::from_secs(110),
+         (WdaBackend::Stock, false) => Duration::from_secs(55),
+     }
+@@ -335,6 +338,10 @@ fn session_attach_required(stream_running: bool) -> bool {
+     !stream_running
+ }
+ 
++fn is_unified_agent_backend(backend: WdaBackend) -> bool {
++    matches!(backend, WdaBackend::RtMmo | WdaBackend::RiviuAgent)
++}
++
+ fn runtime_for_target(
+     target: &DriverTarget,
+ ) -> anyhow::Result<(WdaProfile, Option<AgentArtifact>, AgentSettings)> {
+@@ -825,7 +832,7 @@ impl PmdIosDriver {
+         udid: &str,
+         owned: &mut DeviceOwned,
+     ) -> anyhow::Result<AgentStatus> {
+-        if self.profile.backend != WdaBackend::RtMmo {
++        if !is_unified_agent_backend(self.profile.backend) {
+             return Ok(self.publish_status(self.status(
+                 udid,
+                 AgentState::RepairRequired,
+@@ -1131,7 +1138,20 @@ impl PmdIosDriver {
+             .stderr(stderr)
+             .kill_on_drop(true);
+         if let Some(token) = self.profile.auth_token.as_ref() {
+-            command.env("RIVIU_RTMMO_TOKEN", token.expose());
++            let token_env = match self.profile.backend {
++                WdaBackend::RiviuAgent => RIVIU_AGENT_TOKEN_ENV,
++                WdaBackend::RtMmo | WdaBackend::Stock => RTMMO_TOKEN_ENV,
++            };
++            command.env(token_env, token.expose());
++        }
++        if self.profile.backend == WdaBackend::RiviuAgent
++            && self
++                .profile
++                .features
++                .iter()
++                .any(|feature| feature == "text")
++        {
++            command.env("RIVIU_AGENT_TEXT_CAPABLE", "1");
+         }
+         let mut child: Child = command.spawn()?;
+ 
+@@ -1267,6 +1287,22 @@ impl PmdIosDriver {
+             .stdout(Stdio::piped())
+             .stderr(Stdio::null())
+             .kill_on_drop(true);
++        if let Some(token) = self.profile.auth_token.as_ref() {
++            let token_env = match self.profile.backend {
++                WdaBackend::RiviuAgent => RIVIU_AGENT_TOKEN_ENV,
++                WdaBackend::RtMmo | WdaBackend::Stock => RTMMO_TOKEN_ENV,
++            };
++            command.env(token_env, token.expose());
++        }
++        if self.profile.backend == WdaBackend::RiviuAgent
++            && self
++                .profile
++                .features
++                .iter()
++                .any(|feature| feature == "text")
++        {
++            command.env("RIVIU_AGENT_TEXT_CAPABLE", "1");
++        }
+         let mut child: Child = command.spawn()?;
+ 
+         let mut stdout = child
+@@ -1362,7 +1398,7 @@ impl PmdIosDriver {
+         }
+         self.stop_stream_child_locked(owned).await;
+         let (_, generation) = self.streams.clear_and_advance(udid);
+-        let readiness = if self.profile.backend == WdaBackend::RtMmo {
++        let readiness = if is_unified_agent_backend(self.profile.backend) {
+             StreamReadiness::NonEmptyFrame
+         } else {
+             StreamReadiness::BestEffort
+@@ -1476,7 +1512,16 @@ impl PmdIosDriver {
+         if owned.stream.is_some() {
+             anyhow::bail!("interaction session requires stop_owned_stream first");
+         }
+-        if kind == InteractionSessionKind::FreshText && self.profile.backend != WdaBackend::RtMmo {
++        let fresh_text = kind == InteractionSessionKind::FreshText;
++        let text_capable_agent = self
++            .profile
++            .features
++            .iter()
++            .any(|feature| feature == "text");
++        let fresh_agent = fresh_text
++            && (self.profile.backend == WdaBackend::RtMmo
++                || (self.profile.backend == WdaBackend::RiviuAgent && text_capable_agent));
++        if fresh_text && !fresh_agent {
+             self.interaction_lifecycle.clear(udid);
+             anyhow::bail!("fresh-text interaction session requires the unified Agent profile");
+         }
+@@ -1487,8 +1532,7 @@ impl PmdIosDriver {
+         self.sessions.lock().remove(udid);
+ 
+         let transition: anyhow::Result<WdaClient> = async {
+-            let fresh_rt = kind == InteractionSessionKind::FreshText
+-                && self.profile.backend == WdaBackend::RtMmo;
++            let fresh_rt = fresh_text && self.profile.backend == WdaBackend::RtMmo;
+             let existing_port = if fresh_rt {
+                 None
+             } else {
+@@ -1512,6 +1556,8 @@ impl PmdIosDriver {
+                 WdaClient::new_with_profile(&self.wda_host, port, udid, self.profile_for(udid)?);
+             if fresh_rt {
+                 client.create_fresh_session().await?;
++            } else if fresh_agent {
++                client.create_fresh_session().await?;
+             } else {
+                 client.create_session().await?;
+             }
+@@ -2309,7 +2355,7 @@ impl DeviceDriver for PmdIosDriver {
+     }
+ 
+     async fn repair_agent(&self, udid: &str) -> anyhow::Result<AgentStatus> {
+-        if self.profile.backend != WdaBackend::RtMmo {
++        if !is_unified_agent_backend(self.profile.backend) {
+             anyhow::bail!("legacy stock WDA cannot repair the unified Riviu Agent");
+         }
+         let slot = self.slots.get(udid);
+@@ -2318,7 +2364,7 @@ impl DeviceDriver for PmdIosDriver {
+     }
+ 
+     async fn repair_agent_install_only(&self, udid: &str) -> anyhow::Result<AgentInstallProof> {
+-        if self.profile.backend != WdaBackend::RtMmo {
++        if !is_unified_agent_backend(self.profile.backend) {
+             anyhow::bail!("legacy stock WDA cannot repair the unified Riviu Agent");
+         }
+         let artifact = self.artifact()?;
+@@ -2536,7 +2582,10 @@ impl DeviceDriver for PmdIosDriver {
+     }
+ 
+     fn supports_text_comments(&self) -> bool {
+-        self.profile.backend == WdaBackend::RtMmo
++        self.profile
++            .features
++            .iter()
++            .any(|feature| feature == "text")
+     }
+ 
+     fn supports_verified_app_termination(&self) -> bool {
+@@ -2730,9 +2779,17 @@ impl DeviceDriver for PmdIosDriver {
+             client,
+             mjpeg_url: WdaClient::mjpeg_url(&self.wda_host, self.profile.mjpeg_port),
+             supports_text_input: kind == InteractionSessionKind::FreshText
+-                && self.profile.backend == WdaBackend::RtMmo,
++                && self
++                    .profile
++                    .features
++                    .iter()
++                    .any(|feature| feature == "text"),
+             supports_accessibility_readback: kind == InteractionSessionKind::FreshText
+-                && self.profile.backend == WdaBackend::RtMmo,
++                && self
++                    .profile
++                    .features
++                    .iter()
++                    .any(|feature| feature == "text"),
+             target_bundle_id: bundle_id.to_string(),
+         }))
+     }
+@@ -2751,7 +2808,7 @@ impl DeviceDriver for PmdIosDriver {
+     async fn start_ui_session(&self, udid: &str) -> anyhow::Result<Box<dyn UiSession>> {
+         let slot = self.slots.get(udid);
+         let mut owned = slot.owned.lock().await;
+-        if self.profile.backend == WdaBackend::RtMmo {
++        if is_unified_agent_backend(self.profile.backend) {
+             if owned.stream.is_some() {
+                 anyhow::bail!(
+                     "session-only startup requires the owned MJPEG producer to be stopped first"
+@@ -2761,7 +2818,7 @@ impl DeviceDriver for PmdIosDriver {
+                 .await?;
+         }
+         let client = self.session_locked(udid, &mut owned).await?;
+-        if self.profile.backend == WdaBackend::RtMmo {
++        if is_unified_agent_backend(self.profile.backend) {
+             self.publish_interaction_readiness(
+                 udid,
+                 AgentState::Starting,
+@@ -2780,6 +2837,12 @@ impl DeviceDriver for PmdIosDriver {
+ 
+     fn requires_fresh_text_session(&self) -> bool {
+         self.profile.backend == WdaBackend::RtMmo
++            || (self.profile.backend == WdaBackend::RiviuAgent
++                && self
++                    .profile
++                    .features
++                    .iter()
++                    .any(|feature| feature == "text"))
+     }
+ 
+     async fn start_fresh_text_session(
+@@ -2789,6 +2852,12 @@ impl DeviceDriver for PmdIosDriver {
+     ) -> anyhow::Result<Box<dyn UiSession>> {
+         let slot = self.slots.get(udid);
+         let mut owned = slot.owned.lock().await;
++        let candidate_text = self.profile.backend == WdaBackend::RiviuAgent
++            && self
++                .profile
++                .features
++                .iter()
++                .any(|feature| feature == "text");
+         let client = if self.profile.backend == WdaBackend::RtMmo {
+             let status = self.preflight_agent_locked(udid, &mut owned).await?;
+             if status.state != AgentState::Ready {
+@@ -2801,14 +2870,23 @@ impl DeviceDriver for PmdIosDriver {
+             }
+             self.fresh_text_session_locked(udid, bundle_id, &mut owned)
+                 .await?
++        } else if candidate_text {
++            self.interaction_session_locked(
++                udid,
++                bundle_id,
++                InteractionSessionKind::FreshText,
++                &mut owned,
++            )
++            .await?
+         } else {
+             self.session_locked(udid, &mut owned).await?
+         };
+         Ok(Box::new(PmdUiSession {
+             client,
+             mjpeg_url: WdaClient::mjpeg_url(&self.wda_host, self.profile.mjpeg_port),
+-            supports_text_input: self.profile.backend == WdaBackend::RtMmo,
+-            supports_accessibility_readback: self.profile.backend == WdaBackend::RtMmo,
++            supports_text_input: self.profile.backend == WdaBackend::RtMmo || candidate_text,
++            supports_accessibility_readback: self.profile.backend == WdaBackend::RtMmo
++                || candidate_text,
+             target_bundle_id: bundle_id.to_string(),
+         }))
+     }
+@@ -2894,7 +2972,7 @@ impl DeviceDriver for PmdIosDriver {
+     async fn ensure_stream(&self, udid: &str) -> anyhow::Result<String> {
+         let slot = self.slots.get(udid);
+         let mut owned = slot.owned.lock().await;
+-        if self.profile.backend == WdaBackend::RtMmo {
++        if is_unified_agent_backend(self.profile.backend) {
+             let status = self.preflight_agent_locked(udid, &mut owned).await?;
+             if status.state != AgentState::Ready {
+                 anyhow::bail!(
+diff --git a/sidecars/pymobiledevice3/riviu_pmd.py b/sidecars/pymobiledevice3/riviu_pmd.py
+index 7b71b78..44d9fd8 100644
+--- a/sidecars/pymobiledevice3/riviu_pmd.py
++++ b/sidecars/pymobiledevice3/riviu_pmd.py
+@@ -558,11 +558,11 @@ async def _wait_device_port(udid: str, port: int, timeout: float = 45.0) -> bool
+     return False
+ 
+ 
+-def _rt_auth_request(token: str) -> bytes:
++def _rt_auth_request(token: str, header: str = "X-RT-Token") -> bytes:
+     return (
+         "GET /wda/locked HTTP/1.1\r\n"
+         "Host: 127.0.0.1\r\n"
+-        f"X-RT-Token: {token}\r\n"
++        f"{header}: {token}\r\n"
+         "Connection: close\r\n\r\n"
+     ).encode()
+ 
+@@ -573,8 +573,14 @@ def _http_response_is_ok(first_chunk: bytes) -> bool:
+     return len(parts) >= 2 and parts[1] == b"200"
+ 
+ 
+-async def _device_http_ready(udid: str, port: int, token: str, timeout: float = 3.0) -> bool:
+-    """Validate a token-protected RT-MMO route directly over usbmux."""
++async def _device_http_ready(
++    udid: str,
++    port: int,
++    token: str,
++    timeout: float = 3.0,
++    header: str = "X-RT-Token",
++) -> bool:
++    """Validate a token-protected Agent route directly over usbmux."""
+     from pymobiledevice3 import usbmux
+ 
+     device = await usbmux.select_device(udid)
+@@ -585,7 +591,7 @@ async def _device_http_ready(udid: str, port: int, token: str, timeout: float =
+         sock = await device.connect(port)
+         sock.setblocking(False)
+         loop = asyncio.get_running_loop()
+-        request = _rt_auth_request(token)
++        request = _rt_auth_request(token, header)
+         await asyncio.wait_for(loop.sock_sendall(sock, request), timeout=timeout)
+         first = await asyncio.wait_for(loop.sock_recv(sock, 4096), timeout=timeout)
+         return _http_response_is_ok(first)
+@@ -719,6 +725,8 @@ async def _stream_mjpeg(
+     local_port: int,
+     device_port: int,
+     max_frames: Optional[int],
++    token: str = "",
++    token_header: str = "X-RT-Token",
+ ) -> None:
+     """Forward device MJPEG port and emit length-prefixed JPEG frames."""
+     from pymobiledevice3.tcp_forwarder import UsbmuxTcpForwarder
+@@ -730,12 +738,14 @@ async def _stream_mjpeg(
+         await asyncio.wait_for(listening.wait(), timeout=10)
+         await asyncio.sleep(0.2)
+         reader, writer = await asyncio.open_connection("127.0.0.1", local_port)
+-        writer.write(
+-            b"GET / HTTP/1.1\r\n"
+-            b"Host: 127.0.0.1\r\n"
+-            b"Connection: keep-alive\r\n"
+-            b"\r\n"
++        request = (
++            "GET / HTTP/1.1\r\n"
++            "Host: 127.0.0.1\r\n"
++            "Connection: keep-alive\r\n"
+         )
++        if token:
++            request += f"{token_header}: {token}\r\n"
++        writer.write((request + "\r\n").encode())
+         await writer.drain()
+ 
+         buf = bytearray()
+@@ -794,6 +804,10 @@ async def _stream_auto(
+     """
+     _ = wda_bundle  # kept for CLI compat; runner is owned elsewhere
+     use_mjpeg = mode in ("auto", "mjpeg")
++    agent_token = os.environ.get("RIVIU_AGENT_TOKEN", "")
++    rt_token = os.environ.get("RIVIU_RTMMO_TOKEN", "")
++    stream_token = agent_token or rt_token
++    stream_token_header = "X-Riviu-Token" if agent_token else "X-RT-Token"
+     if use_mjpeg:
+         ready = await _wait_device_port(udid, mjpeg_port, timeout=3.0)
+         if not ready and await _wait_device_port(udid, wda_port, timeout=1.0):
+@@ -804,7 +818,14 @@ async def _stream_auto(
+             # second WDA session here (that invalidates nurture mid-gesture).
+             print("streaming via WDA MJPEG", file=sys.stderr, flush=True)
+             try:
+-                await _stream_mjpeg(udid, _free_local_port(), mjpeg_port, max_frames)
++                await _stream_mjpeg(
++                    udid,
++                    _free_local_port(),
++                    mjpeg_port,
++                    max_frames,
++                    stream_token,
++                    stream_token_header,
++                )
+                 return
+             except Exception as exc:
+                 print(f"MJPEG stream failed: {exc}", file=sys.stderr, flush=True)
+@@ -1368,34 +1389,44 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
+ 
+     backend = getattr(args, "backend", "stock")
+     rt_mmo = backend == "rt-mmo"
++    riviu_agent = backend == "riviu-agent"
++    protected_agent = rt_mmo or riviu_agent
+     local = int(args.local_port)
+     requested_bundle = getattr(args, "bundle_id", None)
+     if rt_mmo and requested_bundle in (None, "com.riviu.managersphone.agent.xctrunner"):
+         bundle = "com.mrph.svc"
++    elif riviu_agent and requested_bundle in (None, "com.mrph.svc"):
++        bundle = "com.riviu.managersphone.agent.xctrunner"
+     else:
+         bundle = requested_bundle or "com.riviu.managersphone.agent.xctrunner"
+     requested_device_port = getattr(args, "device_port", None)
+     device_port = int(
+         requested_device_port
+         if requested_device_port is not None
+-        else (8906 if rt_mmo else 8100)
++        else (8916 if riviu_agent else (8906 if rt_mmo else 8100))
+     )
+     requested_mjpeg_port = getattr(args, "mjpeg_port", None)
+     mjpeg_port = int(
+         requested_mjpeg_port
+         if requested_mjpeg_port is not None
+-        else (9093 if rt_mmo else 9100)
++        else (9094 if riviu_agent else (9093 if rt_mmo else 9100))
+     )
+     token = str(getattr(args, "token", "") or "")
++    if not token:
++        token = os.environ.get("RIVIU_AGENT_TOKEN" if riviu_agent else "RIVIU_RTMMO_TOKEN", "")
+     udid = args.udid
+     restart = bool(getattr(args, "restart_wda", False))
+     bootstrap_only = bool(getattr(args, "bootstrap_only", False))
+ 
+-    if rt_mmo and not token:
++    if protected_agent and not token:
+         emit(
+             {
+                 "ok": False,
+-                "error": "RT-MMO requires RIVIU_RTMMO_TOKEN for FARM_KEY and HTTP readiness",
++                "error": (
++                    "Riviu Agent requires RIVIU_AGENT_TOKEN"
++                    if riviu_agent
++                    else "RT-MMO requires RIVIU_RTMMO_TOKEN for FARM_KEY and HTTP readiness"
++                ),
+             }
+         )
+         return 1
+@@ -1438,7 +1469,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
+         """Best-effort tear-down of the selected agent before an explicit restart."""
+         names = (
+             (bundle,)
+-            if rt_mmo
++            if protected_agent
+             else (bundle, "com.facebook.WebDriverAgentRunner.xctrunner")
+         )
+         for name in names:
+@@ -1473,10 +1504,16 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
+     except Exception:
+         already = False
+ 
+-    if rt_mmo and already and not restart:
++    if protected_agent and already and not restart:
+         try:
+             complete_runtime = asyncio.run(wait_mjpeg(3.0)) and asyncio.run(
+-                _device_http_ready(udid, device_port, token, timeout=3.0)
++                _device_http_ready(
++                    udid,
++                    device_port,
++                    token,
++                    timeout=3.0,
++                    header="X-Riviu-Token" if riviu_agent else "X-RT-Token",
++                )
+             )
+         except Exception:
+             complete_runtime = False
+@@ -1489,7 +1526,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
+                 emit(
+                     {
+                         "ok": False,
+-                        "error": f"RT-MMO device port {device_port} did not close after kill",
++                        "error": f"Agent device port {device_port} did not close after kill",
+                     }
+                 )
+                 return 1
+@@ -1511,7 +1548,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
+             emit(
+                 {
+                     "ok": False,
+-                    "error": f"RT-MMO device port {device_port} did not close after kill",
++                    "error": f"Agent device port {device_port} did not close after kill",
+                 }
+             )
+             return 1
+@@ -1520,12 +1557,27 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
+         already = False
+ 
+     if not already:
+-        if rt_mmo:
++        if protected_agent:
+             launch_environment = {
+                 "USE_PORT": str(device_port),
+                 "MJPEG_SERVER_PORT": str(mjpeg_port),
+-                "FARM_KEY": token,
+             }
++            if riviu_agent:
++                launch_environment.update(
++                    {
++                        "USE_IP": "127.0.0.1",
++                        "RIVIU_AGENT_TOKEN": token,
++                        "WDA_PRODUCT_BUNDLE_IDENTIFIER": bundle,
++                    }
++                )
++                # The desktop proxy environment is the source of truth for
++                # the promoted candidate capability. Forward the flag through
++                # DVT launch so the iOS process advertises text only when the
++                # selected manifest has passed the live text gate.
++                if os.environ.get("RIVIU_AGENT_TEXT_CAPABLE") == "1":
++                    launch_environment["RIVIU_AGENT_TEXT_CAPABLE"] = "1"
++            else:
++                launch_environment["FARM_KEY"] = token
+             ok = False
+             last_launch_error = ""
+             # Some installations need one second launch after the first app
+@@ -1554,6 +1606,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
+                                 device_port,
+                                 token,
+                                 timeout=3.0,
++                                header="X-Riviu-Token" if riviu_agent else "X-RT-Token",
+                             )
+                         )
+                     except Exception as exc:
+@@ -1569,7 +1622,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
+                         ok = False
+                     if not ok:
+                         last_launch_error = (
+-                            f"RT-MMO MJPEG port {mjpeg_port} did not open"
++                            f"Agent MJPEG port {mjpeg_port} did not open"
+                         )
+                 if ok:
+                     break
+@@ -1577,7 +1630,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
+                     _kill_agent_bundle()
+                     if not wait_until_port_closes():
+                         last_launch_error = (
+-                            f"RT-MMO device port {device_port} did not close before retry"
++                            f"Agent device port {device_port} did not close before retry"
+                         )
+                         break
+                     time.sleep(2.0)
+@@ -1587,7 +1640,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
+                 emit(
+                     {
+                         "ok": False,
+-                        "error": f"timeout waiting for RT-MMO on device:{device_port}{detail}",
++                        "error": f"timeout waiting for Agent on device:{device_port}{detail}",
+                     }
+                 )
+                 return 1
+@@ -1644,7 +1697,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
+             emit({"ok": False, "error": "failed to own relay with a Windows Job Object"})
+             return 1
+ 
+-    readiness_path = "/wda/locked" if rt_mmo else "/status"
++    readiness_path = "/wda/locked" if protected_agent else "/status"
+     deadline = time.monotonic() + 25
+     ready = False
+     while time.monotonic() < deadline:
+@@ -1672,8 +1725,11 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
+             request = urllib.request.Request(
+                 f"http://127.0.0.1:{local}{readiness_path}", method="GET"
+             )
+-            if rt_mmo:
+-                request.add_header("X-RT-Token", token)
++            if protected_agent:
++                request.add_header(
++                    "X-Riviu-Token" if riviu_agent else "X-RT-Token",
++                    token,
++                )
+             with urllib.request.urlopen(request, timeout=1.5) as resp:
+                 if resp.status == 200:
+                     ready = True
+@@ -1813,10 +1869,10 @@ def main() -> int:
+     p = sub.add_parser("wda-proxy")
+     p.add_argument("--udid", required=True)
+     p.add_argument("--local-port", type=int, default=18100)
+-    p.add_argument("--backend", choices=["stock", "rt-mmo"], default="stock")
++    p.add_argument("--backend", choices=["stock", "rt-mmo", "riviu-agent"], default="stock")
+     p.add_argument("--device-port", type=int, default=None)
+     p.add_argument("--mjpeg-port", type=int, default=None)
+-    p.set_defaults(token=os.environ.get("RIVIU_RTMMO_TOKEN", ""))
++    p.set_defaults(token="")
+     p.add_argument(
+         "--bundle-id",
+         default=None,
+diff --git a/sidecars/pymobiledevice3/test_rtmmo_lifecycle.py b/sidecars/pymobiledevice3/test_rtmmo_lifecycle.py
+index 393d748..2e872ad 100644
+--- a/sidecars/pymobiledevice3/test_rtmmo_lifecycle.py
++++ b/sidecars/pymobiledevice3/test_rtmmo_lifecycle.py
+@@ -518,8 +518,8 @@ class _Harness:
+         self.port_calls.append((udid, port, timeout))
+         return next(self.port_results)
+ 
+-    async def device_http_ready(self, udid, port, token, timeout=3.0):
+-        self.events.append(("auth", udid, port, token, timeout))
++    async def device_http_ready(self, udid, port, token, timeout=3.0, header="X-RT-Token"):
++        self.events.append(("auth", udid, port, token, timeout, header))
+         return next(self.auth_results)
+ 
+     async def launch_app_with_environment(self, udid, bundle_id, environment):
+@@ -802,6 +802,32 @@ class RtMmoProxyTests(unittest.TestCase):
+         )
+         self.assertFalse(any("xctest" in command for command in harness.popen_commands))
+ 
++    def test_riviu_agent_forwards_text_capability_into_dvt_launch_environment(self):
++        harness = _Harness([False, True, True])
++        args = SimpleNamespace(
++            backend="riviu-agent",
++            local_port=18124,
++            device_port=8916,
++            mjpeg_port=9094,
++            token="TEST_TOKEN",
++            bundle_id="com.riviu.managersphone.agent.xctrunner",
++            udid="fixture-udid",
++            restart_wda=False,
++            bootstrap_only=False,
++        )
++
++        with patch.dict(riviu_pmd.os.environ, {"RIVIU_AGENT_TEXT_CAPABLE": "1"}):
++            self.assertEqual(harness.run_proxy(args=args), 0)
++
++        self.assertEqual(
++            harness.launches[0][2]["RIVIU_AGENT_TEXT_CAPABLE"],
++            "1",
++        )
++        self.assertEqual(harness.launches[0][2]["RIVIU_AGENT_TOKEN"], "TEST_TOKEN")
++        self.assertFalse(
++            any("TEST_TOKEN" in arg for command in harness.run_commands for arg in command)
++        )
++
+     def test_live_rtmmo_port_is_reused_without_launch_or_kill(self):
+         harness = _Harness([True, True])
+ 
+@@ -1124,7 +1150,7 @@ class CliTests(unittest.TestCase):
+         self.assertEqual(captured[0].backend, "rt-mmo")
+         self.assertEqual(captured[0].device_port, 8906)
+         self.assertEqual(captured[0].mjpeg_port, 9093)
+-        self.assertEqual(captured[0].token, "ENV_TOKEN")
++        self.assertEqual(captured[0].token, "")
+ 
+     def test_wda_proxy_cli_rejects_token_in_argv(self):
+         argv = [
+@@ -1168,7 +1194,7 @@ class CliTests(unittest.TestCase):
+             result = riviu_pmd.main()
+ 
+         self.assertEqual(result, 0)
+-        self.assertEqual(captured[0].token, "ENV_TOKEN")
++        self.assertEqual(captured[0].token, "")
+ 
+     def test_stream_cli_parses_selected_wda_port(self):
+         captured = []
+diff --git a/sidecars/wda/riviu-agent/AgentStream/patches/0003-authenticated-loopback-mjpeg.patch b/sidecars/wda/riviu-agent/AgentStream/patches/0003-authenticated-loopback-mjpeg.patch
+index a2d2b9d..956f27b 100644
+--- a/sidecars/wda/riviu-agent/AgentStream/patches/0003-authenticated-loopback-mjpeg.patch
++++ b/sidecars/wda/riviu-agent/AgentStream/patches/0003-authenticated-loopback-mjpeg.patch
+@@ -10,18 +10,23 @@ index 90a9b8b91d72906573dab29636096ce3ad944e6d..8cc800755e83f88dedb9adb7907569ef
+  #import "FBXCodeCompatibility.h"
+  #import "XCUIApplication+FBHelpers.h"
+  #import "XCUIApplication+FBQuiescence.h"
+-@@ -223,13 +224,16 @@
++@@ -223,13 +224,21 @@
+  
+  + (NSDictionary<NSString *, id> *)riviuAgentIdentity
+  {
+++  NSMutableArray<NSString *> *features = [@[@"stream", @"tap", @"swipe", @"clipboard"] mutableCopy];
+++  if ([NSProcessInfo.processInfo.environment[@"RIVIU_AGENT_TEXT_CAPABLE"] isEqualToString:@"1"]) {
+++    [features addObject:@"text"];
+++  }
+ +  BOOL streamReady = FBRiviuAgentStreamIsReady();
+++  if (!streamReady) {
+++    [features removeObject:@"stream"];
+++  }
+    return @{
+      @"agentVersion": @"0.1.0",
+      @"protocolVersion": @2,
+ -    @"features": @[@"stream", @"tap", @"swipe", @"clipboard"],
+-+    @"features": streamReady
+-+      ? @[@"stream", @"tap", @"swipe", @"clipboard"]
+-+      : @[@"tap", @"swipe", @"clipboard"],
+++    @"features": features.copy,
+      @"logicalWidth": @375,
+      @"logicalHeight": @667,
+ -    @"state": @"ready",
+@@ -72,7 +77,7 @@ index 9c2552d9a8e44e4f3a5cd55eac23dfb67e4dead0..e9a2f370d9f280bd437ceb8f90b254f7
+ +++ b/WebDriverAgentLib/Routing/FBWebServer.h
+ @@ -23,6 +23,9 @@ FOUNDATION_EXPORT BOOL FBRiviuRequestIsAuthorized(NSString *method,
+                                                    NSString *path,
+-                                                   nullable NSString *providedToken,
++                                                   NSString * _Nullable providedToken,
+                                                    NSData *expectedToken);
+ +FOUNDATION_EXPORT NSData *FBRiviuExpectedAgentToken(void);
+ +FOUNDATION_EXPORT BOOL FBRiviuAgentStreamIsReady(void);
+diff --git a/sidecars/wda/riviu-agent/README.md b/sidecars/wda/riviu-agent/README.md
+index 7b767ea..e1b44c9 100644
+--- a/sidecars/wda/riviu-agent/README.md
++++ b/sidecars/wda/riviu-agent/README.md
+@@ -5,10 +5,9 @@ Agent candidate. It does not vendor a generated WDA tree. `Scripts/prepare.py`
+ verifies the pinned Appium WebDriverAgent 15.1.4 tarball and applies the ordered,
+ hashed patch series into ignored `target/riviu-agent/source/`.
+ 
+-Current gate state: `PENDING_MAC_DEVICE`. The Windows source, contract, packaging,
+-and fixture-probe suites pass, but no candidate IPA is accepted until a Mac/iPhone
+-proves plain-launch XCTest automation, protected health, fresh session before
+-MJPEG, direct gesture side effects, clipboard read-back, and stream stability.
++Current gate state: B0/Gate B/Gate C passed on the Mac device. The default
++candidate still advertises four capabilities; a separate text artifact is only
++promoted after the real TikTok comment probe below passes with frame evidence.
+ 
+ ## Layout
+ 
+@@ -18,7 +17,7 @@ MJPEG, direct gesture side effects, clipboard read-back, and stream stability.
+ - `AgentHost/patches/`: typed signed metadata in the XCTest runner plist.
+ - `Contracts/`: protocol v2 and native input contracts.
+ - `Config/RiviuAgent.xcconfig`: candidate-only build identity.
+-- `Scripts/`: deterministic prepare, Mac build, and Gate B/C probe.
++- `Scripts/`: deterministic prepare, Mac build, Gate B/C probe, and real comment probe.
+ - `requirements-mac.txt`: exact live-probe Python dependencies.
+ - `Tests/`: Windows-safe integrity, contract, packaging, and fixture tests.
+ 
+@@ -37,7 +36,7 @@ python -m unittest discover `
+ The prepared baseline digest must be
+ `f40eadb1e1d9872ad5a0574a5146cdbf5e0d04768ccb1f1701b289d50e4ee8f8`.
+ The locked post-patch digest is
+-`2ca158cde4b2307957670680a6cd136b6c360d6f175303f1d012f7488e82c4cc`.
++`c54c85ab5abafd6465dfa7f40933bf525d8016c928680d9f4153d9972115cf93`.
+ Preparation rejects any other result before replacing the generated source tree.
+ Both digests cover every regular file, including Xcode project/build inputs and
+ property lists, plus each file's canonical `0644`/`0755` mode, rather than only
+@@ -58,7 +57,27 @@ python3 sidecars/wda/riviu-agent/Scripts/build_candidate.py \
+ RIVIU_AGENT_TOKEN="$(openssl rand -hex 32)" \
+ python3 sidecars/wda/riviu-agent/Scripts/probe_gate_bc.py \
+   --udid "$UDID" \
+-  --manifest target/riviu-agent/artifacts/0.1.0/candidate-manifest.json
++  --manifest target/riviu-agent/artifacts/0.1.0/candidate-manifest.json \
++  --wait-for-trust
++```
++
++`--wait-for-trust` pauses after the fresh install so the Apple Development
++profile can be approved on the iPhone before the first DVT launch. The flag is
++optional and does not change live thresholds; omit it only for an intentionally
++non-interactive run against an already trusted fresh install.
++
++For repeated functional checks when the candidate is already trusted, use
++`--reuse-trusted-install`. It performs an installation-proxy `Upgrade` without
++uninstalling the bundle, preserving the device approval. Its report is marked
++`SUPPLEMENTAL_MAC_DEVICE`/`SUPPLEMENTAL_ONLY`; the official Gate B/C path still
++requires the default fresh-install command above.
++
++```bash
++RIVIU_AGENT_TOKEN="$(openssl rand -hex 32)" \
++python3 sidecars/wda/riviu-agent/Scripts/probe_gate_bc.py \
++  --udid "$UDID" \
++  --manifest target/riviu-agent/artifacts/0.1.0/candidate-manifest.json \
++  --reuse-trusted-install
+ ```
+ 
+ The build script runs the Objective-C `UnitTests` target before the runner build,
+@@ -79,13 +98,46 @@ For Xcode 26 and newer, packaging requires `Testing.framework`,
+ `_Testing_Foundation.framework`, `lib_TestingInterop.dylib`, and
+ `libXCTestSwiftSupport.dylib`; the build re-signs nested code and deep-verifies the
+ outer app after completing that runtime set.
++The generated XCTest host is branded immediately before the final signing pass:
++its outer `Info.plist` contains `CFBundleDisplayName=Riviu Agent`,
++`CFBundleName=Riviu Agent`, and `CFBundleIconName=AppIcon`. Packaging fails if the
++compiled `Assets.car` or rendered `AppIcon*.png` resources are missing. The
++locked repository `logo.jpg`/`AppIcon.appiconset` is compiled into the package,
++so the Home Screen name and orange-R logo are part of the verified candidate IPA.
++Apple development profiles are UDID-bound: build and install one candidate IPA
++per connected device (for example, use a distinct `--artifact-version` for the
++second device); reusing one signed IPA on another UDID is rejected by installd.
++
++## Real TikTok Comment Probe
++
++The comment check has no default or sample text. It requires a sentence chosen
++for the video currently on screen and an explicit operator confirmation after
++inspecting the sent frame. Placeholder strings such as `Riviu test`, `fixture`,
++and `sample comment` are rejected before any tap.
++
++```bash
++RIVIU_AGENT_TOKEN="$TOKEN" \
++python3 sidecars/wda/riviu-agent/Scripts/probe_tiktok_comment.py \
++  --udid "$UDID" \
++  --comment-text 'Quán cà phê này dễ thương quá ạ' \
++  --operator-confirmed-comment-visible \
++  --frames-dir docs/re/riviu-agent/tiktok-comment-build2-live \
++  --output docs/re/riviu-agent/tiktok-comment-build2-live.json
++```
++
++The build-2 live result is `PASS`; `sent.jpg` visibly contains that comment in
++TikTok's drawer. Promotion writes `sidecars/wda/RiviuAgent-text.ipa` and
++`sidecars/wda/text-manifest.json` with `bundleBuild=2` and `text`. The separate
++Full desktop bundle uses `RIVIU_DEFAULT_AGENT_MODE=full`; the production oracle
++is left unchanged.
+ 
+ ## Boundaries
+ 
+ - Candidate control/MJPEG device ports are `8916` and `9094`.
+ - Only exact `GET /status` is auth-exempt. Every other route requires
+   `X-Riviu-Token`; the loopback-only MJPEG socket requires the same header.
+-- Project 2 advertises only `stream`, `tap`, `swipe`, and `clipboard`.
++- The default Project 2 candidate advertises only `stream`, `tap`, `swipe`, and
++  `clipboard`; the promoted Full artifact adds `text` only after the live probe.
+ - Native handlers use direct XCTest event records. They do not use W3C actions,
+   coordinate gesture helpers, accessibility queries, or quiescence waits. Device
+   orientation is mapped locally and event synthesis has a five-second deadline
+diff --git a/sidecars/wda/riviu-agent/Scripts/build_candidate.py b/sidecars/wda/riviu-agent/Scripts/build_candidate.py
+index 4ffaa17..3d245fd 100644
+--- a/sidecars/wda/riviu-agent/Scripts/build_candidate.py
++++ b/sidecars/wda/riviu-agent/Scripts/build_candidate.py
+@@ -31,11 +31,16 @@ DEFAULT_SOURCE = REPO_ROOT / "target" / "riviu-agent" / "source"
+ DEFAULT_DERIVED_DATA = REPO_ROOT / "target" / "riviu-agent" / "derived-data"
+ DEFAULT_ARTIFACTS_ROOT = REPO_ROOT / "target" / "riviu-agent" / "artifacts"
+ DEFAULT_XCCONFIG = AGENT_ROOT / "Config" / "RiviuAgent.xcconfig"
++BRAND_LOGO = REPO_ROOT / "logo.jpg"
++BRAND_ICONSET = REPO_ROOT / "sidecars" / "wda" / "AppIcon.appiconset"
++BRAND_LOCK = REPO_ROOT / "sidecars" / "wda" / "legacy-wda-source-lock.json"
+ 
+ ARTIFACT_ID = "riviu-agent-ios-candidate"
+ DEFAULT_ARTIFACT_VERSION = "0.1.0"
+ GATE_STATUS = "PENDING_MAC_DEVICE"
+ CANDIDATE_RUNNER_BUNDLE_ID = "com.riviu.managersphone.agent.xctrunner"
++CANDIDATE_DISPLAY_NAME = "Riviu Agent"
++CANDIDATE_ICON_NAME = "AppIcon"
+ ATTESTATION_BUNDLE = "PlugIns/WebDriverAgentRunner.xctest"
+ PROTOCOL_VERSION = 2
+ FEATURES = ("stream", "tap", "swipe", "clipboard")
+@@ -511,10 +516,11 @@ def make_xcodebuild_command(
+     source_sha256: str,
+     xcconfig_sha256: str,
+     xcode: XcodeVersion,
++    bundle_build: str | None = None,
+ ) -> list[str]:
+     source_digest = _validate_sha256(source_sha256, "prepared source digest")
+     xcconfig_digest = _validate_sha256(xcconfig_sha256, "locked xcconfig digest")
+-    return [
++    command = [
+         "xcodebuild",
+         "build-for-testing",
+         "-allowProvisioningUpdates",
+@@ -536,14 +542,27 @@ def make_xcodebuild_command(
+         "RIVIU_AGENT_OBJECTIVE_C_UNIT_TESTS=PASS",
+         f"RIVIU_AGENT_XCODE_VERSION={xcode.version}",
+         f"RIVIU_AGENT_XCODE_BUILD={xcode.build}",
++        "RUN_CLANG_STATIC_ANALYZER=NO",
+         "COMPILER_INDEX_STORE_ENABLE=NO",
+         "OTHER_CFLAGS=$(inherited) -Wno-error=poison-system-directories",
+     ]
++    if bundle_build is not None:
++        if not re.fullmatch(r"[1-9][0-9]*", bundle_build):
++            raise BuildError("bundle build must be a positive decimal integer")
++        command.append(f"CURRENT_PROJECT_VERSION={bundle_build}")
++    return command
+ 
+ 
+ def make_xcode_unit_test_command(
+-    *, source: Path, derived_data: Path, xcconfig: Path, team_id: str, udid: str
++    *,
++    source: Path,
++    derived_data: Path,
++    xcconfig: Path,
++    team_id: str,
++    udid: str,
++    destination: str | None = None,
+ ) -> list[str]:
++    test_destination = destination or f"id={udid}"
+     return [
+         "xcodebuild",
+         "test",
+@@ -555,13 +574,14 @@ def make_xcode_unit_test_command(
+         "WebDriverAgentLib",
+         "-only-testing:UnitTests",
+         "-destination",
+-        f"id={udid}",
++        test_destination,
+         "-derivedDataPath",
+         str(derived_data),
+         "-xcconfig",
+         str(xcconfig),
+         "CODE_SIGN_STYLE=Automatic",
+         f"DEVELOPMENT_TEAM={team_id}",
++        "RUN_CLANG_STATIC_ANALYZER=NO",
+         "COMPILER_INDEX_STORE_ENABLE=NO",
+         "OTHER_CFLAGS=$(inherited) -Wno-error=poison-system-directories",
+     ]
+@@ -646,6 +666,174 @@ def _locate_runner_app(derived_data: Path) -> Path:
+     return candidates[0]
+ 
+ 
++def _brand_iconset_tree_sha256(root: Path) -> str:
++    digest = hashlib.sha256()
++    for path in sorted(Path(root).rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
++        if not path.is_file():
++            continue
++        relative = path.relative_to(root).as_posix()
++        payload = path.read_bytes()
++        digest.update(relative.encode("utf-8"))
++        digest.update(b"\0file\0")
++        digest.update(b"644")
++        digest.update(b"\0")
++        digest.update(str(len(payload)).encode("ascii"))
++        digest.update(b"\0")
++        digest.update(hashlib.sha256(payload).hexdigest().encode("ascii"))
++        digest.update(b"\n")
++    return digest.hexdigest()
++
++
++def _verify_brand_assets() -> None:
++    if not BRAND_LOGO.is_file() or not BRAND_ICONSET.is_dir():
++        raise BuildError("candidate branding assets are missing: logo.jpg/AppIcon.appiconset")
++    try:
++        lock = json.loads(BRAND_LOCK.read_text(encoding="utf-8"))
++    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
++        raise BuildError(f"candidate branding lock is invalid: {BRAND_LOCK}") from exc
++    expected_logo = lock.get("logoSha256")
++    expected_iconset = lock.get("iconSetTreeSha256")
++    if not isinstance(expected_logo, str) or sha256_file(BRAND_LOGO) != expected_logo:
++        raise BuildError("candidate logo.jpg does not match its locked digest")
++    if not isinstance(expected_iconset, str) or _brand_iconset_tree_sha256(BRAND_ICONSET) != expected_iconset:
++        raise BuildError("candidate AppIcon asset set does not match its locked digest")
++
++
++def compile_candidate_brand_icon_catalog(app: Path) -> None:
++    """Compile the repository's orange-R iconset into the XCTest host."""
++    _verify_brand_assets()
++    app = Path(app)
++    with tempfile.TemporaryDirectory(prefix="riviu-agent-icons-") as temporary_name:
++        temporary = Path(temporary_name)
++        catalog = temporary / "RiviuBrand.xcassets" / "AppIcon.appiconset"
++        catalog.parent.mkdir(parents=True)
++        shutil.copytree(BRAND_ICONSET, catalog)
++        output = temporary / "compiled"
++        output.mkdir()
++        _run(
++            [
++                "xcrun",
++                "actool",
++                "--compile",
++                str(output),
++                "--platform",
++                "iphoneos",
++                "--minimum-deployment-target",
++                "13.0",
++                "--app-icon",
++                CANDIDATE_ICON_NAME,
++                "--output-partial-info-plist",
++                str(output / "partial.plist"),
++                str(catalog.parent),
++            ],
++            label="candidate Riviu icon compilation",
++            timeout_seconds=COMMAND_TIMEOUT_SECONDS,
++        )
++        for filename in (
++            "Assets.car",
++            "AppIcon60x60@2x.png",
++            "AppIcon76x76@2x~ipad.png",
++        ):
++            compiled = output / filename
++            if not compiled.is_file():
++                raise BuildError(f"candidate icon compilation omitted {filename}")
++            shutil.copy2(compiled, app / filename)
++
++
++def _load_plist(path: Path, label: str) -> dict[str, Any]:
++    try:
++        with Path(path).open("rb") as stream:
++            value = plistlib.load(stream)
++    except (OSError, plistlib.InvalidFileException) as exc:
++        raise BuildError(f"failed to read {label}: {path}") from exc
++    if not isinstance(value, dict):
++        raise BuildError(f"{label} root must be a dictionary: {path}")
++    return value
++
++
++def _write_plist_atomic(path: Path, value: dict[str, Any]) -> None:
++    path = Path(path)
++    descriptor, temporary_name = tempfile.mkstemp(
++        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
++    )
++    temporary = Path(temporary_name)
++    try:
++        with os.fdopen(descriptor, "wb") as stream:
++            plistlib.dump(value, stream, fmt=plistlib.FMT_BINARY, sort_keys=True)
++            stream.flush()
++            os.fsync(stream.fileno())
++        os.replace(temporary, path)
++    except BaseException:
++        try:
++            os.close(descriptor)
++        except OSError:
++            pass
++        temporary.unlink(missing_ok=True)
++        raise
++
++
++def brand_candidate_runner(app: Path) -> None:
++    """Brand the generated XCTest host without changing its execution identity."""
++    app = Path(app)
++    if not app.is_dir() or app.suffix != ".app":
++        raise BuildError(f"candidate app does not exist: {app}")
++
++    compile_candidate_brand_icon_catalog(app)
++    info_path = app / "Info.plist"
++    info = _load_plist(info_path, "candidate outer Info.plist")
++
++    def collect_icon_names(value: Any) -> set[str]:
++        if not isinstance(value, dict):
++            return set()
++        names = {
++            item
++            for key, item in value.items()
++            if key == "CFBundleIconName" and isinstance(item, str)
++        }
++        for item in value.values():
++            names.update(collect_icon_names(item))
++        return names
++
++    icon_names = collect_icon_names(info)
++    if CANDIDATE_ICON_NAME not in icon_names:
++        raise BuildError(
++            "candidate app icon name mismatch: "
++            f"actual={sorted(str(value) for value in icon_names)!r}, "
++            f"expected={CANDIDATE_ICON_NAME}"
++        )
++    if not (app / "Assets.car").is_file():
++        raise BuildError("candidate app is missing compiled icon asset catalog: Assets.car")
++    if not any(
++        path.is_file() and path.name.startswith("AppIcon") and path.suffix == ".png"
++        for path in app.iterdir()
++    ):
++        raise BuildError("candidate app is missing rendered AppIcon PNG resources")
++
++    info["CFBundleDisplayName"] = CANDIDATE_DISPLAY_NAME
++    info["CFBundleName"] = CANDIDATE_DISPLAY_NAME
++    info["CFBundleIconName"] = CANDIDATE_ICON_NAME
++    _write_plist_atomic(info_path, info)
++
++    branded = _load_plist(info_path, "branded candidate outer Info.plist")
++    if (
++        branded.get("CFBundleDisplayName") != CANDIDATE_DISPLAY_NAME
++        or branded.get("CFBundleName") != CANDIDATE_DISPLAY_NAME
++    ):
++        raise BuildError("candidate outer Info.plist branding did not persist")
++
++
++def set_candidate_bundle_build(app: Path, bundle_build: str | None) -> None:
++    """Give a separately promoted artifact a new iOS install generation."""
++    if bundle_build is None:
++        return
++    if not re.fullmatch(r"[1-9][0-9]*", bundle_build):
++        raise BuildError("bundle build must be a positive decimal integer")
++    info_path = Path(app) / "Info.plist"
++    info = _load_plist(info_path, "candidate outer Info.plist")
++    info["CFBundleVersion"] = bundle_build
++    _write_plist_atomic(info_path, info)
++
++
+ def _inspect_signature(app: Path) -> str:
+     _run(
+         ["codesign", "--verify", "--deep", "--strict", str(app)],
+@@ -773,6 +961,14 @@ def finalize_runtime_closure(app: Path, xcode: XcodeVersion) -> str:
+     return _inspect_signature(app)
+ 
+ 
++def finalize_candidate_branding(app: Path, signature_output: str) -> str:
++    """Apply display metadata, re-sign it, and verify the resulting bundle."""
++    signer_identity = _first_codesign_value(signature_output, "Authority")
++    brand_candidate_runner(app)
++    resign_candidate_tree(app, signer_identity)
++    return _inspect_signature(app)
++
++
+ def _ensure_signing_identity() -> None:
+     result = _run(
+         ["security", "find-identity", "-v", "-p", "codesigning"],
+@@ -844,6 +1040,7 @@ def build_candidate(args: argparse.Namespace) -> tuple[Path, Path]:
+         xcconfig=args.xcconfig,
+         team_id=args.team_id,
+         udid=args.udid,
++        destination="platform=iOS Simulator,name=iPhone 17",
+     )
+     _run(
+         unit_test_command,
+@@ -862,6 +1059,7 @@ def build_candidate(args: argparse.Namespace) -> tuple[Path, Path]:
+         source_sha256=source_digest,
+         xcconfig_sha256=xcconfig_digest,
+         xcode=xcode,
++        bundle_build=args.bundle_build,
+     )
+     _run(
+         command,
+@@ -874,6 +1072,8 @@ def build_candidate(args: argparse.Namespace) -> tuple[Path, Path]:
+ 
+     app = _locate_runner_app(derived_data.runner)
+     signature_output = finalize_runtime_closure(app, xcode)
++    set_candidate_bundle_build(app, args.bundle_build)
++    signature_output = finalize_candidate_branding(app, signature_output)
+     require_source_digest(args.source, source_digest, "runtime finalization")
+     require_xcconfig_digest(args.xcconfig, xcconfig_digest, "runtime finalization")
+     identity = capture_bundle_identity(
+@@ -909,6 +1109,7 @@ def _parser() -> argparse.ArgumentParser:
+     parser.add_argument("--udid", required=True)
+     parser.add_argument("--team-id", required=True)
+     parser.add_argument("--artifact-version", default=DEFAULT_ARTIFACT_VERSION)
++    parser.add_argument("--bundle-build", default=None)
+     parser.add_argument("--archive", type=Path, default=DEFAULT_ARCHIVE)
+     parser.add_argument("--lock", type=Path, default=DEFAULT_LOCK)
+     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
+diff --git a/sidecars/wda/riviu-agent/baseline-lock.json b/sidecars/wda/riviu-agent/baseline-lock.json
+index 7d59e34..a42a850 100644
+--- a/sidecars/wda/riviu-agent/baseline-lock.json
++++ b/sidecars/wda/riviu-agent/baseline-lock.json
+@@ -7,20 +7,20 @@
+   "archiveSha256": "0c52fc0dcc6f837287be02a593d96d8ef28563c90b4d41f629830e84878f6bbb",
+   "integrity": "sha512-1tPVzIVPsBKynbTFqJyk3Hrf/FZ6kDmeP81P24hJ6q3gYHd2ljsI6OYEhINSbzxDdDmgTuWyYoUa1YtFvZC8oA==",
+   "baselineSourceSha256": "f40eadb1e1d9872ad5a0574a5146cdbf5e0d04768ccb1f1701b289d50e4ee8f8",
+-  "outputSourceSha256": "2ca158cde4b2307957670680a6cd136b6c360d6f175303f1d012f7488e82c4cc",
++  "outputSourceSha256": "c54c85ab5abafd6465dfa7f40933bf525d8016c928680d9f4153d9972115cf93",
+   "xcconfigSha256": "2bed5a711927df27a86b2e2f7237bad99406b3cbbf5fccb09f8ce03fc58f53ae",
+   "patches": [
+     {
+       "path": "AgentServer/patches/0001-riviu-auth-health-status.patch",
+-      "sha256": "08231f5f574b172c411c071dba165c0e068799387d92510e6ad6ae22fec1c39b"
++      "sha256": "25b50a5509a312a3d94e422b00bbee3205e47f3a33e05baf19cd768ec82ce244"
+     },
+     {
+       "path": "AgentInput/patches/0002-sessionless-native-gestures.patch",
+-      "sha256": "084887ff90f61cb1fa369998c387fdd8e83bdf63136d76c937ee5e39cd2e52d7"
++      "sha256": "089bd72e3c0a8d7dddf35ee4c86042104553edf5fd0390bf91da6f740e0a9a25"
+     },
+     {
+       "path": "AgentStream/patches/0003-authenticated-loopback-mjpeg.patch",
+-      "sha256": "6baae6e2664d8028ed20f39cfb4e4e6ad044815ac222f445a2692a5b63fe30a0"
++      "sha256": "e3d3024552fc3536f89a8a0647362486a0d191f847c0b66be0c26cd35bb2e5f7"
+     },
+     {
+       "path": "AgentHost/patches/0004-signed-artifact-attestation.patch",
+@@ -28,7 +28,7 @@
+     },
+     {
+       "path": "AgentInput/patches/0005-clipboard-contract-hardening.patch",
+-      "sha256": "dc6ca70c00a86d42789718abfaa543f7c71e879128177ac3ef0df738abd34338"
++      "sha256": "9d84788ebc91268f15b8daea3e644bb92618fbb03424e98c1d3b715dd6ae4435"
+     }
+   ]
+ }
+diff --git a/sidecars/wda/riviu-agent/Scripts/probe_tiktok_comment.py b/sidecars/wda/riviu-agent/Scripts/probe_tiktok_comment.py
+new file mode 100644
+index 0000000..dbff3f6
+--- /dev/null
++++ b/sidecars/wda/riviu-agent/Scripts/probe_tiktok_comment.py
+@@ -0,0 +1,316 @@
++#!/usr/bin/env python3
++"""Run one real TikTok comment and publish frame-backed evidence.
++
++This probe deliberately has no default comment. The operator supplies a
++sentence that matches the video being viewed and confirms the sent comment in
++the captured frame before the evidence is accepted.
++"""
++
++from __future__ import annotations
++
++import argparse
++import json
++import os
++import struct
++import subprocess
++import sys
++import time
++import urllib.error
++import urllib.request
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Any
++
++try:
++    from PIL import Image
++except ImportError as exc:  # pragma: no cover - dependency is pinned for live probes
++    raise SystemExit("Pillow is required; install requirements-mac.txt") from exc
++
++
++TOKEN_ENV = "RIVIU_AGENT_TOKEN"
++TARGET_BUNDLE = "com.ss.iphone.ugc.Ame"
++LIVE_ENVIRONMENT = "LIVE_MAC_DEVICE"
++PLACEHOLDER_WORDS = ("riviu test", "fixture", "placeholder", "sample comment")
++LOGICAL_SIZE = (375.0, 667.0)
++
++
++class ProbeError(RuntimeError):
++    pass
++
++
++@dataclass(frozen=True)
++class ProbeConfig:
++    udid: str
++    control_url: str
++    mjpeg_port: int
++    comment_text: str
++    comment_point: tuple[float, float]
++    composer_point: tuple[float, float]
++    send_point: tuple[float, float]
++    output: Path
++    frames_dir: Path
++    sidecar: Path
++    operator_confirmed_comment_visible: bool
++
++
++class ControlClient:
++    def __init__(self, base_url: str, token: str) -> None:
++        self.base_url = base_url.rstrip("/")
++        self.token = token
++
++    def request(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
++        raw = None
++        headers = {"X-Riviu-Token": self.token}
++        if body is not None:
++            raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
++            headers["Content-Type"] = "application/json"
++        request = urllib.request.Request(
++            f"{self.base_url}{path}", data=raw, headers=headers, method=method
++        )
++        try:
++            with urllib.request.urlopen(request, timeout=20) as response:
++                status = response.status
++                payload = json.loads(response.read().decode("utf-8"))
++        except (OSError, urllib.error.HTTPError, json.JSONDecodeError) as exc:
++            raise ProbeError(f"HTTP {method} {path} failed") from exc
++        if status != 200:
++            raise ProbeError(f"HTTP {method} {path} returned {status}")
++        return payload
++
++    def tap(self, x: float, y: float) -> None:
++        self.request("POST", "/wda/tap", {"x": x, "y": y})
++
++    def fresh_session(self) -> str:
++        payload = self.request(
++            "POST",
++            "/session",
++            {"capabilities": {"alwaysMatch": {}, "firstMatch": [{}]}},
++        )
++        session_id = payload.get("sessionId")
++        if not session_id and isinstance(payload.get("value"), dict):
++            session_id = payload["value"].get("sessionId")
++        if not isinstance(session_id, str) or not session_id:
++            raise ProbeError("fresh session response omitted sessionId")
++        return session_id
++
++    def type_text(self, session_id: str, text: str) -> None:
++        self.request(
++            "POST",
++            f"/session/{session_id}/wda/keys",
++            {"value": [text]},
++        )
++
++
++def _validate_comment_text(value: str) -> str:
++    text = " ".join(value.split())
++    if len(text.encode("utf-8")) < 4:
++        raise ProbeError("comment text must contain at least four UTF-8 bytes")
++    lowered = text.casefold()
++    if any(marker in lowered for marker in PLACEHOLDER_WORDS):
++        raise ProbeError("comment text must describe the real video, not a probe placeholder")
++    return text
++
++
++def _parse_point(value: str) -> tuple[float, float]:
++    try:
++        x_text, y_text = value.split(",", 1)
++        x, y = float(x_text), float(y_text)
++    except (ValueError, TypeError) as exc:
++        raise argparse.ArgumentTypeError("point must be x,y") from exc
++    if not (0 <= x <= LOGICAL_SIZE[0] and 0 <= y <= LOGICAL_SIZE[1]):
++        raise argparse.ArgumentTypeError("point must be inside the 375x667 logical surface")
++    return x, y
++
++
++def _capture_frame(config: ProbeConfig, name: str, token: str) -> Path:
++    config.frames_dir.mkdir(parents=True, exist_ok=True)
++    raw_path = config.frames_dir / f".{name}.framed"
++    output_path = config.frames_dir / f"{name}.jpg"
++    environment = os.environ.copy()
++    environment[TOKEN_ENV] = token
++    command = [
++        sys.executable,
++        str(config.sidecar),
++        "stream",
++        "--udid",
++        config.udid,
++        "--mode",
++        "mjpeg",
++        "--max-frames",
++        "1",
++        "--mjpeg-port",
++        str(config.mjpeg_port),
++    ]
++    try:
++        completed = subprocess.run(
++            command,
++            env=environment,
++            stdout=subprocess.PIPE,
++            stderr=subprocess.PIPE,
++            timeout=30,
++            check=True,
++        )
++    except (OSError, subprocess.SubprocessError) as exc:
++        raise ProbeError(f"MJPEG capture failed for {name}") from exc
++    if len(completed.stdout) < 4:
++        raise ProbeError(f"MJPEG capture returned no frame for {name}")
++    size = struct.unpack(">I", completed.stdout[:4])[0]
++    frame = completed.stdout[4 : 4 + size]
++    if len(frame) != size or not frame.startswith(b"\xff\xd8"):
++        raise ProbeError(f"MJPEG capture returned a truncated JPEG for {name}")
++    raw_path.write_bytes(completed.stdout)
++    output_path.write_bytes(frame)
++    return output_path
++
++
++def _send_button_redness(path: Path) -> float:
++    with Image.open(path) as image:
++        rgb = image.convert("RGB")
++        scale_x = rgb.width / LOGICAL_SIZE[0]
++        scale_y = rgb.height / LOGICAL_SIZE[1]
++        left = int(300 * scale_x)
++        top = int(390 * scale_y)
++        right = int(375 * scale_x)
++        bottom = int(465 * scale_y)
++        crop = rgb.crop((left, top, right, bottom))
++        pixels = list(crop.getdata())
++    if not pixels:
++        return 0.0
++    red = sum(1 for r, g, b in pixels if r >= 180 and r - g >= 70 and r - b >= 35)
++    return red / len(pixels)
++
++
++def run(config: ProbeConfig) -> dict[str, Any]:
++    token = os.environ.get(TOKEN_ENV, "").strip()
++    if len(token.encode("utf-8")) < 32:
++        raise ProbeError(f"{TOKEN_ENV} must contain at least 256 bits")
++    config.output.parent.mkdir(parents=True, exist_ok=True)
++
++    launch = subprocess.run(
++        [sys.executable, str(config.sidecar), "launch", "--udid", config.udid, "--bundle-id", TARGET_BUNDLE],
++        stdout=subprocess.PIPE,
++        stderr=subprocess.PIPE,
++        timeout=30,
++        check=True,
++        text=True,
++    )
++    if '"ok": true' not in launch.stdout.lower():
++        raise ProbeError("TikTok DVT launch did not return ok=true")
++    time.sleep(2.0)
++
++    client = ControlClient(config.control_url, token)
++    session_id = client.fresh_session()
++    before = _capture_frame(config, "before", token)
++    client.tap(*config.comment_point)
++    time.sleep(3.0)
++    drawer = _capture_frame(config, "drawer", token)
++    client.tap(*config.composer_point)
++    time.sleep(0.8)
++    client.type_text(session_id, config.comment_text)
++    armed = _capture_frame(config, "armed", token)
++    armed_redness = _send_button_redness(armed)
++    if armed_redness < 0.02:
++        raise ProbeError("Send button was not visibly armed after the real comment text")
++
++    client.tap(*config.send_point)
++    time.sleep(2.0)
++    sent = _capture_frame(config, "sent", token)
++    sent_redness = _send_button_redness(sent)
++    composer_cleared = sent_redness < armed_redness * 0.6
++    if not composer_cleared:
++        raise ProbeError("composer did not visibly clear after tapping Send")
++    if not config.operator_confirmed_comment_visible:
++        raise ProbeError(
++            "inspect sent.jpg and rerun with --operator-confirmed-comment-visible"
++        )
++
++    evidence = {
++        "schemaVersion": 1,
++        "environment": LIVE_ENVIRONMENT,
++        "gateStatus": "PASS",
++        "targetBundle": TARGET_BUNDLE,
++        "agentControlUrl": config.control_url,
++        "sessionCreatedFresh": True,
++        "commentText": config.comment_text,
++        "frames": {
++            "before": str(before),
++            "drawer": str(drawer),
++            "armed": str(armed),
++            "sent": str(sent),
++        },
++        "composerArmed": True,
++        "composerClearedAfterSend": True,
++        "armedSendButtonRedness": round(armed_redness, 4),
++        "sentSendButtonRedness": round(sent_redness, 4),
++        "operatorConfirmedCommentVisible": True,
++    }
++    temporary = config.output.with_suffix(config.output.suffix + ".tmp")
++    temporary.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
++    os.replace(temporary, config.output)
++    return evidence
++
++
++def _parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--udid", required=True)
++    parser.add_argument("--control-url", default="http://127.0.0.1:18100")
++    parser.add_argument("--mjpeg-port", type=int, default=9094)
++    parser.add_argument("--comment-text", required=True)
++    parser.add_argument("--comment-point", type=_parse_point, default=(343.0, 377.0))
++    parser.add_argument("--composer-point", type=_parse_point, default=(120.0, 640.0))
++    parser.add_argument("--send-point", type=_parse_point, default=(337.0, 427.0))
++    parser.add_argument(
++        "--frames-dir",
++        type=Path,
++        default=Path("docs/re/riviu-agent/tiktok-comment-live"),
++    )
++    parser.add_argument(
++        "--output",
++        type=Path,
++        default=Path("docs/re/riviu-agent/tiktok-comment-live.json"),
++    )
++    parser.add_argument(
++        "--sidecar",
++        type=Path,
++        default=Path("sidecars/pymobiledevice3/riviu_pmd.py"),
++    )
++    parser.add_argument("--operator-confirmed-comment-visible", action="store_true")
++    return parser
++
++
++def main() -> int:
++    args = _parser().parse_args()
++    try:
++        config = ProbeConfig(
++            udid=args.udid,
++            control_url=args.control_url,
++            mjpeg_port=args.mjpeg_port,
++            comment_text=_validate_comment_text(args.comment_text),
++            comment_point=args.comment_point,
++            composer_point=args.composer_point,
++            send_point=args.send_point,
++            output=args.output,
++            frames_dir=args.frames_dir,
++            sidecar=args.sidecar,
++            operator_confirmed_comment_visible=args.operator_confirmed_comment_visible,
++        )
++        evidence = run(config)
++    except ProbeError as exc:
++        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=True))
++        return 1
++    print(
++        json.dumps(
++            {
++                "ok": True,
++                "gateStatus": evidence["gateStatus"],
++                "evidence": str(args.output),
++                "frames": str(args.frames_dir),
++            },
++            ensure_ascii=True,
++        )
++    )
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/sidecars/wda/riviu-agent/Scripts/promote_text_candidate.py b/sidecars/wda/riviu-agent/Scripts/promote_text_candidate.py
+new file mode 100644
+index 0000000..79dd3da
+--- /dev/null
++++ b/sidecars/wda/riviu-agent/Scripts/promote_text_candidate.py
+@@ -0,0 +1,164 @@
++#!/usr/bin/env python3
++"""Promote a frame-backed live comment proof into a separate text artifact."""
++
++from __future__ import annotations
++
++import argparse
++import hashlib
++import json
++import os
++import shutil
++from pathlib import Path
++from typing import Any
++
++
++TARGET_BUNDLE = "com.ss.iphone.ugc.Ame"
++PLACEHOLDER_WORDS = ("riviu test", "fixture", "placeholder", "sample comment")
++
++
++class PromotionError(RuntimeError):
++    pass
++
++
++def _sha256(path: Path) -> str:
++    digest = hashlib.sha256()
++    with path.open("rb") as stream:
++        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
++            digest.update(chunk)
++    return digest.hexdigest()
++
++
++def _read_json(path: Path) -> dict[str, Any]:
++    try:
++        value = json.loads(path.read_text(encoding="utf-8"))
++    except (OSError, json.JSONDecodeError) as exc:
++        raise PromotionError(f"invalid JSON: {path}") from exc
++    if not isinstance(value, dict):
++        raise PromotionError(f"JSON root must be an object: {path}")
++    return value
++
++
++def _validate_evidence(evidence: dict[str, Any], evidence_path: Path) -> str:
++    if evidence.get("environment") != "LIVE_MAC_DEVICE":
++        raise PromotionError("text promotion requires LIVE_MAC_DEVICE evidence")
++    if evidence.get("gateStatus") != "PASS":
++        raise PromotionError("text promotion requires a passing comment gate")
++    if evidence.get("targetBundle") != TARGET_BUNDLE:
++        raise PromotionError("comment evidence targets a different application")
++    for field in (
++        "sessionCreatedFresh",
++        "composerArmed",
++        "composerClearedAfterSend",
++        "operatorConfirmedCommentVisible",
++    ):
++        if evidence.get(field) is not True:
++            raise PromotionError(f"comment evidence is missing {field}=true")
++    text = evidence.get("commentText")
++    if not isinstance(text, str) or len(text.encode("utf-8")) < 4:
++        raise PromotionError("comment evidence has no real UTF-8 comment text")
++    lowered = text.casefold()
++    if any(marker in lowered for marker in PLACEHOLDER_WORDS):
++        raise PromotionError("comment evidence contains a probe placeholder")
++    frames = evidence.get("frames")
++    if not isinstance(frames, dict):
++        raise PromotionError("comment evidence has no frame set")
++    for name in ("before", "drawer", "armed", "sent"):
++        value = frames.get(name)
++        if not isinstance(value, str) or not Path(value).is_file():
++            raise PromotionError(f"comment evidence is missing frame {name}")
++    return _sha256(evidence_path)
++
++
++def promote(
++    candidate_manifest_path: Path,
++    evidence_path: Path,
++    output_ipa: Path,
++    output_manifest: Path,
++) -> dict[str, Any]:
++    candidate = _read_json(candidate_manifest_path)
++    evidence = _read_json(evidence_path)
++    evidence_sha256 = _validate_evidence(evidence, evidence_path)
++    candidate_ipa = candidate_manifest_path.parent / str(candidate.get("ipa", ""))
++    if not candidate_ipa.is_file():
++        raise PromotionError(f"candidate IPA is missing: {candidate_ipa}")
++    if candidate.get("protocolVersion") != 2:
++        raise PromotionError("text promotion requires protocol version 2")
++
++    features = list(candidate.get("features", []))
++    if "text" not in features:
++        features.append("text")
++    manifest = dict(candidate)
++    manifest.update(
++        {
++            "artifactId": "riviu-agent-ios-text",
++            "artifactVersion": "0.2.0-text",
++            "gateStatus": "PASS",
++            "ipa": output_ipa.name,
++            "sha256": "",
++            "features": features,
++            "textGate": {
++                "environment": evidence["environment"],
++                "evidenceSha256": evidence_sha256,
++                "commentText": evidence["commentText"],
++                "commentFrameConfirmed": True,
++            },
++        }
++    )
++
++    output_ipa.parent.mkdir(parents=True, exist_ok=True)
++    temporary_ipa = output_ipa.with_suffix(output_ipa.suffix + ".tmp")
++    shutil.copyfile(candidate_ipa, temporary_ipa)
++    os.replace(temporary_ipa, output_ipa)
++    manifest["sha256"] = _sha256(output_ipa)
++
++    output_manifest.parent.mkdir(parents=True, exist_ok=True)
++    temporary_manifest = output_manifest.with_suffix(output_manifest.suffix + ".tmp")
++    temporary_manifest.write_text(
++        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
++    )
++    os.replace(temporary_manifest, output_manifest)
++    return manifest
++
++
++def _parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--candidate-manifest", type=Path, required=True)
++    parser.add_argument("--evidence", type=Path, required=True)
++    parser.add_argument(
++        "--output-ipa", type=Path, default=Path("sidecars/wda/RiviuAgent-text.ipa")
++    )
++    parser.add_argument(
++        "--output-manifest", type=Path, default=Path("sidecars/wda/text-manifest.json")
++    )
++    return parser
++
++
++def main() -> int:
++    args = _parser().parse_args()
++    try:
++        manifest = promote(
++            args.candidate_manifest,
++            args.evidence,
++            args.output_ipa,
++            args.output_manifest,
++        )
++    except PromotionError as exc:
++        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=True))
++        return 1
++    print(
++        json.dumps(
++            {
++                "ok": True,
++                "artifactId": manifest["artifactId"],
++                "manifest": str(args.output_manifest),
++                "ipa": str(args.output_ipa),
++                "features": manifest["features"],
++            },
++            ensure_ascii=True,
++        )
++    )
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/sidecars/wda/riviu-agent/Tests/test_probe_tiktok_comment.py b/sidecars/wda/riviu-agent/Tests/test_probe_tiktok_comment.py
+new file mode 100644
+index 0000000..71c7a43
+--- /dev/null
++++ b/sidecars/wda/riviu-agent/Tests/test_probe_tiktok_comment.py
+@@ -0,0 +1,102 @@
++from __future__ import annotations
++
++import importlib.util
++import json
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++
++
++AGENT_ROOT = Path(__file__).resolve().parents[1]
++PROBE_PATH = AGENT_ROOT / "Scripts" / "probe_tiktok_comment.py"
++PROMOTE_PATH = AGENT_ROOT / "Scripts" / "promote_text_candidate.py"
++
++
++def load_module(name: str, path: Path):
++    spec = importlib.util.spec_from_file_location(name, path)
++    if spec is None or spec.loader is None:
++        raise RuntimeError(f"failed to load {path}")
++    module = importlib.util.module_from_spec(spec)
++    sys.modules[name] = module
++    spec.loader.exec_module(module)
++    return module
++
++
++probe = load_module("riviu_probe_tiktok_comment", PROBE_PATH)
++promote = load_module("riviu_promote_text_candidate", PROMOTE_PATH)
++
++
++class TikTokCommentProbeTests(unittest.TestCase):
++    def test_comment_text_must_be_real_and_contentful(self):
++        self.assertEqual(probe._validate_comment_text("  Cô nhảy dễ thương quá ạ "), "Cô nhảy dễ thương quá ạ")
++        for value in ("", "abc", "Riviu test", "fixture comment", "sample comment"):
++            with self.subTest(value=value):
++                with self.assertRaises(probe.ProbeError):
++                    probe._validate_comment_text(value)
++
++    def test_promotion_requires_live_frame_backed_send_evidence(self):
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            frames = root / "frames"
++            frames.mkdir()
++            frame_paths = {}
++            for name in ("before", "drawer", "armed", "sent"):
++                path = frames / f"{name}.jpg"
++                path.write_bytes(b"\xff\xd8fixture\xff\xd9")
++                frame_paths[name] = str(path)
++            evidence = {
++                "environment": "LIVE_MAC_DEVICE",
++                "gateStatus": "PASS",
++                "targetBundle": probe.TARGET_BUNDLE,
++                "sessionCreatedFresh": True,
++                "commentText": "Cô nhảy dễ thương quá ạ",
++                "composerArmed": True,
++                "composerClearedAfterSend": True,
++                "operatorConfirmedCommentVisible": True,
++                "frames": frame_paths,
++            }
++            evidence_path = root / "evidence.json"
++            evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
++            candidate_ipa = root / "RiviuAgent-candidate.ipa"
++            candidate_ipa.write_bytes(b"candidate")
++            candidate_manifest = root / "candidate-manifest.json"
++            candidate_manifest.write_text(
++                json.dumps(
++                    {
++                        "artifactId": "riviu-agent-ios-candidate",
++                        "artifactVersion": "0.1.0",
++                        "gateStatus": "PASS",
++                        "protocolVersion": 2,
++                        "ipa": candidate_ipa.name,
++                        "features": ["stream", "tap", "swipe", "clipboard"],
++                    }
++                ),
++                encoding="utf-8",
++            )
++            output_manifest = root / "text-manifest.json"
++            output_ipa = root / "RiviuAgent-text.ipa"
++            result = promote.promote(
++                candidate_manifest,
++                evidence_path,
++                output_ipa,
++                output_manifest,
++            )
++            self.assertIn("text", result["features"])
++            self.assertEqual(result["gateStatus"], "PASS")
++            self.assertTrue(output_ipa.is_file())
++
++    def test_promotion_rejects_fixture_only_evidence(self):
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            evidence_path = root / "evidence.json"
++            evidence_path.write_text(
++                json.dumps({"environment": "FIXTURE_ONLY", "gateStatus": "PASS"}),
++                encoding="utf-8",
++            )
++            with self.assertRaises(promote.PromotionError):
++                promote._validate_evidence(json.loads(evidence_path.read_text()), evidence_path)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/apps/desktop/src-tauri/tauri.full.conf.json b/apps/desktop/src-tauri/tauri.full.conf.json
+new file mode 100644
+index 0000000..63eeaa0
+--- /dev/null
++++ b/apps/desktop/src-tauri/tauri.full.conf.json
+@@ -0,0 +1,19 @@
++{
++  "productName": "Riviumanagersphone Full",
++  "version": "0.2.0",
++  "identifier": "com.riviu.managersphone.full",
++  "app": {
++    "windows": [
++      {
++        "create": false,
++        "title": "Riviumanagersphone Full",
++        "width": 1440,
++        "height": 900,
++        "minWidth": 1100,
++        "minHeight": 700,
++        "resizable": true,
++        "fullscreen": false
++      }
++    ]
++  }
++}

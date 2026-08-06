@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import hashlib
 import importlib.metadata
 import io
 import json
@@ -30,6 +31,7 @@ CONTRACT_DIAGNOSTICS_ENV = "RIVIU_SIDECAR_CONTRACT_DIAGNOSTICS"
 WINDOWS_CREATE_NO_WINDOW = 0x08000000
 EMBEDDED_TIDEVICE_COMMAND = "__tidevice"
 EMBEDDED_SCRIPT_COMMAND = "__script"
+EMBEDDED_XCTEST_COMMAND = "__xctest"
 
 
 def _background_process_options(options: dict) -> dict:
@@ -50,6 +52,13 @@ def _background_run(command, **options):
     return subprocess.run(command, **_background_process_options(options))
 
 
+def _sidecar_command(arguments: list[str]) -> list[str]:
+    """Run this sidecar again without putting secrets in child argv."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable, *arguments]
+    return [sys.executable, str(Path(sys.argv[0]).resolve()), *arguments]
+
+
 def _embedded_tidevice_main(arguments: list[str]) -> int:
     """Run tidevice inside the frozen sidecar without a second Python install."""
     from tidevice.__main__ import main as tidevice_main
@@ -61,6 +70,58 @@ def _embedded_tidevice_main(arguments: list[str]) -> int:
         return int(result or 0)
     finally:
         sys.argv = previous_argv
+
+
+async def _run_xctest_service(udid: str, bundle_id: str) -> None:
+    """Keep an XCTest runner alive through pymobiledevice3 DVT.
+
+    iOS 16 can reject a direct ProcessControl launch of an XCTest runner even
+    after the developer profile is trusted. XCUITestService sends the test
+    configuration that starts the same runner and is still a DVT transport;
+    the parent proxy owns this child and terminates it during cleanup.
+    """
+    from pymobiledevice3.lockdown import create_using_usbmux
+    from pymobiledevice3.services.dvt.testmanaged.xcuitest import (
+        TestConfig,
+        XCUITestService,
+    )
+
+    lockdown = await create_using_usbmux(serial=udid)
+    try:
+        config = await TestConfig.create_for(lockdown, runner_bundle_id=bundle_id)
+        names = (
+            "RIVIU_AGENT_TOKEN",
+            "USE_IP",
+            "USE_PORT",
+            "MJPEG_SERVER_PORT",
+            "WDA_PRODUCT_BUNDLE_IDENTIFIER",
+            "RIVIU_AGENT_TEXT_CAPABLE",
+            "RIVIU_AGENT_MEDIA_CAPABLE",
+        )
+        config.runner_app_env = {
+            name: os.environ[name]
+            for name in names
+            if os.environ.get(name)
+        }
+        await XCUITestService(lockdown).run(config)
+    finally:
+        with contextlib.suppress(Exception):
+            await lockdown.close()
+
+
+def _embedded_xctest_main(arguments: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="riviu_pmd __xctest")
+    parser.add_argument("--udid", required=True)
+    parser.add_argument("--bundle-id", required=True)
+    args = parser.parse_args(arguments)
+    try:
+        asyncio.run(_run_xctest_service(args.udid, args.bundle_id))
+        return 0
+    except KeyboardInterrupt:
+        return 0
+    except Exception as exc:
+        print(f"XCUITest service failed: {exc}", file=sys.stderr, flush=True)
+        return 1
 
 
 def _is_allowed_embedded_script(path: Path) -> bool:
@@ -472,6 +533,115 @@ def cmd_screenshot(args: argparse.Namespace) -> int:
     return 0
 
 
+def _media_file_manifest(source_root: Path) -> list[dict]:
+    """Build a deterministic, hash-attested manifest for a managed campaign tree."""
+    if not source_root.is_dir():
+        raise ValueError(f"media source root is not a directory: {source_root}")
+    files: list[dict] = []
+    for bundle in sorted(source_root.iterdir(), key=lambda path: path.name.lower()):
+        if not bundle.is_dir() or bundle.name.startswith("."):
+            continue
+        for path in sorted(bundle.iterdir(), key=lambda item: item.name.lower()):
+            if not path.is_file() or path.name.startswith("."):
+                continue
+            suffix = path.suffix.lower()
+            if path.name == "caption.txt":
+                kind = "caption"
+            elif suffix in {".png", ".jpg", ".jpeg"}:
+                kind = "image"
+            else:
+                raise ValueError(f"unsupported media file: {path}")
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            files.append(
+                {
+                    "bundle": bundle.name,
+                    "file": path.name,
+                    "kind": kind,
+                    "bytes": path.stat().st_size,
+                    "sha256": digest,
+                }
+            )
+    if not files:
+        raise ValueError("media source root contains no managed files")
+    return files
+
+
+def cmd_media_stage(args: argparse.Namespace) -> int:
+    """Copy a managed publish campaign into the Agent sandbox with readback proof."""
+    if not try_import():
+        print("pymobiledevice3 not installed", file=sys.stderr)
+        return 1
+    source_root = Path(args.source_root).expanduser().resolve()
+    if not args.campaign_id or "/" in args.campaign_id or "\\" in args.campaign_id:
+        print("campaign id must be a single path component", file=sys.stderr)
+        return 2
+    try:
+        local_manifest = _media_file_manifest(source_root)
+    except Exception as exc:
+        emit({"ok": False, "error": str(exc)})
+        return 2
+
+    from pymobiledevice3.lockdown import create_using_usbmux
+    from pymobiledevice3.services.house_arrest import HouseArrestService
+
+    async def _run() -> dict:
+        lockdown = await create_using_usbmux(serial=args.udid)
+        remote_root = f"Documents/Riviu/Publish/{args.campaign_id}"
+        try:
+            async with await HouseArrestService.create(
+                lockdown, args.agent_bundle_id, documents_only=False
+            ) as service:
+                async def ensure_dir(path: str) -> None:
+                    if not await service.exists(path):
+                        await service.makedirs(path)
+
+                await ensure_dir(remote_root)
+                for entry in local_manifest:
+                    local_path = source_root / entry["bundle"] / entry["file"]
+                    remote_path = f"{remote_root}/{entry['bundle']}/{entry['file']}"
+                    await ensure_dir(f"{remote_root}/{entry['bundle']}")
+                    await service.push(local_path, remote_path, progress_bar=False)
+                    stat = await service.stat(remote_path)
+                    if int(stat.get("st_size", -1)) != int(entry["bytes"]):
+                        raise RuntimeError(f"AFC size readback mismatch: {remote_path}")
+                    if entry["bytes"] <= 4 * 1024 * 1024:
+                        remote_bytes = await service.get_file_contents(remote_path)
+                        remote_hash = hashlib.sha256(remote_bytes).hexdigest()
+                        if remote_hash != entry["sha256"]:
+                            raise RuntimeError(f"AFC hash readback mismatch: {remote_path}")
+                manifest_bytes = json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "campaignId": args.campaign_id,
+                        "files": local_manifest,
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ).encode("utf-8")
+                await service.set_file_contents(f"{remote_root}/manifest.json", manifest_bytes)
+                manifest_stat = await service.stat(f"{remote_root}/manifest.json")
+                return {
+                    "ok": True,
+                    "udid": args.udid,
+                    "agentBundleId": args.agent_bundle_id,
+                    "campaignId": args.campaign_id,
+                    "remoteRoot": remote_root,
+                    "fileCount": len(local_manifest),
+                    "manifestSha256": hashlib.sha256(manifest_bytes).hexdigest(),
+                    "manifestBytes": int(manifest_stat.get("st_size", -1)),
+                    "readback": "size+sha256",
+                }
+        finally:
+            await lockdown.close()
+
+    try:
+        emit(asyncio.run(_run()))
+        return 0
+    except Exception as exc:
+        emit({"ok": False, "error": str(exc)})
+        return 1
+
+
 def _png_to_jpeg(raw: bytes, quality: int, max_width: int = 540) -> bytes:
     from PIL import Image
 
@@ -558,11 +728,11 @@ async def _wait_device_port(udid: str, port: int, timeout: float = 45.0) -> bool
     return False
 
 
-def _rt_auth_request(token: str) -> bytes:
+def _rt_auth_request(token: str, header: str = "X-RT-Token") -> bytes:
     return (
         "GET /wda/locked HTTP/1.1\r\n"
         "Host: 127.0.0.1\r\n"
-        f"X-RT-Token: {token}\r\n"
+        f"{header}: {token}\r\n"
         "Connection: close\r\n\r\n"
     ).encode()
 
@@ -573,8 +743,14 @@ def _http_response_is_ok(first_chunk: bytes) -> bool:
     return len(parts) >= 2 and parts[1] == b"200"
 
 
-async def _device_http_ready(udid: str, port: int, token: str, timeout: float = 3.0) -> bool:
-    """Validate a token-protected RT-MMO route directly over usbmux."""
+async def _device_http_ready(
+    udid: str,
+    port: int,
+    token: str,
+    timeout: float = 3.0,
+    header: str = "X-RT-Token",
+) -> bool:
+    """Validate a token-protected Agent route directly over usbmux."""
     from pymobiledevice3 import usbmux
 
     device = await usbmux.select_device(udid)
@@ -585,7 +761,7 @@ async def _device_http_ready(udid: str, port: int, token: str, timeout: float = 
         sock = await device.connect(port)
         sock.setblocking(False)
         loop = asyncio.get_running_loop()
-        request = _rt_auth_request(token)
+        request = _rt_auth_request(token, header)
         await asyncio.wait_for(loop.sock_sendall(sock, request), timeout=timeout)
         first = await asyncio.wait_for(loop.sock_recv(sock, 4096), timeout=timeout)
         return _http_response_is_ok(first)
@@ -719,6 +895,8 @@ async def _stream_mjpeg(
     local_port: int,
     device_port: int,
     max_frames: Optional[int],
+    token: str = "",
+    token_header: str = "X-RT-Token",
 ) -> None:
     """Forward device MJPEG port and emit length-prefixed JPEG frames."""
     from pymobiledevice3.tcp_forwarder import UsbmuxTcpForwarder
@@ -730,18 +908,23 @@ async def _stream_mjpeg(
         await asyncio.wait_for(listening.wait(), timeout=10)
         await asyncio.sleep(0.2)
         reader, writer = await asyncio.open_connection("127.0.0.1", local_port)
-        writer.write(
-            b"GET / HTTP/1.1\r\n"
-            b"Host: 127.0.0.1\r\n"
-            b"Connection: keep-alive\r\n"
-            b"\r\n"
+        request = (
+            "GET / HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Connection: keep-alive\r\n"
         )
+        if token:
+            request += f"{token_header}: {token}\r\n"
+        writer.write((request + "\r\n").encode())
         await writer.drain()
 
         buf = bytearray()
         frames = 0
         while max_frames is None or frames < max_frames:
-            chunk = await reader.read(65536)
+            try:
+                chunk = await asyncio.wait_for(reader.read(65536), timeout=2.0)
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError("MJPEG connection stalled") from exc
             if not chunk:
                 raise RuntimeError("MJPEG connection closed")
             buf.extend(chunk)
@@ -758,6 +941,54 @@ async def _stream_mjpeg(
         fwd_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await fwd_task
+
+
+async def _stream_mjpeg_with_reconnect(
+    udid: str,
+    device_port: int,
+    max_frames: Optional[int],
+    token: str = "",
+    token_header: str = "X-RT-Token",
+) -> None:
+    """Run the long-lived MJPEG reader with one bounded reconnect.
+
+    A device-side MJPEG socket can close transiently while the agent and its
+    XCTest session remain healthy. Reconnect only the reader/forwarder once;
+    finite frame captures keep their exact frame-count semantics and fail
+    immediately instead of silently returning additional frames.
+    """
+    try:
+        await _stream_mjpeg(
+            udid,
+            _free_local_port(),
+            device_port,
+            max_frames,
+            token,
+            token_header,
+        )
+        return
+    except Exception as first_error:
+        if max_frames is not None:
+            raise
+        print(
+            "MJPEG connection dropped; reconnecting once",
+            file=sys.stderr,
+            flush=True,
+        )
+        # Wait for usbmux/the agent to accept a fresh socket before creating a
+        # second forwarder. A failed wait preserves the original exception.
+        if not await _wait_device_port(udid, device_port, timeout=3.0):
+            raise first_error
+        await asyncio.sleep(0.25)
+
+    await _stream_mjpeg(
+        udid,
+        _free_local_port(),
+        device_port,
+        max_frames,
+        token,
+        token_header,
+    )
 
 
 def _start_wda_tidevice(udid: str, bundle_id: str):
@@ -794,6 +1025,10 @@ async def _stream_auto(
     """
     _ = wda_bundle  # kept for CLI compat; runner is owned elsewhere
     use_mjpeg = mode in ("auto", "mjpeg")
+    agent_token = os.environ.get("RIVIU_AGENT_TOKEN", "")
+    rt_token = os.environ.get("RIVIU_RTMMO_TOKEN", "")
+    stream_token = agent_token or rt_token
+    stream_token_header = "X-Riviu-Token" if agent_token else "X-RT-Token"
     if use_mjpeg:
         ready = await _wait_device_port(udid, mjpeg_port, timeout=3.0)
         if not ready and await _wait_device_port(udid, wda_port, timeout=1.0):
@@ -804,7 +1039,13 @@ async def _stream_auto(
             # second WDA session here (that invalidates nurture mid-gesture).
             print("streaming via WDA MJPEG", file=sys.stderr, flush=True)
             try:
-                await _stream_mjpeg(udid, _free_local_port(), mjpeg_port, max_frames)
+                await _stream_mjpeg_with_reconnect(
+                    udid,
+                    mjpeg_port,
+                    max_frames,
+                    stream_token,
+                    stream_token_header,
+                )
                 return
             except Exception as exc:
                 print(f"MJPEG stream failed: {exc}", file=sys.stderr, flush=True)
@@ -890,6 +1131,40 @@ async def _launch_app_with_environment(
                 )
     finally:
         await lockdown.close()
+
+
+def _start_embedded_xctest(
+    udid: str,
+    bundle_id: str,
+    token: str,
+    device_port: int,
+    mjpeg_port: int,
+) -> subprocess.Popen:
+    """Start the candidate XCTest service without placing its token in argv."""
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "RIVIU_AGENT_TOKEN": token,
+            "USE_IP": "127.0.0.1",
+            "USE_PORT": str(device_port),
+            "MJPEG_SERVER_PORT": str(mjpeg_port),
+            "WDA_PRODUCT_BUNDLE_IDENTIFIER": bundle_id,
+        }
+    )
+    return _background_popen(
+        _sidecar_command(
+            [
+                EMBEDDED_XCTEST_COMMAND,
+                "--udid",
+                udid,
+                "--bundle-id",
+                bundle_id,
+            ]
+        ),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=environment,
+    )
 
 
 TERMINATE_TIMEOUT_SECONDS = 5.0
@@ -1368,34 +1643,44 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
 
     backend = getattr(args, "backend", "stock")
     rt_mmo = backend == "rt-mmo"
+    riviu_agent = backend == "riviu-agent"
+    protected_agent = rt_mmo or riviu_agent
     local = int(args.local_port)
     requested_bundle = getattr(args, "bundle_id", None)
     if rt_mmo and requested_bundle in (None, "com.riviu.managersphone.agent.xctrunner"):
         bundle = "com.mrph.svc"
+    elif riviu_agent and requested_bundle in (None, "com.mrph.svc"):
+        bundle = "com.riviu.managersphone.agent.xctrunner"
     else:
         bundle = requested_bundle or "com.riviu.managersphone.agent.xctrunner"
     requested_device_port = getattr(args, "device_port", None)
     device_port = int(
         requested_device_port
         if requested_device_port is not None
-        else (8906 if rt_mmo else 8100)
+        else (8916 if riviu_agent else (8906 if rt_mmo else 8100))
     )
     requested_mjpeg_port = getattr(args, "mjpeg_port", None)
     mjpeg_port = int(
         requested_mjpeg_port
         if requested_mjpeg_port is not None
-        else (9093 if rt_mmo else 9100)
+        else (9094 if riviu_agent else (9093 if rt_mmo else 9100))
     )
     token = str(getattr(args, "token", "") or "")
+    if not token:
+        token = os.environ.get("RIVIU_AGENT_TOKEN" if riviu_agent else "RIVIU_RTMMO_TOKEN", "")
     udid = args.udid
     restart = bool(getattr(args, "restart_wda", False))
     bootstrap_only = bool(getattr(args, "bootstrap_only", False))
 
-    if rt_mmo and not token:
+    if protected_agent and not token:
         emit(
             {
                 "ok": False,
-                "error": "RT-MMO requires RIVIU_RTMMO_TOKEN for FARM_KEY and HTTP readiness",
+                "error": (
+                    "Riviu Agent requires RIVIU_AGENT_TOKEN"
+                    if riviu_agent
+                    else "RT-MMO requires RIVIU_RTMMO_TOKEN for FARM_KEY and HTTP readiness"
+                ),
             }
         )
         return 1
@@ -1438,7 +1723,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
         """Best-effort tear-down of the selected agent before an explicit restart."""
         names = (
             (bundle,)
-            if rt_mmo
+            if protected_agent
             else (bundle, "com.facebook.WebDriverAgentRunner.xctrunner")
         )
         for name in names:
@@ -1473,10 +1758,16 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
     except Exception:
         already = False
 
-    if rt_mmo and already and not restart:
+    if protected_agent and already and not restart:
         try:
             complete_runtime = asyncio.run(wait_mjpeg(3.0)) and asyncio.run(
-                _device_http_ready(udid, device_port, token, timeout=3.0)
+                _device_http_ready(
+                    udid,
+                    device_port,
+                    token,
+                    timeout=3.0,
+                    header="X-Riviu-Token" if riviu_agent else "X-RT-Token",
+                )
             )
         except Exception:
             complete_runtime = False
@@ -1489,7 +1780,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
                 emit(
                     {
                         "ok": False,
-                        "error": f"RT-MMO device port {device_port} did not close after kill",
+                        "error": f"Agent device port {device_port} did not close after kill",
                     }
                 )
                 return 1
@@ -1511,7 +1802,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
             emit(
                 {
                     "ok": False,
-                    "error": f"RT-MMO device port {device_port} did not close after kill",
+                    "error": f"Agent device port {device_port} did not close after kill",
                 }
             )
             return 1
@@ -1520,74 +1811,124 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
         already = False
 
     if not already:
-        if rt_mmo:
+        if protected_agent:
             launch_environment = {
                 "USE_PORT": str(device_port),
                 "MJPEG_SERVER_PORT": str(mjpeg_port),
-                "FARM_KEY": token,
             }
+            if riviu_agent:
+                launch_environment.update(
+                    {
+                        "USE_IP": "127.0.0.1",
+                        "RIVIU_AGENT_TOKEN": token,
+                        "WDA_PRODUCT_BUNDLE_IDENTIFIER": bundle,
+                    }
+                )
+                # The desktop proxy environment is the source of truth for
+                # the promoted candidate capability. Forward the flag through
+                # DVT launch so the iOS process advertises text only when the
+                # selected manifest has passed the live text gate.
+                if os.environ.get("RIVIU_AGENT_TEXT_CAPABLE") == "1":
+                    launch_environment["RIVIU_AGENT_TEXT_CAPABLE"] = "1"
+                if os.environ.get("RIVIU_AGENT_MEDIA_CAPABLE") == "1":
+                    launch_environment["RIVIU_AGENT_MEDIA_CAPABLE"] = "1"
+            else:
+                launch_environment["FARM_KEY"] = token
             ok = False
             last_launch_error = ""
-            # Some installations need one second launch after the first app
-            # process exits before binding HTTP. Keep this bounded at one retry.
-            for attempt in range(2):
-                try:
-                    asyncio.run(
-                        _launch_app_with_environment(
-                            udid,
-                            bundle,
-                            launch_environment,
-                        )
+            if riviu_agent:
+                # On iOS 16 a direct ProcessControl launch can return a PID and
+                # still reject the XCTest runner before it binds HTTP. Keep the
+                # XCUITest configuration alive in a child of this proxy; the
+                # token remains in that child's environment, never its argv.
+                for attempt in range(2):
+                    xctest = _start_embedded_xctest(
+                        udid, bundle, token, device_port, mjpeg_port
                     )
-                except Exception as exc:
-                    last_launch_error = str(exc)
-                try:
-                    ok = asyncio.run(wait_port(35.0))
-                except Exception as exc:
-                    last_launch_error = str(exc)
-                    ok = False
-                if ok:
+                    own_xctest = True
                     try:
-                        ok = asyncio.run(
-                            _device_http_ready(
+                        ok = asyncio.run(wait_port(75.0 if restart else 55.0))
+                    except Exception as exc:
+                        last_launch_error = str(exc)
+                        ok = False
+                    if ok:
+                        break
+                    if xctest.poll() is not None:
+                        last_launch_error = (
+                            f"XCUITest service exited early ({xctest.returncode})"
+                        )
+                    _stop(xctest)
+                    own_xctest = False
+                    xctest = None
+                    if attempt == 0:
+                        _kill_agent_bundle()
+                        if not wait_until_port_closes():
+                            last_launch_error = (
+                                f"Agent device port {device_port} did not close before retry"
+                            )
+                            break
+                        time.sleep(2.0)
+            else:
+                # RT-MMO still uses the direct DVT ProcessControl app launch.
+                # Some installations need one second launch after the first app
+                # process exits before binding HTTP; keep this bounded at one retry.
+                for attempt in range(2):
+                    try:
+                        asyncio.run(
+                            _launch_app_with_environment(
                                 udid,
-                                device_port,
-                                token,
-                                timeout=3.0,
+                                bundle,
+                                launch_environment,
                             )
                         )
                     except Exception as exc:
                         last_launch_error = str(exc)
-                        ok = False
-                    if not ok and not last_launch_error:
-                        last_launch_error = "protected /wda/locked auth probe failed"
-                if ok:
                     try:
-                        ok = asyncio.run(wait_mjpeg(15.0))
+                        ok = asyncio.run(wait_port(35.0))
                     except Exception as exc:
                         last_launch_error = str(exc)
                         ok = False
-                    if not ok:
-                        last_launch_error = (
-                            f"RT-MMO MJPEG port {mjpeg_port} did not open"
-                        )
-                if ok:
-                    break
-                if attempt == 0:
-                    _kill_agent_bundle()
-                    if not wait_until_port_closes():
-                        last_launch_error = (
-                            f"RT-MMO device port {device_port} did not close before retry"
-                        )
+                    if ok:
                         break
-                    time.sleep(2.0)
+                    if attempt == 0:
+                        _kill_agent_bundle()
+                        if not wait_until_port_closes():
+                            last_launch_error = (
+                                f"Agent device port {device_port} did not close before retry"
+                            )
+                            break
+                        time.sleep(2.0)
+            if ok:
+                try:
+                    ok = asyncio.run(
+                        _device_http_ready(
+                            udid,
+                            device_port,
+                            token,
+                            timeout=3.0,
+                            header="X-Riviu-Token" if riviu_agent else "X-RT-Token",
+                        )
+                    )
+                except Exception as exc:
+                    last_launch_error = str(exc)
+                    ok = False
+                if not ok and not last_launch_error:
+                    last_launch_error = "protected /wda/locked auth probe failed"
+            if ok:
+                try:
+                    ok = asyncio.run(wait_mjpeg(15.0))
+                except Exception as exc:
+                    last_launch_error = str(exc)
+                    ok = False
+                if not ok:
+                    last_launch_error = f"Agent MJPEG port {mjpeg_port} did not open"
             if not ok:
                 cleanup()
                 detail = f": {last_launch_error}" if last_launch_error else ""
                 emit(
                     {
                         "ok": False,
-                        "error": f"timeout waiting for RT-MMO on device:{device_port}{detail}",
+                        "error": f"timeout waiting for Agent on device:{device_port}{detail}",
                     }
                 )
                 return 1
@@ -1644,7 +1985,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
             emit({"ok": False, "error": "failed to own relay with a Windows Job Object"})
             return 1
 
-    readiness_path = "/wda/locked" if rt_mmo else "/status"
+    readiness_path = "/wda/locked" if protected_agent else "/status"
     deadline = time.monotonic() + 25
     ready = False
     while time.monotonic() < deadline:
@@ -1672,8 +2013,11 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
             request = urllib.request.Request(
                 f"http://127.0.0.1:{local}{readiness_path}", method="GET"
             )
-            if rt_mmo:
-                request.add_header("X-RT-Token", token)
+            if protected_agent:
+                request.add_header(
+                    "X-Riviu-Token" if riviu_agent else "X-RT-Token",
+                    token,
+                )
             with urllib.request.urlopen(request, timeout=1.5) as resp:
                 if resp.status == 200:
                     ready = True
@@ -1722,6 +2066,8 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
 def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == EMBEDDED_TIDEVICE_COMMAND:
         return _embedded_tidevice_main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == EMBEDDED_XCTEST_COMMAND:
+        return _embedded_xctest_main(sys.argv[2:])
     if len(sys.argv) > 2 and sys.argv[1] == EMBEDDED_SCRIPT_COMMAND:
         return _embedded_script_main(sys.argv[2], sys.argv[3:])
 
@@ -1757,6 +2103,12 @@ def main() -> int:
     p = sub.add_parser("screenshot")
     p.add_argument("--udid", required=True)
     p.add_argument("--out", required=True)
+
+    p = sub.add_parser("media-stage")
+    p.add_argument("--udid", required=True)
+    p.add_argument("--agent-bundle-id", required=True)
+    p.add_argument("--campaign-id", required=True)
+    p.add_argument("--source-root", required=True)
 
     p = sub.add_parser("stream")
     p.add_argument("--udid", required=True)
@@ -1813,10 +2165,10 @@ def main() -> int:
     p = sub.add_parser("wda-proxy")
     p.add_argument("--udid", required=True)
     p.add_argument("--local-port", type=int, default=18100)
-    p.add_argument("--backend", choices=["stock", "rt-mmo"], default="stock")
+    p.add_argument("--backend", choices=["stock", "rt-mmo", "riviu-agent"], default="stock")
     p.add_argument("--device-port", type=int, default=None)
     p.add_argument("--mjpeg-port", type=int, default=None)
-    p.set_defaults(token=os.environ.get("RIVIU_RTMMO_TOKEN", ""))
+    p.set_defaults(token="")
     p.add_argument(
         "--bundle-id",
         default=None,
@@ -1841,6 +2193,7 @@ def main() -> int:
         "inspect-device-capabilities": cmd_inspect_device_capabilities,
         "uninstall": cmd_uninstall,
         "screenshot": cmd_screenshot,
+        "media-stage": cmd_media_stage,
         "stream": cmd_stream,
         "syslog": cmd_syslog,
         "launch": cmd_launch,

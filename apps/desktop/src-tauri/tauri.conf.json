@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "create": false,
         "title": "Riviumanagersphone",
         "width": 1440,
         "height": 900,
@@ -28,6 +29,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "macOS": {
+      "signingIdentity": "-"
+    },
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper",
@@ -49,9 +53,14 @@
       "../../../sidecars/wda/build_and_install.py": "sidecars/wda/build_and_install.py",
       "../../../sidecars/wda/legacy-wda-source-lock.json": "sidecars/wda/legacy-wda-source-lock.json",
       "../../../sidecars/wda/agent-manifest.json": "sidecars/wda/agent-manifest.json",
+      "../../../sidecars/wda/candidate-manifest.json": "sidecars/wda/candidate-manifest.json",
+      "../../../sidecars/wda/text-manifest.json": "sidecars/wda/text-manifest.json",
       "../../../sidecars/wda/interaction-capabilities.json": "sidecars/wda/interaction-capabilities.json",
       "../../../sidecars/wda/interaction-capabilities.schema.json": "sidecars/wda/interaction-capabilities.schema.json",
+      "../../../sidecars/wda/interaction_vision_ocr.swift": "sidecars/wda/interaction_vision_ocr.swift",
       "../../../sidecars/wda/RiviuAgent.ipa": "sidecars/wda/RiviuAgent.ipa",
+      "../../../sidecars/wda/RiviuAgent-candidate.ipa": "sidecars/wda/RiviuAgent-candidate.ipa",
+      "../../../sidecars/wda/RiviuAgent-text.ipa": "sidecars/wda/RiviuAgent-text.ipa",
       "../../../sidecars/wda/Riviumanagersphone.ipa": "sidecars/wda/Riviumanagersphone.ipa"
     },
     "icon": [

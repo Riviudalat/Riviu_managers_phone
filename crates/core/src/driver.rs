@@ -226,6 +226,12 @@ pub trait DeviceDriver: Send + Sync {
     async fn stop_owned_stream(&self, _udid: &str) -> anyhow::Result<StreamStopProof> {
         unsupported("stopOwnedStream")
     }
+    /// Stop a bounded background producer while retaining the last decoded
+    /// frame for the desktop tile. The generation still advances so buffered
+    /// bytes from the parked producer cannot be published after the stop.
+    async fn park_owned_stream(&self, udid: &str) -> anyhow::Result<StreamStopProof> {
+        self.stop_owned_stream(udid).await
+    }
     async fn start_stream_after_session(&self, _udid: &str) -> anyhow::Result<StreamStartProof> {
         unsupported("startStreamAfterSession")
     }
@@ -290,6 +296,51 @@ pub trait DeviceDriver: Send + Sync {
     async fn list_devices(&self) -> anyhow::Result<Vec<DeviceInfo>>;
     async fn refresh_device(&self, udid: &str) -> anyhow::Result<DeviceInfo>;
     async fn install_app(&self, udid: &str, path: &Path) -> anyhow::Result<()>;
+    /// Stage a verified publish tree in the Agent sandbox. This is deliberately
+    /// separate from `install_app`; media must never be sent through installd.
+    async fn stage_publish_media(
+        &self,
+        _udid: &str,
+        _agent_bundle_id: &str,
+        _campaign_id: &str,
+        _source_root: &Path,
+    ) -> anyhow::Result<serde_json::Value> {
+        unsupported("stagePublishMedia")
+    }
+    /// Whether the selected Agent advertises the native media prepare route.
+    /// Staging remains available for older/production Agents, but callers must
+    /// only invoke the protected route when this capability is present.
+    fn supports_push_media(&self) -> bool {
+        false
+    }
+    /// Ask the Agent to validate the staged campaign and return its import
+    /// proof. This is deliberately separate from TikTok posting.
+    async fn prepare_publish_media(
+        &self,
+        _udid: &str,
+        _campaign_id: &str,
+        _manifest_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        unsupported("preparePublishMedia")
+    }
+    /// Import the validated campaign into the device photo library so TikTok's
+    /// native photo composer can select the assets.
+    async fn import_publish_media(
+        &self,
+        _udid: &str,
+        _campaign_id: &str,
+        _manifest_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        unsupported("importPublishMedia")
+    }
+    /// Remove only the photo assets created for a verified campaign.
+    async fn cleanup_publish_media(
+        &self,
+        _udid: &str,
+        _import_id: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        unsupported("cleanupPublishMedia")
+    }
     async fn uninstall_app(&self, udid: &str, bundle_id: &str) -> anyhow::Result<()>;
     async fn screenshot(&self, udid: &str, dest: &Path) -> anyhow::Result<PathBuf>;
     async fn syslog_tail(&self, udid: &str, lines: usize) -> anyhow::Result<String>;

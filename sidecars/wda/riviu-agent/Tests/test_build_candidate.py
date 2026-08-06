@@ -174,6 +174,40 @@ class BuildCandidateTests(unittest.TestCase):
             "PlugIns/WebDriverAgentRunner.xctest", identity.attestation_bundle
         )
 
+    def test_brands_outer_runner_and_requires_compiled_riviu_icon(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self._make_app(
+                Path(tmp),
+                outer_info_overrides={
+                    "CFBundleIcons": {
+                        "CFBundlePrimaryIcon": {
+                            "CFBundleIconName": build_candidate.CANDIDATE_ICON_NAME
+                        }
+                    }
+                },
+            )
+            (app / "Assets.car").write_bytes(b"compiled icon catalog")
+            (app / "AppIcon60x60@2x.png").write_bytes(b"rendered icon")
+
+            with mock.patch.object(build_candidate, "compile_candidate_brand_icon_catalog"):
+                build_candidate.brand_candidate_runner(app)
+
+            with (app / "Info.plist").open("rb") as stream:
+                info = plistlib.load(stream)
+        self.assertEqual(build_candidate.CANDIDATE_DISPLAY_NAME, info["CFBundleDisplayName"])
+        self.assertEqual(build_candidate.CANDIDATE_DISPLAY_NAME, info["CFBundleName"])
+
+    def test_branding_rejects_runner_without_compiled_icon(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = self._make_app(
+                Path(tmp),
+                outer_info_overrides={"CFBundleIconName": build_candidate.CANDIDATE_ICON_NAME},
+            )
+
+            with mock.patch.object(build_candidate, "compile_candidate_brand_icon_catalog"):
+                with self.assertRaisesRegex(build_candidate.BuildError, "Assets.car"):
+                    build_candidate.brand_candidate_runner(app)
+
     def test_rejects_attestation_copied_only_to_outer_runner_app(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             app = self._make_app(Path(tmp))
@@ -346,6 +380,35 @@ class BuildCandidateTests(unittest.TestCase):
         self.assertNotIn("RIVIU_AGENT_TOKEN", serialized)
         self.assertNotIn("X-Riviu-Token", serialized)
 
+    def test_media_capable_manifest_is_explicitly_opt_in(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_root = Path(tmp) / "artifacts" / "0.3.0-media"
+            artifact_root.mkdir(parents=True)
+            ipa = artifact_root / "RiviuAgent-candidate.ipa"
+            ipa.write_bytes(b"signed media candidate bytes")
+            app = self._make_app(Path(tmp))
+            identity = build_candidate.capture_bundle_identity(
+                app,
+                self._codesign_output(),
+                expected_source_sha256=self.SOURCE_SHA256,
+                expected_xcconfig_sha256=self.XCCONFIG_SHA256,
+                expected_xcode=self.xcode,
+            )
+
+            manifest = build_candidate.generate_candidate_manifest(
+                artifact_version="0.3.0-media",
+                artifact_root=artifact_root,
+                ipa_path=ipa,
+                app_name=app.name,
+                identity=identity,
+                features=build_candidate.FEATURES + (build_candidate.MEDIA_FEATURE,),
+            )
+
+        self.assertEqual(
+            ["stream", "tap", "swipe", "clipboard", "pushMedia"],
+            manifest["features"],
+        )
+
     def test_rejects_ipa_outside_artifact_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -456,6 +519,19 @@ class BuildCandidateTests(unittest.TestCase):
         self.assertIn("RIVIU_AGENT_XCODE_VERSION=16.4", command)
         self.assertIn("RIVIU_AGENT_XCODE_BUILD=16F6", command)
         self.assertNotIn("RIVIU_AGENT_TOKEN", " ".join(command))
+
+        text_command = build_candidate.make_xcodebuild_command(
+            source=Path("/tmp/source"),
+            derived_data=Path("/tmp/derived"),
+            xcconfig=Path("/tmp/RiviuAgent.xcconfig"),
+            team_id="ABCDE12345",
+            udid="fixture-device",
+            source_sha256=self.SOURCE_SHA256,
+            xcconfig_sha256=self.XCCONFIG_SHA256,
+            xcode=self.xcode,
+            bundle_build="2",
+        )
+        self.assertIn("CURRENT_PROJECT_VERSION=2", text_command)
 
     def test_xcode26_runtime_closure_embeds_missing_device_libraries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

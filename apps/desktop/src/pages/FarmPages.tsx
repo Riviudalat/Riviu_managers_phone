@@ -6,7 +6,6 @@ import {
   apiDocs,
   authLogin,
   authRegister,
-  createPublishTask,
   deleteAppLibrary,
   deleteGroup,
   deleteMaterial,
@@ -20,10 +19,16 @@ import {
   listMaterials,
   listOpLogs,
   listProxies,
-  listPublishTasks,
   listSchedules,
   listScripts,
   listUsers,
+  publishCancel,
+  publishCreateCampaign,
+  publishList,
+  publishPrepare,
+  publishPost,
+  publishScanFolder,
+  publishTransfer,
   pushMaterial,
   saveGroup,
   saveProxy,
@@ -31,7 +36,7 @@ import {
   saveScript,
 } from "../api";
 import { SelectionStrip, flash, targetsOf } from "../components/SelectionStrip";
-import { pickIpa, pickMaterial } from "../pickFile";
+import { pickDirectory, pickIpa, pickMaterial } from "../pickFile";
 import type {
   AnalyticsSummary,
   AppLibraryItem,
@@ -41,7 +46,9 @@ import type {
   MaterialItem,
   OpLog,
   ProxyConfig,
-  PublishTask,
+  PublishBundle,
+  PublishCampaignRecord,
+  PublishFolderManifest,
   ScheduleItem,
 } from "../types";
 
@@ -573,36 +580,48 @@ export function SyncPage({
 }
 
 export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
-  const [tasks, setTasks] = useState<PublishTask[]>([]);
-  const [scripts, setScripts] = useState<[string, string][]>([]);
-  const [materials, setMaterials] = useState<MaterialItem[]>([]);
-  const [name, setName] = useState("publish-1");
-  const [scriptName, setScriptName] = useState("");
-  const [materialId, setMaterialId] = useState("");
+  const [sourceRoot, setSourceRoot] = useState("");
+  const [manifest, setManifest] = useState<PublishFolderManifest | null>(null);
+  const [bundleIds, setBundleIds] = useState<string[]>([]);
+  const [runAt, setRunAt] = useState("");
+  const [campaigns, setCampaigns] = useState<PublishCampaignRecord[]>([]);
   const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
   const targets = targetsOf(selected, devices);
 
-  const reload = async () => {
-    setTasks(await listPublishTasks());
-    let scriptsList = await listScripts();
-    if (!scriptsList.length) {
-      const body = await exampleScript();
-      await saveScript("example", body);
-      scriptsList = await listScripts();
-    }
-    setScripts(scriptsList);
-    if (!scriptName && scriptsList.length) setScriptName(scriptsList[0][0]);
-    setMaterials(await listMaterials());
-  };
+  const reload = () => publishList().then(setCampaigns).catch((e) => setMsg(String(e)));
   useEffect(() => {
-    reload().catch((e) => flash(String(e)));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    reload();
   }, []);
+
+  const selectedBundles =
+    manifest?.bundles.filter((bundle) => bundleIds.includes(bundle.id)) ?? [];
+  const mappingReady = selectedBundles.length > 0 && selectedBundles.length === targets.length;
+
+  const scan = async (path: string) => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const next = await publishScanFolder(path);
+      setSourceRoot(path);
+      setManifest(next);
+      setBundleIds(next.bundles.slice(0, targets.length).map((bundle) => bundle.id));
+    } catch (e) {
+      setManifest(null);
+      setBundleIds([]);
+      setMsg(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <div className="panel">
       <header className="panel-header">
-        <h2>Publish tasks</h2>
+        <h2>Đăng carousel</h2>
+        <button type="button" className="ghost" onClick={reload} disabled={busy}>
+          Refresh
+        </button>
       </header>
       <SelectionStrip
         devices={devices}
@@ -610,70 +629,221 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
         onSelectAll={() => onSelectUdids(devices.map((d) => d.udid))}
         onClear={() => onSelectUdids([])}
       />
-      <p className="hint">Chạy script automation local trên máy đã chọn (không gọi mạng xã hội cloud).</p>
-      <label>
-        Tên task
-        <input value={name} onChange={(e) => setName(e.target.value)} />
-      </label>
-      <label>
-        Script
-        <select value={scriptName} onChange={(e) => setScriptName(e.target.value)}>
-          <option value="">— chọn —</option>
-          {scripts.map(([n]) => (
-            <option key={n} value={n}>
-              {n}
-            </option>
+      <div className="row" style={{ marginTop: 8 }}>
+        <input
+          style={{ flex: 1 }}
+          value={sourceRoot}
+          onChange={(e) => setSourceRoot(e.target.value)}
+          placeholder="Thư mục chứa bo1, bo2…"
+        />
+        <button
+          type="button"
+          className="ghost"
+          disabled={busy}
+          onClick={async () => {
+            const path = await pickDirectory();
+            if (path) await scan(path);
+          }}
+        >
+          Chọn thư mục
+        </button>
+        <button
+          type="button"
+          className="primary"
+          disabled={!sourceRoot.trim() || busy}
+          onClick={() => scan(sourceRoot.trim())}
+        >
+          Quét
+        </button>
+      </div>
+      {manifest && (
+        <>
+          <div className="row" style={{ marginTop: 10, justifyContent: "space-between" }}>
+            <strong>{manifest.bundles.length} bundle · {manifest.ignoredPartnerFiles} partner bỏ qua</strong>
+            <span className="hint">{manifest.ignoredHiddenFiles} file ẩn bỏ qua</span>
+          </div>
+          <div className="job-list" style={{ marginTop: 8, maxHeight: 330, overflow: "auto" }}>
+            {manifest.bundles.map((bundle: PublishBundle) => {
+              const checked = bundleIds.includes(bundle.id);
+              return (
+                <label key={bundle.id} className="job-card" style={{ cursor: "pointer" }}>
+                  <div className="row" style={{ alignItems: "flex-start" }}>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(e) => {
+                        setBundleIds((current) =>
+                          e.target.checked
+                            ? [...current, bundle.id]
+                            : current.filter((id) => id !== bundle.id),
+                        );
+                      }}
+                    />
+                    <div style={{ flex: 1 }}>
+                      <strong>{bundle.name}</strong>
+                      <span className="pill">{bundle.images.length} ảnh</span>
+                      <p className="hint" style={{ whiteSpace: "pre-wrap" }}>
+                        {bundle.caption.slice(0, 180) || "(caption rỗng)"}
+                      </p>
+                    </div>
+                  </div>
+                </label>
+              );
+            })}
+          </div>
+          {manifest.notices.length > 0 && (
+            <p className="hint" style={{ whiteSpace: "pre-wrap" }}>
+              {manifest.notices.map((notice) => notice.message).join("\n")}
+            </p>
+          )}
+        </>
+      )}
+      <section style={{ marginTop: 12 }}>
+        <h3>Mapping tuần tự</h3>
+        <div className="job-list">
+          {selectedBundles.map((bundle, index) => (
+            <article key={bundle.id} className="job-card">
+              <strong>{index + 1}. {bundle.name}</strong>
+              <span className="hint mono">→ {targets[index] ?? "Chưa có máy"}</span>
+            </article>
           ))}
-        </select>
+          {!selectedBundles.length && <p className="hint">Chọn bundle để tạo mapping.</p>}
+        </div>
+      </section>
+      <label style={{ marginTop: 12 }}>
+        Lịch chạy một lần (để trống = chạy ngay)
+        <input type="datetime-local" value={runAt} onChange={(e) => setRunAt(e.target.value)} />
       </label>
-      <label>
-        Material (optional)
-        <select value={materialId} onChange={(e) => setMaterialId(e.target.value)}>
-          <option value="">—</option>
-          {materials.map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.name}
-            </option>
-          ))}
-        </select>
-      </label>
+      <p className="hint">Public · âm thanh mặc định · xoá asset sau khi có bằng chứng đăng thành công.</p>
       <button
         type="button"
         className="primary"
-        disabled={!scriptName || !targets.length || busy}
+        disabled={!mappingReady || busy}
         onClick={async () => {
           setBusy(true);
+          setMsg(null);
           try {
-            const t = await createPublishTask(
-              name,
-              scriptName,
-              materialId ? [materialId] : [],
+            const campaign = await publishCreateCampaign(
+              sourceRoot.trim(),
+              bundleIds,
               targets,
+              runAt || null,
             );
+            if (!runAt) await publishPrepare(campaign.id);
             await reload();
-            flash(`Task «${t.name}» → ${t.status} · ${targets.length} máy`);
+            setMsg(
+              runAt
+                ? `Đã lập lịch ${bundleIds.length} bundle cho ${targets.length} máy.`
+                : `Đã chuẩn bị ${bundleIds.length} bundle. Bấm Post để đăng native trên TikTok.`,
+            );
           } catch (e) {
-            flash(String(e));
+            setMsg(String(e));
           } finally {
             setBusy(false);
           }
         }}
       >
-        Tạo &amp; chạy ({targets.length} máy)
+        {runAt ? "Lập lịch" : "Tạo & chuẩn bị"} ({bundleIds.length} → {targets.length})
       </button>
+      {msg && <p className="error" style={{ whiteSpace: "pre-wrap" }}>{msg}</p>}
       <div className="job-list" style={{ marginTop: 12 }}>
-        {tasks.map((t) => (
-          <article key={t.id} className="job-card">
+        {campaigns.map((campaign) => (
+          <article key={campaign.id} className="job-card">
             <div>
-              <strong>{t.name}</strong>
-              <span className={`pill ${t.status}`}>{t.status}</span>
+              <strong>{campaign.id.slice(0, 8)}</strong>
+              <span className={`pill ${campaign.state}`}>{campaign.state}</span>
             </div>
             <p className="hint">
-              {t.scriptName} · {t.udids.length} devices · {new Date(t.createdAt).toLocaleString()}
+              {campaign.assignments.length} mapping · {new Date(campaign.createdAt).toLocaleString()}
+              {campaign.runAt ? ` · ${campaign.runAt}` : ""}
             </p>
+            <div className="row">
+              {campaign.state === "ready" && (
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={busy}
+                  onClick={async () => {
+                    setBusy(true);
+                    try {
+                      await publishTransfer(campaign.id);
+                      await reload();
+                      setMsg("Đã import ảnh vào Photos. Bấm Post để mở composer TikTok.");
+                    } catch (e) {
+                      setMsg(String(e));
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  Transfer media
+                </button>
+              )}
+              {campaign.state === "imported" && (
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={busy}
+                  onClick={async () => {
+                    setBusy(true);
+                    try {
+                      await publishPost(campaign.id);
+                      await reload();
+                      setMsg("Đã đăng và xác nhận frame TikTok; ảnh tạm đã được dọn.");
+                    } catch (e) {
+                      setMsg(String(e));
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  Post
+                </button>
+              )}
+              {(campaign.state === "queued" || campaign.state === "scheduled") && (
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={busy || campaign.state === "scheduled"}
+                  onClick={async () => {
+                    setBusy(true);
+                    try {
+                      await publishPrepare(campaign.id);
+                      await reload();
+                    } catch (e) {
+                      setMsg(String(e));
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  Prepare
+                </button>
+              )}
+              {!['succeeded', 'cancelled', 'uncertain'].includes(campaign.state) && (
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={busy}
+                  onClick={async () => {
+                    setBusy(true);
+                    try {
+                      await publishCancel(campaign.id);
+                      await reload();
+                    } catch (e) {
+                      setMsg(String(e));
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  Huỷ
+                </button>
+              )}
+            </div>
           </article>
         ))}
-        {!tasks.length && <p className="hint">Chưa có publish task</p>}
+        {!campaigns.length && <p className="hint">Chưa có campaign</p>}
       </div>
     </div>
   );

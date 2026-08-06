@@ -217,6 +217,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test -f apps/desktop/src-tauri/tauri.full.conf.json
+          test -f sidecars/wda/RiviuAgent-candidate.ipa
+          test -f sidecars/wda/candidate-manifest.json
+          test -f sidecars/wda/RiviuAgent-text.ipa
+          test -f sidecars/wda/text-manifest.json
           python scripts/collect_desktop_ci_artifacts.py snapshot-production \
             --output target/production-wda-inputs.json \
             --require-canonical-production
@@ -232,12 +237,17 @@ jobs:
 
       - name: Build Tauri installers
         working-directory: apps/desktop
+        env:
+          # Release artifacts must select the standalone Riviu Agent. The
+          # sidecar overlay below supplies the frozen Python/tidevice runtime.
+          RIVIU_DEFAULT_AGENT_MODE: full
         shell: bash
         run: |
           set -euo pipefail
           npm run tauri -- build --ci \
             --target "${{ matrix.target }}" \
             --bundles "${{ matrix.bundles }}" \
+            --config "${{ github.workspace }}/apps/desktop/src-tauri/tauri.full.conf.json" \
             --config "${{ github.workspace }}/target/tauri-sidecar.conf.json" \
             -- --locked
 

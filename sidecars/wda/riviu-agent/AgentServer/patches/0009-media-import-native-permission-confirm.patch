@@ -1,0 +1,51 @@
+--- a/WebDriverAgentLib/Commands/FBCustomCommands.m
++++ b/WebDriverAgentLib/Commands/FBCustomCommands.m
+@@ -529,27 +529,32 @@
+       }];
+     }
+     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:45.0];
++    NSDate *permissionTapReady = [NSDate dateWithTimeIntervalSinceNow:0.65];
++    NSDate *nextPermissionTap = permissionTapReady;
++    NSUInteger permissionTapAttempts = 0;
+     while (dispatch_semaphore_wait(semaphore, DISPATCH_TIME_NOW) != 0) {
+       // The permission alert is hosted by SpringBoard.  Keep the XCTest run
+       // loop pumping while the request callback is pending; a blocking wait
+       // here prevents the callback from running when WDA handles the route on
+-      // its main thread.  Dismiss the first-run prompt deterministically so a
+-      // publish job does not remain in `transferring` waiting for a human tap.
+-      @try {
+-        XCUIElement *alert = XCUIApplication.fb_systemApplication.fb_alertElement;
+-        if (alert != nil) {
+-          NSPredicate *predicate = [NSPredicate predicateWithFormat:
+-                                    @"label CONTAINS[c] %@ OR label CONTAINS[c] %@ OR label CONTAINS[c] %@",
+-                                    @"tất cả ảnh", @"all photos", @"full access"];
+-          XCUIElement *button = [[alert.buttons matchingPredicate:predicate]
+-                                 firstMatch];
+-          if (button.exists) {
+-            [button tap];
++      // its main thread. Confirm the first-run prompt deterministically with
++      // the native XCTest event path. The iOS Photos permission sheet places
++      // the full-access action at the center of the portrait screen, around
++      // 61% of its height. Retry briefly because SpringBoard presents the
++      // sheet asynchronously; never fall through to a blind tap after it is
++      // gone.
++      if (permissionTapAttempts < 4 && [[NSDate date] compare:nextPermissionTap] != NSOrderedAscending) {
++        CGSize screenSize = XCUIApplication.fb_systemApplication.wdFrame.size;
++        if (screenSize.width > 0.0 && screenSize.height > 0.0) {
++          NSError *tapError = nil;
++          BOOL tapped = [self riviuMediaTapPoint:
++                         CGPointMake(screenSize.width * 0.50, screenSize.height * 0.61)
++                         error:&tapError];
++          permissionTapAttempts += 1;
++          nextPermissionTap = [NSDate dateWithTimeIntervalSinceNow:0.75];
++          if (!tapped && tapError != nil && error != NULL) {
++            *error = tapError;
+           }
+-        }
+-      } @catch (NSException *exception) {
+-        // SpringBoard can disappear between the snapshot and tap. The next
+-        // loop observes the authorization callback or a new prompt.
++        }
+       }
+       if ([[NSDate date] compare:deadline] != NSOrderedAscending) {
+         if (error != NULL) *error = [self riviuMediaError:@"photo library authorization timed out"];

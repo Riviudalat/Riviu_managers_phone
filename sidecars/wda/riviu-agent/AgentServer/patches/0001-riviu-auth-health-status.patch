@@ -56,7 +56,7 @@ index 34bca6515dcfd6e9a4fed27c821f6e342a39deb6..9c2552d9a8e44e4f3a5cd55eac23dfb6
 +FOUNDATION_EXPORT BOOL FBRiviuRequestIsAuthenticationExempt(NSString *method, NSString *path);
 +FOUNDATION_EXPORT BOOL FBRiviuRequestIsAuthorized(NSString *method,
 +                                                  NSString *path,
-+                                                  nullable NSString *providedToken,
++                                                  NSString * _Nullable providedToken,
 +                                                  NSData *expectedToken);
 +
  /**
@@ -123,7 +123,7 @@ index 5d4d835353fab4490fa01c2894e4c634b5fbbaf2..161836b9bc888396f5b12d780827e354
 +
 +BOOL FBRiviuRequestIsAuthorized(NSString *method,
 +                                NSString *path,
-+                                NSString *providedToken,
++                                NSString * _Nullable providedToken,
 +                                NSData *expectedToken)
 +{
 +  if (FBRiviuRequestIsAuthenticationExempt(method, path)) {

@@ -366,6 +366,10 @@ fn the_filled_heart_is_separated_from_the_outline_by_an_absolute_threshold() {
 /// 14 of them in a row for 0 likes before this test's rule existed.
 #[test]
 fn rail_presence_separates_tappable_videos_from_live_cards() {
+    assert_eq!(
+        screen::feed_card_kind(&load("feed-live-card.jpg")),
+        screen::FeedCardKind::LivePreview
+    );
     for name in ["feed-live-card.jpg", "feed-mid-swipe.jpg"] {
         let img = load(name);
         assert_eq!(
@@ -389,6 +393,10 @@ fn rail_presence_separates_tappable_videos_from_live_cards() {
         assert!(
             screen::rail_icons_present(&load(name)),
             "{name} has a rail but was reported as having none"
+        );
+        assert!(
+            screen::locate_action_rail(&load(name)).is_some(),
+            "{name} could not yield a fresh action rail"
         );
     }
 }

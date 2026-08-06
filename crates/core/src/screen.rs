@@ -29,6 +29,11 @@ pub const CLOSE_X_THRESHOLD: f64 = 0.85;
 /// the match cheap and avoids false hits in the video itself.
 const CLOSE_X_REGION: (f64, f64, f64, f64) = (0.68, 0.08, 1.0, 0.92);
 
+/// A TikTok promo card can float from the upper-left and keep the compose bar
+/// visible. Its close control is a dark circular button rather than the light
+/// X used by sheets, so it has a separate colour/shape detector.
+const PROMO_CLOSE_REGION: (f64, f64, f64, f64) = (0.15, 0.15, 0.25, 0.22);
+
 /// Screen-fraction x of TikTok's right-hand action rail (avatar → share).
 pub const RAIL_X: f64 = 0.919;
 
@@ -231,6 +236,33 @@ pub fn rail_icons_present(img: &RgbImage) -> bool {
     rail_icon_centres(img).len() >= RAIL_MIN_ICONS
 }
 
+/// Locate a rail even when the red follow badge is hidden because the author
+/// is already followed. The first two members of a stable icon chain are the
+/// like and comment glyphs in that layout; derive follow from the measured
+/// pitch instead of reusing a previous card's coordinates.
+pub fn locate_action_rail(img: &RgbImage) -> Option<ActionRail> {
+    if let Some(rail) = find_action_rail(img) {
+        return Some(rail);
+    }
+    let centres = rail_icon_centres(img);
+    if centres.len() < 3 {
+        return None;
+    }
+    let like_y = centres[0];
+    let comment_y = centres[1];
+    let pitch = comment_y - like_y;
+    if !(RAIL_ICON_PITCH.0..=RAIL_ICON_PITCH.1).contains(&pitch) {
+        return None;
+    }
+    Some(ActionRail {
+        x: RAIL_X,
+        follow_y: like_y - FOLLOW_TO_LIKE,
+        like_y,
+        comment_y,
+        located: true,
+    })
+}
+
 /// Minimum number of evenly spaced glyphs that counts as a rail.
 const RAIL_MIN_ICONS: usize = 2;
 /// Vertical gap between neighbouring rail icons, in screen fractions. Measured
@@ -401,14 +433,39 @@ pub struct ScreenObservation {
     pub evidence: Evidence,
 }
 
+/// Kind of feed card currently visible. This is intentionally conservative:
+/// uncertain cards are treated as ordinary video and the engine only performs
+/// a photo/LIVE-specific gesture after a positive visual marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedCardKind {
+    Video,
+    PhotoCarousel,
+    LivePreview,
+    TransitionOrUnknown,
+}
+
+/// True only when TikTok's feed chrome is reachable and no transient notice is
+/// covering the content. A toast is still a feed frame, but waiting for it to
+/// fade avoids tapping while its UI text is in the vision evidence.
+pub fn is_actionable_feed(observation: &ScreenObservation) -> bool {
+    observation.kind == ScreenKind::Feed && !observation.evidence.ad_feedback_notice
+}
+
+/// Classify a frame and require an actionable feed rather than just a visible
+/// compose bar.
+pub fn feed_ready(img: &RgbImage, logical_width: Option<f64>) -> bool {
+    is_actionable_feed(&classify(img, logical_width))
+}
+
 impl ScreenObservation {
     /// Compact one-line form for debug logs and frame-dump filenames.
     pub fn debug_line(&self) -> String {
         let e = &self.evidence;
         format!(
-            "{} bar={} cyan={:.0} white={:.0} pink={:.0} x_score={:.3} light={:.0} neutral={:.1} cta={:.0} live={:.0}",
+            "{} bar={} notice={} cyan={:.0} white={:.0} pink={:.0} x_score={:.3} light={:.0} neutral={:.1} cta={:.0} live={:.0}",
             self.kind.label(),
             e.compose_bar,
+            e.ad_feedback_notice,
             e.cyan,
             e.white,
             e.pink,
@@ -435,6 +492,9 @@ pub struct Evidence {
     pub picker_cta: f64,
     pub live_pill: f64,
     pub alert_blue: f64,
+    /// TikTok's transient ad-feedback toast. It has no safe dismiss button and
+    /// fades by itself, so the engine waits instead of tapping a guess.
+    pub ad_feedback_notice: bool,
 }
 
 /// Mean (R, G, B) of a fractional region, sampled every other pixel.
@@ -520,6 +580,60 @@ pub fn compose_bar_visible(img: &RgbImage) -> (bool, f64, f64, f64) {
     (ok, cyan, white, pink)
 }
 
+/// Mean luma, luma standard deviation and per-pixel colourfulness for a region.
+/// The toast detector uses all three so a dark video band is not enough to make
+/// a frame look blocked.
+fn region_luma_stats(img: &RgbImage, x0: f64, y0: f64, x1: f64, y1: f64) -> (f64, f64, f64) {
+    let (w, h) = (img.width() as f64, img.height() as f64);
+    let px0 = (x0 * w).max(0.0) as u32;
+    let py0 = (y0 * h).max(0.0) as u32;
+    let px1 = ((x1 * w) as u32).min(img.width());
+    let py1 = ((y1 * h) as u32).min(img.height());
+    let (mut sum, mut sum_sq, mut colour, mut n) = (0.0, 0.0, 0.0, 0.0);
+    let mut y = py0;
+    while y < py1 {
+        let mut x = px0;
+        while x < px1 {
+            let p = img.get_pixel(x, y);
+            let luma = (p[0] as f64 + p[1] as f64 + p[2] as f64) / 3.0;
+            sum += luma;
+            sum_sq += luma * luma;
+            colour += (p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2])) as f64;
+            n += 1.0;
+            x += 2;
+        }
+        y += 2;
+    }
+    if n == 0.0 {
+        return (0.0, 0.0, 0.0);
+    }
+    let mean = sum / n;
+    let variance = (sum_sq / n - mean * mean).max(0.0);
+    (mean, variance.sqrt(), colour / n)
+}
+
+/// TikTok's "Bạn sẽ thấy ít quảng cáo như thế này hơn" notice is a dark,
+/// rounded, short-lived toast over the upper feed. It has no reliable close
+/// target; identifying it lets nurture pause until TikTok removes it itself.
+pub fn ad_feedback_notice_present(img: &RgbImage) -> bool {
+    if !compose_bar_visible(img).0 {
+        return false;
+    }
+
+    let (core_luma, core_sd, core_colour) = region_luma_stats(img, 0.12, 0.12, 0.88, 0.18);
+    let above = region_brightness(img, 0.12, 0.09, 0.88, 0.12);
+    let below = region_brightness(img, 0.12, 0.18, 0.88, 0.21);
+    let left = region_brightness(img, 0.02, 0.12, 0.08, 0.18);
+    let right = region_brightness(img, 0.92, 0.12, 0.98, 0.18);
+    let surrounding = (above + below + left + right) / 4.0;
+    let capsule_contrast = surrounding - core_luma;
+
+    (95.0..=160.0).contains(&core_luma)
+        && (18.0..=46.0).contains(&core_sd)
+        && (8.0..=35.0).contains(&core_colour)
+        && capsule_contrast >= 20.0
+}
+
 /// Locate TikTok's close button, returning its centre as screen fractions plus
 /// the NCC score. Shape match inside [`CLOSE_X_REGION`] only — cheap, and a
 /// match in the video area would be a false positive anyway.
@@ -566,6 +680,134 @@ pub fn find_close_button(img: &RgbImage, logical_width: Option<f64>) -> Option<(
     Some((cx / w as f64, cy / h as f64, m.score))
 }
 
+fn is_promo_close_dark(p: &image::Rgb<u8>) -> bool {
+    let max = p[0].max(p[1]).max(p[2]);
+    let min = p[0].min(p[1]).min(p[2]);
+    max <= 190 && max.saturating_sub(min) >= 35
+}
+
+fn is_promo_close_cross(p: &image::Rgb<u8>) -> bool {
+    let min = p[0].min(p[1]).min(p[2]);
+    let max = p[0].max(p[1]).max(p[2]);
+    min >= 145 && max >= 180 && max.saturating_sub(min) <= 120
+}
+
+fn is_promo_warm(p: &image::Rgb<u8>) -> bool {
+    let (r, g, b) = (p[0] as i32, p[1] as i32, p[2] as i32);
+    r > 150 && r > g + 45 && r > b + 30
+}
+
+/// Locate the dismissive X on TikTok's floating upper-left promo card.
+///
+/// This overlay leaves TikTok's compose bar visible, so the normal feed
+/// short-circuit would otherwise hide it. The match requires three independent
+/// signals: a dark circular button, a light diagonal cross inside it, and a
+/// warm/red promo surface immediately below-left. A video frame with a random
+/// dark patch or white glyph does not satisfy all three.
+pub fn find_promo_close(img: &RgbImage) -> Option<(f64, f64, f64)> {
+    let (w, h) = (img.width() as i32, img.height() as i32);
+    if w < 160 || h < 240 {
+        return None;
+    }
+    let radius = ((0.021 * w as f64).round() as i32).max(8);
+    let r2 = radius * radius;
+    let ann_lo = ((radius as f64 * 1.18).powi(2)) as i32;
+    let ann_hi = ((radius as f64 * 1.65).powi(2)) as i32;
+    let x0 = (PROMO_CLOSE_REGION.0 * w as f64) as i32;
+    let x1 = (PROMO_CLOSE_REGION.2 * w as f64) as i32;
+    let y0 = (PROMO_CLOSE_REGION.1 * h as f64) as i32;
+    let y1 = (PROMO_CLOSE_REGION.3 * h as f64) as i32;
+    // The close control is stable on the iPhone 8 layout; an 8-pixel grid is
+    // enough to cover its 16-pixel radius without scanning every candidate.
+    let step = (radius / 2).max(4) as usize;
+    let mut best: Option<(f64, f64, f64)> = None;
+
+    for cy in (y0..=y1).step_by(step) {
+        for cx in (x0..=x1).step_by(step) {
+            let mut inner_n = 0u32;
+            let mut dark_n = 0u32;
+            let mut cross_n = 0u32;
+            let mut inner_max_sum = 0.0f64;
+            for dy in (-radius..=radius).step_by(2) {
+                for dx in (-radius..=radius).step_by(2) {
+                    if dx * dx + dy * dy > r2 {
+                        continue;
+                    }
+                    let x = cx + dx;
+                    let y = cy + dy;
+                    if x < 0 || y < 0 || x >= w || y >= h {
+                        continue;
+                    }
+                    let p = img.get_pixel(x as u32, y as u32);
+                    inner_n += 1;
+                    inner_max_sum += p[0].max(p[1]).max(p[2]) as f64;
+                    dark_n += is_promo_close_dark(p) as u32;
+                    cross_n += is_promo_close_cross(p) as u32;
+                }
+            }
+            if inner_n == 0 {
+                continue;
+            }
+
+            let mut ann_n = 0u32;
+            let mut ann_max_sum = 0.0f64;
+            for dy in (-radius * 2..=radius * 2).step_by(3) {
+                for dx in (-radius * 2..=radius * 2).step_by(3) {
+                    let d2 = dx * dx + dy * dy;
+                    if d2 < ann_lo || d2 > ann_hi {
+                        continue;
+                    }
+                    let x = cx + dx;
+                    let y = cy + dy;
+                    if x < 0 || y < 0 || x >= w || y >= h {
+                        continue;
+                    }
+                    let p = img.get_pixel(x as u32, y as u32);
+                    ann_n += 1;
+                    ann_max_sum += p[0].max(p[1]).max(p[2]) as f64;
+                }
+            }
+            if ann_n == 0 {
+                continue;
+            }
+
+            // The gift/promo artwork sits below-left of its close control.
+            let px0 = (cx - radius * 5).max(0);
+            let px1 = (cx - radius).min(w);
+            let py0 = (cy + radius).min(h);
+            let py1 = (cy + radius * 6).min(h);
+            let mut promo_n = 0u32;
+            let mut warm_n = 0u32;
+            for y in (py0..py1).step_by(3) {
+                for x in (px0..px1).step_by(3) {
+                    promo_n += 1;
+                    warm_n += is_promo_warm(img.get_pixel(x as u32, y as u32)) as u32;
+                }
+            }
+            if promo_n == 0 {
+                continue;
+            }
+
+            let dark = dark_n as f64 / inner_n as f64;
+            let cross = cross_n as f64 / inner_n as f64;
+            let contrast = ann_max_sum / ann_n as f64 - inner_max_sum / inner_n as f64;
+            let warm = warm_n as f64 / promo_n as f64;
+            if dark < 0.65 || cross < 0.04 || contrast < 18.0 || warm < 0.10 {
+                continue;
+            }
+            let score = (0.86
+                + (dark - 0.65).min(0.25) * 0.15
+                + (cross - 0.04).min(0.15) * 0.20
+                + (warm - 0.10).min(0.50) * 0.05)
+                .min(0.99);
+            if best.is_none_or(|(_, _, old)| score > old) {
+                best = Some((cx as f64 / w as f64, cy as f64 / h as f64, score));
+            }
+        }
+    }
+    best
+}
+
 /// Does this look like the "Chọn chủ đề bạn thích" onboarding page?
 ///
 /// Deliberately more than a brightness test — a white video frame passes that.
@@ -595,6 +837,84 @@ fn live_room_evidence(img: &RgbImage) -> (bool, f64) {
     let rg = r - g;
     let rb = r - b;
     (rg >= LIVE_PILL_RG_MIN && rb >= LIVE_PILL_RB_MIN, rg.min(rb))
+}
+
+fn live_preview_label_present(img: &RgbImage) -> bool {
+    let (w, h) = (img.width() as f64, img.height() as f64);
+    let x0 = (0.02 * w) as u32;
+    let x1 = (0.27 * w) as u32;
+    let y0 = (0.76 * h) as u32;
+    let y1 = (0.87 * h) as u32;
+    if x1 <= x0 || y1 <= y0 {
+        return false;
+    }
+    let mut hits = 0u32;
+    let mut total = 0u32;
+    for y in (y0..y1).step_by(2) {
+        for x in (x0..x1).step_by(2) {
+            let p = img.get_pixel(x, y).0;
+            total += 1;
+            if p[0] > 175 && p[1] < 120 && p[2] > 70 && p[0] as i16 - p[1] as i16 > 50 {
+                hits += 1;
+            }
+        }
+    }
+    total > 0 && hits as f64 / total as f64 >= 0.035
+}
+
+/// Detect the small page indicator used by TikTok photo posts. We require a
+/// stable row of at least three bright blobs and a real rail; a plain video
+/// highlight or transition therefore remains `Video`/`TransitionOrUnknown`.
+fn photo_indicator_present(img: &RgbImage) -> bool {
+    let (w, h) = (img.width(), img.height());
+    let y0 = (0.67 * h as f64) as u32;
+    let y1 = (0.82 * h as f64) as u32;
+    let x0 = (0.28 * w as f64) as u32;
+    let x1 = (0.72 * w as f64) as u32;
+    let mut runs = 0usize;
+    let mut in_run = false;
+    for x in x0..x1 {
+        let mut bright = 0u32;
+        let mut count = 0u32;
+        for y in (y0..y1).step_by(3) {
+            let p = img.get_pixel(x, y).0;
+            count += 1;
+            if p[0] > 205 && p[1] > 205 && p[2] > 205 {
+                bright += 1;
+            }
+        }
+        let hit = count > 0 && bright as f64 / count as f64 > 0.32;
+        match (hit, in_run) {
+            (true, false) => {
+                in_run = true;
+            }
+            (false, true) => {
+                runs += 1;
+                in_run = false;
+            }
+            _ => {}
+        }
+    }
+    if in_run {
+        runs += 1;
+    }
+    runs >= 3
+}
+
+pub fn feed_card_kind(img: &RgbImage) -> FeedCardKind {
+    if !compose_bar_visible(img).0 {
+        return FeedCardKind::TransitionOrUnknown;
+    }
+    if live_preview_label_present(img) && !rail_icons_present(img) {
+        return FeedCardKind::LivePreview;
+    }
+    if rail_icons_present(img) && photo_indicator_present(img) {
+        return FeedCardKind::PhotoCarousel;
+    }
+    if !rail_icons_present(img) {
+        return FeedCardKind::TransitionOrUnknown;
+    }
+    FeedCardKind::Video
 }
 
 /// One row of the composer's emoji grid, as screen fractions.
@@ -722,15 +1042,9 @@ pub fn classify(img: &RgbImage, logical_width: Option<f64>) -> ScreenObservation
     ev.cyan = cyan;
     ev.white = white;
     ev.pink = pink;
+    ev.ad_feedback_notice = ad_feedback_notice_present(img);
 
     let done = |kind, evidence| ScreenObservation { kind, evidence };
-
-    // A visible compose bar means nothing is covering TikTok's chrome, so no
-    // full-screen sheet can be up. Checking it first also skips the template
-    // match on the overwhelming majority of frames.
-    if bar {
-        return done(ScreenKind::Feed, ev);
-    }
 
     // System alerts before everything else that taps: they sit above TikTok on
     // a dimmed backdrop, so any coordinate derived from the app underneath is
@@ -738,6 +1052,21 @@ pub fn classify(img: &RgbImage, logical_width: Option<f64>) -> ScreenObservation
     if let Some((x, y, blue)) = find_system_alert(img) {
         ev.alert_blue = blue;
         return done(ScreenKind::SystemAlert { x, y }, ev);
+    }
+
+    // Floating promo cards keep the compose bar visible but place a dark ✕ in
+    // the upper-left, so this must run before the feed short-circuit.
+    if let Some((x, y, score)) = find_promo_close(img) {
+        ev.close_x_score = score;
+        return done(ScreenKind::ClosableSheet { x, y, score }, ev);
+    }
+
+    // A visible compose bar means nothing is covering TikTok's chrome, so no
+    // full-screen sheet can be up. Checking it after the strict system-alert
+    // signature keeps an iOS alert from being mistaken for a reachable feed
+    // when its dimmed backdrop leaves enough of the bar visible.
+    if bar {
+        return done(ScreenKind::Feed, ev);
     }
 
     // A LIVE room before the ✕ search: its product cards carry a grey ✕ that
@@ -1094,6 +1423,97 @@ mod tests {
     fn compose_bar_marks_the_feed() {
         let obs = classify(&feed_scene(), Some(375.0));
         assert_eq!(obs.kind, ScreenKind::Feed, "{}", obs.debug_line());
+        assert!(is_actionable_feed(&obs));
+    }
+
+    #[test]
+    fn recognises_the_transient_ad_feedback_notice_and_waits_for_it() {
+        let mut screen = feed_scene();
+        for y in 80..280 {
+            for x in 0..W {
+                screen.put_pixel(x, y, image::Rgb([180, 185, 195]));
+            }
+        }
+        // A compact neutral toast with a few light text strokes, matching the
+        // live "ít quảng cáo hơn" notice without depending on its wording.
+        for y in 160..225 {
+            for x in 75..675 {
+                screen.put_pixel(x, y, image::Rgb([108, 114, 128]));
+            }
+        }
+        for y in 184..192 {
+            for (x0, x1) in [(120, 198), (214, 268), (288, 365), (388, 470)] {
+                for x in x0..x1 {
+                    screen.put_pixel(x, y, image::Rgb([238, 240, 244]));
+                }
+            }
+        }
+
+        assert!(ad_feedback_notice_present(&screen));
+        let obs = classify(&screen, Some(375.0));
+        assert_eq!(obs.kind, ScreenKind::Feed, "{}", obs.debug_line());
+        assert!(obs.evidence.ad_feedback_notice);
+        assert!(!is_actionable_feed(&obs));
+    }
+
+    fn promo_scene() -> RgbImage {
+        let mut img = RgbImage::from_fn(W, H, |x, y| {
+            let v = ((x / 11 + y / 17) % 8) as u8;
+            image::Rgb([48 + v, 108 + v, 236 + v])
+        });
+        with_compose_bar(&mut img);
+
+        // The observed floating card has a warm gift/promo surface below-left
+        // of a dark blue close button.
+        for y in 260..340 {
+            for x in 58..122 {
+                img.put_pixel(x, y, image::Rgb([220, 80, 62]));
+            }
+        }
+
+        let (cx, cy, radius) = (136i32, 244i32, 16i32);
+        for y in cy - radius..=cy + radius {
+            for x in cx - radius..=cx + radius {
+                let dx = x - cx;
+                let dy = y - cy;
+                if dx * dx + dy * dy <= radius * radius {
+                    img.put_pixel(x as u32, y as u32, image::Rgb([30, 72, 158]));
+                }
+            }
+        }
+        for y in cy - 8..=cy + 8 {
+            for x in cx - 8..=cx + 8 {
+                let dx = (x - cx).abs();
+                let dy = (y - cy).abs();
+                if (dx - dy).abs() <= 1 {
+                    img.put_pixel(x as u32, y as u32, image::Rgb([245, 245, 245]));
+                }
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn finds_upper_left_promo_close_before_feed_short_circuit() {
+        let screen = promo_scene();
+        let (x, y, score) = find_promo_close(&screen).expect("promo close");
+        assert!(score >= 0.86, "score {score}");
+        assert!((x - 136.0 / W as f64).abs() < 0.03, "x {x}");
+        assert!((y - 244.0 / H as f64).abs() < 0.03, "y {y}");
+
+        let obs = classify(&screen, Some(375.0));
+        match obs.kind {
+            ScreenKind::ClosableSheet { x, y, .. } => {
+                assert!((x - 136.0 / W as f64).abs() < 0.03, "x {x}");
+                assert!((y - 244.0 / H as f64).abs() < 0.03, "y {y}");
+            }
+            other => panic!("expected promo sheet, got {other:?} ({})", obs.debug_line()),
+        }
+    }
+
+    #[test]
+    fn no_upper_left_promo_close_on_plain_feed() {
+        assert!(find_promo_close(&feed_scene()).is_none());
     }
 
     #[test]

@@ -474,7 +474,7 @@ pub struct AnalyticsSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct NurtureSettings {
     pub base_url: String,
     pub model: String,
@@ -521,20 +521,24 @@ impl Default for NurtureSettings {
             // Vilao AI is an OpenAI-compatible gateway; any other compatible
             // endpoint works by changing these two fields. The key is never
             // stored here — it comes from the settings row or RIVIU_AI_API_KEY.
-            base_url: "https://api.vilao.ai/v1".into(),
-            model: "cd/gpt-5.5".into(),
+            base_url: "https://api.deepseek.com".into(),
+            model: "deepseek-v4-flash".into(),
             api_key: String::new(),
             input_price_per_1m: 1.25,
             output_price_per_1m: 10.0,
             bundle_id: "com.ss.iphone.ugc.Ame".into(),
-            num_videos: 50,
+            // Manual runs use a varied 2–3 hour horizon; this remains the
+            // legacy fixture ceiling for callers that do not pass a duration.
+            num_videos: 120,
             num_rounds: 1,
-            like_prob: 40,
-            comment_prob: 25,
-            follow_prob: 5,
-            frenzy_prob: 8,
-            watch_min: 5.0,
-            watch_max: 20.0,
+            like_prob: 35,
+            // Comments are opt-in because a fresh install has no AI key. Once
+            // a key is configured, the operator can enable a small comment rate.
+            comment_prob: 0,
+            follow_prob: 3,
+            frenzy_prob: 6,
+            watch_min: 3.0,
+            watch_max: 18.0,
             persona: "casual".into(),
             fatigue: true,
             time_of_day: true,
@@ -546,14 +550,104 @@ impl Default for NurtureSettings {
             stagger_delay_min: 5,
             stagger_delay_max: 15,
             comment_lang: "vi".into(),
-            ai_directions: "Gen z|Tự nhiên|Ngắn gọn".into(),
+            ai_directions: "Tự nhiên|Thân mật|Hơi hài|Ngắn gọn".into(),
             max_comment_words: 12,
             schedule_enabled: false,
-            schedule_every_minutes: 60,
-            schedule_duration_minutes: 20,
+            // Scheduling is disabled by default. If enabled, use human-sized
+            // blocks instead of short fixed bursts on the hour.
+            schedule_every_minutes: 240,
+            schedule_duration_minutes: 150,
             schedule_udids: Vec::new(),
             steady_mood: String::new(),
         }
+    }
+}
+
+impl NurtureSettings {
+    /// Upgrade the values shipped by the pre-human-v2 profile once.
+    ///
+    /// Only exact legacy defaults are replaced, so an operator's deliberate
+    /// overrides (API endpoint, persona, language, or custom probabilities)
+    /// remain intact. Unknown legacy fields are removed when the normalized
+    /// profile is serialized back to the settings store.
+    pub(crate) fn migrate_legacy_defaults(&mut self) -> bool {
+        let defaults = Self::default();
+        let mut changed = false;
+
+        macro_rules! replace_if {
+            ($field:ident, $legacy:expr) => {
+                if self.$field == $legacy {
+                    self.$field = defaults.$field.clone();
+                    changed = true;
+                }
+            };
+        }
+
+        replace_if!(num_videos, 50);
+        replace_if!(like_prob, 40);
+        replace_if!(comment_prob, 25);
+        replace_if!(follow_prob, 5);
+        replace_if!(frenzy_prob, 8);
+        if (self.watch_min, self.watch_max) == (5.0, 20.0) {
+            self.watch_min = defaults.watch_min;
+            self.watch_max = defaults.watch_max;
+            changed = true;
+        }
+        replace_if!(schedule_every_minutes, 60);
+        replace_if!(schedule_duration_minutes, 20);
+
+        changed
+    }
+}
+
+#[cfg(test)]
+mod nurture_settings_tests {
+    use super::NurtureSettings;
+
+    #[test]
+    fn defaults_allow_a_first_run_without_ai_credentials() {
+        let settings = NurtureSettings::default();
+        assert_eq!(settings.comment_prob, 0);
+        assert_eq!(settings.like_prob, 35);
+        assert_eq!(settings.follow_prob, 3);
+        assert_eq!(settings.frenzy_prob, 6);
+        assert_eq!((settings.watch_min, settings.watch_max), (3.0, 18.0));
+        assert!(!settings.schedule_enabled);
+        assert_eq!(settings.schedule_every_minutes, 240);
+        assert_eq!(settings.schedule_duration_minutes, 150);
+    }
+
+    #[test]
+    fn legacy_defaults_migrate_without_touching_custom_fields() {
+        let mut settings = NurtureSettings {
+            api_key: "fixture-key".into(),
+            model: "custom-model".into(),
+            persona: "custom-persona".into(),
+            num_videos: 50,
+            like_prob: 40,
+            comment_prob: 25,
+            follow_prob: 5,
+            frenzy_prob: 8,
+            watch_min: 5.0,
+            watch_max: 20.0,
+            schedule_every_minutes: 60,
+            schedule_duration_minutes: 20,
+            ..Default::default()
+        };
+
+        assert!(settings.migrate_legacy_defaults());
+        assert_eq!(settings.num_videos, 120);
+        assert_eq!(settings.like_prob, 35);
+        assert_eq!(settings.comment_prob, 0);
+        assert_eq!(settings.follow_prob, 3);
+        assert_eq!(settings.frenzy_prob, 6);
+        assert_eq!((settings.watch_min, settings.watch_max), (3.0, 18.0));
+        assert_eq!(settings.schedule_every_minutes, 240);
+        assert_eq!(settings.schedule_duration_minutes, 150);
+        assert_eq!(settings.api_key, "fixture-key");
+        assert_eq!(settings.model, "custom-model");
+        assert_eq!(settings.persona, "custom-persona");
+        assert!(!settings.migrate_legacy_defaults());
     }
 }
 
@@ -573,10 +667,37 @@ pub struct NurtureCommentCost {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct NurtureCommentAttempt {
+    pub id: String,
+    pub udid: String,
+    pub outcome: String,
+    pub source: String,
+    pub model: String,
+    pub base_url_host: String,
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub usd: f64,
+    pub preview: String,
+    pub caption_preview: String,
+    pub frame_sha256: String,
+    pub context_confidence: Option<u8>,
+    pub relevance: Option<u8>,
+    pub evidence_support: Option<u8>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NurtureSessionStatus {
     pub udid: String,
     pub running: bool,
     pub videos_done: u32,
+    #[serde(default)]
+    pub like_attempts: u32,
+    #[serde(default)]
+    pub comment_attempts: u32,
+    #[serde(default)]
+    pub follow_attempts: u32,
     pub likes: u32,
     pub comments: u32,
     pub follows: u32,

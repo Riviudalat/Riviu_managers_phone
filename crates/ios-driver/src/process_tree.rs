@@ -13,7 +13,9 @@ use std::ffi::OsStr;
 /// as Python, PowerShell and tidevice otherwise allocate their own window.
 /// Piped stdin/stdout/stderr continue to work with `CREATE_NO_WINDOW`.
 pub(crate) fn background_command(program: impl AsRef<OsStr>) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(program);
+    let command = tokio::process::Command::new(program);
+    #[cfg(windows)]
+    let mut command = command;
     #[cfg(windows)]
     {
         use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;

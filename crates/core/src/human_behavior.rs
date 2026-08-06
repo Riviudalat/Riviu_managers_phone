@@ -1,7 +1,10 @@
 //! Human-like behavior state machine for TikTok nurture (ported cleanly from TOOL TIKTOK).
 
-use rand::Rng;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -204,6 +207,32 @@ impl HumanBehavior {
         ms as u64
     }
 
+    /// Sample a swipe duration from a human-looking mixture. Fast swipes are
+    /// rare, ordinary swipes dominate, and distracted/fatigued moments create
+    /// occasional slow drags. `frenzy` is the explicit rare fast-scroll mode.
+    pub fn swipe_duration_ms(&mut self, frenzy: bool) -> u64 {
+        let mut rng = rand::thread_rng();
+        if frenzy {
+            return rng.gen_range(150..=240);
+        }
+        match rng.gen_range(0..100) {
+            0..=6 => rng.gen_range(190..=280),
+            7..=27 => rng.gen_range(520..=820),
+            _ => rng.gen_range(300..=520),
+        }
+    }
+
+    /// Photo carousels use a horizontal drag, usually slower than a feed
+    /// swipe while a person reads the image, with occasional brisk changes.
+    pub fn photo_swipe_duration_ms(&mut self) -> u64 {
+        let mut rng = rand::thread_rng();
+        if rng.gen_ratio(1, 8) {
+            rng.gen_range(280..=420)
+        } else {
+            rng.gen_range(420..=760)
+        }
+    }
+
     pub fn reset_swipe_streak(&mut self) {
         self.consecutive_swipes = 0;
     }
@@ -245,6 +274,21 @@ pub fn pick_direction(raw: &str) -> Option<String> {
         return None;
     }
     let mut rng = rand::thread_rng();
+    Some(parts[rng.gen_range(0..parts.len())].to_string())
+}
+
+/// Deterministic direction selection for a prepared comment. A retry for the
+/// same frame fingerprint must keep the same style instruction.
+pub fn pick_direction_seeded(raw: &str, seed: u64) -> Option<String> {
+    let parts: Vec<_> = raw
+        .split('|')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let mut rng = StdRng::seed_from_u64(seed);
     Some(parts[rng.gen_range(0..parts.len())].to_string())
 }
 
@@ -320,9 +364,9 @@ impl Mood {
 
     pub fn label(self) -> &'static str {
         match self {
-            Mood::Skimming => "lướt nhanh",
-            Mood::Liking => "thả tim nhiều",
-            Mood::Chatty => "hay bình luận",
+            Mood::Skimming => "lướt",
+            Mood::Liking => "xem kỹ",
+            Mood::Chatty => "tương tác",
         }
     }
 }
@@ -407,6 +451,166 @@ pub fn roll_follow_in_mood(follow_prob: u32, mood: Mood) -> bool {
     roll_bool(p)
 }
 
+/// Internal pacing policy. It is deliberately not exposed as a user setting:
+/// configured probabilities still decide whether an action is desired, while
+/// this policy keeps the resulting session inside a human-sized rolling rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyAction {
+    Like,
+    Comment,
+    Follow,
+}
+
+#[derive(Debug, Clone)]
+pub struct HumanSessionPolicy {
+    like_cap: u32,
+    comment_cap: u32,
+    follow_cap: u32,
+    attempts: VecDeque<(Instant, PolicyAction)>,
+    last_action_at: Option<Instant>,
+    recent_posts: VecDeque<bool>,
+    videos_since_break: u32,
+    next_rest_at: u32,
+    block_started: Instant,
+    block_length: Duration,
+    cold_restart_used: bool,
+    rng: StdRng,
+}
+
+impl HumanSessionPolicy {
+    pub fn new(like_prob: u32, comment_prob: u32, follow_prob: u32) -> Self {
+        let seed = rand::thread_rng().gen::<u64>();
+        let mut rng = StdRng::seed_from_u64(seed);
+        let cap = |prob: u32, low: u32, high: u32, rng: &mut StdRng| {
+            if prob == 0 {
+                0
+            } else {
+                rng.gen_range(low..=high)
+            }
+        };
+        let next_rest_at = rng.gen_range(7..=13);
+        Self {
+            like_cap: cap(like_prob, 8, 16, &mut rng),
+            comment_cap: cap(comment_prob, 1, 3, &mut rng),
+            follow_cap: cap(follow_prob, 1, 2, &mut rng),
+            attempts: VecDeque::new(),
+            last_action_at: None,
+            recent_posts: VecDeque::with_capacity(5),
+            videos_since_break: 0,
+            next_rest_at,
+            block_started: Instant::now(),
+            block_length: Duration::from_secs(rng.gen_range(20..=45) * 60),
+            cold_restart_used: false,
+            rng,
+        }
+    }
+
+    /// Begin a new feed card. At most two of the last five cards can receive
+    /// an interaction; a card skipped by the engine remains false.
+    pub fn begin_post(&mut self) {
+        if self.recent_posts.len() == 5 {
+            self.recent_posts.pop_front();
+        }
+        self.recent_posts.push_back(false);
+    }
+
+    pub fn can_interact_with_post(&self) -> bool {
+        self.recent_posts.iter().filter(|&&used| used).count() < 2
+    }
+
+    pub fn mark_post_interacted(&mut self) {
+        if let Some(last) = self.recent_posts.back_mut() {
+            *last = true;
+        }
+    }
+
+    fn prune(&mut self, now: Instant) {
+        let window = Duration::from_secs(60 * 60);
+        while self
+            .attempts
+            .front()
+            .is_some_and(|(at, _)| now.duration_since(*at) >= window)
+        {
+            self.attempts.pop_front();
+        }
+    }
+
+    pub fn can_attempt(&mut self, action: PolicyAction) -> bool {
+        let now = Instant::now();
+        self.prune(now);
+        let cap = match action {
+            PolicyAction::Like => self.like_cap,
+            PolicyAction::Comment => self.comment_cap,
+            PolicyAction::Follow => self.follow_cap,
+        };
+        if cap == 0 {
+            return false;
+        }
+        self.attempts
+            .iter()
+            .filter(|(_, kind)| *kind == action)
+            .count()
+            < cap as usize
+    }
+
+    /// Record an attempt before the gesture. A failed confirmation still
+    /// consumes this slot, preventing retries from becoming a burst.
+    pub fn record_attempt(&mut self, action: PolicyAction) {
+        let now = Instant::now();
+        self.prune(now);
+        self.attempts.push_back((now, action));
+        self.last_action_at = Some(now);
+    }
+
+    /// Return the next gap after the previous action. The selected range is
+    /// intentionally broad enough to avoid a metronomic cadence.
+    pub fn min_action_gap(&mut self) -> Duration {
+        Duration::from_secs(self.rng.gen_range(12..=35))
+    }
+
+    pub fn rest_after_video(&mut self) -> Option<Duration> {
+        self.videos_since_break = self.videos_since_break.saturating_add(1);
+        if self.videos_since_break < self.next_rest_at {
+            return None;
+        }
+        self.videos_since_break = 0;
+        self.next_rest_at = self.rng.gen_range(7..=13);
+        Some(Duration::from_secs(self.rng.gen_range(15..=90)))
+    }
+
+    pub fn should_take_home_break(&mut self) -> bool {
+        self.rng.gen_ratio(1, 18)
+    }
+
+    pub fn should_enter_live(&mut self) -> bool {
+        self.rng.gen_ratio(1, 6)
+    }
+
+    pub fn should_take_block_break(&self) -> bool {
+        self.block_started.elapsed() >= self.block_length
+    }
+
+    pub fn reset_block(&mut self) {
+        self.block_started = Instant::now();
+        self.block_length = Duration::from_secs(self.rng.gen_range(20..=45) * 60);
+    }
+
+    pub fn home_break_duration(&mut self) -> Duration {
+        Duration::from_secs(self.rng.gen_range(60..=240))
+    }
+
+    pub fn should_cold_restart(&mut self) -> bool {
+        if self.cold_restart_used {
+            return false;
+        }
+        let selected = self.rng.gen_ratio(1, 240);
+        if selected {
+            self.cold_restart_used = true;
+        }
+        selected
+    }
+}
+
 #[cfg(test)]
 mod mood_tests {
     use super::*;
@@ -472,5 +676,54 @@ mod mood_tests {
     fn watch_length_follows_the_mood() {
         assert!(Mood::Skimming.watch_mult() < Mood::Liking.watch_mult());
         assert!(Mood::Liking.watch_mult() < Mood::Chatty.watch_mult());
+    }
+
+    #[test]
+    fn internal_policy_caps_attempts_and_post_bursts() {
+        let mut policy = HumanSessionPolicy::new(100, 100, 100);
+        policy.begin_post();
+        assert!(policy.can_attempt(PolicyAction::Like));
+        policy.record_attempt(PolicyAction::Like);
+        policy.mark_post_interacted();
+        policy.begin_post();
+        assert!(policy.can_attempt(PolicyAction::Comment));
+        policy.record_attempt(PolicyAction::Comment);
+        policy.mark_post_interacted();
+        policy.begin_post();
+        assert!(!policy.can_interact_with_post());
+    }
+
+    #[test]
+    fn policy_does_not_schedule_actions_that_are_disabled() {
+        let mut policy = HumanSessionPolicy::new(0, 0, 0);
+        assert!(!policy.can_attempt(PolicyAction::Like));
+        assert!(!policy.can_attempt(PolicyAction::Comment));
+        assert!(!policy.can_attempt(PolicyAction::Follow));
+    }
+
+    #[test]
+    fn swipe_duration_profile_stays_inside_human_bounds() {
+        let mut behavior = HumanBehavior::new("casual", false, false, true);
+        for _ in 0..500 {
+            assert!((150..=820).contains(&behavior.swipe_duration_ms(false)));
+            assert!((150..=240).contains(&behavior.swipe_duration_ms(true)));
+            assert!((280..=760).contains(&behavior.photo_swipe_duration_ms()));
+        }
+    }
+
+    #[test]
+    fn policy_rest_threshold_stays_between_seven_and_thirteen_videos() {
+        let mut policy = HumanSessionPolicy::new(0, 0, 0);
+        let mut since_rest = 0;
+        let mut rests = 0;
+        for _ in 0..200 {
+            since_rest += 1;
+            if policy.rest_after_video().is_some() {
+                assert!((7..=13).contains(&since_rest));
+                since_rest = 0;
+                rests += 1;
+            }
+        }
+        assert!(rests >= 10, "policy did not schedule enough rests: {rests}");
     }
 }

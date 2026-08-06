@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const SUPPORTED_AGENT_PROTOCOL: u32 = 1;
+pub const SUPPORTED_CANDIDATE_AGENT_PROTOCOL: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -162,11 +163,15 @@ fn validate_manifest(manifest: &AgentManifest) -> anyhow::Result<()> {
         }
     }
 
-    if manifest.protocol_version != SUPPORTED_AGENT_PROTOCOL {
+    if !matches!(
+        manifest.protocol_version,
+        SUPPORTED_AGENT_PROTOCOL | SUPPORTED_CANDIDATE_AGENT_PROTOCOL
+    ) {
         bail!(
-            "unsupported agent protocol {}; supported protocol is {}",
+            "unsupported agent protocol {}; supported protocols are {} and {}",
             manifest.protocol_version,
-            SUPPORTED_AGENT_PROTOCOL
+            SUPPORTED_AGENT_PROTOCOL,
+            SUPPORTED_CANDIDATE_AGENT_PROTOCOL
         );
     }
     if manifest.control_port == 0 || manifest.mjpeg_port == 0 {
@@ -302,7 +307,7 @@ mod tests {
     #[test]
     fn unsupported_protocol_is_rejected() {
         let mut manifest = valid_manifest();
-        manifest["protocolVersion"] = json!(SUPPORTED_AGENT_PROTOCOL + 1);
+        manifest["protocolVersion"] = json!(SUPPORTED_CANDIDATE_AGENT_PROTOCOL + 1);
         let fixture = Fixture::new(manifest, true);
 
         let error = AgentArtifact::load(&fixture.manifest_path)
@@ -358,7 +363,7 @@ mod tests {
 
     #[test]
     fn invalid_protocol_ports_dimensions_and_checksums_are_rejected() {
-        for protocol in [0, SUPPORTED_AGENT_PROTOCOL + 1] {
+        for protocol in [0, SUPPORTED_CANDIDATE_AGENT_PROTOCOL + 1] {
             let mut manifest = valid_manifest();
             manifest["protocolVersion"] = json!(protocol);
             let fixture = Fixture::new(manifest, true);

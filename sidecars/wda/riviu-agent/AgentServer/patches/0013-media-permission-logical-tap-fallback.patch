@@ -1,0 +1,31 @@
+--- a/WebDriverAgentLib/Commands/FBCustomCommands.m
++++ b/WebDriverAgentLib/Commands/FBCustomCommands.m
+@@ -583,7 +583,7 @@
+       // 61% of its height. Retry briefly because SpringBoard presents the
+       // sheet asynchronously; never fall through to a blind tap after it is
+       // gone.
+-      if (permissionTapAttempts < 4 && [[NSDate date] compare:nextPermissionTap] != NSOrderedAscending) {
++      if (permissionTapAttempts < 16 && [[NSDate date] compare:nextPermissionTap] != NSOrderedAscending) {
+         // SpringBoard's accessibility frame can describe the underlying
+         // TikTok window while its permission sheet is foreground. Use the
+         // process screen bounds first so the native event lands on the full
+@@ -594,11 +594,15 @@
+         }
+         if (screenSize.width > 0.0 && screenSize.height > 0.0) {
+           NSError *tapError = nil;
+-          BOOL tapped = [self riviuMediaTapPoint:
+-                         CGPointMake(screenSize.width * 0.50, screenSize.height * 0.61)
+-                         error:&tapError];
++          CGPoint permissionPoint = CGPointMake(screenSize.width * 0.50, screenSize.height * 0.61);
++          // Some iOS 16 XCTest runners report physical 2x bounds here. The
++          // agent contract and native /wda/tap use logical points.
++          if (screenSize.width > 450.0 || screenSize.height > 800.0) {
++            permissionPoint = CGPointMake(187.5, 407.0);
++          }
++          BOOL tapped = [self riviuMediaTapPoint:permissionPoint error:&tapError];
+           permissionTapAttempts += 1;
+-          nextPermissionTap = [NSDate dateWithTimeIntervalSinceNow:0.75];
++          nextPermissionTap = [NSDate dateWithTimeIntervalSinceNow:0.60];
+           if (!tapped && tapError != nil && error != NULL) {
+             *error = tapError;
+           }

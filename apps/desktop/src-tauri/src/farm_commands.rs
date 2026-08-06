@@ -228,31 +228,39 @@ pub async fn push_material(
         .into_iter()
         .find(|m| m.id == material_id)
         .ok_or_else(|| "material not found".to_string())?;
-    // Best-effort: copy into artifacts push staging and attempt sidecar afc push.
+    // Media never goes through installd. Stage it as a one-file campaign and
+    // let the driver perform HouseArrest/AFC size+hash readback.
     let context = state
         .control
-        .try_acquire_exclusive(&udid, DeviceWorkOwner::Repair)
+        .try_acquire_exclusive(&udid, DeviceWorkOwner::Script)
         .await
         .map_err(err)?;
-    let msg = match state
+    let staged = state
+        .artifacts_dir
+        .join("push-staging")
+        .join(&udid)
+        .join(&material_id)
+        .join("material");
+    std::fs::create_dir_all(&staged).map_err(err)?;
+    let dest = staged.join(&item.name);
+    std::fs::copy(&item.path, &dest).map_err(err)?;
+    let campaign_root = staged
+        .parent()
+        .ok_or_else(|| "material staging root missing".to_string())?;
+    let evidence = state
         .control
-        .install_app(&context, &PathBuf::from(&item.path))
+        .stage_publish_media(
+            &context,
+            &state.active_agent_bundle_id,
+            &material_id,
+            campaign_root,
+        )
         .await
-    {
-        Ok(()) => format!("Pushed/installed {} to {udid}", item.name),
-        Err(e) => {
-            // Non-ipa materials: stage path for manual transfer
-            let staged = state.artifacts_dir.join("push-staging").join(&udid);
-            std::fs::create_dir_all(&staged).map_err(err)?;
-            let dest = staged.join(&item.name);
-            std::fs::copy(&item.path, &dest).map_err(err)?;
-            format!(
-                "Staged {} at {} (direct AFC push unavailable: {e})",
-                item.name,
-                dest.display()
-            )
-        }
-    };
+        .map_err(err)?;
+    let msg = format!(
+        "Transferred {} to Agent sandbox on {udid}; readback={}",
+        item.name, evidence
+    );
     log(&state, "material.push", &format!("{udid}:{material_id}"));
     Ok(msg)
 }
@@ -457,7 +465,9 @@ pub fn api_docs() -> String {
 - list_materials / add_material / delete_material / push_material
 - list_apps_library / add_app_library / delete_app_library / install_library_app / uninstall_app
 - list_schedules / save_schedule / delete_schedule
-- list_publish_tasks / create_publish_task
+- publish_scan_folder / publish_create_campaign / publish_list / publish_get
+- publish_prepare / publish_transfer / publish_post / publish_cancel
+- list_publish_tasks / create_publish_task (legacy script compatibility)
 - list_op_logs / analytics_summary / list_users
 
 ## Auth (hidden by default)
@@ -465,7 +475,7 @@ pub fn api_docs() -> String {
 - Set RIVIU_SHOW_AUTH=1 to show login UI
 
 ## Sidecar
-- python riviu_pmd.py list|install|uninstall|stream|start-wda|...
+- python riviu_pmd.py list|install|uninstall|media-stage|stream|start-wda|...
 "#
     .into()
 }

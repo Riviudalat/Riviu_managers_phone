@@ -1,0 +1,112 @@
+{
+  "schemaVersion": 1,
+  "status": "candidate-route",
+  "feature": "pushMedia",
+  "transport": {
+    "staging": "HouseArrestAfc",
+    "root": "Documents/Riviu/Publish/{campaignId}",
+    "manifest": "manifest.json",
+    "readback": ["size", "sha256"]
+  },
+  "authentication": {
+    "header": "X-Riviu-Token",
+    "required": true,
+    "constantTime": true
+  },
+  "routes": [
+    {
+      "method": "POST",
+      "path": "/riviu/media/v1/prepare",
+      "auth": "protected",
+      "request": {
+        "type": "object",
+        "required": ["campaignId", "manifestSha256"],
+        "additionalProperties": false,
+        "properties": {
+          "campaignId": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+          "manifestSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      },
+      "response": {
+        "type": "object",
+        "required": ["campaignId", "importId", "state", "files"],
+        "properties": {
+          "campaignId": {"type": "string"},
+          "importId": {"type": "string", "minLength": 1},
+          "state": {"const": "ready"},
+          "files": {"type": "integer", "minimum": 1}
+        }
+      },
+      "successStatus": 200
+    },
+    {
+      "method": "GET",
+      "path": "/riviu/media/v1/prepare/{importId}",
+      "auth": "protected",
+      "response": {
+        "type": "object",
+        "required": ["importId", "state", "files"],
+        "properties": {
+          "importId": {"type": "string", "minLength": 1},
+          "state": {"enum": ["ready", "consumed", "failed"]},
+          "files": {"type": "integer", "minimum": 1}
+        }
+      },
+      "successStatus": 200
+    },
+    {
+      "method": "POST",
+      "path": "/riviu/media/v1/import",
+      "auth": "protected",
+      "request": {
+        "type": "object",
+        "required": ["campaignId", "manifestSha256"],
+        "additionalProperties": false,
+        "properties": {
+          "campaignId": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+          "manifestSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      },
+      "response": {
+        "type": "object",
+        "required": ["campaignId", "importId", "state", "files", "albumId"],
+        "properties": {
+          "campaignId": {"type": "string"},
+          "importId": {"type": "string", "minLength": 1},
+          "state": {"const": "imported"},
+          "files": {"type": "integer", "minimum": 1},
+          "albumId": {"type": "string", "minLength": 1}
+        }
+      },
+      "successStatus": 200
+    },
+    {
+      "method": "DELETE",
+      "path": "/riviu/media/v1/import/{importId}",
+      "auth": "protected",
+      "response": {
+        "type": "object",
+        "required": ["campaignId", "importId", "state", "files"],
+        "properties": {
+          "campaignId": {"type": "string"},
+          "importId": {"type": "string", "minLength": 1},
+          "state": {"const": "cleaned"},
+          "files": {"type": "integer", "minimum": 0}
+        }
+      },
+      "successStatus": 200
+    }
+  ],
+  "promotionGate": {
+    "requires": [
+      "candidateBuild",
+      "protectedAuth",
+      "HouseArrestReadback",
+      "freshSessionBeforeMjpeg",
+      "TikTokPhotoComposerImport",
+      "postFrameEvidence",
+      "verifiedCleanup"
+    ],
+    "advertiseFeatureBeforeGate": false
+  }
+}

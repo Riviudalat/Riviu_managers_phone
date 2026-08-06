@@ -29,13 +29,27 @@ import type {
   OpLog,
   ProxyConfig,
   PublishTask,
+  PublishCampaignDetail,
+  PublishCampaignRecord,
+  PublishFolderManifest,
   ScheduleItem,
   StreamSettings,
+  NurtureCommentAttempt,
   NurtureCommentCost,
   NurtureCostSummary,
+  NurtureApiTestResult,
   NurtureSessionStatus,
   NurtureSettings,
+  InteractionCampaignDetail,
+  InteractionCampaignSummary,
+  ThreadCampaignRequest,
+  ThreadPreview,
+  TikTokLinkLine,
 } from "./types";
+
+export async function startupError() {
+  return invoke<string | null>("startup_error");
+}
 
 export async function listDevices() {
   return invoke<DeviceInfo[]>("list_devices");
@@ -342,6 +356,48 @@ export async function createPublishTask(
   });
 }
 
+export async function publishScanFolder(sourceRoot: string) {
+  return invoke<PublishFolderManifest>("publish_scan_folder", { sourceRoot });
+}
+
+export async function publishCreateCampaign(
+  sourceRoot: string,
+  bundleIds: string[],
+  udids: string[],
+  runAt?: string | null,
+) {
+  return invoke<PublishCampaignRecord>("publish_create_campaign", {
+    sourceRoot,
+    bundleIds,
+    udids,
+    runAt: runAt ?? null,
+  });
+}
+
+export async function publishList(limit = 50) {
+  return invoke<PublishCampaignRecord[]>("publish_list", { limit });
+}
+
+export async function publishGet(campaignId: string) {
+  return invoke<PublishCampaignDetail | null>("publish_get", { campaignId });
+}
+
+export async function publishCancel(campaignId: string) {
+  return invoke<void>("publish_cancel", { campaignId });
+}
+
+export async function publishPrepare(campaignId: string) {
+  return invoke<PublishCampaignDetail>("publish_prepare", { campaignId });
+}
+
+export async function publishTransfer(campaignId: string) {
+  return invoke<PublishCampaignDetail>("publish_transfer", { campaignId });
+}
+
+export async function publishPost(campaignId: string) {
+  return invoke<PublishCampaignDetail>("publish_post", { campaignId });
+}
+
 export async function listOpLogs(limit = 100) {
   return invoke<OpLog[]>("list_op_logs", { limit });
 }
@@ -366,8 +422,16 @@ export async function nurtureSaveSettings(settings: NurtureSettings) {
   return invoke<NurtureSettings>("nurture_save_settings", { settings });
 }
 
+export async function nurtureTestApi(udid: string) {
+  return invoke<NurtureApiTestResult>("nurture_test_api", { udid });
+}
+
 export async function nurtureListCosts(limit = 100) {
   return invoke<NurtureCommentCost[]>("nurture_list_costs", { limit });
+}
+
+export async function nurtureListCommentAttempts(limit = 100) {
+  return invoke<NurtureCommentAttempt[]>("nurture_list_comment_attempts", { limit });
 }
 
 export async function nurtureCostSummary() {
@@ -387,6 +451,45 @@ export async function nurtureStart(udids: string[], durationMinutes?: number | n
 
 export async function nurtureStop(udids: string[] = []) {
   return invoke<void>("nurture_stop", { udids });
+}
+
+export async function interactionParseLinks(rawText: string) {
+  return invoke<TikTokLinkLine[]>("interaction_parse_links", { rawText });
+}
+
+export async function interactionResolveLinks(rawText: string) {
+  return invoke<TikTokLinkLine[]>("interaction_resolve_links", { rawText });
+}
+
+export async function interactionPreviewThread(request: ThreadCampaignRequest) {
+  return invoke<ThreadPreview>("interaction_preview_thread", { request });
+}
+
+export async function interactionStartThread(request: ThreadCampaignRequest) {
+  return invoke<{ campaign: InteractionCampaignSummary; queued: boolean }>(
+    "interaction_start_thread",
+    { request },
+  );
+}
+
+export async function interactionList(limit = 30) {
+  return invoke<InteractionCampaignSummary[]>("interaction_list", { limit });
+}
+
+export async function interactionGet(campaignId: string) {
+  return invoke<InteractionCampaignDetail | null>("interaction_get", { campaignId });
+}
+
+export async function interactionCancel(campaignId: string) {
+  return invoke<void>("interaction_cancel", { campaignId });
+}
+
+export async function interactionRetry(campaignId: string) {
+  return invoke<void>("interaction_retry", { campaignId });
+}
+
+export async function interactionOpenOnDevice(udid: string, url: string) {
+  return invoke<void>("interaction_open_on_device", { udid, url });
 }
 
 export function listenRiviuEvents(handler: (payload: unknown) => void): Promise<UnlistenFn> {

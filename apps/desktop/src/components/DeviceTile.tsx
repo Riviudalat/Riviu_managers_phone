@@ -1,8 +1,8 @@
 import { memo, useRef, useState } from "react";
 import { tileStreamStateView } from "../types";
 import type { DeviceInfo, TileSize } from "../types";
-import { deviceSwipe, deviceTap, groupInput } from "../api";
-import { useDeviceFrame } from "../frameStore";
+import { deviceSwipe, deviceTap, groupInput, latestFrame } from "../api";
+import { useDeviceFrame, useHydratedDeviceFrame } from "../frameStore";
 
 const DEFAULT_W = 375;
 const DEFAULT_H = 667;
@@ -107,6 +107,7 @@ function DeviceTileInner({
   groupUdids,
   groupMode,
 }: Props) {
+  useHydratedDeviceFrame(device.udid, latestFrame);
   const frame = useDeviceFrame(device.udid);
   const imgRef = useRef<HTMLImageElement>(null);
   const drag = useRef<{ x: number; y: number } | null>(null);
@@ -118,6 +119,8 @@ function DeviceTileInner({
     Boolean(frame),
     Boolean(device.lastError),
   );
+  const emptyLabel =
+    streamState.state === "sampling" ? "Đang mở stream…" : device.lastError || "No stream";
 
   return (
     <article
@@ -196,7 +199,7 @@ function DeviceTileInner({
           />
         ) : (
           <div className="dev-window-empty">
-            <span>{device.lastError || "No stream"}</span>
+            <span>{emptyLabel}</span>
             <button
               type="button"
               className="link"

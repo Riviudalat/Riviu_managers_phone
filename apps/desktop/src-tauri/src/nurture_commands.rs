@@ -5,8 +5,11 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use riviu_core::{
-    DeviceControlPlane, DeviceWorkOwner, NurtureEngine, NurtureSessionStatus, NurtureSettings,
+    DeviceControlPlane, DeviceWorkOwner, FrameSource, NurtureEngine, NurtureSessionStatus,
+    NurtureSettings,
 };
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::command_error::CommandError;
@@ -14,6 +17,66 @@ use crate::state::AppState;
 
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NurtureApiTestResult {
+    pub udid: String,
+    pub comment: String,
+    pub caption: Option<String>,
+    pub context_confidence: u8,
+    pub relevance: u8,
+    pub evidence_support: u8,
+    pub frame_sha256: String,
+    pub model: String,
+    pub base_url_host: String,
+    pub evidence_mode: String,
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub usd: f64,
+}
+
+fn validate_nurture_settings(settings: &NurtureSettings) -> Result<(), String> {
+    if !(1..=10_000).contains(&settings.num_videos) {
+        return Err("num_videos phải nằm trong khoảng 1..=10000".into());
+    }
+    if !(1..=100).contains(&settings.num_rounds) {
+        return Err("num_rounds phải nằm trong khoảng 1..=100".into());
+    }
+    if settings.like_prob.saturating_add(settings.comment_prob) > 100 {
+        return Err(format!(
+            "like_prob ({}) + comment_prob ({}) > 100",
+            settings.like_prob, settings.comment_prob
+        ));
+    }
+    if !(4..=30).contains(&settings.max_comment_words) {
+        return Err("max_comment_words phải nằm trong khoảng 4..=30".into());
+    }
+    if settings.follow_prob > 100 || settings.frenzy_prob > 100 {
+        return Err("follow_prob và frenzy_prob phải nằm trong khoảng 0..=100".into());
+    }
+    if settings.comment_prob > 0 && settings.api_key.trim().is_empty() {
+        return Err("Đã bật bình luận nhưng API key còn trống".into());
+    }
+    if settings.base_url.trim().is_empty() || settings.model.trim().is_empty() {
+        return Err("Base URL và model AI không được để trống".into());
+    }
+    if !settings.watch_min.is_finite()
+        || !settings.watch_max.is_finite()
+        || settings.watch_min <= 0.0
+        || settings.watch_max < settings.watch_min
+        || settings.watch_max > 120.0
+    {
+        return Err("Khoảng thời gian xem video phải trong 0..120 giây và min <= max".into());
+    }
+    if !(15..=1_440).contains(&settings.schedule_every_minutes) {
+        return Err("schedule_every_minutes phải nằm trong khoảng 15..=1440".into());
+    }
+    if !(15..=360).contains(&settings.schedule_duration_minutes) {
+        return Err("schedule_duration_minutes phải nằm trong khoảng 15..=360".into());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -26,12 +89,7 @@ pub fn nurture_save_settings(
     state: State<'_, AppState>,
     settings: NurtureSettings,
 ) -> Result<NurtureSettings, String> {
-    if settings.like_prob + settings.comment_prob > 100 {
-        return Err(format!(
-            "like_prob ({}) + comment_prob ({}) > 100",
-            settings.like_prob, settings.comment_prob
-        ));
-    }
+    validate_nurture_settings(&settings)?;
     let _admission = state.ensure_accepting_work()?;
     let prev = state.db.get_nurture_settings().unwrap_or_default();
     state.db.save_nurture_settings(&settings).map_err(err)?;
@@ -51,6 +109,109 @@ pub fn nurture_save_settings(
     Ok(settings)
 }
 
+/// Run the same grounded vision pipeline as production comment preparation,
+/// but stop after returning the prepared text. No device UI or comment sender
+/// is opened by this command.
+#[tauri::command]
+pub async fn nurture_test_api(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<NurtureApiTestResult, String> {
+    let _admission = state.ensure_accepting_work()?;
+    let udid = udid.trim().to_string();
+    if udid.is_empty() {
+        return Err("Chọn một thiết bị để test API".into());
+    }
+    let settings = state.db.get_nurture_settings().map_err(err)?;
+    if settings.api_key.trim().is_empty() {
+        return Err("API key đang trống — lưu Cấu hình AI trước khi test".into());
+    }
+    if settings.base_url.trim().is_empty() || settings.model.trim().is_empty() {
+        return Err("Base URL và model AI không được để trống".into());
+    }
+
+    let mut frames = Vec::with_capacity(3);
+    if let Some(frame) = state.streams.latest(&udid) {
+        frames.push(frame.as_ref().clone());
+    }
+    let mut stream = FrameSource::subscribe(&state.streams, &udid);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
+    while frames.len() < 3 {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, stream.next()).await {
+            Ok(Some(frame)) => frames.push(frame.as_ref().clone()),
+            Ok(None) | Err(_) => break,
+        }
+    }
+    if frames.is_empty() {
+        return Err(format!("Chưa có frame stream cho thiết bị {udid}"));
+    }
+
+    let direction = settings
+        .ai_directions
+        .split('|')
+        .map(str::trim)
+        .find(|value| !value.is_empty());
+    let (result, evidence_mode) = if riviu_core::openai_client::provider_supports_vision(&settings)
+    {
+        (
+            riviu_core::openai_client::prepare_grounded_comment(&settings, &frames, direction)
+                .await
+                .map_err(err)?,
+            "vision",
+        )
+    } else {
+        let frame = frames
+            .last()
+            .ok_or_else(|| "Chưa có frame stream cho thiết bị".to_string())?;
+        let observations = crate::interaction_ocr::recognize(frame)
+            .await
+            .map_err(|error| format!("DeepSeek chỉ nhận text và OCR caption lỗi: {error}"))?;
+        let caption = riviu_core::openai_client::ocr_caption(&observations).ok_or_else(|| {
+            "DeepSeek chỉ nhận text; chưa đọc được caption từ frame hiện tại".to_string()
+        })?;
+        let frame_sha256 = sha256_hex(frame);
+        (
+            riviu_core::openai_client::prepare_caption_comment(
+                &settings,
+                &caption,
+                &frame_sha256,
+                direction,
+            )
+            .await
+            .map_err(err)?,
+            "ocr-caption",
+        )
+    };
+
+    Ok(NurtureApiTestResult {
+        udid,
+        comment: result.text,
+        caption: result
+            .caption
+            .map(|caption| caption.chars().take(240).collect()),
+        context_confidence: result.context_confidence,
+        relevance: result.relevance,
+        evidence_support: result.evidence_support,
+        frame_sha256: result.frame_sha256,
+        model: result.model,
+        base_url_host: result.base_url_host,
+        evidence_mode: evidence_mode.into(),
+        prompt_tokens: result.prompt_tokens,
+        completion_tokens: result.completion_tokens,
+        usd: result.usd,
+    })
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
 #[tauri::command]
 pub fn nurture_list_costs(
     state: State<'_, AppState>,
@@ -59,6 +220,17 @@ pub fn nurture_list_costs(
     state
         .db
         .list_nurture_comment_costs(limit.unwrap_or(100))
+        .map_err(err)
+}
+
+#[tauri::command]
+pub fn nurture_list_comment_attempts(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<riviu_core::NurtureCommentAttempt>, String> {
+    state
+        .db
+        .list_nurture_comment_attempts(limit.unwrap_or(100))
         .map_err(err)
 }
 
@@ -91,7 +263,16 @@ pub async fn nurture_start(
         .db
         .get_nurture_settings()
         .map_err(CommandError::operation)?;
+    validate_nurture_settings(&settings).map_err(CommandError::operation)?;
     preflight_comment_job(&state.control, &udids, &settings).await?;
+    // Manual starts get a varied 2–3 hour horizon so they do not all end on
+    // the same fixed video count. Scheduled starts keep their explicit value.
+    let run_duration = duration_minutes
+        .map(|m| Duration::from_secs(m as u64 * 60))
+        .or_else(|| {
+            let jitter = chrono::Utc::now().timestamp_subsec_nanos() as u32 % 61;
+            Some(Duration::from_secs((120 + jitter) as u64 * 60))
+        });
     let started = state
         .nurture
         .start_many(
@@ -99,7 +280,7 @@ pub async fn nurture_start(
             state.nurture_engine.clone(),
             udids,
             settings,
-            duration_minutes.map(|m| Duration::from_secs(m as u64 * 60)),
+            run_duration,
         )
         .await;
     Ok(started)
@@ -263,6 +444,9 @@ impl NurtureRuntime {
                 udid: udid.clone(),
                 running: true,
                 videos_done: 0,
+                like_attempts: 0,
+                comment_attempts: 0,
+                follow_attempts: 0,
                 likes: 0,
                 comments: 0,
                 follows: 0,
@@ -296,6 +480,9 @@ impl NurtureRuntime {
                         udid: udid_clone.clone(),
                         running: false,
                         videos_done: 0,
+                        like_attempts: 0,
+                        comment_attempts: 0,
+                        follow_attempts: 0,
                         likes: 0,
                         comments: 0,
                         follows: 0,
@@ -330,6 +517,9 @@ impl NurtureRuntime {
                             udid: udid_clone.clone(),
                             running: false,
                             videos_done: 0,
+                            like_attempts: 0,
+                            comment_attempts: 0,
+                            follow_attempts: 0,
                             likes: 0,
                             comments: 0,
                             follows: 0,
@@ -458,5 +648,31 @@ mod tests {
             0,
             "comment preflight must use install-only readiness"
         );
+    }
+
+    #[test]
+    fn default_nurture_settings_pass_validation() {
+        assert!(validate_nurture_settings(&NurtureSettings::default()).is_ok());
+    }
+
+    #[test]
+    fn nurture_validation_rejects_unbounded_session_values() {
+        let mut settings = NurtureSettings::default();
+        settings.num_videos = 10_001;
+        assert!(validate_nurture_settings(&settings)
+            .expect_err("video ceiling must be bounded")
+            .contains("num_videos"));
+
+        settings = NurtureSettings::default();
+        settings.schedule_duration_minutes = 10;
+        assert!(validate_nurture_settings(&settings)
+            .expect_err("schedule burst must be human-sized")
+            .contains("schedule_duration_minutes"));
+
+        settings = NurtureSettings::default();
+        settings.watch_max = 121.0;
+        assert!(validate_nurture_settings(&settings)
+            .expect_err("watch duration must be bounded")
+            .contains("thời gian xem"));
     }
 }

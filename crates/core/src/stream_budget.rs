@@ -9,7 +9,10 @@ use uuid::Uuid;
 use crate::DeviceWorkOwner;
 
 const DEFAULT_STREAM_LIMIT: usize = 1;
-const MAXIMUM_STREAM_LIMIT: usize = 2;
+/// Upper bound for one bounded producer per phone in the planned 20-100
+/// device fleet. The desktop still defaults to two until capacity is
+/// explicitly configured for a larger farm.
+const MAXIMUM_STREAM_LIMIT: usize = 100;
 const BACKGROUND_TURN_TIMEOUT: Duration = Duration::from_secs(5);
 const BACKGROUND_FAILURE_BACKOFF: Duration = Duration::from_secs(30);
 
@@ -216,10 +219,19 @@ impl StreamBudgetManager {
     }
 
     pub fn mark_running(&self, token: Uuid) -> Result<(), StreamBudgetError> {
+        self.mark_running_at(token, Instant::now())
+    }
+
+    fn mark_running_at(&self, token: Uuid, now: Instant) -> Result<(), StreamBudgetError> {
         let mut state = self.inner.lock();
         let record = state.record_mut(token)?;
         record.state = match record.state {
-            ProducerState::BackgroundReserved => ProducerState::BackgroundRunning,
+            ProducerState::BackgroundReserved => {
+                // Reservation may cover slow agent/session bootstrap. Start the
+                // bounded background turn when the producer is actually live.
+                record.turn_deadline = Some(now + self.turn_timeout);
+                ProducerState::BackgroundRunning
+            }
             ProducerState::ForegroundReserved => ProducerState::ForegroundRunning,
             current => {
                 return Err(StreamBudgetError::InvalidTransition {
@@ -786,7 +798,7 @@ mod tests {
     use crate::DeviceWorkOwner;
 
     #[test]
-    fn defaults_to_one_and_rejects_limits_above_two() {
+    fn defaults_to_one_and_rejects_limits_above_fleet_cap() {
         let default_budget = StreamBudgetManager::default();
         assert_eq!(default_budget.configured_limit(), 1);
         assert_eq!(default_budget.turn_timeout(), Duration::from_secs(5));
@@ -796,14 +808,18 @@ mod tests {
             StreamBudgetManager::new(0),
             Err(StreamBudgetError::InvalidLimit {
                 requested: 0,
-                maximum: 2
+                maximum: 100
             })
         ));
+        assert_eq!(
+            StreamBudgetManager::new(100).unwrap().configured_limit(),
+            100
+        );
         assert!(matches!(
-            StreamBudgetManager::new(3),
+            StreamBudgetManager::new(101),
             Err(StreamBudgetError::InvalidLimit {
-                requested: 3,
-                maximum: 2
+                requested: 101,
+                maximum: 100
             })
         ));
     }
@@ -861,12 +877,13 @@ mod tests {
         let start = Instant::now();
         let first = budget.reserve_background_at("tile-a", start).unwrap();
         assert_eq!(first.turn_deadline(), start + Duration::from_secs(5));
-        budget.mark_running(first.token()).unwrap();
+        let running_at = start + Duration::from_secs(10);
+        budget.mark_running_at(first.token(), running_at).unwrap();
         assert!(!budget
-            .background_turn_due_at(first.token(), start + Duration::from_secs(4))
+            .background_turn_due_at(first.token(), running_at + Duration::from_secs(4))
             .unwrap());
         assert!(budget
-            .background_turn_due_at(first.token(), start + Duration::from_secs(5))
+            .background_turn_due_at(first.token(), running_at + Duration::from_secs(5))
             .unwrap());
 
         let stop = budget.begin_stop(first.token()).unwrap();

@@ -14,7 +14,7 @@ mod wda;
 
 pub use agent::{
     decide_install, AgentArtifact, AgentInstallDecision, AgentManifest, InstalledAppMetadata,
-    SUPPORTED_AGENT_PROTOCOL,
+    SUPPORTED_AGENT_PROTOCOL, SUPPORTED_CANDIDATE_AGENT_PROTOCOL,
 };
 pub use config::{AgentToken, DriverConfig, DriverTarget, UnifiedAgentConfig};
 pub use interaction_capabilities::load_production_registry;

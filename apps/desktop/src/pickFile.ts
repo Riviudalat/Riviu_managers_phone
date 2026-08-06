@@ -16,6 +16,17 @@ export async function pickFile(opts?: {
   return selected;
 }
 
+export async function pickDirectory(title = "Chọn thư mục nội dung"): Promise<string | null> {
+  const selected = await open({
+    multiple: false,
+    directory: true,
+    title,
+  });
+  if (selected == null) return null;
+  if (Array.isArray(selected)) return selected[0] ?? null;
+  return selected;
+}
+
 export async function pickIpa(): Promise<string | null> {
   return pickFile({
     title: "Chọn IPA",

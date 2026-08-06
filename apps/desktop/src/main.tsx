@@ -4,8 +4,18 @@ import "@xyflow/react/dist/style.css";
 import "./index.css";
 import App from "./App.tsx";
 
-createRoot(document.getElementById("root")!).render(
+const rootElement = document.getElementById("root")!;
+createRoot(rootElement).render(
   <StrictMode>
     <App />
   </StrictMode>,
 );
+
+const removeBootMarkerWhenMounted = () => {
+  if (rootElement.childElementCount > 0) {
+    document.getElementById("boot-marker")?.remove();
+    return;
+  }
+  window.requestAnimationFrame(removeBootMarkerWhenMounted);
+};
+window.requestAnimationFrame(removeBootMarkerWhenMounted);

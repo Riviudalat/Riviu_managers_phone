@@ -1,5 +1,5 @@
 import type { DeviceInfo } from "../types";
-import { IconHeart, IconPhone, IconRefresh } from "./Icons";
+import { IconChat, IconHeart, IconPhone, IconRefresh } from "./Icons";
 
 interface Props {
   selected: DeviceInfo[];
@@ -10,6 +10,8 @@ interface Props {
   onRefresh: () => void | Promise<void>;
   onNurture: () => void;
   nurtureOpen: boolean;
+  onInteraction: () => void;
+  interactionOpen: boolean;
   syncOn: boolean;
 }
 
@@ -22,6 +24,8 @@ export function ProfileToolbar({
   onRefresh,
   onNurture,
   nurtureOpen,
+  onInteraction,
+  interactionOpen,
   syncOn,
 }: Props) {
   const startable = selected.filter(
@@ -93,6 +97,15 @@ export function ProfileToolbar({
       >
         <IconHeart size={15} />
         Nuôi TT
+      </button>
+      <button
+        type="button"
+        className={`tb-btn ${interactionOpen ? "active" : ""}`}
+        onClick={onInteraction}
+        title="Tương tác comment theo link TikTok"
+      >
+        <IconChat size={15} />
+        Tương tác
       </button>
       <div className="grow" />
       <button type="button" className="tb-btn refresh" onClick={() => void onRefresh()} title="Refresh">

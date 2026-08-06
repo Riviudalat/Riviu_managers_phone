@@ -1,0 +1,8 @@
+{"comments":0,"elapsed_s":71.621778625,"follows":0,"kind":"run","likes":0,"slowest_request_ms":857,"summary":"partial — 1 video, 0 tim, 0 bình luận, 0 follow, 0 popup đóng, 0 recovery, 72s, kết thúc ở TikTok, lỗi cuối: swipe không đổi frame","udid":"a99f4bd9f877b2a0e3682ee24fd1c68f75ba6982","usd":0.0,"videos":1}
+{"kind":"endpoint","line":"interaction.openUrl.standard n=1    p50=111ms  p95=111ms  max=111ms  ok"}
+{"kind":"endpoint","line":"session.create             n=2    p50=9ms    p95=9ms    max=9ms    ok"}
+{"kind":"endpoint","line":"session.prime              n=2    p50=8ms    p95=9ms    max=9ms    ok"}
+{"kind":"endpoint","line":"swipe.native               n=8    p50=800ms  p95=857ms  max=857ms  ok"}
+{"kind":"endpoint","line":"wda.locked                 n=4    p50=4ms    p95=9ms    max=9ms    ok"}
+{"detail":"ok","event":"launch_app","kind":"event","ms":574}
+{"detail":"ok","event":"launch_app","kind":"event","ms":614}

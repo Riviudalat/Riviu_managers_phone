@@ -1,0 +1,252 @@
+{
+  "candidate": {
+    "artifactId": "riviu-agent-ios-candidate",
+    "artifactVersion": "0.2.0-text",
+    "attestationBundle": "PlugIns/WebDriverAgentRunner.xctest",
+    "bundleBuild": "2",
+    "bundleId": "com.riviu.managersphone.agent.xctrunner",
+    "bundleVersion": "1.0",
+    "executable": "WebDriverAgentRunner-Runner",
+    "features": [
+      "stream",
+      "tap",
+      "swipe",
+      "clipboard"
+    ],
+    "ipaMetadataBound": true,
+    "ipaSha256": "45b98dda18ad403b2fdeb547e239a3594506944e1235d8e99345cd7450158389",
+    "manifestSha256": "add83bb13e5329ef8dd5a6395bac15d4e0abdc9a001b9fc9ec3eae227cf9a14b",
+    "payloadApp": "WebDriverAgentRunner-Runner.app",
+    "protocolVersion": 2,
+    "signatureIdentifier": "com.riviu.managersphone.agent.xctrunner",
+    "signerIdentitySha256": "7fc96cec369760226c75338e985f01998cfe4708c766fbd2ec46c0967fb6b104",
+    "signerTeamId": "FTWFKDVD7D",
+    "sourceSha256": "c54c85ab5abafd6465dfa7f40933bf525d8016c928680d9f4153d9972115cf93",
+    "xcconfigSha256": "2bed5a711927df27a86b2e2f7237bad99406b3cbbf5fccb09f8ce03fc58f53ae",
+    "xcode": {
+      "build": "17F113",
+      "version": "26.6"
+    }
+  },
+  "device": {
+    "applicationType": "User",
+    "bundleBuild": "2",
+    "bundleId": "com.riviu.managersphone.agent.xctrunner",
+    "bundleVersion": "1.0",
+    "freshInstall": false,
+    "iOSVersion": "16.7.16",
+    "identityMatch": true,
+    "installationMode": "trusted_upgrade",
+    "payloadApp": "WebDriverAgentRunner-Runner.app",
+    "productType": "iPhone10,1",
+    "signerIdentitySha256": "7fc96cec369760226c75338e985f01998cfe4708c766fbd2ec46c0967fb6b104",
+    "signerTeamId": "FTWFKDVD7D"
+  },
+  "environment": "SUPPLEMENTAL_MAC_DEVICE",
+  "gateB": "SUPPLEMENTAL_ONLY",
+  "gateC": "SUPPLEMENTAL_ONLY",
+  "gateStatus": "SUPPLEMENTAL_ONLY",
+  "generatedAt": "2026-08-05T10:19:50.147884+00:00",
+  "measurements": {
+    "argvTokenScanClean": true,
+    "authStatusesByLaunch": [
+      {
+        "correct": 200,
+        "missing": 401,
+        "wrong": 401
+      },
+      {
+        "correct": 200,
+        "missing": 401,
+        "wrong": 401
+      },
+      {
+        "correct": 200,
+        "missing": 401,
+        "wrong": 401
+      },
+      {
+        "correct": 200,
+        "missing": 401,
+        "wrong": 401
+      },
+      {
+        "correct": 200,
+        "missing": 401,
+        "wrong": 401
+      }
+    ],
+    "candidateFreshInstalled": false,
+    "cleanupVerified": false,
+    "clipboardAgentForegroundIdentityVerified": false,
+    "clipboardAgentForegroundPidStable": false,
+    "clipboardByteExact": 0,
+    "coldLaunchOrder": [
+      [
+        "launch",
+        "health",
+        "foreground",
+        "session",
+        "mjpeg"
+      ],
+      [
+        "launch",
+        "health",
+        "foreground",
+        "session",
+        "mjpeg"
+      ],
+      [
+        "launch",
+        "health",
+        "foreground",
+        "session",
+        "mjpeg"
+      ],
+      [
+        "launch",
+        "health",
+        "foreground",
+        "session",
+        "mjpeg"
+      ],
+      [
+        "launch",
+        "health",
+        "foreground",
+        "session",
+        "mjpeg"
+      ]
+    ],
+    "coldLaunchProcessWitnesses": [
+      {
+        "newPidFingerprint": "a142832c40dfb4b2",
+        "newProcessVerified": true,
+        "oldProcessObserved": false,
+        "processAbsentBeforeLaunch": true
+      },
+      {
+        "newPidFingerprint": "c1fcf0cd023db10f",
+        "newProcessVerified": true,
+        "oldProcessObserved": true,
+        "processAbsentBeforeLaunch": true
+      },
+      {
+        "newPidFingerprint": "ad7a0849a3ea6e33",
+        "newProcessVerified": true,
+        "oldProcessObserved": true,
+        "processAbsentBeforeLaunch": true
+      },
+      {
+        "newPidFingerprint": "61dd8cd59a50bdae",
+        "newProcessVerified": true,
+        "oldProcessObserved": true,
+        "processAbsentBeforeLaunch": true
+      },
+      {
+        "newPidFingerprint": "88831144c552348a",
+        "newProcessVerified": true,
+        "oldProcessObserved": true,
+        "processAbsentBeforeLaunch": true
+      }
+    ],
+    "coldLaunchSuccesses": 5,
+    "failures": [
+      "HTTP POST /session/F5696606-EB2C-4D5B-ABA9-61CA031C8F83/element failed",
+      "cleanup verification failed"
+    ],
+    "firstJpegCount": 5,
+    "gestureControlFrames": 8,
+    "gestureControlSamples": 2,
+    "installedIdentityMatch": true,
+    "ipaTokenScanClean": true,
+    "logTokenScanClean": true,
+    "manifestTokenScanClean": true,
+    "manualTrustPauseCompleted": false,
+    "manualTrustPauseRequested": false,
+    "minimumSwipeVisualMargin": null,
+    "minimumTapVisualMargin": 21.593,
+    "mjpegAuthStatusesByLaunch": [
+      {
+        "correct": 200,
+        "missing": 401,
+        "wrong": 401
+      },
+      {
+        "correct": 200,
+        "missing": 401,
+        "wrong": 401
+      },
+      {
+        "correct": 200,
+        "missing": 401,
+        "wrong": 401
+      },
+      {
+        "correct": 200,
+        "missing": 401,
+        "wrong": 401
+      },
+      {
+        "correct": 200,
+        "missing": 401,
+        "wrong": 401
+      }
+    ],
+    "reportTokenScanClean": true,
+    "sessionCommandSuccesses": 5,
+    "sessionFingerprints": [
+      "140f98f281dc87a1",
+      "746f3399fce03b56",
+      "5aaaf90ff52118c9",
+      "1fb988ab7151fa38",
+      "890e2d49c7049a5d"
+    ],
+    "settingsActiveChecks": 5,
+    "sourceTokenScanClean": true,
+    "statusIdentitySuccesses": 5,
+    "streamControlChecks": 0,
+    "streamFrames": 0,
+    "streamInvalidFrames": 0,
+    "streamMaxControlCompletionGapSeconds": null,
+    "streamMaxControlCycleSeconds": null,
+    "streamMaxControlScheduleLatenessSeconds": null,
+    "streamMaxFrameGapSeconds": null,
+    "streamObservedSeconds": 0.0,
+    "streamReconnects": 0,
+    "streamSessionChecks": 0,
+    "swipeCausalChanges": 0,
+    "swipeForwardCausalChanges": 0,
+    "swipeReverseCausalChanges": 0,
+    "tapCausalChanges": 2,
+    "tapSemanticToggles": 2,
+    "unicodeKeysReadBack": false,
+    "xcconfigTokenScanClean": true
+  },
+  "requirements": {
+    "additionalControlFramesPerAction": 3,
+    "coldLaunches": 5,
+    "controlFrameSamplesPerAction": 4,
+    "controlIntervalSeconds": 5.0,
+    "maximumControlCompletionGapSeconds": 5.5,
+    "maximumControlCycleSeconds": 5.0,
+    "maximumControlScheduleLatenessSeconds": 0.5,
+    "maximumFrameGapSeconds": 2.0,
+    "maximumStreamReconnects": 1,
+    "minimumControlChecks": 60,
+    "minimumStreamFps": 1.0,
+    "streamSeconds": 300.0,
+    "swipeCausalSuccesses": 20,
+    "tapCausalSuccesses": 50,
+    "visualEvidence": {
+      "activeBundleCheckedBeforeAndAfter": true,
+      "causalMargin": 3.0,
+      "control": "maximum pairwise delta across preceding no-action frames",
+      "metric": "meanAbsoluteLumaDelta32x32",
+      "minimumDelta": 6.0,
+      "surface": "Settings",
+      "tapSemanticTarget": "XCUIElementTypeSwitch"
+    }
+  },
+  "schemaVersion": 2
+}

@@ -1,0 +1,17 @@
+--- a/WebDriverAgentLib/Commands/FBCustomCommands.m
++++ b/WebDriverAgentLib/Commands/FBCustomCommands.m
+@@ -585,8 +585,9 @@
+       // gone.
+       if (permissionTapAttempts < 4 && [[NSDate date] compare:nextPermissionTap] != NSOrderedAscending) {
+-        CGSize screenSize = XCUIApplication.fb_systemApplication.wdFrame.size;
+-        if (screenSize.width <= 0.0 || screenSize.height <= 0.0) {
+-          screenSize = UIScreen.mainScreen.bounds.size;
+-        }
++        // SpringBoard's accessibility frame can describe the underlying
++        // TikTok window while its permission sheet is foreground. Use the
++        // process screen bounds first so the native event lands on the full
++        // access action in the 375x667 logical portrait fixture.
++        CGSize screenSize = UIScreen.mainScreen.bounds.size;
+         if (screenSize.width <= 0.0 || screenSize.height <= 0.0) {
+           screenSize = CGSizeMake(375.0, 667.0);
+         }

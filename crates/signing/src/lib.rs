@@ -15,7 +15,9 @@ use tokio::process::Command;
 use credentials::{APPLE_EMAIL_ACCOUNT, APPLE_PASSWORD_ACCOUNT};
 
 fn background_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
-    let mut command = Command::new(program);
+    let command = Command::new(program);
+    #[cfg(windows)]
+    let mut command = command;
     #[cfg(windows)]
     {
         use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;

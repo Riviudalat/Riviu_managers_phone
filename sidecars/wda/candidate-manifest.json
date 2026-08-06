@@ -1,0 +1,37 @@
+{
+  "artifactId": "riviu-agent-ios-candidate",
+  "artifactVersion": "0.5.8-media-text",
+  "attestationBundle": "PlugIns/WebDriverAgentRunner.xctest",
+  "bundleBuild": "14",
+  "bundleId": "com.riviu.managersphone.agent.xctrunner",
+  "bundleVersion": "1.0",
+  "controlPort": 8916,
+  "executable": "WebDriverAgentRunner-Runner",
+  "features": [
+    "stream",
+    "tap",
+    "swipe",
+    "clipboard",
+    "text",
+    "pushMedia"
+  ],
+  "gateStatus": "PENDING_MAC_DEVICE",
+  "ipa": "RiviuAgent-candidate.ipa",
+  "logicalHeight": 667,
+  "logicalWidth": 375,
+  "mjpegPort": 9094,
+  "objectiveCUnitTests": "PASS",
+  "payloadApp": "WebDriverAgentRunner-Runner.app",
+  "protocolVersion": 2,
+  "schemaVersion": 1,
+  "sha256": "e86e77abe14d7190090b19e8e88c2a9b14417caac5ec18c604ab4ebb9a2e7d51",
+  "signatureIdentifier": "com.riviu.managersphone.agent.xctrunner",
+  "signerIdentity": "Apple Development: thaotrinh04091999@gmail.com (T3UQHS3K9F)",
+  "signerTeamId": "FTWFKDVD7D",
+  "sourceSha256": "4c7465251a31469c5b90edfb56defa988f7f80f69b1278c3027366722304d915",
+  "xcconfigSha256": "2bed5a711927df27a86b2e2f7237bad99406b3cbbf5fccb09f8ce03fc58f53ae",
+  "xcode": {
+    "build": "17F113",
+    "version": "26.6"
+  }
+}

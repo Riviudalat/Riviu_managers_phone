@@ -1,0 +1,8 @@
+{"comments":0,"elapsed_s":317.918278959,"follows":0,"kind":"run","likes":0,"slowest_request_ms":712,"summary":"done — 1 video, 0 tim, 0 bình luận, 0 follow, 0 popup đóng, 0 recovery, 318s, KHÔNG ở TikTok lúc kết thúc","udid":"a99f4bd9f877b2a0e3682ee24fd1c68f75ba6982","usd":0.0,"videos":1}
+{"kind":"endpoint","line":"apps.activate              n=1    p50=63ms   p95=63ms   max=63ms   session=1"}
+{"kind":"endpoint","line":"homescreen                 n=1    p50=163ms  p95=163ms  max=163ms  ok"}
+{"kind":"endpoint","line":"session.create             n=1    p50=9ms    p95=9ms    max=9ms    ok"}
+{"kind":"endpoint","line":"session.prime              n=1    p50=9ms    p95=9ms    max=9ms    ok"}
+{"kind":"endpoint","line":"swipe.native               n=1    p50=712ms  p95=712ms  max=712ms  ok"}
+{"kind":"endpoint","line":"wda.locked                 n=3    p50=5ms    p95=9ms    max=9ms    ok"}
+{"detail":"ok","event":"launch_app","kind":"event","ms":601}

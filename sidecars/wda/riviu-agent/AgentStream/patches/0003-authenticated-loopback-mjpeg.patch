@@ -10,18 +10,23 @@ index 90a9b8b91d72906573dab29636096ce3ad944e6d..8cc800755e83f88dedb9adb7907569ef
  #import "FBXCodeCompatibility.h"
  #import "XCUIApplication+FBHelpers.h"
  #import "XCUIApplication+FBQuiescence.h"
-@@ -223,13 +224,16 @@
+@@ -223,13 +224,21 @@
  
  + (NSDictionary<NSString *, id> *)riviuAgentIdentity
  {
++  NSMutableArray<NSString *> *features = [@[@"stream", @"tap", @"swipe", @"clipboard"] mutableCopy];
++  if ([NSProcessInfo.processInfo.environment[@"RIVIU_AGENT_TEXT_CAPABLE"] isEqualToString:@"1"]) {
++    [features addObject:@"text"];
++  }
 +  BOOL streamReady = FBRiviuAgentStreamIsReady();
++  if (!streamReady) {
++    [features removeObject:@"stream"];
++  }
    return @{
      @"agentVersion": @"0.1.0",
      @"protocolVersion": @2,
 -    @"features": @[@"stream", @"tap", @"swipe", @"clipboard"],
-+    @"features": streamReady
-+      ? @[@"stream", @"tap", @"swipe", @"clipboard"]
-+      : @[@"tap", @"swipe", @"clipboard"],
++    @"features": features.copy,
      @"logicalWidth": @375,
      @"logicalHeight": @667,
 -    @"state": @"ready",
@@ -72,7 +77,7 @@ index 9c2552d9a8e44e4f3a5cd55eac23dfb67e4dead0..e9a2f370d9f280bd437ceb8f90b254f7
 +++ b/WebDriverAgentLib/Routing/FBWebServer.h
 @@ -23,6 +23,9 @@ FOUNDATION_EXPORT BOOL FBRiviuRequestIsAuthorized(NSString *method,
                                                    NSString *path,
-                                                   nullable NSString *providedToken,
+                                                   NSString * _Nullable providedToken,
                                                    NSData *expectedToken);
 +FOUNDATION_EXPORT NSData *FBRiviuExpectedAgentToken(void);
 +FOUNDATION_EXPORT BOOL FBRiviuAgentStreamIsReady(void);

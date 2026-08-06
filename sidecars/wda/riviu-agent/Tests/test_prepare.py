@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import base64
 import hashlib
 import importlib.util
@@ -387,7 +389,12 @@ class RealOverlayTests(unittest.TestCase):
                 output / "WebDriverAgentLib" / "Routing" / "FBWebServer.m"
             ).read_text(encoding="utf-8")
 
-            self.assertEqual(result.patch_count, 5)
+            expected_patch_count = len(
+                json.loads((ROOT / "baseline-lock.json").read_text(encoding="utf-8"))[
+                    "patches"
+                ]
+            )
+            self.assertEqual(result.patch_count, expected_patch_count)
             self.assertIn("FBRiviuConstantTimeDataEqual", server)
             self.assertIn("FBRiviuRequestIsAuthenticationExempt", server)
             self.assertIn("RIVIU_AGENT_TOKEN", server)
@@ -439,8 +446,8 @@ class RealOverlayTests(unittest.TestCase):
             self.assertIn('@"riviuAgent"', session)
             for feature in ('@"stream"', '@"tap"', '@"swipe"', '@"clipboard"'):
                 self.assertIn(feature, session)
-            self.assertNotIn('@"text"', session)
-            self.assertNotIn('@"pushMedia"', session)
+            self.assertIn('RIVIU_AGENT_TEXT_CAPABLE', session)
+            self.assertIn('RIVIU_AGENT_MEDIA_CAPABLE', session)
             self.assertIn("testRiviuStatusRouteIsTheOnlyAuthenticationExemption", route_tests)
             self.assertIn("testRiviuAuthenticationTruthTable", route_tests)
 
@@ -553,7 +560,12 @@ class RealOverlayTests(unittest.TestCase):
             info_path = output / "WebDriverAgentRunner" / "Info.plist"
             info = plistlib.loads(info_path.read_bytes())
 
-            self.assertEqual(5, result.patch_count)
+            expected_patch_count = len(
+                json.loads((ROOT / "baseline-lock.json").read_text(encoding="utf-8"))[
+                    "patches"
+                ]
+            )
+            self.assertEqual(expected_patch_count, result.patch_count)
             self.assertEqual(
                 "$(RIVIU_AGENT_SOURCE_SHA256)", info["RiviuAgentSourceSHA256"]
             )

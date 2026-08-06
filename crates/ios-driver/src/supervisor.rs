@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -253,9 +254,12 @@ impl OwnedChild {
             self.registry.forget(&self.udid, self.role);
             return true;
         };
-        let _ = child.start_kill();
+        // `kill()` both sends SIGKILL and waits for the child.  A stream sidecar
+        // can be blocked in an async USB read; the old start_kill + five-second
+        // wait left the child owned after the deadline and made foreground
+        // preemption fail closed while the campaign stayed in-flight.
         let stopped = matches!(
-            tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await,
+            tokio::time::timeout(std::time::Duration::from_secs(15), child.kill()).await,
             Ok(Ok(_))
         );
         if stopped {
@@ -288,6 +292,14 @@ pub struct DeviceOwned {
     pub wda_port: Option<u16>,
     pub proxy: Option<OwnedChild>,
     pub stream: Option<OwnedChild>,
+    /// Generation that the owned stream child publishes into. A parked
+    /// producer advances the hub generation; never reuse a still-running
+    /// child from the previous generation.
+    pub stream_generation: Option<u64>,
+    /// Set by the stdout reader while it can still publish frames. A sidecar
+    /// may remain alive briefly after its pipe closes, so process liveness
+    /// alone is not enough to decide whether a stream can be reused.
+    pub stream_reader_alive: Option<Arc<AtomicBool>>,
     /// Next proxy spawn must kill and restart the device-side runner. Set only
     /// after a *confirmed* wedge: a runner that answers `/status` but cannot
     /// gesture. Never set from a health probe alone.

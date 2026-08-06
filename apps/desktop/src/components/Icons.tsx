@@ -230,6 +230,15 @@ export function IconHeart({ size = 18, className }: IconProps) {
   );
 }
 
+export function IconChat({ size = 18, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <path d="M5 5.5h14a2 2 0 012 2v8a2 2 0 01-2 2H11l-4.5 3v-3H5a2 2 0 01-2-2v-8a2 2 0 012-2z" stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round" />
+      <path d="M7.5 10h9M7.5 13h6" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export const MENU_ICONS: Record<string, (p: IconProps) => ReactElement> = {
   control: IconGrid,
   groups: IconUsers,

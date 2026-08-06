@@ -7,6 +7,9 @@ CONTRACT_PATH = Path(__file__).resolve().parents[1] / "Contracts" / "control-v2.
 NATIVE_INPUT_PATH = (
     Path(__file__).resolve().parents[1] / "Contracts" / "native-input-v1.json"
 )
+MEDIA_CONTRACT_PATH = (
+    Path(__file__).resolve().parents[1] / "Contracts" / "media-v1.json"
+)
 
 
 class ControlContractTests(unittest.TestCase):
@@ -258,9 +261,26 @@ class ControlContractTests(unittest.TestCase):
         self.assertEqual("string", set_schema["properties"]["contentType"]["type"])
         self.assertIs(False, set_schema["additionalProperties"])
         self.assertIs(False, get_route["requestSchema"]["additionalProperties"])
+
         self.assertEqual("base64", get_route["responseSchema"]["properties"]["value"]["encoding"])
         self.assertIs(True, get_route["responseSchema"]["properties"]["value"]["byteExact"])
         self.assertIs(True, self.contract["lifecycle"]["clipboardRuntimeSchemaValidation"])
+
+    def test_media_contract_is_implemented_but_not_promoted_by_default(self):
+        media = json.loads(MEDIA_CONTRACT_PATH.read_text(encoding="utf-8"))
+        self.assertEqual("candidate-route", media["status"])
+        self.assertEqual("pushMedia", media["feature"])
+        self.assertFalse(media["promotionGate"]["advertiseFeatureBeforeGate"])
+        self.assertEqual(["size", "sha256"], media["transport"]["readback"])
+        self.assertEqual(
+            {
+                "POST /riviu/media/v1/prepare",
+                "GET /riviu/media/v1/prepare/{importId}",
+                "POST /riviu/media/v1/import",
+                "DELETE /riviu/media/v1/import/{importId}",
+            },
+            {f'{route["method"]} {route["path"]}' for route in media["routes"]},
+        )
 
     def test_lifecycle_and_error_semantics_are_explicit(self):
         lifecycle = self.contract["lifecycle"]

@@ -1,0 +1,17 @@
+--- a/WebDriverAgentLib/Commands/FBCustomCommands.m
++++ b/WebDriverAgentLib/Commands/FBCustomCommands.m
+@@ -579,7 +579,13 @@
+       // gone.
+       if (permissionTapAttempts < 4 && [[NSDate date] compare:nextPermissionTap] != NSOrderedAscending) {
+         CGSize screenSize = XCUIApplication.fb_systemApplication.wdFrame.size;
+-        if (screenSize.width > 0.0 && screenSize.height > 0.0) {
++        if (screenSize.width <= 0.0 || screenSize.height <= 0.0) {
++          screenSize = UIScreen.mainScreen.bounds.size;
++        }
++        if (screenSize.width <= 0.0 || screenSize.height <= 0.0) {
++          screenSize = CGSizeMake(375.0, 667.0);
++        }
++        if (screenSize.width > 0.0 && screenSize.height > 0.0) {
+           NSError *tapError = nil;
+           BOOL tapped = [self riviuMediaTapPoint:
+                          CGPointMake(screenSize.width * 0.50, screenSize.height * 0.61)

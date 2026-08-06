@@ -213,6 +213,104 @@ export interface PublishTask {
   createdAt: string;
 }
 
+export type PublishCampaignState =
+  | "queued"
+  | "scheduled"
+  | "preparing"
+  | "ready"
+  | "transferring"
+  | "imported"
+  | "posting"
+  | "verifying"
+  | "succeeded"
+  | "failedBeforeDispatch"
+  | "uncertain"
+  | "cancelled"
+  | "missed";
+
+export interface PublishImage {
+  path: string;
+  fileName: string;
+  order: number;
+  sha256: string;
+  byteLen: number;
+  width: number;
+  height: number;
+}
+
+export interface PublishBundle {
+  id: string;
+  sourcePath: string;
+  name: string;
+  mediaKind: "image";
+  images: PublishImage[];
+  captionPath: string;
+  caption: string;
+  captionSha256: string;
+  totalBytes: number;
+}
+
+export interface PublishScanNotice {
+  severity: "warning" | "error";
+  path: string;
+  message: string;
+}
+
+export interface PublishFolderManifest {
+  sourceRoot: string;
+  scannedAt: string;
+  bundles: PublishBundle[];
+  notices: PublishScanNotice[];
+  ignoredPartnerFiles: number;
+  ignoredHiddenFiles: number;
+}
+
+export interface PublishAssignmentPlan {
+  bundleId: string;
+  udid: string;
+  ordinal: number;
+}
+
+export interface PublishCampaignRecord {
+  id: string;
+  requestId: string;
+  sourceRoot: string;
+  state: PublishCampaignState;
+  runAt?: string | null;
+  visibility: "public";
+  cleanupPolicy: "deleteImportedAssetsAfterVerified";
+  assignments: PublishAssignmentPlan[];
+  createdAt: string;
+  updatedAt: string;
+  errorCode?: string | null;
+}
+
+export interface PublishAssignmentRecord {
+  id: string;
+  campaignId: string;
+  bundleId: string;
+  ordinal: number;
+  udid: string;
+  state: PublishCampaignState;
+  effectIntent?: string | null;
+  evidenceJson?: string | null;
+  errorCode?: string | null;
+}
+
+export interface PublishEventRecord {
+  revision: number;
+  kind: string;
+  payloadJson: string;
+  createdAt: string;
+}
+
+export interface PublishCampaignDetail {
+  campaign: PublishCampaignRecord;
+  bundles: PublishBundle[];
+  assignments: PublishAssignmentRecord[];
+  events: PublishEventRecord[];
+}
+
 export interface OpLog {
   id: string;
   action: string;
@@ -279,6 +377,23 @@ export interface NurtureSettings {
   scheduleEveryMinutes: number;
   scheduleDurationMinutes: number;
   scheduleUdids: string[];
+  steadyMood?: string;
+}
+
+export interface NurtureApiTestResult {
+  udid: string;
+  comment: string;
+  caption: string | null;
+  contextConfidence: number;
+  relevance: number;
+  evidenceSupport: number;
+  frameSha256: string;
+  model: string;
+  baseUrlHost: string;
+  evidenceMode: string;
+  promptTokens: number;
+  completionTokens: number;
+  usd: number;
 }
 
 export interface NurtureCommentCost {
@@ -293,10 +408,32 @@ export interface NurtureCommentCost {
   createdAt: string;
 }
 
+export interface NurtureCommentAttempt {
+  id: string;
+  udid: string;
+  outcome: string;
+  source: string;
+  model: string;
+  baseUrlHost: string;
+  promptTokens: number;
+  completionTokens: number;
+  usd: number;
+  preview: string;
+  captionPreview: string;
+  frameSha256: string;
+  contextConfidence?: number;
+  relevance?: number;
+  evidenceSupport?: number;
+  createdAt: string;
+}
+
 export interface NurtureSessionStatus {
   udid: string;
   running: boolean;
   videosDone: number;
+  likeAttempts: number;
+  commentAttempts: number;
+  followAttempts: number;
   likes: number;
   comments: number;
   follows: number;
@@ -309,6 +446,104 @@ export interface NurtureCostSummary {
   totalUsd: number;
   todayComments: number;
   totalComments: number;
+}
+
+export type TikTokPostKind = "video" | "photo";
+export type LinkErrorCode =
+  | "empty"
+  | "invalidUrl"
+  | "unsupportedScheme"
+  | "unsupportedHost"
+  | "userInfoNotAllowed"
+  | "customPortNotAllowed"
+  | "unsupportedTargetKind"
+  | "unresolvedShortLink";
+
+export interface ResolvedTikTokTarget {
+  originalUrl: string;
+  normalizedUrl: string;
+  targetKey: string;
+  contentId: string;
+  author: string;
+  kind: TikTokPostKind;
+}
+
+export interface TikTokLinkLine {
+  lineNo: number;
+  original: string;
+  target: ResolvedTikTokTarget | null;
+  error: LinkErrorCode | null;
+}
+
+export interface ThreadCampaignRequest {
+  requestId: string;
+  targets: ResolvedTikTokTarget[];
+  actorUdids: string[];
+  messageCount: number;
+  instruction: string;
+  maxWords: number;
+}
+
+export type ThreadMessageState =
+  | "queued"
+  | "preparing"
+  | "ready"
+  | "sending"
+  | "succeeded"
+  | "failed"
+  | "uncertain"
+  | "skippedParent";
+export type ThreadCampaignState =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "partial"
+  | "failed"
+  | "cancelled";
+
+export interface InteractionCampaignSummary {
+  id: string;
+  requestId: string;
+  state: ThreadCampaignState;
+  messageCount: number;
+  targetCount: number;
+  succeededMessages: number;
+  failedMessages: number;
+  updatedAt: string;
+}
+
+export interface InteractionAssignmentRecord {
+  id: string;
+  targetKey: string;
+  ordinal: number;
+  actorUdid: string;
+  parentAssignmentId: string | null;
+  state: ThreadMessageState;
+  preparedText: string | null;
+  errorCode: string | null;
+}
+
+export interface InteractionCampaignDetail {
+  summary: InteractionCampaignSummary;
+  assignments: InteractionAssignmentRecord[];
+}
+
+export interface ThreadPlanAssignment {
+  targetKey: string;
+  ordinal: number;
+  actorUdid: string;
+  parentOrdinal: number | null;
+}
+
+export interface ThreadPlan {
+  requestId: string;
+  assignments: ThreadPlanAssignment[];
+}
+
+export interface ThreadPreview {
+  lines: TikTokLinkLine[];
+  plan: ThreadPlan | null;
+  validTargetCount: number;
 }
 
 export type JsonValue = string | number | boolean | null | JsonObject | JsonValue[];

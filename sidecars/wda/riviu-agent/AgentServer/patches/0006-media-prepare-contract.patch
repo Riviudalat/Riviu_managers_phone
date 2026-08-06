@@ -1,0 +1,239 @@
+diff --git a/WebDriverAgentLib/Commands/FBCustomCommands.m b/WebDriverAgentLib/Commands/FBCustomCommands.m
+index c8c110e..f2dfbc7 100644
+--- a/WebDriverAgentLib/Commands/FBCustomCommands.m
++++ b/WebDriverAgentLib/Commands/FBCustomCommands.m
+@@ -8,6 +8,7 @@
+ 
+ #import "FBCustomCommands.h"
+ 
++#import <CommonCrypto/CommonDigest.h>
+ #import <XCTest/XCUIDevice.h>
+ #import <CoreLocation/CoreLocation.h>
+ 
+@@ -57,6 +58,8 @@ + (NSArray *)routes
+     [[FBRoute POST:@"/wda/setPasteboard"].withoutSession respondWithTarget:self action:@selector(handleSetPasteboard:)],
+     [[FBRoute POST:@"/wda/getPasteboard"] respondWithTarget:self action:@selector(handleGetPasteboard:)],
+     [[FBRoute POST:@"/wda/getPasteboard"].withoutSession respondWithTarget:self action:@selector(handleGetPasteboard:)],
++    [[FBRoute POST:@"/riviu/media/v1/prepare"].withoutSession respondWithTarget:self action:@selector(handleRiviuMediaPrepare:)],
++    [[FBRoute GET:@"/riviu/media/v1/prepare/:importId"].withoutSession respondWithTarget:self action:@selector(handleRiviuMediaStatus:)],
+     [[FBRoute GET:@"/wda/batteryInfo"] respondWithTarget:self action:@selector(handleGetBatteryInfo:)],
+ #endif
+     [[FBRoute POST:@"/wda/pressButton"] respondWithTarget:self action:@selector(handlePressButtonCommand:)],
+@@ -241,6 +244,166 @@ + (NSDictionary *)processArguments:(XCUIApplication *)app
+ }
+ 
+ #if !TARGET_OS_TV
+++ (BOOL)riviuMediaSafeComponent:(id)value
++{
++  if (![value isKindOfClass:NSString.class]) {
++    return NO;
++  }
++  NSString *component = (NSString *)value;
++  if (component.length == 0 || component.length > 128 || [component isEqualToString:@"."] || [component isEqualToString:@".."]) {
++    return NO;
++  }
++  for (NSUInteger index = 0; index < component.length; index++) {
++    unichar character = [component characterAtIndex:index];
++    BOOL allowed = (character >= 'a' && character <= 'z') ||
++                   (character >= 'A' && character <= 'Z') ||
++                   (character >= '0' && character <= '9') ||
++                   character == '.' || character == '_' || character == '-';
++    if (!allowed) {
++      return NO;
++    }
++  }
++  return YES;
++}
++
+++ (NSString *)riviuMediaSha256Hex:(NSData *)data
++{
++  unsigned char digest[CC_SHA256_DIGEST_LENGTH];
++  CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
++  NSMutableString *result = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
++  for (NSUInteger index = 0; index < CC_SHA256_DIGEST_LENGTH; index++) {
++    [result appendFormat:@"%02x", digest[index]];
++  }
++  return result.copy;
++}
++
+++ (BOOL)riviuMediaSha256:(NSString *)value
++{
++  if (![value isKindOfClass:NSString.class] || value.length != CC_SHA256_DIGEST_LENGTH * 2) {
++    return NO;
++  }
++  for (NSUInteger index = 0; index < value.length; index++) {
++    unichar character = [value characterAtIndex:index];
++    BOOL hex = (character >= '0' && character <= '9') ||
++               (character >= 'a' && character <= 'f');
++    if (!hex) {
++      return NO;
++    }
++  }
++  return YES;
++}
++
+++ (NSString *)riviuMediaRootForCampaign:(NSString *)campaignId
++{
++  return [[[[NSHomeDirectory() stringByAppendingPathComponent:@"Documents"]
++             stringByAppendingPathComponent:@"Riviu"]
++             stringByAppendingPathComponent:@"Publish"]
++             stringByAppendingPathComponent:campaignId];
++}
++
+++ (id<FBResponsePayload>)riviuMediaInvalid:(NSString *)message
++{
++  return FBResponseWithStatus([FBCommandStatus invalidArgumentErrorWithMessage:message traceback:nil]);
++}
++
+++ (id<FBResponsePayload>)riviuMediaPrepareResponseForCampaign:(NSString *)campaignId
++                                                  manifestSha256:(NSString *)expectedManifestSha256
++{
++  if (![self riviuMediaSafeComponent:campaignId] || ![self riviuMediaSha256:expectedManifestSha256]) {
++    return [self riviuMediaInvalid:@"campaignId or manifestSha256 does not match media-v1"];
++  }
++
++  NSString *root = [self riviuMediaRootForCampaign:campaignId];
++  NSString *manifestPath = [root stringByAppendingPathComponent:@"manifest.json"];
++  NSData *manifestData = [NSData dataWithContentsOfFile:manifestPath options:NSDataReadingMappedIfSafe error:nil];
++  if (nil == manifestData) {
++    return FBResponseWithStatus([FBCommandStatus unknownErrorWithMessage:@"media manifest is missing" traceback:nil]);
++  }
++  if (![[self riviuMediaSha256Hex:manifestData] isEqualToString:expectedManifestSha256]) {
++    return FBResponseWithStatus([FBCommandStatus unknownErrorWithMessage:@"media manifest hash mismatch" traceback:nil]);
++  }
++
++  NSError *jsonError = nil;
++  id decoded = [NSJSONSerialization JSONObjectWithData:manifestData options:0 error:&jsonError];
++  if (![decoded isKindOfClass:NSDictionary.class]) {
++    return [self riviuMediaInvalid:@"media manifest must be a JSON object"];
++  }
++  NSDictionary *manifest = (NSDictionary *)decoded;
++  if (![manifest[@"campaignId"] isEqual:campaignId] || [manifest[@"schemaVersion"] integerValue] != 1) {
++    return [self riviuMediaInvalid:@"media manifest identity is invalid"];
++  }
++  NSArray *files = manifest[@"files"];
++  if (![files isKindOfClass:NSArray.class] || files.count == 0) {
++    return [self riviuMediaInvalid:@"media manifest contains no files"];
++  }
++
++  NSMutableSet<NSString *> *seen = [NSMutableSet setWithCapacity:files.count];
++  for (id item in files) {
++    if (![item isKindOfClass:NSDictionary.class]) {
++      return [self riviuMediaInvalid:@"media manifest file entry is invalid"];
++    }
++    NSDictionary *entry = (NSDictionary *)item;
++    NSString *bundle = entry[@"bundle"];
++    NSString *file = entry[@"file"];
++    NSString *sha256 = entry[@"sha256"];
++    NSNumber *byteCount = entry[@"bytes"];
++    if (![self riviuMediaSafeComponent:bundle] || ![self riviuMediaSafeComponent:file] ||
++        ![self riviuMediaSha256:sha256] || ![byteCount isKindOfClass:NSNumber.class] || byteCount.longLongValue < 0) {
++      return [self riviuMediaInvalid:@"media manifest file entry schema is invalid"];
++    }
++    NSString *key = [NSString stringWithFormat:@"%@/%@", bundle, file];
++    if ([seen containsObject:key]) {
++      return [self riviuMediaInvalid:@"media manifest contains duplicate files"];
++    }
++    [seen addObject:key];
++    NSString *bundleRoot = [root stringByAppendingPathComponent:bundle];
++    NSString *filePath = [bundleRoot stringByAppendingPathComponent:file];
++    NSString *standardizedRoot = [root stringByAppendingString:@"/"];
++    if (![filePath.stringByStandardizingPath hasPrefix:standardizedRoot]) {
++      return [self riviuMediaInvalid:@"media manifest path escapes campaign root"];
++    }
++    NSData *fileData = [NSData dataWithContentsOfFile:filePath options:NSDataReadingMappedIfSafe error:nil];
++    if (nil == fileData || fileData.length != byteCount.unsignedLongLongValue ||
++        ![[self riviuMediaSha256Hex:fileData] isEqualToString:sha256]) {
++      return FBResponseWithStatus([FBCommandStatus unknownErrorWithMessage:@"media file readback verification failed" traceback:nil]);
++    }
++  }
++
++  NSString *importId = [NSString stringWithFormat:@"%@-%@", campaignId, expectedManifestSha256];
++  return FBResponseWithObject(@{
++    @"campaignId": campaignId,
++    @"importId": importId,
++    @"state": @"ready",
++    @"files": @(files.count),
++  });
++}
++
+++ (id<FBResponsePayload>)handleRiviuMediaPrepare:(FBRouteRequest *)request
++{
++  if (![request.arguments isKindOfClass:NSDictionary.class] || request.arguments.count != 2 ||
++      ![request.arguments[@"campaignId"] isKindOfClass:NSString.class] ||
++      ![request.arguments[@"manifestSha256"] isKindOfClass:NSString.class]) {
++    return [self riviuMediaInvalid:@"media prepare body must contain campaignId and manifestSha256 only"];
++  }
++  return [self riviuMediaPrepareResponseForCampaign:request.arguments[@"campaignId"]
++                                      manifestSha256:request.arguments[@"manifestSha256"]];
++}
++
+++ (id<FBResponsePayload>)handleRiviuMediaStatus:(FBRouteRequest *)request
++{
++  NSString *importId = request.parameters[@"importId"];
++  if (![importId isKindOfClass:NSString.class] || importId.length <= CC_SHA256_DIGEST_LENGTH * 2 + 1) {
++    return [self riviuMediaInvalid:@"importId is invalid"];
++  }
++  NSUInteger separator = importId.length - (CC_SHA256_DIGEST_LENGTH * 2 + 1);
++  if ([importId characterAtIndex:separator] != '-') {
++    return [self riviuMediaInvalid:@"importId is invalid"];
++  }
++  NSString *campaignId = [importId substringToIndex:separator];
++  NSString *manifestSha256 = [importId substringFromIndex:separator + 1];
++  return [self riviuMediaPrepareResponseForCampaign:campaignId manifestSha256:manifestSha256];
++}
++
+ + (BOOL)riviuPasteboardArguments:(id)arguments validForSet:(BOOL)isSet
+ {
+   if (![arguments isKindOfClass:NSDictionary.class]) {
+diff --git a/WebDriverAgentLib/Commands/FBSessionCommands.m b/WebDriverAgentLib/Commands/FBSessionCommands.m
+index 1a729dd..4cdc400 100644
+--- a/WebDriverAgentLib/Commands/FBSessionCommands.m
++++ b/WebDriverAgentLib/Commands/FBSessionCommands.m
+@@ -228,6 +228,9 @@ + (NSArray *)routes
+   if ([NSProcessInfo.processInfo.environment[@"RIVIU_AGENT_TEXT_CAPABLE"] isEqualToString:@"1"]) {
+     [features addObject:@"text"];
+   }
++  if ([NSProcessInfo.processInfo.environment[@"RIVIU_AGENT_MEDIA_CAPABLE"] isEqualToString:@"1"]) {
++    [features addObject:@"pushMedia"];
++  }
+   BOOL streamReady = FBRiviuAgentStreamIsReady();
+   if (!streamReady) {
+     [features removeObject:@"stream"];
+diff --git a/WebDriverAgentTests/UnitTests/FBRouteTests.m b/WebDriverAgentTests/UnitTests/FBRouteTests.m
+index 4c53bc7..9a8f35d 100644
+--- a/WebDriverAgentTests/UnitTests/FBRouteTests.m
++++ b/WebDriverAgentTests/UnitTests/FBRouteTests.m
+@@ -33,6 +33,9 @@ @interface FBRoute_TargetAction : FBRoute
+ 
+ @interface FBCustomCommands (RiviuAgentTests)
+ + (BOOL)riviuPasteboardArguments:(id)arguments validForSet:(BOOL)isSet;
+++ (BOOL)riviuMediaSafeComponent:(id)value;
+++ (BOOL)riviuMediaSha256:(NSString *)value;
+++ (NSString *)riviuMediaSha256Hex:(NSData *)data;
+ @end
+ 
+ @interface FBHandlerMock : NSObject
+@@ -250,6 +253,22 @@ - (void)testRiviuPasteboardGetRequiresExactSchema
+   XCTAssertFalse([FBCustomCommands riviuPasteboardArguments:(id)@[] validForSet:NO]);
+ }
+ 
++- (void)testRiviuMediaManifestComponentsAndHashesAreCanonical
++{
++  XCTAssertTrue([FBCustomCommands riviuMediaSafeComponent:@"bundle-01"]);
++  XCTAssertTrue([FBCustomCommands riviuMediaSafeComponent:@"caption.txt"]);
++  XCTAssertFalse([FBCustomCommands riviuMediaSafeComponent:@"../escape"]);
++  XCTAssertFalse([FBCustomCommands riviuMediaSafeComponent:@"nested/name"]);
++  XCTAssertFalse([FBCustomCommands riviuMediaSafeComponent:@""]);
++
++  NSString *digest = [FBCustomCommands riviuMediaSha256Hex:
++      [@"Riviu media" dataUsingEncoding:NSUTF8StringEncoding]];
++  XCTAssertEqual(digest.length, 64);
++  XCTAssertTrue([FBCustomCommands riviuMediaSha256:digest]);
++  XCTAssertFalse([FBCustomCommands riviuMediaSha256:[digest uppercaseString]]);
++  XCTAssertFalse([FBCustomCommands riviuMediaSha256:@"short"]);
++}
++
+ + (id<FBResponsePayload>)dummyHandler:(FBRouteRequest *)request
+ {
+   return nil;

@@ -19,10 +19,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use app_lib::interaction_ocr::DesktopFrameTextSource;
 use riviu_core::db::Database;
 use riviu_core::{
-    AgentSettings, DeviceControlPlane, DeviceWorkCoordinator, NurtureEngine, NurtureSettings,
-    StreamBudgetManager,
+    AgentSettings, DeviceControlPlane, DeviceWorkCoordinator, DeviceWorkOwner,
+    InteractionSessionKind, NurtureEngine, NurtureSettings, StreamBudgetManager,
 };
 use riviu_ios_driver::{
     create_driver, telemetry, AgentArtifact, AgentToken, DriverConfig, DriverTarget,
@@ -42,6 +43,7 @@ struct Args {
     watch_max: f64,
     jsonl: Option<PathBuf>,
     steady: String,
+    open_url: Option<String>,
 }
 
 impl Default for Args {
@@ -58,6 +60,7 @@ impl Default for Args {
             watch_max: 8.0,
             jsonl: None,
             steady: String::new(),
+            open_url: None,
         }
     }
 }
@@ -87,6 +90,7 @@ fn parse_args() -> Result<Args, String> {
             "--watch-max" => a.watch_max = num(&value, "--watch-max")?,
             "--jsonl" => a.jsonl = Some(PathBuf::from(value)),
             "--steady" => a.steady = value,
+            "--open-url" => a.open_url = Some(value),
             other => return Err(format!("tham số lạ: {other}")),
         }
         i += 2;
@@ -118,19 +122,56 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&artifacts)?;
     let db = Arc::new(Database::open(data.join("riviu.db"))?);
 
+    eprintln!("driver: loading settings");
     let agent_settings = db.get_agent_settings()?;
+    eprintln!("driver: creating sidecar driver");
     let bundle = create_driver(resolve_driver_config(&root, &data, agent_settings)?).await?;
+    eprintln!("driver: created");
     let control = Arc::new(DeviceControlPlane::new(
         bundle.driver,
         Arc::new(DeviceWorkCoordinator::new()),
         Arc::new(StreamBudgetManager::default()),
     ));
+
+    // The desktop sampler normally performs this install/auth-only preflight
+    // before a nurture job is submitted.  The headless harness has no sampler,
+    // so establish the protected relay explicitly while the repair context
+    // owns the device; the nurture transition then reuses that relay and still
+    // creates the WDA session before starting MJPEG.
+    eprintln!("preflight: acquiring repair context");
+    let preflight_context = control
+        .try_acquire_exclusive(&args.udid, DeviceWorkOwner::Repair)
+        .await?;
+    eprintln!("preflight: checking protected agent");
+    let preflight = tokio::time::timeout(
+        Duration::from_secs(45),
+        control.preflight_agent(&preflight_context),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Agent preflight timed out after 45s"))??;
+    if !preflight.auth_ready {
+        anyhow::bail!(
+            "Riviu Agent preflight chưa sẵn sàng: {}",
+            preflight
+                .message
+                .unwrap_or_else(|| "protected auth unavailable".to_string())
+        );
+    }
+    eprintln!(
+        "Agent preflight OK: state={:?} auth={} session={} stream={}",
+        preflight.state, preflight.auth_ready, preflight.session_ready, preflight.mjpeg_ready
+    );
+    // Release the short-lived repair lease before Nurture acquires its own
+    // device owner. Keeping this context alive would queue the interaction
+    // job forever behind the completed preflight.
+    drop(preflight_context);
     let engine = NurtureEngine::new(
         db,
         control.clone(),
         Arc::new(bundle.streams.clone()),
         artifacts,
-    );
+    )
+    .with_frame_text_source(Arc::new(DesktopFrameTextSource));
 
     let mut settings = NurtureSettings {
         num_videos: args.videos,
@@ -153,9 +194,14 @@ async fn main() -> anyhow::Result<()> {
     }
     if args.comment_prob > 0 && settings.api_key.trim().is_empty() {
         eprintln!(
-            "cảnh báo: --comment-prob {} nhưng RIVIU_AI_API_KEY trống — sẽ dùng pool dựng sẵn",
+            "cảnh báo: --comment-prob {} nhưng RIVIU_AI_API_KEY trống — comment sẽ được bỏ qua",
             args.comment_prob
         );
+    }
+
+    if let Some(url) = args.open_url.as_deref() {
+        open_url_on_device(&control, &args.udid, &settings.bundle_id, url).await?;
+        eprintln!("opened TikTok URL fixture");
     }
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -276,6 +322,36 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn open_url_on_device(
+    control: &DeviceControlPlane,
+    udid: &str,
+    bundle_id: &str,
+    url: &str,
+) -> anyhow::Result<()> {
+    if !url.starts_with("https://") || url.trim() != url {
+        anyhow::bail!("--open-url chỉ nhận HTTPS URL canonical");
+    }
+    let exclusive = control
+        .try_acquire_exclusive(udid, DeviceWorkOwner::Interaction)
+        .await?;
+    let (exclusive, capacity) = control.reserve_ui_capacity(exclusive).await?;
+    let session = control
+        .start_interaction_session(exclusive, bundle_id, InteractionSessionKind::Ordinary)
+        .await?;
+    let stream = control.start_reserved_stream(session, capacity).await?;
+    let ui = control.streaming_session(&stream)?;
+    let result = async {
+        ui.open_url(url).await?;
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    let cleanup = control.close_ui_context(stream).await;
+    result?;
+    cleanup?;
+    Ok(())
+}
+
 fn write_jsonl(
     path: &PathBuf,
     args: &Args,
@@ -347,10 +423,24 @@ fn resolve_driver_config(
         DriverTarget::LegacyStock
     } else {
         let credentials = CredentialStore::system()?;
-        let env_token = std::env::var("RIVIU_RTMMO_TOKEN").ok();
-        let token = credentials.agent_token_or_create(env_token.as_deref())?;
-        let mut artifact =
-            AgentArtifact::load(sidecar_root.join("wda").join("agent-manifest.json"))?;
+        let env_token = std::env::var("RIVIU_AGENT_TOKEN")
+            .or_else(|_| std::env::var("RIVIU_RTMMO_TOKEN"))
+            .ok();
+        // A live harness token is already supplied by the caller. Keep it in
+        // memory for this run instead of touching the interactive macOS
+        // Keychain; the desktop Full runtime uses the same ephemeral path.
+        let token = match env_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            Some(value) => value.to_string(),
+            None => credentials.agent_token_or_create(None)?,
+        };
+        let manifest = std::env::var_os("RIVIU_AGENT_MANIFEST")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| sidecar_root.join("wda").join("agent-manifest.json"));
+        let mut artifact = AgentArtifact::load(manifest)?;
         if let Some(path) = std::env::var_os("RIVIU_RTMMO_IPA") {
             artifact.ipa_path = PathBuf::from(path);
         }

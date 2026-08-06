@@ -54,21 +54,32 @@ Mock farm chỉ dùng khi phát triển: `RIVIU_MOCK_DEVICES=1`.
 
 ```powershell
 # Windows PowerShell
+$env:RIVIU_DEFAULT_AGENT_MODE = "full"
 py -3.12 -m pip install -r sidecars/pymobiledevice3/requirements-build.txt
 cd apps/desktop
 npm ci
 npm run sidecar:build
-npm run tauri -- build --config ../../target/tauri-sidecar.conf.json
+npm run tauri -- build `
+  --config src-tauri/tauri.full.conf.json `
+  --config ../../target/tauri-sidecar.conf.json
 ```
 
-Trên macOS, thay `py -3.12` bằng `python3.12`.
+Trên macOS/Linux, dùng `export RIVIU_DEFAULT_AGENT_MODE=full`, thay `py -3.12`
+bằng `python3.12`, rồi chạy cùng các lệnh build với dấu `\` thay cho dấu `` ` ``.
 
 `build_desktop_sidecar.py` tạo runtime native đúng kiến trúc, chạy smoke test và
 ghi `runtime-manifest.json`. Package Python không liên quan trong môi trường local
 được bỏ qua, nhưng mọi dependency đang hoạt động của runtime phải có mặt và đúng
 exact version trong lock. Bản release chính thức dùng Python 3.12.10, Node 24.15.0
 và Rust 1.95.0. Không commit thư mục `target/`; CI dựng lại sạch trên từng hệ điều
-hành.
+hành. Push lên `main` không đưa bundle trong `target/` vào Git; workflow sẽ dựng
+`desktop-windows-x64` và upload bộ cài `.msi`/NSIS trong Actions trong 30 ngày. Tag
+`v<version>` sẽ đính kèm các bộ cài đã verify vào GitHub Release.
+IPA Agent là artifact ký riêng theo provisioning/UDID: muốn workflow đóng gói
+đúng bản Full thì phải commit `sidecars/wda/RiviuAgent-text.ipa` cùng
+`text-manifest.json`; IPA hiện tại dùng profile Xcode-managed 7 ngày, còn
+installer Windows không có hạn 7 ngày. Đổi sang iPhone mới hoặc hết hạn profile
+vẫn cần build/ký IPA trên Mac trước.
 
 Luồng re-sign legacy trên Mac dùng source WDA 16.0.0 và asset đã khóa hash trong
 bundle, sau đó copy sang cache người dùng để build. Nó không tải source upstream
@@ -88,5 +99,19 @@ sidecars/signer/
 scripts/               build/attestation/CI artifact tooling
 ```
 
-Production Agent hiện vẫn là `sidecars/wda/RiviuAgent.ipa`; xem `AGENTS.md` trước
+Production oracle vẫn là `sidecars/wda/RiviuAgent.ipa`; bản Full dùng candidate
+kết hợp `sidecars/wda/RiviuAgent-candidate.ipa` với `text` và `pushMedia` đã build
+theo transaction. Xem `AGENTS.md` trước
 khi sửa runtime, WDA, IPA hoặc các gate thiết bị thật.
+
+## Đăng carousel ảnh
+
+Mở trang **Đăng carousel**, chọn thư mục nội dung một cấp (mỗi thư mục con là
+một bài), quét rồi chọn subset bundle và phone. Ảnh `01`, `02`... được giữ đúng
+thứ tự; `caption*.txt` được hash nguyên bản; `partners*.xlsx` và file ẩn bị bỏ
+qua. Mapping phải một-một theo thứ tự hiển thị. Có thể tạo ngay hoặc lịch một
+lần. Media được copy vào staging managed và transfer qua HouseArrest/AFC với
+readback size + SHA-256, sau đó Agent native import vào Photos. Nút `Post` mở
+composer ảnh TikTok, chọn đúng thứ tự ảnh, nhập caption, bấm Đăng và chờ frame
+thoát khỏi composer trước khi ghi `Succeeded`; chỉ khi đó asset import mới được
+cleanup. Lỗi sau khi đã bấm Đăng được ghi `Uncertain` để tránh đăng trùng.

@@ -152,6 +152,29 @@ impl ScreenState {
             .map(|(obs, _)| *obs)
     }
 
+    /// Wait until the watcher has observed an interactive TikTok feed.
+    ///
+    /// This is used once, immediately after the watcher starts, so an overlay
+    /// that was already present when TikTok came to the foreground is handled
+    /// before the nurture loop sends its first gesture. The watcher remains
+    /// active after this gate for overlays that appear later in the session.
+    pub async fn wait_until_feed(&self, stop: &AtomicBool, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if stop.load(Ordering::Relaxed) {
+                return false;
+            }
+            if self
+                .recent(Duration::from_secs(1))
+                .is_some_and(|obs| screen::is_actionable_feed(&obs))
+            {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
+    }
+
     fn set(&self, obs: ScreenObservation) {
         *self.inner.write() = Some((obs, Instant::now()));
     }
@@ -170,6 +193,9 @@ pub struct ScreenWatcher {
     log: LogFn,
     pub stats: Arc<WatchStats>,
     pub state: ScreenState,
+    /// Set by nurture only while it intentionally dwells in a LIVE room.
+    /// System alerts remain actionable; only the LIVE auto-close is suppressed.
+    pub live_owned: Arc<AtomicBool>,
 }
 
 impl ScreenWatcher {
@@ -192,6 +218,7 @@ impl ScreenWatcher {
             log,
             stats: Arc::new(WatchStats::default()),
             state: ScreenState::default(),
+            live_owned: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -265,6 +292,13 @@ impl ScreenWatcher {
 
                 match obs.kind {
                     ScreenKind::Feed => {
+                        if obs.evidence.ad_feedback_notice {
+                            // TikTok owns this toast and removes it on its own;
+                            // do not count it as a cleared popup or tap through
+                            // its transient UI text.
+                            pending = None;
+                            continue;
+                        }
                         if let Some(a) = awaiting.take() {
                             let ms = a.first_seen.elapsed().as_millis() as u32;
                             self.stats.popups_closed.fetch_add(1, Ordering::Relaxed);
@@ -300,13 +334,18 @@ impl ScreenWatcher {
                         .await;
                     }
                     ScreenKind::LiveRoom => {
-                        self.on_popup(
-                            Sighting::live(),
-                            &mut pending,
-                            &mut awaiting,
-                            &mut cooldown_until,
-                        )
-                        .await;
+                        if self.live_owned.load(Ordering::Relaxed) {
+                            pending = None;
+                            awaiting = None;
+                        } else {
+                            self.on_popup(
+                                Sighting::live(),
+                                &mut pending,
+                                &mut awaiting,
+                                &mut cooldown_until,
+                            )
+                            .await;
+                        }
                     }
                     ScreenKind::SystemAlert { x, y } => {
                         self.on_popup(
@@ -626,5 +665,28 @@ mod tests {
             state.recent(Duration::ZERO).is_none(),
             "a zero-age window must reject even a fresh reading"
         );
+    }
+
+    #[tokio::test]
+    async fn screen_state_wait_until_feed_stops_on_cancel_and_accepts_feed() {
+        let state = ScreenState::default();
+        let stop = AtomicBool::new(false);
+        state.set(ScreenObservation {
+            kind: ScreenKind::Feed,
+            evidence: Default::default(),
+        });
+        assert!(
+            state
+                .wait_until_feed(&stop, Duration::from_millis(50))
+                .await
+        );
+
+        state.set(ScreenObservation {
+            kind: ScreenKind::SystemAlert { x: 0.32, y: 0.57 },
+            evidence: Default::default(),
+        });
+        assert!(!state.wait_until_feed(&stop, Duration::from_millis(5)).await);
+        stop.store(true, Ordering::Relaxed);
+        assert!(!state.wait_until_feed(&stop, Duration::from_secs(1)).await);
     }
 }

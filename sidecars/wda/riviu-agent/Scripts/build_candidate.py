@@ -31,14 +31,21 @@ DEFAULT_SOURCE = REPO_ROOT / "target" / "riviu-agent" / "source"
 DEFAULT_DERIVED_DATA = REPO_ROOT / "target" / "riviu-agent" / "derived-data"
 DEFAULT_ARTIFACTS_ROOT = REPO_ROOT / "target" / "riviu-agent" / "artifacts"
 DEFAULT_XCCONFIG = AGENT_ROOT / "Config" / "RiviuAgent.xcconfig"
+BRAND_LOGO = REPO_ROOT / "logo.jpg"
+BRAND_ICONSET = REPO_ROOT / "sidecars" / "wda" / "AppIcon.appiconset"
+BRAND_LOCK = REPO_ROOT / "sidecars" / "wda" / "legacy-wda-source-lock.json"
 
 ARTIFACT_ID = "riviu-agent-ios-candidate"
 DEFAULT_ARTIFACT_VERSION = "0.1.0"
 GATE_STATUS = "PENDING_MAC_DEVICE"
 CANDIDATE_RUNNER_BUNDLE_ID = "com.riviu.managersphone.agent.xctrunner"
+CANDIDATE_DISPLAY_NAME = "Riviu Agent"
+CANDIDATE_ICON_NAME = "AppIcon"
 ATTESTATION_BUNDLE = "PlugIns/WebDriverAgentRunner.xctest"
 PROTOCOL_VERSION = 2
 FEATURES = ("stream", "tap", "swipe", "clipboard")
+TEXT_FEATURE = "text"
+MEDIA_FEATURE = "pushMedia"
 CONTROL_PORT = 8916
 MJPEG_PORT = 9094
 LOGICAL_WIDTH = 375
@@ -339,6 +346,7 @@ def generate_candidate_manifest(
     ipa_path: Path,
     app_name: str,
     identity: BundleIdentity,
+    features: tuple[str, ...] = FEATURES,
 ) -> dict[str, Any]:
     if not artifact_version.strip():
         raise BuildError("artifact version must be nonblank")
@@ -370,7 +378,7 @@ def generate_candidate_manifest(
         "mjpegPort": MJPEG_PORT,
         "logicalWidth": LOGICAL_WIDTH,
         "logicalHeight": LOGICAL_HEIGHT,
-        "features": list(FEATURES),
+        "features": list(features),
         "objectiveCUnitTests": identity.objective_c_unit_tests,
         "xcode": {"version": identity.xcode.version, "build": identity.xcode.build},
     }
@@ -511,10 +519,11 @@ def make_xcodebuild_command(
     source_sha256: str,
     xcconfig_sha256: str,
     xcode: XcodeVersion,
+    bundle_build: str | None = None,
 ) -> list[str]:
     source_digest = _validate_sha256(source_sha256, "prepared source digest")
     xcconfig_digest = _validate_sha256(xcconfig_sha256, "locked xcconfig digest")
-    return [
+    command = [
         "xcodebuild",
         "build-for-testing",
         "-allowProvisioningUpdates",
@@ -536,14 +545,27 @@ def make_xcodebuild_command(
         "RIVIU_AGENT_OBJECTIVE_C_UNIT_TESTS=PASS",
         f"RIVIU_AGENT_XCODE_VERSION={xcode.version}",
         f"RIVIU_AGENT_XCODE_BUILD={xcode.build}",
+        "RUN_CLANG_STATIC_ANALYZER=NO",
         "COMPILER_INDEX_STORE_ENABLE=NO",
         "OTHER_CFLAGS=$(inherited) -Wno-error=poison-system-directories",
     ]
+    if bundle_build is not None:
+        if not re.fullmatch(r"[1-9][0-9]*", bundle_build):
+            raise BuildError("bundle build must be a positive decimal integer")
+        command.append(f"CURRENT_PROJECT_VERSION={bundle_build}")
+    return command
 
 
 def make_xcode_unit_test_command(
-    *, source: Path, derived_data: Path, xcconfig: Path, team_id: str, udid: str
+    *,
+    source: Path,
+    derived_data: Path,
+    xcconfig: Path,
+    team_id: str,
+    udid: str,
+    destination: str | None = None,
 ) -> list[str]:
+    test_destination = destination or f"id={udid}"
     return [
         "xcodebuild",
         "test",
@@ -555,13 +577,14 @@ def make_xcode_unit_test_command(
         "WebDriverAgentLib",
         "-only-testing:UnitTests",
         "-destination",
-        f"id={udid}",
+        test_destination,
         "-derivedDataPath",
         str(derived_data),
         "-xcconfig",
         str(xcconfig),
         "CODE_SIGN_STYLE=Automatic",
         f"DEVELOPMENT_TEAM={team_id}",
+        "RUN_CLANG_STATIC_ANALYZER=NO",
         "COMPILER_INDEX_STORE_ENABLE=NO",
         "OTHER_CFLAGS=$(inherited) -Wno-error=poison-system-directories",
     ]
@@ -644,6 +667,174 @@ def _locate_runner_app(derived_data: Path) -> Path:
         rendered = ", ".join(str(path) for path in candidates)
         raise BuildError(f"build produced multiple runner apps: {rendered}")
     return candidates[0]
+
+
+def _brand_iconset_tree_sha256(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(Path(root).rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(root).as_posix()
+        payload = path.read_bytes()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0file\0")
+        digest.update(b"644")
+        digest.update(b"\0")
+        digest.update(str(len(payload)).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(payload).hexdigest().encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _verify_brand_assets() -> None:
+    if not BRAND_LOGO.is_file() or not BRAND_ICONSET.is_dir():
+        raise BuildError("candidate branding assets are missing: logo.jpg/AppIcon.appiconset")
+    try:
+        lock = json.loads(BRAND_LOCK.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BuildError(f"candidate branding lock is invalid: {BRAND_LOCK}") from exc
+    expected_logo = lock.get("logoSha256")
+    expected_iconset = lock.get("iconSetTreeSha256")
+    if not isinstance(expected_logo, str) or sha256_file(BRAND_LOGO) != expected_logo:
+        raise BuildError("candidate logo.jpg does not match its locked digest")
+    if not isinstance(expected_iconset, str) or _brand_iconset_tree_sha256(BRAND_ICONSET) != expected_iconset:
+        raise BuildError("candidate AppIcon asset set does not match its locked digest")
+
+
+def compile_candidate_brand_icon_catalog(app: Path) -> None:
+    """Compile the repository's orange-R iconset into the XCTest host."""
+    _verify_brand_assets()
+    app = Path(app)
+    with tempfile.TemporaryDirectory(prefix="riviu-agent-icons-") as temporary_name:
+        temporary = Path(temporary_name)
+        catalog = temporary / "RiviuBrand.xcassets" / "AppIcon.appiconset"
+        catalog.parent.mkdir(parents=True)
+        shutil.copytree(BRAND_ICONSET, catalog)
+        output = temporary / "compiled"
+        output.mkdir()
+        _run(
+            [
+                "xcrun",
+                "actool",
+                "--compile",
+                str(output),
+                "--platform",
+                "iphoneos",
+                "--minimum-deployment-target",
+                "13.0",
+                "--app-icon",
+                CANDIDATE_ICON_NAME,
+                "--output-partial-info-plist",
+                str(output / "partial.plist"),
+                str(catalog.parent),
+            ],
+            label="candidate Riviu icon compilation",
+            timeout_seconds=COMMAND_TIMEOUT_SECONDS,
+        )
+        for filename in (
+            "Assets.car",
+            "AppIcon60x60@2x.png",
+            "AppIcon76x76@2x~ipad.png",
+        ):
+            compiled = output / filename
+            if not compiled.is_file():
+                raise BuildError(f"candidate icon compilation omitted {filename}")
+            shutil.copy2(compiled, app / filename)
+
+
+def _load_plist(path: Path, label: str) -> dict[str, Any]:
+    try:
+        with Path(path).open("rb") as stream:
+            value = plistlib.load(stream)
+    except (OSError, plistlib.InvalidFileException) as exc:
+        raise BuildError(f"failed to read {label}: {path}") from exc
+    if not isinstance(value, dict):
+        raise BuildError(f"{label} root must be a dictionary: {path}")
+    return value
+
+
+def _write_plist_atomic(path: Path, value: dict[str, Any]) -> None:
+    path = Path(path)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            plistlib.dump(value, stream, fmt=plistlib.FMT_BINARY, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def brand_candidate_runner(app: Path) -> None:
+    """Brand the generated XCTest host without changing its execution identity."""
+    app = Path(app)
+    if not app.is_dir() or app.suffix != ".app":
+        raise BuildError(f"candidate app does not exist: {app}")
+
+    compile_candidate_brand_icon_catalog(app)
+    info_path = app / "Info.plist"
+    info = _load_plist(info_path, "candidate outer Info.plist")
+
+    def collect_icon_names(value: Any) -> set[str]:
+        if not isinstance(value, dict):
+            return set()
+        names = {
+            item
+            for key, item in value.items()
+            if key == "CFBundleIconName" and isinstance(item, str)
+        }
+        for item in value.values():
+            names.update(collect_icon_names(item))
+        return names
+
+    icon_names = collect_icon_names(info)
+    if CANDIDATE_ICON_NAME not in icon_names:
+        raise BuildError(
+            "candidate app icon name mismatch: "
+            f"actual={sorted(str(value) for value in icon_names)!r}, "
+            f"expected={CANDIDATE_ICON_NAME}"
+        )
+    if not (app / "Assets.car").is_file():
+        raise BuildError("candidate app is missing compiled icon asset catalog: Assets.car")
+    if not any(
+        path.is_file() and path.name.startswith("AppIcon") and path.suffix == ".png"
+        for path in app.iterdir()
+    ):
+        raise BuildError("candidate app is missing rendered AppIcon PNG resources")
+
+    info["CFBundleDisplayName"] = CANDIDATE_DISPLAY_NAME
+    info["CFBundleName"] = CANDIDATE_DISPLAY_NAME
+    info["CFBundleIconName"] = CANDIDATE_ICON_NAME
+    _write_plist_atomic(info_path, info)
+
+    branded = _load_plist(info_path, "branded candidate outer Info.plist")
+    if (
+        branded.get("CFBundleDisplayName") != CANDIDATE_DISPLAY_NAME
+        or branded.get("CFBundleName") != CANDIDATE_DISPLAY_NAME
+    ):
+        raise BuildError("candidate outer Info.plist branding did not persist")
+
+
+def set_candidate_bundle_build(app: Path, bundle_build: str | None) -> None:
+    """Give a separately promoted artifact a new iOS install generation."""
+    if bundle_build is None:
+        return
+    if not re.fullmatch(r"[1-9][0-9]*", bundle_build):
+        raise BuildError("bundle build must be a positive decimal integer")
+    info_path = Path(app) / "Info.plist"
+    info = _load_plist(info_path, "candidate outer Info.plist")
+    info["CFBundleVersion"] = bundle_build
+    _write_plist_atomic(info_path, info)
 
 
 def _inspect_signature(app: Path) -> str:
@@ -773,6 +964,14 @@ def finalize_runtime_closure(app: Path, xcode: XcodeVersion) -> str:
     return _inspect_signature(app)
 
 
+def finalize_candidate_branding(app: Path, signature_output: str) -> str:
+    """Apply display metadata, re-sign it, and verify the resulting bundle."""
+    signer_identity = _first_codesign_value(signature_output, "Authority")
+    brand_candidate_runner(app)
+    resign_candidate_tree(app, signer_identity)
+    return _inspect_signature(app)
+
+
 def _ensure_signing_identity() -> None:
     result = _run(
         ["security", "find-identity", "-v", "-p", "codesigning"],
@@ -844,6 +1043,7 @@ def build_candidate(args: argparse.Namespace) -> tuple[Path, Path]:
         xcconfig=args.xcconfig,
         team_id=args.team_id,
         udid=args.udid,
+        destination="platform=iOS Simulator,name=iPhone 17",
     )
     _run(
         unit_test_command,
@@ -862,6 +1062,7 @@ def build_candidate(args: argparse.Namespace) -> tuple[Path, Path]:
         source_sha256=source_digest,
         xcconfig_sha256=xcconfig_digest,
         xcode=xcode,
+        bundle_build=args.bundle_build,
     )
     _run(
         command,
@@ -874,6 +1075,8 @@ def build_candidate(args: argparse.Namespace) -> tuple[Path, Path]:
 
     app = _locate_runner_app(derived_data.runner)
     signature_output = finalize_runtime_closure(app, xcode)
+    set_candidate_bundle_build(app, args.bundle_build)
+    signature_output = finalize_candidate_branding(app, signature_output)
     require_source_digest(args.source, source_digest, "runtime finalization")
     require_xcconfig_digest(args.xcconfig, xcconfig_digest, "runtime finalization")
     identity = capture_bundle_identity(
@@ -892,13 +1095,19 @@ def build_candidate(args: argparse.Namespace) -> tuple[Path, Path]:
     artifact_dir = args.artifacts_root / version
     ipa = artifact_dir / "RiviuAgent-candidate.ipa"
     package_candidate_ipa(app, ipa)
+    manifest_features = FEATURES
+    if args.text_capable:
+        manifest_features += (TEXT_FEATURE,)
+    if args.media_capable:
+        manifest_features += (MEDIA_FEATURE,)
     manifest = generate_candidate_manifest(
         artifact_version=version,
         artifact_root=artifact_dir,
         ipa_path=ipa,
         app_name=app.name,
         identity=identity,
-    )
+        features=manifest_features,
+)
     manifest_path = artifact_dir / "candidate-manifest.json"
     _write_json_atomic(manifest_path, manifest)
     return ipa, manifest_path
@@ -909,12 +1118,23 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--udid", required=True)
     parser.add_argument("--team-id", required=True)
     parser.add_argument("--artifact-version", default=DEFAULT_ARTIFACT_VERSION)
+    parser.add_argument("--bundle-build", default=None)
     parser.add_argument("--archive", type=Path, default=DEFAULT_ARCHIVE)
     parser.add_argument("--lock", type=Path, default=DEFAULT_LOCK)
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
     parser.add_argument("--derived-data", type=Path, default=DEFAULT_DERIVED_DATA)
     parser.add_argument("--artifacts-root", type=Path, default=DEFAULT_ARTIFACTS_ROOT)
     parser.add_argument("--xcconfig", type=Path, default=DEFAULT_XCCONFIG)
+    parser.add_argument(
+        "--text-capable",
+        action="store_true",
+        help="include the gated native text capability in the candidate manifest",
+    )
+    parser.add_argument(
+        "--media-capable",
+        action="store_true",
+        help="include the gated native pushMedia capability in the candidate manifest",
+    )
     return parser
 
 

@@ -15,13 +15,16 @@
 //! * **Nothing is reported that was not verified.** A like counts once the
 //!   heart turns red in a later frame, a swipe once the frame changes.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use parking_lot::Mutex;
 mod actions;
 mod recovery;
+mod touch;
 
 use actions::{CommentResult, LikeResult};
 use recovery::Budget;
@@ -31,15 +34,16 @@ use crate::db::Database;
 use crate::device_control::{DeviceControlPlane, UiWithStreamContext};
 use crate::driver::{ui_error_kind, UiError, UiErrorKind, UiSession};
 use crate::frame_source::FrameSource;
+use crate::frame_text::{FrameTextSource, NullFrameTextSource};
 use crate::human_behavior::{
-    in_night_window, roll_feed_action_in_mood, roll_follow_in_mood, FeedAction, HumanBehavior,
-    MoodCycle,
+    in_night_window, roll_bool, roll_feed_action_in_mood, roll_follow_in_mood, FeedAction,
+    HumanBehavior, HumanSessionPolicy, MoodCycle, PolicyAction,
 };
-use crate::openai_client::generate_comment_pool;
 use crate::screen::{self, ActionRail, ScreenKind};
 use crate::screen_watch::{ScreenWatcher, SessionHandle};
-use crate::types::{InteractionSessionKind, NurtureSessionStatus, NurtureSettings};
+use crate::types::{InteractionSessionKind, NurtureSessionStatus, NurtureSettings, TapPoint};
 use crate::DeviceWorkOwner;
+use touch::TouchPointPlanner;
 
 /// How long to wait for the frame to change before calling a swipe blocked.
 ///
@@ -49,6 +53,9 @@ use crate::DeviceWorkOwner;
 /// widened.
 pub(super) const SWIPE_SETTLE: Duration = Duration::from_millis(2_400);
 const TEXT_NOT_ARMED_REFRESH_THRESHOLD: u8 = 2;
+/// Give the frame watcher time to close overlays that were already visible
+/// when TikTok came foreground before the first feed gesture is sent.
+const STARTUP_POPUP_DRAIN: Duration = Duration::from_secs(12);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommentRecoveryAction {
@@ -110,7 +117,9 @@ pub struct NurtureEngine {
     pub db: Arc<Database>,
     pub control: Arc<DeviceControlPlane>,
     pub frames: Arc<dyn FrameSource>,
+    pub frame_text: Arc<dyn FrameTextSource>,
     pub artifacts_dir: PathBuf,
+    touch_points: Arc<Mutex<HashMap<String, TouchPointPlanner>>>,
 }
 
 impl NurtureEngine {
@@ -124,8 +133,39 @@ impl NurtureEngine {
             db,
             control,
             frames,
+            frame_text: Arc::new(NullFrameTextSource),
             artifacts_dir,
+            touch_points: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn with_frame_text_source(mut self, source: Arc<dyn FrameTextSource>) -> Self {
+        self.frame_text = source;
+        self
+    }
+
+    pub(super) fn reset_touch_points(&self, udid: &str, screen_size: (f64, f64)) {
+        self.touch_points
+            .lock()
+            .insert(udid.to_string(), TouchPointPlanner::new(screen_size));
+    }
+
+    pub(super) fn clear_touch_points(&self, udid: &str) {
+        self.touch_points.lock().remove(udid);
+    }
+
+    pub(super) fn next_touch_point(
+        &self,
+        udid: &str,
+        screen_size: (f64, f64),
+        center: TapPoint,
+        radius: (f64, f64),
+    ) -> TapPoint {
+        let mut planners = self.touch_points.lock();
+        let planner = planners
+            .entry(udid.to_string())
+            .or_insert_with(|| TouchPointPlanner::new(screen_size));
+        planner.next(center, radius)
     }
 
     async fn open_ui_context(
@@ -226,6 +266,9 @@ impl NurtureEngine {
             udid: udid.to_string(),
             running: true,
             videos_done: 0,
+            like_attempts: 0,
+            comment_attempts: 0,
+            follow_attempts: 0,
             likes: 0,
             comments: 0,
             follows: 0,
@@ -317,6 +360,7 @@ impl NurtureEngine {
             Ok(sz) if sz.0 > 0.0 && sz.1 > 0.0 => sz,
             _ => (375.0, 667.0),
         };
+        self.reset_touch_points(udid, screen_size);
 
         // Now the agent is warm, attach the stream that the watcher reads.
         report(&mut status, "mở stream màn hình".into());
@@ -333,7 +377,7 @@ impl NurtureEngine {
         // What is on screen before we touch anything?
         let already_on_tiktok = self
             .latest_image(udid)
-            .map(|img| screen::classify(&img, Some(screen_size.0)).kind == ScreenKind::Feed)
+            .map(|img| screen::feed_ready(&img, Some(screen_size.0)))
             .unwrap_or(false);
 
         let handle = SessionHandle::new();
@@ -385,19 +429,39 @@ impl NurtureEngine {
         );
         let watcher_stats = watcher.stats.clone();
         let watcher_state = watcher.state.clone();
+        let live_owned = watcher.live_owned.clone();
         let watcher_suppress = suppress.clone();
         let watch_task = tokio::spawn(watcher.run_suppressible(watcher_suppress));
 
-        // Comment pool: generated once so a slow or failing API never leaves
-        // the phone sitting in an open comment box mid-session.
-        let mut pool: Vec<String> = Vec::new();
-        if settings.comment_prob > 0 {
-            report(&mut status, "chuẩn bị pool comment".into());
-            let (p, usd) = generate_comment_pool(&settings, 30).await;
-            status.session_usd += usd;
-            report(&mut status, format!("pool comment: {} câu", p.len()));
-            pool = p;
+        // The watcher normally runs in parallel with nurture. At startup we
+        // add one small gate so a notification/sheet that appeared during app
+        // launch cannot receive the first like or swipe. The watcher keeps
+        // running after this gate for overlays that appear mid-session.
+        let popup_closed_before = watcher_stats.popups_closed.load(Ordering::Relaxed);
+        let startup_ready = watcher_state
+            .wait_until_feed(&stop, STARTUP_POPUP_DRAIN)
+            .await;
+        let popup_closed_after = watcher_stats.popups_closed.load(Ordering::Relaxed);
+        if popup_closed_after > popup_closed_before {
+            report(
+                &mut status,
+                format!(
+                    "đã tự tắt {} thông báo/popup đầu phiên",
+                    popup_closed_after - popup_closed_before
+                ),
+            );
         }
+        if !startup_ready && !stop.load(Ordering::Relaxed) {
+            report(
+                &mut status,
+                "chưa xác nhận frame TikTok sau khi dọn thông báo — tiếp tục theo dõi".into(),
+            );
+        }
+
+        // Contextual comments are prepared per video from a fresh frame set.
+        // There is deliberately no generic pool fallback: an uncertain comment
+        // is skipped before the drawer opens and the feed keeps moving.
+        let pool: Vec<String> = Vec::new();
 
         let mut human = HumanBehavior::new(
             &settings.persona,
@@ -407,6 +471,12 @@ impl NurtureEngine {
         );
         let mut budget = Budget::new();
         let mut text_health = TextCommentHealth::default();
+        let mut policy = HumanSessionPolicy::new(
+            settings.like_prob,
+            settings.comment_prob,
+            settings.follow_prob,
+        );
+        let mut last_interaction_at: Option<Instant> = None;
         // `steady_mood` pins the cycle for feature tests; a normal run varies.
         let mut moods = match settings.steady_mood.as_str() {
             "chatty" => MoodCycle::fixed(crate::human_behavior::Mood::Chatty),
@@ -418,7 +488,16 @@ impl NurtureEngine {
         let mut outcome = Outcome::Done;
         let mut last_error: Option<String> = None;
 
-        let total_videos = settings.num_videos.max(1) * settings.num_rounds.max(1);
+        // A timed/manual run is bounded by its duration rather than the old
+        // short video-count cap. Keep the explicit cap for fixture/test runs.
+        let total_videos = if max_duration.is_some() {
+            u32::MAX
+        } else {
+            settings
+                .num_videos
+                .max(1)
+                .saturating_mul(settings.num_rounds.max(1))
+        };
         // True when the loop ran out of videos rather than out of time.
         let mut hit_video_cap = true;
         'feed: for _video in 0..total_videos {
@@ -441,25 +520,7 @@ impl NurtureEngine {
                 last_error = Some("hết ngân sách recovery".into());
                 break;
             }
-
-            // Update the rail from the live frame; keep the last good one when
-            // the author is already followed and the badge is gone.
-            //
-            // `rail_present` is a separate question from "did the badge move".
-            // A LIVE preview card and a mid-swipe frame both keep the compose
-            // bar — so both classify as `Feed` — while carrying no rail to tap.
-            // Acting on them is the blind tapping this engine exists to avoid:
-            // one run spent 14 consecutive videos tapping empty space for 0
-            // likes before this check existed.
-            let mut rail_present = false;
-            if let Some(img) = self.latest_image(udid) {
-                if let Some(found) = screen::find_action_rail(&img) {
-                    rail = found;
-                    rail_present = true;
-                } else {
-                    rail_present = screen::rail_icons_present(&img);
-                }
-            }
+            policy.begin_post();
 
             // One mood runs for several videos, so a session looks like a
             // person skimming, then liking a run, then chatting — not an
@@ -485,18 +546,22 @@ impl NurtureEngine {
             // positions that do not exist there and opening the LIVE chat
             // keyboard. A swipe leaves; blind taps do not.
             if !self.on_feed(udid) {
-                let kind = self
+                let observation = self
                     .latest_image(udid)
-                    .map(|img| screen::classify(&img, Some(screen_size.0)).kind);
+                    .map(|img| screen::classify(&img, Some(screen_size.0)));
+                let kind = observation.map(|obs| obs.kind);
                 // Two screens the watcher clears with a tap, and that a swipe
                 // cannot: a LIVE room scrolls its own content instead of
                 // leaving, and an iOS alert is not TikTok's to swipe at all.
                 let watcher_owned = matches!(
                     kind,
                     Some(ScreenKind::LiveRoom) | Some(ScreenKind::SystemAlert { .. })
-                );
+                ) || observation
+                    .is_some_and(|obs| obs.evidence.ad_feedback_notice);
                 if watcher_owned {
-                    let note = if matches!(kind, Some(ScreenKind::SystemAlert { .. })) {
+                    let note = if observation.is_some_and(|obs| obs.evidence.ad_feedback_notice) {
+                        "thông báo quảng cáo đang hiện — chờ TikTok tự đóng"
+                    } else if matches!(kind, Some(ScreenKind::SystemAlert { .. })) {
                         "hộp thoại hệ thống — chờ watcher bấm nút bỏ qua"
                     } else {
                         "đang ở phòng LIVE — chờ watcher bấm ✕"
@@ -504,7 +569,7 @@ impl NurtureEngine {
                     report(&mut status, note.into());
                     let back = self
                         .wait_for_frame(udid, Duration::from_secs(12), &stop, |img| {
-                            screen::classify(img, Some(screen_size.0)).kind == ScreenKind::Feed
+                            screen::feed_ready(img, Some(screen_size.0))
                         })
                         .await;
                     if back.is_none() {
@@ -514,7 +579,14 @@ impl NurtureEngine {
                 } else {
                     report(&mut status, "không ở FYP — vuốt để về feed".into());
                     let _ = self
-                        .do_swipe(udid, session.as_ref(), &gestures, screen_size, false, &stop)
+                        .do_swipe(
+                            udid,
+                            session.as_ref(),
+                            &gestures,
+                            screen_size,
+                            human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
+                            &stop,
+                        )
                         .await;
                     sleep_interruptible(Duration::from_millis(1_200), &stop).await;
                     if !self.on_feed(udid) {
@@ -522,6 +594,129 @@ impl NurtureEngine {
                     }
                     report(&mut status, "đã về FYP".into());
                 }
+            }
+
+            // Re-read the rail after the watch and after any overlay drain.
+            // The previous frame may belong to the card just left, so it is
+            // never reused for an action on this card.
+            let mut rail_present = false;
+            if let Some(img) = self.latest_image(udid) {
+                if let Some(found) = screen::locate_action_rail(&img) {
+                    rail = found;
+                    rail_present = true;
+                }
+            }
+            let card_kind = self
+                .latest_image(udid)
+                .map(|img| screen::feed_card_kind(&img))
+                .unwrap_or(screen::FeedCardKind::TransitionOrUnknown);
+            match card_kind {
+                screen::FeedCardKind::LivePreview => {
+                    if policy.should_enter_live() {
+                        report(&mut status, "gặp LIVE — vào xem một lúc rồi thoát".into());
+                        live_owned.store(true, Ordering::Relaxed);
+                        let entered = {
+                            let _guard = gestures.lock().await;
+                            let point = self.next_touch_point(
+                                udid,
+                                screen_size,
+                                TapPoint {
+                                    x: screen_size.0 * 0.50,
+                                    y: screen_size.1 * 0.46,
+                                },
+                                (18.0, 20.0),
+                            );
+                            session.tap(point).await.is_ok()
+                        };
+                        if entered {
+                            let _ = self
+                                .wait_for_frame(udid, Duration::from_secs(8), &stop, |img| {
+                                    matches!(
+                                        screen::classify(img, Some(screen_size.0)).kind,
+                                        screen::ScreenKind::LiveRoom
+                                    )
+                                })
+                                .await;
+                            let live_digest = self
+                                .frames
+                                .latest(udid)
+                                .map(|frame| frame_digest(&frame))
+                                .unwrap_or_default();
+                            let dwell = Duration::from_secs(20 + (live_digest % 71));
+                            sleep_interruptible(dwell, &stop).await;
+                            {
+                                let _guard = gestures.lock().await;
+                                let point = self.next_touch_point(
+                                    udid,
+                                    screen_size,
+                                    TapPoint {
+                                        x: screen_size.0 * screen::LIVE_EXIT.0,
+                                        y: screen_size.1 * screen::LIVE_EXIT.1,
+                                    },
+                                    (12.0, 10.0),
+                                );
+                                let _ = session.tap(point).await;
+                            }
+                            let _ = self
+                                .wait_for_frame(udid, Duration::from_secs(8), &stop, |img| {
+                                    screen::feed_ready(img, Some(screen_size.0))
+                                })
+                                .await;
+                        }
+                        live_owned.store(false, Ordering::Relaxed);
+                    } else {
+                        report(&mut status, "gặp thẻ LIVE — lướt qua thẻ xem trước".into());
+                        let _ = self
+                            .do_swipe(
+                                udid,
+                                session.as_ref(),
+                                &gestures,
+                                screen_size,
+                                human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
+                                &stop,
+                            )
+                            .await;
+                        sleep_interruptible(Duration::from_millis(1_200), &stop).await;
+                    }
+                    continue;
+                }
+                screen::FeedCardKind::PhotoCarousel => {
+                    report(
+                        &mut status,
+                        "gặp bài ảnh — xem vài ảnh rồi vuốt ngang".into(),
+                    );
+                    let card_digest = self
+                        .frames
+                        .latest(udid)
+                        .map(|frame| frame_digest(&frame))
+                        .unwrap_or_default();
+                    let slides = 1 + (card_digest % 3) as u32;
+                    for _ in 0..slides {
+                        let dwell = Duration::from_secs(2 + (card_digest % 6));
+                        sleep_interruptible(dwell, &stop).await;
+                        let _ = self
+                            .do_photo_swipe(
+                                udid,
+                                session.as_ref(),
+                                &gestures,
+                                screen_size,
+                                human.photo_swipe_duration_ms(),
+                                &stop,
+                            )
+                            .await;
+                    }
+                    if let Some(img) = self.latest_image(udid) {
+                        if let Some(found) = screen::locate_action_rail(&img) {
+                            rail = found;
+                            rail_present = true;
+                        }
+                    }
+                }
+                screen::FeedCardKind::TransitionOrUnknown => {
+                    report(&mut status, "khung đang chuyển — chờ frame ổn định".into());
+                    sleep_interruptible(Duration::from_millis(700), &stop).await;
+                }
+                screen::FeedCardKind::Video => {}
             }
 
             // No rail on this card: watch it out and move on rather than tap
@@ -532,12 +727,23 @@ impl NurtureEngine {
                     "thẻ không có thanh hành động (LIVE / đang chuyển) — chỉ vuốt tiếp".into(),
                 );
                 if self
-                    .do_swipe(udid, session.as_ref(), &gestures, screen_size, false, &stop)
+                    .do_swipe(
+                        udid,
+                        session.as_ref(),
+                        &gestures,
+                        screen_size,
+                        human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
+                        &stop,
+                    )
                     .await
                     .unwrap_or(false)
                 {
                     status.videos_done += 1;
                     on_status(status.clone());
+                    if let Some(rest) = policy.rest_after_video() {
+                        report(&mut status, format!("nghỉ tự nhiên {}s", rest.as_secs()));
+                        sleep_interruptible(rest, &stop).await;
+                    }
                 }
                 continue;
             }
@@ -545,7 +751,28 @@ impl NurtureEngine {
             human.note_action();
             let mut comment_recovery_action = CommentRecoveryAction::None;
             match roll_feed_action_in_mood(settings.like_prob, settings.comment_prob, mood) {
+                FeedAction::Like
+                    if !policy.can_interact_with_post()
+                        || !policy.can_attempt(PolicyAction::Like) =>
+                {
+                    report(&mut status, "bỏ qua tim: nhịp phiên hiện tại đã đủ".into());
+                }
                 FeedAction::Like => {
+                    if !wait_for_action_gap(
+                        &mut last_interaction_at,
+                        policy.min_action_gap(),
+                        &stop,
+                    )
+                    .await
+                    {
+                        outcome = Outcome::Stopped;
+                        hit_video_cap = false;
+                        break 'feed;
+                    }
+                    policy.record_attempt(PolicyAction::Like);
+                    policy.mark_post_interacted();
+                    status.like_attempts += 1;
+                    on_status(status.clone());
                     report(&mut status, "thả tim".into());
                     match self
                         .do_like(udid, session.as_ref(), &gestures, &rail, screen_size, &stop)
@@ -595,7 +822,31 @@ impl NurtureEngine {
                         }
                     }
                 }
+                FeedAction::Comment
+                    if !policy.can_interact_with_post()
+                        || !policy.can_attempt(PolicyAction::Comment) =>
+                {
+                    report(
+                        &mut status,
+                        "bỏ qua bình luận: nhịp phiên hiện tại đã đủ".into(),
+                    );
+                }
                 FeedAction::Comment => {
+                    if !wait_for_action_gap(
+                        &mut last_interaction_at,
+                        policy.min_action_gap(),
+                        &stop,
+                    )
+                    .await
+                    {
+                        outcome = Outcome::Stopped;
+                        hit_video_cap = false;
+                        break 'feed;
+                    }
+                    policy.record_attempt(PolicyAction::Comment);
+                    policy.mark_post_interacted();
+                    status.comment_attempts += 1;
+                    on_status(status.clone());
                     report(&mut status, "bình luận".into());
                     suppress.store(true, Ordering::Relaxed);
                     let res = self
@@ -710,38 +961,59 @@ impl NurtureEngine {
             }
 
             if roll_follow_in_mood(settings.follow_prob, mood) {
-                report(&mut status, "follow".into());
-                match self
-                    .do_follow(udid, session.as_ref(), &gestures, &rail, screen_size, &stop)
-                    .await
+                if !policy.can_interact_with_post() || !policy.can_attempt(PolicyAction::Follow) {
+                    report(
+                        &mut status,
+                        "bỏ qua follow: nhịp phiên hiện tại đã đủ".into(),
+                    );
+                } else if !wait_for_action_gap(
+                    &mut last_interaction_at,
+                    policy.min_action_gap(),
+                    &stop,
+                )
+                .await
                 {
-                    Ok(true) => {
-                        status.follows += 1;
-                        report(&mut status, "follow thành công".into());
-                    }
-                    Ok(false) => report(&mut status, "follow không đổi trạng thái".into()),
-                    Err(e) => {
-                        let msg = format!("follow thất bại: {}", describe(&e));
-                        report(&mut status, msg.clone());
-                        last_error = Some(msg);
-                        if !self
-                            .recover(
-                                udid,
-                                &bundle_id,
-                                fresh_text_session,
-                                &mut ui_context,
-                                &mut session,
-                                &handle,
-                                &mut budget,
-                                &mut text_health,
-                                &e,
-                                &mut status,
-                                &on_status,
-                            )
-                            .await
-                        {
-                            outcome = Outcome::Failed;
-                            break 'feed;
+                    outcome = Outcome::Stopped;
+                    hit_video_cap = false;
+                    break 'feed;
+                } else {
+                    policy.record_attempt(PolicyAction::Follow);
+                    policy.mark_post_interacted();
+                    status.follow_attempts += 1;
+                    on_status(status.clone());
+                    report(&mut status, "follow".into());
+                    match self
+                        .do_follow(udid, session.as_ref(), &gestures, &rail, screen_size, &stop)
+                        .await
+                    {
+                        Ok(true) => {
+                            status.follows += 1;
+                            report(&mut status, "follow thành công".into());
+                        }
+                        Ok(false) => report(&mut status, "follow không đổi trạng thái".into()),
+                        Err(e) => {
+                            let msg = format!("follow thất bại: {}", describe(&e));
+                            report(&mut status, msg.clone());
+                            last_error = Some(msg);
+                            if !self
+                                .recover(
+                                    udid,
+                                    &bundle_id,
+                                    fresh_text_session,
+                                    &mut ui_context,
+                                    &mut session,
+                                    &handle,
+                                    &mut budget,
+                                    &mut text_health,
+                                    &e,
+                                    &mut status,
+                                    &on_status,
+                                )
+                                .await
+                            {
+                                outcome = Outcome::Failed;
+                                break 'feed;
+                            }
                         }
                     }
                 }
@@ -752,7 +1024,14 @@ impl NurtureEngine {
             report(&mut status, "vuốt video tiếp".into());
             let mut advanced_to_next_video = false;
             match self
-                .do_swipe(udid, session.as_ref(), &gestures, screen_size, false, &stop)
+                .do_swipe(
+                    udid,
+                    session.as_ref(),
+                    &gestures,
+                    screen_size,
+                    human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
+                    &stop,
+                )
                 .await
             {
                 Ok(true) => {
@@ -766,7 +1045,14 @@ impl NurtureEngine {
                     report(&mut status, "vuốt không ăn — chờ popup rồi thử lại".into());
                     sleep_interruptible(Duration::from_millis(1_800), &stop).await;
                     match self
-                        .do_swipe(udid, session.as_ref(), &gestures, screen_size, false, &stop)
+                        .do_swipe(
+                            udid,
+                            session.as_ref(),
+                            &gestures,
+                            screen_size,
+                            human.swipe_duration_ms(false),
+                            &stop,
+                        )
                         .await
                     {
                         Ok(true) => {
@@ -844,6 +1130,56 @@ impl NurtureEngine {
                 };
                 break 'feed;
             }
+            if advanced_to_next_video {
+                if let Some(rest) = policy.rest_after_video() {
+                    report(&mut status, format!("nghỉ tự nhiên {}s", rest.as_secs()));
+                    sleep_interruptible(rest, &stop).await;
+                }
+                if policy.should_take_block_break() || policy.should_take_home_break() {
+                    let break_for = policy.home_break_duration();
+                    report(
+                        &mut status,
+                        format!(
+                            "tạm về màn hình chính khoảng {}s rồi mở TikTok lại",
+                            break_for.as_secs()
+                        ),
+                    );
+                    let _ = session.home().await;
+                    sleep_interruptible(break_for, &stop).await;
+                    if policy.should_cold_restart() {
+                        report(
+                            &mut status,
+                            "khởi động lại TikTok sau một quãng nghỉ".into(),
+                        );
+                        let _ = self
+                            .control
+                            .terminate_streaming_app(&ui_context, &bundle_id)
+                            .await;
+                        sleep_interruptible(Duration::from_secs(2), &stop).await;
+                        match self
+                            .control
+                            .recover_streaming_session(
+                                &mut ui_context,
+                                &bundle_id,
+                                session_kind,
+                                false,
+                            )
+                            .await
+                        {
+                            Ok(next) => session = next,
+                            Err(error) => {
+                                report(&mut status, format!("không mở lại được TikTok: {error}"));
+                                outcome = Outcome::Partial;
+                                break 'feed;
+                            }
+                        }
+                    } else {
+                        let _ = session.launch_app_foreground(&bundle_id).await;
+                    }
+                    sleep_interruptible(Duration::from_secs(4), &stop).await;
+                    policy.reset_block();
+                }
+            }
             sleep_interruptible(Duration::from_millis(human.after_swipe_pause_ms()), &stop).await;
         }
 
@@ -859,7 +1195,7 @@ impl NurtureEngine {
         let never = AtomicBool::new(false);
         let ended_on_tiktok = self
             .wait_for_frame(udid, Duration::from_millis(2_500), &never, |img| {
-                screen::classify(img, Some(screen_size.0)).kind == ScreenKind::Feed
+                screen::feed_ready(img, Some(screen_size.0))
             })
             .await
             .is_some();
@@ -917,6 +1253,7 @@ impl NurtureEngine {
             "nurture.session",
             &format!("{udid} {summary} usd={:.4}", status.session_usd),
         );
+        self.clear_touch_points(udid);
         Ok(status)
     }
 
@@ -951,7 +1288,7 @@ impl NurtureEngine {
 
     fn on_feed(&self, udid: &str) -> bool {
         self.latest_image(udid)
-            .map(|img| screen::classify(&img, None).kind == ScreenKind::Feed)
+            .map(|img| screen::feed_ready(&img, None))
             .unwrap_or(false)
     }
 }
@@ -985,6 +1322,24 @@ pub(super) async fn sleep_interruptible(dur: Duration, stop: &AtomicBool) {
         tokio::time::sleep(slice).await;
         left = left.saturating_sub(slice);
     }
+}
+
+async fn wait_for_action_gap(
+    last_action_at: &mut Option<Instant>,
+    gap: Duration,
+    stop: &AtomicBool,
+) -> bool {
+    if let Some(last) = *last_action_at {
+        let elapsed = last.elapsed();
+        if elapsed < gap {
+            sleep_interruptible(gap - elapsed, stop).await;
+        }
+    }
+    if stop.load(Ordering::Relaxed) {
+        return false;
+    }
+    *last_action_at = Some(Instant::now());
+    true
 }
 
 #[cfg(test)]

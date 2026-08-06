@@ -1,0 +1,125 @@
+diff --git a/WebDriverAgentLib/Commands/FBCustomCommands.m b/WebDriverAgentLib/Commands/FBCustomCommands.m
+--- a/WebDriverAgentLib/Commands/FBCustomCommands.m
++++ b/WebDriverAgentLib/Commands/FBCustomCommands.m
+@@ -9,6 +9,7 @@
+ #import "FBCustomCommands.h"
+ 
+ #import <CommonCrypto/CommonDigest.h>
+ #import <Photos/Photos.h>
++#import <UIKit/UIKit.h>
+ #import <XCTest/XCUIDevice.h>
+ #import <CoreLocation/CoreLocation.h>
+@@ -38,5 +39,8 @@
+ #import "XCUIElementQuery.h"
+ #import "FBUnattachedAppLauncher.h"
+ #import "XCUIApplication+FBAlert.h"
++#import "FBXCTestDaemonsProxy.h"
++#import "XCPointerEventPath.h"
++#import "XCSynthesizedEventRecord.h"
+ 
+ @implementation FBCustomCommands
+@@ -500,5 +504,42 @@
+   return files;
+ }
+ 
+++ (UIInterfaceOrientation)riviuMediaInterfaceOrientation
++{
++  switch (XCUIDevice.sharedDevice.orientation) {
++    case UIDeviceOrientationPortrait:
++      return UIInterfaceOrientationPortrait;
++    case UIDeviceOrientationPortraitUpsideDown:
++      return UIInterfaceOrientationPortraitUpsideDown;
++    case UIDeviceOrientationLandscapeLeft:
++      return UIInterfaceOrientationLandscapeRight;
++    case UIDeviceOrientationLandscapeRight:
++      return UIInterfaceOrientationLandscapeLeft;
++    case UIDeviceOrientationUnknown:
++    case UIDeviceOrientationFaceUp:
++    case UIDeviceOrientationFaceDown:
++    default:
++      return UIInterfaceOrientationPortrait;
++  }
++}
++
+++ (BOOL)riviuMediaTapPoint:(CGPoint)point error:(NSError **)error
++{
++  XCPointerEventPath *eventPath = [[XCPointerEventPath alloc]
++                                   initForTouchAtPoint:point
++                                   offset:0.0];
++  [eventPath liftUpAtOffset:0.05];
++  XCSynthesizedEventRecord *eventRecord = [[XCSynthesizedEventRecord alloc]
++                                           initWithName:@"Riviu media confirmation"
++                                           interfaceOrientation:self.riviuMediaInterfaceOrientation];
++  [eventRecord addPointerEventPath:eventPath];
++  return [FBXCTestDaemonsProxy synthesizeEventWithRecord:eventRecord timeout:5.0 error:error];
++}
++
++// PhotoLibrary's destructive change confirmation is a SpringBoard alert. A
++// broad accessibility snapshot from this WDA route can block behind TikTok,
++// so use the same native XCTest event path as /wda/tap after the alert has had
++// time to appear. The route performs only the asset deletion, which produces
++// one deterministic confirmation and leaves an empty, harmless album behind.
+ + (BOOL)riviuMediaAuthorizeReadWrite:(NSError **)error
+ {
+@@ -730,45 +770,38 @@
+   }
+   NSArray<NSString *> *assetIds = [record[@"assetIds"] isKindOfClass:NSArray.class] ? record[@"assetIds"] : @[];
+   NSString *albumId = [record[@"albumId"] isKindOfClass:NSString.class] ? record[@"albumId"] : nil;
+   PHFetchResult<PHAsset *> *assets = [PHAsset fetchAssetsWithLocalIdentifiers:assetIds options:nil];
+-  PHFetchResult<PHAssetCollection *> *albums = albumId.length > 0
+-      ? [PHAssetCollection fetchAssetCollectionsWithLocalIdentifiers:@[albumId] options:nil]
+-      : nil;
+   dispatch_semaphore_t changesSemaphore = dispatch_semaphore_create(0);
+   __block BOOL deleted = NO;
+   __block NSError *changesError = nil;
+   [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+     if (assets.count > 0) {
+       [PHAssetChangeRequest deleteAssets:assets];
+     }
+-    if (albums.count > 0) {
+-      [PHAssetCollectionChangeRequest deleteAssetCollections:albums];
+-    }
+   } completionHandler:^(BOOL success, NSError *changeError) {
+     deleted = success;
+     changesError = changeError;
+     dispatch_semaphore_signal(changesSemaphore);
+   }];
+   NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:45.0];
++  NSDate *tapReady = [NSDate dateWithTimeIntervalSinceNow:0.65];
++  BOOL confirmationTapSent = NO;
+   while (dispatch_semaphore_wait(changesSemaphore, DISPATCH_TIME_NOW) != 0) {
+-    // iOS asks for confirmation before an app removes a user-visible album.
+-    // Keep the XCTest run loop alive and confirm only the explicit delete
+-    // action for this cleanup request.
+-    @try {
+-      XCUIElement *alert = XCUIApplication.fb_systemApplication.fb_alertElement;
+-      if (alert != nil) {
+-        NSPredicate *predicate = [NSPredicate predicateWithFormat:
+-                                  @"label CONTAINS[c] %@ OR label CONTAINS[c] %@ OR label CONTAINS[c] %@",
+-                                  @"xóa", @"delete", @"remove"];
+-        XCUIElement *button = [[alert.buttons matchingPredicate:predicate]
+-                               firstMatch];
+-        if (button.exists) {
+-          [button tap];
+-        }
+-      }
+-    } @catch (NSException *exception) {
+-      // SpringBoard can disappear between the snapshot and tap.
++    // The asset confirmation is centered near 75% of a portrait screen. It
++    // is hosted by SpringBoard, so coordinate synthesis remains responsive
++    // even when an accessibility snapshot would block on the active app.
++    if (!confirmationTapSent && [[NSDate date] compare:tapReady] != NSOrderedAscending) {
++      CGSize screenSize = XCUIApplication.fb_systemApplication.wdFrame.size;
++      if (screenSize.width > 0.0 && screenSize.height > 0.0) {
++        NSError *tapError = nil;
++        confirmationTapSent = [self riviuMediaTapPoint:
++                               CGPointMake(screenSize.width * 0.68, screenSize.height * 0.745)
++                               error:&tapError];
++        if (!confirmationTapSent && tapError != nil) {
++          changesError = tapError;
++        }
++      }
+     }
+     if ([[NSDate date] compare:deadline] != NSOrderedAscending) {
+       error = [self riviuMediaError:@"photo cleanup confirmation timed out"];
+       return FBResponseWithUnknownError(error);

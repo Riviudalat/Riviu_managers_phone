@@ -14,12 +14,18 @@ use rand::{Rng, SeedableRng};
 use uuid::Uuid;
 
 use crate::driver::UiSession;
-use crate::human_behavior::pick_direction;
+use crate::human_behavior::pick_direction_seeded;
+use crate::interaction::{PreparedThreadMessage, ThreadSendEvidence};
+#[cfg(test)]
+use crate::openai_client::pick_from_pool;
 use crate::openai_client::{
-    choose_emoji_reaction, generate_vision_comment, host_of, pick_from_pool,
+    choose_emoji_reaction, host_of, ocr_caption, prepare_caption_comment, prepare_grounded_comment,
+    provider_supports_vision,
 };
-use crate::screen::{self, ActionRail, CommentDrawer, ScreenKind};
-use crate::types::{NurtureCommentCost, NurtureSettings, SwipeGesture, TapPoint};
+use crate::screen::{self, ActionRail, CommentDrawer};
+use crate::types::{
+    NurtureCommentAttempt, NurtureCommentCost, NurtureSettings, SwipeGesture, TapPoint,
+};
 
 use super::{frame_digest, sleep_interruptible, NurtureEngine, SWIPE_SETTLE};
 
@@ -56,6 +62,8 @@ pub(super) enum CommentResult {
     EmojiSent(f64),
     /// Neither vision generation nor the pre-generated pool yielded text.
     NoText,
+    /// Contextual preparation was rejected before any drawer gesture.
+    ContextSkipped,
     /// The comment icon did not open the drawer.
     NoDrawer,
     /// The drawer already contained text before this attempt started.
@@ -83,6 +91,7 @@ impl CommentResult {
             }
             CommentResult::EmojiSent(_) => "đã gửi bình luận emoji",
             CommentResult::NoText => "không có nội dung bình luận chữ dùng được",
+            CommentResult::ContextSkipped => "bỏ qua: AI không xác nhận được comment bám nội dung",
             CommentResult::NoDrawer => "không mở được khay bình luận",
             CommentResult::ExistingDraft => "khay bình luận đang có bản nháp cũ",
             CommentResult::NoComposer => "không mở được composer emoji",
@@ -103,9 +112,256 @@ struct PreparedTextComment {
     completion_tokens: u32,
     usd: f64,
     source: &'static str,
+    frame_sha256: Option<String>,
+    caption_preview: Option<String>,
+    context_confidence: Option<u8>,
+    relevance: Option<u8>,
+    evidence_support: Option<u8>,
+    attempt_id: Option<String>,
 }
 
 impl NurtureEngine {
+    /// Send one already-prepared campaign message. The caller must persist the
+    /// prepared text/hash before invoking this method. This deliberately keeps
+    /// the same frame-confirmed drawer contract as nurture comments, but does
+    /// not call an AI provider while the composer is open.
+    pub async fn send_prepared_thread_comment(
+        &self,
+        udid: &str,
+        session: &dyn UiSession,
+        gestures: &tokio::sync::Mutex<()>,
+        prepared: &PreparedThreadMessage,
+        stop: &AtomicBool,
+    ) -> anyhow::Result<ThreadSendEvidence> {
+        if !session.supports_text_input() {
+            return Err(anyhow!("text_channel_unavailable"));
+        }
+        let Some(open_bytes) = self.frames.latest(udid) else {
+            return Err(anyhow!("frame_unavailable"));
+        };
+        let open_image = image::load_from_memory(&open_bytes)
+            .map_err(|_| anyhow!("frame_decode_failed"))?
+            .to_rgb8();
+        let screen_size = session.window_size().await.unwrap_or((375.0, 667.0));
+        let rail = screen::find_action_rail(&open_image).unwrap_or_else(ActionRail::fallback);
+        let point = |x: f64, y: f64| {
+            self.next_touch_point(
+                udid,
+                screen_size,
+                TapPoint {
+                    x: screen_size.0 * x,
+                    y: screen_size.1 * y,
+                },
+                (8.0, 8.0),
+            )
+        };
+
+        {
+            let _guard = gestures.lock().await;
+            session
+                .tap(point(rail.x, rail.comment_y))
+                .await
+                .map_err(|e| anyhow!("open_comment_drawer: {e}"))?;
+        }
+        let drawer = self
+            .wait_for_frame(udid, Duration::from_secs(6), stop, |img| {
+                !matches!(
+                    screen::comment_drawer_state(img).0,
+                    CommentDrawer::Closed | CommentDrawer::Unknown
+                )
+            })
+            .await
+            .ok_or_else(|| anyhow!("comment_drawer_not_confirmed"))?;
+        if screen::comment_drawer_state(&drawer).0 != CommentDrawer::Open {
+            return Err(anyhow!("comment_drawer_has_existing_draft"));
+        }
+        sleep_interruptible(COMMENT_DRAWER_SETTLE, stop).await;
+        let before_typing = self
+            .frames
+            .latest(udid)
+            .ok_or_else(|| anyhow!("frame_unavailable_before_typing"))?;
+        {
+            let _guard = gestures.lock().await;
+            session
+                .tap(point(screen::COMMENT_INPUT.0, screen::COMMENT_INPUT.1))
+                .await
+                .map_err(|e| anyhow!("focus_comment_input: {e}"))?;
+            sleep_interruptible(COMMENT_INPUT_SETTLE, stop).await;
+            session
+                .type_text(&prepared.text)
+                .await
+                .map_err(|e| anyhow!("type_comment: {e}"))?;
+        }
+        let changed = self
+            .wait_for_new_frame(
+                udid,
+                Duration::from_secs(6),
+                stop,
+                frame_digest(&before_typing),
+            )
+            .await;
+        let armed_frame = if changed {
+            self.wait_for_frame(udid, Duration::from_secs(6), stop, |img| {
+                screen::comment_drawer_state(img).0 == CommentDrawer::SendArmed
+            })
+            .await
+        } else {
+            None
+        };
+        let armed_bytes = self
+            .frames
+            .latest(udid)
+            .ok_or_else(|| anyhow!("armed_frame_missing"))?;
+        if armed_frame.is_none() {
+            return Err(anyhow!("send_not_armed"));
+        }
+        {
+            let _guard = gestures.lock().await;
+            session
+                .tap(point(screen::SEND_BUTTON.0, screen::SEND_BUTTON.1))
+                .await
+                .map_err(|e| anyhow!("tap_send: {e}"))?;
+        }
+        let _cleared = self
+            .wait_for_frame(udid, Duration::from_secs(6), stop, |img| {
+                screen::comment_drawer_state(img).0 == CommentDrawer::Open
+            })
+            .await
+            .ok_or_else(|| anyhow!("send_clear_not_confirmed"))?;
+        let cleared_bytes = self
+            .frames
+            .latest(udid)
+            .ok_or_else(|| anyhow!("cleared_frame_missing"))?;
+        self.close_comment_ui(udid, session, gestures, screen_size, stop)
+            .await;
+        Ok(ThreadSendEvidence {
+            text_sha256: prepared.text_sha256.clone(),
+            armed_frame_sha256: format!("{:016x}", frame_digest(&armed_bytes)),
+            cleared_frame_sha256: format!("{:016x}", frame_digest(&cleared_bytes)),
+        })
+    }
+
+    /// Continue a comment drawer after the locator has identified the exact
+    /// parent and its Reply control. The caller owns the identity proof; this
+    /// method only performs the same armed/cleared composer checks.
+    pub async fn send_prepared_thread_reply(
+        &self,
+        udid: &str,
+        session: &dyn UiSession,
+        gestures: &tokio::sync::Mutex<()>,
+        reply_point: TapPoint,
+        prepared: &PreparedThreadMessage,
+        stop: &AtomicBool,
+    ) -> anyhow::Result<ThreadSendEvidence> {
+        if !session.supports_text_input() {
+            return Err(anyhow!("text_channel_unavailable"));
+        }
+        let screen_size = session.window_size().await.unwrap_or((375.0, 667.0));
+        let reply_point = self.next_touch_point(udid, screen_size, reply_point, (8.0, 8.0));
+        {
+            let _guard = gestures.lock().await;
+            session
+                .tap(reply_point)
+                .await
+                .map_err(|e| anyhow!("tap_reply: {e}"))?;
+        }
+        self.wait_for_frame(udid, Duration::from_secs(5), stop, |img| {
+            !matches!(
+                screen::comment_drawer_state(img).0,
+                CommentDrawer::Closed | CommentDrawer::Unknown
+            )
+        })
+        .await
+        .ok_or_else(|| anyhow!("reply_composer_not_confirmed"))?;
+        sleep_interruptible(COMMENT_INPUT_SETTLE, stop).await;
+        let before_typing = self
+            .frames
+            .latest(udid)
+            .ok_or_else(|| anyhow!("frame_unavailable_before_reply"))?;
+        {
+            let _guard = gestures.lock().await;
+            session
+                .tap(self.next_touch_point(
+                    udid,
+                    screen_size,
+                    TapPoint {
+                        x: screen_size.0 * screen::COMMENT_INPUT.0,
+                        y: screen_size.1 * screen::COMMENT_INPUT.1,
+                    },
+                    (24.0, 10.0),
+                ))
+                .await
+                .map_err(|e| anyhow!("focus_reply_input: {e}"))?;
+            sleep_interruptible(COMMENT_INPUT_SETTLE, stop).await;
+            session
+                .type_text(&prepared.text)
+                .await
+                .map_err(|e| anyhow!("type_reply: {e}"))?;
+        }
+        let changed = self
+            .wait_for_new_frame(
+                udid,
+                Duration::from_secs(6),
+                stop,
+                frame_digest(&before_typing),
+            )
+            .await;
+        let armed = changed
+            && self
+                .wait_for_frame(udid, Duration::from_secs(6), stop, |img| {
+                    screen::comment_drawer_state(img).0 == CommentDrawer::SendArmed
+                })
+                .await
+                .is_some();
+        let armed_bytes = self
+            .frames
+            .latest(udid)
+            .ok_or_else(|| anyhow!("reply_armed_frame_missing"))?;
+        if !armed {
+            return Err(anyhow!("reply_send_not_armed"));
+        }
+        {
+            let _guard = gestures.lock().await;
+            session
+                .tap(self.next_touch_point(
+                    udid,
+                    screen_size,
+                    TapPoint {
+                        x: screen_size.0 * screen::SEND_BUTTON.0,
+                        y: screen_size.1 * screen::SEND_BUTTON.1,
+                    },
+                    (8.0, 8.0),
+                ))
+                .await
+                .map_err(|e| anyhow!("tap_reply_send: {e}"))?;
+        }
+        self.wait_for_frame(udid, Duration::from_secs(6), stop, |img| {
+            screen::comment_drawer_state(img).0 == CommentDrawer::Open
+        })
+        .await
+        .ok_or_else(|| anyhow!("reply_clear_not_confirmed"))?;
+        let cleared_bytes = self
+            .frames
+            .latest(udid)
+            .ok_or_else(|| anyhow!("reply_cleared_frame_missing"))?;
+        let _ = session
+            .tap(self.next_touch_point(
+                udid,
+                screen_size,
+                TapPoint {
+                    x: screen_size.0 * screen::DRAWER_DISMISS.0,
+                    y: screen_size.1 * screen::DRAWER_DISMISS.1,
+                },
+                (12.0, 10.0),
+            ))
+            .await;
+        Ok(ThreadSendEvidence {
+            text_sha256: prepared.text_sha256.clone(),
+            armed_frame_sha256: format!("{:016x}", frame_digest(&armed_bytes)),
+            cleared_frame_sha256: format!("{:016x}", frame_digest(&cleared_bytes)),
+        })
+    }
+
     /// Tap the heart, then confirm from a later frame that it turned red.
     pub(super) async fn do_like(
         &self,
@@ -126,10 +382,15 @@ impl NurtureEngine {
         }
 
         let mut rng = StdRng::from_entropy();
-        let point = TapPoint {
-            x: screen_size.0 * rail.x + rng.gen_range(-3.0..3.0),
-            y: screen_size.1 * rail.like_y + rng.gen_range(-4.0..4.0),
-        };
+        let point = self.next_touch_point(
+            udid,
+            screen_size,
+            TapPoint {
+                x: screen_size.0 * rail.x,
+                y: screen_size.1 * rail.like_y,
+            },
+            (10.0, 12.0),
+        );
         sleep_interruptible(Duration::from_millis(rng.gen_range(400..900)), stop).await;
         {
             let _guard = gestures.lock().await;
@@ -175,10 +436,15 @@ impl NurtureEngine {
         }
 
         let mut rng = StdRng::from_entropy();
-        let point = TapPoint {
-            x: screen_size.0 * rail.x,
-            y: screen_size.1 * rail.follow_y + rng.gen_range(-3.0..3.0),
-        };
+        let point = self.next_touch_point(
+            udid,
+            screen_size,
+            TapPoint {
+                x: screen_size.0 * rail.x,
+                y: screen_size.1 * rail.follow_y,
+            },
+            (10.0, 10.0),
+        );
         sleep_interruptible(Duration::from_millis(rng.gen_range(300..700)), stop).await;
         {
             let _guard = gestures.lock().await;
@@ -202,7 +468,7 @@ impl NurtureEngine {
         session: &dyn UiSession,
         gestures: &tokio::sync::Mutex<()>,
         screen_size: (f64, f64),
-        frenzy: bool,
+        duration_ms: u64,
         stop: &AtomicBool,
     ) -> anyhow::Result<bool> {
         let before = self.frames.latest(udid).map(|f| frame_digest(&f));
@@ -217,11 +483,7 @@ impl NurtureEngine {
                 x: x0 + rng.gen_range(-8.0..8.0),
                 y: (screen_size.1 * 0.25 + rng.gen_range(-50.0..50.0)).max(40.0),
             },
-            duration_ms: if frenzy {
-                rng.gen_range(180..280)
-            } else {
-                rng.gen_range(280..450)
-            },
+            duration_ms,
         };
         {
             let _guard = gestures.lock().await;
@@ -237,10 +499,49 @@ impl NurtureEngine {
         Ok(changed)
     }
 
+    /// Advance one slide in a TikTok photo carousel. Photo posts use a
+    /// horizontal gesture and still require a newer frame as proof; the
+    /// caller decides how many slides to sample.
+    pub(super) async fn do_photo_swipe(
+        &self,
+        udid: &str,
+        session: &dyn UiSession,
+        gestures: &tokio::sync::Mutex<()>,
+        screen_size: (f64, f64),
+        duration_ms: u64,
+        stop: &AtomicBool,
+    ) -> anyhow::Result<bool> {
+        let before = self.frames.latest(udid).map(|f| frame_digest(&f));
+        let mut rng = StdRng::from_entropy();
+        let y = screen_size.1 * rng.gen_range(0.38..0.62);
+        let gesture = SwipeGesture {
+            from: TapPoint {
+                x: screen_size.0 * rng.gen_range(0.74..0.84),
+                y,
+            },
+            to: TapPoint {
+                x: screen_size.0 * rng.gen_range(0.16..0.27),
+                y: y + rng.gen_range(-4.0..4.0),
+            },
+            duration_ms,
+        };
+        {
+            let _guard = gestures.lock().await;
+            session.swipe(gesture).await?;
+        }
+        let Some(before) = before else {
+            return Ok(true);
+        };
+        Ok(self
+            .wait_for_new_frame(udid, SWIPE_SETTLE, stop, before)
+            .await)
+    }
+
     /// Close the comment drawer. Safe to call from any state: the dismiss point
     /// is near the top of the screen, well away from anything destructive.
     pub(super) async fn dismiss_drawer(
         &self,
+        udid: &str,
         session: &dyn UiSession,
         gestures: &tokio::sync::Mutex<()>,
         screen_size: (f64, f64),
@@ -248,10 +549,15 @@ impl NurtureEngine {
     ) {
         let _guard = gestures.lock().await;
         let _ = session
-            .tap(TapPoint {
-                x: screen_size.0 * screen::DRAWER_DISMISS.0,
-                y: screen_size.1 * screen::DRAWER_DISMISS.1,
-            })
+            .tap(self.next_touch_point(
+                udid,
+                screen_size,
+                TapPoint {
+                    x: screen_size.0 * screen::DRAWER_DISMISS.0,
+                    y: screen_size.1 * screen::DRAWER_DISMISS.1,
+                },
+                (12.0, 10.0),
+            ))
             .await;
         sleep_interruptible(Duration::from_millis(700), stop).await;
     }
@@ -272,11 +578,11 @@ impl NurtureEngine {
         stop: &AtomicBool,
     ) -> bool {
         for _ in 0..3 {
-            self.dismiss_drawer(session, gestures, screen_size, stop)
+            self.dismiss_drawer(udid, session, gestures, screen_size, stop)
                 .await;
             if self
                 .wait_for_frame(udid, Duration::from_secs(3), stop, |img| {
-                    screen::classify(img, Some(screen_size.0)).kind == ScreenKind::Feed
+                    screen::feed_ready(img, Some(screen_size.0))
                 })
                 .await
                 .is_some()
@@ -304,9 +610,16 @@ impl NurtureEngine {
             .latest(udid)
             .ok_or_else(|| anyhow!("không có frame để chọn cảm xúc"))?;
         let (reaction, usd) = choose_emoji_reaction(settings, &frame).await;
-        let tap = |x: f64, y: f64| TapPoint {
-            x: screen_size.0 * x,
-            y: screen_size.1 * y,
+        let tap = |x: f64, y: f64| {
+            self.next_touch_point(
+                udid,
+                screen_size,
+                TapPoint {
+                    x: screen_size.0 * x,
+                    y: screen_size.1 * y,
+                },
+                (8.0, 8.0),
+            )
         };
 
         {
@@ -443,10 +756,10 @@ impl NurtureEngine {
 
     /// Post a text comment on the current video.
     ///
-    /// Vision generation happens before opening the drawer so a slow API cannot
-    /// leave UI behind. A generated sentence is preferred; the pre-generated
-    /// pool is the offline fallback. Typing is only an attempted input: the
-    /// stream must show Send arm before it is tapped, then disarm afterwards.
+    /// Context collection and the two AI passes happen before opening the drawer
+    /// so a slow provider cannot leave UI behind. Typing is only an attempted
+    /// input: the stream must show Send arm before it is tapped, then disarm
+    /// afterwards.
     /// A failed text attempt is closed and classified without trying an emoji in
     /// the same field, which avoids accidentally posting mixed content.
     #[allow(clippy::too_many_arguments)]
@@ -458,67 +771,148 @@ impl NurtureEngine {
         rail: &ActionRail,
         screen_size: (f64, f64),
         settings: &NurtureSettings,
-        pool: &[String],
+        _pool: &[String],
         stop: &AtomicBool,
     ) -> anyhow::Result<CommentResult> {
         if !session.supports_text_input() {
             return Ok(CommentResult::TextChannelUnavailable);
         }
-        let frame = self
-            .frames
-            .latest(udid)
-            .ok_or_else(|| anyhow!("không có frame để sinh bình luận"))?;
-        let direction = pick_direction(&settings.ai_directions);
-        let generated = if settings.api_key.trim().is_empty() {
-            None
+        let prepared = if settings.api_key.trim().is_empty() {
+            // Unit fixtures still exercise the proven drawer sender with an
+            // explicit pool entry. Production never passes a pool, so an empty
+            // API key is a contextual skip rather than a generic post.
+            #[cfg(test)]
+            {
+                pick_from_pool(_pool).map(|text| PreparedTextComment {
+                    text,
+                    model: settings.model.clone(),
+                    base_url_host: host_of(&settings.base_url),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    usd: 0.0,
+                    source: "test-fixture",
+                    frame_sha256: None,
+                    caption_preview: None,
+                    context_confidence: None,
+                    relevance: None,
+                    evidence_support: None,
+                    attempt_id: None,
+                })
+            }
+            #[cfg(not(test))]
+            {
+                None
+            }
         } else {
-            match generate_vision_comment(settings, &frame, direction.as_deref()).await {
-                Ok(comment) => Some(comment),
+            let Some(frames) = self.collect_comment_frames(udid, screen_size, stop).await else {
+                self.record_context_skip_attempt(udid, settings, "evidence_unavailable");
+                return Ok(CommentResult::ContextSkipped);
+            };
+            let direction = pick_direction_seeded(
+                &settings.ai_directions,
+                frames
+                    .first()
+                    .map(|frame| frame_digest(frame) as u64)
+                    .unwrap_or_default(),
+            );
+            let prepared_result = if provider_supports_vision(settings) {
+                prepare_grounded_comment(settings, &frames, direction.as_deref()).await
+            } else {
+                let frame = frames.last().ok_or_else(|| anyhow!("no_usable_evidence"))?;
+                let observations = self.frame_text.recognize(frame).await?;
+                let caption =
+                    ocr_caption(&observations).ok_or_else(|| anyhow!("caption_ocr_empty"))?;
+                let fingerprint = format!("{:016x}", frame_digest(frame));
+                prepare_caption_comment(settings, &caption, &fingerprint, direction.as_deref())
+                    .await
+            };
+            match prepared_result {
+                Ok(comment) => Some(PreparedTextComment {
+                    text: comment.text,
+                    model: comment.model,
+                    base_url_host: comment.base_url_host,
+                    prompt_tokens: comment.prompt_tokens,
+                    completion_tokens: comment.completion_tokens,
+                    usd: comment.usd,
+                    source: if provider_supports_vision(settings) {
+                        "grounded-vision"
+                    } else {
+                        "ocr-caption"
+                    },
+                    frame_sha256: Some(comment.frame_sha256),
+                    caption_preview: comment
+                        .caption
+                        .as_deref()
+                        .map(|caption| caption.chars().take(160).collect()),
+                    context_confidence: Some(comment.context_confidence),
+                    relevance: Some(comment.relevance),
+                    evidence_support: Some(comment.evidence_support),
+                    attempt_id: None,
+                }),
                 Err(error) => {
-                    tracing::warn!(
-                        "[nurture {udid}] sinh bình luận vision lỗi: {error} — dùng pool"
-                    );
+                    tracing::info!("[nurture {udid}] bỏ qua comment semantic: {error}");
+                    if std::env::var_os("RIVIU_LIVE_NURTURE_VERBOSE").is_some() {
+                        eprintln!("[nurture {udid}] comment semantic skip: {error}");
+                    }
                     None
                 }
             }
         };
-        let prepared = if let Some(comment) = generated {
-            Some(PreparedTextComment {
-                text: comment.text,
-                model: comment.model,
-                base_url_host: comment.base_url_host,
-                prompt_tokens: comment.prompt_tokens,
-                completion_tokens: comment.completion_tokens,
-                usd: comment.usd,
-                source: "vision",
-            })
-        } else {
-            pick_from_pool(pool).map(|text| PreparedTextComment {
-                text,
-                model: settings.model.clone(),
-                base_url_host: host_of(&settings.base_url),
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                usd: 0.0,
-                source: "pool",
-            })
-        };
-        let Some(prepared) = prepared else {
-            return Ok(CommentResult::NoText);
+        let Some(mut prepared) = prepared else {
+            self.record_context_skip_attempt(udid, settings, "context_skipped");
+            return Ok(CommentResult::ContextSkipped);
         };
 
-        let tap = |x: f64, y: f64| TapPoint {
-            x: screen_size.0 * x,
-            y: screen_size.1 * y,
+        let attempt = NurtureCommentAttempt {
+            id: Uuid::new_v4().to_string(),
+            udid: udid.to_string(),
+            outcome: "prepared".into(),
+            source: prepared.source.into(),
+            model: prepared.model.clone(),
+            base_url_host: prepared.base_url_host.clone(),
+            prompt_tokens: prepared.prompt_tokens,
+            completion_tokens: prepared.completion_tokens,
+            usd: prepared.usd,
+            preview: prepared.text.chars().take(160).collect(),
+            caption_preview: prepared.caption_preview.clone().unwrap_or_default(),
+            frame_sha256: prepared.frame_sha256.clone().unwrap_or_default(),
+            context_confidence: prepared.context_confidence,
+            relevance: prepared.relevance,
+            evidence_support: prepared.evidence_support,
+            created_at: Utc::now().to_rfc3339(),
+        };
+        if let Err(error) = self.db.add_nurture_comment_attempt(&attempt) {
+            tracing::warn!("[nurture {udid}] không ghi được comment attempt: {error}");
+        }
+        prepared.attempt_id = Some(attempt.id);
+
+        // AI/OCR preparation can take several seconds; reacquire the rail from
+        // the newest frame before opening the drawer so we never tap a stale
+        // card's comment coordinate.
+        let active_rail = self
+            .latest_image(udid)
+            .and_then(|img| screen::locate_action_rail(&img))
+            .unwrap_or(*rail);
+        let tap = |x: f64, y: f64| {
+            self.next_touch_point(
+                udid,
+                screen_size,
+                TapPoint {
+                    x: screen_size.0 * x,
+                    y: screen_size.1 * y,
+                },
+                (8.0, 8.0),
+            )
         };
 
         // 1. open the comment drawer
         let open_result = async {
             let _guard = gestures.lock().await;
-            session.tap(tap(rail.x, rail.comment_y)).await
+            session.tap(tap(active_rail.x, active_rail.comment_y)).await
         }
         .await;
         if let Err(error) = open_result {
+            self.update_comment_attempt(&prepared, "open_error");
             self.close_comment_ui(udid, session, gestures, screen_size, stop)
                 .await;
             return Err(error);
@@ -532,6 +926,7 @@ impl NurtureEngine {
             })
             .await;
         if drawer.is_none() {
+            self.update_comment_attempt(&prepared, "no_drawer");
             self.close_comment_ui(udid, session, gestures, screen_size, stop)
                 .await;
             return Ok(CommentResult::NoDrawer);
@@ -546,6 +941,7 @@ impl NurtureEngine {
         // that is armed before this attempt owns an older draft; typing or
         // sending in that state would misattribute its contents to `prepared`.
         let Some(open_frame) = self.frames.latest(udid) else {
+            self.update_comment_attempt(&prepared, "no_drawer");
             self.close_comment_ui(udid, session, gestures, screen_size, stop)
                 .await;
             return Ok(CommentResult::NoDrawer);
@@ -556,6 +952,14 @@ impl NurtureEngine {
             .map(|img| screen::comment_drawer_state(&img.to_rgb8()).0)
             .unwrap_or(CommentDrawer::Unknown);
         if drawer_state != CommentDrawer::Open {
+            self.update_comment_attempt(
+                &prepared,
+                if drawer_state == CommentDrawer::SendArmed {
+                    "existing_draft"
+                } else {
+                    "no_drawer"
+                },
+            );
             self.close_comment_ui(udid, session, gestures, screen_size, stop)
                 .await;
             return Ok(if drawer_state == CommentDrawer::SendArmed {
@@ -577,6 +981,7 @@ impl NurtureEngine {
         }
         .await;
         if let Err(error) = input_result {
+            self.update_comment_attempt(&prepared, "type_error");
             self.close_comment_ui(udid, session, gestures, screen_size, stop)
                 .await;
             return Err(error);
@@ -591,6 +996,7 @@ impl NurtureEngine {
                 .await
                 .is_some();
         if !armed {
+            self.update_comment_attempt(&prepared, "text_not_armed");
             self.close_comment_ui(udid, session, gestures, screen_size, stop)
                 .await;
             return Ok(CommentResult::TextNotArmed);
@@ -604,6 +1010,7 @@ impl NurtureEngine {
         }
         .await;
         if let Err(error) = send_result {
+            self.update_comment_attempt(&prepared, "send_error");
             self.close_comment_ui(udid, session, gestures, screen_size, stop)
                 .await;
             return Err(error);
@@ -621,12 +1028,17 @@ impl NurtureEngine {
             .await;
 
         if !sent {
+            self.update_comment_attempt(&prepared, "text_uncertain");
             return Ok(CommentResult::TextNotSent);
         }
+        self.update_comment_attempt(&prepared, "sent");
         tracing::info!(
-            "[nurture {udid}] đã gửi bình luận chữ ({}) {:?}",
+            "[nurture {udid}] đã gửi bình luận chữ source={} frame_sha256={:?} context={:?} relevance={:?} evidence={:?}",
             prepared.source,
-            prepared.text
+            prepared.frame_sha256,
+            prepared.context_confidence,
+            prepared.relevance,
+            prepared.evidence_support
         );
 
         let cost = NurtureCommentCost {
@@ -644,6 +1056,66 @@ impl NurtureEngine {
             tracing::warn!("[nurture {udid}] không ghi được cost bình luận: {error}");
         }
         Ok(CommentResult::TextSent(cost.usd))
+    }
+
+    /// Capture a short, same-post evidence window from the existing MJPEG
+    /// source. Any popup or transition inside the window invalidates the set;
+    /// posting a sentence from mixed screens is worse than skipping a turn.
+    async fn collect_comment_frames(
+        &self,
+        udid: &str,
+        screen_size: (f64, f64),
+        stop: &AtomicBool,
+    ) -> Option<Vec<Vec<u8>>> {
+        let mut frames = Vec::with_capacity(3);
+        for sample in 0..3 {
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                return None;
+            }
+            let frame = self.frames.latest(udid)?;
+            let image = image::load_from_memory(&frame).ok()?.to_rgb8();
+            if !screen::feed_ready(&image, Some(screen_size.0)) {
+                return None;
+            }
+            frames.push((*frame).clone());
+            if sample < 2 {
+                sleep_interruptible(Duration::from_millis(600), stop).await;
+            }
+        }
+        Some(frames)
+    }
+
+    fn update_comment_attempt(&self, prepared: &PreparedTextComment, outcome: &str) {
+        let Some(id) = prepared.attempt_id.as_deref() else {
+            return;
+        };
+        if let Err(error) = self.db.update_nurture_comment_attempt_outcome(id, outcome) {
+            tracing::warn!("không cập nhật outcome comment attempt {id}: {error}");
+        }
+    }
+
+    fn record_context_skip_attempt(&self, udid: &str, settings: &NurtureSettings, outcome: &str) {
+        let attempt = NurtureCommentAttempt {
+            id: Uuid::new_v4().to_string(),
+            udid: udid.to_string(),
+            outcome: outcome.to_string(),
+            source: "grounded-vision".into(),
+            model: settings.model.clone(),
+            base_url_host: host_of(&settings.base_url),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            usd: 0.0,
+            preview: String::new(),
+            caption_preview: String::new(),
+            frame_sha256: String::new(),
+            context_confidence: None,
+            relevance: None,
+            evidence_support: None,
+            created_at: Utc::now().to_rfc3339(),
+        };
+        if let Err(error) = self.db.add_nurture_comment_attempt(&attempt) {
+            tracing::warn!("không ghi được context skip attempt: {error}");
+        }
     }
 }
 
@@ -808,7 +1280,11 @@ mod tests {
         }
 
         fn near(point: &TapPoint, expected: (f64, f64)) -> bool {
-            (point.x - 375.0 * expected.0).abs() < 1.0 && (point.y - 667.0 * expected.1).abs() < 1.0
+            // Production taps are deliberately sampled inside the control's
+            // safe hitbox, so the fixture must model a hit area rather than
+            // requiring the old single-pixel center.
+            (point.x - 375.0 * expected.0).abs() < 20.0
+                && (point.y - 667.0 * expected.1).abs() < 20.0
         }
     }
 
@@ -997,6 +1473,48 @@ mod tests {
         assert_eq!(costs.len(), 1);
         assert_eq!(costs[0].preview, COMMENT);
         assert_eq!(costs[0].usd, 0.0, "pool text has no per-comment AI cost");
+        let attempts = engine
+            .db
+            .list_nurture_comment_attempts(10)
+            .expect("comment attempts");
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].outcome, "sent");
+        assert_eq!(attempts[0].preview, COMMENT);
+        assert_eq!(attempts[0].source, "test-fixture");
+
+        drop(engine);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn missing_context_is_skipped_and_audited_before_opening_the_drawer() {
+        let frames = Arc::new(TestFrames::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let session = RecordingSession::new(frames.clone(), stop.clone(), true, false);
+        let (engine, db_path) = test_engine(frames);
+
+        let result = engine
+            .do_comment(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                &ActionRail::fallback(),
+                (375.0, 667.0),
+                &NurtureSettings::default(),
+                &[],
+                stop.as_ref(),
+            )
+            .await
+            .expect("context skip");
+
+        assert_eq!(result, CommentResult::ContextSkipped);
+        assert_eq!(session.ordinary_taps.load(Ordering::Relaxed), 0);
+        let attempts = engine
+            .db
+            .list_nurture_comment_attempts(10)
+            .expect("comment attempts");
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].outcome, "context_skipped");
 
         drop(engine);
         let _ = std::fs::remove_file(db_path);

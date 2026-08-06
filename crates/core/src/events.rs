@@ -25,6 +25,10 @@ pub enum AppEvent {
         run_id: Uuid,
         revision: u64,
     },
+    InteractionUpdated {
+        campaign_id: String,
+        revision: u64,
+    },
     StreamFrame {
         udid: String,
         /// Base64 JPEG frame for UI when not using HTTP MJPEG URL.

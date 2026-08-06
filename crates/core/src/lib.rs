@@ -8,10 +8,13 @@ pub mod driver;
 pub mod events;
 pub mod flow;
 pub mod frame_source;
+pub mod frame_text;
 pub mod human_behavior;
+pub mod interaction;
 pub mod job_queue;
 pub mod nurture;
 pub mod openai_client;
+pub mod publish;
 pub mod registry;
 pub mod screen;
 pub mod screen_match;
@@ -40,8 +43,11 @@ pub use frame_source::{
     Frame, FrameSource, FrameStream, GenerationFrame, GenerationFrameEvent, GenerationFrameSource,
     GenerationFrameStream, NullFrameSource,
 };
+pub use frame_text::{FrameTextSource, NullFrameTextSource};
+pub use interaction::*;
 pub use job_queue::JobQueue;
 pub use nurture::NurtureEngine;
+pub use publish::*;
 pub use registry::DeviceRegistry;
 pub use screen::{ScreenKind, ScreenObservation};
 pub use screen_watch::{ScreenWatcher, WatchStats};

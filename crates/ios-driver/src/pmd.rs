@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -20,7 +21,7 @@ use riviu_core::{
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
 
 use crate::config::{DriverConfig, DriverTarget};
@@ -37,14 +38,17 @@ use crate::{decide_install, AgentArtifact, AgentInstallDecision, InstalledAppMet
 
 /// First local port used for the USB tunnel to device WDA (8100).
 const WDA_LOCAL_PORT_BASE: u16 = 18100;
-/// Distinct WDA-control tunnels, one per device. Room for a large phone farm.
-const WDA_LOCAL_PORT_SPAN: u16 = 64;
+/// Distinct WDA-control tunnels, one per device. Keep more slots than the
+/// planned 100-phone ceiling so a stale registry entry cannot exhaust the
+/// range while a farm is being rotated.
+const WDA_LOCAL_PORT_SPAN: u16 = 128;
 const SIDECAR_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
 const PMD_SIDECAR_PROTOCOL_VERSION: u64 = 2;
 const VERIFIED_PROCESS_CONTROL_CONTRACT: &str = "verifiedProcessControl";
 const INTERACTION_DRIVER_ADAPTER_VERSION: &str = "interaction-v1";
 const INTERACTION_TARGET_BUNDLE_ID: &str = "com.ss.iphone.ugc.Ame";
 const RTMMO_TOKEN_ENV: &str = "RIVIU_RTMMO_TOKEN";
+const RIVIU_AGENT_TOKEN_ENV: &str = "RIVIU_AGENT_TOKEN";
 
 #[derive(Debug, Clone)]
 struct SidecarProgram {
@@ -272,6 +276,7 @@ fn proxy_args(
         match profile.backend {
             WdaBackend::Stock => "stock",
             WdaBackend::RtMmo => "rt-mmo",
+            WdaBackend::RiviuAgent => "riviu-agent",
         }
         .into(),
         "--device-port".into(),
@@ -309,6 +314,7 @@ fn stream_args(profile: &WdaProfile, udid: &str) -> Vec<String> {
         "--mode".into(),
         match profile.backend {
             WdaBackend::RtMmo => "mjpeg",
+            WdaBackend::RiviuAgent => "mjpeg",
             WdaBackend::Stock => "auto",
         }
         .into(),
@@ -325,7 +331,7 @@ fn proxy_ready_window(profile: &WdaProfile, force_restart: bool) -> Duration {
     match (profile.backend, force_restart) {
         // Two bounded app-launch attempts can each spend 25 s launching and
         // 35 s waiting for the device port, plus cleanup between attempts.
-        (WdaBackend::RtMmo, _) => Duration::from_secs(180),
+        (WdaBackend::RtMmo | WdaBackend::RiviuAgent, _) => Duration::from_secs(180),
         (WdaBackend::Stock, true) => Duration::from_secs(110),
         (WdaBackend::Stock, false) => Duration::from_secs(55),
     }
@@ -333,6 +339,10 @@ fn proxy_ready_window(profile: &WdaProfile, force_restart: bool) -> Duration {
 
 fn session_attach_required(stream_running: bool) -> bool {
     !stream_running
+}
+
+fn is_unified_agent_backend(backend: WdaBackend) -> bool {
+    matches!(backend, WdaBackend::RtMmo | WdaBackend::RiviuAgent)
 }
 
 fn runtime_for_target(
@@ -825,7 +835,7 @@ impl PmdIosDriver {
         udid: &str,
         owned: &mut DeviceOwned,
     ) -> anyhow::Result<AgentStatus> {
-        if self.profile.backend != WdaBackend::RtMmo {
+        if !is_unified_agent_backend(self.profile.backend) {
             return Ok(self.publish_status(self.status(
                 udid,
                 AgentState::RepairRequired,
@@ -1131,7 +1141,29 @@ impl PmdIosDriver {
             .stderr(stderr)
             .kill_on_drop(true);
         if let Some(token) = self.profile.auth_token.as_ref() {
-            command.env("RIVIU_RTMMO_TOKEN", token.expose());
+            let token_env = match self.profile.backend {
+                WdaBackend::RiviuAgent => RIVIU_AGENT_TOKEN_ENV,
+                WdaBackend::RtMmo | WdaBackend::Stock => RTMMO_TOKEN_ENV,
+            };
+            command.env(token_env, token.expose());
+        }
+        if self.profile.backend == WdaBackend::RiviuAgent
+            && self
+                .profile
+                .features
+                .iter()
+                .any(|feature| feature == "text")
+        {
+            command.env("RIVIU_AGENT_TEXT_CAPABLE", "1");
+        }
+        if self.profile.backend == WdaBackend::RiviuAgent
+            && self
+                .profile
+                .features
+                .iter()
+                .any(|feature| feature == "pushMedia")
+        {
+            command.env("RIVIU_AGENT_MEDIA_CAPABLE", "1");
         }
         let mut child: Child = command.spawn()?;
 
@@ -1202,6 +1234,8 @@ impl PmdIosDriver {
                 return false;
             }
         }
+        owned.stream_generation = None;
+        owned.stream_reader_alive = None;
         true
     }
 
@@ -1260,14 +1294,66 @@ impl PmdIosDriver {
         }
 
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let reader_alive = Arc::new(AtomicBool::new(true));
 
         let mut command = self.sidecar_command()?;
         command
             .args(stream_args(&self.profile, udid))
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
+        if let Some(token) = self.profile.auth_token.as_ref() {
+            let token_env = match self.profile.backend {
+                WdaBackend::RiviuAgent => RIVIU_AGENT_TOKEN_ENV,
+                WdaBackend::RtMmo | WdaBackend::Stock => RTMMO_TOKEN_ENV,
+            };
+            command.env(token_env, token.expose());
+        }
+        if self.profile.backend == WdaBackend::RiviuAgent
+            && self
+                .profile
+                .features
+                .iter()
+                .any(|feature| feature == "text")
+        {
+            command.env("RIVIU_AGENT_TEXT_CAPABLE", "1");
+        }
+        if self.profile.backend == WdaBackend::RiviuAgent
+            && self
+                .profile
+                .features
+                .iter()
+                .any(|feature| feature == "pushMedia")
+        {
+            command.env("RIVIU_AGENT_MEDIA_CAPABLE", "1");
+        }
         let mut child: Child = command.spawn()?;
+
+        if let Some(stderr) = child.stderr.take() {
+            let udid_owned = udid.to_string();
+            let secret = self
+                .profile
+                .auth_token
+                .as_ref()
+                .map(|token| token.expose().to_string());
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let safe = secret
+                        .as_deref()
+                        .map(|token| line.replace(token, "[REDACTED]"))
+                        .unwrap_or(line);
+                    let lower = safe.to_ascii_lowercase();
+                    if lower.contains("failed")
+                        || lower.contains("closed")
+                        || lower.contains("error")
+                        || lower.contains("reconnect")
+                    {
+                        tracing::warn!("stream sidecar [{udid_owned}] {safe}");
+                    }
+                }
+            });
+        }
 
         let mut stdout = child
             .stdout
@@ -1275,6 +1361,7 @@ impl PmdIosDriver {
             .ok_or_else(|| anyhow::anyhow!("stream stdout missing"))?;
         let streams = self.streams.clone();
         let udid_owned = udid.to_string();
+        let reader_alive_task = reader_alive.clone();
         tokio::spawn(async move {
             let mut ready_tx = Some(ready_tx);
             let mut len_buf = [0u8; 4];
@@ -1310,6 +1397,7 @@ impl PmdIosDriver {
                     }
                 }
             }
+            reader_alive_task.store(false, Ordering::Release);
             tracing::info!("stream ended for {udid_owned}");
         });
 
@@ -1320,6 +1408,8 @@ impl PmdIosDriver {
             child,
             &format!("stream --udid {udid}"),
         ));
+        owned.stream_generation = Some(generation);
+        owned.stream_reader_alive = Some(reader_alive);
         match readiness {
             StreamReadiness::BestEffort => {
                 // Stock's lockdown fallback can be slow; startup remains best-effort.
@@ -1353,16 +1443,22 @@ impl PmdIosDriver {
         if self.sidecar.is_none() {
             anyhow::bail!("sidecar missing");
         }
+        let current_generation = self.streams.generation(udid);
         if owned
             .stream
             .as_mut()
             .is_some_and(|child| !child.has_exited())
+            && owned.stream_generation == Some(current_generation)
+            && owned
+                .stream_reader_alive
+                .as_ref()
+                .is_some_and(|alive| alive.load(Ordering::Acquire))
         {
             return Ok(());
         }
         self.stop_stream_child_locked(owned).await;
         let (_, generation) = self.streams.clear_and_advance(udid);
-        let readiness = if self.profile.backend == WdaBackend::RtMmo {
+        let readiness = if is_unified_agent_backend(self.profile.backend) {
             StreamReadiness::NonEmptyFrame
         } else {
             StreamReadiness::BestEffort
@@ -1476,7 +1572,16 @@ impl PmdIosDriver {
         if owned.stream.is_some() {
             anyhow::bail!("interaction session requires stop_owned_stream first");
         }
-        if kind == InteractionSessionKind::FreshText && self.profile.backend != WdaBackend::RtMmo {
+        let fresh_text = kind == InteractionSessionKind::FreshText;
+        let text_capable_agent = self
+            .profile
+            .features
+            .iter()
+            .any(|feature| feature == "text");
+        let fresh_agent = fresh_text
+            && (self.profile.backend == WdaBackend::RtMmo
+                || (self.profile.backend == WdaBackend::RiviuAgent && text_capable_agent));
+        if fresh_text && !fresh_agent {
             self.interaction_lifecycle.clear(udid);
             anyhow::bail!("fresh-text interaction session requires the unified Agent profile");
         }
@@ -1487,8 +1592,7 @@ impl PmdIosDriver {
         self.sessions.lock().remove(udid);
 
         let transition: anyhow::Result<WdaClient> = async {
-            let fresh_rt = kind == InteractionSessionKind::FreshText
-                && self.profile.backend == WdaBackend::RtMmo;
+            let fresh_rt = fresh_text && self.profile.backend == WdaBackend::RtMmo;
             let existing_port = if fresh_rt {
                 None
             } else {
@@ -1511,6 +1615,8 @@ impl PmdIosDriver {
             let mut client =
                 WdaClient::new_with_profile(&self.wda_host, port, udid, self.profile_for(udid)?);
             if fresh_rt {
+                client.create_fresh_session().await?;
+            } else if fresh_agent {
                 client.create_fresh_session().await?;
             } else {
                 client.create_session().await?;
@@ -2309,7 +2415,7 @@ impl DeviceDriver for PmdIosDriver {
     }
 
     async fn repair_agent(&self, udid: &str) -> anyhow::Result<AgentStatus> {
-        if self.profile.backend != WdaBackend::RtMmo {
+        if !is_unified_agent_backend(self.profile.backend) {
             anyhow::bail!("legacy stock WDA cannot repair the unified Riviu Agent");
         }
         let slot = self.slots.get(udid);
@@ -2318,7 +2424,7 @@ impl DeviceDriver for PmdIosDriver {
     }
 
     async fn repair_agent_install_only(&self, udid: &str) -> anyhow::Result<AgentInstallProof> {
-        if self.profile.backend != WdaBackend::RtMmo {
+        if !is_unified_agent_backend(self.profile.backend) {
             anyhow::bail!("legacy stock WDA cannot repair the unified Riviu Agent");
         }
         let artifact = self.artifact()?;
@@ -2461,6 +2567,20 @@ impl DeviceDriver for PmdIosDriver {
         })
     }
 
+    async fn park_owned_stream(&self, udid: &str) -> anyhow::Result<StreamStopProof> {
+        let slot = self.slots.get(udid);
+        let mut owned = slot.owned.lock().await;
+        let child_stopped = self.stop_stream_child_locked(&mut owned).await;
+        let (old_generation, new_generation) = self.streams.park_and_advance(udid);
+        self.sessions.lock().remove(udid);
+        self.interaction_lifecycle.clear(udid);
+        Ok(StreamStopProof {
+            old_generation,
+            new_generation,
+            child_stopped,
+        })
+    }
+
     async fn confirm_interaction_stream_stopped(
         &self,
         udid: &str,
@@ -2536,7 +2656,10 @@ impl DeviceDriver for PmdIosDriver {
     }
 
     fn supports_text_comments(&self) -> bool {
-        self.profile.backend == WdaBackend::RtMmo
+        self.profile
+            .features
+            .iter()
+            .any(|feature| feature == "text")
     }
 
     fn supports_verified_app_termination(&self) -> bool {
@@ -2653,6 +2776,104 @@ impl DeviceDriver for PmdIosDriver {
         Ok(())
     }
 
+    async fn stage_publish_media(
+        &self,
+        udid: &str,
+        agent_bundle_id: &str,
+        campaign_id: &str,
+        source_root: &Path,
+    ) -> anyhow::Result<serde_json::Value> {
+        if source_root.is_dir() == false {
+            anyhow::bail!("publish media source root is not a directory");
+        }
+        if campaign_id.is_empty()
+            || campaign_id.contains('/')
+            || campaign_id.contains('\\')
+            || agent_bundle_id.is_empty()
+        {
+            anyhow::bail!("invalid publish media identifiers");
+        }
+        let source = source_root.display().to_string();
+        self.run_json(&[
+            "media-stage",
+            "--udid",
+            udid,
+            "--agent-bundle-id",
+            agent_bundle_id,
+            "--campaign-id",
+            campaign_id,
+            "--source-root",
+            &source,
+        ])
+        .await
+    }
+
+    fn supports_push_media(&self) -> bool {
+        self.profile
+            .features
+            .iter()
+            .any(|feature| feature == "pushMedia")
+    }
+
+    async fn prepare_publish_media(
+        &self,
+        udid: &str,
+        campaign_id: &str,
+        manifest_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        if !self.supports_push_media() {
+            anyhow::bail!("selected Agent does not advertise pushMedia");
+        }
+        let slot = self.slots.get(udid);
+        let mut owned = slot.owned.lock().await;
+        let port = self.ensure_relay_locked(udid, &mut owned).await?;
+        let client =
+            WdaClient::new_with_profile(&self.wda_host, port, udid, self.profile_for(udid)?);
+        client
+            .prepare_publish_media(campaign_id, manifest_sha256)
+            .await
+            .map_err(anyhow::Error::new)
+    }
+
+    async fn import_publish_media(
+        &self,
+        udid: &str,
+        campaign_id: &str,
+        manifest_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        if !self.supports_push_media() {
+            anyhow::bail!("selected Agent does not advertise pushMedia");
+        }
+        let slot = self.slots.get(udid);
+        let mut owned = slot.owned.lock().await;
+        let port = self.ensure_relay_locked(udid, &mut owned).await?;
+        let client =
+            WdaClient::new_with_profile(&self.wda_host, port, udid, self.profile_for(udid)?);
+        client
+            .import_publish_media(campaign_id, manifest_sha256)
+            .await
+            .map_err(anyhow::Error::new)
+    }
+
+    async fn cleanup_publish_media(
+        &self,
+        udid: &str,
+        import_id: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        if !self.supports_push_media() {
+            anyhow::bail!("selected Agent does not advertise pushMedia");
+        }
+        let slot = self.slots.get(udid);
+        let mut owned = slot.owned.lock().await;
+        let port = self.ensure_relay_locked(udid, &mut owned).await?;
+        let client =
+            WdaClient::new_with_profile(&self.wda_host, port, udid, self.profile_for(udid)?);
+        client
+            .cleanup_publish_media(import_id)
+            .await
+            .map_err(anyhow::Error::new)
+    }
+
     async fn uninstall_app(&self, udid: &str, bundle_id: &str) -> anyhow::Result<()> {
         self.run_json(&["uninstall", "--udid", udid, "--bundle-id", bundle_id])
             .await?;
@@ -2730,9 +2951,17 @@ impl DeviceDriver for PmdIosDriver {
             client,
             mjpeg_url: WdaClient::mjpeg_url(&self.wda_host, self.profile.mjpeg_port),
             supports_text_input: kind == InteractionSessionKind::FreshText
-                && self.profile.backend == WdaBackend::RtMmo,
+                && self
+                    .profile
+                    .features
+                    .iter()
+                    .any(|feature| feature == "text"),
             supports_accessibility_readback: kind == InteractionSessionKind::FreshText
-                && self.profile.backend == WdaBackend::RtMmo,
+                && self
+                    .profile
+                    .features
+                    .iter()
+                    .any(|feature| feature == "text"),
             target_bundle_id: bundle_id.to_string(),
         }))
     }
@@ -2751,7 +2980,7 @@ impl DeviceDriver for PmdIosDriver {
     async fn start_ui_session(&self, udid: &str) -> anyhow::Result<Box<dyn UiSession>> {
         let slot = self.slots.get(udid);
         let mut owned = slot.owned.lock().await;
-        if self.profile.backend == WdaBackend::RtMmo {
+        if is_unified_agent_backend(self.profile.backend) {
             if owned.stream.is_some() {
                 anyhow::bail!(
                     "session-only startup requires the owned MJPEG producer to be stopped first"
@@ -2761,7 +2990,7 @@ impl DeviceDriver for PmdIosDriver {
                 .await?;
         }
         let client = self.session_locked(udid, &mut owned).await?;
-        if self.profile.backend == WdaBackend::RtMmo {
+        if is_unified_agent_backend(self.profile.backend) {
             self.publish_interaction_readiness(
                 udid,
                 AgentState::Starting,
@@ -2780,6 +3009,12 @@ impl DeviceDriver for PmdIosDriver {
 
     fn requires_fresh_text_session(&self) -> bool {
         self.profile.backend == WdaBackend::RtMmo
+            || (self.profile.backend == WdaBackend::RiviuAgent
+                && self
+                    .profile
+                    .features
+                    .iter()
+                    .any(|feature| feature == "text"))
     }
 
     async fn start_fresh_text_session(
@@ -2789,6 +3024,12 @@ impl DeviceDriver for PmdIosDriver {
     ) -> anyhow::Result<Box<dyn UiSession>> {
         let slot = self.slots.get(udid);
         let mut owned = slot.owned.lock().await;
+        let candidate_text = self.profile.backend == WdaBackend::RiviuAgent
+            && self
+                .profile
+                .features
+                .iter()
+                .any(|feature| feature == "text");
         let client = if self.profile.backend == WdaBackend::RtMmo {
             let status = self.preflight_agent_locked(udid, &mut owned).await?;
             if status.state != AgentState::Ready {
@@ -2801,14 +3042,23 @@ impl DeviceDriver for PmdIosDriver {
             }
             self.fresh_text_session_locked(udid, bundle_id, &mut owned)
                 .await?
+        } else if candidate_text {
+            self.interaction_session_locked(
+                udid,
+                bundle_id,
+                InteractionSessionKind::FreshText,
+                &mut owned,
+            )
+            .await?
         } else {
             self.session_locked(udid, &mut owned).await?
         };
         Ok(Box::new(PmdUiSession {
             client,
             mjpeg_url: WdaClient::mjpeg_url(&self.wda_host, self.profile.mjpeg_port),
-            supports_text_input: self.profile.backend == WdaBackend::RtMmo,
-            supports_accessibility_readback: self.profile.backend == WdaBackend::RtMmo,
+            supports_text_input: self.profile.backend == WdaBackend::RtMmo || candidate_text,
+            supports_accessibility_readback: self.profile.backend == WdaBackend::RtMmo
+                || candidate_text,
             target_bundle_id: bundle_id.to_string(),
         }))
     }
@@ -2894,7 +3144,7 @@ impl DeviceDriver for PmdIosDriver {
     async fn ensure_stream(&self, udid: &str) -> anyhow::Result<String> {
         let slot = self.slots.get(udid);
         let mut owned = slot.owned.lock().await;
-        if self.profile.backend == WdaBackend::RtMmo {
+        if is_unified_agent_backend(self.profile.backend) {
             let status = self.preflight_agent_locked(udid, &mut owned).await?;
             if status.state != AgentState::Ready {
                 anyhow::bail!(

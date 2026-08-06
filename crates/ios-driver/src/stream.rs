@@ -35,16 +35,21 @@ pub fn encode_rgb_jpeg(
     Ok(buf)
 }
 
-/// Fan-out of device screen frames to every consumer: the UI tile, and the
-/// nurture engine's popup watcher.
+/// Fan-out of device screen frames to every consumer: the UI preview and the
+/// nurture engine's popup watcher. The fleet-wide feed is reserved for the
+/// desktop scheduler; device-scoped consumers get a dedicated channel.
 ///
 /// Frames are shared as `Arc<Vec<u8>>` rather than cloned per subscriber — a
 /// 750×1334 JPEG is ~100 kB and there are several subscribers at up to 24 FPS.
 #[derive(Clone)]
 pub struct StreamHub {
     state: Arc<RwLock<HubState>>,
+    /// Fleet-wide feed used by the desktop preview scheduler.
     tx: broadcast::Sender<(String, Frame)>,
-    generation_tx: broadcast::Sender<HubGenerationEvent>,
+    /// Per-device feeds keep screen watchers from draining frames belonging to
+    /// every other phone in the fleet.
+    device_tx: Arc<RwLock<HashMap<String, broadcast::Sender<Frame>>>>,
+    device_generation_tx: Arc<RwLock<HashMap<String, broadcast::Sender<HubGenerationEvent>>>>,
 }
 
 #[derive(Clone)]
@@ -65,33 +70,64 @@ enum HubGenerationEvent {
 struct HubState {
     latest: HashMap<String, Frame>,
     generations: HashMap<String, u64>,
+    /// Monotonic per-device counters survive a producer handoff. The current
+    /// generation still has its own `sequences` entry, but a new producer can
+    /// never reuse the last frame number from the parked producer.
+    sequence_counters: HashMap<String, u64>,
     sequences: HashMap<String, u64>,
 }
 
 impl StreamHub {
     pub fn new() -> Self {
-        let (tx, _) = broadcast::channel(256);
-        let (generation_tx, _) = broadcast::channel(256);
+        let (tx, _) = broadcast::channel(1024);
         Self {
             state: Arc::new(RwLock::new(HubState::default())),
             tx,
-            generation_tx,
+            device_tx: Arc::new(RwLock::new(HashMap::new())),
+            device_generation_tx: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    fn device_sender(&self, udid: &str) -> broadcast::Sender<Frame> {
+        if let Some(sender) = self.device_tx.read().get(udid).cloned() {
+            return sender;
+        }
+        let mut senders = self.device_tx.write();
+        senders
+            .entry(udid.to_string())
+            .or_insert_with(|| broadcast::channel(32).0)
+            .clone()
+    }
+
+    fn device_generation_sender(&self, udid: &str) -> broadcast::Sender<HubGenerationEvent> {
+        if let Some(sender) = self.device_generation_tx.read().get(udid).cloned() {
+            return sender;
+        }
+        let mut senders = self.device_generation_tx.write();
+        senders
+            .entry(udid.to_string())
+            .or_insert_with(|| broadcast::channel(32).0)
+            .clone()
     }
 
     pub fn publish(&self, udid: &str, jpeg: Vec<u8>) {
         let frame: Frame = Arc::new(jpeg);
-        let mut state = self.state.write();
-        let generation = state.generations.get(udid).copied().unwrap_or(0);
-        let sequence = next_frame_sequence(&mut state, udid);
-        state.latest.insert(udid.to_string(), frame.clone());
-        let _ = self.tx.send((udid.to_string(), frame.clone()));
-        let _ = self.generation_tx.send(HubGenerationEvent::Frame {
+        let (generation, sequence) = {
+            let mut state = self.state.write();
+            let generation = state.generations.get(udid).copied().unwrap_or(0);
+            let sequence = next_frame_sequence(&mut state, udid);
+            state.latest.insert(udid.to_string(), frame.clone());
+            (generation, sequence)
+        };
+        let event = HubGenerationEvent::Frame {
             udid: udid.to_string(),
             generation,
             sequence,
-            bytes: frame,
-        });
+            bytes: frame.clone(),
+        };
+        let _ = self.device_sender(udid).send(frame.clone());
+        let _ = self.tx.send((udid.to_string(), frame.clone()));
+        let _ = self.device_generation_sender(udid).send(event);
     }
 
     pub(crate) fn generation(&self, udid: &str) -> u64 {
@@ -105,25 +141,39 @@ impl StreamHub {
 
     pub(crate) fn publish_if_current(&self, udid: &str, generation: u64, jpeg: Vec<u8>) -> bool {
         let frame: Frame = Arc::new(jpeg);
-        let mut state = self.state.write();
-        let current = state.generations.get(udid).copied().unwrap_or(0);
-        if generation != current {
-            return false;
-        }
-        let sequence = next_frame_sequence(&mut state, udid);
-        state.latest.insert(udid.to_string(), frame.clone());
-        let _ = self.tx.send((udid.to_string(), frame.clone()));
-        let _ = self.generation_tx.send(HubGenerationEvent::Frame {
+        let sequence = {
+            let mut state = self.state.write();
+            let current = state.generations.get(udid).copied().unwrap_or(0);
+            if generation != current {
+                return false;
+            }
+            let sequence = next_frame_sequence(&mut state, udid);
+            state.latest.insert(udid.to_string(), frame.clone());
+            sequence
+        };
+        let event = HubGenerationEvent::Frame {
             udid: udid.to_string(),
             generation,
             sequence,
-            bytes: frame,
-        });
+            bytes: frame.clone(),
+        };
+        let _ = self.device_sender(udid).send(frame.clone());
+        let _ = self.tx.send((udid.to_string(), frame.clone()));
+        let _ = self.device_generation_sender(udid).send(event);
         true
     }
 
     pub fn latest(&self, udid: &str) -> Option<Frame> {
         self.state.read().latest.get(udid).cloned()
+    }
+
+    /// Return the monotonic frame sequence for the current stream generation.
+    ///
+    /// The bytes of two valid screenshots can be identical while a device is
+    /// still streaming (for example, an idle Home screen). Consumers that
+    /// need liveness must compare this sequence rather than an image digest.
+    pub fn latest_frame_sequence(&self, udid: &str) -> Option<u64> {
+        self.state.read().sequences.get(udid).copied()
     }
 
     pub fn clear(&self, udid: &str) {
@@ -138,10 +188,28 @@ impl StreamHub {
         let old_generation = *generation;
         *generation = generation.checked_add(1).unwrap_or(1);
         let new_generation = *generation;
-        let _ = self.generation_tx.send(HubGenerationEvent::Advanced {
+        let event = HubGenerationEvent::Advanced {
             udid: udid.to_string(),
             generation: new_generation,
-        });
+        };
+        let _ = self.device_generation_sender(udid).send(event);
+        (old_generation, new_generation)
+    }
+
+    /// Advance the producer generation without dropping the last frame. This
+    /// is only for a normal background-stream park; destructive UI handoffs
+    /// must continue to use `clear_and_advance`.
+    pub(crate) fn park_and_advance(&self, udid: &str) -> (u64, u64) {
+        let mut state = self.state.write();
+        let generation = state.generations.entry(udid.to_string()).or_default();
+        let old_generation = *generation;
+        *generation = generation.checked_add(1).unwrap_or(1);
+        let new_generation = *generation;
+        let event = HubGenerationEvent::Advanced {
+            udid: udid.to_string(),
+            generation: new_generation,
+        };
+        let _ = self.device_generation_sender(udid).send(event);
         (old_generation, new_generation)
     }
 
@@ -160,8 +228,7 @@ impl Default for StreamHub {
 
 /// Per-device view of the hub's broadcast.
 struct HubStream {
-    udid: String,
-    rx: broadcast::Receiver<(String, Frame)>,
+    rx: broadcast::Receiver<Frame>,
 }
 
 struct HubGenerationStream {
@@ -237,8 +304,7 @@ impl FrameStream for HubStream {
     async fn next(&mut self) -> Option<Frame> {
         loop {
             match self.rx.recv().await {
-                Ok((udid, frame)) if udid == self.udid => return Some(frame),
-                Ok(_) => continue,
+                Ok(frame) => return Some(frame),
                 // A slow consumer drops the backlog and resumes at the newest
                 // frame. For a screen watcher that is exactly right: stale
                 // frames describe a screen that has already changed.
@@ -252,8 +318,7 @@ impl FrameStream for HubStream {
 impl FrameSource for StreamHub {
     fn subscribe(&self, udid: &str) -> Box<dyn FrameStream> {
         Box::new(HubStream {
-            udid: udid.to_string(),
-            rx: self.tx.subscribe(),
+            rx: self.device_sender(udid).subscribe(),
         })
     }
 
@@ -268,7 +333,7 @@ impl GenerationFrameSource for StreamHub {
             udid: udid.to_string(),
             generation,
             state: self.state.clone(),
-            rx: self.generation_tx.subscribe(),
+            rx: self.device_generation_sender(udid).subscribe(),
         })
     }
 
@@ -286,11 +351,12 @@ impl GenerationFrameSource for StreamHub {
 }
 
 fn next_frame_sequence(state: &mut HubState, udid: &str) -> u64 {
-    let sequence = state.sequences.entry(udid.to_string()).or_default();
-    *sequence = sequence
+    let counter = state.sequence_counters.entry(udid.to_string()).or_default();
+    *counter = counter
         .checked_add(1)
         .expect("a stream generation cannot publish u64::MAX frames");
-    *sequence
+    state.sequences.insert(udid.to_string(), *counter);
+    *counter
 }
 
 #[cfg(test)]
@@ -355,6 +421,31 @@ mod tests {
         assert_eq!(&*frame.bytes, &[4, 5, 6]);
     }
 
+    #[test]
+    fn latest_frame_sequence_advances_for_identical_frames() {
+        let hub = StreamHub::new();
+        assert_eq!(hub.latest_frame_sequence("fixture"), None);
+
+        hub.publish("fixture", vec![4, 5, 6]);
+        assert_eq!(hub.latest_frame_sequence("fixture"), Some(1));
+        hub.publish("fixture", vec![4, 5, 6]);
+        assert_eq!(hub.latest_frame_sequence("fixture"), Some(2));
+    }
+
+    #[test]
+    fn frame_sequence_does_not_repeat_after_a_generation_clear() {
+        let hub = StreamHub::new();
+        let generation = hub.generation("fixture");
+        assert!(hub.publish_if_current("fixture", generation, vec![1]));
+        assert_eq!(hub.latest_frame_sequence("fixture"), Some(1));
+
+        hub.clear("fixture");
+        assert_eq!(hub.latest_frame_sequence("fixture"), None);
+        let next_generation = hub.generation("fixture");
+        assert!(hub.publish_if_current("fixture", next_generation, vec![2]));
+        assert_eq!(hub.latest_frame_sequence("fixture"), Some(2));
+    }
+
     #[tokio::test]
     async fn fresh_generation_subscription_only_yields_post_subscription_frames() {
         let hub = StreamHub::new();
@@ -392,6 +483,21 @@ mod tests {
             &[9, 9],
             "frames from another device leaked through"
         );
+    }
+
+    #[tokio::test]
+    async fn device_scoped_subscription_does_not_scan_a_hundred_device_backlog() {
+        let hub = StreamHub::new();
+        let mut stream = FrameSource::subscribe(&hub, "udid-50");
+        for index in 0..100 {
+            hub.publish(&format!("udid-{index}"), vec![index as u8]);
+        }
+
+        let frame = tokio::time::timeout(Duration::from_millis(25), stream.next())
+            .await
+            .expect("the selected device frame should be immediately available")
+            .expect("device channel remains open");
+        assert_eq!(&*frame, &[50]);
     }
 
     #[tokio::test]
@@ -441,6 +547,22 @@ mod tests {
         let (broadcast_udid, broadcast_frame) = broadcasts.recv().await.expect("new frame");
         assert_eq!(broadcast_udid, "udid-a");
         assert_eq!(&*broadcast_frame, &[3]);
+        assert_eq!(&*FrameSource::latest(&hub, "udid-a").unwrap(), &[3]);
+    }
+
+    #[test]
+    fn parking_advances_generation_but_keeps_the_last_frame_for_tiles() {
+        let hub = StreamHub::new();
+        hub.publish("udid-a", vec![1]);
+        let old_generation = hub.generation("udid-a");
+
+        let (old, parked) = hub.park_and_advance("udid-a");
+
+        assert_eq!(old, old_generation);
+        assert_ne!(old, parked);
+        assert_eq!(&*FrameSource::latest(&hub, "udid-a").unwrap(), &[1]);
+        assert!(!hub.publish_if_current("udid-a", old_generation, vec![2]));
+        assert!(hub.publish_if_current("udid-a", parked, vec![3]));
         assert_eq!(&*FrameSource::latest(&hub, "udid-a").unwrap(), &[3]);
     }
 

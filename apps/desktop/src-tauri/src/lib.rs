@@ -4,11 +4,24 @@ mod command_error;
 mod commands;
 mod farm_commands;
 mod flow_commands;
+mod interaction_commands;
+pub mod interaction_ocr;
 mod nurture_commands;
+mod publish_commands;
 mod state;
 
 use state::AppState;
-use tauri::{Manager, RunEvent};
+use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
+
+#[derive(Clone, Default)]
+struct StartupState {
+    error: Option<String>,
+}
+
+#[tauri::command]
+fn startup_error(state: tauri::State<'_, StartupState>) -> Option<String> {
+    state.error.clone()
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -17,6 +30,19 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            let window = if let Some(window) = app.get_webview_window("main") {
+                window
+            } else {
+                WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                    .title("Riviumanagersphone")
+                    .inner_size(1440.0, 900.0)
+                    .min_inner_size(1100.0, 700.0)
+                    .resizable(true)
+                    .visible(true)
+                    .build()?
+            };
+            window.show()?;
+            window.set_focus()?;
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -27,14 +53,28 @@ pub fn run() {
 
             let handle = app.handle().clone();
             let resource_dir = app.path().resource_dir().ok();
-            let state = tauri::async_runtime::block_on(AppState::bootstrap(resource_dir))
-                .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
-            state.spawn_background_tasks(handle.clone());
-            handle.manage(state);
+            let startup_state =
+                match tauri::async_runtime::block_on(AppState::bootstrap(resource_dir)) {
+                    Ok(state) => {
+                        state.spawn_background_tasks(handle.clone());
+                        handle.manage(state);
+                        StartupState::default()
+                    }
+                    Err(error) => {
+                        let message = format!("{error:#}");
+                        log::error!("desktop startup is blocked: {message}");
+                        StartupState {
+                            error: Some(message),
+                        }
+                    }
+                };
+
+            handle.manage(startup_state);
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            startup_error,
             agent_commands::agent_get_settings,
             agent_commands::agent_save_settings,
             agent_commands::agent_list_statuses,
@@ -113,13 +153,32 @@ pub fn run() {
             flow_commands::flow_get_run,
             flow_commands::flow_coordinate_frame,
             flow_commands::flow_read_artifact,
+            interaction_commands::interaction_parse_links,
+            interaction_commands::interaction_resolve_links,
+            interaction_commands::interaction_preview_thread,
+            interaction_commands::interaction_start_thread,
+            interaction_commands::interaction_list,
+            interaction_commands::interaction_get,
+            interaction_commands::interaction_cancel,
+            interaction_commands::interaction_retry,
+            interaction_commands::interaction_open_on_device,
             nurture_commands::nurture_get_settings,
             nurture_commands::nurture_save_settings,
+            nurture_commands::nurture_test_api,
             nurture_commands::nurture_list_costs,
+            nurture_commands::nurture_list_comment_attempts,
             nurture_commands::nurture_cost_summary,
             nurture_commands::nurture_session_status,
             nurture_commands::nurture_start,
             nurture_commands::nurture_stop,
+            publish_commands::publish_scan_folder,
+            publish_commands::publish_create_campaign,
+            publish_commands::publish_list,
+            publish_commands::publish_get,
+            publish_commands::publish_cancel,
+            publish_commands::publish_prepare,
+            publish_commands::publish_transfer,
+            publish_commands::publish_post,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -128,7 +187,9 @@ pub fn run() {
         if !matches!(event, RunEvent::Exit) {
             return;
         }
-        let state = handle.state::<AppState>();
+        let Some(state) = handle.try_state::<AppState>() else {
+            return;
+        };
         state.reject_new_work();
         state.nurture.begin_shutdown();
         state.flows.stop_all();
@@ -225,7 +286,12 @@ mod tests {
             ),
             (
                 include_str!("nurture_commands.rs"),
-                &["nurture_save_settings", "nurture_start", "nurture_stop"][..],
+                &[
+                    "nurture_save_settings",
+                    "nurture_test_api",
+                    "nurture_start",
+                    "nurture_stop",
+                ][..],
             ),
             (
                 include_str!("flow_commands.rs"),
@@ -236,6 +302,16 @@ mod tests {
                     "flow_cancel_run",
                     "flow_retry_attempt",
                     "flow_coordinate_frame",
+                ][..],
+            ),
+            (
+                include_str!("publish_commands.rs"),
+                &[
+                    "publish_create_campaign",
+                    "publish_cancel",
+                    "publish_prepare",
+                    "publish_transfer",
+                    "publish_post",
                 ][..],
             ),
         ];

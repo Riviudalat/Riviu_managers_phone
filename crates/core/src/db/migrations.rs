@@ -24,6 +24,21 @@ const MIGRATIONS: &[Migration] = &[
         name: "flow-v2-schema",
         apply: apply_migration_2,
     },
+    Migration {
+        version: 3,
+        name: "nurture-comment-attempts",
+        apply: apply_migration_3,
+    },
+    Migration {
+        version: 4,
+        name: "interaction-comment-threads",
+        apply: apply_migration_4,
+    },
+    Migration {
+        version: 5,
+        name: "publish-campaigns",
+        apply: apply_migration_5,
+    },
 ];
 
 const LEDGER_SQL: &str = r#"
@@ -275,6 +290,237 @@ CREATE INDEX idx_flow_artifacts_attempt ON flow_artifacts(attempt_id);
 CREATE INDEX idx_flow_events_revision ON flow_events(run_id, revision);
 "#;
 
+const NURTURE_COMMENT_ATTEMPTS_SCHEMA_SQL: &str = r#"
+CREATE TABLE nurture_comment_attempts (
+  id TEXT PRIMARY KEY,
+  udid TEXT NOT NULL,
+  outcome TEXT NOT NULL,
+  source TEXT NOT NULL,
+  model TEXT NOT NULL,
+  base_url_host TEXT NOT NULL,
+  prompt_tokens INTEGER NOT NULL DEFAULT 0,
+  completion_tokens INTEGER NOT NULL DEFAULT 0,
+  usd REAL NOT NULL DEFAULT 0,
+  preview TEXT NOT NULL DEFAULT '',
+  caption_preview TEXT NOT NULL DEFAULT '',
+  frame_sha256 TEXT NOT NULL DEFAULT '',
+  context_confidence INTEGER,
+  relevance INTEGER,
+  evidence_support INTEGER,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX idx_nurture_comment_attempts_created
+  ON nurture_comment_attempts(created_at DESC);
+"#;
+
+const INTERACTION_COMMENT_THREADS_SCHEMA_SQL: &str = r#"
+CREATE TABLE tiktok_accounts (
+  id TEXT PRIMARY KEY,
+  udid TEXT NOT NULL,
+  slot_key TEXT NOT NULL,
+  username TEXT,
+  state TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  UNIQUE (udid, slot_key)
+);
+
+CREATE TABLE interaction_campaigns (
+  id TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL UNIQUE,
+  request_json TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('queued','running','succeeded','partial','failed','cancelled')),
+  message_count INTEGER NOT NULL CHECK (message_count BETWEEN 2 AND 6),
+  revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+  error_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE interaction_campaign_actors (
+  campaign_id TEXT NOT NULL,
+  actor_ordinal INTEGER NOT NULL CHECK (actor_ordinal >= 0),
+  udid TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'planned',
+  error_code TEXT,
+  PRIMARY KEY (campaign_id, actor_ordinal),
+  UNIQUE (campaign_id, udid),
+  FOREIGN KEY (campaign_id) REFERENCES interaction_campaigns(id) ON DELETE CASCADE
+);
+
+CREATE TABLE interaction_targets (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL,
+  line_no INTEGER NOT NULL CHECK (line_no >= 1),
+  original_url TEXT NOT NULL,
+  normalized_url TEXT NOT NULL,
+  target_key TEXT NOT NULL,
+  content_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('video','photo')),
+  state TEXT NOT NULL DEFAULT 'queued',
+  context_json TEXT,
+  error_code TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE (campaign_id, target_key),
+  FOREIGN KEY (campaign_id) REFERENCES interaction_campaigns(id) ON DELETE CASCADE
+);
+
+CREATE TABLE interaction_assignments (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  message_ordinal INTEGER NOT NULL CHECK (message_ordinal BETWEEN 0 AND 5),
+  actor_udid TEXT NOT NULL,
+  parent_assignment_id TEXT,
+  prepared_json TEXT,
+  state TEXT NOT NULL DEFAULT 'queued',
+  effect_intent TEXT,
+  evidence_json TEXT,
+  error_code TEXT,
+  revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (campaign_id, target_id, message_ordinal),
+  FOREIGN KEY (campaign_id) REFERENCES interaction_campaigns(id) ON DELETE CASCADE,
+  FOREIGN KEY (target_id) REFERENCES interaction_targets(id) ON DELETE CASCADE,
+  FOREIGN KEY (parent_assignment_id) REFERENCES interaction_assignments(id) ON DELETE RESTRICT
+);
+
+CREATE TABLE interaction_artifacts (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  assignment_id TEXT,
+  kind TEXT NOT NULL,
+  metadata_json TEXT NOT NULL,
+  relative_path TEXT,
+  sha256 TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (campaign_id) REFERENCES interaction_campaigns(id) ON DELETE CASCADE,
+  FOREIGN KEY (target_id) REFERENCES interaction_targets(id) ON DELETE CASCADE,
+  FOREIGN KEY (assignment_id) REFERENCES interaction_assignments(id) ON DELETE SET NULL
+);
+
+CREATE TABLE interaction_dispatch (
+  campaign_id TEXT PRIMARY KEY,
+  state TEXT NOT NULL DEFAULT 'queued',
+  owner TEXT,
+  claimed_at TEXT,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (campaign_id) REFERENCES interaction_campaigns(id) ON DELETE CASCADE
+);
+
+CREATE TABLE interaction_retry_requests (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL,
+  request_id TEXT NOT NULL UNIQUE,
+  assignment_ids_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (campaign_id) REFERENCES interaction_campaigns(id) ON DELETE CASCADE
+);
+
+CREATE TABLE interaction_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK (revision >= 1),
+  kind TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE (campaign_id, revision),
+  FOREIGN KEY (campaign_id) REFERENCES interaction_campaigns(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_interaction_campaigns_updated ON interaction_campaigns(updated_at DESC);
+CREATE INDEX idx_interaction_targets_campaign ON interaction_targets(campaign_id, line_no);
+CREATE INDEX idx_interaction_assignments_target ON interaction_assignments(target_id, message_ordinal);
+CREATE INDEX idx_interaction_assignments_state ON interaction_assignments(campaign_id, state);
+CREATE INDEX idx_interaction_artifacts_assignment ON interaction_artifacts(assignment_id);
+CREATE INDEX idx_interaction_events_revision ON interaction_events(campaign_id, revision);
+"#;
+
+const PUBLISH_CAMPAIGNS_SCHEMA_SQL: &str = r#"
+CREATE TABLE publish_campaigns (
+  id TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL UNIQUE,
+  source_root TEXT NOT NULL,
+  request_json TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN (
+    'queued','scheduled','preparing','ready','transferring','imported',
+    'posting','verifying','succeeded','failed_before_dispatch','uncertain',
+    'cancelled','missed'
+  )),
+  run_at TEXT,
+  revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+  error_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE publish_bundles (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+  name TEXT NOT NULL,
+  source_path TEXT NOT NULL,
+  caption TEXT NOT NULL,
+  caption_sha256 TEXT NOT NULL CHECK (
+    length(caption_sha256) = 64 AND caption_sha256 NOT GLOB '*[^0-9a-f]*'
+  ),
+  manifest_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE (campaign_id, id),
+  UNIQUE (campaign_id, ordinal),
+  FOREIGN KEY (campaign_id) REFERENCES publish_campaigns(id) ON DELETE CASCADE
+);
+
+CREATE TABLE publish_assignments (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL,
+  bundle_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+  udid TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN (
+    'queued','scheduled','preparing','ready','transferring','imported',
+    'posting','verifying','succeeded','failed_before_dispatch','uncertain',
+    'cancelled','missed'
+  )),
+  effect_intent TEXT,
+  evidence_json TEXT,
+  error_code TEXT,
+  revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (campaign_id, bundle_id),
+  UNIQUE (campaign_id, udid),
+  FOREIGN KEY (campaign_id) REFERENCES publish_campaigns(id) ON DELETE CASCADE,
+  FOREIGN KEY (bundle_id) REFERENCES publish_bundles(id) ON DELETE RESTRICT
+);
+
+CREATE TABLE publish_dispatch (
+  campaign_id TEXT PRIMARY KEY,
+  state TEXT NOT NULL DEFAULT 'queued',
+  owner TEXT,
+  claimed_at TEXT,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (campaign_id) REFERENCES publish_campaigns(id) ON DELETE CASCADE
+);
+
+CREATE TABLE publish_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK (revision >= 1),
+  kind TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE (campaign_id, revision),
+  FOREIGN KEY (campaign_id) REFERENCES publish_campaigns(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_publish_campaigns_updated ON publish_campaigns(updated_at DESC);
+CREATE INDEX idx_publish_assignments_campaign ON publish_assignments(campaign_id, ordinal);
+CREATE INDEX idx_publish_assignments_state ON publish_assignments(campaign_id, state);
+CREATE INDEX idx_publish_events_revision ON publish_events(campaign_id, revision);
+"#;
+
 pub(super) fn run(connection: &mut Connection) -> anyhow::Result<()> {
     run_internal(connection, None)
 }
@@ -425,6 +671,21 @@ fn apply_migration_1(transaction: &Transaction<'_>) -> anyhow::Result<()> {
 
 fn apply_migration_2(transaction: &Transaction<'_>) -> anyhow::Result<()> {
     transaction.execute_batch(FLOW_V2_SCHEMA_SQL)?;
+    Ok(())
+}
+
+fn apply_migration_3(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    transaction.execute_batch(NURTURE_COMMENT_ATTEMPTS_SCHEMA_SQL)?;
+    Ok(())
+}
+
+fn apply_migration_4(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    transaction.execute_batch(INTERACTION_COMMENT_THREADS_SCHEMA_SQL)?;
+    Ok(())
+}
+
+fn apply_migration_5(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    transaction.execute_batch(PUBLISH_CAMPAIGNS_SCHEMA_SQL)?;
     Ok(())
 }
 
@@ -773,9 +1034,10 @@ mod tests {
                 .iter()
                 .map(|(version, _)| *version)
                 .collect::<Vec<_>>(),
-            vec![1, 2]
+            vec![1, 2, 3, 4, 5]
         );
         assert!(table_exists(&connection, "flow_documents"));
+        assert!(table_exists(&connection, "nurture_comment_attempts"));
         drop(connection);
         drop(database);
         cleanup(&path);
@@ -878,7 +1140,7 @@ mod tests {
 
     #[test]
     fn every_migration_rolls_back_its_schema_and_ledger_row_on_failure() {
-        for failed_version in [1, 2] {
+        for failed_version in [1, 2, 3, 4, 5] {
             let path = temp_db_path(&format!("migration-{failed_version}-rollback"));
             let mut connection = Connection::open(&path).expect("rollback fixture");
             let error = run_with_failpoint(&mut connection, Some(failed_version))
@@ -887,7 +1149,7 @@ mod tests {
 
             if failed_version == 1 {
                 assert!(user_objects(&connection).is_empty());
-            } else {
+            } else if failed_version == 2 {
                 assert_eq!(
                     migration_rows(&connection)
                         .iter()
@@ -897,6 +1159,37 @@ mod tests {
                 );
                 assert!(table_exists(&connection, "scripts"));
                 assert!(!table_exists(&connection, "flow_documents"));
+            } else if failed_version == 3 {
+                assert_eq!(
+                    migration_rows(&connection)
+                        .iter()
+                        .map(|(version, _)| *version)
+                        .collect::<Vec<_>>(),
+                    vec![1, 2]
+                );
+                assert!(table_exists(&connection, "flow_documents"));
+                assert!(!table_exists(&connection, "nurture_comment_attempts"));
+            } else if failed_version == 4 {
+                assert_eq!(
+                    migration_rows(&connection)
+                        .iter()
+                        .map(|(version, _)| *version)
+                        .collect::<Vec<_>>(),
+                    vec![1, 2, 3]
+                );
+                assert!(table_exists(&connection, "nurture_comment_attempts"));
+                assert!(!table_exists(&connection, "publish_campaigns"));
+                assert!(!table_exists(&connection, "interaction_campaigns"));
+            } else {
+                assert_eq!(
+                    migration_rows(&connection)
+                        .iter()
+                        .map(|(version, _)| *version)
+                        .collect::<Vec<_>>(),
+                    vec![1, 2, 3, 4]
+                );
+                assert!(table_exists(&connection, "interaction_campaigns"));
+                assert!(!table_exists(&connection, "publish_campaigns"));
             }
 
             run(&mut connection).expect("retry migrations");
@@ -905,7 +1198,7 @@ mod tests {
                     .iter()
                     .map(|(version, _)| *version)
                     .collect::<Vec<_>>(),
-                vec![1, 2]
+                vec![1, 2, 3, 4, 5]
             );
             let guest_count: i64 = connection
                 .query_row(
@@ -948,7 +1241,7 @@ mod tests {
                 .iter()
                 .map(|(version, _)| *version)
                 .collect::<Vec<_>>(),
-            vec![1, 2]
+            vec![1, 2, 3, 4, 5]
         );
         drop(connection);
         cleanup(&path);
@@ -993,7 +1286,7 @@ mod tests {
                 .iter()
                 .map(|(version, _)| *version)
                 .collect::<Vec<_>>(),
-            vec![1, 2]
+            vec![1, 2, 3, 4, 5]
         );
         drop(connection);
         cleanup(&path);
@@ -1039,7 +1332,7 @@ mod tests {
                             connection
                                 .execute(
                                     "INSERT INTO schema_migrations(version,name,applied_at)
-                                     VALUES(3,'future','2026-07-30T00:00:02Z')",
+                                     VALUES(6,'future','2026-07-30T00:00:02Z')",
                                     [],
                                 )
                                 .expect("future migration");

@@ -1,9 +1,12 @@
+use std::sync::mpsc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 
 const SERVICE: &str = "riviu-managers-phone";
 pub(crate) const AGENT_TOKEN_ACCOUNT: &str = "agent-auth-token";
+pub(crate) const CANDIDATE_AGENT_TOKEN_ACCOUNT: &str = "agent-candidate-auth-token";
 pub(crate) const APPLE_EMAIL_ACCOUNT: &str = "apple-id-email";
 pub(crate) const APPLE_PASSWORD_ACCOUNT: &str = "apple-id-password";
 
@@ -53,6 +56,8 @@ pub struct CredentialStore {
 }
 
 impl CredentialStore {
+    const CANDIDATE_KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
     pub fn new(backend: Arc<dyn CredentialBackend>) -> Self {
         Self { backend }
     }
@@ -81,6 +86,101 @@ impl CredentialStore {
         Ok(self
             .get(AGENT_TOKEN_ACCOUNT)?
             .is_some_and(|token| !token.is_empty()))
+    }
+
+    /// Candidate Agent authentication is local to this desktop and can be
+    /// generated on first launch. Keep it in a separate Keychain account so a
+    /// production RT-MMO credential is never silently reused with protocol v2.
+    pub fn candidate_agent_token_or_create(
+        &self,
+        explicit_env: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let explicit = explicit_env
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let Some(token) = explicit {
+            if self.candidate_get()?.as_deref() != Some(token) {
+                self.candidate_set(token)?;
+            }
+            return Ok(token.to_owned());
+        }
+
+        if let Some(token) = self.candidate_get()? {
+            if !token.trim().is_empty() {
+                return Ok(token);
+            }
+        }
+
+        let token = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        // A locked/unavailable macOS keychain must not block the desktop
+        // startup path. The token remains valid for this process and the
+        // best-effort write can complete on a later launch.
+        self.candidate_set(&token)?;
+        Ok(token)
+    }
+
+    /// Generate the Full desktop credential without touching the interactive
+    /// macOS Keychain. The Full bundle owns its candidate agent lifecycle, so
+    /// an in-memory token is sufficient for that process and avoids a login
+    /// keychain prompt during every bootstrap.
+    pub fn candidate_agent_token_ephemeral(
+        &self,
+        explicit_env: Option<&str>,
+    ) -> anyhow::Result<String> {
+        if let Some(token) = explicit_env
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(token.to_owned());
+        }
+        Ok(format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        ))
+    }
+
+    pub fn has_candidate_agent_token(&self) -> anyhow::Result<bool> {
+        Ok(self
+            .candidate_get()?
+            .is_some_and(|token| !token.trim().is_empty()))
+    }
+
+    fn candidate_get(&self) -> anyhow::Result<Option<String>> {
+        let backend = self.backend.clone();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let _ = sender.send(backend.get(CANDIDATE_AGENT_TOKEN_ACCOUNT));
+        });
+        match receiver.recv_timeout(Self::CANDIDATE_KEYCHAIN_TIMEOUT) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                anyhow::bail!("candidate credential worker disconnected")
+            }
+        }
+    }
+
+    fn candidate_set(&self, value: &str) -> anyhow::Result<()> {
+        let backend = self.backend.clone();
+        let value = value.to_owned();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let _ = sender.send(backend.set(CANDIDATE_AGENT_TOKEN_ACCOUNT, &value));
+        });
+        match receiver.recv_timeout(Self::CANDIDATE_KEYCHAIN_TIMEOUT) {
+            Ok(result) => result,
+            // Keep the generated token in memory when Keychain is waiting for
+            // user interaction. A later launch retries persistence.
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                anyhow::bail!("candidate credential worker disconnected")
+            }
+        }
     }
 
     pub(crate) fn get(&self, account: &str) -> anyhow::Result<Option<String>> {
@@ -176,6 +276,18 @@ mod tests {
 
         assert!(error.to_string().contains("RIVIU_RTMMO_TOKEN"));
         assert_eq!(backend.get(AGENT_TOKEN_ACCOUNT).unwrap(), None);
+    }
+
+    #[test]
+    fn ephemeral_candidate_token_does_not_touch_the_backend() {
+        let (backend, store) = fixture();
+
+        let token = store
+            .candidate_agent_token_ephemeral(None)
+            .expect("generate candidate token");
+
+        assert_eq!(token.len(), 64);
+        assert_eq!(backend.get(CANDIDATE_AGENT_TOKEN_ACCOUNT).unwrap(), None);
     }
 
     #[test]

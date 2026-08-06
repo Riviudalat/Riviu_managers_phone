@@ -263,7 +263,7 @@ index dcfcaf3fb28a22ebb930763210d682726b653ee1..9a24d260fd0a43cec235f04239479771
  #import "FBRoute.h"
  #import "FBSessionCommands.h"
  #import "FBWebServer.h"
-@@ -16,6 +18,12 @@
+@@ -16,6 +18,16 @@
  + (NSDictionary<NSString *, id> *)riviuAgentIdentity;
  @end
  
@@ -271,6 +271,10 @@ index dcfcaf3fb28a22ebb930763210d682726b653ee1..9a24d260fd0a43cec235f04239479771
 ++ (BOOL)riviuReadFiniteNumber:(id)candidate result:(double *)result;
 ++ (BOOL)riviuArguments:(id)arguments
 +     containExactlyKeys:(NSArray<NSString *> *)keys;
++@end
++
++@interface FBRoute_TargetAction : FBRoute
++@property (nonatomic, assign, readonly) SEL action;
 +@end
 +
  @class RouteResponse;
@@ -291,9 +295,9 @@ index dcfcaf3fb28a22ebb930763210d682726b653ee1..9a24d260fd0a43cec235f04239479771
 +  XCTAssertEqual(routes.count, 2);
 +  XCTAssertEqualObjects([routes[@"/wda/tap"] valueForKey:@"requiresSession"], @NO);
 +  XCTAssertEqualObjects([routes[@"/wda/swipe"] valueForKey:@"requiresSession"], @NO);
-+  XCTAssertEqualObjects(NSStringFromSelector((SEL)[[routes[@"/wda/tap"] valueForKey:@"action"] pointerValue]),
++  XCTAssertEqualObjects(NSStringFromSelector(((FBRoute_TargetAction *)routes[@"/wda/tap"]).action),
 +                        @"handleRiviuNativeTap:");
-+  XCTAssertEqualObjects(NSStringFromSelector((SEL)[[routes[@"/wda/swipe"] valueForKey:@"action"] pointerValue]),
++  XCTAssertEqualObjects(NSStringFromSelector(((FBRoute_TargetAction *)routes[@"/wda/swipe"]).action),
 +                        @"handleRiviuNativeSwipe:");
 +}
 +
@@ -311,8 +315,8 @@ index dcfcaf3fb28a22ebb930763210d682726b653ee1..9a24d260fd0a43cec235f04239479771
 +- (void)testRiviuNativeInputRequiresAnExactDictionaryBody
 +{
 +  NSArray<NSString *> *keys = @[@"x", @"y"];
-+  XCTAssertTrue([FBElementCommands riviuArguments:@{@"x": @1, @"y": @2} containExactlyKeys:keys]);
-+  XCTAssertFalse([FBElementCommands riviuArguments:@{@"x": @1, @"y": @2, @"z": @3} containExactlyKeys:keys]);
++  XCTAssertTrue(([FBElementCommands riviuArguments:@{@"x": @1, @"y": @2} containExactlyKeys:keys]));
++  XCTAssertFalse(([FBElementCommands riviuArguments:@{@"x": @1, @"y": @2, @"z": @3} containExactlyKeys:keys]));
 +  XCTAssertFalse([FBElementCommands riviuArguments:(id)@[] containExactlyKeys:keys]);
 +}
 +

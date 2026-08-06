@@ -5,10 +5,9 @@ Agent candidate. It does not vendor a generated WDA tree. `Scripts/prepare.py`
 verifies the pinned Appium WebDriverAgent 15.1.4 tarball and applies the ordered,
 hashed patch series into ignored `target/riviu-agent/source/`.
 
-Current gate state: `PENDING_MAC_DEVICE`. The Windows source, contract, packaging,
-and fixture-probe suites pass, but no candidate IPA is accepted until a Mac/iPhone
-proves plain-launch XCTest automation, protected health, fresh session before
-MJPEG, direct gesture side effects, clipboard read-back, and stream stability.
+Current gate state: B0/Gate B/Gate C passed on the Mac device. The default
+candidate still advertises four capabilities; a separate text artifact is only
+promoted after the real TikTok comment probe below passes with frame evidence.
 
 ## Layout
 
@@ -17,8 +16,11 @@ MJPEG, direct gesture side effects, clipboard read-back, and stream stability.
 - `AgentInput/patches/`: direct sessionless event-record tap/swipe.
 - `AgentHost/patches/`: typed signed metadata in the XCTest runner plist.
 - `Contracts/`: protocol v2 and native input contracts.
+- `Contracts/media-v1.json`: native pushMedia prepare/readback contract. It is
+  opt-in in `build_candidate.py --media-capable` and remains hidden from the
+  default artifact until the TikTok post gates pass.
 - `Config/RiviuAgent.xcconfig`: candidate-only build identity.
-- `Scripts/`: deterministic prepare, Mac build, and Gate B/C probe.
+- `Scripts/`: deterministic prepare, Mac build, Gate B/C probe, and real comment probe.
 - `requirements-mac.txt`: exact live-probe Python dependencies.
 - `Tests/`: Windows-safe integrity, contract, packaging, and fixture tests.
 
@@ -37,7 +39,7 @@ python -m unittest discover `
 The prepared baseline digest must be
 `f40eadb1e1d9872ad5a0574a5146cdbf5e0d04768ccb1f1701b289d50e4ee8f8`.
 The locked post-patch digest is
-`2ca158cde4b2307957670680a6cd136b6c360d6f175303f1d012f7488e82c4cc`.
+`c48950af762890ccd2e2cd64940bfcdf637240367a02179b8da8dfb739416223`.
 Preparation rejects any other result before replacing the generated source tree.
 Both digests cover every regular file, including Xcode project/build inputs and
 property lists, plus each file's canonical `0644`/`0755` mode, rather than only
@@ -58,7 +60,27 @@ python3 sidecars/wda/riviu-agent/Scripts/build_candidate.py \
 RIVIU_AGENT_TOKEN="$(openssl rand -hex 32)" \
 python3 sidecars/wda/riviu-agent/Scripts/probe_gate_bc.py \
   --udid "$UDID" \
-  --manifest target/riviu-agent/artifacts/0.1.0/candidate-manifest.json
+  --manifest target/riviu-agent/artifacts/0.1.0/candidate-manifest.json \
+  --wait-for-trust
+```
+
+`--wait-for-trust` pauses after the fresh install so the Apple Development
+profile can be approved on the iPhone before the first DVT launch. The flag is
+optional and does not change live thresholds; omit it only for an intentionally
+non-interactive run against an already trusted fresh install.
+
+For repeated functional checks when the candidate is already trusted, use
+`--reuse-trusted-install`. It performs an installation-proxy `Upgrade` without
+uninstalling the bundle, preserving the device approval. Its report is marked
+`SUPPLEMENTAL_MAC_DEVICE`/`SUPPLEMENTAL_ONLY`; the official Gate B/C path still
+requires the default fresh-install command above.
+
+```bash
+RIVIU_AGENT_TOKEN="$(openssl rand -hex 32)" \
+python3 sidecars/wda/riviu-agent/Scripts/probe_gate_bc.py \
+  --udid "$UDID" \
+  --manifest target/riviu-agent/artifacts/0.1.0/candidate-manifest.json \
+  --reuse-trusted-install
 ```
 
 The build script runs the Objective-C `UnitTests` target before the runner build,
@@ -79,13 +101,51 @@ For Xcode 26 and newer, packaging requires `Testing.framework`,
 `_Testing_Foundation.framework`, `lib_TestingInterop.dylib`, and
 `libXCTestSwiftSupport.dylib`; the build re-signs nested code and deep-verifies the
 outer app after completing that runtime set.
+The generated XCTest host is branded immediately before the final signing pass:
+its outer `Info.plist` contains `CFBundleDisplayName=Riviu Agent`,
+`CFBundleName=Riviu Agent`, and `CFBundleIconName=AppIcon`. Packaging fails if the
+compiled `Assets.car` or rendered `AppIcon*.png` resources are missing. The
+locked repository `logo.jpg`/`AppIcon.appiconset` is compiled into the package,
+so the Home Screen name and orange-R logo are part of the verified candidate IPA.
+Apple development profiles are UDID-bound: build and install one candidate IPA
+per connected device (for example, use a distinct `--artifact-version` for the
+second device); reusing one signed IPA on another UDID is rejected by installd.
+
+## Real TikTok Comment Probe
+
+The comment check has no default or sample text. It requires a sentence chosen
+for the video currently on screen and an explicit operator confirmation after
+inspecting the sent frame. Placeholder strings such as `Riviu test`, `fixture`,
+and `sample comment` are rejected before any tap.
+
+```bash
+RIVIU_AGENT_TOKEN="$TOKEN" \
+python3 sidecars/wda/riviu-agent/Scripts/probe_tiktok_comment.py \
+  --udid "$UDID" \
+  --comment-text 'Quán cà phê này dễ thương quá ạ' \
+  --operator-confirmed-comment-visible \
+  --frames-dir docs/re/riviu-agent/tiktok-comment-build2-live \
+  --output docs/re/riviu-agent/tiktok-comment-build2-live.json
+```
+
+The build-2 live result is `PASS`; `sent.jpg` visibly contains that comment in
+TikTok's drawer. Promotion writes `sidecars/wda/RiviuAgent-text.ipa` and
+`sidecars/wda/text-manifest.json` with `bundleBuild=2` and `text`. The separate
+Full desktop bundle uses `RIVIU_DEFAULT_AGENT_MODE=full`; the production oracle
+is left unchanged.
 
 ## Boundaries
 
 - Candidate control/MJPEG device ports are `8916` and `9094`.
 - Only exact `GET /status` is auth-exempt. Every other route requires
   `X-Riviu-Token`; the loopback-only MJPEG socket requires the same header.
-- Project 2 advertises only `stream`, `tap`, `swipe`, and `clipboard`.
+- The default Project 2 candidate advertises only `stream`, `tap`, `swipe`, and
+  `clipboard`; the promoted Full artifact adds `text` only after the live probe.
+- Desktop media staging is implemented through HouseArrest/AFC with a manifest
+  and size+SHA-256 readback. The media-capable candidate now exposes protected
+  `POST/GET /riviu/media/v1/prepare` for native manifest/file verification; the
+  default artifact still hides `pushMedia`, and preparation alone never counts
+  as a TikTok post.
 - Native handlers use direct XCTest event records. They do not use W3C actions,
   coordinate gesture helpers, accessibility queries, or quiescence waits. Device
   orientation is mapped locally and event synthesis has a five-second deadline

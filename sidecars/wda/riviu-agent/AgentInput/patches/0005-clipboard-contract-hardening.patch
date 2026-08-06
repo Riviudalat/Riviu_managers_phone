@@ -64,16 +64,13 @@ index f9ee2cc..81dac8d 100644
  #import "FBRoute.h"
  #import "FBSessionCommands.h"
  #import "FBWebServer.h"
-@@ -24,6 +25,10 @@
-      containExactlyKeys:(NSArray<NSString *> *)keys;
- @end
+@@ -31,3 +31,7 @@
+ @class RouteResponse;
  
 +@interface FBCustomCommands (RiviuAgentTests)
 ++ (BOOL)riviuPasteboardArguments:(id)arguments validForSet:(BOOL)isSet;
 +@end
 +
- @class RouteResponse;
- 
  @interface FBHandlerMock : NSObject
 @@ -220,6 +225,27 @@
    XCTAssertFalse([FBElementCommands riviuArguments:(id)@[] containExactlyKeys:keys]);
@@ -81,22 +78,22 @@ index f9ee2cc..81dac8d 100644
  
 +- (void)testRiviuPasteboardSetRequiresExactSchema
 +{
-+  XCTAssertTrue([FBCustomCommands riviuPasteboardArguments:@{@"content": @"SGVsbG8="} validForSet:YES]);
-+  XCTAssertTrue([FBCustomCommands riviuPasteboardArguments:@{@"content": @"SGVsbG8=", @"contentType": @"plaintext"} validForSet:YES]);
-+  XCTAssertFalse([FBCustomCommands riviuPasteboardArguments:@{} validForSet:YES]);
-+  XCTAssertFalse([FBCustomCommands riviuPasteboardArguments:@{@"content": @1} validForSet:YES]);
-+  XCTAssertFalse([FBCustomCommands riviuPasteboardArguments:@{@"content": @"SGVsbG8=", @"extra": @1} validForSet:YES]);
-+  XCTAssertFalse([FBCustomCommands riviuPasteboardArguments:@{@"content": @"SGVsbG8=", @"contentType": @""} validForSet:YES]);
++  XCTAssertTrue(([FBCustomCommands riviuPasteboardArguments:@{@"content": @"SGVsbG8="} validForSet:YES]));
++  XCTAssertTrue(([FBCustomCommands riviuPasteboardArguments:@{@"content": @"SGVsbG8=", @"contentType": @"plaintext"} validForSet:YES]));
++  XCTAssertFalse(([FBCustomCommands riviuPasteboardArguments:@{} validForSet:YES]));
++  XCTAssertFalse(([FBCustomCommands riviuPasteboardArguments:@{@"content": @1} validForSet:YES]));
++  XCTAssertFalse(([FBCustomCommands riviuPasteboardArguments:@{@"content": @"SGVsbG8=", @"extra": @1} validForSet:YES]));
++  XCTAssertFalse(([FBCustomCommands riviuPasteboardArguments:@{@"content": @"SGVsbG8=", @"contentType": @""} validForSet:YES]));
 +  XCTAssertFalse([FBCustomCommands riviuPasteboardArguments:(id)@[] validForSet:YES]);
 +}
 +
 +- (void)testRiviuPasteboardGetRequiresExactSchema
 +{
-+  XCTAssertTrue([FBCustomCommands riviuPasteboardArguments:@{} validForSet:NO]);
-+  XCTAssertTrue([FBCustomCommands riviuPasteboardArguments:@{@"contentType": @"plaintext"} validForSet:NO]);
-+  XCTAssertFalse([FBCustomCommands riviuPasteboardArguments:@{@"content": @"SGVsbG8="} validForSet:NO]);
-+  XCTAssertFalse([FBCustomCommands riviuPasteboardArguments:@{@"contentType": @1} validForSet:NO]);
-+  XCTAssertFalse([FBCustomCommands riviuPasteboardArguments:@{@"extra": @1} validForSet:NO]);
++  XCTAssertTrue(([FBCustomCommands riviuPasteboardArguments:@{} validForSet:NO]));
++  XCTAssertTrue(([FBCustomCommands riviuPasteboardArguments:@{@"contentType": @"plaintext"} validForSet:NO]));
++  XCTAssertFalse(([FBCustomCommands riviuPasteboardArguments:@{@"content": @"SGVsbG8="} validForSet:NO]));
++  XCTAssertFalse(([FBCustomCommands riviuPasteboardArguments:@{@"contentType": @1} validForSet:NO]));
++  XCTAssertFalse(([FBCustomCommands riviuPasteboardArguments:@{@"extra": @1} validForSet:NO]));
 +  XCTAssertFalse([FBCustomCommands riviuPasteboardArguments:(id)@[] validForSet:NO]);
 +}
 +

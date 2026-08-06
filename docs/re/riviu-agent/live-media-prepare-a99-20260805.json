@@ -1,0 +1,38 @@
+{
+  "ok": true,
+  "environment": "LIVE_MAC_DEVICE_SUPPLEMENTAL",
+  "device": "a99f4bd9f877b2a0e3682ee24fd1c68f75ba6982",
+  "campaignId": "live-publish-a99-20260805",
+  "manifestSha256": "7983a69ae78797ec4bd98d8417c93ae05b67fa787225e827db44356b46ee74a0",
+  "http": {
+    "status": 200,
+    "health": 200,
+    "missingAuth": 401,
+    "prepare": 200,
+    "get": 200
+  },
+  "features": [
+    "stream",
+    "tap",
+    "swipe",
+    "clipboard",
+    "pushMedia"
+  ],
+  "prepare": {
+    "campaignId": "live-publish-a99-20260805",
+    "importId": "live-publish-a99-20260805-7983a69ae78797ec4bd98d8417c93ae05b67fa787225e827db44356b46ee74a0",
+    "state": "ready",
+    "files": 9
+  },
+  "get": {
+    "campaignId": "live-publish-a99-20260805",
+    "importId": "live-publish-a99-20260805-7983a69ae78797ec4bd98d8417c93ae05b67fa787225e827db44356b46ee74a0",
+    "state": "ready",
+    "files": 9
+  },
+  "stage": {
+    "fileCount": 9,
+    "readback": "size+sha256"
+  },
+  "verifiedCleanup": true
+}

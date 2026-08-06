@@ -1,6 +1,8 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use parking_lot::RwLock;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONNECTION};
 use reqwest::Client;
 use riviu_core::{
@@ -62,6 +64,7 @@ const INTERACTION_RESPONSE_LIMIT_BYTES: usize = 64 * 1024;
 pub(crate) enum WdaBackend {
     Stock,
     RtMmo,
+    RiviuAgent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,8 +110,13 @@ struct SendOptions<'a> {
 impl WdaProfile {
     pub(crate) fn unified(config: &UnifiedAgentConfig) -> Self {
         let manifest = &config.artifact.manifest;
+        let candidate = manifest.protocol_version >= 2;
         Self {
-            backend: WdaBackend::RtMmo,
+            backend: if candidate {
+                WdaBackend::RiviuAgent
+            } else {
+                WdaBackend::RtMmo
+            },
             bundle_id: manifest.bundle_id.clone(),
             device_port: manifest.control_port,
             mjpeg_port: manifest.mjpeg_port,
@@ -120,7 +128,11 @@ impl WdaProfile {
             agent_ipa: Some(config.artifact.ipa_path.clone()),
             features: manifest.features.clone(),
             launch_kind: LaunchKind::Application,
-            session_strategy: SessionStrategy::StatusThenCreate,
+            session_strategy: if candidate {
+                SessionStrategy::CreateThenPrime
+            } else {
+                SessionStrategy::StatusThenCreate
+            },
             interaction_http: None,
         }
         .with_interaction_capabilities(UiCapabilities::default())
@@ -198,6 +210,18 @@ impl WdaProfile {
     #[cfg(test)]
     fn interaction_fixture(token: &str, capabilities: UiCapabilities) -> Self {
         Self::try_interaction_fixture(token, capabilities).expect("valid interaction fixture")
+    }
+
+    fn auth_header_name(&self) -> &'static str {
+        match self.backend {
+            WdaBackend::RiviuAgent => "X-Riviu-Token",
+            WdaBackend::RtMmo => "X-RT-Token",
+            WdaBackend::Stock => "X-RT-Token",
+        }
+    }
+
+    fn uses_sessionless_native_gestures(&self) -> bool {
+        matches!(self.backend, WdaBackend::RtMmo | WdaBackend::RiviuAgent)
     }
 }
 
@@ -318,7 +342,10 @@ pub struct WdaClient {
     base: String,
     port: u16,
     udid: String,
-    session_id: Option<String>,
+    // Sessionless native gestures can rotate the XCTest session when a
+    // keyboard/composer is focused. Keep the id shared across cloned clients
+    // so the following text request targets the active session.
+    session_id: Arc<RwLock<Option<String>>>,
     profile: WdaProfile,
 }
 
@@ -344,7 +371,7 @@ impl WdaClient {
             base: format!("http://{host}:{port}"),
             port,
             udid: udid.to_string(),
-            session_id: None,
+            session_id: Arc::new(RwLock::new(None)),
             profile,
         }
     }
@@ -364,7 +391,7 @@ impl WdaClient {
     /// Cheap probe so a cached session isn't reused after the device dropped it.
     pub async fn session_alive(&self) -> bool {
         if self.profile.session_strategy == SessionStrategy::StatusThenCreate {
-            let Some(expected) = self.session_id.as_deref() else {
+            let Some(expected) = self.session_id.read().clone() else {
                 return false;
             };
             let url = format!("{}/status", self.base);
@@ -380,7 +407,7 @@ impl WdaClient {
                 .ok()
                 .and_then(|value| session_id_from(&value).map(str::to_string))
                 .as_deref()
-                == Some(expected);
+                == Some(expected.as_str());
         }
         let Ok(url) = self.session_url("/window/size") else {
             return false;
@@ -410,7 +437,7 @@ impl WdaClient {
                 .await
             {
                 if let Some(sid) = session_id_from(&status) {
-                    self.session_id = Some(sid.to_string());
+                    *self.session_id.write() = Some(sid.to_string());
                     return Ok(());
                 }
             }
@@ -438,7 +465,7 @@ impl WdaClient {
                     format!("session id missing: {resp}"),
                 )
             })?;
-            self.session_id = Some(sid.to_string());
+            *self.session_id.write() = Some(sid.to_string());
             return Ok(());
         }
 
@@ -465,7 +492,7 @@ impl WdaClient {
                 )
             })?
             .to_string();
-        self.session_id = Some(sid);
+        *self.session_id.write() = Some(sid);
         if !self.prime_session().await {
             return Err(UiError::new(
                 UiErrorKind::Timeout,
@@ -498,7 +525,7 @@ impl WdaClient {
         {
             Ok(resp) => {
                 if let Some(sid) = session_id_from(&resp).map(str::to_string) {
-                    self.session_id = Some(sid);
+                    *self.session_id.write() = Some(sid);
                     return Ok(());
                 }
                 UiError::new(
@@ -526,7 +553,7 @@ impl WdaClient {
                 .await
             {
                 if let Some(sid) = session_id_from(&status).map(str::to_string) {
-                    self.session_id = Some(sid);
+                    *self.session_id.write() = Some(sid);
                     return Ok(());
                 }
             }
@@ -597,9 +624,16 @@ impl WdaClient {
     fn session_url(&self, path: &str) -> Result<String, UiError> {
         let sid = self
             .session_id
-            .as_ref()
+            .read()
+            .clone()
             .ok_or_else(|| UiError::new(UiErrorKind::Session, "session", "no WDA session"))?;
         Ok(format!("{}/session/{sid}{path}", self.base))
+    }
+
+    fn update_session_from_response(&self, response: &serde_json::Value) {
+        if let Some(sid) = session_id_from(response) {
+            *self.session_id.write() = Some(sid.to_string());
+        }
     }
 
     /// One WDA request, timed and classified.
@@ -695,7 +729,7 @@ impl WdaClient {
             .profile
             .auth_token
             .as_ref()
-            .map(|token| ("X-RT-Token", token.expose()));
+            .map(|token| (self.profile.auth_header_name(), token.expose()));
         self.send_inner_with_auth(method, url, label, body, timeout, auth)
             .await
     }
@@ -734,6 +768,7 @@ impl WdaClient {
         let mut req = match method {
             Method::Get => self.http.get(url),
             Method::Post => self.http.post(url),
+            Method::Delete => self.http.delete(url),
         };
         req = req.timeout(options.timeout);
         if let Some((name, value)) = options.auth {
@@ -866,7 +901,7 @@ impl WdaClient {
                 .map_err(|e| UiError::new(UiErrorKind::Other, "screenshot", e.to_string()))?;
             let mut request = client.get(&url);
             if let Some(token) = self.profile.auth_token.as_ref() {
-                request = request.header("X-RT-Token", token.expose());
+                request = request.header(self.profile.auth_header_name(), token.expose());
             }
             let resp = request.send().await.map_err(|e| {
                 let kind = if e.is_timeout() {
@@ -904,7 +939,7 @@ impl WdaClient {
     }
 
     pub async fn window_size(&self) -> Result<(f64, f64), UiError> {
-        if self.profile.backend == WdaBackend::RtMmo {
+        if self.profile.uses_sessionless_native_gestures() {
             return Ok(self.profile.logical_size);
         }
         let url = self.session_url("/window/size")?;
@@ -989,8 +1024,10 @@ impl WdaClient {
             "toX": to_x,
             "toY": to_y,
         });
-        self.send(Method::Post, &url, endpoint, Some(&body), GESTURE_TIMEOUT)
+        let response = self
+            .send(Method::Post, &url, endpoint, Some(&body), GESTURE_TIMEOUT)
             .await?;
+        self.update_session_from_response(&response);
         Ok(())
     }
 
@@ -1008,7 +1045,7 @@ impl WdaClient {
     pub async fn tap(&self, point: TapPoint) -> Result<(), UiError> {
         let x = point.x.round();
         let y = point.y.round();
-        if self.profile.backend == WdaBackend::RtMmo {
+        if self.profile.uses_sessionless_native_gestures() {
             // RT-MMO exposes this native endpoint sessionless. W3C actions
             // wedge its automation session after the first TikTok touch.
             return self
@@ -1063,16 +1100,18 @@ impl WdaClient {
     /// interaction and which therefore focuses text fields. See
     /// `UiSession::tap_native`.
     pub async fn tap_native(&self, point: TapPoint) -> Result<(), UiError> {
-        if self.profile.backend == WdaBackend::RtMmo {
+        if self.profile.uses_sessionless_native_gestures() {
             let url = format!("{}/wda/tap", self.base);
-            self.send(
-                Method::Post,
-                &url,
-                "tap.native",
-                Some(&json!({ "x": point.x.round(), "y": point.y.round() })),
-                GESTURE_TIMEOUT,
-            )
-            .await?;
+            let response = self
+                .send(
+                    Method::Post,
+                    &url,
+                    "tap.native",
+                    Some(&json!({ "x": point.x.round(), "y": point.y.round() })),
+                    GESTURE_TIMEOUT,
+                )
+                .await?;
+            self.update_session_from_response(&response);
             return Ok(());
         }
         let url = self.session_url("/wda/tap")?;
@@ -1094,7 +1133,7 @@ impl WdaClient {
         let ty = gesture.to.y.round();
         let duration = (gesture.duration_ms as f64 / 1000.0).clamp(0.05, 2.0);
 
-        if self.profile.backend == WdaBackend::RtMmo {
+        if self.profile.uses_sessionless_native_gestures() {
             return self
                 .rt_mmo_native_swipe(fx, fy, tx, ty, duration.clamp(0.08, 0.35), "swipe.native")
                 .await;
@@ -1153,7 +1192,7 @@ impl WdaClient {
         }
         let url = self.session_url("/wda/keys")?;
         let value = match self.profile.backend {
-            WdaBackend::RtMmo => vec![text.to_string()],
+            WdaBackend::RtMmo | WdaBackend::RiviuAgent => vec![text.to_string()],
             WdaBackend::Stock => text.chars().map(|c| c.to_string()).collect(),
         };
         let body = json!({
@@ -1374,6 +1413,106 @@ impl WdaClient {
             .is_ok())
     }
 
+    /// Validate a HouseArrest-staged publish tree through the protected native
+    /// Agent route. The route is sessionless; the caller still owns the device
+    /// lease so relay lifecycle cannot race a transfer.
+    pub async fn prepare_publish_media(
+        &self,
+        campaign_id: &str,
+        manifest_sha256: &str,
+    ) -> Result<serde_json::Value, UiError> {
+        if campaign_id.is_empty()
+            || campaign_id.len() > 128
+            || !campaign_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            || manifest_sha256.len() != 64
+            || !manifest_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(UiError::new(
+                UiErrorKind::Http,
+                "media.prepare",
+                "campaign id or manifest SHA-256 is not canonical",
+            ));
+        }
+        let url = format!("{}/riviu/media/v1/prepare", self.base);
+        self.send(
+            Method::Post,
+            &url,
+            "media.prepare",
+            Some(&json!({
+                "campaignId": campaign_id,
+                "manifestSha256": manifest_sha256,
+            })),
+            Duration::from_secs(15),
+        )
+        .await
+    }
+
+    pub async fn import_publish_media(
+        &self,
+        campaign_id: &str,
+        manifest_sha256: &str,
+    ) -> Result<serde_json::Value, UiError> {
+        if campaign_id.is_empty()
+            || campaign_id.len() > 128
+            || !campaign_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            || manifest_sha256.len() != 64
+            || !manifest_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(UiError::new(
+                UiErrorKind::Http,
+                "media.import",
+                "campaign id or manifest SHA-256 is not canonical",
+            ));
+        }
+        let url = format!("{}/riviu/media/v1/import", self.base);
+        self.send(
+            Method::Post,
+            &url,
+            "media.import",
+            Some(&json!({
+                "campaignId": campaign_id,
+                "manifestSha256": manifest_sha256,
+            })),
+            Duration::from_secs(45),
+        )
+        .await
+    }
+
+    pub async fn cleanup_publish_media(
+        &self,
+        import_id: &str,
+    ) -> Result<serde_json::Value, UiError> {
+        if import_id.is_empty()
+            || import_id.len() <= 65
+            || !import_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return Err(UiError::new(
+                UiErrorKind::Http,
+                "media.cleanup",
+                "import id is not canonical",
+            ));
+        }
+        let url = format!("{}/riviu/media/v1/import/{}", self.base, import_id);
+        self.send(
+            Method::Delete,
+            &url,
+            "media.cleanup",
+            None,
+            Duration::from_secs(45),
+        )
+        .await
+    }
+
     /// Liveness probe. Deliberately **not** a reason to recycle the runner:
     /// Stock `/status` false-negatives under USB load, and killing a live agent
     /// on that signal cost 2–3 minutes per occurrence in live test #9. RT-MMO
@@ -1381,7 +1520,7 @@ impl WdaClient {
     /// adopted as the selected agent. Only a failed gesture with a transport
     /// error justifies touching the transport.
     pub async fn health_quick(&self) -> bool {
-        let (path, label) = if self.profile.backend == WdaBackend::RtMmo {
+        let (path, label) = if self.profile.uses_sessionless_native_gestures() {
             ("/wda/locked", "wda.locked")
         } else {
             ("/status", "status")
@@ -1394,7 +1533,7 @@ impl WdaClient {
         {
             return true;
         }
-        if self.profile.backend == WdaBackend::RtMmo {
+        if self.profile.uses_sessionless_native_gestures() {
             return false;
         }
         let Ok(url) = self.session_url("/window/size") else {
@@ -1432,12 +1571,24 @@ impl WdaClient {
                 "only canonical HTTPS URLs are accepted",
             ));
         }
-        let capability = self
+        let Some(capability) = self
             .profile
             .interaction_http
             .as_ref()
             .and_then(|adapter| adapter.capabilities.open_url.as_ref())
-            .ok_or_else(|| interaction_contract_error("openUrl", "capability is unsupported"))?;
+        else {
+            // Candidate Agent builds expose the standard WDA URL route while
+            // their live interaction-capability report is still empty. Keep
+            // the fallback explicit and candidate-only; RT-MMO and stock
+            // profiles remain fail-closed when no qualified route exists.
+            if matches!(self.profile.backend, WdaBackend::RiviuAgent) {
+                return self.open_url_standard(url).await;
+            }
+            return Err(interaction_contract_error(
+                "openUrl",
+                "capability is unsupported",
+            ));
+        };
         let body = json!({
             "url": url,
             "bundleId": capability.target_bundle_id,
@@ -1445,6 +1596,19 @@ impl WdaClient {
         });
         self.send_protected_route(&capability.route, "interaction.openUrl", Some(&body))
             .await?;
+        Ok(())
+    }
+
+    async fn open_url_standard(&self, url: &str) -> Result<(), UiError> {
+        let route = self.session_url("/url")?;
+        self.send(
+            Method::Post,
+            &route,
+            "interaction.openUrl.standard",
+            Some(&json!({ "url": url })),
+            Duration::from_secs(15),
+        )
+        .await?;
         Ok(())
     }
 
@@ -1717,6 +1881,7 @@ impl WdaClient {
 enum Method {
     Get,
     Post,
+    Delete,
 }
 
 fn session_id_from(value: &serde_json::Value) -> Option<&str> {
@@ -1852,8 +2017,8 @@ mod tests {
     fn interaction_client(port: u16, scope: RouteScope) -> WdaClient {
         let profile =
             WdaProfile::interaction_fixture(FIXTURE_TOKEN, interaction_capabilities(scope));
-        let mut client = WdaClient::new_with_profile("127.0.0.1", port, "fixture", profile);
-        client.session_id = Some("fixture-session".to_string());
+        let client = WdaClient::new_with_profile("127.0.0.1", port, "fixture", profile);
+        *client.session_id.write() = Some("fixture-session".to_string());
         client
     }
 
@@ -2597,7 +2762,7 @@ mod tests {
                 .contains("x-rt-token: test-token"),
             "{request}"
         );
-        assert_eq!(client.session_id.as_deref(), Some("sid-status"));
+        assert_eq!(client.session_id.read().as_deref(), Some("sid-status"));
     }
 
     #[tokio::test]
@@ -2627,7 +2792,7 @@ mod tests {
         assert!(requests.iter().all(|request| request
             .to_ascii_lowercase()
             .contains("x-rt-token: test-token")));
-        assert_eq!(client.session_id.as_deref(), Some("sid-created"));
+        assert_eq!(client.session_id.read().as_deref(), Some("sid-created"));
     }
 
     #[tokio::test]
@@ -2672,7 +2837,7 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(body).unwrap(),
             json!({"capabilities":{"firstMatch":[{}]}})
         );
-        assert_eq!(client.session_id.as_deref(), Some("sid-fresh"));
+        assert_eq!(client.session_id.read().as_deref(), Some("sid-fresh"));
     }
 
     #[test]
@@ -2724,8 +2889,8 @@ mod tests {
         let (port, requests) =
             scripted_server(vec![r#"{"value":null}"#, r#"{"value":null}"#]).await;
         let profile = WdaProfile::rt_mmo("test-token".to_string());
-        let mut client = WdaClient::new_with_profile("127.0.0.1", port, "udid-a", profile);
-        client.session_id = Some("sid-attached".to_string());
+        let client = WdaClient::new_with_profile("127.0.0.1", port, "udid-a", profile);
+        *client.session_id.write() = Some("sid-attached".to_string());
 
         client.tap(TapPoint { x: 120.2, y: 639.8 }).await.unwrap();
         client
@@ -2764,11 +2929,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sessionless_native_gesture_tracks_rotated_session_id() {
+        let (port, request) =
+            one_response_server(r#"{"sessionId":"sid-rotated","value":null}"#).await;
+        let profile = WdaProfile::rt_mmo("test-token".to_string());
+        let client = WdaClient::new_with_profile("127.0.0.1", port, "udid-a", profile);
+        *client.session_id.write() = Some("sid-before".to_string());
+
+        client.tap(TapPoint { x: 120.0, y: 640.0 }).await.unwrap();
+
+        let request = request.await.expect("captured request");
+        assert!(request.starts_with("POST /wda/swipe HTTP/1.1"), "{request}");
+        assert_eq!(client.session_id.read().as_deref(), Some("sid-rotated"));
+    }
+
+    #[tokio::test]
     async fn rt_mmo_types_whole_text_as_one_value_token() {
         let (port, request) = one_response_server(r#"{"value":null}"#).await;
         let profile = WdaProfile::rt_mmo("test-token".to_string());
-        let mut client = WdaClient::new_with_profile("127.0.0.1", port, "udid-a", profile);
-        client.session_id = Some("sid-attached".to_string());
+        let client = WdaClient::new_with_profile("127.0.0.1", port, "udid-a", profile);
+        *client.session_id.write() = Some("sid-attached".to_string());
 
         client.type_text("Hay qua ban oi").await.unwrap();
 
@@ -2788,8 +2968,8 @@ mod tests {
     async fn rt_mmo_feed_swipe_uses_sessionless_native_endpoint() {
         let (port, request) = one_response_server(r#"{"value":null}"#).await;
         let profile = WdaProfile::rt_mmo("test-token".to_string());
-        let mut client = WdaClient::new_with_profile("127.0.0.1", port, "udid-a", profile);
-        client.session_id = Some("sid-attached".to_string());
+        let client = WdaClient::new_with_profile("127.0.0.1", port, "udid-a", profile);
+        *client.session_id.write() = Some("sid-attached".to_string());
 
         client
             .swipe(SwipeGesture {
@@ -2825,8 +3005,8 @@ mod tests {
     async fn rt_mmo_cached_session_liveness_uses_status_not_window_size() {
         let (port, request) = one_response_server(r#"{"sessionId":"sid-status"}"#).await;
         let profile = WdaProfile::rt_mmo("test-token".to_string());
-        let mut client = WdaClient::new_with_profile("127.0.0.1", port, "udid-a", profile);
-        client.session_id = Some("sid-status".to_string());
+        let client = WdaClient::new_with_profile("127.0.0.1", port, "udid-a", profile);
+        *client.session_id.write() = Some("sid-status".to_string());
 
         assert!(client.session_alive().await);
 

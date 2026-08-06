@@ -19,6 +19,26 @@ pub fn resolve_desktop_agent_runtime(
     legacy_token: Option<&str>,
     mock_requested: bool,
 ) -> anyhow::Result<ResolvedAgentRuntime> {
+    resolve_desktop_agent_runtime_with_candidate(
+        sidecar_root,
+        state_dir,
+        database,
+        credentials,
+        legacy_token,
+        mock_requested,
+        false,
+    )
+}
+
+pub fn resolve_desktop_agent_runtime_with_candidate(
+    sidecar_root: PathBuf,
+    state_dir: PathBuf,
+    database: &Database,
+    credentials: &CredentialStore,
+    legacy_token: Option<&str>,
+    mock_requested: bool,
+    prefer_candidate: bool,
+) -> anyhow::Result<ResolvedAgentRuntime> {
     let settings = database.get_agent_settings()?;
     if mock_requested {
         return Ok(ResolvedAgentRuntime {
@@ -32,9 +52,58 @@ pub fn resolve_desktop_agent_runtime(
         });
     }
 
-    let token = credentials.agent_token_or_create(legacy_token)?;
-    let token_configured = credentials.has_agent_token()?;
-    let artifact = AgentArtifact::load(sidecar_root.join("wda").join("agent-manifest.json"))?;
+    let backend_override = std::env::var("RIVIU_AGENT_MODE")
+        .or_else(|_| std::env::var("RIVIU_WDA_BACKEND"))
+        .unwrap_or_default();
+    let backend_override = backend_override.trim().to_ascii_lowercase();
+    let default_mode = option_env!("RIVIU_DEFAULT_AGENT_MODE").unwrap_or(if prefer_candidate {
+        "candidate"
+    } else {
+        "rt-mmo"
+    });
+    let effective_mode = if backend_override.is_empty() || backend_override == "auto" {
+        default_mode
+    } else {
+        backend_override.as_str()
+    };
+    let explicit_manifest = std::env::var_os("RIVIU_AGENT_MANIFEST").map(PathBuf::from);
+    let candidate_manifest = sidecar_root.join("wda").join("candidate-manifest.json");
+    let text_manifest = sidecar_root.join("wda").join("text-manifest.json");
+    let full_requested = effective_mode == "full";
+    let text_requested = matches!(effective_mode, "text" | "candidate-text");
+    let use_candidate = explicit_manifest.is_some()
+        || full_requested
+        || text_requested
+        || matches!(effective_mode, "candidate" | "riviu-agent")
+        || (prefer_candidate && effective_mode == "candidate" && candidate_manifest.is_file());
+    let manifest_path = explicit_manifest.unwrap_or_else(|| {
+        if text_requested && !full_requested {
+            text_manifest
+        } else if use_candidate {
+            candidate_manifest
+        } else {
+            sidecar_root.join("wda").join("agent-manifest.json")
+        }
+    });
+    let (token, token_configured) = if use_candidate {
+        let explicit_token = std::env::var("RIVIU_AGENT_TOKEN").ok();
+        if effective_mode == "full" {
+            // Full owns a short-lived local agent session. Avoid an interactive
+            // Keychain read/write during bootstrap; production candidate mode
+            // keeps the persistent Keychain-backed credential path below.
+            (
+                credentials.candidate_agent_token_ephemeral(explicit_token.as_deref())?,
+                true,
+            )
+        } else {
+            let token = credentials.candidate_agent_token_or_create(explicit_token.as_deref())?;
+            (token, credentials.has_candidate_agent_token()?)
+        }
+    } else {
+        let token = credentials.agent_token_or_create(legacy_token)?;
+        (token, credentials.has_agent_token()?)
+    };
+    let artifact = AgentArtifact::load(manifest_path)?;
     artifact.verify_checksum()?;
 
     let unified = UnifiedAgentConfig {

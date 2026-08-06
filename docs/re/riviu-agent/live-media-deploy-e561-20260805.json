@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "environment": "LIVE_MAC_DEVICE_SUPPLEMENTAL",
+  "device": {
+    "udid": "e561b690b878ffa609a66985573c87169f4af2d2",
+    "iosVersion": "16.7.16",
+    "agentBundleId": "com.riviu.managersphone.agent.xctrunner"
+  },
+  "desktopApp": {
+    "path": "/Applications/Riviumanagersphone Full.app",
+    "executableSha256": "615247763d13c09dddad1e7ba6fd62aba9c7af9bfa8ad102af06161322a43a42",
+    "codesign": "PASS"
+  },
+  "bundledSidecar": {
+    "path": "/Applications/Riviumanagersphone Full.app/Contents/Resources/sidecars/pymobiledevice3/runtime/riviu-pmd",
+    "entrypointSha256": "0e8effcfb374df7afa50cacd971179bd9a0b0b3acfe6cff3f79dfc7ba277b81c",
+    "treeSha256": "eb49e807c274b737f315e655347d7f9f5e6ce8a379fd35d5668ff6606664623d",
+    "ping": "PASS"
+  },
+  "media": {
+    "campaignId": "live-media-deploy-e561-20260805",
+    "manifestSha256": "2f44e401cea21f4c2cc00781337b7b4083fe62287a2b64bfbfb130a8fd542573",
+    "fileCount": 9,
+    "readback": "size+sha256"
+  },
+  "http": {
+    "health": 200,
+    "prepareWithoutAuth": 401,
+    "prepare": 200,
+    "getPrepare": 200
+  },
+  "features": ["stream", "tap", "swipe", "clipboard", "pushMedia"],
+  "state": "ready",
+  "cleanupDeferred": true
+}

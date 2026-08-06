@@ -10,12 +10,14 @@ import {
   prepareDevice,
   refreshDevices,
   setStreamSettings,
+  startupError,
 } from "./api";
 import { summarizeBulkRepair } from "./agentStatus";
 import { DeviceTile } from "./components/DeviceTile";
 import { FilterToolbar, type ViewMode } from "./components/FilterToolbar";
 import { FocusStream } from "./components/FocusStream";
 import { IconRefresh, IconUser } from "./components/Icons";
+import { InteractionPopup } from "./components/InteractionPopup";
 import { JobsPanel } from "./components/JobsPanel";
 import { NurturePopup } from "./components/NurturePopup";
 import { ProfileToolbar } from "./components/ProfileToolbar";
@@ -82,6 +84,7 @@ function App() {
   });
   const [jobsScriptSeed, setJobsScriptSeed] = useState<string | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
+  const [startupIssue, setStartupIssue] = useState<string | null | undefined>(undefined);
   const [user, setUser] = useState<LocalUser | null>(null);
   const [showAuthUi, setShowAuthUi] = useState(false);
   const [authForced, setAuthForced] = useState(false);
@@ -90,6 +93,7 @@ function App() {
   const [filterConn, setFilterConn] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
   const [nurtureOpen, setNurtureOpen] = useState(false);
+  const [interactionOpen, setInteractionOpen] = useState(false);
   const [flowDirty, setFlowDirty] = useState(false);
   const [automationView, setAutomationView] = useState<"flow" | "legacy">("flow");
 
@@ -131,50 +135,74 @@ function App() {
   }, []);
 
   useEffect(() => {
-    authSession()
-      .then((s) => {
-        setShowAuthUi(s.showAuthUi);
-        setUser(s.user ?? null);
-        if (s.showAuthUi && !s.bypassed) {
-          setPage("login");
-        }
-      })
-      .catch(() => undefined);
-    reload();
+    let cancelled = false;
     let unlisten: (() => void) | undefined;
-    listenRiviuEvents((payload) => {
-      const p = payload as Record<string, unknown>;
-      if (p.type === "devicesUpdated" && Array.isArray(p.devices)) {
-        setDevices(p.devices as DeviceInfo[]);
-      }
-      if (p.type === "deviceUpdated" && p.device) {
-        const device = p.device as DeviceInfo;
-        setDevices((prev) => {
-          const idx = prev.findIndex((d) => d.udid === device.udid);
-          if (idx === -1) return [...prev, device];
-          const next = [...prev];
-          next[idx] = device;
-          return next;
+
+    startupError()
+      .then((issue) => {
+        if (cancelled) return;
+        setStartupIssue(issue);
+        if (issue) return;
+
+        void authSession()
+          .then((s) => {
+            if (cancelled) return;
+            setShowAuthUi(s.showAuthUi);
+            setUser(s.user ?? null);
+            if (s.showAuthUi && !s.bypassed) {
+              setPage("login");
+            }
+          })
+          .catch(() => undefined);
+        void reload();
+        void listenRiviuEvents((payload) => {
+          const p = payload as Record<string, unknown>;
+          if (p.type === "devicesUpdated" && Array.isArray(p.devices)) {
+            setDevices(p.devices as DeviceInfo[]);
+          }
+          if (p.type === "deviceUpdated" && p.device) {
+            const device = p.device as DeviceInfo;
+            setDevices((prev) => {
+              const idx = prev.findIndex((d) => d.udid === device.udid);
+              if (idx === -1) return [...prev, device];
+              const next = [...prev];
+              next[idx] = device;
+              return next;
+            });
+          }
+          if (p.type === "jobUpdated" && p.job) {
+            const job = p.job as JobRecord;
+            setJobs((prev) => {
+              const idx = prev.findIndex((j) => j.id === job.id);
+              if (idx === -1) return [job, ...prev];
+              const next = [...prev];
+              next[idx] = job;
+              return next;
+            });
+          }
+          if (p.type === "streamFrame" && typeof p.udid === "string") {
+            pushFrame(p.udid as string, String(p.jpegBase64 ?? ""));
+            setDevices((prev) => markDeviceFrameLive(prev, p.udid as string));
+          }
+        }).then((fn) => {
+          if (cancelled) {
+            fn();
+          } else {
+            unlisten = fn;
+          }
         });
-      }
-      if (p.type === "jobUpdated" && p.job) {
-        const job = p.job as JobRecord;
-        setJobs((prev) => {
-          const idx = prev.findIndex((j) => j.id === job.id);
-          if (idx === -1) return [job, ...prev];
-          const next = [...prev];
-          next[idx] = job;
-          return next;
-        });
-      }
-      if (p.type === "streamFrame" && typeof p.udid === "string") {
-        pushFrame(p.udid as string, String(p.jpegBase64 ?? ""));
-        setDevices((prev) => markDeviceFrameLive(prev, p.udid as string));
-      }
-    }).then((fn) => {
-      unlisten = fn;
-    });
-    return () => unlisten?.();
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setStartupIssue(null);
+        setBootError(String(error));
+        void reload();
+      });
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, [reload]);
 
   const focusDevice = useMemo(
@@ -226,6 +254,26 @@ function App() {
 
   const authBlocking = (showAuthUi || authForced) && (page === "login" || page === "register");
   const title = PAGE_TITLE[page] ?? page;
+
+  if (startupIssue) {
+    return (
+      <main className="startup-state">
+        <div className="startup-state-card">
+          <h1>Riviu Managers Phone</h1>
+          <h2>Chưa sẵn sàng khởi động</h2>
+          <p>{startupIssue}</p>
+          <p>
+            Kiểm tra cấu hình agent và Keychain của bản đang chạy, sau đó mở lại
+            app. Bản Full tự tạo credential cục bộ; bản production yêu cầu token
+            RT-MMO được cấu hình một lần.
+          </p>
+          <button type="button" className="primary" onClick={() => window.location.reload()}>
+            Thử lại
+          </button>
+        </div>
+      </main>
+    );
+  }
 
   if (authBlocking && page === "login") {
     return (
@@ -303,7 +351,15 @@ function App() {
                 selected={selectedDevices}
                 syncOn={groupMode}
                 nurtureOpen={nurtureOpen}
-                onNurture={() => setNurtureOpen((v) => !v)}
+                onNurture={() => {
+                  setInteractionOpen(false);
+                  setNurtureOpen((v) => !v);
+                }}
+                interactionOpen={interactionOpen}
+                onInteraction={() => {
+                  setNurtureOpen(false);
+                  setInteractionOpen((v) => !v);
+                }}
                 onStart={async () => {
                   const targets = selected.length
                     ? selected
@@ -597,6 +653,14 @@ function App() {
           devices={devices}
           selected={selected}
           onClose={() => setNurtureOpen(false)}
+        />
+      )}
+
+      {page === "control" && interactionOpen && (
+        <InteractionPopup
+          devices={devices}
+          selected={selected}
+          onClose={() => setInteractionOpen(false)}
         />
       )}
     </div>

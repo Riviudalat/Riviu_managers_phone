@@ -54,6 +54,20 @@ EXPECTED_PAYLOAD_APP = "WebDriverAgentRunner-Runner.app"
 EXPECTED_EXECUTABLE = "WebDriverAgentRunner-Runner"
 EXPECTED_ATTESTATION_BUNDLE = "PlugIns/WebDriverAgentRunner.xctest"
 SETTINGS_BUNDLE_ID = "com.apple.Preferences"
+SETTINGS_FOREGROUND_SETTLE_SECONDS = 5.0
+SETTINGS_BACK_TAP = {"x": 20.0, "y": 50.0}
+SETTINGS_ROOT_RETRIES = 6
+SETTINGS_SEARCH_PULL_DOWN = {
+    "fromX": 187.0,
+    "fromY": 180.0,
+    "toX": 187.0,
+    "toY": 600.0,
+    "delay": 0.25,
+}
+SETTINGS_SEARCH_RETRIES = 3
+SETTINGS_POST_ACTION_SETTLE_SECONDS = 1.0
+ACTIVE_APP_SETTLE_TIMEOUT_SECONDS = 5.0
+ACTIVE_APP_SETTLE_POLL_SECONDS = 0.25
 MAX_HTTP_BODY_BYTES = 16 * 1024 * 1024
 MAX_MJPEG_BUFFER_BYTES = 16 * 1024 * 1024
 MAX_TOKEN_SCAN_FILE_BYTES = 128 * 1024 * 1024
@@ -89,9 +103,16 @@ GATE_VISUAL_CAUSAL_MARGIN = 3.0
 GATE_ADDITIONAL_CONTROL_FRAMES_PER_ACTION = 3
 GATE_CONTROL_FRAME_SAMPLES_PER_ACTION = GATE_ADDITIONAL_CONTROL_FRAMES_PER_ACTION + 1
 INSTALL_OPERATION_TIMEOUT_SECONDS = 180.0
+# installation_proxy can return before deviceprocesscontrolservice registers the app
+POST_INSTALL_SETTLE_SECONDS = 60.0
 PROCESS_CONTROL_TIMEOUT_SECONDS = 30.0
+# A freshly installed XCTest runner can return transient DTX code 2 while the
+# device process-control service registers its application record.
+DVT_LAUNCH_ATTEMPTS = 8
+DVT_LAUNCH_RETRY_DELAY_SECONDS = 1.5
 DEVICE_PORT_PROBE_TIMEOUT_SECONDS = 5.0
 LIVE_ENVIRONMENT = "LIVE_MAC_DEVICE"
+SUPPLEMENTAL_ENVIRONMENT = "SUPPLEMENTAL_MAC_DEVICE"
 FIXTURE_ENVIRONMENT = "FIXTURE_ONLY"
 
 CONTENT_REGION = (0.05, 0.08, 0.95, 0.92)
@@ -220,6 +241,7 @@ class CandidateArtifact:
     signer_team_id: str
     xcode_version: str
     xcode_build: str
+    features: tuple[str, ...]
 
     def evidence(self) -> dict[str, Any]:
         return {
@@ -241,7 +263,7 @@ class CandidateArtifact:
             "signerTeamId": self.signer_team_id,
             "xcode": {"version": self.xcode_version, "build": self.xcode_build},
             "protocolVersion": EXPECTED_PROTOCOL_VERSION,
-            "features": list(EXPECTED_FEATURES),
+            "features": list(self.features),
         }
 
 
@@ -595,7 +617,15 @@ def load_candidate_artifact(
     for key, expected in exact_values.items():
         if manifest.get(key) != expected:
             raise ProbeError(f"candidate manifest field {key} does not match the gate contract")
-    if manifest.get("features") != EXPECTED_FEATURES:
+    manifest_features = manifest.get("features")
+    expected_feature_prefix = list(EXPECTED_FEATURES)
+    if (
+        not isinstance(manifest_features, list)
+        or manifest_features[: len(expected_feature_prefix)] != expected_feature_prefix
+        or any(not isinstance(feature, str) for feature in manifest_features)
+        or any(feature not in {"pushMedia"} for feature in manifest_features[len(expected_feature_prefix) :])
+        or len(manifest_features) != len(set(manifest_features))
+    ):
         raise ProbeError("candidate manifest feature set does not match protocol v2")
 
     source_sha256 = _required_sha256(manifest, "sourceSha256", "candidate manifest")
@@ -695,6 +725,7 @@ def load_candidate_artifact(
         signer_team_id=signer_team_id,
         xcode_version=xcode_version,
         xcode_build=xcode_build,
+        features=tuple(manifest_features),
     )
 
 
@@ -1203,6 +1234,8 @@ class ProbeConfig:
     action_observation_seconds: float = 1.0
     control_interval_seconds: float = GATE_CONTROL_INTERVAL_SECONDS
     foreground_bundle: str = SETTINGS_BUNDLE_ID
+    wait_for_trust: bool = False
+    reuse_trusted_install: bool = False
     swipe_from_x: float = 187.0
     swipe_from_y: float = 500.0
     swipe_to_x: float = 187.0
@@ -1224,6 +1257,26 @@ class ProbeConfig:
                 raise ProbeError(f"{name} must be positive")
         if self.action_settle_seconds < 0:
             raise ProbeError("action_settle_seconds must not be negative")
+        if self.wait_for_trust and self.reuse_trusted_install:
+            raise ProbeError(
+                "wait_for_trust and reuse_trusted_install are mutually exclusive"
+            )
+
+
+def wait_for_manual_trust() -> None:
+    """Pause after fresh-install so the user can approve the developer profile."""
+    print(
+        "Fresh install is complete. On this iPhone open Settings > General > "
+        "VPN & Device Management, select the Apple Development profile, and "
+        "tap Trust/Verify. Press Enter here after the approval is complete.",
+        flush=True,
+    )
+    try:
+        input()
+    except EOFError as exc:
+        raise ProbeError(
+            "manual trust checkpoint requires an interactive terminal"
+        ) from exc
 
 
 def validate_live_config(config: ProbeConfig) -> None:
@@ -1251,7 +1304,13 @@ class DeviceAdapter(Protocol):
     @property
     def mjpeg_address(self) -> tuple[str, int]: ...
 
-    def prepare_candidate(self, artifact: CandidateArtifact, timeout: float) -> dict[str, Any]: ...
+    def prepare_candidate(
+        self,
+        artifact: CandidateArtifact,
+        timeout: float,
+        *,
+        reuse_trusted_install: bool = False,
+    ) -> dict[str, Any]: ...
 
     def terminate_candidate(self) -> int | None: ...
 
@@ -1276,6 +1335,8 @@ def empty_measurements() -> dict[str, Any]:
     return {
         "candidateFreshInstalled": False,
         "installedIdentityMatch": False,
+        "manualTrustPauseRequested": False,
+        "manualTrustPauseCompleted": False,
         "cleanupVerified": False,
         "coldLaunchSuccesses": 0,
         "coldLaunchProcessWitnesses": [],
@@ -1317,6 +1378,8 @@ def empty_measurements() -> dict[str, Any]:
 
 def _environment_gate(environment: str, checks: tuple[bool, ...], failures: Any) -> str:
     if environment != LIVE_ENVIRONMENT:
+        if environment == SUPPLEMENTAL_ENVIRONMENT:
+            return "SUPPLEMENTAL_ONLY"
         return FIXTURE_ENVIRONMENT
     return "PASS" if all(checks) and not failures else "FAIL"
 
@@ -1423,6 +1486,8 @@ def evaluate_gate(measurements: dict[str, Any], environment: str) -> str:
     gate_b = evaluate_gate_b(measurements, environment)
     gate_c = evaluate_gate_c(measurements, environment)
     if environment != LIVE_ENVIRONMENT:
+        if environment == SUPPLEMENTAL_ENVIRONMENT:
+            return "SUPPLEMENTAL_ONLY"
         return FIXTURE_ENVIRONMENT
     return "PASS" if gate_b == "PASS" and gate_c == "PASS" else "FAIL"
 
@@ -1537,15 +1602,18 @@ class ProbeRunner:
         self.config = config
         self.token = token
         self.token_preflight = dict(token_preflight or {})
+        self._settings_post_action_settle_seconds = 0.0
 
     def _validate_identity(self, result: HttpResult) -> None:
         if result.status != 200 or not isinstance(result.payload, dict):
             raise ProbeError("protected health did not return HTTP 200 JSON")
         value = result.payload.get("value")
+        artifact = getattr(self, "artifact", None)
+        features = list(artifact.features) if artifact is not None else list(EXPECTED_FEATURES)
         expected = {
             "agentVersion": EXPECTED_AGENT_VERSION,
             "protocolVersion": EXPECTED_PROTOCOL_VERSION,
-            "features": EXPECTED_FEATURES,
+            "features": features,
             "logicalWidth": 375,
             "logicalHeight": 667,
             "state": "ready",
@@ -1558,10 +1626,12 @@ class ProbeRunner:
             raise ProbeError("discovery status did not return HTTP 200 JSON")
         value = result.payload.get("value")
         identity = value.get("riviuAgent") if isinstance(value, dict) else None
+        artifact = getattr(self, "artifact", None)
+        features = list(artifact.features) if artifact is not None else list(EXPECTED_FEATURES)
         expected = {
             "agentVersion": EXPECTED_AGENT_VERSION,
             "protocolVersion": EXPECTED_PROTOCOL_VERSION,
-            "features": EXPECTED_FEATURES,
+            "features": features,
             "logicalWidth": 375,
             "logicalHeight": 667,
             "state": "ready",
@@ -1631,6 +1701,26 @@ class ProbeRunner:
         previous = measurements[key]
         measurements[key] = round(value if previous is None else min(previous, value), 3)
 
+    def _ensure_settings_root(self, client: ControlClient, session_id: str) -> None:
+        """Return Settings to its root page before querying a switch.
+
+        iOS restores the last Settings page after a cold launch. Trust/profile
+        pages have no switch, so a bounded native back tap makes the gesture
+        surface deterministic without weakening the action thresholds.
+        """
+        client.require_active_bundle(session_id, self.config.foreground_bundle)
+        for _ in range(SETTINGS_ROOT_RETRIES):
+            try:
+                client.find_element(session_id, "XCUIElementTypeSwitch")
+                return
+            except ProbeError as error:
+                message = str(error)
+                if "returned 404" not in message or "/element" not in message:
+                    raise
+                client.require_ok("POST", "/wda/tap", SETTINGS_BACK_TAP)
+                time.sleep(0.75)
+        raise ProbeError("Settings root did not expose an XCUIElementTypeSwitch")
+
     def _measure_gestures(
         self,
         client: ControlClient,
@@ -1662,6 +1752,8 @@ class ProbeRunner:
                 measurements["tapCausalChanges"] += 1
             if {before_value, after_value} == {"0", "1"}:
                 measurements["tapSemanticToggles"] += 1
+            if self._settings_post_action_settle_seconds:
+                time.sleep(self._settings_post_action_settle_seconds)
 
         for index in range(self.config.swipe_attempts):
             client.require_active_bundle(session_id, self.config.foreground_bundle)
@@ -1696,6 +1788,49 @@ class ProbeRunner:
                     "swipeReverseCausalChanges" if reverse else "swipeForwardCausalChanges"
                 )
                 measurements[direction_key] += 1
+            if self._settings_post_action_settle_seconds:
+                time.sleep(self._settings_post_action_settle_seconds)
+
+    def _wait_for_active_bundle(
+        self,
+        client: ControlClient,
+        session_id: str,
+        bundle_id: str,
+        expected_pid: int,
+    ) -> int:
+        deadline = time.monotonic() + ACTIVE_APP_SETTLE_TIMEOUT_SECONDS
+        last_error: ProbeError | None = None
+        while time.monotonic() < deadline:
+            try:
+                active_pid = client.require_active_bundle(session_id, bundle_id)
+                if active_pid == expected_pid:
+                    return active_pid
+                last_error = ProbeError(
+                    "candidate foreground identity returned an unexpected PID"
+                )
+            except ProbeError as error:
+                if "active application does not match" not in str(error):
+                    raise
+                last_error = error
+            time.sleep(ACTIVE_APP_SETTLE_POLL_SECONDS)
+        if last_error is not None:
+            raise last_error
+        raise ProbeError("candidate foreground identity did not settle")
+
+    def _ensure_settings_search(self, client: ControlClient, session_id: str) -> None:
+        """Reveal the iOS 16 Settings search field before Unicode read-back."""
+        client.require_active_bundle(session_id, self.config.foreground_bundle)
+        for _ in range(SETTINGS_SEARCH_RETRIES):
+            try:
+                client.find_element(session_id, "XCUIElementTypeSearchField")
+                return
+            except ProbeError as error:
+                message = str(error)
+                if "returned 404" not in message or "/element" not in message:
+                    raise
+                client.require_ok("POST", "/wda/swipe", SETTINGS_SEARCH_PULL_DOWN)
+                time.sleep(0.75)
+        raise ProbeError("Settings search field did not appear after pull-down")
 
     @staticmethod
     def _measure_clipboard(client: ControlClient, measurements: dict[str, Any]) -> None:
@@ -1792,6 +1927,9 @@ class ProbeRunner:
         environment = getattr(self.adapter, "evidence_environment", FIXTURE_ENVIRONMENT)
         if environment == LIVE_ENVIRONMENT:
             validate_live_config(self.config)
+        self._settings_post_action_settle_seconds = (
+            SETTINGS_POST_ACTION_SETTLE_SECONDS if environment == LIVE_ENVIRONMENT else 0.0
+        )
         measurements = empty_measurements()
         if self.token_preflight:
             if set(self.token_preflight) != set(TOKEN_PREFLIGHT_FIELDS) or not all(
@@ -1806,10 +1944,16 @@ class ProbeRunner:
         previous_pid: int | None = None
         try:
             device_evidence = self.adapter.prepare_candidate(
-                self.artifact, self.config.port_close_timeout
+                self.artifact,
+                self.config.port_close_timeout,
+                reuse_trusted_install=self.config.reuse_trusted_install,
             )
             measurements["candidateFreshInstalled"] = device_evidence.get("freshInstall") is True
             measurements["installedIdentityMatch"] = device_evidence.get("identityMatch") is True
+            measurements["manualTrustPauseRequested"] = self.config.wait_for_trust
+            if self.config.wait_for_trust:
+                wait_for_manual_trust()
+                measurements["manualTrustPauseCompleted"] = True
             for index in range(self.config.cold_launches):
                 self.adapter.stop_relays()
                 old_pid = self.adapter.terminate_candidate()
@@ -1821,15 +1965,18 @@ class ProbeRunner:
                     raise ProbeError(
                         "candidate PID changed before the next cold launch"
                     )
-                new_pid = self.adapter.launch_candidate(
-                    {
-                        "USE_PORT": str(CONTROL_DEVICE_PORT),
-                        "MJPEG_SERVER_PORT": str(MJPEG_DEVICE_PORT),
-                        "USE_IP": "127.0.0.1",
-                        "WDA_PRODUCT_BUNDLE_IDENTIFIER": self.artifact.bundle_id,
-                        TOKEN_ENVIRONMENT: self.token.reveal(),
-                    }
-                )
+                launch_environment = {
+                    "USE_PORT": str(CONTROL_DEVICE_PORT),
+                    "MJPEG_SERVER_PORT": str(MJPEG_DEVICE_PORT),
+                    "USE_IP": "127.0.0.1",
+                    "WDA_PRODUCT_BUNDLE_IDENTIFIER": self.artifact.bundle_id,
+                    TOKEN_ENVIRONMENT: self.token.reveal(),
+                }
+                if "text" in self.artifact.features:
+                    launch_environment["RIVIU_AGENT_TEXT_CAPABLE"] = "1"
+                if "pushMedia" in self.artifact.features:
+                    launch_environment["RIVIU_AGENT_MEDIA_CAPABLE"] = "1"
+                new_pid = self.adapter.launch_candidate(launch_environment)
                 if isinstance(new_pid, bool) or not isinstance(new_pid, int) or new_pid <= 0:
                     raise ProbeError("candidate launch omitted a verified process ID")
                 order = ["launch"]
@@ -1849,6 +1996,10 @@ class ProbeRunner:
                 order.append("health")
 
                 self.adapter.foreground(self.config.foreground_bundle)
+                if environment == LIVE_ENVIRONMENT:
+                    # Settings restores its last page; let XCTest publish a fresh
+                    # accessibility snapshot before the element probe begins.
+                    time.sleep(SETTINGS_FOREGROUND_SETTLE_SECONDS)
                 order.append("foreground")
                 active_session = client.create_session()
                 client.require_session(active_session)
@@ -1890,7 +2041,11 @@ class ProbeRunner:
                 previous_pid = new_pid
 
                 if index == self.config.cold_launches - 1:
+                    if environment in {LIVE_ENVIRONMENT, SUPPLEMENTAL_ENVIRONMENT}:
+                        self._ensure_settings_root(client, active_session)
                     self._measure_gestures(client, active_session, sampler, measurements)
+                    if environment in {LIVE_ENVIRONMENT, SUPPLEMENTAL_ENVIRONMENT}:
+                        self._ensure_settings_search(client, active_session)
                     self._measure_unicode_keys(client, active_session, measurements)
                     self._monitor_stream(client, active_session, sampler, measurements)
                     candidate_pid = self.adapter.foreground_candidate_without_restart()
@@ -1901,8 +2056,11 @@ class ProbeRunner:
                     ):
                         raise ProbeError("candidate foreground activation omitted its stable PID")
                     measurements["clipboardAgentForegroundPidStable"] = True
-                    active_pid = client.require_active_bundle(
-                        active_session, self.artifact.bundle_id
+                    active_pid = self._wait_for_active_bundle(
+                        client,
+                        active_session,
+                        self.artifact.bundle_id,
+                        candidate_pid,
                     )
                     if active_pid != candidate_pid:
                         raise ProbeError(
@@ -2119,9 +2277,14 @@ async def _device_port_is_open(
 
 
 class MacDeviceAdapter:
-    evidence_environment = LIVE_ENVIRONMENT
 
-    def __init__(self, *, udid: str, artifact: CandidateArtifact) -> None:
+    def __init__(
+        self,
+        *,
+        udid: str,
+        artifact: CandidateArtifact,
+        reuse_trusted_install: bool = False,
+    ) -> None:
         if sys.platform != "darwin":
             raise ProbeError("live Gate B/C probe requires macOS")
         requirements = {"pymobiledevice3": "10.1.0", "Pillow": "11.3.0"}
@@ -2135,6 +2298,10 @@ class MacDeviceAdapter:
         self.udid = udid
         self.artifact = artifact
         self.candidate_bundle = artifact.bundle_id
+        self.reuse_trusted_install = reuse_trusted_install
+        self.evidence_environment = (
+            SUPPLEMENTAL_ENVIRONMENT if reuse_trusted_install else LIVE_ENVIRONMENT
+        )
         self.control_relay: UsbmuxRelay | None = None
         self.mjpeg_relay: UsbmuxRelay | None = None
 
@@ -2150,17 +2317,25 @@ class MacDeviceAdapter:
             raise ProbeError("MJPEG relay is not running")
         return "127.0.0.1", self.mjpeg_relay.local_port
 
-    def prepare_candidate(self, artifact: CandidateArtifact, timeout: float) -> dict[str, Any]:
+    def prepare_candidate(
+        self,
+        artifact: CandidateArtifact,
+        timeout: float,
+        *,
+        reuse_trusted_install: bool = False,
+    ) -> dict[str, Any]:
         if artifact != self.artifact:
             raise ProbeError("adapter candidate does not match the attested artifact")
+        if reuse_trusted_install != self.reuse_trusted_install:
+            raise ProbeError("candidate reuse mode does not match the adapter")
         if _sha256_file(artifact.ipa_path) != artifact.ipa_sha256:
             raise ProbeError("candidate IPA changed after manifest attestation")
         self.stop_relays()
         self.terminate_candidate()
         if not self.wait_candidate_ports_closed(timeout):
-            raise ProbeError("candidate ports remained open before fresh install")
+            raise ProbeError("candidate ports remained open before candidate install")
 
-        async def fresh_install() -> tuple[dict[str, Any], str, str]:
+        async def install_or_reuse() -> tuple[dict[str, Any], str, str]:
             from pymobiledevice3.lockdown import create_using_usbmux
             from pymobiledevice3.services.installation_proxy import InstallationProxyService
 
@@ -2170,20 +2345,36 @@ class MacDeviceAdapter:
                 product_version = lockdown.product_version or "unknown"
                 async with InstallationProxyService(lockdown=lockdown) as proxy:
                     before = await proxy.get_apps(bundle_identifiers=[artifact.bundle_id])
-                    if artifact.bundle_id in before:
-                        await proxy.uninstall(artifact.bundle_id)
-                    await proxy.install_from_local(str(artifact.ipa_path), developer=True)
+                    if self.reuse_trusted_install:
+                        installed = before.get(artifact.bundle_id)
+                        if not isinstance(installed, dict):
+                            raise ProbeError(
+                                "trusted candidate is not installed; run a fresh-install probe first"
+                            )
+                        await proxy.install_from_local(
+                            str(artifact.ipa_path),
+                            cmd="Upgrade",
+                            options={"ApplicationType": "User"},
+                            developer=True,
+                        )
+                    else:
+                        if artifact.bundle_id in before:
+                            await proxy.uninstall(artifact.bundle_id)
+                        await proxy.install_from_local(str(artifact.ipa_path), developer=True)
                     after = await proxy.get_apps(bundle_identifiers=[artifact.bundle_id])
                     installed = after.get(artifact.bundle_id)
                     if not isinstance(installed, dict):
-                        raise ProbeError("freshly installed candidate was not returned by installation proxy")
+                        raise ProbeError("candidate install was not returned by installation proxy")
                     return installed, product_type, product_version
             finally:
                 await lockdown.close()
 
         installed, product_type, product_version = run_async_bounded(
-            fresh_install(), INSTALL_OPERATION_TIMEOUT_SECONDS, "candidate fresh install"
+            install_or_reuse(),
+            INSTALL_OPERATION_TIMEOUT_SECONDS,
+            "candidate install or trusted upgrade",
         )
+        time.sleep(POST_INSTALL_SETTLE_SECONDS)
         installed_path = installed.get("Path")
         payload_name = (
             PurePosixPath(installed_path).name if isinstance(installed_path, str) else None
@@ -2202,7 +2393,10 @@ class MacDeviceAdapter:
         if not all(comparisons.values()):
             raise ProbeError("installed candidate identity does not match the attested IPA")
         return {
-            "freshInstall": True,
+            "freshInstall": not self.reuse_trusted_install,
+            "installationMode": (
+                "trusted_upgrade" if self.reuse_trusted_install else "fresh_install"
+            ),
             "identityMatch": True,
             "productType": product_type,
             "iOSVersion": product_version,
@@ -2286,11 +2480,22 @@ class MacDeviceAdapter:
             )
             return activated, observed
 
-        activated, observed = run_async_bounded(
-            _with_process_control(self.udid, launch),
-            PROCESS_CONTROL_TIMEOUT_SECONDS,
-            "candidate launch",
-        )
+        for attempt in range(DVT_LAUNCH_ATTEMPTS):
+            try:
+                activated, observed = run_async_bounded(
+                    _with_process_control(self.udid, launch),
+                    PROCESS_CONTROL_TIMEOUT_SECONDS,
+                    "candidate launch",
+                )
+                break
+            except Exception as exc:
+                transient = (
+                    "deviceprocesscontrolservice" in str(exc)
+                    and "failed to launch" in str(exc)
+                )
+                if not transient or attempt == DVT_LAUNCH_ATTEMPTS - 1:
+                    raise
+                time.sleep(DVT_LAUNCH_RETRY_DELAY_SECONDS)
         if (
             isinstance(activated, bool)
             or not isinstance(activated, int)
@@ -2492,6 +2697,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--swipe-attempts", type=int, default=GATE_SWIPE_SUCCESSES)
     parser.add_argument("--stream-seconds", type=float, default=GATE_STREAM_SECONDS)
     parser.add_argument("--request-timeout", type=float, default=10.0)
+    parser.add_argument(
+        "--wait-for-trust",
+        action="store_true",
+        help="pause after fresh-install for manual Apple Development profile approval",
+    )
+    parser.add_argument(
+        "--reuse-trusted-install",
+        action="store_true",
+        help="upgrade the current trusted install without uninstalling (supplemental only)",
+    )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     return parser
 
@@ -2520,9 +2735,15 @@ def main() -> int:
             stream_seconds=args.stream_seconds,
             request_timeout=args.request_timeout,
             foreground_bundle=SETTINGS_BUNDLE_ID,
+            wait_for_trust=args.wait_for_trust,
+            reuse_trusted_install=args.reuse_trusted_install,
         )
         validate_live_config(config)
-        adapter = MacDeviceAdapter(udid=args.udid, artifact=artifact)
+        adapter = MacDeviceAdapter(
+            udid=args.udid,
+            artifact=artifact,
+            reuse_trusted_install=args.reuse_trusted_install,
+        )
         with guard_process_output(token):
             report = ProbeRunner(
                 adapter=adapter,

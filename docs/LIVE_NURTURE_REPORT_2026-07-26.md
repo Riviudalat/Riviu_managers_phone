@@ -125,7 +125,7 @@ Xác suất cấu hình được nhân theo nhịp nên trung bình phiên vẫn
 | `crates/core/src/screen_match.rs` | NCC coarse-to-fine, cache template, truy cập slice thô |
 | `crates/core/src/nurture/` | Viết lại toàn bộ flow, tách 3 module (xem §8) |
 | `crates/core/src/human_behavior.rs` | `MoodCycle` — nhịp hành vi theo đợt |
-| `crates/core/src/openai_client.rs` | vilao.ai; vision comment + pool dựng sẵn; sanitize |
+| `crates/core/src/openai_client.rs` | gateway vision grounded hai lượt; sanitize; pool chỉ còn fixture |
 | `apps/desktop/src-tauri/src/bin/live_nurture_test.rs` | Flags, JSONL, exit code |
 | `sidecars/pymobiledevice3/riviu_pmd.py` | `--restart-wda` luôn kill bundle rồi chờ port đóng |
 
@@ -667,8 +667,32 @@ chiều trên video nền đỏ.
 Vòng `final2`: 725 s, tim 19/20 lần thử (**95 %**), 30 thẻ không có rail được bỏ
 qua đúng, swipe p50 768 ms, tap p50 410 ms, **không có request lỗi**.
 
-## D. Chưa giải quyết
+## D. Lịch sử stock WDA
 
-Bình luận **text** vẫn chặn y như máy cũ — kết luận §5.1 không đổi. Đường duy
-nhất có bằng chứng vẫn là WDA vá (TrollStore + idbagent, port 8906, header
-`X-RT-Token`).
+Bình luận **text** bị chặn trên stock WDA của các vòng test cũ. Kết quả đó không
+được dùng làm bằng chứng cho runtime RT-MMO/candidate hiện tại; gate live riêng
+vẫn phải xác minh lại trước khi quảng bá khả năng text.
+
+---
+
+# Cập nhật implementation grounded comment (04/08/2026)
+
+Luồng production đã được chuyển sang chuẩn bị comment có bằng chứng trước khi
+đụng UI:
+
+- Lấy ba frame MJPEG liên tiếp khi màn hình vẫn là Feed, ghép thành contact sheet
+  portrait và phóng vùng caption.
+- Gọi AI hai lượt: `grounded_generate` đọc caption/visual facts, sau đó
+  `grounded_verify` đọc lại frame độc lập. Nội dung/caption ưu tiên hơn direction.
+- Chỉ gửi khi overall >= 80, instructionFit >= 70, genericity <= 30 và không có
+  cờ contradiction, unsupported claim hoặc nhầm chữ UI. Lỗi API, JSON sai, frame
+  không hợp lệ hoặc điểm không đạt đều bỏ lượt, không dùng pool câu chung.
+- Mỗi attempt grounded, kể cả lượt bị skip trước UI, lưu outcome trong
+  `nurture_comment_attempts`; lượt qua gate có caption preview, SHA-256 contact
+  sheet, điểm và token/cost. Cost comment chỉ ghi sau frame xác nhận nút Gửi đã
+  tắt.
+
+Đã xác minh bằng mock gateway local hai lượt và test toàn workspace. Live iPhone
+semantic gate chưa chạy trên môi trường này vì `RIVIU_AI_API_KEY` chưa được cấu
+hình; `tidevice` đã cài trong `$HOME/Library/Python/3.9/bin` và nhận được thiết bị
+khi thêm PATH theo handoff.

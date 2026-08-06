@@ -4,7 +4,7 @@
 > hay danh sách "đừng làm lại" thì cập nhật ngay trong cùng lần thay đổi đó.
 > File này là thứ đầu tiên agent sau đọc.
 >
-> Cập nhật lần cuối: 31/07/2026.
+> **Cập nhật lần cuối:** 06/08/2026.
 
 ---
 
@@ -210,9 +210,20 @@ lưu 444, chia sẻ 511.
 - `run_suppressible()` cho nurture tạm dừng *hành động* khi nó tự lái luồng nhiều
   bước (mở drawer bình luận) — vẫn phân loại để `state` luôn mới.
 
-Watcher xử lý 4 loại màn hình chắn đường: `ClosableSheet` (tap ✕),
+Watcher xử lý 4 loại màn hình chắn đường: `ClosableSheet` (tap ✕, gồm cả thẻ
+khuyến mãi nổi có nút ✕ góc trái),
 `InterestPicker` (tap nút bỏ qua), `LiveRoom` (tap ✕ — vuốt chỉ cuộn trong
 phòng), và `SystemAlert`.
+
+Toast TikTok `Bạn sẽ thấy ít quảng cáo như thế này hơn` không có nút đóng ổn
+định: `screen.rs` đánh dấu nó là `ad_feedback_notice` trên một frame Feed nhưng
+`feed_ready()` trả false, để watcher/nurture chờ toast tự biến mất trước khi
+đọc caption hoặc gửi gesture. Không dùng tọa độ tap mù cho lớp toast này.
+
+Ngay sau khi TikTok được đưa lên foreground, nurture chờ watcher xác nhận một
+frame `Feed` (tối đa 12 giây). Vì vậy thông báo/popup đã có sẵn lúc khởi động
+được đóng trước gesture đầu tiên; watcher vẫn chạy liên tục để xử lý popup phát
+sinh giữa phiên. Không dùng `autoDismissAlerts` để làm việc này.
 
 #### `SystemAlert` — hộp thoại của iOS, không phải của TikTok
 
@@ -342,7 +353,7 @@ Thiết kế chi tiết:
   phục hồi feature call graph và Project 2 phải thêm contract/probe trước khi sửa
   một delta theo feature; không suy diễn call edge từ tên selector.
 
-### 3.9 Project 2 Riviu Agent candidate (checkpoint Windows 29/07/2026)
+### 3.9 Project 2 Riviu Agent candidate (checkpoint Mac 04/08/2026)
 
 Source candidate nam o `sidecars/wda/riviu-agent/` theo mo hinh pinned overlay:
 `Scripts/prepare.py` verify npm tarball WDA 15.1.4, baseline digest
@@ -351,7 +362,7 @@ apply dung thu tu nam patch co SHA-256 trong `baseline-lock.json`. Source sinh r
 chi nam trong ignored `target/riviu-agent/source`; khong vendor de len Git va khong
 sua `sidecars/wda/WebDriverAgent/` stock 16.0.0.
 Digest sau patch phai dung
-`2ca158cde4b2307957670680a6cd136b6c360d6f175303f1d012f7488e82c4cc`;
+`c54c85ab5abafd6465dfa7f40933bf525d8016c928680d9f4153d9972115cf93`;
 `prepare.py` khoa `git -c core.autocrlf=false` de giu LF cua upstream. Khong tai
 sinh patch voi line-ending churn lam delta Objective-C thanh thay toan file.
 Digest tinh moi regular file va canonical mode (`0644` hoac `0755`), gom ca
@@ -362,8 +373,10 @@ POSIX, prepare phai dat mode that tu tar de `embed-runner-icon.sh` chay duoc.
 Candidate protocol v2 dung `RIVIU_AGENT_TOKEN` (toi thieu 32 byte UTF-8), header
 `X-Riviu-Token`, control `8916`, MJPEG `9094`. Chi exact `GET /status` duoc mien
 auth. Protected health tra `agentVersion=0.1.0`, `protocolVersion=2`, logical
-`375x667` va feature dung bon muc `stream/tap/swipe/clipboard`; Project 2 tuyet
-doi chua advertise `text` hoac `pushMedia`.
+`375x667` va candidate mac dinh dung bon muc `stream/tap/swipe/clipboard`.
+Artifact promoted rieng `sidecars/wda/RiviuAgent-text.ipa` chi them `text` khi
+manifest da qua text gate; relay phai forward `RIVIU_AGENT_TEXT_CAPABLE=1` qua
+DVT launch. Khong advertise `pushMedia`.
 
 Sessionless `/wda/tap` va `/wda/swipe` cua candidate dung truc tiep
 `XCPointerEventPath` -> `XCSynthesizedEventRecord` ->
@@ -375,6 +388,9 @@ doi hai handler nay ve `/actions`, `XCUICoordinate`,
 `pressForDuration:thenDragToCoordinate:` hoac `fb_waitUntilStable`; cac duong
 high-level do da biet co the wedge TikTok. Route element legacy van thuoc baseline,
 khong phai candidate native route.
+Envelope cua gesture co the tra `sessionId` moi khi focus composer lam XCTest
+rotate session; WdaClient va live probe phai nhan id nay truoc `/wda/keys`. ACK
+HTTP 200 van khong la bang chung text neu frame chua doi va nut Gui chua do.
 
 Patch stream bind MJPEG vao loopback, doc header toi da 8192 byte trong 5 giay va
 bat buoc cung `X-Riviu-Token` truoc khi nhan client. Health chi advertise `stream`
@@ -435,26 +451,65 @@ dung PID da xac nhan. Nam PID fingerprint phai khac nhau. JSON va hai gate Markd
 publish theo transaction co rollback, khong de lai evidence tron neu replace loi.
 Report JSON/Markdown chi publish sau `rtmmo-re verify-redaction`, va cleanup phai
 dung sampler/relay, terminate candidate, xac nhan ca hai device port da dong.
-Project 2 chua noi candidate vao desktop nen khong danh PASS cho soft/hard runtime
-recovery: moi control/session fault lam Gate C fail; budget recovery thuoc Project
-4. O phase nay chi MJPEG reader duoc reconnect co gioi han toi da mot lan.
+Project 2 da noi candidate vao desktop theo mot profile rieng sau khi Gate B/C
+PASS; candidate mac dinh van khoa text/comment theo feature list bon muc. Text
+duoc promote thanh artifact rieng sau mot probe TikTok co frame that, khong thay
+production oracle. Soft/hard runtime recovery van chua thuoc phase nay: moi
+control/session fault lam Gate C fail; budget recovery thuoc Project 4. O phase nay
+chi MJPEG reader duoc reconnect co gioi han toi da mot lan.
 
-Trang thai hien tai: source/contract/build/probe fixture tren Windows da PASS;
-B0, Gate B va Gate C van `PENDING_MAC_DEVICE`. HTTP port hoac `/status` 200 khong
-chung minh automation readiness. B0 can 5 cold plain-launch co protected health,
-fresh automation session va JPEG dau tien theo dung thu tu. Cho toi luc gate live
-dat, desktop khong chuyen candidate va production `sidecars/wda/RiviuAgent.ipa` +
-`agent-manifest.json` phai giu nguyen (SHA-256 lan luot
+Desktop sidecar ap dung gioi han nay cho stream dai han: neu socket MJPEG dong
+dot ngot, reader cho usbmux/agent san sang roi tao mot forwarder moi va thu lai
+mot lan. Neu lan thu hai that bai thi producer ket thuc de supervisor/sampler
+bao loi; khong retry vo han. Capture huu han (`max_frames`) khong reconnect de
+giu dung so frame yeu cau. Moi lan doc MJPEG cung co deadline 2 giay; socket
+khong EOF nhung khong tra byte moi duoc coi la stalled va di cung nhanh reconnect
+co gioi han, tranh giu reader task song vo han voi sequence dung yen.
+
+Trang thai hien tai: source/contract/build/probe fixture tren Windows da PASS; Mac
+candidate build/sign va install identity tren hai iPhone that da PASS. Candidate
+IPA da co ten hien thi `Riviu Agent` va logo chu R tu `logo.jpg`, duoc kiem tra
+truoc khi ky lai. IPA candidate trong desktop la artifact rieng; production
+`sidecars/wda/RiviuAgent.ipa` va `agent-manifest.json` van giu nguyen.
+B0, Gate B va Gate C chinh thuc tren iPhone thu hai da `PASS` o buoc DVT
+plain-launch, protected health/session/JPEG va cleanup.
+Ngay 04/08/2026, evidence live ghi nhan 5/5 cold launch, 5/5 status identity,
+5/5 session, 2,852 frame trong 300 giay, max gap 0.18 giay, 50 tap, 20 swipe,
+Unicode read-back, clipboard byte-exact va cleanup sach. Trusted upgrade path
+tren ca hai iPhone van duoc giu o `SUPPLEMENTAL_ONLY`; HTTP port hoac `/status`
+200 rieng le khong chung minh automation readiness. Production artifact van duoc
+bao toan voi SHA-256:
 `8a24847099495ff70b998522692c43f00dd16b90f698bda6953a73f5d33002ea` va
-`e98a549af4c061556effd36424e7732219e1a6d262bcf1f259279975024b6e1a`). Xem
+`e98a549af4c061556effd36424e7732219e1a6d262bcf1f259279975024b6e1a`. Xem
 `docs/superpowers/specs/2026-07-29-riviu-agent-standalone-control-parity-design.md`
 va `docs/re/riviu-agent/`.
+
+Text gate da co bang chung TikTok that, khong dung chuoi mau: probe
+`sidecars/wda/riviu-agent/Scripts/probe_tiktok_comment.py` bat buoc nhan
+`--comment-text`, reject `Riviu test`/fixture/placeholder va doi operator xac
+nhan frame Send. Evidence build `2` o
+`docs/re/riviu-agent/tiktok-comment-build2-live.json` cung `before.jpg`,
+`drawer.jpg`, `armed.jpg`, `sent.jpg`; comment da gui la
+`Quán cà phê này dễ thương quá ạ`. Promotion tao
+`sidecars/wda/RiviuAgent-text.ipa` + `sidecars/wda/text-manifest.json` voi
+`artifactVersion=0.2.0-text`, `bundleBuild=2`, `features` gom `text`, va app rieng
+`/Applications/Riviumanagersphone Full.app` build voi `RIVIU_DEFAULT_AGENT_MODE=full`.
+Sau lan uninstall/install de kiem build `2`, device 1 da approve Apple
+Development va probe comment build `2` PASS; device 2 da cai cung IPA nhung van
+cho approve profile truoc khi lay protected health/JPEG. Khong coi HTTP 401, port
+mo, hoac evidence cua runner cu la bang chung B/C cua build moi.
+Build record, patch/diff va rollback da duoc ghi tai
+`docs/re/riviu-agent/full-build/verification.txt`,
+`docs/re/riviu-agent/full-build/full-build.diff` va
+`docs/re/riviu-agent/full-build/rollback.sh`; oracle backup nam trong
+`target/riviu-agent/rollback/production-oracle/` (ignored).
 
 ### 3.10 Handoff bat buoc khi mo du an tren Mac
 
 Agent tiep nhan tren Mac phai tiep tuc dung checkpoint Project 2 hien tai, khong
-lap lai forensic/Gate A va khong ghi de production IPA. Muc tieu dau tien la build
-candidate, chay B0/Gate B/Gate C tren iPhone that, roi moi danh gia text/comment.
+lap lai forensic/Gate A va khong ghi de production IPA. Candidate B0/Gate B/Gate C
+da co evidence; lan tiep theo la trust profile, xac nhan build `2` va chay lai text
+probe tren iPhone that truoc khi thay production artifact.
 
 ```bash
 cd <REPO_ROOT>
@@ -483,7 +538,17 @@ python3 sidecars/wda/riviu-agent/Scripts/build_candidate.py \
 RIVIU_AGENT_TOKEN="$(openssl rand -hex 32)" \
 python3 sidecars/wda/riviu-agent/Scripts/probe_gate_bc.py \
   --udid "$UDID" \
-  --manifest target/riviu-agent/artifacts/0.1.0/candidate-manifest.json
+  --manifest target/riviu-agent/artifacts/0.1.0/candidate-manifest.json \
+  --wait-for-trust
+
+`--wait-for-trust` dung trong live run tuong tac: probe se dung sau fresh-install
+de Trust/Verify Apple Development profile tren iPhone, roi nhan Enter de tiep tuc.
+Flag nay khong ha nguong gate va mac dinh van tat.
+
+Neu app candidate hien tai da duoc trust, dung `--reuse-trusted-install` cho vong
+functional lap lai: installation_proxy se `Upgrade` IPA ma khong uninstall bundle,
+giu lai approval. Report se mang `SUPPLEMENTAL_MAC_DEVICE`/`SUPPLEMENTAL_ONLY`;
+Gate B/C chinh thuc van dung fresh-install mac dinh.
 
 cargo run -q -p rtmmo-re -- verify-redaction \
   --input docs/re/riviu-agent/candidate-probes.json \
@@ -497,11 +562,12 @@ khac nhau va cleanup sach. Neu mot gate fail, giu production artifact, sua dung
 failure dau tien va chay lai toan bo probe.
 
 Ngay ca khi B/C PASS, candidate van chua duoc goi la thay the day du RT-MMO:
-feature list van chi co `stream/tap/swipe/clipboard`. Buoc ke tiep tren Mac la them
-gate TikTok comment end-to-end: foreground link/video fixture, fresh session truoc
+feature list mac dinh van chi co `stream/tap/swipe/clipboard`; desktop Full chi
+advertise `text` tu manifest promoted rieng. Gate TikTok comment da co frame that
+voi chuoi noi dung co nghia, nhung moi build moi phai lap lai fresh session truoc
 MJPEG, focus composer, Unicode read-back/armed-send frame, tap Send va frame xac
-nhan comment da gui. Chi sau khi gate nay PASS moi advertise `text`, noi candidate
-vao desktop o Project 4 va thay production artifact theo transaction co rollback.
+nhan comment da gui truoc khi cap nhat artifact text. Production oracle van khong
+doi trong phase nay.
 
 ### 3.11 Proxy/supervision checkpoint (29/07/2026)
 
@@ -1168,9 +1234,13 @@ release hien tai phai duoc mo ta dung nhu sau:
 - Nuoi account va text comment qua production RT-MMO da co live proof tren iPhone 8
   iOS 16.7.15. Luong nay van phu thuoc exact production IPA + RT-MMO token; chua co
   live regression tren Mac cho toan bo `main` moi.
-- Source Riviu Agent candidate da PASS source/contract/fixture tren Windows, nhung B0,
-  Gate B va Gate C van `PENDING_MAC_DEVICE`. Candidate hien chi advertise
-  `stream/tap/swipe/clipboard`; chua co `text`, chua thay day du RT-MMO.
+- Source Riviu Agent candidate da PASS source/contract/fixture tren Windows; B0,
+  Gate B va Gate C tren Mac da `PASS`. Candidate da duoc noi vao desktop voi
+  profile rieng va mac dinh chi advertise `stream/tap/swipe/clipboard`. Artifact
+  `RiviuAgent-text.ipa`/Full app da co manifest `text` sau probe comment that,
+  nhung build `2` chua duoc live re-probe vi iOS dang doi trust profile. Desktop
+  macOS tao WebView sau asset setup de tranh trang trang va gioi han Keychain
+  candidate de bootstrap khong mac neu keychain dang doi user interaction.
 - Flow V2 da dong F0/F1/F2: Tauri composition/commands, startup recovery, React
   drag/drop editor, exact revision save, run monitor va invalidation da co. F3
   Rust fixture, Playwright va rollback proof da PASS voi nhan `FIXTURE_ONLY`; F3
@@ -1186,15 +1256,16 @@ release hien tai phai duoc mo ta dung nhu sau:
 - MDM/supervision/AdminControl, remote fleet policy va cac muc deferred o section
   3.11 chua nam trong phase hien tai.
 
-Production artifact van phai giu byte-exact cho den khi Mac live gate dat:
+Production artifact van phai giu byte-exact; artifact text la promoted sidecar
+rieng va khong ghi de oracle:
 `sidecars/wda/RiviuAgent.ipa` SHA-256
 `8a24847099495ff70b998522692c43f00dd16b90f698bda6953a73f5d33002ea` va
 canonical-LF `agent-manifest.json` SHA-256
 `e98a549af4c061556effd36424e7732219e1a6d262bcf1f259279975024b6e1a`.
-Mac build candidate vao `target/riviu-agent/artifacts/0.1.0/`, chay B0/B/C, sau do
-them va PASS TikTok comment end-to-end. Chi sau do moi advertise `text`, wire
-candidate vao desktop va thay dong thoi IPA + manifest production bang transaction
-co rollback; khong ghi de production artifact chi vi source/build fixture PASS.
+Mac build candidate vao `target/riviu-agent/artifacts/0.2.0-text/`, chay lai B0/B/C
+cho build `2` sau khi trust, sau do lap lai TikTok comment end-to-end. Chi artifact
+text duoc cap nhat theo transaction co rollback; khong ghi de production artifact
+chi vi source/build fixture PASS.
 
 ### 3.16 Active priority: Interaction Campaign + Flow V2 (31/07/2026)
 
@@ -1211,7 +1282,7 @@ runtime-qualified protected auth + geometry tren Mac/iPhone.
 
 Cac quyet dinh bat buoc cho lan trien khai nay:
 
-- Interaction dung migration version 3 tren `schema_migrations` chung da co version
+  - Interaction dung migration version 4 tren `schema_migrations` chung da co version
   1/2; khong tao migration ledger thu hai. Flow F2 khong thay schema: archive tra
   projection ngay trong cung transaction, con `FlowMutationCoordinator` tuan tu hoa
   commit + emit va cap revision invalidation tang dan trong tung phien desktop.
@@ -1296,6 +1367,67 @@ canonical-LF van
 `e98a549af4c061556effd36424e7732219e1a6d262bcf1f259279975024b6e1a`.
 
 ### 3.18 Desktop self-contained packaging va CI/CD (31/07/2026)
+
+#### 3.18.1 Mac local bundle checkpoint (04/08/2026)
+
+`apps/desktop/src-tauri/tauri.conf.json` phai dat
+`bundle.macOS.signingIdentity` = `"-"` cho build local. Neu bo field nay, Tauri
+chi de linker ad-hoc signature tren executable; app co `Contents/Resources` nhung
+khong co resource seal, `codesign --verify --deep --strict` fail va Finder khong
+mo duoc. Sau moi build Mac phai kiem tra ca `.app` va DMG da mount, khong chi xem
+file ton tai. Build da verify:
+
+```text
+target/debug/bundle/macos/Riviumanagersphone.app
+target/debug/bundle/dmg/Riviumanagersphone_0.1.0_aarch64.dmg
+```
+
+Ca hai deu `codesign --verify --deep --strict` PASS; `open -W` giu process song.
+Day van la ad-hoc artifact (`TeamIdentifier` khong co), nen `spctl`/Gatekeeper
+van co the can phep lan dau; chua goi day la Developer ID/notarized release.
+Ngay 04/08, `/Applications/Riviumanagersphone.app` van la ban cu voi resource
+seal hong du du target bundle moi da dung; da thay bang bundle moi va verify lai
+ngay tai duong dan Finder. Khi user bao app van loi, kiem tra ca hai duong dan
+nay truoc khi rebuild lan nua. Ban cu duoc giu tai `/tmp` de rollback.
+
+Desktop khong duoc panic khi `RIVIU_RTMMO_TOKEN` thieu. Setup luu loi vao
+`StartupState`, frontend hien trang thai cau hinh va khoa thao tac thiet bi; no
+khong tu fallback sang stock/mock va cung khong sinh token. Token hop le van phai
+duoc dat qua environment mot lan de migrate vao native Keychain account
+`agent-auth-token`, sau do mo lai app.
+
+Tile background stream bat dau tinh deadline tu luc producer that su chay
+(`mark_running` sau frame dau), khong tinh tu luc reserve; vi vay bootstrap
+agent/MJPEG cham khong lam tile roi som. Khi frame dau da co, registry phai dat
+`wdaReady=true` va frontend doc lai `latest_frame` de khong mat frame den truoc
+luc WebView subscribe. Core fixture van co budget mac dinh 1 de giu gate
+foreground; desktop Full tao `StreamBudgetManager::new(2)` va giu hai producer
+MJPEG cho hai UDID cung luc. Khi budget desktop da du hai slot, deadline 5 giay
+chi dung de phat hien socket dung va recycle producer; stream khoe tiep tuc
+`Live`, khong park theo chu ky. Neu foreground preempt hoac budget mot slot thi
+sampler moi park producer va giu anh cu voi nhan `Parked`; `Sampling` phai hien
+thi dang mo stream thay vi `No stream`.
+Sau khi park/preempt, agent co the bao `Starting` trong luc session cu vua dong;
+sampler chi duoc quay lai neu tile da co `wdaReady=true` va khong
+`Busy/Preparing`, con bootstrap lan dau (chua co frame) van phai cho den luc
+`Ready`.
+
+Ngay 05/08/2026 da sua dung contract nay: `DeviceDriver::park_owned_stream`
+cho phep `DeviceControlPlane` dung producer nen ma khong go `StreamHub.latest`;
+`StreamHub` van tang generation de frame buffered cua producer cu bi bo qua.
+`PmdIosDriver` stop child MJPEG, park generation, roi sampler co the quay lai
+producer moi. Moi ban Full phai duoc compile voi `RIVIU_DEFAULT_AGENT_MODE=full`
+va build script phai khai bao `rerun-if-env-changed`, neu khong binary co the
+dong goi candidate mode cu va bi chan token/stream ngay luc startup.
+Sampler liveness dung `StreamHub.latest_frame_sequence` thay vi digest JPEG:
+man hinh dung yen van co the phat nhieu frame byte-giong-nhau, va chi socket
+khong phat frame moi trong tron luot 5 giay moi duoc danh dau `Stale`. Bo dem
+sequence rieng theo UDID van tang qua moi generation; clear/park chi doi
+generation va cache frame, khong cho frame dau cua producer moi lap lai so cu
+va bi danh dau stale oan.
+`DeviceOwned.stream_generation` phai khop generation hien tai moi duoc reuse
+child; child con song nhung thuoc generation da park phai bi stop va spawn lai,
+neu khong reader se publish vao generation cu va tile se giu cung sequence.
 
 Release desktop khong duoc phu thuoc Python/pip/tidevice cua may nguoi dung.
 `scripts/build_desktop_sidecar.py` dung PyInstaller onedir de dong goi Python,
@@ -1566,7 +1698,9 @@ Ngày 28/07/2026 đã nối xong đường text end-to-end trong code:
   relay `8906`, stream `9093`; retry launch có giới hạn; token qua environment;
   kiểm tra/cài IPA từ `RIVIU_RTMMO_IPA` khi bundle thiếu. Chế độ
   `--bootstrap-only` restart agent text mà không sinh relay thứ hai.
-- `nurture/actions.rs`: sinh vision comment trước khi mở UI, pool là fallback;
+- `nurture/actions.rs`: lấy contact sheet ba frame và chạy grounded generate +
+  independent verify trước khi mở UI; nếu semantic gate không đạt thì bỏ lượt,
+  không dùng pool comment chung;
   tap input `(120,640)` qua native tap, `/wda/keys` nhận một phần tử chứa cả câu;
   chỉ tap Gửi
   khi drawer ban đầu đúng `Open` và một **frame mới** chuyển `Open -> SendArmed`;
@@ -2090,3 +2224,362 @@ Fixture hiện có: `feed-iphone8.jpg`, `feed-iphone8-b.jpg`, `feed-rail-variant
 - Milestone hiện tại chỉ hoàn thiện runtime Agent hợp nhất và text comment. Các phase
   2-6 của capability control plane vẫn chưa triển khai; MDM/full fleet policy thuộc
   phase 3 và được để lại cho kế hoạch sau.
+
+### 9. Context-grounded comment (04/08/2026)
+
+- Comment chữ production phải lấy bằng chứng từ **ba frame MJPEG liên tiếp** của
+  cùng màn hình Feed. Frame được ghép thành contact sheet portrait, kèm crop phóng
+  vùng caption; không dùng `GET /screenshot` và không lấy caption từ OCR UI riêng.
+- Mỗi lần comment chạy hai lượt AI: `grounded_generate` đọc caption/visual facts và
+  tạo một câu; `grounded_verify` đọc lại frame độc lập để chấm relevance,
+  evidenceSupport, instructionFit và genericity. Nội dung/caption luôn thắng
+  direction giọng điệu; câu đạt phải ngắn, khẩu ngữ như phản ứng vừa xem xong,
+  không mang giọng báo cáo/tóm tắt. Marker kiểu `được trình bày`, `mang đến`,
+  `người xem`, `chất lượng` bị coi là formal-style và phải retry/skip.
+- Chỉ nhận khi overall >= 80, instructionFit >= 70, genericity <= 30 và không có
+  contradiction/unsupportedClaim/uiTextConfusion. Một lần retry chỉ dành cho lỗi
+  điểm mềm; API lỗi, JSON sai, frame không phải Feed hoặc bằng chứng mơ hồ đều
+  `ContextSkipped` và **không** dùng pool comment chung.
+- Mỗi attempt grounded, kể cả lượt bị skip trước UI, được ghi vào
+  `nurture_comment_attempts`; attempt qua gate có caption preview, frame SHA-256,
+  điểm kiểm chứng, token/cost và outcome (`sent`, `text_not_armed`,
+  `text_uncertain`, `context_skipped`, ...). Cost row chỉ được ghi sau xác nhận
+  nút Gửi đã tắt; HTTP ACK không phải bằng chứng gửi thành công.
+- `generate_comment_pool` và pool fixture chỉ còn để tương thích test cũ; không
+  được gọi từ production `NurtureEngine`. Thay đổi schema phải kèm migration,
+  rollback test và cập nhật command `nurture_list_comment_attempts` nếu UI cần
+  hiển thị lịch sử.
+
+### 10. Interaction Campaign implementation checkpoint (04/08/2026)
+
+- `crates/core/src/interaction.rs` hiện có parser URL TikTok video/photo trực tiếp,
+  reject typed cho host/scheme/path/short-link, planner root rotation theo
+  `(target_index + ordinal) % actor_count`, chain parent và hash exact text trước
+  UI. Short link vẫn phải resolve qua bước identity Copy Link trước khi được
+  phép chạy; parser không tự coi URL rút gọn là target hợp lệ.
+- Migration `interaction-comment-threads` là **version 4** trong ledger chung,
+  không tạo ledger riêng. SQLite lưu campaign/actor/target/assignment, prepared
+  text, effect intent, evidence, retry/cancel projection và artifact locator.
+  `Database` có create/list/get/request/prepare/state/artifact APIs; test rollback
+  migration và test persistence đều phải giữ.
+- Tauri đã đăng ký `interaction_parse_links`, preview/start/list/get/cancel/retry
+  và `interaction_open_on_device`. React có nút `Tương tác` cạnh `Nuôi TT`, panel
+  Setup/Monitor, multiline direct link, actor 2-6, message 2-6, instruction và
+  max words. Run Now persist trước khi spawn worker; không có scheduler phase này.
+- Worker dùng `DeviceWorkOwner::Interaction` và thứ tự session -> MJPEG -> open URL;
+  từng target chuẩn bị toàn bộ text qua grounded AI rồi persist hash trước send.
+  Root sender xác nhận drawer/type/Send armed/Send cleared bằng frame. Sau root,
+  Vision OCR revision 3 phải thấy author + exact normalized text trên hai frame;
+  reply chỉ tap nút `Reply` khi locator khớp hai frame, nếu không assignment là
+  `skippedParent`/partial. Sau effect intent, lỗi send là `uncertain` và retry bị
+  chặn; không báo thành công theo HTTP ACK.
+- Gate live Mac 04/08: candidate mới build/sign được với
+  `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`, nhưng DVT launch
+  `com.riviu.managersphone.agent.xctrunner` trả deviceprocesscontrol code 2 trên
+  iPhone 8 iOS 16.7.16; Gate B/C = `FAIL`, report tại
+  `docs/re/riviu-agent/interaction-gate-live-e561.json`. Supplemental reuse cũng
+  chỉ là `SUPPLEMENTAL_ONLY`. Vì vậy production
+  `sidecars/wda/interaction-capabilities.json` vẫn giữ `qualifications: []`,
+  không promote candidate và không gọi Interaction Ready trên desktop.
+- Hash production text/manifest/capability sau vòng test vẫn phải khớp lần lượt
+  `45b98dda18ad403b2fdeb547e239a3594506944e1235d8e99345cd7450158389`,
+  `562578b1740a1e4ae13c863b28e6f72c448c3be80bfb3906b9d8342595850e73` và
+  `f2e75b2c71dda557de6ec21f64f49b7ab0c8bb3bfe0bbccb5e64ab59be2c9709`.
+- Verification roles, scoped diff và rollback artifact nằm ở
+  `docs/verification/interaction-thread-20260804/`; lỗi trước khi ghi effect
+  intent là `Failed` và có thể retry, còn lỗi sau `Sending` là `Uncertain` và
+  không dispatch lại.
+
+### 11. API comment preview (05/08/2026)
+
+- Popup `Nuôi TT` có nút `Test API` trong `Cấu hình AI`. Nút lưu và validate đúng
+  cấu hình hiện tại, lấy tối đa ba frame MJPEG của máy đã chọn, rồi gọi
+  `nurture_test_api` dùng chính `prepare_grounded_comment` của production khi
+  provider nhận ảnh. DeepSeek V4 public endpoint là text-only nên nhánh này OCR
+  caption cục bộ và gọi `prepare_caption_comment` hai lượt text JSON; kết quả ghi
+  rõ `OCR caption + text`. Lệnh chỉ trả preview comment, caption, điểm bằng
+  chứng, token, cost, model/host và SHA-256 evidence; không mở composer, không tap
+  Send, không ghi comment lên TikTok.
+- Test phải chạy khi máy đang ở một video/photo TikTok có frame stream mới. Home,
+  profile, LIVE hoặc frame không đủ bằng chứng sẽ trả lỗi/context rejection thay
+  vì tạo comment chung chung. Không coi HTTP/API thành công là comment đã gửi.
+- Model và Base URL vẫn là cấu hình người dùng; không hiển thị dòng gợi ý model
+  cố định trong popup. Cấu hình hiện tại của DB dùng endpoint DeepSeek và model
+  DeepSeek đã lưu, không được ghi đè khi build/cài lại app.
+- Gate text-only dùng context OCR >= 60 và relevance/evidenceSupport >= 80,
+  kèm các cờ contradiction/unsupportedClaim/uiTextConfusion và formal-style như
+  gate vision. Không hạ gate vision; hai mode phải hiển thị rõ nguồn evidence.
+- Artifact và lệnh kiểm chứng/rollback của preview nằm ở
+  `docs/verification/api-test-20260805/`.
+
+### 12. Stream preview scaling (05/08/2026)
+
+- `StreamHub` giữ một fleet feed cho desktop scheduler và channel riêng theo
+  UDID cho `FrameSource`/popup watcher. Không quay lại kiểu mỗi watcher đọc
+  broadcast toàn fleet: 100 máy sẽ tạo fan-out O(n²) và làm stream bị giật dù
+  từng MJPEG vẫn còn sống.
+- Desktop preview giữ latest frame theo UDID, round-robin và mã hoá base64 tối
+  đa 240 frame/giây toàn fleet. Hai máy vẫn nhận tối đa 24 FPS/máy; khi tăng
+  fleet, tốc độ preview tự chia đều (20 máy = 12 FPS/máy, 100 máy = 2 FPS/máy)
+  và producer đã dừng sẽ rời ngân sách sau 10 giây. Đây chỉ là ngân sách UI;
+  stream raw vẫn là nguồn bằng chứng cho watcher và nurture.
+- `RIVIU_STREAM_CAPACITY` là cấu hình desktop cho 1..100 producer, mặc định 2
+  để giữ hành vi live hiện tại. Giá trị ngoài khoảng bị bỏ qua và ghi cảnh báo,
+  không được tự nâng capacity trong code gọi lệnh.
+- Dải local WDA-control có 128 slot (`18100..18227`) để không đụng port khi
+  fleet xoay vòng tới 100 UDID. Mọi relay vẫn phải nằm trong supervisor lock và
+  registry fingerprint; không tạo relay thứ hai cho cùng UDID.
+- Khi thêm virtualized grid hoặc focus priority, chỉ thay scheduler preview;
+  không nới `snapshotMaxDepth`, không bật `autoDismissAlerts`, không đổi thứ tự
+  session-trước-stream và không dùng preview event để chứng minh gesture/comment.
+
+### 13. Standalone Riviu Agent full interaction install (05/08/2026)
+
+- `sidecars/wda/RiviuAgent-text.ipa` build `2` là artifact candidate độc lập cho
+  scope tương tác hiện tại: `stream`, `tap`, `swipe`, `clipboard`, `text`.
+  Text gate TikTok đã có frame `armed`/`sent` thật và manifest SHA-256 là
+  `45b98dda18ad403b2fdeb547e239a3594506944e1235d8e99345cd7450158389`.
+- Build `2` đã được upgrade trên cả hai iPhone test; `is-installed` xác nhận
+  `com.riviu.managersphone.agent.xctrunner`, version `1.0`, build `2`, đúng
+  Apple Development signer. Desktop Full được build với
+  `RIVIU_DEFAULT_AGENT_MODE=full` và khởi động không cần biến môi trường.
+- Protected runtime hiện dùng `backend=riviu-agent` trên cả hai máy. Sáu mẫu
+  `/status` liên tiếp trả `state=ready`, protocol `2`, có `text`; mỗi máy đã
+  trả một JPEG MJPEG HTTP `200` hợp lệ qua header `X-Riviu-Token`. Không có
+  process/port RT-MMO (`8906`/`9093`) trong phiên này. `RiviuAgent.ipa` và
+  `agent-manifest.json` production vẫn chỉ là rollback oracle, không phải
+  dependency runtime của Full.
+- Bản desktop đã được đóng gói self-contained bằng PyInstaller onedir Python
+  3.12.13 với closure khóa `pymobiledevice3==10.1.0` và `tidevice==0.12.11`;
+  frozen `ping`, embedded tidevice, signer và signing-resource self-test đều
+  PASS. Process thực tế chạy từ
+  `Contents/Resources/sidecars/pymobiledevice3/runtime/riviu-pmd`, không cần
+  Python/pip/tidevice trên máy người dùng. Executable hash là
+  `46b711e1ddf7e133cca945a28dc9a50e4a400214e527e966b7c65ec87f901946`, tree
+  hash `56774fce35dc0a20f29e052c86b5cfeda342e274e827b0a978a70a1aea15e0cf`.
+- CI release phải truyền `RIVIU_DEFAULT_AGENT_MODE=full` và merge
+  `apps/desktop/src-tauri/tauri.full.conf.json` trước
+  `target/tauri-sidecar.conf.json`; nếu chỉ dùng config mặc định thì artifact
+  sẽ trở về tên desktop cũ và mode legacy. Thư mục `target/` không commit: push
+  `main` tạo artifact Windows/MSI/NSIS trong Actions, còn tag `v*` tạo Release.
+- Verification record, desktop preview capture, IPA rollback và desktop
+  pre-sidecar rollback nằm trong
+  `docs/verification/standalone-agent-full-20260805/`.
+- `RiviuAgent-text.ipa` hiện đã deep-verify chữ ký và embedded profile có đúng
+  hai UDID test, `CreationDate=2026-08-03` và `ExpirationDate=2026-08-10`;
+  đây là Xcode-managed/free provisioning 7 ngày. Windows desktop installer
+  không có hạn này, nhưng Agent trên iPhone sẽ cần IPA ký lại sau ngày hết hạn
+  hoặc khi đổi UDID. Không gọi IPA này là universal artifact cho thiết bị mới.
+- Candidate v2 chưa quảng bá `pushMedia`; capability này chỉ được thêm sau khi
+  có route contract và read-back test riêng theo source-reconstruction design.
+  Không gọi bản candidate hiện tại là parity đầy đủ với oracle RT-MMO cho tới
+  khi gate đó hoàn tất. Verification và rollback của lần cài này nằm ở
+  `docs/verification/standalone-agent-full-20260805/`.
+
+### 14. Photo carousel publish campaign (05/08/2026)
+
+- Input publish là một thư mục một cấp: mỗi thư mục con là một carousel image,
+  ảnh phải có tiền tố số liên tiếp bắt đầu từ `01`, có đúng một `caption*.txt`;
+  `partners*.xlsx`, file ẩn và file không nhận diện bị bỏ qua có notice. Parser
+  chỉ đọc PNG/JPG/JPEG (HEIC chưa được decoder hỗ trợ), giữ caption UTF-8 sau
+  chuẩn hoá newline và tính SHA-256 từng ảnh/caption. Không tự sửa caption bị
+  cắt hoặc tự thêm hashtag.
+- `crates/core/src/publish.rs` tạo manifest side-effect-free; copy sang
+  `artifacts/publish/<request-id>/<bundle-id>` được verify lại hash trước khi
+  ghi DB. Mapping là một-một theo thứ tự bundle đã chọn và UDID đã chọn, cấm
+  trùng/thiếu. Visibility hiện cố định `Public`, âm thanh TikTok mặc định,
+  cleanup chỉ được phép sau bằng chứng post thành công.
+- Migration 5 (`publish-campaigns`) lưu request, manifest bundle, assignment,
+  dispatch lease và event revision. Tauri commands mới là
+  `publish_scan_folder`, `publish_create_campaign`, `publish_list`,
+  `publish_get`, `publish_prepare`, `publish_transfer`, `publish_cancel`;
+  `publish_prepare` chỉ chuyển sang `ready`, không giả nhận đã đăng.
+- `publish_transfer` và `push_material` không được gọi `install_app` cho media.
+  Chúng giữ device lease rồi gọi sidecar `media-stage`, đẩy ảnh/caption qua
+  HouseArrest/AFC vào `Documents/Riviu/Publish/<campaign-id>`, ghi manifest và
+  đọc lại size + SHA-256. Candidate media route sau đó gọi protected native
+  `prepare` rồi `import`: Photos tạo album `Riviu-<import-id>` theo đúng thứ tự
+  ảnh và lưu asset IDs để cleanup idempotent. Lỗi stage/native import phải ghi
+  `uncertain`, không để assignment kẹt ở `transferring` và không tự đăng lại.
+- `sidecars/wda/riviu-agent/Contracts/media-v1.json` nay là candidate-route cho
+  native `pushMedia`: patch 0006 thêm protected `POST/GET
+  /riviu/media/v1/prepare`, kiểm tra campaign/schema, path containment, size và
+  SHA-256 readback. `build_candidate.py --media-capable` và probe truyền cờ
+  runtime một cách opt-in; production/default candidate vẫn không advertise
+  feature này cho tới khi gate TikTok import, post-frame evidence và cleanup
+  verification hoàn tất.
+- UI Publish hiện cho chọn thư mục, subset bundle, subset phone, hiển thị mapping
+  tuần tự/caption, chạy ngay hoặc lịch một lần. Assignment `imported` có nút
+  `Post`; `publish_post` mở fresh TikTok session, stream MJPEG, chọn album, chọn
+  đủ ảnh, nhập caption Unicode, xác nhận modal Public và chỉ ghi `succeeded`
+  khi frame sau đăng thay đổi. Scheduler đến hạn chạy transfer rồi post tự động;
+  lỗi sau effect intent là `uncertain`. Test đã pass: core parser/DB campaign,
+  TypeScript/Vite build, Python media manifest, candidate contract.
+- Bản Full arm64 đã build/cài tại `/Applications/Riviumanagersphone Full.app`,
+  `codesign --verify --deep --strict` PASS. Candidate `0.5.2-media-text` (build
+  `8`, source SHA
+  `6055167f6cc2bab55147839bb21d028328554660568c7884d68fc93154443e03`) quảng bá
+  đúng `stream/tap/swipe/clipboard/text/pushMedia`; resource sidecar frozen có
+  `pymobiledevice3 10.1.0`. Live e561 đã PASS stage + native import (8 ảnh,
+  1 caption) và đã chạy tới TikTok composer/post flow. iOS yêu cầu xác nhận khi
+  xoá album Photos; patch 0007 chuyển cleanup sang `performChanges` async, bơm
+  run loop và tự bấm nút `Xóa/Delete`, còn desktop cleanup chạy trước khi đóng
+  stream và có một lần retry. Build/install đã PASS; Gate post+cleanup cuối vẫn
+  chờ e561 được mở khóa lại sau reboot để chạy lại live. Production/default IPA
+  vẫn giữ nguyên; không promote candidate trước khi record mới có frame post và
+  cleanup `state=cleaned`.
+
+#### 14.1 Live checkpoint 06/08/2026
+
+- Native media permission đã có retry bằng XCTest pointer event. Patch `0011`
+  fallback `wdFrame` và patch `0012` ưu tiên `UIScreen.mainScreen.bounds`, sau
+  đó dùng fixture `375x667` nếu UIKit chưa trả frame. Cleanup giữ retry native
+  bốn lần và fallback frame từ patch `0010`.
+- Baseline lock hiện có 12 patch; output source SHA-256 là
+  `f219ee8e356dc68119ee763059803934f80caaa275eda07ba8f42ea7bdb4f9a9`.
+  Candidate build `0.5.7-media-text`/build `13`, IPA SHA-256
+  `feeaa11cc68d9ab040e3a4326c5d4a52d0de037fb820c7406a28fa65f712708d`,
+  source/contract/objective-C unit tests đều PASS và feature list gồm
+  `stream/tap/swipe/clipboard/text/pushMedia`.
+- Full app được build từ `apps/desktop/src-tauri` với cả hai config full và
+  sidecar overlay; executable SHA-256 hiện tại là
+  `663d03a2a48363115e65f345fafc2e4eea4785428ee79d9facb4059d36cd5a53` và
+  `codesign --verify --deep --strict` PASS. Production
+  `sidecars/wda/RiviuAgent.ipa` không bị thay thế.
+- Live campaign `49496e40-9642-42fa-a44b-949edb5ecc24` và
+  `723cc89d-36f4-4b72-8b33-d686ef296d3e` đã xác nhận stage/readback, nhưng
+  import e561 timeout ở popup Photos nên state là `uncertain`; không gọi đây là
+  `imported`. Cần trust lại IPA build 13 trên thiết bị trước khi chạy lại
+  transfer/post/cleanup và ghi frame evidence.
+- Test xác nhận: `cargo test -p riviu-core --lib publish` 9/9,
+  `cargo check -p riviu-managers-phone` PASS (chỉ dead-code warning), Python
+  `unittest discover sidecars/wda/riviu-agent/Tests` 125/125. Hai assertion
+  patch-count đã đổi sang đọc số patch từ `baseline-lock.json` để không vỡ khi
+  thêm patch native.
+
+#### 14.2 Live verifier checkpoint 06/08/2026
+
+- Candidate 0.5.7/build 13 đã chạy thật trên e561. Photos permission không tự
+  đóng trước deadline; manual native tap `(187,407)` đóng được popup, sau đó
+  phải bỏ qua alert `iPhone chưa được Kích hoạt`. Campaign
+  `521e1510-ba54-4bdf-9e57-73384cbe2468` giữ `uncertain/media_transfer_native_failed`.
+- Với quyền Photos đã được cấp, campaign
+  `94389eb4-68a5-416c-816c-e47e2e0ee3b0` đạt `imported` (8 ảnh), Post flow rời
+  composer và cleanup trả `state=cleaned` cho 8 asset. Frame sau Post lại hiện
+  popup `Trạng thái tài khoản / Tài khoản của bạn đã bị khóa.`; record đã được
+  sửa transactionally thành `uncertain/post_account_locked`, assignment có
+  `effectIntent=post_carousel`, frame `/tmp/e561-post-success.png`, event
+  `verification_failed` revision 7. Không gọi đây là post thành công.
+- `publish_commands.rs` nay chạy Vision OCR ở frame sau Post và frame chờ tiếp
+  theo, chặn cả chuỗi tiếng Việt/không dấu và English `account locked`. Desktop
+  crate test 47/47, core publish 9/9, Python candidate 125/125, fmt/check PASS.
+- Baseline lock có 13 patch; patch mới
+  `0013-media-permission-logical-tap-fallback.patch` SHA-256
+  `31567ca568c71550b130bb8054e647c83fe9453ea7a154f43c1561ea45bd1831` kéo dài
+  16 lần tap native và dùng logical `(187.5,407)` nếu UIKit báo bounds vật lý
+  2x. Source SHA-256 mới là
+  `4c7465251a31469c5b90edfb56defa988f7f80f69b1278c3027366722304d915`.
+- Candidate `0.5.8-media-text`/build `14`, IPA SHA-256
+  `e86e77abe14d7190090b19e8e88c2a9b14417caac5ec18c604ab4ebb9a2e7d51`, features
+  `stream/tap/swipe/clipboard/text/pushMedia`, Objective-C unit tests PASS. Build
+  dùng a99 vì e561 đã rớt khỏi danh sách Xcode; gate live vẫn `PENDING_MAC_DEVICE`.
+- Full app mới tại `/Applications/Riviumanagersphone Full.app`, executable SHA-256
+  `d4a033b259a43debd4dd1fb02ca2b778822509834afe1184c73102958f42ba1b`,
+  `codesign --verify --deep --strict` PASS. Production
+  `sidecars/wda/RiviuAgent.ipa`/manifest không bị thay thế. Candidate 14 cần một
+  vòng cài/trust e561 mới để xác nhận automatic Photos permission; không ghi
+  PASS trước vòng đó.
+
+#### 14.3 Gate B/C a99 checkpoint 06/08/2026
+
+- Candidate media-only `0.5.8-media`/build `15` được build trên a99 với patch
+  0013; feature set đúng contract gate là
+  `stream/tap/swipe/clipboard/pushMedia`, IPA SHA-256
+  `5f085ee785b77c7bd3050592212c38a5dcc438a77930dde34c0203b0ec8d3420`, manifest
+  SHA-256 `083263e4101b986d23d40790fd6816deca17d877fc0acfc2e542ff01926b25bf`,
+  source SHA-256 vẫn `4c7465251a31469c5b90edfb56defa988f7f80f69b1278c3027366722304d915`.
+- Probe fresh report `docs/re/riviu-agent/candidate-probes-a99-20260806-media-fresh2.json`
+  xác nhận `candidateFreshInstalled=true`, identity và cleanup đều pass, nhưng
+  cold launch bị iOS từ chối với `Security ... profile has not been explicitly
+  trusted by the user`; Gate B/C là `FAIL`. Đây là trust của profile sau
+  uninstall/fresh-install, không phải HTTP/auth/manifest failure. Settings trên
+  a99 đang mở popup `Nhà phát triển Không đáng tin cậy` để user xác nhận profile.
+- Sau reboot, `tidevice developer -r` đã mount Developer Support. Runner text cũ
+  chỉ launch được khi đã trusted; media candidate cũng báo `Test runner ready`
+  khi được upgrade từ bản trusted. Không gọi supplemental reuse là Gate PASS;
+  live Gate B/C chính thức vẫn chờ user trust candidate mới rồi chạy lại fresh
+  probe với ngưỡng cố định.
+- Các report supplemental/fresh fail đều được giữ lại và qua
+  `rtmmo-re verify-redaction`; production IPA/manifest và app Full không bị
+  thay đổi bởi gate probe.
+
+#### 14.4 Human-like nurture checkpoint 06/08/2026
+
+- Guard nhịp cũ đã được gỡ khỏi `NurtureSettings`, Tauri validation và popup.
+  UI không còn mục `Nhịp an toàn`; cấu hình người dùng chỉ giữ xác suất và
+  thời lượng xem. Không thêm lại các trường `risk_*`/`RiskGuard`.
+- `crates/core/src/human_behavior.rs::HumanSessionPolicy` là policy nội bộ,
+  luôn bật: cap rolling ngẫu nhiên theo giờ (tim/bình luận/follow), khoảng
+  cách 12..35 giây, tối đa 2 bài đã tương tác trong 5 bài gần nhất, micro-rest
+  7..13 video, block 20..45 phút, nghỉ Home 60..240 giây, Home ngẫu nhiên và
+  cold restart rất hiếm (tối đa một lần mỗi phiên). Attempt được ghi trước
+  gesture; counter thành công chỉ tăng khi frame sau xác nhận.
+- Engine lấy action rail mới trên từng frame, không dùng rail cũ. `FeedCardKind`
+  phân biệt video, `PhotoCarousel` (vuốt ngang 1..3 ảnh), `LivePreview` (vào
+  phòng theo xác suất, dwell rồi thoát hoặc vuốt qua) và transition. Watcher
+  tạm nhường `LiveRoom` khi engine đang sở hữu phòng để không tự đóng nhầm.
+- Production DeepSeek text-only đi qua `FrameTextSource` của desktop, OCR
+  caption rồi `prepare_caption_comment`; provider vision vẫn dùng 3-frame
+  grounded path. Default mới là `https://api.deepseek.com`/
+  `deepseek-v4-flash`. Windows adapter hiện báo thiếu Vision OCR thay vì giả
+  nhận diện.
+- Harness headless gọi preflight install/auth bằng context `Repair`, thả
+  context trước khi chạy nurture, và dùng token env trực tiếp để tránh Keychain
+  prompt. Trình tự live xác nhận: relay/auth -> session -> stream -> foreground.
+- Verification: `cargo test -q -p riviu-core --lib` 299 pass/1 ignored,
+  `cargo test -q -p riviu-core --test real_frames` 15 pass,
+  `cargo test -q -p riviu-managers-phone` 49 pass, frontend `npm run build`
+  PASS, `codesign --verify --deep --strict` PASS. Full executable hiện tại có
+  SHA-256 `e4da1fb730ad7fcb4cf82b750c85ed05f5b3bcf743f6ab4a427c4d81ec9e53e2`.
+- Installed app là `/Applications/Riviumanagersphone Full.app`; rollback copy
+  được giữ tại `/Applications/Riviumanagersphone Full.app.rollback-20260806-human-v2`
+  với hash baseline `335c35fcb79af920e0714b2f96d20ffeb250100ef361628f8ff798252d1ef68a`.
+  Không overwrite production IPA/manifest trong `sidecars/wda/`.
+- Live smoke pass trên a99 (1 phút): session create/prime pass, stream có frame,
+  6 video, popup đóng 1 lần, nhận diện LIVE preview và bài ảnh, 0 recovery nặng.
+  Một lượt sau gặp màn không phải FYP và kết thúc `0 video`; giữ cả hai log,
+  không chuyển lượt fail thành pass. Chi tiết nằm ở
+  `docs/verification/nurture-human-v2-20260806/`.
+- Review default 06/08/2026: `HumanSessionPolicy` giữ một ngưỡng nghỉ cố định
+  7..13 video rồi mới bốc ngưỡng tiếp theo; trước đây nó bốc lại ở từng video
+  nên cadence không ổn định. `frenzy_prob` giờ được nối vào các swipe feed
+  bình thường (retry sau swipe kẹt vẫn dùng tốc độ thường) và có ô chỉnh trong
+  popup. Default fresh install là like `35%`, comment `0%` (comment chỉ bật sau
+  khi có API key), follow `3%`, vuốt nhanh `6%`, xem `3..18s`; lịch vẫn tắt,
+  nếu bật dùng chu kỳ `240 phút`/block `150 phút`. Setting đã lưu không bị
+  migrate/ghi đè.
+- Validation mới chặn `num_videos` > 10000, `num_rounds` > 100, watch > 120s,
+  lịch ngoài `15..1440` phút hoặc block ngoài `15..360` phút; engine dùng
+  `saturating_mul` cho legacy fixture. Tests sau review: core `299 pass/1
+  ignored`, Tauri `49 pass`, frontend `73 pass`; Full app rebuild hash
+  `e4da1fb730ad7fcb4cf82b750c85ed05f5b3bcf743f6ab4a427c4d81ec9e53e2`, harness
+  hash `681ffe53517fb1244791778c177091ff8baf0d33389c9167bec309e29f6246df`,
+  codesign strict PASS. Live smoke cũ vẫn là bằng chứng hành vi thiết bị; chưa
+  gán nó thành pass mới cho thay đổi default.
+- Touch/speed review 06/08/2026: `crates/core/src/nurture/touch.rs` giữ lịch sử
+  tọa độ theo UDID và session, lượng tử hóa về lưới logical nguyên, không trả
+  lại điểm đã dùng và tránh điểm gần nhau trong 96 lần gần nhất. Planner được
+  dùng cho rail, LIVE, comment drawer/composer, emoji, thread reply và send;
+  watcher popup vẫn giữ điểm đóng cố định để không miss hộp thoại hệ thống.
+  Swipe feed dùng mixture nhanh hiếm `190..280ms`, bình thường `300..520ms`,
+  chậm `520..820ms`; cờ frenzy dùng `150..240ms`, retry swipe kẹt không frenzy.
+  Carousel dùng `280..420ms` nhanh hoặc `420..760ms` thường. Không gọi đây là
+  bất biến vô hạn: vùng hitbox hữu hạn; planner có fallback mở rộng và fail
+  closed khi toàn bộ logical screen đã cạn điểm.
+- Final closure 06/08/2026: legacy nurture settings được migrate một lần với
+  marker `nurture.settings.migration.v2`, DB backup và `rollback-db.sh`; candidate
+  Riviu Agent mở URL bằng `/url` khi capability report không có route riêng,
+  desktop inject OCR caption thật và text-only comment retry sau verifier. Live
+  target-photo run `live-comment-target-open-url-v6.jsonl` PASS: 3 video, 2
+  comment có frame xác nhận, 0 recovery. Không quảng bá comment khi evidence gate
+  fail; stock/RT-MMO vẫn giữ fail-closed contract.

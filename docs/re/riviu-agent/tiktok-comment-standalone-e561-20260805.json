@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "environment": "LIVE_MAC_DEVICE",
+  "gateStatus": "PASS",
+  "targetBundle": "com.ss.iphone.ugc.Ame",
+  "agentControlUrl": "http://127.0.0.1:18100",
+  "sessionCreatedFresh": true,
+  "commentText": "Mộc Trà Farm nhìn yên bình quá ạ",
+  "frames": {
+    "before": "docs/re/riviu-agent/tiktok-comment-standalone-e561-20260805/before.jpg",
+    "drawer": "docs/re/riviu-agent/tiktok-comment-standalone-e561-20260805/drawer.jpg",
+    "armed": "docs/re/riviu-agent/tiktok-comment-standalone-e561-20260805/armed.jpg",
+    "sent": "docs/re/riviu-agent/tiktok-comment-standalone-e561-20260805/sent.jpg"
+  },
+  "composerArmed": true,
+  "composerClearedAfterSend": true,
+  "armedSendButtonRedness": 0.243,
+  "sentSendButtonRedness": 0.0,
+  "operatorConfirmedCommentVisible": true
+}

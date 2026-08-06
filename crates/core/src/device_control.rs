@@ -503,6 +503,77 @@ impl DeviceControlPlane {
             .map_err(|error| driver_error(lease.udid(), "installApp", error))
     }
 
+    pub async fn stage_publish_media(
+        &self,
+        context: &DeviceExclusiveContext,
+        agent_bundle_id: &str,
+        campaign_id: &str,
+        source_root: &Path,
+    ) -> Result<serde_json::Value, DeviceControlError> {
+        let lease = self.validate_exclusive(context)?;
+        self.driver
+            .stage_publish_media(lease.udid(), agent_bundle_id, campaign_id, source_root)
+            .await
+            .map_err(|error| driver_error(lease.udid(), "stagePublishMedia", error))
+    }
+
+    pub fn supports_push_media(&self) -> bool {
+        self.driver.supports_push_media()
+    }
+
+    pub async fn prepare_publish_media(
+        &self,
+        context: &DeviceExclusiveContext,
+        campaign_id: &str,
+        manifest_sha256: &str,
+    ) -> Result<serde_json::Value, DeviceControlError> {
+        let lease = self.validate_exclusive(context)?;
+        self.driver
+            .prepare_publish_media(lease.udid(), campaign_id, manifest_sha256)
+            .await
+            .map_err(|error| driver_error(lease.udid(), "preparePublishMedia", error))
+    }
+
+    pub async fn import_publish_media(
+        &self,
+        context: &DeviceExclusiveContext,
+        campaign_id: &str,
+        manifest_sha256: &str,
+    ) -> Result<serde_json::Value, DeviceControlError> {
+        let lease = self.validate_exclusive(context)?;
+        self.driver
+            .import_publish_media(lease.udid(), campaign_id, manifest_sha256)
+            .await
+            .map_err(|error| driver_error(lease.udid(), "importPublishMedia", error))
+    }
+
+    pub async fn cleanup_publish_media(
+        &self,
+        context: &DeviceExclusiveContext,
+        import_id: &str,
+    ) -> Result<serde_json::Value, DeviceControlError> {
+        let lease = self.validate_exclusive(context)?;
+        self.driver
+            .cleanup_publish_media(lease.udid(), import_id)
+            .await
+            .map_err(|error| driver_error(lease.udid(), "cleanupPublishMedia", error))
+    }
+
+    /// Remove native publish assets while the foreground UI context still owns
+    /// the live Agent relay. Closing the stream first can make the sidecar
+    /// recycle the XCTest process before this sessionless route is sent.
+    pub async fn cleanup_publish_media_with_ui(
+        &self,
+        context: &UiWithStreamContext,
+        import_id: &str,
+    ) -> Result<serde_json::Value, DeviceControlError> {
+        let lease = self.validate_stream(context)?;
+        self.driver
+            .cleanup_publish_media(lease.udid(), import_id)
+            .await
+            .map_err(|error| driver_error(lease.udid(), "cleanupPublishMedia", error))
+    }
+
     pub async fn uninstall_app(
         &self,
         context: &DeviceExclusiveContext,
@@ -1395,6 +1466,12 @@ impl DeviceControlPlane {
 
     pub fn reserved_stream_capacity(&self) -> usize {
         self.streams.reserved_capacity()
+    }
+
+    /// Maximum number of background/foreground producers this control plane
+    /// may keep alive at once.
+    pub fn configured_stream_capacity(&self) -> usize {
+        self.streams.configured_limit()
     }
 
     pub fn cleanup_quarantine_count(&self) -> usize {
@@ -2844,7 +2921,7 @@ async fn clean_background(
     }
     let request = streams.begin_stop(ticket.token)?;
     let proof = driver
-        .stop_owned_stream(&ticket.udid)
+        .park_owned_stream(&ticket.udid)
         .await
         .map_err(|error| driver_error(&ticket.udid, "stopBackgroundStream", error))?;
     streams.complete_stop(request, proof)?;

@@ -22,6 +22,7 @@ vi.mock("./api", () => ({
   prepareDevice: vi.fn(async () => undefined),
   refreshDevices: vi.fn(async () => []),
   setStreamSettings: vi.fn(async (settings: unknown) => settings),
+  startupError: vi.fn(async () => null),
 }));
 
 vi.mock("./components/flow/FlowWorkspace", () => ({

@@ -1,0 +1,42 @@
+{
+  "artifactId": "riviu-agent-ios-text",
+  "artifactVersion": "0.2.0-text",
+  "attestationBundle": "PlugIns/WebDriverAgentRunner.xctest",
+  "bundleBuild": "2",
+  "bundleId": "com.riviu.managersphone.agent.xctrunner",
+  "bundleVersion": "1.0",
+  "controlPort": 8916,
+  "executable": "WebDriverAgentRunner-Runner",
+  "features": [
+    "stream",
+    "tap",
+    "swipe",
+    "clipboard",
+    "text"
+  ],
+  "gateStatus": "PASS",
+  "ipa": "RiviuAgent-text.ipa",
+  "logicalHeight": 667,
+  "logicalWidth": 375,
+  "mjpegPort": 9094,
+  "objectiveCUnitTests": "PASS",
+  "payloadApp": "WebDriverAgentRunner-Runner.app",
+  "protocolVersion": 2,
+  "schemaVersion": 1,
+  "sha256": "45b98dda18ad403b2fdeb547e239a3594506944e1235d8e99345cd7450158389",
+  "signatureIdentifier": "com.riviu.managersphone.agent.xctrunner",
+  "signerIdentity": "Apple Development: thaotrinh04091999@gmail.com (T3UQHS3K9F)",
+  "signerTeamId": "FTWFKDVD7D",
+  "sourceSha256": "c54c85ab5abafd6465dfa7f40933bf525d8016c928680d9f4153d9972115cf93",
+  "xcconfigSha256": "2bed5a711927df27a86b2e2f7237bad99406b3cbbf5fccb09f8ce03fc58f53ae",
+  "xcode": {
+    "build": "17F113",
+    "version": "26.6"
+  },
+  "textGate": {
+    "environment": "LIVE_MAC_DEVICE",
+    "evidenceSha256": "789815ef49137fc8edf6ed794623714005a802c54bd1efd42ae2c1d2183f9d9a",
+    "commentText": "Quán cà phê này dễ thương quá ạ",
+    "commentFrameConfirmed": true
+  }
+}

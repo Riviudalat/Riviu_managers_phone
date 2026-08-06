@@ -1,0 +1,48 @@
+Riviu Managers Phone Full build verification
+Run date: 2026-08-04
+
+Modified artifact
+  sidecars/wda/RiviuAgent-text.ipa
+  SHA-256: 45b98dda18ad403b2fdeb547e239a3594506944e1235d8e99345cd7450158389
+  sidecars/wda/text-manifest.json: artifactVersion=0.2.0-text, bundleBuild=2,
+  features=stream/tap/swipe/clipboard/text, gateStatus=PASS
+
+Real device evidence
+  docs/re/riviu-agent/tiktok-comment-build2-live.json
+  commentText: Quán cà phê này dễ thương quá ạ
+  sent frame: docs/re/riviu-agent/tiktok-comment-build2-live/sent.jpg
+  probe output: {"ok": true, "gateStatus": "PASS"}
+  The sent frame was inspected and shows the text in TikTok's comment drawer.
+
+Desktop artifact
+  /Applications/Riviumanagersphone Full.app
+  target/release/bundle/dmg/Riviumanagersphone Full_0.2.0_aarch64.dmg
+  codesign --verify --deep --strict: exit 0
+  embedded text IPA checksum equals text-manifest.json sha256: exit 0
+
+Protected runtime (device 1)
+  GET /status with X-Riviu-Token: HTTP 200
+  /value/riviuAgent/features: [stream, tap, swipe, clipboard, text]
+  GET /wda/locked without token: HTTP 401
+  GET /wda/locked with token: HTTP 200
+  MJPEG stream one-frame decode: JPEG ffd8, frameBytes=58579, exit 0
+
+Tests
+  cargo fmt --all -- --check: exit 0
+  cargo test -p riviu-ios-driver --lib: 130 passed, exit 0
+  cargo test -p riviu-managers-phone --lib: 40 passed, exit 0
+  cargo test -p riviu-signing --lib: 6 passed, exit 0
+  Python sidecar/build/probe suite: 79 tests, OK, exit 0
+  npm run build: exit 0
+  git diff --check: exit 0
+
+Preserved production oracle
+  target/riviu-agent/rollback/production-oracle/RiviuAgent.ipa
+    SHA-256: 8a24847099495ff70b998522692c43f00dd16b90f698bda6953a73f5d33002ea
+  target/riviu-agent/rollback/production-oracle/agent-manifest.json
+    SHA-256: e98a549af4c061556effd36424e7732219e1a6d262bcf1f259279975024b6e1a
+
+Device 2
+  Text runner build 2 is installed and signer identity matches.
+  Launch remains pending the Apple Development trust approval on that phone;
+  it is not counted as a live text PASS until protected health and MJPEG run.

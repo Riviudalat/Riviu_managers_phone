@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -9,17 +10,50 @@ use parking_lot::{Mutex, RwLock};
 use riviu_core::db::Database;
 use riviu_core::{
     AppEvent, BackgroundStreamLease, DeviceControlPlane, DeviceRegistry, DeviceWorkCoordinator,
-    EventBus, FlowArtifactStore, FlowId, FlowRuntime, FlowRuntimeDeps, JobQueue, NurtureEngine,
-    StreamBudgetManager, StreamSettings, STREAM_FPS,
+    EventBus, FlowArtifactStore, FlowId, FlowRuntime, FlowRuntimeDeps, Frame, JobQueue,
+    NurtureEngine, StreamBudgetManager, StreamSettings, STREAM_FPS,
 };
 use riviu_ios_driver::{create_driver, DriverMode, DriverTarget, StreamHub};
 use riviu_signing::{CredentialStore, SigningService};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Notify;
 
-use crate::agent_runtime::{resolve_desktop_agent_runtime, ResolvedAgentRuntime};
+use crate::agent_runtime::{resolve_desktop_agent_runtime_with_candidate, ResolvedAgentRuntime};
 use crate::command_error::CommandError;
 use crate::nurture_commands::NurtureRuntime;
+
+const DEFAULT_DESKTOP_STREAM_CAPACITY: usize = 2;
+const MAX_DESKTOP_STREAM_CAPACITY: usize = 100;
+/// UI preview is deliberately a separate budget from the raw stream consumed
+/// by popup watchers and action confirmation. At two phones this preserves
+/// 24 FPS per tile; at 20-100 phones it degrades evenly instead of flooding
+/// the WebView with thousands of base64 events per second.
+const PREVIEW_TOTAL_FPS: u32 = 240;
+const PREVIEW_MAX_FPS_PER_DEVICE: u32 = STREAM_FPS;
+const PREVIEW_TICK: Duration = Duration::from_millis(4);
+const PREVIEW_IDLE_EVICTION: Duration = Duration::from_secs(10);
+
+fn preview_fps_for_device_count(count: usize) -> u32 {
+    (PREVIEW_TOTAL_FPS / count.max(1) as u32).clamp(1, PREVIEW_MAX_FPS_PER_DEVICE)
+}
+
+/// Keep the current two-phone behavior as the default while allowing a farm
+/// deployment to opt into one producer per connected phone. Invalid values
+/// fail closed to the default instead of creating an accidental USB storm.
+fn configured_desktop_stream_capacity() -> usize {
+    match std::env::var("RIVIU_STREAM_CAPACITY") {
+        Ok(raw) => match raw.trim().parse::<usize>() {
+            Ok(value) if (1..=MAX_DESKTOP_STREAM_CAPACITY).contains(&value) => value,
+            _ => {
+                log::warn!(
+                    "invalid RIVIU_STREAM_CAPACITY={raw:?}; using default {DEFAULT_DESKTOP_STREAM_CAPACITY}"
+                );
+                DEFAULT_DESKTOP_STREAM_CAPACITY
+            }
+        },
+        Err(_) => DEFAULT_DESKTOP_STREAM_CAPACITY,
+    }
+}
 
 pub struct AppState {
     pub registry: DeviceRegistry,
@@ -35,6 +69,7 @@ pub struct AppState {
     pub agent_token_configured: bool,
     pub active_agent_artifact_id: String,
     pub active_agent_artifact_version: String,
+    pub active_agent_bundle_id: String,
     pub stream_settings: Arc<RwLock<StreamSettings>>,
     pub artifacts_dir: PathBuf,
     pub legacy_wda_bundle: PathBuf,
@@ -142,7 +177,8 @@ impl Drop for CommandAdmission {
 
 struct ActiveBackgroundSample {
     lease: BackgroundStreamLease,
-    baseline_digest: Option<u64>,
+    baseline_sequence: Option<u64>,
+    last_frame_at: Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,7 +196,7 @@ struct BackgroundStreamSampler {
     control: Arc<DeviceControlPlane>,
     streams: StreamHub,
     registry: DeviceRegistry,
-    active: Option<ActiveBackgroundSample>,
+    active: Vec<ActiveBackgroundSample>,
     cursor: usize,
 }
 
@@ -170,33 +206,67 @@ impl BackgroundStreamSampler {
             control,
             streams,
             registry,
-            active: None,
+            active: Vec::new(),
             cursor: 0,
         }
     }
 
     async fn tick(&mut self) -> SamplerTick {
-        if let Some(sample) = self.active.take() {
+        let samples = std::mem::take(&mut self.active);
+        let mut retained = Vec::with_capacity(samples.len());
+        let mut first_event = None;
+        let mut terminal_change = false;
+        let multi_stream = self.control.configured_stream_capacity() > 1;
+
+        for mut sample in samples {
             let udid = sample.lease.udid().to_string();
             if !self.control.background_stream_is_current(&sample.lease) {
                 set_stream_parked(&self.registry, &udid);
-                return SamplerTick::Preempted(udid);
+                terminal_change = true;
+                if first_event.is_none() {
+                    first_event = Some(SamplerTick::Preempted(udid));
+                }
+                continue;
             }
 
-            let fresh = self
-                .streams
-                .latest(&udid)
-                .map(|frame| Some(frame_digest(&frame)) != sample.baseline_digest)
+            let latest_sequence = self.streams.latest_frame_sequence(&udid);
+            let fresh = latest_sequence
+                .map(|sequence| Some(sequence) != sample.baseline_sequence)
                 .unwrap_or(false);
             let turn_due = self
                 .control
                 .background_turn_due(&sample.lease)
                 .unwrap_or(true);
-            if fresh || turn_due {
+            // Keep the producer alive for its whole bounded turn. The old
+            // path stopped as soon as the first frame arrived, which left the
+            // tile with a static snapshot and made a working MJPEG stream look
+            // like "No stream" to the operator. A foreground job still
+            // preempts this lease through the ownership check above.
+            // With two desktop tile slots, a healthy producer stays live past
+            // the bookkeeping deadline. A producer that stops advancing still
+            // gets recycled at the next deadline.
+            if fresh {
+                sample.baseline_sequence = latest_sequence;
+                sample.last_frame_at = Instant::now();
+            }
+            let stream_watchdog_expired = sample.last_frame_at.elapsed() >= Duration::from_secs(5);
+            if turn_due && (!multi_stream || (!fresh && stream_watchdog_expired)) {
+                if !fresh {
+                    log::warn!(
+                        "background stream stale: udid={} baseline_sequence={:?} latest_sequence={:?} last_frame_age_ms={}",
+                        udid,
+                        sample.baseline_sequence,
+                        latest_sequence,
+                        sample.last_frame_at.elapsed().as_millis(),
+                    );
+                }
                 match self.control.stop_background_stream(&sample.lease).await {
                     Ok(_) if fresh => {
                         set_stream_parked(&self.registry, &udid);
-                        return SamplerTick::Parked(udid);
+                        terminal_change = true;
+                        if first_event.is_none() {
+                            first_event = Some(SamplerTick::Parked(udid));
+                        }
                     }
                     Ok(_) => {
                         set_stream_state(
@@ -208,7 +278,10 @@ impl BackgroundStreamSampler {
                                     .to_string(),
                             ),
                         );
-                        return SamplerTick::Stale(udid);
+                        terminal_change = true;
+                        if first_event.is_none() {
+                            first_event = Some(SamplerTick::Stale(udid));
+                        }
                     }
                     Err(error) => {
                         set_stream_state(
@@ -217,80 +290,116 @@ impl BackgroundStreamSampler {
                             riviu_core::TileStreamState::Error,
                             Some(error.to_string()),
                         );
-                        self.active = Some(sample);
-                        return SamplerTick::Failed(udid);
+                        retained.push(sample);
+                        if first_event.is_none() {
+                            first_event = Some(SamplerTick::Failed(udid));
+                        }
                     }
                 }
+            } else {
+                set_stream_state(
+                    &self.registry,
+                    &udid,
+                    riviu_core::TileStreamState::Live,
+                    None,
+                );
+                retained.push(sample);
+                if first_event.is_none() {
+                    first_event = Some(SamplerTick::Sampling(udid));
+                }
             }
-
-            self.active = Some(sample);
-            return SamplerTick::Sampling(udid);
         }
+        self.active = retained;
 
-        let devices = self.registry.list();
-        for offset in 0..devices.len() {
-            let index = (self.cursor + offset) % devices.len();
-            let device = &devices[index];
-            if !background_sample_candidate(device, &self.control.cached_agent_status(&device.udid))
-            {
-                continue;
-            }
-            let Ok(lease) = self.control.reserve_background_stream(&device.udid) else {
-                continue;
-            };
-            set_stream_state(
-                &self.registry,
-                &device.udid,
-                riviu_core::TileStreamState::Sampling,
-                None,
-            );
-            let baseline_digest = self
-                .streams
-                .latest(&device.udid)
-                .map(|frame| frame_digest(&frame));
-            match self.control.start_background_stream(&lease).await {
-                Ok(url) => {
-                    if let Some(mut current) = self.registry.get(&device.udid) {
-                        current.stream_url = Some(url);
-                        current.status = riviu_core::DeviceStatus::Ready;
-                        current.tile_stream_state = riviu_core::TileStreamState::Sampling;
-                        current.last_error = None;
-                        self.registry.upsert(current);
+        // A stop/preemption is left visible for one tick; the next tick starts
+        // replacements. This preserves a truthful handoff state and prevents
+        // a failed producer from being hidden by an immediate restart.
+        if !terminal_change && self.active.len() < self.control.configured_stream_capacity() {
+            let devices = self.registry.list();
+            while self.active.len() < self.control.configured_stream_capacity() {
+                let mut started = false;
+                for offset in 0..devices.len() {
+                    let index = (self.cursor + offset) % devices.len();
+                    let device = &devices[index];
+                    if !background_sample_candidate(
+                        device,
+                        &self.control.cached_agent_status(&device.udid),
+                    ) {
+                        continue;
                     }
-                    self.active = Some(ActiveBackgroundSample {
-                        lease,
-                        baseline_digest,
-                    });
-                    self.cursor = (index + 1) % devices.len().max(1);
-                    return SamplerTick::Started(device.udid.clone());
-                }
-                Err(error) => {
+                    let Ok(lease) = self.control.reserve_background_stream(&device.udid) else {
+                        continue;
+                    };
                     set_stream_state(
                         &self.registry,
                         &device.udid,
-                        riviu_core::TileStreamState::Error,
-                        Some(error.to_string()),
+                        riviu_core::TileStreamState::Sampling,
+                        None,
                     );
-                    self.cursor = (index + 1) % devices.len().max(1);
-                    return SamplerTick::Failed(device.udid.clone());
+                    let baseline_sequence = self.streams.latest_frame_sequence(&device.udid);
+                    match self.control.start_background_stream(&lease).await {
+                        Ok(url) => {
+                            if let Some(mut current) = self.registry.get(&device.udid) {
+                                current.stream_url = Some(url);
+                                current.status = riviu_core::DeviceStatus::Ready;
+                                // ensure_stream returns only after the unified agent has
+                                // produced its first frame. Keep the readiness banner
+                                // truthful even after a normal producer handoff.
+                                current.wda_ready = true;
+                                current.tile_stream_state = riviu_core::TileStreamState::Sampling;
+                                current.last_error = None;
+                                self.registry.upsert(current);
+                            }
+                            self.active.push(ActiveBackgroundSample {
+                                lease,
+                                baseline_sequence,
+                                last_frame_at: Instant::now(),
+                            });
+                            self.cursor = (index + 1) % devices.len().max(1);
+                            if first_event.is_none() {
+                                first_event = Some(SamplerTick::Started(device.udid.clone()));
+                            }
+                            started = true;
+                        }
+                        Err(error) => {
+                            set_stream_state(
+                                &self.registry,
+                                &device.udid,
+                                riviu_core::TileStreamState::Error,
+                                Some(error.to_string()),
+                            );
+                            self.cursor = (index + 1) % devices.len().max(1);
+                            if first_event.is_none() {
+                                first_event = Some(SamplerTick::Failed(device.udid.clone()));
+                            }
+                        }
+                    }
+                    break;
+                }
+                if !started {
+                    break;
                 }
             }
         }
-        SamplerTick::Idle
+        first_event.unwrap_or(SamplerTick::Idle)
     }
 
     async fn stop(&mut self) -> Result<(), riviu_core::DeviceControlError> {
-        let Some(sample) = self.active.take() else {
-            return Ok(());
-        };
-        if self.control.background_stream_is_current(&sample.lease) {
-            if let Err(error) = self.control.stop_background_stream(&sample.lease).await {
-                self.active = Some(sample);
-                return Err(error);
+        let samples = std::mem::take(&mut self.active);
+        let mut first_error = None;
+        for sample in samples {
+            if self.control.background_stream_is_current(&sample.lease) {
+                if let Err(error) = self.control.stop_background_stream(&sample.lease).await {
+                    self.active.push(sample);
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    continue;
+                }
             }
+            set_stream_parked(&self.registry, sample.lease.udid());
         }
-        set_stream_parked(&self.registry, sample.lease.udid());
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 }
 
@@ -315,29 +424,45 @@ impl AppState {
             driver_config,
             settings: resolved_agent_settings,
             token_configured: agent_token_configured,
-        } = resolve_desktop_agent_runtime(
+        } = resolve_desktop_agent_runtime_with_candidate(
             sidecar_root.clone(),
             data.clone(),
             &db,
             &credentials,
             legacy_token.as_deref(),
             mock_requested,
+            true,
         )?;
-        let (active_agent_artifact_id, active_agent_artifact_version) = match &driver_config.target
-        {
-            DriverTarget::Real(config) => (
-                config.artifact.manifest.artifact_id.clone(),
-                config.artifact.manifest.artifact_version.clone(),
-            ),
-            DriverTarget::Mock => ("riviu-agent-mock".to_string(), "1.0.0".to_string()),
-            DriverTarget::LegacyStock => ("legacy-stock-wda".to_string(), String::new()),
-        };
+        let (active_agent_artifact_id, active_agent_artifact_version, active_agent_bundle_id) =
+            match &driver_config.target {
+                DriverTarget::Real(config) => (
+                    config.artifact.manifest.artifact_id.clone(),
+                    config.artifact.manifest.artifact_version.clone(),
+                    config.artifact.manifest.bundle_id.clone(),
+                ),
+                DriverTarget::Mock => (
+                    "riviu-agent-mock".to_string(),
+                    "1.0.0".to_string(),
+                    "com.riviu.managersphone.agent.xctrunner".to_string(),
+                ),
+                DriverTarget::LegacyStock => (
+                    "legacy-stock-wda".to_string(),
+                    String::new(),
+                    "com.riviu.managersphone.agent.xctrunner".to_string(),
+                ),
+            };
         let bundle = create_driver(driver_config).await?;
         bundle.driver.set_agent_settings(resolved_agent_settings);
         let control = Arc::new(DeviceControlPlane::new_with_capability_registry(
             bundle.driver.clone(),
             Arc::new(DeviceWorkCoordinator::new()),
-            Arc::new(StreamBudgetManager::default()),
+            // Keep both connected phone tiles live. Core flow fixtures retain
+            // the conservative default; the desktop has two USB devices in
+            // its live fleet and the driver supports two producers.
+            Arc::new(
+                StreamBudgetManager::new(configured_desktop_stream_capacity())
+                    .expect("desktop stream capacity"),
+            ),
             bundle.interaction_capabilities.clone(),
         ));
         let signing = SigningService::with_credentials(sidecar_root.join("signer"), credentials);
@@ -361,7 +486,8 @@ impl AppState {
             control.clone(),
             Arc::new(bundle.streams.clone()),
             artifacts_dir.clone(),
-        );
+        )
+        .with_frame_text_source(Arc::new(crate::interaction_ocr::DesktopFrameTextSource));
 
         // Recovery must see an authoritative initial fleet snapshot. Flow target
         // selection and startup reconciliation both fail closed on absent devices.
@@ -406,6 +532,7 @@ impl AppState {
             agent_token_configured,
             active_agent_artifact_id,
             active_agent_artifact_version,
+            active_agent_bundle_id,
             stream_settings: Arc::new(RwLock::new(StreamSettings::default())),
             artifacts_dir,
             legacy_wda_bundle: sidecar_root.join("wda").join("Riviumanagersphone.ipa"),
@@ -494,35 +621,91 @@ impl AppState {
             }
         });
 
-        // Forward stream frames @ 24 FPS pacing to UI
+        // Forward a bounded latest-frame preview to the UI. The raw StreamHub
+        // feed stays lossless enough for automation; this path only keeps one
+        // Arc per device and emits the newest frame on a fair round-robin
+        // schedule. That prevents base64 encoding and WebView events from
+        // growing as O(device_count * source_fps).
         let streams = self.streams.clone();
         let app_frames = app.clone();
         tauri::async_runtime::spawn(async move {
             let mut rx = streams.subscribe();
-            let min_gap = Duration::from_millis(1000 / STREAM_FPS as u64);
-            let mut last_emit = std::collections::HashMap::<String, std::time::Instant>::new();
+            let mut ticker = tokio::time::interval(PREVIEW_TICK);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut latest = HashMap::<String, Frame>::new();
+            let mut last_received = HashMap::<String, Instant>::new();
+            let mut next_due = HashMap::<String, Instant>::new();
+            let mut order = Vec::<String>::new();
+            let mut cursor = 0usize;
+            let mut last_eviction = Instant::now();
             loop {
-                match rx.recv().await {
-                    Ok((udid, jpeg)) => {
-                        let now = std::time::Instant::now();
-                        let allow = last_emit
-                            .get(&udid)
-                            .map(|t| now.duration_since(*t) >= min_gap)
-                            .unwrap_or(true);
-                        if !allow {
+                tokio::select! {
+                    biased;
+                    _ = ticker.tick() => {
+                        let now = Instant::now();
+                        // A stopped/parked producer should not consume a slot
+                        // forever after its last frame. The frontend keeps its
+                        // cached last image, so eviction only affects the
+                        // scheduler's active-rate calculation.
+                        if now.duration_since(last_eviction) >= Duration::from_secs(1) {
+                            last_eviction = now;
+                            order.retain(|udid| {
+                                last_received.get(udid).is_some_and(|seen| {
+                                    now.duration_since(*seen) <= PREVIEW_IDLE_EVICTION
+                                })
+                            });
+                            latest.retain(|udid, _| order.iter().any(|id| id == udid));
+                            next_due.retain(|udid, _| order.iter().any(|id| id == udid));
+                            if !order.is_empty() {
+                                cursor %= order.len();
+                            } else {
+                                cursor = 0;
+                            }
+                        }
+
+                        let count = order.len();
+                        if count == 0 {
                             continue;
                         }
-                        last_emit.insert(udid.clone(), now);
-                        let payload = serde_json::json!({
-                            "type": "streamFrame",
-                            "udid": udid,
-                            "jpegBase64": B64.encode(jpeg.as_slice()),
-                            "fps": STREAM_FPS,
-                        });
-                        let _ = app_frames.emit("riviu://event", payload);
+                        let per_device_fps = preview_fps_for_device_count(count);
+                        let gap = Duration::from_nanos(1_000_000_000u64 / per_device_fps as u64);
+                        // Emit at most one frame per scheduler tick. The
+                        // round-robin cursor prevents the first device from
+                        // monopolising the global preview budget.
+                        for _ in 0..count {
+                            let index = cursor % count;
+                            cursor = (cursor + 1) % count;
+                            let udid = &order[index];
+                            if next_due.get(udid).is_some_and(|due| *due > now) {
+                                continue;
+                            }
+                            let Some(frame) = latest.get(udid).cloned() else {
+                                continue;
+                            };
+                            next_due.insert(udid.clone(), now + gap);
+                            let payload = serde_json::json!({
+                                "type": "streamFrame",
+                                "udid": udid,
+                                "jpegBase64": B64.encode(frame.as_slice()),
+                                "fps": per_device_fps,
+                            });
+                            let _ = app_frames.emit("riviu://event", payload);
+                            break;
+                        }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(_) => break,
+                    message = rx.recv() => match message {
+                        Ok((udid, frame)) => {
+                            let now = Instant::now();
+                            if !latest.contains_key(&udid) {
+                                order.push(udid.clone());
+                                next_due.insert(udid.clone(), now);
+                            }
+                            latest.insert(udid.clone(), frame);
+                            last_received.insert(udid, now);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break,
+                    }
                 }
             }
         });
@@ -602,6 +785,103 @@ impl AppState {
                         (now + chrono::Duration::minutes(s.every_minutes as i64)).to_rfc3339(),
                     );
                     let _ = db.upsert_schedule(&s);
+                }
+            }
+        });
+
+        // One-time publish schedules are intentionally conservative: opening
+        // the desktop after the deadline marks the campaign missed instead
+        // of surprise-posting. A campaign that is due while this process is
+        // open runs the same transfer -> native composer -> frame verification
+        // transaction as the manual Post button.
+        let publish_db = self.db.clone();
+        let publish_control = self.control.clone();
+        let publish_frames = Arc::new(self.streams.clone());
+        let publish_agent_bundle = self.active_agent_bundle_id.clone();
+        let publish_admission = self.command_admission.clone();
+        let publish_background_stop = self.background_stop.clone();
+        let publish_started_at = chrono::Local::now().naive_local();
+        tauri::async_runtime::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(15));
+            loop {
+                interval.tick().await;
+                if publish_background_stop.load(Ordering::Acquire) {
+                    break;
+                }
+                let Ok(campaigns) = publish_db.list_publish_campaigns(200) else {
+                    continue;
+                };
+                let now = chrono::Local::now().naive_local();
+                for campaign in campaigns {
+                    if campaign.state != riviu_core::PublishCampaignState::Scheduled {
+                        continue;
+                    }
+                    let Some(raw_run_at) = campaign.run_at.as_deref() else {
+                        let _ = publish_db.update_publish_campaign_state(
+                            &campaign.id,
+                            riviu_core::PublishCampaignState::FailedBeforeDispatch,
+                            Some("missing_run_at"),
+                        );
+                        continue;
+                    };
+                    let Ok(run_at) =
+                        chrono::NaiveDateTime::parse_from_str(raw_run_at, "%Y-%m-%dT%H:%M")
+                            .or_else(|_| {
+                                chrono::NaiveDateTime::parse_from_str(
+                                    raw_run_at,
+                                    "%Y-%m-%dT%H:%M:%S",
+                                )
+                            })
+                    else {
+                        let _ = publish_db.update_publish_campaign_state(
+                            &campaign.id,
+                            riviu_core::PublishCampaignState::FailedBeforeDispatch,
+                            Some("invalid_run_at"),
+                        );
+                        continue;
+                    };
+                    if run_at < publish_started_at {
+                        let _ = publish_db.update_publish_campaign_state(
+                            &campaign.id,
+                            riviu_core::PublishCampaignState::Missed,
+                            Some("app_opened_after_deadline"),
+                        );
+                        let _ = publish_db.log_op("publish.missed", &campaign.id);
+                        continue;
+                    }
+                    if run_at > now {
+                        continue;
+                    }
+                    let Ok(_admission) = publish_admission.ensure_accepting_work() else {
+                        break;
+                    };
+                    if let Err(error) = crate::publish_commands::transfer_publish_campaign_inner(
+                        publish_control.clone(),
+                        publish_db.clone(),
+                        publish_agent_bundle.clone(),
+                        campaign.id.clone(),
+                    )
+                    .await
+                    {
+                        let _ = publish_db.log_op(
+                            "publish.schedule.error",
+                            &format!("{}: {error}", campaign.id),
+                        );
+                        continue;
+                    }
+                    if let Err(error) = crate::publish_commands::post_publish_campaign_inner(
+                        publish_control.clone(),
+                        publish_db.clone(),
+                        publish_frames.clone(),
+                        campaign.id.clone(),
+                    )
+                    .await
+                    {
+                        let _ = publish_db.log_op(
+                            "publish.schedule.post_error",
+                            &format!("{}: {error}", campaign.id),
+                        );
+                    }
                 }
             }
         });
@@ -721,12 +1001,12 @@ fn background_sample_candidate(
             | riviu_core::DeviceStatus::Pairing
             | riviu_core::DeviceStatus::Preparing
             | riviu_core::DeviceStatus::Busy
-    ) && matches!(
+    ) && (matches!(
         status.state,
         riviu_core::AgentState::Unknown
             | riviu_core::AgentState::Ready
             | riviu_core::AgentState::Error
-    )
+    ) || (status.state == riviu_core::AgentState::Starting && device.wda_ready))
 }
 
 fn set_stream_parked(registry: &DeviceRegistry, udid: &str) {
@@ -741,6 +1021,9 @@ fn set_stream_state(
 ) {
     if let Some(mut device) = registry.get(udid) {
         device.tile_stream_state = state;
+        if state == riviu_core::TileStreamState::Live {
+            device.wda_ready = true;
+        }
         if !matches!(
             state,
             riviu_core::TileStreamState::Live | riviu_core::TileStreamState::Sampling
@@ -761,15 +1044,6 @@ fn set_stream_state(
         device.last_error = error;
         registry.upsert(device);
     }
-}
-
-fn frame_digest(frame: &[u8]) -> u64 {
-    let mut digest = 0xcbf2_9ce4_8422_2325_u64 ^ frame.len() as u64;
-    for byte in frame.iter().step_by((frame.len() / 512).max(1)) {
-        digest ^= *byte as u64;
-        digest = digest.wrapping_mul(0x100_0000_01b3);
-    }
-    digest
 }
 
 fn resolve_sidecar_root(resource_dir: Option<&Path>) -> PathBuf {
@@ -810,6 +1084,14 @@ fn resolve_sidecar_root_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_budget_is_smooth_for_small_fleet_and_bounded_for_large_fleet() {
+        assert_eq!(preview_fps_for_device_count(0), 24);
+        assert_eq!(preview_fps_for_device_count(2), 24);
+        assert_eq!(preview_fps_for_device_count(20), 12);
+        assert_eq!(preview_fps_for_device_count(100), 2);
+    }
 
     #[test]
     fn mock_data_override_is_absolute_and_never_available_to_real_devices() {
@@ -925,12 +1207,23 @@ mod tests {
         DeviceRegistry,
         BackgroundStreamSampler,
     ) {
+        sampler_fixture_with_limit(1).await
+    }
+
+    async fn sampler_fixture_with_limit(
+        limit: usize,
+    ) -> (
+        riviu_ios_driver::MockIosDriver,
+        Arc<DeviceControlPlane>,
+        DeviceRegistry,
+        BackgroundStreamSampler,
+    ) {
         let driver = riviu_ios_driver::MockIosDriver::new();
         let streams = driver.stream_hub();
         let control = Arc::new(DeviceControlPlane::new(
             Arc::new(driver.clone()),
             Arc::new(DeviceWorkCoordinator::new()),
-            Arc::new(StreamBudgetManager::default()),
+            Arc::new(StreamBudgetManager::new(limit).expect("valid stream capacity")),
         ));
         let registry = DeviceRegistry::new(EventBus::new(32));
         registry.upsert_many(control.list_devices().await.expect("list mock devices"));
@@ -939,7 +1232,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn background_stream_sampler_rotates_one_producer_after_a_fresh_frame() {
+    async fn background_stream_sampler_keeps_a_live_producer_for_its_turn() {
         let (driver, control, registry, mut sampler) = sampler_fixture().await;
         assert_eq!(driver.stream_restart_calls(), 0);
 
@@ -959,17 +1252,69 @@ mod tests {
 
         assert_eq!(
             sampler.tick().await,
-            SamplerTick::Parked("MOCK-IPHONE-01".to_string())
-        );
-        assert_eq!(control.reserved_stream_capacity(), 0);
-        assert_eq!(
-            sampler.tick().await,
-            SamplerTick::Started("MOCK-IPHONE-02".to_string())
+            SamplerTick::Sampling("MOCK-IPHONE-01".to_string())
         );
         assert_eq!(control.reserved_stream_capacity(), 1);
-        assert_eq!(driver.stream_restart_calls(), 2);
+        assert_eq!(
+            registry
+                .get("MOCK-IPHONE-01")
+                .expect("first tile remains live")
+                .tile_stream_state,
+            riviu_core::TileStreamState::Live
+        );
 
         sampler.stop().await.expect("stop sampler producer");
+        assert_eq!(control.reserved_stream_capacity(), 0);
+        control.shutdown_cleanup().await.expect("shutdown control");
+    }
+
+    #[tokio::test]
+    async fn background_stream_sampler_keeps_both_desktop_tiles_live() {
+        let (driver, control, registry, mut sampler) = sampler_fixture_with_limit(2).await;
+
+        assert_eq!(
+            sampler.tick().await,
+            SamplerTick::Started("MOCK-IPHONE-01".to_string())
+        );
+        assert_eq!(control.reserved_stream_capacity(), 2);
+        assert_eq!(driver.stream_restart_calls(), 2);
+
+        assert!(matches!(sampler.tick().await, SamplerTick::Sampling(_)));
+        for udid in ["MOCK-IPHONE-01", "MOCK-IPHONE-02"] {
+            assert_eq!(
+                registry.get(udid).expect("desktop tile").tile_stream_state,
+                riviu_core::TileStreamState::Live
+            );
+        }
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        assert!(matches!(sampler.tick().await, SamplerTick::Sampling(_)));
+        assert_eq!(control.reserved_stream_capacity(), 2);
+
+        sampler.stop().await.expect("stop desktop producers");
+        assert_eq!(control.reserved_stream_capacity(), 0);
+        control.shutdown_cleanup().await.expect("shutdown control");
+    }
+
+    #[tokio::test]
+    async fn background_stream_sampler_does_not_recycle_at_a_healthy_turn_boundary() {
+        let (driver, control, _registry, mut sampler) = sampler_fixture_with_limit(2).await;
+        driver.set_mock_stream_static("MOCK-IPHONE-01", true);
+        driver.set_mock_stream_static("MOCK-IPHONE-02", true);
+
+        assert!(matches!(sampler.tick().await, SamplerTick::Started(_)));
+        assert_eq!(driver.stream_restart_calls(), 2);
+
+        // Move beyond the five-second bookkeeping deadline, then model a
+        // frame observed just before the sampler tick. The producer is quiet
+        // at this exact instant, but it is not stalled and must remain live.
+        tokio::time::sleep(Duration::from_secs(5) + Duration::from_millis(25)).await;
+        for sample in &mut sampler.active {
+            sample.last_frame_at = Instant::now();
+        }
+        assert!(matches!(sampler.tick().await, SamplerTick::Sampling(_)));
+        assert_eq!(driver.stream_restart_calls(), 2);
+
+        sampler.stop().await.expect("stop desktop producers");
         control.shutdown_cleanup().await.expect("shutdown control");
     }
 
@@ -1045,16 +1390,12 @@ mod tests {
         let (driver, control, registry, mut sampler) = sampler_fixture().await;
         driver.set_mock_stream_static("MOCK-IPHONE-01", true);
         assert!(matches!(sampler.tick().await, SamplerTick::Started(_)));
-        let sample = sampler.active.as_mut().expect("active sampler turn");
-        sample.baseline_digest = sampler
-            .streams
-            .latest(sample.lease.udid())
-            .map(|frame| frame_digest(&frame));
-        let wait = sample
-            .lease
-            .turn_deadline()
-            .saturating_duration_since(Instant::now());
-        tokio::time::sleep(wait + Duration::from_millis(25)).await;
+        let sample = sampler.active.first_mut().expect("active sampler turn");
+        sample.baseline_sequence = sampler.streams.latest_frame_sequence(sample.lease.udid());
+        // The bounded turn starts when the producer is marked running, not
+        // when its reservation is created; include a full turn after the
+        // first frame so slow bootstrap cannot make this assertion early.
+        tokio::time::sleep(Duration::from_secs(5) + Duration::from_millis(25)).await;
 
         assert_eq!(
             sampler.tick().await,
@@ -1093,11 +1434,16 @@ mod tests {
         for state in [
             riviu_core::AgentState::Missing,
             riviu_core::AgentState::RepairRequired,
-            riviu_core::AgentState::Starting,
         ] {
             status.state = state;
             assert!(!background_sample_candidate(&device, &status));
         }
+
+        status.state = riviu_core::AgentState::Starting;
+        assert!(background_sample_candidate(&device, &status));
+        device.wda_ready = false;
+        assert!(!background_sample_candidate(&device, &status));
+        device.wda_ready = true;
 
         status.state = riviu_core::AgentState::Error;
         assert!(background_sample_candidate(&device, &status));
@@ -1154,6 +1500,40 @@ mod tests {
         assert_eq!(device.stream_url, None);
         assert_eq!(device.status, riviu_core::DeviceStatus::Ready);
         assert_eq!(device.last_error.as_deref(), Some("no fresh frame"));
+    }
+
+    #[test]
+    fn live_stream_marks_agent_ready_after_first_frame() {
+        let events = riviu_core::EventBus::new(8);
+        let registry = riviu_core::DeviceRegistry::new(events);
+        registry.upsert(riviu_core::DeviceInfo {
+            udid: "fixture-ready".to_string(),
+            name: "fixture".to_string(),
+            model: "fixture".to_string(),
+            ios_version: "fixture".to_string(),
+            connection: riviu_core::ConnectionKind::Mock,
+            status: riviu_core::DeviceStatus::Connected,
+            battery: None,
+            wda_ready: false,
+            wda_expires_at: None,
+            stream_url: None,
+            tile_stream_state: riviu_core::TileStreamState::Sampling,
+            last_error: None,
+        });
+
+        set_stream_state(
+            &registry,
+            "fixture-ready",
+            riviu_core::TileStreamState::Live,
+            None,
+        );
+
+        assert!(
+            registry
+                .get("fixture-ready")
+                .expect("live device")
+                .wda_ready
+        );
     }
 
     #[test]
@@ -1247,6 +1627,14 @@ mod tests {
                 "sidecars/wda/agent-manifest.json",
             ),
             (
+                "../../../sidecars/wda/candidate-manifest.json",
+                "sidecars/wda/candidate-manifest.json",
+            ),
+            (
+                "../../../sidecars/wda/text-manifest.json",
+                "sidecars/wda/text-manifest.json",
+            ),
+            (
                 "../../../sidecars/wda/interaction-capabilities.json",
                 "sidecars/wda/interaction-capabilities.json",
             ),
@@ -1255,8 +1643,20 @@ mod tests {
                 "sidecars/wda/interaction-capabilities.schema.json",
             ),
             (
+                "../../../sidecars/wda/interaction_vision_ocr.swift",
+                "sidecars/wda/interaction_vision_ocr.swift",
+            ),
+            (
                 "../../../sidecars/wda/RiviuAgent.ipa",
                 "sidecars/wda/RiviuAgent.ipa",
+            ),
+            (
+                "../../../sidecars/wda/RiviuAgent-candidate.ipa",
+                "sidecars/wda/RiviuAgent-candidate.ipa",
+            ),
+            (
+                "../../../sidecars/wda/RiviuAgent-text.ipa",
+                "sidecars/wda/RiviuAgent-text.ipa",
             ),
             (
                 "../../../sidecars/wda/Riviumanagersphone.ipa",
