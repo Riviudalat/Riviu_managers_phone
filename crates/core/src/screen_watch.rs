@@ -95,6 +95,9 @@ pub struct WatchStats {
     pub popups_detected: AtomicU32,
     pub popups_closed: AtomicU32,
     pub popups_unresolved: AtomicU32,
+    /// Popups whose tracking was dropped because the engine took the screen —
+    /// neither closed nor given up on after tapping.
+    pub popups_abandoned: AtomicU32,
     /// Total milliseconds from first sighting to a confirmed close.
     pub close_latency_ms_total: AtomicU32,
 }
@@ -108,6 +111,7 @@ impl WatchStats {
             popups_detected: self.popups_detected.load(Ordering::Relaxed),
             popups_closed: closed,
             popups_unresolved: self.popups_unresolved.load(Ordering::Relaxed),
+            popups_abandoned: self.popups_abandoned.load(Ordering::Relaxed),
             mean_close_ms: self
                 .close_latency_ms_total
                 .load(Ordering::Relaxed)
@@ -124,6 +128,7 @@ pub struct WatchSummary {
     pub popups_detected: u32,
     pub popups_closed: u32,
     pub popups_unresolved: u32,
+    pub popups_abandoned: u32,
     pub mean_close_ms: u32,
 }
 
@@ -359,8 +364,21 @@ impl ScreenWatcher {
                     }
                     ScreenKind::LiveRoom => {
                         if self.live_owned.load(Ordering::Relaxed) {
+                            // The engine entered this room on purpose, so the ✕
+                            // is not the watcher's to press. Any popup being
+                            // tracked stops being trackable here — but dropping
+                            // it silently made the session summary claim fewer
+                            // popups than were actually seen. It is neither
+                            // closed nor given up on; it is abandoned, and it
+                            // says so.
                             pending = None;
-                            awaiting = None;
+                            if let Some(a) = awaiting.take() {
+                                self.stats.popups_abandoned.fetch_add(1, Ordering::Relaxed);
+                                (self.log)(&format!(
+                                    "Bỏ theo dõi popup {} — engine đang chủ động ở phòng LIVE",
+                                    a.label
+                                ));
+                            }
                         } else {
                             self.on_popup(
                                 Sighting::live(),

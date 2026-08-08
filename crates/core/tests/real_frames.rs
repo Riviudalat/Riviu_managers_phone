@@ -506,6 +506,71 @@ fn a_real_live_room_is_recognised_and_the_feed_is_not() {
     }
 }
 
+/// How much room the LIVE threshold actually has, now that `live_pill` is
+/// measured on feed frames too instead of being left at 0.0 by the compose-bar
+/// short circuit.
+///
+/// Measured: the room reads 134.1; the reddest feed frame in the fixture set
+/// (`feed-live-card.jpg`, which carries a LIVE *preview* and so is the closest
+/// an ordinary card gets) reads 17.2. The threshold sits at 90/80 between them.
+///
+/// This bounds the *false positive* direction only. The false negative — a room
+/// whose host the account already follows, where the pill is simply not on
+/// screen — cannot be bounded without a capture of that screen, and no fixture
+/// here is one. `OFF_FEED_LIMIT` is what stops that case costing a session.
+#[test]
+fn the_live_threshold_has_measurable_headroom_over_every_feed_frame() {
+    let room = screen::classify(&load("live-room-1.jpg"), Some(LOGICAL_W))
+        .evidence
+        .live_pill;
+    assert!(
+        room > 120.0,
+        "the LIVE room reads {room:.1}, barely over the threshold"
+    );
+
+    for (name, img) in feed_frames().into_iter().chain(same_card_frames()) {
+        let pill = screen::classify(&img, Some(LOGICAL_W)).evidence.live_pill;
+        assert!(
+            pill < room / 3.0,
+            "{name} reads {pill:.1} against the room's {room:.1} — the margin \
+             that keeps a feed card off the LIVE path has narrowed"
+        );
+    }
+}
+
+/// The ✕ that leaves a LIVE room sits at `LIVE_EXIT`, and that coordinate used
+/// to fall outside the close-button search region entirely — the one ✕ the
+/// engine most needs was the one it could never look for.
+///
+/// The region now contains it. Finding it is a separate problem: the room's ✕
+/// is a thin white stroke over translucent grey, and the sheet template scores
+/// 0.624 against it, well under `CLOSE_X_THRESHOLD`. So this pins the reachable
+/// part, and pins that no fixture produces a false match either — widening a
+/// search region is only safe if nothing new matches inside it.
+#[test]
+fn the_live_exit_is_inside_the_close_button_search_region() {
+    let (_, top, _, bottom) = screen::close_x_region();
+    assert!(
+        screen::LIVE_EXIT.1 > top && screen::LIVE_EXIT.1 < bottom,
+        "LIVE_EXIT y={} is outside the search band {top}..{bottom}",
+        screen::LIVE_EXIT.1
+    );
+
+    for (name, img) in feed_frames()
+        .into_iter()
+        .chain(same_card_frames())
+        .chain([("live-room-1.jpg", load("live-room-1.jpg"))])
+    {
+        if let Some((x, y, score)) = screen::find_close_button(&img, Some(LOGICAL_W)) {
+            assert!(
+                score < screen::CLOSE_X_THRESHOLD,
+                "{name}: a close button matched at ({x:.3},{y:.3}) score={score:.3} — \
+                 the widened region introduced a tap target that was not there"
+            );
+        }
+    }
+}
+
 /// Measured at the correctly located heart, video content barely moves the
 /// redness: 9.6 / 4.1 / 29.3 across three frames of the same unliked card, all
 /// far below `LIKE_FILLED_REDNESS`. The threshold itself is sound — what was

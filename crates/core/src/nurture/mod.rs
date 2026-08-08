@@ -62,6 +62,22 @@ pub(super) const SWIPE_SETTLE: Duration = Duration::from_millis(2_400);
 /// Poll faster than frames arrive, so the few hundred milliseconds the rail is
 /// off screen cannot fall between two samples.
 pub(super) const SWIPE_POLL: Duration = Duration::from_millis(60);
+/// Consecutive turns that may end off the FYP before the session stops trying
+/// to swipe its way back.
+///
+/// A screen the loop cannot leave is the LIVE-room failure, and it is the most
+/// expensive thing that can go wrong here. Vertical swipes inside a LIVE room
+/// scroll the room's own content instead of exiting, so `on_feed` stays false
+/// and this branch used to repeat until the video budget ran out: every turn
+/// spent, `videos_done` zero, outcome `Failed`, and nothing in the log saying
+/// why. One missed room cost the whole session — and the detector misses a room
+/// whenever the account already follows the host, because the follow pill it
+/// keys on is then not on screen at all.
+///
+/// Four turns is enough for the watcher to clear an ordinary overlay and for
+/// one retry swipe; past that, relaunching is the only thing left that reliably
+/// leaves a LIVE room.
+const OFF_FEED_LIMIT: u32 = 4;
 const TEXT_NOT_ARMED_REFRESH_THRESHOLD: u8 = 2;
 /// Give the frame watcher time to close overlays that were already visible
 /// when TikTok came foreground before the first feed gesture is sent.
@@ -509,6 +525,7 @@ impl NurtureEngine {
                     &ui_context,
                     session.as_ref(),
                     &settings,
+                    screen_size.0,
                     &gestures,
                     &stop,
                 )
@@ -607,6 +624,7 @@ impl NurtureEngine {
         };
         // True when the loop ran out of videos rather than out of time.
         let mut hit_video_cap = true;
+        let mut off_feed_streak = 0u32;
         'feed: for _video in 0..total_videos {
             if stop.load(Ordering::Relaxed) {
                 outcome = Outcome::Stopped;
@@ -652,7 +670,44 @@ impl NurtureEngine {
             // different — a live run spent several videos tapping rail
             // positions that do not exist there and opening the LIVE chat
             // keyboard. A swipe leaves; blind taps do not.
-            if !self.on_feed(udid) {
+            if !self.on_feed(udid, screen_size.0) {
+                off_feed_streak += 1;
+                if off_feed_streak >= OFF_FEED_LIMIT {
+                    report(
+                        &mut status,
+                        format!("kẹt ngoài FYP {off_feed_streak} lượt — mở lại TikTok"),
+                    );
+                    let relaunched = self
+                        .bring_tiktok_foreground(
+                            udid,
+                            &ui_context,
+                            session.as_ref(),
+                            &settings,
+                            screen_size.0,
+                            &gestures,
+                            &stop,
+                        )
+                        .await
+                        .unwrap_or(false);
+                    if relaunched || self.on_feed(udid, screen_size.0) {
+                        off_feed_streak = 0;
+                        report(&mut status, "đã về FYP sau khi mở lại TikTok".into());
+                    } else {
+                        let message = format!(
+                            "không rời được màn hình ngoài FYP sau {off_feed_streak} lượt \
+                             (thường là phòng LIVE mà detector không nhận ra) — dừng phiên"
+                        );
+                        report(&mut status, message.clone());
+                        last_error = Some(message);
+                        hit_video_cap = false;
+                        outcome = if status.videos_done == 0 {
+                            Outcome::Failed
+                        } else {
+                            Outcome::Partial
+                        };
+                        break 'feed;
+                    }
+                }
                 let observation = self
                     .latest_image(udid)
                     .map(|img| screen::classify(&img, Some(screen_size.0)));
@@ -697,12 +752,15 @@ impl NurtureEngine {
                         )
                         .await;
                     sleep_interruptible(Duration::from_millis(1_200), &stop).await;
-                    if !self.on_feed(udid) {
+                    if !self.on_feed(udid, screen_size.0) {
                         continue;
                     }
                     report(&mut status, "đã về FYP".into());
                 }
             }
+            // Every path that gets here is on the feed: either it always was, or
+            // one of the branches above got back to it.
+            off_feed_streak = 0;
 
             // Re-read the rail after the watch and after any overlay drain.
             // The previous frame may belong to the card just left, so it is
@@ -1399,12 +1457,14 @@ impl NurtureEngine {
 
     /// Bring TikTok forward. Prefers WDA activate, which does not restart a
     /// running app; falls back to the Instruments launch path.
+    #[allow(clippy::too_many_arguments)]
     async fn bring_tiktok_foreground(
         &self,
         udid: &str,
         context: &UiWithStreamContext,
         session: &dyn UiSession,
         settings: &NurtureSettings,
+        logical_width: f64,
         gestures: &tokio::sync::Mutex<()>,
         stop: &AtomicBool,
     ) -> anyhow::Result<bool> {
@@ -1413,7 +1473,7 @@ impl NurtureEngine {
             let _guard = gestures.lock().await;
             if session.launch_app_foreground(bundle).await.is_ok() {
                 sleep_interruptible(Duration::from_millis(1_500), stop).await;
-                if self.on_feed(udid) {
+                if self.on_feed(udid, logical_width) {
                     return Ok(true);
                 }
             }
@@ -1426,9 +1486,13 @@ impl NurtureEngine {
         Ok(true)
     }
 
-    fn on_feed(&self, udid: &str) -> bool {
+    /// `screen_size.0` matters: without it `classify` cannot scale its
+    /// templates to the device, and this was the one call site passing `None`
+    /// while every other passed `Some(..)` — so the check that decides whether
+    /// the engine is allowed to act was the least informed one in the file.
+    fn on_feed(&self, udid: &str, logical_width: f64) -> bool {
         self.latest_image(udid)
-            .map(|img| screen::feed_ready(&img, None))
+            .map(|img| screen::feed_ready(&img, Some(logical_width)))
             .unwrap_or(false)
     }
 }

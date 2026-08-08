@@ -27,7 +27,20 @@ pub const CLOSE_X_THRESHOLD: f64 = 0.85;
 /// Search window for the close button, as screen fractions. TikTok puts it in
 /// the upper-right of whatever sheet is showing; restricting the search keeps
 /// the match cheap and avoids false hits in the video itself.
-const CLOSE_X_REGION: (f64, f64, f64, f64) = (0.68, 0.08, 1.0, 0.92);
+///
+/// The top edge used to be 0.08, which put it *below* [`LIVE_EXIT`] at 0.069 —
+/// and the match centre has to clear the crop by half a template besides. So
+/// the one ✕ the engine most needs to find was the one ✕ this search could
+/// never reach, and a LIVE room whose follow pill is absent (host already
+/// followed) had no second way out at all. 0.045 leaves room for the template
+/// and still starts below the status bar.
+const CLOSE_X_REGION: (f64, f64, f64, f64) = (0.68, 0.045, 1.0, 0.92);
+
+/// The close-button search band, so a test can assert [`LIVE_EXIT`] is inside
+/// it rather than the two constants drifting apart again unnoticed.
+pub fn close_x_region() -> (f64, f64, f64, f64) {
+    CLOSE_X_REGION
+}
 
 /// A TikTok promo card can float from the upper-left and keep the compose bar
 /// visible. Its close control is a dark circular button rather than the light
@@ -1135,6 +1148,14 @@ pub fn classify(img: &RgbImage, logical_width: Option<f64>) -> ScreenObservation
     // full-screen sheet can be up. Checking it after the strict system-alert
     // signature keeps an iOS alert from being mistaken for a reachable feed
     // when its dimmed backdrop leaves enough of the bar visible.
+    // Measured before the feed short-circuit, not after. The LIVE reading used
+    // to be taken only on frames that had already failed the compose-bar test,
+    // so `live_pill` was 0.0 on every feed frame — and `RIVIU_FRAME_DUMP`, the
+    // one tool for calibrating the threshold against real captures, could
+    // therefore never show how close an ordinary feed frame gets to it.
+    let (live, pill) = live_room_evidence(img);
+    ev.live_pill = pill;
+
     if bar {
         return done(ScreenKind::Feed, ev);
     }
@@ -1142,8 +1163,6 @@ pub fn classify(img: &RgbImage, logical_width: Option<f64>) -> ScreenObservation
     // A LIVE room before the ✕ search: its product cards carry a grey ✕ that
     // scores above threshold, and tapping that only closes the card while the
     // session stays stuck in the room.
-    let (live, pill) = live_room_evidence(img);
-    ev.live_pill = pill;
     if live {
         return done(ScreenKind::LiveRoom, ev);
     }
