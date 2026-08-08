@@ -16,6 +16,7 @@ vi.mock("./api", () => ({
   })),
   listenRiviuEvents: vi.fn(async () => () => undefined),
   listDevices: vi.fn(async () => []),
+  listGroups: vi.fn(async () => []),
   listJobs: vi.fn(async () => []),
   listSchedules: vi.fn(async () => []),
   listScripts: vi.fn(async () => [["fixture", "{}"]]),

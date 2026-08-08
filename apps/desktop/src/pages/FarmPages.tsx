@@ -85,6 +85,7 @@ export function GroupsPage({ devices, selected, onSelectUdids }: SelProps) {
         selected={selected}
         onSelectAll={() => onSelectUdids(devices.map((d) => d.udid))}
         onClear={() => onSelectUdids([])}
+        onSelectUdids={onSelectUdids}
       />
       <div className="panel-grid">
         <section>
@@ -316,6 +317,7 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
         selected={selected}
         onSelectAll={() => onSelectUdids(devices.map((d) => d.udid))}
         onClear={() => onSelectUdids([])}
+        onSelectUdids={onSelectUdids}
       />
       <div className="row" style={{ marginTop: 8 }}>
         <input
@@ -424,6 +426,7 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
         selected={selected}
         onSelectAll={() => onSelectUdids(devices.map((d) => d.udid))}
         onClear={() => onSelectUdids([])}
+        onSelectUdids={onSelectUdids}
       />
       <div className="row" style={{ marginTop: 8 }}>
         <input
@@ -549,6 +552,7 @@ export function SyncPage({
         selected={selected}
         onSelectAll={() => onSelectUdids(devices.map((d) => d.udid))}
         onClear={() => onSelectUdids([])}
+        onSelectUdids={onSelectUdids}
       />
       <p className="hint">
         Click máy để thêm/bớt selection. Máy đầu = Master. Bật Sync rồi điều khiển trong cửa sổ phóng
@@ -628,6 +632,7 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
         selected={selected}
         onSelectAll={() => onSelectUdids(devices.map((d) => d.udid))}
         onClear={() => onSelectUdids([])}
+        onSelectUdids={onSelectUdids}
       />
       <div className="row" style={{ marginTop: 8 }}>
         <input
@@ -1083,6 +1088,7 @@ export function ScheduleBlock({
         selected={selected}
         onSelectAll={() => onSelectUdids(devices.map((d) => d.udid))}
         onClear={() => onSelectUdids([])}
+        onSelectUdids={onSelectUdids}
       />
       <label>
         Tên
