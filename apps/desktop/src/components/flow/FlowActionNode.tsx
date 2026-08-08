@@ -4,6 +4,7 @@ import {
   CirclePlay,
   CircleStop,
   Crosshair,
+  GitBranch,
   House,
   Keyboard,
   MousePointerClick,
@@ -44,6 +45,7 @@ export const ACTION_PRESENTATION: Partial<
   home: { label: "Home", icon: House },
   assertVisible: { label: "Assert Visible", icon: ScanSearch },
   tapVision: { label: "Tap Vision", icon: Crosshair },
+  ifVision: { label: "If Vision", icon: GitBranch },
 };
 
 function objectNumber(value: JsonValue | undefined, key: string): number | null {
@@ -79,7 +81,8 @@ export function summarizeAction(kind: ActionKind, config: JsonObject): string {
       return text("label");
     case "assertVisible":
       return text("accessibilityId");
-    case "tapVision": {
+    case "tapVision":
+    case "ifVision": {
       const hasTemplate = text("templatePngBase64").length > 0;
       const threshold =
         typeof config.threshold === "number" ? config.threshold.toFixed(2) : "?";
@@ -111,8 +114,27 @@ export function FlowActionNode({ data, selected }: NodeProps<FlowCanvasNode>) {
         )}
       </div>
       <div className="flow-node-summary">{summarizeAction(data.kind, data.config)}</div>
-      {data.kind !== "end" && (
-        <Handle type="source" position={Position.Right} id="flow" />
+      {data.kind === "ifVision" ? (
+        <>
+          <span className="flow-node-port-label flow-node-port-matched">matched</span>
+          <Handle
+            type="source"
+            position={Position.Right}
+            id="matched"
+            style={{ top: "38%" }}
+          />
+          <span className="flow-node-port-label flow-node-port-unmatched">no match</span>
+          <Handle
+            type="source"
+            position={Position.Right}
+            id="notMatched"
+            style={{ top: "72%" }}
+          />
+        </>
+      ) : (
+        data.kind !== "end" && (
+          <Handle type="source" position={Position.Right} id="flow" />
+        )
       )}
     </div>
   );

@@ -693,6 +693,24 @@
   white-space: nowrap;
 }
 
+.flow-node-port-label {
+  position: absolute;
+  right: 12px;
+  transform: translateY(-50%);
+  color: var(--text-3);
+  font: 0.58rem var(--font-mono);
+  pointer-events: none;
+}
+
+.flow-node-port-matched {
+  top: 38%;
+  color: var(--accent, #4caf50);
+}
+
+.flow-node-port-unmatched {
+  top: 72%;
+}
+
 .flow-node-error {
   min-width: 18px;
   height: 18px;

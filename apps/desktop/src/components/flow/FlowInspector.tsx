@@ -742,7 +742,7 @@ export function FlowInspector({
     if (schema === null) return <p>This action has no editable schema.</p>;
     if (schema.type !== "object") throw new Error("UnsupportedFieldSchema");
 
-    if (node.kind === "tapVision") {
+    if (node.kind === "tapVision" || node.kind === "ifVision") {
       const template =
         typeof node.config.templatePngBase64 === "string" ? node.config.templatePngBase64 : "";
       return (

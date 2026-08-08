@@ -577,6 +577,7 @@ export type ActionKind =
   | "home"
   | "assertVisible"
   | "tapVision"
+  | "ifVision"
   | "rawHttp"
   | "rawWda"
   | "shell";
@@ -729,6 +730,12 @@ export type CompiledActionConfig =
   | { kind: "assertVisible"; accessibilityId: string }
   | {
       kind: "tapVision";
+      templatePngBase64: string;
+      threshold: number;
+      region: VisionRegion | null;
+    }
+  | {
+      kind: "ifVision";
       templatePngBase64: string;
       threshold: number;
       region: VisionRegion | null;

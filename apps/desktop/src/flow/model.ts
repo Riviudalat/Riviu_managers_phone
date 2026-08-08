@@ -40,6 +40,7 @@ export function defaultConfigForAction(kind: ActionKind): JsonObject {
     case "assertVisible":
       return { accessibilityId: "" };
     case "tapVision":
+    case "ifVision":
       return { templatePngBase64: "", threshold: 0.85 };
     case "rawHttp":
     case "rawWda":
