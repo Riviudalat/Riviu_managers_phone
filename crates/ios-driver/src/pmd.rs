@@ -79,9 +79,12 @@ impl SidecarProgram {
                 script.display()
             );
         }
+        let python = find_python().await?;
+        let mut prefix_args = python.launcher_args;
+        prefix_args.push(script.into_os_string());
         Ok(Self {
-            executable: find_python().await?,
-            prefix_args: vec![script.into_os_string()],
+            executable: python.executable,
+            prefix_args,
         })
     }
 
@@ -1852,19 +1855,85 @@ impl InstallOnlyRuntime for PmdInstallOnlyRuntime<'_> {
     }
 }
 
-async fn find_python() -> anyhow::Result<PathBuf> {
-    for candidate in ["python3", "python"] {
-        if let Ok(output) = background_command(candidate)
-            .arg("--version")
+/// A Python interpreter, plus any launcher arguments needed to select it
+/// (`py -3.12` on Windows).
+struct PythonChoice {
+    executable: PathBuf,
+    launcher_args: Vec<OsString>,
+}
+
+/// Interpreters to try, best first.
+///
+/// The README installs the sidecar's requirements with `py -3.12`, so that is
+/// what we look for first — via the launcher, which resolves the version
+/// regardless of PATH order. Bare `python3` comes last on Windows because it is
+/// usually the Microsoft Store alias, which reports a version happily and then
+/// fails to import anything.
+#[cfg(windows)]
+fn python_candidates() -> Vec<(&'static str, &'static [&'static str])> {
+    vec![
+        ("py", &["-3.12"][..]),
+        ("python3.12", &[][..]),
+        ("py", &["-3"][..]),
+        ("python3", &[][..]),
+        ("python", &[][..]),
+    ]
+}
+
+#[cfg(not(windows))]
+fn python_candidates() -> Vec<(&'static str, &'static [&'static str])> {
+    vec![
+        ("python3.12", &[][..]),
+        ("python3", &[][..]),
+        ("python", &[][..]),
+    ]
+}
+
+/// Ask an interpreter whether it can see the sidecar's dependency. `find_spec`
+/// only locates the package, so this stays far cheaper than importing it.
+const PROBE_SNIPPET: &str = "import importlib.util, sys; \
+     sys.exit(0 if importlib.util.find_spec('pymobiledevice3') else 1)";
+
+/// Pick a Python that can actually run the sidecar.
+///
+/// Selecting the first interpreter on PATH is not enough: a machine may carry
+/// several Pythons and the requirements live in exactly one of them. Choosing by
+/// capability keeps the runtime aligned with whatever the README's install step
+/// wrote to, instead of silently picking an interpreter with no dependencies and
+/// reporting an empty device list.
+async fn find_python() -> anyhow::Result<PythonChoice> {
+    let mut rejected: Vec<String> = Vec::new();
+    for (program, launcher_args) in python_candidates() {
+        let label = if launcher_args.is_empty() {
+            program.to_string()
+        } else {
+            format!("{program} {}", launcher_args.join(" "))
+        };
+        let probe = background_command(program)
+            .args(launcher_args)
+            .arg("-c")
+            .arg(PROBE_SNIPPET)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .output()
-            .await
-        {
-            if output.status.success() {
-                return Ok(PathBuf::from(candidate));
+            .await;
+        match probe {
+            Ok(output) if output.status.success() => {
+                tracing::info!(interpreter = %label, "selected Python for the sidecar");
+                return Ok(PythonChoice {
+                    executable: PathBuf::from(program),
+                    launcher_args: launcher_args.iter().map(OsString::from).collect(),
+                });
             }
+            Ok(_) => rejected.push(format!("{label} (pymobiledevice3 not installed)")),
+            Err(error) => rejected.push(format!("{label} ({error})")),
         }
     }
-    anyhow::bail!("python3 not found")
+    anyhow::bail!(
+        "no Python with pymobiledevice3 installed. Install the sidecar requirements \
+         as the README describes, then restart. Tried: {}",
+        rejected.join("; ")
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

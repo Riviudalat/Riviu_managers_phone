@@ -61,6 +61,9 @@ pub struct AppState {
     pub control: Arc<DeviceControlPlane>,
     pub streams: StreamHub,
     pub driver_mode: DriverMode,
+    /// Set when the device sidecar failed to start; the UI shows it so an empty
+    /// device list is never mistaken for "nothing plugged in".
+    pub driver_degraded_reason: Option<String>,
     pub jobs: JobQueue,
     pub flows: FlowRuntime,
     pub flow_artifacts: FlowArtifactStore,
@@ -524,6 +527,7 @@ impl AppState {
             control,
             streams: bundle.streams,
             driver_mode: bundle.mode,
+            driver_degraded_reason: bundle.degraded_reason,
             jobs,
             flows,
             flow_artifacts,

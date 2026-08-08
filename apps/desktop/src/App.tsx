@@ -3,6 +3,7 @@ import {
   agentBulkRepair,
   agentListStatuses,
   authSession,
+  driverDegradedReason,
   getStreamSettings,
   listenRiviuEvents,
   listDevices,
@@ -89,6 +90,7 @@ function App() {
   });
   const [jobsScriptSeed, setJobsScriptSeed] = useState<string | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
+  const [driverIssue, setDriverIssue] = useState<string | null>(null);
   const [startupIssue, setStartupIssue] = useState<string | null | undefined>(undefined);
   const [user, setUser] = useState<LocalUser | null>(null);
   const [showAuthUi, setShowAuthUi] = useState(false);
@@ -152,6 +154,9 @@ function App() {
       setJobs(j);
       setSettings(s);
       setBootError(null);
+      // An empty list can mean "nothing plugged in" or "the device sidecar never
+      // started". Ask which, so the UI does not report the wrong one.
+      setDriverIssue(await driverDegradedReason().catch(() => null));
     } catch (e) {
       setBootError(String(e));
     }
@@ -372,6 +377,13 @@ function App() {
               }
             >
               Chưa kết nối được backend: {bootError}
+            </Banner>
+          )}
+
+          {driverIssue && (
+            <Banner tone="error">
+              Không đọc được thiết bị thật — danh sách sẽ luôn trống cho tới khi
+              sửa xong. Nguyên nhân: {driverIssue}
             </Banner>
           )}
 

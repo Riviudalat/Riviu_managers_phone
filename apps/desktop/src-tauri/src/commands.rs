@@ -768,6 +768,13 @@ pub fn driver_mode(state: State<'_, AppState>) -> String {
     }
 }
 
+/// Why real devices cannot be listed, or `None` when the sidecar is healthy.
+/// Read-only, so it needs no admission gate.
+#[tauri::command]
+pub fn driver_degraded_reason(state: State<'_, AppState>) -> Option<String> {
+    state.driver_degraded_reason.clone()
+}
+
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }

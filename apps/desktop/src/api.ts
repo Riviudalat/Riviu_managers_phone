@@ -249,6 +249,11 @@ export async function driverMode() {
   return invoke<string>("driver_mode");
 }
 
+/** Why real devices cannot be listed, or null when the sidecar is healthy. */
+export async function driverDegradedReason() {
+  return invoke<string | null>("driver_degraded_reason");
+}
+
 export async function authSession() {
   return invoke<AuthSession>("auth_session");
 }

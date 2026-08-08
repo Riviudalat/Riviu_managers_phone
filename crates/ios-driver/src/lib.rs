@@ -33,6 +33,13 @@ pub struct DriverBundle {
     pub streams: StreamHub,
     pub mode: DriverMode,
     pub interaction_capabilities: Arc<DeviceCapabilityRegistry>,
+    /// Why real-device support is unavailable, when the sidecar could not start.
+    ///
+    /// The app still runs in this state, but every device list comes back empty.
+    /// Without this the UI could only say "no iPhone found" — indistinguishable
+    /// from an unplugged cable, and wrong whenever the real cause is a broken
+    /// sidecar. Carrying the reason lets the operator be told what to fix.
+    pub degraded_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +64,7 @@ pub async fn create_driver(config: DriverConfig) -> anyhow::Result<DriverBundle>
             streams,
             mode: DriverMode::Mock,
             interaction_capabilities,
+            degraded_reason: None,
         });
     }
 
@@ -69,10 +77,17 @@ pub async fn create_driver(config: DriverConfig) -> anyhow::Result<DriverBundle>
                 streams,
                 mode: DriverMode::Pymobiledevice3,
                 interaction_capabilities,
+                degraded_reason: None,
             })
         }
         Err(err) => {
-            tracing::warn!("pymobiledevice3 sidecar unavailable ({err:#}); empty real device list");
+            // Starting degraded keeps the rest of the app usable, but it must not
+            // look like a healthy install with nothing plugged in: carry the cause
+            // out so the UI can show it.
+            let reason = format!("{err:#}");
+            tracing::error!(
+                "pymobiledevice3 sidecar unavailable ({reason}); real devices cannot be listed"
+            );
             let driver = PmdIosDriver::degraded(&config)?;
             let streams = driver.stream_hub();
             Ok(DriverBundle {
@@ -80,6 +95,7 @@ pub async fn create_driver(config: DriverConfig) -> anyhow::Result<DriverBundle>
                 streams,
                 mode: DriverMode::Pymobiledevice3,
                 interaction_capabilities,
+                degraded_reason: Some(reason),
             })
         }
     }
