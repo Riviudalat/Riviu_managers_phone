@@ -13,6 +13,10 @@ import {
   startupError,
 } from "./api";
 import { summarizeBulkRepair } from "./agentStatus";
+import { requestConfirm } from "./confirmStore";
+import { pushToast, toastError } from "./toastStore";
+import { ConfirmHost } from "./components/ConfirmHost";
+import { ToastHost } from "./components/ToastHost";
 import { DeviceTile } from "./components/DeviceTile";
 import { FilterToolbar, type ViewMode } from "./components/FilterToolbar";
 import { FocusStream } from "./components/FocusStream";
@@ -97,17 +101,35 @@ function App() {
   const [flowDirty, setFlowDirty] = useState(false);
   const [automationView, setAutomationView] = useState<"flow" | "legacy">("flow");
 
-  const requestPage = useCallback((next: PageId) => {
-    if (next === page) return;
-    if (flowDirty && !window.confirm("Discard unsaved Flow changes?")) return;
-    setPage(next);
-  }, [flowDirty, page]);
+  const confirmDiscardFlow = useCallback(
+    () =>
+      requestConfirm({
+        title: "Bỏ thay đổi Flow chưa lưu?",
+        message: "Bản nháp hiện tại chưa được lưu và sẽ mất khi rời khỏi trang.",
+        confirmLabel: "Bỏ thay đổi",
+        cancelLabel: "Ở lại",
+        danger: true,
+      }),
+    [],
+  );
 
-  const requestAutomationView = useCallback((next: "flow" | "legacy") => {
-    if (next === automationView) return;
-    if (flowDirty && !window.confirm("Discard unsaved Flow changes?")) return;
-    setAutomationView(next);
-  }, [automationView, flowDirty]);
+  const requestPage = useCallback(
+    async (next: PageId) => {
+      if (next === page) return;
+      if (flowDirty && !(await confirmDiscardFlow())) return;
+      setPage(next);
+    },
+    [confirmDiscardFlow, flowDirty, page],
+  );
+
+  const requestAutomationView = useCallback(
+    async (next: "flow" | "legacy") => {
+      if (next === automationView) return;
+      if (flowDirty && !(await confirmDiscardFlow())) return;
+      setAutomationView(next);
+    },
+    [automationView, confirmDiscardFlow, flowDirty],
+  );
 
   useEffect(() => {
     if (!flowDirty) return;
@@ -309,7 +331,7 @@ function App() {
         total={devices.length}
         readyCount={readyCount}
         groupMode={groupMode}
-        onPage={requestPage}
+        onPage={(next) => void requestPage(next)}
         onToggleCollapse={() => setAsideCollapsed((v) => !v)}
       />
 
@@ -319,7 +341,7 @@ function App() {
           <div className="topbar-drag" />
           <div className="topbar-actions">
             {groupMode && <span className="chip primary">Sync</span>}
-            <span className="chip info">{settings.fps} FPS</span>
+            {readyCount > 0 && <span className="chip ok">{readyCount} sẵn sàng</span>}
             {runningJobs > 0 && <span className="chip warn">{runningJobs} job</span>}
             <button
               type="button"
@@ -365,12 +387,16 @@ function App() {
                     ? selected
                     : filtered.map((d) => d.udid);
                   if (!targets.length) {
-                    window.alert("Chưa có thiết bị");
+                    pushToast("warn", "Chưa có thiết bị", "Cắm iPhone qua USB rồi bấm Làm mới.");
                     return;
                   }
-                  for (const u of targets) await prepareDevice(u);
-                  await reload();
-                  window.alert(`Start/Prepare: ${targets.length} máy`);
+                  try {
+                    for (const u of targets) await prepareDevice(u);
+                    await reload();
+                    pushToast("ok", "Đã khởi động", `Chuẩn bị ${targets.length} máy`);
+                  } catch (error) {
+                    toastError("Khởi động thất bại", error);
+                  }
                 }}
                 onStop={() => setSelected([])}
                 onInstall={async () => {
@@ -380,22 +406,33 @@ function App() {
                         .filter((device) => device.status !== "disconnected")
                         .map((device) => device.udid);
                   if (!targets.length) {
-                    window.alert("Chưa có thiết bị");
+                    pushToast("warn", "Chưa có thiết bị", "Cắm iPhone qua USB rồi bấm Làm mới.");
                     return;
                   }
                   const scope = selected.length ? "đã chọn" : "đang kết nối";
-                  if (!window.confirm(`Sửa Riviu Agent trên ${targets.length} máy ${scope}?`)) {
-                    return;
+                  const proceed = await requestConfirm({
+                    title: `Sửa Riviu Agent trên ${targets.length} máy?`,
+                    message: `Áp dụng cho ${targets.length} máy ${scope}. Stream trên các máy này sẽ khởi động lại.`,
+                    confirmLabel: "Sửa agent",
+                  });
+                  if (!proceed) return;
+                  try {
+                    const repaired = await agentBulkRepair(targets);
+                    const [, refreshed] = await Promise.all([
+                      reload(),
+                      agentListStatuses(targets),
+                    ]);
+                    const summary = summarizeBulkRepair(
+                      refreshed.length ? refreshed : repaired,
+                    );
+                    pushToast(
+                      summary.attentionCount > 0 ? "warn" : "ok",
+                      summary.heading,
+                      summary.message,
+                    );
+                  } catch (error) {
+                    toastError("Sửa agent thất bại", error);
                   }
-                  const repaired = await agentBulkRepair(targets);
-                  const [, refreshed] = await Promise.all([
-                    reload(),
-                    agentListStatuses(targets),
-                  ]);
-                  const summary = summarizeBulkRepair(
-                    refreshed.length ? refreshed : repaired,
-                  );
-                  window.alert(`${summary.heading}\n${summary.message}`);
                 }}
                 onSync={() => setGroupMode((v) => !v)}
                 onRefresh={async () => {
@@ -551,7 +588,7 @@ function App() {
                   type="button"
                   role="tab"
                   aria-selected={automationView === "flow"}
-                  onClick={() => requestAutomationView("flow")}
+                  onClick={() => void requestAutomationView("flow")}
                 >
                   Flow
                 </button>
@@ -559,7 +596,7 @@ function App() {
                   type="button"
                   role="tab"
                   aria-selected={automationView === "legacy"}
-                  onClick={() => requestAutomationView("legacy")}
+                  onClick={() => void requestAutomationView("legacy")}
                 >
                   Legacy
                 </button>
@@ -583,7 +620,7 @@ function App() {
                   <ScriptsPanel
                     onUseInJobs={(json) => {
                       setJobsScriptSeed(json);
-                      requestPage("jobs");
+                      void requestPage("jobs");
                     }}
                   />
                   <div className="panel automation-legacy-schedule">
@@ -663,6 +700,9 @@ function App() {
           onClose={() => setInteractionOpen(false)}
         />
       )}
+
+      <ToastHost />
+      <ConfirmHost />
     </div>
   );
 }

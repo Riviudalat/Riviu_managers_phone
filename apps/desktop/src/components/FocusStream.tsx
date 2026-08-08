@@ -14,14 +14,17 @@ import {
 } from "../api";
 import { pickDirectory } from "../pickFile";
 import { peekFrame, useDeviceFrame, useHydratedDeviceFrame } from "../frameStore";
+import { requestConfirm } from "../confirmStore";
+import { pushToast, toastError } from "../toastStore";
 import {
-  IconBack,
   IconCamera,
+  IconChevronLeft,
+  IconChevronRight,
   IconClose,
+  IconDownload,
   IconHome,
-  IconPin,
   IconPower,
-  IconVolume,
+  IconUpload,
 } from "./Icons";
 
 interface Props {
@@ -51,11 +54,16 @@ function mapToDevice(
   };
 }
 
+/**
+ * Device control dock. Sits beside the fleet grid as a real layout column
+ * rather than a near-fullscreen overlay, so the operator keeps sight of the
+ * other devices while driving one. Collapses to a screen-only strip.
+ */
 export function FocusStream({ device, onClose, groupUdids, groupMode }: Props) {
   useHydratedDeviceFrame(device.udid, latestFrame);
   const frame = useDeviceFrame(device.udid) ?? peekFrame(device.udid) ?? null;
   const [text, setText] = useState("");
-  const [pinned, setPinned] = useState(true);
+  const [compact, setCompact] = useState(false);
   const [busy, setBusy] = useState(false);
   const imgRef = useRef<HTMLImageElement>(null);
   const drag = useRef<{ x: number; y: number } | null>(null);
@@ -97,231 +105,198 @@ export function FocusStream({ device, onClose, groupUdids, groupMode }: Props) {
         await deviceSwipe(device.udid, start.x, start.y, end.x, end.y, iw, ih);
       }
     } catch (e) {
-      window.alert(`Điều khiển thất bại:\n${e}`);
+      toastError("Điều khiển thất bại", e);
     } finally {
       setBusy(false);
     }
   };
 
-  return (
-    <div className="focus-layer" aria-label="Focus stream">
-      {!pinned && <div className="focus-backdrop" onClick={onClose} />}
-      <div className="focus-panel floating">
-        <div className="focus-titlebar">
-          <div className="title">
-            <strong>{device.name}</strong>
-            <span className="hint">
-              {device.model} · iOS {device.iosVersion}
-              {busy ? " · đang gửi…" : " · click/kéo để điều khiển"}
-            </span>
-          </div>
-          <div className="win-btns">
-            <button
-              type="button"
-              className={pinned ? "active" : ""}
-              title={pinned ? "Bỏ ghim" : "Ghim"}
-              onClick={() => setPinned((v) => !v)}
-            >
-              <IconPin size={14} />
-            </button>
-            <button type="button" className="close" title="Đóng" onClick={onClose}>
-              <IconClose size={14} />
-            </button>
-          </div>
-        </div>
+  const goHome = async () => {
+    try {
+      await deviceHome(device.udid);
+    } catch (e) {
+      toastError("Không về được màn hình chính", e);
+    }
+  };
 
-        <div className="focus-body">
-          <nav className="focus-nav">
-            <button
-              type="button"
-              title="Home"
-              onClick={async () => {
-                try {
-                  await deviceHome(device.udid);
-                } catch (e) {
-                  window.alert(String(e));
-                }
+  const capture = async () => {
+    try {
+      pushToast("ok", "Đã chụp màn hình", await screenshot(device.udid));
+    } catch (e) {
+      toastError("Chụp màn hình thất bại", e);
+    }
+  };
+
+  const reboot = async () => {
+    const proceed = await requestConfirm({
+      title: `Khởi động lại ${device.name}?`,
+      message: "Thiết bị sẽ ngắt kết nối vài phút và stream dừng cho tới khi khởi động xong.",
+      confirmLabel: "Khởi động lại",
+      danger: true,
+    });
+    if (!proceed) return;
+    try {
+      await rebootDevice(device.udid);
+      pushToast("info", "Đang khởi động lại", device.name);
+    } catch (e) {
+      toastError("Khởi động lại thất bại", e);
+    }
+  };
+
+  const backup = async () => {
+    const dir = await pickDirectory("Chọn thư mục lưu backup");
+    if (!dir) return;
+    pushToast("info", "Đang backup…", `${device.name} — có thể mất vài phút.`);
+    try {
+      await backupDevice(device.udid, dir);
+      pushToast("ok", "Backup xong", dir);
+    } catch (e) {
+      toastError("Backup thất bại", e);
+    }
+  };
+
+  const restore = async () => {
+    const dir = await pickDirectory("Chọn thư mục backup để phục hồi");
+    if (!dir) return;
+    const proceed = await requestConfirm({
+      title: `Phục hồi ${device.name} từ backup?`,
+      message: "Toàn bộ dữ liệu hiện tại trên thiết bị sẽ bị ghi đè và máy sẽ khởi động lại.",
+      confirmLabel: "Ghi đè & phục hồi",
+      danger: true,
+    });
+    if (!proceed) return;
+    pushToast("info", "Đang phục hồi…", device.name);
+    try {
+      await restoreDevice(device.udid, dir);
+      pushToast("ok", "Đã phục hồi", "Thiết bị sẽ khởi động lại.");
+    } catch (e) {
+      toastError("Phục hồi thất bại", e);
+    }
+  };
+
+  const sendKeys = async () => {
+    try {
+      if (targets.length > 1) {
+        await groupInput({ udids: targets, kind: "type", text });
+      } else {
+        await deviceTypeText(device.udid, text);
+      }
+      pushToast("ok", "Đã gửi phím", `${text.length} ký tự · ${targets.length} máy`);
+    } catch (e) {
+      toastError("Gửi phím thất bại", e);
+    }
+  };
+
+  return (
+    <aside
+      className={`focus-dock ${compact ? "compact" : ""}`}
+      aria-label={`Điều khiển ${device.name}`}
+    >
+      <header className="focus-dock-head">
+        <div className="title">
+          <strong>{device.name}</strong>
+          <span className="hint">
+            {device.model} · iOS {device.iosVersion}
+          </span>
+        </div>
+        <button
+          type="button"
+          title={compact ? "Mở rộng" : "Thu gọn"}
+          aria-label={compact ? "Mở rộng bảng điều khiển" : "Thu gọn bảng điều khiển"}
+          onClick={() => setCompact((v) => !v)}
+        >
+          {compact ? <IconChevronLeft size={14} /> : <IconChevronRight size={14} />}
+        </button>
+        <button type="button" className="close" title="Đóng" aria-label="Đóng" onClick={onClose}>
+          <IconClose size={14} />
+        </button>
+      </header>
+
+      <div className="focus-dock-screen">
+        <div className="focus-screen">
+          {frame ? (
+            <img
+              ref={imgRef}
+              src={`data:image/jpeg;base64,${frame}`}
+              alt={device.name}
+              draggable={false}
+              className="focus-touch"
+              onPointerDown={(e) => {
+                if (e.button !== 0 || !imgRef.current) return;
+                e.preventDefault();
+                drag.current = mapToDevice(imgRef.current, e.clientX, e.clientY);
+                e.currentTarget.setPointerCapture(e.pointerId);
               }}
-            >
-              <IconHome size={18} />
-            </button>
-            <button type="button" title="Back (iOS hạn chế)" disabled>
-              <IconBack size={18} />
-            </button>
-            <button
-              type="button"
-              title="Screenshot"
-              onClick={async () => {
-                try {
-                  alert(`Đã lưu: ${await screenshot(device.udid)}`);
-                } catch (e) {
-                  window.alert(String(e));
-                }
-              }}
-            >
-              <IconCamera size={18} />
-            </button>
-            <button type="button" title="Volume (chưa hỗ trợ)" disabled>
-              <IconVolume size={18} />
-            </button>
-            <button
-              type="button"
-              title="Reboot"
-              onClick={async () => {
-                try {
-                  await rebootDevice(device.udid);
-                } catch (e) {
-                  window.alert(String(e));
-                }
-              }}
-            >
-              <IconPower size={18} />
-            </button>
-            <button
-              type="button"
-              title="Backup thiết bị (Mobilebackup2 — có thể mất vài phút)"
-              onClick={async () => {
-                const dir = await pickDirectory("Chọn thư mục lưu backup");
-                if (!dir) return;
-                try {
-                  await backupDevice(device.udid, dir);
-                  window.alert("Backup xong");
-                } catch (e) {
-                  window.alert(String(e));
-                }
-              }}
-            >
-              💾
-            </button>
-            <button
-              type="button"
-              title="Restore từ backup (GHI ĐÈ dữ liệu + khởi động lại)"
-              onClick={async () => {
-                const dir = await pickDirectory("Chọn thư mục backup để phục hồi");
-                if (!dir) return;
-                if (
-                  !window.confirm(
-                    "Phục hồi sẽ ghi đè dữ liệu trên thiết bị và khởi động lại. Tiếp tục?",
-                  )
-                ) {
+              onPointerUp={async (e) => {
+                if (e.button !== 0 || !drag.current || !imgRef.current) {
+                  drag.current = null;
                   return;
                 }
-                try {
-                  await restoreDevice(device.udid, dir);
-                  window.alert("Đã phục hồi (thiết bị sẽ khởi động lại)");
-                } catch (e) {
-                  window.alert(String(e));
-                }
+                e.preventDefault();
+                const start = drag.current;
+                const end = mapToDevice(imgRef.current, e.clientX, e.clientY);
+                drag.current = null;
+                await runGesture(start, end);
               }}
-            >
-              ⭯
-            </button>
-          </nav>
-
-          <div className="focus-screen-wrap">
-            <div className="focus-screen screen-only">
-              {frame ? (
-                <img
-                  ref={imgRef}
-                  src={`data:image/jpeg;base64,${frame}`}
-                  alt={device.name}
-                  draggable={false}
-                  className="focus-touch"
-                  onPointerDown={(e) => {
-                    if (e.button !== 0 || !imgRef.current) return;
-                    e.preventDefault();
-                    drag.current = mapToDevice(imgRef.current, e.clientX, e.clientY);
-                    e.currentTarget.setPointerCapture(e.pointerId);
-                  }}
-                  onPointerUp={async (e) => {
-                    if (e.button !== 0 || !drag.current || !imgRef.current) {
-                      drag.current = null;
-                      return;
-                    }
-                    e.preventDefault();
-                    const start = drag.current;
-                    const end = mapToDevice(imgRef.current, e.clientX, e.clientY);
-                    drag.current = null;
-                    await runGesture(start, end);
-                  }}
-                  onPointerCancel={() => {
-                    drag.current = null;
-                  }}
-                />
-              ) : (
-                <div className="screen-empty">Đang chờ stream…</div>
-              )}
-            </div>
-          </div>
-
-          <aside className="focus-toolbar">
-            <h4>Điều khiển</h4>
-            <button
-              type="button"
-              onClick={async () => {
-                try {
-                  await deviceHome(device.udid);
-                } catch (e) {
-                  window.alert(String(e));
-                }
+              onPointerCancel={() => {
+                drag.current = null;
               }}
-            >
-              Home
-            </button>
-            <button
-              type="button"
-              onClick={async () => {
-                try {
-                  alert(`Đã lưu: ${await screenshot(device.udid)}`);
-                } catch (e) {
-                  window.alert(String(e));
-                }
-              }}
-            >
-              Chụp màn hình
-            </button>
-            <button
-              type="button"
-              onClick={async () => {
-                try {
-                  await rebootDevice(device.udid);
-                } catch (e) {
-                  window.alert(String(e));
-                }
-              }}
-            >
-              Khởi động lại
-            </button>
-
-            <h4>Bàn phím</h4>
-            <label>
-              Gõ chữ
-              <input value={text} onChange={(e) => setText(e.target.value)} />
-            </label>
-            <button
-              type="button"
-              className="primary"
-              onClick={async () => {
-                try {
-                  if (targets.length > 1) {
-                    await groupInput({ udids: targets, kind: "type", text });
-                  } else {
-                    await deviceTypeText(device.udid, text);
-                  }
-                } catch (e) {
-                  window.alert(String(e));
-                }
-              }}
-            >
-              Gửi phím
-            </button>
-
-            {groupMode && <p className="hint">Đồng bộ nhóm: {targets.length} máy</p>}
-            <p className="hint">Click / kéo trên màn hình để điều khiển</p>
-            <p className="hint mono">{device.udid}</p>
-          </aside>
+            />
+          ) : (
+            <div className="screen-empty">Đang chờ stream…</div>
+          )}
         </div>
       </div>
-    </div>
+
+      <nav className="focus-dock-nav" aria-label="Thao tác thiết bị">
+        <button type="button" title="Về màn hình chính" onClick={() => void goHome()}>
+          <IconHome size={17} />
+        </button>
+        <button type="button" title="Chụp màn hình" onClick={() => void capture()}>
+          <IconCamera size={17} />
+        </button>
+        <button type="button" title="Khởi động lại" onClick={() => void reboot()}>
+          <IconPower size={17} />
+        </button>
+        <button
+          type="button"
+          title="Backup thiết bị (Mobilebackup2 — có thể mất vài phút)"
+          onClick={() => void backup()}
+        >
+          <IconDownload size={17} />
+        </button>
+        <button
+          type="button"
+          className="danger"
+          title="Phục hồi từ backup (ghi đè dữ liệu + khởi động lại)"
+          onClick={() => void restore()}
+        >
+          <IconUpload size={17} />
+        </button>
+      </nav>
+
+      {!compact && (
+        <div className="focus-dock-tools">
+          <label>
+            Gõ chữ
+            <input
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder="Nội dung cần gõ…"
+            />
+          </label>
+          <button type="button" className="primary" onClick={() => void sendKeys()}>
+            Gửi phím{targets.length > 1 ? ` · ${targets.length} máy` : ""}
+          </button>
+          <p className="hint">
+            {busy ? "Đang gửi lệnh…" : "Click hoặc kéo trên màn hình để điều khiển."}
+          </p>
+          {groupMode && targets.length > 1 && (
+            <p className="hint">Đồng bộ nhóm: {targets.length} máy nhận cùng thao tác.</p>
+          )}
+          <p className="hint mono">{device.udid}</p>
+        </div>
+      )}
+    </aside>
   );
 }

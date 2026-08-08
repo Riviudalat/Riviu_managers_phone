@@ -32,6 +32,7 @@ import {
   type DocumentRequestIdentity,
 } from "./editorState";
 import { normalizeFlowIssues, validateDraftNumbers } from "../../flow/validation";
+import { requestConfirm } from "../../confirmStore";
 import type {
   ActionDefinition,
   DeviceInfo,
@@ -244,13 +245,20 @@ export function FlowWorkspace({
     return next;
   }, []);
 
-  const confirmDiscard = useCallback(() => (
-    !state.dirty || window.confirm("Discard unsaved Flow changes?")
+  const confirmDiscard = useCallback(async () => (
+    !state.dirty ||
+    (await requestConfirm({
+      title: "Bỏ thay đổi Flow chưa lưu?",
+      message: "Bản nháp hiện tại chưa được lưu và sẽ mất.",
+      confirmLabel: "Bỏ thay đổi",
+      cancelLabel: "Ở lại",
+      danger: true,
+    }))
   ), [state.dirty]);
 
-  const selectFlow = useCallback((id: string) => {
-    if (!confirmDiscard()) return;
-    void openSavedFlow(id).catch((error) => setOperationError(errorText(error)));
+  const selectFlow = useCallback(async (id: string) => {
+    if (!(await confirmDiscard())) return;
+    await openSavedFlow(id).catch((error) => setOperationError(errorText(error)));
   }, [confirmDiscard, openSavedFlow]);
 
   const replaceWithNew = useCallback((document: FlowDocumentV2, source: "new" | "duplicate") => {
@@ -338,9 +346,16 @@ export function FlowWorkspace({
   }, [state]);
 
   const archive = useCallback(() => {
-    if (!saved || !window.confirm(`Archive ${state.document.name}?`)) return;
-    setOperationError(null);
+    if (!saved) return;
     void (async () => {
+      const proceed = await requestConfirm({
+        title: `Lưu trữ «${state.document.name}»?`,
+        message: "Flow sẽ được đưa khỏi danh sách đang dùng. Các bản chạy đã ghi vẫn giữ nguyên.",
+        confirmLabel: "Lưu trữ",
+        danger: true,
+      });
+      if (!proceed) return;
+      setOperationError(null);
       try {
         await flowArchive(state.document.id);
         clearDraft(state.document.id);
@@ -423,12 +438,16 @@ export function FlowWorkspace({
         validationPending={state.validationRequest !== null}
         savePending={state.saveRequest !== null}
         onRename={(name) => dispatch({ type: "renameFlow", name })}
-        onSelectFlow={selectFlow}
+        onSelectFlow={(id) => void selectFlow(id)}
         onNew={() => {
-          if (confirmDiscard()) replaceWithNew(newFlowDocument(), "new");
+          void confirmDiscard().then((ok) => {
+            if (ok) replaceWithNew(newFlowDocument(), "new");
+          });
         }}
         onDuplicate={() => {
-          if (confirmDiscard()) replaceWithNew(duplicateDocument(state.document), "duplicate");
+          void confirmDiscard().then((ok) => {
+            if (ok) replaceWithNew(duplicateDocument(state.document), "duplicate");
+          });
         }}
         onArchive={archive}
         onSave={save}

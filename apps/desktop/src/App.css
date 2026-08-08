@@ -1634,8 +1634,8 @@ button.linkish,
 .panel textarea,
 .panel input,
 .panel select,
-.focus-toolbar input,
-.focus-toolbar textarea {
+.focus-dock-tools input,
+.focus-dock-tools textarea {
   border: 1px solid var(--line-strong);
   border-radius: 4px;
   padding: 0.4rem 0.55rem;
@@ -1688,154 +1688,101 @@ button.linkish,
 }
 
 /* Focus = floating window; grid underneath keeps live mini streams */
-.focus-layer {
-  position: fixed;
-  inset: 0;
-  z-index: 50;
-  pointer-events: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 1rem;
-}
-.focus-backdrop {
-  position: absolute;
-  inset: 0;
-  background: rgba(15, 18, 25, 0.22);
-  pointer-events: auto;
-}
-.focus-panel {
-  background: #fff;
-  border-radius: 8px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.2);
+/* ——— Device control dock ———
+   A real layout column beside the fleet grid (.shell is display:flex), not a
+   near-fullscreen overlay: the operator keeps sight of the other devices while
+   driving one, and can collapse this to a screen-only strip. */
+.focus-dock {
+  flex: 0 0 auto;
+  width: 340px;
+  min-width: 0;
   display: flex;
   flex-direction: column;
+  background: #fff;
+  border-left: 1px solid var(--line);
   overflow: hidden;
-  pointer-events: auto;
-  position: relative;
-  z-index: 1;
-  height: min(90vh, 820px);
-  width: auto;
-  max-width: calc(100vw - 2rem);
+  transition: width 0.18s ease;
 }
-.focus-panel.floating {
-  margin: 0;
-  align-self: center;
+.focus-dock.compact {
+  width: 214px;
 }
-.focus-panel:has(.focus-toolbar) {
-  width: auto;
+@media (max-width: 1180px) {
+  .focus-dock {
+    width: 286px;
+  }
+  .focus-dock.compact {
+    width: 190px;
+  }
 }
-.focus-overlay {
-  /* legacy alias */
-  position: fixed;
-  inset: 0;
-  z-index: 50;
-}
-.focus-titlebar {
-  height: 32px;
+
+.focus-dock-head {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 0.45rem;
-  padding: 0 0.35rem 0 0.65rem;
-  background: #f3f4f6;
-  cursor: default;
-  user-select: none;
+  gap: 0.3rem;
+  padding: 0.5rem 0.4rem 0.5rem 0.7rem;
+  border-bottom: 1px solid var(--line);
 }
-.focus-titlebar .title {
+.focus-dock-head .title {
   flex: 1;
-  display: flex;
-  align-items: baseline;
-  gap: 0.45rem;
   min-width: 0;
-  overflow: hidden;
 }
-.focus-titlebar .title strong {
-  font-size: 0.8rem;
+.focus-dock-head .title strong {
+  display: block;
+  font-size: 0.82rem;
   font-weight: 600;
+  color: var(--text-1);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.focus-titlebar .win-btns {
-  display: flex;
-  gap: 0.25rem;
+.focus-dock-head .hint {
+  display: block;
+  color: var(--text-3);
+  font-size: 0.68rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.focus-titlebar .win-btns button {
-  width: 28px;
-  height: 24px;
-  padding: 0;
-  border: none;
-  border-radius: 4px;
-  background: #dbeafe;
-  color: var(--text-2);
+.focus-dock-head button {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
   display: grid;
   place-items: center;
-}
-.focus-titlebar .win-btns button:hover {
-  background: #bfdbfe;
-}
-.focus-titlebar .win-btns button.close:hover {
-  background: #ef4444;
-  color: #fff;
-}
-.focus-body {
-  flex: 1;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: 48px auto 176px;
-  align-items: stretch;
-}
-.focus-nav {
-  border-right: 1px solid var(--line);
-  background: #fafbfc;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.25rem;
-  padding: 0.45rem 0.2rem;
-}
-.focus-nav button {
-  width: 36px;
-  height: 36px;
-  padding: 0;
   border: none;
+  border-radius: 5px;
   background: transparent;
-  border-radius: 6px;
   color: var(--text-2);
-  display: grid;
-  place-items: center;
 }
-.focus-nav button:hover:not(:disabled) {
+.focus-dock-head button:hover {
   background: var(--primary-soft);
   color: var(--primary);
 }
-.focus-nav button:disabled {
-  opacity: 0.35;
+.focus-dock-head button.close:hover {
+  background: rgb(245 108 108 / 14%);
+  color: var(--danger);
 }
-.focus-screen-wrap {
-  min-width: 0;
+
+.focus-dock-screen {
+  flex: 1;
   min-height: 0;
-  height: 100%;
-  background: #0f1115;
   display: flex;
   align-items: center;
   justify-content: center;
-  overflow: hidden;
-  padding: 6px;
+  padding: 0.5rem;
+  background: #0f1115;
 }
-.focus-screen.screen-only {
+.focus-dock .focus-screen {
   height: 100%;
   width: auto;
-  max-width: min(42vw, 420px);
+  max-width: 100%;
   aspect-ratio: 9 / 16;
-  margin: 0;
-  border: none;
-  border-radius: 4px;
-  background: #000;
   display: flex;
   align-items: center;
   justify-content: center;
+  border-radius: 5px;
+  background: #000;
   overflow: hidden;
 }
 .focus-screen img {
@@ -1851,29 +1798,73 @@ button.linkish,
   touch-action: none;
   user-select: none;
 }
-.focus-toolbar {
-  border-left: 1px solid var(--line);
-  padding: 0.75rem;
+
+.focus-dock-nav {
+  flex-shrink: 0;
+  display: flex;
+  gap: 0.2rem;
+  padding: 0.4rem;
+  border-top: 1px solid var(--line);
+  background: #fafbfc;
+}
+.focus-dock-nav button {
+  flex: 1;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-2);
+}
+.focus-dock-nav button:hover {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+.focus-dock-nav button.danger:hover {
+  background: rgb(245 108 108 / 14%);
+  color: var(--danger);
+}
+
+.focus-dock-tools {
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 0.45rem;
+  max-height: 42%;
+  padding: 0.6rem 0.7rem 0.75rem;
+  border-top: 1px solid var(--line);
   overflow: auto;
-  background: #fff;
 }
-.focus-toolbar h4 {
-  margin: 0.15rem 0 0;
-  font-size: 0.7rem;
+.focus-dock-tools label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  color: var(--text-2);
+  font-size: 0.74rem;
+}
+.focus-dock-tools .hint {
+  margin: 0;
   color: var(--text-3);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  font-size: 0.68rem;
+  line-height: 1.45;
+}
+.focus-dock-tools .hint.mono {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.focus-dock-tools button.primary {
+  padding: 0.45rem;
+  border: 1px solid var(--primary);
+  border-radius: 6px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 0.78rem;
   font-weight: 600;
 }
-.focus-toolbar label {
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-  font-size: 0.78rem;
-  color: var(--text-2);
+.focus-dock-tools button.primary:hover {
+  border-color: var(--primary-deep);
+  background: var(--primary-deep);
 }
 
 .settings-card {
@@ -2319,3 +2310,187 @@ button.danger:hover:not(:disabled) {
 .interaction-detail { display: flex; flex-direction: column; gap: 0.25rem; border-top: 1px solid var(--line); padding-top: 0.55rem; }
 .interaction-assignment { display: flex; align-items: center; gap: 0.45rem; min-width: 0; border-bottom: 1px solid var(--line); padding: 0.3rem 0; font-size: 0.7rem; }
 .interaction-assignment > .grow { min-width: 0; }
+
+/* ——— Toasts · replace window.alert ——— */
+.toast-host {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 120;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  width: min(360px, calc(100vw - 2rem));
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.7rem 0.75rem;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--primary);
+  border-radius: var(--radius);
+  background: #fff;
+  box-shadow: 0 12px 34px rgb(15 23 42 / 16%);
+  pointer-events: auto;
+  animation: toast-in 0.24s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast {
+    animation: none;
+  }
+}
+
+.toast-icon {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--primary);
+}
+.toast-ok {
+  border-left-color: var(--ok);
+}
+.toast-ok .toast-icon {
+  color: var(--ok);
+}
+.toast-warn {
+  border-left-color: var(--warn);
+}
+.toast-warn .toast-icon {
+  color: var(--warn);
+}
+.toast-error {
+  border-left-color: var(--danger);
+}
+.toast-error .toast-icon {
+  color: var(--danger);
+}
+
+.toast-copy {
+  min-width: 0;
+  flex: 1;
+}
+.toast-copy strong {
+  display: block;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-1);
+}
+.toast-copy p {
+  margin: 0.15rem 0 0;
+  max-height: 4.5rem;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 0.74rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.toast-close {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-3);
+}
+.toast-close:hover {
+  background: var(--bg-muted);
+  color: var(--text-1);
+}
+
+/* ——— Confirm dialog · replace window.confirm ——— */
+.confirm-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 130;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+}
+
+.confirm-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgb(15 23 42 / 32%);
+}
+
+.confirm-card {
+  position: relative;
+  width: min(420px, 100%);
+  padding: 1.25rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  box-shadow: 0 20px 60px rgb(15 23 42 / 26%);
+}
+.confirm-card h3 {
+  margin: 0;
+  font-size: 0.98rem;
+  font-weight: 700;
+  color: var(--text-1);
+}
+.confirm-card p {
+  margin: 0.6rem 0 0;
+  color: var(--text-2);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1.15rem;
+}
+.confirm-actions button {
+  min-width: 88px;
+  padding: 0.5rem 0.9rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text-1);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+.confirm-actions button:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.confirm-actions button.primary {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #fff;
+}
+.confirm-actions button.primary:hover {
+  border-color: var(--primary-deep);
+  background: var(--primary-deep);
+  color: #fff;
+}
+.confirm-actions button.danger {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: #fff;
+}
+.confirm-actions button.danger:hover {
+  border-color: #d94a4a;
+  background: #d94a4a;
+  color: #fff;
+}

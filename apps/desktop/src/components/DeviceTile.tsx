@@ -3,6 +3,7 @@ import { tileStreamStateView } from "../types";
 import type { DeviceInfo, TileSize } from "../types";
 import { deviceSwipe, deviceTap, groupInput, latestFrame } from "../api";
 import { useDeviceFrame, useHydratedDeviceFrame } from "../frameStore";
+import { toastError } from "../toastStore";
 
 const DEFAULT_W = 375;
 const DEFAULT_H = 667;
@@ -92,7 +93,7 @@ async function sendGesture(
       await deviceSwipe(device.udid, start.x, start.y, end.x, end.y, imageW, imageH);
     }
   } catch (e) {
-    window.alert(`Điều khiển thất bại:\n${e}`);
+    toastError("Điều khiển thất bại", e);
   }
 }
 

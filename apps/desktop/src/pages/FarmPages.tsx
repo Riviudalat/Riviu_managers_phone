@@ -36,7 +36,7 @@ import {
   saveSchedule,
   saveScript,
 } from "../api";
-import { SelectionStrip, flash, targetsOf } from "../components/SelectionStrip";
+import { SelectionStrip, flash, flashError, targetsOf } from "../components/SelectionStrip";
 import { pickDirectory, pickIpa, pickMaterial } from "../pickFile";
 import type {
   AnalyticsSummary,
@@ -270,7 +270,7 @@ export function ProxyPage() {
                         await navigator.clipboard.writeText(text);
                         flash("Đã copy config vào clipboard");
                       } catch (e) {
-                        flash(String(e));
+                        flashError(e);
                       }
                     }}
                   >
@@ -304,7 +304,7 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
   const targets = targetsOf(selected, devices);
   const target = targets[0];
 
-  const reload = () => listMaterials().then(setItems).catch((e) => flash(String(e)));
+  const reload = () => listMaterials().then(setItems).catch((e) => flashError(e));
   useEffect(() => {
     reload();
   }, []);
@@ -350,7 +350,7 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
               await reload();
               flash("Đã thêm material");
             } catch (e) {
-              flash(String(e));
+              flashError(e);
             } finally {
               setBusy(false);
             }
@@ -379,7 +379,7 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
                   try {
                     flash(await pushMaterial(target!, m.id));
                   } catch (e) {
-                    flash(String(e));
+                    flashError(e);
                   } finally {
                     setBusy(false);
                   }
@@ -416,10 +416,10 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
   const [groupResults, setGroupResults] = useState<GroupInstallResult[]>([]);
   const targets = targetsOf(selected, devices);
 
-  const reload = () => listAppsLibrary().then(setItems).catch((e) => flash(String(e)));
+  const reload = () => listAppsLibrary().then(setItems).catch((e) => flashError(e));
   useEffect(() => {
     reload();
-    listGroups().then(setGroups).catch((e) => flash(String(e)));
+    listGroups().then(setGroups).catch((e) => flashError(e));
   }, []);
 
   const installToGroup = async (ipaPath: string) => {
@@ -439,7 +439,7 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
           : `Đã cài lên ${results.length} máy trong nhóm`,
       );
     } catch (e) {
-      flash(String(e));
+      flashError(e);
     } finally {
       setBusy(false);
     }
@@ -504,7 +504,7 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
             await reload();
             flash("Đã thêm IPA vào thư viện");
           } catch (e) {
-            flash(String(e));
+            flashError(e);
           } finally {
             setBusy(false);
           }
@@ -1043,7 +1043,7 @@ export function TeamPage() {
 
 export function LogsPage() {
   const [logs, setLogs] = useState<OpLog[]>([]);
-  const load = () => listOpLogs(200).then(setLogs).catch((e) => flash(String(e)));
+  const load = () => listOpLogs(200).then(setLogs).catch((e) => flashError(e));
   useEffect(() => {
     load();
   }, []);
@@ -1141,7 +1141,7 @@ export function ScheduleBlock({
     if (!scriptName && scriptsList.length) setScriptName(scriptsList[0][0]);
   };
   useEffect(() => {
-    reload().catch((e) => flash(String(e)));
+    reload().catch((e) => flashError(e));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1195,7 +1195,7 @@ export function ScheduleBlock({
             await reload();
             flash(`Schedule «${name}» mỗi ${mins} phút · ${targets.length} máy`);
           } catch (e) {
-            flash(String(e));
+            flashError(e);
           }
         }}
       >

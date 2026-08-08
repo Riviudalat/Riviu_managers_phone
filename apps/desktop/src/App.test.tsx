@@ -2,6 +2,8 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
+import { resetConfirms } from "./confirmStore";
+import { resetToasts } from "./toastStore";
 
 vi.mock("./api", () => ({
   agentBulkRepair: vi.fn(async () => []),
@@ -35,7 +37,11 @@ vi.mock("./components/flow/FlowWorkspace", () => ({
   ),
 }));
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  resetConfirms();
+  resetToasts();
+});
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -44,7 +50,6 @@ beforeEach(() => {
 describe("Flow page integration", () => {
   it("prompts once before leaving a dirty Flow draft", async () => {
     const user = userEvent.setup();
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "Flow" }));
@@ -53,12 +58,18 @@ describe("Flow page integration", () => {
     );
     await user.click(screen.getByRole("button", { name: "Jobs" }));
 
-    expect(confirm).toHaveBeenCalledTimes(1);
+    // Declining the themed confirm keeps the draft open on the Flow page.
+    await user.click(await screen.findByRole("button", { name: "Ở lại" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
+    );
     expect(screen.getByText("Flow", { selector: ".topbar-title" })).toBeVisible();
 
-    confirm.mockReturnValue(true);
     await user.click(screen.getByRole("button", { name: "Jobs" }));
-    expect(screen.getByText("Jobs", { selector: ".topbar-title" })).toBeVisible();
+    await user.click(await screen.findByRole("button", { name: "Bỏ thay đổi" }));
+    await waitFor(() =>
+      expect(screen.getByText("Jobs", { selector: ".topbar-title" })).toBeVisible(),
+    );
   });
 
   it("keeps the legacy automation surface reachable", async () => {

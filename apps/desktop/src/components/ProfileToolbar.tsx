@@ -1,5 +1,6 @@
 import type { DeviceInfo } from "../types";
 import { IconChat, IconHeart, IconPhone, IconRefresh } from "./Icons";
+import { toastError } from "../toastStore";
 
 interface Props {
   selected: DeviceInfo[];
@@ -49,7 +50,7 @@ export function ProfileToolbar({
           try {
             await onStart();
           } catch (e) {
-            window.alert(String(e));
+            toastError("Khởi động thất bại", e);
           }
         }}
         title="Prepare / start stream (selected hoặc tất cả)"
@@ -74,7 +75,7 @@ export function ProfileToolbar({
           try {
             await onInstall();
           } catch (e) {
-            window.alert(String(e));
+            toastError("Sửa agent thất bại", e);
           }
         }}
         title="Cài / re-sign agent"
