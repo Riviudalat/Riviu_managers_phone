@@ -163,6 +163,12 @@ export interface DeviceGroup {
   createdAt: string;
 }
 
+export interface GroupInstallResult {
+  udid: string;
+  ok: boolean;
+  error?: string;
+}
+
 export interface ProxyConfig {
   id: string;
   name: string;

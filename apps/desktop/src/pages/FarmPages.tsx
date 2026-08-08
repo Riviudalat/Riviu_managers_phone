@@ -13,6 +13,7 @@ import {
   deleteSchedule,
   exampleScript,
   exportProxyConfig,
+  installIpaToGroup,
   installLibraryApp,
   listAppsLibrary,
   listGroups,
@@ -42,6 +43,7 @@ import type {
   AppLibraryItem,
   DeviceGroup,
   DeviceInfo,
+  GroupInstallResult,
   LocalUser,
   MaterialItem,
   OpLog,
@@ -409,12 +411,39 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
   const [path, setPath] = useState("");
   const [bundleId, setBundleId] = useState("");
   const [busy, setBusy] = useState(false);
+  const [groups, setGroups] = useState<DeviceGroup[]>([]);
+  const [groupId, setGroupId] = useState("");
+  const [groupResults, setGroupResults] = useState<GroupInstallResult[]>([]);
   const targets = targetsOf(selected, devices);
 
   const reload = () => listAppsLibrary().then(setItems).catch((e) => flash(String(e)));
   useEffect(() => {
     reload();
+    listGroups().then(setGroups).catch((e) => flash(String(e)));
   }, []);
+
+  const installToGroup = async (ipaPath: string) => {
+    if (!groupId) {
+      flash("Chọn một nhóm trước");
+      return;
+    }
+    setBusy(true);
+    setGroupResults([]);
+    try {
+      const results = await installIpaToGroup(groupId, ipaPath);
+      setGroupResults(results);
+      const failed = results.filter((r) => !r.ok).length;
+      flash(
+        failed
+          ? `Cài xong: ${results.length - failed} OK, ${failed} lỗi`
+          : `Đã cài lên ${results.length} máy trong nhóm`,
+      );
+    } catch (e) {
+      flash(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <div className="panel">
@@ -428,6 +457,19 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
         onClear={() => onSelectUdids([])}
         onSelectUdids={onSelectUdids}
       />
+      <div className="row" style={{ marginTop: 8 }}>
+        <label style={{ flex: 1 }}>
+          Cài hàng loạt theo nhóm
+          <select value={groupId} onChange={(e) => setGroupId(e.target.value)}>
+            <option value="">— chọn nhóm —</option>
+            {groups.map((g) => (
+              <option key={g.id} value={g.id}>
+                {g.name} ({g.udids.length} máy)
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
       <div className="row" style={{ marginTop: 8 }}>
         <input
           style={{ flex: 1 }}
@@ -505,6 +547,15 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
               </button>
               <button
                 type="button"
+                className="primary"
+                disabled={!groupId || busy}
+                title="Cài lên toàn bộ máy trong nhóm đã chọn (chạy phía backend)"
+                onClick={() => installToGroup(a.path)}
+              >
+                Cài → nhóm
+              </button>
+              <button
+                type="button"
                 className="ghost"
                 onClick={async () => {
                   await deleteAppLibrary(a.id);
@@ -518,6 +569,20 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
         ))}
         {!items.length && <p className="hint">Chưa có IPA — bấm «Chọn IPA…»</p>}
       </div>
+      {groupResults.length > 0 && (
+        <div className="job-list" style={{ marginTop: 12 }}>
+          <h4>Kết quả cài theo nhóm</h4>
+          {groupResults.map((r) => (
+            <article key={r.udid} className="job-card">
+              <div>
+                <span className="pill">{r.ok ? "✅ OK" : "❌ Lỗi"}</span>
+                <span className="mono">{r.udid.slice(0, 12)}</span>
+              </div>
+              {r.error && <p className="hint">{r.error}</p>}
+            </article>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

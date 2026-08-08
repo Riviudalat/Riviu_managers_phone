@@ -11,6 +11,7 @@ import type {
   DeviceGroup,
   DeviceInfo,
   DeviceMeta,
+  GroupInstallResult,
   ActionDefinition,
   CompiledRevision,
   FlowArtifactPayload,
@@ -69,6 +70,10 @@ export async function installIpa(udid: string, path: string) {
 
 export async function uninstallApp(udid: string, bundleId: string) {
   return invoke<void>("uninstall_app", { udid, bundleId });
+}
+
+export async function installIpaToGroup(groupId: string, path: string) {
+  return invoke<GroupInstallResult[]>("install_ipa_to_group", { groupId, path });
 }
 
 export async function screenshot(udid: string) {

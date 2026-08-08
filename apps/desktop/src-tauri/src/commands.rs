@@ -145,6 +145,76 @@ pub async fn install_ipa(
         .map_err(CommandError::from)
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupInstallResult {
+    pub udid: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Install one signed IPA onto every member of a device group.
+///
+/// Devices are processed one at a time: each takes its own exclusive Repair
+/// lease, installs, then releases before the next. A single device's failure is
+/// recorded and the batch continues, so one bad device never aborts the fleet.
+#[tauri::command]
+pub async fn install_ipa_to_group(
+    state: State<'_, AppState>,
+    group_id: String,
+    path: String,
+) -> Result<Vec<GroupInstallResult>, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+
+    let ipa = PathBuf::from(&path);
+    if !ipa.is_file() {
+        return Err(CommandError::invalid_argument(format!(
+            "IPA not found at {path}"
+        )));
+    }
+
+    let group = state
+        .db
+        .list_groups()
+        .map_err(CommandError::operation)?
+        .into_iter()
+        .find(|group| group.id == group_id)
+        .ok_or_else(|| {
+            CommandError::code("GroupNotFound", format!("group {group_id} not found"))
+        })?;
+
+    if group.udids.is_empty() {
+        return Err(CommandError::invalid_argument("group has no devices"));
+    }
+
+    let mut results = Vec::with_capacity(group.udids.len());
+    for udid in group.udids {
+        let outcome = async {
+            let context = state
+                .control
+                .try_acquire_exclusive(&udid, DeviceWorkOwner::Repair)
+                .await?;
+            state.control.install_app(&context, &ipa).await
+        }
+        .await;
+        results.push(match outcome {
+            Ok(()) => GroupInstallResult {
+                udid,
+                ok: true,
+                error: None,
+            },
+            Err(error) => GroupInstallResult {
+                udid,
+                ok: false,
+                error: Some(error.to_string()),
+            },
+        });
+    }
+
+    Ok(results)
+}
+
 #[tauri::command]
 pub async fn uninstall_app(
     state: State<'_, AppState>,
