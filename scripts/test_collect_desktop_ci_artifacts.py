@@ -562,6 +562,38 @@ class ArtifactContractTests(unittest.TestCase):
         # Property-change chatter is not what a reader needs.
         self.assertNotIn("Property change 200", summary)
 
+    def test_shallow_temp_dir_stays_far_from_the_max_path_ceiling(self):
+        # The deepest payload entry is ~135 characters of relative path, so the
+        # scratch root has to leave room for it under Windows' 260-char limit.
+        deep = Path(tempfile.gettempdir()) / ("nested" * 12)
+        with artifacts.shallow_temp_dir("rv-test-", deep) as temporary:
+            self.assertTrue(temporary.is_dir())
+            self.assertLess(len(str(temporary)), 60)
+            created = temporary
+
+        self.assertFalse(created.exists())
+
+    def test_shallow_temp_dir_falls_back_when_the_drive_root_is_closed(self):
+        real_mkdtemp = tempfile.mkdtemp
+
+        def deny_drive_root(*args, **kwargs):
+            # Refuse only the drive-root attempt; TemporaryDirectory needs the
+            # real mkdtemp for the fallback to work at all.
+            directory = kwargs.get("dir")
+            if directory is not None and Path(directory) == Path(Path(directory).anchor):
+                raise OSError("denied")
+            return real_mkdtemp(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as parent:
+            fallback_parent = Path(parent) / "fallback"
+            with patch.object(artifacts.tempfile, "mkdtemp", side_effect=deny_drive_root):
+                with artifacts.shallow_temp_dir("rv-test-", fallback_parent) as temporary:
+                    self.assertTrue(temporary.is_dir())
+                    # The fallback must still be usable, not silently skipped.
+                    self.assertTrue(
+                        str(temporary).startswith(str(fallback_parent))
+                    )
+
     def test_msi_log_absence_is_reported_rather_than_raising(self):
         with tempfile.TemporaryDirectory() as temporary:
             summary = artifacts.read_msi_log(Path(temporary) / "missing.log")

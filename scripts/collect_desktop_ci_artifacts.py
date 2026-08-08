@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 from dataclasses import dataclass
 import hashlib
 import json
@@ -528,6 +529,35 @@ MSI_LOG_ERROR_PATTERN = re.compile(
 )
 
 
+@contextlib.contextmanager
+def shallow_temp_dir(prefix: str, fallback_parent: Path):
+    """A scratch directory close to the drive root.
+
+    Windows still enforces MAX_PATH inside the installer, and the deepest file
+    in the payload — PyInstaller's vendored dist-info under the frozen runtime —
+    is long on its own. Rooted under `target/<triple>/release` the extraction
+    exceeded 260 characters and msiexec failed with 1320, even though a real
+    install into `C:\\Program Files\\...` has ~70 characters more headroom.
+    Falls back to the caller's directory where the drive root is not writable.
+    """
+    root = Path(f"{fallback_parent.drive}\\") if fallback_parent.drive else None
+    if root is not None:
+        try:
+            temporary = tempfile.mkdtemp(prefix=prefix, dir=root)
+        except OSError:
+            temporary = None
+        if temporary is not None:
+            try:
+                yield Path(temporary)
+            finally:
+                shutil.rmtree(temporary, ignore_errors=True)
+            return
+
+    fallback_parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=fallback_parent) as temporary:
+        yield Path(temporary)
+
+
 def read_msi_log(path: Path, *, keep: int = 24) -> str:
     """Summarise an msiexec verbose log for an error message.
 
@@ -826,10 +856,8 @@ def verify_windows_package(
         )
 
     bundle_dir.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(
-        prefix="desktop-msi-extract-", dir=bundle_dir.parent
-    ) as temporary:
-        extract_root = Path(temporary).resolve()
+    with shallow_temp_dir("rv-msi-", bundle_dir.parent) as temporary:
+        extract_root = temporary.resolve()
         # msiexec prints nothing; /L*v is the only way to learn why it refused.
         msi_log = extract_root / "msiexec-administrative.log"
         command = [
@@ -862,10 +890,9 @@ def verify_windows_package(
         )
     evidence["msiAdministrativeExtract"] = "PASS"
 
-    with tempfile.TemporaryDirectory(
-        prefix="desktop-nsis-install-", dir=bundle_dir.parent
-    ) as temporary:
-        install_root = (Path(temporary) / "installed").resolve()
+    # Same MAX_PATH exposure as the MSI extraction above.
+    with shallow_temp_dir("rv-nsis-", bundle_dir.parent) as temporary:
+        install_root = (temporary / "i").resolve()
         run_checked(
             [str(nsis_installers[0]), "/S", f"/D={install_root}"], timeout=300
         )
