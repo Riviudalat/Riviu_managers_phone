@@ -521,6 +521,16 @@ def find_installers(bundle_dir: Path, target: str) -> list[Path]:
     return installers
 
 
+def read_log_tail(path: Path, *, limit: int = 2000) -> str:
+    """Best-effort tail of a tool log; absence is itself worth reporting."""
+    try:
+        # msiexec writes UTF-16 on some locales; never let decoding mask the
+        # failure we are trying to explain.
+        return path.read_text(encoding="utf-8", errors="replace")[-limit:]
+    except OSError as error:
+        return f"<unreadable: {error}>"
+
+
 def run_checked(command: list[str], *, timeout: int = 120) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
@@ -534,8 +544,12 @@ def run_checked(command: list[str], *, timeout: int = 120) -> subprocess.Complet
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         stdout = getattr(error, "stdout", "") or ""
         stderr = getattr(error, "stderr", "") or ""
+        # msiexec reports everything through its exit code and writes nothing to
+        # either stream, so omitting the code left its failures undiagnosable.
+        code = getattr(error, "returncode", None)
+        detail = "timed out" if code is None else f"exit {code}"
         raise ArtifactError(
-            f"packaged artifact command failed: {command!r}; "
+            f"packaged artifact command failed ({detail}): {command!r}; "
             f"stdout={stdout[-1000:]!r}; stderr={stderr[-1000:]!r}"
         ) from error
 
@@ -791,14 +805,23 @@ def verify_windows_package(
         prefix="desktop-msi-extract-", dir=bundle_dir.parent
     ) as temporary:
         extract_root = Path(temporary).resolve()
+        # msiexec prints nothing; /L*v is the only way to learn why it refused.
+        msi_log = extract_root / "msiexec-administrative.log"
         command = [
             "msiexec.exe",
             "/a",
             str(msi_installers[0]),
             "/qn",
             f"TARGETDIR={extract_root}",
+            "/L*v",
+            str(msi_log),
         ]
-        run_checked(command, timeout=300)
+        try:
+            run_checked(command, timeout=300)
+        except ArtifactError as error:
+            raise ArtifactError(
+                f"{error}; msiexec log tail={read_log_tail(msi_log)!r}"
+            ) from error
         sidecars_roots = [
             path
             for path in extract_root.rglob("sidecars")
