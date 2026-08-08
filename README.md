@@ -20,7 +20,8 @@ mới.
 
 Bộ cài đã mang sẵn Python runtime, `pymobiledevice3==10.1.0` và
 `tidevice==0.12.11`; máy người dùng không cần cài Python hay pip. Trên Windows,
-installer tự tải WebView2 bootstrapper khi hệ điều hành chưa có.
+installer tự tải WebView2 bootstrapper khi hệ điều hành chưa có, và bản dựng
+link tĩnh CRT nên không cần cài Visual C++ Redistributable.
 
 Các prerequisite thuộc hệ điều hành/nhà cung cấp:
 
