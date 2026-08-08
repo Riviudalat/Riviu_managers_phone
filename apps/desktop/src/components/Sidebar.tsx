@@ -23,34 +23,34 @@ const MENU: {
     label: "Thường dùng",
     children: [
       { id: "control", label: "Quản lý cửa sổ" },
-      { id: "material", label: "Material" },
+      { id: "material", label: "Kho nội dung" },
     ],
   },
   {
     id: "discover",
     label: "Khám phá",
     children: [
-      { id: "apps", label: "App center" },
+      { id: "apps", label: "Trung tâm ứng dụng" },
       { id: "scripts", label: "Flow" },
       { id: "sync", label: "Đồng bộ cửa sổ" },
-      { id: "jobs", label: "Jobs" },
+      { id: "jobs", label: "Tác vụ" },
     ],
   },
   {
     id: "publish",
     label: "Xuất bản",
     children: [
-      { id: "publish", label: "Publish" },
-      { id: "data", label: "Data center" },
+      { id: "publish", label: "Đăng bài" },
+      { id: "data", label: "Dữ liệu" },
     ],
   },
   {
     id: "system",
     label: "Hệ thống",
     children: [
-      { id: "account", label: "Account" },
+      { id: "account", label: "Tài khoản" },
       { id: "api", label: "API" },
-      { id: "settings", label: "Settings" },
+      { id: "settings", label: "Cài đặt" },
     ],
   },
 ];

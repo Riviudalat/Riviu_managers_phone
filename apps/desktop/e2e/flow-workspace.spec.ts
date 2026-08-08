@@ -232,7 +232,7 @@ test("legacy scripts and jobs remain reachable", async ({ page }) => {
   await page.getByRole("tab", { name: "Legacy" }).click();
   await expect(page.getByRole("heading", { name: "Scripts" })).toBeVisible();
   await page.getByRole("button", { name: "Use in Jobs" }).first().click();
-  await expect(page.locator(".topbar-title", { hasText: "Jobs" })).toBeVisible();
+  await expect(page.locator(".topbar-title", { hasText: "Tác vụ" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Run script" })).toBeVisible();
 });
 

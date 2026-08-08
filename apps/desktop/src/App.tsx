@@ -58,18 +58,18 @@ const FlowWorkspace = lazy(async () => {
 
 const PAGE_TITLE: Partial<Record<PageId, string>> = {
   control: "Quản lý cửa sổ",
-  material: "Material",
-  apps: "App center",
+  material: "Kho nội dung",
+  apps: "Trung tâm ứng dụng",
   scripts: "Flow",
-  jobs: "Jobs",
+  jobs: "Tác vụ",
   sync: "Đồng bộ cửa sổ",
-  publish: "Publish",
-  data: "Data center",
-  account: "Account",
+  publish: "Đăng bài",
+  data: "Dữ liệu",
+  account: "Tài khoản",
   api: "API",
-  settings: "Settings",
-  login: "Login",
-  register: "Register",
+  settings: "Cài đặt",
+  login: "Đăng nhập",
+  register: "Đăng ký",
 };
 
 function App() {

@@ -56,7 +56,7 @@ describe("Flow page integration", () => {
     await user.click(
       await screen.findByRole("button", { name: "Mark fixture dirty" }),
     );
-    await user.click(screen.getByRole("button", { name: "Jobs" }));
+    await user.click(screen.getByRole("button", { name: "Tác vụ" }));
 
     // Declining the themed confirm keeps the draft open on the Flow page.
     await user.click(await screen.findByRole("button", { name: "Ở lại" }));
@@ -65,10 +65,10 @@ describe("Flow page integration", () => {
     );
     expect(screen.getByText("Flow", { selector: ".topbar-title" })).toBeVisible();
 
-    await user.click(screen.getByRole("button", { name: "Jobs" }));
+    await user.click(screen.getByRole("button", { name: "Tác vụ" }));
     await user.click(await screen.findByRole("button", { name: "Bỏ thay đổi" }));
     await waitFor(() =>
-      expect(screen.getByText("Jobs", { selector: ".topbar-title" })).toBeVisible(),
+      expect(screen.getByText("Tác vụ", { selector: ".topbar-title" })).toBeVisible(),
     );
   });
 
