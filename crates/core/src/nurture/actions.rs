@@ -1853,6 +1853,54 @@ mod tests {
         );
     }
 
+    /// The photo-post test the page dots could not carry.
+    ///
+    /// A photo post publishes byte-identical frames because nothing moves. A
+    /// video cannot: the stream re-encodes every frame at 24 FPS and does not
+    /// deduplicate, which is the same fact that made the old swipe check
+    /// worthless and makes this one work.
+    #[tokio::test]
+    async fn a_card_whose_frames_never_change_reads_as_a_still_post() {
+        let stop = Arc::new(AtomicBool::new(false));
+        // The same frame handed back for the whole window.
+        let frames = Arc::new(ScriptedFrames::new(&[FEED]));
+        let (engine, db_path) = test_engine_from(frames);
+
+        assert!(engine.card_is_still(UDID, stop.as_ref()).await);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn a_card_whose_frames_change_is_not_a_still_post() {
+        // Three frames of one *playing* card. They differ, which is exactly why
+        // they cannot be a photo post — and why they were useless as proof of a
+        // swipe.
+        let stop = Arc::new(AtomicBool::new(false));
+        let frames = Arc::new(ScriptedFrames::new(&[
+            SAME_CARD[0],
+            SAME_CARD[1],
+            SAME_CARD[2],
+        ]));
+        let (engine, db_path) = test_engine_from(frames);
+
+        assert!(!engine.card_is_still(UDID, stop.as_ref()).await);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn a_stopped_session_never_reports_a_still_card() {
+        let stop = Arc::new(AtomicBool::new(true));
+        let frames = Arc::new(ScriptedFrames::new(&[FEED]));
+        let (engine, db_path) = test_engine_from(frames);
+
+        assert!(
+            !engine.card_is_still(UDID, stop.as_ref()).await,
+            "a stop must not be reported as a still card, or the session would \
+             start a horizontal swipe on its way out"
+        );
+        let _ = std::fs::remove_file(db_path);
+    }
+
     #[tokio::test]
     async fn a_follow_is_not_confirmed_on_a_non_feed_frame() {
         // The real feed fixture shows a red follow badge; tapping follow flips

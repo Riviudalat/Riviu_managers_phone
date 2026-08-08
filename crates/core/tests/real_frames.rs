@@ -506,6 +506,41 @@ fn a_real_live_room_is_recognised_and_the_feed_is_not() {
     }
 }
 
+/// A photo carousel and a video with big caption text are the same thing to a
+/// single frame, and pretending otherwise cost more than it paid.
+///
+/// `feed-photo-carousel.jpg` is a real photo post — "Ảnh" badge, eight page
+/// dots, a "1 / 8" counter. `feed-caption-text.jpg` is an ordinary video whose
+/// caption is large white text in the same band. The removed detector called
+/// the second one a carousel and the first one a video; across 40 captured
+/// cards it scored one true positive against nine false ones and missed three
+/// photo posts.
+///
+/// Both must now classify as an ordinary feed card, because that is the honest
+/// answer from one frame, and because the horizontal swipe a carousel verdict
+/// authorises navigates *away from the feed* when it is wrong. What actually
+/// separates them is that the photo post does not change between frames.
+#[test]
+fn a_photo_post_and_a_caption_heavy_video_are_both_ordinary_feed_cards() {
+    for name in ["feed-photo-carousel.jpg", "feed-caption-text.jpg"] {
+        let img = load(name);
+        assert_eq!(
+            screen::feed_card_kind(&img),
+            screen::FeedCardKind::Video,
+            "{name} must read as an ordinary card; single-frame carousel \
+             detection was removed because it was wrong nine times in ten"
+        );
+        assert!(
+            screen::feed_ready(&img, Some(LOGICAL_W)),
+            "{name} is still an actionable feed card"
+        );
+        assert!(
+            screen::locate_action_rail(&img).is_some(),
+            "{name} still has a locatable rail"
+        );
+    }
+}
+
 /// The saturation guard must not fire on the frame the swipe check depends on.
 ///
 /// `rail_column_saturated` exists so one washed-out video frame cannot be read
@@ -673,6 +708,35 @@ fn the_glyph_chain_overrules_a_badge_the_video_faked() {
         "the chain must win: like landed at {:.1} px",
         arbitrated.like_y * height
     );
+}
+
+/// The chain reading is bounded by where the rail can actually be.
+///
+/// A live run located a rail with the heart at 199 pt on a frame still
+/// animating after a back gesture — 115 pt above the real one, and with no
+/// follow badge present to contradict it, so the arbitration above had nothing
+/// to weigh it against. Every genuine capture in this fixture set puts the
+/// heart within a few points of 0.47 of the frame; a chain outside the two
+/// known layouts by more than half an icon is some other row of bright things.
+#[test]
+fn a_located_rail_always_lands_where_the_rail_can_be() {
+    let mut checked = 0;
+    for (name, img) in feed_frames()
+        .into_iter()
+        .chain(same_card_frames())
+        .chain([("feed-photo-carousel.jpg", load("feed-photo-carousel.jpg"))])
+    {
+        let Some(rail) = screen::locate_action_rail(&img) else {
+            continue;
+        };
+        checked += 1;
+        assert!(
+            (0.38..=0.55).contains(&rail.like_y),
+            "{name}: like at {:.3} of the frame, outside anywhere the rail sits",
+            rail.like_y
+        );
+    }
+    assert!(checked >= 5, "only {checked} frames had a locatable rail");
 }
 
 /// A two-glyph chain does not outrank the badge. On `feed-heart-liked.jpg` the

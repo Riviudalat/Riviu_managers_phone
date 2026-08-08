@@ -208,10 +208,7 @@ async fn main() -> anyhow::Result<()> {
                             let ms = start.elapsed().as_millis();
                             let rail = screen::rail_icons_present(&img);
                             let card = screen::feed_card_kind(&img);
-                            let settled = matches!(
-                                card,
-                                screen::FeedCardKind::Video | screen::FeedCardKind::PhotoCarousel
-                            );
+                            let settled = card == screen::FeedCardKind::Video;
                             if !rail && rail_gone_at.is_none() {
                                 rail_gone_at = Some(ms);
                             }

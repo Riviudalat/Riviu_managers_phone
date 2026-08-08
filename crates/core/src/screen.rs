@@ -324,6 +324,15 @@ fn rail_from_icon_chain(img: &RgbImage) -> Option<RailReading> {
         } else {
             (centres[0], centres[1])
         };
+    // The rail is a fixed control, not something that can be anywhere. A chain
+    // claiming the heart is half an icon outside both known layouts is some
+    // other row of bright things — measured live at 199 pt against a real 314,
+    // on a frame still animating after a back gesture, where no follow badge
+    // existed to contradict it. The tap missed by 115 pt.
+    if !(LIKE_Y_LAYOUT1 - RAIL_LIKE_Y_SLACK..=LIKE_Y_LAYOUT2 + RAIL_LIKE_Y_SLACK).contains(&like_y)
+    {
+        return None;
+    }
     Some(RailReading {
         rail: ActionRail {
             x: RAIL_X,
@@ -348,6 +357,13 @@ const RAIL_CHAIN_OUTRANKS_BADGE: usize = 3;
 /// pitch is where a tap lands on the neighbouring button, so a quarter leaves a
 /// full icon of margin.
 const RAIL_AGREEMENT_PITCH_FRACTION: f64 = 0.25;
+/// Where the like heart sits under each known layout, and how far outside that
+/// span a chain-derived reading may still be believed. Half an icon pitch is
+/// the point at which a tap lands on the neighbouring button, so it is the
+/// widest slack that can still be called the same control.
+const LIKE_Y_LAYOUT1: f64 = FOLLOW_Y_LAYOUT1 + FOLLOW_TO_LIKE;
+const LIKE_Y_LAYOUT2: f64 = FOLLOW_Y_LAYOUT2 + FOLLOW_TO_LIKE;
+const RAIL_LIKE_Y_SLACK: f64 = 40.0 / 667.0;
 /// Vertical gap between neighbouring rail icons, in screen fractions. Measured
 /// 65–69 logical points; the window is widened to absorb JPEG blur.
 const RAIL_ICON_PITCH: (f64, f64) = (55.0 / 667.0, 80.0 / 667.0);
@@ -550,11 +566,23 @@ pub struct ScreenObservation {
 
 /// Kind of feed card currently visible. This is intentionally conservative:
 /// uncertain cards are treated as ordinary video and the engine only performs
-/// a photo/LIVE-specific gesture after a positive visual marker.
+/// a LIVE-specific gesture after a positive visual marker.
+///
+/// There is deliberately no `PhotoCarousel` here. There was, keyed on the page
+/// dots, and measured against 40 real cards it fired on 10 of them: one photo
+/// post and nine videos, while missing three photo posts. The dots cannot carry
+/// it — six of the seven are dim grey at ~50% opacity over the photo, so on a
+/// real capture only the *active* dot clears any brightness threshold, and every
+/// rule tried in their place (evenly spaced local maxima; uniform-width evenly
+/// spaced blobs) matched caption text instead, at 19 false positives out of 36.
+/// A line of same-size letters at a fixed font is exactly a row of evenly spaced
+/// uniform blobs.
+///
+/// What separates a photo post from a video is not on any single frame: the
+/// photo post does not change. See `NurtureEngine::card_is_still`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FeedCardKind {
     Video,
-    PhotoCarousel,
     LivePreview,
     TransitionOrUnknown,
 }
@@ -977,54 +1005,12 @@ fn live_preview_label_present(img: &RgbImage) -> bool {
     total > 0 && hits as f64 / total as f64 >= 0.035
 }
 
-/// Detect the small page indicator used by TikTok photo posts. We require a
-/// stable row of at least three bright blobs and a real rail; a plain video
-/// highlight or transition therefore remains `Video`/`TransitionOrUnknown`.
-fn photo_indicator_present(img: &RgbImage) -> bool {
-    let (w, h) = (img.width(), img.height());
-    let y0 = (0.67 * h as f64) as u32;
-    let y1 = (0.82 * h as f64) as u32;
-    let x0 = (0.28 * w as f64) as u32;
-    let x1 = (0.72 * w as f64) as u32;
-    let mut runs = 0usize;
-    let mut in_run = false;
-    for x in x0..x1 {
-        let mut bright = 0u32;
-        let mut count = 0u32;
-        for y in (y0..y1).step_by(3) {
-            let p = img.get_pixel(x, y).0;
-            count += 1;
-            if p[0] > 205 && p[1] > 205 && p[2] > 205 {
-                bright += 1;
-            }
-        }
-        let hit = count > 0 && bright as f64 / count as f64 > 0.32;
-        match (hit, in_run) {
-            (true, false) => {
-                in_run = true;
-            }
-            (false, true) => {
-                runs += 1;
-                in_run = false;
-            }
-            _ => {}
-        }
-    }
-    if in_run {
-        runs += 1;
-    }
-    runs >= 3
-}
-
 pub fn feed_card_kind(img: &RgbImage) -> FeedCardKind {
     if !compose_bar_visible(img).0 {
         return FeedCardKind::TransitionOrUnknown;
     }
     if live_preview_label_present(img) && !rail_icons_present(img) {
         return FeedCardKind::LivePreview;
-    }
-    if rail_icons_present(img) && photo_indicator_present(img) {
-        return FeedCardKind::PhotoCarousel;
     }
     if !rail_icons_present(img) {
         return FeedCardKind::TransitionOrUnknown;

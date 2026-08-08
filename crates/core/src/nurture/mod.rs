@@ -88,6 +88,12 @@ const OFF_FEED_BACK_ATTEMPTS: u32 = 3;
 /// clearing, short enough that a card which simply eats gestures cannot consume
 /// the run.
 const BLOCKED_SWIPE_LIMIT: u32 = 3;
+/// Samples that must all be byte-identical for a card to count as a still post,
+/// and the gap between them. Three samples across 1.2 s: long enough that a
+/// video's motion shows up, short enough to sit inside the watch the loop
+/// already performs on every card.
+const STILL_CARD_SAMPLES: u32 = 3;
+const STILL_CARD_GAP: Duration = Duration::from_millis(400);
 const TEXT_NOT_ARMED_REFRESH_THRESHOLD: u8 = 2;
 /// Give the frame watcher time to close overlays that were already visible
 /// when TikTok came foreground before the first feed gesture is sent.
@@ -307,13 +313,12 @@ impl NurtureEngine {
                             // advance this check replaced.
                             left = !screen::rail_icons_present(&img)
                                 && !screen::rail_column_saturated(&img);
-                        } else if matches!(
-                            screen::feed_card_kind(&img),
-                            screen::FeedCardKind::Video | screen::FeedCardKind::PhotoCarousel
-                        ) {
-                            // Both kinds require the compose bar *and* an icon
+                        } else if screen::feed_card_kind(&img) == screen::FeedCardKind::Video {
+                            // `Video` requires the compose bar *and* an icon
                             // chain, so this is a feed card that has finished
                             // moving — not a LIVE room, alert or transition.
+                            // Photo posts land here too: they are `Video` to
+                            // this classifier, and settling is all that matters.
                             return SwipeOutcome::Advanced;
                         }
                     }
@@ -900,10 +905,14 @@ impl NurtureEngine {
                     }
                     continue;
                 }
-                screen::FeedCardKind::PhotoCarousel => {
+                screen::FeedCardKind::TransitionOrUnknown => {
+                    report(&mut status, "khung đang chuyển — chờ frame ổn định".into());
+                    sleep_interruptible(Duration::from_millis(700), &stop).await;
+                }
+                screen::FeedCardKind::Video if self.card_is_still(udid, &stop).await => {
                     report(
                         &mut status,
-                        "gặp bài ảnh — xem vài ảnh rồi vuốt ngang".into(),
+                        "gặp bài ảnh (khung đứng yên) — xem vài ảnh rồi vuốt ngang".into(),
                     );
                     let card_digest = self
                         .frames
@@ -925,15 +934,31 @@ impl NurtureEngine {
                             )
                             .await;
                         // A horizontal swipe only turns a page while the card
-                        // really is a carousel; on anything else TikTok reads it
-                        // as navigation and leaves the feed. Both times a live
-                        // run wandered off the FYP it was immediately after this
-                        // branch, so stop sliding the moment the feed is gone
-                        // rather than swiping deeper into wherever we landed.
+                        // really is a photo post; on anything else TikTok reads
+                        // it as navigation and leaves the feed. Both times a
+                        // live run wandered off the FYP it was immediately after
+                        // this branch. Stillness is strong evidence but not
+                        // proof, so the branch checks its own work and undoes
+                        // it — the back gesture is what leaves a detail page.
                         if !self.on_feed(udid, screen_size.0) {
+                            report(&mut status, "vuốt ngang đã rời feed — lùi lại".into());
+                            let back = self
+                                .escape_to_feed(
+                                    udid,
+                                    session.as_ref(),
+                                    &gestures,
+                                    screen_size,
+                                    OFF_FEED_BACK_ATTEMPTS,
+                                    &stop,
+                                )
+                                .await;
                             report(
                                 &mut status,
-                                "vuốt ngang đã rời khỏi feed — dừng xem ảnh".into(),
+                                if back {
+                                    "đã lùi về FYP".into()
+                                } else {
+                                    "lùi chưa về được FYP".to_string()
+                                },
                             );
                             break;
                         }
@@ -944,10 +969,6 @@ impl NurtureEngine {
                             rail_present = true;
                         }
                     }
-                }
-                screen::FeedCardKind::TransitionOrUnknown => {
-                    report(&mut status, "khung đang chuyển — chờ frame ổn định".into());
-                    sleep_interruptible(Duration::from_millis(700), &stop).await;
                 }
                 screen::FeedCardKind::Video => {}
             }
@@ -1575,6 +1596,39 @@ impl NurtureEngine {
             .await?;
         sleep_interruptible(Duration::from_millis(2_000), stop).await;
         Ok(true)
+    }
+
+    /// Is this card a still post rather than a playing video?
+    ///
+    /// This is what tells a photo carousel from a video, and it is the only
+    /// thing measured that does. A photo post publishes byte-identical frames
+    /// because nothing on screen moves; a video cannot, since the stream
+    /// re-encodes every frame at 24 FPS with no deduplication — the same fact
+    /// that made the old swipe check useless is what makes this reliable.
+    ///
+    /// Measured over 40 real cards: 4 came back still, at least three of them
+    /// confirmed photo posts by eye (page dots and the "Ảnh" badge), and none
+    /// of the 36 videos did. The page-dot detector this replaces scored 1 true
+    /// positive against 9 false ones on the same cards.
+    ///
+    /// Only a video that holds a perfectly static frame for the whole window
+    /// can pass, and the caller still has to survive being wrong — a horizontal
+    /// swipe on a video navigates away from the feed.
+    async fn card_is_still(&self, udid: &str, stop: &AtomicBool) -> bool {
+        let Some(first) = self.frames.latest(udid).map(|f| frame_digest(&f)) else {
+            return false;
+        };
+        for _ in 0..STILL_CARD_SAMPLES {
+            sleep_interruptible(STILL_CARD_GAP, stop).await;
+            if stop.load(Ordering::Relaxed) {
+                return false;
+            }
+            match self.frames.latest(udid).map(|f| frame_digest(&f)) {
+                Some(next) if next == first => {}
+                _ => return false,
+            }
+        }
+        true
     }
 
     /// Try to get back to the FYP from wherever the session has ended up.
