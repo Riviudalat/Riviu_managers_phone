@@ -104,6 +104,24 @@ describe("Flow editor reducer", () => {
     ).toBe(initial);
   });
 
+  it("keeps pan and zoom out of the draft's dirty and compiled state", () => {
+    // React Flow emits a move as soon as the canvas mounts. Treating that as an
+    // edit marked an untouched flow dirty, which blocks Run (`canRun` wants a
+    // clean draft) and prompts to discard changes the operator never made.
+    const clean = initialEditorState(newFlowDocument("Fixture"), false);
+    const panned = reduceFlowEditor(clean, {
+      type: "setViewport",
+      viewport: { x: 120, y: -40, zoom: 1.5 },
+    });
+
+    expect(panned).not.toBe(clean);
+    expect(panned.document.viewport).toEqual({ x: 120, y: -40, zoom: 1.5 });
+    expect(panned.dirty).toBe(false);
+    // A view change is not an edit: no history entry, no compile invalidation.
+    expect(panned.past).toEqual(clean.past);
+    expect(panned.documentEpoch).toBe(clean.documentEpoch);
+  });
+
   it("invalidates compilation on every edit and ignores an old validation result", () => {
     const initial = initialEditorState(newFlowDocument("Fixture"));
     const identity: DocumentRequestIdentity = {

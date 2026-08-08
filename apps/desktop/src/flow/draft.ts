@@ -126,9 +126,14 @@ export function reduceFlowEditor(
         ? state
         : mutate(state, { ...state.document, name: action.name });
     case "setViewport":
+      // Panning and zooming is a view preference, not an edit. Routing it
+      // through mutate() marked a freshly opened flow dirty (React Flow emits
+      // a move on mount), which blocked Run — `canRun` requires a clean draft —
+      // prompted to discard changes nobody made, and threw away the compiled
+      // plan. The new viewport rides along with the next real edit's save.
       return finiteViewport(action.viewport) &&
           !sameViewport(action.viewport, state.document.viewport)
-        ? mutate(state, { ...state.document, viewport: { ...action.viewport } })
+        ? { ...state, document: { ...state.document, viewport: { ...action.viewport } } }
         : state;
     case "moveNode": {
       if (!Number.isFinite(action.position.x) || !Number.isFinite(action.position.y)) return state;

@@ -228,7 +228,12 @@ export function FlowWorkspace({
       );
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [state.document, state.documentEpoch]);
+    // Keyed on the document's semantic version, not its object identity.
+    // documentEpoch is bumped by every real edit, while panning the canvas
+    // replaces the document object without changing what compiles — watching
+    // identity restarted validation on each pan and discarded the in-flight
+    // result (its requestId no longer matched), leaving compiled null.
+  }, [state.documentEpoch]);
 
   const compiled = isCompilationCurrent(state) ? state.compiled?.value ?? null : null;
   const selectedNode = state.document.nodes.find((node) => node.id === state.selectedNodeId) ?? null;
