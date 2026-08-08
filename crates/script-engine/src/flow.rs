@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use riviu_core::{
-    canonical_compiled_plan_json, compiled_plan_sha256, contracts, release_one_catalog,
-    validate_artifact_label, ActionDefinition, ActionKind, AutomationScript, CanvasPoint,
-    CompiledActionConfig, CompiledFlowNode, CompiledFlowPlanV2, CompiledTapTarget, ContextPlan,
-    EvidenceKind, EvidenceRequirement, EvidenceSpec, FlowDocumentV2, FlowEdge, FlowNode,
-    FlowViewport, ImageCoordinateTarget, NodeId, QualifiedElementLocator, ResourceClass,
-    ScriptAction, FLOW_SCHEMA_VERSION,
+    canonical_compiled_plan_json, compiled_plan_sha256, contracts, decode_vision_template,
+    release_one_catalog, validate_artifact_label, validate_vision_region, ActionDefinition,
+    ActionKind, AutomationScript, CanvasPoint, CompiledActionConfig, CompiledFlowNode,
+    CompiledFlowPlanV2, CompiledTapTarget, ContextPlan, EvidenceKind, EvidenceRequirement,
+    EvidenceSpec, FlowDocumentV2, FlowEdge, FlowNode, FlowViewport, ImageCoordinateTarget, NodeId,
+    QualifiedElementLocator, ResourceClass, ScriptAction, VisionRegion, FLOW_SCHEMA_VERSION,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -109,6 +109,15 @@ struct ScreenshotConfig {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AssertVisibleConfig {
     accessibility_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TapVisionConfig {
+    template_png_base64: String,
+    threshold: f64,
+    #[serde(default)]
+    region: Option<VisionRegion>,
 }
 
 pub fn compile_flow(
@@ -533,6 +542,26 @@ fn compile_config(kind: ActionKind, value: &Value) -> Result<CompiledActionConfi
                 accessibility_id: config.accessibility_id,
             })
         }
+        ActionKind::TapVision => {
+            let config = decode::<TapVisionConfig>(value)?;
+            if !config.threshold.is_finite() || !(0.0..=1.0).contains(&config.threshold) {
+                return Err(ConfigError::range(
+                    "threshold",
+                    "threshold must be in 0.0..=1.0",
+                ));
+            }
+            decode_vision_template(&config.template_png_base64)
+                .map_err(|message| ConfigError::range("templatePngBase64", message))?;
+            if let Some(region) = &config.region {
+                validate_vision_region(region)
+                    .map_err(|message| ConfigError::range("region", message))?;
+            }
+            Ok(CompiledActionConfig::TapVision {
+                template_png_base64: config.template_png_base64,
+                threshold: config.threshold,
+                region: config.region,
+            })
+        }
         ActionKind::RawHttp | ActionKind::RawWda | ActionKind::Shell => {
             Err(ConfigError::invalid("raw actions are not enabled"))
         }
@@ -682,6 +711,7 @@ fn validate_evidence(
         ) => text == value && read_back_locator == locator,
         (ActionKind::Screenshot, _, EvidenceSpec::ArtifactDecodedAndHashed)
         | (ActionKind::Tap, _, EvidenceSpec::FrameRegionChanged { .. })
+        | (ActionKind::TapVision, _, EvidenceSpec::FrameRegionChanged { .. })
         | (ActionKind::Swipe, _, EvidenceSpec::FrameDigestChanged { .. }) => true,
         _ => false,
     };
@@ -1153,6 +1183,54 @@ mod tests {
         );
     }
 
+    /// A valid 2x2 RGB PNG, base64-encoded (correct CRCs; decodes in the `image`
+    /// crate, which validates chunk CRCs strictly).
+    const PNG_1X1: &str =
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP8zwACTGCSAQANHQEDgslx/wAAAABJRU5ErkJggg==";
+
+    fn tap_vision_node(template: &str, threshold: f64) -> FlowNode {
+        let mut node = FlowNode::new(
+            ActionKind::TapVision,
+            json!({ "templatePngBase64": template, "threshold": threshold }),
+        );
+        node.postcondition = Some(EvidenceSpec::FrameRegionChanged {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            minimum_distance: 1,
+        });
+        node
+    }
+
+    #[test]
+    fn tap_vision_compiles_a_valid_template_and_rejects_bad_config() {
+        let ok = linear_document(vec![
+            start(),
+            launch("com.apple.Preferences"),
+            tap_vision_node(PNG_1X1, 0.85),
+            end(),
+        ]);
+        assert!(compile(&ok).is_ok(), "valid tap vision must compile");
+
+        let bad_threshold = linear_document(vec![
+            start(),
+            launch("com.apple.Preferences"),
+            tap_vision_node(PNG_1X1, 1.5),
+            end(),
+        ]);
+        assert_error(&bad_threshold, "ConfigOutOfRange");
+
+        // Valid base64 ("not-a-png") that is not a PNG must be rejected.
+        let bad_template = linear_document(vec![
+            start(),
+            launch("com.apple.Preferences"),
+            tap_vision_node("bm90LWEtcG5n", 0.85),
+            end(),
+        ]);
+        assert_error(&bad_template, "ConfigOutOfRange");
+    }
+
     #[test]
     fn valid_start_launch_end_compiles_to_typed_nodes() {
         let document = linear_document(vec![start(), launch("com.apple.Preferences"), end()]);
@@ -1521,6 +1599,10 @@ mod tests {
             (
                 ActionKind::AssertVisible,
                 json!({ "accessibilityId": "Button" }),
+            ),
+            (
+                ActionKind::TapVision,
+                json!({ "templatePngBase64": "aGVsbG8=", "threshold": 0.85 }),
             ),
         ];
 
@@ -2028,6 +2110,16 @@ mod tests {
                 linear_document(vec![start(), launch("com.apple.Preferences"), node, end()])
             }
             ActionKind::AssertVisible => {
+                linear_document(vec![start(), launch("com.apple.Preferences"), node, end()])
+            }
+            ActionKind::TapVision => {
+                node.postcondition = Some(EvidenceSpec::FrameRegionChanged {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                    minimum_distance: 1,
+                });
                 linear_document(vec![start(), launch("com.apple.Preferences"), node, end()])
             }
             ActionKind::TerminateApp

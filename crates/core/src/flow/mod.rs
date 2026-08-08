@@ -81,6 +81,7 @@ mod tests {
                 ActionKind::Screenshot,
                 ActionKind::Home,
                 ActionKind::AssertVisible,
+                ActionKind::TapVision,
             ]
         );
         assert!(catalog.iter().all(|entry| !matches!(

@@ -8,12 +8,12 @@ use uuid::Uuid;
 
 use super::{
     capture_baseline, capture_process_baseline, compiled_plan_sha256, contracts,
-    decode_and_hash_artifact, evaluate_postcondition, qualified_geometry_profile_id,
-    verify_process_absence, ActionKind, CompiledActionConfig, CompiledFlowNode, CompiledFlowPlanV2,
-    CompiledTapTarget, EvidenceBaseline, EvidenceError, EvidenceSpec, FlowArtifactRecord,
-    FlowArtifactStore, FlowAttemptState, FlowCancellation, FlowCapabilitySnapshot,
-    FlowContextReleaseProof, FlowDeviceContext, FlowDeviceRunState, FlowErrorRecord,
-    FlowPreflightScope, NodeId, SideEffectClass,
+    decode_and_hash_artifact, decode_vision_template, evaluate_postcondition,
+    qualified_geometry_profile_id, verify_process_absence, ActionKind, CompiledActionConfig,
+    CompiledFlowNode, CompiledFlowPlanV2, CompiledTapTarget, EvidenceBaseline, EvidenceError,
+    EvidenceSpec, FlowArtifactRecord, FlowArtifactStore, FlowAttemptState, FlowCancellation,
+    FlowCapabilitySnapshot, FlowContextReleaseProof, FlowDeviceContext, FlowDeviceRunState,
+    FlowErrorRecord, FlowPreflightScope, NodeId, SideEffectClass,
 };
 use crate::db::{AttemptTransitionPatch, Database};
 use crate::{
@@ -1451,6 +1451,115 @@ impl FlowExecutor {
                     ));
                 }
                 Ok(ActionOutput::None)
+            }
+            (
+                ActionKind::TapVision,
+                CompiledActionConfig::TapVision {
+                    template_png_base64,
+                    threshold,
+                    region,
+                },
+            ) => {
+                let session = context
+                    .session(&self.deps.control)
+                    .map_err(FlowExecutionError::device)?;
+                let generation = context.generation();
+                let frame = self
+                    .deps
+                    .frames
+                    .latest_in_generation(&self.deps.udid, generation)
+                    .ok_or_else(|| {
+                        ActionDispatchFailure::non_delivery(FlowExecutionError::new(
+                            "StaleGeneration",
+                            "no frame exists in the owned stream generation",
+                        ))
+                    })?;
+                let scene = image::load_from_memory(&frame.bytes)
+                    .map_err(|error| {
+                        ActionDispatchFailure::non_delivery(FlowExecutionError::new(
+                            "VisionDecode",
+                            format!("decode live frame: {error}"),
+                        ))
+                    })?
+                    .to_rgb8();
+                // Re-check the generation didn't flip while decoding — same guard
+                // validate_geometry uses for the compiled-coordinate path.
+                if self
+                    .deps
+                    .frames
+                    .latest_in_generation(&self.deps.udid, generation)
+                    .is_none()
+                {
+                    return Err(ActionDispatchFailure::non_delivery(
+                        FlowExecutionError::new(
+                            "StaleGeneration",
+                            "stream generation changed while decoding the vision frame",
+                        ),
+                    ));
+                }
+                let template = decode_vision_template(template_png_base64).map_err(|message| {
+                    ActionDispatchFailure::non_delivery(FlowExecutionError::new(
+                        "VisionTemplate",
+                        message,
+                    ))
+                })?;
+                let (frame_w, frame_h) = (scene.width(), scene.height());
+                // Optional ROI (screen fractions) → pixel box; match center maps
+                // back to full-frame pixel space for tap_image.
+                let (offset_x, offset_y, haystack) = match region {
+                    Some(roi) => {
+                        let to_px = |value: f64, span: u32| {
+                            (value * f64::from(span))
+                                .round()
+                                .clamp(0.0, f64::from(span)) as u32
+                        };
+                        let x0 = to_px(roi.x0, frame_w);
+                        let y0 = to_px(roi.y0, frame_h);
+                        let x1 = to_px(roi.x1, frame_w);
+                        let y1 = to_px(roi.y1, frame_h);
+                        let (width, height) = (x1.saturating_sub(x0), y1.saturating_sub(y0));
+                        if width == 0 || height == 0 {
+                            return Err(ActionDispatchFailure::deterministic_read(
+                                FlowExecutionError::new(
+                                    "VisionRegion",
+                                    "search region is empty at the live frame size",
+                                ),
+                            ));
+                        }
+                        let cropped =
+                            image::imageops::crop_imm(&scene, x0, y0, width, height).to_image();
+                        (f64::from(x0), f64::from(y0), cropped)
+                    }
+                    None => (0.0, 0.0, scene),
+                };
+                let haystack_gray = crate::screen_match::to_gray(&haystack);
+                let needle_gray = crate::screen_match::to_gray(&template);
+                match crate::screen_match::find_template(&haystack_gray, &needle_gray) {
+                    Some(matched) if matched.score >= *threshold => {
+                        session
+                            .tap_image(
+                                offset_x + matched.cx,
+                                offset_y + matched.cy,
+                                f64::from(frame_w),
+                                f64::from(frame_h),
+                            )
+                            .await
+                            .map_err(FlowExecutionError::other)?;
+                        Ok(ActionOutput::None)
+                    }
+                    other => {
+                        let best = other.map_or(0.0, |matched| matched.score);
+                        Err(ActionDispatchFailure::deterministic_read(
+                            FlowExecutionError::new(
+                                "VisionNotFound",
+                                format!(
+                                    "template not found (best score {best:.3} < threshold {:.3})",
+                                    *threshold
+                                ),
+                            ),
+                        ))
+                    }
+                }
             }
             _ => Err(FlowExecutionError::new(
                 "CompiledPlanCorrupt",

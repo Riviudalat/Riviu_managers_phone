@@ -39,6 +39,8 @@ export function defaultConfigForAction(kind: ActionKind): JsonObject {
       return { label: "screenshot", format: "jpeg" };
     case "assertVisible":
       return { accessibilityId: "" };
+    case "tapVision":
+      return { templatePngBase64: "", threshold: 0.85 };
     case "rawHttp":
     case "rawWda":
     case "shell":

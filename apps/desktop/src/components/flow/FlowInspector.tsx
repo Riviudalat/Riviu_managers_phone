@@ -15,6 +15,7 @@ import type {
 import { flowCoordinateFrame } from "../../api";
 import { acceptFiniteValueAsNumber } from "../../flow/validation";
 import { FlowCoordinatePicker } from "./FlowCoordinatePicker";
+import { FlowVisionCapture } from "./FlowVisionCapture";
 
 interface JsonSchema {
   type: "object" | "string" | "number" | "integer" | "boolean";
@@ -640,6 +641,7 @@ export function FlowInspector({
   } | null>(null);
   const [pickerError, setPickerError] = useState<string | null>(null);
   const [pickerLoading, setPickerLoading] = useState(false);
+  const [visionFrame, setVisionFrame] = useState<FlowCoordinateFrame | null>(null);
 
   if (node === null || definition === null) {
     return (
@@ -688,6 +690,37 @@ export function FlowInspector({
     }
   };
 
+  const requestVisionFrame = async () => {
+    setPickerError(null);
+    setPickerLoading(true);
+    try {
+      const frame = loadCoordinateFrame
+        ? await loadCoordinateFrame()
+        : await flowCoordinateFrame(coordinateDeviceUdid ?? "", launchBundleId ?? "");
+      setVisionFrame(frame);
+    } catch (error) {
+      setPickerError(displayCommandError(error));
+    } finally {
+      setPickerLoading(false);
+    }
+  };
+
+  const handleTemplateUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) return;
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let binary = "";
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+      const next: JsonObject = { ...node.config, templatePngBase64: btoa(binary) };
+      delete next.region;
+      commitConfig(next);
+    } catch (error) {
+      setPickerError(displayCommandError(error));
+    }
+  };
+
   const renderCoordinate = (
     field: CoordinateFieldName,
     value: JsonValue | undefined,
@@ -708,6 +741,61 @@ export function FlowInspector({
   const renderConfigFields = () => {
     if (schema === null) return <p>This action has no editable schema.</p>;
     if (schema.type !== "object") throw new Error("UnsupportedFieldSchema");
+
+    if (node.kind === "tapVision") {
+      const template =
+        typeof node.config.templatePngBase64 === "string" ? node.config.templatePngBase64 : "";
+      return (
+        <>
+          <div className="flow-field">
+            <span>Ảnh mẫu (template)</span>
+            {template ? (
+              <img
+                className="flow-vision-template-preview"
+                src={`data:image/png;base64,${template}`}
+                alt="Template preview"
+              />
+            ) : (
+              <p className="flow-inspector-empty">Chưa có mẫu — chụp từ thiết bị hoặc tải PNG.</p>
+            )}
+            <div className="flow-vision-template-actions">
+              <button
+                type="button"
+                disabled={!coordinateAvailable || pickerLoading}
+                onClick={() => void requestVisionFrame()}
+              >
+                Chụp mẫu từ thiết bị
+              </button>
+              <label className="flow-vision-upload">
+                Tải PNG
+                <input type="file" accept="image/png" onChange={(event) => void handleTemplateUpload(event)} />
+              </label>
+            </div>
+          </div>
+          <SchemaField
+            name="threshold"
+            schema={
+              schema.properties?.threshold ?? { type: "number", minimum: 0, maximum: 1 }
+            }
+            value={node.config.threshold}
+            issues={issuesForField(nodeIssues, "threshold")}
+            onChange={(value) => updateConfigField("threshold", value)}
+          />
+          {isJsonObject(node.config.region) && (
+            <button
+              type="button"
+              onClick={() => {
+                const next: JsonObject = { ...node.config };
+                delete next.region;
+                commitConfig(next);
+              }}
+            >
+              Xóa vùng tìm (tìm toàn màn hình)
+            </button>
+          )}
+        </>
+      );
+    }
 
     if (node.kind === "tap") {
       const pointMode = isJsonObject(node.config.point);
@@ -793,6 +881,22 @@ export function FlowInspector({
       />
       {pickerLoading && <p role="status">Loading device frame...</p>}
       {pickerError && <p role="alert">{pickerError}</p>}
+      {visionFrame && (
+        <section className="flow-coordinate-popover" aria-label="Capture template">
+          <FlowVisionCapture
+            frame={visionFrame}
+            onCapture={(templatePngBase64, region) => {
+              commitConfig({
+                ...node.config,
+                templatePngBase64,
+                region: { x0: region.x0, y0: region.y0, x1: region.x1, y1: region.y1 },
+              });
+              setVisionFrame(null);
+            }}
+            onCancel={() => setVisionFrame(null)}
+          />
+        </section>
+      )}
       {picker && (
         <section className="flow-coordinate-popover" aria-label={`Pick ${picker.field}`}>
           <FlowCoordinatePicker

@@ -570,6 +570,7 @@ export type ActionKind =
   | "screenshot"
   | "home"
   | "assertVisible"
+  | "tapVision"
   | "rawHttp"
   | "rawWda"
   | "shell";
@@ -719,7 +720,20 @@ export type CompiledActionConfig =
   | { kind: "swipe"; from: ImageCoordinateTarget; to: ImageCoordinateTarget; durationMs: number }
   | { kind: "typeText"; text: string; readBackLocator: QualifiedElementLocator }
   | { kind: "screenshot"; label: string; format: string }
-  | { kind: "assertVisible"; accessibilityId: string };
+  | { kind: "assertVisible"; accessibilityId: string }
+  | {
+      kind: "tapVision";
+      templatePngBase64: string;
+      threshold: number;
+      region: VisionRegion | null;
+    };
+
+export interface VisionRegion {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
 
 export interface CompiledFlowNode {
   id: string;

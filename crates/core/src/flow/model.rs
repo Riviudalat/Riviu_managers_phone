@@ -130,6 +130,7 @@ pub enum ActionKind {
     Screenshot,
     Home,
     AssertVisible,
+    TapVision,
     RawHttp,
     RawWda,
     Shell,
@@ -611,6 +612,14 @@ pub enum CompiledActionConfig {
     AssertVisible {
         accessibility_id: String,
     },
+    TapVision {
+        /// Template image (a small crop of the target), PNG, base64-encoded.
+        template_png_base64: String,
+        /// Match threshold in [0,1]; the NCC score must reach it to tap.
+        threshold: f64,
+        /// Optional search region (screen fractions) to speed up and disambiguate.
+        region: Option<VisionRegion>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -622,6 +631,60 @@ pub enum CompiledActionConfig {
 pub enum CompiledTapTarget {
     Point { target: ImageCoordinateTarget },
     AccessibilityId { value: String },
+}
+
+/// A rectangular search region for a vision node, in screen fractions (0..=1).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VisionRegion {
+    pub x0: f64,
+    pub y0: f64,
+    pub x1: f64,
+    pub y1: f64,
+}
+
+/// Maximum base64-encoded vision template size (~256 KB decoded).
+pub const MAX_VISION_TEMPLATE_ENCODED_BYTES: usize = 350_000;
+
+/// Decode a base64 PNG vision template into an RGB image, enforcing a size cap.
+/// Shared by the Flow compiler (fail-fast validation) and the executor (runtime
+/// match), so both agree on exactly what a valid template is.
+pub fn decode_vision_template(base64_png: &str) -> Result<image::RgbImage, String> {
+    use base64::Engine as _;
+    if base64_png.is_empty() {
+        return Err("vision template is empty".to_string());
+    }
+    if base64_png.len() > MAX_VISION_TEMPLATE_ENCODED_BYTES {
+        return Err("vision template exceeds the size limit".to_string());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64_png)
+        .map_err(|error| format!("vision template is not valid base64: {error}"))?;
+    let decoded = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+        .map_err(|error| format!("vision template is not a valid PNG: {error}"))?;
+    Ok(decoded.to_rgb8())
+}
+
+/// Validate a vision search region: coordinates finite, within [0,1], and forming
+/// a positive-area box. Shared by the compiler.
+pub fn validate_vision_region(region: &VisionRegion) -> Result<(), String> {
+    let all_finite = region.x0.is_finite()
+        && region.y0.is_finite()
+        && region.x1.is_finite()
+        && region.y1.is_finite();
+    if !all_finite {
+        return Err("region coordinates must be finite".to_string());
+    }
+    let in_unit = [region.x0, region.y0, region.x1, region.y1]
+        .iter()
+        .all(|value| (0.0..=1.0).contains(value));
+    if !in_unit {
+        return Err("region coordinates must be within 0..=1".to_string());
+    }
+    if region.x0 >= region.x1 || region.y0 >= region.y1 {
+        return Err("region must have positive width and height".to_string());
+    }
+    Ok(())
 }
 
 pub fn qualified_geometry_profile_id(

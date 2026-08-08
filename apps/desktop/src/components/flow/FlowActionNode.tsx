@@ -3,6 +3,7 @@ import {
   Camera,
   CirclePlay,
   CircleStop,
+  Crosshair,
   House,
   Keyboard,
   MousePointerClick,
@@ -42,6 +43,7 @@ export const ACTION_PRESENTATION: Partial<
   screenshot: { label: "Screenshot", icon: Camera },
   home: { label: "Home", icon: House },
   assertVisible: { label: "Assert Visible", icon: ScanSearch },
+  tapVision: { label: "Tap Vision", icon: Crosshair },
 };
 
 function objectNumber(value: JsonValue | undefined, key: string): number | null {
@@ -77,6 +79,12 @@ export function summarizeAction(kind: ActionKind, config: JsonObject): string {
       return text("label");
     case "assertVisible":
       return text("accessibilityId");
+    case "tapVision": {
+      const hasTemplate = text("templatePngBase64").length > 0;
+      const threshold =
+        typeof config.threshold === "number" ? config.threshold.toFixed(2) : "?";
+      return hasTemplate ? `vision ≥ ${threshold}` : "no template";
+    }
     default:
       return "";
   }

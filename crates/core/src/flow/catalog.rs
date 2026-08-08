@@ -145,6 +145,26 @@ pub fn config_schema(kind: ActionKind) -> Value {
                 "accessibilityId": { "type": "string", "minLength": 1, "maxLength": 512 }
             }
         }),
+        ActionKind::TapVision => serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["templatePngBase64", "threshold"],
+            "properties": {
+                "templatePngBase64": { "type": "string", "minLength": 1 },
+                "threshold": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+                "region": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["x0", "y0", "x1", "y1"],
+                    "properties": {
+                        "x0": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+                        "y0": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+                        "x1": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+                        "y1": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+                    }
+                }
+            }
+        }),
         ActionKind::RawHttp | ActionKind::RawWda | ActionKind::Shell => Value::Null,
     }
 }
@@ -154,7 +174,7 @@ pub fn required_capabilities(kind: ActionKind) -> Vec<String> {
         ActionKind::Start | ActionKind::End | ActionKind::Wait => &[],
         ActionKind::LaunchApp => &["app.launch"],
         ActionKind::TerminateApp => &["app.terminate"],
-        ActionKind::Tap => &["ui.tap", "stream"],
+        ActionKind::Tap | ActionKind::TapVision => &["ui.tap", "stream"],
         ActionKind::Swipe => &["ui.swipe", "stream"],
         ActionKind::TypeText => &["ui.text", "stream", "accessibility.readText"],
         ActionKind::Screenshot => &["stream"],
@@ -206,7 +226,7 @@ pub fn contracts(
             ReconciliationPolicy::ReadActiveApp,
             RetryPolicy::IdempotentAfterRead,
         ),
-        ActionKind::Tap | ActionKind::Swipe => (
+        ActionKind::Tap | ActionKind::Swipe | ActionKind::TapVision => (
             ResourceClass::UiWithStream,
             SideEffectClass::AmbiguousUi,
             EvidenceRequirement::Frame,
@@ -257,6 +277,7 @@ pub fn release_one_catalog() -> Vec<ActionDefinition> {
         ActionKind::Screenshot,
         ActionKind::Home,
         ActionKind::AssertVisible,
+        ActionKind::TapVision,
     ]
     .into_iter()
     .map(action_definition)
@@ -321,6 +342,7 @@ fn label(kind: ActionKind) -> &'static str {
         ActionKind::Screenshot => "Screenshot",
         ActionKind::Home => "Home",
         ActionKind::AssertVisible => "Assert Visible",
+        ActionKind::TapVision => "Tap Vision",
         ActionKind::RawHttp => "Raw HTTP",
         ActionKind::RawWda => "Raw WDA",
         ActionKind::Shell => "Shell",
@@ -335,7 +357,9 @@ fn category(kind: ActionKind) -> ActionCategory {
         | ActionKind::RawWda
         | ActionKind::Shell => ActionCategory::Control,
         ActionKind::LaunchApp | ActionKind::TerminateApp | ActionKind::Home => ActionCategory::App,
-        ActionKind::Tap | ActionKind::Swipe | ActionKind::TypeText => ActionCategory::Input,
+        ActionKind::Tap | ActionKind::Swipe | ActionKind::TypeText | ActionKind::TapVision => {
+            ActionCategory::Input
+        }
         ActionKind::Wait => ActionCategory::Timing,
         ActionKind::Screenshot | ActionKind::AssertVisible => ActionCategory::Evidence,
     }
@@ -345,7 +369,7 @@ fn allowed_evidence(kind: ActionKind) -> Vec<EvidenceKind> {
     match kind {
         ActionKind::LaunchApp | ActionKind::Home => vec![EvidenceKind::ActiveAppEquals],
         ActionKind::TerminateApp => vec![EvidenceKind::ProcessAbsent],
-        ActionKind::Tap => vec![EvidenceKind::FrameRegionChanged],
+        ActionKind::Tap | ActionKind::TapVision => vec![EvidenceKind::FrameRegionChanged],
         ActionKind::Swipe => vec![EvidenceKind::FrameDigestChanged],
         ActionKind::TypeText => vec![EvidenceKind::TextReadBackEquals],
         ActionKind::Screenshot => vec![EvidenceKind::ArtifactDecodedAndHashed],
@@ -364,7 +388,9 @@ fn default_timeout_ms(kind: ActionKind) -> u32 {
         ActionKind::Start | ActionKind::End => 1_000,
         ActionKind::Wait => 60_000,
         ActionKind::LaunchApp | ActionKind::TerminateApp | ActionKind::Home => 10_000,
-        ActionKind::Tap | ActionKind::Swipe | ActionKind::Screenshot => 5_000,
+        ActionKind::Tap | ActionKind::Swipe | ActionKind::Screenshot | ActionKind::TapVision => {
+            5_000
+        }
         ActionKind::TypeText => 10_000,
         ActionKind::AssertVisible => 4_000,
         ActionKind::RawHttp | ActionKind::RawWda | ActionKind::Shell => 10_000,
