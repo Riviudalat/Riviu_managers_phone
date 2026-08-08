@@ -215,6 +215,66 @@ pub async fn install_ipa_to_group(
     Ok(results)
 }
 
+/// Spike gate for restore-based unsigned installs (TrollRestore). Returns false
+/// until the hardware feasibility pass in `docs/re/unsigned-install-spike.md`
+/// completes. Deliberately a plain fn, not a `const` — a `const false` would make
+/// the safety gates below unreachable dead code; keeping them reachable documents
+/// the intended order and lets tests exercise them.
+fn unsigned_install_enabled() -> bool {
+    false
+}
+
+/// SPIKE ONLY — restore-based install of an unsigned IPA.
+///
+/// The destructive restore path is intentionally **not wired**. This command
+/// exists to encode the safety gates (capability off by default, backup-first,
+/// isolation from the production agent) and always refuses before touching a
+/// device. See `docs/re/unsigned-install-spike.md`.
+#[tauri::command]
+pub async fn install_unsigned_ipa(
+    state: State<'_, AppState>,
+    udid: String,
+    path: String,
+    backup_dir: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+
+    // Gate 1 — capability disabled by default.
+    if !unsigned_install_enabled() {
+        return Err(CommandError::code(
+            "UnsignedInstallDisabled",
+            "restore-based unsigned install is disabled; see docs/re/unsigned-install-spike.md",
+        ));
+    }
+
+    // Gate 2 — the IPA must exist.
+    if !std::path::Path::new(&path).is_file() {
+        return Err(CommandError::invalid_argument(format!(
+            "IPA not found at {path}"
+        )));
+    }
+
+    // Gate 3 — backup-first: a prior backup must exist as a rollback path.
+    if !std::path::Path::new(&backup_dir).is_dir() {
+        return Err(CommandError::invalid_argument(
+            "a device backup is required before a restore-based install (see backup_device)",
+        ));
+    }
+
+    // Take a real exclusive lease so the intent is genuine, then refuse: the
+    // destructive restore path is not wired in the spike phase.
+    let _context = state
+        .control
+        .try_acquire_exclusive(&udid, DeviceWorkOwner::Repair)
+        .await
+        .map_err(CommandError::from)?;
+
+    Err(CommandError::code(
+        "UnsignedInstallSpike",
+        "unsigned install execution is not wired in the spike phase; no device action taken",
+    ))
+}
+
 #[tauri::command]
 pub async fn uninstall_app(
     state: State<'_, AppState>,
