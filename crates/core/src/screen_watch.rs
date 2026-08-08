@@ -242,9 +242,14 @@ impl ScreenWatcher {
         let dump = FrameDump::from_env(&self.udid);
         let mut last_analyzed: Option<Instant> = None;
         let mut last_digest: u64 = 0;
+        let mut last_obs: Option<ScreenObservation> = None;
         let mut pending: Option<Sighting> = None;
         let mut awaiting: Option<Awaiting> = None;
         let mut cooldown_until: Option<Instant> = None;
+        // The one popup we have exhausted our retries on. Kept so an identical,
+        // unmoved popup is not re-drummed after give-up; cleared when the feed
+        // returns or a different popup appears.
+        let mut given_up: Option<Sighting> = None;
 
         'outer: while !self.stop.load(Ordering::Relaxed) {
             let mut stream = self.frames.subscribe(&self.udid);
@@ -265,22 +270,37 @@ impl ScreenWatcher {
                 if last_analyzed.is_some_and(|t| t.elapsed() < min_gap) {
                     continue;
                 }
-                // A motionless feed re-sends identical bytes; decoding them
-                // again cannot change the answer.
+                // A motionless feed re-sends identical bytes, so the decode is
+                // skippable — but a *static popup* (a byte-identical alert over a
+                // still card) must still advance its two-frame confirmation and
+                // its post-cooldown retry, or it is never dismissed. So skip
+                // identical bytes outright only when no popup work is in flight;
+                // otherwise re-drive the logic from the cached classification
+                // (identical bytes => identical class) without re-decoding.
                 let digest = digest(&frame);
-                if digest == last_digest {
+                let unchanged = digest == last_digest;
+                if unchanged && pending.is_none() && awaiting.is_none() {
                     continue;
                 }
-                last_digest = digest;
                 last_analyzed = Some(Instant::now());
 
-                let Ok(img) = image::load_from_memory(&frame).map(|i| i.to_rgb8()) else {
-                    continue;
+                let obs = if unchanged {
+                    match last_obs {
+                        Some(obs) => obs,
+                        None => continue,
+                    }
+                } else {
+                    last_digest = digest;
+                    let Ok(img) = image::load_from_memory(&frame).map(|i| i.to_rgb8()) else {
+                        continue;
+                    };
+                    let obs = screen::classify(&img, Some(self.logical.0));
+                    self.stats.frames_analyzed.fetch_add(1, Ordering::Relaxed);
+                    self.state.set(obs);
+                    dump.maybe_write(&frame, &obs);
+                    last_obs = Some(obs);
+                    obs
                 };
-                let obs = screen::classify(&img, Some(self.logical.0));
-                self.stats.frames_analyzed.fetch_add(1, Ordering::Relaxed);
-                self.state.set(obs);
-                dump.maybe_write(&frame, &obs);
 
                 if suppress.load(Ordering::Relaxed) {
                     // Someone else owns the screen right now. Keep observing,
@@ -292,6 +312,9 @@ impl ScreenWatcher {
 
                 match obs.kind {
                     ScreenKind::Feed => {
+                        // Feed is back: any popup we gave up on is gone, so a
+                        // later reappearance is a fresh situation to retry.
+                        given_up = None;
                         if obs.evidence.ad_feedback_notice {
                             // TikTok owns this toast and removes it on its own;
                             // do not count it as a cleared popup or tap through
@@ -330,6 +353,7 @@ impl ScreenWatcher {
                             &mut pending,
                             &mut awaiting,
                             &mut cooldown_until,
+                            &mut given_up,
                         )
                         .await;
                     }
@@ -343,6 +367,7 @@ impl ScreenWatcher {
                                 &mut pending,
                                 &mut awaiting,
                                 &mut cooldown_until,
+                                &mut given_up,
                             )
                             .await;
                         }
@@ -353,6 +378,7 @@ impl ScreenWatcher {
                             &mut pending,
                             &mut awaiting,
                             &mut cooldown_until,
+                            &mut given_up,
                         )
                         .await;
                     }
@@ -362,6 +388,7 @@ impl ScreenWatcher {
                             &mut pending,
                             &mut awaiting,
                             &mut cooldown_until,
+                            &mut given_up,
                         )
                         .await;
                     }
@@ -378,16 +405,27 @@ impl ScreenWatcher {
         pending: &mut Option<Sighting>,
         awaiting: &mut Option<Awaiting>,
         cooldown_until: &mut Option<Instant>,
+        given_up: &mut Option<Sighting>,
     ) {
         // Still inside the post-tap animation window: say nothing, do nothing.
         if cooldown_until.is_some_and(|t| Instant::now() < t) {
             return;
+        }
+        // Already exhausted the retry cap on this exact popup: do not restart
+        // attempts on the next identical sighting. Cleared when the feed returns
+        // (see the Feed arm) or when a different popup appears (just below).
+        if given_up.as_ref().is_some_and(|g| g.same_as(&seen)) {
+            return;
+        }
+        if given_up.is_some() {
+            *given_up = None;
         }
         // A popup that outlived its confirmation window is retried, up to a cap.
         if let Some(a) = awaiting {
             if a.first_seen.elapsed() > CONFIRM_WINDOW {
                 if a.attempts >= MAX_ATTEMPTS {
                     self.give_up(awaiting);
+                    *given_up = Some(seen.clone());
                     return;
                 }
             } else {
@@ -401,7 +439,11 @@ impl ScreenWatcher {
                 prev.count
             }
             _ => {
-                *pending = Some(seen.clone());
+                // First agreeing frame. Store count = 1 so the *second* agreeing
+                // frame reaches CONFIRM_FRAMES and taps — not the third.
+                let mut fresh = seen.clone();
+                fresh.count = 1;
+                *pending = Some(fresh);
                 1
             }
         };
@@ -688,5 +730,108 @@ mod tests {
         assert!(!state.wait_until_feed(&stop, Duration::from_millis(5)).await);
         stop.store(true, Ordering::Relaxed);
         assert!(!state.wait_until_feed(&stop, Duration::from_secs(1)).await);
+    }
+
+    use crate::frame_source::{Frame, FrameStream};
+    use crate::types::SwipeGesture;
+
+    /// A frame source that hands out the same encoded frame forever — the shape
+    /// of a motionless screen (byte-identical frames).
+    struct RepeatFrames {
+        frame: Frame,
+    }
+
+    impl FrameSource for RepeatFrames {
+        fn subscribe(&self, _udid: &str) -> Box<dyn FrameStream> {
+            Box::new(RepeatStream {
+                frame: self.frame.clone(),
+            })
+        }
+
+        fn latest(&self, _udid: &str) -> Option<Frame> {
+            Some(self.frame.clone())
+        }
+    }
+
+    struct RepeatStream {
+        frame: Frame,
+    }
+
+    #[async_trait::async_trait]
+    impl FrameStream for RepeatStream {
+        async fn next(&mut self) -> Option<Frame> {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            Some(self.frame.clone())
+        }
+    }
+
+    struct TapRecorder {
+        taps: Arc<AtomicU32>,
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for TapRecorder {
+        async fn tap(&self, _point: TapPoint) -> anyhow::Result<()> {
+            self.taps.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        async fn swipe(&self, _gesture: SwipeGesture) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn type_text(&self, _text: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn home(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn find_and_tap(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn assert_visible(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+    }
+
+    /// A SIM-less activation alert sits over a motionless card, so every frame
+    /// is byte-identical. The digest gate used to skip all but the first, so the
+    /// two-frame confirmation never completed and the alert was never tapped.
+    /// The watcher must still confirm it (from the cached classification) and tap.
+    #[tokio::test]
+    async fn a_static_system_alert_is_still_confirmed_and_tapped() {
+        let frame: Frame =
+            Arc::new(include_bytes!("../tests/fixtures/system-alert-activation.jpg").to_vec());
+        let frames = Arc::new(RepeatFrames { frame });
+        let session = SessionHandle::new();
+        let taps = Arc::new(AtomicU32::new(0));
+        session.set(Arc::new(TapRecorder { taps: taps.clone() }));
+        let stop = Arc::new(AtomicBool::new(false));
+        let watcher = ScreenWatcher::new(
+            "fixture-udid",
+            frames,
+            session,
+            Arc::new(tokio::sync::Mutex::new(())),
+            stop.clone(),
+            (375.0, 667.0),
+            Arc::new(|_: &str| {}),
+        );
+        let stats = watcher.stats.clone();
+        let task = tokio::spawn(watcher.run());
+
+        // Two analyses at the 3 FPS cap (~333 ms each) plus scheduling slack.
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        stop.store(true, Ordering::Relaxed);
+        let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+
+        assert!(
+            taps.load(Ordering::Relaxed) >= 1,
+            "a static, byte-identical system alert must still be tapped"
+        );
+        assert!(
+            stats.popups_detected.load(Ordering::Relaxed) >= 1,
+            "the alert must be detected and confirmed"
+        );
     }
 }

@@ -9,10 +9,11 @@ use uuid::Uuid;
 use crate::DeviceWorkOwner;
 
 const DEFAULT_STREAM_LIMIT: usize = 1;
-/// Upper bound for one bounded producer per phone in the planned 20-100
-/// device fleet. The desktop still defaults to two until capacity is
-/// explicitly configured for a larger farm.
-const MAXIMUM_STREAM_LIMIT: usize = 100;
+/// Hard ceiling on concurrent MJPEG producers on one desktop (AGENTS.md §3.5/
+/// §3.12: default 1, hard max 2). The managed fleet may hold 20-100 phones, but
+/// only this many ever stream at once — the desktop shows at most two tiles.
+/// Accepting a larger configured limit would silently drop that guarantee.
+const MAXIMUM_STREAM_LIMIT: usize = 2;
 const BACKGROUND_TURN_TIMEOUT: Duration = Duration::from_secs(5);
 const BACKGROUND_FAILURE_BACKOFF: Duration = Duration::from_secs(30);
 
@@ -798,7 +799,7 @@ mod tests {
     use crate::DeviceWorkOwner;
 
     #[test]
-    fn defaults_to_one_and_rejects_limits_above_fleet_cap() {
+    fn defaults_to_one_and_rejects_limits_above_the_hard_max_of_two() {
         let default_budget = StreamBudgetManager::default();
         assert_eq!(default_budget.configured_limit(), 1);
         assert_eq!(default_budget.turn_timeout(), Duration::from_secs(5));
@@ -808,18 +809,16 @@ mod tests {
             StreamBudgetManager::new(0),
             Err(StreamBudgetError::InvalidLimit {
                 requested: 0,
-                maximum: 100
+                maximum: 2
             })
         ));
-        assert_eq!(
-            StreamBudgetManager::new(100).unwrap().configured_limit(),
-            100
-        );
+        // The hard max is 2 (AGENTS.md §3.5/§3.12): three concurrent producers
+        // must be rejected, not silently accepted.
         assert!(matches!(
-            StreamBudgetManager::new(101),
+            StreamBudgetManager::new(3),
             Err(StreamBudgetError::InvalidLimit {
-                requested: 101,
-                maximum: 100
+                requested: 3,
+                maximum: 2
             })
         ));
     }

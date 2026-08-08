@@ -237,23 +237,36 @@ pub fn rail_icons_present(img: &RgbImage) -> bool {
 }
 
 /// Locate a rail even when the red follow badge is hidden because the author
-/// is already followed. The first two members of a stable icon chain are the
-/// like and comment glyphs in that layout; derive follow from the measured
-/// pitch instead of reusing a previous card's coordinates.
+/// is already followed. The white-glyph scan only sees unfilled icons, so a
+/// filled (liked) heart is red and drops out of the chain — the chain then
+/// starts at the comment bubble, one pitch below the heart, not at the heart
+/// itself. Probe for a red heart one pitch above the first white run to tell
+/// the two cases apart, then derive follow from the measured pitch instead of
+/// reusing a previous card's coordinates.
 pub fn locate_action_rail(img: &RgbImage) -> Option<ActionRail> {
     if let Some(rail) = find_action_rail(img) {
         return Some(rail);
     }
     let centres = rail_icon_centres(img);
-    if centres.len() < 3 {
+    if centres.len() < RAIL_MIN_ICONS {
         return None;
     }
-    let like_y = centres[0];
-    let comment_y = centres[1];
-    let pitch = comment_y - like_y;
+    // Pitch from the first gap of the white-glyph chain.
+    let pitch = centres[1] - centres[0];
     if !(RAIL_ICON_PITCH.0..=RAIL_ICON_PITCH.1).contains(&pitch) {
         return None;
     }
+    // If a filled heart sits one pitch above the first white run, that run is
+    // the comment bubble and the heart was excluded for being red; otherwise
+    // the first run is the (unfilled) heart itself. Same primitive do_like uses
+    // to confirm a like, so "filled" means exactly what it means there.
+    let heart_above = centres[0] - pitch;
+    let (like_y, comment_y) =
+        if heart_above > 0.0 && icon_redness(img, RAIL_X, heart_above) > LIKE_FILLED_REDNESS {
+            (heart_above, centres[0])
+        } else {
+            (centres[0], centres[1])
+        };
     Some(ActionRail {
         x: RAIL_X,
         follow_y: like_y - FOLLOW_TO_LIKE,
@@ -1374,6 +1387,63 @@ mod tests {
         let mut img = feed_backdrop();
         with_compose_bar(&mut img);
         img
+    }
+
+    /// Paint a solid block down the rail column.
+    fn paint_rail_block(img: &mut RgbImage, y0: u32, y1: u32, colour: [u8; 3]) {
+        let x0 = ((RAIL_X - RAIL_HALF_WIDTH) * W as f64) as u32;
+        let x1 = ((RAIL_X + RAIL_HALF_WIDTH) * W as f64) as u32;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                img.put_pixel(x, y, image::Rgb(colour));
+            }
+        }
+    }
+
+    /// A filled (liked) heart is red, so the white-glyph scan cannot see it and
+    /// the chain starts at the comment bubble. `locate_action_rail` must probe
+    /// for the red heart one pitch up and keep the like target on it — not on
+    /// the comment bubble one pitch below, which was the silent misfire.
+    #[test]
+    fn locate_action_rail_keeps_the_like_target_on_a_filled_heart() {
+        const WHITE: [u8; 3] = [254, 254, 254];
+        const RED: [u8; 3] = [254, 44, 85];
+
+        // Filled heart: red heart slot + white comment/save/share below it.
+        let mut liked = feed_backdrop();
+        paint_rail_block(&mut liked, 600, 670, RED); // heart ~624px, tall for the redness probe
+        paint_rail_block(&mut liked, 757, 771, WHITE); // comment ~764px
+        paint_rail_block(&mut liked, 879, 893, WHITE); // save ~886px
+        paint_rail_block(&mut liked, 1015, 1029, WHITE); // share ~1022px
+        let rail = locate_action_rail(&liked).expect("liked-card rail");
+        let redness = like_redness_at(&liked, &rail);
+        assert!(
+            redness > LIKE_FILLED_REDNESS,
+            "like target (y={:.3}) landed off the red heart: redness {redness:.1}",
+            rail.like_y
+        );
+        assert!(
+            rail.like_y < rail.comment_y,
+            "the heart must sit above the comment bubble"
+        );
+
+        // Unfilled heart: a white heart is already the first run, so the label
+        // stays put and the like target lands on it.
+        let mut unliked = feed_backdrop();
+        paint_rail_block(&mut unliked, 617, 631, WHITE); // white heart ~624px
+        paint_rail_block(&mut unliked, 757, 771, WHITE); // comment ~764px
+        paint_rail_block(&mut unliked, 879, 893, WHITE); // save ~886px
+        let rail = locate_action_rail(&unliked).expect("unliked-card rail");
+        assert!(
+            (rail.like_y * H as f64 - 624.0).abs() < 20.0,
+            "unfilled heart like target at {} px, expected ~624",
+            rail.like_y * H as f64
+        );
+        assert!(
+            (rail.comment_y * H as f64 - 764.0).abs() < 20.0,
+            "comment target at {} px, expected ~764",
+            rail.comment_y * H as f64
+        );
     }
 
     /// Feed with a white sheet covering everything below `sheet_top`, the shape

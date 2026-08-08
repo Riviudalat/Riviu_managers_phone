@@ -143,7 +143,12 @@ impl NurtureEngine {
             .map_err(|_| anyhow!("frame_decode_failed"))?
             .to_rgb8();
         let screen_size = session.window_size().await.unwrap_or((375.0, 667.0));
-        let rail = screen::find_action_rail(&open_image).unwrap_or_else(ActionRail::fallback);
+        // Locate the rail per frame (handles already-followed cards where the
+        // red badge is hidden). Fail the attempt rather than tapping the
+        // layout-2 fallback constants blind — on a layout-1 card that lands on
+        // the Save icon and silently bookmarks the video.
+        let rail = screen::locate_action_rail(&open_image)
+            .ok_or_else(|| anyhow!("action_rail_not_located"))?;
         let point = |x: f64, y: f64| {
             self.next_touch_point(
                 udid,
@@ -344,17 +349,20 @@ impl NurtureEngine {
             .frames
             .latest(udid)
             .ok_or_else(|| anyhow!("reply_cleared_frame_missing"))?;
-        let _ = session
-            .tap(self.next_touch_point(
-                udid,
-                screen_size,
-                TapPoint {
-                    x: screen_size.0 * screen::DRAWER_DISMISS.0,
-                    y: screen_size.1 * screen::DRAWER_DISMISS.1,
-                },
-                (12.0, 10.0),
-            ))
-            .await;
+        {
+            let _guard = gestures.lock().await;
+            let _ = session
+                .tap(self.next_touch_point(
+                    udid,
+                    screen_size,
+                    TapPoint {
+                        x: screen_size.0 * screen::DRAWER_DISMISS.0,
+                        y: screen_size.1 * screen::DRAWER_DISMISS.1,
+                    },
+                    (12.0, 10.0),
+                ))
+                .await;
+        }
         Ok(ThreadSendEvidence {
             text_sha256: prepared.text_sha256.clone(),
             armed_frame_sha256: format!("{:016x}", frame_digest(&armed_bytes)),
@@ -450,9 +458,13 @@ impl NurtureEngine {
             let _guard = gestures.lock().await;
             session.tap(point).await?;
         }
+        // Require the confirming frame to still be an actionable feed: a system
+        // alert dims the whole screen, which reads as "badge gone" at the rail
+        // and would otherwise count a follow the alert actually swallowed.
         let gone = self
             .wait_for_frame(udid, Duration::from_millis(2_500), stop, |img| {
                 !screen::follow_badge_present(img, rail)
+                    && screen::feed_ready(img, Some(screen_size.0))
             })
             .await
             .is_some();
@@ -491,7 +503,9 @@ impl NurtureEngine {
         }
 
         let Some(before) = before else {
-            return Ok(true);
+            // No pre-swipe baseline (e.g. right after a stream clear): a swipe
+            // with no before-frame cannot be counted as a confirmed advance.
+            return Ok(false);
         };
         let changed = self
             .wait_for_new_frame(udid, SWIPE_SETTLE, stop, before)
@@ -530,7 +544,8 @@ impl NurtureEngine {
             session.swipe(gesture).await?;
         }
         let Some(before) = before else {
-            return Ok(true);
+            // No pre-swipe baseline: cannot confirm the carousel advanced.
+            return Ok(false);
         };
         Ok(self
             .wait_for_new_frame(udid, SWIPE_SETTLE, stop, before)
@@ -812,7 +827,7 @@ impl NurtureEngine {
                 &settings.ai_directions,
                 frames
                     .first()
-                    .map(|frame| frame_digest(frame) as u64)
+                    .map(|frame| frame_digest(frame))
                     .unwrap_or_default(),
             );
             let prepared_result = if provider_supports_vision(settings) {
@@ -1148,6 +1163,20 @@ mod tests {
         }
     }
 
+    /// A frame source with nothing cached — models the moment right after a
+    /// stream clear, when `latest()` briefly returns None.
+    struct NoFrames;
+
+    impl FrameSource for NoFrames {
+        fn subscribe(&self, _udid: &str) -> Box<dyn FrameStream> {
+            Box::new(EmptyStream)
+        }
+
+        fn latest(&self, _udid: &str) -> Option<Frame> {
+            None
+        }
+    }
+
     struct TestFrames {
         current: Mutex<Frame>,
         feed: Frame,
@@ -1416,6 +1445,10 @@ mod tests {
     }
 
     fn test_engine(frames: Arc<TestFrames>) -> (NurtureEngine, PathBuf) {
+        test_engine_from(frames)
+    }
+
+    fn test_engine_from(frames: Arc<dyn FrameSource>) -> (NurtureEngine, PathBuf) {
         let db_path =
             std::env::temp_dir().join(format!("riviu-core-comment-test-{}.db", Uuid::new_v4()));
         let control = Arc::new(crate::DeviceControlPlane::new(
@@ -1430,6 +1463,73 @@ mod tests {
             std::env::temp_dir(),
         );
         (engine, db_path)
+    }
+
+    #[tokio::test]
+    async fn a_swipe_without_a_before_frame_is_not_counted_as_an_advance() {
+        // Right after a stream clear the frame cache is empty. A swipe with no
+        // before-frame has no evidence the feed moved and must not be counted.
+        let stop = Arc::new(AtomicBool::new(false));
+        let session =
+            RecordingSession::new(Arc::new(TestFrames::new()), stop.clone(), false, false);
+        let (engine, db_path) = test_engine_from(Arc::new(NoFrames));
+
+        let moved = engine
+            .do_swipe(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                (375.0, 667.0),
+                200,
+                stop.as_ref(),
+            )
+            .await
+            .expect("swipe");
+
+        assert!(
+            !moved,
+            "a swipe with no before-frame must not count as a confirmed advance"
+        );
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn a_follow_is_not_confirmed_on_a_non_feed_frame() {
+        // The real feed fixture shows a red follow badge; tapping follow flips
+        // the mock to a grey drawer frame — badge gone but NOT an actionable
+        // feed, exactly like the SIM-less activation alert that dims the screen.
+        // "Badge absent" alone must no longer count as a follow.
+        let frames = Arc::new(TestFrames::new());
+        let feed_img =
+            image::load_from_memory(&FrameSource::latest(frames.as_ref(), UDID).expect("feed"))
+                .expect("decode feed")
+                .to_rgb8();
+        assert!(
+            screen::follow_badge_present(&feed_img, &ActionRail::fallback()),
+            "fixture precondition: the feed frame must show a red follow badge"
+        );
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let session = RecordingSession::new(frames.clone(), stop.clone(), false, false);
+        let (engine, db_path) = test_engine(frames);
+
+        let confirmed = engine
+            .do_follow(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                &ActionRail::fallback(),
+                (375.0, 667.0),
+                stop.as_ref(),
+            )
+            .await
+            .expect("follow");
+
+        assert!(
+            !confirmed,
+            "a badge that vanished on a non-feed (dimmed) frame must not count as a follow"
+        );
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[tokio::test]

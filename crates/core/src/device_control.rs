@@ -290,14 +290,24 @@ impl DeviceControlPlane {
         })?;
         let lease = self
             .work
-            .with_idle_device(udid, || self.streams.reserve_background(udid))
+            .with_idle_device(udid, || {
+                let reserved = self.streams.reserve_background(udid);
+                // Record the BackgroundStore entry under the same device
+                // metadata lock that reserved the budget. Inserting it after the
+                // lock was released let a concurrent park see the budget record
+                // without this entry, orphaning the ticket and spuriously
+                // failing shutdown with CleanupQuarantined.
+                if let Ok(lease) = &reserved {
+                    self.backgrounds.insert(lease.udid(), lease.token());
+                }
+                reserved
+            })
             .map_err(
                 |current_owner| DeviceControlError::BackgroundStreamBlocked {
                     udid: udid.to_string(),
                     current_owner,
                 },
             )??;
-        self.backgrounds.insert(lease.udid(), lease.token());
         Ok(lease)
     }
 
@@ -1165,6 +1175,15 @@ impl DeviceControlPlane {
             .map_err(|error| driver_error(lease.udid(), "inspectStreamingAppProcess", error))
     }
 
+    /// Recover a wedged interaction session: stop the stream, optionally recycle
+    /// the transport, then start a fresh session + stream.
+    ///
+    /// The whole destructive sequence runs on the cleanup worker, not in the
+    /// caller's future. Cancelling the caller only drops the `oneshot` response;
+    /// the worker still owns the in-flight stops and either finishes the recovery
+    /// or cleans up by the observed generation. Running the stops directly here
+    /// let a dropped caller abort a half-done stop and leave the generation
+    /// inconsistent, quarantining the lease and (at budget=1) wedging the fleet.
     pub async fn recover_streaming_session(
         &self,
         context: &mut UiWithStreamContext,
@@ -1172,53 +1191,41 @@ impl DeviceControlPlane {
         kind: InteractionSessionKind,
         recycle_transport: bool,
     ) -> Result<Arc<dyn UiSession>, DeviceControlError> {
-        let lease = self.validate_stream(context)?;
-        let udid = lease.udid().to_string();
-        let expected = context.start_proof.generation;
-        let mut stopped = self
-            .driver
-            .stop_owned_stream(&udid)
-            .await
-            .map_err(|error| driver_error(&udid, "stopOwnedStreamForRecovery", error))?;
-        validate_stop_generation(&udid, expected, stopped)?;
-
-        if recycle_transport {
-            self.driver.recycle_ui_transport(&udid).await;
-            let recycled_stop = self
-                .driver
-                .stop_owned_stream(&udid)
-                .await
-                .map_err(|error| driver_error(&udid, "resetLifecycleAfterRecycle", error))?;
-            validate_stop_generation(&udid, stopped.new_generation, recycled_stop)?;
-            stopped = recycled_stop;
+        self.validate_stream(context)?;
+        let plane_id = context.plane_id;
+        let original_stream = context.start_proof.clone();
+        let cleanup = context.cleanup.clone();
+        let ticket = context
+            .take_ticket()
+            .expect("validated stream context has a cleanup ticket");
+        let (response_tx, response_rx) = oneshot::channel();
+        let command = WorkerCommand::RecoverStream {
+            plane_id,
+            ticket,
+            cleanup: cleanup.clone(),
+            original_stream: original_stream.clone(),
+            bundle_id: bundle_id.to_string(),
+            kind,
+            recycle_transport,
+            response: response_tx,
+        };
+        if let Err(error) = self.cleanup_tx.send(command) {
+            if let WorkerCommand::RecoverStream { ticket, .. } = error.0 {
+                *context = ticket.into_context(plane_id, cleanup, original_stream, None);
+            }
+            return Err(DeviceControlError::CleanupWorkerClosed);
         }
-        context.start_proof.generation = stopped.new_generation;
-        context.start_proof.first_frame_observed = false;
-
-        let session = self
-            .driver
-            .start_interaction_session(&udid, bundle_id, kind)
+        let response = response_rx
             .await
-            .map_err(|error| driver_error(&udid, "recoverInteractionSession", error))?;
-        let session: Arc<dyn UiSession> = Arc::from(session);
-        let stream = self
-            .driver
-            .start_stream_after_session(&udid)
-            .await
-            .map_err(|error| driver_error(&udid, "recoverStreamAfterSession", error))?;
-        if !stream.first_frame_observed {
-            return Err(DeviceControlError::FirstFrameMissing { udid });
+            .map_err(|_| DeviceControlError::CleanupWorkerClosed)?;
+        let RecoverStreamResponse {
+            result,
+            context: replacement,
+        } = response;
+        if let Some(replacement) = replacement {
+            *context = replacement;
         }
-        if stream.generation != stopped.new_generation {
-            return Err(DeviceControlError::StopProofMismatch {
-                udid,
-                expected: stopped.new_generation,
-                actual: stream.generation,
-            });
-        }
-        context.session = Some(session.clone());
-        context.start_proof = stream;
-        Ok(session)
+        result
     }
 
     pub async fn start_reserved_stream(
@@ -1969,6 +1976,11 @@ struct GuardedClipboardResponse {
     context: Option<UiWithStreamContext>,
 }
 
+struct RecoverStreamResponse {
+    result: Result<Arc<dyn UiSession>, DeviceControlError>,
+    context: Option<UiWithStreamContext>,
+}
+
 #[derive(Clone)]
 struct BackgroundCleanupTicket {
     udid: String,
@@ -2139,6 +2151,16 @@ enum WorkerCommand {
         final_session_kind: InteractionSessionKind,
         operation: GuardedClipboardOperation,
         response: oneshot::Sender<GuardedClipboardResponse>,
+    },
+    RecoverStream {
+        plane_id: Uuid,
+        ticket: DeviceCleanupTicket,
+        cleanup: CleanupSink,
+        original_stream: StreamStartProof,
+        bundle_id: String,
+        kind: InteractionSessionKind,
+        recycle_transport: bool,
+        response: oneshot::Sender<RecoverStreamResponse>,
     },
     Cleanup(DeviceCleanupTicket),
     DrainBackground {
@@ -2506,6 +2528,34 @@ async fn run_cleanup_worker(
                     .await;
                 });
             }
+            WorkerCommand::RecoverStream {
+                plane_id,
+                ticket,
+                cleanup,
+                original_stream,
+                bundle_id,
+                kind,
+                recycle_transport,
+                response,
+            } => {
+                let driver = driver.clone();
+                let operation_locks = operation_locks.clone();
+                tasks.spawn(async move {
+                    let _operation = operation_locks.lock_one(ticket.lease.udid()).await;
+                    process_recover_stream(
+                        &driver,
+                        plane_id,
+                        ticket,
+                        cleanup,
+                        original_stream,
+                        bundle_id,
+                        kind,
+                        recycle_transport,
+                        response,
+                    )
+                    .await;
+                });
+            }
             WorkerCommand::Cleanup(ticket) => {
                 let driver = driver.clone();
                 let streams = streams.clone();
@@ -2687,7 +2737,7 @@ async fn reserve_context(
 ) -> Result<ReservedUiCapacity, ContextTransitionFailure> {
     let udid = context.udid().to_string();
     let owner = context.owner();
-    let _capacity = capacity_gate.lock().await;
+    let capacity_guard = capacity_gate.lock().await;
     let (operation_guards, expected_victim) = loop {
         let victim = match streams.preview_foreground_victim(&udid) {
             Ok(victim) => victim,
@@ -2726,6 +2776,13 @@ async fn reserve_context(
             })
         }
     };
+    // The victim is now Revoking and the target ForegroundReserved — both occupy
+    // capacity under the budget mutex — so a concurrent reserve for another
+    // device fails fast (CapacityExhausted) or selects a different victim.
+    // Release the global capacity gate before the (possibly slow) victim stop so
+    // a stall on one device cannot block capacity reservation fleet-wide. The
+    // per-UDID operation guards stay held across the stop.
+    drop(capacity_guard);
     let proof = if transfer.requires_stop_proof() {
         let revoked_udid = transfer
             .revoked_udid()
@@ -3077,6 +3134,94 @@ async fn process_guarded_clipboard(
             GuardedClipboardResponse {
                 result: Err(error),
                 context,
+            }
+        }
+    };
+    let _ = response.send(completed);
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_recover_stream(
+    driver: &Arc<dyn DeviceDriver>,
+    plane_id: Uuid,
+    ticket: DeviceCleanupTicket,
+    cleanup: CleanupSink,
+    original_stream: StreamStartProof,
+    bundle_id: String,
+    kind: InteractionSessionKind,
+    recycle_transport: bool,
+    response: oneshot::Sender<RecoverStreamResponse>,
+) {
+    let udid = ticket.lease.udid().to_string();
+    let expected = ticket.expected_generation;
+    // Newest confirmed post-stop generation, so a failure rebuilds the context
+    // with a generation a later close/drop can clean up against exactly.
+    let mut destructive_generation: Option<u64> = None;
+
+    let outcome: Result<(Arc<dyn UiSession>, StreamStartProof), DeviceControlError> = async {
+        let expected = expected
+            .ok_or_else(|| DeviceControlError::StopGenerationUnknown { udid: udid.clone() })?;
+        let mut stopped = driver
+            .stop_owned_stream(&udid)
+            .await
+            .map_err(|error| driver_error(&udid, "stopOwnedStreamForRecovery", error))?;
+        validate_stop_generation(&udid, expected, stopped)?;
+        destructive_generation = Some(stopped.new_generation);
+
+        if recycle_transport {
+            driver.recycle_ui_transport(&udid).await;
+            let recycled_stop = driver
+                .stop_owned_stream(&udid)
+                .await
+                .map_err(|error| driver_error(&udid, "resetLifecycleAfterRecycle", error))?;
+            validate_stop_generation(&udid, stopped.new_generation, recycled_stop)?;
+            stopped = recycled_stop;
+            destructive_generation = Some(stopped.new_generation);
+        }
+
+        let session = driver
+            .start_interaction_session(&udid, &bundle_id, kind)
+            .await
+            .map_err(|error| driver_error(&udid, "recoverInteractionSession", error))?;
+        let session: Arc<dyn UiSession> = Arc::from(session);
+        let stream = driver
+            .start_stream_after_session(&udid)
+            .await
+            .map_err(|error| driver_error(&udid, "recoverStreamAfterSession", error))?;
+        if !stream.first_frame_observed {
+            return Err(DeviceControlError::FirstFrameMissing { udid: udid.clone() });
+        }
+        if stream.generation != stopped.new_generation {
+            return Err(DeviceControlError::StopProofMismatch {
+                udid: udid.clone(),
+                expected: stopped.new_generation,
+                actual: stream.generation,
+            });
+        }
+        Ok((session, stream))
+    }
+    .await;
+
+    let completed = match outcome {
+        Ok((session, stream)) => RecoverStreamResponse {
+            result: Ok(session.clone()),
+            context: Some(ticket.into_context(plane_id, cleanup, stream, Some(session))),
+        },
+        Err(error) => {
+            // Keep the caller's reservation/lease and rebuild the context,
+            // exactly as the old in-caller path left it on failure — the caller
+            // still owns cleanup via close_ui_context. The rebuilt proof carries
+            // the post-stop generation so that if the caller was cancelled and
+            // this context is dropped instead of delivered, its Drop enqueues a
+            // cleanup against that same generation and nothing is quarantined.
+            let mut proof = original_stream;
+            if let Some(generation) = destructive_generation {
+                proof.generation = generation;
+                proof.first_frame_observed = false;
+            }
+            RecoverStreamResponse {
+                result: Err(error),
+                context: Some(ticket.into_context(plane_id, cleanup, proof, None)),
             }
         }
     };
@@ -4404,6 +4549,68 @@ mod tests {
         assert_eq!(streams.reserved_capacity(), 0);
     }
 
+    /// A stalled victim stop on one device must not hold the global capacity
+    /// gate: a foreground reserve for an unrelated device must resolve rather
+    /// than block behind the stuck stop. Before the gate was released after
+    /// begin_foreground_transfer, B deadlocked on `capacity_gate.lock()` and
+    /// this timed out.
+    #[tokio::test]
+    async fn a_stalled_victim_stop_does_not_block_reservation_for_other_devices() {
+        let driver = Arc::new(TestDriver::default());
+        let streams = Arc::new(crate::StreamBudgetManager::new(1).expect("stream budget"));
+        let background = streams
+            .reserve_background("iphone-victim")
+            .expect("background reservation");
+        streams
+            .mark_running(background.token())
+            .expect("background producer running");
+        let control = Arc::new(DeviceControlPlane::new(
+            driver.clone(),
+            Arc::new(crate::DeviceWorkCoordinator::new()),
+            streams.clone(),
+        ));
+
+        // A reserves foreground capacity, revoking the victim; its stop blocks.
+        let exclusive_a = control
+            .try_acquire_exclusive("iphone-a", crate::DeviceWorkOwner::Interaction)
+            .await
+            .expect("target A lease");
+        let reserve_control = control.clone();
+        let reserve_a =
+            tokio::spawn(async move { reserve_control.reserve_ui_capacity(exclusive_a).await });
+        driver.wait_for_stop().await;
+
+        // B reserves for an unrelated device. Capacity is full during A's
+        // transfer (A reserved + victim revoking at limit 1), so B must return
+        // quickly with an error rather than block on the released gate.
+        let exclusive_b = control
+            .try_acquire_exclusive("iphone-b", crate::DeviceWorkOwner::ManualControl)
+            .await
+            .expect("target B lease");
+        let outcome_b = timeout(TEST_TIMEOUT, control.reserve_ui_capacity(exclusive_b))
+            .await
+            .expect("a reserve for an unrelated device must not block on the stuck stop");
+        assert!(
+            outcome_b.is_err(),
+            "capacity is full during the transfer, so B must fail fast"
+        );
+        assert_eq!(
+            driver.stop_calls.load(Ordering::SeqCst),
+            1,
+            "B must not trigger a second stop"
+        );
+
+        driver.complete_stop();
+        let (context_a, capacity_a) = timeout(TEST_TIMEOUT, reserve_a)
+            .await
+            .expect("A completes")
+            .expect("reserve A task")
+            .expect("A foreground capacity");
+        drop(capacity_a);
+        drop(context_a);
+        assert_eq!(streams.reserved_capacity(), 0);
+    }
+
     #[tokio::test]
     async fn shared_device_owner_unrelated_udid_stops_run_concurrently() {
         let driver = Arc::new(TestDriver::default());
@@ -4648,6 +4855,52 @@ mod tests {
         drop(capacity);
         drop(replacement);
         assert_eq!(control.reserved_stream_capacity(), 0);
+    }
+
+    /// Cancelling the caller mid-recovery must not abort the in-flight stop.
+    /// The stop runs on the cleanup worker, so after the caller is aborted the
+    /// worker still finishes the stop and proceeds to start a fresh interaction
+    /// session. The old in-caller stop ran in the caller's future, so aborting
+    /// the caller dropped it and the session was never started.
+    #[tokio::test]
+    async fn cancelling_recovery_does_not_abort_the_worker_owned_stop() {
+        let driver = Arc::new(TestDriver::default());
+        let control = Arc::new(control_plane(driver.clone(), 1));
+        let context =
+            streaming_context(&control, "iphone-a", crate::DeviceWorkOwner::Nurture).await;
+        let baseline_sessions = driver.session_starts.load(Ordering::SeqCst);
+        let task_control = control.clone();
+
+        let task = tokio::spawn(async move {
+            let mut context = context;
+            task_control
+                .recover_streaming_session(
+                    &mut context,
+                    "com.ss.iphone.ugc.Ame",
+                    InteractionSessionKind::Ordinary,
+                    false,
+                )
+                .await
+        });
+
+        // The recovery's first stop runs in the worker and blocks (no permits).
+        driver.wait_for_stop().await;
+        // Cancel the caller while that stop is still in flight.
+        task.abort();
+        let _ = task.await;
+
+        // Unblock the worker. It must finish the stop and go on to start a fresh
+        // session — proving the destructive sequence outlived the caller.
+        driver.allow_stop.add_permits(4);
+        timeout(TEST_TIMEOUT, async {
+            while driver.session_starts.load(Ordering::SeqCst) <= baseline_sessions {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the worker must finish the stop and start a fresh session after caller cancel");
+
+        assert!(driver.session_starts.load(Ordering::SeqCst) > baseline_sessions);
     }
 
     #[tokio::test]

@@ -670,8 +670,11 @@ async fn open_comment_for_ocr(
         .latest(udid)
         .context("không có frame trước khi mở comment")?;
     let image = image::load_from_memory(&frame)?.to_rgb8();
-    let rail = riviu_core::screen::find_action_rail(&image)
-        .unwrap_or_else(riviu_core::screen::ActionRail::fallback);
+    // Locate per frame and fail closed rather than tapping the layout-2
+    // fallback blind (an already-followed card hides the red badge; a
+    // layout-1 card would then bookmark instead of opening comments).
+    let rail = riviu_core::screen::locate_action_rail(&image)
+        .context("không định vị được action rail để mở comment")?;
     let screen_size = session.window_size().await.unwrap_or((375.0, 667.0));
     {
         let _guard = gestures.lock().await;

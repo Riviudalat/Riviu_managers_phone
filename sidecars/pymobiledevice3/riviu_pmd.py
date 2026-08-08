@@ -1049,7 +1049,10 @@ async def _stream_auto(
                 return
             except Exception as exc:
                 print(f"MJPEG stream failed: {exc}", file=sys.stderr, flush=True)
-                if mode == "mjpeg":
+                # A finite capture must keep its exact frame count: never fall
+                # through to the screenshot source after MJPEG has already
+                # emitted frames, or the caller gets more than max_frames.
+                if mode == "mjpeg" or max_frames is not None:
                     raise
         elif mode == "mjpeg":
             raise RuntimeError(
@@ -1335,12 +1338,13 @@ def cmd_reboot(args: argparse.Namespace) -> int:
 
     async def _run() -> None:
         lockdown = await create_using_usbmux(serial=args.udid)
+        # pymobiledevice3 is pinned to 10.1.0, whose DiagnosticsService.restart()
+        # is async. The old sync-API (4.x/5.x) fallback here mis-handled any
+        # incidental TypeError as "older API" and left an un-awaited coroutine,
+        # so reboot reported ok without rebooting — let real errors propagate.
         try:
             async with DiagnosticsService(lockdown=lockdown) as diag:
                 await diag.restart()
-        except TypeError:
-            # older sync API
-            DiagnosticsService(lockdown=lockdown).restart()
         finally:
             await lockdown.close()
 
@@ -1458,6 +1462,11 @@ def cmd_wda_forward(args: argparse.Namespace) -> int:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        # Own the relay with a kill-on-close Job Object (as wda-proxy does) so a
+        # force-stop of this process reaps the relay instead of orphaning it.
+        # Held in scope for the lifetime of this call; the OS closes it (and so
+        # kills the relay) when this process dies.
+        relay_job = _windows_kill_on_close_job(proc) if sys.platform == "win32" else None
         # Wait until HTTP /status answers (or process dies).
         deadline = time.monotonic() + 25
         ready = False
@@ -1691,6 +1700,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
     xctest = None
     relay = None
     relay_job = None
+    xctest_job = None
     own_xctest = False
     cleaned = False
 
@@ -1736,6 +1746,28 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
             except Exception:
                 pass
 
+    def own_xctest_job() -> None:
+        # Hold the XCTest runner in its own kill-on-close Job Object so a
+        # force-stop of this proxy (TerminateProcess runs no signal handler on
+        # Windows) also reaps the runner instead of orphaning it until the
+        # desktop's root job closes.
+        nonlocal xctest_job
+        if sys.platform != "win32" or xctest is None:
+            return
+        xctest_job = _windows_kill_on_close_job(xctest)
+        if xctest_job is None:
+            print(
+                "warning: XCTest runner is not held by a Job Object; relying on "
+                "the desktop process guard for force-kill cleanup",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    def release_xctest_job() -> None:
+        nonlocal xctest_job
+        _windows_close_handle(xctest_job)
+        xctest_job = None
+
     def cleanup(_signum=None, _frame=None) -> None:
         nonlocal cleaned, relay_job
         if cleaned:
@@ -1747,6 +1779,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
         # Only tear down XCTest we started — leave stream's WDA alone.
         if own_xctest:
             _stop(xctest)
+        release_xctest_job()
         if _signum is not None:
             raise SystemExit(0)
 
@@ -1846,6 +1879,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
                         udid, bundle, token, device_port, mjpeg_port
                     )
                     own_xctest = True
+                    own_xctest_job()
                     try:
                         ok = asyncio.run(wait_port(75.0 if restart else 55.0))
                     except Exception as exc:
@@ -1858,6 +1892,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
                             f"XCUITest service exited early ({xctest.returncode})"
                         )
                     _stop(xctest)
+                    release_xctest_job()
                     own_xctest = False
                     xctest = None
                     if attempt == 0:
@@ -1940,6 +1975,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
                 stderr=subprocess.DEVNULL,
             )
             own_xctest = True
+            own_xctest_job()
             try:
                 # A cold start after a kill can take a while on this device; the
                 # recovery path needs the longer window or it gives up just before
@@ -1956,6 +1992,7 @@ def cmd_wda_proxy(args: argparse.Namespace) -> int:
             if xctest.poll() is not None:
                 own_xctest = False
                 xctest = None
+                release_xctest_job()
 
     if bootstrap_only:
         emit(

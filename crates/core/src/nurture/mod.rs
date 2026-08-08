@@ -1144,7 +1144,10 @@ impl NurtureEngine {
                             break_for.as_secs()
                         ),
                     );
-                    let _ = session.home().await;
+                    {
+                        let _guard = gestures.lock().await;
+                        let _ = session.home().await;
+                    }
                     sleep_interruptible(break_for, &stop).await;
                     if policy.should_cold_restart() {
                         report(
@@ -1166,7 +1169,13 @@ impl NurtureEngine {
                             )
                             .await
                         {
-                            Ok(next) => session = next,
+                            Ok(next) => {
+                                // Swap the watcher's session handle too, or the
+                                // popup watcher keeps tapping through the dead
+                                // pre-restart session for the rest of the run.
+                                session = next;
+                                handle.set(session.clone());
+                            }
                             Err(error) => {
                                 report(&mut status, format!("không mở lại được TikTok: {error}"));
                                 outcome = Outcome::Partial;
@@ -1174,6 +1183,7 @@ impl NurtureEngine {
                             }
                         }
                     } else {
+                        let _guard = gestures.lock().await;
                         let _ = session.launch_app_foreground(&bundle_id).await;
                     }
                     sleep_interruptible(Duration::from_secs(4), &stop).await;

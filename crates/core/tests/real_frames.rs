@@ -390,13 +390,29 @@ fn rail_presence_separates_tappable_videos_from_live_cards() {
         "feed-heart-liked.jpg",
         "feed-heart-liked-sponsored.jpg",
     ] {
+        let img = load(name);
         assert!(
-            screen::rail_icons_present(&load(name)),
+            screen::rail_icons_present(&img),
             "{name} has a rail but was reported as having none"
         );
-        assert!(
-            screen::locate_action_rail(&load(name)).is_some(),
-            "{name} could not yield a fresh action rail"
-        );
+        let rail = screen::locate_action_rail(&img)
+            .unwrap_or_else(|| panic!("{name} could not yield a fresh action rail"));
+        // On a card whose heart is already filled (liked), the located like
+        // point must land on the red heart — not on the comment bubble one
+        // pitch below it. The regression this guards: an already-followed +
+        // liked card hides the red badge AND excludes the red heart from the
+        // white-glyph scan, so the chain used to start at the comment bubble
+        // and `like_y` was mislabeled onto it.
+        if name.contains("heart-liked") {
+            let redness = screen::like_redness_at(&img, &rail);
+            assert!(
+                redness > screen::LIKE_FILLED_REDNESS,
+                "{name}: located like point (y={:.3}) reads redness {redness:.1}, \
+                 expected a filled heart (> {:.1}); locate_action_rail put the like \
+                 target on the comment bubble instead of the heart",
+                rail.like_y,
+                screen::LIKE_FILLED_REDNESS
+            );
+        }
     }
 }

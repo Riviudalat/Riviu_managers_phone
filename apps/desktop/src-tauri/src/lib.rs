@@ -328,7 +328,16 @@ mod tests {
 
     #[test]
     fn exit_order_cancels_workers_then_drains_commands_before_cleanup() {
+        // Scope the search to the app.run(...) exit closure. Searching the whole
+        // file matched the `ordered` array literal below — which is, of course,
+        // already in order — so the test passed regardless of the real sequence.
         let source = include_str!("lib.rs");
+        let run_start = source.find("app.run(").expect("app.run present in run()");
+        let run_end = source[run_start..]
+            .find("\n#[cfg(test)]")
+            .map(|index| run_start + index)
+            .unwrap_or(source.len());
+        let exit_flow = &source[run_start..run_end];
         let ordered = [
             "state.reject_new_work()",
             "state.nurture.begin_shutdown()",
@@ -338,11 +347,11 @@ mod tests {
             "state.shutdown_background_sampler()",
             "state.flows.shutdown()",
             "state.jobs.shutdown()",
-            "state.control.shutdown_cleanup()",
+            "control.shutdown_cleanup()",
         ];
         let mut offset = 0;
         for operation in ordered {
-            let position = source[offset..]
+            let position = exit_flow[offset..]
                 .find(operation)
                 .unwrap_or_else(|| panic!("missing shutdown operation {operation}"));
             offset += position + operation.len();

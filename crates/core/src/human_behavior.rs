@@ -328,28 +328,35 @@ pub enum Mood {
 
 impl Mood {
     /// Multipliers applied to the configured probabilities while this mood runs.
-    /// The weighted average over a cycle lands near 1.0 for each channel.
+    ///
+    /// Skimming never interacts, so the like/comment/follow expectation is
+    /// carried entirely by the Liking and Chatty runs. Videos are shared across
+    /// moods ≈ 60.4 % Skimming / 30.5 % Liking / 9.1 % Chatty (each mood's video
+    /// share = P(mood) × mean run length), so these multipliers are scaled to
+    /// make the video-weighted session average land at 1.0 per channel before
+    /// per-mood clamping — the setting still means what it says. Verified by
+    /// `mood_multipliers_average_near_one_over_a_long_session`.
     fn like_mult(self) -> f64 {
         match self {
             Mood::Skimming => 0.0,
-            Mood::Liking => 2.2,
-            Mood::Chatty => 1.2,
+            Mood::Liking => 2.82,
+            Mood::Chatty => 1.54,
         }
     }
 
     fn comment_mult(self) -> f64 {
         match self {
             Mood::Skimming => 0.0,
-            Mood::Liking => 0.5,
-            Mood::Chatty => 3.0,
+            Mood::Liking => 1.18,
+            Mood::Chatty => 7.07,
         }
     }
 
     fn follow_mult(self) -> f64 {
         match self {
             Mood::Skimming => 0.0,
-            Mood::Liking => 1.6,
-            Mood::Chatty => 1.4,
+            Mood::Liking => 2.60,
+            Mood::Chatty => 2.28,
         }
     }
 
@@ -614,6 +621,37 @@ impl HumanSessionPolicy {
 #[cfg(test)]
 mod mood_tests {
     use super::*;
+
+    /// The per-mood multipliers must make the video-weighted session average
+    /// land at ~1.0 per channel, measured against the real MoodCycle roll
+    /// distribution and run lengths (not a hand-computed share). Regression
+    /// guard for the skew that used to deliver ≈0.42× on comments.
+    #[test]
+    fn mood_multipliers_average_near_one_over_a_long_session() {
+        let mut cycle = MoodCycle::new();
+        let iterations = 300_000;
+        let (mut like, mut comment, mut follow) = (0.0_f64, 0.0_f64, 0.0_f64);
+        for _ in 0..iterations {
+            let (mood, _) = cycle.next();
+            like += mood.like_mult();
+            comment += mood.comment_mult();
+            follow += mood.follow_mult();
+        }
+        let n = iterations as f64;
+        let (like, comment, follow) = (like / n, comment / n, follow / n);
+        assert!(
+            (like - 1.0).abs() < 0.07,
+            "like average {like:.3} drifted off 1.0"
+        );
+        assert!(
+            (comment - 1.0).abs() < 0.07,
+            "comment average {comment:.3} drifted off 1.0"
+        );
+        assert!(
+            (follow - 1.0).abs() < 0.07,
+            "follow average {follow:.3} drifted off 1.0"
+        );
+    }
 
     #[test]
     fn skimming_never_interacts() {

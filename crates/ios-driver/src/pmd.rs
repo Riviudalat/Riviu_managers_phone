@@ -599,7 +599,22 @@ impl PmdIosDriver {
                 });
             anyhow::bail!("pmd {}: {}", args.first().unwrap_or(&""), detail);
         }
-        Ok(serde_json::from_str(stdout.trim()).unwrap_or(serde_json::json!({ "ok": true })))
+        let trimmed = stdout.trim();
+        if trimmed.is_empty() {
+            // A zero-exit command that printed nothing is a success with no
+            // payload (fire-and-forget actions).
+            return Ok(serde_json::json!({ "ok": true }));
+        }
+        // Non-empty stdout MUST be the single JSON document the protocol emits.
+        // Fabricating `{"ok":true}` here made field-probing callers (e.g.
+        // inspect_agent_locked) read stray output as "agent not installed" and
+        // needlessly uninstall/reinstall.
+        serde_json::from_str(trimmed).map_err(|error| {
+            anyhow::anyhow!(
+                "pmd {}: stdout is not valid JSON: {error}",
+                args.first().unwrap_or(&"")
+            )
+        })
     }
 
     /// The sticky control port for a device.
@@ -1614,9 +1629,7 @@ impl PmdIosDriver {
             };
             let mut client =
                 WdaClient::new_with_profile(&self.wda_host, port, udid, self.profile_for(udid)?);
-            if fresh_rt {
-                client.create_fresh_session().await?;
-            } else if fresh_agent {
+            if fresh_rt || fresh_agent {
                 client.create_fresh_session().await?;
             } else {
                 client.create_session().await?;
@@ -1642,7 +1655,13 @@ impl PmdIosDriver {
                 self.interaction_lifecycle.clear(udid);
                 self.stop_stream_child_locked(owned).await;
                 self.teardown_proxy_locked(owned).await;
-                owned.force_restart = false;
+                // Do NOT clear force_restart here. If a prior confirmed wedge set
+                // it, the device-side runner is still alive and only the next
+                // spawn's `--restart-wda` kills it. Clearing it made the next
+                // ensure_relay adopt the wedged runner (200 on /wda/locked, dead
+                // gestures) and spin the 2–3 minute recycle loop the flag exists
+                // to prevent. It is cleared only after a successful spawn (1105)
+                // or a reinstall (947/1804).
                 let message = self.secret_free_error(&error);
                 self.publish_status(self.status(
                     udid,
@@ -1690,7 +1709,9 @@ impl PmdIosDriver {
                 self.sessions.lock().remove(udid);
                 self.teardown_stream_locked(udid, owned).await;
                 self.teardown_proxy_locked(owned).await;
-                owned.force_restart = false;
+                // Keep force_restart set through the failure so the restore
+                // below (and any later ensure_relay) issues `--restart-wda` and
+                // kills the wedged device-side runner instead of adopting it.
                 let restore = async {
                     self.session_locked(udid, owned).await?;
                     self.ensure_stream_locked(udid, owned).await
@@ -2685,7 +2706,12 @@ impl DeviceDriver for PmdIosDriver {
         }
         let value = match self.run_json(&["list"]).await {
             Ok(v) => v,
-            Err(_) => return Ok(Vec::new()),
+            Err(error) => {
+                // A transient sidecar failure must not silently read as an empty
+                // fleet. Surface it, then degrade to empty so the UI stays alive.
+                tracing::warn!("device list scan failed: {error:#}");
+                return Ok(Vec::new());
+            }
         };
         let devices = value
             .get("devices")
@@ -2783,7 +2809,7 @@ impl DeviceDriver for PmdIosDriver {
         campaign_id: &str,
         source_root: &Path,
     ) -> anyhow::Result<serde_json::Value> {
-        if source_root.is_dir() == false {
+        if !source_root.is_dir() {
             anyhow::bail!("publish media source root is not a directory");
         }
         if campaign_id.is_empty()
@@ -3128,7 +3154,8 @@ impl DeviceDriver for PmdIosDriver {
                 self.teardown_stream_locked(udid, &mut owned).await;
                 self.sessions.lock().remove(udid);
                 self.teardown_proxy_locked(&mut owned).await;
-                owned.force_restart = false;
+                // Keep force_restart set so the next ensure_relay restarts the
+                // wedged device-side runner rather than adopting it.
                 let message = self.secret_free_error(&error);
                 self.publish_interaction_readiness(
                     udid,
@@ -3913,6 +3940,27 @@ print(json.dumps({'ok': True, 'note': 'terminate best-effort'}), flush=True)
         assert!(
             !args.iter().any(|arg| arg == "test-token"),
             "the token must be injected through the child environment, not argv"
+        );
+    }
+
+    #[test]
+    fn proxy_args_request_a_device_runner_restart_only_when_forced() {
+        let profile = WdaProfile::rt_mmo("test-token".to_string());
+        assert!(
+            !proxy_args(&profile, "udid-a", 18100, false)
+                .iter()
+                .any(|arg| arg == "--restart-wda"),
+            "a plain start must not restart the device-side runner"
+        );
+        // A confirmed wedge (force_restart) must survive to the spawn so the
+        // sidecar kills and relaunches the device-side runner instead of
+        // adopting the wedged one. The interaction/transition error branches
+        // must not clear force_restart before this spawn runs.
+        assert!(
+            proxy_args(&profile, "udid-a", 18100, true)
+                .iter()
+                .any(|arg| arg == "--restart-wda"),
+            "a forced restart must pass --restart-wda"
         );
     }
 
