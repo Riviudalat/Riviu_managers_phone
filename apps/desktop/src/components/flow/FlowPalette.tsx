@@ -12,10 +12,10 @@ const CATEGORY_ORDER: Exclude<ActionCategory, "control">[] = [
 ];
 
 const CATEGORY_LABELS: Record<Exclude<ActionCategory, "control">, string> = {
-  app: "App",
-  input: "Input",
-  timing: "Timing",
-  evidence: "Evidence",
+  app: "Ứng dụng",
+  input: "Thao tác",
+  timing: "Thời gian",
+  evidence: "Bằng chứng",
 };
 
 function beginActionDrag(event: DragEvent, action: ActionDefinition) {
@@ -51,11 +51,14 @@ export function FlowPalette({
                   draggable={action.disabledReason === null}
                   disabled={action.disabledReason !== null}
                   aria-disabled={action.disabledReason !== null}
-                  title={action.disabledReason ?? action.label}
+                  title={action.disabledReason ?? presentation.label}
                   onDragStart={(event) => beginActionDrag(event, action)}
                 >
                   <Icon aria-hidden="true" size={15} />
-                  <span>{action.label}</span>
+                  {/* Same source as the canvas node title, so an action cannot
+                      be called one thing in the palette and another once
+                      dropped. The backend's `label` stays the canonical name. */}
+                  <span>{presentation.label}</span>
                 </button>
               );
             })}

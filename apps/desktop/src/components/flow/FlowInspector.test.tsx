@@ -168,10 +168,10 @@ describe("FlowInspector", () => {
     expect(screen.getByTestId("evidence")).toHaveTextContent(
       '"bundleId":"com.fixture.new"',
     );
-    expect(within(screen.getByLabelText("Evidence type")).getByRole("option", {
-      name: "Active app equals",
+    expect(within(screen.getByLabelText("Loại bằng chứng")).getByRole("option", {
+      name: "App đang mở khớp bundle",
     })).toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: "Process absent" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Tiến trình đã tắt" })).not.toBeInTheDocument();
   });
 
   it("keeps Terminate App ProcessAbsent evidence equal to the configured bundle", () => {
@@ -198,7 +198,7 @@ describe("FlowInspector", () => {
       kind: "processAbsent",
       bundleId: "com.fixture.target",
     });
-    expect(screen.getByLabelText("Expected absent bundle ID")).toHaveValue(
+    expect(screen.getByLabelText("Bundle ID phải vắng mặt")).toHaveValue(
       "com.fixture.target",
     );
   });
@@ -217,7 +217,7 @@ describe("FlowInspector", () => {
         onConfig={onConfig}
       />,
     );
-    const input = screen.getByLabelText("Duration (ms)");
+    const input = screen.getByLabelText("Thời lượng (ms)");
     expect(input).toHaveAttribute("min", "1");
     expect(input).toHaveAttribute("max", "60000");
     expect(input).toHaveAttribute("step", "1");
@@ -257,9 +257,9 @@ describe("FlowInspector", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Coordinate" }));
+    fireEvent.click(screen.getByRole("button", { name: "Toạ độ" }));
     expect(screen.getByTestId("config")).not.toHaveTextContent("accessibilityId");
-    fireEvent.click(screen.getByRole("button", { name: "Pick point from device" }));
+    fireEvent.click(screen.getByRole("button", { name: "Chọn điểm trên thiết bị" }));
     const image = await screen.findByRole("img", { name: "Device frame" });
     vi.spyOn(image, "getBoundingClientRect").mockReturnValue({
       x: 100,
@@ -286,7 +286,7 @@ describe("FlowInspector", () => {
       },
     });
     expect(screen.queryByRole("option", {
-      name: "Qualified frame predicate",
+      name: "Vị ngữ khung có kiểm định",
     })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Accessibility ID" }));
@@ -329,14 +329,14 @@ describe("FlowInspector", () => {
         onConfig={onConfig}
       />,
     );
-    const from = screen.getByRole("group", { name: "From" });
+    const from = screen.getByRole("group", { name: "Từ điểm" });
     const x = within(from).getByLabelText("X");
     fireEvent.change(x, { target: { value: "42.5" } });
     expect(onConfig).toHaveBeenCalledTimes(1);
     fireEvent.change(x, { target: { value: "Infinity" } });
     expect(onConfig).toHaveBeenCalledTimes(1);
     expect(within(from).getByLabelText("Profile ID")).toHaveAttribute("readonly");
-    expect(within(from).getByLabelText("Orientation")).toHaveValue("portrait");
+    expect(within(from).getByLabelText("Hướng màn hình")).toHaveValue("portrait");
   });
 
   it("uses a two-option Type Text read-back locator and synchronizes its evidence", () => {
@@ -373,12 +373,12 @@ describe("FlowInspector", () => {
         )}
       />,
     );
-    const configLocator = screen.getAllByRole("group", { name: "Locator strategy" })[0];
+    const configLocator = screen.getAllByRole("group", { name: "Cách định vị" })[0];
     expect(within(configLocator).getAllByRole("button")).toHaveLength(2);
     fireEvent.click(within(configLocator).getByRole("button", { name: "Class name" }));
     expect(screen.getByTestId("config")).toHaveTextContent('"strategy":"className"');
     expect(screen.getByTestId("evidence")).toHaveTextContent('"strategy":"className"');
-    fireEvent.change(screen.getByLabelText("Text"), { target: { value: "updated" } });
+    fireEvent.change(screen.getByLabelText("Nội dung"), { target: { value: "updated" } });
     expect(screen.getByTestId("evidence")).toHaveTextContent('"value":"updated"');
   });
 
@@ -408,11 +408,11 @@ describe("FlowInspector", () => {
         ]}
       />,
     );
-    expect(screen.getByLabelText("Label")).toHaveAttribute("maxlength", "96");
-    expect(screen.getByLabelText("Format")).toHaveValue("jpeg");
+    expect(screen.getByLabelText("Nhãn")).toHaveAttribute("maxlength", "96");
+    expect(screen.getByLabelText("Định dạng")).toHaveValue("jpeg");
     expect(screen.getByText("Label is invalid")).toHaveAttribute("role", "alert");
     expect(screen.getByText("Node is invalid")).toHaveAttribute("role", "alert");
-    fireEvent.change(screen.getByLabelText("Label"), { target: { value: "x".repeat(97) } });
+    fireEvent.change(screen.getByLabelText("Nhãn"), { target: { value: "x".repeat(97) } });
     expect(onConfig).not.toHaveBeenCalled();
   });
 });
@@ -468,7 +468,7 @@ describe("FlowImportDialog", () => {
       diagnostics: [],
     });
     render(<FlowImportDialog onImport={onImport} onClose={vi.fn()} importLegacy={importer} />);
-    fireEvent.change(screen.getByLabelText("Legacy script JSON"), {
+    fireEvent.change(screen.getByLabelText("JSON script cũ"), {
       target: { value: '{"steps":[]}' },
     });
     fireEvent.click(screen.getByRole("button", { name: "Import" }));
@@ -494,7 +494,7 @@ describe("FlowJsonDialog", () => {
         validate={validate}
       />,
     );
-    const editor = screen.getByLabelText("Document JSON");
+    const editor = screen.getByLabelText("JSON tài liệu");
     fireEvent.change(editor, { target: { value: "{" } });
     fireEvent.click(screen.getByRole("button", { name: "Validate and apply" }));
     expect(await screen.findByRole("alert")).not.toHaveTextContent(/^$/);
@@ -527,7 +527,7 @@ describe("FlowJsonDialog", () => {
     await waitFor(() => expect(onApply).toHaveBeenCalledWith(document));
 
     fireEvent.click(screen.getByRole("button", { name: "Load saved export" }));
-    await waitFor(() => expect(screen.getByLabelText("Document JSON")).toHaveValue(exported));
+    await waitFor(() => expect(screen.getByLabelText("JSON tài liệu")).toHaveValue(exported));
     expect(exportFlow).toHaveBeenCalledWith(document.id, document.revision);
   });
 
@@ -543,7 +543,7 @@ describe("FlowJsonDialog", () => {
         validate={validate}
       />,
     );
-    fireEvent.change(screen.getByLabelText("Document JSON"), {
+    fireEvent.change(screen.getByLabelText("JSON tài liệu"), {
       target: { value: " ".repeat(1_048_577) },
     });
     fireEvent.click(screen.getByRole("button", { name: "Validate and apply" }));

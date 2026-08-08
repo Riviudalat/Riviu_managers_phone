@@ -94,7 +94,7 @@ export function FlowToolbar(props: FlowToolbarProps) {
 
   return (
     <header className="flow-toolbar" data-testid="flow-toolbar">
-      <IconCommand label="Toggle action palette" onClick={props.onTogglePalette}>
+      <IconCommand label="Bật/tắt bảng hành động" onClick={props.onTogglePalette}>
         <PanelLeft size={16} />
       </IconCommand>
       <select
@@ -113,52 +113,52 @@ export function FlowToolbar(props: FlowToolbarProps) {
       </select>
       <input
         className="flow-name-input"
-        aria-label="Flow name"
+        aria-label="Tên Flow"
         value={props.flowName}
         maxLength={120}
         onChange={(event) => props.onRename(event.currentTarget.value)}
       />
-      <IconCommand label="New flow" onClick={props.onNew}>
+      <IconCommand label="Flow mới" onClick={props.onNew}>
         <Plus size={16} />
       </IconCommand>
       <IconCommand
-        label="Duplicate flow"
+        label="Nhân bản Flow"
         disabled={!props.currentFlowId}
         onClick={props.onDuplicate}
       >
         <Copy size={16} />
       </IconCommand>
       <IconCommand
-        label="Archive flow"
+        label="Lưu trữ Flow"
         disabled={!props.currentFlowId}
         onClick={props.onArchive}
       >
         <Archive size={16} />
       </IconCommand>
       <span className="flow-toolbar-separator" />
-      <IconCommand label="Undo" disabled={!props.canUndo} onClick={props.onUndo}>
+      <IconCommand label="Hoàn tác" disabled={!props.canUndo} onClick={props.onUndo}>
         <Undo2 size={16} />
       </IconCommand>
-      <IconCommand label="Redo" disabled={!props.canRedo} onClick={props.onRedo}>
+      <IconCommand label="Làm lại" disabled={!props.canRedo} onClick={props.onRedo}>
         <Redo2 size={16} />
       </IconCommand>
-      <IconCommand label="Save revision" disabled={!canSave} onClick={props.onSave}>
+      <IconCommand label="Lưu bản" disabled={!canSave} onClick={props.onSave}>
         <Save size={16} />
       </IconCommand>
-      <IconCommand label="Validate flow" onClick={() => setPreviewOpen(true)}>
+      <IconCommand label="Kiểm tra Flow" onClick={() => setPreviewOpen(true)}>
         <CheckCircle size={16} />
       </IconCommand>
-      <IconCommand label="Import flow" onClick={props.onImport}>
+      <IconCommand label="Nhập Flow" onClick={props.onImport}>
         <Upload size={16} />
       </IconCommand>
       <IconCommand
-        label="Export flow"
+        label="Xuất Flow"
         disabled={!props.currentFlowId}
         onClick={props.onExport}
       >
         <Download size={16} />
       </IconCommand>
-      <IconCommand label="View JSON" onClick={props.onJson}>
+      <IconCommand label="Xem JSON" onClick={props.onJson}>
         <Braces size={16} />
       </IconCommand>
       <button
@@ -168,13 +168,13 @@ export function FlowToolbar(props: FlowToolbarProps) {
         onClick={props.onRun}
       >
         <Play size={16} />
-        Run flow
+        Chạy Flow
       </button>
-      <IconCommand label="Toggle inspector" onClick={props.onToggleInspector}>
+      <IconCommand label="Bật/tắt bảng thuộc tính" onClick={props.onToggleInspector}>
         <PanelRight size={16} />
       </IconCommand>
       {previewOpen && (
-        <section role="dialog" aria-label="Compile preview" className="flow-compile-preview">
+        <section role="dialog" aria-label="Xem trước biên dịch" className="flow-compile-preview">
           <strong>{props.compiled ? "Valid" : "Invalid"}</strong>
           <code>
             {props.compiled
@@ -192,7 +192,7 @@ export function FlowToolbar(props: FlowToolbarProps) {
             ))}
           </ul>
           <button type="button" onClick={() => setPreviewOpen(false)}>
-            Close
+            Đóng
           </button>
         </section>
       )}

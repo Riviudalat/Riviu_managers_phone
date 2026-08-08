@@ -101,7 +101,7 @@ export function Sidebar({
 
         {!collapsed && (
           <div className="aside-stats">
-            <h4>Dashboard</h4>
+            <h4>Tổng quan</h4>
             <div className="aside-stat-row">
               <span>Thiết bị</span>
               <span />

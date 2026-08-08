@@ -19,19 +19,19 @@ async function openFlow(page: Page, selectDevices = false): Promise<void> {
     }
   }
   await page.locator(".menu-item").getByText("Flow", { exact: true }).click();
-  await expect(page.getByRole("region", { name: "Flow workspace" })).toHaveAttribute(
+  await expect(page.getByRole("region", { name: "Không gian Flow" })).toHaveAttribute(
     "data-loading",
     "false",
   );
-  await expect(page.getByLabel("Flow name")).toHaveValue("Fixture flow");
+  await expect(page.getByLabel("Tên Flow")).toHaveValue("Fixture flow");
   await expect(page.getByTestId("flow-canvas")).toBeVisible();
 }
 
 async function insertActionOnFirstEdge(page: Page, action: string): Promise<Locator> {
   const actionKinds: Record<string, string> = {
-    Screenshot: "screenshot",
-    Tap: "tap",
-    Wait: "wait",
+    "Chụp màn hình": "screenshot",
+    "Chạm": "tap",
+    "Chờ": "wait",
   };
   const kind = actionKinds[action];
   if (!kind) throw new Error(`Unsupported E2E action: ${action}`);
@@ -101,47 +101,47 @@ test.beforeEach(async ({ page }, testInfo) => {
 
 test("authors, saves, runs, and reloads a selected-device flow", async ({ page }) => {
   await openFlow(page, true);
-  await page.getByRole("button", { name: "New flow" }).click();
-  await page.getByLabel("Flow name").fill("E2E flow");
+  await page.getByRole("button", { name: "Flow mới" }).click();
+  await page.getByLabel("Tên Flow").fill("E2E flow");
 
-  await insertActionOnFirstEdge(page, "Wait");
-  await page.getByLabel("Duration (ms)").fill("250");
+  await insertActionOnFirstEdge(page, "Chờ");
+  await page.getByLabel("Thời lượng (ms)").fill("250");
 
-  await insertActionOnFirstEdge(page, "Tap");
+  await insertActionOnFirstEdge(page, "Chạm");
   await page.getByLabel("Accessibility ID", { exact: true }).fill("like-button");
-  await page.getByLabel("Evidence type").selectOption("frameDigestChanged");
-  await page.getByLabel("Minimum distance").fill("8");
+  await page.getByLabel("Loại bằng chứng").selectOption("frameDigestChanged");
+  await page.getByLabel("Khoảng cách tối thiểu").fill("8");
 
-  await insertActionOnFirstEdge(page, "Screenshot");
-  await page.getByLabel("Label", { exact: true }).fill("E2E evidence");
-  await page.getByLabel("Evidence type").selectOption("artifactDecodedAndHashed");
+  await insertActionOnFirstEdge(page, "Chụp màn hình");
+  await page.getByLabel("Nhãn", { exact: true }).fill("E2E evidence");
+  await page.getByLabel("Loại bằng chứng").selectOption("artifactDecodedAndHashed");
 
-  const save = page.getByRole("button", { name: "Save revision" });
+  const save = page.getByRole("button", { name: "Lưu bản" });
   await waitForEnabled(save);
-  await page.getByRole("button", { name: "Validate flow" }).click();
-  await expect(page.getByRole("dialog", { name: "Compile preview" })).toContainText("Valid");
-  await page.getByRole("dialog", { name: "Compile preview" }).getByRole("button", {
-    name: "Close",
+  await page.getByRole("button", { name: "Kiểm tra Flow" }).click();
+  await expect(page.getByRole("dialog", { name: "Xem trước biên dịch" })).toContainText("Valid");
+  await page.getByRole("dialog", { name: "Xem trước biên dịch" }).getByRole("button", {
+    name: "Đóng",
   }).click();
   await save.click();
 
-  const run = page.getByRole("button", { name: "Run flow" });
+  const run = page.getByRole("button", { name: "Chạy Flow" });
   await waitForEnabled(run);
   await run.click();
-  const runDialog = page.getByRole("dialog", { name: "Run flow" });
-  await runDialog.getByRole("radio", { name: "Selected" }).check();
+  const runDialog = page.getByRole("dialog", { name: "Chạy Flow" });
+  await runDialog.getByRole("radio", { name: "Đã chọn" }).check();
   await expect(runDialog.getByText("2 selected")).toBeVisible();
-  await runDialog.getByRole("button", { name: "Run on devices" }).click();
+  await runDialog.getByRole("button", { name: "Chạy trên thiết bị" }).click();
 
   await expect(page.getByRole("row", { name: /MOCK-IPHONE-01.*Wait.*Succeeded/ })).toBeVisible();
   await expect(page.getByRole("row", { name: /MOCK-IPHONE-02.*Wait.*Succeeded/ })).toBeVisible();
   await page.getByRole("button", { name: "Fixture screenshot 1" }).click();
-  const artifact = page.getByRole("dialog", { name: "Artifact" });
+  const artifact = page.getByRole("dialog", { name: "Tệp kết quả" });
   await expect(artifact).toContainText("Fixture screenshot");
   await expect.poll(async () => artifact.getByRole("img").evaluate((image) =>
     (image as HTMLImageElement).naturalWidth
   )).toBeGreaterThan(0);
-  await artifact.getByRole("button", { name: "Close" }).click();
+  await artifact.getByRole("button", { name: "Đóng" }).click();
   const calls = await mockCommandCalls(page);
   expect(calls).toContainEqual(expect.objectContaining({
     command: "flow_save_revision",
@@ -159,14 +159,14 @@ test("authors, saves, runs, and reloads a selected-device flow", async ({ page }
 
   await page.reload();
   await page.locator(".menu-item").getByText("Flow", { exact: true }).click();
-  await expect(page.getByRole("region", { name: "Flow workspace" })).toHaveAttribute(
+  await expect(page.getByRole("region", { name: "Không gian Flow" })).toHaveAttribute(
     "data-loading",
     "false",
   );
-  await expect(page.getByLabel("Flow name")).toHaveValue("E2E flow");
-  await expect(page.locator(FLOW_NODE_TITLE).filter({ hasText: "Wait" })).toHaveCount(1);
-  await expect(page.locator(FLOW_NODE_TITLE).filter({ hasText: "Tap" })).toHaveCount(1);
-  await expect(page.locator(FLOW_NODE_TITLE).filter({ hasText: "Screenshot" })).toHaveCount(1);
+  await expect(page.getByLabel("Tên Flow")).toHaveValue("E2E flow");
+  await expect(page.locator(FLOW_NODE_TITLE).filter({ hasText: "Chờ" })).toHaveCount(1);
+  await expect(page.locator(FLOW_NODE_TITLE).filter({ hasText: "Chạm" })).toHaveCount(1);
+  await expect(page.locator(FLOW_NODE_TITLE).filter({ hasText: "Chụp màn hình" })).toHaveCount(1);
 });
 
 test("keeps uncertain Tap non-retryable and cancels a running Wait", async ({ page }) => {
@@ -175,49 +175,49 @@ test("keeps uncertain Tap non-retryable and cancels a running Wait", async ({ pa
   await expect.poll(async () =>
     (await mockCommandCalls(page)).filter((call) => call.command === "flow_validate").length
   ).toBeGreaterThan(0);
-  await page.getByRole("button", { name: "Validate flow" }).click();
-  const preview = page.getByRole("dialog", { name: "Compile preview" });
+  await page.getByRole("button", { name: "Kiểm tra Flow" }).click();
+  const preview = page.getByRole("dialog", { name: "Xem trước biên dịch" });
   await expect(preview).toContainText("Valid");
-  await preview.getByRole("button", { name: "Close" }).click();
-  const run = page.getByRole("button", { name: "Run flow" });
+  await preview.getByRole("button", { name: "Đóng" }).click();
+  const run = page.getByRole("button", { name: "Chạy Flow" });
   await waitForEnabled(run);
   await run.click();
-  await page.getByRole("dialog", { name: "Run flow" })
-    .getByRole("button", { name: "Run on devices" })
+  await page.getByRole("dialog", { name: "Chạy Flow" })
+    .getByRole("button", { name: "Chạy trên thiết bị" })
     .click();
   await expect(page.getByTestId("flow-monitor")).toContainText("Uncertain");
   await expect(page.getByRole("button", { name: /Retry Tap/ })).toHaveCount(0);
 
   await setNextRunMode(page, "runningWait");
   await run.click();
-  await page.getByRole("dialog", { name: "Run flow" })
-    .getByRole("button", { name: "Run on devices" })
+  await page.getByRole("dialog", { name: "Chạy Flow" })
+    .getByRole("button", { name: "Chạy trên thiết bị" })
     .click();
   await expect(page.getByTestId("flow-monitor")).toContainText("Running");
   const runId = await page.locator(".flow-run-history select").inputValue();
-  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByRole("button", { name: "Hủy", exact: true }).click();
   await emitRiviuEvent(page, { type: "flowRunUpdated", runId, revision: 2 });
   await expect(page.getByTestId("flow-monitor")).toContainText("Cancelled");
-  await expect(page.getByRole("button", { name: "Cancel", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Hủy", exact: true })).toBeDisabled();
 });
 
 test("imports supported legacy JSON and preserves the draft on diagnostics", async ({ page }) => {
   await openFlow(page);
-  await page.getByRole("button", { name: "Import flow" }).click();
-  let dialog = page.getByRole("dialog", { name: "Import legacy flow" });
-  await dialog.getByLabel("Legacy script JSON").fill(JSON.stringify({
+  await page.getByRole("button", { name: "Nhập Flow" }).click();
+  let dialog = page.getByRole("dialog", { name: "Nhập Flow cũ" });
+  await dialog.getByLabel("JSON script cũ").fill(JSON.stringify({
     version: 1,
     name: "supported",
     steps: [{ action: "wait", milliseconds: 250 }],
   }));
   await dialog.getByRole("button", { name: "Import", exact: true }).click();
   await expect(dialog).toBeHidden();
-  await expect(page.getByLabel("Flow name")).toHaveValue("Imported legacy flow");
+  await expect(page.getByLabel("Tên Flow")).toHaveValue("Imported legacy flow");
   const nodeCount = await page.locator(".flow-node").count();
 
-  await page.getByRole("button", { name: "Import flow" }).click();
-  dialog = page.getByRole("dialog", { name: "Import legacy flow" });
-  await dialog.getByLabel("Legacy script JSON").fill(JSON.stringify({
+  await page.getByRole("button", { name: "Nhập Flow" }).click();
+  dialog = page.getByRole("dialog", { name: "Nhập Flow cũ" });
+  await dialog.getByLabel("JSON script cũ").fill(JSON.stringify({
     version: 1,
     name: "unsupported",
     steps: [{ action: "wait", milliseconds: 60_001 }],
@@ -257,12 +257,12 @@ for (const viewport of [
   }) => {
     await page.setViewportSize(viewport);
     await openFlow(page);
-    await page.locator(FLOW_NODE_TITLE).filter({ hasText: "Tap" }).click();
+    await page.locator(FLOW_NODE_TITLE).filter({ hasText: "Chạm" }).click();
     if (viewport.width <= 1100) {
-      await page.getByRole("button", { name: "Toggle action palette" }).click();
+      await page.getByRole("button", { name: "Bật/tắt bảng hành động" }).click();
       await expect(page.getByTestId("flow-palette")).toHaveAttribute("data-open", "false");
-      await expect(page.getByRole("button", { name: "Run flow" })).toBeInViewport();
-      await expect(page.getByRole("button", { name: "Toggle inspector" })).toBeInViewport();
+      await expect(page.getByRole("button", { name: "Chạy Flow" })).toBeInViewport();
+      await expect(page.getByRole("button", { name: "Bật/tắt bảng thuộc tính" })).toBeInViewport();
     }
 
     const canvas = await page.getByTestId("flow-canvas").boundingBox();

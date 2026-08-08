@@ -429,7 +429,7 @@ export function FlowWorkspace({
   }, []);
 
   return (
-    <section className="flow-workspace" aria-label="Flow workspace" data-loading={loading}>
+    <section className="flow-workspace" aria-label="Không gian Flow" data-loading={loading}>
       <FlowToolbar
         flows={flows}
         currentFlowId={saved ? state.document.id : null}
@@ -476,13 +476,13 @@ export function FlowWorkspace({
         {operationError && (
           <div className="flow-operation-error" role="alert">
             <span>{operationError}</span>
-            <button type="button" onClick={() => setOperationError(null)}>Dismiss</button>
+            <button type="button" onClick={() => setOperationError(null)}>Bỏ qua</button>
           </div>
         )}
         {state.notice && (
           <div className="flow-operation-error" role="status">
             Revision {state.notice.savedRevision} saved; the newer local draft remains open.
-            <button type="button" onClick={() => dispatch({ type: "dismissNotice" })}>Dismiss</button>
+            <button type="button" onClick={() => dispatch({ type: "dismissNotice" })}>Bỏ qua</button>
           </div>
         )}
       </div>
@@ -538,12 +538,12 @@ export function FlowWorkspace({
         />
         <div className="flow-run-history">
           <label>
-            <span>Run</span>
+            <span>Lượt chạy</span>
             <select
               value={activeRun?.run.id ?? ""}
               onChange={(event) => selectRun(event.currentTarget.value)}
             >
-              <option value="">No run selected</option>
+              <option value="">Chưa chọn lượt chạy</option>
               {runs.map((run) => (
                 <option key={run.id} value={run.id}>
                   {run.state} / {run.id.slice(0, 8)}
@@ -561,7 +561,7 @@ export function FlowWorkspace({
           />
         ) : (
           <section className="flow-monitor flow-monitor-empty" data-testid="flow-monitor">
-            <span>No active run</span>
+            <span>Chưa có lượt chạy</span>
           </section>
         )}
       </div>
@@ -601,10 +601,10 @@ export function FlowWorkspace({
       )}
       {artifact && (
         <div className="flow-dialog-layer">
-          <section className="flow-dialog flow-artifact-dialog" role="dialog" aria-label="Artifact">
+          <section className="flow-dialog flow-artifact-dialog" role="dialog" aria-label="Tệp kết quả">
             <header>
               <strong>{artifact.label}</strong>
-              <button type="button" onClick={() => setArtifact(null)}>Close</button>
+              <button type="button" onClick={() => setArtifact(null)}>Đóng</button>
             </header>
             <img
               src={`data:${artifact.kind.includes("/") ? artifact.kind : `image/${artifact.kind}`};base64,${artifact.base64}`}

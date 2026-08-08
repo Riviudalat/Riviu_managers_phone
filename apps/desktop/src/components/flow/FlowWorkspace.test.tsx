@@ -260,7 +260,7 @@ async function renderReadyWorkspace(onDirtyChange = vi.fn()) {
   );
   await screen.findByDisplayValue("Saved flow");
   await waitFor(() => expect(api.flowValidate).toHaveBeenCalled());
-  await waitFor(() => expect(screen.getByRole("button", { name: "Run flow" })).toBeEnabled());
+  await waitFor(() => expect(screen.getByRole("button", { name: "Chạy Flow" })).toBeEnabled());
   return onDirtyChange;
 }
 
@@ -272,12 +272,12 @@ describe("FlowWorkspace startup", () => {
     expect(api.flowList).toHaveBeenCalledWith();
     expect(api.flowListRuns).toHaveBeenCalledWith(100);
     expect(api.flowGet).toHaveBeenCalledWith(savedDocument.id);
-    const disabledLaunch = screen.getByRole("button", { name: "Launch App" });
+    const disabledLaunch = screen.getByRole("button", { name: "Mở ứng dụng" });
     expect(disabledLaunch).toBeDisabled();
     expect(disabledLaunch).toHaveAttribute("title", "Requires qualified device");
     expect(screen.queryByRole("button", { name: "Raw HTTP" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Save revision" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Run flow" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Lưu bản" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Chạy Flow" })).toBeEnabled();
   });
 
   it("leaves loading state and reports a saved-revision fetch failure", async () => {
@@ -293,7 +293,7 @@ describe("FlowWorkspace startup", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("revision read failed");
     await waitFor(() => expect(
-      screen.getByRole("region", { name: "Flow workspace" }),
+      screen.getByRole("region", { name: "Không gian Flow" }),
     ).toHaveAttribute("data-loading", "false"));
   });
 });
@@ -342,22 +342,22 @@ describe("FlowWorkspace editing", () => {
     fireEvent.click(screen.getByRole("button", { name: "Append Wait fixture" }));
 
     expect(screen.getByTestId("canvas-kinds")).toHaveTextContent("start,end,wait");
-    expect(screen.getByRole("button", { name: "Undo" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Run flow" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Hoàn tác" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Chạy Flow" })).toBeDisabled();
     await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(true));
 
-    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    fireEvent.click(screen.getByRole("button", { name: "Hoàn tác" }));
     expect(screen.getByTestId("canvas-kinds")).toHaveTextContent("start,end");
     expect(screen.getByTestId("canvas-kinds")).not.toHaveTextContent("wait");
-    expect(screen.getByRole("button", { name: "Redo" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Làm lại" })).toBeEnabled();
   });
 
   it("enables Save only after current validation, then enables Run after a clean saved revision", async () => {
     await renderReadyWorkspace();
     fireEvent.click(screen.getByRole("button", { name: "Append Wait fixture" }));
 
-    const save = screen.getByRole("button", { name: "Save revision" });
-    const run = screen.getByRole("button", { name: "Run flow" });
+    const save = screen.getByRole("button", { name: "Lưu bản" });
+    const run = screen.getByRole("button", { name: "Chạy Flow" });
     expect(save).toBeDisabled();
     expect(run).toBeDisabled();
     await waitFor(() => expect(save).toBeEnabled());
@@ -369,7 +369,7 @@ describe("FlowWorkspace editing", () => {
     expect(save).toBeDisabled();
 
     fireEvent.click(run);
-    fireEvent.click(screen.getByRole("button", { name: "Run on devices" }));
+    fireEvent.click(screen.getByRole("button", { name: "Chạy trên thiết bị" }));
     await waitFor(() => expect(api.flowRun).toHaveBeenCalledWith(
       savedDocument.id,
       3,

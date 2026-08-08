@@ -8,13 +8,13 @@ export function FlowDiagnostics({
   onSelectNode?: (nodeId: string) => void;
 }) {
   return (
-    <section className="flow-diagnostics" aria-label="Flow diagnostics">
+    <section className="flow-diagnostics" aria-label="Chẩn đoán Flow">
       <header>
-        <strong>Diagnostics</strong>
+        <strong>Chẩn đoán</strong>
         <span>{issues.length}</span>
       </header>
       {issues.length === 0 ? (
-        <p>Valid</p>
+        <p>Hợp lệ</p>
       ) : (
         <ul>
           {issues.map((issue, index) => (

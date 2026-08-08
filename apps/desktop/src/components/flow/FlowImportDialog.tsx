@@ -37,15 +37,15 @@ export function FlowImportDialog({
   };
 
   return (
-    <section role="dialog" aria-modal="true" aria-label="Import legacy flow" className="flow-dialog">
+    <section role="dialog" aria-modal="true" aria-label="Nhập Flow cũ" className="flow-dialog">
       <header>
-        <strong>Import legacy flow</strong>
-        <button type="button" aria-label="Close import dialog" title="Close" onClick={onClose}>
+        <strong>Nhập Flow cũ</strong>
+        <button type="button" aria-label="Đóng hộp thoại nhập" title="Đóng" onClick={onClose}>
           <X aria-hidden="true" size={16} />
         </button>
       </header>
       <label className="flow-field">
-        <span>Legacy script JSON</span>
+        <span>JSON script cũ</span>
         <textarea
           value={raw}
           rows={14}
@@ -55,7 +55,7 @@ export function FlowImportDialog({
       </label>
       {error && <p role="alert">{error}</p>}
       {result && result.diagnostics.length > 0 && (
-        <section aria-label="Import diagnostics">
+        <section aria-label="Chẩn đoán nhập">
           <strong>{result.diagnostics.length} diagnostics</strong>
           <ul>
             {result.diagnostics.map((diagnostic, index) => (
@@ -71,7 +71,7 @@ export function FlowImportDialog({
         </section>
       )}
       <footer>
-        <button type="button" onClick={onClose}>Cancel</button>
+        <button type="button" onClick={onClose}>Hủy</button>
         <button type="button" disabled={busy || raw.trim() === ""} onClick={() => void submit()}>
           <Upload aria-hidden="true" size={15} />
           {busy ? "Importing..." : "Import"}

@@ -33,19 +33,19 @@ export type FlowCanvasNode = Node<FlowActionNodeData, "flowAction">;
 export const ACTION_PRESENTATION: Partial<
   Record<ActionKind, { label: string; icon: LucideIcon }>
 > = {
-  start: { label: "Start", icon: CirclePlay },
-  end: { label: "End", icon: CircleStop },
-  launchApp: { label: "Launch App", icon: Rocket },
-  terminateApp: { label: "Terminate App", icon: PowerOff },
-  wait: { label: "Wait", icon: Timer },
-  tap: { label: "Tap", icon: MousePointerClick },
-  swipe: { label: "Swipe", icon: MoveUp },
-  typeText: { label: "Type Text", icon: Keyboard },
-  screenshot: { label: "Screenshot", icon: Camera },
-  home: { label: "Home", icon: House },
-  assertVisible: { label: "Assert Visible", icon: ScanSearch },
-  tapVision: { label: "Tap Vision", icon: Crosshair },
-  ifVision: { label: "If Vision", icon: GitBranch },
+  start: { label: "Bắt đầu", icon: CirclePlay },
+  end: { label: "Kết thúc", icon: CircleStop },
+  launchApp: { label: "Mở ứng dụng", icon: Rocket },
+  terminateApp: { label: "Tắt ứng dụng", icon: PowerOff },
+  wait: { label: "Chờ", icon: Timer },
+  tap: { label: "Chạm", icon: MousePointerClick },
+  swipe: { label: "Vuốt", icon: MoveUp },
+  typeText: { label: "Gõ chữ", icon: Keyboard },
+  screenshot: { label: "Chụp màn hình", icon: Camera },
+  home: { label: "Về màn hình chính", icon: House },
+  assertVisible: { label: "Kiểm tra hiển thị", icon: ScanSearch },
+  tapVision: { label: "Chạm theo ảnh", icon: Crosshair },
+  ifVision: { label: "Nếu thấy ảnh", icon: GitBranch },
 };
 
 function objectNumber(value: JsonValue | undefined, key: string): number | null {

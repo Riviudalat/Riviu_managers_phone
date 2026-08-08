@@ -33,16 +33,16 @@ export function FlowRunDialog({
   const selection = targetSelection(mode, oneUdid, selectedUdids);
 
   return (
-    <section role="dialog" aria-label="Run flow" className="flow-dialog flow-run-dialog">
+    <section role="dialog" aria-label="Chạy Flow" className="flow-dialog flow-run-dialog">
       <header>
-        <strong>Run flow</strong>
+        <strong>Chạy Flow</strong>
         {onClose && (
-          <button type="button" aria-label="Close run dialog" title="Close" onClick={onClose}>
+          <button type="button" aria-label="Đóng hộp thoại chạy" title="Đóng" onClick={onClose}>
             <X size={16} />
           </button>
         )}
       </header>
-      <div className="segmented" role="radiogroup" aria-label="Targets">
+      <div className="segmented" role="radiogroup" aria-label="Thiết bị đích">
         {(["one", "selected", "allEligible"] as const).map((value) => (
           <label key={value}>
             <input
@@ -53,14 +53,14 @@ export function FlowRunDialog({
               onChange={() => setMode(value)}
             />
             <span>
-              {value === "one" ? "One" : value === "selected" ? "Selected" : "All eligible"}
+              {value === "one" ? "Một máy" : value === "selected" ? "Đã chọn" : "Tất cả máy hợp lệ"}
             </span>
           </label>
         ))}
       </div>
       {mode === "one" && (
         <select
-          aria-label="Device"
+          aria-label="Thiết bị"
           value={oneUdid}
           onChange={(event) => setOneUdid(event.target.value)}
         >
@@ -72,7 +72,7 @@ export function FlowRunDialog({
         </select>
       )}
       {mode === "selected" && <output>{selectedUdids.length} selected</output>}
-      {mode === "allEligible" && <output>Preflight pending</output>}
+      {mode === "allEligible" && <output>Đang tiền kiểm</output>}
       <footer>
         <button
           type="button"
@@ -80,7 +80,7 @@ export function FlowRunDialog({
           disabled={selection === null}
           onClick={() => selection && onRun(selection)}
         >
-          Run on devices
+          Chạy trên thiết bị
         </button>
       </footer>
     </section>

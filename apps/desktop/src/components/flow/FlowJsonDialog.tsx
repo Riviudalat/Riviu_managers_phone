@@ -79,12 +79,12 @@ export function FlowJsonDialog({
     <section role="dialog" aria-modal="true" aria-label="Flow JSON" className="flow-dialog">
       <header>
         <strong>Flow JSON</strong>
-        <button type="button" aria-label="Close JSON dialog" title="Close" onClick={onClose}>
+        <button type="button" aria-label="Đóng hộp thoại JSON" title="Đóng" onClick={onClose}>
           <X aria-hidden="true" size={16} />
         </button>
       </header>
       <label className="flow-field">
-        <span>Document JSON</span>
+        <span>JSON tài liệu</span>
         <textarea
           value={raw}
           rows={20}
@@ -92,7 +92,7 @@ export function FlowJsonDialog({
           onChange={(event) => setRaw(event.currentTarget.value)}
         />
       </label>
-      <p>Advanced document view</p>
+      <p>Xem tài liệu nâng cao</p>
       {error && <p role="alert">{error}</p>}
       <footer>
         <button type="button" disabled={busy !== null} onClick={() => void loadExport()}>

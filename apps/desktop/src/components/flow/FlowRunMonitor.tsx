@@ -124,25 +124,25 @@ export function FlowRunMonitor({
         </div>
         <button
           type="button"
-          title="Cancel run"
+          title="Hủy lượt chạy"
           onClick={() => onCancel(detail.run.id)}
           disabled={terminal(detail.run.state)}
         >
           <Ban size={14} />
-          Cancel
+          Hủy
         </button>
       </header>
       <table>
         <thead>
           <tr>
-            <th>Device</th>
+            <th>Thiết bị</th>
             <th>Node</th>
-            <th>Attempt</th>
-            <th>Status</th>
-            <th>Duration</th>
-            <th>Evidence</th>
-            <th>Artifact</th>
-            <th>Error</th>
+            <th>Lượt thử</th>
+            <th>Trạng thái</th>
+            <th>Thời lượng</th>
+            <th>Bằng chứng</th>
+            <th>Tệp kết quả</th>
+            <th>Lỗi</th>
             <th />
           </tr>
         </thead>

@@ -14,6 +14,7 @@ import type {
 } from "../../types";
 import { flowCoordinateFrame } from "../../api";
 import { acceptFiniteValueAsNumber } from "../../flow/validation";
+import { ACTION_PRESENTATION } from "./FlowActionNode";
 import { FlowCoordinatePicker } from "./FlowCoordinatePicker";
 import { FlowVisionCapture } from "./FlowVisionCapture";
 
@@ -69,14 +70,14 @@ const ORIENTATIONS: ScreenOrientation[] = [
 ];
 
 const EVIDENCE_LABELS: Record<EvidenceKind, string> = {
-  activeAppEquals: "Active app equals",
-  processAbsent: "Process absent",
-  frameDigestChanged: "Frame digest changed",
-  frameRegionChanged: "Frame region changed",
-  qualifiedFramePredicate: "Qualified frame predicate",
-  accessibilityVisible: "Accessibility visible",
-  textReadBackEquals: "Text read-back equals",
-  artifactDecodedAndHashed: "Artifact decoded and hashed",
+  activeAppEquals: "App đang mở khớp bundle",
+  processAbsent: "Tiến trình đã tắt",
+  frameDigestChanged: "Toàn màn hình đổi",
+  frameRegionChanged: "Vùng màn hình đổi",
+  qualifiedFramePredicate: "Vị ngữ khung có kiểm định",
+  accessibilityVisible: "Phần tử hiển thị",
+  textReadBackEquals: "Văn bản đọc lại khớp",
+  artifactDecodedAndHashed: "Tệp kết quả giải mã & băm",
 };
 
 function isJsonObject(value: JsonValue | undefined): value is JsonObject {
@@ -85,23 +86,25 @@ function isJsonObject(value: JsonValue | undefined): value is JsonObject {
 
 function titleFor(name: string): string {
   const known: Record<string, string> = {
+    // Identifiers keep their platform spelling — they name a WDA/iOS concept,
+    // not an English word the operator is meant to read.
     accessibilityId: "Accessibility ID",
     bundleId: "Bundle ID",
     detectorId: "Detector ID",
-    durationMs: "Duration (ms)",
-    format: "Format",
-    from: "From",
-    imageHeight: "Image height",
-    imageWidth: "Image width",
-    label: "Label",
-    minimumDistance: "Minimum distance",
-    point: "Point",
     profileId: "Profile ID",
-    readBackLocator: "Read-back locator",
-    strategy: "Strategy",
-    text: "Text",
-    to: "To",
-    value: "Locator value",
+    durationMs: "Thời lượng (ms)",
+    format: "Định dạng",
+    from: "Từ điểm",
+    imageHeight: "Chiều cao ảnh",
+    imageWidth: "Chiều rộng ảnh",
+    label: "Nhãn",
+    minimumDistance: "Khoảng cách tối thiểu",
+    point: "Điểm",
+    readBackLocator: "Locator đọc lại",
+    strategy: "Cách định vị",
+    text: "Nội dung",
+    to: "Đến điểm",
+    value: "Giá trị locator",
   };
   return known[name] ?? name.replace(/([a-z])([A-Z])/g, "$1 $2");
 }
@@ -285,8 +288,8 @@ function ReadBackLocatorFields({
   const locator = locatorFromValue(value as JsonValue | undefined);
   return (
     <fieldset className="flow-field-group">
-      <legend>Read-back locator</legend>
-      <div role="group" aria-label="Locator strategy" className="flow-segmented-control">
+      <legend>Locator đọc lại</legend>
+      <div role="group" aria-label="Cách định vị" className="flow-segmented-control">
         {(["accessibilityId", "className"] as const).map((strategy) => (
           <button
             type="button"
@@ -299,7 +302,7 @@ function ReadBackLocatorFields({
         ))}
       </div>
       <label className="flow-field">
-        <span>Locator value</span>
+        <span>Giá trị locator</span>
         <input
           type="text"
           value={locator.value}
@@ -397,7 +400,7 @@ function CoordinateFields({
         {numericField("imageHeight", "Image height", true, 1)}
       </div>
       <label className="flow-field">
-        <span>Orientation</span>
+        <span>Hướng màn hình</span>
         <select
           value={coordinate.orientation}
           onChange={(event) =>
@@ -416,7 +419,7 @@ function CoordinateFields({
         <input type="text" value={coordinate.profileId} readOnly />
       </label>
       <button type="button" disabled={!canPick} onClick={() => onPick(field)}>
-        Pick {label.toLowerCase()} from device
+        Chọn {label.toLowerCase()} trên thiết bị
       </button>
       <FieldIssues issues={issues} />
     </fieldset>
@@ -475,7 +478,7 @@ function EvidenceFields({
   onChange: (value: EvidenceSpec | null) => void;
 }) {
   const allowed = availableEvidence(definition);
-  if (allowed.length === 0) return <p className="flow-inspector-empty">No evidence fields</p>;
+  if (allowed.length === 0) return <p className="flow-inspector-empty">Không có trường bằng chứng</p>;
   const currentKind = node.postcondition?.kind ?? "";
   const postcondition =
     node.postcondition !== null && node.postcondition !== undefined &&
@@ -485,18 +488,18 @@ function EvidenceFields({
 
   return (
     <fieldset className="flow-field-group">
-      <legend>Evidence</legend>
+      <legend>Bằng chứng</legend>
       <label className="flow-field">
-        <span>Evidence type</span>
+        <span>Loại bằng chứng</span>
         <select
-          aria-label="Evidence type"
+          aria-label="Loại bằng chứng"
           value={allowed.includes(currentKind as EvidenceKind) ? currentKind : ""}
           onChange={(event) => {
             const kind = event.currentTarget.value as EvidenceKind;
             onChange(kind ? defaultEvidence(kind, node, definition, launchBundleId) : null);
           }}
         >
-          <option value="">Select evidence</option>
+          <option value="">Chọn bằng chứng</option>
           {allowed.map((kind) => (
             <option key={kind} value={kind}>
               {EVIDENCE_LABELS[kind]}
@@ -506,7 +509,7 @@ function EvidenceFields({
       </label>
       {postcondition?.kind === "activeAppEquals" && (
         <label className="flow-field">
-          <span>Expected bundle ID</span>
+          <span>Bundle ID mong đợi</span>
           <input
             type="text"
             readOnly={typeof node.config.bundleId === "string"}
@@ -519,13 +522,13 @@ function EvidenceFields({
       )}
       {postcondition?.kind === "processAbsent" && (
         <label className="flow-field">
-          <span>Expected absent bundle ID</span>
+          <span>Bundle ID phải vắng mặt</span>
           <input type="text" readOnly value={postcondition.bundleId} />
         </label>
       )}
       {postcondition?.kind === "frameDigestChanged" && (
         <FiniteEvidenceInput
-          label="Minimum distance"
+          label="Khoảng cách tối thiểu"
           value={postcondition.minimumDistance}
           onChange={(minimumDistance) => onChange({ kind: "frameDigestChanged", minimumDistance })}
         />
@@ -580,7 +583,7 @@ function EvidenceFields({
             onChange={(locator) => onChange({ ...postcondition, locator })}
           />
           <label className="flow-field">
-            <span>Expected text</span>
+            <span>Văn bản mong đợi</span>
             <input type="text" readOnly value={postcondition.value} />
           </label>
         </>
@@ -645,7 +648,7 @@ export function FlowInspector({
 
   if (node === null || definition === null) {
     return (
-      <aside className="flow-inspector" aria-label="Flow inspector" data-testid="flow-inspector">
+      <aside className="flow-inspector" aria-label="Bảng thuộc tính Flow" data-testid="flow-inspector">
         <p>Select an action to edit it.</p>
       </aside>
     );
@@ -801,7 +804,7 @@ export function FlowInspector({
       const pointMode = isJsonObject(node.config.point);
       return (
         <>
-          <div role="group" aria-label="Tap target mode" className="flow-segmented-control">
+          <div role="group" aria-label="Kiểu chọn điểm chạm" className="flow-segmented-control">
             <button
               type="button"
               aria-pressed={!pointMode}
@@ -816,7 +819,7 @@ export function FlowInspector({
                 commitConfig({ point: coordinateToJson(coordinateFromValue(node.config.point)) })
               }
             >
-              Coordinate
+              Toạ độ
             </button>
           </div>
           {pointMode
@@ -864,14 +867,15 @@ export function FlowInspector({
   };
 
   return (
-    <aside className="flow-inspector" aria-label="Flow inspector" data-testid="flow-inspector">
+    <aside className="flow-inspector" aria-label="Bảng thuộc tính Flow" data-testid="flow-inspector">
       <header>
-        <strong>{definition.label}</strong>
+        {/* Same display name as the palette and the canvas node. */}
+        <strong>{ACTION_PRESENTATION[node.kind]?.label ?? definition.label}</strong>
         <span>{node.id}</span>
       </header>
       {definition.disabledReason && <p role="alert">{definition.disabledReason}</p>}
       <FieldIssues issues={nodeIssues.filter((issue) => !issue.field)} />
-      <section aria-label="Action configuration">{renderConfigFields()}</section>
+      <section aria-label="Cấu hình hành động">{renderConfigFields()}</section>
       <EvidenceFields
         node={node}
         definition={definition}
@@ -882,7 +886,7 @@ export function FlowInspector({
       {pickerLoading && <p role="status">Loading device frame...</p>}
       {pickerError && <p role="alert">{pickerError}</p>}
       {visionFrame && (
-        <section className="flow-coordinate-popover" aria-label="Capture template">
+        <section className="flow-coordinate-popover" aria-label="Chụp ảnh mẫu">
           <FlowVisionCapture
             frame={visionFrame}
             onCapture={(templatePngBase64, region) => {
@@ -910,7 +914,7 @@ export function FlowInspector({
               setPicker(null);
             }}
           />
-          <button type="button" onClick={() => setPicker(null)}>Cancel picker</button>
+          <button type="button" onClick={() => setPicker(null)}>Hủy chọn</button>
         </section>
       )}
     </aside>

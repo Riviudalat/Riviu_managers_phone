@@ -299,9 +299,11 @@ export async function installTauriMock(
       definition("wait", "Wait", "timing", {
         type: "object",
         properties: {
+          // No `title`: the real catalog ships none, so the inspector's own
+          // label map supplies it. Inventing one here made the e2e exercise a
+          // label path production never takes.
           durationMs: {
             type: "integer",
-            title: "Duration (ms)",
             minimum: 1,
             maximum: 60_000,
           },
