@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import type { DeviceInfo } from "../types";
 import {
+  backupDevice,
   deviceHome,
   deviceSwipe,
   deviceTap,
@@ -8,8 +9,10 @@ import {
   groupInput,
   latestFrame,
   rebootDevice,
+  restoreDevice,
   screenshot,
 } from "../api";
+import { pickDirectory } from "../pickFile";
 import { peekFrame, useDeviceFrame, useHydratedDeviceFrame } from "../frameStore";
 import {
   IconBack,
@@ -173,6 +176,45 @@ export function FocusStream({ device, onClose, groupUdids, groupMode }: Props) {
               }}
             >
               <IconPower size={18} />
+            </button>
+            <button
+              type="button"
+              title="Backup thiết bị (Mobilebackup2 — có thể mất vài phút)"
+              onClick={async () => {
+                const dir = await pickDirectory("Chọn thư mục lưu backup");
+                if (!dir) return;
+                try {
+                  await backupDevice(device.udid, dir);
+                  window.alert("Backup xong");
+                } catch (e) {
+                  window.alert(String(e));
+                }
+              }}
+            >
+              💾
+            </button>
+            <button
+              type="button"
+              title="Restore từ backup (GHI ĐÈ dữ liệu + khởi động lại)"
+              onClick={async () => {
+                const dir = await pickDirectory("Chọn thư mục backup để phục hồi");
+                if (!dir) return;
+                if (
+                  !window.confirm(
+                    "Phục hồi sẽ ghi đè dữ liệu trên thiết bị và khởi động lại. Tiếp tục?",
+                  )
+                ) {
+                  return;
+                }
+                try {
+                  await restoreDevice(device.udid, dir);
+                  window.alert("Đã phục hồi (thiết bị sẽ khởi động lại)");
+                } catch (e) {
+                  window.alert(String(e));
+                }
+              }}
+            >
+              ⭯
             </button>
           </nav>
 

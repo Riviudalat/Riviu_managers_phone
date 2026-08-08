@@ -219,6 +219,44 @@ pub async fn reboot_device(state: State<'_, AppState>, udid: String) -> Result<(
 }
 
 #[tauri::command]
+pub async fn backup_device(
+    state: State<'_, AppState>,
+    udid: String,
+    dest: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let context = state
+        .control
+        .try_acquire_exclusive(&udid, DeviceWorkOwner::Repair)
+        .await
+        .map_err(CommandError::from)?;
+    state
+        .control
+        .backup_device(&context, std::path::Path::new(&dest))
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn restore_device(
+    state: State<'_, AppState>,
+    udid: String,
+    src: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let context = state
+        .control
+        .try_acquire_exclusive(&udid, DeviceWorkOwner::Repair)
+        .await
+        .map_err(CommandError::from)?;
+    state
+        .control
+        .restore_device(&context, std::path::Path::new(&src))
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
 pub async fn device_tap(
     state: State<'_, AppState>,
     udid: String,

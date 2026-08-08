@@ -628,6 +628,30 @@ impl DeviceControlPlane {
             .map_err(|error| driver_error(lease.udid(), "reboot", error))
     }
 
+    pub async fn backup_device(
+        &self,
+        context: &DeviceExclusiveContext,
+        dest: &std::path::Path,
+    ) -> Result<(), DeviceControlError> {
+        let lease = self.validate_exclusive(context)?;
+        self.driver
+            .backup_device(lease.udid(), dest)
+            .await
+            .map_err(|error| driver_error(lease.udid(), "backupDevice", error))
+    }
+
+    pub async fn restore_device(
+        &self,
+        context: &DeviceExclusiveContext,
+        src: &std::path::Path,
+    ) -> Result<(), DeviceControlError> {
+        let lease = self.validate_exclusive(context)?;
+        self.driver
+            .restore_device(lease.udid(), src)
+            .await
+            .map_err(|error| driver_error(lease.udid(), "restoreDevice", error))
+    }
+
     pub async fn terminate_app(
         &self,
         context: &DeviceExclusiveContext,

@@ -83,6 +83,14 @@ export async function rebootDevice(udid: string) {
   return invoke<void>("reboot_device", { udid });
 }
 
+export async function backupDevice(udid: string, dest: string) {
+  return invoke<void>("backup_device", { udid, dest });
+}
+
+export async function restoreDevice(udid: string, src: string) {
+  return invoke<void>("restore_device", { udid, src });
+}
+
 export async function deviceTap(
   udid: string,
   x: number,

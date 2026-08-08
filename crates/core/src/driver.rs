@@ -293,6 +293,15 @@ pub trait DeviceDriver: Send + Sync {
     ) -> anyhow::Result<AppProcessState> {
         unsupported("inspectAppProcess")
     }
+    /// Full device backup into `dest`/<udid> via Mobilebackup2. Long-running.
+    async fn backup_device(&self, _udid: &str, _dest: &Path) -> anyhow::Result<()> {
+        unsupported("backupDevice")
+    }
+    /// Restore a Mobilebackup2 backup from `src` (the directory containing the
+    /// per-device backup). Long-running; typically reboots the device.
+    async fn restore_device(&self, _udid: &str, _src: &Path) -> anyhow::Result<()> {
+        unsupported("restoreDevice")
+    }
     async fn list_devices(&self) -> anyhow::Result<Vec<DeviceInfo>>;
     async fn refresh_device(&self, udid: &str) -> anyhow::Result<DeviceInfo>;
     async fn install_app(&self, udid: &str, path: &Path) -> anyhow::Result<()>;

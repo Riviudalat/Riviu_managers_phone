@@ -1357,6 +1357,66 @@ def cmd_reboot(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_backup(args: argparse.Namespace) -> int:
+    if not try_import():
+        print("pymobiledevice3 not installed", file=sys.stderr)
+        return 1
+    from pymobiledevice3.lockdown import create_using_usbmux
+    from pymobiledevice3.services.mobilebackup2 import Mobilebackup2Service
+
+    async def _run() -> None:
+        lockdown = await create_using_usbmux(serial=args.udid)
+        try:
+            async with Mobilebackup2Service(lockdown) as service:
+                await service.backup(
+                    full=bool(args.full),
+                    backup_directory=args.dest,
+                    progress_callback=lambda percent: print(
+                        f"backup progress {percent}", file=sys.stderr, flush=True
+                    ),
+                )
+        finally:
+            await lockdown.close()
+
+    try:
+        asyncio.run(_run())
+        emit({"ok": True, "udid": args.udid, "dest": args.dest})
+        return 0
+    except Exception as exc:
+        emit({"ok": False, "error": str(exc)})
+        return 1
+
+
+def cmd_restore(args: argparse.Namespace) -> int:
+    if not try_import():
+        print("pymobiledevice3 not installed", file=sys.stderr)
+        return 1
+    from pymobiledevice3.lockdown import create_using_usbmux
+    from pymobiledevice3.services.mobilebackup2 import Mobilebackup2Service
+
+    async def _run() -> None:
+        lockdown = await create_using_usbmux(serial=args.udid)
+        try:
+            async with Mobilebackup2Service(lockdown) as service:
+                await service.restore(
+                    backup_directory=args.src,
+                    reboot=not args.no_reboot,
+                    progress_callback=lambda percent: print(
+                        f"restore progress {percent}", file=sys.stderr, flush=True
+                    ),
+                )
+        finally:
+            await lockdown.close()
+
+    try:
+        asyncio.run(_run())
+        emit({"ok": True, "udid": args.udid, "src": args.src})
+        return 0
+    except Exception as exc:
+        emit({"ok": False, "error": str(exc)})
+        return 1
+
+
 def cmd_tunnel(args: argparse.Namespace) -> int:
     emit({"ok": True, "udid": args.udid, "message": "Start `pymobiledevice3 remote tunnel` / start-tunnel separately for iOS 17+"})
     return 0
@@ -2184,6 +2244,16 @@ def main() -> int:
     p = sub.add_parser("reboot")
     p.add_argument("--udid", required=True)
 
+    p = sub.add_parser("backup")
+    p.add_argument("--udid", required=True)
+    p.add_argument("--dest", required=True)
+    p.add_argument("--full", action="store_true")
+
+    p = sub.add_parser("restore")
+    p.add_argument("--udid", required=True)
+    p.add_argument("--src", required=True)
+    p.add_argument("--no-reboot", action="store_true")
+
     p = sub.add_parser("tunnel")
     p.add_argument("--udid", required=True)
 
@@ -2237,6 +2307,8 @@ def main() -> int:
         "terminate": cmd_terminate,
         "app-process": cmd_app_process,
         "reboot": cmd_reboot,
+        "backup": cmd_backup,
+        "restore": cmd_restore,
         "tunnel": cmd_tunnel,
         "start-wda": cmd_start_wda,
         "wda-forward": cmd_wda_forward,

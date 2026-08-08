@@ -43,6 +43,8 @@ const WDA_LOCAL_PORT_BASE: u16 = 18100;
 /// range while a farm is being rotated.
 const WDA_LOCAL_PORT_SPAN: u16 = 128;
 const SIDECAR_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
+/// Device backup/restore can transfer many GB; give it a generous ceiling.
+const BACKUP_COMMAND_TIMEOUT: Duration = Duration::from_secs(7_200);
 const PMD_SIDECAR_PROTOCOL_VERSION: u64 = 2;
 const VERIFIED_PROCESS_CONTROL_CONTRACT: &str = "verifiedProcessControl";
 const INTERACTION_DRIVER_ADAPTER_VERSION: &str = "interaction-v1";
@@ -555,6 +557,17 @@ impl PmdIosDriver {
     }
 
     async fn run_json(&self, args: &[&str]) -> anyhow::Result<serde_json::Value> {
+        self.run_json_with_timeout(args, SIDECAR_COMMAND_TIMEOUT)
+            .await
+    }
+
+    /// As [`Self::run_json`] but with a caller-chosen deadline, for long-running
+    /// sidecar operations (device backup/restore) that would exceed the default.
+    async fn run_json_with_timeout(
+        &self,
+        args: &[&str],
+        timeout: Duration,
+    ) -> anyhow::Result<serde_json::Value> {
         if self.sidecar.is_none() {
             anyhow::bail!(
                 "pymobiledevice3 sidecar not configured — install python3 + pymobiledevice3"
@@ -566,13 +579,13 @@ impl PmdIosDriver {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let output = tokio::time::timeout(SIDECAR_COMMAND_TIMEOUT, command.output())
+        let output = tokio::time::timeout(timeout, command.output())
             .await
             .map_err(|_| {
                 anyhow::anyhow!(
                     "pmd {} timed out after {}s",
                     args.first().unwrap_or(&""),
-                    SIDECAR_COMMAND_TIMEOUT.as_secs()
+                    timeout.as_secs()
                 )
             })??;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2959,6 +2972,26 @@ impl DeviceDriver for PmdIosDriver {
 
     async fn reboot(&self, udid: &str) -> anyhow::Result<()> {
         self.run_json(&["reboot", "--udid", udid]).await?;
+        Ok(())
+    }
+
+    async fn backup_device(&self, udid: &str, dest: &Path) -> anyhow::Result<()> {
+        let dest = dest.to_string_lossy().to_string();
+        self.run_json_with_timeout(
+            &["backup", "--udid", udid, "--dest", &dest, "--full"],
+            BACKUP_COMMAND_TIMEOUT,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn restore_device(&self, udid: &str, src: &Path) -> anyhow::Result<()> {
+        let src = src.to_string_lossy().to_string();
+        self.run_json_with_timeout(
+            &["restore", "--udid", udid, "--src", &src],
+            BACKUP_COMMAND_TIMEOUT,
+        )
+        .await?;
         Ok(())
     }
 
