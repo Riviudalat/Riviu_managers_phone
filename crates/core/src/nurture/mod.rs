@@ -321,21 +321,20 @@ impl NurtureEngine {
         None
     }
 
-    /// [`Self::wait_for_frame`] with a watermark: the frame that was on screen
-    /// when the gesture went out cannot itself be the proof that the gesture
-    /// worked.
+    /// [`Self::wait_for_frame`] with watermarks: frames the caller has already
+    /// seen, and which therefore cannot be proof that a later gesture worked.
     ///
-    /// A digest is all this seam offers — `FrameSource` carries no sequence
+    /// Digests are all this seam offers — `FrameSource` carries no sequence
     /// number, unlike the `GenerationFrameSource` the flow engine uses. So this
-    /// excludes exactly one frame, not every frame older than the tap. Callers
-    /// must still read their baseline from the frame they aim at, immediately
-    /// before aiming, rather than leaning on this to catch a stale screen.
+    /// excludes named frames, not every frame older than the gesture. Callers
+    /// must still read their baseline from the frame they act on, immediately
+    /// before acting, rather than leaning on this to catch a stale screen.
     pub(in crate::nurture) async fn wait_for_frame_after<F>(
         &self,
         udid: &str,
         timeout: Duration,
         stop: &AtomicBool,
-        watermark: u64,
+        watermarks: &[u64],
         mut pred: F,
     ) -> Option<image::RgbImage>
     where
@@ -347,7 +346,7 @@ impl NurtureEngine {
                 return None;
             }
             if let Some(frame) = self.frames.latest(udid) {
-                if frame_digest(&frame) != watermark {
+                if !watermarks.contains(&frame_digest(&frame)) {
                     if let Some(img) = image::load_from_memory(&frame).ok().map(|i| i.to_rgb8()) {
                         if pred(&img) {
                             return Some(img);
@@ -992,14 +991,6 @@ impl NurtureEngine {
                                     report(
                                         &mut status,
                                         "đã gửi bình luận chữ (xác nhận nút gửi tắt)".into(),
-                                    );
-                                }
-                                CommentResult::EmojiSent(usd) => {
-                                    status.comments += 1;
-                                    status.session_usd += usd;
-                                    report(
-                                        &mut status,
-                                        "đã gửi bình luận emoji (xác nhận nút gửi tắt)".into(),
                                     );
                                 }
                                 CommentResult::TextNotSent => report(
