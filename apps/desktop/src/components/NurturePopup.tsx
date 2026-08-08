@@ -338,8 +338,11 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                         <div className="nurture-float-log-head">
                           <span className={`nurture-dot${s.running ? " on" : ""}`} />
                           <strong title={s.udid}>{deviceLabel(devices, s.udid)}</strong>
-                          <span className="hint">
-                            {s.videosDone}v · ♥{s.likes}/{s.likeAttempts} · BL{s.comments}/{s.commentAttempts} · +{s.follows}/{s.followAttempts}
+                          <span
+                            className="hint"
+                            title="video đã xác nhận / lượt vuốt · tim · bình luận · follow"
+                          >
+                            {s.videosDone}/{s.swipeAttempts}v · ♥{s.likes}/{s.likeAttempts} · BL{s.comments}/{s.commentAttempts} · +{s.follows}/{s.followAttempts}
                           </span>
                         </div>
                         <p className="nurture-float-log-msg">{statusVi(s.lastMessage)}</p>

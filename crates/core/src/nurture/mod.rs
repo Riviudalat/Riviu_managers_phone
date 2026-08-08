@@ -13,7 +13,10 @@
 //!   touch the transport; a rejected command never triggers a recycle. Earlier
 //!   builds treated every failure as "WDA unhealthy" and burned 2–3 minutes.
 //! * **Nothing is reported that was not verified.** A like counts once the
-//!   heart turns red in a later frame, a swipe once the frame changes.
+//!   heart turns red in a later frame, a swipe once the action rail has left
+//!   the screen and a new card has settled. Evidence has to be *structural*:
+//!   the stream publishes every frame at 24 FPS with no deduplication, so "the
+//!   frame changed" is what a playing video does, not what a swipe does.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -26,7 +29,7 @@ mod actions;
 mod recovery;
 mod touch;
 
-use actions::{CommentResult, LikeResult};
+use actions::{CommentResult, LikeResult, SwipeOutcome};
 use recovery::Budget;
 pub use recovery::Outcome;
 
@@ -45,13 +48,20 @@ use crate::types::{InteractionSessionKind, NurtureSessionStatus, NurtureSettings
 use crate::DeviceWorkOwner;
 use touch::TouchPointPlanner;
 
-/// How long to wait for the frame to change before calling a swipe blocked.
+/// How long to wait for a new card to settle before calling a swipe blocked.
 ///
-/// The stream only pushes on change and runs at ~7 FPS, so a tighter window
-/// reports false "blocked" and the loop swipes twice — skipping a video. A
-/// 15-minute run showed 115 swipes for 47 confirmed advances before this was
-/// widened.
+/// TikTok's snap animation plus stream latency puts the settled card a good
+/// second behind the gesture, and a tighter window reports false "blocked" —
+/// the loop then swipes twice and skips a video.
+///
+/// The note this comment used to carry ("the stream only pushes on change and
+/// runs at ~7 FPS") was wrong on both counts: [`crate::stream::StreamHub`]
+/// publishes every frame at 24 FPS. That mistake is why the old check believed
+/// a changed frame meant a moved feed.
 pub(super) const SWIPE_SETTLE: Duration = Duration::from_millis(2_400);
+/// Poll faster than frames arrive, so the few hundred milliseconds the rail is
+/// off screen cannot fall between two samples.
+pub(super) const SWIPE_POLL: Duration = Duration::from_millis(60);
 const TEXT_NOT_ARMED_REFRESH_THRESHOLD: u8 = 2;
 /// Give the frame watcher time to close overlays that were already visible
 /// when TikTok came foreground before the first feed gesture is sent.
@@ -227,6 +237,64 @@ impl NurtureEngine {
         false
     }
 
+    /// Watch the action rail across a swipe and report what the stream proves.
+    ///
+    /// Decodes only frames the stream has not already shown: the transition
+    /// lasts a few hundred milliseconds, so the poll has to be faster than the
+    /// frames arrive, and without the digest guard that would decode the same
+    /// frame several times over.
+    ///
+    /// Evidence is gathered strictly *after* the gesture returns. Running the
+    /// watch concurrently would catch the transition a little more reliably,
+    /// but the screen watcher taps through the same gesture lock — a ✕ it
+    /// pressed while our swipe queued would take the rail away and read as our
+    /// swipe having moved the feed. Missing a transition costs one video;
+    /// crediting a swipe the watcher caused is the very bug being fixed.
+    pub(in crate::nurture) async fn watch_swipe(
+        &self,
+        udid: &str,
+        timeout: Duration,
+        stop: &AtomicBool,
+        rail_before: bool,
+    ) -> SwipeOutcome {
+        // Starting with no rail is already the "left" state, and the proof is
+        // then the rail *arriving* on a settled card — just as much a card
+        // change. That is the LIVE-preview and carousel path.
+        let mut left = !rail_before;
+        let mut decoded: Option<u64> = None;
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            if let Some(frame) = self.frames.latest(udid) {
+                let digest = frame_digest(&frame);
+                if decoded != Some(digest) {
+                    decoded = Some(digest);
+                    if let Some(img) = image::load_from_memory(&frame).ok().map(|i| i.to_rgb8()) {
+                        if !left {
+                            left = !screen::rail_icons_present(&img);
+                        } else if matches!(
+                            screen::feed_card_kind(&img),
+                            screen::FeedCardKind::Video | screen::FeedCardKind::PhotoCarousel
+                        ) {
+                            // Both kinds require the compose bar *and* an icon
+                            // chain, so this is a feed card that has finished
+                            // moving — not a LIVE room, alert or transition.
+                            return SwipeOutcome::Advanced;
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(SWIPE_POLL).await;
+        }
+        if left {
+            SwipeOutcome::Moved
+        } else {
+            SwipeOutcome::Blocked
+        }
+    }
+
     /// Wait for a frame that satisfies `pred`, or give up.
     pub(super) async fn wait_for_frame<F>(
         &self,
@@ -266,6 +334,7 @@ impl NurtureEngine {
             udid: udid.to_string(),
             running: true,
             videos_done: 0,
+            swipe_attempts: 0,
             like_attempts: 0,
             comment_attempts: 0,
             follow_attempts: 0,
@@ -578,6 +647,7 @@ impl NurtureEngine {
                     report(&mut status, "đã về FYP".into());
                 } else {
                     report(&mut status, "không ở FYP — vuốt để về feed".into());
+                    status.swipe_attempts += 1;
                     let _ = self
                         .do_swipe(
                             udid,
@@ -666,6 +736,7 @@ impl NurtureEngine {
                         live_owned.store(false, Ordering::Relaxed);
                     } else {
                         report(&mut status, "gặp thẻ LIVE — lướt qua thẻ xem trước".into());
+                        status.swipe_attempts += 1;
                         let _ = self
                             .do_swipe(
                                 udid,
@@ -726,6 +797,11 @@ impl NurtureEngine {
                     &mut status,
                     "thẻ không có thanh hành động (LIVE / đang chuyển) — chỉ vuốt tiếp".into(),
                 );
+                status.swipe_attempts += 1;
+                // Leaving a card that has no rail is still provable, from the
+                // other side: the rail *arriving* on a settled card is the
+                // card change. Landing on another rail-less card is not, and
+                // stays uncounted.
                 if self
                     .do_swipe(
                         udid,
@@ -736,7 +812,7 @@ impl NurtureEngine {
                         &stop,
                     )
                     .await
-                    .unwrap_or(false)
+                    .is_ok_and(|outcome| outcome == SwipeOutcome::Advanced)
                 {
                     status.videos_done += 1;
                     on_status(status.clone());
@@ -1023,6 +1099,7 @@ impl NurtureEngine {
 
             report(&mut status, "vuốt video tiếp".into());
             let mut advanced_to_next_video = false;
+            status.swipe_attempts += 1;
             match self
                 .do_swipe(
                     udid,
@@ -1034,16 +1111,29 @@ impl NurtureEngine {
                 )
                 .await
             {
-                Ok(true) => {
+                Ok(SwipeOutcome::Advanced) => {
                     advanced_to_next_video = true;
                     status.videos_done += 1;
                     on_status(status.clone());
                 }
-                Ok(false) => {
-                    // The frame did not change. The watcher closes popups on
-                    // its own; give it a beat, then try once more.
+                Ok(SwipeOutcome::Moved) => {
+                    // The rail left, so the gesture landed and the card we were
+                    // on is gone. Swiping again here would skip whatever came
+                    // next; the loop re-reads the screen at the top instead.
+                    // Not counted: nothing settled that could be counted.
+                    advanced_to_next_video = true;
+                    report(
+                        &mut status,
+                        "đã rời thẻ cũ nhưng chưa thấy thẻ mới ổn định — đọc lại màn hình".into(),
+                    );
+                }
+                Ok(SwipeOutcome::Blocked) => {
+                    // The rail never left: the feed swallowed the gesture,
+                    // usually under a popup. The watcher closes those on its
+                    // own; give it a beat, then try once more.
                     report(&mut status, "vuốt không ăn — chờ popup rồi thử lại".into());
                     sleep_interruptible(Duration::from_millis(1_800), &stop).await;
+                    status.swipe_attempts += 1;
                     match self
                         .do_swipe(
                             udid,
@@ -1055,14 +1145,18 @@ impl NurtureEngine {
                         )
                         .await
                     {
-                        Ok(true) => {
+                        Ok(SwipeOutcome::Advanced) => {
                             advanced_to_next_video = true;
                             status.videos_done += 1;
                             on_status(status.clone());
                         }
-                        Ok(false) => {
+                        Ok(SwipeOutcome::Moved) => {
+                            advanced_to_next_video = true;
+                            report(&mut status, "đã rời thẻ cũ, chưa xác nhận thẻ mới".into());
+                        }
+                        Ok(SwipeOutcome::Blocked) => {
                             report(&mut status, "vuốt vẫn không ăn".into());
-                            last_error = Some("swipe không đổi frame".into());
+                            last_error = Some("swipe không rời được thẻ hiện tại".into());
                         }
                         Err(e) => {
                             let msg = format!("vuốt lỗi: {}", describe(&e));
@@ -1236,9 +1330,10 @@ impl NurtureEngine {
 
         let elapsed = started.elapsed();
         let summary = format!(
-            "{} — {} video, {} tim, {} bình luận, {} follow, {} popup đóng, {} recovery, {:.0}s{}{}",
+            "{} — {}/{} video, {} tim, {} bình luận, {} follow, {} popup đóng, {} recovery, {:.0}s{}{}",
             outcome.as_str(),
             status.videos_done,
+            status.swipe_attempts,
             status.likes,
             status.comments,
             status.follows,

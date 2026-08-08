@@ -691,7 +691,14 @@ pub struct NurtureCommentAttempt {
 pub struct NurtureSessionStatus {
     pub udid: String,
     pub running: bool,
+    /// Swipes that were *proven* to reach a new card. Every other counter here
+    /// already comes in an attempted/succeeded pair; this one did not, so a
+    /// swipe that went nowhere was indistinguishable from one that worked.
     pub videos_done: u32,
+    /// Vertical feed swipes sent, confirmed or not. Photo-carousel slides are
+    /// not counted: they move within one card, not to the next one.
+    #[serde(default)]
+    pub swipe_attempts: u32,
     #[serde(default)]
     pub like_attempts: u32,
     #[serde(default)]

@@ -437,6 +437,7 @@ export interface NurtureSessionStatus {
   udid: string;
   running: boolean;
   videosDone: number;
+  swipeAttempts: number;
   likeAttempts: number;
   commentAttempts: number;
   followAttempts: number;

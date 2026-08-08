@@ -2,7 +2,8 @@
 //!
 //! Nothing here reports success it has not seen: a like counts once the heart
 //! turns red in a later frame, a follow once the badge disappears, a swipe once
-//! the frame changes, a comment once the Send button was observed armed.
+//! the action rail has left the screen and a new card has settled, a comment
+//! once the Send button was observed armed.
 
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -31,6 +32,28 @@ use super::{frame_digest, sleep_interruptible, NurtureEngine, SWIPE_SETTLE};
 
 const COMMENT_DRAWER_SETTLE: Duration = Duration::from_millis(3_500);
 const COMMENT_INPUT_SETTLE: Duration = Duration::from_millis(1_200);
+
+/// What a swipe could be *proven* to have done.
+///
+/// The three variants exist because they authorise different next moves, and
+/// collapsing them to a bool loses exactly the distinction that matters: a
+/// gesture the feed swallowed is safe to repeat, one that moved the feed is
+/// not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SwipeOutcome {
+    /// The rail left the screen and a settled feed card came back. The only
+    /// outcome counted as a video watched.
+    Advanced,
+    /// The rail left but nothing settled inside the window — still animating,
+    /// covered by an overlay, or landed on a card that has no rail at all
+    /// (LIVE preview). The gesture *was* taken, so repeating it would skip a
+    /// card; the caller re-reads the screen instead.
+    Moved,
+    /// The rail never left. Frames kept arriving — a playing video guarantees
+    /// that — so this is a gesture the feed swallowed, and repeating it is
+    /// both safe and the right move.
+    Blocked,
+}
 
 /// What happened to a like attempt. "Already liked" is a normal outcome and
 /// must not be reported as a failure — conflating the two is what made the old
@@ -471,9 +494,22 @@ impl NurtureEngine {
         Ok(gone)
     }
 
-    /// Swipe to the next video, confirming from the stream that the frame
-    /// actually changed. Returns `Ok(false)` when the gesture was accepted but
-    /// the feed did not move — usually a popup on top.
+    /// Swipe to the next video, proving from the stream that the feed actually
+    /// moved.
+    ///
+    /// "Did any byte of the frame change?" cannot answer this.
+    /// [`crate::stream::StreamHub::publish`] does no deduplication and the
+    /// stream runs at 24 FPS, so a video playing on the card you are *already*
+    /// on produces a different frame every ~42 ms — roughly 57 chances inside
+    /// the settle window to call a swipe that went nowhere a success. Fixtures
+    /// `feed-same-card-{1,2,3}.jpg` are three frames of one card, taken seconds
+    /// apart with identical author, caption and counts, and their digests all
+    /// differ.
+    ///
+    /// The action rail answers it instead: it is on every video card and it is
+    /// gone while the feed is between cards (`feed-mid-swipe.jpg`), so
+    /// `rail → no rail → rail` is the feed moving and a playing video cannot
+    /// fake it. See [`SwipeOutcome`].
     pub(super) async fn do_swipe(
         &self,
         udid: &str,
@@ -482,8 +518,10 @@ impl NurtureEngine {
         screen_size: (f64, f64),
         duration_ms: u64,
         stop: &AtomicBool,
-    ) -> anyhow::Result<bool> {
-        let before = self.frames.latest(udid).map(|f| frame_digest(&f));
+    ) -> anyhow::Result<SwipeOutcome> {
+        let rail_before = self
+            .latest_image(udid)
+            .map(|img| screen::rail_icons_present(&img));
         let mut rng = StdRng::from_entropy();
         let x0 = screen_size.0 * 0.5 + rng.gen_range(-20.0..20.0);
         let gesture = SwipeGesture {
@@ -502,15 +540,15 @@ impl NurtureEngine {
             session.swipe(gesture).await?;
         }
 
-        let Some(before) = before else {
-            // No pre-swipe baseline (e.g. right after a stream clear): a swipe
-            // with no before-frame cannot be counted as a confirmed advance.
-            return Ok(false);
+        let Some(rail_before) = rail_before else {
+            // No pre-swipe baseline (e.g. right after a stream clear). The
+            // gesture went out, so repeating it could skip a card, but nothing
+            // here proves it landed anywhere.
+            return Ok(SwipeOutcome::Moved);
         };
-        let changed = self
-            .wait_for_new_frame(udid, SWIPE_SETTLE, stop, before)
-            .await;
-        Ok(changed)
+        Ok(self
+            .watch_swipe(udid, SWIPE_SETTLE, stop, rail_before)
+            .await)
     }
 
     /// Advance one slide in a TikTok photo carousel. Photo posts use a
@@ -1224,6 +1262,72 @@ mod tests {
         }
     }
 
+    /// Replays a scripted sequence of real captures, one per `latest()` call,
+    /// then holds on the last. `watch_swipe` decodes only frames whose digest
+    /// it has not already seen, so the script is consumed at the rate the
+    /// detector genuinely samples the stream.
+    struct ScriptedFrames {
+        script: Mutex<std::collections::VecDeque<Frame>>,
+        last: Mutex<Frame>,
+    }
+
+    impl ScriptedFrames {
+        /// Frames the detector has not reached yet. Tests assert on this
+        /// rather than on elapsed time: a debug build decodes a 1 MP JPEG far
+        /// slower than [`SWIPE_POLL`], so a wall-clock window that is generous
+        /// in release can expire after one frame here and pass for the wrong
+        /// reason.
+        fn unread(&self) -> usize {
+            self.script.lock().len()
+        }
+    }
+
+    impl ScriptedFrames {
+        fn new(script: &[&'static [u8]]) -> Self {
+            let queue: std::collections::VecDeque<Frame> = script
+                .iter()
+                .map(|bytes| Arc::new(bytes.to_vec()))
+                .collect();
+            let first = queue
+                .front()
+                .expect("scripted frames must not be empty")
+                .clone();
+            Self {
+                // Only a placeholder: the first `latest()` pops the same frame
+                // and overwrites it. Seeding from the front rather than popping
+                // is what keeps script[0] from being swallowed.
+                last: Mutex::new(first),
+                script: Mutex::new(queue),
+            }
+        }
+    }
+
+    impl FrameSource for ScriptedFrames {
+        fn subscribe(&self, _udid: &str) -> Box<dyn FrameStream> {
+            Box::new(EmptyStream)
+        }
+
+        fn latest(&self, _udid: &str) -> Option<Frame> {
+            let mut last = self.last.lock();
+            if let Some(next) = self.script.lock().pop_front() {
+                *last = next;
+            }
+            Some(last.clone())
+        }
+    }
+
+    /// Three frames of one sponsored card, captured seconds apart with the
+    /// same author, caption and counts. Their bytes — and so their digests —
+    /// all differ, because the video kept playing.
+    const SAME_CARD: [&[u8]; 3] = [
+        include_bytes!("../../tests/fixtures/feed-same-card-1.jpg"),
+        include_bytes!("../../tests/fixtures/feed-same-card-2.jpg"),
+        include_bytes!("../../tests/fixtures/feed-same-card-3.jpg"),
+    ];
+    const FEED: &[u8] = include_bytes!("../../tests/fixtures/feed-iphone8.jpg");
+    const MID_SWIPE: &[u8] = include_bytes!("../../tests/fixtures/feed-mid-swipe.jpg");
+    const LIVE_ROOM: &[u8] = include_bytes!("../../tests/fixtures/live-room-1.jpg");
+
     fn drawer_frame(armed: bool) -> RgbImage {
         let mut img = RgbImage::from_pixel(750, 1334, Rgb([225, 225, 225]));
         if armed {
@@ -1474,7 +1578,7 @@ mod tests {
             RecordingSession::new(Arc::new(TestFrames::new()), stop.clone(), false, false);
         let (engine, db_path) = test_engine_from(Arc::new(NoFrames));
 
-        let moved = engine
+        let outcome = engine
             .do_swipe(
                 UDID,
                 &session,
@@ -1486,10 +1590,144 @@ mod tests {
             .await
             .expect("swipe");
 
-        assert!(
-            !moved,
-            "a swipe with no before-frame must not count as a confirmed advance"
+        assert_eq!(
+            outcome,
+            SwipeOutcome::Moved,
+            "a swipe with no before-frame must not count as a confirmed advance, \
+             and must not be repeated either — the gesture already went out"
         );
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn a_playing_video_on_the_same_card_is_not_an_advance() {
+        // The regression this whole change exists for. All three frames are the
+        // same sponsored card; the old check compared whole-frame digests, and
+        // because a playing video changes every frame it reported a confirmed
+        // advance for a feed that never moved.
+        let stop = Arc::new(AtomicBool::new(false));
+        let session =
+            RecordingSession::new(Arc::new(TestFrames::new()), stop.clone(), false, false);
+        // The first frame is consumed as the pre-swipe baseline, the rest by
+        // the watch.
+        let frames = Arc::new(ScriptedFrames::new(&[
+            SAME_CARD[0],
+            SAME_CARD[0],
+            SAME_CARD[1],
+            SAME_CARD[2],
+        ]));
+        let digests: Vec<u64> = SAME_CARD.iter().map(|f| frame_digest(f)).collect();
+        assert!(
+            digests[0] != digests[1] && digests[1] != digests[2],
+            "fixtures must have differing digests or they cannot show the defect: {digests:?}"
+        );
+        let (engine, db_path) = test_engine_from(frames.clone());
+
+        let outcome = engine
+            .do_swipe(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                (375.0, 667.0),
+                200,
+                stop.as_ref(),
+            )
+            .await
+            .expect("swipe");
+
+        assert_eq!(
+            outcome,
+            SwipeOutcome::Blocked,
+            "the rail never left, so the feed never moved — a changed frame is \
+             the video playing, not a swipe landing"
+        );
+        assert_eq!(
+            frames.unread(),
+            0,
+            "all three frames of the card must have been examined"
+        );
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn the_rail_leaving_and_a_card_settling_is_an_advance() {
+        // The structural signal: rail → no rail (mid-swipe) → rail on a settled
+        // feed card. A playing video cannot produce the middle frame.
+        let stop = Arc::new(AtomicBool::new(false));
+        let frames = Arc::new(ScriptedFrames::new(&[FEED, MID_SWIPE, SAME_CARD[0]]));
+        let (engine, db_path) = test_engine_from(frames.clone());
+
+        let outcome = engine
+            .watch_swipe(UDID, SWIPE_SETTLE, stop.as_ref(), true)
+            .await;
+
+        assert_eq!(outcome, SwipeOutcome::Advanced);
+        assert_eq!(
+            frames.unread(),
+            0,
+            "the settled card must have been reached"
+        );
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn a_rail_that_leaves_without_settling_is_not_counted_but_is_not_repeated() {
+        // Mid-swipe and nothing after it: the gesture landed, so swiping again
+        // would skip whatever is arriving, but no card settled to count.
+        let stop = Arc::new(AtomicBool::new(false));
+        let frames = Arc::new(ScriptedFrames::new(&[MID_SWIPE]));
+        let (engine, db_path) = test_engine_from(frames.clone());
+
+        let outcome = engine
+            .watch_swipe(UDID, Duration::from_millis(800), stop.as_ref(), true)
+            .await;
+
+        assert_eq!(outcome, SwipeOutcome::Moved);
+        assert_eq!(
+            frames.unread(),
+            0,
+            "the mid-swipe frame must have been read"
+        );
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn landing_in_a_live_room_does_not_settle_as_a_feed_card() {
+        // A LIVE room has no compose bar and no icon chain, so it must not pass
+        // for a new feed card however long it is on screen. Guards the settle
+        // check against being weakened to "the rail came back".
+        let stop = Arc::new(AtomicBool::new(false));
+        let frames = Arc::new(ScriptedFrames::new(&[MID_SWIPE, LIVE_ROOM]));
+        let (engine, db_path) = test_engine_from(frames.clone());
+
+        let outcome = engine
+            .watch_swipe(UDID, SWIPE_SETTLE, stop.as_ref(), true)
+            .await;
+
+        assert_eq!(outcome, SwipeOutcome::Moved);
+        assert_eq!(
+            frames.unread(),
+            0,
+            "the LIVE frame must have been read and rejected, not merely unread"
+        );
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn leaving_a_card_that_has_no_rail_is_proven_by_the_rail_arriving() {
+        // LIVE previews and carousels have no rail, so "the rail left" is not
+        // available. Going from no rail to a settled card that has one is the
+        // same card change read from the other side.
+        let stop = Arc::new(AtomicBool::new(false));
+        let frames = Arc::new(ScriptedFrames::new(&[LIVE_ROOM, FEED]));
+        let (engine, db_path) = test_engine_from(frames.clone());
+
+        let outcome = engine
+            .watch_swipe(UDID, SWIPE_SETTLE, stop.as_ref(), false)
+            .await;
+
+        assert_eq!(outcome, SwipeOutcome::Advanced);
+        assert_eq!(frames.unread(), 0);
         let _ = std::fs::remove_file(db_path);
     }
 
