@@ -321,6 +321,45 @@ impl NurtureEngine {
         None
     }
 
+    /// [`Self::wait_for_frame`] with a watermark: the frame that was on screen
+    /// when the gesture went out cannot itself be the proof that the gesture
+    /// worked.
+    ///
+    /// A digest is all this seam offers — `FrameSource` carries no sequence
+    /// number, unlike the `GenerationFrameSource` the flow engine uses. So this
+    /// excludes exactly one frame, not every frame older than the tap. Callers
+    /// must still read their baseline from the frame they aim at, immediately
+    /// before aiming, rather than leaning on this to catch a stale screen.
+    pub(in crate::nurture) async fn wait_for_frame_after<F>(
+        &self,
+        udid: &str,
+        timeout: Duration,
+        stop: &AtomicBool,
+        watermark: u64,
+        mut pred: F,
+    ) -> Option<image::RgbImage>
+    where
+        F: FnMut(&image::RgbImage) -> bool,
+    {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if stop.load(Ordering::Relaxed) {
+                return None;
+            }
+            if let Some(frame) = self.frames.latest(udid) {
+                if frame_digest(&frame) != watermark {
+                    if let Some(img) = image::load_from_memory(&frame).ok().map(|i| i.to_rgb8()) {
+                        if pred(&img) {
+                            return Some(img);
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(180)).await;
+        }
+        None
+    }
+
     pub async fn run_session(
         &self,
         udid: &str,
@@ -851,7 +890,7 @@ impl NurtureEngine {
                     on_status(status.clone());
                     report(&mut status, "thả tim".into());
                     match self
-                        .do_like(udid, session.as_ref(), &gestures, &rail, screen_size, &stop)
+                        .do_like(udid, session.as_ref(), &gestures, screen_size, &stop)
                         .await
                     {
                         Ok(LikeResult::Liked) => {
@@ -861,6 +900,11 @@ impl NurtureEngine {
                         Ok(LikeResult::AlreadyLiked) => {
                             report(&mut status, "video đã tim từ trước — bỏ qua".into())
                         }
+                        Ok(LikeResult::NotOnFeed) => report(
+                            &mut status,
+                            "bỏ qua tim: khung hiện tại không phải thẻ feed có thanh hành động"
+                                .into(),
+                        ),
                         Ok(LikeResult::NotConfirmed { before, best }) => report(
                             &mut status,
                             format!(

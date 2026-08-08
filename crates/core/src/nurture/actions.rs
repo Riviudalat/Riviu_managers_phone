@@ -62,6 +62,9 @@ pub(super) enum SwipeOutcome {
 pub(super) enum LikeResult {
     Liked,
     AlreadyLiked,
+    /// Nothing was tapped: the current frame is not an actionable feed card
+    /// with a locatable rail, so there is no heart to aim at.
+    NotOnFeed,
     /// Tapped, and the heart never reddened. Carries the redness before the tap
     /// and the highest seen after it — without those two numbers a miss is
     /// indistinguishable from a heart that reddened too slowly to catch.
@@ -394,25 +397,51 @@ impl NurtureEngine {
     }
 
     /// Tap the heart, then confirm from a later frame that it turned red.
+    /// Tap the heart, and take the rail, the baseline and the confirmation from
+    /// frames that are all qualified.
+    ///
+    /// The caller's rail is deliberately not used. It was located before
+    /// `wait_for_action_gap`, which sleeps 12–35 s, so by the time a like runs
+    /// it can belong to a card that is long gone — and tapping coordinates from
+    /// a previous card is the "tapped 14 in a row for 0 likes" failure. The
+    /// comment path already re-locates for the same reason. If no rail can be
+    /// found on the *current* frame, nothing is tapped at all.
     pub(super) async fn do_like(
         &self,
         udid: &str,
         session: &dyn UiSession,
         gestures: &tokio::sync::Mutex<()>,
-        rail: &ActionRail,
         screen_size: (f64, f64),
         stop: &AtomicBool,
     ) -> anyhow::Result<LikeResult> {
-        let before = self
-            .latest_image(udid)
-            .map(|img| screen::like_redness_at(&img, rail))
-            .unwrap_or(0.0);
+        // The human pause comes first, so everything below is read from the
+        // frame the tap is actually aimed at. Reading the rail and the baseline
+        // *before* a 400–900 ms pause leaves a window in which the feed can
+        // move on, and a card that arrives in that window is already liked
+        // often enough to confirm a like nobody performed.
+        let mut rng = StdRng::from_entropy();
+        sleep_interruptible(Duration::from_millis(rng.gen_range(400..900)), stop).await;
+
+        let Some(frame) = self.frames.latest(udid) else {
+            return Ok(LikeResult::NotOnFeed);
+        };
+        let Some(img) = image::load_from_memory(&frame).ok().map(|i| i.to_rgb8()) else {
+            return Ok(LikeResult::NotOnFeed);
+        };
+        if !screen::feed_ready(&img, Some(screen_size.0)) {
+            return Ok(LikeResult::NotOnFeed);
+        }
+        let Some(rail) = screen::locate_action_rail(&img) else {
+            return Ok(LikeResult::NotOnFeed);
+        };
+
+        let before = screen::like_redness_at(&img, &rail);
         // Already liked — tapping again would un-like it.
         if before > screen::LIKE_FILLED_REDNESS {
             return Ok(LikeResult::AlreadyLiked);
         }
+        let watermark = frame_digest(&frame);
 
-        let mut rng = StdRng::from_entropy();
         let point = self.next_touch_point(
             udid,
             screen_size,
@@ -422,7 +451,6 @@ impl NurtureEngine {
             },
             (10.0, 12.0),
         );
-        sleep_interruptible(Duration::from_millis(rng.gen_range(400..900)), stop).await;
         {
             let _guard = gestures.lock().await;
             session.tap(point).await?;
@@ -432,10 +460,18 @@ impl NurtureEngine {
         // the fill level does not depend on the video behind it. A relative
         // test does, which is how a red-heavy clip made real likes read as
         // misses and outlines read as already-liked.
+        //
+        // The confirming frame must postdate the tap and must still be an
+        // actionable feed — a system alert dims the screen, and a dimmed frame
+        // is not one the heart can be read from. `do_follow` has carried that
+        // second guard for a while; this path did not.
         let mut best = before;
         let confirmed = self
-            .wait_for_frame(udid, Duration::from_millis(2_500), stop, |img| {
-                let now = screen::like_redness_at(img, rail);
+            .wait_for_frame_after(udid, Duration::from_millis(2_500), stop, watermark, |img| {
+                if !screen::feed_ready(img, Some(screen_size.0)) {
+                    return false;
+                }
+                let now = screen::like_redness_at(img, &rail);
                 best = best.max(now);
                 now > screen::LIKE_FILLED_REDNESS
             })
@@ -1324,7 +1360,47 @@ mod tests {
         include_bytes!("../../tests/fixtures/feed-same-card-2.jpg"),
         include_bytes!("../../tests/fixtures/feed-same-card-3.jpg"),
     ];
+    /// Records taps and nothing else, so a test can assert both where the tap
+    /// landed and that no tap went out at all.
+    #[derive(Default)]
+    struct TapRecorder {
+        taps: Mutex<Vec<TapPoint>>,
+    }
+
+    #[async_trait]
+    impl UiSession for TapRecorder {
+        async fn tap(&self, point: TapPoint) -> anyhow::Result<()> {
+            self.taps.lock().push(point);
+            Ok(())
+        }
+
+        async fn swipe(&self, _gesture: SwipeGesture) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn type_text(&self, _text: &str) -> anyhow::Result<()> {
+            anyhow::bail!("not used")
+        }
+
+        async fn home(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn find_and_tap(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            anyhow::bail!("not used")
+        }
+
+        async fn assert_visible(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            anyhow::bail!("not used")
+        }
+
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+    }
+
     const FEED: &[u8] = include_bytes!("../../tests/fixtures/feed-iphone8.jpg");
+    const LIKED: &[u8] = include_bytes!("../../tests/fixtures/feed-heart-liked.jpg");
     const MID_SWIPE: &[u8] = include_bytes!("../../tests/fixtures/feed-mid-swipe.jpg");
     const LIVE_ROOM: &[u8] = include_bytes!("../../tests/fixtures/live-room-1.jpg");
 
@@ -1729,6 +1805,98 @@ mod tests {
         assert_eq!(outcome, SwipeOutcome::Advanced);
         assert_eq!(frames.unread(), 0);
         let _ = std::fs::remove_file(db_path);
+    }
+
+    /// `do_like` had no test at all before this. These four cover the guards it
+    /// gained, and each asserts on the taps that went out — a like that reports
+    /// the right verdict while still touching the screen is not a pass.
+    async fn like_on(script: &[&'static [u8]]) -> (LikeResult, Vec<TapPoint>) {
+        let stop = Arc::new(AtomicBool::new(false));
+        let session = TapRecorder::default();
+        let (engine, db_path) = test_engine_from(Arc::new(ScriptedFrames::new(script)));
+        let result = engine
+            .do_like(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                (375.0, 667.0),
+                stop.as_ref(),
+            )
+            .await
+            .expect("like");
+        let taps = session.taps.lock().clone();
+        let _ = std::fs::remove_file(db_path);
+        (result, taps)
+    }
+
+    #[tokio::test]
+    async fn an_already_liked_card_is_left_alone() {
+        // Tapping a filled heart un-likes it, so this must not reach the screen.
+        let (result, taps) = like_on(&[LIKED]).await;
+
+        assert_eq!(result, LikeResult::AlreadyLiked);
+        assert!(
+            taps.is_empty(),
+            "an already-liked heart was tapped: {taps:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_live_room_is_never_tapped_for_a_like() {
+        // The heart coordinates land on LIVE room chrome. `do_follow` has always
+        // required an actionable feed here; the like path did not.
+        let (result, taps) = like_on(&[LIVE_ROOM]).await;
+
+        assert_eq!(result, LikeResult::NotOnFeed);
+        assert!(taps.is_empty(), "tapped inside a LIVE room: {taps:?}");
+    }
+
+    #[tokio::test]
+    async fn a_frame_with_no_locatable_rail_is_never_tapped() {
+        // Mid-swipe still classifies as a feed — the compose bar is visible —
+        // but the rail is half faded out and cannot be located. Tapping the
+        // last known coordinates here is the "14 in a row for 0 likes" failure.
+        let (result, taps) = like_on(&[MID_SWIPE]).await;
+
+        assert_eq!(result, LikeResult::NotOnFeed);
+        assert!(taps.is_empty(), "tapped a frame with no rail: {taps:?}");
+    }
+
+    #[tokio::test]
+    async fn a_like_is_confirmed_from_the_heart_the_tap_aimed_at() {
+        // Unliked card, then the same card with the heart filled.
+        let (result, taps) = like_on(&[FEED, FEED, LIKED]).await;
+
+        assert_eq!(result, LikeResult::Liked);
+        assert_eq!(taps.len(), 1, "exactly one tap: {taps:?}");
+        // 629 px of a 1334 px frame is 314.5 pt, and the planner stays inside
+        // the heart's (10, 12) radius.
+        let tap = &taps[0];
+        assert!(
+            (tap.y - 314.5).abs() <= 12.0,
+            "tap landed at y={:.1} pt, not on the located heart",
+            tap.y
+        );
+        assert!(
+            (tap.x - 375.0 * screen::RAIL_X).abs() <= 10.0,
+            "tap landed at x={:.1} pt, not in the rail column",
+            tap.x
+        );
+    }
+
+    #[tokio::test]
+    async fn a_heart_that_never_fills_is_reported_with_both_readings() {
+        // The stream keeps serving the same unliked card. A miss has to carry
+        // the numbers, or it is indistinguishable from a slow heart.
+        let (result, _taps) = like_on(&[FEED]).await;
+
+        let LikeResult::NotConfirmed { before, best } = result else {
+            panic!("expected NotConfirmed, got {result:?}");
+        };
+        assert!(
+            before < screen::LIKE_FILLED_REDNESS && best < screen::LIKE_FILLED_REDNESS,
+            "before={before:.1} best={best:.1}"
+        );
     }
 
     #[tokio::test]

@@ -168,29 +168,53 @@ fn the_feed_is_not_mistaken_for_the_comment_drawer() {
 }
 
 /// Telling an already-liked video from an unliked one is what stops the engine
-/// un-liking someone's post. Measured on real captures: an unliked heart is a
-/// white glyph (redness ≈ −5…+10), a liked one is filled TikTok red (≈ 124).
+/// un-liking someone's post.
+///
+/// This asserts the decision production actually makes —
+/// `like_redness_at(img, located_rail) > LIKE_FILLED_REDNESS` — rather than the
+/// hand-picked 60/45 bounds it used to, which were both looser and tighter than
+/// the shipped threshold in different directions and so passed for frames the
+/// engine would have decided the other way. It reads the rail the same way too:
+/// `ActionRail::fallback()` is layout-2 constants, not what the engine taps.
+///
+/// Measured margins against the 90.0 threshold, worst case in each direction:
+///
+/// | frame | redness | verdict |
+/// |---|---|---|
+/// | `feed-heart-liked-sponsored` | 96.4 | liked, +6.4 of headroom |
+/// | `feed-heart-liked` | 123.8 | liked |
+/// | `feed-same-card-3` | 29.3 | unliked, 60.7 of headroom |
+/// | `feed-rail-variant` | 0.6 | unliked |
 #[test]
 fn a_liked_heart_reads_red_and_an_unliked_one_does_not() {
-    let rail = screen::ActionRail::fallback();
-
-    let liked = load("feed-heart-liked.jpg");
-    let liked_redness = screen::like_redness_at(&liked, &rail);
-    assert!(
-        liked_redness > 60.0,
-        "a liked heart measured {liked_redness:.1}; the engine would like it again"
-    );
+    for name in ["feed-heart-liked.jpg", "feed-heart-liked-sponsored.jpg"] {
+        let img = load(name);
+        let rail = screen::locate_action_rail(&img).expect("a liked card still has a rail");
+        let redness = screen::like_redness_at(&img, &rail);
+        assert!(
+            redness > screen::LIKE_FILLED_REDNESS,
+            "{name}: liked heart measured {redness:.1}, below the {:.1} the engine \
+             requires — it would like the post again and un-like it",
+            screen::LIKE_FILLED_REDNESS
+        );
+    }
 
     for name in [
         "feed-iphone8.jpg",
         "feed-iphone8-b.jpg",
         "feed-rail-variant.png",
+        "feed-same-card-1.jpg",
+        "feed-same-card-2.jpg",
+        "feed-same-card-3.jpg",
     ] {
         let img = load(name);
+        let rail = screen::locate_action_rail(&img).expect("rail");
         let redness = screen::like_redness_at(&img, &rail);
         assert!(
-            redness < 45.0,
-            "{name}: unliked heart measured {redness:.1}, so the like would be skipped"
+            redness <= screen::LIKE_FILLED_REDNESS,
+            "{name}: unliked heart measured {redness:.1}, at or above the {:.1} that \
+             means 'already liked' — the like would be skipped",
+            screen::LIKE_FILLED_REDNESS
         );
     }
 }
@@ -483,11 +507,9 @@ fn a_real_live_room_is_recognised_and_the_feed_is_not() {
 }
 
 /// Measured at the correctly located heart, video content barely moves the
-/// redness: 9.6 / 3.1 / 27.8 across three frames of the same unliked card, all
-/// far below `LIKE_FILLED_REDNESS`. The threshold itself is sound.
-///
-/// What is *not* sound is where the rail says the heart is — see the ignored
-/// test below.
+/// redness: 9.6 / 4.1 / 29.3 across three frames of the same unliked card, all
+/// far below `LIKE_FILLED_REDNESS`. The threshold itself is sound — what was
+/// not is where the rail said the heart was, which the test below covers.
 #[test]
 fn the_heart_reading_is_stable_when_the_rail_is_located_correctly() {
     let rail = screen::locate_action_rail(&load("feed-same-card-1.jpg"))
@@ -506,28 +528,76 @@ fn the_heart_reading_is_stable_when_the_rail_is_located_correctly() {
     }
 }
 
-/// KNOWN DEFECT — `locate_action_rail` is not stable across frames of one card.
+/// The chain only outranks the badge when the two genuinely disagree, so this
+/// pins both halves of the rule on the frame that needs it: the badge search on
+/// its own is still wrong on `feed-same-card-2.jpg`, and `locate_action_rail`
+/// still corrects it. Without the first assertion the test would keep passing
+/// if the ribbon simply stopped registering, which would prove nothing about
+/// the arbitration.
+#[test]
+fn the_glyph_chain_overrules_a_badge_the_video_faked() {
+    let img = load("feed-same-card-2.jpg");
+    let height = img.height() as f64;
+
+    let badge_only = screen::find_action_rail(&img).expect("the ribbon still reads as a badge");
+    let arbitrated = screen::locate_action_rail(&img).expect("rail");
+
+    assert!(
+        (badge_only.like_y * height - 554.5).abs() < 3.0,
+        "the badge search alone still puts like at {:.1} px, not 554.5 — if the \
+         input changed, this test no longer exercises the disagreement",
+        badge_only.like_y * height
+    );
+    assert!(
+        (arbitrated.like_y * height - 624.5).abs() < 3.0,
+        "the chain must win: like landed at {:.1} px",
+        arbitrated.like_y * height
+    );
+}
+
+/// A two-glyph chain does not outrank the badge. On `feed-heart-liked.jpg` the
+/// heart is filled and so drops out of the white-glyph scan, leaving a stray
+/// two-run pair from the video at a plausible pitch — 57 px away from where the
+/// badge correctly puts the heart. Letting any chain win would move the like
+/// target onto video content and read 123.8 as if the card were unliked.
+#[test]
+fn a_two_glyph_chain_does_not_outrank_the_badge() {
+    let img = load("feed-heart-liked.jpg");
+    let rail = screen::locate_action_rail(&img).expect("rail");
+
+    assert!(
+        (rail.like_y * img.height() as f64 - 629.5).abs() < 3.0,
+        "like landed at {:.1} px, not on the badge-derived heart",
+        rail.like_y * img.height() as f64
+    );
+    assert!(
+        screen::like_redness_at(&img, &rail) > screen::LIKE_FILLED_REDNESS,
+        "this card is liked and must still read as liked"
+    );
+}
+
+/// The rail must not move while the card does not.
 ///
 /// The three `feed-same-card-*` captures are the same sponsored post, seconds
 /// apart, differing only in the video playing behind the chrome. The card
-/// carries a pink "LIVE 8.8 Sale" badge above the rail. Measured:
+/// carries a pink "LIVE 8.8 Sale" ribbon above the rail, and the badge search
+/// takes the topmost red run in its band — so on frame 2 the ribbon won:
 ///
-/// | frame | layout | like_y |
-/// |---|---|---|
-/// | 1 | 2 | 630 px |
-/// | 2 | **1** | **554 px** |
-/// | 3 | 2 | 630 px |
+/// | frame | layout | like_y before | like_y now |
+/// |---|---|---|---|
+/// | 1 | 2 | 630 px | 630.5 px |
+/// | 2 | **1** | **554 px** | 624.5 px |
+/// | 3 | 2 | 630 px | 630.0 px |
 ///
-/// Frame 2 mistakes the pink LIVE badge for the follow badge, flips to layout 1
-/// and moves the like target 76 px — more than half an icon pitch. A tap there
-/// misses the heart and lands on the badge, and `like_redness_at` then reads the
-/// badge (79.7) instead of the heart (3.1), which is close enough to
-/// `LIKE_FILLED_REDNESS` to also fake an "already liked" skip.
+/// 76 px is more than half an icon pitch: the tap missed the heart and landed
+/// on the ribbon, and `like_redness_at` then read the ribbon (79.7) instead of
+/// the heart (3.1) — close enough to `LIKE_FILLED_REDNESS` to also fake an
+/// "already liked" skip. It was the "tapped 14 in a row for 0 likes" failure
+/// class returning through a different door.
 ///
-/// This is the "tapped 14 in a row for 0 likes" failure class returning through
-/// a different door. Un-ignore this when the rail locator is fixed.
+/// `locate_action_rail` now ranks the badge against the white-glyph chain,
+/// which did not move on any of the three frames.
 #[test]
-#[ignore = "known defect: rail layout flips on cards with a pink LIVE badge"]
 fn the_rail_stays_put_across_frames_of_one_card() {
     let heights: Vec<f64> = [
         "feed-same-card-1.jpg",

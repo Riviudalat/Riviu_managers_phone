@@ -236,17 +236,61 @@ pub fn rail_icons_present(img: &RgbImage) -> bool {
     rail_icon_centres(img).len() >= RAIL_MIN_ICONS
 }
 
-/// Locate a rail even when the red follow badge is hidden because the author
-/// is already followed. The white-glyph scan only sees unfilled icons, so a
-/// filled (liked) heart is red and drops out of the chain — the chain then
-/// starts at the comment bubble, one pitch below the heart, not at the heart
-/// itself. Probe for a red heart one pitch above the first white run to tell
-/// the two cases apart, then derive follow from the measured pitch instead of
-/// reusing a previous card's coordinates.
+/// Locate the rail, cross-checking the two independent readings of it.
+///
+/// [`find_action_rail`] keys on the red follow badge and is the more precise
+/// landmark when it is right, but it is a single red run and the topmost one
+/// in its band wins — so anything red the video puts above the badge takes the
+/// whole rail with it. Measured on `feed-same-card-2.jpg`, where a sponsored
+/// card's pink "LIVE 8.8 Sale" ribbon produced a 27 px run above the real
+/// 41 px badge and moved the like target 76 px, over half an icon pitch. The
+/// tap then lands on the ribbon, and — worse — the redness probe reads the
+/// ribbon at 79.7 instead of the heart at 3.1, close enough to the filled
+/// threshold to also fake an "already liked" skip. That is the "tapped 14 in a
+/// row for 0 likes" failure by another door.
+///
+/// The white-glyph chain is the other reading, and it did not move: all three
+/// frames of that card give the same four centres. So the two are compared,
+/// and when they disagree the one with more independent support wins — a chain
+/// of three or more glyphs at a measured pitch outranks one red run, while a
+/// two-glyph chain (which video content can imitate, see `feed-heart-liked`)
+/// does not.
+///
+/// The chain reading also stands alone when the author is already followed and
+/// there is no badge at all. The scan only sees *unfilled* icons, so a liked
+/// heart is red and drops out, and the chain then starts at the comment bubble
+/// one pitch below the heart. A redness probe one pitch above the first glyph
+/// tells the two cases apart.
 pub fn locate_action_rail(img: &RgbImage) -> Option<ActionRail> {
-    if let Some(rail) = find_action_rail(img) {
-        return Some(rail);
+    match (find_action_rail(img), rail_from_icon_chain(img)) {
+        (Some(badge), Some(chain)) => {
+            let disagreement = (badge.like_y - chain.rail.like_y).abs();
+            if disagreement <= chain.pitch * RAIL_AGREEMENT_PITCH_FRACTION
+                || chain.icons < RAIL_CHAIN_OUTRANKS_BADGE
+            {
+                Some(badge)
+            } else {
+                Some(chain.rail)
+            }
+        }
+        (Some(badge), None) => Some(badge),
+        (None, Some(chain)) => Some(chain.rail),
+        (None, None) => None,
     }
+}
+
+/// The chain reading together with what backs it, so it can be ranked against
+/// the badge's single red run.
+struct RailReading {
+    rail: ActionRail,
+    /// Icon spacing this chain measured, in screen fractions.
+    pitch: f64,
+    /// Glyph detections in the chain.
+    icons: usize,
+}
+
+/// Derive the rail from the evenly spaced white glyphs alone.
+fn rail_from_icon_chain(img: &RgbImage) -> Option<RailReading> {
     let centres = rail_icon_centres(img);
     if centres.len() < RAIL_MIN_ICONS {
         return None;
@@ -267,17 +311,30 @@ pub fn locate_action_rail(img: &RgbImage) -> Option<ActionRail> {
         } else {
             (centres[0], centres[1])
         };
-    Some(ActionRail {
-        x: RAIL_X,
-        follow_y: like_y - FOLLOW_TO_LIKE,
-        like_y,
-        comment_y,
-        located: true,
+    Some(RailReading {
+        rail: ActionRail {
+            x: RAIL_X,
+            follow_y: like_y - FOLLOW_TO_LIKE,
+            like_y,
+            comment_y,
+            located: true,
+        },
+        pitch,
+        icons: centres.len(),
     })
 }
 
 /// Minimum number of evenly spaced glyphs that counts as a rail.
 const RAIL_MIN_ICONS: usize = 2;
+/// Glyphs a chain needs before it overrules the follow badge. Two is enough to
+/// *see* a rail but not to overrule one, because video content produces stray
+/// two-run pairs at a plausible pitch; three is three independent detections.
+const RAIL_CHAIN_OUTRANKS_BADGE: usize = 3;
+/// How far the badge-derived like position may sit from the chain-derived one
+/// and still be the same icon, as a fraction of the measured pitch. Half a
+/// pitch is where a tap lands on the neighbouring button, so a quarter leaves a
+/// full icon of margin.
+const RAIL_AGREEMENT_PITCH_FRACTION: f64 = 0.25;
 /// Vertical gap between neighbouring rail icons, in screen fractions. Measured
 /// 65–69 logical points; the window is widened to absorb JPEG blur.
 const RAIL_ICON_PITCH: (f64, f64) = (55.0 / 667.0, 80.0 / 667.0);
