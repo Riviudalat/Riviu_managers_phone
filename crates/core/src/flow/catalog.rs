@@ -145,7 +145,7 @@ pub fn config_schema(kind: ActionKind) -> Value {
                 "accessibilityId": { "type": "string", "minLength": 1, "maxLength": 512 }
             }
         }),
-        ActionKind::TapVision => serde_json::json!({
+        ActionKind::TapVision | ActionKind::IfVision => serde_json::json!({
             "type": "object",
             "additionalProperties": false,
             "required": ["templatePngBase64", "threshold"],
@@ -177,7 +177,7 @@ pub fn required_capabilities(kind: ActionKind) -> Vec<String> {
         ActionKind::Tap | ActionKind::TapVision => &["ui.tap", "stream"],
         ActionKind::Swipe => &["ui.swipe", "stream"],
         ActionKind::TypeText => &["ui.text", "stream", "accessibility.readText"],
-        ActionKind::Screenshot => &["stream"],
+        ActionKind::Screenshot | ActionKind::IfVision => &["stream"],
         ActionKind::Home => &["ui.home"],
         ActionKind::AssertVisible => &["accessibility.visible"],
         ActionKind::RawHttp | ActionKind::RawWda | ActionKind::Shell => &[],
@@ -214,6 +214,15 @@ pub fn contracts(
         ),
         ActionKind::AssertVisible => (
             ResourceClass::UiSession,
+            SideEffectClass::None,
+            EvidenceRequirement::None,
+            ReconciliationPolicy::None,
+            RetryPolicy::BeforeDispatchOnly,
+        ),
+        // Read-only branch predicate: reads a stream frame and routes to
+        // matched/notMatched. No device mutation, so no evidence/reconciliation.
+        ActionKind::IfVision => (
+            ResourceClass::UiWithStream,
             SideEffectClass::None,
             EvidenceRequirement::None,
             ReconciliationPolicy::None,
@@ -278,6 +287,7 @@ pub fn release_one_catalog() -> Vec<ActionDefinition> {
         ActionKind::Home,
         ActionKind::AssertVisible,
         ActionKind::TapVision,
+        ActionKind::IfVision,
     ]
     .into_iter()
     .map(action_definition)
@@ -304,10 +314,10 @@ fn action_definition(kind: ActionKind) -> ActionDefinition {
         } else {
             vec![flow_port()]
         },
-        output_ports: if kind == ActionKind::End {
-            Vec::new()
-        } else {
-            vec![flow_port()]
+        output_ports: match kind {
+            ActionKind::End => Vec::new(),
+            ActionKind::IfVision => vec![branch_port("matched"), branch_port("notMatched")],
+            _ => vec![flow_port()],
         },
         required_capabilities: required_capabilities(kind),
         resource_class,
@@ -329,6 +339,14 @@ fn flow_port() -> PortDefinition {
     }
 }
 
+fn branch_port(name: &str) -> PortDefinition {
+    PortDefinition {
+        name: name.into(),
+        value_type: "flow".into(),
+        required: true,
+    }
+}
+
 fn label(kind: ActionKind) -> &'static str {
     match kind {
         ActionKind::Start => "Start",
@@ -343,6 +361,7 @@ fn label(kind: ActionKind) -> &'static str {
         ActionKind::Home => "Home",
         ActionKind::AssertVisible => "Assert Visible",
         ActionKind::TapVision => "Tap Vision",
+        ActionKind::IfVision => "If Vision",
         ActionKind::RawHttp => "Raw HTTP",
         ActionKind::RawWda => "Raw WDA",
         ActionKind::Shell => "Shell",
@@ -353,6 +372,7 @@ fn category(kind: ActionKind) -> ActionCategory {
     match kind {
         ActionKind::Start
         | ActionKind::End
+        | ActionKind::IfVision
         | ActionKind::RawHttp
         | ActionKind::RawWda
         | ActionKind::Shell => ActionCategory::Control,
@@ -377,6 +397,7 @@ fn allowed_evidence(kind: ActionKind) -> Vec<EvidenceKind> {
         | ActionKind::End
         | ActionKind::Wait
         | ActionKind::AssertVisible
+        | ActionKind::IfVision
         | ActionKind::RawHttp
         | ActionKind::RawWda
         | ActionKind::Shell => Vec::new(),
@@ -392,7 +413,7 @@ fn default_timeout_ms(kind: ActionKind) -> u32 {
             5_000
         }
         ActionKind::TypeText => 10_000,
-        ActionKind::AssertVisible => 4_000,
+        ActionKind::AssertVisible | ActionKind::IfVision => 4_000,
         ActionKind::RawHttp | ActionKind::RawWda | ActionKind::Shell => 10_000,
     }
 }

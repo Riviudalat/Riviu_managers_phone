@@ -341,6 +341,7 @@ mod tests {
             revision: document.revision,
             nodes: Default::default(),
             execution_order: Vec::new(),
+            successors: Default::default(),
             context_plan: ContextPlan {
                 requires_exclusive: false,
                 requires_ui_session: false,

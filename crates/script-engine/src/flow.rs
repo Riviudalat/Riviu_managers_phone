@@ -227,6 +227,10 @@ pub fn compile_flow(
         nodes.keys().map(|id| (*id, Vec::new())).collect();
     let mut outgoing: BTreeMap<NodeId, Vec<NodeId>> =
         nodes.keys().map(|id| (*id, Vec::new())).collect();
+    // Adjacency keyed by the source node's output port. Each port routes to
+    // exactly one target: branch nodes expose several ports, linear nodes only
+    // `flow`. This is the graph the executor walks at runtime.
+    let mut successors: BTreeMap<NodeId, BTreeMap<String, NodeId>> = BTreeMap::new();
     for edge in &document.edges {
         if !edge_ids.insert(edge.id) {
             errors.push(FlowCompileError::document(
@@ -234,10 +238,10 @@ pub fn compile_flow(
                 format!("edge ID {} is duplicated", edge.id),
             ));
         }
-        if edge.source_port != "flow" || edge.target_port != "flow" {
+        if edge.target_port != "flow" {
             errors.push(FlowCompileError::document(
                 "InvalidPort",
-                format!("edge {} must connect flow ports", edge.id),
+                format!("edge {} must enter the flow port", edge.id),
             ));
         }
         if !nodes.contains_key(&edge.source_node_id) || !nodes.contains_key(&edge.target_node_id) {
@@ -246,6 +250,41 @@ pub fn compile_flow(
                 format!("edge {} references an unknown node", edge.id),
             ));
             continue;
+        }
+        // The source port must be one the source node's kind actually exposes.
+        let source_kind = nodes[&edge.source_node_id].kind;
+        let port_is_declared =
+            definitions
+                .get(&source_kind)
+                .map_or(edge.source_port == "flow", |definition| {
+                    definition
+                        .output_ports
+                        .iter()
+                        .any(|port| port.name == edge.source_port)
+                });
+        if !port_is_declared {
+            errors.push(FlowCompileError::document(
+                "InvalidPort",
+                format!(
+                    "edge {} leaves port {:?}, which {source_kind:?} does not expose",
+                    edge.id, edge.source_port
+                ),
+            ));
+            continue;
+        }
+        if successors
+            .entry(edge.source_node_id)
+            .or_default()
+            .insert(edge.source_port.clone(), edge.target_node_id)
+            .is_some()
+        {
+            errors.push(FlowCompileError::document(
+                "InvalidPort",
+                format!(
+                    "port {:?} of a node fans out to more than one target",
+                    edge.source_port
+                ),
+            ));
         }
         outgoing
             .get_mut(&edge.source_node_id)
@@ -260,16 +299,26 @@ pub fn compile_flow(
     for (&node_id, node) in &nodes {
         let incoming_count = incoming.get(&node_id).map_or(0, Vec::len);
         let outgoing_count = outgoing.get(&node_id).map_or(0, Vec::len);
+        let node_successors = successors.get(&node_id);
         let valid = match node.kind {
             ActionKind::Start => incoming_count == 0 && outgoing_count == 1,
-            ActionKind::End => incoming_count == 1 && outgoing_count == 0,
+            // End may be the join of several branches: one or more in, none out.
+            ActionKind::End => incoming_count >= 1 && outgoing_count == 0,
+            // Branch predicate: one in, both typed ports wired to distinct edges.
+            ActionKind::IfVision => {
+                incoming_count == 1
+                    && outgoing_count == 2
+                    && node_successors.is_some_and(|ports| {
+                        ports.contains_key("matched") && ports.contains_key("notMatched")
+                    })
+            }
             _ => incoming_count == 1 && outgoing_count == 1,
         };
         if !valid {
             errors.push(FlowCompileError::node(
                 "InvalidDegree",
                 format!(
-                    "{:?} requires a linear flow degree; got {incoming_count} incoming and {outgoing_count} outgoing",
+                    "{:?} has an invalid flow degree; got {incoming_count} incoming and {outgoing_count} outgoing",
                     node.kind
                 ),
                 node_id,
@@ -291,9 +340,9 @@ pub fn compile_flow(
             "release-one flows must be acyclic",
         ));
     }
-    let execution_order = linear_walk(document.entry_node_id, &outgoing, nodes.len());
-    let visited: BTreeSet<_> = execution_order.iter().copied().collect();
-    for node_id in nodes.keys().filter(|node_id| !visited.contains(node_id)) {
+    let execution_order = topological_order(&nodes, &incoming, &outgoing);
+    let reachable = reachable_from(document.entry_node_id, &outgoing);
+    for node_id in nodes.keys().filter(|node_id| !reachable.contains(node_id)) {
         errors.push(FlowCompileError::node(
             "DisconnectedNode",
             "node is not reachable from entryNodeId",
@@ -390,6 +439,7 @@ pub fn compile_flow(
         revision: document.revision,
         nodes: compiled_nodes,
         execution_order,
+        successors,
         context_plan,
         action_definition_versions,
         required_capabilities,
@@ -557,6 +607,26 @@ fn compile_config(kind: ActionKind, value: &Value) -> Result<CompiledActionConfi
                     .map_err(|message| ConfigError::range("region", message))?;
             }
             Ok(CompiledActionConfig::TapVision {
+                template_png_base64: config.template_png_base64,
+                threshold: config.threshold,
+                region: config.region,
+            })
+        }
+        ActionKind::IfVision => {
+            let config = decode::<TapVisionConfig>(value)?;
+            if !config.threshold.is_finite() || !(0.0..=1.0).contains(&config.threshold) {
+                return Err(ConfigError::range(
+                    "threshold",
+                    "threshold must be in 0.0..=1.0",
+                ));
+            }
+            decode_vision_template(&config.template_png_base64)
+                .map_err(|message| ConfigError::range("templatePngBase64", message))?;
+            if let Some(region) = &config.region {
+                validate_vision_region(region)
+                    .map_err(|message| ConfigError::range("region", message))?;
+            }
+            Ok(CompiledActionConfig::IfVision {
                 template_png_base64: config.template_png_base64,
                 threshold: config.threshold,
                 region: config.region,
@@ -787,23 +857,56 @@ fn graph_has_cycle(
     processed != nodes.len()
 }
 
-fn linear_walk(
-    entry_node_id: NodeId,
+/// A deterministic topological order over every node (Kahn's algorithm, ties
+/// broken by NodeId). `Start` is the unique in-degree-0 node so it leads; the
+/// result is independent of document node/edge ordering, which keeps the plan
+/// hash stable. Assumes the graph is acyclic — a cycle is reported separately
+/// via `graph_has_cycle`, and the (partial) order returned here is never used
+/// because compilation aborts on that error first.
+fn topological_order(
+    nodes: &BTreeMap<NodeId, &riviu_core::FlowNode>,
+    incoming: &BTreeMap<NodeId, Vec<NodeId>>,
     outgoing: &BTreeMap<NodeId, Vec<NodeId>>,
-    node_count: usize,
 ) -> Vec<NodeId> {
-    let mut order = Vec::new();
-    let mut current = Some(entry_node_id);
-    while let Some(node_id) = current {
-        if order.contains(&node_id) || order.len() >= node_count {
-            break;
-        }
+    let mut indegree: BTreeMap<NodeId, usize> = nodes
+        .keys()
+        .map(|id| (*id, incoming.get(id).map_or(0, Vec::len)))
+        .collect();
+    let mut ready: BTreeSet<NodeId> = indegree
+        .iter()
+        .filter_map(|(&id, &degree)| (degree == 0).then_some(id))
+        .collect();
+    let mut order = Vec::with_capacity(nodes.len());
+    while let Some(&node_id) = ready.iter().next() {
+        ready.remove(&node_id);
         order.push(node_id);
-        current = outgoing
-            .get(&node_id)
-            .and_then(|targets| (targets.len() == 1).then(|| targets[0]));
+        for &target in outgoing.get(&node_id).into_iter().flatten() {
+            let degree = indegree.get_mut(&target).expect("known target");
+            *degree = degree.saturating_sub(1);
+            if *degree == 0 {
+                ready.insert(target);
+            }
+        }
     }
     order
+}
+
+/// Every node reachable from `entry` by walking output edges — used to flag
+/// nodes stranded off the graph (`DisconnectedNode`).
+fn reachable_from(entry: NodeId, outgoing: &BTreeMap<NodeId, Vec<NodeId>>) -> BTreeSet<NodeId> {
+    let mut seen = BTreeSet::new();
+    let mut stack = vec![entry];
+    while let Some(node_id) = stack.pop() {
+        if !seen.insert(node_id) {
+            continue;
+        }
+        for &target in outgoing.get(&node_id).into_iter().flatten() {
+            if !seen.contains(&target) {
+                stack.push(target);
+            }
+        }
+    }
+    seen
 }
 
 fn sort_errors(errors: &mut [FlowCompileError]) {
@@ -1114,6 +1217,16 @@ mod tests {
         }
     }
 
+    fn branch_edge(source: NodeId, port: &str, target: NodeId) -> FlowEdge {
+        FlowEdge {
+            id: Uuid::new_v4(),
+            source_node_id: source,
+            source_port: port.into(),
+            target_node_id: target,
+            target_port: "flow".into(),
+        }
+    }
+
     fn start() -> FlowNode {
         FlowNode::new(ActionKind::Start, json!({}))
     }
@@ -1232,6 +1345,91 @@ mod tests {
     }
 
     #[test]
+    fn if_vision_compiles_to_a_branching_plan_with_typed_successors() {
+        let start_node = start();
+        let launch_node = launch("com.apple.Preferences");
+        let if_node = FlowNode::new(
+            ActionKind::IfVision,
+            json!({ "templatePngBase64": PNG_1X1, "threshold": 0.8 }),
+        );
+        let matched_tail = FlowNode::new(ActionKind::Wait, json!({ "durationMs": 1 }));
+        let end_node = end();
+        // start → launch → ifVision; matched → wait → end; notMatched → end.
+        let document = FlowDocumentV2 {
+            schema_version: FLOW_SCHEMA_VERSION,
+            id: Uuid::from_u128(7),
+            name: "Branch".into(),
+            revision: 1,
+            entry_node_id: start_node.id,
+            edges: vec![
+                FlowEdge::flow(start_node.id, launch_node.id),
+                FlowEdge::flow(launch_node.id, if_node.id),
+                branch_edge(if_node.id, "matched", matched_tail.id),
+                branch_edge(if_node.id, "notMatched", end_node.id),
+                FlowEdge::flow(matched_tail.id, end_node.id),
+            ],
+            nodes: vec![
+                start_node,
+                launch_node,
+                if_node.clone(),
+                matched_tail.clone(),
+                end_node.clone(),
+            ],
+            viewport: FlowViewport::default(),
+        };
+        let plan = compile(&document).expect("branching flow compiles").plan;
+
+        let ports = plan.successors.get(&if_node.id).expect("branch successors");
+        assert_eq!(ports.get("matched"), Some(&matched_tail.id));
+        assert_eq!(ports.get("notMatched"), Some(&end_node.id));
+        // The matched tail rejoins the shared End node.
+        assert_eq!(
+            plan.successors
+                .get(&matched_tail.id)
+                .and_then(|ports| ports.get("flow")),
+            Some(&end_node.id)
+        );
+        // successor_on_path honours the runtime-chosen branch.
+        assert_eq!(
+            plan.successor_on_path(if_node.id, Some("matched")),
+            Some(matched_tail.id)
+        );
+        assert_eq!(
+            plan.successor_on_path(if_node.id, Some("notMatched")),
+            Some(end_node.id)
+        );
+        // Every node appears exactly once in the topological order.
+        assert_eq!(plan.execution_order.len(), plan.nodes.len());
+    }
+
+    #[test]
+    fn if_vision_requires_both_branch_ports() {
+        let start_node = start();
+        let launch_node = launch("com.apple.Preferences");
+        let if_node = FlowNode::new(
+            ActionKind::IfVision,
+            json!({ "templatePngBase64": PNG_1X1, "threshold": 0.8 }),
+        );
+        let end_node = end();
+        // Only the matched port is wired — notMatched is missing.
+        let document = FlowDocumentV2 {
+            schema_version: FLOW_SCHEMA_VERSION,
+            id: Uuid::from_u128(8),
+            name: "Half branch".into(),
+            revision: 1,
+            entry_node_id: start_node.id,
+            edges: vec![
+                FlowEdge::flow(start_node.id, launch_node.id),
+                FlowEdge::flow(launch_node.id, if_node.id),
+                branch_edge(if_node.id, "matched", end_node.id),
+            ],
+            nodes: vec![start_node, launch_node, if_node, end_node],
+            viewport: FlowViewport::default(),
+        };
+        assert_error(&document, "InvalidDegree");
+    }
+
+    #[test]
     fn valid_start_launch_end_compiles_to_typed_nodes() {
         let document = linear_document(vec![start(), launch("com.apple.Preferences"), end()]);
         let compiled = compile(&document).expect("valid graph");
@@ -1272,10 +1470,27 @@ mod tests {
         ]);
         assert_error(&missing_end, "EndCount");
 
-        let mut cycle = linear_document(vec![start(), launch("com.apple.Preferences"), end()]);
-        cycle
-            .edges
-            .push(FlowEdge::flow(cycle.nodes[2].id, cycle.nodes[1].id));
+        // A cycle between two Wait nodes. Each node's single `flow` port is used
+        // exactly once (no fan-out), so the graph reaches cycle detection rather
+        // than tripping the port checks first.
+        let start_node = start();
+        let first = FlowNode::new(ActionKind::Wait, json!({ "durationMs": 1 }));
+        let second = FlowNode::new(ActionKind::Wait, json!({ "durationMs": 1 }));
+        let end_node = end();
+        let cycle = FlowDocumentV2 {
+            schema_version: FLOW_SCHEMA_VERSION,
+            id: Uuid::from_u128(1),
+            name: "Fixture".into(),
+            revision: 1,
+            entry_node_id: start_node.id,
+            edges: vec![
+                FlowEdge::flow(start_node.id, first.id),
+                FlowEdge::flow(first.id, second.id),
+                FlowEdge::flow(second.id, first.id),
+            ],
+            nodes: vec![start_node, first, second, end_node],
+            viewport: FlowViewport::default(),
+        };
         assert_error(&cycle, "Cycle");
 
         let mut disconnected = linear_document(vec![start(), end()]);
@@ -1602,6 +1817,10 @@ mod tests {
             ),
             (
                 ActionKind::TapVision,
+                json!({ "templatePngBase64": "aGVsbG8=", "threshold": 0.85 }),
+            ),
+            (
+                ActionKind::IfVision,
                 json!({ "templatePngBase64": "aGVsbG8=", "threshold": 0.85 }),
             ),
         ];
@@ -2121,6 +2340,29 @@ mod tests {
                     minimum_distance: 1,
                 });
                 linear_document(vec![start(), launch("com.apple.Preferences"), node, end()])
+            }
+            ActionKind::IfVision => {
+                // A branch node: both ports rejoin at a single End node.
+                let start_node = start();
+                let launch_node = launch("com.apple.Preferences");
+                let end_node = end();
+                let entry_node_id = start_node.id;
+                let edges = vec![
+                    FlowEdge::flow(start_node.id, launch_node.id),
+                    FlowEdge::flow(launch_node.id, node.id),
+                    branch_edge(node.id, "matched", end_node.id),
+                    branch_edge(node.id, "notMatched", end_node.id),
+                ];
+                FlowDocumentV2 {
+                    schema_version: FLOW_SCHEMA_VERSION,
+                    id: Uuid::from_u128(1),
+                    name: "Fixture".into(),
+                    revision: 1,
+                    entry_node_id,
+                    nodes: vec![start_node, launch_node, node, end_node],
+                    edges,
+                    viewport: FlowViewport::default(),
+                }
             }
             ActionKind::TerminateApp
             | ActionKind::RawHttp

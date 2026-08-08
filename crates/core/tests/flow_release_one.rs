@@ -30,7 +30,7 @@ const SPRINGBOARD: &str = "com.apple.springboard";
 const MOCK_UDIDS: [&str; 2] = ["MOCK-IPHONE-01", "MOCK-IPHONE-02"];
 const TERMINAL_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const EXPECTED_PLAN_SHA256: &str =
-    "88333ddcbb7ae804825e1902ad5c0a3d04431def5a947f65aabf8dae724173c4";
+    "0cade80dae4ddbf361413ea582680a4c849c9698490bc176e9ec3344247f68b2";
 
 #[tokio::test]
 async fn release_one_fixture_runs_two_devices_without_shared_attempts() {

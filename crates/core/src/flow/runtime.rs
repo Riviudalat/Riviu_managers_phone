@@ -1535,16 +1535,28 @@ fn first_reclaimable_attempt(
     plan: &super::CompiledFlowPlanV2,
     attempts: &[FlowNodeAttemptRecord],
 ) -> Option<FlowNodeAttemptRecord> {
-    let mut predecessors_succeeded = true;
-    for node_id in &plan.execution_order {
+    // Walk the taken path from Start, advancing through succeeded nodes and
+    // following each IfVision node's recorded branch. The first node on that
+    // path still Queued is the frontier to reclaim; a non-terminal or failed
+    // node means there is nothing safely reclaimable ahead of it.
+    let mut current = plan.entry_node();
+    let mut guard = 0usize;
+    while let Some(node_id) = current {
+        guard += 1;
+        if guard > plan.nodes.len() + 1 {
+            return None;
+        }
         let latest = attempts
             .iter()
-            .filter(|attempt| attempt.node_id == *node_id)
+            .filter(|attempt| attempt.node_id == node_id)
             .max_by_key(|attempt| attempt.attempt_no)?;
-        if latest.state == FlowAttemptState::Queued && predecessors_succeeded {
-            return Some(latest.clone());
+        match latest.state {
+            FlowAttemptState::Queued => return Some(latest.clone()),
+            FlowAttemptState::Succeeded => {
+                current = plan.successor_on_path(node_id, latest.chosen_port.as_deref());
+            }
+            _ => return None,
         }
-        predecessors_succeeded &= latest.state == FlowAttemptState::Succeeded;
     }
     None
 }
@@ -4989,6 +5001,7 @@ mod tests {
             revision: 1,
             nodes: nodes.into_iter().map(|node| (node.id, node)).collect(),
             execution_order,
+            successors: Default::default(),
             context_plan,
             action_definition_versions,
             required_capabilities: capabilities
@@ -5079,6 +5092,7 @@ mod tests {
             canonical_input: None,
             evidence_baseline: None,
             evidence_result: None,
+            chosen_port: None,
             retry_allowed: false,
             error: None,
             started_at: None,

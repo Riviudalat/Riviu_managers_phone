@@ -82,6 +82,7 @@ mod tests {
                 ActionKind::Home,
                 ActionKind::AssertVisible,
                 ActionKind::TapVision,
+                ActionKind::IfVision,
             ]
         );
         assert!(catalog.iter().all(|entry| !matches!(
@@ -272,17 +273,34 @@ mod tests {
             assert_eq!(definition.retry_policy, retry);
 
             let expected_inputs = usize::from(definition.kind != ActionKind::Start);
-            let expected_outputs = usize::from(definition.kind != ActionKind::End);
             assert_eq!(definition.input_ports.len(), expected_inputs);
-            assert_eq!(definition.output_ports.len(), expected_outputs);
-            for port in definition
-                .input_ports
-                .iter()
-                .chain(&definition.output_ports)
-            {
+            for port in &definition.input_ports {
                 assert_eq!(port.name, "flow");
                 assert_eq!(port.value_type, "flow");
                 assert!(port.required);
+            }
+            match definition.kind {
+                ActionKind::End => assert!(definition.output_ports.is_empty()),
+                // The branch predicate exposes two typed output ports.
+                ActionKind::IfVision => {
+                    let names = definition
+                        .output_ports
+                        .iter()
+                        .map(|port| port.name.as_str())
+                        .collect::<Vec<_>>();
+                    assert_eq!(names, vec!["matched", "notMatched"]);
+                    for port in &definition.output_ports {
+                        assert_eq!(port.value_type, "flow");
+                        assert!(port.required);
+                    }
+                }
+                _ => {
+                    assert_eq!(definition.output_ports.len(), 1);
+                    let port = &definition.output_ports[0];
+                    assert_eq!(port.name, "flow");
+                    assert_eq!(port.value_type, "flow");
+                    assert!(port.required);
+                }
             }
             assert!(definition.qualified_detector_ids.is_empty());
         }
@@ -549,6 +567,7 @@ mod tests {
             revision,
             nodes: BTreeMap::from([(node.id, node)]),
             execution_order: vec![node_id()],
+            successors: Default::default(),
             context_plan: ContextPlan {
                 requires_exclusive: true,
                 requires_ui_session: true,

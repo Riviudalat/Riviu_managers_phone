@@ -39,6 +39,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "publish-campaigns",
         apply: apply_migration_5,
     },
+    Migration {
+        version: 6,
+        name: "flow-ifvision-branch",
+        apply: apply_migration_6,
+    },
 ];
 
 const LEDGER_SQL: &str = r#"
@@ -689,6 +694,14 @@ fn apply_migration_5(transaction: &Transaction<'_>) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn apply_migration_6(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    // First-class record of the port an IfVision branch selected at runtime, so
+    // recovery can rebuild the taken path without re-running the vision predicate.
+    // Nullable: every existing attempt (and every non-branch node) leaves it NULL.
+    transaction.execute_batch("ALTER TABLE flow_node_attempts ADD COLUMN chosen_port TEXT;")?;
+    Ok(())
+}
+
 fn apply_v1_schema(connection: &Connection) -> anyhow::Result<()> {
     connection.execute_batch(V1_SCHEMA_SQL)?;
     Ok(())
@@ -1034,7 +1047,7 @@ mod tests {
                 .iter()
                 .map(|(version, _)| *version)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5]
+            vec![1, 2, 3, 4, 5, 6]
         );
         assert!(table_exists(&connection, "flow_documents"));
         assert!(table_exists(&connection, "nurture_comment_attempts"));
@@ -1140,7 +1153,7 @@ mod tests {
 
     #[test]
     fn every_migration_rolls_back_its_schema_and_ledger_row_on_failure() {
-        for failed_version in [1, 2, 3, 4, 5] {
+        for failed_version in [1, 2, 3, 4, 5, 6] {
             let path = temp_db_path(&format!("migration-{failed_version}-rollback"));
             let mut connection = Connection::open(&path).expect("rollback fixture");
             let error = run_with_failpoint(&mut connection, Some(failed_version))
@@ -1180,7 +1193,7 @@ mod tests {
                 assert!(table_exists(&connection, "nurture_comment_attempts"));
                 assert!(!table_exists(&connection, "publish_campaigns"));
                 assert!(!table_exists(&connection, "interaction_campaigns"));
-            } else {
+            } else if failed_version == 5 {
                 assert_eq!(
                     migration_rows(&connection)
                         .iter()
@@ -1190,6 +1203,17 @@ mod tests {
                 );
                 assert!(table_exists(&connection, "interaction_campaigns"));
                 assert!(!table_exists(&connection, "publish_campaigns"));
+            } else {
+                // Failed at 6: migrations 1..=5 applied (publish_campaigns
+                // present), and the IfVision branch column migration rolled back.
+                assert_eq!(
+                    migration_rows(&connection)
+                        .iter()
+                        .map(|(version, _)| *version)
+                        .collect::<Vec<_>>(),
+                    vec![1, 2, 3, 4, 5]
+                );
+                assert!(table_exists(&connection, "publish_campaigns"));
             }
 
             run(&mut connection).expect("retry migrations");
@@ -1198,7 +1222,7 @@ mod tests {
                     .iter()
                     .map(|(version, _)| *version)
                     .collect::<Vec<_>>(),
-                vec![1, 2, 3, 4, 5]
+                vec![1, 2, 3, 4, 5, 6]
             );
             let guest_count: i64 = connection
                 .query_row(
@@ -1241,7 +1265,7 @@ mod tests {
                 .iter()
                 .map(|(version, _)| *version)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5]
+            vec![1, 2, 3, 4, 5, 6]
         );
         drop(connection);
         cleanup(&path);
@@ -1286,7 +1310,7 @@ mod tests {
                 .iter()
                 .map(|(version, _)| *version)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5]
+            vec![1, 2, 3, 4, 5, 6]
         );
         drop(connection);
         cleanup(&path);
@@ -1332,7 +1356,7 @@ mod tests {
                             connection
                                 .execute(
                                     "INSERT INTO schema_migrations(version,name,applied_at)
-                                     VALUES(6,'future','2026-07-30T00:00:02Z')",
+                                     VALUES(7,'future','2026-07-30T00:00:02Z')",
                                     [],
                                 )
                                 .expect("future migration");

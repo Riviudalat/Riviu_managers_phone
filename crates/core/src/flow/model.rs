@@ -131,6 +131,7 @@ pub enum ActionKind {
     Home,
     AssertVisible,
     TapVision,
+    IfVision,
     RawHttp,
     RawWda,
     Shell,
@@ -264,10 +265,69 @@ pub struct CompiledFlowPlanV2 {
     pub flow_id: FlowId,
     pub revision: u64,
     pub nodes: BTreeMap<NodeId, CompiledFlowNode>,
+    /// A stable topological order over every node. Retained for deterministic
+    /// recovery ordering, canonical hashing, and executing legacy linear plans.
+    /// It no longer implies that all nodes run: with branches only the nodes on
+    /// the taken path execute (see `successors`).
     pub execution_order: Vec<NodeId>,
+    /// Explicit per-node adjacency keyed by output port (`flow` for linear nodes,
+    /// `matched`/`notMatched` for `IfVision`). Empty for legacy plans compiled
+    /// before branching existed — the executor then falls back to
+    /// `execution_order`. `skip_serializing_if` keeps those legacy plans'
+    /// canonical JSON (and thus their frozen plan hash) byte-identical.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub successors: BTreeMap<NodeId, BTreeMap<String, NodeId>>,
     pub context_plan: ContextPlan,
     pub action_definition_versions: BTreeMap<ActionKind, u32>,
     pub required_capabilities: BTreeSet<String>,
+}
+
+impl CompiledFlowPlanV2 {
+    /// The Start node — always first in the topological order.
+    pub fn entry_node(&self) -> Option<NodeId> {
+        self.execution_order.first().copied()
+    }
+
+    /// The next node on the taken path after `node_id`. An `IfVision` node routes
+    /// by `chosen_port` (`matched`/`notMatched`); every other kind uses its lone
+    /// `flow` port. Legacy plans with no `successors` fall back to the linear
+    /// `execution_order`. Returns `None` at `End`, a dead end, or an as-yet
+    /// undecided branch (missing `chosen_port`).
+    pub fn successor_on_path(&self, node_id: NodeId, chosen_port: Option<&str>) -> Option<NodeId> {
+        if self.successors.is_empty() {
+            let index = self.execution_order.iter().position(|id| *id == node_id)?;
+            return self.execution_order.get(index + 1).copied();
+        }
+        let kind = self.nodes.get(&node_id)?.kind;
+        if kind == ActionKind::End {
+            return None;
+        }
+        let ports = self.successors.get(&node_id)?;
+        match kind {
+            ActionKind::IfVision => ports.get(chosen_port?).copied(),
+            _ => ports.get("flow").copied(),
+        }
+    }
+
+    /// Graph-predecessors of `node_id`: the source of every edge pointing at it.
+    /// A rejoin node has several; only the branch actually taken will have run.
+    /// Legacy plans fall back to the single linear predecessor.
+    pub fn predecessors(&self, node_id: NodeId) -> Vec<NodeId> {
+        if self.successors.is_empty() {
+            let Some(index) = self.execution_order.iter().position(|id| *id == node_id) else {
+                return Vec::new();
+            };
+            return index
+                .checked_sub(1)
+                .map(|previous| vec![self.execution_order[previous]])
+                .unwrap_or_default();
+        }
+        self.successors
+            .iter()
+            .filter(|(_, ports)| ports.values().any(|target| *target == node_id))
+            .map(|(source, _)| *source)
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -508,6 +568,12 @@ pub struct FlowNodeAttemptRecord {
     pub canonical_input: Option<Value>,
     pub evidence_baseline: Option<Value>,
     pub evidence_result: Option<Value>,
+    /// For an `IfVision` node, the output port the runtime match selected
+    /// (`matched`/`notMatched`). First-class so recovery can rebuild the taken
+    /// path without re-running the vision predicate. `None` for every other kind
+    /// and for attempts recorded before branching existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_port: Option<String>,
     pub retry_allowed: bool,
     pub error: Option<FlowErrorRecord>,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -616,6 +682,14 @@ pub enum CompiledActionConfig {
         /// Template image (a small crop of the target), PNG, base64-encoded.
         template_png_base64: String,
         /// Match threshold in [0,1]; the NCC score must reach it to tap.
+        threshold: f64,
+        /// Optional search region (screen fractions) to speed up and disambiguate.
+        region: Option<VisionRegion>,
+    },
+    IfVision {
+        /// Template image (a small crop of the target), PNG, base64-encoded.
+        template_png_base64: String,
+        /// Match threshold in [0,1]; a score reaching it routes to `matched`.
         threshold: f64,
         /// Optional search region (screen fractions) to speed up and disambiguate.
         region: Option<VisionRegion>,

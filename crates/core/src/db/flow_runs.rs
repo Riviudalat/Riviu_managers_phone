@@ -26,6 +26,9 @@ pub struct AttemptTransitionPatch {
     pub evidence_baseline: Option<Value>,
     pub evidence_result: Option<Value>,
     pub error: Option<FlowErrorRecord>,
+    /// The branch port an IfVision node selected; persisted so recovery can
+    /// rebuild the taken path without re-running the vision predicate.
+    pub chosen_port: Option<String>,
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -188,7 +191,7 @@ fn query_flow_run_detail(
         "SELECT a.id,a.device_run_id,a.node_id,a.action_kind,a.attempt_no,
                 a.side_effect_class,a.state,a.canonical_input_json,
                 a.evidence_baseline_json,a.evidence_result_json,a.retry_safe,a.error_json,
-                a.started_at,a.updated_at,a.finished_at
+                a.started_at,a.updated_at,a.finished_at,a.chosen_port
          FROM flow_node_attempts a
          JOIN flow_device_runs d ON d.id=a.device_run_id
          WHERE d.run_id=?1
@@ -887,7 +890,8 @@ impl Database {
                     WHEN started_at IS NULL AND ?2='intentCommitted' THEN ?8
                     ELSE started_at END,
                 updated_at=?8,
-                finished_at=CASE WHEN ?9=1 THEN ?8 ELSE finished_at END
+                finished_at=CASE WHEN ?9=1 THEN ?8 ELSE finished_at END,
+                chosen_port=COALESCE(?11,chosen_port)
              WHERE id=?1 AND state=?10",
             params![
                 attempt_id.to_string(),
@@ -900,6 +904,7 @@ impl Database {
                 now,
                 i64::from(next.is_terminal()),
                 expected_name,
+                patch.chosen_port,
             ],
         )?;
         if changed != 1 {
@@ -1332,7 +1337,7 @@ impl Database {
             "SELECT a.id,a.device_run_id,a.node_id,a.action_kind,a.attempt_no,
                     a.side_effect_class,a.state,a.canonical_input_json,
                     a.evidence_baseline_json,a.evidence_result_json,a.retry_safe,a.error_json,
-                    a.started_at,a.updated_at,a.finished_at
+                    a.started_at,a.updated_at,a.finished_at,a.chosen_port
              FROM flow_node_attempts a
              JOIN flow_device_runs d ON d.id=a.device_run_id
              WHERE d.run_id=?1
@@ -1403,7 +1408,7 @@ impl Database {
         let mut statement = connection.prepare(
             "SELECT id,device_run_id,node_id,action_kind,attempt_no,side_effect_class,state,
                     canonical_input_json,evidence_baseline_json,evidence_result_json,retry_safe,
-                    error_json,started_at,updated_at,finished_at
+                    error_json,started_at,updated_at,finished_at,chosen_port
              FROM flow_node_attempts
              WHERE state NOT IN (
                 'succeeded','failedBeforeDispatch','failedVerified','uncertain','cancelled'
@@ -1511,7 +1516,7 @@ impl Database {
         let mut statement = connection.prepare(
             "SELECT id,device_run_id,node_id,action_kind,attempt_no,side_effect_class,state,
                     canonical_input_json,evidence_baseline_json,evidence_result_json,retry_safe,
-                    error_json,started_at,updated_at,finished_at
+                    error_json,started_at,updated_at,finished_at,chosen_port
              FROM flow_node_attempts WHERE device_run_id=?1
              ORDER BY attempt_no ASC,node_id ASC,id ASC",
         )?;
@@ -2831,27 +2836,42 @@ fn validate_attempt_claim(
         latest_id == attempt_id.to_string(),
         "StateConflict: only the latest Flow attempt may claim intent"
     );
-    let node_index = identity
-        .plan
-        .execution_order
-        .iter()
-        .position(|node_id| *node_id == identity.node.id)
-        .context("Flow attempt node is absent from execution order")?;
-    for predecessor_id in &identity.plan.execution_order[..node_index] {
-        let predecessor_state: String = transaction.query_row(
-            "SELECT state FROM flow_node_attempts
-             WHERE device_run_id=?1 AND node_id=?2
-             ORDER BY attempt_no DESC LIMIT 1",
-            params![
-                identity.device_run_id.to_string(),
-                predecessor_id.to_string()
-            ],
-            |row| row.get(0),
-        )?;
+    // Path-aware predecessor gate: a node may claim intent once at least one of
+    // its graph-predecessors has succeeded. On the taken (linear) path this is
+    // its single predecessor; a rejoin node has several potential predecessors,
+    // but only the branch actually taken will have run and succeeded. A
+    // succeeded predecessor inductively implies the whole chain back to Start
+    // succeeded, since a node only succeeds after itself passing this gate.
+    // Start (no predecessors) is always claimable.
+    let predecessors = identity.plan.predecessors(identity.node.id);
+    if !predecessors.is_empty() {
+        let mut any_succeeded = false;
+        for predecessor_id in predecessors {
+            let predecessor_state: Option<String> = transaction
+                .query_row(
+                    "SELECT state FROM flow_node_attempts
+                     WHERE device_run_id=?1 AND node_id=?2
+                     ORDER BY attempt_no DESC LIMIT 1",
+                    params![
+                        identity.device_run_id.to_string(),
+                        predecessor_id.to_string()
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if predecessor_state
+                .as_deref()
+                .map(|state| parse_enum_name::<FlowAttemptState>(state, "predecessor state"))
+                .transpose()?
+                == Some(FlowAttemptState::Succeeded)
+            {
+                any_succeeded = true;
+                break;
+            }
+        }
         ensure!(
-            parse_enum_name::<FlowAttemptState>(&predecessor_state, "predecessor state")?
-                == FlowAttemptState::Succeeded,
-            "StateConflict: Flow attempt predecessor is not succeeded"
+            any_succeeded,
+            "StateConflict: no succeeded predecessor authorizes this Flow attempt"
         );
     }
     let uncertain: i64 = transaction.query_row(
@@ -2922,24 +2942,36 @@ fn validate_device_success_projection(
     let run = query_run_record(connection, device.run_id)?
         .context("Flow device parent run does not exist")?;
     let plan = load_validated_run_plan(connection, &run)?;
-    for node_id in &plan.execution_order {
-        let latest_state: Option<String> = connection
+    // Path-aware success: walk the taken path from the entry node, following
+    // each IfVision node's recorded branch, and require every node ON THAT PATH
+    // to have succeeded. The walk stops at the path's sink (the node with no
+    // successor — End in a fully compiled plan). Off-path nodes (the branch not
+    // taken) never ran and are intentionally ignored.
+    let mut current = plan.entry_node();
+    let mut visited = 0usize;
+    while let Some(node_id) = current {
+        visited += 1;
+        ensure!(
+            visited <= plan.nodes.len() + 1,
+            "StateConflict: taken path exceeds the compiled node count"
+        );
+        let latest: Option<(String, Option<String>)> = connection
             .query_row(
-                "SELECT state FROM flow_node_attempts
+                "SELECT state,chosen_port FROM flow_node_attempts
                  WHERE device_run_id=?1 AND node_id=?2
                  ORDER BY attempt_no DESC LIMIT 1",
                 params![device.id.to_string(), node_id.to_string()],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
+        let (state, chosen_port) =
+            latest.context("StateConflict: a node on the taken path has no attempt")?;
         ensure!(
-            latest_state
-                .as_deref()
-                .map(|state| parse_enum_name::<FlowAttemptState>(state, "Flow attempt state"))
-                .transpose()?
-                == Some(FlowAttemptState::Succeeded),
-            "StateConflict: device success requires every compiled node to succeed"
+            parse_enum_name::<FlowAttemptState>(&state, "Flow attempt state")?
+                == FlowAttemptState::Succeeded,
+            "StateConflict: device success requires every node on the taken path to succeed"
         );
+        current = plan.successor_on_path(node_id, chosen_port.as_deref());
     }
     Ok(())
 }
@@ -3016,7 +3048,7 @@ fn query_attempt_record(
         .query_row(
             "SELECT id,device_run_id,node_id,action_kind,attempt_no,side_effect_class,state,
                     canonical_input_json,evidence_baseline_json,evidence_result_json,retry_safe,
-                    error_json,started_at,updated_at,finished_at
+                    error_json,started_at,updated_at,finished_at,chosen_port
              FROM flow_node_attempts WHERE id=?1",
             [id.to_string()],
             attempt_row,
@@ -3295,6 +3327,7 @@ struct FlowAttemptRow {
     started_at: Option<String>,
     updated_at: String,
     finished_at: Option<String>,
+    chosen_port: Option<String>,
 }
 
 fn attempt_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FlowAttemptRow> {
@@ -3314,6 +3347,7 @@ fn attempt_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FlowAttemptRow> {
         started_at: row.get(12)?,
         updated_at: row.get(13)?,
         finished_at: row.get(14)?,
+        chosen_port: row.get(15)?,
     })
 }
 
@@ -3386,6 +3420,7 @@ impl FlowAttemptRow {
             canonical_input,
             evidence_baseline,
             evidence_result,
+            chosen_port: self.chosen_port,
             retry_allowed,
             error,
             started_at,
@@ -3585,6 +3620,7 @@ mod tests {
             revision: 1,
             nodes: BTreeMap::from([(node.id, node.clone())]),
             execution_order: vec![node.id],
+            successors: Default::default(),
             context_plan: ContextPlan {
                 requires_exclusive: false,
                 requires_ui_session: false,
@@ -3625,6 +3661,7 @@ mod tests {
             revision: document.revision,
             nodes: BTreeMap::from([(first.id, first.clone()), (second.id, second.clone())]),
             execution_order: vec![first.id, second.id],
+            successors: Default::default(),
             context_plan: ContextPlan {
                 requires_exclusive: false,
                 requires_ui_session: false,

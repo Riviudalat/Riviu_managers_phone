@@ -128,6 +128,11 @@ enum ActionOutput {
         format: String,
         bytes: Arc<Vec<u8>>,
     },
+    /// An IfVision node decided which output port to take (`matched`/`notMatched`).
+    /// Carries no postcondition — the decision itself is the outcome.
+    Branch {
+        port: String,
+    },
 }
 
 struct ActionDispatchFailure {
@@ -292,31 +297,47 @@ impl FlowExecutor {
             }
         }
 
+        // Walk the graph from Start, following each node's single flow port and
+        // each IfVision node's runtime-chosen branch. Only nodes on the taken
+        // path execute; off-path attempts stay Queued and are ignored by the
+        // path-aware success projection.
         let mut first_launch_pending = plan.context_plan.requires_ui_session;
-        for node_id in &plan.execution_order {
+        let mut current = plan.entry_node();
+        let mut steps = 0usize;
+        while let Some(node_id) = current {
+            steps += 1;
+            if steps > plan.nodes.len() + 1 {
+                let error = FlowExecutionError::new(
+                    "CompiledPlanCorrupt",
+                    "taken path exceeds the compiled node count",
+                );
+                return self
+                    .finish_failed(device_run_id, &mut context, &mut reservation, error)
+                    .await;
+            }
             if self.deps.cancellation.is_cancelled() {
                 let error = FlowExecutionError::new("Cancelled", "flow was cancelled");
                 return self
                     .finish_failed(device_run_id, &mut context, &mut reservation, error)
                     .await;
             }
-            let node = plan.nodes.get(node_id).ok_or_else(|| {
+            let node = plan.nodes.get(&node_id).ok_or_else(|| {
                 FlowExecutionError::new(
                     "CompiledPlanCorrupt",
-                    format!("execution order references missing node {node_id}"),
+                    format!("taken path references missing node {node_id}"),
                 )
             })?;
             let special_launch = first_launch_pending && node.kind == ActionKind::LaunchApp;
             let attempt = initialized_attempts
                 .iter()
-                .find(|attempt| attempt.node_id == *node_id)
+                .find(|attempt| attempt.node_id == node_id)
                 .ok_or_else(|| {
                     FlowExecutionError::new(
                         "CompiledPlanCorrupt",
                         format!("initialized attempt is missing for node {node_id}"),
                     )
                 })?;
-            let result = self
+            let chosen_port = match self
                 .execute_node(
                     device_run_id,
                     node,
@@ -327,15 +348,21 @@ impl FlowExecutor {
                     &mut reservation,
                     special_launch,
                 )
-                .await;
-            if special_launch && result.is_ok() {
-                first_launch_pending = false;
-            }
-            if let Err(error) = result {
-                return self
-                    .finish_failed(device_run_id, &mut context, &mut reservation, error)
-                    .await;
-            }
+                .await
+            {
+                Ok(port) => {
+                    if special_launch {
+                        first_launch_pending = false;
+                    }
+                    port
+                }
+                Err(error) => {
+                    return self
+                        .finish_failed(device_run_id, &mut context, &mut reservation, error)
+                        .await;
+                }
+            };
+            current = plan.successor_on_path(node_id, chosen_port.as_deref());
         }
 
         if first_launch_pending {
@@ -401,18 +428,35 @@ impl FlowExecutor {
                 "an uncertain device attempt blocks successor dispatch",
             ));
         }
-        let first_index = plan
-            .execution_order
-            .iter()
-            .position(|node_id| *node_id == initial.attempt.node_id)
-            .ok_or_else(|| {
-                FlowExecutionError::new("RunIdentityMismatch", "retry node is outside the plan")
-            })?;
-        for predecessor_id in &plan.execution_order[..first_index] {
+        // Rebuild the taken path from Start up to the retry node, replaying each
+        // already-decided branch from its recorded chosen_port. Every node on
+        // that prefix must be durably succeeded, and we capture the app the
+        // prefix last launched so the live session can be re-attached.
+        let retry_node_id = initial.attempt.node_id;
+        let mut prior_launch_bundle: Option<String> = None;
+        let mut cursor = plan.entry_node();
+        let mut prefix_steps = 0usize;
+        loop {
+            let Some(node_id) = cursor else {
+                return Err(FlowExecutionError::new(
+                    "RunIdentityMismatch",
+                    "retry node is not on the taken path",
+                ));
+            };
+            if node_id == retry_node_id {
+                break;
+            }
+            prefix_steps += 1;
+            if prefix_steps > plan.nodes.len() + 1 {
+                return Err(FlowExecutionError::new(
+                    "CompiledPlanCorrupt",
+                    "taken path exceeds the compiled node count",
+                ));
+            }
             let latest = initial
                 .device_attempts
                 .iter()
-                .filter(|attempt| attempt.node_id == *predecessor_id)
+                .filter(|attempt| attempt.node_id == node_id)
                 .max_by_key(|attempt| attempt.attempt_no)
                 .ok_or_else(|| {
                     FlowExecutionError::new(
@@ -426,6 +470,14 @@ impl FlowExecutor {
                     "retry predecessor is not durably succeeded",
                 ));
             }
+            if let Some(CompiledFlowNode {
+                config: CompiledActionConfig::LaunchApp { bundle_id },
+                ..
+            }) = plan.nodes.get(&node_id)
+            {
+                prior_launch_bundle = Some(bundle_id.clone());
+            }
+            cursor = plan.successor_on_path(node_id, latest.chosen_port.as_deref());
         }
 
         let mut context = FlowDeviceContext::no_device_resources(&self.deps.udid);
@@ -532,9 +584,8 @@ impl FlowExecutor {
             }
         }
 
-        let prior_launch_bundle = last_launch_bundle_before(&plan, first_index);
         let mut first_launch_pending = plan.context_plan.requires_ui_session;
-        if let Some(bundle_id) = prior_launch_bundle {
+        if let Some(bundle_id) = prior_launch_bundle.as_deref() {
             let observed_bundle = match context.active_app_bundle(&self.deps.control).await {
                 Ok(bundle_id) => bundle_id,
                 Err(error) => {
@@ -610,9 +661,21 @@ impl FlowExecutor {
             first_launch_pending = false;
         }
 
-        for (index, node_id) in plan.execution_order.iter().enumerate() {
-            if index < first_index {
-                continue;
+        // Execute the retry node and continue down the taken path, deciding
+        // branches as they run. Nodes past the retry point never ran, but any
+        // already-succeeded node is skipped defensively (idempotent resume).
+        let mut current = Some(retry_node_id);
+        let mut steps = 0usize;
+        while let Some(node_id) = current {
+            steps += 1;
+            if steps > plan.nodes.len() + 1 {
+                let error = FlowExecutionError::new(
+                    "CompiledPlanCorrupt",
+                    "taken path exceeds the compiled node count",
+                );
+                return self
+                    .finish_failed(device_run_id, &mut context, &mut reservation, error)
+                    .await;
             }
             if self.deps.cancellation.is_cancelled() {
                 let error = FlowExecutionError::new("Cancelled", "flow retry was cancelled");
@@ -620,16 +683,16 @@ impl FlowExecutor {
                     .finish_failed(device_run_id, &mut context, &mut reservation, error)
                     .await;
             }
-            let node = plan.nodes.get(node_id).ok_or_else(|| {
+            let node = plan.nodes.get(&node_id).ok_or_else(|| {
                 FlowExecutionError::new(
                     "CompiledPlanCorrupt",
-                    format!("execution order references missing node {node_id}"),
+                    format!("taken path references missing node {node_id}"),
                 )
             })?;
             let attempt = initial
                 .device_attempts
                 .iter()
-                .filter(|attempt| attempt.node_id == *node_id)
+                .filter(|attempt| attempt.node_id == node_id)
                 .max_by_key(|attempt| attempt.attempt_no)
                 .ok_or_else(|| {
                     FlowExecutionError::new(
@@ -638,10 +701,11 @@ impl FlowExecutor {
                     )
                 })?;
             if attempt.state == FlowAttemptState::Succeeded {
+                current = plan.successor_on_path(node_id, attempt.chosen_port.as_deref());
                 continue;
             }
             let special_launch = first_launch_pending && node.kind == ActionKind::LaunchApp;
-            let result = self
+            let chosen_port = match self
                 .execute_node(
                     device_run_id,
                     node,
@@ -652,15 +716,21 @@ impl FlowExecutor {
                     &mut reservation,
                     special_launch,
                 )
-                .await;
-            if special_launch && result.is_ok() {
-                first_launch_pending = false;
-            }
-            if let Err(error) = result {
-                return self
-                    .finish_failed(device_run_id, &mut context, &mut reservation, error)
-                    .await;
-            }
+                .await
+            {
+                Ok(port) => {
+                    if special_launch {
+                        first_launch_pending = false;
+                    }
+                    port
+                }
+                Err(error) => {
+                    return self
+                        .finish_failed(device_run_id, &mut context, &mut reservation, error)
+                        .await;
+                }
+            };
+            current = plan.successor_on_path(node_id, chosen_port.as_deref());
         }
 
         if first_launch_pending {
@@ -837,7 +907,7 @@ impl FlowExecutor {
         context: &mut FlowDeviceContext,
         reservation: &mut Option<UiCapacityReservation>,
         special_launch: bool,
-    ) -> Result<(), FlowExecutionError> {
+    ) -> Result<Option<String>, FlowExecutionError> {
         self.verify_live_node_capabilities(node, context)?;
         let baseline_deadline = tokio::time::Instant::now() + EVIDENCE_TIMEOUT;
         let baseline = self
@@ -961,7 +1031,8 @@ impl FlowExecutor {
                             &mut failure,
                             error,
                         )
-                        .await;
+                        .await
+                        .map(|()| None);
                 }
                 let next = if error.code == "Cancelled"
                     && contracts(node.kind).1 == SideEffectClass::None
@@ -987,13 +1058,22 @@ impl FlowExecutor {
         };
         let deadline = tokio::time::Instant::now() + EVIDENCE_TIMEOUT;
 
+        // A branch predicate carries its chosen port; persist it alongside the
+        // transition into verification so recovery can rebuild the taken path.
+        let chosen_port = match &output {
+            ActionOutput::Branch { port } => Some(port.clone()),
+            _ => None,
+        };
         self.deps
             .database
             .transition_attempt(
                 attempt_id,
                 FlowAttemptState::EffectDispatched,
                 FlowAttemptState::Verifying,
-                AttemptTransitionPatch::default(),
+                AttemptTransitionPatch {
+                    chosen_port: chosen_port.clone(),
+                    ..Default::default()
+                },
             )
             .map_err(FlowExecutionError::other)?;
 
@@ -1007,6 +1087,7 @@ impl FlowExecutor {
             deadline,
         )
         .await
+        .map(|()| chosen_port)
     }
 
     async fn reconcile_initial_launch_failure(
@@ -1561,6 +1642,90 @@ impl FlowExecutor {
                     }
                 }
             }
+            (
+                ActionKind::IfVision,
+                CompiledActionConfig::IfVision {
+                    template_png_base64,
+                    threshold,
+                    region,
+                },
+            ) => {
+                // Read-only branch predicate: find the template on the current
+                // frame and route by whether it clears the threshold. Unlike
+                // TapVision, "not found" is not a failure — it is the notMatched
+                // branch. Only an unreadable screen is a (retriable) failure.
+                let generation = context.generation();
+                let frame = self
+                    .deps
+                    .frames
+                    .latest_in_generation(&self.deps.udid, generation)
+                    .ok_or_else(|| {
+                        ActionDispatchFailure::non_delivery(FlowExecutionError::new(
+                            "StaleGeneration",
+                            "no frame exists in the owned stream generation",
+                        ))
+                    })?;
+                let scene = image::load_from_memory(&frame.bytes)
+                    .map_err(|error| {
+                        ActionDispatchFailure::non_delivery(FlowExecutionError::new(
+                            "VisionDecode",
+                            format!("decode live frame: {error}"),
+                        ))
+                    })?
+                    .to_rgb8();
+                if self
+                    .deps
+                    .frames
+                    .latest_in_generation(&self.deps.udid, generation)
+                    .is_none()
+                {
+                    return Err(ActionDispatchFailure::non_delivery(
+                        FlowExecutionError::new(
+                            "StaleGeneration",
+                            "stream generation changed while decoding the vision frame",
+                        ),
+                    ));
+                }
+                let template = decode_vision_template(template_png_base64).map_err(|message| {
+                    ActionDispatchFailure::non_delivery(FlowExecutionError::new(
+                        "VisionTemplate",
+                        message,
+                    ))
+                })?;
+                let (frame_w, frame_h) = (scene.width(), scene.height());
+                let haystack = match region {
+                    Some(roi) => {
+                        let to_px = |value: f64, span: u32| {
+                            (value * f64::from(span))
+                                .round()
+                                .clamp(0.0, f64::from(span)) as u32
+                        };
+                        let x0 = to_px(roi.x0, frame_w);
+                        let y0 = to_px(roi.y0, frame_h);
+                        let x1 = to_px(roi.x1, frame_w);
+                        let y1 = to_px(roi.y1, frame_h);
+                        let (width, height) = (x1.saturating_sub(x0), y1.saturating_sub(y0));
+                        if width == 0 || height == 0 {
+                            return Err(ActionDispatchFailure::deterministic_read(
+                                FlowExecutionError::new(
+                                    "VisionRegion",
+                                    "search region is empty at the live frame size",
+                                ),
+                            ));
+                        }
+                        image::imageops::crop_imm(&scene, x0, y0, width, height).to_image()
+                    }
+                    None => scene,
+                };
+                let haystack_gray = crate::screen_match::to_gray(&haystack);
+                let needle_gray = crate::screen_match::to_gray(&template);
+                let matched = crate::screen_match::find_template(&haystack_gray, &needle_gray)
+                    .is_some_and(|found| found.score >= *threshold);
+                let port = if matched { "matched" } else { "notMatched" };
+                Ok(ActionOutput::Branch {
+                    port: port.to_string(),
+                })
+            }
             _ => Err(FlowExecutionError::new(
                 "CompiledPlanCorrupt",
                 format!("compiled action config does not match node {}", node.id),
@@ -1709,6 +1874,9 @@ impl FlowExecutor {
                 }
             }
             ActionOutput::Screenshot { .. } => unreachable!("handled above"),
+            ActionOutput::Branch { .. } => {
+                unreachable!("branch nodes carry no postcondition and succeed before this point")
+            }
         };
         let result_value = serde_json::to_value(&result).map_err(FlowExecutionError::other)?;
         if result.matched {
@@ -3850,6 +4018,7 @@ mod tests {
             revision: 1,
             nodes,
             execution_order,
+            successors: Default::default(),
             context_plan,
             action_definition_versions,
             required_capabilities: required_capabilities
