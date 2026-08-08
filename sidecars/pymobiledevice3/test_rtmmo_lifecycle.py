@@ -513,6 +513,10 @@ class _Harness:
         self.events = []
         self.processes = []
         self.launches = []
+        # The XCTest agent receives its token through the child environment, so
+        # the environment is part of the contract under test, not an incidental
+        # kwarg.
+        self.popen_environments = []
 
     async def wait_device_port(self, udid, port, timeout=45.0):
         self.port_calls.append((udid, port, timeout))
@@ -526,8 +530,9 @@ class _Harness:
         self.launches.append((udid, bundle_id, dict(environment)))
         return 1234
 
-    def popen(self, command, **_kwargs):
+    def popen(self, command, **kwargs):
         self.popen_commands.append(list(command))
+        self.popen_environments.append(dict(kwargs.get("env") or {}))
         process = _FakeProcess(command)
         self.processes.append(process)
         return process
@@ -802,7 +807,11 @@ class RtMmoProxyTests(unittest.TestCase):
         )
         self.assertFalse(any("xctest" in command for command in harness.popen_commands))
 
-    def test_riviu_agent_forwards_text_capability_into_dvt_launch_environment(self):
+    def test_riviu_agent_forwards_text_capability_into_xctest_environment(self):
+        # The riviu-agent backend starts the XCTest service rather than issuing a
+        # DVT app launch, so the capability and the token travel in the child's
+        # environment. Both must stay out of argv: the token is a secret and argv
+        # is world-readable on the host.
         harness = _Harness([False, True, True])
         args = SimpleNamespace(
             backend="riviu-agent",
@@ -819,13 +828,23 @@ class RtMmoProxyTests(unittest.TestCase):
         with patch.dict(riviu_pmd.os.environ, {"RIVIU_AGENT_TEXT_CAPABLE": "1"}):
             self.assertEqual(harness.run_proxy(args=args), 0)
 
-        self.assertEqual(
-            harness.launches[0][2]["RIVIU_AGENT_TEXT_CAPABLE"],
-            "1",
-        )
-        self.assertEqual(harness.launches[0][2]["RIVIU_AGENT_TOKEN"], "TEST_TOKEN")
+        xctest_environments = [
+            environment
+            for command, environment in zip(
+                harness.popen_commands, harness.popen_environments
+            )
+            if any("xctest" in str(argument) for argument in command)
+        ]
+        self.assertEqual(len(xctest_environments), 1)
+        self.assertEqual(xctest_environments[0]["RIVIU_AGENT_TEXT_CAPABLE"], "1")
+        self.assertEqual(xctest_environments[0]["RIVIU_AGENT_TOKEN"], "TEST_TOKEN")
+        self.assertEqual(harness.launches, [])
         self.assertFalse(
-            any("TEST_TOKEN" in arg for command in harness.run_commands for arg in command)
+            any(
+                "TEST_TOKEN" in str(argument)
+                for command in harness.popen_commands + harness.run_commands
+                for argument in command
+            )
         )
 
     def test_live_rtmmo_port_is_reused_without_launch_or_kill(self):
@@ -849,8 +868,12 @@ class RtMmoProxyTests(unittest.TestCase):
         )
 
     def test_cold_start_rejects_agent_that_binds_but_fails_auth(self):
+        # Port probes, in order: the pre-launch "already running?" check, the
+        # first launch's wait, the close-poll before the retry, then the retry's
+        # wait. The agent only binds on the retry, so the cold-start relaunch is
+        # exercised before auth gets to reject it.
         harness = _Harness(
-            [False, True, False, True],
+            [False, False, False, True],
             auth_results=[False, False],
         )
 
@@ -864,8 +887,10 @@ class RtMmoProxyTests(unittest.TestCase):
         )
 
     def test_cold_start_rejects_control_and_auth_without_mjpeg(self):
+        # Same cold-start relaunch as above, but control binds and auth passes;
+        # the final probe is the MJPEG port, which never opens.
         harness = _Harness(
-            [False, True, False, False, True, False],
+            [False, False, False, True, False],
             auth_results=[True, True],
         )
 

@@ -507,7 +507,7 @@ async fn post_one_assignment(
                 x: grid_x[index % 3],
                 y: grid_y[index / 3],
             };
-            let _ = session.tap(point).await?;
+            session.tap(point).await?;
             tokio::time::sleep(Duration::from_millis(180)).await;
         }
         let selected = wait_for_frame(frames, &assignment.udid, Duration::from_secs(5)).await?;
@@ -748,6 +748,8 @@ async fn frame_reports_account_lock(frame: &[u8]) -> bool {
     }
 }
 
+/// Read by the macOS OCR path; the tests exercise the matcher on every platform.
+#[cfg(any(target_os = "macos", test))]
 fn account_status_text_is_locked(text: &str) -> bool {
     let account_status = text.contains("trạng thái tài khoản")
         || text.contains("trang thai tai khoan")

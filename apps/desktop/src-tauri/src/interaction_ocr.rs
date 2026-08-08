@@ -1,4 +1,5 @@
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use riviu_core::{CommentOcrObservation, FrameTextSource};
@@ -13,6 +14,9 @@ impl FrameTextSource for DesktopFrameTextSource {
     }
 }
 
+/// Only the macOS `recognize` shells out to the Swift Vision helper; elsewhere
+/// there is nothing to locate.
+#[cfg(target_os = "macos")]
 fn helper_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
@@ -33,6 +37,7 @@ fn helper_candidates() -> Vec<PathBuf> {
     candidates
 }
 
+#[cfg(target_os = "macos")]
 fn find_helper() -> Option<PathBuf> {
     helper_candidates().into_iter().find(|path| path.is_file())
 }
@@ -78,6 +83,3 @@ fn recognize_sync(frame: &[u8]) -> anyhow::Result<Vec<CommentOcrObservation>> {
     let parsed = serde_json::from_slice::<Vec<CommentOcrObservation>>(&output.stdout)?;
     Ok(parsed)
 }
-
-#[allow(dead_code)]
-fn _assert_path_type(_: &Path) {}

@@ -11,6 +11,9 @@ pub struct ResolvedAgentRuntime {
     pub token_configured: bool,
 }
 
+/// Convenience wrapper that pins `candidate = false`. Production resolves the
+/// candidate explicitly through `..._with_candidate`, so this exists for tests.
+#[cfg(test)]
 pub fn resolve_desktop_agent_runtime(
     sidecar_root: PathBuf,
     state_dir: PathBuf,

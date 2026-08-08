@@ -270,7 +270,7 @@ pub async fn nurture_start(
     let run_duration = duration_minutes
         .map(|m| Duration::from_secs(m as u64 * 60))
         .or_else(|| {
-            let jitter = chrono::Utc::now().timestamp_subsec_nanos() as u32 % 61;
+            let jitter = chrono::Utc::now().timestamp_subsec_nanos() % 61;
             Some(Duration::from_secs((120 + jitter) as u64 * 60))
         });
     let started = state
@@ -657,20 +657,26 @@ mod tests {
 
     #[test]
     fn nurture_validation_rejects_unbounded_session_values() {
-        let mut settings = NurtureSettings::default();
-        settings.num_videos = 10_001;
+        let settings = NurtureSettings {
+            num_videos: 10_001,
+            ..NurtureSettings::default()
+        };
         assert!(validate_nurture_settings(&settings)
             .expect_err("video ceiling must be bounded")
             .contains("num_videos"));
 
-        settings = NurtureSettings::default();
-        settings.schedule_duration_minutes = 10;
+        let settings = NurtureSettings {
+            schedule_duration_minutes: 10,
+            ..NurtureSettings::default()
+        };
         assert!(validate_nurture_settings(&settings)
             .expect_err("schedule burst must be human-sized")
             .contains("schedule_duration_minutes"));
 
-        settings = NurtureSettings::default();
-        settings.watch_max = 121.0;
+        let settings = NurtureSettings {
+            watch_max: 121.0,
+            ..NurtureSettings::default()
+        };
         assert!(validate_nurture_settings(&settings)
             .expect_err("watch duration must be bounded")
             .contains("thời gian xem"));
