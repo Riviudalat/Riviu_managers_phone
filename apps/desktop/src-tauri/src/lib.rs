@@ -1,5 +1,7 @@
 mod agent_commands;
-mod agent_runtime;
+/// Public so the live harness binaries resolve the agent exactly as the app
+/// does. Duplicating the token/manifest choice is how the two drift apart.
+pub mod agent_runtime;
 mod command_error;
 mod commands;
 mod farm_commands;

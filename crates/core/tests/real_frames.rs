@@ -4,7 +4,10 @@
 //! thresholds against real MJPEG output — JPEG artefacts, video content behind
 //! the chrome, and the compression the device applies at quality 55.
 //!
-//! Capture more with `RIVIU_FRAME_DUMP=<dir>` during a live run.
+//! Capture more with `RIVIU_FRAME_DUMP=<dir>` during a live run, or with
+//! `cargo run -p riviu-managers-phone --bin capture_frames` when the case you
+//! need does not change classification (a dump only writes on a class change,
+//! so it can never produce two frames of the same feed card).
 
 use std::path::Path;
 use std::time::Instant;
@@ -415,4 +418,135 @@ fn rail_presence_separates_tappable_videos_from_live_cards() {
             );
         }
     }
+}
+
+/// Three consecutive frames of the *same* sponsored card, captured while its
+/// video played. Same author, same caption, same like/comment/share counts —
+/// the feed never moved.
+fn same_card_frames() -> Vec<(&'static str, image::RgbImage)> {
+    vec![
+        ("feed-same-card-1.jpg", load("feed-same-card-1.jpg")),
+        ("feed-same-card-2.jpg", load("feed-same-card-2.jpg")),
+        ("feed-same-card-3.jpg", load("feed-same-card-3.jpg")),
+    ]
+}
+
+/// The rail is what separates "the feed moved" from "the video played".
+///
+/// A playing video repaints the whole frame, so a whole-frame digest changes
+/// between these three captures even though the card is identical. The rail
+/// does not: it stays present and locatable on every frame of one card, and
+/// only drops out during the transition to the next one (`feed-mid-swipe.jpg`).
+#[test]
+fn the_rail_survives_a_playing_video_but_not_a_swipe() {
+    for (name, img) in same_card_frames() {
+        assert!(
+            screen::rail_icons_present(&img),
+            "{name}: the card never changed, so its rail must still be present"
+        );
+        assert!(
+            screen::locate_action_rail(&img).is_some(),
+            "{name}: rail must stay locatable while the video plays"
+        );
+    }
+
+    assert!(
+        !screen::rail_icons_present(&load("feed-mid-swipe.jpg")),
+        "a frame captured mid-swipe must not report a rail"
+    );
+}
+
+/// The first real LIVE-room capture. Until this fixture existed the LIVE
+/// detector had no test at all, and no negative control either.
+#[test]
+fn a_real_live_room_is_recognised_and_the_feed_is_not() {
+    let live = load("live-room-1.jpg");
+    assert_eq!(
+        screen::classify(&live, Some(LOGICAL_W)).kind,
+        ScreenKind::LiveRoom,
+        "a real LIVE room must classify as LiveRoom"
+    );
+    // A LIVE room shows its own chat bar, never TikTok's compose pill.
+    assert!(
+        !screen::compose_bar_visible(&live).0,
+        "a LIVE room has no FYP compose bar"
+    );
+
+    // Negative control: ordinary feed frames must never read as a LIVE room.
+    for (name, img) in feed_frames().into_iter().chain(same_card_frames()) {
+        assert_ne!(
+            screen::classify(&img, Some(LOGICAL_W)).kind,
+            ScreenKind::LiveRoom,
+            "{name} is a feed frame and must not classify as a LIVE room"
+        );
+    }
+}
+
+/// Measured at the correctly located heart, video content barely moves the
+/// redness: 9.6 / 3.1 / 27.8 across three frames of the same unliked card, all
+/// far below `LIKE_FILLED_REDNESS`. The threshold itself is sound.
+///
+/// What is *not* sound is where the rail says the heart is — see the ignored
+/// test below.
+#[test]
+fn the_heart_reading_is_stable_when_the_rail_is_located_correctly() {
+    let rail = screen::locate_action_rail(&load("feed-same-card-1.jpg"))
+        .expect("the sponsored card has a rail");
+
+    for name in [
+        "feed-same-card-1.jpg",
+        "feed-same-card-2.jpg",
+        "feed-same-card-3.jpg",
+    ] {
+        let redness = screen::like_redness_at(&load(name), &rail);
+        assert!(
+            redness < 45.0,
+            "{name}: unliked heart measured {redness:.1} at the located heart position"
+        );
+    }
+}
+
+/// KNOWN DEFECT — `locate_action_rail` is not stable across frames of one card.
+///
+/// The three `feed-same-card-*` captures are the same sponsored post, seconds
+/// apart, differing only in the video playing behind the chrome. The card
+/// carries a pink "LIVE 8.8 Sale" badge above the rail. Measured:
+///
+/// | frame | layout | like_y |
+/// |---|---|---|
+/// | 1 | 2 | 630 px |
+/// | 2 | **1** | **554 px** |
+/// | 3 | 2 | 630 px |
+///
+/// Frame 2 mistakes the pink LIVE badge for the follow badge, flips to layout 1
+/// and moves the like target 76 px — more than half an icon pitch. A tap there
+/// misses the heart and lands on the badge, and `like_redness_at` then reads the
+/// badge (79.7) instead of the heart (3.1), which is close enough to
+/// `LIKE_FILLED_REDNESS` to also fake an "already liked" skip.
+///
+/// This is the "tapped 14 in a row for 0 likes" failure class returning through
+/// a different door. Un-ignore this when the rail locator is fixed.
+#[test]
+#[ignore = "known defect: rail layout flips on cards with a pink LIVE badge"]
+fn the_rail_stays_put_across_frames_of_one_card() {
+    let heights: Vec<f64> = [
+        "feed-same-card-1.jpg",
+        "feed-same-card-2.jpg",
+        "feed-same-card-3.jpg",
+    ]
+    .into_iter()
+    .map(|name| {
+        let img = load(name);
+        let rail = screen::locate_action_rail(&img).expect("rail");
+        rail.like_y * img.height() as f64
+    })
+    .collect();
+
+    let spread = heights.iter().cloned().fold(f64::MIN, f64::max)
+        - heights.iter().cloned().fold(f64::MAX, f64::min);
+    // Half an icon pitch is ~65 px at @2x; anything near that taps the wrong icon.
+    assert!(
+        spread < 20.0,
+        "like target moved {spread:.0} px across frames of the same card: {heights:?}"
+    );
 }
