@@ -536,6 +536,38 @@ class ArtifactContractTests(unittest.TestCase):
             ):
                 artifacts.verify_runtime(runtime, "x86_64-pc-windows-msvc")
 
+    def test_msi_log_decodes_utf16_and_reports_the_failing_lines(self):
+        # msiexec writes UTF-16 and buries the cause thousands of lines above
+        # the exit, so a byte tail shows only the shutdown sequence.
+        noise = "\n".join(f"MSI (s): Property change {index}" for index in range(400))
+        log = (
+            "=== Verbose logging started ===\n"
+            + noise
+            + "\nMSI (s): Note: 1: 2262 2: Error 3: -2147287038\n"
+            + "MSI (s): Error 1310: Error writing to file C:\\nope\\riviu.exe\n"
+            + noise
+            + "\nMSI (c): MainEngineThread is returning 1603\n"
+            "=== Verbose logging stopped ===\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "msiexec.log"
+            path.write_text(log, encoding="utf-16")
+
+            summary = artifacts.read_msi_log(path)
+
+        self.assertIn("Error 1310", summary)
+        self.assertIn("returning 1603", summary)
+        # Decoding must not leave UTF-16 padding behind.
+        self.assertNotIn("\x00", summary)
+        # Property-change chatter is not what a reader needs.
+        self.assertNotIn("Property change 200", summary)
+
+    def test_msi_log_absence_is_reported_rather_than_raising(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            summary = artifacts.read_msi_log(Path(temporary) / "missing.log")
+
+        self.assertIn("unreadable", summary)
+
 
 if __name__ == "__main__":
     unittest.main()

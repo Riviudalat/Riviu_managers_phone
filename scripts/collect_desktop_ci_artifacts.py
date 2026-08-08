@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import plistlib
+import re
 import shutil
 import stat
 import subprocess
@@ -521,14 +522,38 @@ def find_installers(bundle_dir: Path, target: str) -> list[Path]:
     return installers
 
 
-def read_log_tail(path: Path, *, limit: int = 2000) -> str:
-    """Best-effort tail of a tool log; absence is itself worth reporting."""
+MSI_LOG_ERROR_PATTERN = re.compile(
+    r"error|failed|cannot|denied|1603|1402|2262|1310|1319|1335|returning \d+",
+    re.IGNORECASE,
+)
+
+
+def read_msi_log(path: Path, *, keep: int = 24) -> str:
+    """Summarise an msiexec verbose log for an error message.
+
+    msiexec writes UTF-16 and buries the cause thousands of lines above the
+    exit, so a byte tail shows only the shutdown sequence. Pull the lines that
+    name a failure instead, and keep the last few for context.
+    """
     try:
-        # msiexec writes UTF-16 on some locales; never let decoding mask the
-        # failure we are trying to explain.
-        return path.read_text(encoding="utf-8", errors="replace")[-limit:]
+        raw = path.read_bytes()
     except OSError as error:
         return f"<unreadable: {error}>"
+    for encoding in ("utf-16", "utf-16-le", "utf-8"):
+        try:
+            text = raw.decode(encoding)
+            break
+        except (UnicodeDecodeError, LookupError):
+            continue
+    else:
+        text = raw.decode("utf-8", errors="replace")
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return "<empty>"
+    flagged = [line for line in lines if MSI_LOG_ERROR_PATTERN.search(line)]
+    selected = flagged[-keep:] if flagged else lines[-keep:]
+    return " | ".join(selected)
 
 
 def run_checked(command: list[str], *, timeout: int = 120) -> subprocess.CompletedProcess[str]:
@@ -820,7 +845,7 @@ def verify_windows_package(
             run_checked(command, timeout=300)
         except ArtifactError as error:
             raise ArtifactError(
-                f"{error}; msiexec log tail={read_log_tail(msi_log)!r}"
+                f"{error}; msiexec log={read_msi_log(msi_log)}"
             ) from error
         sidecars_roots = [
             path
