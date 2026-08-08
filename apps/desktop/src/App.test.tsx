@@ -86,7 +86,7 @@ describe("Flow page integration", () => {
       "aria-selected",
       "true",
     );
-    expect(screen.getByRole("heading", { name: "Scripts" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Kịch bản" })).toBeVisible();
   });
 
   it("registers a close guard only while the Flow draft is dirty", async () => {

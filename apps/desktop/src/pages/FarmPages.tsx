@@ -37,6 +37,17 @@ import {
   saveScript,
 } from "../api";
 import { SelectionStrip, flash, flashError, targetsOf } from "../components/SelectionStrip";
+import { EmptyState } from "../components/States";
+import {
+  IconApp,
+  IconImage,
+  IconLog,
+  IconPhone,
+  IconProxy,
+  IconRocket,
+  IconUser,
+  IconUsers,
+} from "../components/Icons";
 import { pickDirectory, pickIpa, pickMaterial } from "../pickFile";
 import type {
   AnalyticsSummary,
@@ -79,7 +90,7 @@ export function GroupsPage({ devices, selected, onSelectUdids }: SelProps) {
       <header className="panel-header">
         <h2>Nhóm thiết bị</h2>
         <button type="button" className="ghost" onClick={reload}>
-          Refresh
+          Làm mới
         </button>
       </header>
       <SelectionStrip
@@ -149,7 +160,14 @@ export function GroupsPage({ devices, selected, onSelectUdids }: SelProps) {
                 </div>
               </article>
             ))}
-            {!groups.length && <p className="hint">Chưa có nhóm — tạo ở cột trái</p>}
+            {!groups.length && (
+              <EmptyState
+                compact
+                icon={<IconUsers size={15} />}
+                title="Chưa có nhóm nào"
+                hint="Tạo nhóm ở cột bên trái để chạy hàng loạt trên nhiều máy."
+              />
+            )}
           </div>
         </section>
       </div>
@@ -181,7 +199,7 @@ export function ProxyPage() {
       <header className="panel-header">
         <h2>Proxy (config — không shop)</h2>
         <button type="button" className="ghost" onClick={reload}>
-          Refresh
+          Làm mới
         </button>
       </header>
       <p className="hint">
@@ -289,7 +307,14 @@ export function ProxyPage() {
                 </div>
               </article>
             ))}
-            {!items.length && <p className="hint">Chưa có proxy</p>}
+            {!items.length && (
+              <EmptyState
+                compact
+                icon={<IconProxy size={15} />}
+                title="Chưa có proxy"
+                hint="Thêm proxy ở khung bên trên để gán cho thiết bị."
+              />
+            )}
           </div>
         </section>
       </div>
@@ -312,7 +337,7 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
   return (
     <div className="panel">
       <header className="panel-header">
-        <h2>Material center</h2>
+        <h2>Kho nội dung</h2>
       </header>
       <SelectionStrip
         devices={devices}
@@ -400,7 +425,14 @@ export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
             </div>
           </article>
         ))}
-        {!items.length && <p className="hint">Chưa có material — bấm «Chọn file…»</p>}
+        {!items.length && (
+          <EmptyState
+            compact
+            icon={<IconImage size={15} />}
+            title="Chưa có nội dung"
+            hint="Bấm «Chọn file…» để thêm ảnh hoặc video vào kho."
+          />
+        )}
       </div>
     </div>
   );
@@ -448,7 +480,7 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
   return (
     <div className="panel">
       <header className="panel-header">
-        <h2>App center</h2>
+        <h2>Trung tâm ứng dụng</h2>
       </header>
       <SelectionStrip
         devices={devices}
@@ -567,7 +599,14 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
             </div>
           </article>
         ))}
-        {!items.length && <p className="hint">Chưa có IPA — bấm «Chọn IPA…»</p>}
+        {!items.length && (
+          <EmptyState
+            compact
+            icon={<IconApp size={15} />}
+            title="Chưa có IPA"
+            hint="Bấm «Chọn IPA…» để thêm ứng dụng vào thư viện."
+          />
+        )}
       </div>
       {groupResults.length > 0 && (
         <div className="job-list" style={{ marginTop: 12 }}>
@@ -636,13 +675,20 @@ export function SyncPage({
           >
             <div>
               <strong>{d.name}</strong>
-              {d.udid === master && <span className="chip primary">Master</span>}
-              {slaves.includes(d.udid) && <span className="chip ok">Slave</span>}
+              {d.udid === master && <span className="chip primary">Máy chính</span>}
+              {slaves.includes(d.udid) && <span className="chip ok">Máy phụ</span>}
             </div>
             <p className="hint mono">{d.udid}</p>
           </article>
         ))}
-        {!devices.length && <p className="hint">Chưa có thiết bị</p>}
+        {!devices.length && (
+          <EmptyState
+            compact
+            icon={<IconPhone size={15} />}
+            title="Chưa có thiết bị"
+            hint="Về Quản lý cửa sổ và làm mới danh sách."
+          />
+        )}
       </div>
     </div>
   );
@@ -689,7 +735,7 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
       <header className="panel-header">
         <h2>Đăng carousel</h2>
         <button type="button" className="ghost" onClick={reload} disabled={busy}>
-          Refresh
+          Làm mới
         </button>
       </header>
       <SelectionStrip
@@ -913,7 +959,14 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
             </div>
           </article>
         ))}
-        {!campaigns.length && <p className="hint">Chưa có campaign</p>}
+        {!campaigns.length && (
+          <EmptyState
+            compact
+            icon={<IconRocket size={15} />}
+            title="Chưa có chiến dịch"
+            hint="Tạo chiến dịch ở khung bên trên để bắt đầu đăng bài."
+          />
+        )}
       </div>
     </div>
   );
@@ -937,9 +990,9 @@ export function DataPage() {
   return (
     <div className="panel">
       <header className="panel-header">
-        <h2>Data center</h2>
+        <h2>Dữ liệu</h2>
         <button type="button" className="ghost" onClick={load}>
-          Refresh
+          Làm mới
         </button>
       </header>
       <div className="stats-grid">
@@ -981,7 +1034,7 @@ export function TeamPage() {
       <header className="panel-header">
         <h2>Thành viên (local)</h2>
         <button type="button" className="ghost" onClick={reload}>
-          Refresh
+          Làm mới
         </button>
       </header>
       <p className="hint">Tài khoản local trên máy này — không đồng bộ cloud.</p>
@@ -1033,7 +1086,14 @@ export function TeamPage() {
                 <p className="hint">{u.createdAt}</p>
               </article>
             ))}
-            {!users.length && <p className="hint">Chưa có user (guest vẫn dùng được app)</p>}
+            {!users.length && (
+              <EmptyState
+                compact
+                icon={<IconUser size={15} />}
+                title="Chưa có người dùng"
+                hint="Vẫn dùng được app ở chế độ khách."
+              />
+            )}
           </div>
         </section>
       </div>
@@ -1050,9 +1110,9 @@ export function LogsPage() {
   return (
     <div className="panel">
       <header className="panel-header">
-        <h2>Operation logs</h2>
+        <h2>Nhật ký thao tác</h2>
         <button type="button" className="ghost" onClick={load}>
-          Refresh
+          Làm mới
         </button>
       </header>
       <div className="job-list">
@@ -1065,7 +1125,14 @@ export function LogsPage() {
             <p className="hint">{l.detail}</p>
           </article>
         ))}
-        {!logs.length && <p className="hint">Chưa có log — thao tác Start/Agent/Publish sẽ ghi ở đây</p>}
+        {!logs.length && (
+          <EmptyState
+            compact
+            icon={<IconLog size={15} />}
+            title="Chưa có nhật ký"
+            hint="Các thao tác Khởi động, Agent và Đăng bài sẽ được ghi lại ở đây."
+          />
+        )}
       </div>
     </div>
   );
@@ -1081,10 +1148,10 @@ export function AccountPage({
   return (
     <div className="panel">
       <header className="panel-header">
-        <h2>Account settings</h2>
+        <h2>Tài khoản</h2>
       </header>
       <section className="settings-card">
-        <h3>Session</h3>
+        <h3>Phiên đăng nhập</h3>
         <p>
           User: <code>{user?.email ?? "guest@local"}</code> · role{" "}
           <code>{user?.role ?? "admin"}</code>
@@ -1147,7 +1214,7 @@ export function ScheduleBlock({
 
   return (
     <section style={{ marginTop: 16 }}>
-      <h3>Task schedule</h3>
+      <h3>Lịch chạy</h3>
       <SelectionStrip
         devices={devices}
         selected={selected}

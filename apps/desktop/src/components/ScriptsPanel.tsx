@@ -23,7 +23,7 @@ export function ScriptsPanel({ onUseInJobs }: Props) {
   return (
     <div className="panel">
       <header className="panel-header">
-        <h2>Scripts</h2>
+        <h2>Kịch bản</h2>
         <button
           type="button"
           className="ghost"
@@ -52,12 +52,12 @@ export function ScriptsPanel({ onUseInJobs }: Props) {
               Save
             </button>
             <button type="button" className="ghost" onClick={() => onUseInJobs(body)}>
-              Use in Jobs
+              Dùng ở Tác vụ
             </button>
           </div>
         </section>
         <section>
-          <h3>Saved</h3>
+          <h3>Đã lưu</h3>
           <ul className="script-list">
             {saved.map(([n, json]) => (
               <li key={n}>

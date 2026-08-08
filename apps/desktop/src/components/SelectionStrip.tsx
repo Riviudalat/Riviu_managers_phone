@@ -75,7 +75,9 @@ export function SelectionStrip({
       <button type="button" className="ghost" disabled={!selected.length} onClick={onClear}>
         Bỏ chọn
       </button>
-      {!devices.length && <span className="hint">Chưa có thiết bị — về Quản lý cửa sổ → Refresh</span>}
+      {!devices.length && (
+        <span className="hint">Chưa có thiết bị — về Quản lý cửa sổ rồi làm mới</span>
+      )}
       {!!devices.length && (
         <span className="hint mono" title={selected.join(", ") || devices.map((d) => d.udid).join(", ")}>
           target×{n}

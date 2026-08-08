@@ -11,6 +11,8 @@ import {
   setAppleId,
 } from "../api";
 import { agentStatusView } from "../agentStatus";
+import { EmptyState } from "./States";
+import { IconPhone } from "./Icons";
 import type { AgentRuntimeView, AgentStatus, DeviceInfo } from "../types";
 
 interface Props {
@@ -150,7 +152,12 @@ export function SettingsPanel({ devices }: Props) {
         {agentMessage && <p className="error">{agentMessage}</p>}
 
         {!connectedDevices.length ? (
-          <p className="hint">Chưa có iPhone đang kết nối.</p>
+          <EmptyState
+            compact
+            icon={<IconPhone size={15} />}
+            title="Chưa có iPhone đang kết nối"
+            hint="Cắm máy qua USB rồi làm mới ở Quản lý cửa sổ."
+          />
         ) : (
           <div className="agent-status-table" role="table" aria-label="Agent readiness">
             <div className="agent-status-head" role="row">

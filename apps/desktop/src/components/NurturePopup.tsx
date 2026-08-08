@@ -10,6 +10,7 @@ import {
 } from "../api";
 import { targetsOf } from "./SelectionStrip";
 import { IconApi, IconClose, IconHeart } from "./Icons";
+import { LoadingState } from "./States";
 import type {
   DeviceInfo,
   NurtureApiTestResult,
@@ -284,7 +285,7 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
 
         <div className="nurture-float-body">
           {!settings ? (
-            <p className="hint">{msg || "Đang tải…"}</p>
+            msg ? <p className="hint">{msg}</p> : <LoadingState />
           ) : (
             <>
               <div className="nurture-float-actions">

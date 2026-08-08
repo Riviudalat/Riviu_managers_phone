@@ -54,7 +54,7 @@ export function JobsPanel({
       />
       <div className="panel-grid">
         <section>
-          <h3>Run script</h3>
+          <h3>Chạy kịch bản</h3>
           <textarea
             rows={14}
             value={scriptJson}
@@ -93,7 +93,7 @@ export function JobsPanel({
           </div>
         </section>
         <section>
-          <h3>History</h3>
+          <h3>Lịch sử</h3>
           <div className="job-list">
             {jobs.map((job) => (
               <article key={job.id} className="job-card">

@@ -20,7 +20,8 @@ import { ToastHost } from "./components/ToastHost";
 import { DeviceTile } from "./components/DeviceTile";
 import { FilterToolbar, type ViewMode } from "./components/FilterToolbar";
 import { FocusStream } from "./components/FocusStream";
-import { IconRefresh, IconUser } from "./components/Icons";
+import { IconPhone, IconRefresh, IconUser } from "./components/Icons";
+import { Banner, EmptyState, LoadingState } from "./components/States";
 import { InteractionPopup } from "./components/InteractionPopup";
 import { JobsPanel } from "./components/JobsPanel";
 import { NurturePopup } from "./components/NurturePopup";
@@ -362,9 +363,16 @@ function App() {
 
         <div className={`content ${page === "scripts" ? "content-flow" : ""}`}>
           {bootError && (
-            <div className="banner">
-              Backend chưa sẵn sàng ({bootError}). Bấm Refresh.
-            </div>
+            <Banner
+              tone="error"
+              action={
+                <button type="button" onClick={() => void reload()}>
+                  Thử lại
+                </button>
+              }
+            >
+              Chưa kết nối được backend: {bootError}
+            </Banner>
           )}
 
           {page === "control" && (
@@ -461,10 +469,10 @@ function App() {
               />
 
               {!!devices.length && !devices.some((d) => d.wdaReady) && (
-                <div className="banner">
-                  Stream chưa sẵn sàng. Chọn máy rồi bấm <strong>Agent</strong> để kiểm
-                  tra và sửa Riviu Agent.
-                </div>
+                <Banner>
+                  Chưa máy nào phát được màn hình. Chọn máy rồi bấm{" "}
+                  <strong>Agent</strong> để kiểm tra và sửa Riviu Agent.
+                </Banner>
               )}
 
               {viewMode === "list" && (
@@ -549,20 +557,23 @@ function App() {
               )}
 
               {!devices.length && (
-                <div className="empty-state">
-                  <h2>Chưa có iPhone</h2>
-                  <p className="hint">Cắm USB, Trust, rồi Refresh.</p>
-                  <button
-                    type="button"
-                    className="primary"
-                    onClick={async () => {
-                      await refreshDevices();
-                      await reload();
-                    }}
-                  >
-                    Refresh devices
-                  </button>
-                </div>
+                <EmptyState
+                  icon={<IconPhone size={20} />}
+                  title="Chưa có iPhone nào"
+                  hint="Cắm máy qua USB, bấm Tin cậy (Trust) trên iPhone, rồi làm mới danh sách."
+                  action={
+                    <button
+                      type="button"
+                      className="primary"
+                      onClick={async () => {
+                        await refreshDevices();
+                        await reload();
+                      }}
+                    >
+                      Làm mới
+                    </button>
+                  }
+                />
               )}
             </>
           )}
@@ -604,9 +615,7 @@ function App() {
               {automationView === "flow" ? (
                 <Suspense
                   fallback={(
-                    <div className="flow-loading" role="status" aria-live="polite">
-                      Đang tải Flow…
-                    </div>
+                    <LoadingState label="Đang tải Flow…" />
                   )}
                 >
                   <FlowWorkspace
