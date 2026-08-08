@@ -78,6 +78,16 @@ pub(super) const SWIPE_POLL: Duration = Duration::from_millis(60);
 /// one retry swipe; past that, relaunching is the only thing left that reliably
 /// leaves a LIVE room.
 const OFF_FEED_LIMIT: u32 = 4;
+/// Back gestures to try before falling back to a relaunch. Three covers a
+/// search result opened from a profile opened from a card — deeper than the
+/// engine can navigate on its own.
+const OFF_FEED_BACK_ATTEMPTS: u32 = 3;
+/// Turns in a row that may end with both the swipe and its retry blocked before
+/// the session gives up on the card. Three turns is six swipes and roughly
+/// thirty seconds — long enough to ride out a popup the watcher is still
+/// clearing, short enough that a card which simply eats gestures cannot consume
+/// the run.
+const BLOCKED_SWIPE_LIMIT: u32 = 3;
 const TEXT_NOT_ARMED_REFRESH_THRESHOLD: u8 = 2;
 /// Give the frame watcher time to close overlays that were already visible
 /// when TikTok came foreground before the first feed gesture is sent.
@@ -289,7 +299,14 @@ impl NurtureEngine {
                     decoded = Some(digest);
                     if let Some(img) = image::load_from_memory(&frame).ok().map(|i| i.to_rgb8()) {
                         if !left {
-                            left = !screen::rail_icons_present(&img);
+                            // A washed-out frame reads "no rail" for a reason
+                            // that has nothing to do with the feed moving, and
+                            // this latch is never reset — so one such frame
+                            // would let the *next* ordinary frame of the *same*
+                            // card count as a new one, which is the very false
+                            // advance this check replaced.
+                            left = !screen::rail_icons_present(&img)
+                                && !screen::rail_column_saturated(&img);
                         } else if matches!(
                             screen::feed_card_kind(&img),
                             screen::FeedCardKind::Video | screen::FeedCardKind::PhotoCarousel
@@ -625,6 +642,7 @@ impl NurtureEngine {
         // True when the loop ran out of videos rather than out of time.
         let mut hit_video_cap = true;
         let mut off_feed_streak = 0u32;
+        let mut blocked_streak = 0u32;
         'feed: for _video in 0..total_videos {
             if stop.load(Ordering::Relaxed) {
                 outcome = Outcome::Stopped;
@@ -677,19 +695,54 @@ impl NurtureEngine {
                         &mut status,
                         format!("kẹt ngoài FYP {off_feed_streak} lượt — mở lại TikTok"),
                     );
-                    let relaunched = self
-                        .bring_tiktok_foreground(
+                    // Back out first — that is what actually leaves a detail
+                    // page. Relaunching does not: iOS restores TikTok's
+                    // navigation stack, and a live run pressed Home and
+                    // relaunched three times without moving off a search-results
+                    // page.
+                    let mut recovered = self
+                        .escape_to_feed(
                             udid,
-                            &ui_context,
                             session.as_ref(),
-                            &settings,
-                            screen_size.0,
                             &gestures,
+                            screen_size,
+                            OFF_FEED_BACK_ATTEMPTS,
                             &stop,
                         )
-                        .await
-                        .unwrap_or(false);
-                    if relaunched || self.on_feed(udid, screen_size.0) {
+                        .await;
+                    if !recovered {
+                        report(&mut status, "vuốt lùi không về được — mở lại TikTok".into());
+                        {
+                            let _guard = gestures.lock().await;
+                            if let Err(error) = session.home().await {
+                                report(&mut status, format!("không bấm được Home: {error}"));
+                            }
+                        }
+                        sleep_interruptible(Duration::from_millis(1_200), &stop).await;
+                        let _ = self
+                            .bring_tiktok_foreground(
+                                udid,
+                                &ui_context,
+                                session.as_ref(),
+                                &settings,
+                                screen_size.0,
+                                &gestures,
+                                &stop,
+                            )
+                            .await;
+                        // Only the screen decides whether it worked.
+                        // `bring_tiktok_foreground` returns Ok(true) from its
+                        // fallback path without ever checking, and believing it
+                        // is what let the streak reset and the loop run on
+                        // forever.
+                        recovered = self
+                            .wait_for_frame(udid, Duration::from_secs(8), &stop, |img| {
+                                screen::feed_ready(img, Some(screen_size.0))
+                            })
+                            .await
+                            .is_some();
+                    }
+                    if recovered {
                         off_feed_streak = 0;
                         report(&mut status, "đã về FYP sau khi mở lại TikTok".into());
                     } else {
@@ -871,6 +924,19 @@ impl NurtureEngine {
                                 &stop,
                             )
                             .await;
+                        // A horizontal swipe only turns a page while the card
+                        // really is a carousel; on anything else TikTok reads it
+                        // as navigation and leaves the feed. Both times a live
+                        // run wandered off the FYP it was immediately after this
+                        // branch, so stop sliding the moment the feed is gone
+                        // rather than swiping deeper into wherever we landed.
+                        if !self.on_feed(udid, screen_size.0) {
+                            report(
+                                &mut status,
+                                "vuốt ngang đã rời khỏi feed — dừng xem ảnh".into(),
+                            );
+                            break;
+                        }
                     }
                     if let Some(img) = self.latest_image(udid) {
                         if let Some(found) = screen::locate_action_rail(&img) {
@@ -1206,10 +1272,12 @@ impl NurtureEngine {
             {
                 Ok(SwipeOutcome::Advanced) => {
                     advanced_to_next_video = true;
+                    blocked_streak = 0;
                     status.videos_done += 1;
                     on_status(status.clone());
                 }
                 Ok(SwipeOutcome::Moved) => {
+                    blocked_streak = 0;
                     // The rail left, so the gesture landed and the card we were
                     // on is gone. Swiping again here would skip whatever came
                     // next; the loop re-reads the screen at the top instead.
@@ -1240,16 +1308,19 @@ impl NurtureEngine {
                     {
                         Ok(SwipeOutcome::Advanced) => {
                             advanced_to_next_video = true;
+                            blocked_streak = 0;
                             status.videos_done += 1;
                             on_status(status.clone());
                         }
                         Ok(SwipeOutcome::Moved) => {
                             advanced_to_next_video = true;
+                            blocked_streak = 0;
                             report(&mut status, "đã rời thẻ cũ, chưa xác nhận thẻ mới".into());
                         }
                         Ok(SwipeOutcome::Blocked) => {
                             report(&mut status, "vuốt vẫn không ăn".into());
                             last_error = Some("swipe không rời được thẻ hiện tại".into());
+                            blocked_streak += 1;
                         }
                         Err(e) => {
                             let msg = format!("vuốt lỗi: {}", describe(&e));
@@ -1301,6 +1372,26 @@ impl NurtureEngine {
                         break 'feed;
                     }
                 }
+            }
+            // A card that swallows both the swipe and its retry, turn after
+            // turn, is not going to start working. A live run spent 280 seconds
+            // — 46 of its 53 swipes — on one photo post before the clock ran
+            // out. Ending the session says so; continuing just burns the budget
+            // in silence.
+            if blocked_streak >= BLOCKED_SWIPE_LIMIT {
+                let message = format!(
+                    "thẻ hiện tại nuốt {blocked_streak} lượt vuốt liên tiếp — dừng phiên \
+                     thay vì vuốt tiếp vô ích"
+                );
+                report(&mut status, message.clone());
+                last_error = Some(message);
+                hit_video_cap = false;
+                outcome = if status.videos_done == 0 {
+                    Outcome::Failed
+                } else {
+                    Outcome::Partial
+                };
+                break 'feed;
             }
             if must_stop_before_next_feed_iteration(comment_recovery_action, advanced_to_next_video)
             {
@@ -1484,6 +1575,59 @@ impl NurtureEngine {
             .await?;
         sleep_interruptible(Duration::from_millis(2_000), stop).await;
         Ok(true)
+    }
+
+    /// Try to get back to the FYP from wherever the session has ended up.
+    ///
+    /// Relaunching does not do it. iOS restores TikTok's navigation stack, so a
+    /// session that wandered onto a search-results or profile page comes back to
+    /// that same page — measured: Home plus three `launch_app` calls left the
+    /// phone exactly where it was. What does leave those pages is the iOS
+    /// back gesture, a swipe in from the left edge, which TikTok honours the
+    /// same way its own top-left ‹ does.
+    ///
+    /// Returns true once an actionable feed is on screen.
+    async fn escape_to_feed(
+        &self,
+        udid: &str,
+        session: &dyn UiSession,
+        gestures: &tokio::sync::Mutex<()>,
+        screen_size: (f64, f64),
+        attempts: u32,
+        stop: &AtomicBool,
+    ) -> bool {
+        for _ in 0..attempts {
+            if stop.load(Ordering::Relaxed) {
+                return false;
+            }
+            {
+                let _guard = gestures.lock().await;
+                let gesture = crate::types::SwipeGesture {
+                    from: TapPoint {
+                        x: 2.0,
+                        y: screen_size.1 * 0.5,
+                    },
+                    to: TapPoint {
+                        x: screen_size.0 * 0.6,
+                        y: screen_size.1 * 0.5,
+                    },
+                    duration_ms: 260,
+                };
+                if session.swipe(gesture).await.is_err() {
+                    return false;
+                }
+            }
+            if self
+                .wait_for_frame(udid, Duration::from_secs(3), stop, |img| {
+                    screen::feed_ready(img, Some(screen_size.0))
+                })
+                .await
+                .is_some()
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// `screen_size.0` matters: without it `classify` cannot scale its

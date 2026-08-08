@@ -41,6 +41,21 @@ fn context_source(settings: &NurtureSettings) -> &'static str {
     }
 }
 
+/// Where a feed swipe starts and ends, as fractions of screen height.
+///
+/// The start used to be 0.75, and on a photo post that is the row of page dots
+/// and the top of the caption block — TikTok reads a drag beginning there as an
+/// interaction with the card, not a scroll, and swallows it whole. Measured on
+/// one such card, four swipes from 0.75 moved nothing at all (the frame did not
+/// change by a single byte), while three from 0.62 advanced the feed twice and
+/// left the card the third time. A live run sat on one photo post for 280
+/// seconds sending swipes that could never work.
+///
+/// 0.62 clears the caption on every card seen so far and still gives a drag of
+/// ~0.42 of the screen, close to the 0.50 it replaces.
+const SWIPE_FROM_Y: f64 = 0.62;
+const SWIPE_TO_Y: f64 = 0.20;
+
 const COMMENT_DRAWER_SETTLE: Duration = Duration::from_millis(3_500);
 const COMMENT_INPUT_SETTLE: Duration = Duration::from_millis(1_200);
 
@@ -554,36 +569,58 @@ impl NurtureEngine {
         duration_ms: u64,
         stop: &AtomicBool,
     ) -> anyhow::Result<SwipeOutcome> {
-        let rail_before = self
-            .latest_image(udid)
-            .map(|img| screen::rail_icons_present(&img));
         let mut rng = StdRng::from_entropy();
         let x0 = screen_size.0 * 0.5 + rng.gen_range(-20.0..20.0);
         let gesture = SwipeGesture {
             from: TapPoint {
                 x: x0,
-                y: screen_size.1 * 0.75,
+                y: screen_size.1 * (SWIPE_FROM_Y + rng.gen_range(-0.03..0.03)),
             },
             to: TapPoint {
                 x: x0 + rng.gen_range(-8.0..8.0),
-                y: (screen_size.1 * 0.25 + rng.gen_range(-50.0..50.0)).max(40.0),
+                y: (screen_size.1 * SWIPE_TO_Y + rng.gen_range(-40.0..40.0)).max(40.0),
             },
             duration_ms,
         };
-        {
-            let _guard = gestures.lock().await;
-            session.swipe(gesture).await?;
-        }
-
+        // Hold the gesture lock across the swipe *and* the watch, and run them
+        // together.
+        //
+        // The first version of this collected evidence only after
+        // `session.swipe()` returned, arguing that watching concurrently would
+        // let a ✕ the screen watcher pressed read as our swipe moving the feed.
+        // Both halves of that were wrong. Measured on the device, six swipes out
+        // of six: the gesture call returns at 535–550 ms, while the rail is off
+        // screen from 222–402 ms and only for 80–120 ms. The window this check
+        // keys on had always closed before the check started looking — a live
+        // run scored 1 confirmed advance out of 16 swipes. And the watcher was
+        // never excluded anyway: it is suppressed only around the comment
+        // drawer, so it was free to tap through the whole settle window.
+        //
+        // Holding the lock across both is what actually excludes it — the
+        // watcher taps through this same lock — and running them together is
+        // the only way to be watching while the transition happens.
+        let _guard = gestures.lock().await;
+        // Read the baseline under the lock as well, so nothing can change the
+        // screen between measuring it and swiping.
+        let rail_before = self
+            .latest_image(udid)
+            .map(|img| screen::rail_icons_present(&img));
         let Some(rail_before) = rail_before else {
             // No pre-swipe baseline (e.g. right after a stream clear). The
-            // gesture went out, so repeating it could skip a card, but nothing
-            // here proves it landed anywhere.
+            // gesture still goes out, so repeating it could skip a card, but
+            // nothing here proves it landed anywhere.
+            session.swipe(gesture).await?;
             return Ok(SwipeOutcome::Moved);
         };
-        Ok(self
-            .watch_swipe(udid, SWIPE_SETTLE, stop, rail_before)
-            .await)
+        // The window now starts with the gesture, so it has to cover the
+        // gesture's own duration as well as the settle.
+        let window = Duration::from_millis(duration_ms) + SWIPE_SETTLE;
+        let (sent, outcome) = tokio::join!(
+            session.swipe(gesture),
+            self.watch_swipe(udid, window, stop, rail_before)
+        );
+        sent?;
+        Ok(outcome)
     }
 
     /// Advance one slide in a TikTok photo carousel. Photo posts use a

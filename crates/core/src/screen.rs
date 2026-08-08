@@ -355,10 +355,64 @@ const RAIL_ICON_PITCH: (f64, f64) = (55.0 / 667.0, 80.0 / 667.0);
 const RAIL_ICON_BAND: (f64, f64) = (0.28, 0.85);
 /// A row is part of a glyph when this much of the rail column is white.
 const RAIL_ICON_COVERAGE: f64 = 0.35;
+/// A bright run this tall, as a fraction of frame height, is not an icon. An
+/// icon measured ~24 logical points (0.036 of the frame); this is four of them,
+/// which nothing in the rail can reach but a washed-out video can.
+const RAIL_SATURATED_RUN: f64 = 0.15;
 
 /// Centres of the longest evenly spaced chain of white glyphs in the rail
 /// column, as screen fractions.
 fn rail_icon_centres(img: &RgbImage) -> Vec<f64> {
+    let h = img.height();
+    // Drop specks: a glyph is at least a few rows tall.
+    let min_h = (0.0045 * h as f64) as u32;
+    let centres: Vec<f64> = rail_glyph_runs(img)
+        .into_iter()
+        .filter(|(a, b)| b.saturating_sub(*a) >= min_h)
+        .map(|(a, b)| (a + b) as f64 / 2.0 / h as f64)
+        .collect();
+
+    // Longest chain whose consecutive gaps match the icon pitch.
+    let mut best: Vec<f64> = Vec::new();
+    for i in 0..centres.len() {
+        let mut chain = vec![centres[i]];
+        for &c in &centres[i + 1..] {
+            let gap = c - chain[chain.len() - 1];
+            if gap >= RAIL_ICON_PITCH.0 && gap <= RAIL_ICON_PITCH.1 {
+                chain.push(c);
+            }
+        }
+        if chain.len() > best.len() {
+            best = chain;
+        }
+    }
+    best
+}
+
+/// Is the rail column washed out rather than empty?
+///
+/// [`rail_icons_present`] answers "is there an icon chain", and a frame whose
+/// video goes near-white behind the right edge — a white product background, a
+/// sky, a flash cut — answers no for a reason that has nothing to do with the
+/// rail: every row in the band passes the white test at once, so the scan
+/// returns one continuous run instead of a chain of glyphs.
+///
+/// That matters because the swipe check treats "no rail" as "the feed is
+/// between cards". One blown-out frame would otherwise latch that conclusion
+/// and let the *next* ordinary frame of the *same* card count as a new one —
+/// reinstating exactly the false advance the rail check exists to remove.
+///
+/// A run taller than several icons cannot be an icon, so it is this instead.
+pub fn rail_column_saturated(img: &RgbImage) -> bool {
+    let h = img.height() as f64;
+    let limit = (RAIL_SATURATED_RUN * h) as u32;
+    rail_glyph_runs(img)
+        .into_iter()
+        .any(|(a, b)| b.saturating_sub(a) >= limit)
+}
+
+/// Runs of rows in the rail column that read as bright glyph material.
+fn rail_glyph_runs(img: &RgbImage) -> Vec<(u32, u32)> {
     let (w, h) = (img.width(), img.height());
     let x0 = ((RAIL_X - RAIL_HALF_WIDTH) * w as f64) as u32;
     let x1 = (((RAIL_X + RAIL_HALF_WIDTH) * w as f64) as u32).min(w);
@@ -394,29 +448,7 @@ fn rail_icon_centres(img: &RgbImage) -> Vec<f64> {
     if let Some(s) = start {
         runs.push((s, y1));
     }
-    // Drop specks: a glyph is at least a few rows tall.
-    let min_h = (0.0045 * h as f64) as u32;
-    let centres: Vec<f64> = runs
-        .into_iter()
-        .filter(|(a, b)| b.saturating_sub(*a) >= min_h)
-        .map(|(a, b)| (a + b) as f64 / 2.0 / h as f64)
-        .collect();
-
-    // Longest chain whose consecutive gaps match the icon pitch.
-    let mut best: Vec<f64> = Vec::new();
-    for i in 0..centres.len() {
-        let mut chain = vec![centres[i]];
-        for &c in &centres[i + 1..] {
-            let gap = c - chain[chain.len() - 1];
-            if gap >= RAIL_ICON_PITCH.0 && gap <= RAIL_ICON_PITCH.1 {
-                chain.push(c);
-            }
-        }
-        if chain.len() > best.len() {
-            best = chain;
-        }
-    }
-    best
+    runs
 }
 
 /// Mean "redness" of a small box centred on a rail icon: high when TikTok has

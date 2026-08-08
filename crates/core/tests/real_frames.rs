@@ -506,6 +506,61 @@ fn a_real_live_room_is_recognised_and_the_feed_is_not() {
     }
 }
 
+/// The saturation guard must not fire on the frame the swipe check depends on.
+///
+/// `rail_column_saturated` exists so one washed-out video frame cannot be read
+/// as "the feed is between cards". But a real mid-swipe is *also* a frame with
+/// no icon chain, and on this device the rail is off screen for only 80–120 ms —
+/// often a single frame. If the guard swallowed that frame too, no swipe could
+/// ever be confirmed. So: the real transition is not saturated, and neither is
+/// any settled card.
+#[test]
+fn the_saturation_guard_does_not_swallow_a_real_mid_swipe() {
+    let mid = load("feed-mid-swipe.jpg");
+    assert!(
+        !screen::rail_icons_present(&mid),
+        "the mid-swipe fixture must still read as rail-less"
+    );
+    assert!(
+        !screen::rail_column_saturated(&mid),
+        "a real transition must not be mistaken for a washed-out frame, or no \
+         swipe could ever be confirmed"
+    );
+
+    for (name, img) in feed_frames().into_iter().chain(same_card_frames()) {
+        assert!(
+            !screen::rail_column_saturated(&img),
+            "{name}: an ordinary feed card must not read as saturated"
+        );
+    }
+}
+
+/// And it must fire on the frame it exists for: a rail column washed out by the
+/// video behind it, which reads "no icon chain" for a reason that has nothing to
+/// do with the feed moving.
+#[test]
+fn the_saturation_guard_fires_on_a_washed_out_rail_column() {
+    let mut blown = load("feed-iphone8.jpg");
+    let (w, h) = (blown.width(), blown.height());
+    // Paint the rail column near-white across the whole search band, which is
+    // what a white product background or a sky does to it.
+    let x0 = ((screen::RAIL_X - 0.05) * w as f64) as u32;
+    for y in (0.28 * h as f64) as u32..(0.85 * h as f64) as u32 {
+        for x in x0..w {
+            blown.put_pixel(x, y, image::Rgb([238, 240, 239]));
+        }
+    }
+
+    assert!(
+        !screen::rail_icons_present(&blown),
+        "a washed-out column yields one continuous run, so no chain"
+    );
+    assert!(
+        screen::rail_column_saturated(&blown),
+        "and that is exactly the frame the guard has to catch"
+    );
+}
+
 /// How much room the LIVE threshold actually has, now that `live_pill` is
 /// measured on feed frames too instead of being left at 0.0 by the compose-bar
 /// short circuit.

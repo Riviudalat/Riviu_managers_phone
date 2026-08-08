@@ -19,16 +19,14 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use app_lib::agent_runtime::{resolve_desktop_agent_runtime_with_candidate, ResolvedAgentRuntime};
 use app_lib::interaction_ocr::DesktopFrameTextSource;
 use riviu_core::db::Database;
 use riviu_core::{
-    AgentSettings, DeviceControlPlane, DeviceWorkCoordinator, DeviceWorkOwner,
-    InteractionSessionKind, NurtureEngine, NurtureSettings, StreamBudgetManager,
+    DeviceControlPlane, DeviceWorkCoordinator, DeviceWorkOwner, InteractionSessionKind,
+    NurtureEngine, NurtureSettings, StreamBudgetManager,
 };
-use riviu_ios_driver::{
-    create_driver, telemetry, AgentArtifact, AgentToken, DriverConfig, DriverTarget,
-    UnifiedAgentConfig,
-};
+use riviu_ios_driver::{create_driver, telemetry};
 use riviu_signing::CredentialStore;
 
 struct Args {
@@ -123,9 +121,26 @@ async fn main() -> anyhow::Result<()> {
     let db = Arc::new(Database::open(data.join("riviu.db"))?);
 
     eprintln!("driver: loading settings");
-    let agent_settings = db.get_agent_settings()?;
     eprintln!("driver: creating sidecar driver");
-    let bundle = create_driver(resolve_driver_config(&root, &data, agent_settings)?).await?;
+    // Resolve exactly as the desktop app does — same keychain account, same
+    // manifest. The harness used to run its own token lookup, which reads the
+    // *legacy* account and never creates one, so a machine whose desktop app
+    // holds a candidate token failed outright with "set RIVIU_RTMMO_TOKEN" —
+    // and a machine that had both would have authenticated this run against an
+    // agent the device is not running.
+    let ResolvedAgentRuntime { driver_config, .. } = resolve_desktop_agent_runtime_with_candidate(
+        root.clone(),
+        data.clone(),
+        &db,
+        &CredentialStore::system()?,
+        std::env::var("RIVIU_AGENT_TOKEN")
+            .or_else(|_| std::env::var("RIVIU_RTMMO_TOKEN"))
+            .ok()
+            .as_deref(),
+        false,
+        true,
+    )?;
+    let bundle = create_driver(driver_config).await?;
     eprintln!("driver: created");
     let control = Arc::new(DeviceControlPlane::new(
         bundle.driver,
@@ -236,13 +251,20 @@ async fn main() -> anyhow::Result<()> {
             stop,
             Some(Duration::from_secs(args.minutes * 60)),
             |st| {
+                // Attempted/confirmed pairs, not bare successes. A run that
+                // reports 10 videos out of 40 swipes is telling you something a
+                // bare "videos=10" cannot.
                 eprintln!(
-                    "[{:>6.1}s] videos={} likes={} comments={} follows={} | {}",
+                    "[{:>6.1}s] videos={}/{} likes={}/{} comments={}/{} follows={}/{} | {}",
                     started.elapsed().as_secs_f64(),
                     st.videos_done,
+                    st.swipe_attempts,
                     st.likes,
+                    st.like_attempts,
                     st.comments,
+                    st.comment_attempts,
                     st.follows,
+                    st.follow_attempts,
                     st.last_message
                 );
             },
@@ -369,9 +391,13 @@ fn write_jsonl(
             "udid": args.udid,
             "elapsed_s": elapsed.as_secs_f64(),
             "videos": status.videos_done,
+            "swipe_attempts": status.swipe_attempts,
             "likes": status.likes,
+            "like_attempts": status.like_attempts,
             "comments": status.comments,
+            "comment_attempts": status.comment_attempts,
             "follows": status.follows,
+            "follow_attempts": status.follow_attempts,
             "usd": status.session_usd,
             "summary": status.last_message,
             "slowest_request_ms": slowest_ms,
@@ -404,57 +430,4 @@ fn resolve_sidecar_root() -> PathBuf {
         .join("sidecars")
         .canonicalize()
         .unwrap_or_else(|_| manifest.join("../../../sidecars"))
-}
-
-fn resolve_driver_config(
-    sidecar_root: &std::path::Path,
-    state_dir: &std::path::Path,
-    settings: AgentSettings,
-) -> anyhow::Result<DriverConfig> {
-    let target = if std::env::var("RIVIU_MOCK_DEVICES")
-        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-    {
-        DriverTarget::Mock
-    } else if std::env::var("RIVIU_WDA_BACKEND")
-        .map(|value| value.trim().eq_ignore_ascii_case("stock"))
-        .unwrap_or(false)
-    {
-        DriverTarget::LegacyStock
-    } else {
-        let credentials = CredentialStore::system()?;
-        let env_token = std::env::var("RIVIU_AGENT_TOKEN")
-            .or_else(|_| std::env::var("RIVIU_RTMMO_TOKEN"))
-            .ok();
-        // A live harness token is already supplied by the caller. Keep it in
-        // memory for this run instead of touching the interactive macOS
-        // Keychain; the desktop Full runtime uses the same ephemeral path.
-        let token = match env_token
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-        {
-            Some(value) => value.to_string(),
-            None => credentials.agent_token_or_create(None)?,
-        };
-        let manifest = std::env::var_os("RIVIU_AGENT_MANIFEST")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| sidecar_root.join("wda").join("agent-manifest.json"));
-        let mut artifact = AgentArtifact::load(manifest)?;
-        if let Some(path) = std::env::var_os("RIVIU_RTMMO_IPA") {
-            artifact.ipa_path = PathBuf::from(path);
-        }
-        artifact.verify_checksum()?;
-        DriverTarget::Real(UnifiedAgentConfig {
-            token: AgentToken::new(token)?,
-            artifact,
-            settings,
-        })
-    };
-
-    Ok(DriverConfig {
-        sidecar_root: sidecar_root.to_path_buf(),
-        state_dir: state_dir.to_path_buf(),
-        target,
-    })
 }
