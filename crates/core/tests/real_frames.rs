@@ -222,18 +222,30 @@ fn a_liked_heart_reads_red_and_an_unliked_one_does_not() {
 /// The watcher classifies several frames a second, in debug builds too. This
 /// is a guard rail, not a benchmark: a regression that puts a full pass into
 /// the hundreds of milliseconds would starve the popup loop.
+///
+/// Timed as the *fastest* of several passes, not the mean. The mean measures
+/// whatever else the machine was doing — the whole suite runs in parallel, and
+/// this test failed at 416 ms against a 400 ms bar while passing at a quarter
+/// of that when run alone. The fastest pass is the one that actually reflects
+/// the code's cost, and a real regression raises it just the same.
+fn fastest_classify(img: &image::RgbImage, runs: u32) -> std::time::Duration {
+    (0..runs)
+        .map(|_| {
+            let started = Instant::now();
+            let _ = screen::classify(img, Some(LOGICAL_W));
+            started.elapsed()
+        })
+        .min()
+        .expect("at least one run")
+}
+
 #[test]
 fn classification_stays_fast_enough_for_the_watcher() {
     let img = load("feed-iphone8.jpg");
     // Warm the cached template so the first decode is not counted.
     let _ = screen::classify(&img, Some(LOGICAL_W));
 
-    let runs = 5;
-    let started = Instant::now();
-    for _ in 0..runs {
-        let _ = screen::classify(&img, Some(LOGICAL_W));
-    }
-    let per_frame = started.elapsed() / runs;
+    let per_frame = fastest_classify(&img, 5);
     println!(
         "classify: {:?}/frame (feed, compose bar visible)",
         per_frame
@@ -253,11 +265,7 @@ fn classification_stays_fast_enough_for_the_watcher() {
             bare.put_pixel(x, y, image::Rgb([10, 10, 10]));
         }
     }
-    let started = Instant::now();
-    for _ in 0..runs {
-        let _ = screen::classify(&bare, Some(LOGICAL_W));
-    }
-    let per_frame = started.elapsed() / runs;
+    let per_frame = fastest_classify(&bare, 5);
     println!(
         "classify: {:?}/frame (no compose bar — full template match)",
         per_frame

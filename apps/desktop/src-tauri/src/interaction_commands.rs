@@ -304,16 +304,8 @@ pub async fn interaction_open_on_device(
         .streaming_session(&context)
         .map_err(CommandError::from)?;
     let result = async {
-        session
-            .open_url(&target.normalized_url)
-            .await
-            .context("mở link TikTok")?;
-        tokio::time::sleep(Duration::from_millis(900)).await;
-        if let Ok(bundle) = session.active_app_bundle().await {
-            if bundle != TIKTOK_BUNDLE_ID {
-                anyhow::bail!("active app không phải TikTok: {bundle}");
-            }
-        }
+        let _proof =
+            open_target_confirmed(&state.nurture_engine, &udid, session.as_ref(), &target).await?;
         Ok::<(), anyhow::Error>(())
     }
     .await;
@@ -402,8 +394,10 @@ async fn execute_thread_campaign(
             .await
             .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
         let session = control.streaming_session(&context)?;
-        session.open_url(&target.normalized_url).await?;
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        // Evidence for the AI has to come from the target, not from whatever
+        // survived the two seconds this used to sleep.
+        let _proof =
+            open_target_confirmed(&engine, target_root_actor, session.as_ref(), target).await?;
         let mut frames = Vec::with_capacity(3);
         for _ in 0..3 {
             if let Some(frame) = engine.frames.latest(target_root_actor) {
@@ -492,8 +486,24 @@ async fn execute_thread_campaign(
             let gestures = tokio::sync::Mutex::new(());
             let mut effect_intent = false;
             let result = async {
-                session.open_url(&target.normalized_url).await?;
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                // Nothing is typed until the target is on screen: an
+                // unconfirmed open posts the campaign's comment to whichever
+                // video the phone happens to be showing.
+                let proof =
+                    open_target_confirmed(&engine, &prepared.actor_udid, session.as_ref(), target)
+                        .await?;
+                if proof == TargetProof::Structural {
+                    // Worth saying out loud: the post is open but unidentified,
+                    // so nothing here rules out the link having resolved to a
+                    // different video. On Windows this is every send, because
+                    // the OCR that reads the handle back is macOS-only.
+                    log::warn!(
+                        "interaction {}: đăng vào bài của @{} chưa đối chiếu được tên tác giả \
+                         (OCR không khả dụng trên nền tảng này)",
+                        target.target_key,
+                        target.author
+                    );
+                }
                 if let Some(parent) = parent_identity.as_ref() {
                     let (observations, screen_size) = open_comment_for_ocr(
                         &engine,
@@ -657,6 +667,131 @@ async fn execute_thread_campaign(
         revision: revision(),
     });
     Ok(())
+}
+
+/// Longest the device gets to land on the target before the open is called a
+/// failure, and how often the frame is read while waiting. The check costs one
+/// OCR pass per poll, so this is deliberately slower than a frame loop — it runs
+/// once per target, not per frame.
+const OPEN_TARGET_TIMEOUT: Duration = Duration::from_secs(14);
+const OPEN_TARGET_POLL: Duration = Duration::from_millis(900);
+/// Characters of the author handle that must be legible. TikTok truncates long
+/// handles with an ellipsis, so a prefix is all that can be required; six is
+/// enough that another account on screen is unlikely to share it.
+const OPEN_TARGET_HANDLE_PREFIX: usize = 6;
+
+/// Open a target link and prove the device landed on *that* post.
+///
+/// `open_url` returning Ok means the request was accepted, not that the video is
+/// on screen. This module already draws that distinction for typing — "the
+/// request returning OK is not evidence of insertion" — but not for opening: two
+/// of the three call sites slept two seconds and carried on, and the third only
+/// asked whether TikTok was frontmost, which does not say *which post* is up,
+/// and skipped even that whenever the query itself failed.
+///
+/// It matters most on the send path. A campaign that opens nothing then posts
+/// its comment to whatever the phone happens to be showing — someone else's
+/// video, under the operator's account. On the evidence path it means the AI
+/// writes its comment about a post that is not the target.
+///
+/// The link carries the author handle and the opened post displays it, so that
+/// is the proof: wait for a frame whose OCR contains it.
+/// How far the open could be proved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetProof {
+    /// The author handle from the link was read back off the screen. This is
+    /// the only level that identifies *which* post is open.
+    Identified,
+    /// TikTok came forward, the screen changed, and it settled on a post — but
+    /// the handle could not be read, so the post is unidentified. OCR here is
+    /// macOS-only (`interaction_ocr::recognize` bails everywhere else), so this
+    /// is the best available proof on Windows.
+    Structural,
+}
+
+async fn open_target_confirmed(
+    engine: &riviu_core::NurtureEngine,
+    udid: &str,
+    session: &dyn riviu_core::UiSession,
+    target: &riviu_core::ResolvedTikTokTarget,
+) -> anyhow::Result<TargetProof> {
+    // The screen as it was before the request, so "nothing happened" is
+    // distinguishable from "the post loaded".
+    let before = engine
+        .frames
+        .latest(udid)
+        .map(|frame| frame_sha256(&frame))
+        .unwrap_or_default();
+
+    session
+        .open_url(&target.normalized_url)
+        .await
+        .with_context(|| format!("mở link {}", target.normalized_url))?;
+
+    let wanted = riviu_core::normalize_locator_text(&target.author);
+    let needle: String = wanted
+        .chars()
+        .take(OPEN_TARGET_HANDLE_PREFIX.min(wanted.chars().count()))
+        .collect();
+
+    let deadline = tokio::time::Instant::now() + OPEN_TARGET_TIMEOUT;
+    let mut ocr_available = true;
+    let mut settled_without_handle = false;
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(OPEN_TARGET_POLL).await;
+        // A wrong frontmost app is decisive; a query that cannot answer it is
+        // not, and never stands in for the frame proof either way.
+        if let Ok(bundle) = session.active_app_bundle().await {
+            if bundle != TIKTOK_BUNDLE_ID {
+                continue;
+            }
+        }
+        let Some(frame) = engine.frames.latest(udid) else {
+            continue;
+        };
+        if frame_sha256(&frame) == before {
+            // Byte-identical to the pre-request screen: the open did nothing.
+            continue;
+        }
+        let Ok(decoded) = image::load_from_memory(&frame) else {
+            continue;
+        };
+        if riviu_core::screen::locate_action_rail(&decoded.to_rgb8()).is_none() {
+            // Still loading, or on an interstitial — not a post yet.
+            continue;
+        }
+        settled_without_handle = true;
+
+        if ocr_available && !needle.is_empty() {
+            match interaction_ocr::recognize(&frame).await {
+                Ok(observations) => {
+                    if observations.iter().any(|observation| {
+                        riviu_core::normalize_locator_text(&observation.text).contains(&needle)
+                    }) {
+                        return Ok(TargetProof::Identified);
+                    }
+                }
+                // Not a reason to fail the open — it is how this build reports
+                // that it has no OCR at all. Fall back to the structural proof
+                // rather than blocking the feature on a platform capability.
+                Err(_) => ocr_available = false,
+            }
+        }
+        if !ocr_available {
+            return Ok(TargetProof::Structural);
+        }
+    }
+
+    if settled_without_handle {
+        anyhow::bail!(
+            "mở link nhưng màn hình không phải bài của @{} (không đọc được tên tác giả)",
+            target.author
+        );
+    }
+    anyhow::bail!(
+        "mở link {} nhưng máy không chuyển sang bài viết nào",
+        target.normalized_url
+    )
 }
 
 async fn open_comment_for_ocr(
