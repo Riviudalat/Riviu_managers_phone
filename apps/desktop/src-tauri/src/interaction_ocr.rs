@@ -27,6 +27,41 @@ pub fn locator_version() -> &'static str {
     }
 }
 
+/// The language tag the installed reader will actually recognise, if any.
+///
+/// macOS pins its Vision request to `["en-US", "vi-VN"]` in the Swift helper, so
+/// Vietnamese is always available there. Windows uses whichever OCR language
+/// pack the machine happens to carry, and a machine with only `en-US` reads
+/// "mới" as "mdi" and "thư" as "thif" — substitutions, not lost tone marks, so
+/// no amount of accent folding reconciles them.
+pub fn recognizer_language() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        Some("vi-VN".to_string())
+    }
+    #[cfg(windows)]
+    {
+        ocr_engine()
+            .ok()?
+            .RecognizerLanguage()
+            .and_then(|language| language.LanguageTag())
+            .map(|tag| tag.to_string_lossy())
+            .ok()
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        None
+    }
+}
+
+/// Whether the installed reader can read back a Vietnamese comment body.
+///
+/// This is what the thread feature actually depends on: a reply has to find the
+/// parent by its exact text, and the campaign writes Vietnamese.
+pub fn reads_vietnamese() -> bool {
+    recognizer_language().is_some_and(|tag| tag.to_ascii_lowercase().starts_with("vi"))
+}
+
 #[derive(Debug, Default)]
 pub struct DesktopFrameTextSource;
 
@@ -266,6 +301,36 @@ mod tests {
                     && o.height > 0.0,
                 "box out of the unit square: {o:?}"
             );
+        }
+    }
+
+    /// What the reader reports it can read has to match what it actually does,
+    /// because the thread feature refuses to start on the strength of it.
+    ///
+    /// On this machine only `en-US` is installed, and the dump test above shows
+    /// what that means in practice: "Mới đi Đà Lạt" comes back as
+    /// "Mdi di Dä Lat". Reporting Vietnamese here would let a campaign start
+    /// and then fail one message in, which is the behaviour the guard exists to
+    /// remove.
+    #[test]
+    fn the_reported_language_is_the_one_the_engine_will_use() {
+        let reported = recognizer_language();
+        match &reported {
+            Some(tag) => {
+                assert!(
+                    !tag.trim().is_empty(),
+                    "a reader reported an empty language"
+                );
+                assert_eq!(
+                    reads_vietnamese(),
+                    tag.to_ascii_lowercase().starts_with("vi"),
+                    "reported {tag} but reads_vietnamese disagreed"
+                );
+            }
+            None => assert!(
+                !reads_vietnamese(),
+                "no reader is available, so nothing can be read in Vietnamese"
+            ),
         }
     }
 

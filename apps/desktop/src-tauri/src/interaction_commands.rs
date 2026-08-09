@@ -115,12 +115,30 @@ pub fn interaction_preview_thread(
     })
 }
 
+/// A thread needs to read its own comment back off the screen to reply to it,
+/// and the campaign writes Vietnamese. Without a reader that can, the run posts
+/// the first message of every thread and skips the rest — so refuse up front,
+/// naming both ways out, instead of discovering it one message in.
+fn require_vietnamese_reader() -> Result<(), CommandError> {
+    if interaction_ocr::reads_vietnamese() {
+        return Ok(());
+    }
+    let found = interaction_ocr::recognizer_language().unwrap_or_else(|| "không có".into());
+    Err(CommandError::code(
+        "OcrLanguageUnavailable",
+        format!(
+            "chuỗi bình luận cần OCR đọc được tiếng Việt để tìm lại bình luận cha;              máy này chỉ có '{found}'. Chạy chiến dịch trên máy Mac, hoặc cài gói ngôn ngữ              tiếng Việt (Settings → Time & language → Language & region → Tiếng Việt →              Language options → Optional features)."
+        ),
+    ))
+}
+
 #[tauri::command]
 pub async fn interaction_start_thread(
     state: State<'_, AppState>,
     request: ThreadCampaignRequest,
 ) -> Result<InteractionStartResult, CommandError> {
     let admission = state.ensure_accepting_work()?;
+    require_vietnamese_reader()?;
     let plan = plan_threads(&request).map_err(interaction_error)?;
     let campaign_id = state
         .db
@@ -255,6 +273,7 @@ pub fn interaction_retry(
     let requested: Option<std::collections::HashSet<String>> =
         assignment_ids.map(|ids| ids.into_iter().collect());
     let admission = state.ensure_accepting_work()?;
+    require_vietnamese_reader()?;
     let detail = state
         .db
         .get_interaction_campaign(&campaign_id)
