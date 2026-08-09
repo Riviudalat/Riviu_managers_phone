@@ -254,6 +254,7 @@ impl NurtureEngine {
         if armed_frame.is_none() {
             return Err(anyhow!("send_not_armed"));
         }
+        let before_send = frame_digest(&armed_bytes);
         {
             let _guard = gestures.lock().await;
             session
@@ -261,10 +262,22 @@ impl NurtureEngine {
                 .await
                 .map_err(|e| anyhow!("tap_send: {e}"))?;
         }
+        // "Ready to type" and "sent" are the same classification — an open,
+        // unarmed drawer — separated only by when they were observed. So the
+        // frames already seen are excluded, `before_typing` above all, because
+        // it satisfied this very predicate and a stream running behind would
+        // otherwise replay it as proof the field emptied. That matters more
+        // here than in the nurture path: this frame's digest is persisted as
+        // `cleared_frame_sha256`, so an unexcluded replay writes the
+        // *pre-typing* screen into the record as evidence the comment posted.
         let _cleared = self
-            .wait_for_frame(udid, Duration::from_secs(6), stop, |img| {
-                screen::comment_drawer_state(img).0 == CommentDrawer::Open
-            })
+            .wait_for_frame_after(
+                udid,
+                Duration::from_secs(6),
+                stop,
+                &[before_send, frame_digest(&before_typing)],
+                |img| screen::comment_drawer_state(img).0 == CommentDrawer::Open,
+            )
             .await
             .ok_or_else(|| anyhow!("send_clear_not_confirmed"))?;
         let cleared_bytes = self
@@ -359,6 +372,7 @@ impl NurtureEngine {
         if !armed {
             return Err(anyhow!("reply_send_not_armed"));
         }
+        let before_send = frame_digest(&armed_bytes);
         {
             let _guard = gestures.lock().await;
             session
@@ -374,9 +388,15 @@ impl NurtureEngine {
                 .await
                 .map_err(|e| anyhow!("tap_reply_send: {e}"))?;
         }
-        self.wait_for_frame(udid, Duration::from_secs(6), stop, |img| {
-            screen::comment_drawer_state(img).0 == CommentDrawer::Open
-        })
+        // Same rule as the top-level comment: a frame already seen cannot be
+        // the proof, and this one is persisted as evidence.
+        self.wait_for_frame_after(
+            udid,
+            Duration::from_secs(6),
+            stop,
+            &[before_send, frame_digest(&before_typing)],
+            |img| screen::comment_drawer_state(img).0 == CommentDrawer::Open,
+        )
         .await
         .ok_or_else(|| anyhow!("reply_clear_not_confirmed"))?;
         let cleared_bytes = self
@@ -404,7 +424,6 @@ impl NurtureEngine {
         })
     }
 
-    /// Tap the heart, then confirm from a later frame that it turned red.
     /// Tap the heart, and take the rail, the baseline and the confirmation from
     /// frames that are all qualified.
     ///
@@ -2054,6 +2073,70 @@ mod tests {
 
         drop(engine);
         let _ = std::fs::remove_file(db_path);
+    }
+
+    /// The link-driven Interaction surface posts through
+    /// `send_prepared_thread_comment`, which had no test at all and carried the
+    /// same defect the nurture comment path did: "ready to type" and "sent" are
+    /// both an open, unarmed drawer, so a stream running behind could replay the
+    /// pre-typing screen as proof the field emptied.
+    ///
+    /// It matters more here. This path *persists* the confirming frame's digest
+    /// as `cleared_frame_sha256`, so an unexcluded replay writes the pre-typing
+    /// screen into the campaign record as evidence the comment posted.
+    async fn thread_comment_on(
+        stale_replay: bool,
+    ) -> (
+        anyhow::Result<crate::interaction::ThreadSendEvidence>,
+        Arc<TestFrames>,
+    ) {
+        let frames = Arc::new(TestFrames::with_stale_replay(stale_replay));
+        let stop = Arc::new(AtomicBool::new(false));
+        let session = RecordingSession::new(frames.clone(), stop.clone(), true, false);
+        let (engine, db_path) = test_engine(frames.clone());
+        let prepared = PreparedThreadMessage {
+            ordinal: 1,
+            actor_udid: UDID.to_string(),
+            text: COMMENT.to_string(),
+            text_sha256: "deadbeef".into(),
+            parent_ordinal: None,
+        };
+
+        let result = engine
+            .send_prepared_thread_comment(
+                UDID,
+                &session,
+                &tokio::sync::Mutex::new(()),
+                &prepared,
+                stop.as_ref(),
+            )
+            .await;
+        drop(engine);
+        let _ = std::fs::remove_file(db_path);
+        (result, frames)
+    }
+
+    #[tokio::test]
+    async fn a_thread_comment_is_confirmed_from_a_frame_that_postdates_the_send() {
+        let (result, _) = thread_comment_on(false).await;
+
+        let evidence = result.expect("thread comment");
+        assert_eq!(evidence.text_sha256, "deadbeef");
+        assert_ne!(
+            evidence.cleared_frame_sha256, evidence.armed_frame_sha256,
+            "the cleared frame must not be the armed one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replayed_pre_typing_drawer_is_not_proof_a_thread_comment_posted() {
+        let (result, _) = thread_comment_on(true).await;
+
+        let error = result.expect_err("a replayed frame must not confirm the send");
+        assert!(
+            error.to_string().contains("send_clear_not_confirmed"),
+            "unexpected error: {error}"
+        );
     }
 
     #[tokio::test]
