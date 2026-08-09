@@ -679,6 +679,10 @@ const OPEN_TARGET_POLL: Duration = Duration::from_millis(900);
 /// handles with an ellipsis, so a prefix is all that can be required; six is
 /// enough that another account on screen is unlikely to share it.
 const OPEN_TARGET_HANDLE_PREFIX: usize = 6;
+/// How long to keep looking for the handle once the post has visibly settled,
+/// before accepting the structural proof and moving on. The post is already up
+/// by then; this is only the identity check catching up.
+const OPEN_TARGET_HANDLE_GRACE: Duration = Duration::from_secs(4);
 
 /// Open a target link and prove the device landed on *that* post.
 ///
@@ -736,7 +740,7 @@ async fn open_target_confirmed(
 
     let deadline = tokio::time::Instant::now() + OPEN_TARGET_TIMEOUT;
     let mut ocr_available = true;
-    let mut settled_without_handle = false;
+    let mut settled_since: Option<tokio::time::Instant> = None;
     while tokio::time::Instant::now() < deadline {
         tokio::time::sleep(OPEN_TARGET_POLL).await;
         // A wrong frontmost app is decisive; a query that cannot answer it is
@@ -760,7 +764,7 @@ async fn open_target_confirmed(
             // Still loading, or on an interstitial — not a post yet.
             continue;
         }
-        settled_without_handle = true;
+        let settled_at = *settled_since.get_or_insert(tokio::time::Instant::now());
 
         if ocr_available && !needle.is_empty() {
             match interaction_ocr::recognize(&frame).await {
@@ -771,22 +775,30 @@ async fn open_target_confirmed(
                         return Ok(TargetProof::Identified);
                     }
                 }
-                // Not a reason to fail the open — it is how this build reports
-                // that it has no OCR at all. Fall back to the structural proof
-                // rather than blocking the feature on a platform capability.
+                // Not a reason to fail the open — it is how a build with no OCR
+                // reports that fact. Fall back to the structural proof rather
+                // than blocking the feature on a platform capability.
                 Err(_) => ocr_available = false,
             }
         }
-        if !ocr_available {
+        // A missing handle downgrades the proof; it never fails the open.
+        //
+        // The handle comes from the URL, and what the post displays is the
+        // account's *nickname*, which often is not the same string — captures
+        // from this device show both cases ("nguyenvantoan8584" on one card,
+        // "Lúc này lúc kia" on another). Until that has been checked against a
+        // link-opened page on a real device, treating a missing handle as proof
+        // of the wrong post would break the feature for every account whose
+        // nickname differs from its handle, to guard against a failure that has
+        // never been observed. The failure that *has* been observed is the open
+        // doing nothing at all, and the checks above catch that.
+        if !ocr_available || settled_at.elapsed() >= OPEN_TARGET_HANDLE_GRACE {
             return Ok(TargetProof::Structural);
         }
     }
 
-    if settled_without_handle {
-        anyhow::bail!(
-            "mở link nhưng màn hình không phải bài của @{} (không đọc được tên tác giả)",
-            target.author
-        );
+    if settled_since.is_some() {
+        return Ok(TargetProof::Structural);
     }
     anyhow::bail!(
         "mở link {} nhưng máy không chuyển sang bài viết nào",
