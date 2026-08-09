@@ -473,18 +473,41 @@ pub fn discover_comment_identity(
     frame_sha256: &str,
     locator_version: &str,
 ) -> Option<CommentLocatorIdentity> {
-    let text = observations.iter().find(|observation| {
+    // Same uniqueness rule `locate_parent_comment` applies. It was missing
+    // here, which quietly undid the safety argument for accent folding: two
+    // lines that fold to the same string were refused when locating the parent
+    // and silently resolved to whichever OCR listed first when discovering it —
+    // and this is the end that decides what the *rest of the thread* replies to.
+    let mut matches_text = observations.iter().filter(|observation| {
         normalize_locator_text(&observation.text) == normalize_locator_text(exact_text)
             && observation.confidence >= 0.55
-    })?;
-    let author = observations.iter().find(|observation| {
-        let label = normalize_locator_text(&observation.text);
-        !label.is_empty()
-            && observation.y <= text.y + 0.02
-            && observation.y + observation.height >= text.y - 0.08
-            && observation.x <= text.x + 0.1
-            && !matches!(label.as_str(), "reply" | "tra loi")
-    })?;
+    });
+    let text = matches_text.next()?;
+    if matches_text.next().is_some() {
+        return None;
+    }
+    let text_index = observations
+        .iter()
+        .position(|observation| std::ptr::eq(observation, text))?;
+    let author = observations
+        .iter()
+        .enumerate()
+        .find(|(index, observation)| {
+            let label = normalize_locator_text(&observation.text);
+            // The comment line satisfies every predicate below against itself:
+            // its own `y` is within 0.02 of its own `y`, its own `x` within 0.1
+            // of its own `x`, and it is neither empty nor a reply label. So if
+            // OCR emitted the body before the author line, the author label
+            // became the comment text — and that wrong identity is what the
+            // next message in the thread then hunts for.
+            *index != text_index
+                && !label.is_empty()
+                && observation.y <= text.y + 0.02
+                && observation.y + observation.height >= text.y - 0.08
+                && observation.x <= text.x + 0.1
+                && !matches!(label.as_str(), "reply" | "tra loi")
+        })
+        .map(|(_, observation)| observation)?;
     Some(CommentLocatorIdentity {
         author_label: author.text.clone(),
         text: text.text.clone(),
@@ -800,6 +823,81 @@ mod tests {
             (match_.reply_y - 0.39).abs() < 0.02,
             "tapped the reply at {:.3}, which belongs to the comment below",
             match_.reply_y
+        );
+    }
+
+    /// The comment line is not its own author.
+    ///
+    /// Every predicate the author scan applies is satisfied by the text
+    /// observation against itself, so the only thing that kept this from firing
+    /// was OCR emitting the author line first — which is not a guarantee, it is
+    /// the order one fixture happened to have. When it does fire, the stored
+    /// identity carries the comment body as the author label, and the next
+    /// message in the thread hunts for a comment written by that string.
+    #[test]
+    fn the_comment_body_is_never_taken_as_its_own_author() {
+        let body = CommentOcrObservation {
+            text: "Quán này xinh quá".into(),
+            confidence: 0.94,
+            x: 0.10,
+            y: 0.34,
+            width: 0.4,
+            height: 0.03,
+        };
+        let author = CommentOcrObservation {
+            text: "actor_1".into(),
+            confidence: 0.97,
+            x: 0.10,
+            y: 0.30,
+            width: 0.2,
+            height: 0.03,
+        };
+
+        // Body first — the order the old code could not survive.
+        let identity = discover_comment_identity(
+            &[body.clone(), author.clone()],
+            "Quán này xinh quá",
+            "sha",
+            "test-ocr",
+        )
+        .expect("identity");
+        assert_eq!(identity.author_label, "actor_1");
+
+        // With no author line at all it must refuse, not fall back to itself.
+        assert!(
+            discover_comment_identity(&[body], "Quán này xinh quá", "sha", "test-ocr").is_none(),
+            "a comment with no readable author has no identity"
+        );
+    }
+
+    /// The same refuse-on-ambiguity rule the parent locator has. Without it the
+    /// two ends of the chain disagreed about what counts as identifiable.
+    #[test]
+    fn a_duplicated_body_has_no_discoverable_identity() {
+        let line = |y: f64| CommentOcrObservation {
+            text: "Quán này xinh quá".into(),
+            confidence: 0.94,
+            x: 0.10,
+            y,
+            width: 0.4,
+            height: 0.03,
+        };
+        let observations = vec![
+            CommentOcrObservation {
+                text: "actor_1".into(),
+                confidence: 0.97,
+                x: 0.10,
+                y: 0.30,
+                width: 0.2,
+                height: 0.03,
+            },
+            line(0.34),
+            line(0.62),
+        ];
+
+        assert!(
+            discover_comment_identity(&observations, "Quán này xinh quá", "sha", "test-ocr")
+                .is_none()
         );
     }
 

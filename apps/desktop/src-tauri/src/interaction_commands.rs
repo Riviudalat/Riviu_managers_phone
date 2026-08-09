@@ -679,6 +679,18 @@ async fn execute_thread_campaign(
                         &gestures,
                     )
                     .await?;
+                    // Hunt down the list first; the stability check then runs
+                    // on the frame that actually shows the parent.
+                    let observations = scroll_to_parent(
+                        &engine,
+                        &prepared.actor_udid,
+                        session.as_ref(),
+                        &gestures,
+                        parent,
+                        screen_size,
+                        observations,
+                    )
+                    .await?;
                     let parent_match =
                         stable_parent_match(&engine, &prepared.actor_udid, parent, observations)
                             .await?;
@@ -1097,6 +1109,91 @@ async fn discover_after_send(
     }
     dismiss_comment_drawer(session, gestures).await;
     Ok(first_identity)
+}
+
+/// How far to hunt for the parent before giving up, and the gesture used.
+///
+/// The drawer only ever showed its first screenful: `open_comment_for_ocr`
+/// opens it, reads one frame, and returns. Every reply is sent from a *different
+/// device* that re-opens the link fresh, so TikTok re-ranks the list each time
+/// and the campaign's own comment is under no obligation to still be near the
+/// top. When it is not, the parent is simply unfindable and the rest of the
+/// thread dies — with no attempt to look further down.
+const PARENT_SCROLL_ATTEMPTS: u32 = 4;
+const PARENT_SCROLL_FROM_Y: f64 = 0.62;
+const PARENT_SCROLL_TO_Y: f64 = 0.38;
+const PARENT_SCROLL_SETTLE: Duration = Duration::from_millis(900);
+
+/// Scroll the comment list until the parent is on screen.
+///
+/// Each scroll has to prove it happened, and here the proof is cheap in a way it
+/// never was for the feed: the drawer is static, so a frame that changed is a
+/// list that moved. (In the feed the opposite held — a playing video changed
+/// every frame, which is what made the old swipe check worthless.) A swipe that
+/// changes nothing means the list is at its end, and a frame that stops
+/// classifying as an open drawer means the gesture closed it instead of
+/// scrolling it; both stop the hunt rather than swiping on blindly.
+async fn scroll_to_parent(
+    engine: &riviu_core::NurtureEngine,
+    udid: &str,
+    session: &dyn riviu_core::UiSession,
+    gestures: &tokio::sync::Mutex<()>,
+    identity: &CommentLocatorIdentity,
+    screen_size: (f64, f64),
+    first: Vec<CommentOcrObservation>,
+) -> anyhow::Result<Vec<CommentOcrObservation>> {
+    if locate_parent_comment(&first, identity).is_some() {
+        return Ok(first);
+    }
+    for attempt in 1..=PARENT_SCROLL_ATTEMPTS {
+        let before = engine
+            .frames
+            .latest(udid)
+            .context("no frame before scrolling the comment list")?;
+        {
+            let _guard = gestures.lock().await;
+            session
+                .swipe(riviu_core::SwipeGesture {
+                    from: TapPoint {
+                        x: screen_size.0 * 0.5,
+                        y: screen_size.1 * PARENT_SCROLL_FROM_Y,
+                    },
+                    to: TapPoint {
+                        x: screen_size.0 * 0.5,
+                        y: screen_size.1 * PARENT_SCROLL_TO_Y,
+                    },
+                    duration_ms: 320,
+                })
+                .await
+                .context("scroll the comment list")?;
+        }
+        tokio::time::sleep(PARENT_SCROLL_SETTLE).await;
+
+        let after = engine
+            .frames
+            .latest(udid)
+            .context("no frame after scrolling the comment list")?;
+        if riviu_core::frame_sha256(&after) == riviu_core::frame_sha256(&before) {
+            anyhow::bail!(
+                "cuộn {attempt} lần nhưng danh sách bình luận không nhúc nhích —                  nhiều khả năng đã hết danh sách"
+            );
+        }
+        let decoded = image::load_from_memory(&after)
+            .context("decode comment drawer frame")?
+            .to_rgb8();
+        if matches!(
+            riviu_core::screen::comment_drawer_state(&decoded).0,
+            riviu_core::screen::CommentDrawer::Closed | riviu_core::screen::CommentDrawer::Unknown
+        ) {
+            anyhow::bail!("cú vuốt đã đóng khay bình luận thay vì cuộn nó");
+        }
+
+        let observations = interaction_ocr::recognize(&after).await?;
+        if locate_parent_comment(&observations, identity).is_some() {
+            return Ok(observations);
+        }
+    }
+    anyhow::bail!("không thấy bình luận cha sau {PARENT_SCROLL_ATTEMPTS} lần cuộn danh sách")
 }
 
 async fn stable_parent_match(
