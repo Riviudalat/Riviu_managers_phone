@@ -272,6 +272,79 @@ một thay đổi trạng thái quan sát được.
 - Pha 5 (nurture): `FeedReader` bản Android hoàn toàn dựa hierarchy; thêm nhánh
   nhận diện bài LIVE.
 
+---
+
+# ĐÍNH CHÍNH QUAN TRỌNG (cùng ngày, sau khi chạy lâu hơn)
+
+Hai kết luận ở trên **sai vì đo trên trạng thái màn hình không đại diện**. Ghi
+lại đầy đủ, vì cả hai đều đã được dùng để ra quyết định kiến trúc.
+
+## 1. "Nỗi lo dump chết dưới animation KHÔNG xảy ra" — SAI
+
+Con số 40/40 ở Đo 1 và 609 ms ở G1a đều đo khi màn hình đang ở trạng thái tĩnh
+hoặc gần tĩnh. Chạy lại **dưới feed video đang tự phát**:
+
+| | |
+|---|---|
+| Mẫu | 20 truy vấn `/element` liên tiếp |
+| Thành công | **20/20** |
+| p50 | **10531 ms** |
+| p95 | 10588 ms |
+| Dưới 2 giây | **0/20** |
+| Trên 9 giây | **20/20** |
+
+Lỗi khi hết giờ: *"Timed out after 10149ms waiting for the root
+AccessibilityNodeInfo in the active window. Make sure the active window is not
+constantly hogging the main UI thread"*.
+
+**Không phải thiếu CPU** — `top` báo `631%idle` ngay lúc đó. Cửa sổ đang phát
+video đơn giản không trả về root node.
+
+**Không setting nào chạm tới được.** Đã thử và đo từng cái:
+
+| Setting | Kết quả |
+|---|---|
+| `waitForIdleTimeout: 0` (xác nhận đã áp dụng bằng GET) | p50 vẫn ~10,2 s |
+| `enableTopmostWindowFromActivePackage: true` | p50 10241 ms |
+| `deferAccessibilityCacheReset: true` | p50 10242 ms |
+
+Đây là hằng số cứng trong uiautomator2-server, không phải tuỳ chọn.
+
+**Hệ quả**: ở trạng thái này, mỗi truy vấn element tốn ~10,5 giây, tức **vòng
+điều khiển vẫn không dùng được** — đúng thứ agent lẽ ra phải chữa. Rủi ro #1
+trong kế hoạch là có thật và **chiếm ưu thế trên chính màn hình mà nurture dành
+toàn bộ thời gian**. Chưa có lời giải; đây là việc phải làm trước Pha 5.
+
+Hướng chưa thử: tắt animation hệ thống (`window_animation_scale` v.v. — nhưng
+không dừng được phát video), giảm/tắt autoplay trong TikTok, hoặc dùng
+AccessibilityService riêng theo sự kiện thay vì hỏi root theo yêu cầu.
+
+## 2. `/status` trả "ready" KHÔNG chứng minh agent làm được gì
+
+Khi tiến trình `am instrument` chết, **tiến trình server vẫn sống** (`ps` xác
+nhận, pid 9413) và **vẫn trả `/status: UiAutomator2 Server is ready to accept
+commands`** — nhưng kết nối `UiAutomation` thuộc về instrumentation, nên mọi
+truy vấn accessibility hết giờ. Khởi động lại instrumentation là hồi phục ngay
+(637 ms).
+
+Đây đúng là kỷ luật "không tin ACK" của dự án, ở một chỗ mới: **liveness phải
+chứng minh bằng một truy vấn accessibility, không phải bằng `/status`.**
+
+## 3. `adb forward` không bền
+
+Khi adb server khởi động lại, **mọi forward biến mất** trong khi agent trên máy
+vẫn sống — và ở tầng HTTP thì hai việc đó không phân biệt được. Đã sửa:
+`agent_ready` dựng lại forward rồi hỏi lần nữa trước khi báo không sẵn sàng
+(`AndroidDriver::agent_ready`), và đã kiểm chứng bằng cách xoá forward rồi chạy
+probe — `open_session` tự phục hồi trong 349 ms.
+
+## 4. Thêm một đối chiếu iOS/Android
+
+`snapshotMaxDepth` của uiautomator2-server mặc định **70** và chạy bình thường.
+Bên iOS nó **buộc phải là 1**, đặt 20 hay 50 là treo lệnh kế tiếp (§2.3
+AGENTS.md). Bất đối xứng này là có thật; chỉ có điều nó không cứu được vấn đề ở
+mục 1.
+
 ## Phụ lục — cạm bẫy khi đo, để không lặp lại
 
 1. **`\$?` trong chuỗi PowerShell không phải escaping.** PowerShell nội suy `$?`

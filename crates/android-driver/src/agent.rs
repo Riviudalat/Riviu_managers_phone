@@ -170,11 +170,38 @@ impl AgentClient {
             .or_else(|| response.get("sessionId").and_then(Value::as_str))
             .ok_or_else(|| anyhow!("agent không trả sessionId: {response}"))?
             .to_string();
-        Ok(Self {
+        let client = Self {
             http,
             base,
             session_id,
-        })
+        };
+        client.prime_session().await?;
+        Ok(client)
+    }
+
+    /// Configure the session before anything else uses it.
+    ///
+    /// Same shape as the iOS rule in AGENTS.md 2.2, where a stock WDA session
+    /// must be primed immediately. Zero means read the tree as it is now: a
+    /// feed of autoplaying video is never idle, so waiting for idle is waiting
+    /// for something that will not happen.
+    ///
+    /// **This does not fix the big problem, and must not be read as if it
+    /// did.** Under a playing TikTok feed on the Galaxy S8+ fleet, every
+    /// element query costs about 10.2–10.5 s: the server waits on a *hardcoded*
+    /// root-`AccessibilityNodeInfo` timeout that no setting reaches.
+    /// `waitForIdleTimeout: 0` was verified applied and changed nothing, and
+    /// neither did `enableTopmostWindowFromActivePackage` or
+    /// `deferAccessibilityCacheReset`. Measured 20/20 queries at p50 10531 ms.
+    /// See `docs/ANDROID_PROBE_REPORT_2026-08-09.md`.
+    async fn prime_session(&self) -> anyhow::Result<()> {
+        self.send(
+            reqwest::Method::POST,
+            "/appium/settings",
+            Some(json!({ "settings": { "waitForIdleTimeout": 0 } })),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Is the agent listening at all? Cheap; used for liveness.

@@ -76,15 +76,47 @@ impl AndroidDriver {
         format!("http://127.0.0.1:{}", self.host_port(serial))
     }
 
+    /// Point a host port at the agent's port on the device.
+    async fn forward(&self, serial: &str) -> anyhow::Result<()> {
+        let forward_spec = format!("tcp:{}", self.host_port(serial));
+        let device_spec = format!("tcp:{AGENT_DEVICE_PORT}");
+        self.adb
+            .device(
+                serial,
+                &["forward", &forward_spec, &device_spec],
+                adb::DEFAULT_TIMEOUT,
+            )
+            .await
+            .context("open the adb forward to the agent")?;
+        self.forwarded.lock().insert(serial.to_string());
+        Ok(())
+    }
+
     /// Whether an agent is reachable for this device, answered honestly.
     ///
     /// Devices we have never forwarded report `false` rather than borrowing
     /// somebody else's agent.
+    ///
+    /// The retry is not defensive padding. The tunnel is not durable: an adb
+    /// server restart drops every forward while the on-device agent keeps
+    /// running, and at the HTTP layer that is indistinguishable from a dead
+    /// agent. Measured — the instrumentation runner exited, `adb forward
+    /// --list` came back empty, `ps` still showed the server alive, and one
+    /// re-forward brought `/status` straight back. Without this the tile would
+    /// flap to not-ready every time the adb server bounces. The extra adb call
+    /// only happens on the failing path.
     async fn agent_ready(&self, serial: &str) -> bool {
         if !self.forwarded.lock().contains(serial) {
             return false;
         }
-        AgentClient::is_ready(&self.agent_base(serial)).await
+        let base = self.agent_base(serial);
+        if AgentClient::is_ready(&base).await {
+            return true;
+        }
+        if self.forward(serial).await.is_err() {
+            return false;
+        }
+        AgentClient::is_ready(&base).await
     }
 
     /// The pid of a package, or `None` when it is not running.
@@ -126,19 +158,8 @@ impl AndroidDriver {
 
     /// Make sure the agent is installed, running and forwarded.
     async fn ensure_agent(&self, serial: &str) -> anyhow::Result<AgentClient> {
-        let port = self.host_port(serial);
         let base = self.agent_base(serial);
-        let forward_spec = format!("tcp:{port}");
-        let device_spec = format!("tcp:{AGENT_DEVICE_PORT}");
-        self.adb
-            .device(
-                serial,
-                &["forward", &forward_spec, &device_spec],
-                adb::DEFAULT_TIMEOUT,
-            )
-            .await
-            .context("open the adb forward to the agent")?;
-        self.forwarded.lock().insert(serial.to_string());
+        self.forward(serial).await?;
 
         if AgentClient::is_ready(&base).await {
             return AgentClient::connect(&base).await;
