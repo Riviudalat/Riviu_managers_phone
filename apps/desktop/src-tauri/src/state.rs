@@ -55,6 +55,28 @@ fn configured_desktop_stream_capacity() -> usize {
     }
 }
 
+/// Build the stream budget, falling back rather than panicking.
+///
+/// `configured_desktop_stream_capacity` accepts up to 100 but the budget
+/// manager hard-caps concurrent producers at 2 (AGENTS.md 3.5/3.12), so
+/// `RIVIU_STREAM_CAPACITY=3` used to panic the app at startup through an
+/// `expect`. The env var's own contract is to fail closed to the default, and
+/// that is what a farm-sized value gets now, with the reason logged.
+fn desktop_stream_budget() -> StreamBudgetManager {
+    let requested = configured_desktop_stream_capacity();
+    match StreamBudgetManager::new(requested) {
+        Ok(manager) => manager,
+        Err(error) => {
+            log::warn!(
+                "RIVIU_STREAM_CAPACITY={requested} is above the stream budget ceiling ({error}); \
+                 using {DEFAULT_DESKTOP_STREAM_CAPACITY}"
+            );
+            StreamBudgetManager::new(DEFAULT_DESKTOP_STREAM_CAPACITY)
+                .expect("the default desktop stream capacity is within the ceiling")
+        }
+    }
+}
+
 pub struct AppState {
     pub registry: DeviceRegistry,
     pub events: EventBus,
@@ -64,6 +86,11 @@ pub struct AppState {
     /// Set when the device sidecar failed to start; the UI shows it so an empty
     /// device list is never mistaken for "nothing plugged in".
     pub driver_degraded_reason: Option<String>,
+    /// Why the Android backend is absent, when it is. `None` means it joined
+    /// the fleet. Kept separate from `driver_degraded_reason`, which is about
+    /// the iOS sidecar: "no adb on this machine" and "the iOS sidecar died"
+    /// are different facts and must not be reported as one.
+    pub android_unavailable_reason: Option<String>,
     pub jobs: JobQueue,
     pub flows: FlowRuntime,
     pub flow_artifacts: FlowArtifactStore,
@@ -461,16 +488,34 @@ impl AppState {
             };
         let bundle = create_driver(driver_config).await?;
         bundle.driver.set_agent_settings(resolved_agent_settings);
+
+        // One plane over both platforms. The Android backend joins only when
+        // `adb` is actually usable, so a machine with no Android tooling gets
+        // no backend rather than one that is permanently degraded — and the
+        // reason is kept so the UI can say which it is.
+        let mut backends: Vec<(String, Arc<dyn riviu_core::driver::DeviceDriver>)> =
+            vec![("ios".to_string(), bundle.driver.clone())];
+        let android_unavailable = match riviu_android_driver::detect_driver(
+            &riviu_android_driver::AndroidDriverConfig::default(),
+        )
+        .await
+        {
+            Ok(driver) => {
+                backends.push(("android".to_string(), driver));
+                None
+            }
+            Err(reason) => Some(reason),
+        };
+        let fleet: Arc<dyn riviu_core::driver::DeviceDriver> =
+            Arc::new(riviu_core::driver_multiplex::MultiplexDriver::new(backends));
+
         let control = Arc::new(DeviceControlPlane::new_with_capability_registry(
-            bundle.driver.clone(),
+            fleet,
             Arc::new(DeviceWorkCoordinator::new()),
             // Keep both connected phone tiles live. Core flow fixtures retain
             // the conservative default; the desktop has two USB devices in
             // its live fleet and the driver supports two producers.
-            Arc::new(
-                StreamBudgetManager::new(configured_desktop_stream_capacity())
-                    .expect("desktop stream capacity"),
-            ),
+            Arc::new(desktop_stream_budget()),
             bundle.interaction_capabilities.clone(),
         ));
         let signing = SigningService::with_credentials(sidecar_root.join("signer"), credentials);
@@ -534,6 +579,7 @@ impl AppState {
             streams: bundle.streams,
             driver_mode: bundle.mode,
             driver_degraded_reason: bundle.degraded_reason,
+            android_unavailable_reason: android_unavailable,
             jobs,
             flows,
             flow_artifacts,

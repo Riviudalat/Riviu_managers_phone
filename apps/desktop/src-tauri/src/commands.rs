@@ -775,6 +775,17 @@ pub fn driver_degraded_reason(state: State<'_, AppState>) -> Option<String> {
     state.driver_degraded_reason.clone()
 }
 
+/// Why the Android half of the fleet is absent, or `None` when it joined.
+///
+/// Separate from [`driver_degraded_reason`] on purpose: "this machine has no
+/// adb" and "the iOS sidecar failed" are different facts with different fixes,
+/// and collapsing them into one string would send an operator looking in the
+/// wrong place.
+#[tauri::command]
+pub fn android_unavailable_reason(state: State<'_, AppState>) -> Option<String> {
+    state.android_unavailable_reason.clone()
+}
+
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }

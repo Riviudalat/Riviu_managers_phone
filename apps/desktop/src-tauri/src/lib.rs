@@ -116,6 +116,7 @@ pub fn run() {
             commands::bulk_resign_wda,
             commands::driver_mode,
             commands::driver_degraded_reason,
+            commands::android_unavailable_reason,
             farm_commands::auth_session,
             farm_commands::auth_login,
             farm_commands::auth_register,

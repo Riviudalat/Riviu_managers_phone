@@ -3094,6 +3094,7 @@ dependencies = [
  "log",
  "parking_lot",
  "reqwest 0.12.28",
+ "riviu-android-driver",
  "riviu-core",
  "riviu-ios-driver",
  "riviu-script-engine",

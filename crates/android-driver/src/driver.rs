@@ -475,6 +475,28 @@ pub fn create_driver(config: &AndroidDriverConfig) -> anyhow::Result<Arc<dyn Dev
     Ok(Arc::new(AndroidDriver::new(config)?))
 }
 
+/// Build the driver only when `adb` is actually usable on this host.
+///
+/// `AdbProgram::resolve` always succeeds — it falls back to the bare name and
+/// lets the OS search `PATH` — so construction alone proves nothing. A machine
+/// with no Android tooling should not carry a permanently degraded Android
+/// backend in every fleet listing; the honest report is that there is no
+/// backend, and why.
+pub async fn detect_driver(config: &AndroidDriverConfig) -> Result<Arc<dyn DeviceDriver>, String> {
+    let driver = AndroidDriver::new(config).map_err(|error| error.to_string())?;
+    driver
+        .adb
+        .run(&["version"], Duration::from_secs(10))
+        .await
+        .map_err(|error| {
+            format!(
+                "adb is not usable ({}): {error}",
+                driver.adb.path().display()
+            )
+        })?;
+    Ok(Arc::new(driver))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

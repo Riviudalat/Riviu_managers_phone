@@ -34,5 +34,5 @@ pub mod session;
 
 pub use adb::AdbProgram;
 pub use agent::{AgentClient, Locator, Rect};
-pub use driver::{create_driver, AndroidDriver, AndroidDriverConfig};
+pub use driver::{create_driver, detect_driver, AndroidDriver, AndroidDriverConfig};
 pub use session::AndroidUiSession;
