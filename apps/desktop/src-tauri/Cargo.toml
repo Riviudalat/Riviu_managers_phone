@@ -37,5 +37,20 @@ async-trait = "0.1"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 reqwest = { workspace = true }
 
+# Windows ships an OCR engine in the OS (Windows.Media.Ocr, Windows 10+). These
+# are Microsoft's own WinRT projections, pure bindings with no runtime of their
+# own, so nothing extra has to be installed on a machine that runs the build —
+# which rules out Tesseract, whose native library and traineddata would have to
+# travel with it.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Foundation",
+    "Foundation_Collections",
+    "Globalization",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Storage_Streams",
+] }
+
 [features]
 default = []

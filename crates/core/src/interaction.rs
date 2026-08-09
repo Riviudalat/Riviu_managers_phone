@@ -331,12 +331,64 @@ pub struct CommentParentMatch {
 /// Normalize OCR labels without losing Vietnamese diacritics. Requiring exact
 /// normalized text is intentional: a fuzzy match could bind a reply to a
 /// neighboring comment in a dense drawer.
+/// Accented Latin letters folded to their base, so the locator survives an OCR
+/// engine that cannot render tone marks.
+///
+/// This is not cosmetic. Which engine reads the screen depends on the language
+/// packs the operating system has installed; measured on a Windows machine
+/// carrying only `en-US`, "Trả lời" comes back as "Trå löi" and "Đà Lạt" as
+/// "Dä Lat". Folding both sides makes those compare equal. The module already
+/// carried the accent-free "tra loi" spelling by hand next to the accented one,
+/// so the case was known — this generalises it past the one word that was
+/// hard-coded.
+///
+/// It is a partial remedy and the limit is worth stating: folding rescues a
+/// letter that lost its mark, not one the engine replaced outright. The same
+/// capture read "thư" as "thif" and "mới" as "mdi", which no folding can
+/// reconcile. Matching a Vietnamese comment body still needs the Vietnamese
+/// pack installed; what this buys everywhere is the control labels and the
+/// ASCII author handles.
+///
+/// Folding is only safe because a duplicated match is now refused rather than
+/// resolved: two comments differing only in tone marks collide here, and
+/// `locate_parent_comment` fails on the ambiguity instead of guessing.
+/// Both the correct Vietnamese letters *and* the Latin accented letters an
+/// engine substitutes for them, because the comparison has to survive either.
+const LATIN_FOLD: &[(char, &str)] = &[
+    ('a', "àáạảãâầấậẩẫăằắặẳẵäåāăą"),
+    ('e', "èéẹẻẽêềếệểễëēĕėęě"),
+    ('i', "ìíịỉĩïĩīĭįı"),
+    ('o', "òóọỏõôồốộổỗơờớợởỡöøōŏő"),
+    ('u', "ùúụủũưừứựửữüūŭůűų"),
+    ('y', "ỳýỵỷỹÿŷ"),
+    ('d', "đďð"),
+    ('c', "çćĉċč"),
+    ('n', "ñńņň"),
+    ('s', "śŝşš"),
+    ('t', "ţťŧ"),
+    ('z', "źżž"),
+    ('g', "ĝğġģ"),
+    ('l', "ĺļľłŀ"),
+    ('r', "ŕŗř"),
+];
+
+fn fold_latin(c: char) -> char {
+    LATIN_FOLD
+        .iter()
+        .find(|(_, variants)| variants.chars().any(|variant| variant == c))
+        .map(|(base, _)| *base)
+        .unwrap_or(c)
+}
+
 pub fn normalize_locator_text(value: &str) -> String {
     value
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase()
+        .chars()
+        .map(fold_latin)
+        .collect()
 }
 
 pub fn locate_parent_comment(
@@ -373,7 +425,7 @@ pub fn locate_parent_comment(
         .iter()
         .filter(|observation| {
             let label = normalize_locator_text(&observation.text);
-            matches!(label.as_str(), "reply" | "trả lời" | "tra loi")
+            matches!(label.as_str(), "reply" | "tra loi")
                 && observation.y >= text.y - 0.02
                 && observation.y <= text_bottom + 0.12
                 && observation.x >= text.x
@@ -410,7 +462,7 @@ pub fn discover_comment_identity(
             && observation.y <= text.y + 0.02
             && observation.y + observation.height >= text.y - 0.08
             && observation.x <= text.x + 0.1
-            && !matches!(label.as_str(), "reply" | "trả lời" | "tra loi")
+            && !matches!(label.as_str(), "reply" | "tra loi")
     })?;
     Some(CommentLocatorIdentity {
         author_label: author.text.clone(),
@@ -708,6 +760,38 @@ mod tests {
             (match_.reply_y - 0.39).abs() < 0.02,
             "tapped the reply at {:.3}, which belongs to the comment below",
             match_.reply_y
+        );
+    }
+
+    /// The locator has to survive OCR that cannot render tone marks.
+    ///
+    /// Which engine reads the screen depends on the operating system's
+    /// installed language packs: a Windows machine with only the English pack
+    /// reads "Trả lời" as "Trå löi". Folding both sides to their base letters is
+    /// what makes the comparison work either way — and the module already
+    /// carried the accent-free "tra loi" spelling by hand, so the case was
+    /// known; this generalises it.
+    #[test]
+    fn locator_text_matches_whether_or_not_the_ocr_kept_the_tone_marks() {
+        assert_eq!(normalize_locator_text("Trả lời"), "tra loi");
+        assert_eq!(normalize_locator_text("Trå löi"), "tra loi");
+        assert_eq!(
+            normalize_locator_text("  Quán   NÀY  xinh quá "),
+            normalize_locator_text("quan nay xinh qua")
+        );
+        assert_eq!(normalize_locator_text("Đà Lạt"), "da lat");
+        assert_eq!(normalize_locator_text("Dä Lat"), "da lat");
+        assert_eq!(normalize_locator_text("Café 123"), "cafe 123");
+        // The limit, stated as a test so nobody assumes more: folding restores a
+        // letter that lost its mark, not one the engine replaced. The same real
+        // capture read "mới" as "mdi" and "thư" as "thif", and no amount of
+        // folding reconciles those — a Vietnamese comment body still needs the
+        // Vietnamese OCR pack.
+        assert_ne!(
+            normalize_locator_text("mdi"),
+            normalize_locator_text("mới"),
+            "a substituted letter is not a folding problem and must not silently \
+             appear to match"
         );
     }
 

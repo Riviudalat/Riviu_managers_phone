@@ -50,9 +50,122 @@ pub async fn recognize(frame: &[u8]) -> anyhow::Result<Vec<CommentOcrObservation
         .map_err(|error| anyhow::anyhow!("OCR worker join: {error}"))?
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows carries an OCR engine in the OS, so the interaction thread does not
+/// have to be macOS-only.
+///
+/// It was: this function used to `bail!("Vision OCR requires macOS")` on every
+/// other platform, which meant `open_comment_for_ocr` — the step that finds the
+/// campaign's own comment and its reply control — could never run on Windows.
+/// A thread there posted its first message and stopped.
+///
+/// One difference from Vision that callers have to know about:
+/// `Windows.Media.Ocr` reports no per-word confidence, so every observation
+/// comes back at [`WINDOWS_OCR_CONFIDENCE`]. Inventing a score per word would
+/// be worse than saying plainly that there is none — the `>= 0.55` filters
+/// downstream simply do not discriminate here, and the exact-text and
+/// uniqueness checks carry the weight instead.
+#[cfg(windows)]
+pub const WINDOWS_OCR_CONFIDENCE: f32 = 1.0;
+
+#[cfg(windows)]
+pub async fn recognize(frame: &[u8]) -> anyhow::Result<Vec<CommentOcrObservation>> {
+    let frame = frame.to_vec();
+    tokio::task::spawn_blocking(move || recognize_sync(&frame))
+        .await
+        .map_err(|error| anyhow::anyhow!("OCR worker join: {error}"))?
+}
+
+#[cfg(windows)]
+fn recognize_sync(frame: &[u8]) -> anyhow::Result<Vec<CommentOcrObservation>> {
+    use windows::Graphics::Imaging::BitmapDecoder;
+    use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
+
+    // Let Windows decode the JPEG rather than handing it a pixel buffer: it
+    // removes a format-conversion step that has nothing to do with reading text.
+    let stream = InMemoryRandomAccessStream::new()?;
+    let writer = DataWriter::CreateDataWriter(&stream.GetOutputStreamAt(0)?)?;
+    writer.WriteBytes(frame)?;
+    writer.StoreAsync()?.get()?;
+    writer.FlushAsync()?.get()?;
+    stream.Seek(0)?;
+
+    let decoder =
+        BitmapDecoder::CreateWithIdAsync(BitmapDecoder::JpegDecoderId()?, &stream)?.get()?;
+    let bitmap = decoder.GetSoftwareBitmapAsync()?.get()?;
+    let (width, height) = (bitmap.PixelWidth()? as f64, bitmap.PixelHeight()? as f64);
+    if width <= 0.0 || height <= 0.0 {
+        anyhow::bail!("khung ảnh rỗng");
+    }
+
+    let engine = ocr_engine()?;
+    let result = engine.RecognizeAsync(&bitmap)?.get()?;
+
+    let mut observations = Vec::new();
+    for line in result.Lines()? {
+        let text = line.Text()?.to_string_lossy();
+        if text.trim().is_empty() {
+            continue;
+        }
+        // A line has no rect of its own — only its words do — so the line box is
+        // their union. The callers locate a tap point from this, so it has to
+        // cover the whole line, not the first word.
+        let (mut x0, mut y0) = (f64::MAX, f64::MAX);
+        let (mut x1, mut y1) = (f64::MIN, f64::MIN);
+        for word in line.Words()? {
+            let rect = word.BoundingRect()?;
+            x0 = x0.min(rect.X as f64);
+            y0 = y0.min(rect.Y as f64);
+            x1 = x1.max(rect.X as f64 + rect.Width as f64);
+            y1 = y1.max(rect.Y as f64 + rect.Height as f64);
+        }
+        if x0 > x1 || y0 > y1 {
+            continue;
+        }
+        observations.push(CommentOcrObservation {
+            text,
+            confidence: WINDOWS_OCR_CONFIDENCE,
+            x: x0 / width,
+            y: y0 / height,
+            width: (x1 - x0) / width,
+            height: (y1 - y0) / height,
+        });
+    }
+    Ok(observations)
+}
+
+/// Prefer Vietnamese, then whatever the user profile offers, then English.
+///
+/// `TryCreateFromLanguage` returns null rather than an error when the pack is
+/// not installed, so each step has to be tested for null instead of trusted.
+/// The handles this reads are ASCII, so the English engine is a genuine
+/// fallback rather than a token one.
+#[cfg(windows)]
+fn ocr_engine() -> anyhow::Result<windows::Media::Ocr::OcrEngine> {
+    use windows::core::HSTRING;
+    use windows::Globalization::Language;
+    use windows::Media::Ocr::OcrEngine;
+
+    for tag in ["vi", "en-US"] {
+        if let Ok(language) = Language::CreateLanguage(&HSTRING::from(tag)) {
+            if let Ok(engine) = OcrEngine::TryCreateFromLanguage(&language) {
+                return Ok(engine);
+            }
+        }
+        if tag == "vi" {
+            if let Ok(engine) = OcrEngine::TryCreateFromUserProfileLanguages() {
+                return Ok(engine);
+            }
+        }
+    }
+    anyhow::bail!(
+        "Windows không có gói OCR nào dùng được — cài Language pack (Settings → \
+         Time & language → Language → Optional features → Basic typing/OCR)"
+    )
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub async fn recognize(_frame: &[u8]) -> anyhow::Result<Vec<CommentOcrObservation>> {
-    anyhow::bail!("Vision OCR requires macOS")
+    anyhow::bail!("OCR chỉ có trên macOS (Vision) và Windows (Windows.Media.Ocr)")
 }
 
 #[cfg(target_os = "macos")]
@@ -82,4 +195,68 @@ fn recognize_sync(frame: &[u8]) -> anyhow::Result<Vec<CommentOcrObservation>> {
     }
     let parsed = serde_json::from_slice::<Vec<CommentOcrObservation>>(&output.stdout)?;
     Ok(parsed)
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    fn fixture(name: &str) -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../crates/core/tests/fixtures")
+            .join(name);
+        std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    }
+
+    /// The OCR the interaction thread runs on has to actually read a device
+    /// capture, not merely compile.
+    ///
+    /// The assertion is on ASCII, deliberately. Which engine Windows hands back
+    /// depends on the installed language packs, and this machine has only
+    /// `en-US`, which renders "Mới đi Đà Lạt" as "Mdi di Dä Lat". The hashtags
+    /// in the same frame come back intact, and ASCII is what the check that
+    /// matters most reads: `open_target_confirmed` compares the author handle
+    /// from the link, and handles are ASCII.
+    #[tokio::test]
+    async fn windows_ocr_reads_a_real_device_capture() {
+        let observations = recognize(&fixture("feed-photo-carousel.jpg"))
+            .await
+            .expect("Windows OCR");
+
+        assert!(
+            observations.len() >= 5,
+            "only {} lines read off the capture",
+            observations.len()
+        );
+        assert!(
+            observations
+                .iter()
+                .any(|o| o.text.to_lowercase().contains("dalat")),
+            "the hashtag line was not read: {:?}",
+            observations.iter().map(|o| &o.text).collect::<Vec<_>>()
+        );
+        for o in &observations {
+            assert!(
+                (0.0..=1.0).contains(&o.x)
+                    && (0.0..=1.0).contains(&o.y)
+                    && o.width > 0.0
+                    && o.height > 0.0,
+                "box out of the unit square: {o:?}"
+            );
+        }
+    }
+
+    /// Whatever engine is installed, one has to be. A machine with no OCR pack
+    /// at all should say so in a way the operator can act on rather than
+    /// failing somewhere downstream.
+    #[test]
+    fn an_engine_is_available_or_the_error_names_the_fix() {
+        if let Err(error) = ocr_engine() {
+            let message = error.to_string();
+            assert!(
+                message.contains("Language pack"),
+                "unhelpful OCR error: {message}"
+            );
+        }
+    }
 }
