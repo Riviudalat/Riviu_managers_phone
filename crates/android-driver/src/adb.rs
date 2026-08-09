@@ -142,6 +142,40 @@ impl AdbProgram {
     }
 }
 
+/// Check a package name before it is pasted into a device shell command.
+///
+/// `adb shell` runs a real shell on the phone, so `bundle_id` reaches it as
+/// code, not as data: a value like `x; rm -rf /sdcard/DCIM` would run. The
+/// bundle id is operator-supplied — nurture settings, Flow action config — and
+/// Flow documents import from JSON, so it can arrive from outside.
+///
+/// Rejecting beats escaping here. An Android package name has a narrow, fully
+/// specified grammar (dot-separated segments of letters, digits and
+/// underscores, each starting with a letter), so anything outside it is a
+/// mistake or an attack, and neither should be quoted and run.
+pub fn validate_package_name(bundle_id: &str) -> anyhow::Result<&str> {
+    let invalid = || anyhow!("not a valid Android package name: {bundle_id:?}");
+    if bundle_id.is_empty() || bundle_id.len() > 255 {
+        return Err(invalid());
+    }
+    let mut segments = 0usize;
+    for segment in bundle_id.split('.') {
+        segments += 1;
+        let mut chars = segment.chars();
+        match chars.next() {
+            Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+            _ => return Err(invalid()),
+        }
+        if !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+            return Err(invalid());
+        }
+    }
+    if segments < 2 {
+        return Err(invalid());
+    }
+    Ok(bundle_id)
+}
+
 fn exe_name() -> &'static str {
     if cfg!(windows) {
         "adb.exe"
@@ -320,6 +354,45 @@ mod tests {
             Some(420)
         );
         assert_eq!(parse_wm_density("Physical density: 420\n"), Some(420));
+    }
+
+    #[test]
+    fn a_real_package_name_is_accepted() {
+        for good in [
+            "com.zhiliaoapp.musically",
+            "io.appium.uiautomator2.server.test",
+            "com.ss.android.ugc.trill",
+            "a.b",
+            "com.example._private1",
+        ] {
+            assert!(validate_package_name(good).is_ok(), "{good}");
+        }
+    }
+
+    #[test]
+    fn anything_the_device_shell_could_act_on_is_refused() {
+        // These are the shapes that matter: the value is pasted into a shell
+        // command on the phone, so a separator or a substitution is code.
+        for bad in [
+            "com.x; rm -rf /sdcard/DCIM",
+            "com.x && reboot",
+            "com.x | sh",
+            "com.x$(id)",
+            "com.x`id`",
+            "com.x\nreboot",
+            "com.x y",
+            "com.x'",
+            "../../etc/passwd",
+            "com..x",
+            "1com.x",
+            "",
+            "nodots",
+        ] {
+            assert!(
+                validate_package_name(bad).is_err(),
+                "should have been refused: {bad:?}"
+            );
+        }
     }
 
     #[test]

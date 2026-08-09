@@ -125,6 +125,9 @@ impl AndroidDriver {
     /// reports as a command failure. Absence is an answer here, not an error —
     /// propagating it made `inspect_app_process` fail precisely when it was
     /// asked about a stopped app, which is the case it exists to describe.
+    ///
+    /// `bundle_id` must already have passed [`adb::validate_package_name`];
+    /// every public caller checks it before reaching here.
     async fn pid_of(&self, serial: &str, bundle_id: &str) -> Option<u64> {
         self.adb
             .shell(serial, &format!("pidof {bundle_id}"))
@@ -234,7 +237,13 @@ async fn probe_device(adb: AdbProgram, serial: String, model_hint: Option<String
          dumpsys battery | grep level",
         sep = FIELD_SEPARATOR
     );
-    let stdout = adb.shell(&serial, &script).await.unwrap_or_default();
+    // A device that will not answer must say so. Swallowing the error left a
+    // tile with a blank model and OS looking like an ordinary connected phone,
+    // which is the same failure as reporting something that was never checked.
+    let (stdout, probe_error) = match adb.shell(&serial, &script).await {
+        Ok(stdout) => (stdout, None),
+        Err(error) => (String::new(), Some(error.to_string())),
+    };
     let fields = parse_inventory(&stdout);
     let model = match model_hint {
         Some(model) if !model.is_empty() => model,
@@ -253,7 +262,11 @@ async fn probe_device(adb: AdbProgram, serial: String, model_hint: Option<String
         // Android release is the honest reading of "OS version" until then.
         ios_version: fields.release.unwrap_or_default(),
         connection: ConnectionKind::Usb,
-        status: DeviceStatus::Connected,
+        status: if probe_error.is_some() {
+            DeviceStatus::Error
+        } else {
+            DeviceStatus::Connected
+        },
         battery: fields.battery,
         wda_ready: false,
         // Android has no provisioning profile to expire. `adb install` needs no
@@ -261,7 +274,7 @@ async fn probe_device(adb: AdbProgram, serial: String, model_hint: Option<String
         wda_expires_at: None,
         stream_url: None,
         tile_stream_state: Default::default(),
-        last_error: None,
+        last_error: probe_error,
     }
 }
 
@@ -401,6 +414,7 @@ impl DeviceDriver for AndroidDriver {
     }
 
     async fn launch_app(&self, udid: &str, bundle_id: &str) -> anyhow::Result<()> {
+        let bundle_id = adb::validate_package_name(bundle_id)?;
         self.adb
             .shell(
                 udid,
@@ -420,6 +434,7 @@ impl DeviceDriver for AndroidDriver {
         udid: &str,
         bundle_id: &str,
     ) -> anyhow::Result<ProcessAbsenceProof> {
+        let bundle_id = adb::validate_package_name(bundle_id)?;
         let before = self.pid_of(udid, bundle_id).await;
         self.adb
             .shell(udid, &format!("am force-stop {bundle_id}"))
@@ -451,6 +466,7 @@ impl DeviceDriver for AndroidDriver {
         udid: &str,
         bundle_id: &str,
     ) -> anyhow::Result<AppProcessState> {
+        let bundle_id = adb::validate_package_name(bundle_id)?;
         let pid = self.pid_of(udid, bundle_id).await;
         Ok(AppProcessState {
             bundle_id: bundle_id.to_string(),

@@ -168,6 +168,7 @@ impl UiSession for AndroidUiSession {
     }
 
     async fn launch_app_foreground(&self, bundle_id: &str) -> anyhow::Result<()> {
+        let bundle_id = crate::adb::validate_package_name(bundle_id)?;
         self.adb
             .shell(
                 &self.serial,
