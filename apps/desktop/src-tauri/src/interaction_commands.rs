@@ -155,6 +155,7 @@ pub async fn interaction_start_thread(
             campaign_id.clone(),
             request,
             plan,
+            None,
         )
         .await
         {
@@ -215,28 +216,60 @@ pub fn interaction_cancel(
     Ok(())
 }
 
+/// Which assignments a retry may re-send.
+///
+/// Excluding `Succeeded` is the whole point: tapping Send is not idempotent, so
+/// a retry that re-ran a delivered message would post the comment twice.
+/// `Uncertain` is excluded for the same reason with less information — delivery
+/// is exactly what is unproven there. `Sending` is still in flight.
+///
+/// `requested` narrows further when the caller names specific assignments;
+/// `None` means "everything still retryable".
+fn retryable_assignments(
+    assignments: &[riviu_core::InteractionAssignmentRecord],
+    requested: Option<&std::collections::HashSet<String>>,
+) -> std::collections::HashSet<String> {
+    assignments
+        .iter()
+        .filter(|assignment| {
+            !matches!(
+                assignment.state,
+                ThreadMessageState::Sending
+                    | ThreadMessageState::Succeeded
+                    | ThreadMessageState::Uncertain
+            )
+        })
+        .filter(|assignment| requested.map_or(true, |ids| ids.contains(&assignment.id)))
+        .map(|assignment| assignment.id.clone())
+        .collect()
+}
+
 #[tauri::command]
 pub fn interaction_retry(
     state: State<'_, AppState>,
     campaign_id: String,
+    assignment_ids: Option<Vec<String>>,
 ) -> Result<(), CommandError> {
+    let requested: Option<std::collections::HashSet<String>> =
+        assignment_ids.map(|ids| ids.into_iter().collect());
     let admission = state.ensure_accepting_work()?;
     let detail = state
         .db
         .get_interaction_campaign(&campaign_id)
         .map_err(CommandError::operation)?
         .ok_or_else(|| CommandError::code("InteractionNotFound", "campaign không tồn tại"))?;
-    if detail.assignments.iter().any(|assignment| {
-        matches!(
-            assignment.state,
-            ThreadMessageState::Sending
-                | ThreadMessageState::Succeeded
-                | ThreadMessageState::Uncertain
-        )
-    }) {
+    // Retry used to refuse the whole campaign the moment *one* message reached
+    // Succeeded — which is precisely the state a broken chain produces (one
+    // posted, the rest skipped), so the failure mode was also unrepairable.
+    //
+    // Scope it per assignment instead. Anything already sent, or whose delivery
+    // is unproven, stays out: tapping Send is not idempotent and a second run
+    // would post the comment twice.
+    let retryable = retryable_assignments(&detail.assignments, requested.as_ref());
+    if retryable.is_empty() {
         return Err(CommandError::code(
             "RetryNotAllowed",
-            "campaign đã có effect intent hoặc trạng thái không chắc chắn",
+            "không có tin nào gửi lại được: mọi tin đã đăng, đang gửi, hoặc ở trạng thái không chắc chắn",
         ));
     }
     state
@@ -269,6 +302,7 @@ pub fn interaction_retry(
             worker_id.clone(),
             request,
             plan,
+            Some(retryable),
         )
         .await
         {
@@ -341,6 +375,7 @@ async fn open_interaction_context(
         .map_err(CommandError::from)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_thread_campaign(
     db: Arc<riviu_core::db::Database>,
     control: Arc<DeviceControlPlane>,
@@ -349,6 +384,7 @@ async fn execute_thread_campaign(
     campaign_id: String,
     request: ThreadCampaignRequest,
     plan: ThreadPlan,
+    only_assignments: Option<std::collections::HashSet<String>>,
 ) -> anyhow::Result<()> {
     let settings = db.get_nurture_settings().context("đọc cấu hình AI")?;
     if settings.api_key.trim().is_empty() {
@@ -455,7 +491,16 @@ async fn execute_thread_campaign(
         // A root comment is sent with full frame evidence. Each subsequent
         // reply first resolves the exact parent text+author on two OCR frames.
         let mut identities = HashMap::<u8, CommentLocatorIdentity>::new();
+        let mut chain_broken_at: Option<u8> = None;
         for (id, prepared) in prepared_messages {
+            // A retry runs the same plan but must not re-send anything already
+            // posted; the caller decides which assignments are in scope.
+            if only_assignments
+                .as_ref()
+                .is_some_and(|only| !only.contains(&id))
+            {
+                continue;
+            }
             // Cancellation was only ever checked between *targets*, so pressing
             // Dừng left every remaining message of the current target to post —
             // up to six more public comments. Check before each one instead.
@@ -470,11 +515,25 @@ async fn execute_thread_campaign(
             let parent_identity = prepared
                 .parent_ordinal
                 .and_then(|ordinal| identities.get(&ordinal).cloned());
-            if prepared.parent_ordinal.is_some() && parent_identity.is_none() {
+            if let Some(parent_ordinal) = prepared
+                .parent_ordinal
+                .filter(|_| parent_identity.is_none())
+            {
+                // The chain is linear and an identity is only ever learned by
+                // sending, so once it breaks nothing later in this target can
+                // recover — every remaining message lands here. Naming the
+                // ordinal that broke it is the difference between "5 messages
+                // skipped" and knowing which one to look at.
+                if chain_broken_at.is_none() {
+                    chain_broken_at = Some(parent_ordinal);
+                }
+                let broke_at = chain_broken_at.unwrap_or(parent_ordinal);
                 db.update_interaction_assignment_state(
                     &id,
                     ThreadMessageState::SkippedParent,
-                    Some("parent_identity_not_confirmed"),
+                    Some(&format!(
+                        "parent_identity_not_confirmed_at_ordinal_{broke_at}"
+                    )),
                     None,
                     None,
                 )?;
@@ -955,4 +1014,78 @@ fn campaign_is_cancelled(db: &riviu_core::db::Database, campaign_id: &str) -> an
             .map(|detail| detail.summary.state),
         Some(ThreadCampaignState::Cancelled)
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use riviu_core::InteractionAssignmentRecord;
+
+    fn assignment(id: &str, ordinal: u8, state: ThreadMessageState) -> InteractionAssignmentRecord {
+        InteractionAssignmentRecord {
+            id: id.into(),
+            target_key: "content:1".into(),
+            ordinal,
+            actor_udid: format!("actor-{ordinal}"),
+            parent_assignment_id: None,
+            state,
+            prepared_text: Some("nội dung".into()),
+            error_code: None,
+        }
+    }
+
+    /// The state a broken chain actually leaves behind: one message posted, the
+    /// rest skipped. Retry used to refuse the whole campaign on sight of that
+    /// single `Succeeded`, so the most common failure was also the one that
+    /// could never be repaired.
+    #[test]
+    fn a_posted_message_is_never_re_sent_but_the_skipped_ones_are_retryable() {
+        let assignments = vec![
+            assignment("a0", 0, ThreadMessageState::Succeeded),
+            assignment("a1", 1, ThreadMessageState::SkippedParent),
+            assignment("a2", 2, ThreadMessageState::SkippedParent),
+        ];
+
+        let retryable = retryable_assignments(&assignments, None);
+
+        assert!(
+            !retryable.contains("a0"),
+            "tapping Send is not idempotent — a delivered comment must never be re-sent"
+        );
+        assert_eq!(retryable.len(), 2);
+        assert!(retryable.contains("a1") && retryable.contains("a2"));
+    }
+
+    /// Delivery is exactly what `Uncertain` does not establish, and `Sending`
+    /// is still in flight. Both stay out for the same reason as `Succeeded`.
+    #[test]
+    fn unproven_and_in_flight_deliveries_are_excluded() {
+        let assignments = vec![
+            assignment("u", 0, ThreadMessageState::Uncertain),
+            assignment("s", 1, ThreadMessageState::Sending),
+            assignment("f", 2, ThreadMessageState::Failed),
+        ];
+
+        let retryable = retryable_assignments(&assignments, None);
+
+        assert_eq!(retryable.len(), 1);
+        assert!(retryable.contains("f"));
+    }
+
+    /// Naming assignments narrows the set; it can never widen it past the
+    /// safety filter above.
+    #[test]
+    fn naming_an_already_posted_assignment_does_not_authorise_re_sending_it() {
+        let assignments = vec![
+            assignment("a0", 0, ThreadMessageState::Succeeded),
+            assignment("a1", 1, ThreadMessageState::SkippedParent),
+        ];
+        let requested: std::collections::HashSet<String> =
+            ["a0".to_string(), "a1".to_string()].into_iter().collect();
+
+        let retryable = retryable_assignments(&assignments, Some(&requested));
+
+        assert_eq!(retryable.len(), 1);
+        assert!(retryable.contains("a1"));
+    }
 }

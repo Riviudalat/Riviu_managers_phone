@@ -502,8 +502,11 @@ export async function interactionCancel(campaignId: string) {
   return invoke<void>("interaction_cancel", { campaignId });
 }
 
-export async function interactionRetry(campaignId: string) {
-  return invoke<void>("interaction_retry", { campaignId });
+/// Omit `assignmentIds` to retry every message that is still retryable.
+/// Messages already sent — or whose delivery is unproven — are excluded either
+/// way: tapping Send is not idempotent.
+export async function interactionRetry(campaignId: string, assignmentIds?: string[]) {
+  return invoke<void>("interaction_retry", { campaignId, assignmentIds });
 }
 
 export async function interactionOpenOnDevice(udid: string, url: string) {
