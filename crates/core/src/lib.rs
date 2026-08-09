@@ -5,6 +5,7 @@ pub mod device_capabilities;
 pub mod device_control;
 pub mod device_work;
 pub mod driver;
+pub mod driver_multiplex;
 pub mod events;
 pub mod flow;
 pub mod frame_source;
