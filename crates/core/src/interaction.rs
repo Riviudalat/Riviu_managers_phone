@@ -280,6 +280,20 @@ pub struct ThreadSendEvidence {
     pub cleared_frame_sha256: String,
 }
 
+/// SHA-256 of a frame's exact bytes.
+///
+/// The two frame fields on [`ThreadSendEvidence`] used to be filled with
+/// `nurture::frame_digest` — a 64-bit FNV-1a over roughly 512 *sampled* bytes,
+/// which is a cheap "did this change?" fingerprint and nothing like a SHA-256.
+/// The values went into the campaign record and into
+/// `interaction_artifacts.sha256` under names that claimed otherwise, so
+/// evidence nobody could verify also could not be recognised as unverifiable.
+pub fn frame_sha256(frame: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(frame);
+    format!("{:x}", digest.finalize())
+}
+
 impl PreparedThreadMessage {
     pub fn new(plan: &ThreadMessagePlan, text: impl Into<String>) -> Self {
         let text = normalize_comment_text(&text.into());
@@ -447,10 +461,17 @@ pub fn locate_parent_comment(
     })
 }
 
+/// `locator_version` records which reader produced `observations`. It used to
+/// be hard-coded `"vision-v1"`, which is only true on macOS — a Windows run
+/// reads through `Windows.Media.Ocr`, whose output differs enough to matter
+/// (no per-word confidence, and tone marks lost without the Vietnamese pack).
+/// Stamping the wrong reader onto stored evidence makes a later mismatch
+/// impossible to explain.
 pub fn discover_comment_identity(
     observations: &[CommentOcrObservation],
     exact_text: &str,
     frame_sha256: &str,
+    locator_version: &str,
 ) -> Option<CommentLocatorIdentity> {
     let text = observations.iter().find(|observation| {
         normalize_locator_text(&observation.text) == normalize_locator_text(exact_text)
@@ -467,7 +488,7 @@ pub fn discover_comment_identity(
     Some(CommentLocatorIdentity {
         author_label: author.text.clone(),
         text: text.text.clone(),
-        locator_version: "vision-v1".into(),
+        locator_version: locator_version.into(),
         frame_sha256: frame_sha256.into(),
     })
 }
@@ -520,6 +541,13 @@ pub struct InteractionCampaignSummary {
     pub message_count: u8,
     pub target_count: u32,
     pub succeeded_messages: u32,
+    /// Messages that were meant to be posted and were not, for any reason —
+    /// `failed`, `uncertain`, **and `skipped_parent`**.
+    ///
+    /// The last one used to be counted nowhere. A thread whose parent could not
+    /// be identified skips every remaining message, so a six-message campaign
+    /// could report "1 succeeded, 0 failed" while five were silently dropped.
+    /// The per-assignment chip already distinguished them; only the total lied.
     pub failed_messages: u32,
     pub updated_at: String,
 }
@@ -869,8 +897,12 @@ mod tests {
                 height: 0.04,
             },
         ];
-        let identity = discover_comment_identity(&observations, "Món này đáng thử", "abc").unwrap();
+        let identity =
+            discover_comment_identity(&observations, "Món này đáng thử", "abc", "test-ocr")
+                .unwrap();
         assert_eq!(identity.author_label, "actor_1");
-        assert_eq!(identity.locator_version, "vision-v1");
+        // The reader is recorded, not assumed: it used to be hard-coded
+        // "vision-v1" even when a Windows run had read the frame.
+        assert_eq!(identity.locator_version, "test-ocr");
     }
 }

@@ -1213,7 +1213,7 @@ impl Database {
             "SELECT c.id,c.request_id,c.state,c.message_count,c.updated_at,
                     (SELECT COUNT(*) FROM interaction_targets t WHERE t.campaign_id=c.id),
                     (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state='succeeded'),
-                    (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state IN ('failed','uncertain'))
+                    (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state IN ('failed','uncertain','skipped_parent'))
              FROM interaction_campaigns c ORDER BY c.updated_at DESC LIMIT ?1",
         )?;
         let rows = statement.query_map(params![limit as i64], interaction_summary_from_row)?;
@@ -1230,7 +1230,7 @@ impl Database {
                 "SELECT c.id,c.request_id,c.state,c.message_count,c.updated_at,
                         (SELECT COUNT(*) FROM interaction_targets t WHERE t.campaign_id=c.id),
                         (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state='succeeded'),
-                        (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state IN ('failed','uncertain'))
+                        (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state IN ('failed','uncertain','skipped_parent'))
                  FROM interaction_campaigns c WHERE c.id=?1",
                 params![campaign_id],
                 interaction_summary_from_row,
@@ -1746,6 +1746,68 @@ mod interaction_tests {
         assert_eq!(
             updated.assignments[0].prepared_text.as_deref(),
             Some("món này nhìn ngon quá")
+        );
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    /// A message that was meant to post and did not has to show up in the
+    /// campaign totals.
+    ///
+    /// `skipped_parent` was counted in neither bucket. It is not a rare state:
+    /// one message whose identity cannot be read makes every later message in
+    /// that thread `skipped_parent`, so a six-message campaign could report
+    /// "1 succeeded, 0 failed" with five silently dropped — the one number an
+    /// operator reads to decide whether anything went wrong.
+    #[test]
+    fn a_skipped_parent_message_is_counted_as_not_delivered() {
+        let (db, path) = fixture();
+        let request = request();
+        let plan = plan_threads(&request).expect("plan");
+        let campaign_id = db
+            .create_interaction_campaign(&request, &plan)
+            .expect("create campaign");
+        let detail = db
+            .get_interaction_campaign(&campaign_id)
+            .expect("detail")
+            .expect("campaign exists");
+
+        db.update_interaction_assignment_state(
+            &detail.assignments[0].id,
+            ThreadMessageState::Succeeded,
+            None,
+            None,
+            None,
+        )
+        .expect("mark succeeded");
+        db.update_interaction_assignment_state(
+            &detail.assignments[1].id,
+            ThreadMessageState::SkippedParent,
+            Some("parent_identity_not_confirmed"),
+            None,
+            None,
+        )
+        .expect("mark skipped");
+
+        let summary = db
+            .get_interaction_campaign(&campaign_id)
+            .expect("summary")
+            .expect("campaign exists")
+            .summary;
+        assert_eq!(summary.succeeded_messages, 1);
+        assert_eq!(
+            summary.failed_messages, 1,
+            "a skipped message is a message that did not post"
+        );
+
+        let listed = db
+            .list_interaction_campaigns(10)
+            .expect("list")
+            .into_iter()
+            .find(|item| item.id == campaign_id)
+            .expect("campaign listed");
+        assert_eq!(
+            listed.failed_messages, 1,
+            "the list view must agree with the detail view"
         );
         std::fs::remove_file(path).expect("remove fixture database");
     }

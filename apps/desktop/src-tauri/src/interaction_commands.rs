@@ -367,16 +367,18 @@ async fn execute_thread_campaign(
             )
         })
         .collect();
+    // Held false for the life of the campaign, on purpose. It reaches the send
+    // functions, where it would abort their waits mid-flight — including the
+    // window between tapping Send and confirming the field cleared, which would
+    // manufacture `Uncertain` and block retry for a comment that did post.
+    // Stopping is handled between assignments instead, where nothing is in
+    // flight.
     let stop = AtomicBool::new(false);
     let mut succeeded = 0usize;
     let mut failed = 0usize;
 
     for target in &request.targets {
-        if matches!(
-            db.get_interaction_campaign(&campaign_id)?
-                .map(|d| d.summary.state),
-            Some(ThreadCampaignState::Cancelled)
-        ) {
+        if campaign_is_cancelled(&db, &campaign_id)? {
             return Ok(());
         }
 
@@ -454,6 +456,17 @@ async fn execute_thread_campaign(
         // reply first resolves the exact parent text+author on two OCR frames.
         let mut identities = HashMap::<u8, CommentLocatorIdentity>::new();
         for (id, prepared) in prepared_messages {
+            // Cancellation was only ever checked between *targets*, so pressing
+            // Dừng left every remaining message of the current target to post —
+            // up to six more public comments. Check before each one instead.
+            //
+            // Deliberately not mid-send: the Send tap is a side effect that has
+            // already gone out, and aborting between it and its confirmation
+            // would manufacture `Uncertain`, which blocks retry. One in-flight
+            // message finishing is the correct cost of stopping.
+            if campaign_is_cancelled(&db, &campaign_id)? {
+                return Ok(());
+            }
             let parent_identity = prepared
                 .parent_ordinal
                 .and_then(|ordinal| identities.get(&ordinal).cloned());
@@ -724,7 +737,7 @@ async fn open_target_confirmed(
     let before = engine
         .frames
         .latest(udid)
-        .map(|frame| frame_sha256(&frame))
+        .map(|frame| riviu_core::frame_sha256(&frame))
         .unwrap_or_default();
 
     session
@@ -753,7 +766,7 @@ async fn open_target_confirmed(
         let Some(frame) = engine.frames.latest(udid) else {
             continue;
         };
-        if frame_sha256(&frame) == before {
+        if riviu_core::frame_sha256(&frame) == before {
             // Byte-identical to the pre-request screen: the open did nothing.
             continue;
         }
@@ -865,18 +878,27 @@ async fn discover_after_send(
         .frames
         .latest(udid)
         .context("identity frame missing")?;
-    let first_sha = frame_sha256(&first_frame);
-    let first_identity = discover_comment_identity(&first, exact_text, &first_sha)
-        .context("comment author/text chưa xuất hiện trong OCR")?;
+    let first_sha = riviu_core::frame_sha256(&first_frame);
+    let first_identity = discover_comment_identity(
+        &first,
+        exact_text,
+        &first_sha,
+        interaction_ocr::locator_version(),
+    )
+    .context("comment author/text chưa xuất hiện trong OCR")?;
     tokio::time::sleep(Duration::from_millis(700)).await;
     let second_frame = engine
         .frames
         .latest(udid)
         .context("identity second frame missing")?;
     let second = interaction_ocr::recognize(&second_frame).await?;
-    let second_identity =
-        discover_comment_identity(&second, exact_text, &frame_sha256(&second_frame))
-            .context("comment identity không ổn định")?;
+    let second_identity = discover_comment_identity(
+        &second,
+        exact_text,
+        &riviu_core::frame_sha256(&second_frame),
+        interaction_ocr::locator_version(),
+    )
+    .context("comment identity không ổn định")?;
     if riviu_core::normalize_locator_text(&first_identity.author_label)
         != riviu_core::normalize_locator_text(&second_identity.author_label)
         || riviu_core::normalize_locator_text(&first_identity.text)
@@ -925,9 +947,12 @@ async fn dismiss_comment_drawer(
         .await;
 }
 
-fn frame_sha256(frame: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut digest = Sha256::new();
-    digest.update(frame);
-    format!("{:x}", digest.finalize())
+/// `interaction_cancel` only flips the campaign row, so the running worker has
+/// to read it back to notice. Nothing else signals it.
+fn campaign_is_cancelled(db: &riviu_core::db::Database, campaign_id: &str) -> anyhow::Result<bool> {
+    Ok(matches!(
+        db.get_interaction_campaign(campaign_id)?
+            .map(|detail| detail.summary.state),
+        Some(ThreadCampaignState::Cancelled)
+    ))
 }

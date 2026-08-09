@@ -4,6 +4,29 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use riviu_core::{CommentOcrObservation, FrameTextSource};
 
+/// Which reader produced a set of observations, recorded on every stored
+/// locator identity.
+///
+/// The two engines are not interchangeable: Vision reports per-word confidence
+/// and, on this build, recognises Vietnamese; `Windows.Media.Ocr` reports no
+/// confidence at all and reads whatever language pack the machine happens to
+/// have. Evidence that does not say which one read it cannot be argued with
+/// later.
+pub fn locator_version() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "vision-v1"
+    }
+    #[cfg(windows)]
+    {
+        "windows-media-ocr-v1"
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        "none"
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct DesktopFrameTextSource;
 

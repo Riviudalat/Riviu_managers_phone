@@ -288,8 +288,8 @@ impl NurtureEngine {
             .await;
         Ok(ThreadSendEvidence {
             text_sha256: prepared.text_sha256.clone(),
-            armed_frame_sha256: format!("{:016x}", frame_digest(&armed_bytes)),
-            cleared_frame_sha256: format!("{:016x}", frame_digest(&cleared_bytes)),
+            armed_frame_sha256: crate::interaction::frame_sha256(&armed_bytes),
+            cleared_frame_sha256: crate::interaction::frame_sha256(&cleared_bytes),
         })
     }
 
@@ -419,8 +419,8 @@ impl NurtureEngine {
         }
         Ok(ThreadSendEvidence {
             text_sha256: prepared.text_sha256.clone(),
-            armed_frame_sha256: format!("{:016x}", frame_digest(&armed_bytes)),
-            cleared_frame_sha256: format!("{:016x}", frame_digest(&cleared_bytes)),
+            armed_frame_sha256: crate::interaction::frame_sha256(&armed_bytes),
+            cleared_frame_sha256: crate::interaction::frame_sha256(&cleared_bytes),
         })
     }
 
