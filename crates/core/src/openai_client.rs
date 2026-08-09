@@ -140,9 +140,21 @@ pub fn host_of(base_url: &str) -> String {
         .to_string()
 }
 
-/// DeepSeek's public V4 Chat Completions endpoint accepts text content only.
-/// Keep this decision explicit so callers can choose an OCR-backed text path
-/// instead of sending an `image_url` payload that the endpoint rejects.
+/// Whether the configured endpoint accepts image content parts.
+///
+/// Keyed on host, not model, and that is deliberate: measured against
+/// `api.deepseek.com` on 09/08/2026, **both** `deepseek-v4-flash` and
+/// `deepseek-v4-pro` reject an `image_url` part with
+/// `unknown variant "image_url", expected "text"`. Serde names exactly one
+/// variant there, so the content-part enum has no image case at all — the
+/// limit is the endpoint's request schema, not the model's capability, and no
+/// model string reaches vision through it. Whatever a DeepSeek model can do
+/// elsewhere, this API surface cannot carry a picture to it.
+///
+/// A `false` here is not a refusal: callers fall back to a locally OCR'd
+/// caption and the caption-scored gate (`accepts_caption`). Re-measure before
+/// trusting this — the day DeepSeek ships an image part, this goes stale
+/// silently.
 pub fn provider_supports_vision(settings: &NurtureSettings) -> bool {
     !host_of(&settings.base_url).eq_ignore_ascii_case("api.deepseek.com")
 }

@@ -2306,6 +2306,19 @@ Fixture hiện có: `feed-iphone8.jpg`, `feed-iphone8-b.jpg`, `feed-rail-variant
 - Model và Base URL vẫn là cấu hình người dùng; không hiển thị dòng gợi ý model
   cố định trong popup. Cấu hình hiện tại của DB dùng endpoint DeepSeek và model
   DeepSeek đã lưu, không được ghi đè khi build/cài lại app.
+- **Đã đo 09/08/2026** — `GET api.deepseek.com/models` trả `deepseek-v4-flash` và
+  `deepseek-v4-pro`; gửi content part `image_url` tới **cả hai** đều trả 400
+  `unknown variant "image_url", expected "text"`. Serde chỉ liệt kê đúng một
+  biến thể, tức content-part enum của endpoint **không có** case ảnh: giới hạn
+  nằm ở request schema của endpoint chứ không phải khả năng của model, nên không
+  model string nào đi vòng qua được. `provider_supports_vision` khoá theo host là
+  vì thế. Đo lại trước khi tin — DeepSeek thêm image part thì cờ này sai âm thầm.
+- Nurture (`nurture_test_api`) và chiến dịch chuỗi bình luận dùng **chung**
+  `prepare_comment_for_frames`. Trước đây mỗi bên tự viết nhánh và bên chuỗi
+  không viết: nó gọi `prepare_grounded_comment` vô điều kiện nên provider
+  text-only làm hỏng cả campaign. Provider text-only là đường bằng chứng yếu hơn
+  (OCR caption + gate `accepts_caption`), **không phải** lý do từ chối — đừng
+  thêm lại cổng chặn ở `interaction_start_thread`.
 - Gate text-only dùng context OCR >= 60 và relevance/evidenceSupport >= 80,
   kèm các cờ contradiction/unsupportedClaim/uiTextConfusion và formal-style như
   gate vision. Không hạ gate vision; hai mode phải hiển thị rõ nguồn evidence.

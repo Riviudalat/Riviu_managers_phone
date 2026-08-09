@@ -115,29 +115,6 @@ pub fn interaction_preview_thread(
     })
 }
 
-/// The thread campaign grounds every comment in frames of the post, so it needs
-/// a provider that accepts images.
-///
-/// Nurture branches on this and falls back to an OCR caption
-/// (`provider_supports_vision` in `openai_client`); this path calls
-/// `prepare_grounded_comment` unconditionally and propagates the failure with
-/// `?`, which aborts the whole campaign. With the default `api.deepseek.com` —
-/// a text-only API — that happens before any device is touched, and the
-/// operator sees "AI chuẩn bị assignment 0" with no hint that the provider is
-/// the problem. Say it up front instead.
-fn require_vision_provider(settings: &riviu_core::NurtureSettings) -> Result<(), CommandError> {
-    if riviu_core::openai_client::provider_supports_vision(settings) {
-        return Ok(());
-    }
-    Err(CommandError::code(
-        "VisionProviderRequired",
-        format!(
-            "chuỗi bình luận cần model đọc được ảnh để bám nội dung bài;              '{}' chỉ nhận text. Đổi sang provider có vision (OpenAI, Gemini, Claude…)              trong cấu hình AI.",
-            riviu_core::openai_client::host_of(&settings.base_url)
-        ),
-    ))
-}
-
 /// A thread needs to read its own comment back off the screen to reply to it,
 /// and the campaign writes Vietnamese. Without a reader that can, the run posts
 /// the first message of every thread and skips the rest — so refuse up front,
@@ -164,12 +141,6 @@ pub async fn interaction_start_thread(
 ) -> Result<InteractionStartResult, CommandError> {
     let admission = state.ensure_accepting_work()?;
     require_vietnamese_reader(request.mode)?;
-    require_vision_provider(
-        &state
-            .db
-            .get_nurture_settings()
-            .map_err(CommandError::operation)?,
-    )?;
     let plan = plan_threads(&request).map_err(interaction_error)?;
     let campaign_id = state
         .db
@@ -304,12 +275,6 @@ pub fn interaction_retry(
     let requested: Option<std::collections::HashSet<String>> =
         assignment_ids.map(|ids| ids.into_iter().collect());
     let admission = state.ensure_accepting_work()?;
-    require_vision_provider(
-        &state
-            .db
-            .get_nurture_settings()
-            .map_err(CommandError::operation)?,
-    )?;
     let detail = state
         .db
         .get_interaction_campaign(&campaign_id)
@@ -628,7 +593,7 @@ async fn execute_thread_campaign(
             } else {
                 request.instruction.clone()
             };
-            let grounded = riviu_core::openai_client::prepare_grounded_comment(
+            let (grounded, _evidence_mode) = crate::nurture_commands::prepare_comment_for_frames(
                 &scoped,
                 &frames,
                 Some(&direction),
