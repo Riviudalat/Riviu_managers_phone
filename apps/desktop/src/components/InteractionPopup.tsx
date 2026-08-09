@@ -3,11 +3,14 @@ import {
   interactionCancel,
   interactionGet,
   interactionList,
+  interactionListArtifacts,
+  interactionReadArtifact,
   interactionParseLinks,
   interactionResolveLinks,
   interactionStartThread,
   listenRiviuEvents,
 } from "../api";
+import type { InteractionArtifactRecord } from "../api";
 import type {
   DeviceInfo,
   InteractionCampaignDetail,
@@ -59,6 +62,8 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
   const [instruction, setInstruction] = useState("tự nhiên, ngắn, nói như người vừa xem xong");
   const [campaigns, setCampaigns] = useState<InteractionCampaignSummary[]>([]);
   const [detail, setDetail] = useState<InteractionCampaignDetail | null>(null);
+  const [artifacts, setArtifacts] = useState<InteractionArtifactRecord[]>([]);
+  const [preview, setPreview] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -158,12 +163,25 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
 
   const openDetail = async (campaign: InteractionCampaignSummary) => {
     setBusy(true);
+    setPreview(null);
     try {
       setDetail(await interactionGet(campaign.id));
+      // Saved frames are what makes a campaign result checkable rather than
+      // just asserted; a campaign that has none still opens.
+      setArtifacts(await interactionListArtifacts(campaign.id).catch(() => []));
     } catch (e) {
       setError(String(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const showShot = async (artifactId: string) => {
+    try {
+      const payload = await interactionReadArtifact(artifactId);
+      setPreview(`data:${payload.mimeType};base64,${payload.base64}`);
+    } catch (e) {
+      setError(String(e));
     }
   };
 
@@ -268,13 +286,28 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
                   <strong>{stateLabel(detail.summary.state)}</strong>
                   {detail.summary.state === "running" && <button type="button" className="danger" onClick={() => void interactionCancel(detail.summary.id)}>Dừng</button>}
                 </div>
-                {detail.assignments.map((assignment) => (
-                  <div key={assignment.id} className="interaction-assignment">
-                    <span>#{assignment.ordinal + 1}</span>
-                    <span className="grow"><strong>{assignment.actorUdid.slice(0, 8)}</strong><small>{assignment.preparedText ?? "Chưa chuẩn bị"}</small></span>
-                    <span className={`chip ${assignment.state === "succeeded" ? "ok" : assignment.state === "uncertain" ? "warn" : "info"}`}>{stateLabel(assignment.state)}</span>
-                  </div>
-                ))}
+                {detail.assignments.map((assignment) => {
+                  const shot = artifacts.find(
+                    (item) => item.assignmentId === assignment.id && item.relativePath,
+                  );
+                  return (
+                    <div key={assignment.id} className="interaction-assignment">
+                      <span>#{assignment.ordinal + 1}</span>
+                      <span className="grow"><strong>{assignment.actorUdid.slice(0, 8)}</strong><small>{assignment.preparedText ?? "Chưa chuẩn bị"}</small></span>
+                      {shot && (
+                        <button type="button" className="ghost" onClick={() => void showShot(shot.id)}>
+                          Ảnh
+                        </button>
+                      )}
+                      <span className={`chip ${assignment.state === "succeeded" ? "ok" : assignment.state === "uncertain" ? "warn" : "info"}`}>{stateLabel(assignment.state)}</span>
+                    </div>
+                  );
+                })}
+                {preview && (
+                  <button type="button" className="interaction-shot" onClick={() => setPreview(null)}>
+                    <img src={preview} alt="Ảnh màn hình khay bình luận" />
+                  </button>
+                )}
               </div>
             )}
           </div>

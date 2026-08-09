@@ -391,6 +391,50 @@ impl FlowArtifactStore {
         Ok(failures)
     }
 
+    /// Read a published file by the relative path recorded next to it, checking
+    /// that the path stays inside this store and that the bytes still hash to
+    /// what was recorded.
+    ///
+    /// [`Self::read_committed_image`] does the same for Flow, but only through
+    /// a `FlowArtifactRecord` — it needs the artifact's `id`, `attempt_id`,
+    /// `label` and `size` to reconstruct and re-validate the path. The
+    /// interaction artifact table stores none of those, so this takes the two
+    /// facts any caller has: where the file is and what it hashed to. The
+    /// containment and size limits are the same.
+    pub fn read_published(
+        &self,
+        relative_path: &str,
+        expected_sha256: &str,
+    ) -> anyhow::Result<Vec<u8>> {
+        ensure!(
+            is_lower_sha256(expected_sha256),
+            "recorded artifact hash is invalid"
+        );
+        let relative = PathBuf::from(relative_path);
+        ensure!(
+            relative.is_relative()
+                && relative
+                    .components()
+                    .all(|component| matches!(component, std::path::Component::Normal(_))),
+            "artifact path is not a plain relative path"
+        );
+        let canonical = self.ensure_managed_file(&self.root.join(relative))?;
+        let size = canonical
+            .metadata()
+            .context("read published artifact metadata")?
+            .len();
+        ensure!(
+            size > 0 && size <= MAX_READ_ARTIFACT_BYTES,
+            "published artifact size is out of range"
+        );
+        let bytes = fs::read(&canonical).context("read published artifact")?;
+        ensure!(
+            sha256_bytes(&bytes) == expected_sha256,
+            "published artifact hash mismatch"
+        );
+        Ok(bytes)
+    }
+
     pub fn read_committed_image(&self, row: &FlowArtifactRecord) -> anyhow::Result<Vec<u8>> {
         self.validate_label(&row.label, &row.kind)?;
         ensure!(row.size > 0, "committed artifact has zero size");
@@ -750,6 +794,50 @@ mod tests {
             sha256: artifact.sha256.clone(),
             created_at: Utc::now(),
         }
+    }
+
+    /// The path the interaction campaign stores is the only handle it keeps on
+    /// a saved frame, so reading it back has to re-establish both facts the
+    /// caller cannot check: that the file is still inside this store, and that
+    /// it is still the file that was recorded.
+    #[test]
+    fn a_published_artifact_reads_back_only_while_it_still_matches_its_record() {
+        let root = temp_artifact_root();
+        let store = FlowArtifactStore::new(&root).expect("store");
+        let artifact = prepare(&store, "comment-drawer.jpeg", "jpeg", JPEG);
+        let relative = store.publish_file(&artifact).expect("publish");
+        let relative = relative.to_string_lossy().into_owned();
+
+        let bytes = store
+            .read_published(&relative, &artifact.sha256)
+            .expect("read published");
+        assert_eq!(bytes, JPEG);
+
+        // A file that no longer hashes to the record is not the evidence the
+        // record describes, and must not be served as if it were.
+        fs::write(root.join(&relative), PNG).expect("tamper with published artifact");
+        assert!(store.read_published(&relative, &artifact.sha256).is_err());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Nothing the database happens to contain may be used to reach outside the
+    /// store — the read takes a path straight from a row.
+    #[test]
+    fn a_published_read_refuses_to_escape_the_store() {
+        let root = temp_artifact_root();
+        let store = FlowArtifactStore::new(&root).expect("store");
+        let artifact = prepare(&store, "comment-drawer.jpeg", "jpeg", JPEG);
+        store.publish_file(&artifact).expect("publish");
+
+        for escape in ["../outside.jpeg", "/etc/passwd", "a/../../outside.jpeg", ""] {
+            assert!(
+                store.read_published(escape, &artifact.sha256).is_err(),
+                "{escape} was accepted"
+            );
+        }
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

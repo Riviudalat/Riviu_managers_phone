@@ -509,6 +509,30 @@ export async function interactionRetry(campaignId: string, assignmentIds?: strin
   return invoke<void>("interaction_retry", { campaignId, assignmentIds });
 }
 
+export interface InteractionArtifactRecord {
+  id: string;
+  assignmentId: string | null;
+  kind: string;
+  relativePath: string | null;
+  sha256: string;
+  createdAt: string;
+}
+
+export interface InteractionArtifactPayload {
+  id: string;
+  kind: string;
+  mimeType: string;
+  base64: string;
+}
+
+export async function interactionListArtifacts(campaignId: string) {
+  return invoke<InteractionArtifactRecord[]>("interaction_list_artifacts", { campaignId });
+}
+
+export async function interactionReadArtifact(artifactId: string) {
+  return invoke<InteractionArtifactPayload>("interaction_read_artifact", { artifactId });
+}
+
 export async function interactionOpenOnDevice(udid: string, url: string) {
   return invoke<void>("interaction_open_on_device", { udid, url });
 }

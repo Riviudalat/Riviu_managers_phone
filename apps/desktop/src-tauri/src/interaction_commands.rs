@@ -145,6 +145,7 @@ pub async fn interaction_start_thread(
     let control = state.control.clone();
     let engine = state.nurture_engine.clone();
     let events = state.events.clone();
+    let artifacts = state.interaction_artifacts.clone();
     tauri::async_runtime::spawn(async move {
         let _worker_admission = admission;
         if let Err(error) = execute_thread_campaign(
@@ -156,6 +157,7 @@ pub async fn interaction_start_thread(
             request,
             plan,
             None,
+            artifacts,
         )
         .await
         {
@@ -291,6 +293,7 @@ pub fn interaction_retry(
     let control = state.control.clone();
     let engine = state.nurture_engine.clone();
     let events = state.events.clone();
+    let artifacts = state.interaction_artifacts.clone();
     let worker_id = campaign_id.clone();
     tauri::async_runtime::spawn(async move {
         let _worker_admission = admission;
@@ -303,6 +306,7 @@ pub fn interaction_retry(
             request,
             plan,
             Some(retryable),
+            artifacts,
         )
         .await
         {
@@ -318,6 +322,59 @@ pub fn interaction_retry(
         revision: revision(),
     });
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InteractionArtifactPayload {
+    pub id: String,
+    pub kind: String,
+    pub mime_type: String,
+    pub base64: String,
+}
+
+/// List the frames saved for a campaign so the operator can see what the phone
+/// actually showed. Rows written before evidence storage have no file.
+#[tauri::command]
+pub fn interaction_list_artifacts(
+    state: State<'_, AppState>,
+    campaign_id: String,
+) -> Result<Vec<riviu_core::InteractionArtifactRecord>, CommandError> {
+    state
+        .db
+        .list_interaction_artifacts(&campaign_id)
+        .map_err(CommandError::operation)
+}
+
+#[tauri::command]
+pub fn interaction_read_artifact(
+    state: State<'_, AppState>,
+    artifact_id: String,
+) -> Result<InteractionArtifactPayload, CommandError> {
+    let record = state
+        .db
+        .get_interaction_artifact(&artifact_id)
+        .map_err(CommandError::operation)?
+        .ok_or_else(|| CommandError::code("ArtifactNotFound", "không có artifact này"))?;
+    let relative = record.relative_path.as_deref().ok_or_else(|| {
+        CommandError::code(
+            "ArtifactNotStored",
+            "artifact này được ghi trước khi có lưu ảnh, không có file kèm theo",
+        )
+    })?;
+    let bytes = state
+        .interaction_artifacts
+        .read_published(relative, &record.sha256)
+        .map_err(|error| {
+            log::error!("interaction artifact validation failed: {error:#}");
+            CommandError::code("ArtifactUnreadable", "ảnh bằng chứng không đọc/kiểm được")
+        })?;
+    Ok(InteractionArtifactPayload {
+        id: record.id,
+        kind: record.kind,
+        mime_type: "image/jpeg".into(),
+        base64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes),
+    })
 }
 
 #[tauri::command]
@@ -375,6 +432,43 @@ async fn open_interaction_context(
         .map_err(CommandError::from)
 }
 
+/// Save the screen as it stands and return its stored path.
+///
+/// The campaign used to persist frame hashes without keeping a single frame, so
+/// nothing it recorded could be checked afterwards — and `Uncertain`, the state
+/// that most needs looking at, wrote no artifact at all. Publishing is
+/// best-effort: a campaign must not fail because evidence could not be filed.
+fn publish_evidence_frame(
+    artifacts: &riviu_core::FlowArtifactStore,
+    engine: &riviu_core::NurtureEngine,
+    campaign_id: &str,
+    assignment_id: &str,
+    udid: &str,
+) -> Option<(String, String)> {
+    let frame = engine.frames.latest(udid)?;
+    let campaign = uuid::Uuid::parse_str(campaign_id).ok()?;
+    let assignment = uuid::Uuid::parse_str(assignment_id).ok()?;
+    let prepared = artifacts
+        .prepare_image(
+            campaign,
+            assignment,
+            uuid::Uuid::new_v4(),
+            "comment-drawer.jpeg",
+            "jpeg",
+            &frame,
+        )
+        .map_err(|error| log::warn!("interaction: không chuẩn bị được ảnh bằng chứng: {error}"))
+        .ok()?;
+    match artifacts.publish_file(&prepared) {
+        Ok(relative) => Some((relative.to_string_lossy().into_owned(), prepared.sha256)),
+        Err(error) => {
+            log::warn!("interaction: không lưu được ảnh bằng chứng: {error}");
+            let _ = artifacts.rollback_file(&prepared);
+            None
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_thread_campaign(
     db: Arc<riviu_core::db::Database>,
@@ -385,6 +479,7 @@ async fn execute_thread_campaign(
     request: ThreadCampaignRequest,
     plan: ThreadPlan,
     only_assignments: Option<std::collections::HashSet<String>>,
+    artifacts: riviu_core::FlowArtifactStore,
 ) -> anyhow::Result<()> {
     let settings = db.get_nurture_settings().context("đọc cấu hình AI")?;
     if settings.api_key.trim().is_empty() {
@@ -673,11 +768,24 @@ async fn execute_thread_campaign(
                     } else {
                         "comment-root-evidence"
                     };
-                    let artifact_sha = evidence_json
-                        .get("postedIdentity")
-                        .and_then(|identity| identity.get("frameSha256"))
-                        .and_then(|value| value.as_str())
-                        .unwrap_or_default();
+                    // The drawer is still open at this point — nothing closes
+                    // it after the identity pass — so this frame shows the
+                    // comment that was just posted, in the list, which is the
+                    // only thing that settles a dispute later.
+                    let saved = publish_evidence_frame(
+                        &artifacts,
+                        &engine,
+                        &campaign_id,
+                        &id,
+                        &prepared.actor_udid,
+                    );
+                    let artifact_sha = saved.as_ref().map(|(_, sha)| sha.as_str()).unwrap_or(
+                        evidence_json
+                            .get("postedIdentity")
+                            .and_then(|identity| identity.get("frameSha256"))
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default(),
+                    );
                     let _ = db.add_interaction_artifact(
                         &campaign_id,
                         &target.target_key,
@@ -685,6 +793,7 @@ async fn execute_thread_campaign(
                         artifact_kind,
                         &evidence_text,
                         artifact_sha,
+                        saved.as_ref().map(|(path, _)| path.as_str()),
                     )?;
                     if let Some(identity) = evidence_json.get("postedIdentity").and_then(|value| {
                         serde_json::from_value::<CommentLocatorIdentity>(value.clone()).ok()
@@ -706,6 +815,27 @@ async fn execute_thread_campaign(
                         None,
                         None,
                     )?;
+                    // Especially here. `Uncertain` means the Send tap went out
+                    // and its confirmation did not arrive, so whether the
+                    // comment posted can only be settled by looking — and this
+                    // path used to write no artifact at all.
+                    if let Some((path, sha)) = publish_evidence_frame(
+                        &artifacts,
+                        &engine,
+                        &campaign_id,
+                        &id,
+                        &prepared.actor_udid,
+                    ) {
+                        let _ = db.add_interaction_artifact(
+                            &campaign_id,
+                            &target.target_key,
+                            Some(&id),
+                            "comment-failure-evidence",
+                            &serde_json::json!({ "error": error.to_string() }).to_string(),
+                            &sha,
+                            Some(&path),
+                        );
+                    }
                     failed += 1;
                 }
             }

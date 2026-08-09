@@ -565,6 +565,18 @@ pub struct InteractionAssignmentRecord {
     pub error_code: Option<String>,
 }
 
+/// A saved frame from a thread campaign, and where it came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InteractionArtifactRecord {
+    pub id: String,
+    pub assignment_id: Option<String>,
+    pub kind: String,
+    pub relative_path: Option<String>,
+    pub sha256: String,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractionCampaignDetail {

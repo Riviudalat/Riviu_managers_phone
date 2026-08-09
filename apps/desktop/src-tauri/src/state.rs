@@ -67,6 +67,11 @@ pub struct AppState {
     pub jobs: JobQueue,
     pub flows: FlowRuntime,
     pub flow_artifacts: FlowArtifactStore,
+    /// The same store mechanism as Flow's, rooted separately. Interaction had
+    /// no artifact storage at all: `interaction_artifacts.relative_path` has
+    /// been in the schema since the first migration and was never written, so a
+    /// campaign left behind hashes of frames nobody kept.
+    pub interaction_artifacts: FlowArtifactStore,
     pub db: Arc<Database>,
     pub signing: SigningService,
     pub agent_token_configured: bool,
@@ -502,6 +507,7 @@ impl AppState {
 
         let command_admission = Arc::new(CommandAdmissionState::new(false));
         let flow_artifacts = FlowArtifactStore::new(artifacts_dir.join("flows"))?;
+        let interaction_artifacts = FlowArtifactStore::new(artifacts_dir.join("interactions"))?;
         let flows = FlowRuntime::new(FlowRuntimeDeps {
             database: db.clone(),
             events: events.clone(),
@@ -531,6 +537,7 @@ impl AppState {
             jobs,
             flows,
             flow_artifacts,
+            interaction_artifacts,
             db,
             signing,
             agent_token_configured,

@@ -169,6 +169,8 @@ pub fn run() {
             interaction_commands::interaction_cancel,
             interaction_commands::interaction_retry,
             interaction_commands::interaction_open_on_device,
+            interaction_commands::interaction_list_artifacts,
+            interaction_commands::interaction_read_artifact,
             nurture_commands::nurture_get_settings,
             nurture_commands::nurture_save_settings,
             nurture_commands::nurture_test_api,

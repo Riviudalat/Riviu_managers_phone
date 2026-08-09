@@ -1357,6 +1357,56 @@ impl Database {
         Ok(())
     }
 
+    /// Saved frames for a campaign, newest first. Rows without a
+    /// `relative_path` predate evidence storage and have no file behind them.
+    pub fn list_interaction_artifacts(
+        &self,
+        campaign_id: &str,
+    ) -> anyhow::Result<Vec<crate::interaction::InteractionArtifactRecord>> {
+        let conn = self.conn()?;
+        let mut statement = conn.prepare(
+            "SELECT id,assignment_id,kind,relative_path,sha256,created_at
+             FROM interaction_artifacts WHERE campaign_id=?1 ORDER BY created_at DESC",
+        )?;
+        let rows = statement.query_map(params![campaign_id], |row| {
+            Ok(crate::interaction::InteractionArtifactRecord {
+                id: row.get(0)?,
+                assignment_id: row.get(1)?,
+                kind: row.get(2)?,
+                relative_path: row.get(3)?,
+                sha256: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// One saved frame by id, for reading its bytes back.
+    pub fn get_interaction_artifact(
+        &self,
+        artifact_id: &str,
+    ) -> anyhow::Result<Option<crate::interaction::InteractionArtifactRecord>> {
+        let conn = self.conn()?;
+        Ok(conn
+            .query_row(
+                "SELECT id,assignment_id,kind,relative_path,sha256,created_at
+                 FROM interaction_artifacts WHERE id=?1",
+                params![artifact_id],
+                |row| {
+                    Ok(crate::interaction::InteractionArtifactRecord {
+                        id: row.get(0)?,
+                        assignment_id: row.get(1)?,
+                        kind: row.get(2)?,
+                        relative_path: row.get(3)?,
+                        sha256: row.get(4)?,
+                        created_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn add_interaction_artifact(
         &self,
         campaign_id: &str,
@@ -1365,6 +1415,7 @@ impl Database {
         kind: &str,
         metadata_json: &str,
         sha256: &str,
+        relative_path: Option<&str>,
     ) -> anyhow::Result<String> {
         let conn = self.conn()?;
         let target_id: String = conn.query_row(
@@ -1375,8 +1426,8 @@ impl Database {
         let id = Uuid::new_v4().to_string();
         conn.execute(
             "INSERT INTO interaction_artifacts
-             (id,campaign_id,target_id,assignment_id,kind,metadata_json,sha256,created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+             (id,campaign_id,target_id,assignment_id,kind,metadata_json,relative_path,sha256,created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![
                 id,
                 campaign_id,
@@ -1384,6 +1435,7 @@ impl Database {
                 assignment_id,
                 kind,
                 metadata_json,
+                relative_path,
                 sha256,
                 Utc::now().to_rfc3339(),
             ],
@@ -1731,6 +1783,7 @@ mod interaction_tests {
             "comment-root-evidence",
             r#"{"fixture":true}"#,
             "fixture-sha",
+            Some("campaign/assignment/attempt/artifact.jpeg"),
         )
         .expect("artifact");
         let loaded = db
