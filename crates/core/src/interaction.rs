@@ -345,9 +345,17 @@ pub fn locate_parent_comment(
 ) -> Option<CommentParentMatch> {
     let wanted_author = normalize_locator_text(&identity.author_label);
     let wanted_text = normalize_locator_text(&identity.text);
-    let text = observations.iter().find(|observation| {
+    // The text must appear exactly once. Two lines reading the same thing —
+    // a repeated campaign message, someone quoting it back — give no way to
+    // tell which one is ours, and picking whichever OCR happened to list first
+    // would anchor the whole reply to a stranger's comment.
+    let mut matches_text = observations.iter().filter(|observation| {
         normalize_locator_text(&observation.text) == wanted_text && observation.confidence >= 0.55
-    })?;
+    });
+    let text = matches_text.next()?;
+    if matches_text.next().is_some() {
+        return None;
+    }
     let author = observations.iter().find(|observation| {
         let label = normalize_locator_text(&observation.text);
         !wanted_author.is_empty()
@@ -355,13 +363,26 @@ pub fn locate_parent_comment(
             && observation.y <= text.y + 0.02
             && observation.y + observation.height >= text.y - 0.08
     })?;
-    let reply = observations.iter().find(|observation| {
-        let label = normalize_locator_text(&observation.text);
-        matches!(label.as_str(), "reply" | "trả lời" | "tra loi")
-            && observation.y >= text.y - 0.02
-            && observation.y <= text.y + text.height + 0.12
-            && observation.x >= text.x
-    })?;
+    // Every comment carries its own "Trả lời", and the band below this one is
+    // wide enough to reach the next comment's. Take the closest, not the first
+    // the OCR happened to emit — OCR order is not screen order, so `find` here
+    // could tap the reply control belonging to somebody else's comment and post
+    // the campaign's reply underneath it.
+    let text_bottom = text.y + text.height;
+    let reply = observations
+        .iter()
+        .filter(|observation| {
+            let label = normalize_locator_text(&observation.text);
+            matches!(label.as_str(), "reply" | "trả lời" | "tra loi")
+                && observation.y >= text.y - 0.02
+                && observation.y <= text_bottom + 0.12
+                && observation.x >= text.x
+        })
+        .min_by(|a, b| {
+            let da = (a.y - text_bottom).abs();
+            let db = (b.y - text_bottom).abs();
+            da.total_cmp(&db)
+        })?;
     Some(CommentParentMatch {
         identity: CommentLocatorIdentity {
             author_label: author.text.clone(),
@@ -629,6 +650,111 @@ mod tests {
             }
         )
         .is_none());
+    }
+
+    /// Every comment carries its own "Trả lời", and the search band below the
+    /// parent reaches the next comment when the two are packed close together.
+    /// OCR order is not screen order, so taking the first match could tap the
+    /// reply control belonging to somebody else's comment — and post the
+    /// campaign's reply underneath a stranger.
+    #[test]
+    fn the_reply_control_taken_is_the_parent_own_not_the_next_comment() {
+        let observations = vec![
+            CommentOcrObservation {
+                text: "creator_a".into(),
+                confidence: 0.98,
+                x: 0.10,
+                y: 0.30,
+                width: 0.2,
+                height: 0.03,
+            },
+            CommentOcrObservation {
+                text: "Quán này xinh quá".into(),
+                confidence: 0.94,
+                x: 0.10,
+                y: 0.34,
+                width: 0.4,
+                height: 0.03,
+            },
+            // The *next* comment's reply control, emitted first by the OCR and
+            // still inside the band, but further from the parent.
+            CommentOcrObservation {
+                text: "Trả lời".into(),
+                confidence: 0.90,
+                x: 0.55,
+                y: 0.46,
+                width: 0.1,
+                height: 0.03,
+            },
+            // The parent's own, right beneath it.
+            CommentOcrObservation {
+                text: "Trả lời".into(),
+                confidence: 0.90,
+                x: 0.55,
+                y: 0.375,
+                width: 0.1,
+                height: 0.03,
+            },
+        ];
+        let identity = CommentLocatorIdentity {
+            author_label: "creator_a".into(),
+            text: "Quán này xinh quá".into(),
+            locator_version: "vision-v1".into(),
+            frame_sha256: "frame".into(),
+        };
+
+        let match_ = locate_parent_comment(&observations, &identity).expect("parent located");
+        assert!(
+            (match_.reply_y - 0.39).abs() < 0.02,
+            "tapped the reply at {:.3}, which belongs to the comment below",
+            match_.reply_y
+        );
+    }
+
+    /// Two lines reading the same thing give no way to tell which one is ours.
+    /// A repeated campaign message does exactly that, and anchoring to the wrong
+    /// one puts the whole rest of the thread under a stranger's comment.
+    #[test]
+    fn a_duplicated_comment_text_is_refused_rather_than_guessed() {
+        let line = |y: f64| CommentOcrObservation {
+            text: "Quán này xinh quá".into(),
+            confidence: 0.94,
+            x: 0.10,
+            y,
+            width: 0.4,
+            height: 0.03,
+        };
+        let observations = vec![
+            CommentOcrObservation {
+                text: "creator_a".into(),
+                confidence: 0.98,
+                x: 0.10,
+                y: 0.30,
+                width: 0.2,
+                height: 0.03,
+            },
+            line(0.34),
+            line(0.60),
+            CommentOcrObservation {
+                text: "Trả lời".into(),
+                confidence: 0.91,
+                x: 0.55,
+                y: 0.375,
+                width: 0.1,
+                height: 0.03,
+            },
+        ];
+        let identity = CommentLocatorIdentity {
+            author_label: "creator_a".into(),
+            text: "Quán này xinh quá".into(),
+            locator_version: "vision-v1".into(),
+            frame_sha256: "frame".into(),
+        };
+
+        assert!(
+            locate_parent_comment(&observations, &identity).is_none(),
+            "two identical lines are ambiguous and must not be resolved by picking one"
+        );
     }
 
     #[test]
