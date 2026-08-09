@@ -482,6 +482,9 @@ export interface TikTokLinkLine {
   error: LinkErrorCode | null;
 }
 
+/** Reply chain, or independent top-level comments from each account. */
+export type ThreadMode = "threaded" | "standalone";
+
 export interface ThreadCampaignRequest {
   requestId: string;
   targets: ResolvedTikTokTarget[];
@@ -489,6 +492,7 @@ export interface ThreadCampaignRequest {
   messageCount: number;
   instruction: string;
   maxWords: number;
+  mode: ThreadMode;
 }
 
 export type ThreadMessageState =

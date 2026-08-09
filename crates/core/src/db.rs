@@ -1716,7 +1716,7 @@ mod interaction_tests {
     use super::*;
     use crate::interaction::{
         plan_threads, PreparedThreadMessage, ResolvedTikTokTarget, ThreadCampaignRequest,
-        ThreadMessageState, TikTokPostKind,
+        ThreadMessageState, ThreadMode, TikTokPostKind,
     };
 
     fn fixture() -> (Database, PathBuf) {
@@ -1740,6 +1740,8 @@ mod interaction_tests {
             message_count: 2,
             instruction: "tự nhiên".into(),
             max_words: 12,
+
+            mode: ThreadMode::Threaded,
         }
     }
 

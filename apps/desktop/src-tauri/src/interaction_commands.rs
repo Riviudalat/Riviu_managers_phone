@@ -142,8 +142,10 @@ fn require_vision_provider(settings: &riviu_core::NurtureSettings) -> Result<(),
 /// and the campaign writes Vietnamese. Without a reader that can, the run posts
 /// the first message of every thread and skips the rest — so refuse up front,
 /// naming both ways out, instead of discovering it one message in.
-fn require_vietnamese_reader() -> Result<(), CommandError> {
-    if interaction_ocr::reads_vietnamese() {
+fn require_vietnamese_reader(mode: riviu_core::ThreadMode) -> Result<(), CommandError> {
+    // Standalone comments never look for a parent, so nothing has to be read
+    // back off the screen and the reader's language is irrelevant.
+    if mode == riviu_core::ThreadMode::Standalone || interaction_ocr::reads_vietnamese() {
         return Ok(());
     }
     let found = interaction_ocr::recognizer_language().unwrap_or_else(|| "không có".into());
@@ -161,7 +163,7 @@ pub async fn interaction_start_thread(
     request: ThreadCampaignRequest,
 ) -> Result<InteractionStartResult, CommandError> {
     let admission = state.ensure_accepting_work()?;
-    require_vietnamese_reader()?;
+    require_vietnamese_reader(request.mode)?;
     require_vision_provider(
         &state
             .db
@@ -302,7 +304,6 @@ pub fn interaction_retry(
     let requested: Option<std::collections::HashSet<String>> =
         assignment_ids.map(|ids| ids.into_iter().collect());
     let admission = state.ensure_accepting_work()?;
-    require_vietnamese_reader()?;
     require_vision_provider(
         &state
             .db
@@ -339,6 +340,9 @@ pub fn interaction_retry(
         .ok_or_else(|| {
             CommandError::code("InteractionNotFound", "campaign request không tồn tại")
         })?;
+    // The mode is whatever the campaign was created with, so the reader
+    // requirement has to be judged against that rather than a fresh choice.
+    require_vietnamese_reader(request.mode)?;
     state
         .db
         .update_interaction_campaign_state(&campaign_id, ThreadCampaignState::Running, None)

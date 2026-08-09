@@ -13,6 +13,7 @@ import {
 import type { InteractionArtifactRecord } from "../api";
 import type {
   DeviceInfo,
+  ThreadMode,
   InteractionCampaignDetail,
   InteractionCampaignSummary,
   ThreadCampaignRequest,
@@ -59,6 +60,7 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
   const [actors, setActors] = useState<string[]>([]);
   const [messageCount, setMessageCount] = useState(2);
   const [maxWords, setMaxWords] = useState(12);
+  const [mode, setMode] = useState<ThreadMode>("threaded");
   const [instruction, setInstruction] = useState("tự nhiên, ngắn, nói như người vừa xem xong");
   const [campaigns, setCampaigns] = useState<InteractionCampaignSummary[]>([]);
   const [detail, setDetail] = useState<InteractionCampaignDetail | null>(null);
@@ -79,8 +81,9 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
       messageCount,
       instruction,
       maxWords,
+      mode,
     }),
-    [actors, instruction, maxWords, messageCount, validTargets],
+    [actors, instruction, maxWords, messageCount, mode, validTargets],
   );
 
   const reloadCampaigns = useCallback(async () => {
@@ -240,6 +243,18 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
                 <input type="number" min={4} max={20} value={maxWords} onChange={(e) => setMaxWords(Number(e.target.value))} />
               </label>
             </div>
+            <label>
+              Kiểu tương tác
+              <select value={mode} onChange={(e) => setMode(e.target.value as ThreadMode)}>
+                <option value="threaded">Qua lại — acc sau trả lời acc trước</option>
+                <option value="standalone">Riêng lẻ — mỗi acc một bình luận gốc</option>
+              </select>
+            </label>
+            <p className="hint">
+              {mode === "threaded"
+                ? "Tạo hội thoại lồng nhau. Cần OCR đọc được tiếng Việt để tìm lại bình luận cha — hiện chỉ có trên macOS."
+                : "Mỗi acc để một bình luận riêng, không lồng nhau. Không cần OCR, chạy được trên mọi máy."}
+            </p>
             <label>
               Giọng điệu / hướng dẫn
               <input value={instruction} onChange={(e) => setInstruction(e.target.value)} />

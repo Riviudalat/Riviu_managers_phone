@@ -150,6 +150,23 @@ fn parse_one(original: &str) -> Result<ResolvedTikTokTarget, LinkErrorCode> {
     })
 }
 
+/// Whether the messages on a post answer each other or stand alone.
+///
+/// `Threaded` is the richer result and the expensive one: every reply after the
+/// first has to find its parent comment on screen, which means reading that
+/// comment's own text back with OCR. `Standalone` drops the chain — each
+/// account leaves its own top-level comment — and with it the entire locator,
+/// so it needs no OCR at all and runs anywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ThreadMode {
+    /// Reply chain: message N answers message N-1.
+    #[default]
+    Threaded,
+    /// Independent top-level comments from each account.
+    Standalone,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadCampaignRequest {
@@ -159,6 +176,10 @@ pub struct ThreadCampaignRequest {
     pub message_count: u8,
     pub instruction: String,
     pub max_words: u8,
+    /// Defaults to `Threaded` so campaigns persisted before this existed still
+    /// deserialise into the behaviour they were created with.
+    #[serde(default)]
+    pub mode: ThreadMode,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -248,10 +269,13 @@ pub fn plan_threads(request: &ThreadCampaignRequest) -> Result<ThreadPlan, Threa
                 target_key: target.target_key.clone(),
                 ordinal,
                 actor_udid: request.actor_udids[actor_index].clone(),
-                parent_ordinal: if ordinal == 0 {
-                    None
-                } else {
-                    Some(ordinal - 1)
+                // Standalone leaves every message parentless, which is the
+                // whole of the difference: no parent means no locator, no OCR,
+                // and no chain to break.
+                parent_ordinal: match request.mode {
+                    ThreadMode::Standalone => None,
+                    ThreadMode::Threaded if ordinal == 0 => None,
+                    ThreadMode::Threaded => Some(ordinal - 1),
                 },
             });
         }
@@ -642,6 +666,8 @@ mod tests {
             message_count: count,
             instruction: "ngắn, tự nhiên".into(),
             max_words: 12,
+
+            mode: ThreadMode::Threaded,
         }
     }
 
@@ -824,6 +850,49 @@ mod tests {
             "tapped the reply at {:.3}, which belongs to the comment below",
             match_.reply_y
         );
+    }
+
+    /// Standalone drops the chain entirely, which is the whole point of it:
+    /// no parent means no locator, no OCR, and nothing that can break halfway
+    /// and take the rest of the messages with it.
+    #[test]
+    fn standalone_leaves_every_message_parentless() {
+        let mut request = request(vec![target("1"), target("2")], vec!["A", "B"], 4);
+        request.mode = ThreadMode::Standalone;
+        let plan = plan_threads(&request).expect("plan");
+
+        assert_eq!(plan.assignments.len(), 8);
+        assert!(
+            plan.assignments
+                .iter()
+                .all(|assignment| assignment.parent_ordinal.is_none()),
+            "a standalone campaign has no replies to locate"
+        );
+        // Actor rotation is untouched: the point is who posts, not what they
+        // answer.
+        let first: Vec<&str> = plan
+            .assignments
+            .iter()
+            .filter(|assignment| assignment.target_key == "content:1")
+            .map(|assignment| assignment.actor_udid.as_str())
+            .collect();
+        assert_eq!(first, ["A", "B", "A", "B"]);
+    }
+
+    /// And threaded still chains, so the mode is a real choice rather than a
+    /// flag that quietly does nothing.
+    #[test]
+    fn threaded_still_answers_the_previous_message() {
+        let mut request = request(vec![target("1")], vec!["A", "B"], 4);
+        request.mode = ThreadMode::Threaded;
+        let plan = plan_threads(&request).expect("plan");
+
+        let parents: Vec<Option<u8>> = plan
+            .assignments
+            .iter()
+            .map(|assignment| assignment.parent_ordinal)
+            .collect();
+        assert_eq!(parents, [None, Some(0), Some(1), Some(2)]);
     }
 
     /// The comment line is not its own author.
