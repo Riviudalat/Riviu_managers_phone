@@ -501,10 +501,61 @@ impl NurtureEngine {
         };
         let mut session = self.control.streaming_session(&ui_context)?;
 
+        // Two refusals here, both closing holes rather than adding caution.
+        //
+        // The fallback used to be `(375.0, 667.0)`: when the size could not be
+        // read the run carried on against a fabricated iPhone 8 screen. Every
+        // tap after that was computed from a number nothing had measured.
+        //
+        // And nothing on this path ever checked the screen class at all. The
+        // qualification registry gates the Flow/Interaction path
+        // (`device_control.rs` negotiate), but nurture went straight from
+        // `window_size()` to multiplying iPhone 8 fractions — so a phone of any
+        // other size would have been tapped with iPhone 8 coordinates, which is
+        // exactly what AGENTS.md 691-692 forbids.
         let screen_size = match session.window_size().await {
-            Ok(sz) if sz.0 > 0.0 && sz.1 > 0.0 => sz,
-            _ => (375.0, 667.0),
+            Ok(size) if size.0 > 0.0 && size.1 > 0.0 => size,
+            Ok(size) => {
+                report(
+                    &mut status,
+                    format!("failed — máy báo kích thước màn hình không dùng được {size:?}"),
+                );
+                status.running = false;
+                return Ok(status);
+            }
+            Err(error) => {
+                report(
+                    &mut status,
+                    format!("failed — không đọc được kích thước màn hình: {error}"),
+                );
+                status.running = false;
+                return Ok(status);
+            }
         };
+        let Some(layout) = screen::calibrated_layout(screen_size.0, screen_size.1) else {
+            let known = screen::CALIBRATED_LAYOUTS
+                .iter()
+                .map(|entry| {
+                    format!(
+                        "{} ({}x{})",
+                        entry.id, entry.logical_width, entry.logical_height
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            report(
+                &mut status,
+                format!(
+                    "failed — chưa hiệu chỉnh bộ dò cho màn hình {}x{}; \
+                     đã hiệu chỉnh: {known}. Chạy quy trình hiệu chỉnh (AGENTS.md mục 6) \
+                     trước khi dùng máy này",
+                    screen_size.0, screen_size.1
+                ),
+            );
+            status.running = false;
+            return Ok(status);
+        };
+        tracing::debug!("[nurture {udid}] layout đã hiệu chỉnh: {}", layout.id);
         self.reset_touch_points(udid, screen_size);
 
         // Now the agent is warm, attach the stream that the watcher reads.

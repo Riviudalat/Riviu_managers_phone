@@ -427,9 +427,27 @@ pub fn is_valid_protected_route_path(path: &str) -> bool {
 }
 
 impl QualifiedGeometry {
+    /// Check a registry entry is internally coherent.
+    ///
+    /// This validates what may be *written into* the qualification registry —
+    /// both callers are static-entry validation (`DeviceQualificationBase` and
+    /// `TargetIdentityCapability`), never a live device.
+    ///
+    /// It used to also require exactly `375.0 x 667.0`, which made the registry
+    /// unable to hold a second screen class at all. Dropping that opens nothing:
+    /// a live device is admitted by `matches()`, which requires its geometry to
+    /// equal a registry entry exactly, and the registry is the allowlist. What
+    /// stays enforced is coherence — a claimed geometry whose logical size times
+    /// its scale does not equal its pixel size is a typo, not a device.
+    ///
+    /// The screen classes whose *detector constants* have been measured are a
+    /// separate list, `screen::CALIBRATED_LAYOUTS`; registry membership and
+    /// calibration are different questions and neither implies the other.
     fn validate(&self) -> Result<(), CapabilityValidationError> {
-        if self.logical_width != 375.0
-            || self.logical_height != 667.0
+        if self.logical_width <= 0.0
+            || self.logical_height <= 0.0
+            || !self.logical_width.is_finite()
+            || !self.logical_height.is_finite()
             || self.pixel_width == 0
             || self.pixel_height == 0
             || !self.scale_x.is_finite()

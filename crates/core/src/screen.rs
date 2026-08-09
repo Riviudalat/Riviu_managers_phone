@@ -14,6 +14,49 @@ use image::RgbImage;
 
 use crate::screen_match::{find_template, to_gray};
 
+/// A screen class whose detector constants in this file have actually been
+/// measured on a physical device.
+///
+/// Every geometry constant below is a fraction anchored to a fixed point
+/// distance from a screen edge, not a proportion of the whole. They therefore
+/// do **not** transfer by arithmetic to a different screen: `COMMENT_INPUT.1`
+/// is `640/667`, which is 27pt up from the bottom of an iPhone 8 but lands 35pt
+/// up on an 844pt-tall iPhone — before counting the 34pt home indicator that an
+/// iPhone 8 does not have. A new class has to be re-measured, not divided.
+pub struct CalibratedLayout {
+    pub id: &'static str,
+    pub logical_width: f64,
+    pub logical_height: f64,
+}
+
+/// Exactly the screen classes that have been calibrated. Adding one is a
+/// measurement exercise (AGENTS.md section 6), not an edit to this table.
+pub const CALIBRATED_LAYOUTS: &[CalibratedLayout] = &[CalibratedLayout {
+    id: "iphone8-portrait-v1",
+    logical_width: 375.0,
+    logical_height: 667.0,
+}];
+
+/// Half a point of slack, because the size arrives as a float over the wire.
+const LAYOUT_MATCH_SLACK: f64 = 0.5;
+
+/// The calibrated layout for a live screen size, or `None` when this screen
+/// class has never been measured.
+///
+/// `None` must mean refuse. Multiplying these fractions against an unmeasured
+/// screen produces tap points that look plausible and land on the wrong
+/// controls — the failure AGENTS.md 691-692 names directly: *"chua qualify
+/// profile moi thi fail closed ... khong tap toa do iPhone 8 len may moi"*.
+pub fn calibrated_layout(
+    logical_width: f64,
+    logical_height: f64,
+) -> Option<&'static CalibratedLayout> {
+    CALIBRATED_LAYOUTS.iter().find(|layout| {
+        (layout.logical_width - logical_width).abs() <= LAYOUT_MATCH_SLACK
+            && (layout.logical_height - logical_height).abs() <= LAYOUT_MATCH_SLACK
+    })
+}
+
 /// TikTok's close-button glyph (grey ✕ on a light disc), cropped at @2x.
 static CLOSE_X_TEMPLATE: &[u8] = include_bytes!("../assets/tiktok_close_x.png");
 
@@ -40,6 +83,44 @@ const CLOSE_X_REGION: (f64, f64, f64, f64) = (0.68, 0.045, 1.0, 0.92);
 /// it rather than the two constants drifting apart again unnoticed.
 pub fn close_x_region() -> (f64, f64, f64, f64) {
     CLOSE_X_REGION
+}
+
+#[cfg(test)]
+mod calibrated_layout_tests {
+    use super::*;
+
+    #[test]
+    fn the_measured_iphone_8_screen_is_calibrated() {
+        let layout = calibrated_layout(375.0, 667.0).expect("iPhone 8 is the measured class");
+        assert_eq!(layout.id, "iphone8-portrait-v1");
+        // Half a point of slack, because the size arrives as a float.
+        assert!(calibrated_layout(375.2, 666.8).is_some());
+    }
+
+    #[test]
+    fn screens_nobody_has_measured_are_refused() {
+        // Each of these would otherwise be tapped with iPhone 8 fractions.
+        for (width, height, what) in [
+            (390.0, 844.0, "iPhone 14"),
+            (393.0, 852.0, "iPhone 15"),
+            (320.0, 568.0, "iPhone SE 1"),
+            (414.0, 896.0, "iPhone 11"),
+            (1080.0, 2220.0, "Galaxy S8+ in device pixels"),
+            (667.0, 375.0, "iPhone 8 rotated to landscape"),
+        ] {
+            assert!(
+                calibrated_layout(width, height).is_none(),
+                "{what} ({width}x{height}) has never been measured and must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_or_absurd_size_is_refused_rather_than_rounded_to_the_nearest_class() {
+        assert!(calibrated_layout(0.0, 0.0).is_none());
+        assert!(calibrated_layout(f64::NAN, f64::NAN).is_none());
+        assert!(calibrated_layout(376.0, 668.0).is_none());
+    }
 }
 
 /// A TikTok promo card can float from the upper-left and keep the compose bar
