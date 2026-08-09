@@ -2708,6 +2708,13 @@ lên màn 844pt thành 35pt từ đáy — sai trước cả khi tính 34pt home
 iPhone 8 không có. **Thêm một lớp máy = đo lại vật lý theo mục 6, không phải
 chia lại.** Và hiện `QualifiedGeometry` **không có trường safe-area nào cả**.
 
+**Trỏ tới `adb`:** `RIVIU_ADB_PATH` chỉ thẳng vào file thực thi, ưu tiên trước
+`ANDROID_SDK_ROOT`/`ANDROID_HOME` rồi mới tới `PATH`. Cần thiết vì một máy có
+thể có platform-tools giải nén rời, không nằm trong layout SDK — khi đó không có
+cách nào khai báo vị trí. Backend Android chỉ tham gia fleet khi `adb version`
+chạy được (`detect_driver`); nếu không, lý do nằm ở `android_unavailable_reason`,
+**tách riêng** với `driver_degraded_reason` của sidecar iOS.
+
 **Kênh gõ chữ iOS không còn phụ thuộc IPA bên thứ ba.** Xem mục 13:
 `RiviuAgent-text.ipa` là bản tự build từ WebDriverAgent, đã có `text` với bằng
 chứng frame thật; `RiviuAgent.ipa` (RT-MMO `com.mrph.svc`) chỉ còn là rollback

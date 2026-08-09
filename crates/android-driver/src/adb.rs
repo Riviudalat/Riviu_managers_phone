@@ -27,16 +27,27 @@ pub struct AdbProgram {
 }
 
 impl AdbProgram {
-    /// Resolve `adb`, preferring an explicitly configured binary, then the
-    /// standard SDK locations, then `PATH`.
+    /// Resolve `adb`, preferring an explicitly configured binary, then
+    /// `RIVIU_ADB_PATH`, then the standard SDK locations, then `PATH`.
     ///
-    /// The error names every place we looked. A driver that just says "adb not
-    /// found" makes the operator guess which of four locations we meant.
+    /// `RIVIU_ADB_PATH` points straight at the executable, which matters
+    /// because a machine can have platform-tools unpacked somewhere without an
+    /// SDK layout around it. Without it the only way to be found is to sit in
+    /// `<ANDROID_SDK_ROOT>/platform-tools/` or on `PATH`, and an operator with
+    /// a loose copy has no way to say where it is.
+    ///
+    /// Named for the repo's existing convention (`RIVIU_STREAM_CAPACITY`,
+    /// `RIVIU_DEFAULT_AGENT_MODE`, `RIVIU_FRAME_DUMP`).
     pub fn resolve(configured: Option<&Path>) -> anyhow::Result<Self> {
         let mut tried: Vec<String> = Vec::new();
         let mut candidates: Vec<PathBuf> = Vec::new();
         if let Some(path) = configured {
             candidates.push(path.to_path_buf());
+        }
+        if let Ok(direct) = std::env::var("RIVIU_ADB_PATH") {
+            if !direct.trim().is_empty() {
+                candidates.push(PathBuf::from(direct.trim()));
+            }
         }
         for key in ["ANDROID_SDK_ROOT", "ANDROID_HOME"] {
             if let Ok(root) = std::env::var(key) {
