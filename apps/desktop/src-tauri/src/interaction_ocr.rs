@@ -30,10 +30,16 @@ pub fn locator_version() -> &'static str {
 /// The language tag the installed reader will actually recognise, if any.
 ///
 /// macOS pins its Vision request to `["en-US", "vi-VN"]` in the Swift helper, so
-/// Vietnamese is always available there. Windows uses whichever OCR language
-/// pack the machine happens to carry, and a machine with only `en-US` reads
-/// "mới" as "mdi" and "thư" as "thif" — substitutions, not lost tone marks, so
-/// no amount of accent folding reconciles them.
+/// Vietnamese is always available there.
+///
+/// Windows never is. `Get-WindowsCapability` lists 35 `Language.OCR~~~*` packs —
+/// Arabic through Chinese — and **there is no `vi-VN`**, so this is not a
+/// machine that happens to be missing a pack; the pack does not exist. The `vi`
+/// preference in [`ocr_engine`] is kept because it costs nothing and would start
+/// working the day Microsoft ships one, but on Windows today the reader is
+/// whatever else is installed, and `en-US` renders "mới" as "mdi" and "thư" as
+/// "thif" — substituted letters, not lost tone marks, so no amount of accent
+/// folding reconciles them.
 pub fn recognizer_language() -> Option<String> {
     #[cfg(target_os = "macos")]
     {

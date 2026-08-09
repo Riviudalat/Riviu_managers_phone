@@ -150,7 +150,7 @@ fn require_vietnamese_reader() -> Result<(), CommandError> {
     Err(CommandError::code(
         "OcrLanguageUnavailable",
         format!(
-            "chuỗi bình luận cần OCR đọc được tiếng Việt để tìm lại bình luận cha;              máy này chỉ có '{found}'. Chạy chiến dịch trên máy Mac, hoặc cài gói ngôn ngữ              tiếng Việt (Settings → Time & language → Language & region → Tiếng Việt →              Language options → Optional features)."
+            "chuỗi bình luận cần OCR đọc được tiếng Việt để tìm lại bình luận cha;              máy này đọc bằng '{found}'. Windows.Media.Ocr không phát hành gói tiếng Việt              (35 gói, không có vi-VN), nên không có gì để cài — chạy chiến dịch trên máy Mac,              nơi helper Vision đã ghim sẵn vi-VN."
         ),
     ))
 }
