@@ -80,25 +80,47 @@ impl AdbProgram {
         command
     }
 
-    /// Run `adb <args>` and return stdout, or an error carrying stderr.
-    pub async fn run(&self, args: &[&str], timeout: Duration) -> anyhow::Result<String> {
+    /// Run `adb <args>` and return raw stdout bytes.
+    ///
+    /// Anything binary — `exec-out screencap -p` above all — must come through
+    /// here. Decoding stdout as text first replaces every invalid UTF-8 byte
+    /// with U+FFFD, which silently corrupts a PNG into something the same
+    /// order of size and no longer an image.
+    pub async fn run_bytes(&self, args: &[&str], timeout: Duration) -> anyhow::Result<Vec<u8>> {
         let mut command = self.command();
         command.args(args);
         let output = tokio::time::timeout(timeout, command.output())
             .await
-            .map_err(|_| anyhow!("adb {} quá {:?} không trả lời", args.join(" "), timeout))?
-            .with_context(|| format!("chạy adb {}", args.join(" ")))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            .map_err(|_| anyhow!("adb {} timed out after {:?}", args.join(" "), timeout))?
+            .with_context(|| format!("run adb {}", args.join(" ")))?;
         if output.status.success() {
-            return Ok(stdout);
+            return Ok(output.stdout);
         }
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let detail = if stderr.is_empty() {
-            stdout.trim().to_string()
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
         } else {
             stderr
         };
-        Err(anyhow!("adb {} lỗi: {detail}", args.join(" ")))
+        Err(anyhow!("adb {} failed: {detail}", args.join(" ")))
+    }
+
+    /// Run `adb <args>` and return stdout as text.
+    pub async fn run(&self, args: &[&str], timeout: Duration) -> anyhow::Result<String> {
+        let bytes = self.run_bytes(args, timeout).await?;
+        Ok(String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    /// Run `adb -s <serial> <args>` and return raw stdout bytes.
+    pub async fn device_bytes(
+        &self,
+        serial: &str,
+        args: &[&str],
+        timeout: Duration,
+    ) -> anyhow::Result<Vec<u8>> {
+        let mut full: Vec<&str> = vec!["-s", serial];
+        full.extend_from_slice(args);
+        self.run_bytes(&full, timeout).await
     }
 
     /// Run `adb -s <serial> <args>`.

@@ -218,18 +218,24 @@ impl UiSession for AndroidUiSession {
     }
 
     async fn screenshot_png(&self) -> anyhow::Result<Vec<u8>> {
-        // Straight through adb: pulling the framebuffer does not need a UI
-        // session, and this avoids a base64 round trip through the agent.
-        let output = self
+        // Raw bytes, never text. A `String` round trip replaces every invalid
+        // UTF-8 byte with U+FFFD and hands back something PNG-sized that is no
+        // longer a PNG — caught by the G1 probe rather than by review.
+        let png = self
             .adb
-            .device(
+            .device_bytes(
                 &self.serial,
                 &["exec-out", "screencap", "-p"],
                 std::time::Duration::from_secs(60),
             )
             .await
             .context("capture an Android screenshot")?;
-        Ok(output.into_bytes())
+        anyhow::ensure!(
+            png.starts_with(&[0x89, b'P', b'N', b'G']),
+            "screencap returned {} bytes that are not a PNG",
+            png.len()
+        );
+        Ok(png)
     }
 
     fn stream_url(&self) -> Option<String> {

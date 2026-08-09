@@ -1,6 +1,6 @@
 //! `DeviceDriver` for Android over adb plus a resident on-device agent.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -24,6 +24,12 @@ const AGENT_RUNNER: &str = "androidx.test.runner.AndroidJUnitRunner";
 const AGENT_DEVICE_PORT: u16 = 6790;
 /// First host port we forward to. One per device, allocated on first use.
 const HOST_PORT_BASE: u16 = 6790;
+/// Separator between sections of the batched inventory shell call.
+///
+/// Letters and underscores only, deliberately. The device shell interprets
+/// this string: an earlier `--8<--` had its `<` taken as an input redirection,
+/// so no separator was ever printed and every field parsed into the first one.
+const FIELD_SEPARATOR: &str = "RIVIU_NEXT_FIELD";
 
 #[derive(Debug, Clone, Default)]
 pub struct AndroidDriverConfig {
@@ -36,6 +42,14 @@ pub struct AndroidDriver {
     adb: AdbProgram,
     /// serial -> forwarded host port.
     ports: Mutex<HashMap<String, u16>>,
+    /// Serials for which *we* established the `adb forward`.
+    ///
+    /// Readiness may only be probed for these. A host port that we allocated
+    /// but never forwarded is not silent — it may already be forwarded to some
+    /// other device, in which case probing it reports that device's agent as
+    /// this one's. Measured: a Xiaomi with no agent installed came back
+    /// `agent=true` because it drew a port an S8+ was using.
+    forwarded: Mutex<HashSet<String>>,
 }
 
 impl AndroidDriver {
@@ -44,6 +58,7 @@ impl AndroidDriver {
         Ok(Self {
             adb,
             ports: Mutex::new(HashMap::new()),
+            forwarded: Mutex::new(HashSet::new()),
         })
     }
 
@@ -61,64 +76,52 @@ impl AndroidDriver {
         format!("http://127.0.0.1:{}", self.host_port(serial))
     }
 
-    async fn getprop(&self, serial: &str, key: &str) -> String {
+    /// Whether an agent is reachable for this device, answered honestly.
+    ///
+    /// Devices we have never forwarded report `false` rather than borrowing
+    /// somebody else's agent.
+    async fn agent_ready(&self, serial: &str) -> bool {
+        if !self.forwarded.lock().contains(serial) {
+            return false;
+        }
+        AgentClient::is_ready(&self.agent_base(serial)).await
+    }
+
+    /// The pid of a package, or `None` when it is not running.
+    ///
+    /// `pidof` exits non-zero for an absent process, which the adb wrapper
+    /// reports as a command failure. Absence is an answer here, not an error —
+    /// propagating it made `inspect_app_process` fail precisely when it was
+    /// asked about a stopped app, which is the case it exists to describe.
+    async fn pid_of(&self, serial: &str, bundle_id: &str) -> Option<u64> {
         self.adb
-            .shell(serial, &format!("getprop {key}"))
+            .shell(serial, &format!("pidof {bundle_id}"))
             .await
-            .map(|value| value.trim().to_string())
-            .unwrap_or_default()
+            .ok()
+            .and_then(|stdout| adb::parse_pidof(&stdout))
     }
 
     async fn screen_size(&self, serial: &str) -> anyhow::Result<(f64, f64)> {
         let stdout = self.adb.shell(serial, "wm size").await?;
         let (width, height) = adb::parse_wm_size(&stdout)
-            .ok_or_else(|| anyhow!("không đọc được kích thước màn hình từ 'wm size'"))?;
+            .ok_or_else(|| anyhow!("could not read the screen size from 'wm size'"))?;
         Ok((f64::from(width), f64::from(height)))
     }
 
-    async fn battery_level(&self, serial: &str) -> Option<u8> {
-        let stdout = self.adb.shell(serial, "dumpsys battery").await.ok()?;
-        stdout
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("level:"))
-            .and_then(|value| value.trim().parse::<u8>().ok())
-    }
-
-    async fn describe(&self, serial: &str, model_hint: Option<&str>) -> DeviceInfo {
-        let release = self.getprop(serial, "ro.build.version.release").await;
-        let model = match model_hint {
-            Some(model) if !model.is_empty() => model.to_string(),
-            _ => self.getprop(serial, "ro.product.model").await,
-        };
-        let agent_ready = AgentClient::is_ready(&self.agent_base(serial)).await;
-        DeviceInfo {
-            udid: serial.to_string(),
-            name: if model.is_empty() {
-                serial.to_string()
-            } else {
-                model.clone()
-            },
-            model,
-            // Still named `ios_version` in core; the rename to `os_version`
-            // plus a `platform` tag is Pha 2 of the Android plan. Populating it
-            // with the Android release is the honest reading of "OS version"
-            // until that lands.
-            ios_version: release,
-            connection: ConnectionKind::Usb,
-            status: if agent_ready {
-                DeviceStatus::Ready
-            } else {
-                DeviceStatus::Connected
-            },
-            battery: self.battery_level(serial).await,
-            wda_ready: agent_ready,
-            // Android has no provisioning profile to expire. `adb install`
-            // needs no per-device signing, so this is `None` forever here.
-            wda_expires_at: None,
-            stream_url: None,
-            tile_stream_state: Default::default(),
-            last_error: None,
-        }
+    /// Open a session as the concrete type.
+    ///
+    /// `start_ui_session` boxes this. Callers that need the Android-specific
+    /// surface — locator queries, element bounds — take this instead of
+    /// downcasting a trait object.
+    pub async fn open_session(&self, udid: &str) -> anyhow::Result<AndroidUiSession> {
+        let agent = self.ensure_agent(udid).await?;
+        let screen = self.screen_size(udid).await?;
+        Ok(AndroidUiSession::new(
+            agent,
+            self.adb.clone(),
+            udid.to_string(),
+            screen,
+        ))
     }
 
     /// Make sure the agent is installed, running and forwarded.
@@ -134,7 +137,8 @@ impl AndroidDriver {
                 adb::DEFAULT_TIMEOUT,
             )
             .await
-            .context("mở adb forward tới agent")?;
+            .context("open the adb forward to the agent")?;
+        self.forwarded.lock().insert(serial.to_string());
 
         if AgentClient::is_ready(&base).await {
             return AgentClient::connect(&base).await;
@@ -147,8 +151,9 @@ impl AndroidDriver {
             .unwrap_or_default();
         if !installed.contains(AGENT_PACKAGE) {
             return Err(anyhow!(
-                "agent chưa được cài trên {serial}. Cài hai APK \
-                 appium-uiautomator2-server và ...-debug-androidTest rồi thử lại"
+                "the agent is not installed on {serial}. Install both \
+                 appium-uiautomator2-server APKs (server and \
+                 debug-androidTest) and try again"
             ));
         }
 
@@ -161,7 +166,7 @@ impl AndroidDriver {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
         Err(anyhow!(
-            "agent trên {serial} không phản hồi /status sau 10 giây"
+            "the agent on {serial} did not answer /status within 10 seconds"
         ))
     }
 
@@ -191,8 +196,73 @@ impl AndroidDriver {
         command.creation_flags(0x0800_0000);
         command
             .spawn()
-            .with_context(|| format!("khởi động agent trên {serial}"))?;
+            .with_context(|| format!("start the agent on {serial}"))?;
         Ok(())
+    }
+}
+
+/// One batched inventory call per device.
+///
+/// Deliberately a single `adb shell`: at roughly a second per call, one round
+/// trip per field over a 16-device fleet is half a minute of listing. Measured
+/// at 34 s before batching and parallelising.
+async fn probe_device(adb: AdbProgram, serial: String, model_hint: Option<String>) -> DeviceInfo {
+    let script = format!(
+        "getprop ro.build.version.release; echo {sep}; \
+         getprop ro.product.model; echo {sep}; \
+         dumpsys battery | grep level",
+        sep = FIELD_SEPARATOR
+    );
+    let stdout = adb.shell(&serial, &script).await.unwrap_or_default();
+    let fields = parse_inventory(&stdout);
+    let model = match model_hint {
+        Some(model) if !model.is_empty() => model,
+        _ => fields.model.unwrap_or_default(),
+    };
+    DeviceInfo {
+        udid: serial.clone(),
+        name: if model.is_empty() {
+            serial.clone()
+        } else {
+            model.clone()
+        },
+        model,
+        // Still named `ios_version` in core; the rename to `os_version` plus a
+        // `platform` tag is Pha 2 of the Android plan. Populating it with the
+        // Android release is the honest reading of "OS version" until then.
+        ios_version: fields.release.unwrap_or_default(),
+        connection: ConnectionKind::Usb,
+        status: DeviceStatus::Connected,
+        battery: fields.battery,
+        wda_ready: false,
+        // Android has no provisioning profile to expire. `adb install` needs no
+        // per-device signing, so this stays `None`.
+        wda_expires_at: None,
+        stream_url: None,
+        tile_stream_state: Default::default(),
+        last_error: None,
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Inventory {
+    release: Option<String>,
+    model: Option<String>,
+    battery: Option<u8>,
+}
+
+fn parse_inventory(stdout: &str) -> Inventory {
+    let mut sections = stdout.split(FIELD_SEPARATOR);
+    let first = sections.next().unwrap_or_default().trim().to_string();
+    let second = sections.next().unwrap_or_default().trim().to_string();
+    let third = sections.next().unwrap_or_default();
+    Inventory {
+        release: (!first.is_empty()).then_some(first),
+        model: (!second.is_empty()).then_some(second),
+        battery: third
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("level:"))
+            .and_then(|value| value.trim().parse::<u8>().ok()),
     }
 }
 
@@ -203,16 +273,22 @@ impl DeviceDriver for AndroidDriver {
             .adb
             .run(&["devices", "-l"], adb::DEFAULT_TIMEOUT)
             .await?;
-        let mut devices = Vec::new();
-        for line in adb::parse_devices(&stdout) {
+        let lines = adb::parse_devices(&stdout);
+
+        // Fan out: the fleet is 16 phones and every one of them costs a round
+        // trip we would otherwise pay in series.
+        let mut inflight = Vec::new();
+        let mut unauthorized = Vec::new();
+        for line in lines {
             match line.state {
                 AdbDeviceState::Device => {
-                    devices.push(self.describe(&line.serial, line.model.as_deref()).await);
+                    let adb = self.adb.clone();
+                    inflight.push(tokio::spawn(probe_device(adb, line.serial, line.model)));
                 }
                 // Report it, do not hide it. A phone whose USB-debugging prompt
                 // has not been accepted is a normal fleet state with an obvious
                 // fix, and dropping it from the list makes it look unplugged.
-                AdbDeviceState::Unauthorized => devices.push(DeviceInfo {
+                AdbDeviceState::Unauthorized => unauthorized.push(DeviceInfo {
                     udid: line.serial.clone(),
                     name: line.model.clone().unwrap_or_else(|| line.serial.clone()),
                     model: line.model.unwrap_or_default(),
@@ -225,23 +301,41 @@ impl DeviceDriver for AndroidDriver {
                     stream_url: None,
                     tile_stream_state: Default::default(),
                     last_error: Some(
-                        "Chưa cho phép USB debugging — bấm Cho phép trên màn hình máy".into(),
+                        "USB debugging not allowed yet — accept the prompt on the device".into(),
                     ),
                 }),
                 AdbDeviceState::Offline | AdbDeviceState::Other => {}
             }
         }
+
+        let mut devices = Vec::with_capacity(inflight.len() + unauthorized.len());
+        for handle in inflight {
+            let Ok(mut device) = handle.await else {
+                continue;
+            };
+            device.wda_ready = self.agent_ready(&device.udid).await;
+            if device.wda_ready {
+                device.status = DeviceStatus::Ready;
+            }
+            devices.push(device);
+        }
+        devices.extend(unauthorized);
         Ok(devices)
     }
 
     async fn refresh_device(&self, udid: &str) -> anyhow::Result<DeviceInfo> {
-        Ok(self.describe(udid, None).await)
+        let mut device = probe_device(self.adb.clone(), udid.to_string(), None).await;
+        device.wda_ready = self.agent_ready(udid).await;
+        if device.wda_ready {
+            device.status = DeviceStatus::Ready;
+        }
+        Ok(device)
     }
 
     async fn install_app(&self, udid: &str, path: &Path) -> anyhow::Result<()> {
         let path = path
             .to_str()
-            .ok_or_else(|| anyhow!("đường dẫn APK không phải UTF-8"))?;
+            .ok_or_else(|| anyhow!("the APK path is not UTF-8"))?;
         self.adb
             .device(
                 udid,
@@ -260,16 +354,22 @@ impl DeviceDriver for AndroidDriver {
     }
 
     async fn screenshot(&self, udid: &str, dest: &Path) -> anyhow::Result<PathBuf> {
-        let remote = "/sdcard/riviu_screenshot.png";
-        self.adb
-            .shell(udid, &format!("screencap -p {remote}"))
+        let png = self
+            .adb
+            .device_bytes(
+                udid,
+                &["exec-out", "screencap", "-p"],
+                Duration::from_secs(120),
+            )
             .await?;
-        let local = dest
-            .to_str()
-            .ok_or_else(|| anyhow!("đường dẫn ảnh không phải UTF-8"))?;
-        self.adb
-            .device(udid, &["pull", remote, local], Duration::from_secs(120))
-            .await?;
+        anyhow::ensure!(
+            png.starts_with(&[0x89, b'P', b'N', b'G']),
+            "screencap returned {} bytes that are not a PNG",
+            png.len()
+        );
+        tokio::fs::write(dest, &png)
+            .await
+            .with_context(|| format!("write {}", dest.display()))?;
         Ok(dest.to_path_buf())
     }
 
@@ -299,24 +399,14 @@ impl DeviceDriver for AndroidDriver {
         udid: &str,
         bundle_id: &str,
     ) -> anyhow::Result<ProcessAbsenceProof> {
-        let before = self
-            .adb
-            .shell(udid, &format!("pidof {bundle_id}"))
-            .await
-            .ok()
-            .and_then(|stdout| adb::parse_pidof(&stdout));
+        let before = self.pid_of(udid, bundle_id).await;
         self.adb
             .shell(udid, &format!("am force-stop {bundle_id}"))
             .await?;
-        let after = self
-            .adb
-            .shell(udid, &format!("pidof {bundle_id}"))
-            .await
-            .ok()
-            .and_then(|stdout| adb::parse_pidof(&stdout));
+        let after = self.pid_of(udid, bundle_id).await;
         if let Some(pid) = after {
             return Err(anyhow!(
-                "{bundle_id} vẫn chạy (pid {pid}) sau khi force-stop"
+                "{bundle_id} is still running (pid {pid}) after force-stop"
             ));
         }
         Ok(ProcessAbsenceProof {
@@ -340,8 +430,7 @@ impl DeviceDriver for AndroidDriver {
         udid: &str,
         bundle_id: &str,
     ) -> anyhow::Result<AppProcessState> {
-        let stdout = self.adb.shell(udid, &format!("pidof {bundle_id}")).await?;
-        let pid = adb::parse_pidof(&stdout);
+        let pid = self.pid_of(udid, bundle_id).await;
         Ok(AppProcessState {
             bundle_id: bundle_id.to_string(),
             pid,
@@ -357,14 +446,7 @@ impl DeviceDriver for AndroidDriver {
     }
 
     async fn start_ui_session(&self, udid: &str) -> anyhow::Result<Box<dyn UiSession>> {
-        let agent = self.ensure_agent(udid).await?;
-        let screen = self.screen_size(udid).await?;
-        Ok(Box::new(AndroidUiSession::new(
-            agent,
-            self.adb.clone(),
-            udid.to_string(),
-            screen,
-        )))
+        Ok(Box::new(self.open_session(udid).await?))
     }
 
     /// No frame producer yet.
@@ -375,7 +457,7 @@ impl DeviceDriver for AndroidDriver {
     /// that publishes nothing.
     async fn ensure_stream(&self, _udid: &str) -> anyhow::Result<String> {
         Err(anyhow!(
-            "driver Android chưa có nguồn frame — xem Pha 5 của kế hoạch"
+            "the Android driver has no frame source yet — see Pha 5 of the plan"
         ))
     }
 
@@ -409,10 +491,57 @@ mod tests {
         assert_eq!(first, HOST_PORT_BASE);
     }
 
-    #[test]
-    fn the_agent_base_url_follows_the_allocated_port() {
+    #[tokio::test]
+    async fn readiness_is_false_until_we_forward_that_device_ourselves() {
+        // The bug this guards: allocating a port does not forward it, and the
+        // port may already belong to another device's agent. Probing it then
+        // reports a phone with no agent as ready.
         let driver = AndroidDriver::new(&AndroidDriverConfig::default()).expect("driver");
-        let base = driver.agent_base("serial-a");
-        assert_eq!(base, format!("http://127.0.0.1:{HOST_PORT_BASE}"));
+        let _ = driver.host_port("never-forwarded");
+        assert!(!driver.agent_ready("never-forwarded").await);
+    }
+
+    #[test]
+    fn the_field_separator_survives_the_device_shell() {
+        // It is echoed by the shell on the phone, so any metacharacter changes
+        // what runs. `--8<--` silently turned into a redirection and every
+        // field collapsed into the first one.
+        assert!(
+            FIELD_SEPARATOR
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_'),
+            "separator {FIELD_SEPARATOR:?} contains a character the device shell may interpret"
+        );
+        assert!(!FIELD_SEPARATOR.is_empty());
+    }
+
+    #[test]
+    fn inventory_splits_into_release_model_and_battery() {
+        let stdout = format!(
+            "9\n{sep}\nSM-G955N\n{sep}\n  level: 58\n  scale: 100\n",
+            sep = FIELD_SEPARATOR
+        );
+        assert_eq!(
+            parse_inventory(&stdout),
+            Inventory {
+                release: Some("9".into()),
+                model: Some("SM-G955N".into()),
+                battery: Some(58),
+            }
+        );
+    }
+
+    #[test]
+    fn inventory_tolerates_missing_sections() {
+        assert_eq!(parse_inventory(""), Inventory::default());
+        let partial = format!("15\n{sep}\n\n{sep}\n", sep = FIELD_SEPARATOR);
+        assert_eq!(
+            parse_inventory(&partial),
+            Inventory {
+                release: Some("15".into()),
+                model: None,
+                battery: None,
+            }
+        );
     }
 }
