@@ -2758,14 +2758,14 @@ impl DeviceDriver for PmdIosDriver {
         Ok(())
     }
 
-    fn supports_text_comments(&self) -> bool {
+    fn supports_text_comments(&self, _udid: &str) -> bool {
         self.profile
             .features
             .iter()
             .any(|feature| feature == "text")
     }
 
-    fn supports_verified_app_termination(&self) -> bool {
+    fn supports_verified_app_termination(&self, _udid: &str) -> bool {
         self.verified_app_termination
     }
 
@@ -2916,7 +2916,7 @@ impl DeviceDriver for PmdIosDriver {
         .await
     }
 
-    fn supports_push_media(&self) -> bool {
+    fn supports_push_media(&self, _udid: &str) -> bool {
         self.profile
             .features
             .iter()
@@ -2929,7 +2929,7 @@ impl DeviceDriver for PmdIosDriver {
         campaign_id: &str,
         manifest_sha256: &str,
     ) -> anyhow::Result<serde_json::Value> {
-        if !self.supports_push_media() {
+        if !self.supports_push_media(udid) {
             anyhow::bail!("selected Agent does not advertise pushMedia");
         }
         let slot = self.slots.get(udid);
@@ -2949,7 +2949,7 @@ impl DeviceDriver for PmdIosDriver {
         campaign_id: &str,
         manifest_sha256: &str,
     ) -> anyhow::Result<serde_json::Value> {
-        if !self.supports_push_media() {
+        if !self.supports_push_media(udid) {
             anyhow::bail!("selected Agent does not advertise pushMedia");
         }
         let slot = self.slots.get(udid);
@@ -2968,7 +2968,7 @@ impl DeviceDriver for PmdIosDriver {
         udid: &str,
         import_id: &str,
     ) -> anyhow::Result<serde_json::Value> {
-        if !self.supports_push_media() {
+        if !self.supports_push_media(udid) {
             anyhow::bail!("selected Agent does not advertise pushMedia");
         }
         let slot = self.slots.get(udid);
@@ -3135,7 +3135,7 @@ impl DeviceDriver for PmdIosDriver {
         }))
     }
 
-    fn requires_fresh_text_session(&self) -> bool {
+    fn requires_fresh_text_session(&self, _udid: &str) -> bool {
         self.profile.backend == WdaBackend::RtMmo
             || (self.profile.backend == WdaBackend::RiviuAgent
                 && self
@@ -3579,7 +3579,7 @@ print(json.dumps({'ok': True, 'note': 'terminate best-effort'}), flush=True)
         .await
         .expect("probe legacy sidecar");
 
-        assert!(!driver.supports_verified_app_termination());
+        assert!(!driver.supports_verified_app_termination("fixture-udid"));
 
         let error = DeviceDriver::terminate_app(&driver, "fixture-udid", "com.fixture.app")
             .await
@@ -3666,7 +3666,10 @@ print(json.dumps({'ok': True, 'note': 'terminate best-effort'}), flush=True)
             })
             .await
             .expect("probe fixture sidecar");
-            assert_eq!(driver.supports_verified_app_termination(), expected);
+            assert_eq!(
+                driver.supports_verified_app_termination("fixture-udid"),
+                expected
+            );
         }
     }
 

@@ -840,7 +840,7 @@ impl FlowExecutor {
         };
         let capability_ids = static_flow_capability_ids(
             agent_status.as_ref(),
-            &self.deps.control.driver_contract_ids(),
+            &self.deps.control.driver_contract_ids(&self.deps.udid),
             !bridge_only && snapshot.protected_auth_ready,
         );
         let missing = plan
@@ -2578,7 +2578,7 @@ mod tests {
             Ok(snapshot)
         }
 
-        fn supports_verified_app_termination(&self) -> bool {
+        fn supports_verified_app_termination(&self, _udid: &str) -> bool {
             true
         }
 

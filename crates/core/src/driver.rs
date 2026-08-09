@@ -280,10 +280,15 @@ pub trait DeviceDriver: Send + Sync {
     ) -> anyhow::Result<GuardedClipboardTransition> {
         unsupported("guardedClipboardTransition")
     }
-    fn supports_text_comments(&self) -> bool {
+    /// Whether this device has a trusted text channel.
+    ///
+    /// Takes a udid because a fleet can be mixed: with an iOS and an Android
+    /// backend behind one multiplexer, a fleet-wide answer would report one
+    /// platform's capability for the other's device.
+    fn supports_text_comments(&self, _udid: &str) -> bool {
         false
     }
-    fn supports_verified_app_termination(&self) -> bool {
+    fn supports_verified_app_termination(&self, _udid: &str) -> bool {
         false
     }
     async fn inspect_app_process(
@@ -319,7 +324,7 @@ pub trait DeviceDriver: Send + Sync {
     /// Whether the selected Agent advertises the native media prepare route.
     /// Staging remains available for older/production Agents, but callers must
     /// only invoke the protected route when this capability is present.
-    fn supports_push_media(&self) -> bool {
+    fn supports_push_media(&self, _udid: &str) -> bool {
         false
     }
     /// Ask the Agent to validate the staged campaign and return its import
@@ -365,7 +370,7 @@ pub trait DeviceDriver: Send + Sync {
     async fn start_ui_session(&self, udid: &str) -> anyhow::Result<Box<dyn UiSession>>;
     /// Whether comment-enabled jobs need the target app foregrounded before a
     /// newly-created trusted text session. Stock WDA keeps its existing order.
-    fn requires_fresh_text_session(&self) -> bool {
+    fn requires_fresh_text_session(&self, _udid: &str) -> bool {
         false
     }
     /// Prepare a text-capable UI session for `bundle_id`. Backends without a

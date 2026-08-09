@@ -440,7 +440,7 @@ async fn open_interaction_context(
         .reserve_ui_capacity(exclusive)
         .await
         .map_err(CommandError::from)?;
-    let kind = if control.requires_fresh_text_session() {
+    let kind = if control.requires_fresh_text_session(udid) {
         InteractionSessionKind::FreshText
     } else {
         InteractionSessionKind::Ordinary

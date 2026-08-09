@@ -4334,7 +4334,7 @@ mod tests {
             Ok(capability_snapshot(target_bundle_id))
         }
 
-        fn supports_verified_app_termination(&self) -> bool {
+        fn supports_verified_app_termination(&self, _udid: &str) -> bool {
             true
         }
 

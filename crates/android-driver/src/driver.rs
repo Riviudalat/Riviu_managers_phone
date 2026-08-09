@@ -415,13 +415,13 @@ impl DeviceDriver for AndroidDriver {
         })
     }
 
-    fn supports_verified_app_termination(&self) -> bool {
+    fn supports_verified_app_termination(&self, _udid: &str) -> bool {
         true
     }
 
     /// Yes, and measured: Vietnamese reaches TikTok's comment box intact
     /// through accessibility `ACTION_SET_TEXT`.
-    fn supports_text_comments(&self) -> bool {
+    fn supports_text_comments(&self, _udid: &str) -> bool {
         true
     }
 

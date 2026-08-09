@@ -434,7 +434,7 @@ impl NurtureEngine {
             return Ok(status);
         }
 
-        if settings.comment_prob > 0 && !self.control.supports_text_comments() {
+        if settings.comment_prob > 0 && !self.control.supports_text_comments(udid) {
             report(
                 &mut status,
                 "failed — Riviu Agent chưa có kênh bình luận chữ; chạy Agent Repair".into(),
@@ -457,7 +457,7 @@ impl NurtureEngine {
         // runner rather than starting a second one.
         let bundle_id = Self::tiktok_bundle(&settings).to_string();
         let fresh_text_session =
-            settings.comment_prob > 0 && self.control.requires_fresh_text_session();
+            settings.comment_prob > 0 && self.control.requires_fresh_text_session(udid);
         let session_kind = if fresh_text_session {
             InteractionSessionKind::FreshText
         } else {

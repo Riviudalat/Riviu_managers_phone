@@ -229,7 +229,7 @@ pub(crate) async fn transfer_publish_campaign_inner(
         {
             Ok(evidence) => {
                 let native_result: anyhow::Result<serde_json::Value> = async {
-                    if control.supports_push_media() {
+                    if control.supports_push_media(&assignment.udid) {
                         let manifest_sha256 = evidence
                             .get("manifestSha256")
                             .and_then(serde_json::Value::as_str)
@@ -356,9 +356,20 @@ pub(crate) async fn post_publish_campaign_inner(
             detail.campaign.state
         );
     }
-    if !control.supports_push_media() {
+    // Asked per device, not once for the campaign. A campaign spans several
+    // phones and a fleet can be mixed, so a single fleet-wide answer would
+    // report one device's agent on behalf of the rest. Still fails fast, before
+    // any state is mutated, and now names the devices that are short.
+    let without_push_media: Vec<&str> = detail
+        .assignments
+        .iter()
+        .filter(|assignment| !control.supports_push_media(&assignment.udid))
+        .map(|assignment| assignment.udid.as_str())
+        .collect();
+    if !without_push_media.is_empty() {
         anyhow::bail!(
-            "selected Agent does not advertise pushMedia; install the combined candidate"
+            "these devices' agents do not advertise pushMedia: {}; install the combined candidate",
+            without_push_media.join(", ")
         );
     }
     db.update_publish_campaign_state(
@@ -635,7 +646,7 @@ async fn open_publish_context(
         .terminate_app(&exclusive, TIKTOK_BUNDLE_ID)
         .await
         .map_err(anyhow::Error::new)?;
-    let kind = if control.requires_fresh_text_session() {
+    let kind = if control.requires_fresh_text_session(udid) {
         InteractionSessionKind::FreshText
     } else {
         InteractionSessionKind::Ordinary

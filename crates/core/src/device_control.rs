@@ -247,20 +247,20 @@ impl DeviceControlPlane {
         self.driver.cached_agent_status(udid)
     }
 
-    pub fn supports_text_comments(&self) -> bool {
-        self.driver.supports_text_comments()
+    pub fn supports_text_comments(&self, udid: &str) -> bool {
+        self.driver.supports_text_comments(udid)
     }
 
-    pub fn driver_contract_ids(&self) -> BTreeSet<String> {
+    pub fn driver_contract_ids(&self, udid: &str) -> BTreeSet<String> {
         let mut contracts = BTreeSet::new();
-        if self.driver.supports_verified_app_termination() {
+        if self.driver.supports_verified_app_termination(udid) {
             contracts.insert("verifiedProcessControl".to_string());
         }
         contracts
     }
 
-    pub fn requires_fresh_text_session(&self) -> bool {
-        self.driver.requires_fresh_text_session()
+    pub fn requires_fresh_text_session(&self, udid: &str) -> bool {
+        self.driver.requires_fresh_text_session(udid)
     }
 
     pub async fn list_devices(&self) -> Result<Vec<DeviceInfo>, DeviceControlError> {
@@ -527,8 +527,8 @@ impl DeviceControlPlane {
             .map_err(|error| driver_error(lease.udid(), "stagePublishMedia", error))
     }
 
-    pub fn supports_push_media(&self) -> bool {
-        self.driver.supports_push_media()
+    pub fn supports_push_media(&self, udid: &str) -> bool {
+        self.driver.supports_push_media(udid)
     }
 
     pub async fn prepare_publish_media(
@@ -3557,7 +3557,7 @@ mod tests {
 
     #[async_trait]
     impl crate::DeviceDriver for TestDriver {
-        fn supports_verified_app_termination(&self) -> bool {
+        fn supports_verified_app_termination(&self, _udid: &str) -> bool {
             true
         }
 
@@ -5334,7 +5334,7 @@ mod tests {
         driver.block_termination();
         let control = Arc::new(control_plane(driver.clone(), 1));
         assert_eq!(
-            control.driver_contract_ids(),
+            control.driver_contract_ids("fixture-udid"),
             std::collections::BTreeSet::from(["verifiedProcessControl".to_string()])
         );
 

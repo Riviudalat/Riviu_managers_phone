@@ -576,7 +576,7 @@ impl DeviceDriver for FixtureDriver {
         Ok(self.snapshot.clone())
     }
 
-    fn supports_verified_app_termination(&self) -> bool {
+    fn supports_verified_app_termination(&self, _udid: &str) -> bool {
         true
     }
 

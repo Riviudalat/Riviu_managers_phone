@@ -458,7 +458,7 @@ pub async fn device_type_text(
     text: String,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let kind = if state.control.requires_fresh_text_session() {
+    let kind = if state.control.requires_fresh_text_session(&udid) {
         InteractionSessionKind::FreshText
     } else {
         InteractionSessionKind::Ordinary
@@ -523,7 +523,7 @@ pub async fn group_input(
         skipped: Vec::new(),
     };
     for udid in udids {
-        let session_kind = if kind == "type" && state.control.requires_fresh_text_session() {
+        let session_kind = if kind == "type" && state.control.requires_fresh_text_session(&udid) {
             InteractionSessionKind::FreshText
         } else {
             InteractionSessionKind::Ordinary

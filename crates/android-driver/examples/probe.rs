@@ -158,11 +158,11 @@ async fn main() -> anyhow::Result<()> {
     );
     println!(
         "    supports_verified_app_termination = {}",
-        driver.supports_verified_app_termination()
+        driver.supports_verified_app_termination(&serial)
     );
     println!(
         "    supports_text_comments        = {}",
-        driver.supports_text_comments()
+        driver.supports_text_comments(&serial)
     );
 
     println!("\n== inspect_app_process ==");

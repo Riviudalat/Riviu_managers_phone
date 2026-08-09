@@ -734,11 +734,11 @@ impl DeviceDriver for MockIosDriver {
         })
     }
 
-    fn supports_text_comments(&self) -> bool {
+    fn supports_text_comments(&self, _udid: &str) -> bool {
         true
     }
 
-    fn supports_verified_app_termination(&self) -> bool {
+    fn supports_verified_app_termination(&self, _udid: &str) -> bool {
         self.mock_verified_app_termination.load(Ordering::SeqCst)
     }
 
@@ -747,7 +747,7 @@ impl DeviceDriver for MockIosDriver {
         udid: &str,
         bundle_id: &str,
     ) -> anyhow::Result<AppProcessState> {
-        if !self.supports_verified_app_termination() {
+        if !self.supports_verified_app_termination(udid) {
             anyhow::bail!("verified app termination is disabled for this mock driver");
         }
         let pid = self
@@ -762,7 +762,7 @@ impl DeviceDriver for MockIosDriver {
         })
     }
 
-    fn requires_fresh_text_session(&self) -> bool {
+    fn requires_fresh_text_session(&self, _udid: &str) -> bool {
         true
     }
 
@@ -844,7 +844,7 @@ impl DeviceDriver for MockIosDriver {
         udid: &str,
         bundle_id: &str,
     ) -> anyhow::Result<ProcessAbsenceProof> {
-        if !self.supports_verified_app_termination() {
+        if !self.supports_verified_app_termination(udid) {
             anyhow::bail!("verified app termination is disabled for this mock driver");
         }
         let old_pid = self
@@ -1073,7 +1073,7 @@ mod tests {
         assert!(status.mjpeg_ready);
         assert!(status.session_ready);
         assert!(status.features.iter().any(|feature| feature == "text"));
-        assert!(driver.supports_text_comments());
+        assert!(driver.supports_text_comments("fixture-udid"));
     }
 
     #[tokio::test]
@@ -1388,12 +1388,12 @@ mod tests {
         let udid = "MOCK-IPHONE-01";
         let bundle_id = "com.fixture.app";
 
-        assert!(!driver.supports_verified_app_termination());
+        assert!(!driver.supports_verified_app_termination("fixture-udid"));
         assert!(driver.inspect_app_process(udid, bundle_id).await.is_err());
         assert!(driver.terminate_app(udid, bundle_id).await.is_err());
         driver.set_mock_verified_app_termination(true);
         driver.set_mock_app_process(udid, bundle_id, Some(42));
-        assert!(driver.supports_verified_app_termination());
+        assert!(driver.supports_verified_app_termination("fixture-udid"));
         assert_eq!(
             driver
                 .inspect_app_process(udid, bundle_id)
