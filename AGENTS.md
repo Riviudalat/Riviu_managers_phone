@@ -2339,6 +2339,10 @@ Fixture hiện có: `feed-iphone8.jpg`, `feed-iphone8-b.jpg`, `feed-rail-variant
 - `RIVIU_STREAM_CAPACITY` là cấu hình desktop cho 1..100 producer, mặc định 2
   để giữ hành vi live hiện tại. Giá trị ngoài khoảng bị bỏ qua và ghi cảnh báo,
   không được tự nâng capacity trong code gọi lệnh.
+- **Đã sửa 09/08/2026**: `StreamBudgetManager` chặn cứng ở 2, nên
+  `RIVIU_STREAM_CAPACITY=3` từng làm app **panic lúc khởi động** qua `.expect()`
+  — trái đúng hợp đồng "giá trị ngoài khoảng bị bỏ qua" ở ngay trên. Giờ hạ về
+  mặc định kèm cảnh báo (`state.rs::desktop_stream_budget`).
 - Dải local WDA-control có 128 slot (`18100..18227`) để không đụng port khi
   fleet xoay vòng tới 100 UDID. Mọi relay vẫn phải nằm trong supervisor lock và
   registry fingerprint; không tạo relay thứ hai cho cùng UDID.
@@ -2596,3 +2600,76 @@ Fixture hiện có: `feed-iphone8.jpg`, `feed-iphone8-b.jpg`, `feed-rail-variant
   target-photo run `live-comment-target-open-url-v6.jsonl` PASS: 3 video, 2
   comment có frame xác nhận, 0 recovery. Không quảng bá comment khi evidence gate
   fail; stock/RT-MMO vẫn giữ fail-closed contract.
+
+## 9. Fleet Android (09/08/2026)
+
+Ổ cắm cho việc này được chừa từ ngày đầu — bản thiết kế gốc
+(`docs/superpowers/specs/2026-07-25-riviu-managers-phone-design.md:7`) viết
+*"…multiple iPhones, with Android deferred behind a `DeviceDriver` trait"*.
+`crates/android-driver` lấp chỗ đó và **không phải sửa `DeviceDriver`/`UiSession`**.
+
+Số đo đầy đủ ở `docs/ANDROID_PROBE_REPORT_2026-08-09.md`. Những điều không được
+đoán lại:
+
+- **Hai tầng, chia theo số đo, không theo thẩm mỹ.** `adb.rs` chỉ dùng cho vòng
+  đời (cài/mở/dừng/khởi động lại): mỗi lệnh tốn 1–2 giây trên fleet Galaxy S8+.
+  `agent.rs` nói HTTP với `appium-uiautomator2-server` thường trú qua
+  `adb forward`: click 130–280 ms, tìm element 609 ms, đọc thuộc tính 241 ms.
+- **Đừng dump cả cây accessibility trong vòng điều khiển.** Agent **không** làm
+  nó rẻ hơn (3403 ms so với 2693–4239 ms qua CLI) vì chi phí nằm ở duyệt và
+  serialize cây, không ở khởi động công cụ. Hãy truy vấn đúng element cần — đó
+  đã là hình dạng của `find_and_tap`/`assert_visible`/`read_text`.
+- **Locator ưu tiên `content-desc`, KHÔNG phải `resource-id`.** `resource-id`
+  của TikTok bị R8 obfuscate (`a1p`, `ty9`, `ebz`) và đổi theo bản build;
+  `content-desc` thì ngữ nghĩa, tiếng Anh bất kể ngôn ngữ giao diện, và **mã hoá
+  cả trạng thái**: `Like` ⇄ `Video liked`, `Read or add comments. 15 comments`.
+  Vì thế `supports_accessibility_readback` ở đây là `true` — backend đầu tiên
+  của dự án nói được câu đó, do iOS buộc giữ `snapshotMaxDepth = 1` (§2.3).
+- **Không port `screen.rs` sang Android.** Nó là cách lách một API hỏng; Android
+  không có lỗi đó.
+- **Không cần IME riêng.** `ACTION_SET_TEXT` gõ tiếng Việt đủ dấu vào ô bình
+  luận TikTok (xác minh bằng ảnh chụp), sau đó TikTok tự chuyển nút gửi sang đỏ.
+  `adb shell input text` thì **giết tiến trình** khi gặp dấu.
+- **`wm size` trả HAI dòng**; phải đọc **Override** (`1080x2220`), không phải
+  Physical (`1440x2960`). Đọc nhầm là lệch 33% mọi toạ độ.
+- **Bẫy hai `EditText`**: khay bình luận mở có một ô ẩn `focused=false` và một ô
+  thật `focused=true`. Selector theo `class name` lấy nhầm cái ẩn, set text
+  "thành công" ở tầng API mà màn hình trống. Dùng `Locator::focused()`.
+- **Bài LIVE trong feed không có rail** like/comment. Vòng nurture phải nhận ra
+  và vuốt qua; nhận ra được từ hierarchy.
+- `find_and_tap` lấy bounds rồi **chạm thật** trong vùng đó, **không** dùng
+  `ACTION_CLICK` của accessibility — click accessibility phân biệt được với
+  người và đi vòng qua lớp cử chỉ mà chống phát hiện đang dựa vào.
+- `AdbProgram::run` giải mã stdout thành text nên **phá dữ liệu nhị phân**; mọi
+  thứ nhị phân (`exec-out screencap -p`) phải qua `run_bytes`/`device_bytes`, và
+  cả hai đường screenshot đều kiểm magic PNG.
+- Dấu phân cách trong lệnh shell gộp **chỉ được dùng chữ và gạch dưới**: một
+  `--8<--` từng bị shell trên máy hiểu `<` là chuyển hướng input.
+- `pidof` thoát khác 0 khi tiến trình vắng mặt. Đó là **câu trả lời**, không
+  phải lỗi — đi qua `AndroidDriver::pid_of`.
+
+`MultiplexDriver` (`crates/core/src/driver_multiplex.rs`) gộp hai backend vào
+**một** `DeviceControlPlane`. Không tách hai plane: `DeviceRegistry::upsert_many`
+thay cả vector và phát `DevicesUpdated` mang toàn fleet, nên hai plane poll độc
+lập sẽ luân phiên xoá máy của nhau; `DeviceExclusiveContext` còn mang `plane_id`
+mà mọi transition đều kiểm. **Bảng route chỉ dựng từ `list_devices`** — không
+bao giờ đoán nền tảng từ chuỗi udid; việc repo không validate định dạng udid là
+tài sản, giữ nguyên. Một backend hỏng **không** che backend còn lại.
+
+`supports_text_comments`, `supports_verified_app_termination`,
+`requires_fresh_text_session`, `supports_push_media` giờ **nhận udid**: trên
+fleet trộn, câu trả lời fleet-wide là lời nói dối về máy của nền tảng kia.
+
+Backend Android chỉ tham gia khi `adb` thực sự dùng được (`detect_driver` chạy
+`adb version` lúc khởi động), và lý do vắng mặt nằm ở
+`android_unavailable_reason` **riêng** với `driver_degraded_reason` — "máy này
+không có adb" và "sidecar iOS chết" là hai sự việc khác nhau.
+
+`StreamHub` vẫn thuộc bundle iOS: driver Android **chưa có nguồn frame**, và
+`ensure_stream` cố tình báo lỗi thay vì trả URL không phát gì.
+
+**Còn nợ, đừng nhầm là đã xong**: `DeviceInfo.ios_version` vẫn mang phiên bản
+Android nên giao diện hiện "iOS 9" cho máy Android — đổi tên sang `os_version` +
+`platform` là việc chưa làm. Chưa máy nào trong fleet có root (`su -c id` không
+trả `uid=0`, không có Magisk/SuperSU/KernelSU), nên toàn bộ tính năng cần root
+vẫn chưa đo được.
