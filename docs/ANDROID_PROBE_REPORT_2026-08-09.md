@@ -208,6 +208,70 @@ hai lần BACK. **Không bấm gửi, không đăng gì.** Ô nhập trở về 
 ⇒ Kết luận "cần agent thường trú" **vẫn đứng, và còn chắc hơn**: nó cần cho
 **hierarchy trên mọi máy**, và thêm cho **thao tác chạm trên 15/16 máy** của fleet.
 
+---
+
+# Gate G1a — cùng ngày: agent thường trú có chữa được không?
+
+Cài `appium-uiautomator2-server` **v10.3.5** (Apache-2.0) lên `ce011711c354be2005`,
+chạy qua `am instrument`, `adb forward tcp:6790`. Server trả `/status` ngay lập tức.
+
+## Đo — CLI so với agent, cùng thao tác, cùng máy
+
+| Thao tác | Qua CLI | **Qua agent** | Tỉ lệ |
+|---|---|---|---|
+| Tìm 1 element | ~2700 ms (phải dump rồi parse) | **609 ms** | 4,4× |
+| Đọc 1 thuộc tính | ~2700 ms | **241 ms** | 11× |
+| Chạm (click) | 1502 ms | **130–280 ms** | 5–11× |
+| Vuốt (W3C actions) | ~1500 ms | **719 ms** | 2× |
+| Gõ tiếng Việt | **không thể — `Killed`** | **741–1156 ms, đúng từng dấu** | — |
+| Dump **toàn bộ** cây | 2693–4239 ms | **3403 ms** | ~1× |
+
+**Kết luận kiến trúc, và nó tinh tế hơn dự đoán ban đầu:** agent chữa được **mọi
+truy vấn có đích**, nhưng **không** chữa được việc dump cả cây — vì chi phí đó nằm
+ở duyệt + serialize cây accessibility, không phải ở khởi động công cụ.
+
+⇒ **Đừng bao giờ dump cả cây trong vòng điều khiển. Hãy truy vấn đúng thứ cần.**
+Và đó chính xác là hình dạng `UiSession` đã có sẵn: `find_and_tap`,
+`assert_visible`, `read_text` đều là truy vấn có đích. Trait không cần đổi hình.
+
+## Tiếng Việt — Pha 3 có thể XOÁ khỏi kế hoạch
+
+`POST /session/:id/element/:id/value` (dùng `ACTION_SET_TEXT` của accessibility)
+gõ được **`Xin chào, món này ngon quá đi mất`** vào ô bình luận TikTok, **đủ mọi
+dấu** (`à ó á đ ấ`), xác minh **bằng ảnh chụp màn hình**, không qua tầng giải mã nào.
+
+**Không cần viết IME riêng.** Toàn bộ Pha 3 của kế hoạch (APK bàn phím, `ime enable`/
+`ime set`, khôi phục IME gốc kèm proof) **bỏ được**.
+
+Thêm nữa: sau khi set text, **nút gửi của TikTok chuyển sang đỏ đậm** — chính app
+xác nhận nó coi nội dung là hợp lệ. Đây đúng là tín hiệu "Send armed" mà bên iOS
+phải dò bằng độ đỏ pixel (`screen.rs::SEND_ARMED_REDNESS`); trên Android nó là
+một thay đổi trạng thái quan sát được.
+
+## Bốn phát hiện về TikTok Android, phát sinh khi đo
+
+1. **Bài LIVE trong feed KHÔNG có rail like/comment.** Màn hình chỉ có
+   `content-desc="LIVE"` và `Tap to watch LIVE`. Nurture phải nhận ra và vuốt qua —
+   nhận ra được từ hierarchy, không cần CV.
+2. **Có HAI node `android.widget.EditText`** khi khay bình luận mở: một cái ẩn
+   `focused="false"` (thanh thu gọn) và một cái thật `focused="true"`. Selector
+   theo `class name` lấy nhầm cái ẩn — set text vào đó **thành công về mặt API**
+   nhưng không hiện gì trên màn hình. **Phải chọn `.focused(true)`.**
+   Đây là cái bẫy tốn nhiều thời gian nhất trong buổi đo.
+3. **`Close` (accessibility id) thoát LIVE room sạch** — đường recovery "off-feed"
+   rẻ hơn hẳn bên iOS.
+4. **Số bình luận đọc được từ content-desc**: `Read or add comments. 15 comments`
+   ⇄ `Add 1st comments`. Tức **xác minh "đã đăng bình luận" đọc thẳng được**,
+   không cần so ảnh.
+
+## Hệ quả với kế hoạch
+
+- Pha 1 giữ nguyên hướng agent, dùng uiautomator2-server (đã chọn). Client Rust
+  chỉ cần nói HTTP/JSON với nó.
+- **Pha 3 xoá.** Tiếng Việt đã giải quyết xong tại Pha 1.
+- Pha 5 (nurture): `FeedReader` bản Android hoàn toàn dựa hierarchy; thêm nhánh
+  nhận diện bài LIVE.
+
 ## Phụ lục — cạm bẫy khi đo, để không lặp lại
 
 1. **`\$?` trong chuỗi PowerShell không phải escaping.** PowerShell nội suy `$?`
@@ -218,3 +282,13 @@ hai lần BACK. **Không bấm gửi, không đăng gì.** Ô nhập trở về 
    trên máy là UTF-8 đúng. Đọc bằng `-Encoding utf8`.
 3. **`adb devices` khởi động daemon ở `tcp:5037`.** Một server mỗi host; app phải
    nhận quyền sở hữu tường minh để không đánh nhau với Android Studio.
+4. **PowerShell `>` chèn BOM và làm hỏng file nhị phân.** `adb exec-out screencap -p > x.png`
+   cho ra file bắt đầu bằng `ef bb bf` thay vì `89 50 4e 47`. Dùng
+   `adb shell screencap -p /sdcard/x.png` rồi `adb pull`.
+5. **`Invoke-RestMethod` của PowerShell 5.1 đọc JSON UTF-8 thành Latin-1.** Text
+   tiếng Việt đúng trên máy hiện ra `Xin chÃ o…` ở phía Windows. **Ảnh chụp màn
+   hình là nguồn sự thật duy nhất không qua tầng giải mã nào** — đã dùng nó để
+   kết luận. (`Invoke-WebRequest` thì cần `-UseBasicParsing` ở chế độ NonInteractive.)
+6. **Biến ở script scope không thấy được trong `function` như mong đợi** trong ngữ
+   cảnh này — URI dựng ra rỗng và mọi element id trả về rỗng, làm cả một lượt đo
+   vô nghĩa mà vẫn in ra số. Viết tuyến tính, đừng bọc hàm.
