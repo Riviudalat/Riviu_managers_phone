@@ -4730,6 +4730,38 @@ Nó cũng báo có `Follow ` trên trang không, vì đó là từ chối dứt 
 
 **Chưa chạy.** Đây là số đo M4/M5 và nó cần một bài thật của người vận hành.
 
+### 9.46 Ngân sách 10 mili-giây trong test, và lần thứ hai cùng một loại lỗi (13/08/2026)
+
+Lần tag thứ hai: **quality fail**, `TimeoutError: app process-control deadline expired` ở
+`test_verified_terminate_accepts_an_already_absent_process`. Nó vừa xanh ở run ngay trước, và
+tôi không sửa dòng nào trong `riviu_pmd.py`.
+
+**Đọc traceback kỹ mới thấy chỗ đúng**: lỗi đến từ khối `finally` — bản thân thao tác **thành
+công**, rồi một bước *cleanup* vượt ngân sách. Và ngân sách đó, trong test, là
+`TERMINATE_CLEANUP_TIMEOUT_SECONDS = **0.01**` — **10 mili-giây đồng hồ thực cho toàn bộ
+cleanup cộng lại**, trong khi mọi thứ trong test đều là fake.
+
+10ms là **cùng bậc độ lớn** với một lần GC pause hay một khựng của Defender trên runner dùng
+chung. Chứng cứ ngay tại máy này: chạy đúng bộ Python của CI bốn lần liên tiếp cho 16,4s rồi
+5,7s / 5,3s / 5,4s — **biên độ 3 lần** chỉ do trạng thái máy.
+
+Vì sao nó bị ép xuống 0.01: fixture làm một await chậm bằng `sleep(1)`, nên ngân sách phải nhỏ
+hơn 1s để test "boundary có bị chặn" chứng minh được điều gì. Nhưng ngân sách cũng là đồng hồ
+thực mà các test đường-thành-công phải **chạy xong bên trong** nó. Cửa sổ hợp lệ rất rộng, và
+0.01 nằm sát mép dưới.
+
+Sửa: đặt tên cho ba con số chỉ có nghĩa khi đi cùng nhau — `FIXTURE_STALL_SECONDS = 1.0`,
+`TEST_DEADLINE_SECONDS = 0.25`, `BOUNDED_WITHIN_SECONDS = 0.9` — và nêu ràng buộc ngay tại chỗ.
+0.25 vẫn kém 1s bốn lần (nên boundary chậm vẫn trip đúng) mà nâng sàn lên **25 lần**. Hai
+assertion thời lượng đổi từ `0.25` sang `BOUNDED_WITHIN_SECONDS`; ý nghĩa giữ nguyên: *chạy xong
+mà không chờ hết cú stall*. Giá phải trả là module đó chạy ~3,2s thay vì ~0,3s — không đáng kể so
+với một job quality 30 phút. Chạy lại 6 lần: ổn định.
+
+**Đây là lần thứ hai trong cùng một ngày cùng một loại lỗi** (lần đầu ở mục 9.42, ngưỡng
+classification). Bài học chung: **một ngưỡng thời gian thực đặt sát chi phí thật là một đồng xu
+tung, không phải một cái gate.** Và cả hai lần, dấu hiệu đều là "test này vừa xanh ở commit
+trước mà tôi không sửa gì liên quan".
+
 ### 9.45 Tag đầu tiên: job release chưa bao giờ chạy, và nó hỏng (13/08/2026)
 
 Push tag `v0.1.1`. Quality xanh, cả ba build xanh, **job release fail** —

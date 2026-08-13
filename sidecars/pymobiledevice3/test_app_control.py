@@ -19,6 +19,24 @@ from unittest import mock
 from sidecars.pymobiledevice3 import riviu_pmd
 
 
+# Three numbers that only make sense together, so they are named together.
+#
+# The fixture stalls one chosen await for FIXTURE_STALL_SECONDS. Every deadline the tests
+# run under has to sit well below that, or a stalled boundary would not trip and
+# `test_every_await_boundary_is_bounded` would prove nothing. But the deadlines are also
+# real wall clock, and the happy-path tests have to *finish inside* them — so they also
+# have to sit well above whatever a shared CI runner does when it hiccups.
+#
+# They used to be 0.02 and 0.01. Ten milliseconds of real time for every cleanup step
+# combined is the same order as a GC pause or a Defender stall, and it failed exactly that
+# way on the first tag push: the operation succeeded and the teardown missed its budget.
+# 0.25 keeps a factor of four below the stall and lifts the floor twenty-five fold.
+FIXTURE_STALL_SECONDS = 1.0
+TEST_DEADLINE_SECONDS = 0.25
+# What "bounded" means for the duration assertions: finished without waiting out the stall.
+BOUNDED_WITHIN_SECONDS = 0.9
+
+
 @contextlib.contextmanager
 def app_control_modules(
     pids,
@@ -41,7 +59,7 @@ def app_control_modules(
 
     async def maybe_delay(name):
         if name in delayed:
-            await asyncio.sleep(1)
+            await asyncio.sleep(FIXTURE_STALL_SECONDS)
 
     class FakeLockdown:
         async def close(self):
@@ -119,10 +137,13 @@ def app_control_modules(
         mock.patch.object(riviu_pmd, "try_import", return_value=True),
         mock.patch.dict(sys.modules, modules),
         mock.patch.object(
-            riviu_pmd, "TERMINATE_TIMEOUT_SECONDS", 0.02, create=True
+            riviu_pmd, "TERMINATE_TIMEOUT_SECONDS", TEST_DEADLINE_SECONDS, create=True
         ),
         mock.patch.object(
-            riviu_pmd, "TERMINATE_CLEANUP_TIMEOUT_SECONDS", 0.01, create=True
+            riviu_pmd,
+            "TERMINATE_CLEANUP_TIMEOUT_SECONDS",
+            TEST_DEADLINE_SECONDS,
+            create=True,
         ),
         mock.patch.object(riviu_pmd, "TERMINATE_POLL_SECONDS", 0.001, create=True),
     ):
@@ -267,7 +288,7 @@ class AppControlTests(unittest.TestCase):
                 asyncio.run(
                     riviu_pmd._terminate_app_verified("fixture", "com.fixture.app")
                 )
-        self.assertLess(time.monotonic() - started, 0.25)
+        self.assertLess(time.monotonic() - started, BOUNDED_WITHIN_SECONDS)
         self.assertEqual(state.killed, [42])
 
     def test_every_await_boundary_is_bounded(self):
@@ -293,7 +314,11 @@ class AppControlTests(unittest.TestCase):
                                 "fixture", "com.fixture.app"
                             )
                         )
-                self.assertLess(time.monotonic() - started, 0.25)
+                # A stalled boundary that is really bounded returns long before the
+                # stall ends; one that is not would take FIXTURE_STALL_SECONDS.
+                self.assertLess(
+                    time.monotonic() - started, BOUNDED_WITHIN_SECONDS
+                )
 
     def test_cleanup_fault_does_not_replace_the_primary_operation_error(self):
         stderr = io.StringIO()
