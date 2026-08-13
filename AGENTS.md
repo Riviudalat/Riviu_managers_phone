@@ -4730,6 +4730,36 @@ Nó cũng báo có `Follow ` trên trang không, vì đó là từ chối dứt 
 
 **Chưa chạy.** Đây là số đo M4/M5 và nó cần một bài thật của người vận hành.
 
+### 9.40 M4 ĐẠT — caption đọc được nguyên văn, và ngưỡng cắt ở đâu (13/08/2026)
+
+**Đo được mà không đăng gì.** Lần trước tôi kết luận "chưa đo được M4" vì hai bài của tài khoản
+trên Redmi không có caption — nhưng tôi **chỉ kiểm Redmi**. Tài khoản trên Note 8
+(`Hoàng Hồng Nam`, `@user19257731814158`) có **nhiều bài carousel ảnh và đều có caption**. Bài học
+nhỏ: "chưa đo được" phải kiểm hết máy đang có trước khi nói ra.
+
+Tap `ProfileTab` (nhãn vừa đo) trên Note 8 ở (972, 2029) — **lần đo thứ hai của nhãn đó, trên máy
+thứ hai**, cùng chuỗi `Hồ sơ`. Rồi mở một bài và dump cây qua agent.
+
+| caption | trạng thái trên trang bài |
+|---|---|
+| 39 ký tự | **nguyên văn** — `probe --measure-own-post` tự báo `VERBATIM` |
+| 49 ký tự (`Mới đi Đà Lạt về, chi phí thực tế đây ạ 👇`) | **nguyên văn**, không dấu cắt |
+| 116 ký tự (`Nếu chỉ có 3 ngày ở Đà Lạt, …`) | **bị cắt**, kết thúc bằng `…` |
+
+**Kết luận: luật của người vận hành hiện thực được.** Thiết kế cần prefix **≥ 24 ký tự**; đo được
+là **nguyên văn tới ít nhất 49**, và prefix đọc được **~115** ký tự cả khi bị cắt. Dư rất nhiều.
+Ngưỡng cắt nằm giữa 49 và ~116, **chưa ghim chính xác** — không cần, vì cả hai đầu đều trên 24.
+
+**Chi tiết cho lúc hiện thực `captionProof`:** dấu cắt là **một ký tự `…`** (U+2026) ở cuối, không
+phải link `thêm`. Nên so khớp nên bỏ `…` cuối rồi so như prefix, và hạ `captionProof="prefix"`.
+
+`Follow control on this page: absent` — dấu hiệu bài-của-mình xác nhận lại lần nữa.
+
+**Điều này làm kết luận về xoá sắc hơn, không đổi nó.** Mục 9.37 nói xoá tự động không dựng được
+vì **nút xoá không có nhãn**. Giờ nửa còn lại cũng có bằng chứng dương: **caption hoàn toàn đủ làm
+bằng chứng**. Tức chuỗi P0–P5 dựng được; chỉ P6 (mở sheet, tap Xoá) là không. Nếu sau này tìm ra
+lối xoá khác (long-press grid, hoặc sau `Cài đặt quyền riêng tư`) thì phần chứng minh đã sẵn sàng.
+
 ### 9.39 Auto-update: khoá, và hai chỗ cố ý KHÔNG tự động (13/08/2026)
 
 **Khoá.** Sinh bằng `tauri signer generate` **ngoài repo**, có mật khẩu:

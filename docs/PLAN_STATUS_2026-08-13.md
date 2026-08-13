@@ -85,8 +85,18 @@ Nhóm theo lý do chứ không theo tính năng, vì lý do mới là thứ quy�
 
 | Việc | Câu hỏi chặn |
 |---|---|
-| **M4 — caption đọc được nguyên chuỗi?** | Hai bài sẵn có của `@cattfan239` **không có caption**, nên chưa đo được. Cần một bài **có** caption. |
+| ~~**M4 — caption đọc được nguyên chuỗi?**~~ | **ĐÃ ĐO — ĐẠT.** Xem mục dưới và `AGENTS.md` 9.40. |
 | **Xoá bài tự động** | **Đã đo và câu trả lời là không.** Xem mục dưới. |
+
+**M4 ĐẠT — nhờ kiểm máy thứ hai.** Lần trước tôi ghi "chưa đo được" sau khi chỉ kiểm Redmi. Tài
+khoản trên Note 8 (`@user19257731814158`) có nhiều bài carousel **và đều có caption**. Số đo:
+caption 39 ký tự → `probe --measure-own-post` báo **`VERBATIM`**; caption 49 ký tự nằm nguyên văn
+trong cây; caption 116 ký tự **bị cắt**, kết thúc bằng một ký tự `…` (U+2026), tức prefix đọc
+được ~115. Thiết kế cần **≥ 24** ⇒ **dư rất nhiều**. `Follow control: absent` xác nhận lại dấu
+hiệu bài-của-mình.
+
+Vậy **luật của người vận hành hiện thực được**: P0–P5 dựng được, caption đủ làm bằng chứng duy
+nhất. Chỉ **P6** (mở sheet, tap Xoá) là không — vì nút xoá không có nhãn, không phải vì caption.
 
 **Xoá tự động: số đo nói không dựng được từ trang bài.** Trên `com.ss.android.ugc.trill` 46.3.3:
 
@@ -122,7 +132,7 @@ nằm sau `Cài đặt quyền riêng tư`.
   bất kỳ code nào trong crate cũng gọi được mà không đi qua một hiện thực `prove_own_post`.
   Thứ thật sự bảo đảm "chứng minh rồi mới xoá" là **các kiểm tra trong `new`**, không phải
   visibility. Ràng nó vào trait sẽ cần một sealed token — chưa có.
-- **`--measure-own-post`** — flag đo đã viết, **chưa chạy** (thiếu bài có caption).
+- ~~**`--measure-own-post`**~~ — đã chạy thật trên Note 8, báo `VERBATIM`. Xem Phần II A.
 
 ### D. Còn thiếu để một tính năng hoàn chỉnh
 
@@ -150,19 +160,19 @@ nằm sau `Cài đặt quyền riêng tư`.
 
 ## Phần III — Việc tiếp theo, có lệnh cụ thể
 
-### 1. Đo M4 (chỉ đọc, không tap gì)
+### 1. ~~Đo M4~~ — xong, `VERBATIM`
 
-Cần một bài **có caption** trên tài khoản của máy. Mở bài đó trên máy rồi:
+Lệnh đã chạy, giữ lại để lặp lại được (chỉ đọc, không tap gì):
 
 ```powershell
 $env:RIVIU_ADB_PATH       = "C:\Users\cattfan\AppData\Local\Android\platform-tools\adb.exe"
 $env:RIVIU_TIKTOK_PACKAGE = "com.ss.android.ugc.trill"
 cargo build -q -p riviu-android-driver --example probe        # build TRƯỚC, xem mục 9.36
-.\target\debug\examples\probe.exe 10969614 --measure-own-post "<caption của bài đó>"
+.\target\debug\examples\probe.exe ce0617164585646f0d7e --measure-own-post "<caption của bài đó>"
 ```
 
-Đọc kết luận theo bảng: nguyên văn / ≥24 ký tự / 1–23 / 0. Ba mức cuối đều dẫn tới "giữ xoá
-tay", và số đo ở Phần II A đã dẫn tới đó rồi bằng đường khác.
+Kết quả: **nguyên văn** (mức tốt nhất trong bảng nguyên văn / ≥24 / 1–23 / 0). Nên caption
+**không** phải chỗ chặn xoá tự động; chỗ chặn là nút xoá không có nhãn.
 
 ### 2. Hoàn thiện auto-update
 
