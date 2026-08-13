@@ -4730,6 +4730,26 @@ Nó cũng báo có `Follow ` trên trang không, vì đó là từ chối dứt 
 
 **Chưa chạy.** Đây là số đo M4/M5 và nó cần một bài thật của người vận hành.
 
+#### Hai biến môi trường probe cần, và lỗi nó báo khi thiếu
+
+Đã mất một lượt vì cái này, ghi lại. `probe` **không** dùng đường resolve adb của app và
+**không** tự tìm package TikTok theo máy:
+
+```powershell
+$env:RIVIU_ADB_PATH      = "<...>\platform-tools\adb.exe"   # thiếu -> "program not found"
+$env:RIVIU_TIKTOK_PACKAGE = "com.ss.android.ugc.trill"      # thiếu -> nhắm musically
+cargo run -q -p riviu-android-driver --example probe -- <serial> --measure-tab-bar
+```
+
+Thiếu cái đầu thì lỗi là `program not found` **sau** dòng
+`launch_app(tiktok) FAILED: run adb -s … monkey …`, đọc như lỗi máy chứ không như lỗi PATH.
+Thiếu cái thứ hai thì nó in `target package: com.zhiliaoapp.musically` rồi fail launch trên
+máy SEA — và dòng `target package` là chỗ duy nhất nói ra điều đó, nên phải đọc nó.
+
+`AdbProgram::resolve` mới (mục 9.28) nhận `bundled` làm ứng viên cuối, nhưng probe gọi
+`resolve(None, None)` nên không dùng adb đóng gói. Chưa sửa: probe là công cụ của người phát
+triển, và chỗ cần đúng thứ tự ứng viên là app.
+
 ### 9.35 Tách `graceful_shutdown`, và một lo ngại bị nói quá (13/08/2026)
 
 Thân của handler `RunEvent::Exit` tách thành `graceful_shutdown(handle)` và được gọi từ **cả**
