@@ -246,6 +246,61 @@ export function IconClose({ size = 18, className }: IconProps) {
   );
 }
 
+export function IconBack({ size = 18, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <path
+        d="M10 7l-5 5 5 5M5 12h14"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+export function IconRecents({ size = 18, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <rect x="6" y="7" width="10" height="12" rx="1.5" stroke="currentColor" strokeWidth="1.75" />
+      <rect x="9" y="5" width="10" height="12" rx="1.5" stroke="currentColor" strokeWidth="1.75" />
+    </svg>
+  );
+}
+
+export function IconVolumeUp({ size = 18, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <path d="M4 10v4h3l4 3V7L7 10H4z" stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round" />
+      <path d="M16 9v6M19 7v10" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function IconVolumeDown({ size = 18, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <path d="M4 10v4h3l4 3V7L7 10H4z" stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round" />
+      <path d="M16 10v4" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function IconBell({ size = 18, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <path
+        d="M6 16V11a6 6 0 1112 0v5l1.5 2H4.5L6 16z"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinejoin="round"
+      />
+      <path d="M10 19a2 2 0 004 0" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function IconRefresh({ size = 18, className }: IconProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden>

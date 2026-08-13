@@ -4,7 +4,7 @@ use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use riviu_core::driver::UiSession;
 use riviu_core::flow::model::{ElementLocatorStrategy, QualifiedElementLocator};
-use riviu_core::{SwipeGesture, TapPoint};
+use riviu_core::{HardwareKey, SwipeGesture, TapPoint};
 
 use crate::adb::AdbProgram;
 use crate::agent::{AgentClient, Locator};
@@ -13,6 +13,28 @@ use crate::agent::{AgentClient, Locator};
 const KEYCODE_HOME: i64 = 3;
 /// `KEYCODE_BACK`.
 const KEYCODE_BACK: i64 = 4;
+/// `KEYCODE_VOLUME_UP`.
+const KEYCODE_VOLUME_UP: i64 = 24;
+/// `KEYCODE_VOLUME_DOWN`.
+const KEYCODE_VOLUME_DOWN: i64 = 25;
+/// `KEYCODE_POWER` — locks the screen; reboot stays a separate confirm.
+const KEYCODE_POWER: i64 = 26;
+/// `KEYCODE_NOTIFICATION`.
+const KEYCODE_NOTIFICATION: i64 = 83;
+/// `KEYCODE_APP_SWITCH` — Recents.
+const KEYCODE_APP_SWITCH: i64 = 187;
+
+pub(crate) fn hardware_keycode(key: HardwareKey) -> i64 {
+    match key {
+        HardwareKey::Home => KEYCODE_HOME,
+        HardwareKey::Back => KEYCODE_BACK,
+        HardwareKey::Recents => KEYCODE_APP_SWITCH,
+        HardwareKey::VolumeUp => KEYCODE_VOLUME_UP,
+        HardwareKey::VolumeDown => KEYCODE_VOLUME_DOWN,
+        HardwareKey::Power => KEYCODE_POWER,
+        HardwareKey::Notification => KEYCODE_NOTIFICATION,
+    }
+}
 
 pub struct AndroidUiSession {
     agent: AgentClient,
@@ -204,6 +226,10 @@ impl UiSession for AndroidUiSession {
 
     async fn back(&self) -> anyhow::Result<()> {
         self.agent.press_key(KEYCODE_BACK).await
+    }
+
+    async fn press_hardware_key(&self, key: HardwareKey) -> anyhow::Result<()> {
+        self.agent.press_key(hardware_keycode(key)).await
     }
 
     /// Find by `content-desc`, then touch it like a finger would.
@@ -574,6 +600,17 @@ mod tests {
             scale_to_screen(996.0, 1250.0, 1080.0, 2220.0, screen),
             (996.0, 1250.0)
         );
+    }
+
+    #[test]
+    fn hardware_keys_map_to_the_android_keycodes_genfarmer_uses() {
+        assert_eq!(hardware_keycode(HardwareKey::Home), 3);
+        assert_eq!(hardware_keycode(HardwareKey::Back), 4);
+        assert_eq!(hardware_keycode(HardwareKey::Recents), 187);
+        assert_eq!(hardware_keycode(HardwareKey::VolumeUp), 24);
+        assert_eq!(hardware_keycode(HardwareKey::VolumeDown), 25);
+        assert_eq!(hardware_keycode(HardwareKey::Power), 26);
+        assert_eq!(hardware_keycode(HardwareKey::Notification), 83);
     }
 
     #[test]

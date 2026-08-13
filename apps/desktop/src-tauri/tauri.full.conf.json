@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Riviumanagersphone Full",
+  "productName": "Riviu Manager Full",
   "version": "0.1.1",
-  "identifier": "com.riviu.managersphone.full",
+  "identifier": "com.riviu.manager.full",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173"
@@ -11,7 +11,7 @@
     "windows": [
       {
         "create": true,
-        "title": "Riviumanagersphone Full",
+        "title": "Riviu Manager Full",
         "width": 1440,
         "height": 900,
         "minWidth": 1100,

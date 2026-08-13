@@ -43,7 +43,7 @@ pub fn run() {
                 window
             } else {
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                    .title("Riviumanagersphone")
+                    .title("Riviu Manager")
                     .inner_size(1440.0, 900.0)
                     .min_inner_size(1100.0, 700.0)
                     .resizable(true)
@@ -106,6 +106,7 @@ pub fn run() {
             commands::device_swipe,
             commands::device_type_text,
             commands::device_home,
+            commands::device_key,
             commands::group_input,
             commands::get_stream_settings,
             commands::set_stream_settings,
@@ -298,6 +299,7 @@ mod tests {
                     "device_swipe",
                     "device_type_text",
                     "device_home",
+                    "device_key",
                     "group_input",
                     "set_stream_settings",
                     "run_script",

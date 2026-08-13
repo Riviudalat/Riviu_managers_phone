@@ -1,9 +1,8 @@
-import { memo, useRef, useState } from "react";
+import { memo, useState } from "react";
 import { deviceModelOsLabel, tileStreamStateView } from "../types";
 import type { DeviceInfo, TileSize } from "../types";
-import { deviceSwipe, deviceTap, groupInput, latestFrame } from "../api";
+import { latestFrame } from "../api";
 import { useDeviceFrame, useHydratedDeviceFrame } from "../frameStore";
-import { toastError } from "../toastStore";
 
 const DEFAULT_W = 375;
 const DEFAULT_H = 667;
@@ -23,8 +22,6 @@ interface Props {
   onSelect: (udid: string, additive: boolean) => void;
   onOpen: (udid: string) => void;
   onPrepare: (udid: string) => void;
-  groupUdids: string[];
-  groupMode: boolean;
 }
 
 function statusText(device: DeviceInfo) {
@@ -32,69 +29,6 @@ function statusText(device: DeviceInfo) {
   if (device.status === "preparing" || device.status === "busy") return "Starting";
   if (device.status === "error") return "Error";
   return device.status;
-}
-
-function mapToDevice(
-  img: HTMLImageElement,
-  clientX: number,
-  clientY: number,
-): { x: number; y: number } {
-  const rect = img.getBoundingClientRect();
-  const nw = img.naturalWidth || DEFAULT_W;
-  const nh = img.naturalHeight || DEFAULT_H;
-  if (rect.width <= 0 || rect.height <= 0) {
-    return { x: nw / 2, y: nh / 2 };
-  }
-  const x = ((clientX - rect.left) / rect.width) * nw;
-  const y = ((clientY - rect.top) / rect.height) * nh;
-  return {
-    x: Math.max(0, Math.min(nw, x)),
-    y: Math.max(0, Math.min(nh, y)),
-  };
-}
-
-async function sendGesture(
-  device: DeviceInfo,
-  groupMode: boolean,
-  groupUdids: string[],
-  start: { x: number; y: number },
-  end: { x: number; y: number },
-  imageW: number,
-  imageH: number,
-) {
-  const targets = groupMode && groupUdids.length > 1 ? groupUdids : [device.udid];
-  const dist = Math.hypot(end.x - start.x, end.y - start.y);
-  try {
-    if (dist < 8) {
-      if (targets.length > 1) {
-        await groupInput({
-          udids: targets,
-          kind: "tap",
-          x: end.x,
-          y: end.y,
-          imageW,
-          imageH,
-        });
-      } else {
-        await deviceTap(device.udid, end.x, end.y, imageW, imageH);
-      }
-    } else if (targets.length > 1) {
-      await groupInput({
-        udids: targets,
-        kind: "swipe",
-        x: start.x,
-        y: start.y,
-        toX: end.x,
-        toY: end.y,
-        imageW,
-        imageH,
-      });
-    } else {
-      await deviceSwipe(device.udid, start.x, start.y, end.x, end.y, imageW, imageH);
-    }
-  } catch (e) {
-    toastError("Điều khiển thất bại", e);
-  }
 }
 
 function DeviceTileInner({
@@ -105,13 +39,9 @@ function DeviceTileInner({
   onSelect,
   onOpen,
   onPrepare,
-  groupUdids,
-  groupMode,
 }: Props) {
   useHydratedDeviceFrame(device.udid, latestFrame);
   const frame = useDeviceFrame(device.udid);
-  const imgRef = useRef<HTMLImageElement>(null);
-  const drag = useRef<{ x: number; y: number } | null>(null);
   const [ratio, setRatio] = useState(DEFAULT_H / DEFAULT_W);
   const width = TILE_W[tileSize];
   const status = statusText(device);
@@ -147,7 +77,7 @@ function DeviceTileInner({
         <button
           type="button"
           className="dev-window-x"
-          title="Phóng to"
+          title="Mở điều khiển"
           onClick={(e) => {
             e.stopPropagation();
             onOpen(device.udid);
@@ -157,15 +87,17 @@ function DeviceTileInner({
         </button>
       </header>
 
-      <div className="dev-window-screen" style={{ aspectRatio: `1 / ${ratio}` }}>
+      <div
+        className="dev-window-screen"
+        style={{ aspectRatio: `1 / ${ratio}` }}
+        title="Bấm để mở điều khiển"
+      >
         {frame ? (
           <img
-            ref={imgRef}
             src={`data:image/jpeg;base64,${frame}`}
             alt={device.name}
             draggable={false}
             className="dev-window-touch"
-            title="Click / kéo để điều khiển máy"
             onLoad={(e) => {
               const el = e.currentTarget;
               if (el.naturalWidth > 0) {
@@ -173,30 +105,7 @@ function DeviceTileInner({
                 setRatio((prev) => (Math.abs(prev - next) > 0.01 ? next : prev));
               }
             }}
-            onPointerDown={(e) => {
-              if (e.button !== 0 || !imgRef.current) return;
-              e.preventDefault();
-              e.stopPropagation();
-              drag.current = mapToDevice(imgRef.current, e.clientX, e.clientY);
-              e.currentTarget.setPointerCapture(e.pointerId);
-            }}
-            onPointerUp={async (e) => {
-              if (e.button !== 0 || !drag.current || !imgRef.current) {
-                drag.current = null;
-                return;
-              }
-              e.preventDefault();
-              e.stopPropagation();
-              const start = drag.current;
-              const end = mapToDevice(imgRef.current, e.clientX, e.clientY);
-              drag.current = null;
-              const iw = imgRef.current.naturalWidth || DEFAULT_W;
-              const ih = imgRef.current.naturalHeight || DEFAULT_H;
-              await sendGesture(device, groupMode, groupUdids, start, end, iw, ih);
-            }}
-            onPointerCancel={() => {
-              drag.current = null;
-            }}
+            onClick={() => onOpen(device.udid)}
           />
         ) : (
           <div className="dev-window-empty">

@@ -570,7 +570,7 @@ def release_asset_name(name: str) -> str:
     """The name GitHub will serve this asset under, decided here instead of guessed later.
 
     GitHub rewrites characters it dislikes in release asset filenames — a space
-    becomes a period — so `Riviumanagersphone Full_0.1.0_x64-setup.exe` is uploaded
+    becomes a period — so `Riviu Manager Full_0.1.0_x64-setup.exe` is uploaded
     under one name and served from a URL carrying another. `latest.json` has to
     contain that URL exactly, and a wrong one fails for an operator months later
     with nothing on this side to notice it.
@@ -1776,7 +1776,7 @@ def build_updater_manifest_command(args: argparse.Namespace) -> dict[str, Any]:
         output,
         {
             "version": version,
-            "notes": args.notes or f"Riviumanagersphone {version}",
+            "notes": args.notes or f"Riviu Manager {version}",
             "pub_date": args.pub_date
             or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "platforms": platforms,

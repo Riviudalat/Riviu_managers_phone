@@ -292,7 +292,7 @@ function App() {
     return (
       <main className="startup-state">
         <div className="startup-state-card">
-          <h1>Riviu Managers Phone</h1>
+          <h1>Riviu Manager</h1>
           <h2>Chưa sẵn sàng khởi động</h2>
           <p>{startupIssue}</p>
           <p>
@@ -577,8 +577,6 @@ function App() {
                       focused={focusUdid === device.udid}
                       onSelect={onSelect}
                       onOpen={setFocusUdid}
-                      groupUdids={selected}
-                      groupMode={groupMode}
                       onPrepare={(udid) => prepareDevice(udid).then(reload)}
                     />
                   ))}
@@ -588,8 +586,8 @@ function App() {
               {!devices.length && (
                 <EmptyState
                   icon={<IconPhone size={20} />}
-                  title="Chưa có iPhone nào"
-                  hint="Cắm máy qua USB, bấm Tin cậy (Trust) trên iPhone, rồi làm mới danh sách."
+                  title="Chưa có điện thoại nào"
+                  hint="Cắm máy qua USB, bấm Tin cậy (Trust) trên iPhone nếu được hỏi, rồi làm mới danh sách."
                   action={
                     <button
                       type="button"

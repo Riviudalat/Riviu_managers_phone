@@ -164,7 +164,7 @@ export function SettingsPanel({ devices }: Props) {
           <EmptyState
             compact
             icon={<IconPhone size={15} />}
-            title="Chưa có iPhone đang kết nối"
+            title="Chưa có điện thoại đang kết nối"
             hint="Cắm máy qua USB rồi làm mới ở Quản lý cửa sổ."
           />
         ) : (

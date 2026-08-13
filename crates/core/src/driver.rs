@@ -12,7 +12,7 @@ use crate::device_capabilities::{
 use crate::flow::QualifiedElementLocator;
 use crate::stream_budget::StreamStopProof;
 use crate::types::{
-    ActiveAppIdentity, AgentSettings, AgentStatus, DeviceInfo, InteractionSessionKind,
+    ActiveAppIdentity, AgentSettings, AgentStatus, DeviceInfo, HardwareKey, InteractionSessionKind,
     StreamHandoffProof, StreamStartProof, SwipeGesture, SwipePath, TapPoint,
 };
 
@@ -390,6 +390,15 @@ pub trait DeviceDriver: Send + Sync {
     /// Creates only a control session. Implementations must not start, stop, or
     /// replace an MJPEG producer; stream lifecycle belongs to DeviceControlPlane.
     async fn start_ui_session(&self, udid: &str) -> anyhow::Result<Box<dyn UiSession>>;
+    /// Open a control session that can coexist with a live background stream.
+    ///
+    /// Default is [`Self::start_ui_session`]. iOS overrides this: a new
+    /// `POST /session` under a live MJPEG wedges the runner, so a live
+    /// producer must reuse the cached session or fail closed. Android's
+    /// uiautomator2 session is independent of minicap, so the default is fine.
+    async fn open_control_session(&self, udid: &str) -> anyhow::Result<Box<dyn UiSession>> {
+        self.start_ui_session(udid).await
+    }
     /// Whether comment-enabled jobs need the target app foregrounded before a
     /// newly-created trusted text session. Stock WDA keeps its existing order.
     fn requires_fresh_text_session(&self, _udid: &str) -> bool {
@@ -477,6 +486,23 @@ pub trait UiSession: Send + Sync {
         false
     }
     async fn home(&self) -> anyhow::Result<()>;
+    /// Press a hardware-looking key from the desktop overlay.
+    ///
+    /// Home and Back delegate to the methods above. Everything else is
+    /// unsupported unless a backend maps it — iOS has no volume HID here,
+    /// and inventing one is the same class of bug as tapping uncalibrated
+    /// coordinates.
+    async fn press_hardware_key(&self, key: HardwareKey) -> anyhow::Result<()> {
+        match key {
+            HardwareKey::Home => self.home().await,
+            HardwareKey::Back => self.back().await,
+            HardwareKey::Recents
+            | HardwareKey::VolumeUp
+            | HardwareKey::VolumeDown
+            | HardwareKey::Power
+            | HardwareKey::Notification => unsupported("pressHardwareKey"),
+        }
+    }
     /// Go back one step, the way the platform's own back gesture would.
     ///
     /// Default unsupported because iOS has no system-wide back: there, leaving a

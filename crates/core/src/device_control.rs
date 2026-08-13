@@ -194,6 +194,28 @@ impl DeviceControlPlane {
         .await
     }
 
+    /// Take exclusive without parking the live preview.
+    ///
+    /// Manual tap/swipe/type/home from the desktop overlay must ride the
+    /// background MJPEG/minicap producer. `try_acquire_exclusive` parks that
+    /// producer, which is why clicking a live tile used to black the screen
+    /// and then wait 40s for TikTok to foreground.
+    pub async fn try_acquire_exclusive_keeping_stream(
+        &self,
+        udid: &str,
+        owner: DeviceWorkOwner,
+    ) -> Result<DeviceExclusiveContext, DeviceControlError> {
+        self.ensure_running()?;
+        let lease = self.work.try_acquire(udid, owner)?;
+        let activity = self.lifecycle.register()?;
+        Ok(DeviceExclusiveContext {
+            plane_id: self.plane_id,
+            lease: Some(lease),
+            activity: Some(activity),
+            ui_capacity_token: None,
+        })
+    }
+
     pub async fn acquire_exclusive(
         &self,
         udid: &str,
@@ -788,9 +810,9 @@ impl DeviceControlPlane {
         let udid = lease.udid().to_string();
         let session = self
             .driver
-            .start_ui_session(&udid)
+            .open_control_session(&udid)
             .await
-            .map_err(|error| driver_error(&udid, "startUiSession", error))?;
+            .map_err(|error| driver_error(&udid, "openControlSession", error))?;
         self.validate_exclusive(&context)?;
         Ok(UiSessionContext {
             plane_id: self.plane_id,
@@ -800,6 +822,39 @@ impl DeviceControlPlane {
             ui_capacity_token: None,
             stream_handoff_generation: None,
         })
+    }
+
+    /// Exclusive + control session for an operator gesture, without touching
+    /// the live preview. Close with [`Self::close_manual_session`] so the
+    /// cached iOS session stays in place for the background stream.
+    pub async fn open_manual_session(
+        &self,
+        udid: &str,
+        owner: DeviceWorkOwner,
+    ) -> Result<UiSessionContext, DeviceControlError> {
+        let exclusive = self
+            .try_acquire_exclusive_keeping_stream(udid, owner)
+            .await?;
+        self.start_owned_ui_session(exclusive).await
+    }
+
+    pub fn close_manual_session(
+        &self,
+        mut context: UiSessionContext,
+    ) -> Result<ContextReleaseProof, DeviceControlError> {
+        let lease = self.validate_session(&context)?;
+        let proof = ContextReleaseProof {
+            udid: lease.udid().to_string(),
+            owner: lease.owner(),
+            had_session: true,
+            had_stream: false,
+        };
+        // Do not invalidate: the background stream on iOS still needs the
+        // cached WDA session. Dropping the Arc releases the exclusive lease.
+        context.session.take();
+        context.activity.take();
+        context.lease.take();
+        Ok(proof)
     }
 
     pub async fn foreground_target_app_and_start_interaction_session(
@@ -3347,6 +3402,8 @@ mod tests {
         configured_ui: Mutex<Vec<UiCapabilities>>,
         confirm_stopped_calls: AtomicUsize,
         stop_calls: AtomicUsize,
+        ui_session_starts: AtomicUsize,
+        invalidate_calls: AtomicUsize,
         stop_generation: AtomicU64,
         unconfirmed_stops: AtomicBool,
         block_sessions: AtomicBool,
@@ -3384,6 +3441,8 @@ mod tests {
                 configured_ui: Mutex::new(Vec::new()),
                 confirm_stopped_calls: AtomicUsize::new(0),
                 stop_calls: AtomicUsize::new(0),
+                ui_session_starts: AtomicUsize::new(0),
+                invalidate_calls: AtomicUsize::new(0),
                 stop_generation: AtomicU64::new(7),
                 unconfirmed_stops: AtomicBool::new(false),
                 block_sessions: AtomicBool::new(false),
@@ -3843,7 +3902,12 @@ mod tests {
         }
 
         async fn start_ui_session(&self, _udid: &str) -> anyhow::Result<Box<dyn crate::UiSession>> {
+            self.ui_session_starts.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(TestSession))
+        }
+
+        fn invalidate_ui_session(&self, _udid: &str) {
+            self.invalidate_calls.fetch_add(1, Ordering::SeqCst);
         }
 
         async fn ensure_stream(&self, _udid: &str) -> anyhow::Result<String> {
@@ -4248,6 +4312,66 @@ mod tests {
             })
         ));
         assert_eq!(driver.session_starts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_manual_session_does_not_park_the_live_preview() {
+        let driver = Arc::new(TestDriver::default());
+        let control = control_plane(driver.clone(), 1);
+        let background = control
+            .reserve_background_stream("iphone-a")
+            .expect("background reservation");
+        control
+            .start_background_stream(&background)
+            .await
+            .expect("background producer");
+
+        let session = control
+            .open_manual_session("iphone-a", crate::DeviceWorkOwner::ManualControl)
+            .await
+            .expect("manual session beside the live tile");
+        assert_eq!(driver.stop_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(driver.ui_session_starts.load(Ordering::SeqCst), 1);
+        assert_eq!(driver.session_starts.load(Ordering::SeqCst), 0);
+        assert_eq!(control.reserved_stream_capacity(), 1);
+
+        control
+            .close_manual_session(session)
+            .expect("release the exclusive without dropping the WDA cache");
+        assert_eq!(driver.invalidate_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(control.reserved_stream_capacity(), 1);
+
+        driver.complete_stop();
+        control.shutdown_cleanup().await.expect("control shutdown");
+    }
+
+    #[tokio::test]
+    async fn a_manual_session_fails_fast_when_another_owner_holds_the_device() {
+        let driver = Arc::new(TestDriver::default());
+        let control = control_plane(driver.clone(), 1);
+        let script = control
+            .try_acquire_exclusive_keeping_stream("iphone-a", crate::DeviceWorkOwner::Script)
+            .await
+            .expect("script owns the device");
+
+        let error = match control
+            .open_manual_session("iphone-a", crate::DeviceWorkOwner::ManualControl)
+            .await
+        {
+            Ok(_) => panic!("manual control must fail fast"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            DeviceControlError::Busy(crate::DeviceBusy {
+                requested_owner: crate::DeviceWorkOwner::ManualControl,
+                current_owner: crate::DeviceWorkOwner::Script,
+                ..
+            })
+        ));
+        assert_eq!(driver.ui_session_starts.load(Ordering::SeqCst), 0);
+        drop(script);
+        control.shutdown_cleanup().await.expect("control shutdown");
     }
 
     #[tokio::test]

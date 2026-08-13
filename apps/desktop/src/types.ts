@@ -39,6 +39,15 @@ export function markDeviceFrameLive(devices: DeviceInfo[], udid: string): Device
 
 export type DevicePlatform = "ios" | "android";
 
+export type HardwareKey =
+  | "home"
+  | "back"
+  | "recents"
+  | "volumeUp"
+  | "volumeDown"
+  | "power"
+  | "notification";
+
 const PLATFORM_OS_NAMES: Record<DevicePlatform, string> = {
   ios: "iOS",
   android: "Android",

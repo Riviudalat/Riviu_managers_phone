@@ -420,6 +420,10 @@ impl DeviceDriver for MultiplexDriver {
         self.route(udid)?.start_ui_session(udid).await
     }
 
+    async fn open_control_session(&self, udid: &str) -> anyhow::Result<Box<dyn UiSession>> {
+        self.route(udid)?.open_control_session(udid).await
+    }
+
     async fn start_fresh_text_session(
         &self,
         udid: &str,

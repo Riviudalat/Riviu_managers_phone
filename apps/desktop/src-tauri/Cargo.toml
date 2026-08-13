@@ -1,7 +1,7 @@
 [package]
 name = "riviu-managers-phone"
 version = "0.1.1"
-description = "Riviumanagersphone — iPhone device farm"
+description = "Riviu Manager — iPhone and Android device farm"
 authors = ["Riviu"]
 edition = "2021"
 rust-version = "1.77.2"

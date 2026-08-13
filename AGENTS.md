@@ -4,14 +4,40 @@
 > hay danh sách "đừng làm lại" thì cập nhật ngay trong cùng lần thay đổi đó.
 > File này là thứ đầu tiên agent sau đọc.
 >
-> **Cập nhật lần cuối:** 06/08/2026.
+> **Cập nhật lần cuối:** 13/08/2026.
 
 ---
 
 ## 1. Dự án này là gì
 
-Riviu managers phone — app desktop (Tauri + React) điều khiển một dàn iPhone qua
-USB để nuôi tài khoản TikTok: xem video, thả tim, follow, bình luận, tự đóng popup.
+**Riviu Manager** (tổ chức: **Riviu Tech**) — app desktop (Tauri + React) điều khiển
+một dàn điện thoại qua USB để nuôi tài khoản TikTok: xem video, thả tim, follow,
+bình luận, tự đóng popup. Hai nền tảng sau một control plane: iPhone qua
+`crates/ios-driver`, Android qua `crates/android-driver`.
+
+### 1.1 Tên: đổi ở desktop, KHÔNG đổi ở artifact iPhone (13/08/2026)
+
+Đổi tên ngày 13/08/2026 từ `Riviumanagersphone`. Ranh giới này là **cố ý**, đừng
+"làm nốt cho đồng bộ":
+
+| Đã đổi | Giá trị mới |
+|---|---|
+| `productName` | `Riviu Manager` / `Riviu Manager Full` |
+| `identifier` | `com.riviu.manager` / `com.riviu.manager.full` |
+| Tiêu đề cửa sổ, sidebar, `index.html`, README, NOTICE | `Riviu Manager` |
+
+| **Giữ nguyên, và vì sao** |
+|---|
+| `com.riviu.managersphone.agent[.xctrunner]` — nằm trong IPA đã ký, bị ghim SHA-256 ở §3.15 và trong `text-manifest.json`/`candidate-manifest.json`, và là `EXPECTED_BUNDLE_ID` của `probe_gate_bc.py`. Đổi = ký lại trên Mac + **tin cậy profile thủ công lại trên từng iPhone** (§4.0 nói rõ không có đường lập trình). |
+| `sidecars/wda/Riviumanagersphone.ipa` và `sidecars/wda/branded/**` — CI gác bằng `git diff --exit-code` (`desktop-ci-cd.yml`). |
+| `sidecars/wda/WebDriverAgent/**/Info.plist` — nằm trong digest của `legacy-wda-source-lock.json` (§3.18). Sửa một ký tự là vỡ lock, build đổ. |
+| Thông báo "giữ app Riviumanagersphone" trong `riviu_pmd.py` và `crates/signing` — chúng nêu tên app **trên iPhone**, vốn không đổi. Đổi chữ mà không đổi app là chỉ sai chỗ cho người vận hành. |
+| Literal `riviu-managers-phone` ở `state.rs::resolve_desktop_data_dir` và `SERVICE` trong `credentials.rs` — **không** suy ra từ `identifier`. Giữ nguyên chính là thứ bảo toàn SQLite (campaign, flow, cấu hình) và token agent trong Keychain. Đổi chúng là mất dữ liệu thuần, đổi lại con số 0. |
+| Tên crate/binary `riviu-managers-phone` — không lộ ra người dùng, đổi thì lan sang workflow và `driver.ps1` `$ProcName` mà không được gì. |
+
+Hệ quả đã biết và đã chấp nhận: `identifier` đổi nên máy đang chạy `v0.1.1` sẽ nhận
+bản cập nhật kế tiếp thành **một app thứ hai nằm cạnh**, không phải nâng cấp đè.
+Dữ liệu không mất (thư mục data không đổi), nhưng người vận hành phải tự gỡ bản cũ.
 
 ```
 apps/desktop/          Tauri app (React UI + lệnh Rust)
@@ -4729,6 +4755,14 @@ code point) và kết luận:
 Nó cũng báo có `Follow ` trên trang không, vì đó là từ chối dứt khoát duy nhất trong chuỗi.
 
 **Chưa chạy.** Đây là số đo M4/M5 và nó cần một bài thật của người vận hành.
+
+### 9.48 Điều khiển từ máy tính không được park stream (13/08/2026)
+
+Bấm ô máy trên lưới **mở overlay giữa màn** (preview lớn + phím Back/Home/Recents/âm lượng/Power/thông báo/chụp), không gửi gesture từ thumbnail. Gesture chỉ chạy trên preview lớn.
+
+`device_tap` / `device_swipe` / `device_type_text` / `device_home` / `device_key` / `group_input` đi qua `DeviceControlPlane::open_manual_session`: exclusive **không** `submit_park`, **không** `start_interaction_session`, **không** foreground TikTok, **không** tạo MJPEG mới, và `close_manual_session` **không** `invalidate_ui_session`. iOS tái dùng session WDA đang cache khi stream còn sống; `POST /session` lúc MJPEG đang chạy vẫn bị cấm. Android `open_session` độc lập với minicap. Nurture đang giữ exclusive thì tap trả `DeviceBusy`.
+
+Đừng quay lại `open_ui_context` cho thao tác tay: path đó park tile, `monkey` TikTok, chờ 40 s, rồi teardown stream.
 
 ### 9.47 v0.1.1 đã phát hành, và chuỗi updater nghiệm thu từ ngoài (13/08/2026)
 

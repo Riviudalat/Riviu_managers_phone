@@ -1,4 +1,4 @@
-# Riviumanagersphone
+# Riviu Manager
 
 Ứng dụng desktop Tauri 2 + Rust + React để quản lý và điều khiển dàn điện thoại
 qua USB — **iPhone** (pymobiledevice3 + Riviu Agent) và **Android** (adb),

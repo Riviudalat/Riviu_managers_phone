@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 <#
-    Driver for the Riviumanagersphone Tauri 2 desktop app (Windows).
+    Driver for the Riviu Manager Tauri 2 desktop app (Windows).
 
     The app is a WebView2 window created from Rust (tauri.conf.json sets
     "create": false, lib.rs builds it), so there is no CDP endpoint and no
@@ -50,7 +50,7 @@ $OutDir   = Join-Path $RepoRoot 'target\run-skill'
 $DevLog   = Join-Path $OutDir 'tauri-dev.log'
 $LauncherPidFile = Join-Path $OutDir 'launcher.pid'
 $ProcName = 'riviu-managers-phone'
-$AppTitle = 'Riviumanagersphone'
+$AppTitle = 'Riviu Manager'
 
 if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Force -Path $OutDir | Out-Null }
 

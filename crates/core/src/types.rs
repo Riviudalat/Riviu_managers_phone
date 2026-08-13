@@ -79,6 +79,23 @@ pub enum DevicePlatform {
     Android,
 }
 
+/// A physical-looking key the operator can press from the desktop overlay.
+///
+/// These are the keys a farm console like GenFarmer puts beside the big phone
+/// preview. Android maps each one to a real `KEYCODE_*`. iOS only has Home;
+/// the rest must stay disabled in the UI rather than inventing HID.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum HardwareKey {
+    Home,
+    Back,
+    Recents,
+    VolumeUp,
+    VolumeDown,
+    Power,
+    Notification,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceInfo {
@@ -188,6 +205,18 @@ mod device_info_tests {
         assert_eq!(
             serde_json::to_value(DevicePlatform::Ios).expect("serialize"),
             serde_json::json!("ios")
+        );
+    }
+
+    #[test]
+    fn hardware_keys_travel_as_camel_case_tags() {
+        assert_eq!(
+            serde_json::to_value(HardwareKey::VolumeUp).expect("serialize"),
+            serde_json::json!("volumeUp")
+        );
+        assert_eq!(
+            serde_json::from_value::<HardwareKey>(serde_json::json!("recents")).expect("decode"),
+            HardwareKey::Recents
         );
     }
 }

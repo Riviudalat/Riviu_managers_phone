@@ -1,9 +1,9 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactElement } from "react";
 import { deviceModelOsLabel } from "../types";
-import type { DeviceInfo } from "../types";
+import type { DeviceInfo, HardwareKey } from "../types";
 import {
   backupDevice,
-  deviceHome,
+  deviceKey,
   deviceSwipe,
   deviceTap,
   deviceTypeText,
@@ -18,14 +18,15 @@ import { peekFrame, useDeviceFrame, useHydratedDeviceFrame } from "../frameStore
 import { requestConfirm } from "../confirmStore";
 import { pushToast, toastError } from "../toastStore";
 import {
+  IconBack,
+  IconBell,
   IconCamera,
-  IconChevronLeft,
-  IconChevronRight,
   IconClose,
-  IconDownload,
   IconHome,
   IconPower,
-  IconUpload,
+  IconRecents,
+  IconVolumeDown,
+  IconVolumeUp,
 } from "./Icons";
 
 interface Props {
@@ -34,6 +35,23 @@ interface Props {
   groupUdids: string[];
   groupMode: boolean;
 }
+
+type KeySpec = {
+  key: HardwareKey;
+  title: string;
+  androidOnly?: boolean;
+  Icon: (props: { size?: number }) => ReactElement;
+};
+
+const HARDWARE_KEYS: KeySpec[] = [
+  { key: "back", title: "Back", androidOnly: true, Icon: IconBack },
+  { key: "home", title: "Home", Icon: IconHome },
+  { key: "recents", title: "Recents", androidOnly: true, Icon: IconRecents },
+  { key: "volumeUp", title: "Tăng âm lượng", androidOnly: true, Icon: IconVolumeUp },
+  { key: "volumeDown", title: "Giảm âm lượng", androidOnly: true, Icon: IconVolumeDown },
+  { key: "power", title: "Khóa màn hình", androidOnly: true, Icon: IconPower },
+  { key: "notification", title: "Thông báo", androidOnly: true, Icon: IconBell },
+];
 
 function mapToDevice(
   img: HTMLImageElement,
@@ -46,7 +64,6 @@ function mapToDevice(
   if (rect.width <= 0 || rect.height <= 0) {
     return { x: nw / 2, y: nh / 2 };
   }
-  // <img> box matches painted pixels (height:100%; width:auto; object-fit:contain)
   const x = ((clientX - rect.left) / rect.width) * nw;
   const y = ((clientY - rect.top) / rect.height) * nh;
   return {
@@ -55,20 +72,23 @@ function mapToDevice(
   };
 }
 
-/**
- * Device control dock. Sits beside the fleet grid as a real layout column
- * rather than a near-fullscreen overlay, so the operator keeps sight of the
- * other devices while driving one. Collapses to a screen-only strip.
- */
 export function FocusStream({ device, onClose, groupUdids, groupMode }: Props) {
   useHydratedDeviceFrame(device.udid, latestFrame);
   const frame = useDeviceFrame(device.udid) ?? peekFrame(device.udid) ?? null;
   const [text, setText] = useState("");
-  const [compact, setCompact] = useState(false);
   const [busy, setBusy] = useState(false);
   const imgRef = useRef<HTMLImageElement>(null);
   const drag = useRef<{ x: number; y: number } | null>(null);
   const targets = groupMode && groupUdids.length > 1 ? groupUdids : [device.udid];
+  const isIos = device.platform === "ios";
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
   const runGesture = async (start: { x: number; y: number }, end: { x: number; y: number }) => {
     const img = imgRef.current;
@@ -112,11 +132,15 @@ export function FocusStream({ device, onClose, groupUdids, groupMode }: Props) {
     }
   };
 
-  const goHome = async () => {
+  const pressKey = async (key: HardwareKey) => {
     try {
-      await deviceHome(device.udid);
+      if (targets.length > 1) {
+        await groupInput({ udids: targets, kind: "key", key });
+      } else {
+        await deviceKey(device.udid, key);
+      }
     } catch (e) {
-      toastError("Không về được màn hình chính", e);
+      toastError("Không bấm được phím", e);
     }
   };
 
@@ -144,19 +168,10 @@ export function FocusStream({ device, onClose, groupUdids, groupMode }: Props) {
     }
   };
 
-  // Mobilebackup2 is an iOS service. There is no Android analogue: `adb backup`
-  // is deprecated and removed on modern Android, so this is a permanent platform
-  // limit rather than a feature waiting to be written. The buttons stay visible but
-  // disabled — they sit in a fixed five-icon row, and hiding two of them reflows
-  // that row per device, giving an operator dragging across the fleet a moving
-  // target.
-  const isIos = device.platform === "ios";
   const IOS_ONLY_BACKUP = "Backup dùng Mobilebackup2 — chỉ có trên iPhone";
   const IOS_ONLY_RESTORE = "Phục hồi backup Mobilebackup2 — chỉ có trên iPhone";
 
   const backup = async () => {
-    // `disabled` is an affordance, not a guard: a keyboard or programmatic path
-    // still reaches this.
     if (!isIos) {
       pushToast("info", "Không hỗ trợ", IOS_ONLY_BACKUP);
       return;
@@ -209,121 +224,127 @@ export function FocusStream({ device, onClose, groupUdids, groupMode }: Props) {
   };
 
   return (
-    <aside
-      className={`focus-dock ${compact ? "compact" : ""}`}
+    <div
+      className="focus-overlay"
+      role="dialog"
+      aria-modal="true"
       aria-label={`Điều khiển ${device.name}`}
+      onClick={onClose}
     >
-      <header className="focus-dock-head">
-        <div className="title">
-          <strong>{device.name}</strong>
-          <span className="hint">{deviceModelOsLabel(device)}</span>
-        </div>
-        <button
-          type="button"
-          title={compact ? "Mở rộng" : "Thu gọn"}
-          aria-label={compact ? "Mở rộng bảng điều khiển" : "Thu gọn bảng điều khiển"}
-          onClick={() => setCompact((v) => !v)}
-        >
-          {compact ? <IconChevronLeft size={14} /> : <IconChevronRight size={14} />}
-        </button>
-        <button type="button" className="close" title="Đóng" aria-label="Đóng" onClick={onClose}>
-          <IconClose size={14} />
-        </button>
-      </header>
-
-      <div className="focus-dock-screen">
-        <div className="focus-screen">
-          {frame ? (
-            <img
-              ref={imgRef}
-              src={`data:image/jpeg;base64,${frame}`}
-              alt={device.name}
-              draggable={false}
-              className="focus-touch"
-              onPointerDown={(e) => {
-                if (e.button !== 0 || !imgRef.current) return;
-                e.preventDefault();
-                drag.current = mapToDevice(imgRef.current, e.clientX, e.clientY);
-                e.currentTarget.setPointerCapture(e.pointerId);
-              }}
-              onPointerUp={async (e) => {
-                if (e.button !== 0 || !drag.current || !imgRef.current) {
+      <div
+        className="focus-stage"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="focus-phone">
+          <header className="focus-phone-head">
+            <div className="title">
+              <strong>{device.name}</strong>
+              <span className="hint">{deviceModelOsLabel(device)}</span>
+            </div>
+            <button type="button" className="close" title="Đóng" aria-label="Đóng" onClick={onClose}>
+              <IconClose size={16} />
+            </button>
+          </header>
+          <div className="focus-phone-screen">
+            {frame ? (
+              <img
+                ref={imgRef}
+                src={`data:image/jpeg;base64,${frame}`}
+                alt={device.name}
+                draggable={false}
+                className="focus-touch"
+                onPointerDown={(e) => {
+                  if (e.button !== 0 || !imgRef.current) return;
+                  e.preventDefault();
+                  drag.current = mapToDevice(imgRef.current, e.clientX, e.clientY);
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                }}
+                onPointerUp={async (e) => {
+                  if (e.button !== 0 || !drag.current || !imgRef.current) {
+                    drag.current = null;
+                    return;
+                  }
+                  e.preventDefault();
+                  const start = drag.current;
+                  const end = mapToDevice(imgRef.current, e.clientX, e.clientY);
                   drag.current = null;
-                  return;
+                  await runGesture(start, end);
+                }}
+                onPointerCancel={() => {
+                  drag.current = null;
+                }}
+              />
+            ) : (
+              <div className="screen-empty">Đang chờ stream…</div>
+            )}
+          </div>
+          <div className="focus-phone-tools">
+            <label>
+              Gõ chữ
+              <input
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                placeholder="Nội dung cần gõ…"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void sendKeys();
+                  }
+                }}
+              />
+            </label>
+            <button type="button" className="primary" onClick={() => void sendKeys()}>
+              Gửi{targets.length > 1 ? ` · ${targets.length}` : ""}
+            </button>
+            <div className="focus-phone-extra">
+              <button type="button" onClick={() => void reboot()}>
+                Khởi động lại
+              </button>
+              <button type="button" disabled={!isIos} onClick={() => void backup()}>
+                Backup
+              </button>
+              <button
+                type="button"
+                className="danger"
+                disabled={!isIos}
+                onClick={() => void restore()}
+              >
+                Restore
+              </button>
+            </div>
+            <p className="hint">
+              {busy ? "Đang gửi lệnh…" : "Click hoặc kéo trên màn hình để điều khiển."}
+            </p>
+            {groupMode && targets.length > 1 && (
+              <p className="hint">Đồng bộ nhóm: {targets.length} máy nhận cùng thao tác.</p>
+            )}
+          </div>
+        </div>
+
+        <nav className="focus-keys" aria-label="Phím chức năng">
+          {HARDWARE_KEYS.map(({ key, title, androidOnly, Icon }) => {
+            const disabled = Boolean(androidOnly && isIos);
+            return (
+              <button
+                key={key}
+                type="button"
+                disabled={disabled}
+                title={
+                  disabled
+                    ? `${title} — chỉ có trên Android`
+                    : title
                 }
-                e.preventDefault();
-                const start = drag.current;
-                const end = mapToDevice(imgRef.current, e.clientX, e.clientY);
-                drag.current = null;
-                await runGesture(start, end);
-              }}
-              onPointerCancel={() => {
-                drag.current = null;
-              }}
-            />
-          ) : (
-            <div className="screen-empty">Đang chờ stream…</div>
-          )}
-        </div>
-      </div>
-
-      <nav className="focus-dock-nav" aria-label="Thao tác thiết bị">
-        <button type="button" title="Về màn hình chính" onClick={() => void goHome()}>
-          <IconHome size={17} />
-        </button>
-        <button type="button" title="Chụp màn hình" onClick={() => void capture()}>
-          <IconCamera size={17} />
-        </button>
-        <button type="button" title="Khởi động lại" onClick={() => void reboot()}>
-          <IconPower size={17} />
-        </button>
-        <button
-          type="button"
-          disabled={!isIos}
-          title={
-            isIos ? "Backup thiết bị (Mobilebackup2 — có thể mất vài phút)" : IOS_ONLY_BACKUP
-          }
-          onClick={() => void backup()}
-        >
-          <IconDownload size={17} />
-        </button>
-        <button
-          type="button"
-          className="danger"
-          disabled={!isIos}
-          title={
-            isIos
-              ? "Phục hồi từ backup (ghi đè dữ liệu + khởi động lại)"
-              : IOS_ONLY_RESTORE
-          }
-          onClick={() => void restore()}
-        >
-          <IconUpload size={17} />
-        </button>
-      </nav>
-
-      {!compact && (
-        <div className="focus-dock-tools">
-          <label>
-            Gõ chữ
-            <input
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder="Nội dung cần gõ…"
-            />
-          </label>
-          <button type="button" className="primary" onClick={() => void sendKeys()}>
-            Gửi phím{targets.length > 1 ? ` · ${targets.length} máy` : ""}
+                onClick={() => void pressKey(key)}
+              >
+                <Icon size={18} />
+              </button>
+            );
+          })}
+          <button type="button" title="Chụp màn hình" onClick={() => void capture()}>
+            <IconCamera size={18} />
           </button>
-          <p className="hint">
-            {busy ? "Đang gửi lệnh…" : "Click hoặc kéo trên màn hình để điều khiển."}
-          </p>
-          {groupMode && targets.length > 1 && (
-            <p className="hint">Đồng bộ nhóm: {targets.length} máy nhận cùng thao tác.</p>
-          )}
-          <p className="hint mono">{device.udid}</p>
-        </div>
-      )}
-    </aside>
+        </nav>
+      </div>
+    </div>
   );
 }

@@ -102,27 +102,6 @@
   padding: 0.15rem 0.5rem 0.75rem;
 }
 
-.menu-group {
-  margin-bottom: 0.15rem;
-}
-.menu-group-title {
-  display: flex;
-  align-items: center;
-  gap: 0.65rem;
-  padding: 0.55rem 0.55rem;
-  color: var(--text-1);
-  font-weight: 700;
-  font-size: 0.875rem;
-  border-radius: 6px;
-}
-.menu-group-title .mi {
-  width: 24px;
-  height: 24px;
-  display: grid;
-  place-items: center;
-  color: var(--primary);
-  flex-shrink: 0;
-}
 .menu-item {
   display: flex;
   align-items: center;
@@ -131,7 +110,8 @@
   border: none;
   background: transparent;
   color: var(--text-2);
-  padding: 0.48rem 0.55rem 0.48rem 2.15rem;
+  /* Flush left: the old 2.15rem indent existed to sit under a group title. */
+  padding: 0.48rem 0.55rem;
   border-radius: 6px;
   text-align: left;
   font-weight: 500;
@@ -202,12 +182,10 @@
 }
 
 .aside.collapsed .aside-logo strong,
-.aside.collapsed .menu-group-title span:not(.mi),
 .aside.collapsed .menu-item span:not(.mi),
 .aside.collapsed .aside-stats {
   display: none;
 }
-.aside.collapsed .menu-group-title,
 .aside.collapsed .menu-item {
   justify-content: center;
   padding-left: 0.35rem;
@@ -1372,9 +1350,8 @@ button:disabled {
   width: 100%;
   background: #f5f7fa;
   position: relative;
-  cursor: crosshair;
+  cursor: pointer;
   overflow: hidden;
-  touch-action: none;
 }
 .dev-window-screen img {
   width: 100%;
@@ -1384,7 +1361,7 @@ button:disabled {
   display: block;
   background: #f5f7fa;
   user-select: none;
-  touch-action: none;
+  cursor: pointer;
 }
 .focus-screen img.focus-touch,
 .focus-touch {
@@ -1738,8 +1715,7 @@ button.linkish,
 .panel textarea,
 .panel input,
 .panel select,
-.focus-dock-tools input,
-.focus-dock-tools textarea {
+.focus-phone-tools input {
   border: 1px solid var(--line-strong);
   border-radius: 4px;
   padding: 0.4rem 0.55rem;
@@ -1808,109 +1784,88 @@ button.linkish,
   color: #c45656;
 }
 
-/* Focus = floating window; grid underneath keeps live mini streams */
-/* ——— Device control dock ———
-   A real layout column beside the fleet grid (.shell is display:flex), not a
-   near-fullscreen overlay: the operator keeps sight of the other devices while
-   driving one, and can collapse this to a screen-only strip. */
-.focus-dock {
-  flex: 0 0 auto;
-  width: 340px;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  background: #fff;
-  border-left: 1px solid var(--line);
-  overflow: hidden;
-  transition: width 0.18s ease;
-}
-.focus-dock.compact {
-  width: 214px;
-}
-@media (max-width: 1180px) {
-  .focus-dock {
-    width: 286px;
-  }
-  .focus-dock.compact {
-    width: 190px;
-  }
-}
-
-.focus-dock-head {
-  flex-shrink: 0;
+/* Focus = centered overlay with a large phone + hardware keys */
+.focus-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
   display: flex;
   align-items: center;
-  gap: 0.3rem;
-  padding: 0.5rem 0.4rem 0.5rem 0.7rem;
-  border-bottom: 1px solid var(--line);
+  justify-content: center;
+  padding: 1.5rem;
+  background: rgb(15 23 42 / 58%);
 }
-.focus-dock-head .title {
+.focus-stage {
+  display: flex;
+  align-items: stretch;
+  gap: 0.85rem;
+  max-height: 92vh;
+  max-width: min(980px, 96vw);
+}
+.focus-phone {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: #111318;
+  border-radius: 22px;
+  padding: 0.7rem 0.7rem 0.85rem;
+  box-shadow: 0 28px 80px rgb(0 0 0 / 45%);
+}
+.focus-phone-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.15rem 0.2rem 0.55rem;
+}
+.focus-phone-head .title {
   flex: 1;
   min-width: 0;
 }
-.focus-dock-head .title strong {
+.focus-phone-head .title strong {
   display: block;
-  font-size: 0.82rem;
+  font-size: 0.88rem;
   font-weight: 600;
-  color: var(--text-1);
+  color: #fff;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.focus-dock-head .hint {
+.focus-phone-head .hint {
   display: block;
-  color: var(--text-3);
-  font-size: 0.68rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  color: rgb(255 255 255 / 55%);
+  font-size: 0.7rem;
 }
-.focus-dock-head button {
+.focus-phone-head button.close {
   flex-shrink: 0;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   display: grid;
   place-items: center;
   border: none;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-2);
+  border-radius: 50%;
+  background: rgb(255 255 255 / 8%);
+  color: #fff;
 }
-.focus-dock-head button:hover {
-  background: var(--primary-soft);
-  color: var(--primary);
+.focus-phone-head button.close:hover {
+  background: rgb(245 108 108 / 28%);
+  color: #fff;
 }
-.focus-dock-head button.close:hover {
-  background: rgb(245 108 108 / 14%);
-  color: var(--danger);
-}
-
-.focus-dock-screen {
+.focus-phone-screen {
   flex: 1;
   min-height: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0.5rem;
-  background: #0f1115;
-}
-.focus-dock .focus-screen {
-  height: 100%;
-  width: auto;
-  max-width: 100%;
-  aspect-ratio: 9 / 16;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 5px;
   background: #000;
+  border-radius: 12px;
   overflow: hidden;
 }
-.focus-screen img {
+.focus-phone-screen img,
+.focus-touch {
   width: auto;
-  height: 100%;
-  max-width: 100%;
-  max-height: 100%;
+  height: auto;
+  max-width: min(420px, 68vw);
+  max-height: calc(92vh - 170px);
   object-fit: contain;
   object-position: center;
   background: #000;
@@ -1919,62 +1874,31 @@ button.linkish,
   touch-action: none;
   user-select: none;
 }
-
-.focus-dock-nav {
-  flex-shrink: 0;
-  display: flex;
-  gap: 0.2rem;
-  padding: 0.4rem;
-  border-top: 1px solid var(--line);
-  background: #fafbfc;
+.focus-phone-screen .screen-empty {
+  color: rgb(255 255 255 / 55%);
+  padding: 3rem 1.5rem;
+  font-size: 0.85rem;
 }
-.focus-dock-nav button {
-  flex: 1;
-  height: 32px;
-  display: grid;
-  place-items: center;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-2);
-}
-.focus-dock-nav button:hover {
-  background: var(--primary-soft);
-  color: var(--primary);
-}
-.focus-dock-nav button.danger:hover {
-  background: rgb(245 108 108 / 14%);
-  color: var(--danger);
-}
-
-.focus-dock-tools {
-  flex-shrink: 0;
+.focus-phone-tools {
   display: flex;
   flex-direction: column;
-  gap: 0.45rem;
-  max-height: 42%;
-  padding: 0.6rem 0.7rem 0.75rem;
-  border-top: 1px solid var(--line);
-  overflow: auto;
+  gap: 0.4rem;
+  padding-top: 0.7rem;
 }
-.focus-dock-tools label {
+.focus-phone-tools label {
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
-  color: var(--text-2);
+  color: rgb(255 255 255 / 72%);
   font-size: 0.74rem;
 }
-.focus-dock-tools .hint {
+.focus-phone-tools .hint {
   margin: 0;
-  color: var(--text-3);
+  color: rgb(255 255 255 / 48%);
   font-size: 0.68rem;
   line-height: 1.45;
 }
-.focus-dock-tools .hint.mono {
-  font-family: var(--font-mono);
-  overflow-wrap: anywhere;
-}
-.focus-dock-tools button.primary {
+.focus-phone-tools button.primary {
   padding: 0.45rem;
   border: 1px solid var(--primary);
   border-radius: 6px;
@@ -1983,9 +1907,57 @@ button.linkish,
   font-size: 0.78rem;
   font-weight: 600;
 }
-.focus-dock-tools button.primary:hover {
+.focus-phone-tools button.primary:hover {
   border-color: var(--primary-deep);
   background: var(--primary-deep);
+}
+.focus-phone-extra {
+  display: flex;
+  gap: 0.35rem;
+}
+.focus-phone-extra button {
+  flex: 1;
+  padding: 0.35rem 0.4rem;
+  border: 1px solid rgb(255 255 255 / 14%);
+  border-radius: 6px;
+  background: rgb(255 255 255 / 6%);
+  color: rgb(255 255 255 / 82%);
+  font-size: 0.72rem;
+}
+.focus-phone-extra button:hover:not(:disabled) {
+  background: rgb(255 255 255 / 12%);
+}
+.focus-phone-extra button:disabled {
+  opacity: 0.4;
+}
+.focus-phone-extra button.danger:hover:not(:disabled) {
+  background: rgb(245 108 108 / 22%);
+  color: #fecaca;
+}
+.focus-keys {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  justify-content: center;
+}
+.focus-keys button {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 50%;
+  background: #fff;
+  color: var(--text-2);
+  box-shadow: 0 8px 18px rgb(15 23 42 / 18%);
+}
+.focus-keys button:hover:not(:disabled) {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+.focus-keys button:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
 }
 
 .settings-card {
@@ -2007,7 +1979,6 @@ button.linkish,
   font-size: 0.82rem;
   color: var(--text-2);
 }
-.menu-group-title .mi svg,
 .menu-item .mi svg {
   display: block;
 }

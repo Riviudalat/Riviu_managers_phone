@@ -452,7 +452,7 @@ pub fn analytics_summary(state: State<'_, AppState>) -> Result<AnalyticsSummary,
 
 #[tauri::command]
 pub fn api_docs() -> String {
-    r#"# Riviumanagersphone local API (Tauri invoke)
+    r#"# Riviu Manager local API (Tauri invoke)
 
 ## Devices
 - list_devices / refresh_devices / prepare_device / reboot_device

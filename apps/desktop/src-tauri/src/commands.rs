@@ -1,8 +1,10 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use riviu_core::{
     AutomationScript, DeviceControlPlane, DeviceExclusiveContext, DeviceInfo, DeviceWorkOwner,
-    InteractionSessionKind, JobRecord, StreamSettings, SwipeGesture, TapPoint, UiWithStreamContext,
+    HardwareKey, InteractionSessionKind, JobRecord, StreamSettings, SwipeGesture, TapPoint,
+    UiSession, UiWithStreamContext,
 };
 use riviu_script_engine::{example_script_json, parse_script};
 use serde::Serialize;
@@ -26,19 +28,6 @@ pub struct GroupInputSkip {
     pub current_owner: Option<DeviceWorkOwner>,
 }
 
-async fn open_ui_context(
-    control: &DeviceControlPlane,
-    udid: &str,
-    owner: DeviceWorkOwner,
-    kind: InteractionSessionKind,
-) -> Result<UiWithStreamContext, CommandError> {
-    let exclusive = control
-        .try_acquire_exclusive(udid, owner)
-        .await
-        .map_err(CommandError::from)?;
-    continue_ui_context(control, exclusive, kind).await
-}
-
 async fn continue_ui_context(
     control: &DeviceControlPlane,
     exclusive: DeviceExclusiveContext,
@@ -48,10 +37,11 @@ async fn continue_ui_context(
         .reserve_ui_capacity(exclusive)
         .await
         .map_err(CommandError::from)?;
-    // Per device, not a module constant. Manual control and Open-on-Device carried the
-    // same defect as the Interaction path: the *iOS* bundle was handed to every
-    // backend, so on Android `start_interaction_session` foregrounded nothing that
-    // exists and the foreground proof could never pass.
+    // Per device, not a module constant. Prepare/Open-on-Device used to hand the
+    // *iOS* bundle to every backend, so on Android `start_interaction_session`
+    // foregrounded nothing that exists and the foreground proof could never pass.
+    // Manual tap/swipe/type/home/key do not use this helper — they go through
+    // `open_manual_session` so they do not park the live preview.
     let udid = exclusive.udid().to_string();
     let target_package = control
         .resolve_tiktok_package(&udid)
@@ -65,6 +55,28 @@ async fn continue_ui_context(
         .start_reserved_stream(session, capacity)
         .await
         .map_err(CommandError::from)
+}
+
+async fn with_manual_session<F, Fut>(
+    control: &DeviceControlPlane,
+    udid: &str,
+    owner: DeviceWorkOwner,
+    f: F,
+) -> Result<(), CommandError>
+where
+    F: FnOnce(Arc<dyn UiSession>) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let context = control
+        .open_manual_session(udid, owner)
+        .await
+        .map_err(CommandError::from)?;
+    let session = control.session(&context).map_err(CommandError::from)?;
+    let result = f(session).await;
+    let cleanup = control.close_manual_session(context);
+    result.map_err(CommandError::operation)?;
+    cleanup.map_err(CommandError::from)?;
+    Ok(())
 }
 
 async fn prepare_ui_with_control(
@@ -403,25 +415,18 @@ pub async fn device_tap(
     image_h: Option<f64>,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let context = open_ui_context(
+    with_manual_session(
         &state.control,
         &udid,
         DeviceWorkOwner::ManualControl,
-        InteractionSessionKind::Ordinary,
+        |session| async move {
+            match (image_w, image_h) {
+                (Some(w), Some(h)) if w > 0.0 && h > 0.0 => session.tap_image(x, y, w, h).await,
+                _ => session.tap(TapPoint { x, y }).await,
+            }
+        },
     )
-    .await?;
-    let session = state
-        .control
-        .streaming_session(&context)
-        .map_err(CommandError::from)?;
-    let result = match (image_w, image_h) {
-        (Some(w), Some(h)) if w > 0.0 && h > 0.0 => session.tap_image(x, y, w, h).await,
-        _ => session.tap(TapPoint { x, y }).await,
-    };
-    let cleanup = state.control.close_ui_context(context).await;
-    result.map_err(CommandError::operation)?;
-    cleanup.map_err(CommandError::from)?;
-    Ok(())
+    .await
 }
 
 #[tauri::command]
@@ -433,29 +438,22 @@ pub async fn device_swipe(
     image_h: Option<f64>,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let context = open_ui_context(
+    with_manual_session(
         &state.control,
         &udid,
         DeviceWorkOwner::ManualControl,
-        InteractionSessionKind::Ordinary,
+        |session| async move {
+            match (image_w, image_h) {
+                (Some(w), Some(h)) if w > 0.0 && h > 0.0 => {
+                    session
+                        .swipe_image(gesture.from, gesture.to, w, h, gesture.duration_ms)
+                        .await
+                }
+                _ => session.swipe(gesture).await,
+            }
+        },
     )
-    .await?;
-    let session = state
-        .control
-        .streaming_session(&context)
-        .map_err(CommandError::from)?;
-    let result = match (image_w, image_h) {
-        (Some(w), Some(h)) if w > 0.0 && h > 0.0 => {
-            session
-                .swipe_image(gesture.from, gesture.to, w, h, gesture.duration_ms)
-                .await
-        }
-        _ => session.swipe(gesture).await,
-    };
-    let cleanup = state.control.close_ui_context(context).await;
-    result.map_err(CommandError::operation)?;
-    cleanup.map_err(CommandError::from)?;
-    Ok(())
+    .await
 }
 
 #[tauri::command]
@@ -465,43 +463,41 @@ pub async fn device_type_text(
     text: String,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let kind = if state.control.requires_fresh_text_session(&udid) {
-        InteractionSessionKind::FreshText
-    } else {
-        InteractionSessionKind::Ordinary
-    };
-    let context =
-        open_ui_context(&state.control, &udid, DeviceWorkOwner::ManualControl, kind).await?;
-    let session = state
-        .control
-        .streaming_session(&context)
-        .map_err(CommandError::from)?;
-    let result = session.type_text(&text).await;
-    let cleanup = state.control.close_ui_context(context).await;
-    result.map_err(CommandError::operation)?;
-    cleanup.map_err(CommandError::from)?;
-    Ok(())
+    with_manual_session(
+        &state.control,
+        &udid,
+        DeviceWorkOwner::ManualControl,
+        |session| async move { session.type_text(&text).await },
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn device_home(state: State<'_, AppState>, udid: String) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let context = open_ui_context(
+    with_manual_session(
         &state.control,
         &udid,
         DeviceWorkOwner::ManualControl,
-        InteractionSessionKind::Ordinary,
+        |session| async move { session.home().await },
     )
-    .await?;
-    let session = state
-        .control
-        .streaming_session(&context)
-        .map_err(CommandError::from)?;
-    let result = session.home().await;
-    let cleanup = state.control.close_ui_context(context).await;
-    result.map_err(CommandError::operation)?;
-    cleanup.map_err(CommandError::from)?;
-    Ok(())
+    .await
+}
+
+#[tauri::command]
+pub async fn device_key(
+    state: State<'_, AppState>,
+    udid: String,
+    key: HardwareKey,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    with_manual_session(
+        &state.control,
+        &udid,
+        DeviceWorkOwner::ManualControl,
+        move |session| async move { session.press_hardware_key(key).await },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -517,9 +513,10 @@ pub async fn group_input(
     text: Option<String>,
     image_w: Option<f64>,
     image_h: Option<f64>,
+    key: Option<HardwareKey>,
 ) -> Result<GroupInputReport, CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    if !matches!(kind.as_str(), "tap" | "swipe" | "type" | "home") {
+    if !matches!(kind.as_str(), "tap" | "swipe" | "type" | "home" | "key") {
         return Err(CommandError::operation(format!(
             "unknown group input kind: {kind}"
         )));
@@ -530,33 +527,28 @@ pub async fn group_input(
         skipped: Vec::new(),
     };
     for udid in udids {
-        let session_kind = if kind == "type" && state.control.requires_fresh_text_session(&udid) {
-            InteractionSessionKind::FreshText
-        } else {
-            InteractionSessionKind::Ordinary
-        };
-        let context = match open_ui_context(
-            &state.control,
-            &udid,
-            DeviceWorkOwner::GroupSync,
-            session_kind,
-        )
-        .await
+        let context = match state
+            .control
+            .open_manual_session(&udid, DeviceWorkOwner::GroupSync)
+            .await
         {
             Ok(context) => context,
-            Err(error) if error.code == "DeviceBusy" => {
-                report.skipped.push(GroupInputSkip {
-                    udid,
-                    code: error.code,
-                    current_owner: error.current_owner,
-                });
-                continue;
+            Err(error) => {
+                let error = CommandError::from(error);
+                if error.code == "DeviceBusy" {
+                    report.skipped.push(GroupInputSkip {
+                        udid,
+                        code: error.code,
+                        current_owner: error.current_owner,
+                    });
+                    continue;
+                }
+                return Err(error);
             }
-            Err(error) => return Err(error),
         };
         let session = state
             .control
-            .streaming_session(&context)
+            .session(&context)
             .map_err(CommandError::from)?;
         let action = match kind.as_str() {
             "tap" => {
@@ -595,9 +587,19 @@ pub async fn group_input(
             }
             "type" => session.type_text(text.as_deref().unwrap_or("")).await,
             "home" => session.home().await,
+            "key" => match key {
+                Some(key) => session.press_hardware_key(key).await,
+                None => {
+                    let cleanup = state.control.close_manual_session(context);
+                    cleanup.map_err(CommandError::from)?;
+                    return Err(CommandError::operation(
+                        "group input kind key requires a hardware key",
+                    ));
+                }
+            },
             _ => unreachable!("group input kind was validated"),
         };
-        let cleanup = state.control.close_ui_context(context).await;
+        let cleanup = state.control.close_manual_session(context);
         action.map_err(CommandError::operation)?;
         cleanup.map_err(CommandError::from)?;
         report.completed_udids.push(udid);
@@ -959,16 +961,12 @@ mod tests {
             .await
             .expect("interaction lease");
 
-        let error = match open_ui_context(
-            &control,
-            "fixture",
-            DeviceWorkOwner::GroupSync,
-            InteractionSessionKind::Ordinary,
-        )
-        .await
+        let error = match control
+            .open_manual_session("fixture", DeviceWorkOwner::GroupSync)
+            .await
         {
             Ok(_) => panic!("group sync must skip an interaction-owned device"),
-            Err(error) => error,
+            Err(error) => CommandError::from(error),
         };
 
         assert_eq!(error.code, "DeviceBusy");

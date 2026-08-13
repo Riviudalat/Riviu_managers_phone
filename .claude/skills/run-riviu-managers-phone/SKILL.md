@@ -1,9 +1,15 @@
 ---
 name: run-riviu-managers-phone
-description: Build, launch, screenshot and drive the Riviumanagersphone Tauri desktop app on Windows, plus run the CI check suite. Use when asked to run, start, build, screenshot, click through, or verify the desktop app / iPhone farm UI, or to confirm a change in crates/ or apps/desktop actually works in the real app.
+description: Build, launch, screenshot and drive the Riviu Manager Tauri desktop app on Windows, plus run the CI check suite. Use when asked to run, start, build, screenshot, click through, or verify the desktop app / iPhone farm UI, or to confirm a change in crates/ or apps/desktop actually works in the real app.
 ---
 
-# Run Riviumanagersphone
+# Run Riviu Manager
+
+> Renamed 13/08/2026: the product is **Riviu Manager** (org: Riviu Tech), window title
+> `Riviu Manager`, identifier `com.riviu.manager`. The **iPhone agent** kept its old
+> identity on purpose — `com.riviu.managersphone.agent.xctrunner` and
+> `sidecars/wda/Riviumanagersphone.ipa` are hash-pinned artifacts, so do not "finish"
+> the rename there.
 
 Tauri 2 + Rust + React desktop app that drives a farm of USB-connected phones. As of
 `b3223f0` that is **two platforms behind one control plane** — iPhones via
@@ -212,7 +218,7 @@ A window opens; Ctrl-C in the terminal stops it. No PATH setup is needed: `pytho
   — `status` printed a 16x16 rect and the occlusion guard "found" a browser there and
   refused to work, all without a single error. The driver now enumerates the process's
   top-level windows and picks the visible one over 40000 px² preferring the title
-  `Riviumanagersphone`. If `status` ever shows a tiny rect or an empty title, that is
+  `Riviu Manager`. If `status` ever shows a tiny rect or an empty title, that is
   this bug returning.
 - **`HWND_TOPMOST` is not sufficient either, and failure is silent.** Another topmost
   window can still sit above ours; a `shot` here captured a full-screen Chrome window
@@ -299,17 +305,20 @@ A window opens; Ctrl-C in the terminal stops it. No PATH setup is needed: `pytho
   itself (not its directory) and outranks `ANDROID_SDK_ROOT`/`ANDROID_HOME`, then PATH;
   `driver.ps1` puts platform-tools on PATH for you and `driver.ps1 android` reports the
   state. Verified here on a Redmi Note 12 (`23021RAAEG`, Android 15, 1080x2400): it
-  appears in the fleet as its own tile, and the tile correctly reads
-  `startBackgroundStream failed … the Android driver has no frame source yet` — that
-  error is **by design**, `ensure_stream` refuses rather than hand back a dead URL, so
-  an Android device never shows a stream and never counts as "ready".
+  appears in the fleet as its own tile. minicap is bundled in the installer
+  (`sidecars/android/noarch/minicap.apk`); a clean Windows install streams
+  Android tiles as `● Live` without `RIVIU_MINICAP_APK`. Click a tile to open
+  the centered control overlay — taps ride the live stream and must not park it
+  or foreground TikTok (AGENTS.md §9.48).
 - **The mixed fleet holds.** With an iPhone 8 and the Redmi attached at once, one
-  `DeviceControlPlane` shows both tiles side by side and the summary reads
-  `Thiết bị 1/2` — iPhone `● Live`, Android `● Error`. Sampled every 15s for ~45s, the
-  dashboard region hashed byte-identical every time, so the failure AGENTS.md §9 warns
-  about (two planes polling independently and taking turns deleting each other's
-  devices, because `DeviceRegistry::upsert_many` replaces the whole vector) does **not**
-  happen. If you ever see the device count oscillate, that is the bug to suspect.
+  `DeviceControlPlane` shows both tiles side by side. After minicap was bundled
+  (AGENTS.md §9.27) both tiles are `● Live` and the summary reads `Thiết bị 2/2`.
+  The older `1/2` / Android `● Error` reading was the missing-APK-env bug, not a
+  multiplexer bug. Sampled every 15s for ~45s, the dashboard region hashed
+  byte-identical every time, so the failure AGENTS.md §9 warns about (two planes
+  polling independently and taking turns deleting each other's devices, because
+  `DeviceRegistry::upsert_many` replaces the whole vector) does **not** happen.
+  If you ever see the device count oscillate, that is the bug to suspect.
 - **What Android still cannot do here, and why.** Do not read the above as a working
   automation path. (1) `crates/android-driver/examples/probe.rs` hardcodes
   `com.zhiliaoapp.musically`, but a SEA phone carries `com.ss.android.ugc.trill`, so

@@ -1,5 +1,5 @@
 import type { PageId } from "../types";
-import { MENU_ICONS, IconGrid } from "./Icons";
+import { MENU_ICONS } from "./Icons";
 
 interface Props {
   page: PageId;
@@ -12,47 +12,19 @@ interface Props {
   onToggleCollapse: () => void;
 }
 
-/** Menu — groups/proxy/team removed */
-const MENU: {
-  id: string;
-  label: string;
-  children: { id: PageId; label: string }[];
-}[] = [
-  {
-    id: "common",
-    label: "Thường dùng",
-    children: [
-      { id: "control", label: "Quản lý cửa sổ" },
-      { id: "material", label: "Kho nội dung" },
-    ],
-  },
-  {
-    id: "discover",
-    label: "Khám phá",
-    children: [
-      { id: "apps", label: "Trung tâm ứng dụng" },
-      { id: "scripts", label: "Flow" },
-      { id: "sync", label: "Đồng bộ cửa sổ" },
-      { id: "jobs", label: "Tác vụ" },
-    ],
-  },
-  {
-    id: "publish",
-    label: "Xuất bản",
-    children: [
-      { id: "publish", label: "Đăng bài" },
-      { id: "data", label: "Dữ liệu" },
-    ],
-  },
-  {
-    id: "system",
-    label: "Hệ thống",
-    children: [
-      { id: "account", label: "Tài khoản" },
-      { id: "api", label: "API" },
-      { id: "settings", label: "Cài đặt" },
-    ],
-  },
+/** Menu — one flat list; groups/proxy/team removed */
+const MENU: { id: PageId; label: string }[] = [
+  { id: "control", label: "Quản lý cửa sổ" },
+  { id: "material", label: "Kho nội dung" },
+  { id: "apps", label: "Trung tâm ứng dụng" },
+  { id: "scripts", label: "Flow" },
+  { id: "sync", label: "Đồng bộ cửa sổ" },
+  { id: "jobs", label: "Tác vụ" },
+  { id: "publish", label: "Đăng bài" },
+  { id: "data", label: "Dữ liệu" },
+  { id: "account", label: "Tài khoản" },
+  { id: "api", label: "API" },
+  { id: "settings", label: "Cài đặt" },
 ];
 
 export function Sidebar({
@@ -69,35 +41,25 @@ export function Sidebar({
     <aside className={`aside ${collapsed ? "collapsed" : ""}`}>
       <div className="aside-logo">
         <img src="/logo.jpg" alt="" />
-        {!collapsed && <strong>Riviumanagersphone</strong>}
+        {!collapsed && <strong>Riviu Manager</strong>}
       </div>
 
       <div className="aside-scroll">
-        {MENU.map((group) => (
-          <div key={group.id} className="menu-group">
-            <div className="menu-group-title">
-              <span className="mi">
-                <IconGrid size={18} />
-              </span>
-              <span>{group.label}</span>
-            </div>
-            {group.children.map((item) => {
-              const Icon = MENU_ICONS[item.id];
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  className={`menu-item ${page === item.id ? "active" : ""}`}
-                  title={item.label}
-                  onClick={() => onPage(item.id)}
-                >
-                  <span className="mi">{Icon ? <Icon size={16} /> : "›"}</span>
-                  <span>{item.label}</span>
-                </button>
-              );
-            })}
-          </div>
-        ))}
+        {MENU.map((item) => {
+          const Icon = MENU_ICONS[item.id];
+          return (
+            <button
+              key={item.id}
+              type="button"
+              className={`menu-item ${page === item.id ? "active" : ""}`}
+              title={item.label}
+              onClick={() => onPage(item.id)}
+            >
+              <span className="mi">{Icon ? <Icon size={16} /> : "›"}</span>
+              <span>{item.label}</span>
+            </button>
+          );
+        })}
 
         {!collapsed && (
           <div className="aside-stats">

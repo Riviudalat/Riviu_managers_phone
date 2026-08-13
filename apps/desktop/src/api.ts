@@ -12,6 +12,7 @@ import type {
   DeviceInfo,
   DeviceMeta,
   GroupInstallResult,
+  HardwareKey,
   ActionDefinition,
   CompiledRevision,
   FlowArtifactPayload,
@@ -142,6 +143,10 @@ export async function deviceHome(udid: string) {
   return invoke<void>("device_home", { udid });
 }
 
+export async function deviceKey(udid: string, key: HardwareKey) {
+  return invoke<void>("device_key", { udid, key });
+}
+
 export async function groupInput(payload: {
   udids: string[];
   kind: string;
@@ -152,6 +157,7 @@ export async function groupInput(payload: {
   text?: string;
   imageW?: number;
   imageH?: number;
+  key?: HardwareKey;
 }) {
   return invoke<void>("group_input", {
     udids: payload.udids,
@@ -163,6 +169,7 @@ export async function groupInput(payload: {
     text: payload.text ?? null,
     imageW: payload.imageW ?? null,
     imageH: payload.imageH ?? null,
+    key: payload.key ?? null,
   });
 }
 

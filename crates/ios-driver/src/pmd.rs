@@ -3282,6 +3282,34 @@ impl DeviceDriver for PmdIosDriver {
         }))
     }
 
+    async fn open_control_session(&self, udid: &str) -> anyhow::Result<Box<dyn UiSession>> {
+        let slot = self.slots.get(udid);
+        let owned = slot.owned.lock().await;
+        if owned.stream.is_some() {
+            let cached = self.sessions.lock().get(udid).cloned();
+            drop(owned);
+            let Some(client) = cached else {
+                anyhow::bail!(
+                    "the live stream has no cached control session; Start the tile again before tapping"
+                );
+            };
+            if !client.session_alive().await {
+                anyhow::bail!(
+                    "the live stream's control session is gone; Start the tile again before tapping"
+                );
+            }
+            return Ok(Box::new(PmdUiSession {
+                client,
+                mjpeg_url: WdaClient::mjpeg_url(&self.wda_host, self.profile.mjpeg_port),
+                supports_text_input: false,
+                supports_accessibility_readback: false,
+                target_bundle_id: INTERACTION_TARGET_BUNDLE_ID.to_string(),
+            }));
+        }
+        drop(owned);
+        self.start_ui_session(udid).await
+    }
+
     fn requires_fresh_text_session(&self, _udid: &str) -> bool {
         self.profile.backend == WdaBackend::RtMmo
             || (self.profile.backend == WdaBackend::RiviuAgent
