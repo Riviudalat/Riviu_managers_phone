@@ -114,8 +114,19 @@ Nên phương án trung thực là **từ chối xoá tự động, giữ tay** 
 đã nêu, nhưng tới bằng đường ngắn hơn: không phải vì caption bị cắt, mà vì **nút xoá không có ở
 đó**. Dùng toạ độ để lách là đúng thứ project này từ chối bịa (`AGENTS.md` mục 10).
 
-**Hai lối chưa thử**, nếu vẫn muốn theo đuổi xoá tự động: long-press trong grid hồ sơ, và thứ
-nằm sau `Cài đặt quyền riêng tư`.
+**Hai lối đó giờ đã thử, và đều đóng** (`AGENTS.md` 9.43): long-press trong grid hồ sơ chỉ **mở
+bài**, không menu ngữ cảnh; `Cài đặt quyền riêng tư` là một sheet không cuộn gồm đúng ba nhóm —
+ai xem được, cho phép bình luận, cho phép dùng lại — **không có mục xoá**. Vậy bốn bề mặt đã
+quét hết và kết luận không còn là "chưa thử nốt".
+
+**Một lối khác mở ra: `Chỉ bạn`.** Trong sheet đó có lựa chọn chỉ-mình-xem, và nó **có nhãn** —
+khác hẳn nút xoá. Đặt bài về `Chỉ bạn` đạt mục đích "bài không còn công khai" mà không xoá. Hai
+điều kiện: node đó `clickable=false` nên phải tap tâm bounds của nhãn (đúng cơ chế đang dùng), và
+trên bài tôi đo nó **xám** vì bài đang bật Ủy quyền quảng cáo — chưa chốt là bài mới đăng có
+chọn được.
+
+**Đây là chỗ cần người vận hành quyết**, vì "gỡ bài" và "để chỉ mình xem" là hai việc khác nhau:
+bài vẫn còn trên tài khoản.
 
 ### B. Chặn bởi phần cứng không có mặt
 

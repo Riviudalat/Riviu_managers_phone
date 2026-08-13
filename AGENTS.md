@@ -4730,6 +4730,45 @@ Nó cũng báo có `Follow ` trên trang không, vì đó là từ chối dứt 
 
 **Chưa chạy.** Đây là số đo M4/M5 và nó cần một bài thật của người vận hành.
 
+### 9.43 Hai lối xoá còn lại: đã đo, đều đóng — và một lối khác mở ra (13/08/2026)
+
+Mục 9.37 kết luận xoá tự động không dựng được từ trang bài, và ghi lại **hai lối chưa thử**.
+Đo cả hai, chỉ-đọc, trên bài thật của tài khoản Note 8.
+
+**Lối 1 — long-press trong grid hồ sơ: đóng.** `input swipe x y x y 900` trên một ô grid chỉ
+**mở bài**, y như một cú tap. Không menu ngữ cảnh, không gì khác xuất hiện.
+
+**Lối 2 — `Cài đặt quyền riêng tư`: đóng cho việc xoá.** Sheet không cuộn, nên inventory dưới
+đây là **toàn bộ** nó:
+
+| nhãn | loại | clickable |
+|---|---|---|
+| `Cài đặt quyền riêng tư` | TextView (tiêu đề) | false |
+| `Đóng` | Button | **true** |
+| `Ai có thể xem bài đăng này` | TextView (đầu mục) | false |
+| `Mọi người` / `Bạn bè` / `Chỉ bạn` | TextView | **false** cả ba |
+| `Cho phép bình luận` | Switch (desc dài) | true |
+| `Cho phép sử dụng lại nội dung` | Switch | true |
+
+**Không có mục xoá.** Vậy bốn bề mặt đã đo — `...` trên trang bài (ra share sheet), thân trang
+bài, long-press trong grid, và sheet quyền riêng tư — đều không có control xoá nào có nhãn.
+Kết luận "xoá tự động không dựng được bằng nhãn trên trill 46.3.3" giờ là **đã quét hết**, không
+còn là "chưa thử nốt".
+
+**Nhưng lối 2 mở ra một thứ khác: `Chỉ bạn`.** Đặt bài về chỉ-mình-xem đạt được *mục đích*
+"bài không còn công khai" mà **không** cần xoá, và nó **có nhãn** — khác hẳn nút xoá. Hai điều
+kiện kèm theo, đo được và phải nói rõ:
+
+1. Node `Chỉ bạn` là `clickable=false`. Đích tap là hàng cha không nhãn, nên cách chạy là
+   locate theo nhãn rồi tap **tâm bounds của nhãn đó** — đúng cơ chế `interaction_hierarchy`
+   đang dùng (`element.centre()`), không phải toạ độ bịa.
+2. Trên đúng bài tôi đo, `Chỉ bạn` **xám** trên ảnh (bài này đang bật Ủy quyền quảng cáo).
+   Cây báo `enabled=true` nhưng đó là thuộc tính của TextView, không phải trạng thái của hàng.
+   Nên "`Chỉ bạn` có chọn được không" **chưa chốt**; trên bài mình vừa đăng thì rất có thể có.
+
+Đây là **lựa chọn của người vận hành, không phải thứ tôi tự đổi**: "gỡ bài" và "để bài ở chế độ
+chỉ mình xem" là hai việc khác nhau — bài vẫn còn trên tài khoản. Ghi ra để chọn, không tự thay.
+
 ### 9.42 Ngưỡng thời gian của `classification_stays_fast_enough_for_the_watcher` (13/08/2026)
 
 Test này fail trong gate của tôi. **Không phải do thay đổi nào của tôi** — nó nằm ở
