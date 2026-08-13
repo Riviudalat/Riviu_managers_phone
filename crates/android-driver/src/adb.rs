@@ -1102,13 +1102,29 @@ mod tests {
         }
 
         #[test]
-        fn resolve_falls_back_to_the_bare_name_when_nothing_on_disk_matches() {
-            // The PATH entry is skipped while stat-ing (a bare name is never a file),
-            // so with no real candidate the answer is the bare name for the OS to
-            // search — not the first non-existent path, which would be unspawnable.
+        fn resolve_never_answers_with_a_path_that_does_not_exist() {
+            // The property, stated so the environment cannot decide it. The first version
+            // asserted the answer *equals* the bare name, which is only true when no SDK
+            // variable happens to point at a real adb — and GitHub's Windows runners set
+            // `ANDROID_HOME` to exactly that. It passed here and failed on CI, which is the
+            // trap the sibling test's comment already warned about; I had fixed only one of
+            // the two.
+            //
+            // What matters either way: a configured path that is not there must never come
+            // back, because it cannot be spawned. The answer is an existing file or the bare
+            // name for the OS to resolve, and nothing else.
             let missing = std::env::temp_dir().join("riviu-adb-absent").join("adb");
             let resolved = AdbProgram::resolve(Some(&missing), None).expect("resolve");
-            assert_eq!(resolved.path(), Path::new(exe_name()));
+            assert_ne!(
+                resolved.path(),
+                missing.as_path(),
+                "a path that does not exist must never be the answer"
+            );
+            assert!(
+                resolved.path() == Path::new(exe_name()) || resolved.path().is_file(),
+                "resolve returned {:?}, which is neither an existing file nor the bare name",
+                resolved.path()
+            );
         }
 
         #[test]

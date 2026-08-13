@@ -4730,6 +4730,36 @@ Nó cũng báo có `Follow ` trên trang không, vì đó là từ chối dứt 
 
 **Chưa chạy.** Đây là số đo M4/M5 và nó cần một bài thật của người vận hành.
 
+### 9.38 CI đỏ bốn lần vì đúng cái bẫy tôi đã tự cảnh báo (13/08/2026)
+
+`cargo test` local 872/0, CI đỏ **bốn lần liên tiếp** ở `Test Rust workspace`. Một test:
+`resolve_falls_back_to_the_bare_name_when_nothing_on_disk_matches`.
+
+**Runner Windows của GitHub có `ANDROID_HOME`** trỏ vào một SDK thật, nên
+`AdbProgram::resolve` tìm thấy `<ANDROID_HOME>/platform-tools/adb.exe` và trả về nó, chứ không
+trả về bare name như test đòi. Máy này `ANDROID_HOME` rỗng nên test xanh.
+
+Điều đáng ghi không phải cái bug, mà là: **tôi đã viết cảnh báo này ra rồi và chỉ áp cho một
+trong hai test cùng phụ thuộc.** Test bên cạnh có nguyên comment "GitHub's windows images set
+`ANDROID_HOME`", còn test này thì không — cùng một lượt sửa, bỏ sót một nửa.
+
+**Sửa:** phát biểu lại tính chất sao cho môi trường không quyết được nó. Điều thật sự cần là
+"một đường dẫn không tồn tại thì **không bao giờ** được trả về, vì không spawn được", nên:
+`assert_ne!(resolved, missing)` cộng "kết quả phải là file có thật **hoặc** bare name". Đúng
+với mọi giá trị của `ANDROID_HOME`.
+
+**Cách kiểm từ giờ:** chạy gate với biến đó đặt sẵn, tức tái tạo môi trường CI ở local:
+
+```powershell
+$env:ANDROID_HOME = "C:\Users\cattfan\AppData\Local\Android"
+cargo test --workspace --locked -- --test-threads=1
+```
+
+Xanh cả khi có và khi không có biến đó thì mới là env-independent. Bài học chung: một test đọc
+`std::env` là một test mà **môi trường** quyết định kết quả, và máy dev không phải môi trường
+CI. `gh run view <id> --log-failed` là cách nhanh nhất để thấy — tôi đã push bốn lần trước khi
+nghĩ tới việc xem CI.
+
 ### 9.37 Trang bài của mình: hai dấu hiệu dương, và KHÔNG có nút xoá nào có nhãn (13/08/2026)
 
 Đo được **mà không đăng gì**: tài khoản trên Redmi (`@cattfan239`, `Mítt zới còiii`) đã có hai
