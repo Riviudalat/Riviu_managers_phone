@@ -140,15 +140,30 @@ pub enum TikTokControl {
     PostButton,
     /// Opens the sheet on our own post that contains the delete row.
     ///
-    /// **Not measured.** One of the three whose absence refuses at *driver selection*
-    /// rather than mid-run: a post that went out and cannot be taken down is a promise the
-    /// session cannot keep, so the refusal has to happen before anything is published.
+    /// **Looked for and not found**, which is stronger than "not measured". Measured on a
+    /// Redmi Note 12, `com.ss.android.ugc.trill` 46.3.3, Vietnamese UI, 13/08/2026: on our
+    /// own post page the three-dots control visible in a screenshot carries **no
+    /// `content-desc` and no `text`** — the full attribute inventory of that screen is in
+    /// AGENTS.md 9.37. So it cannot be located by this catalogue's mechanism at all;
+    /// locating it would take geometry, and geometry for an irreversible tap on a screen
+    /// nobody calibrated is exactly what this project refuses to invent.
+    ///
+    /// One caveat, kept because it is honest: that dump was taken with TikTok's share sheet
+    /// auto-opened over the top of the page, and only on that one build. A second look on a
+    /// clean page could still find a label.
+    ///
+    /// Refuses at *driver selection* rather than mid-run: a post that went out and cannot be
+    /// taken down is a promise the session cannot keep, so the refusal has to happen before
+    /// anything is published.
     PostDeleteMenu,
     /// The delete row inside that sheet.
     ///
-    /// **Not measured**, and it needs `locate_all` rather than `locate` when it is: the
-    /// rail already carries `Thêm hoặc xóa video này khỏi mục Yêu thích` (AGENTS.md 2641),
-    /// so a `Xóa` locator matching more than one node is a real hazard and must refuse.
+    /// **Not measured**, and the decoy is now confirmed by measurement rather than
+    /// predicted: on the own-post page the *only* string containing `xóa` anywhere, in
+    /// either attribute, is `Thêm hoặc xóa video này khỏi mục Yêu thích.` — the favourites
+    /// toggle. A `Contains("xóa")` locator would tap that. So this needs `locate_all` and
+    /// must refuse on more than one match, and it needs an exact string rather than a
+    /// substring.
     PostDelete,
     /// The confirm button in the delete dialog.
     ///

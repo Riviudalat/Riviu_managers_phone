@@ -4730,6 +4730,57 @@ Nó cũng báo có `Follow ` trên trang không, vì đó là từ chối dứt 
 
 **Chưa chạy.** Đây là số đo M4/M5 và nó cần một bài thật của người vận hành.
 
+### 9.37 Trang bài của mình: hai dấu hiệu dương, và KHÔNG có nút xoá nào có nhãn (13/08/2026)
+
+Đo được **mà không đăng gì**: tài khoản trên Redmi (`@cattfan239`, `Mítt zới còiii`) đã có hai
+bài sẵn, nên chỉ cần tap `ProfileTab` vừa đo rồi mở một bài. Dump qua **agent** (không dùng
+`uiautomator dump` — nó đòi idle và grid hồ sơ có thumbnail động, lại giết agent theo §9.21).
+
+**Hai dấu hiệu *dương* của bài-của-mình**, tốt hơn hẳn việc chỉ dựa vào sự vắng mặt của
+`Follow`:
+
+| dấu hiệu | bài của mình | bài người khác |
+|---|---|---|
+| `Cài đặt quyền riêng tư` (text) | **có** | không |
+| `… lượt xem` (text) | **có** | không |
+| `Follow ` (desc) | **không** | có |
+
+Kế hoạch chỉ có "không có `Follow ` trên rail" — một sự vắng mặt. Hai cái trên là sự *hiện
+diện*, và một chuỗi bằng chứng dựa vào hiện diện thì mạnh hơn.
+
+**Và đây là kết quả dứt khoát cho đường xoá.** Toàn bộ inventory của trang bài đó:
+
+- `content-desc`: `Âm gốc của …`, `Chia sẻ video. …`, `Đọc hoặc viết bình luận. …`,
+  `Hồ sơ Mítt zới còiii`, `Phát`, `Quay lại`,
+  **`Thêm hoặc xóa video này khỏi mục Yêu thích.`**, `Thích`, `Thích video. 20 lượt thích`,
+  `Thịnh hành`, `Tìm kiếm`, `Video`
+- `text`: `· 05-31`, `0`, `20`, `410 lượt xem`, `Bóc tem`, `Cài đặt quyền riêng tư`,
+  `Dùng thử mẫu trên TikTok`, `Mítt zới còiii`, `Tìm kiếm`, `Tìm nội dung liên quan`
+
+Hai kết luận:
+
+1. **Không có control xoá nào có nhãn.** Cụm `...` thấy rõ trong ảnh chụp **không có
+   `content-desc` và không có `text`**. Nên `PostDeleteMenu` không định vị được bằng cơ chế
+   của catalogue này; muốn tới nó phải dùng **toạ độ**, mà toạ độ cho một cú tap không lùi
+   được trên màn chưa calibrate là đúng thứ project này từ chối bịa (mục 10).
+2. **Mồi bẫy đã được xác nhận, không còn là dự đoán.** Chuỗi duy nhất chứa `xóa` trên cả
+   trang, ở cả hai thuộc tính, là `Thêm hoặc xóa video này khỏi mục Yêu thích.` — nút **Yêu
+   thích**. `Contains("xóa")` sẽ tap vào đó.
+
+Và bẫy `Contains("Hồ sơ")` xuất hiện **lần thứ hai**: trang này có `Hồ sơ Mítt zới còiii`.
+
+**Hệ quả cho quyết định của người vận hành.** Kế hoạch đã nêu khả năng "từ chối xoá tự động,
+giữ tay" nếu caption không đọc được. Số đo này đưa tới cùng kết luận **bằng một đường khác và
+sớm hơn**: chưa cần biết caption có bị cắt không, vì **nút xoá còn chưa định vị được bằng
+nhãn**. Xoá tự động trên build này chỉ làm được nếu chấp nhận toạ độ — tôi không đề nghị điều đó.
+
+**Hai điều còn ngỏ, ghi để không ai tưởng đã đóng:** bản dump lấy lúc TikTok tự mở share sheet
+che phần trên, và chỉ trên **một** build; nhìn lại trên trang sạch vẫn có thể thấy nhãn. Và
+sheet mở ra *sau* khi tap `...` có thể có nhãn — cái không có nhãn là **chỗ bấm để mở nó**.
+
+**Chưa đo được M4** (caption nguyên văn) vì hai bài sẵn có của tài khoản **không có caption**.
+Muốn trả lời M4 phải có một bài có caption.
+
 #### `ProfileTab` đã đo, và cái bẫy hoá ra nằm ngay trên cùng một màn
 
 Redmi Note 12, `com.ss.android.ugc.trill`, UI tiếng Việt, 13/08/2026 — thanh tab dưới ở
