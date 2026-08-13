@@ -12,6 +12,7 @@ pub mod interaction_ocr;
 mod interaction_target;
 mod nurture_commands;
 mod publish_commands;
+mod publish_driver;
 mod state;
 
 use state::AppState;
