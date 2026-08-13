@@ -476,6 +476,27 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // M4/M5. Read-only, but it needs a post of ours already open on screen — the probe
+    // does not navigate there, on purpose: getting there by hand keeps this measurement
+    // free of assumptions about a profile grid nobody has measured yet.
+    if let Some(caption) = args
+        .iter()
+        .position(|arg| arg == "--measure-own-post")
+        .and_then(|at| args.get(at + 1))
+    {
+        println!(
+            "
+== our own post: is the caption readable verbatim? =="
+        );
+        match measure_own_post_caption(&session, caption).await {
+            Ok(()) => {}
+            Err(error) => println!("  FAILED: {error:#}"),
+        }
+    } else {
+        println!("
+(skipping the own-post caption measurement; open one of your own posts and pass --measure-own-post \"<caption>\" — reads only)");
+    }
+
     if args.iter().any(|arg| arg == "--measure-composer") {
         println!("\n== composer contents ==");
         match measure_composer(&session, ui, labels, size).await {
@@ -1718,6 +1739,78 @@ async fn measure_target_open(
 ///
 /// Prints every labelled node in the bottom band with its geometry, so the opener can
 /// be identified by name and then added to `tiktok_labels` with provenance.
+/// M4/M5 — can our own caption be read back off our own post page, verbatim?
+///
+/// **The gate the whole delete design rests on.** The operator's rule is that a delete tap
+/// may only go out after the code has read the campaign's exact caption on the post that is
+/// open. If TikTok truncates the caption below roughly two dozen characters, that rule is
+/// not implementable and the honest answer is to refuse automatic deletion and keep it
+/// manual — so this measurement decides a design question, not a parameter.
+///
+/// Read-only. It dumps the tree and reports; it taps nothing.
+async fn measure_own_post_caption(
+    session: &riviu_android_driver::AndroidUiSession,
+    caption: &str,
+) -> anyhow::Result<()> {
+    let source = session.agent().source().await?;
+    let dump = std::path::Path::new("target").join("own-post.xml");
+    std::fs::write(&dump, &source).ok();
+    println!(
+        "    tree dumped to {} ({} bytes)",
+        dump.display(),
+        source.len()
+    );
+
+    let wanted: String = caption.trim().to_string();
+    println!(
+        "    campaign caption: {} chars, {:?}",
+        wanted.chars().count(),
+        wanted
+    );
+
+    // Verbatim first. If this is present the rule is implementable as written.
+    if source.contains(&wanted) {
+        println!("    VERBATIM: the full caption is on this screen — the rule is implementable");
+    } else {
+        println!("    NOT VERBATIM — measuring how much of it survives");
+        // Longest prefix that appears, by characters rather than bytes: the caption is
+        // Vietnamese and a byte-wise walk would split a code point.
+        let chars: Vec<char> = wanted.chars().collect();
+        let mut longest = 0usize;
+        for take in 1..=chars.len() {
+            let prefix: String = chars[..take].iter().collect();
+            if source.contains(&prefix) {
+                longest = take;
+            } else {
+                break;
+            }
+        }
+        println!(
+            "    longest prefix present: {longest} of {} chars",
+            chars.len()
+        );
+        if longest == 0 {
+            println!("    VERDICT: nothing of the caption is readable — automatic delete CANNOT be proved");
+        } else if longest < 24 {
+            println!("    VERDICT: prefix shorter than 24 chars — too weak to identify a post; keep deletion manual");
+        } else {
+            println!("    VERDICT: prefix is long enough to identify a post, record captionProof=\"prefix\"");
+        }
+    }
+
+    // A `Follow ` control here would mean this is somebody else's post, which is the one
+    // decisive refusal in the proof chain.
+    println!(
+        "    Follow control on this page: {}",
+        if source.contains("Follow ") {
+            "PRESENT — not our post"
+        } else {
+            "absent"
+        }
+    );
+    Ok(())
+}
+
 async fn measure_tab_bar(
     session: &riviu_android_driver::AndroidUiSession,
     screen: (f64, f64),

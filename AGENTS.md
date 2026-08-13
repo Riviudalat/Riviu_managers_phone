@@ -4670,6 +4670,66 @@ câu trước ..." vì `previous` đã có. Đáng nói là **ở chế độ Ri
 luận độc lập không trả lời ai — nhưng chính nó lại làm chữ neo tốt hơn và đậu gate. Tức tỉ lệ
 loại ~50% ở lần đầu mỗi target là **có thể sửa được**, và chỗ sửa là prompt, không phải gate.
 
+### 9.36 Đăng bài: phần không cần máy đã làm, và phép đo quyết định (13/08/2026)
+
+Kế hoạch xếp **code trước, đo sau** cho Phase 3, và ba phần dưới đây không chạm máy nào.
+
+**Nhãn khai báo mà từ chối.** Sáu control mới — `ProfileTab`, `ComposerNext`, `PostButton`,
+`PostDeleteMenu`, `PostDelete`, `PostDeleteConfirm` — đều `None` ở **cả hai** label set vì
+chưa ai đo. `None` nghĩa là từ chối. Ba nhãn xoá từ chối **lúc chọn driver**, không phải giữa
+chừng: bài đã đăng mà không gỡ được là lời hứa phiên chạy không giữ được, nên phải từ chối
+trước khi đăng.
+
+Hai điều ghi trước cả khi đo, vì chúng là bẫy đã biết: `ProfileTab` **phải** `Exact` —
+`Hồ sơ <tên>` có trên action rail nên `Contains` sẽ mở hồ sơ tác giả, đúng bẫy từng làm
+`Contains("Follow")` khớp tab `Đã follow`, và so khớp description **không phân biệt hoa
+thường**. `PostDelete` **phải** dùng `locate_all` chứ không `locate` — rail đã có
+`Thêm hoặc xóa video này khỏi mục Yêu thích` (mục 2641) nên hơn một match là chuyện thật và
+phải từ chối.
+
+**Test đầy đủ giờ không trôi được nữa.** `no_entry_carries_an_empty_label` trước đây lặp một
+mảng **viết tay** chỉ có 15 trong 17 control, nên nhãn nào thêm sau cùng đơn giản là không
+được kiểm — im lặng. Giờ nó lặp `TikTokControl::ALL`, và `ordinal()` (`#[cfg(test)]`) match
+**exhaustive** nên compiler từ chối một variant mới cho tới khi nó có trong `ordinal`, rồi
+`every_control_appears_in_all` từ chối tới khi nó có trong `ALL`.
+
+**`publish_driver.rs`: "chứng minh rồi mới xoá" là sự thật ở tầng type.** `PostProof` chỉ
+dựng được bởi một hiện thực `prove_own_post` (field private, constructor nhận *quan sát* chứ
+không nhận một chữ "đúng"), nên `delete_proved_post` không thể gọi mà chưa chứng minh gì. Thứ
+tự do compiler kiểm, không do ai nhớ. Ba mức không đồng nhất, theo số đo: `Follow ` trên rail
+là **từ chối dứt khoát** (bài người khác, caption khớp mấy cũng không bù được); caption không
+khớp thì từ chối, bị cắt thì **hạ** xuống `captionProof="prefix"`; counter ảnh đọc không được
+thì **hạ** xuống `"unread"` (mục 9.20 đã đo counter là overlay tạm) nhưng counter **đọc được
+mà lệch** thì từ chối — vì lúc đó bài trên màn không phải bundle.
+
+`DeleteFailure` copy hai variant của `SendFailure` **và lý lẽ đảo chiều**: với comment,
+`AfterEffect` chặn retry để không đăng hai lần; với xoá, nó chặn retry vì lần thử thứ hai sẽ
+rơi vào **bài mới nhất hiện tại**. Cùng variant, lý lẽ ngược nhau — và chính chỗ đảo đó là lý
+lẽ mạnh nhất cho cả chuỗi bằng chứng.
+
+#### Phép đo quyết định, chạy được ngay
+
+```
+cargo run -p riviu-android-driver --example probe -- <serial> --measure-own-post "<caption>"
+```
+
+**Chỉ đọc, không tap gì.** Mở sẵn một bài của mình trên máy rồi chạy — probe **không** tự
+điều hướng tới đó, cố ý, để phép đo không dựa vào một grid hồ sơ chưa ai đo. Nó dump cây, rồi
+trả lời đúng một câu: caption của campaign có nằm **nguyên văn** trên màn không. Không nguyên
+văn thì nó đo prefix dài nhất **theo ký tự** (caption tiếng Việt, đi theo byte sẽ cắt giữa
+code point) và kết luận:
+
+| prefix đọc được | kết luận |
+|---|---|
+| nguyên văn | luật của người vận hành hiện thực được như đã viết |
+| ≥ 24 ký tự | đủ để định danh một bài; ghi `captionProof="prefix"` |
+| 1–23 ký tự | **quá yếu** — giữ xoá bằng tay |
+| 0 | **không chứng minh được** — không xoá tự động |
+
+Nó cũng báo có `Follow ` trên trang không, vì đó là từ chối dứt khoát duy nhất trong chuỗi.
+
+**Chưa chạy.** Đây là số đo M4/M5 và nó cần một bài thật của người vận hành.
+
 ### 9.35 Tách `graceful_shutdown`, và một lo ngại bị nói quá (13/08/2026)
 
 Thân của handler `RunEvent::Exit` tách thành `graceful_shutdown(handle)` và được gọi từ **cả**
