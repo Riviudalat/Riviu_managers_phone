@@ -37,11 +37,42 @@ export function markDeviceFrameLive(devices: DeviceInfo[], udid: string): Device
   return changed ? next : devices;
 }
 
+export type DevicePlatform = "ios" | "android";
+
+const PLATFORM_OS_NAMES: Record<DevicePlatform, string> = {
+  ios: "iOS",
+  android: "Android",
+};
+
+/** "iOS 16.7.15" / "Android 15".
+ *
+ * Never guesses: an unrecognised platform yields the bare version, because
+ * labelling an Android phone "iOS" is the exact bug this replaces. */
+export function deviceOsLabel(device: Pick<DeviceInfo, "platform" | "osVersion">): string {
+  const name: string | undefined = PLATFORM_OS_NAMES[device.platform];
+  const version = device.osVersion ?? "";
+  if (!name) return version;
+  return version ? `${name} ${version}` : name;
+}
+
+/** The one label shared by the tile footer, the device row and the focus dock.
+ *
+ * One function because those three had already drifted into three different
+ * strings — `iOS {v}`, `{model} · {v}`, `{model} · {v}` — and only one of them
+ * said which OS. */
+export function deviceModelOsLabel(
+  device: Pick<DeviceInfo, "model" | "platform" | "osVersion">,
+): string {
+  const os = deviceOsLabel(device);
+  return os ? `${device.model} · ${os}` : device.model;
+}
+
 export interface DeviceInfo {
   udid: string;
   name: string;
   model: string;
-  iosVersion: string;
+  platform: DevicePlatform;
+  osVersion: string;
   connection: ConnectionKind;
   status: DeviceStatus;
   battery?: number | null;
@@ -384,7 +415,84 @@ export interface NurtureSettings {
   scheduleDurationMinutes: number;
   scheduleUdids: string[];
   steadyMood?: string;
+
+  // Per-feature switches. Separate from the probabilities so pausing a feature does not
+  // destroy the tuned number — see `NurtureSettings` in `crates/core/src/types.rs`.
+  // Optional here because a profile stored before they existed has no key for them, and
+  // the Rust side defaults every one to `true`.
+  likeEnabled?: boolean;
+  commentEnabled?: boolean;
+  followEnabled?: boolean;
+  frenzyEnabled?: boolean;
+  carouselEnabled?: boolean;
+  /// Ceiling on slides paged through in one photo carousel.
+  carouselMaxSlides?: number;
+  /// How much of that ceiling to traverse, as a percentage. 100 = to the end.
+  carouselPortionPercent?: number;
+  /**
+   * Whether the engine's own pacing may override the numbers above.
+   *
+   * Optional and read as `false` when absent, matching the Rust `#[serde(default)]`: a row
+   * stored before this existed means the same thing as off. Off is the shipped default —
+   * the ceilings it holds back are listed on the switch's own explanation.
+   */
+  humanLimits?: boolean;
 }
+
+/// Which settings a **running** session picks up on its next post.
+///
+/// The same split as `NurtureSettings::absorb_live_changes` on the Rust side, and it has to
+/// stay the same split: this list is what the UI promises, that one is what the loop does.
+/// Anything not here needs the session stopped and started again, and the form says so
+/// rather than letting the operator wonder why a change did nothing.
+export const LIVE_TUNABLE_FIELDS = new Set<keyof NurtureSettings>([
+  "likeProb",
+  "commentProb",
+  "followProb",
+  "frenzyProb",
+  "likeEnabled",
+  "commentEnabled",
+  "followEnabled",
+  "frenzyEnabled",
+  "watchMin",
+  "watchMax",
+  "fatigue",
+  "timeOfDay",
+  "pauseSwipe",
+  "nightStart",
+  "nightEnd",
+  "recoverDelayMin",
+  "recoverDelayMax",
+  "carouselEnabled",
+  "carouselMaxSlides",
+  "carouselPortionPercent",
+  "baseUrl",
+  "model",
+  "apiKey",
+  "inputPricePer1m",
+  "outputPricePer1m",
+  "commentLang",
+  "aiDirections",
+  "maxCommentWords",
+]);
+
+/// Fields a running session will **not** pick up, with the reason to show the operator.
+///
+/// Each reason is a fact about the session, not a policy: it built something out of the
+/// value and cannot rebuild it mid-run.
+export const RESTART_REQUIRED_REASONS: Partial<Record<keyof NurtureSettings, string>> = {
+  numVideos: "Mục tiêu của phiên được tính lúc bắt đầu",
+  numRounds: "Mục tiêu của phiên được tính lúc bắt đầu",
+  persona: "Mô hình hành vi được dựng một lần từ persona",
+  steadyMood: "Chu kỳ mood đã dựng xong",
+  bundleId: "App đã mở rồi; trên Android package được resolve theo từng máy",
+  staggerDelayMin: "Chỉ có tác dụng giữa các phiên",
+  staggerDelayMax: "Chỉ có tác dụng giữa các phiên",
+  scheduleEnabled: "Lịch tác động giữa các phiên",
+  scheduleEveryMinutes: "Lịch tác động giữa các phiên",
+  scheduleDurationMinutes: "Lịch tác động giữa các phiên",
+  scheduleUdids: "Lịch tác động giữa các phiên",
+};
 
 export interface NurtureApiTestResult {
   udid: string;
@@ -493,6 +601,15 @@ export interface ThreadCampaignRequest {
   instruction: string;
   maxWords: number;
   mode: ThreadMode;
+  /**
+   * Comments written by the operator, used instead of the AI when non-empty.
+   *
+   * Optional so a caller that never sets it keeps the AI behaviour, matching the Rust
+   * `#[serde(default)]`. The backend deals them out across (target, ordinal).
+   */
+  manualComments?: string[];
+  /** Also like each target, once per actor that comments on it. */
+  likeTarget?: boolean;
 }
 
 export type ThreadMessageState =
@@ -917,6 +1034,12 @@ export interface DeviceCapabilitySnapshot {
   driverAdapterVersion: string;
   transport: ActiveTransport;
   productType: string;
+  /** Stays `iosVersion` on purpose, unlike `DeviceInfo.osVersion`.
+   *
+   * This mirror follows the **wire**, not the Rust field name. The Rust side is
+   * `DeviceCapabilitySnapshot::os_version` with `#[serde(rename = "iosVersion")]`,
+   * frozen because the key is persisted under `deny_unknown_fields` and is hash
+   * material for a stored `profile_id`. See `crates/core/src/device_capabilities.rs`. */
   iosVersion: string;
   targetApp: InstalledTargetIdentity;
   protectedAuthReady: boolean;

@@ -13,7 +13,7 @@ use crate::flow::QualifiedElementLocator;
 use crate::stream_budget::StreamStopProof;
 use crate::types::{
     ActiveAppIdentity, AgentSettings, AgentStatus, DeviceInfo, InteractionSessionKind,
-    StreamHandoffProof, StreamStartProof, SwipeGesture, TapPoint,
+    StreamHandoffProof, StreamStartProof, SwipeGesture, SwipePath, TapPoint,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -288,6 +288,28 @@ pub trait DeviceDriver: Send + Sync {
     fn supports_text_comments(&self, _udid: &str) -> bool {
         false
     }
+    /// Whether this device's sessions can report element geometry.
+    ///
+    /// A **pre-flight prediction**, answerable without opening a session, so callers
+    /// can gate a picker or choose a strategy before touching the phone. The session's
+    /// own [`UiSession::supports_element_bounds`] stays the runtime authority; if the
+    /// two disagree, follow the session and record the mismatch rather than silently
+    /// taking the other path.
+    ///
+    /// Named for the property the code actually depends on rather than for a platform:
+    /// "android implies hierarchy" is an inference that can be wrong, while "this
+    /// device reports bounds" is the thing being relied on.
+    fn reports_element_bounds(&self, _udid: &str) -> bool {
+        false
+    }
+    /// Which TikTok build this device can be driven against.
+    ///
+    /// The default is the iOS bundle — for a backend with one fixed app id that is a
+    /// fact, not a guess. Android has two regional builds whose labels differ, so it
+    /// must read the device (`crate::tiktok_target`).
+    async fn resolve_tiktok_package(&self, _udid: &str) -> anyhow::Result<String> {
+        Ok(crate::tiktok_target::IOS_TIKTOK_BUNDLE.to_string())
+    }
     fn supports_verified_app_termination(&self, _udid: &str) -> bool {
         false
     }
@@ -411,6 +433,20 @@ pub trait UiSession: Send + Sync {
         self.tap(point).await
     }
     async fn swipe(&self, gesture: SwipeGesture) -> anyhow::Result<()>;
+    /// Draw a swipe as a **path**, if this backend can.
+    ///
+    /// The default collapses it to its two endpoints, so a backend that has no multi-point
+    /// gesture API is not broken by callers that plan one — it simply gets the straight line
+    /// it always got. Android overrides this because the W3C pointer protocol it speaks
+    /// takes any number of moves with individual durations, which is what makes a curved,
+    /// accelerating gesture free.
+    ///
+    /// Why a second method rather than a richer [`SwipeGesture`]: that type is persisted in
+    /// flow scripts and carried in evidence, and every stored script would have to grow a
+    /// path it does not have. See [`SwipePath`].
+    async fn swipe_path(&self, path: SwipePath) -> anyhow::Result<()> {
+        self.swipe(path.as_gesture()).await
+    }
     /// Tap using coordinates in stream/screenshot pixel space.
     async fn tap_image(&self, x: f64, y: f64, image_w: f64, image_h: f64) -> anyhow::Result<()> {
         let _ = (image_w, image_h);
@@ -441,6 +477,15 @@ pub trait UiSession: Send + Sync {
         false
     }
     async fn home(&self) -> anyhow::Result<()>;
+    /// Go back one step, the way the platform's own back gesture would.
+    ///
+    /// Default unsupported because iOS has no system-wide back: there, leaving a
+    /// sheet is an edge swipe or a close button at a calibrated position. Android
+    /// has `KEYCODE_BACK`, and the comment flow needs it — pressing Home instead
+    /// would close a drawer by leaving TikTok altogether.
+    async fn back(&self) -> anyhow::Result<()> {
+        unsupported("back")
+    }
     async fn find_and_tap(&self, accessibility_id: &str) -> anyhow::Result<()>;
     async fn assert_visible(&self, accessibility_id: &str) -> anyhow::Result<()>;
     /// Dismiss a visible iOS system alert if present. Default: unsupported.
@@ -466,6 +511,29 @@ pub trait UiSession: Send + Sync {
     async fn open_url(&self, _url: &str) -> anyhow::Result<()> {
         unsupported("openUrl")
     }
+    /// Open a URL, requiring it to be handled by **one named app**.
+    ///
+    /// Exists because [`Self::open_url`] is not enough on Android, and that was measured
+    /// rather than reasoned about. A bare `VIEW` intent for `https://www.tiktok.com/…`
+    /// resolves to `com.android.intentresolver.ResolverActivity` — the app chooser —
+    /// because TikTok and Chrome both claim the domain. Naming the package resolves it
+    /// to TikTok's own `AppLinkHandlerV2` instead:
+    ///
+    /// ```text
+    /// resolve-activity -a VIEW -d <url>                    -> ResolverActivity
+    /// resolve-activity -a VIEW -c BROWSABLE -d <url> <pkg>  -> AppLinkHandlerV2
+    /// ```
+    ///
+    /// A campaign that opens a link into a browser and then types would post nothing, or
+    /// post somewhere unintended; the arrival check catches that
+    /// (`interaction_hierarchy::ArrivalRefusal::WrongApp`), but not resolving to a chooser
+    /// in the first place is better than detecting it afterwards.
+    ///
+    /// The default delegates, which is correct for a backend where the URL scheme has one
+    /// possible handler.
+    async fn open_url_in_app(&self, url: &str, _bundle_id: &str) -> anyhow::Result<()> {
+        self.open_url(url).await
+    }
     async fn set_clipboard(&self, _content_type: &str, _bytes: &[u8]) -> anyhow::Result<()> {
         unsupported("setClipboard")
     }
@@ -489,10 +557,181 @@ pub trait UiSession: Send + Sync {
     fn supports_accessibility_readback(&self) -> bool {
         false
     }
+    /// Where a control actually is on screen, and what state it is in.
+    ///
+    /// This is the one primitive the hierarchy-driven nurture loop needs and
+    /// `read_text` cannot give: not the label's text but its *rectangle*, so the
+    /// existing touch-jitter planner can pick a human-looking point inside the
+    /// real control instead of multiplying a calibrated fraction. Default is
+    /// unsupported, because iOS cannot answer it — `snapshotMaxDepth` is pinned
+    /// at 1 there (AGENTS.md 2.3), which is exactly why that backend locates
+    /// controls by pixels.
+    async fn locate(&self, _query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+        unsupported("locate")
+    }
+    /// **Every** element matching the query, not just the first.
+    ///
+    /// Exists because some controls are deliberately not unique: a comment drawer has
+    /// one Reply button per row, and choosing among them is a geometric question, not
+    /// a matching one. Picking the first would post a reply under whichever comment
+    /// happened to be highest.
+    ///
+    /// Implementations should skip the per-element attribute reads that
+    /// [`Self::locate`] performs unless they are cheap — this can be called against a
+    /// list of dozens of rows, and `locate` already costs several round trips each.
+    async fn locate_all(&self, _query: ElementQuery<'_>) -> anyhow::Result<Vec<ElementBox>> {
+        unsupported("locateAll")
+    }
+    /// [`Self::locate_all`], but with each element's label actually read.
+    ///
+    /// A separate method because it is **materially more expensive** and most callers
+    /// must not pay for it. `locate_all` returns geometry only — measured at ~90–170 ms
+    /// per element for the rectangle alone — and reading a label costs a further round
+    /// trip on top of that, per element.
+    ///
+    /// It exists because one caller genuinely needs the text and cannot get it any
+    /// other way: reading back *which comment* is at a rectangle. Selecting a comment
+    /// row by geometry needs an author label that is not empty
+    /// (`crate::interaction_hierarchy`), and there is no primitive for "describe the
+    /// element at this rectangle" — the query is the only handle a caller has.
+    ///
+    /// Call it once per send, never inside a poll loop. The default delegates, so a
+    /// backend that has no cheaper `locate_all` loses nothing.
+    async fn locate_all_described(
+        &self,
+        query: ElementQuery<'_>,
+    ) -> anyhow::Result<Vec<ElementBox>> {
+        self.locate_all(query).await
+    }
+    /// Whether [`Self::locate_description`] answers instead of refusing.
+    ///
+    /// Separate from [`Self::supports_accessibility_readback`] on purpose: a
+    /// backend could read text without being able to report geometry, and the
+    /// nurture loop needs geometry to tap.
+    fn supports_element_bounds(&self) -> bool {
+        false
+    }
+    /// The UI language, for picking a measured label set.
+    ///
+    /// `None` means "unknown", which callers must treat as refuse-to-guess:
+    /// `content-desc` is translated on some builds, so the wrong language
+    /// produces locators that silently match nothing
+    /// (`crate::tiktok_labels`).
+    async fn ui_language(&self) -> Option<String> {
+        None
+    }
+    /// The installed `versionName` of an app, for picking a measured label set.
+    ///
+    /// Needed for the same reason as [`Self::ui_language`] and for the mirror-image
+    /// reason: some measured labels are unresolved Android resource references, which
+    /// are language-independent but **reassigned on every app rebuild**. Measured, two
+    /// phones on the same package and language: the comment drawer's Send button is
+    /// `@2131823284` on TikTok 46.3.3 and `@2131823293` on 46.4.3
+    /// (`crate::tiktok_labels`).
+    ///
+    /// `None` means "unknown", which callers treat as unmeasured — those controls
+    /// refuse rather than tapping an id that may now belong to a different button.
+    /// Backends whose labels are all real strings have nothing to answer here.
+    async fn app_version(&self, _bundle_id: &str) -> Option<String> {
+        None
+    }
     /// Raw screen capture via the UI channel (WDA `GET /screenshot`).
     /// Cheap (~0.3s over USB) unlike the pymobiledevice3 path.
     async fn screenshot_png(&self) -> anyhow::Result<Vec<u8>> {
         anyhow::bail!("screenshot_png not supported")
     }
     fn stream_url(&self) -> Option<String>;
+}
+
+/// How to find an element in a hierarchy that can be queried.
+///
+/// Two strategies because two are needed and no more: TikTok's action rail is
+/// labelled, and its comment input is not — that field carries a placeholder in
+/// `text` and an empty `content-desc`, so only its class identifies it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ElementQuery<'a> {
+    /// Match `content-desc`. `exact` is false for labels that embed a value: a
+    /// comment label carries its own count (`… 697 bình luận`), so an exact match
+    /// can never hit one.
+    Description { value: &'a str, exact: bool },
+    /// Match the widget class, e.g. `android.widget.EditText`.
+    ClassName(&'a str),
+    /// Match the node's rendered `text`, not its `content-desc`.
+    ///
+    /// Needed because the two are not interchangeable: TikTok's action rail is
+    /// described, while the Reply button inside its comment drawer carries an
+    /// **empty** `content-desc` and puts `Trả lời` in `text`. A comment body is the
+    /// same — its content *is* its text.
+    Text { value: &'a str, exact: bool },
+}
+
+impl<'a> ElementQuery<'a> {
+    pub fn exact_description(value: &'a str) -> Self {
+        Self::Description { value, exact: true }
+    }
+
+    pub fn description_contains(value: &'a str) -> Self {
+        Self::Description {
+            value,
+            exact: false,
+        }
+    }
+}
+
+/// A control's on-screen rectangle, in the same coordinate space as
+/// [`UiSession::tap`], plus the label and state it was found with.
+///
+/// The label comes back with the geometry because one hierarchy query already
+/// carries it, and the loop needs it: the comment control's own text
+/// (`… 697 bình luận`) is what distinguishes one post from the next, which is
+/// how a swipe is proved to have advanced without looking at pixels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ElementBox {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    /// The element's label, as read by **whichever method produced this box**.
+    ///
+    /// Not always `content-desc`, and the difference matters: [`UiSession::locate`] reads
+    /// `content-desc`, [`UiSession::locate_all_described`] reads the rendered `text`, and
+    /// [`UiSession::locate_all`] reads neither and leaves this `None`. That is measured,
+    /// not sloppy — a TikTok comment row carries its author and body in `text` with an
+    /// empty `content-desc`, while the action rail is the other way round, so a single
+    /// attribute cannot serve both.
+    ///
+    /// The consequence for callers: **never compare two `description`s that came from
+    /// different methods.** They are labels from different attributes and disagreeing is
+    /// the normal case.
+    pub description: Option<String>,
+    /// Whether the control is enabled.
+    ///
+    /// Carried because it is a *proof*, not decoration: TikTok's comment Send
+    /// button exists in the drawer the whole time and flips from
+    /// `enabled=false` to `enabled=true` when the field holds text. That
+    /// transition is the same "send is armed" evidence the iOS engine has to
+    /// detect by pixel colour, available here as an attribute.
+    pub enabled: bool,
+}
+
+impl ElementBox {
+    pub fn centre(&self) -> TapPoint {
+        TapPoint {
+            x: self.x + self.width / 2.0,
+            y: self.y + self.height / 2.0,
+        }
+    }
+
+    /// Half-extents for the touch planner, shrunk so jitter stays clear of the
+    /// edge.
+    ///
+    /// A rectangle read off the hierarchy is the control's *hit area*; tapping
+    /// its last pixel row is a coin flip on rounding. 40% of the half-extent,
+    /// floored at one point, keeps every planned tap comfortably inside.
+    pub fn jitter_radius(&self) -> (f64, f64) {
+        (
+            (self.width / 2.0 * 0.4).max(1.0),
+            (self.height / 2.0 * 0.4).max(1.0),
+        )
+    }
 }

@@ -63,13 +63,33 @@ pub enum TileStreamState {
     Error,
 }
 
+/// Which mobile OS a device runs.
+///
+/// Stamped by the backend that listed the device. Never inferred from the udid —
+/// see the rules at the top of `crate::driver_multiplex`.
+///
+/// Deliberately has **no `Default`** and no `#[serde(default)]`. The only plausible
+/// default is `Ios`, which is exactly the bug this field exists to remove: an
+/// Android phone rendered as "iOS 15". A backend that cannot answer must fail to
+/// compile, and a payload that omits the key must fail to decode.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DevicePlatform {
+    Ios,
+    Android,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceInfo {
     pub udid: String,
     pub name: String,
     pub model: String,
-    pub ios_version: String,
+    pub platform: DevicePlatform,
+    /// The OS release, as the platform words it: `16.7.15` on iOS, `15` on
+    /// Android. Read with [`Self::platform`], never alone — it used to be called
+    /// `ios_version` and the UI printed a hardcoded "iOS" beside it.
+    pub os_version: String,
     pub connection: ConnectionKind,
     pub status: DeviceStatus,
     pub battery: Option<u8>,
@@ -97,7 +117,8 @@ mod device_info_tests {
             "udid": "fixture",
             "name": "fixture",
             "model": "fixture",
-            "iosVersion": "fixture",
+            "platform": "ios",
+            "osVersion": "fixture",
             "connection": "mock",
             "status": "ready",
             "battery": null,
@@ -106,9 +127,68 @@ mod device_info_tests {
             "streamUrl": null,
             "lastError": null
         }))
-        .expect("decode legacy device payload");
+        .expect("decode a device payload without a tile state");
 
         assert_eq!(decoded.tile_stream_state, TileStreamState::Parked);
+    }
+
+    fn payload_without(omit: &str) -> serde_json::Value {
+        let mut payload = serde_json::json!({
+            "udid": "fixture",
+            "name": "fixture",
+            "model": "fixture",
+            "platform": "android",
+            "osVersion": "15",
+            "connection": "usb",
+            "status": "ready",
+            "battery": null,
+            "wdaReady": true,
+            "wdaExpiresAt": null,
+            "streamUrl": null,
+            "lastError": null
+        });
+        payload
+            .as_object_mut()
+            .expect("object")
+            .remove(omit)
+            .expect("the key being omitted must have been there");
+        payload
+    }
+
+    #[test]
+    fn a_payload_with_no_platform_is_refused_rather_than_defaulted_to_ios() {
+        // The whole reason `DevicePlatform` has no `Default`. A silent `Ios` here
+        // is the "iOS 15 on an Android phone" bug coming back through the wire.
+        let error = serde_json::from_value::<DeviceInfo>(payload_without("platform"))
+            .expect_err("platform is required");
+        assert!(error.to_string().contains("platform"), "{error}");
+    }
+
+    #[test]
+    fn the_old_ios_version_key_no_longer_decodes() {
+        // Proves the rename is a rename, not an alias. `DeviceInfo` is built fresh
+        // on every listing and never persisted, so there is exactly one producer
+        // and a second accepted spelling would only hide a stale one.
+        let mut payload = payload_without("osVersion");
+        payload
+            .as_object_mut()
+            .expect("object")
+            .insert("iosVersion".into(), serde_json::json!("15"));
+        assert!(serde_json::from_value::<DeviceInfo>(payload).is_err());
+    }
+
+    #[test]
+    fn the_platform_travels_as_a_lowercase_tag() {
+        // Matches `ConnectionKind`'s `"usb"`/`"wifi"`/`"mock"` convention, which is
+        // what the hand-written TS mirror is written against.
+        assert_eq!(
+            serde_json::to_value(DevicePlatform::Android).expect("serialize"),
+            serde_json::json!("android")
+        );
+        assert_eq!(
+            serde_json::to_value(DevicePlatform::Ios).expect("serialize"),
+            serde_json::json!("ios")
+        );
     }
 }
 
@@ -125,6 +205,69 @@ pub struct SwipeGesture {
     pub from: TapPoint,
     pub to: TapPoint,
     pub duration_ms: u64,
+}
+
+/// One leg of a swipe: move to this point, taking this long.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwipeStep {
+    pub point: TapPoint,
+    pub duration_ms: u64,
+}
+
+/// A swipe as a **path** rather than as two endpoints.
+///
+/// Exists because [`SwipeGesture`] cannot describe a human gesture. It becomes one
+/// `pointerMove` on the wire, which is a perfectly straight line traversed at a perfectly
+/// constant velocity, from the same two coordinates every time — three properties a finger
+/// does not have, and all three are trivially measurable by anything watching.
+///
+/// A path carries what the straight line cannot: slight curvature, a velocity that builds
+/// and then eases, and a lift that happens a beat after the movement stops. The W3C pointer
+/// protocol the Android agent speaks takes an arbitrary number of moves with individual
+/// durations, so this costs nothing extra on the wire — the old shape was simply the
+/// simplest thing that worked.
+///
+/// Backends that cannot express a path collapse it to first-point → last-point through the
+/// default [`UiSession::swipe_path`](crate::driver::UiSession::swipe_path), so nothing has
+/// to implement this to keep working.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwipePath {
+    /// Where the finger lands, before any movement.
+    pub start: TapPoint,
+    /// Where it goes, in order. Never empty.
+    pub steps: Vec<SwipeStep>,
+    /// How long the finger stays down after the last move, before lifting.
+    ///
+    /// A real flick does not end at the instant the finger stops: there is a few
+    /// milliseconds of contact after the motion, and on Android that gap is part of how the
+    /// framework decides between a fling and a drag.
+    pub settle_ms: u64,
+}
+
+impl SwipePath {
+    /// The last point, which is where the gesture ends.
+    pub fn end(&self) -> TapPoint {
+        self.steps
+            .last()
+            .map(|step| step.point.clone())
+            .unwrap_or_else(|| self.start.clone())
+    }
+
+    /// Total time the finger is in contact and moving.
+    pub fn travel_ms(&self) -> u64 {
+        self.steps.iter().map(|step| step.duration_ms).sum()
+    }
+
+    /// The same gesture as two endpoints, for a backend that cannot draw a path.
+    pub fn as_gesture(&self) -> SwipeGesture {
+        SwipeGesture {
+            from: self.start.clone(),
+            to: self.end(),
+            duration_ms: self.travel_ms().max(1),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -513,6 +656,84 @@ pub struct NurtureSettings {
     /// a test — a real session should vary.
     #[serde(default)]
     pub steady_mood: String,
+
+    // ---- per-feature switches ----
+    //
+    // Separate from the probabilities on purpose. `like_prob = 0` already turns liking
+    // off, but it does so by **destroying the tuned number** — the operator who wants to
+    // pause liking for one run has to remember what 35 was. A switch keeps the number and
+    // stops the behaviour, which is what "bật tắt riêng biệt" actually asks for.
+    //
+    // Every one defaults to `true` so an existing stored profile keeps behaving exactly as
+    // it did: `#[serde(default)]` on a bool would give `false` and silently switch
+    // everything off on upgrade.
+    #[serde(default = "yes")]
+    pub like_enabled: bool,
+    #[serde(default = "yes")]
+    pub comment_enabled: bool,
+    #[serde(default = "yes")]
+    pub follow_enabled: bool,
+    #[serde(default = "yes")]
+    pub frenzy_enabled: bool,
+    /// Whether to page through a photo carousel at all, rather than treating it as one
+    /// card and swiping past.
+    #[serde(default = "yes")]
+    pub carousel_enabled: bool,
+    /// Whether the built-in human pacing is allowed to override the configured numbers.
+    ///
+    /// Defaults to **off**, which is a deliberate change of shipped behaviour made on
+    /// 12/08/2026: the operator asked for the panel's numbers to be the real numbers.
+    ///
+    /// What switching it on restores is listed on
+    /// [`HumanSessionPolicy::new`](crate::human_behavior::HumanSessionPolicy::new) — a
+    /// per-hour ceiling of 8–16 likes, a two-of-the-last-five-cards rule, a 12–35 s wait
+    /// after every action, rests, and block breaks. Those are what make a run look like a
+    /// person rather than a script, so off is faster, denser and more distinguishable. It
+    /// is the operator's trade to make, and `false` is what they chose.
+    ///
+    /// `#[serde(default)]` rather than `default = "yes"`, so a stored row written before
+    /// this existed reads as off too — the same answer the operator gave.
+    #[serde(default)]
+    pub human_limits: bool,
+
+    // ---- photo carousel ----
+    /// Hard ceiling on slides paged through in one carousel.
+    ///
+    /// A ceiling rather than a target: the traversal stops as soon as a swipe **fails to
+    /// change the screen**, which is the real end of the carousel. This only bounds a post
+    /// that never stops changing — a video misread as a photo, or a card that animates.
+    #[serde(default = "default_carousel_max_slides")]
+    pub carousel_max_slides: u32,
+    /// How much of a photo post to look at, as a percentage. 100 means "to the end".
+    ///
+    /// **What 50 means depends on what the backend can see, and that is measured rather
+    /// than a design choice:**
+    ///
+    /// * Android — half of *this post*. The page counter is on screen and readable, so the
+    ///   total is known before the first sideways swipe.
+    /// * iOS — half of the **ceiling**, because the pixel engine has no counter to read and
+    ///   learns the end of a carousel only from a swipe that fails to change the frame.
+    ///
+    /// The earlier note here said no counter existed anywhere — "a dump of every `TextView`
+    /// on a photo post contains no `1 / 7` counter", measured 11/08/2026 — and the Android
+    /// traversal was left unbuilt on that basis. **It was wrong.** The counter is split
+    /// across three sibling nodes, `"1"`, `" / "`, `"5"`, so a search for one node
+    /// containing a slash finds nothing. Re-measured on the same SM-N950F on 12/08/2026
+    /// against two real photo posts: it advances per image and disappears after the last.
+    #[serde(default = "default_carousel_portion_percent")]
+    pub carousel_portion_percent: u32,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn default_carousel_max_slides() -> u32 {
+    12
+}
+
+fn default_carousel_portion_percent() -> u32 {
+    100
 }
 
 impl Default for NurtureSettings {
@@ -559,11 +780,139 @@ impl Default for NurtureSettings {
             schedule_duration_minutes: 150,
             schedule_udids: Vec::new(),
             steady_mood: String::new(),
+            like_enabled: true,
+            comment_enabled: true,
+            follow_enabled: true,
+            frenzy_enabled: true,
+            carousel_enabled: true,
+            human_limits: false,
+            carousel_max_slides: default_carousel_max_slides(),
+            carousel_portion_percent: default_carousel_portion_percent(),
         }
     }
 }
 
 impl NurtureSettings {
+    /// Fold the per-feature switches **into** the probabilities.
+    ///
+    /// Applied once when a session takes its snapshot and again on every live refresh, so
+    /// the loop only ever sees effective values. That is deliberate and it is the whole
+    /// safety argument for the switches: there are a dozen places that read `like_prob`,
+    /// `comment_prob`, `follow_prob` and `frenzy_prob`, and asking each of them to also
+    /// check a flag is asking for one of them to be forgotten — which would be a feature
+    /// the operator switched off still happening.
+    ///
+    /// The switch flags are left as they are, so the UI still round-trips what the operator
+    /// chose; only the working copy's probabilities are zeroed.
+    pub fn into_effective(mut self) -> Self {
+        if !self.like_enabled {
+            self.like_prob = 0;
+        }
+        if !self.comment_enabled {
+            self.comment_prob = 0;
+        }
+        if !self.follow_enabled {
+            self.follow_prob = 0;
+        }
+        if !self.frenzy_enabled {
+            self.frenzy_prob = 0;
+        }
+        if !self.carousel_enabled {
+            self.carousel_max_slides = 0;
+        }
+        self
+    }
+
+    /// The safety ceiling on its own, with the portion **not** folded in.
+    ///
+    /// For a backend that can read how many images a post has, which is Android: the
+    /// portion is applied to the post's real total there, so folding it into the ceiling
+    /// as well would apply it twice. `0` still means the switch is off.
+    ///
+    /// [`Self::carousel_slide_budget`] is the other half of this split and belongs to the
+    /// pixel engine, which has no total to take a fraction of.
+    pub fn carousel_ceiling(&self) -> u32 {
+        if !self.carousel_enabled {
+            return 0;
+        }
+        self.carousel_max_slides
+    }
+
+    /// How many slides one carousel may be paged through, **portion already folded in**.
+    ///
+    /// `0` means "do not page at all" — the carousel switch is off, and the caller should
+    /// treat the post as a single card. Otherwise at least one slide, so a portion rounded
+    /// down to nothing still looks at something.
+    ///
+    /// This is the pixel engine's number, and folding the portion into the ceiling is a
+    /// concession to what that engine can see: it learns the end of a carousel only by a
+    /// swipe failing to change the frame, so "half" cannot mean half of anything it knows.
+    /// A backend that reads the counter should take [`Self::carousel_ceiling`] instead.
+    pub fn carousel_slide_budget(&self) -> u32 {
+        if !self.carousel_enabled || self.carousel_max_slides == 0 {
+            return 0;
+        }
+        let portion = self.carousel_portion_percent.min(100);
+        let budget = (u64::from(self.carousel_max_slides) * u64::from(portion) / 100) as u32;
+        budget.max(1)
+    }
+
+    /// Copy the fields a **running** session is allowed to pick up, leaving the rest.
+    ///
+    /// The split is the answer to "which parameters can change mid-run", and it is not
+    /// arbitrary. What is copied is a knob: a probability, a duration, a switch — reading a
+    /// new value on the next post is indistinguishable from the operator having set it
+    /// before that post.
+    ///
+    /// What is **not** copied is anything the session already built something out of:
+    ///
+    /// * `num_videos` / `num_rounds` — the session's target was computed at start; moving
+    ///   it underneath a run in progress makes "42 of 120" meaningless.
+    /// * `persona` — `HumanBehavior` is constructed from it once, so a change would need
+    ///   the behaviour model rebuilt mid-session.
+    /// * `steady_mood` — the mood cycle is already built.
+    /// * `bundle_id` — the app is already open, and on Android the package is resolved per
+    ///   device anyway.
+    /// * `schedule_*` and `stagger_delay_*` — they act *between* sessions, not inside one.
+    ///
+    /// The UI marks those as needing a restart, so this list and that list are the same
+    /// list, and this doc is where it is written down.
+    pub fn absorb_live_changes(&mut self, fresh: &NurtureSettings) {
+        // Behaviour knobs.
+        self.like_prob = fresh.like_prob;
+        self.comment_prob = fresh.comment_prob;
+        self.follow_prob = fresh.follow_prob;
+        self.frenzy_prob = fresh.frenzy_prob;
+        self.like_enabled = fresh.like_enabled;
+        self.comment_enabled = fresh.comment_enabled;
+        self.follow_enabled = fresh.follow_enabled;
+        self.frenzy_enabled = fresh.frenzy_enabled;
+        self.watch_min = fresh.watch_min;
+        self.watch_max = fresh.watch_max;
+        self.fatigue = fresh.fatigue;
+        self.time_of_day = fresh.time_of_day;
+        self.pause_swipe = fresh.pause_swipe;
+        self.human_limits = fresh.human_limits;
+        self.night_start = fresh.night_start;
+        self.night_end = fresh.night_end;
+        self.recover_delay_min = fresh.recover_delay_min;
+        self.recover_delay_max = fresh.recover_delay_max;
+        // Carousel.
+        self.carousel_enabled = fresh.carousel_enabled;
+        self.carousel_max_slides = fresh.carousel_max_slides;
+        self.carousel_portion_percent = fresh.carousel_portion_percent;
+        // What the AI is told, and where it is asked. Read per comment, so a corrected key
+        // or a reworded direction takes effect on the next one — which is the point.
+        self.base_url = fresh.base_url.clone();
+        self.model = fresh.model.clone();
+        self.api_key = fresh.api_key.clone();
+        self.input_price_per_1m = fresh.input_price_per_1m;
+        self.output_price_per_1m = fresh.output_price_per_1m;
+        self.comment_lang = fresh.comment_lang.clone();
+        self.ai_directions = fresh.ai_directions.clone();
+        self.max_comment_words = fresh.max_comment_words;
+    }
+
     /// Upgrade the values shipped by the pre-human-v2 profile once.
     ///
     /// Only exact legacy defaults are replaced, so an operator's deliberate
@@ -603,6 +952,29 @@ impl NurtureSettings {
 #[cfg(test)]
 mod nurture_settings_tests {
     use super::NurtureSettings;
+
+    #[test]
+    fn the_ceiling_and_the_portion_are_two_different_numbers() {
+        // They are split because the two backends can see different things, and conflating
+        // them applied the percentage twice on Android: once folded into the ceiling here,
+        // once against the post's real image count in the traversal.
+        let mut settings = NurtureSettings {
+            carousel_max_slides: 12,
+            carousel_portion_percent: 50,
+            carousel_enabled: true,
+            ..NurtureSettings::default()
+        };
+        assert_eq!(settings.carousel_ceiling(), 12, "the ceiling is untouched");
+        assert_eq!(
+            settings.carousel_slide_budget(),
+            6,
+            "the pixel engine's number has the portion folded in"
+        );
+        // The switch closes both doors.
+        settings.carousel_enabled = false;
+        assert_eq!(settings.carousel_ceiling(), 0);
+        assert_eq!(settings.carousel_slide_budget(), 0);
+    }
 
     #[test]
     fn defaults_allow_a_first_run_without_ai_credentials() {
@@ -719,4 +1091,170 @@ pub struct NurtureCostSummary {
     pub total_usd: f64,
     pub today_comments: u32,
     pub total_comments: u32,
+}
+
+/// Tests for the per-feature switches, the carousel budget, and the live-refresh split.
+///
+/// A module of their own rather than folded into `nurture_settings_tests`, which predates
+/// them and covers defaults and the legacy migration.
+#[cfg(test)]
+mod nurture_tuning_tests {
+    use super::NurtureSettings;
+
+    #[test]
+    fn an_old_stored_profile_upgrades_with_every_feature_still_on() {
+        // Deliberately missing every field added for the switches and the carousel.
+        let legacy = r#"{
+            "baseUrl":"https://api.deepseek.com","model":"m","apiKey":"",
+            "inputPricePer1m":1.0,"outputPricePer1m":2.0,
+            "bundleId":"com.ss.iphone.ugc.Ame","numVideos":10,"numRounds":1,
+            "likeProb":35,"commentProb":4,"followProb":3,"frenzyProb":6,
+            "watchMin":3.0,"watchMax":18.0,"persona":"casual",
+            "fatigue":true,"timeOfDay":true,"pauseSwipe":true,
+            "nightStart":0,"nightEnd":0,
+            "recoverDelayMin":2,"recoverDelayMax":4,
+            "staggerDelayMin":5,"staggerDelayMax":15,
+            "commentLang":"vi","aiDirections":"x","maxCommentWords":12,
+            "scheduleEnabled":false,"scheduleEveryMinutes":240,
+            "scheduleDurationMinutes":150
+        }"#;
+        let settings: NurtureSettings = serde_json::from_str(legacy).expect("legacy profile");
+        assert!(settings.like_enabled);
+        assert!(settings.comment_enabled);
+        assert!(settings.follow_enabled);
+        assert!(settings.frenzy_enabled);
+        assert!(settings.carousel_enabled);
+        assert_eq!(settings.carousel_max_slides, 12);
+        assert_eq!(settings.carousel_portion_percent, 100);
+        // And the tuned numbers survive untouched.
+        let effective = settings.into_effective();
+        assert_eq!(effective.like_prob, 35);
+        assert_eq!(effective.comment_prob, 4);
+    }
+
+    #[test]
+    fn a_switch_keeps_the_tuned_number_while_stopping_the_behaviour() {
+        // The entire reason a switch exists separately from the probability: pausing a
+        // feature must not make the operator remember what 35 was.
+        let mut settings = NurtureSettings {
+            like_prob: 35,
+            comment_prob: 4,
+            follow_prob: 3,
+            frenzy_prob: 6,
+            like_enabled: false,
+            comment_enabled: false,
+            follow_enabled: false,
+            frenzy_enabled: false,
+            ..Default::default()
+        };
+        let stored = settings.clone();
+        settings = settings.into_effective();
+        // The loop sees zero, so no call site has to know the switch exists.
+        assert_eq!(settings.like_prob, 0);
+        assert_eq!(settings.comment_prob, 0);
+        assert_eq!(settings.follow_prob, 0);
+        assert_eq!(settings.frenzy_prob, 0);
+        // The stored profile still carries the numbers, so the UI round-trips them.
+        assert_eq!(stored.like_prob, 35);
+    }
+
+    #[test]
+    fn the_carousel_budget_is_a_portion_of_the_ceiling_and_never_zero_when_on() {
+        let settings = |max, portion, on| NurtureSettings {
+            carousel_max_slides: max,
+            carousel_portion_percent: portion,
+            carousel_enabled: on,
+            ..Default::default()
+        };
+        assert_eq!(settings(12, 100, true).carousel_slide_budget(), 12);
+        assert_eq!(settings(12, 50, true).carousel_slide_budget(), 6);
+        assert_eq!(settings(7, 50, true).carousel_slide_budget(), 3);
+        // A portion that rounds to nothing still looks at one slide — "half" must not mean
+        // "none" on a short ceiling.
+        assert_eq!(settings(1, 10, true).carousel_slide_budget(), 1);
+        // Over 100 is clamped rather than trusted.
+        assert_eq!(settings(4, 250, true).carousel_slide_budget(), 4);
+        // Off means off, and the loop reads 0 as "treat it as one card".
+        assert_eq!(settings(12, 100, false).carousel_slide_budget(), 0);
+        assert_eq!(settings(0, 100, true).carousel_slide_budget(), 0);
+        // And `into_effective` agrees with the accessor, so the loop cannot get two
+        // different answers depending on which one it asked.
+        assert_eq!(
+            settings(12, 100, false)
+                .into_effective()
+                .carousel_max_slides,
+            0
+        );
+    }
+
+    #[test]
+    fn a_live_refresh_moves_the_knobs_and_leaves_the_structure_alone() {
+        // The split that answers "what can change mid-run". Everything asserted as
+        // unchanged here is something the session already built on: a target it counts
+        // against, a behaviour model it constructed, or an app it already opened.
+        let mut running = NurtureSettings {
+            like_prob: 10,
+            num_videos: 120,
+            num_rounds: 2,
+            persona: "casual".into(),
+            steady_mood: "chatty".into(),
+            bundle_id: "com.ss.iphone.ugc.Ame".into(),
+            stagger_delay_min: 5,
+            schedule_every_minutes: 240,
+            ..Default::default()
+        };
+        let fresh = NurtureSettings {
+            like_prob: 80,
+            comment_prob: 9,
+            watch_max: 30.0,
+            carousel_portion_percent: 50,
+            follow_enabled: false,
+            max_comment_words: 20,
+            api_key: "corrected".into(),
+            // Structural: all different, all of which must be ignored.
+            num_videos: 1,
+            num_rounds: 99,
+            persona: "hype".into(),
+            steady_mood: "skimming".into(),
+            bundle_id: "com.zhiliaoapp.musically".into(),
+            stagger_delay_min: 999,
+            schedule_every_minutes: 1,
+            ..Default::default()
+        };
+        running.absorb_live_changes(&fresh);
+
+        assert_eq!(running.like_prob, 80, "a probability is a knob");
+        assert_eq!(running.comment_prob, 9);
+        assert_eq!(running.watch_max, 30.0);
+        assert_eq!(running.carousel_portion_percent, 50);
+        assert!(!running.follow_enabled, "a switch is a knob");
+        assert_eq!(running.max_comment_words, 20);
+        assert_eq!(
+            running.api_key, "corrected",
+            "a corrected key must take effect"
+        );
+
+        assert_eq!(
+            running.num_videos, 120,
+            "the session's target must not move"
+        );
+        assert_eq!(running.num_rounds, 2);
+        assert_eq!(
+            running.persona, "casual",
+            "HumanBehavior was built from this"
+        );
+        assert_eq!(
+            running.steady_mood, "chatty",
+            "the mood cycle is already built"
+        );
+        assert_eq!(
+            running.bundle_id, "com.ss.iphone.ugc.Ame",
+            "the app is already open"
+        );
+        assert_eq!(
+            running.stagger_delay_min, 5,
+            "acts between sessions, not inside one"
+        );
+        assert_eq!(running.schedule_every_minutes, 240);
+    }
 }

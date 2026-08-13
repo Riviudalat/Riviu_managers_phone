@@ -50,7 +50,7 @@ import type {
   PageId,
   StreamSettings,
 } from "./types";
-import { markDeviceFrameLive } from "./types";
+import { deviceModelOsLabel, markDeviceFrameLive } from "./types";
 import "./App.css";
 
 const FlowWorkspace = lazy(async () => {
@@ -526,9 +526,7 @@ function App() {
                             </span>
                           </td>
                           <td className="mono">{device.udid.slice(0, 12)}…</td>
-                          <td>
-                            {device.model} · {device.iosVersion}
-                          </td>
+                          <td>{deviceModelOsLabel(device)}</td>
                           <td>{device.connection.toUpperCase()}</td>
                           <td>
                             <button

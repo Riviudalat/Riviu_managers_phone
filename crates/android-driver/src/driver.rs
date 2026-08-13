@@ -31,15 +31,151 @@ const HOST_PORT_BASE: u16 = 6790;
 /// so no separator was ever printed and every field parsed into the first one.
 const FIELD_SEPARATOR: &str = "RIVIU_NEXT_FIELD";
 
+/// How long the interaction handoff waits for one decoded frame.
+///
+/// Same 12 s the iOS path allows. It is a *failure* deadline, not a fallback: see
+/// [`StreamReadiness::DecodedFrame`].
+const INTERACTION_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(12);
+/// How long to wait for the target app to actually reach the foreground.
+///
+/// **Measured, and the old 5 s was wrong by a factor of four.** A cold TikTok start on
+/// the SM-N950F (Android 8) reached the foreground at 15,9 / 19,7 / 19,4 s across three
+/// runs from `am force-stop` (12/08/2026), and 26,9 s on a fourth with coarser polling.
+/// With 5 s the app refused every cold start — the operator saw
+/// `did not reach the foreground … the phone is showing <unreadable>` for a phone that
+/// was launching TikTok perfectly well, and the natural next move was to go looking for
+/// a broken `dumpsys` command. It was not broken; the deadline was.
+///
+/// Still a deadline and not a fallback: a locked screen makes `monkey` report success
+/// while nothing moves, and that has to end in a refusal rather than a session driving a
+/// lock screen. 40 s is the slowest measured start plus room, on the oldest phone here.
+const FOREGROUND_PROOF_TIMEOUT: Duration = Duration::from_secs(40);
+const FOREGROUND_PROOF_POLL: Duration = Duration::from_millis(250);
+/// How long a killed minicap child gets to actually exit before we stop claiming
+/// it is gone.
+const CHILD_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How honest a stream start has to be about frames.
+///
+/// The split exists because minicap only publishes when the display changes
+/// (`crate::frames`), so "no frame" means different things on the two paths that
+/// start it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamReadiness {
+    /// The operator's tile. A phone sitting on a static screen legitimately
+    /// produces nothing, and the desktop sampler has its own freshness watchdog
+    /// and `Stale` label for that. Demanding a frame here would report a working
+    /// phone as broken.
+    BestEffort,
+    /// The interaction handoff. One JPEG that *decodes* must be accepted by the
+    /// sink at the expected generation, or the start fails — the caller has just
+    /// foregrounded a playing TikTok feed, so silence means something is wrong.
+    DecodedFrame,
+}
+
+/// Exclusive right to start a producer for one serial.
+///
+/// Released in `Drop`, which is the point: a start future cancelled mid-flight —
+/// nurture's stop flag aborting the task — must not strand the serial as
+/// permanently "starting". That is also why the claim set is a sync mutex.
+struct StartClaim<'a> {
+    starting: &'a Mutex<HashSet<String>>,
+    serial: String,
+}
+
+impl Drop for StartClaim<'_> {
+    fn drop(&mut self) {
+        self.starting.lock().remove(&self.serial);
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct AndroidDriverConfig {
-    /// Explicit path to `adb`. Falls back to `ANDROID_SDK_ROOT`/`ANDROID_HOME`,
-    /// then `PATH`.
+    /// Explicit path to `adb`. Falls back to `RIVIU_ADB_PATH`,
+    /// `ANDROID_SDK_ROOT`/`ANDROID_HOME`, `PATH`, then [`Self::bundled_adb_path`].
     pub adb_path: Option<PathBuf>,
+    /// DeviceFarmer's `noarch/minicap.apk`, the JPEG frame source. Falls back to
+    /// `RIVIU_MINICAP_APK`, then [`Self::bundled_minicap_apk`].
+    pub minicap_apk: Option<PathBuf>,
+    /// The `adb` shipped inside our own installer, verified against
+    /// `android-tools-manifest.json` before it gets here.
+    ///
+    /// **Lowest priority of all**, and a separate field for exactly that reason:
+    /// putting the bundled path into [`Self::adb_path`] would make it outrank
+    /// `RIVIU_ADB_PATH` and every SDK variable, because those are only consulted when
+    /// the configured field is empty. A field the operator cannot outrank is not a
+    /// safety net, it is a hijack.
+    pub bundled_adb_path: Option<PathBuf>,
+    /// The `minicap.apk` shipped inside our own installer, same precedence rule.
+    ///
+    /// Also a separate field, and for a sharper version of the same reason: setting
+    /// `minicap_apk` directly would break **both** overrides at once, since the
+    /// configured value is preferred over `RIVIU_MINICAP_APK`. See AGENTS.md 9.27 —
+    /// keeping that env override working is part of the decision to bundle at all.
+    pub bundled_minicap_apk: Option<PathBuf>,
+}
+
+/// One running minicap feed, owned so a second `ensure_stream` reuses it and a
+/// stop can prove the child is gone.
+struct StreamProducer {
+    /// The hub generation this producer publishes into. A producer whose
+    /// generation is stale must die rather than publish (`FrameSink`).
+    generation: u64,
+    host_port: u16,
+    child: tokio::process::Child,
+    reader: tokio::task::JoinHandle<()>,
+    /// minicap's own pid on the device, from its banner.
+    ///
+    /// Recorded for diagnosis, not used to kill: killing by pid needs a
+    /// `/proc/<pid>/cmdline` guard against pid reuse and costs an adb round trip on
+    /// every teardown, and the failure it would defend against — a stranded
+    /// device-side minicap — has not been observed. A stranded one would hold the
+    /// per-serial abstract socket and the next start would adopt it, still
+    /// producing real frames of the real screen.
+    device_pid: u32,
 }
 
 pub struct AndroidDriver {
     adb: AdbProgram,
+    minicap_apk: Option<PathBuf>,
+    /// Where frames go. Injected by the composition root, which owns the hub —
+    /// this crate must not depend on whichever crate that is.
+    frame_sink: Mutex<Option<Arc<dyn riviu_core::FrameSink>>>,
+    /// serial -> the minicap feed we started for it.
+    ///
+    /// Held **only** across map access — `get` / `insert` / `remove` — never across
+    /// the adb work. It used to wrap the whole start, including an `ensure_apk`
+    /// push with a 120 s timeout, so one phone opening a stream blocked every other
+    /// phone's start *and* stop. [`AndroidDriver::starting`] is what makes the
+    /// short critical section safe.
+    streams: tokio::sync::Mutex<HashMap<String, StreamProducer>>,
+    /// Serials with a producer start in flight.
+    ///
+    /// The atomic claim that replaces holding [`Self::streams`] across the slow
+    /// work. A second start for the same serial is **refused**, not queued: a
+    /// hidden queue is the fleet-wide serialisation this removes.
+    starting: Mutex<HashSet<String>>,
+    /// Driver-side proof that stopped → session → stream is being followed.
+    ///
+    /// Catches a generation drift at the step that broke, so the operator sees
+    /// which one rather than core's opaque `StopProofMismatch`.
+    interaction: riviu_core::InteractionLifecycleRegistry,
+    /// serial -> the agent session we already opened, reused rather than remade.
+    ///
+    /// **This cache is a correctness fix, not an optimisation.** `AgentClient::connect`
+    /// POSTs `/session`, and opening one per `open_session` degrades the on-device
+    /// server: measured on a Redmi Note 12 (11/08/2026), after about ten accumulated
+    /// sessions every element query rose from ~150 ms to the server's hardcoded
+    /// root-`AccessibilityNodeInfo` timeout — 10 000+ ms and then `absent`, which
+    /// reads exactly like a wrong locator. Force-stopping the instrumentation
+    /// restored 118–425 ms immediately. See [`AgentClient::close`].
+    agents: Mutex<HashMap<String, AgentClient>>,
+    /// serial -> the resolved TikTok package, memoised.
+    ///
+    /// `pm list packages` is a 1–2 s adb round trip per candidate and this sits on the
+    /// path to every session. Invalidated by `refresh_device`, because a build can be
+    /// installed or removed while the app is running.
+    tiktok_packages: Mutex<HashMap<String, String>>,
     /// serial -> forwarded host port.
     ports: Mutex<HashMap<String, u16>>,
     /// Serials for which *we* established the `adb forward`.
@@ -54,12 +190,442 @@ pub struct AndroidDriver {
 
 impl AndroidDriver {
     pub fn new(config: &AndroidDriverConfig) -> anyhow::Result<Self> {
-        let adb = AdbProgram::resolve(config.adb_path.as_deref())?;
-        Ok(Self {
+        let adb = AdbProgram::resolve(
+            config.adb_path.as_deref(),
+            config.bundled_adb_path.as_deref(),
+        )?;
+        Ok(Self::with_adb(adb, config))
+    }
+
+    /// Build around an `adb` that has already been chosen.
+    ///
+    /// Split out for [`detect_driver`], which proves a specific candidate answers
+    /// before committing to it. Without this the probe's choice would be thrown away
+    /// and re-derived by `resolve`, which picks the first candidate that merely
+    /// *exists* — so a broken adb earlier in the order would win over the working one
+    /// the probe just found.
+    fn with_adb(adb: AdbProgram, config: &AndroidDriverConfig) -> Self {
+        // config -> env -> bundled. The bundled path is last so neither override is
+        // taken away by the act of shipping a copy; see `AndroidDriverConfig`.
+        let minicap_apk = config
+            .minicap_apk
+            .clone()
+            .or_else(|| {
+                std::env::var("RIVIU_MINICAP_APK")
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+            })
+            .or_else(|| config.bundled_minicap_apk.clone());
+        Self {
             adb,
+            minicap_apk,
+            frame_sink: Mutex::new(None),
+            streams: tokio::sync::Mutex::new(HashMap::new()),
+            starting: Mutex::new(HashSet::new()),
+            interaction: riviu_core::InteractionLifecycleRegistry::default(),
+            agents: Mutex::new(HashMap::new()),
+            tiktok_packages: Mutex::new(HashMap::new()),
             ports: Mutex::new(HashMap::new()),
             forwarded: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Point this backend at the hub that orders and fans out frames.
+    ///
+    /// Without it `ensure_stream` refuses rather than inventing a stream nobody
+    /// can read.
+    pub fn set_frame_sink(&self, sink: Arc<dyn riviu_core::FrameSink>) {
+        *self.frame_sink.lock() = Some(sink);
+    }
+
+    /// The hub, or a refusal that names the fix.
+    ///
+    /// Never falls back to an internal counter: that would be a second source of
+    /// truth for evidence ordering, and `crate::frames` forbids it. In the desktop
+    /// app this cannot fail — the composition root wires the hub before the driver
+    /// joins the fleet — so a failure here means a harness forgot to.
+    fn sink(&self) -> anyhow::Result<Arc<dyn riviu_core::FrameSink>> {
+        self.frame_sink.lock().clone().ok_or_else(|| {
+            anyhow!(
+                "no frame sink is wired to the Android driver; call set_frame_sink before \
+                 starting a stream"
+            )
         })
+    }
+
+    /// Claim the exclusive right to start a producer for `serial`.
+    fn claim_start(&self, serial: &str) -> anyhow::Result<StartClaim<'_>> {
+        if !self.starting.lock().insert(serial.to_string()) {
+            anyhow::bail!("a minicap start for {serial} is already in flight");
+        }
+        Ok(StartClaim {
+            starting: &self.starting,
+            serial: serial.to_string(),
+        })
+    }
+
+    /// Refuse unless the driver owns no producer for `serial` and none is being
+    /// born.
+    ///
+    /// Both halves matter: a producer *starting* would publish into the generation
+    /// a handoff is about to hand out.
+    async fn producer_absent(&self, serial: &str) -> anyhow::Result<()> {
+        if self.starting.lock().contains(serial) {
+            anyhow::bail!("a minicap start for {serial} is already in flight");
+        }
+        if self.streams.lock().await.contains_key(serial) {
+            anyhow::bail!(
+                "{serial} still owns a minicap producer; stop_owned_stream must run first"
+            );
+        }
+        Ok(())
+    }
+
+    /// Spawn minicap for `serial`, publishing into exactly `generation`.
+    ///
+    /// Never advances a generation and never holds a lock across the adb work. The
+    /// step order is the port-hygiene contract: the APK push happens before any
+    /// port is taken, the forward happens exactly once, and the producer is only
+    /// registered at the very end so a failed start leaves nothing to clean up.
+    ///
+    /// Returns whether a decoded frame was observed — always `false` for
+    /// [`StreamReadiness::BestEffort`], which does not wait for one.
+    async fn spawn_producer(
+        &self,
+        serial: &str,
+        generation: u64,
+        readiness: StreamReadiness,
+    ) -> anyhow::Result<bool> {
+        let sink = self.sink()?;
+        let apk = self.minicap_apk.clone().ok_or_else(|| {
+            anyhow!(
+                "no minicap apk configured: set RIVIU_MINICAP_APK to DeviceFarmer's \
+                 noarch/minicap.apk (AGENTS.md 9)"
+            )
+        })?;
+
+        let screen = crate::frames::device_screen(&self.adb, serial).await?;
+        let options = crate::frames::MinicapOptions::for_device(
+            serial,
+            crate::frames::Projection::half(screen.0, screen.1),
+        );
+        // Push before taking a port, so a push failure strands nothing.
+        crate::frames::ensure_apk(&self.adb, serial, &apk).await?;
+
+        if readiness == StreamReadiness::DecodedFrame {
+            self.refuse_undrivable_screen(serial).await?;
+        }
+
+        let mut child = tokio::process::Command::new(self.adb.path())
+            .args([
+                "-s",
+                serial,
+                "shell",
+                &crate::frames::launch_command(&options),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .context("spawn minicap")?;
+
+        // Forward exactly once. `adb forward tcp:0` allocates a *new* host port on
+        // every call, so retrying the forward alongside the connect leaks one port
+        // per attempt — measured: four stranded forwards to the same socket after
+        // a single launch. Only the connect is retried, because minicap binds its
+        // socket a beat after `app_process` starts.
+        let host_port = crate::frames::forward(&self.adb, serial, &options.socket).await?;
+        let mut connected = None;
+        let mut last_error = None;
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            if child.try_wait().ok().flatten().is_some() {
+                crate::frames::remove_forward(&self.adb, serial, host_port)
+                    .await
+                    .ok();
+                anyhow::bail!("minicap exited before it accepted a connection");
+            }
+            match crate::frames::MinicapStream::connect(host_port).await {
+                Ok(stream) => {
+                    connected = Some(stream);
+                    break;
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        let Some(mut stream) = connected else {
+            // Give the port back before surfacing the failure.
+            crate::frames::remove_forward(&self.adb, serial, host_port)
+                .await
+                .ok();
+            let _ = child.kill().await;
+            return Err(
+                last_error.unwrap_or_else(|| anyhow!("minicap never accepted a connection"))
+            );
+        };
+        let banner = stream.banner().clone();
+        tracing::info!(
+            serial,
+            host_port,
+            generation,
+            ?readiness,
+            banner = ?banner,
+            "minicap frame source started"
+        );
+
+        // The interaction path needs to know a real frame landed. A oneshot rather
+        // than polling the hub: a *parked* frame from before this producer is still
+        // in the hub's cache, so watching the cache would accept a pre-session frame
+        // as proof of a stream started after it.
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+        let mut ready_tx = (readiness == StreamReadiness::DecodedFrame).then_some(ready_tx);
+        let udid = serial.to_string();
+        let publisher = Arc::clone(&sink);
+        let reader = tokio::spawn(async move {
+            let sink = publisher;
+            loop {
+                match stream.next_frame().await {
+                    Ok(frame) => {
+                        // A frame that does not decode is skipped, not published,
+                        // while we are still waiting for the first one.
+                        let qualifies =
+                            ready_tx.is_some() && riviu_core::frame_source::decodes_as_jpeg(&frame);
+                        if ready_tx.is_some() && !qualifies {
+                            tracing::debug!(
+                                udid,
+                                generation,
+                                bytes = frame.len(),
+                                "skipping an undecodable candidate first frame"
+                            );
+                            continue;
+                        }
+                        // A stale generation is the signal to stop, not an error:
+                        // a newer stream owns this device now.
+                        if !sink.publish_if_current(&udid, generation, frame) {
+                            tracing::info!(udid, generation, "minicap reader superseded; stopping");
+                            return;
+                        }
+                        if qualifies {
+                            if let Some(sender) = ready_tx.take() {
+                                let _ = sender.send(());
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(udid, generation, %error, "minicap reader stopped");
+                        return;
+                    }
+                }
+            }
+        });
+
+        let mut first_frame_observed = false;
+        if readiness == StreamReadiness::DecodedFrame {
+            let started = std::time::Instant::now();
+            match tokio::time::timeout(INTERACTION_FIRST_FRAME_TIMEOUT, ready_rx).await {
+                Ok(Ok(())) => {
+                    first_frame_observed = true;
+                    tracing::info!(
+                        serial,
+                        generation,
+                        ms = started.elapsed().as_millis(),
+                        "minicap first decoded frame accepted"
+                    );
+                }
+                // Tear down rather than reporting `Ok(first_frame_observed: false)`:
+                // every consumer in core treats `false` as fatal, so returning it
+                // would buy nothing except a live orphan producer.
+                _ => {
+                    reader.abort();
+                    let _ = child.kill().await;
+                    crate::frames::remove_forward(&self.adb, serial, host_port)
+                        .await
+                        .ok();
+                    anyhow::bail!(
+                        "minicap produced no decodable frame in {}s for {serial}: the display may \
+                         not have changed (minicap publishes on change), or the projection is \
+                         wrong. banner {}x{} virtual {}x{} orient {}, host port {host_port}, \
+                         sink generation {}",
+                        INTERACTION_FIRST_FRAME_TIMEOUT.as_secs(),
+                        banner.real_width,
+                        banner.real_height,
+                        banner.virtual_width,
+                        banner.virtual_height,
+                        banner.orientation,
+                        sink.generation(serial)
+                    );
+                }
+            }
+        }
+
+        // Registered last, so nothing above needs undoing on failure.
+        self.streams.lock().await.insert(
+            serial.to_string(),
+            StreamProducer {
+                generation,
+                host_port,
+                child,
+                reader,
+                device_pid: banner.pid,
+            },
+        );
+        Ok(first_frame_observed)
+    }
+
+    /// Refuse a screen minicap cannot compose from, before anything is spawned.
+    ///
+    /// Two separate conditions, and the second is the one that bites: measured on a
+    /// locked Redmi Note 12 (11/08/2026), `dumpsys power` reported
+    /// `mWakefulness=Awake` and `mScreenOnFully=true` while the phone sat on its
+    /// lock screen and nothing could be foregrounded. Wakefulness alone passes a
+    /// phone no driver can drive.
+    ///
+    /// An unreadable `dumpsys` is **unknown**, never a refusal — the fleet spans
+    /// Android 9 to 15 and they do not print the same bodies.
+    async fn refuse_undrivable_screen(&self, serial: &str) -> anyhow::Result<()> {
+        if let Ok(power) = self.adb.shell(serial, "dumpsys power").await {
+            if adb::parse_display_awake(&power) == Some(false) {
+                anyhow::bail!(
+                    "{serial} has its display asleep; minicap composes nothing while the screen \
+                     is off. Wake the phone and retry"
+                );
+            }
+        }
+        if let Ok(window) = self.adb.shell(serial, "dumpsys window").await {
+            if adb::parse_keyguard_locked(&window) == Some(true) {
+                anyhow::bail!(
+                    "{serial} is on the lock screen. The screen may be on, but no app can be \
+                     brought to the foreground until it is unlocked"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Kill a feed and drop its forward. Best effort by design: the caller has
+    /// already removed it from the registry, so failing here must not strand the
+    /// device with a producer nobody owns.
+    async fn stop_producer(&self, serial: &str, mut producer: StreamProducer) -> bool {
+        producer.reader.abort();
+        // Ignore the kill error: the child may already have been reaped by an
+        // earlier `try_wait`, and that is a stopped child, not a failure.
+        let _ = producer.child.start_kill();
+        let confirmed = matches!(
+            tokio::time::timeout(CHILD_EXIT_TIMEOUT, producer.child.wait()).await,
+            Ok(Ok(_))
+        );
+        if !confirmed {
+            tracing::warn!(
+                serial,
+                device_pid = producer.device_pid,
+                "could not confirm the minicap child exited"
+            );
+        }
+        if let Err(error) =
+            crate::frames::remove_forward(&self.adb, serial, producer.host_port).await
+        {
+            tracing::warn!(serial, port = producer.host_port, %error, "could not remove the minicap forward");
+        }
+        confirmed
+    }
+
+    /// Remove whatever producer we own for `serial` and kill it.
+    ///
+    /// `true` means the driver is confirmed to own no live producer afterwards —
+    /// **including when it owned none to begin with**. That is not laxity: the
+    /// control plane's `StreamStopProof::confirms_stop` requires
+    /// `child_stopped && new > old`, and reporting `false` for "there was nothing to
+    /// stop" would quarantine the lease on every teardown that follows a failed
+    /// stream start. iOS answers the same way.
+    async fn take_and_stop_producer(&self, serial: &str) -> bool {
+        let producer = self.streams.lock().await.remove(serial);
+        match producer {
+            Some(producer) => self.stop_producer(serial, producer).await,
+            None => true,
+        }
+    }
+
+    /// The one place a teardown advances a generation.
+    ///
+    /// `retain_last_frame` distinguishes park from stop: both must make every frame
+    /// the dead producer still holds unpublishable, but park keeps the tile's last
+    /// image instead of blanking it.
+    async fn teardown_stream(
+        &self,
+        serial: &str,
+        retain_last_frame: bool,
+    ) -> anyhow::Result<riviu_core::stream_budget::StreamStopProof> {
+        let sink = self.sink()?;
+        let child_stopped = self.take_and_stop_producer(serial).await;
+        // Read the old generation separately: `FrameSink` returns only the new one,
+        // deliberately. Safe because every advance for this serial happens either in
+        // the producer-map critical section or under a start claim, and the control
+        // plane holds a per-UDID operation lock across the whole sequence.
+        let old_generation = sink.generation(serial);
+        let new_generation = if retain_last_frame {
+            sink.park_and_advance(serial)
+        } else {
+            sink.clear_and_advance(serial)
+        };
+        if child_stopped {
+            // Recording the stop lets the plane's recovery path start a session
+            // straight after a stop without confirming the handoff again.
+            self.interaction.record_stopped(serial, new_generation);
+        } else {
+            self.interaction.clear(serial);
+        }
+        Ok(riviu_core::stream_budget::StreamStopProof {
+            old_generation,
+            new_generation,
+            child_stopped,
+        })
+    }
+
+    /// Start or reuse the tile feed for one device.
+    ///
+    /// Reuses a live producer whose generation is still current, which is what keeps
+    /// a repeated `ensure_stream` from restarting a working stream — the same rule
+    /// the iOS path follows.
+    async fn ensure_minicap_locked(&self, serial: &str) -> anyhow::Result<()> {
+        let sink = self.sink()?;
+        let claim = self.claim_start(serial)?;
+
+        let reusable = {
+            let mut streams = self.streams.lock().await;
+            match streams.get_mut(serial) {
+                Some(existing) => {
+                    let alive = existing
+                        .child
+                        .try_wait()
+                        .map(|status| status.is_none())
+                        .unwrap_or(false);
+                    alive
+                        && existing.generation == sink.generation(serial)
+                        && !existing.reader.is_finished()
+                }
+                None => false,
+            }
+        };
+        if reusable {
+            return Ok(());
+        }
+        // Whatever is there is stale; killing it happens outside the map lock.
+        self.take_and_stop_producer(serial).await;
+
+        let generation = sink.clear_and_advance(serial);
+        let started = self
+            .spawn_producer(serial, generation, StreamReadiness::BestEffort)
+            .await;
+        drop(claim);
+        started.map(|_| ())
+    }
+
+    /// Stop the feed for one device, if we own one.
+    pub async fn stop_minicap(&self, serial: &str) {
+        self.take_and_stop_producer(serial).await;
     }
 
     fn host_port(&self, serial: &str) -> u16 {
@@ -164,8 +730,44 @@ impl AndroidDriver {
         let base = self.agent_base(serial);
         self.forward(serial).await?;
 
+        // Reuse the session we already have. Opening a second one costs the whole
+        // fleet: see the note on `Self::agents`.
+        let cached = self.agents.lock().get(serial).cloned();
+        if let Some(agent) = cached {
+            if agent.is_alive().await {
+                return Ok(agent);
+            }
+            // Dead, and still registered on the device. Ask the server to forget it
+            // before opening another, or the leak this cache exists to stop happens
+            // one session at a time anyway.
+            let _ = agent.close().await;
+            self.agents.lock().remove(serial);
+        }
+
+        // A server that answers `/status` usually just needs a fresh session — that is the
+        // rotten-session case `AgentClient::recycle` documents. But `/status` does not prove
+        // the accessibility tree is readable, and when it is not, a new session against the
+        // same server is just as blind: measured on an SM-N950F on 12/08/2026, where an
+        // out-of-band `uiautomator dump` had taken `UiAutomation` away and `open_session`
+        // happily returned a 4040 ms session whose every element query then blocked.
+        //
+        // So the new session has to prove itself, and the fall-through is to restart the
+        // instrumentation rather than to hand back something that cannot see.
         if AgentClient::is_ready(&base).await {
-            return AgentClient::connect(&base).await;
+            let agent = self.open_and_cache_agent(serial, &base).await?;
+            if agent.is_alive().await {
+                return Ok(agent);
+            }
+            tracing::warn!(
+                serial,
+                "the agent answers /status but cannot read the accessibility tree — \
+                 restarting the instrumentation. Something else may be holding \
+                 UiAutomation (an `adb shell uiautomator dump` does this)"
+            );
+            let _ = agent.close().await;
+            self.agents.lock().remove(serial);
+            self.restart_instrumentation(serial).await?;
+            return self.instrument_and_wait(serial, &base).await;
         }
 
         let installed = self
@@ -181,17 +783,77 @@ impl AndroidDriver {
             ));
         }
 
+        self.instrument_and_wait(serial, &base).await
+    }
+
+    /// Start the runner and wait for a session that can actually read the screen.
+    async fn instrument_and_wait(&self, serial: &str, base: &str) -> anyhow::Result<AgentClient> {
         self.spawn_instrumentation(serial)?;
         // The server binds its port a beat after the runner starts.
         for _ in 0..40 {
-            if AgentClient::is_ready(&base).await {
-                return AgentClient::connect(&base).await;
+            if AgentClient::is_ready(base).await {
+                let agent = self.open_and_cache_agent(serial, base).await?;
+                if agent.is_alive().await {
+                    return Ok(agent);
+                }
+                // Bound to the port but blind. Reported rather than retried forever: a
+                // second restart would race the same holder of `UiAutomation`, and the
+                // operator needs to know something else on the phone has it.
+                let _ = agent.close().await;
+                self.agents.lock().remove(serial);
+                return Err(anyhow!(
+                    "the agent on {serial} is listening but cannot read the accessibility \
+                     tree even after a restart. Something else holds UiAutomation — an \
+                     `adb shell uiautomator dump`, or another automation tool on the phone"
+                ));
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
         Err(anyhow!(
             "the agent on {serial} did not answer /status within 10 seconds"
         ))
+    }
+
+    /// Stop the running instrumentation so the next start is a clean one.
+    ///
+    /// Force-stopping both halves is what actually recovered the phone by hand on
+    /// 12/08/2026 — `open_session` then re-instrumented and answered in 4040 ms. The
+    /// server holds `UiAutomation` for its lifetime, so nothing short of ending the
+    /// process gets it back.
+    async fn restart_instrumentation(&self, serial: &str) -> anyhow::Result<()> {
+        for package in [AGENT_PACKAGE, AGENT_TEST_PACKAGE] {
+            if let Err(error) = self
+                .adb
+                .shell(serial, &format!("am force-stop {package}"))
+                .await
+            {
+                tracing::warn!(serial, package, %error, "could not stop the agent half");
+            }
+        }
+        // The port stays bound for a moment after the process goes.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        Ok(())
+    }
+
+    /// Open one session and remember it for this serial.
+    async fn open_and_cache_agent(&self, serial: &str, base: &str) -> anyhow::Result<AgentClient> {
+        let agent = AgentClient::connect(base).await?;
+        self.agents.lock().insert(serial.to_string(), agent.clone());
+        Ok(agent)
+    }
+
+    /// Drop and delete the cached session for one device.
+    ///
+    /// Awaits, so it cannot be called from `invalidate_ui_session`, which is
+    /// synchronous. That one only forgets the entry; this is the path that also
+    /// tells the device.
+    pub async fn close_agent(&self, serial: &str) {
+        let agent = self.agents.lock().remove(serial);
+        if let Some(agent) = agent {
+            if let Err(error) = agent.close().await {
+                tracing::warn!(serial, %error, "could not delete the agent session");
+            }
+        }
     }
 
     /// Start the instrumentation runner and let it keep running.
@@ -260,7 +922,8 @@ async fn probe_device(adb: AdbProgram, serial: String, model_hint: Option<String
         // Still named `ios_version` in core; the rename to `os_version` plus a
         // `platform` tag is Pha 2 of the Android plan. Populating it with the
         // Android release is the honest reading of "OS version" until then.
-        ios_version: fields.release.unwrap_or_default(),
+        platform: riviu_core::DevicePlatform::Android,
+        os_version: fields.release.unwrap_or_default(),
         connection: ConnectionKind::Usb,
         status: if probe_error.is_some() {
             DeviceStatus::Error
@@ -303,11 +966,28 @@ fn parse_inventory(stdout: &str) -> Inventory {
 #[async_trait]
 impl DeviceDriver for AndroidDriver {
     async fn list_devices(&self) -> anyhow::Result<Vec<DeviceInfo>> {
-        let stdout = self
+        // Read until two consecutive `adb devices` agree. A single reading is
+        // not evidence: a server that is restarting answers one call and reports
+        // a different fleet on the next, and `DeviceRegistry::upsert_many`
+        // replaces the whole vector (AGENTS.md 9) — so a bad snapshot does not
+        // just look wrong, it deletes devices from the fleet.
+        //
+        // An unstable reading is still returned rather than raised. Refusing the
+        // scan would blank the Android half of a mixed fleet, which is the same
+        // damage from the other direction; the honest fix is for the registry to
+        // keep the previous vector on an untrusted read, and that is not built.
+        let reading = self
             .adb
-            .run(&["devices", "-l"], adb::DEFAULT_TIMEOUT)
-            .await?;
-        let lines = adb::parse_devices(&stdout);
+            .devices_stable(Duration::from_millis(250), Duration::from_millis(1500))
+            .await;
+        if !reading.stable {
+            tracing::warn!(
+                attempts = reading.attempts,
+                devices = reading.devices.len(),
+                "adb device list never settled; using the last reading"
+            );
+        }
+        let lines = reading.devices;
 
         // Fan out: the fleet is 16 phones and every one of them costs a round
         // trip we would otherwise pay in series.
@@ -326,7 +1006,8 @@ impl DeviceDriver for AndroidDriver {
                     udid: line.serial.clone(),
                     name: line.model.clone().unwrap_or_else(|| line.serial.clone()),
                     model: line.model.unwrap_or_default(),
-                    ios_version: String::new(),
+                    platform: riviu_core::DevicePlatform::Android,
+                    os_version: String::new(),
                     connection: ConnectionKind::Usb,
                     status: DeviceStatus::Pairing,
                     battery: None,
@@ -358,6 +1039,9 @@ impl DeviceDriver for AndroidDriver {
     }
 
     async fn refresh_device(&self, udid: &str) -> anyhow::Result<DeviceInfo> {
+        // A refresh is the operator saying "look again", which is also the moment a
+        // TikTok build may have been installed or removed.
+        self.tiktok_packages.lock().remove(udid);
         let mut device = probe_device(self.adb.clone(), udid.to_string(), None).await;
         device.wda_ready = self.agent_ready(udid).await;
         if device.wda_ready {
@@ -461,6 +1145,120 @@ impl DeviceDriver for AndroidDriver {
         true
     }
 
+    /// True — every Android session answers `locate`.
+    fn reports_element_bounds(&self, _udid: &str) -> bool {
+        true
+    }
+
+    /// Push a campaign's files into a directory MediaStore does **not** scan.
+    ///
+    /// `agent_bundle_id` is unused here and that is deliberate rather than an
+    /// oversight: on iOS the files go into the Agent's own sandbox over HouseArrest, so
+    /// the bundle id names the destination. Android has no such sandbox in play — the
+    /// staging directory is a dot-prefixed folder under `Pictures`, hidden from the
+    /// media scanner and therefore from TikTok's picker, which is what preserves the
+    /// contract's two-step meaning.
+    async fn stage_publish_media(
+        &self,
+        udid: &str,
+        _agent_bundle_id: &str,
+        campaign_id: &str,
+        source_root: &Path,
+    ) -> anyhow::Result<serde_json::Value> {
+        crate::publish::stage(&self.adb, udid, campaign_id, source_root).await
+    }
+
+    /// True — the import path below is real, so callers may use the native route.
+    fn supports_push_media(&self, _udid: &str) -> bool {
+        true
+    }
+
+    async fn prepare_publish_media(
+        &self,
+        udid: &str,
+        campaign_id: &str,
+        manifest_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        crate::publish::prepare(&self.adb, udid, campaign_id, manifest_sha256).await
+    }
+
+    async fn import_publish_media(
+        &self,
+        udid: &str,
+        campaign_id: &str,
+        manifest_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        crate::publish::import(&self.adb, udid, campaign_id, manifest_sha256).await
+    }
+
+    async fn cleanup_publish_media(
+        &self,
+        udid: &str,
+        import_id: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        crate::publish::cleanup(&self.adb, udid, import_id).await
+    }
+
+    /// Which regional TikTok build this phone actually has.
+    ///
+    /// Reads the installed packages rather than the foreground app: at the time a
+    /// caller needs this there is no session yet and the phone may be on the
+    /// launcher. Foreground is the right way to *break a tie* between two installed
+    /// builds, and the wrong way to resolve in the first place.
+    ///
+    /// Memoised because `pm list packages` is a 1–2 s adb round trip per candidate
+    /// and this is on the path to every session.
+    async fn resolve_tiktok_package(&self, udid: &str) -> anyhow::Result<String> {
+        if let Some(known) = self.tiktok_packages.lock().get(udid) {
+            return Ok(known.clone());
+        }
+        let mut listing = String::new();
+        for candidate in riviu_core::tiktok_target::measured_android_packages() {
+            let candidate = adb::validate_package_name(candidate)?;
+            if let Ok(stdout) = self
+                .adb
+                .shell(udid, &format!("pm list packages {candidate}"))
+                .await
+            {
+                listing.push_str(&stdout);
+                listing.push('\n');
+            }
+        }
+        let resolved = match riviu_core::tiktok_target::resolve_installed_android_tiktok(&listing) {
+            Ok(package) => package,
+            Err(riviu_core::tiktok_target::TargetResolution::Ambiguous(found)) => {
+                // Two measured builds side by side. Whichever is in front is the one
+                // the operator is working with; anything else would be a coin flip.
+                //
+                // Read through adb rather than opening a session: resolving a package
+                // must not have the side effect of creating one, and `mCurrentFocus`
+                // needs no agent.
+                let foreground = self
+                    .adb
+                    .shell(udid, "dumpsys window displays | grep mCurrentFocus")
+                    .await
+                    .ok()
+                    .as_deref()
+                    .and_then(adb::parse_current_focus_package);
+                match foreground.filter(|package| found.contains(package)) {
+                    Some(package) => package,
+                    None => anyhow::bail!(
+                        "{udid}: more than one measured TikTok build is installed ({}), and none \
+                         of them is in the foreground to break the tie",
+                        found.join(", ")
+                    ),
+                }
+            }
+            Err(error) => {
+                return Err(anyhow!("{udid}: {error}"));
+            }
+        };
+        self.tiktok_packages
+            .lock()
+            .insert(udid.to_string(), resolved.clone());
+        Ok(resolved)
+    }
+
     async fn inspect_app_process(
         &self,
         udid: &str,
@@ -486,16 +1284,179 @@ impl DeviceDriver for AndroidDriver {
         Ok(Box::new(self.open_session(udid).await?))
     }
 
-    /// No frame producer yet.
+    /// Read the generation the next session and stream must both use.
     ///
-    /// Deliberate: with hierarchy-based location, frames are corroboration
-    /// rather than the locator, so the video pipeline is deferred until
-    /// measurement shows it is needed. Failing loudly beats returning a URL
-    /// that publishes nothing.
-    async fn ensure_stream(&self, _udid: &str) -> anyhow::Result<String> {
-        Err(anyhow!(
-            "the Android driver has no frame source yet — see Pha 5 of the plan"
-        ))
+    /// **Reads, never advances.** The whole handoff contract rests on nothing moving
+    /// between here and `start_stream_after_session`, which is how
+    /// `proof.generation == handoff_generation` holds by construction rather than by
+    /// copying a number around.
+    ///
+    /// Idempotent: the control plane re-confirms on a failed stream start to re-arm
+    /// its cleanup ticket, so a second call at the same generation must succeed.
+    async fn confirm_interaction_stream_stopped(
+        &self,
+        udid: &str,
+    ) -> anyhow::Result<riviu_core::StreamHandoffProof> {
+        let sink = self.sink()?;
+        self.producer_absent(udid).await?;
+        let generation = sink.generation(udid);
+        self.interaction.record_stopped(udid, generation);
+        Ok(riviu_core::StreamHandoffProof { generation })
+    }
+
+    /// Open a session with the target app proven to be in front.
+    ///
+    /// The foreground **proof** is the point. `monkey` exits 0 in cases where it did
+    /// not do what was asked — it is the "HTTP 200" of this path — so the answer
+    /// comes from `active_app_bundle`, which reads `mCurrentFocus` and is real
+    /// evidence. Nothing else on the nurture path foregrounds the app, so without
+    /// this the hierarchy loop would run against the launcher and report a locator
+    /// failure for what is really a launch failure.
+    ///
+    /// `kind` produces the same session either way on Android and that is recorded
+    /// rather than silently dropped: `FreshText` exists on iOS because the trusted
+    /// text channel is a property of *when* the session was created, while here it
+    /// is a property of the agent — `type_text` goes through accessibility
+    /// `ACTION_SET_TEXT` and carries full Vietnamese diacritics regardless.
+    async fn start_interaction_session(
+        &self,
+        udid: &str,
+        bundle_id: &str,
+        kind: riviu_core::InteractionSessionKind,
+    ) -> anyhow::Result<Box<dyn UiSession>> {
+        // Cheap, phone-free refusals first, so a caller that got the sequence wrong
+        // learns before anything is touched.
+        let bundle_id = adb::validate_package_name(bundle_id)?.to_string();
+        let sink = self.sink()?;
+        let generation = sink.generation(udid);
+        let reservation = self.interaction.begin_session(udid, generation, kind)?;
+
+        let session = self.open_session(udid).await?;
+        riviu_core::driver::UiSession::launch_app_foreground(&session, &bundle_id).await?;
+
+        let deadline = std::time::Instant::now() + FOREGROUND_PROOF_TIMEOUT;
+        loop {
+            let observed = match riviu_core::driver::UiSession::active_app_bundle(&session).await {
+                Ok(package) if package == bundle_id => break,
+                Ok(package) => package,
+                Err(error) => format!("<unreadable: {error}>"),
+            };
+            if std::time::Instant::now() >= deadline {
+                self.interaction.clear(udid);
+                anyhow::bail!(
+                    "{bundle_id} did not reach the foreground on {udid} within {}s; the phone is \
+                     showing {observed}. A locked screen does this — `monkey` reports success and \
+                     nothing moves",
+                    FOREGROUND_PROOF_TIMEOUT.as_secs()
+                );
+            }
+            tokio::time::sleep(FOREGROUND_PROOF_POLL).await;
+        }
+
+        self.interaction.complete_session(&reservation)?;
+        tracing::info!(
+            udid,
+            bundle_id = %bundle_id,
+            generation,
+            ?kind,
+            "android interaction session started with a foreground proof"
+        );
+        Ok(Box::new(session))
+    }
+
+    /// Delegate, so the target is not launched twice.
+    ///
+    /// The trait default calls `launch_app` and *then* `start_interaction_session`,
+    /// which on Android would `monkey` TikTok twice — an extra round trip and a
+    /// redundant resume. `start_interaction_session` already foregrounds and proves
+    /// it. iOS overrides this for the same reason.
+    async fn foreground_target_app_and_start_interaction_session(
+        &self,
+        udid: &str,
+        bundle_id: &str,
+        kind: riviu_core::InteractionSessionKind,
+    ) -> anyhow::Result<Box<dyn UiSession>> {
+        self.start_interaction_session(udid, bundle_id, kind).await
+    }
+
+    /// Start the interaction stream at the handoff generation, proving a frame.
+    ///
+    /// `first_frame_observed` is literally what the reader proved — a JPEG that
+    /// decoded and was accepted by the sink at this generation. There is no path
+    /// that sets it to a constant, and a timeout is an error rather than a `false`.
+    async fn start_stream_after_session(
+        &self,
+        udid: &str,
+    ) -> anyhow::Result<riviu_core::StreamStartProof> {
+        let sink = self.sink()?;
+        let claim = self.claim_start(udid)?;
+        if self.streams.lock().await.contains_key(udid) {
+            anyhow::bail!(
+                "interaction stream for {udid} requires the old producer to be stopped first"
+            );
+        }
+        let generation = sink.generation(udid);
+        // Catches a drift between the handoff and now, here, with a message naming
+        // the step — rather than letting core report an opaque StopProofMismatch.
+        let reservation = self.interaction.reserve_stream(udid, generation)?;
+
+        let started = self
+            .spawn_producer(
+                udid,
+                reservation.generation(),
+                StreamReadiness::DecodedFrame,
+            )
+            .await;
+        drop(claim);
+        let first_frame_observed = started?;
+        self.interaction.complete_stream(&reservation)?;
+        Ok(riviu_core::StreamStartProof {
+            generation: reservation.generation(),
+            first_frame_observed,
+            stream_url: format!("auto-stream://{udid}"),
+        })
+    }
+
+    /// Destructive stop: the producer dies and the tile's cached frame goes with it.
+    async fn stop_owned_stream(
+        &self,
+        udid: &str,
+    ) -> anyhow::Result<riviu_core::stream_budget::StreamStopProof> {
+        self.teardown_stream(udid, false).await
+    }
+
+    /// Bounded stop: the producer dies but the tile keeps its last image.
+    ///
+    /// This is the path the desktop sampler takes every time it finishes a
+    /// background sample. Before it existed the Android tile ended every turn in
+    /// `TileStreamState::Error`, because the trait default refused.
+    async fn park_owned_stream(
+        &self,
+        udid: &str,
+    ) -> anyhow::Result<riviu_core::stream_budget::StreamStopProof> {
+        self.teardown_stream(udid, true).await
+    }
+
+    /// Forget any lifecycle reservation for this device.
+    ///
+    /// Called by the plane's cleanup when a ticket is abandoned, and synchronous for
+    /// that reason.
+    fn invalidate_ui_session(&self, udid: &str) {
+        self.interaction.clear(udid);
+    }
+
+    /// The operator's tile feed, started best-effort.
+    ///
+    /// Deliberately does **not** require a first frame, unlike the interaction
+    /// handoff. minicap publishes only when the display changes, so a phone
+    /// sitting on a static screen legitimately produces nothing — and the desktop
+    /// sampler already has its own freshness watchdog and a `Stale` label for
+    /// that. Demanding a frame here would report a working phone as broken.
+    async fn ensure_stream(&self, udid: &str) -> anyhow::Result<String> {
+        self.ensure_minicap_locked(udid).await?;
+        // The scheme is a marker, not a fetchable URL: readers take frames from
+        // the hub. Same shape the iOS path returns so the tile treats both alike.
+        Ok(format!("auto-stream://{udid}"))
     }
 
     async fn prepare_device(&self, udid: &str) -> anyhow::Result<()> {
@@ -519,24 +1480,305 @@ pub fn create_driver(config: &AndroidDriverConfig) -> anyhow::Result<Arc<dyn Dev
 /// with no Android tooling should not carry a permanently degraded Android
 /// backend in every fleet listing; the honest report is that there is no
 /// backend, and why.
-pub async fn detect_driver(config: &AndroidDriverConfig) -> Result<Arc<dyn DeviceDriver>, String> {
-    let driver = AndroidDriver::new(config).map_err(|error| error.to_string())?;
-    driver
-        .adb
-        .run(&["version"], Duration::from_secs(10))
-        .await
-        .map_err(|error| {
-            format!(
-                "adb is not usable ({}): {error}",
-                driver.adb.path().display()
-            )
-        })?;
-    Ok(Arc::new(driver))
+///
+/// Returns the concrete driver rather than `Arc<dyn DeviceDriver>` so the caller
+/// can still hand it a frame sink; it coerces to the trait object at the point it
+/// is put in a fleet.
+///
+/// Every candidate in [`AdbProgram::candidates`] is tried in order and the first one
+/// that answers `adb version` wins. It used to resolve a single path and probe only
+/// that, which had a real bug in it: `resolve` picks the first candidate that merely
+/// **exists**, so a stale `ANDROID_HOME` pointing at a deleted SDK — or, once we ship
+/// one, any earlier entry that happens to be broken — made this report that Android
+/// was unavailable on a machine with a perfectly good adb one position further down.
+/// Trying each is also what makes the bundled copy reachable at all, since it sits
+/// last on purpose.
+pub async fn detect_driver(config: &AndroidDriverConfig) -> Result<Arc<AndroidDriver>, String> {
+    let candidates = AdbProgram::candidates(
+        config.adb_path.as_deref(),
+        config.bundled_adb_path.as_deref(),
+    );
+    let mut refusals: Vec<String> = Vec::new();
+    for candidate in candidates {
+        let adb = AdbProgram::at(candidate.path.clone());
+        match adb.run(&["version"], Duration::from_secs(10)).await {
+            Ok(_) => return Ok(Arc::new(AndroidDriver::with_adb(adb, config))),
+            Err(error) => refusals.push(format!(
+                "{} ({}): {error}",
+                candidate.path.display(),
+                candidate.origin.label()
+            )),
+        }
+    }
+    // Every candidate named, with where it came from. The operator needs to see that
+    // their `RIVIU_ADB_PATH` was read and rejected, not wonder whether it was read.
+    Err(format!(
+        "không có adb nào chạy được. Đã thử: {}",
+        refusals.join("; ")
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// A `FrameSink` that counts which advance was used.
+    ///
+    /// The counters are the point: the difference between stop and park is not
+    /// visible in the returned generation, only in whether the cached frame
+    /// survived, so the test has to observe the call itself.
+    #[derive(Default)]
+    struct TestSink {
+        generations: Mutex<HashMap<String, u64>>,
+        cleared: AtomicU64,
+        parked: AtomicU64,
+    }
+
+    impl TestSink {
+        fn advance(&self, udid: &str) -> u64 {
+            let mut generations = self.generations.lock();
+            let entry = generations.entry(udid.to_string()).or_insert(0);
+            *entry += 1;
+            *entry
+        }
+    }
+
+    impl riviu_core::FrameSink for TestSink {
+        fn generation(&self, udid: &str) -> u64 {
+            self.generations.lock().get(udid).copied().unwrap_or(0)
+        }
+
+        fn clear_and_advance(&self, udid: &str) -> u64 {
+            self.cleared.fetch_add(1, Ordering::Relaxed);
+            self.advance(udid)
+        }
+
+        fn park_and_advance(&self, udid: &str) -> u64 {
+            self.parked.fetch_add(1, Ordering::Relaxed);
+            self.advance(udid)
+        }
+
+        fn publish_if_current(&self, _udid: &str, _generation: u64, _jpeg: Vec<u8>) -> bool {
+            true
+        }
+    }
+
+    /// A driver whose adb path does not exist.
+    ///
+    /// Used to prove *ordering*: if a method returns an error on such a driver, it
+    /// refused before attempting any adb call.
+    fn driver_with_unrunnable_adb() -> AndroidDriver {
+        let mut driver = AndroidDriver::new(&AndroidDriverConfig::default()).expect("driver");
+        driver.adb = AdbProgram::unrunnable_for_test(PathBuf::from(
+            "C:/riviu-nonexistent/definitely-not-adb.exe",
+        ));
+        driver
+    }
+
+    fn wired(sink: &Arc<TestSink>) -> AndroidDriver {
+        let driver = driver_with_unrunnable_adb();
+        driver.set_frame_sink(Arc::clone(sink) as Arc<dyn riviu_core::FrameSink>);
+        driver
+    }
+
+    #[tokio::test]
+    async fn stop_with_no_producer_still_confirms_the_stop() {
+        // The trap: the control plane's `confirms_stop` needs
+        // `child_stopped && new > old`, and `clean_ticket` quarantines the whole
+        // lease when it does not hold. Reporting `false` for "there was nothing to
+        // stop" would quarantine every teardown after a failed stream start.
+        let sink = Arc::new(TestSink::default());
+        let driver = wired(&sink);
+
+        let proof = driver.stop_owned_stream("fixture").await.expect("stop");
+
+        assert!(
+            proof.child_stopped,
+            "an absent producer is a stopped producer"
+        );
+        assert_eq!((proof.old_generation, proof.new_generation), (0, 1));
+        assert!(proof.child_stopped && proof.new_generation > proof.old_generation);
+    }
+
+    #[tokio::test]
+    async fn two_stops_advance_one_generation_each() {
+        let sink = Arc::new(TestSink::default());
+        let driver = wired(&sink);
+
+        let first = driver.stop_owned_stream("fixture").await.expect("stop");
+        let second = driver.stop_owned_stream("fixture").await.expect("stop");
+
+        assert_eq!((first.old_generation, first.new_generation), (0, 1));
+        assert_eq!((second.old_generation, second.new_generation), (1, 2));
+    }
+
+    #[tokio::test]
+    async fn confirm_reads_the_generation_and_never_advances_it() {
+        // AGENTS.md is explicit that the handoff read must not stop a process or
+        // bump a generation. Without this the equality the plane checks would hold
+        // only by luck.
+        let sink = Arc::new(TestSink::default());
+        let driver = wired(&sink);
+
+        let first = driver
+            .confirm_interaction_stream_stopped("fixture")
+            .await
+            .expect("handoff");
+        let second = driver
+            .confirm_interaction_stream_stopped("fixture")
+            .await
+            .expect("a repeated handoff is idempotent");
+
+        assert_eq!(first.generation, second.generation);
+        assert_eq!(sink.cleared.load(Ordering::Relaxed), 0);
+        assert_eq!(sink.parked.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn confirm_after_stop_matches_the_stop_proof() {
+        // This is the equality `start_reserved_stream` enforces.
+        let sink = Arc::new(TestSink::default());
+        let driver = wired(&sink);
+
+        let stop = driver.stop_owned_stream("fixture").await.expect("stop");
+        let handoff = driver
+            .confirm_interaction_stream_stopped("fixture")
+            .await
+            .expect("handoff");
+
+        assert_eq!(handoff.generation, stop.new_generation);
+    }
+
+    #[tokio::test]
+    async fn park_keeps_the_last_frame_and_still_advances() {
+        let sink = Arc::new(TestSink::default());
+        let driver = wired(&sink);
+
+        let proof = driver.park_owned_stream("fixture").await.expect("park");
+
+        assert!(proof.new_generation > proof.old_generation);
+        assert_eq!(sink.parked.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            sink.cleared.load(Ordering::Relaxed),
+            0,
+            "park must not clear the tile's cached frame"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_stream_without_a_confirm_is_refused_before_any_adb_call() {
+        // The driver's adb path does not exist, so reaching adb would surface a
+        // spawn error instead of this message.
+        let sink = Arc::new(TestSink::default());
+        let driver = wired(&sink);
+
+        let error = driver
+            .start_stream_after_session("fixture")
+            .await
+            .expect_err("no session reservation");
+
+        assert!(error.to_string().contains("session reservation"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn the_handoff_and_the_start_refuse_when_no_frame_sink_is_wired() {
+        // A harness that forgot `set_frame_sink` must be told so, not handed a
+        // fabricated generation from some driver-local counter.
+        let driver = driver_with_unrunnable_adb();
+
+        for message in [
+            driver
+                .confirm_interaction_stream_stopped("fixture")
+                .await
+                .expect_err("no sink")
+                .to_string(),
+            driver
+                .start_stream_after_session("fixture")
+                .await
+                .expect_err("no sink")
+                .to_string(),
+            driver
+                .stop_owned_stream("fixture")
+                .await
+                .expect_err("no sink")
+                .to_string(),
+            driver
+                .park_owned_stream("fixture")
+                .await
+                .expect_err("no sink")
+                .to_string(),
+        ] {
+            assert!(message.contains("frame sink"), "{message}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_start_claim_blocks_a_second_start_and_is_released_on_drop() {
+        let driver = driver_with_unrunnable_adb();
+
+        let claim = driver.claim_start("fixture").expect("first claim");
+        assert!(driver.claim_start("fixture").is_err());
+        // A different serial is unaffected — the claim is per device, not a fleet
+        // lock, which is the whole point of replacing the shared map lock.
+        let other = driver.claim_start("other").expect("a different serial");
+        drop(other);
+        drop(claim);
+        driver.claim_start("fixture").expect("released on drop");
+    }
+
+    #[tokio::test]
+    async fn a_handoff_is_refused_while_a_start_is_in_flight() {
+        // A producer being born would publish into the generation the handoff is
+        // about to hand out.
+        let sink = Arc::new(TestSink::default());
+        let driver = wired(&sink);
+        let _claim = driver.claim_start("fixture").expect("claim");
+
+        let error = driver
+            .confirm_interaction_stream_stopped("fixture")
+            .await
+            .expect_err("a start is in flight");
+
+        assert!(error.to_string().contains("in flight"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn an_interaction_session_refuses_an_invalid_package_before_touching_the_phone() {
+        let sink = Arc::new(TestSink::default());
+        let driver = wired(&sink);
+
+        let error = driver
+            .start_interaction_session(
+                "fixture",
+                "com.x; rm -rf /sdcard/DCIM",
+                riviu_core::InteractionSessionKind::Ordinary,
+            )
+            .await
+            .err()
+            .expect("a package name that is really a shell command must be refused");
+
+        assert!(error.to_string().contains("package name"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn an_interaction_session_requires_the_handoff_first() {
+        let sink = Arc::new(TestSink::default());
+        let driver = wired(&sink);
+
+        let error = driver
+            .start_interaction_session(
+                "fixture",
+                "com.ss.android.ugc.trill",
+                riviu_core::InteractionSessionKind::Ordinary,
+            )
+            .await
+            .err()
+            .expect("a session without a recorded handoff must be refused");
+
+        assert!(error.to_string().contains("stop_owned_stream"), "{error}");
+    }
 
     #[test]
     fn each_device_gets_its_own_forwarded_port() {

@@ -20,8 +20,8 @@ use riviu_core::{
 use tokio::sync::{oneshot, RwLock};
 use tokio::task::JoinHandle;
 
-use crate::interaction_runtime::InteractionLifecycleRegistry;
 use crate::stream::{encode_rgb_jpeg, StreamHub};
+use riviu_core::InteractionLifecycleRegistry;
 
 struct MockStreamProducer {
     generation: u64,
@@ -91,7 +91,8 @@ impl MockIosDriver {
                 udid: "MOCK-IPHONE-01".into(),
                 name: "iPhone Mock 01".into(),
                 model: "iPhone10,1".into(),
-                ios_version: "16.7.15".into(),
+                platform: riviu_core::DevicePlatform::Ios,
+                os_version: "16.7.15".into(),
                 connection: ConnectionKind::Mock,
                 status: DeviceStatus::Ready,
                 battery: Some(86),
@@ -105,7 +106,8 @@ impl MockIosDriver {
                 udid: "MOCK-IPHONE-02".into(),
                 name: "iPhone Mock 02".into(),
                 model: "iPhone15,2".into(),
-                ios_version: "18.2".into(),
+                platform: riviu_core::DevicePlatform::Ios,
+                os_version: "18.2".into(),
                 connection: ConnectionKind::Mock,
                 status: DeviceStatus::Ready,
                 battery: Some(62),
@@ -119,7 +121,8 @@ impl MockIosDriver {
                 udid: "MOCK-IPHONE-03".into(),
                 name: "iPhone Mock 03".into(),
                 model: "iPhone13,2".into(),
-                ios_version: "16.7".into(),
+                platform: riviu_core::DevicePlatform::Ios,
+                os_version: "16.7".into(),
                 connection: ConnectionKind::Mock,
                 status: DeviceStatus::Preparing,
                 battery: Some(41),
@@ -321,7 +324,7 @@ impl MockIosDriver {
     }
 
     fn interaction_snapshot(udid: &str) -> anyhow::Result<DeviceCapabilitySnapshot> {
-        let (product_type, ios_version, target_version, target_build, geometry) = match udid {
+        let (product_type, os_version, target_version, target_build, geometry) = match udid {
             "MOCK-IPHONE-01" => (
                 "iPhone10,1",
                 "16.7.15",
@@ -358,7 +361,7 @@ impl MockIosDriver {
             driver_adapter_version: "interaction-v1".into(),
             transport: ActiveTransport::Mock,
             product_type: product_type.into(),
-            ios_version: ios_version.into(),
+            os_version: os_version.into(),
             target_app: InstalledTargetIdentity {
                 bundle_id: "com.ss.iphone.ugc.Ame".into(),
                 version: target_version.into(),
@@ -1152,9 +1155,9 @@ mod tests {
             .expect("listed fixture");
 
         assert_eq!(qualified.product_type, "iPhone10,1");
-        assert_eq!(qualified.ios_version, "16.7.15");
+        assert_eq!(qualified.os_version, "16.7.15");
         assert_eq!(listed.model, qualified.product_type);
-        assert_eq!(listed.ios_version, qualified.ios_version);
+        assert_eq!(listed.os_version, qualified.os_version);
         assert_eq!(qualified.transport, ActiveTransport::Mock);
         assert_eq!(
             qualified.geometry.as_ref().map(|value| (
@@ -1166,7 +1169,7 @@ mod tests {
             Some((375.0, 667.0, 750, 1334))
         );
         assert_eq!(newer.product_type, "iPhone15,2");
-        assert_eq!(newer.ios_version, "18.2");
+        assert_eq!(newer.os_version, "18.2");
         assert_eq!(newer.geometry, None);
         let mock_frame = render_mock_frame("iPhone Mock 01", 0, 0).expect("mock JPEG");
         let decoded = image::load_from_memory(&mock_frame).expect("decode mock JPEG");

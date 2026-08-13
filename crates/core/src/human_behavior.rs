@@ -73,6 +73,44 @@ impl HumanBehavior {
         }
     }
 
+    /// Pick up the three rhythm switches an operator can flip while a session runs.
+    ///
+    /// Assignment rather than a rebuild, and that is the whole point: `session_start`
+    /// is what fatigue is measured from, and `action_count` / `pause_after_swipes`
+    /// are where the session is in its own arc. `HumanBehavior::new` would reset all
+    /// of them, so re-enabling fatigue two hours in would restart its clock at zero
+    /// and the run would act freshly rested — the opposite of what was asked for.
+    ///
+    /// `persona` is deliberately absent: it seeds the behaviour model itself, so it
+    /// stays on the restart-required list in
+    /// [`NurtureSettings::absorb_live_changes`](crate::types::NurtureSettings::absorb_live_changes).
+    pub fn retune(&mut self, fatigue: bool, tod: bool, pause_swipe: bool) {
+        self.fatigue_enabled = fatigue;
+        self.tod_enabled = tod;
+        self.pause_swipe = pause_swipe;
+    }
+
+    /// Read the three switches back.
+    ///
+    /// Test-only, and deliberately not public API: the switches are inputs, and code that
+    /// wanted to branch on them would be second-guessing this type. They exist so
+    /// `nurture::live` can assert that a saved change actually arrived here, which is the
+    /// half of live tuning that was broken while looking correct.
+    #[cfg(test)]
+    pub(crate) fn fatigue_is_on(&self) -> bool {
+        self.fatigue_enabled
+    }
+
+    #[cfg(test)]
+    pub(crate) fn time_of_day_is_on(&self) -> bool {
+        self.tod_enabled
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_swipe_is_on(&self) -> bool {
+        self.pause_swipe
+    }
+
     pub fn note_action(&mut self) {
         self.action_count += 1;
         if self.action_count >= self.next_transition_at {
@@ -121,43 +159,43 @@ impl HumanBehavior {
         };
     }
 
+    /// How long to sit on one post.
+    ///
+    /// **Two things here were the same mistake the tap points made**, and both showed up in
+    /// a real log as a pattern rather than as a person:
+    ///
+    /// * It forced consecutive dwells apart — `min_delta` of 15 % of the window, so two
+    ///   posts in a row could not be watched for a similar length. A live run with a 3–5 s
+    ///   window produced `2,5 · 3,6 · 2,8 · 3,2 · 2,7 · 2,3 · 2,9 · 2,0` — alternating, never
+    ///   close twice. People watch two clips for the same length all the time.
+    /// * The draw was three disjoint uniform bands (20 % low, 10 % high, 70 % middle), so
+    ///   the shape had hard edges at the band boundaries and was flat inside each.
+    ///
+    /// Now it is one continuous draw, skewed to the short end, which is the shape watch time
+    /// actually has: most posts get a glance, a few hold attention. Repeats are allowed
+    /// because they happen.
+    ///
+    /// `persona` moves the skew rather than switching between bands — one dial instead of
+    /// three hard-coded ranges, and `bored` / `curious` still mean what they meant.
     pub fn watch_seconds(&mut self, watch_min: f64, watch_max: f64) -> f64 {
         let mut rng = rand::thread_rng();
         let span = (watch_max - watch_min).max(0.5);
-        let base = match self.persona.as_str() {
-            "bored" => watch_min + span * rng.gen_range(0.05..0.60),
-            "curious" => watch_min + span * rng.gen_range(0.60..1.0),
-            _ => {
-                let roll = rng.gen_range(0.0..1.0);
-                if roll < 0.2 {
-                    watch_min + span * rng.gen_range(0.05..0.25)
-                } else if roll < 0.3 {
-                    watch_min + span * rng.gen_range(0.80..1.0)
-                } else {
-                    watch_min + span * rng.gen_range(0.15..0.70)
-                }
-            }
+        // Above 1 pulls mass toward the short end, below 1 toward the long end.
+        let skew = match self.persona.as_str() {
+            "bored" => 2.6,
+            "curious" => 0.6,
+            _ => 1.7,
         };
-        let mut secs = base * self.state.watch_mult();
+        let unit = rng.gen_range(0.0..1.0_f64).powf(skew);
+        let mut secs = (watch_min + span * unit) * self.state.watch_mult();
         if self.fatigue_enabled {
             secs *= self.fatigue_mult();
         }
         if self.tod_enabled {
             secs *= self.tod_mult();
         }
-        let jitter = span * 0.03;
-        secs += rng.gen_range(-jitter..jitter);
-        secs = secs.clamp(watch_min, watch_max);
-        let min_delta = (span * 0.15).min(1.5);
-        if (secs - self.last_watch).abs() < min_delta && span > min_delta {
-            secs = if secs > self.last_watch {
-                (secs + min_delta).min(watch_max)
-            } else {
-                (secs - min_delta).max(watch_min)
-            };
-        }
-        self.last_watch = secs;
-        secs
+        self.last_watch = secs.clamp(watch_min, watch_max);
+        self.last_watch
     }
 
     fn fatigue_mult(&self) -> f64 {
@@ -210,27 +248,39 @@ impl HumanBehavior {
     /// Sample a swipe duration from a human-looking mixture. Fast swipes are
     /// rare, ordinary swipes dominate, and distracted/fatigued moments create
     /// occasional slow drags. `frenzy` is the explicit rare fast-scroll mode.
+    /// How long one feed flick takes.
+    ///
+    /// **The old version left a hole in the distribution.** It picked one of three disjoint
+    /// ranges — 190–280, 300–520, 520–820 — so no swipe ever lasted 281–299 ms. A histogram
+    /// with a gap in it is a stronger signal than any single value, and nothing about a
+    /// finger produces one.
+    ///
+    /// One continuous range now, skewed short, which keeps the old shape's intent — most
+    /// flicks brisk, some slow and deliberate — without the seams.
     pub fn swipe_duration_ms(&mut self, frenzy: bool) -> u64 {
         let mut rng = rand::thread_rng();
-        if frenzy {
-            return rng.gen_range(150..=240);
-        }
-        match rng.gen_range(0..100) {
-            0..=6 => rng.gen_range(190..=280),
-            7..=27 => rng.gen_range(520..=820),
-            _ => rng.gen_range(300..=520),
-        }
+        let (low, high, skew) = if frenzy {
+            // The bounds are the ones that were already here — 150–240 — because nothing
+            // measured says otherwise and the fault being fixed was the *hole* in the
+            // non-frenzy range, not its edges. `mood_tests::swipe_duration_profile_stays_
+            // inside_human_bounds` pins them, and it is right to.
+            (150.0, 240.0, 1.3)
+        } else {
+            (190.0, 820.0, 1.8)
+        };
+        let unit = rng.gen_range(0.0..1.0_f64).powf(skew);
+        (low + (high - low) * unit).round() as u64
     }
 
-    /// Photo carousels use a horizontal drag, usually slower than a feed
-    /// swipe while a person reads the image, with occasional brisk changes.
+    /// Photo carousels use a horizontal drag, usually slower than a feed swipe while a
+    /// person reads the image, with occasional brisk changes.
+    ///
+    /// Skewed the other way — below 1 — because this one leans *long*: the reason to drag a
+    /// carousel slowly is that there is something to look at.
     pub fn photo_swipe_duration_ms(&mut self) -> u64 {
         let mut rng = rand::thread_rng();
-        if rng.gen_ratio(1, 8) {
-            rng.gen_range(280..=420)
-        } else {
-            rng.gen_range(420..=760)
-        }
+        let unit = rng.gen_range(0.0..1.0_f64).powf(0.7);
+        (280.0 + 480.0 * unit).round() as u64
     }
 
     pub fn reset_swipe_streak(&mut self) {
@@ -324,6 +374,20 @@ pub enum Mood {
     Liking,
     /// Invested in a topic: long watches, comments, likes.
     Chatty,
+    /// No mood at all: every multiplier is 1.0, so the configured probability applies to
+    /// every post and the configured watch window is the real window.
+    ///
+    /// This is what `human_limits = false` runs, and it exists because the mood cycle was
+    /// the **third** layer quietly overriding the panel. `Skimming::like_mult()` is
+    /// `0.0` — not reduced, off — and Skimming is about 60 % of videos, so a session that
+    /// happened to stay in it liked nothing at all at any setting. Measured on 12/08/2026:
+    /// a twelve-video run with `like_prob = 100` reported `tim 0/0`, every post logged
+    /// `(lướt)`.
+    ///
+    /// The per-mood multipliers are still right for what they are for — they average to 1.0
+    /// across a long session, which keeps the *setting* honest over an hour. They are simply
+    /// not what an operator asking for "100 % means every post" is asking for.
+    Neutral,
 }
 
 impl Mood {
@@ -338,6 +402,7 @@ impl Mood {
     /// `mood_multipliers_average_near_one_over_a_long_session`.
     fn like_mult(self) -> f64 {
         match self {
+            Mood::Neutral => 1.0,
             Mood::Skimming => 0.0,
             Mood::Liking => 2.82,
             Mood::Chatty => 1.54,
@@ -346,6 +411,7 @@ impl Mood {
 
     fn comment_mult(self) -> f64 {
         match self {
+            Mood::Neutral => 1.0,
             Mood::Skimming => 0.0,
             Mood::Liking => 1.18,
             Mood::Chatty => 7.07,
@@ -354,6 +420,7 @@ impl Mood {
 
     fn follow_mult(self) -> f64 {
         match self {
+            Mood::Neutral => 1.0,
             Mood::Skimming => 0.0,
             Mood::Liking => 2.60,
             Mood::Chatty => 2.28,
@@ -363,6 +430,7 @@ impl Mood {
     /// Watch-length multiplier — skimming is quick, chatty lingers.
     pub fn watch_mult(self) -> f64 {
         match self {
+            Mood::Neutral => 1.0,
             Mood::Skimming => 0.55,
             Mood::Liking => 1.0,
             Mood::Chatty => 1.45,
@@ -374,6 +442,7 @@ impl Mood {
             Mood::Skimming => "lướt",
             Mood::Liking => "xem kỹ",
             Mood::Chatty => "tương tác",
+            Mood::Neutral => "theo đúng tỉ lệ đặt",
         }
     }
 }
@@ -407,6 +476,32 @@ impl MoodCycle {
         };
         c.roll();
         c
+    }
+
+    /// A cycle that never varies anything: [`Mood::Neutral`] forever.
+    ///
+    /// What `human_limits = false` uses, so the configured probabilities and watch window
+    /// apply to every post rather than to a session average.
+    pub fn neutral() -> Self {
+        Self::fixed(Mood::Neutral)
+    }
+
+    /// Switch between the varying cycle and [`Self::neutral`] mid-session.
+    ///
+    /// Needed because the pacing switch is live-tunable: an operator who turns it off while
+    /// a run is going has to get the plain probabilities from the next post, not the next
+    /// run — the same rule every other live switch follows.
+    pub fn retune(&mut self, limits: bool) {
+        match (limits, self.current) {
+            // Leaving full control: start varying again from a fresh run.
+            (true, Mood::Neutral) => {
+                self.remaining = 0;
+                self.roll();
+            }
+            // Entering full control: stop varying immediately.
+            (false, _) => *self = Self::neutral(),
+            _ => {}
+        }
     }
 
     /// The mood for this video, advancing the cycle. Returns `(mood, changed)`
@@ -468,6 +563,15 @@ pub enum PolicyAction {
     Follow,
 }
 
+/// The gap left between two actions when the human pacing is switched off.
+///
+/// Not zero, and not a policy either — it is a **settle**. Every action here proves itself
+/// by reading the screen back (a like by its label flipping, a comment by the Send button
+/// disarming), and firing the next gesture into a screen that is still animating is how a
+/// tap lands on whatever slides under it. 800 ms is below anything a human-pacing argument
+/// would ask for and above the frame or two a transition needs.
+const UNPACED_ACTION_GAP: Duration = Duration::from_millis(800);
+
 #[derive(Debug, Clone)]
 pub struct HumanSessionPolicy {
     like_cap: u32,
@@ -481,11 +585,32 @@ pub struct HumanSessionPolicy {
     block_started: Instant,
     block_length: Duration,
     cold_restart_used: bool,
+    /// Whether this type is allowed to override the operator at all.
+    ///
+    /// `false` is **full control**: every ceiling, every enforced gap and every imposed
+    /// rest below stops applying, and the configured probabilities become exactly what
+    /// happens. That is the shipped default, by an explicit operator decision on
+    /// 12/08/2026 — see [`Self::new`].
+    limits: bool,
     rng: StdRng,
 }
 
 impl HumanSessionPolicy {
-    pub fn new(like_prob: u32, comment_prob: u32, follow_prob: u32) -> Self {
+    /// `limits` decides whether anything in this type is allowed to bind.
+    ///
+    /// **What it holds back, measured against what an operator sets:** a per-hour ceiling
+    /// of 8–16 likes / 1–3 comments / 1–2 follows; a rule that at most **two of the last
+    /// five** cards may be interacted with at all; a **12–35 s** wait after every action;
+    /// a 15–90 s rest every 7–13 videos; and 20–45 minute block breaks. Together those
+    /// meant that "Thích 100%" produced likes on well under half the posts — the ceiling
+    /// and the two-of-five rule bound long before the probability did, which is exactly
+    /// the surprise that led to this parameter existing.
+    ///
+    /// `false` — the default — makes the configured numbers the real numbers. The cost is
+    /// real and belongs on the record: this pacing is what makes a session look like a
+    /// person, so a run without it is faster, denser and more distinguishable. The
+    /// operator asked for the numbers to mean what they say and owns that trade.
+    pub fn new(like_prob: u32, comment_prob: u32, follow_prob: u32, limits: bool) -> Self {
         let seed = rand::thread_rng().gen::<u64>();
         let mut rng = StdRng::seed_from_u64(seed);
         let cap = |prob: u32, low: u32, high: u32, rng: &mut StdRng| {
@@ -508,7 +633,47 @@ impl HumanSessionPolicy {
             block_started: Instant::now(),
             block_length: Duration::from_secs(rng.gen_range(20..=45) * 60),
             cold_restart_used: false,
+            limits,
             rng,
+        }
+    }
+
+    /// Re-open a per-hour ceiling that was closed because the feature was off when the
+    /// session started.
+    ///
+    /// The ceilings themselves stay out of the operator's hands — that is this type's
+    /// stated design, and a run whose ceiling could be raised mid-session would not be
+    /// human-paced any more. What this fixes is narrower and was a real dead end: a cap
+    /// is `0` when its probability was `0` at construction, and `can_attempt` reads `0`
+    /// as *never*. So switching a feature on while a session ran left it switched on
+    /// everywhere in the UI and still unable to fire, forever, with no message saying so.
+    ///
+    /// Hence only the transitions are acted on. A cap that is already open keeps the
+    /// number it was given, so this is safe to call once per post: re-rolling the ceiling
+    /// every post would make "at most 8–16 an hour" mean nothing.
+    pub fn retune(&mut self, like_prob: u32, comment_prob: u32, follow_prob: u32, limits: bool) {
+        self.limits = limits;
+        Self::retune_cap(&mut self.like_cap, like_prob, 8, 16, &mut self.rng);
+        Self::retune_cap(&mut self.comment_cap, comment_prob, 1, 3, &mut self.rng);
+        Self::retune_cap(&mut self.follow_cap, follow_prob, 1, 2, &mut self.rng);
+    }
+
+    /// The like ceiling as it stands. Test-only: it exists to prove that calling
+    /// [`Self::retune`] once per post leaves an already-open ceiling alone.
+    #[cfg(test)]
+    pub(crate) fn like_ceiling(&self) -> u32 {
+        self.like_cap
+    }
+
+    fn retune_cap(cap: &mut u32, prob: u32, low: u32, high: u32, rng: &mut StdRng) {
+        match (prob, *cap) {
+            // Switched off: shut the ceiling, so the change takes effect on this post
+            // rather than only on the probability roll.
+            (0, _) => *cap = 0,
+            // Switched on after starting off: it has no ceiling yet, give it one.
+            (_, 0) => *cap = rng.gen_range(low..=high),
+            // Already open. Leave it exactly as it was.
+            _ => {}
         }
     }
 
@@ -522,6 +687,9 @@ impl HumanSessionPolicy {
     }
 
     pub fn can_interact_with_post(&self) -> bool {
+        if !self.limits {
+            return true;
+        }
         self.recent_posts.iter().filter(|&&used| used).count() < 2
     }
 
@@ -543,6 +711,9 @@ impl HumanSessionPolicy {
     }
 
     pub fn can_attempt(&mut self, action: PolicyAction) -> bool {
+        if !self.limits {
+            return true;
+        }
         let now = Instant::now();
         self.prune(now);
         let cap = match action {
@@ -572,10 +743,16 @@ impl HumanSessionPolicy {
     /// Return the next gap after the previous action. The selected range is
     /// intentionally broad enough to avoid a metronomic cadence.
     pub fn min_action_gap(&mut self) -> Duration {
+        if !self.limits {
+            return UNPACED_ACTION_GAP;
+        }
         Duration::from_secs(self.rng.gen_range(12..=35))
     }
 
     pub fn rest_after_video(&mut self) -> Option<Duration> {
+        if !self.limits {
+            return None;
+        }
         self.videos_since_break = self.videos_since_break.saturating_add(1);
         if self.videos_since_break < self.next_rest_at {
             return None;
@@ -586,7 +763,7 @@ impl HumanSessionPolicy {
     }
 
     pub fn should_take_home_break(&mut self) -> bool {
-        self.rng.gen_ratio(1, 18)
+        self.limits && self.rng.gen_ratio(1, 18)
     }
 
     pub fn should_enter_live(&mut self) -> bool {
@@ -594,7 +771,7 @@ impl HumanSessionPolicy {
     }
 
     pub fn should_take_block_break(&self) -> bool {
-        self.block_started.elapsed() >= self.block_length
+        self.limits && self.block_started.elapsed() >= self.block_length
     }
 
     pub fn reset_block(&mut self) {
@@ -607,7 +784,7 @@ impl HumanSessionPolicy {
     }
 
     pub fn should_cold_restart(&mut self) -> bool {
-        if self.cold_restart_used {
+        if !self.limits || self.cold_restart_used {
             return false;
         }
         let selected = self.rng.gen_ratio(1, 240);
@@ -718,7 +895,7 @@ mod mood_tests {
 
     #[test]
     fn internal_policy_caps_attempts_and_post_bursts() {
-        let mut policy = HumanSessionPolicy::new(100, 100, 100);
+        let mut policy = HumanSessionPolicy::new(100, 100, 100, true);
         policy.begin_post();
         assert!(policy.can_attempt(PolicyAction::Like));
         policy.record_attempt(PolicyAction::Like);
@@ -733,7 +910,7 @@ mod mood_tests {
 
     #[test]
     fn policy_does_not_schedule_actions_that_are_disabled() {
-        let mut policy = HumanSessionPolicy::new(0, 0, 0);
+        let mut policy = HumanSessionPolicy::new(0, 0, 0, true);
         assert!(!policy.can_attempt(PolicyAction::Like));
         assert!(!policy.can_attempt(PolicyAction::Comment));
         assert!(!policy.can_attempt(PolicyAction::Follow));
@@ -751,7 +928,7 @@ mod mood_tests {
 
     #[test]
     fn policy_rest_threshold_stays_between_seven_and_thirteen_videos() {
-        let mut policy = HumanSessionPolicy::new(0, 0, 0);
+        let mut policy = HumanSessionPolicy::new(0, 0, 0, true);
         let mut since_rest = 0;
         let mut rests = 0;
         for _ in 0..200 {

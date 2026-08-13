@@ -452,7 +452,7 @@ mod tests {
             driver_adapter_version: "interaction-v1".into(),
             transport: ActiveTransport::LegacyUsbmuxTransport,
             product_type: "iPhone10,1".into(),
-            ios_version: "16.7.15".into(),
+            os_version: "16.7.15".into(),
             target_app: InstalledTargetIdentity {
                 bundle_id: "com.ss.iphone.ugc.Ame".into(),
                 version: "fixture-version".into(),

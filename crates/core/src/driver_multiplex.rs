@@ -301,6 +301,15 @@ impl DeviceDriver for MultiplexDriver {
             .is_some_and(|driver| driver.supports_verified_app_termination(udid))
     }
 
+    fn reports_element_bounds(&self, udid: &str) -> bool {
+        self.try_route(udid)
+            .is_some_and(|driver| driver.reports_element_bounds(udid))
+    }
+
+    async fn resolve_tiktok_package(&self, udid: &str) -> anyhow::Result<String> {
+        self.route(udid)?.resolve_tiktok_package(udid).await
+    }
+
     fn supports_push_media(&self, udid: &str) -> bool {
         self.try_route(udid)
             .is_some_and(|driver| driver.supports_push_media(udid))
@@ -483,7 +492,8 @@ mod tests {
             udid: udid.to_string(),
             name: udid.to_string(),
             model: String::new(),
-            ios_version: String::new(),
+            platform: crate::DevicePlatform::Ios,
+            os_version: String::new(),
             connection: ConnectionKind::Usb,
             status: DeviceStatus::Connected,
             battery: None,

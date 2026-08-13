@@ -11,6 +11,8 @@ use crate::agent::{AgentClient, Locator};
 
 /// `KEYCODE_HOME`.
 const KEYCODE_HOME: i64 = 3;
+/// `KEYCODE_BACK`.
+const KEYCODE_BACK: i64 = 4;
 
 pub struct AndroidUiSession {
     agent: AgentClient,
@@ -40,6 +42,43 @@ impl AndroidUiSession {
     /// This is the bridge the engine actually wants. Nurture does not want
     /// "press like", it wants *where* like is, so the existing touch-jitter
     /// planner can pick a human-looking point inside it.
+    /// The UI language, for picking a measured TikTok label set.
+    ///
+    /// A device property rather than flow configuration, and it exists at all
+    /// because label text is per-language: an English locator finds nothing on a
+    /// Vietnamese UI (`riviu_core::tiktok_labels`).
+    pub async fn ui_locale(&self) -> Option<String> {
+        let property = self
+            .adb
+            .shell(&self.serial, "getprop persist.sys.locale")
+            .await
+            .unwrap_or_default();
+        let setting = self
+            .adb
+            .shell(&self.serial, "settings get system system_locales")
+            .await
+            .unwrap_or_default();
+        crate::adb::parse_locale(&property, &setting)
+    }
+
+    /// The installed `versionName` of a package.
+    ///
+    /// Keyed on the same reasoning as [`Self::ui_locale`]: some measured labels are
+    /// unresolved resource ids, which move when the app is rebuilt
+    /// (`riviu_core::tiktok_labels`). `dumpsys package` measured 1–2 s on this fleet,
+    /// which is why callers read it once per session and not per locate.
+    pub async fn app_version_name(&self, bundle_id: &str) -> Option<String> {
+        // Same rule as everywhere else in this crate: this string reaches a real shell
+        // on the phone, so it is validated as code rather than trusted as data.
+        let package = crate::adb::validate_package_name(bundle_id).ok()?;
+        let dumpsys = self
+            .adb
+            .shell(&self.serial, &format!("dumpsys package {package}"))
+            .await
+            .ok()?;
+        riviu_core::tiktok_labels::parse_version_name(&dumpsys).map(str::to_string)
+    }
+
     pub async fn find_bounds(
         &self,
         locator: &Locator,
@@ -67,6 +106,25 @@ fn scale_to_screen(x: f64, y: f64, image_w: f64, image_h: f64, screen: (f64, f64
     (x * screen.0 / image_w, y * screen.1 / image_h)
 }
 
+/// Translate a core query into the agent's locator vocabulary.
+fn to_agent_locator(query: riviu_core::ElementQuery<'_>) -> Locator {
+    match query {
+        riviu_core::ElementQuery::Description { value, exact: true } => {
+            Locator::Description(value.to_string())
+        }
+        riviu_core::ElementQuery::Description {
+            value,
+            exact: false,
+        } => Locator::DescriptionContains(value.to_string()),
+        riviu_core::ElementQuery::ClassName(value) => Locator::ClassName(value.to_string()),
+        riviu_core::ElementQuery::Text { value, exact: true } => Locator::Text(value.to_string()),
+        riviu_core::ElementQuery::Text {
+            value,
+            exact: false,
+        } => Locator::TextContains(value.to_string()),
+    }
+}
+
 fn to_locator(locator: &QualifiedElementLocator) -> Locator {
     match locator.strategy {
         ElementLocatorStrategy::AccessibilityId => Locator::Description(locator.value.clone()),
@@ -88,6 +146,15 @@ impl UiSession for AndroidUiSession {
                 gesture.duration_ms,
             )
             .await
+    }
+
+    /// The real thing: one `pointerMove` per leg, each with its own duration.
+    ///
+    /// This is why the path type exists. `swipe` sends a single move, which the framework
+    /// receives as a straight line at constant speed; here the phone sees a curve whose
+    /// velocity builds and eases, then a few milliseconds of contact before the lift.
+    async fn swipe_path(&self, path: riviu_core::types::SwipePath) -> anyhow::Result<()> {
+        self.agent.swipe_path(&path).await
     }
 
     async fn tap_image(&self, x: f64, y: f64, image_w: f64, image_h: f64) -> anyhow::Result<()> {
@@ -135,6 +202,10 @@ impl UiSession for AndroidUiSession {
         self.agent.press_key(KEYCODE_HOME).await
     }
 
+    async fn back(&self) -> anyhow::Result<()> {
+        self.agent.press_key(KEYCODE_BACK).await
+    }
+
     /// Find by `content-desc`, then touch it like a finger would.
     ///
     /// Resolves bounds first and taps inside them instead of issuing an
@@ -179,12 +250,45 @@ impl UiSession for AndroidUiSession {
     }
 
     async fn active_app_bundle(&self) -> anyhow::Result<String> {
-        let stdout = self
-            .adb
-            .shell(&self.serial, "dumpsys window windows | grep mCurrentFocus")
-            .await?;
-        crate::adb::parse_current_focus_package(&stdout)
-            .ok_or_else(|| anyhow!("could not read the foreground package"))
+        // `dumpsys window windows` no longer carries `mCurrentFocus`: measured
+        // empty on Android 15 (Redmi Note 12, HyperOS `OS2.0.207.0`) while it is
+        // the line that does work on the Android 9 S8+ fleet. So ask both instead
+        // of betting on one, and treat grep's non-zero exit for "no match" as an
+        // answer rather than an error — that exit is what made the G1 probe fail
+        // here with an empty message.
+        // Measured on both phones in the fleet, 12/08/2026, and the split is total:
+        //
+        // | form                      | Note 8 / Android 8 | Redmi Note 12 / Android 15 |
+        // |---------------------------|--------------------|----------------------------|
+        // | `dumpsys window windows`  | works, 88–148 ms   | **empty, always**          |
+        // | `dumpsys window displays` | **empty, always**  | works, 105–107 ms          |
+        // | `dumpsys window`          | works, 84–97 ms    | works, 129–172 ms          |
+        //
+        // So the subcommand-free form is the only one that answers on both, and it costs
+        // the same — the `grep` runs on the device, so one line comes back either way.
+        // It goes first for that reason: with `windows` first, every call on the Android
+        // 15 phone spent a wasted round trip (122–167 ms) before the one that works.
+        // The other two stay as fallbacks rather than being deleted, because a phone
+        // that answers only one of them is exactly what this list is for.
+        const SOURCES: [&str; 3] = [
+            "dumpsys window | grep mCurrentFocus",
+            "dumpsys window windows | grep mCurrentFocus",
+            "dumpsys window displays | grep mCurrentFocus",
+        ];
+        let mut tried: Vec<String> = Vec::new();
+        for source in SOURCES {
+            match self.adb.shell(&self.serial, source).await {
+                Ok(stdout) => match crate::adb::parse_current_focus_package(&stdout) {
+                    Some(package) => return Ok(package),
+                    None => tried.push(format!("`{source}` had no mCurrentFocus line")),
+                },
+                Err(error) => tried.push(format!("`{source}` failed: {error}")),
+            }
+        }
+        Err(anyhow!(
+            "could not read the foreground package. Tried: {}",
+            tried.join("; ")
+        ))
     }
 
     /// Android has a first-class intent for this, so unlike the iOS side it
@@ -195,6 +299,36 @@ impl UiSession for AndroidUiSession {
                 &self.serial,
                 &format!(
                     "am start -a android.intent.action.VIEW -d {}",
+                    shell_quote(url)
+                ),
+            )
+            .await
+            .map(|_| ())
+    }
+
+    /// The same intent, but pinned to one app and carrying `BROWSABLE`.
+    ///
+    /// Measured on a Redmi Note 12, 11/08/2026, with `cmd package resolve-activity`:
+    /// the intent [`Self::open_url`] builds resolves to
+    /// `com.android.intentresolver.ResolverActivity` — the **app chooser** — because both
+    /// TikTok and Chrome have `www.tiktok.com` verified. So a link opened that way reaches
+    /// a dialog, not the post. Naming the package resolves to
+    /// `com.ss.android.ugc.aweme.deeplink.AppLinkHandlerV2`.
+    ///
+    /// `BROWSABLE` is included because that is the category an app-link filter declares;
+    /// without it the intent is matched only by the filter's implicit `DEFAULT`, which is
+    /// how a chooser gets involved in the first place.
+    ///
+    /// The package is validated, not trusted: it is interpolated into a command a real
+    /// shell on the phone runs, the same rule as everywhere else in this crate.
+    async fn open_url_in_app(&self, url: &str, bundle_id: &str) -> anyhow::Result<()> {
+        let package = crate::adb::validate_package_name(bundle_id)?;
+        self.adb
+            .shell(
+                &self.serial,
+                &format!(
+                    "am start -a android.intent.action.VIEW \
+                     -c android.intent.category.BROWSABLE -d {} -p {package}",
                     shell_quote(url)
                 ),
             )
@@ -239,9 +373,154 @@ impl UiSession for AndroidUiSession {
         Ok(png)
     }
 
+    /// Bounds, label, and enabled state, from one hierarchy query.
+    ///
+    /// The attribute read-backs are extra round trips rather than fields of the
+    /// first response, because the agent's find reply carries only the element id.
+    /// Both are still worth it: the comment control's own text is what tells two
+    /// posts apart — that is what proves a swipe advanced — and the Send button's
+    /// `enabled` flag is what proves the comment is armed.
+    async fn locate(
+        &self,
+        query: riviu_core::ElementQuery<'_>,
+    ) -> anyhow::Result<Option<riviu_core::ElementBox>> {
+        let locator = to_agent_locator(query);
+        let Some(element) = self.agent.find(&locator).await? else {
+            return Ok(None);
+        };
+        let rect = self.agent.rect(&element).await?;
+        // A missing label is not a failure: absent is a legitimate answer for an
+        // element found by substring or by class, and the caller only needs it for
+        // the fingerprint.
+        let description = self
+            .agent
+            .attribute(&element, "content-desc")
+            .await
+            .ok()
+            .flatten();
+        // Default to enabled when the attribute cannot be read. The alternative —
+        // defaulting to disabled — would report a live Send button as unarmed and
+        // silently drop every comment.
+        let enabled = self
+            .agent
+            .attribute(&element, "enabled")
+            .await
+            .ok()
+            .flatten()
+            .map(|value| value != "false")
+            .unwrap_or(true);
+        Ok(Some(riviu_core::ElementBox {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+            description,
+            enabled,
+        }))
+    }
+
+    /// Bounds for **every** match, geometry only.
+    ///
+    /// Deliberately skips the `content-desc` and `enabled` read-backs that
+    /// [`Self::locate`] performs. Those are two extra HTTP round trips *per element*,
+    /// and this is called against a comment list: on a drawer with a dozen rows the
+    /// attribute reads would dominate, and the caller that needs them
+    /// (`interaction_hierarchy`, choosing a reply control by position) needs
+    /// rectangles, not labels. `description` therefore comes back `None` here — ask
+    /// [`Self::locate`] for a specific element when the label matters.
+    async fn locate_all(
+        &self,
+        query: riviu_core::ElementQuery<'_>,
+    ) -> anyhow::Result<Vec<riviu_core::ElementBox>> {
+        let locator = to_agent_locator(query);
+        let ids = self.agent.find_all(&locator).await?;
+        let mut found = Vec::with_capacity(ids.len());
+        for id in ids {
+            // One stale element in a scrolling list must not lose the others: the
+            // list can move between the find and the rect read.
+            match self.agent.rect(&id).await {
+                Ok(rect) => found.push(riviu_core::ElementBox {
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.width,
+                    height: rect.height,
+                    description: None,
+                    enabled: true,
+                }),
+                Err(error) => {
+                    tracing::debug!(%error, "skipping an element whose rect could not be read")
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// Bounds **and** the rendered `text` for every match.
+    ///
+    /// The expensive sibling of [`Self::locate_all`], and it reads `text` rather than
+    /// `content-desc`: the caller is reading comment rows, whose author and body labels
+    /// were measured to live in `text` while `content-desc` is empty (AGENTS.md §9.5).
+    /// Asking for `content-desc` here would return `None` for every row and the caller
+    /// would conclude the drawer has no comments in it.
+    ///
+    /// One extra round trip per element on top of the rectangle. Measured cost for the
+    /// rectangles alone was 684 ms for 4 elements and 1172 ms for 13; this roughly
+    /// doubles that. Acceptable once per send, never in a poll loop.
+    ///
+    /// An element whose text cannot be read is kept with `description: None` rather
+    /// than dropped — losing a row silently would turn "the author is unreadable" into
+    /// "this comment is not on screen", and the second one makes a reply land somewhere
+    /// else.
+    async fn locate_all_described(
+        &self,
+        query: riviu_core::ElementQuery<'_>,
+    ) -> anyhow::Result<Vec<riviu_core::ElementBox>> {
+        let locator = to_agent_locator(query);
+        let ids = self.agent.find_all(&locator).await?;
+        let mut found = Vec::with_capacity(ids.len());
+        for id in ids {
+            // Same reasoning as `locate_all`: one stale element in a scrolling list
+            // must not lose the others.
+            let Ok(rect) = self.agent.rect(&id).await else {
+                continue;
+            };
+            let description = self
+                .agent
+                .attribute(&id, "text")
+                .await
+                .ok()
+                .flatten()
+                .filter(|value| !value.is_empty());
+            found.push(riviu_core::ElementBox {
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
+                description,
+                enabled: true,
+            });
+        }
+        Ok(found)
+    }
+
+    /// True — this is the backend the primitive exists for.
+    fn supports_element_bounds(&self) -> bool {
+        true
+    }
+
+    async fn ui_language(&self) -> Option<String> {
+        self.ui_locale().await
+    }
+
+    async fn app_version(&self, bundle_id: &str) -> Option<String> {
+        self.app_version_name(bundle_id).await
+    }
+
     fn stream_url(&self) -> Option<String> {
-        // No MJPEG producer yet. Frames are deliberately deferred: with
-        // hierarchy-based location they are corroboration, not the locator.
+        // Frames are published straight into the shared `StreamHub` by the
+        // driver's minicap producer (`crate::frames`), so there is no per-session
+        // URL to hand out. Hierarchy queries locate controls; frames are the
+        // operator's view, not the locator.
         None
     }
 }

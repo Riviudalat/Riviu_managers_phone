@@ -98,7 +98,24 @@ pub struct DeviceCapabilitySnapshot {
     pub driver_adapter_version: String,
     pub transport: ActiveTransport,
     pub product_type: String,
-    pub ios_version: String,
+    /// **The Rust name moved; the wire key is frozen at `iosVersion`.**
+    ///
+    /// This struct is not an ephemeral view model like `DeviceInfo` — it is a
+    /// persisted identity record. It is stored as JSON in
+    /// `flow_device_runs.capability_snapshot_json` under `deny_unknown_fields`, so
+    /// renaming the key makes every historical row fail to decode: a hard error, not
+    /// a default. And its key *set* is hand-copied into the SHA-256 behind
+    /// `qualified_geometry_profile_id` (`crate::flow::model`), whose output is itself
+    /// persisted in compiled plans and attempt inputs and enforced at execution
+    /// time.
+    ///
+    /// Renaming the Rust field alone is still worth it: it keeps this readable
+    /// alongside `DeviceInfo::os_version`, including the standing coherence
+    /// assertion in the mock driver that the two carry the same value. A migration
+    /// to move the key would additionally have to recompute every stored
+    /// `profile_id` in the same transaction — a data-integrity hazard for no gain.
+    #[serde(rename = "iosVersion")]
+    pub os_version: String,
     pub target_app: InstalledTargetIdentity,
     pub protected_auth_ready: bool,
     pub geometry: Option<QualifiedGeometry>,
@@ -318,8 +335,14 @@ impl DeviceCapabilityQualification {
             && self.base.product_type == snapshot.product_type
             && self.base.target_app == snapshot.target_app
             && self.base.geometry == *geometry
+            // `ios_min_inclusive` / `ios_max_inclusive` keep their names: the
+            // Interaction qualification registry is structurally iOS-only (its
+            // `product_type` vocabulary is `iPhone10,1`, its transport is usbmux),
+            // its on-disk JSON Schema has these in `required` *and* `pattern`, and a
+            // Python producer writes them. Renaming would need three files to move
+            // together for nothing.
             && version_in_range(
-                &snapshot.ios_version,
+                &snapshot.os_version,
                 &self.base.ios_min_inclusive,
                 &self.base.ios_max_inclusive,
             )
@@ -612,7 +635,7 @@ mod tests {
             driver_adapter_version: "interaction-v1".into(),
             transport: ActiveTransport::LegacyUsbmuxTransport,
             product_type: "iPhone10,1".into(),
-            ios_version: "16.7.15".into(),
+            os_version: "16.7.15".into(),
             target_app: InstalledTargetIdentity {
                 bundle_id: "com.ss.iphone.ugc.Ame".into(),
                 version: "35.0.0".into(),
@@ -711,7 +734,7 @@ mod tests {
             Box::new(|v| v.driver_adapter_version.push_str(".changed")),
             Box::new(|v| v.transport = ActiveTransport::RsdTransport),
             Box::new(|v| v.product_type = "iPhone99,1".into()),
-            Box::new(|v| v.ios_version = "16.7.14".into()),
+            Box::new(|v| v.os_version = "16.7.14".into()),
             Box::new(|v| v.target_app.bundle_id.push_str(".changed")),
             Box::new(|v| v.target_app.version.push_str(".changed")),
             Box::new(|v| v.target_app.build.push('1')),

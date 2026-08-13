@@ -1,0 +1,37 @@
+{
+  "manifestVersion": 1,
+  "toolsetId": "riviu-android-tools-20260812",
+  "adbRevision": "37.0.1",
+  "adbVersion": "1.0.41",
+  "adbBuild": "37.0.1-15733141",
+  "minicapSource": "@devicefarmer/minicap-prebuilt@2.7.3 prebuilt/noarch/minicap.apk",
+  "files": [
+    {
+      "path": "noarch/minicap.apk",
+      "bytes": 4209669,
+      "sha256": "6111c9b110039aefc99837e1553e876e31290530cdbdb0f789b8b327f277a97c",
+      "role": "minicapApk"
+    },
+    {
+      "path": "win-x86_64/adb.exe",
+      "bytes": 8273560,
+      "sha256": "b4a6b455702684652cccf7b46258b29e653538904359a58fd4931cf3ef286b3f",
+      "role": "adbExe"
+    },
+    {
+      "path": "win-x86_64/AdbWinApi.dll",
+      "bytes": 108184,
+      "sha256": "c1d653030b4bde65d3e07e4d0b0979e17be56df1436cdd15528630f27808050d"
+    },
+    {
+      "path": "win-x86_64/AdbWinUsbApi.dll",
+      "bytes": 73368,
+      "sha256": "0710e894d9b40f71a670c13c694079d564c92c1279da382cfe4850983aaebe1b"
+    },
+    {
+      "path": "win-x86_64/NOTICE-platform-tools.txt",
+      "bytes": 1154131,
+      "sha256": "38ec8c6f5b7799c223ffeab1f9e81c2d5fc67b5e56d6424f649630ca1ee1a811"
+    }
+  ]
+}

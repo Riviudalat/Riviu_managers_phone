@@ -1,7 +1,12 @@
 # Riviumanagersphone
 
-Ứng dụng desktop Tauri 2 + Rust + React để quản lý và điều khiển dàn iPhone qua
-USB. Bản phân phối hỗ trợ Windows x64, macOS Apple Silicon và macOS Intel.
+Ứng dụng desktop Tauri 2 + Rust + React để quản lý và điều khiển dàn điện thoại
+qua USB — **iPhone** (pymobiledevice3 + Riviu Agent) và **Android** (adb),
+chung một control plane. Bản phân phối hỗ trợ Windows x64, macOS Apple Silicon
+và macOS Intel.
+
+Phần mềm của người khác đi kèm trong bộ cài được liệt kê ở [`NOTICE`](NOTICE),
+gồm cả một mục ghi rõ chỗ giấy phép **chưa được thẩm định**.
 
 ## Cài bản dựng
 
@@ -23,6 +28,11 @@ Bộ cài đã mang sẵn Python runtime, `pymobiledevice3==10.1.0` và
 installer tự tải WebView2 bootstrapper khi hệ điều hành chưa có, và bản dựng
 link tĩnh CRT nên không cần cài Visual C++ Redistributable.
 
+Đường Android cũng đã mang sẵn: `adb.exe` + hai DLL của nó (platform-tools
+37.0.1) và `minicap.apk` cho stream. Không cần cài Android SDK. Máy nào **đã**
+có adb thì bản đó được ưu tiên trước bản đóng gói — cố ý, xem "Thứ tự tìm adb"
+dưới đây.
+
 Các prerequisite thuộc hệ điều hành/nhà cung cấp:
 
 - Windows cần Apple Devices hoặc Apple Mobile Device Support để có USB driver và
@@ -31,6 +41,33 @@ Các prerequisite thuộc hệ điều hành/nhà cung cấp:
   ký lại agent iPhone.
 - Artifact macOS CI hiện ký ad-hoc. Khi chưa cấu hình Developer ID + notarization,
   macOS có thể yêu cầu xác nhận trong **Privacy & Security** ở lần mở đầu.
+- Bộ cài Windows **chưa được ký số**. Lần đầu chạy `.exe` NSIS, SmartScreen có
+  thể hiện "Windows protected your PC" và phải bấm **More info → Run anyway**.
+  Đây là việc còn bỏ ngỏ, không phải lỗi.
+
+### Máy Android còn cần làm tay
+
+Hai thứ này bộ cài **không** mang, và không có cách nào đóng gói được:
+
+- **USB driver theo từng model.** `adb devices` có thể rỗng dù adb hoàn toàn
+  bình thường. Bật **USB debugging** trong Developer options, cắm dây, rồi chấp
+  nhận hộp thoại *Allow USB debugging* hiện trên điện thoại. Chưa chấp nhận thì
+  adb báo `unauthorized`; dây/hub sạc-only thì báo `offline`.
+- **Hai APK `io.appium.uiautomator2.server{,.test}`.** Đường điều khiển theo cây
+  giao diện (nurture, tương tác, đăng bài trên Android) nói HTTP với một
+  `appium-uiautomator2-server` chạy trên máy. Chưa cài hai APK đó thì máy vẫn
+  hiện trong fleet và vẫn stream được, nhưng mọi thao tác đọc/chạm theo nhãn đều
+  thất bại. Việc đóng gói hai APK này **chưa** làm.
+
+### Thứ tự tìm adb
+
+`configured → RIVIU_ADB_PATH → ANDROID_SDK_ROOT → ANDROID_HOME → PATH → bản
+đóng gói`. Bản đóng gói xếp **cuối cùng** có chủ ý: máy đã cài Android Studio
+hoặc scrcpy thì adb của nó đang giữ adb server ở cổng 5037, và một client khác
+revision sẽ buộc `adb server version doesn't match this client; killing...`,
+phá session của công cụ khác. adb của người vận hành thắng **nếu nó chạy được**;
+bản đóng gói là lưới an toàn cho máy sạch. `RIVIU_MINICAP_APK` cũng vẫn override
+được `minicap.apk` đóng gói theo cùng nguyên tắc đó.
 
 ## Chạy từ source
 

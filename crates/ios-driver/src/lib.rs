@@ -72,12 +72,22 @@ pub async fn create_driver(config: DriverConfig) -> anyhow::Result<DriverBundle>
         Ok(driver) => {
             tracing::info!("using pymobiledevice3 iOS driver (real devices)");
             let streams = driver.stream_hub();
+            // Not unconditionally `None` any more, and this one line is the whole fix
+            // for the case the exit-2 tolerance opened: `probe` returns `Ok` for a
+            // sidecar that answered but answered badly, and until now that verdict was
+            // thrown away here, so a broken install reported as a healthy one with
+            // nothing plugged in. The red banner already existed; it was simply never
+            // given a reason to show.
+            let degraded_reason = driver.boot_degraded_reason();
+            if let Some(reason) = &degraded_reason {
+                tracing::error!("iOS sidecar started degraded: {reason}");
+            }
             Ok(DriverBundle {
                 driver: Arc::new(driver),
                 streams,
                 mode: DriverMode::Pymobiledevice3,
                 interaction_capabilities,
-                degraded_reason: None,
+                degraded_reason,
             })
         }
         Err(err) => {

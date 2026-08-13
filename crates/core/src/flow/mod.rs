@@ -226,7 +226,7 @@ mod tests {
         assert_geometry_hash_changes(&baseline, &target_build);
 
         let mut ios = snapshot.clone();
-        ios.ios_version = "16.7.16".into();
+        ios.os_version = "16.7.16".into();
         assert_geometry_hash_changes(&baseline, &ios);
 
         let mut orientation = snapshot.clone();
@@ -595,7 +595,7 @@ mod tests {
             driver_adapter_version: "fixture-driver-1".into(),
             transport: ActiveTransport::Mock,
             product_type: "iPhone10,1".into(),
-            ios_version: "16.7.15".into(),
+            os_version: "16.7.15".into(),
             target_app: InstalledTargetIdentity {
                 bundle_id: "com.apple.Preferences".into(),
                 version: "1".into(),

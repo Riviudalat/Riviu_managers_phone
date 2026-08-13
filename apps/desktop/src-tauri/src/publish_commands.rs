@@ -306,7 +306,12 @@ pub(crate) async fn transfer_publish_campaign_inner(
         .ok_or_else(|| anyhow::anyhow!("campaign disappeared after transfer"))
 }
 
-const TIKTOK_BUNDLE_ID: &str = "com.ss.iphone.ugc.Ame";
+/// The publish path is iOS-only until the Android media pipeline exists.
+///
+/// Not a resolved value: `stage_publish_media` and friends are unimplemented on
+/// Android, and the Publish page refuses an Android target before dispatch. Kept as
+/// the shared constant so nobody mistakes it for a per-device answer.
+const TIKTOK_BUNDLE_ID: &str = riviu_core::tiktok_target::IOS_TIKTOK_BUNDLE;
 const PLUS_BUTTON: TapPoint = TapPoint { x: 187.0, y: 640.0 };
 const GALLERY_BUTTON: TapPoint = TapPoint { x: 32.0, y: 632.0 };
 const ALBUM_PICKER: TapPoint = TapPoint { x: 187.0, y: 47.0 };

@@ -61,7 +61,8 @@
       "../../../sidecars/wda/RiviuAgent.ipa": "sidecars/wda/RiviuAgent.ipa",
       "../../../sidecars/wda/RiviuAgent-candidate.ipa": "sidecars/wda/RiviuAgent-candidate.ipa",
       "../../../sidecars/wda/RiviuAgent-text.ipa": "sidecars/wda/RiviuAgent-text.ipa",
-      "../../../sidecars/wda/Riviumanagersphone.ipa": "sidecars/wda/Riviumanagersphone.ipa"
+      "../../../sidecars/wda/Riviumanagersphone.ipa": "sidecars/wda/Riviumanagersphone.ipa",
+      "../../../sidecars/android/": "sidecars/android/"
     },
     "icon": [
       "icons/32x32.png",

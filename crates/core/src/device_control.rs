@@ -251,6 +251,20 @@ impl DeviceControlPlane {
         self.driver.supports_text_comments(udid)
     }
 
+    /// Pre-flight prediction; the session stays the runtime authority. See
+    /// `DeviceDriver::reports_element_bounds`.
+    pub fn reports_element_bounds(&self, udid: &str) -> bool {
+        self.driver.reports_element_bounds(udid)
+    }
+
+    /// Which TikTok build this device can be driven against.
+    pub async fn resolve_tiktok_package(&self, udid: &str) -> Result<String, DeviceControlError> {
+        self.driver
+            .resolve_tiktok_package(udid)
+            .await
+            .map_err(|error| driver_error(udid, "resolveTikTokPackage", error))
+    }
+
     pub fn driver_contract_ids(&self, udid: &str) -> BTreeSet<String> {
         let mut contracts = BTreeSet::new();
         if self.driver.supports_verified_app_termination(udid) {
@@ -3770,7 +3784,8 @@ mod tests {
                 udid: udid.to_string(),
                 name: "fixture".to_string(),
                 model: "fixture".to_string(),
-                ios_version: "fixture".to_string(),
+                platform: crate::DevicePlatform::Ios,
+                os_version: "fixture".to_string(),
                 connection: ConnectionKind::Mock,
                 status: DeviceStatus::Ready,
                 battery: None,
@@ -3890,7 +3905,7 @@ mod tests {
             driver_adapter_version: "interaction-v1".to_string(),
             transport: ActiveTransport::LegacyUsbmuxTransport,
             product_type: "iPhone10,1".to_string(),
-            ios_version: "16.7.15".to_string(),
+            os_version: "16.7.15".to_string(),
             target_app: target_app.clone(),
             protected_auth_ready: true,
             geometry: Some(geometry.clone()),

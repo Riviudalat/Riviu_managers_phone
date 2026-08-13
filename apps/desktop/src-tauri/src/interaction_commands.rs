@@ -17,9 +17,18 @@ use tauri::State;
 
 use crate::command_error::CommandError;
 use crate::interaction_ocr;
+use crate::interaction_target::{SendFailure, SendOutcome, TargetDriver};
 use crate::state::AppState;
 
-const TIKTOK_BUNDLE_ID: &str = "com.ss.iphone.ugc.Ame";
+/// One device's TikTok build plus the context opened against it.
+///
+/// The package travels with the context because every caller needs it again: the
+/// arrival check compares it against `active_app_bundle()`, and it is per device —
+/// the iOS bundle and Android's two regional builds are three different ids.
+struct InteractionDevice {
+    context: riviu_core::UiWithStreamContext,
+    target_package: String,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -115,21 +124,76 @@ pub fn interaction_preview_thread(
     })
 }
 
-/// A thread needs to read its own comment back off the screen to reply to it,
-/// and the campaign writes Vietnamese. Without a reader that can, the run posts
-/// the first message of every thread and skips the rest — so refuse up front,
-/// naming both ways out, instead of discovering it one message in.
-fn require_vietnamese_reader(mode: riviu_core::ThreadMode) -> Result<(), CommandError> {
-    // Standalone comments never look for a parent, so nothing has to be read
-    // back off the screen and the reader's language is irrelevant.
-    if mode == riviu_core::ThreadMode::Standalone || interaction_ocr::reads_vietnamese() {
+/// Refuse a Threaded campaign the actors cannot actually carry out.
+///
+/// Two separate reasons, and the OCR one used to be the only one — stated as a
+/// property of the *desktop host*, which it is not. It is a property of the
+/// **actors**: a device that reads the accessibility tree never calls
+/// `interaction_ocr` at all, so the host's OCR language is irrelevant to it.
+///
+/// The second reason is new and has no equivalent in the pixel-only code, because
+/// the situation could not arise before. A thread is a linear chain and each message
+/// is sent from a *different* actor, so message N must find message N-1's comment on
+/// screen. A hierarchy actor stores an author label read from a node's `text`; a pixel
+/// actor then has to re-find that row by OCR and match the author label
+/// (`locate_parent_comment` requires it). The bodies will agree — both sides compare
+/// a string this project typed — but the author labels may not: a badge, a
+/// truncation, a rendered-versus-attribute difference. Refusing costs nothing today
+/// because nobody is running mixed campaigns, and it is far cheaper than a chain that
+/// breaks halfway with no explanation. Standalone is unaffected: it has no parent to
+/// find.
+fn require_parent_locator(
+    control: &DeviceControlPlane,
+    mode: riviu_core::ThreadMode,
+    actor_udids: &[String],
+) -> Result<(), CommandError> {
+    // Standalone comments never look for a parent, so nothing has to be read back off
+    // the screen and neither reason applies.
+    if mode == riviu_core::ThreadMode::Standalone {
+        return Ok(());
+    }
+    let (hierarchy, pixel): (Vec<&String>, Vec<&String>) = actor_udids
+        .iter()
+        .partition(|udid| control.reports_element_bounds(udid));
+
+    if !hierarchy.is_empty() && !pixel.is_empty() {
+        return Err(CommandError::code(
+            "MixedPlatformThread",
+            format!(
+                "chuỗi bình luận lồng nhau không chạy trộn hai loại máy: {} máy đọc hierarchy                  ({}) và {} máy nhận dạng ảnh ({}). Hai bên đọc nhãn tác giả theo hai cách nên                  mắt xích có thể đứt giữa chừng. Dùng toàn iPhone, toàn Android, hoặc chuyển                  sang chế độ Standalone.",
+                hierarchy.len(),
+                hierarchy
+                    .iter()
+                    .map(|udid| udid.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                pixel.len(),
+                pixel
+                    .iter()
+                    .map(|udid| udid.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+        ));
+    }
+
+    // All-hierarchy: the parent is found in the tree and OCR is never invoked.
+    if pixel.is_empty() {
+        return Ok(());
+    }
+    if interaction_ocr::reads_vietnamese() {
         return Ok(());
     }
     let found = interaction_ocr::recognizer_language().unwrap_or_else(|| "không có".into());
     Err(CommandError::code(
         "OcrLanguageUnavailable",
         format!(
-            "chuỗi bình luận cần OCR đọc được tiếng Việt để tìm lại bình luận cha;              máy này đọc bằng '{found}'. Windows.Media.Ocr không phát hành gói tiếng Việt              (35 gói, không có vi-VN), nên không có gì để cài — chạy chiến dịch trên máy Mac,              nơi helper Vision đã ghim sẵn vi-VN."
+            "chuỗi bình luận trên máy nhận dạng ảnh ({}) cần OCR đọc được tiếng Việt để tìm              lại bình luận cha; máy này đọc bằng '{found}'. Windows.Media.Ocr không phát hành              gói tiếng Việt (35 gói, không có vi-VN), nên không có gì để cài — chạy chiến dịch              trên máy Mac, nơi helper Vision đã ghim sẵn vi-VN.",
+            pixel
+                .iter()
+                .map(|udid| udid.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
         ),
     ))
 }
@@ -140,7 +204,7 @@ pub async fn interaction_start_thread(
     request: ThreadCampaignRequest,
 ) -> Result<InteractionStartResult, CommandError> {
     let admission = state.ensure_accepting_work()?;
-    require_vietnamese_reader(request.mode)?;
+    require_parent_locator(&state.control, request.mode, &request.actor_udids)?;
     let plan = plan_threads(&request).map_err(interaction_error)?;
     let campaign_id = state
         .db
@@ -166,6 +230,8 @@ pub async fn interaction_start_thread(
     let engine = state.nurture_engine.clone();
     let events = state.events.clone();
     let artifacts = state.interaction_artifacts.clone();
+    // The concrete hub, because only it can answer a generation-qualified read.
+    let frames: Arc<dyn riviu_core::GenerationFrameSource> = Arc::new(state.streams.clone());
     tauri::async_runtime::spawn(async move {
         let _worker_admission = admission;
         if let Err(error) = execute_thread_campaign(
@@ -178,6 +244,7 @@ pub async fn interaction_start_thread(
             plan,
             None,
             artifacts,
+            frames,
         )
         .await
         {
@@ -307,7 +374,7 @@ pub fn interaction_retry(
         })?;
     // The mode is whatever the campaign was created with, so the reader
     // requirement has to be judged against that rather than a fresh choice.
-    require_vietnamese_reader(request.mode)?;
+    require_parent_locator(&state.control, request.mode, &request.actor_udids)?;
     state
         .db
         .update_interaction_campaign_state(&campaign_id, ThreadCampaignState::Running, None)
@@ -317,6 +384,8 @@ pub fn interaction_retry(
     let engine = state.nurture_engine.clone();
     let events = state.events.clone();
     let artifacts = state.interaction_artifacts.clone();
+    // The concrete hub, because only it can answer a generation-qualified read.
+    let frames: Arc<dyn riviu_core::GenerationFrameSource> = Arc::new(state.streams.clone());
     let worker_id = campaign_id.clone();
     tauri::async_runtime::spawn(async move {
         let _worker_admission = admission;
@@ -330,6 +399,7 @@ pub fn interaction_retry(
             plan,
             Some(retryable),
             artifacts,
+            frames,
         )
         .await
         {
@@ -412,14 +482,23 @@ pub async fn interaction_open_on_device(
         .first()
         .and_then(|line| line.target.clone())
         .ok_or_else(|| CommandError::invalid_argument("link TikTok phải là video/photo URL"))?;
-    let context = open_interaction_context(&state.control, &udid).await?;
+    let InteractionDevice {
+        context,
+        target_package,
+    } = open_interaction_context(&state.control, &udid).await?;
     let session = state
         .control
         .streaming_session(&context)
         .map_err(CommandError::from)?;
     let result = async {
-        let _proof =
-            open_target_confirmed(&state.nurture_engine, &udid, session.as_ref(), &target).await?;
+        let _proof = open_target_confirmed(
+            &state.nurture_engine,
+            &udid,
+            session.as_ref(),
+            &target,
+            &target_package,
+        )
+        .await?;
         Ok::<(), anyhow::Error>(())
     }
     .await;
@@ -431,7 +510,13 @@ pub async fn interaction_open_on_device(
 async fn open_interaction_context(
     control: &DeviceControlPlane,
     udid: &str,
-) -> Result<riviu_core::UiWithStreamContext, CommandError> {
+) -> Result<InteractionDevice, CommandError> {
+    // Resolve before acquiring anything: a phone with no drivable TikTok build should
+    // refuse without taking a lease or a capacity slot.
+    let target_package = control
+        .resolve_tiktok_package(udid)
+        .await
+        .map_err(CommandError::from)?;
     let exclusive = control
         .try_acquire_exclusive(udid, DeviceWorkOwner::Interaction)
         .await
@@ -446,13 +531,41 @@ async fn open_interaction_context(
         InteractionSessionKind::Ordinary
     };
     let session = control
-        .start_interaction_session(exclusive, TIKTOK_BUNDLE_ID, kind)
+        .start_interaction_session(exclusive, &target_package, kind)
         .await
         .map_err(CommandError::from)?;
-    control
+    let context = control
         .start_reserved_stream(session, capacity)
         .await
-        .map_err(CommandError::from)
+        .map_err(CommandError::from)?;
+    Ok(InteractionDevice {
+        context,
+        target_package,
+    })
+}
+
+/// Pick the frame that can honestly stand as proof of a send, or nothing.
+///
+/// Two conditions, and both were missing. **Generation**: the caller's own stream
+/// generation, so a frame cached by a producer that has since died cannot be published —
+/// measured on this farm (`last_frame_age_ms=11373` with `baseline_sequence ==
+/// latest_sequence`), the hub will happily hand back stale bytes and `FrameSource::latest`
+/// promises nothing about liveness. **Watermark**: strictly newer than the frame that was
+/// current before the Send tap, so what gets filed is the screen *after* the comment
+/// exists rather than the screen that preceded it.
+///
+/// Pure and separated from the campaign so both can be pinned by tests without a device.
+fn evidence_frame_after(
+    frames: &dyn riviu_core::GenerationFrameSource,
+    udid: &str,
+    generation: u64,
+    watermark: Option<u64>,
+) -> Option<riviu_core::GenerationFrame> {
+    frames
+        .latest_in_generation(udid, generation)
+        // `map_or(true, ..)` rather than `is_none_or`: this crate pins MSRV 1.77.2 and that
+        // helper only stabilised in 1.82.
+        .filter(|frame| watermark.map_or(true, |mark| frame.sequence > mark))
 }
 
 /// Save the screen as it stands and return its stored path.
@@ -461,14 +574,28 @@ async fn open_interaction_context(
 /// nothing it recorded could be checked afterwards — and `Uncertain`, the state
 /// that most needs looking at, wrote no artifact at all. Publishing is
 /// best-effort: a campaign must not fail because evidence could not be filed.
+///
+/// Takes the frame rather than a source, because the caller is the only place that knows
+/// which frame is admissible — and because reading it *here* was the bug: this ran after
+/// `close_ui_context`, which tears the stream down and removes the device's cached frame,
+/// so `latest` returned `None` on every single call and every artefact row was filed with
+/// a path of `NULL`.
 fn publish_evidence_frame(
     artifacts: &riviu_core::FlowArtifactStore,
-    engine: &riviu_core::NurtureEngine,
+    frame: Option<riviu_core::GenerationFrame>,
     campaign_id: &str,
     assignment_id: &str,
     udid: &str,
 ) -> Option<(String, String)> {
-    let frame = engine.frames.latest(udid)?;
+    let Some(frame) = frame else {
+        log::warn!(
+            "interaction {udid}: không có frame nào hợp lệ sau khi gửi \
+             (generation đã tiến, hoặc chưa có frame mới hơn mốc trước khi gửi) — \
+             không lưu ảnh bằng chứng"
+        );
+        return None;
+    };
+    let frame = frame.bytes;
     let campaign = uuid::Uuid::parse_str(campaign_id).ok()?;
     let assignment = uuid::Uuid::parse_str(assignment_id).ok()?;
     let prepared = artifacts
@@ -492,6 +619,101 @@ fn publish_evidence_frame(
     }
 }
 
+/// Photograph the target on its root actor, for the AI to write from.
+///
+/// Extracted so the failure is a value the caller can attribute to one target instead of
+/// a `?` that ends the campaign. Every step in here is a step that can fail on a real
+/// phone — open the context, choose a driver, prove arrival, get frames — and none of
+/// them is a reason to abandon the targets that come after.
+async fn collect_target_evidence_frames(
+    control: &Arc<DeviceControlPlane>,
+    engine: &riviu_core::NurtureEngine,
+    plan: &riviu_core::ThreadPlan,
+    target: &riviu_core::ResolvedTikTokTarget,
+    settle: Duration,
+) -> anyhow::Result<Vec<Vec<u8>>> {
+    let target_root_actor = plan
+        .assignments
+        .iter()
+        .find(|assignment| assignment.target_key == target.target_key && assignment.ordinal == 0)
+        .map(|assignment| assignment.actor_udid.as_str())
+        .context("target root actor missing")?;
+    let InteractionDevice {
+        context,
+        target_package,
+    } = open_interaction_context(control, target_root_actor)
+        .await
+        .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
+    let session = control.streaming_session(&context)?;
+    // Evidence for the AI has to come from the target, not from whatever survived the two
+    // seconds this used to sleep.
+    let evidence_gestures = tokio::sync::Mutex::new(());
+    let frames = async {
+        let evidence_driver = choose_target_driver(
+            engine,
+            target_root_actor,
+            session.as_ref(),
+            &target_package,
+            &evidence_gestures,
+        )
+        .await?;
+        let _proof = evidence_driver
+            .open_target(session.as_ref(), target)
+            .await?;
+        drop(evidence_driver);
+        let mut frames = Vec::with_capacity(3);
+        for _ in 0..3 {
+            if let Some(frame) = engine.frames.latest(target_root_actor) {
+                frames.push((*frame).clone());
+            }
+            tokio::time::sleep(settle).await;
+        }
+        Ok::<_, anyhow::Error>(frames)
+    }
+    .await;
+    // Closed on every path, including the failing ones: leaving the context open would
+    // strand the lease and the stream for a target we are about to give up on.
+    let closed = control.close_ui_context(context).await;
+    let frames = frames?;
+    closed?;
+    if frames.is_empty() {
+        anyhow::bail!("không có frame stream");
+    }
+    Ok(frames)
+}
+
+/// Mark every assignment of one target failed with the same reason.
+///
+/// The alternative — which is what happened — is leaving them in `queued`, where they read
+/// as "not started yet" for ever. `queued` is also the one state a retry treats as
+/// retryable, so silent `queued` rows are a re-send waiting to happen.
+fn fail_whole_target(
+    db: &Arc<riviu_core::db::Database>,
+    plan: &riviu_core::ThreadPlan,
+    assignment_ids: &HashMap<(String, u8), String>,
+    target: &riviu_core::ResolvedTikTokTarget,
+    error_code: &str,
+) -> anyhow::Result<()> {
+    for assignment in plan
+        .assignments
+        .iter()
+        .filter(|assignment| assignment.target_key == target.target_key)
+    {
+        let Some(id) = assignment_ids.get(&(assignment.target_key.clone(), assignment.ordinal))
+        else {
+            continue;
+        };
+        db.update_interaction_assignment_state(
+            id,
+            ThreadMessageState::Failed,
+            Some(error_code),
+            None,
+            None,
+        )?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_thread_campaign(
     db: Arc<riviu_core::db::Database>,
@@ -503,6 +725,9 @@ async fn execute_thread_campaign(
     plan: ThreadPlan,
     only_assignments: Option<std::collections::HashSet<String>>,
     artifacts: riviu_core::FlowArtifactStore,
+    // Separate from `engine.frames`, which is an `Arc<dyn FrameSource>` and therefore has
+    // no way to ask for a *generation*. Evidence needs that: see `evidence_frame_after`.
+    frame_source: Arc<dyn riviu_core::GenerationFrameSource>,
 ) -> anyhow::Result<()> {
     let settings = db.get_nurture_settings().context("đọc cấu hình AI")?;
     if settings.api_key.trim().is_empty() {
@@ -531,40 +756,50 @@ async fn execute_thread_campaign(
     let mut succeeded = 0usize;
     let mut failed = 0usize;
 
-    for target in &request.targets {
+    for (target_index, target) in request.targets.iter().enumerate() {
         if campaign_is_cancelled(&db, &campaign_id)? {
             return Ok(());
         }
 
         // Open the target and collect the same-post evidence before preparing
         // any message. All texts for this target are persisted before send.
-        let target_root_actor = plan
-            .assignments
-            .iter()
-            .find(|assignment| {
-                assignment.target_key == target.target_key && assignment.ordinal == 0
-            })
-            .map(|assignment| assignment.actor_udid.as_str())
-            .context("target root actor missing")?;
-        let context = open_interaction_context(&control, target_root_actor)
+        //
+        // **Only when the AI is writing.** In manual mode the pool already covers every
+        // (target, ordinal), so nothing here is ever read — and opening the target on
+        // ordinal 0's own phone is what then makes ordinal 0's arrival check refuse
+        // deterministically. See `ThreadCampaignRequest::needs_ai_evidence_frames`.
+        //
+        // A failure in here now fails **this target**, not the campaign. It used to be a
+        // bare `?` on a function returning `anyhow::Result<()>`, so the first target that
+        // could not be photographed ended the whole run: every later target was left in
+        // `queued` with no error of its own, and the campaign carried one target's message.
+        // Measured: a two-target run posted one comment and never touched target two.
+        let frames = if request.needs_ai_evidence_frames() {
+            match collect_target_evidence_frames(
+                &control,
+                &engine,
+                &plan,
+                target,
+                Duration::from_millis(500),
+            )
             .await
-            .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
-        let session = control.streaming_session(&context)?;
-        // Evidence for the AI has to come from the target, not from whatever
-        // survived the two seconds this used to sleep.
-        let _proof =
-            open_target_confirmed(&engine, target_root_actor, session.as_ref(), target).await?;
-        let mut frames = Vec::with_capacity(3);
-        for _ in 0..3 {
-            if let Some(frame) = engine.frames.latest(target_root_actor) {
-                frames.push((*frame).clone());
+            {
+                Ok(frames) => frames,
+                Err(error) => {
+                    fail_whole_target(
+                        &db,
+                        &plan,
+                        &assignment_ids,
+                        target,
+                        &format!("target_evidence_unavailable: {error}"),
+                    )?;
+                    failed += request.message_count as usize;
+                    continue;
+                }
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-        control.close_ui_context(context).await?;
-        if frames.is_empty() {
-            anyhow::bail!("target {} không có frame stream", target.target_key);
-        }
+        } else {
+            Vec::new()
+        };
 
         let mut prepared_messages = Vec::with_capacity(request.message_count as usize);
         let mut previous = None::<String>;
@@ -576,6 +811,20 @@ async fn execute_thread_campaign(
             let id = assignment_ids
                 .get(&(assignment.target_key.clone(), assignment.ordinal))
                 .context("assignment id missing")?;
+            // An out-of-scope assignment keeps the state it earned. This guard is the one
+            // that makes `retryable_assignments` mean anything: that function excludes
+            // `Succeeded` precisely because tapping Send is not idempotent, but this loop
+            // used to overwrite **every** assignment of the target with `Preparing`
+            // regardless of scope. The send loop below then skipped them, so a first retry
+            // posted nothing twice — it merely erased the record that they had succeeded.
+            // The *second* retry then read `Preparing`, which is retryable, and would have
+            // re-posted a comment that was already public.
+            if only_assignments
+                .as_ref()
+                .is_some_and(|scope| !scope.contains(id))
+            {
+                continue;
+            }
             db.update_interaction_assignment_state(
                 id,
                 ThreadMessageState::Preparing,
@@ -583,24 +832,37 @@ async fn execute_thread_campaign(
                 None,
                 None,
             )?;
-            let mut scoped = settings.clone();
-            scoped.max_comment_words = u32::from(request.max_words);
-            let direction = if let Some(parent) = &previous {
-                format!(
-                    "{}; trả lời tự nhiên câu trước {:?}, không nhắc lại nguyên văn",
-                    request.instruction, parent
-                )
-            } else {
-                request.instruction.clone()
+            // The operator's own comments win when they gave any. Dealt across
+            // (target, ordinal) so ten links do not all open with the same sentence, and
+            // deterministically, so a replay of this campaign sends the same text — which is
+            // what makes the stored evidence checkable.
+            let text = match request.manual_comment_for(target_index, assignment.ordinal) {
+                Some(manual) => manual.to_string(),
+                None => {
+                    let mut scoped = settings.clone();
+                    scoped.max_comment_words = u32::from(request.max_words);
+                    let direction = if let Some(parent) = &previous {
+                        format!(
+                            "{}; trả lời tự nhiên câu trước {:?}, không nhắc lại nguyên văn",
+                            request.instruction, parent
+                        )
+                    } else {
+                        request.instruction.clone()
+                    };
+                    let (grounded, _evidence_mode) =
+                        crate::nurture_commands::prepare_comment_for_frames(
+                            &scoped,
+                            &frames,
+                            Some(&direction),
+                        )
+                        .await
+                        .with_context(|| {
+                            format!("AI chuẩn bị assignment {}", assignment.ordinal)
+                        })?;
+                    grounded.text
+                }
             };
-            let (grounded, _evidence_mode) = crate::nurture_commands::prepare_comment_for_frames(
-                &scoped,
-                &frames,
-                Some(&direction),
-            )
-            .await
-            .with_context(|| format!("AI chuẩn bị assignment {}", assignment.ordinal))?;
-            let prepared = PreparedThreadMessage::new(assignment, grounded.text);
+            let prepared = PreparedThreadMessage::new(assignment, text);
             previous = Some(prepared.text.clone());
             db.prepare_interaction_assignment(id, &prepared)?;
             prepared_messages.push((id.clone(), prepared));
@@ -658,7 +920,7 @@ async fn execute_thread_campaign(
                 failed += 1;
                 continue;
             }
-            let context = match open_interaction_context(&control, &prepared.actor_udid).await {
+            let opened = match open_interaction_context(&control, &prepared.actor_udid).await {
                 Ok(context) => context,
                 Err(error) => {
                     db.update_interaction_assignment_state(
@@ -672,55 +934,91 @@ async fn execute_thread_campaign(
                     continue;
                 }
             };
+            let InteractionDevice {
+                context,
+                target_package: opened_package,
+            } = opened;
             let session = control.streaming_session(&context)?;
             let gestures = tokio::sync::Mutex::new(());
             let mut effect_intent = false;
+            // The stream this context owns. A frame from any other generation belongs to a
+            // producer that has already been torn down and proves nothing about this send.
+            let generation = context.stream_proof().generation;
+            // Seeded here so a failure *before* the send (a refused arrival, a driver that
+            // will not be chosen) still files the screen that explains it, and re-read just
+            // before the tap so the published frame is strictly newer than the comment.
+            let mut watermark = frame_source
+                .latest_in_generation(&prepared.actor_udid, generation)
+                .map(|frame| frame.sequence);
             let result = async {
+                // Chosen once per assignment, from the session in hand. A build with no
+                // measured labels refuses here — before the link is opened, so before
+                // anything at all has happened on the phone.
+                let driver = choose_target_driver(
+                    &engine,
+                    &prepared.actor_udid,
+                    session.as_ref(),
+                    &opened_package,
+                    &gestures,
+                )
+                .await?;
                 // Nothing is typed until the target is on screen: an
                 // unconfirmed open posts the campaign's comment to whichever
                 // video the phone happens to be showing.
-                let proof =
-                    open_target_confirmed(&engine, &prepared.actor_udid, session.as_ref(), target)
-                        .await?;
+                let proof = driver.open_target(session.as_ref(), target).await?;
                 if proof == TargetProof::Structural {
-                    // Worth saying out loud: the post is open but unidentified,
-                    // so nothing here rules out the link having resolved to a
-                    // different video. On Windows this is every send, because
-                    // the OCR that reads the handle back is macOS-only.
+                    // Worth saying out loud: the post is open but unidentified, so nothing
+                    // here rules out the link having resolved to a different post.
+                    //
+                    // This used to blame OCR being macOS-only, which was wrong twice. The
+                    // condition is on the proof *level* and knows nothing about platform or
+                    // driver: the hierarchy path never calls OCR at all, and the pixel path
+                    // also lands here when OCR ran fine and simply did not find the handle
+                    // within the grace window. Naming the reader instead of guessing at a
+                    // cause is the honest version — a message that sends the operator to
+                    // install OCR when the handle merely is not on screen is worse than no
+                    // message.
                     log::warn!(
-                        "interaction {}: đăng vào bài của @{} chưa đối chiếu được tên tác giả \
-                         (OCR không khả dụng trên nền tảng này)",
+                        "interaction {}: đăng vào bài của @{} ở mức bằng chứng Structural — \
+                         không có gì trên màn nêu handle nên chưa xác định được đây có đúng \
+                         bài đó không (reader={})",
                         target.target_key,
-                        target.author
+                        target.author,
+                        driver.kind()
                     );
                 }
+                // The like, if the operator asked for one. **After the arrival proof and
+                // before anything is typed**, for two reasons: the rail is where the arrival
+                // check just found it, so no extra locate is needed, and a like that fails
+                // must not consume the comment — so it is logged and the message carries on.
+                //
+                // Not fatal on purpose. A refusal here is either "this backend cannot" or
+                // "the label did not flip", and neither is a reason to abandon a comment the
+                // operator queued. The campaign's own record shows what happened.
+                if request.like_target {
+                    match driver.like_target(session.as_ref()).await {
+                        Ok(reason) => log::info!(
+                            "interaction {}: {} — {reason}",
+                            target.target_key,
+                            prepared.actor_udid
+                        ),
+                        Err(error) => log::warn!(
+                            "interaction {}: không thả tim được ({error:#})",
+                            target.target_key
+                        ),
+                    }
+                }
+
+                // `effect_intent` decides `Uncertain` versus `Failed` on the error path,
+                // and `Uncertain` is permanently unretryable. So it is **not** set before
+                // the call: only the driver knows whether a Send tap actually went out,
+                // and the steps that locate a parent can fail with nothing typed. Setting
+                // it optimistically is exactly the bug this shape exists to prevent — it
+                // made a never-posted reply impossible to retry.
+                //
+                // The DB `Sending` write still happens first: it is the audit record that
+                // this assignment is about to act, and it must survive a crash mid-send.
                 if let Some(parent) = parent_identity.as_ref() {
-                    let (observations, screen_size) = open_comment_for_ocr(
-                        &engine,
-                        &prepared.actor_udid,
-                        session.as_ref(),
-                        &gestures,
-                    )
-                    .await?;
-                    // Hunt down the list first; the stability check then runs
-                    // on the frame that actually shows the parent.
-                    let observations = scroll_to_parent(
-                        &engine,
-                        &prepared.actor_udid,
-                        session.as_ref(),
-                        &gestures,
-                        parent,
-                        screen_size,
-                        observations,
-                    )
-                    .await?;
-                    let parent_match =
-                        stable_parent_match(&engine, &prepared.actor_udid, parent, observations)
-                            .await?;
-                    let reply_point = TapPoint {
-                        x: screen_size.0 * parent_match.reply_x,
-                        y: screen_size.1 * parent_match.reply_y,
-                    };
                     db.update_interaction_assignment_state(
                         &id,
                         ThreadMessageState::Sending,
@@ -728,30 +1026,27 @@ async fn execute_thread_campaign(
                         Some("reply_comment"),
                         None,
                     )?;
-                    effect_intent = true;
-                    let evidence = engine
-                        .send_prepared_thread_reply(
-                            &prepared.actor_udid,
-                            session.as_ref(),
-                            &gestures,
-                            reply_point,
-                            &prepared,
-                            &stop,
-                        )
-                        .await?;
-                    let identity = discover_after_send(
-                        &engine,
-                        &prepared.actor_udid,
-                        session.as_ref(),
-                        &gestures,
-                        &prepared.text,
-                    )
-                    .await
-                    .ok();
+                    // Strictly the frame that was current when Send was tapped, so
+                    // anything published afterwards has to be newer than the comment.
+                    watermark = frame_source
+                        .latest_in_generation(&prepared.actor_udid, generation)
+                        .map(|frame| frame.sequence);
+                    let sent = match driver
+                        .send_reply(session.as_ref(), parent, &prepared, &stop)
+                        .await
+                    {
+                        Ok(sent) => sent,
+                        Err(failure) => {
+                            effect_intent = failure.effect_may_have_gone_out();
+                            return Err(failure.into_error());
+                        }
+                    };
                     Ok::<serde_json::Value, anyhow::Error>(serde_json::json!({
-                        "send": evidence,
+                        "send": sent.evidence,
                         "parent": parent,
-                        "postedIdentity": identity,
+                        "postedIdentity": sent.identity,
+                        "reader": driver.kind(),
+                        "arrival": proof.as_str(),
                     }))
                 } else {
                     db.update_interaction_assignment_state(
@@ -761,32 +1056,36 @@ async fn execute_thread_campaign(
                         Some("post_comment"),
                         None,
                     )?;
-                    effect_intent = true;
-                    let evidence = engine
-                        .send_prepared_thread_comment(
-                            &prepared.actor_udid,
-                            session.as_ref(),
-                            &gestures,
-                            &prepared,
-                            &stop,
-                        )
-                        .await?;
-                    let identity = discover_after_send(
-                        &engine,
-                        &prepared.actor_udid,
-                        session.as_ref(),
-                        &gestures,
-                        &prepared.text,
-                    )
-                    .await
-                    .ok();
+                    // Strictly the frame that was current when Send was tapped, so
+                    // anything published afterwards has to be newer than the comment.
+                    watermark = frame_source
+                        .latest_in_generation(&prepared.actor_udid, generation)
+                        .map(|frame| frame.sequence);
+                    let sent = match driver.send_root(session.as_ref(), &prepared, &stop).await {
+                        Ok(sent) => sent,
+                        Err(failure) => {
+                            effect_intent = failure.effect_may_have_gone_out();
+                            return Err(failure.into_error());
+                        }
+                    };
                     Ok::<serde_json::Value, anyhow::Error>(serde_json::json!({
-                        "send": evidence,
-                        "postedIdentity": identity,
+                        "send": sent.evidence,
+                        "postedIdentity": sent.identity,
+                        "reader": driver.kind(),
+                        "arrival": proof.as_str(),
                     }))
                 }
             }
             .await;
+            // Before the teardown, not after. `close_ui_context` stops the stream and
+            // removes this device's cached frame, which is why every artefact row until
+            // now was filed with a NULL path.
+            let evidence = evidence_frame_after(
+                frame_source.as_ref(),
+                &prepared.actor_udid,
+                generation,
+                watermark,
+            );
             let cleanup = control.close_ui_context(context).await;
             match result {
                 Ok(evidence_json) => {
@@ -803,24 +1102,22 @@ async fn execute_thread_campaign(
                     } else {
                         "comment-root-evidence"
                     };
-                    // The drawer is still open at this point — nothing closes
-                    // it after the identity pass — so this frame shows the
-                    // comment that was just posted, in the list, which is the
-                    // only thing that settles a dispute later.
+                    // The drawer is still open on the phone — nothing closes it after the
+                    // identity pass — so this frame shows the comment that was just posted,
+                    // in the list, which is the only thing that settles a dispute later.
+                    // The frame itself was taken above, while the stream was still alive.
                     let saved = publish_evidence_frame(
                         &artifacts,
-                        &engine,
+                        evidence.clone(),
                         &campaign_id,
                         &id,
                         &prepared.actor_udid,
                     );
-                    let artifact_sha = saved.as_ref().map(|(_, sha)| sha.as_str()).unwrap_or(
-                        evidence_json
-                            .get("postedIdentity")
-                            .and_then(|identity| identity.get("frameSha256"))
-                            .and_then(|value| value.as_str())
-                            .unwrap_or_default(),
-                    );
+                    // No fallback sha. It used to borrow `postedIdentity.frameSha256` when
+                    // nothing was stored, which produced exactly the row observed on
+                    // 13/08/2026: a digest that looks like evidence next to a `relative_path`
+                    // of NULL and no bytes anywhere. A row that stored nothing must say so.
+                    let artifact_sha = saved.as_ref().map(|(_, sha)| sha.as_str()).unwrap_or("");
                     let _ = db.add_interaction_artifact(
                         &campaign_id,
                         &target.target_key,
@@ -856,7 +1153,7 @@ async fn execute_thread_campaign(
                     // path used to write no artifact at all.
                     if let Some((path, sha)) = publish_evidence_frame(
                         &artifacts,
-                        &engine,
+                        evidence,
                         &campaign_id,
                         &id,
                         &prepared.actor_udid,
@@ -939,15 +1236,36 @@ const OPEN_TARGET_HANDLE_GRACE: Duration = Duration::from_secs(4);
 /// is the proof: wait for a frame whose OCR contains it.
 /// How far the open could be proved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TargetProof {
+pub(crate) enum TargetProof {
     /// The author handle from the link was read back off the screen. This is
     /// the only level that identifies *which* post is open.
     Identified,
     /// TikTok came forward, the screen changed, and it settled on a post — but
-    /// the handle could not be read, so the post is unidentified. OCR here is
-    /// macOS-only (`interaction_ocr::recognize` bails everywhere else), so this
-    /// is the best available proof on Windows.
+    /// the handle could not be read, so the post is unidentified.
+    ///
+    /// This is the level nearly every real send reaches, and **not** because of any
+    /// platform limitation — the note that used to sit here blamed OCR for being
+    /// macOS-only, which was wrong on both counts. The hierarchy path reads the handle
+    /// out of the accessibility tree and calls no OCR at all; it lands here because a
+    /// TikTok post page shows the *nickname*, and a nickname folds onto its handle for
+    /// roughly one account in three (`interaction_hierarchy::author_matches_handle`
+    /// documents the measurements). So sending is deliberately **not** gated on
+    /// [`Self::Identified`]: gating it would refuse most posts that opened perfectly.
     Structural,
+}
+
+impl TargetProof {
+    /// The word that goes into the evidence row.
+    ///
+    /// Stored rather than only logged: the proof level is the difference between "we know
+    /// which post this landed on" and "we know a post was open", and a stored campaign
+    /// that does not say which of those it achieved cannot be audited afterwards.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Identified => "identified",
+            Self::Structural => "structural",
+        }
+    }
 }
 
 async fn open_target_confirmed(
@@ -955,6 +1273,7 @@ async fn open_target_confirmed(
     udid: &str,
     session: &dyn riviu_core::UiSession,
     target: &riviu_core::ResolvedTikTokTarget,
+    target_package: &str,
 ) -> anyhow::Result<TargetProof> {
     // The screen as it was before the request, so "nothing happened" is
     // distinguishable from "the post loaded".
@@ -983,7 +1302,7 @@ async fn open_target_confirmed(
         // A wrong frontmost app is decisive; a query that cannot answer it is
         // not, and never stands in for the frame proof either way.
         if let Ok(bundle) = session.active_app_bundle().await {
-            if bundle != TIKTOK_BUNDLE_ID {
+            if bundle != target_package {
                 continue;
             }
         }
@@ -1134,6 +1453,361 @@ async fn discover_after_send(
     Ok(first_identity)
 }
 
+/// Today's pixel path, behind [`TargetDriver`] and otherwise unchanged.
+///
+/// Every method here delegates to the function that already did the work, in the same
+/// order and with the same arguments. Nothing about the iOS behaviour changes — the
+/// point of the trait is that Android can be a peer, not that this path be rewritten.
+struct PixelTargetDriver<'a> {
+    engine: &'a riviu_core::NurtureEngine,
+    udid: &'a str,
+    target_package: &'a str,
+    gestures: &'a tokio::sync::Mutex<()>,
+}
+
+#[async_trait::async_trait]
+impl TargetDriver for PixelTargetDriver<'_> {
+    fn kind(&self) -> &'static str {
+        "pixel"
+    }
+
+    async fn open_target(
+        &self,
+        session: &dyn riviu_core::UiSession,
+        target: &riviu_core::ResolvedTikTokTarget,
+    ) -> anyhow::Result<TargetProof> {
+        open_target_confirmed(self.engine, self.udid, session, target, self.target_package).await
+    }
+
+    async fn send_root(
+        &self,
+        session: &dyn riviu_core::UiSession,
+        prepared: &PreparedThreadMessage,
+        stop: &AtomicBool,
+    ) -> Result<SendOutcome, SendFailure> {
+        // `AfterEffect` for the whole call, which is exactly what this path did before
+        // the trait existed: the caller used to set `effect_intent = true` immediately
+        // before it. `send_prepared_thread_comment` can also fail *before* tapping Send,
+        // but distinguishing that would change iOS behaviour, and the safe direction for
+        // a comment that may have posted is to refuse the retry.
+        let evidence = self
+            .engine
+            .send_prepared_thread_comment(self.udid, session, self.gestures, prepared, stop)
+            .await
+            .map_err(SendFailure::after)?;
+        let identity = discover_after_send(
+            self.engine,
+            self.udid,
+            session,
+            self.gestures,
+            &prepared.text,
+        )
+        .await
+        .ok();
+        Ok(SendOutcome { evidence, identity })
+    }
+
+    async fn send_reply(
+        &self,
+        session: &dyn riviu_core::UiSession,
+        parent: &CommentLocatorIdentity,
+        prepared: &PreparedThreadMessage,
+        stop: &AtomicBool,
+    ) -> Result<SendOutcome, SendFailure> {
+        // Everything down to the reply tap is `BeforeEffect`: it opens the drawer,
+        // scrolls, and reads frames. Nothing is typed and no Send tap goes out, so a
+        // failure here must stay retryable — the parent genuinely may not be in the list,
+        // because each reply comes from a different device and TikTok re-ranks the
+        // comments between them.
+        let (observations, screen_size) =
+            open_comment_for_ocr(self.engine, self.udid, session, self.gestures)
+                .await
+                .map_err(SendFailure::before)?;
+        // Hunt down the list first; the stability check then runs on the frame that
+        // actually shows the parent.
+        let observations = scroll_to_parent(
+            self.engine,
+            self.udid,
+            session,
+            self.gestures,
+            parent,
+            screen_size,
+            observations,
+        )
+        .await
+        .map_err(SendFailure::before)?;
+        let parent_match = stable_parent_match(self.engine, self.udid, parent, observations)
+            .await
+            .map_err(SendFailure::before)?;
+        let reply_point = TapPoint {
+            x: screen_size.0 * parent_match.reply_x,
+            y: screen_size.1 * parent_match.reply_y,
+        };
+        let evidence = self
+            .engine
+            .send_prepared_thread_reply(
+                self.udid,
+                session,
+                self.gestures,
+                reply_point,
+                prepared,
+                stop,
+            )
+            .await
+            .map_err(SendFailure::after)?;
+        let identity = discover_after_send(
+            self.engine,
+            self.udid,
+            session,
+            self.gestures,
+            &prepared.text,
+        )
+        .await
+        .ok();
+        Ok(SendOutcome { evidence, identity })
+    }
+}
+
+/// The hierarchy path, for devices that report where their controls are.
+///
+/// Holds the resolved label set rather than resolving per call: the lookup needs the UI
+/// language *and* the app version, and reading the version costs a `dumpsys` (1–2 s
+/// measured). Resolving once per assignment is also what makes a build nobody has
+/// measured refuse **before** the first tap.
+struct HierarchyTargetDriver<'a> {
+    engine: &'a riviu_core::NurtureEngine,
+    udid: &'a str,
+    target_package: &'a str,
+    labels: riviu_core::tiktok_labels::TikTokControls,
+    screen: (f64, f64),
+}
+
+impl HierarchyTargetDriver<'_> {
+    /// The current frame's SHA, or empty when no frame is available.
+    ///
+    /// The same source the pixel path uses, so a stored evidence row means the same
+    /// thing whichever driver wrote it. Empty rather than an error: a missing frame is
+    /// not a reason to fail a send that otherwise succeeded, it just leaves that field
+    /// unproved.
+    fn frame_sha(&self) -> String {
+        self.engine
+            .frames
+            .latest(self.udid)
+            .map(|frame| riviu_core::frame_sha256(&frame))
+            .unwrap_or_default()
+    }
+
+    /// Turn a hierarchy outcome into the shared shape, or a classified failure.
+    ///
+    /// The classification comes from the verdict, and `CommentVerdict`'s own contract is
+    /// what makes it sound: **every variant except `Sent` means nothing was posted, and
+    /// `NotConfirmed` is the only one where a Send tap went out**. So `NotConfirmed` is
+    /// the single `AfterEffect` case; `SendUnmeasured`, `NoDrawer`, `NoSendControl` and
+    /// `NotArmed` all provably never tapped Send and must stay retryable.
+    fn finish(
+        outcome: riviu_core::interaction_hierarchy::HierarchySendOutcome,
+        prepared: &PreparedThreadMessage,
+    ) -> Result<SendOutcome, SendFailure> {
+        use riviu_core::tiktok_drawer::CommentVerdict;
+        if !outcome.verdict.is_sent() {
+            // The verdict's own reason, verbatim: it names the step that stopped.
+            let error = anyhow::anyhow!("{}", outcome.verdict.reason());
+            return Err(match outcome.verdict {
+                CommentVerdict::NotConfirmed => SendFailure::AfterEffect(error),
+                _ => SendFailure::BeforeEffect(error),
+            });
+        }
+        Ok(SendOutcome {
+            evidence: riviu_core::ThreadSendEvidence {
+                text_sha256: prepared.text_sha256.clone(),
+                armed_frame_sha256: outcome.armed_frame_sha256,
+                cleared_frame_sha256: outcome.cleared_frame_sha256,
+            },
+            identity: outcome.identity,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl TargetDriver for HierarchyTargetDriver<'_> {
+    fn kind(&self) -> &'static str {
+        "hierarchy"
+    }
+
+    /// Like the open post, through the same measured contract the nurture loop uses.
+    ///
+    /// `riviu_core::tiktok_like` is shared rather than reimplemented here: the proof is that
+    /// the liked label appears, or the not-liked one goes while the action rail stays, and two
+    /// copies of that rule would drift into reporting different things.
+    ///
+    /// The tap goes to the centre of the rectangle the device reported. There is no touch
+    /// planner on this path — a campaign taps a given post once, so there is no history to
+    /// vary against, and the alternative would be a planner constructed per assignment whose
+    /// "history" is a single entry.
+    async fn like_target(&self, session: &dyn riviu_core::UiSession) -> anyhow::Result<String> {
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let verdict = riviu_core::tiktok_like::like_post(
+            session,
+            self.labels,
+            &mut riviu_core::tiktok_like::centre_of,
+            &stop,
+        )
+        .await?;
+        if verdict.is_liked() {
+            Ok(verdict.reason().to_string())
+        } else {
+            anyhow::bail!("{}", verdict.reason())
+        }
+    }
+
+    async fn open_target(
+        &self,
+        session: &dyn riviu_core::UiSession,
+        target: &riviu_core::ResolvedTikTokTarget,
+    ) -> anyhow::Result<TargetProof> {
+        use riviu_core::interaction_hierarchy::TargetArrival;
+        // The campaign's stop flag is deliberately not threaded in here: aborting an
+        // arrival check is safe, but the flag this campaign holds is permanently false
+        // on purpose (see `execute_thread_campaign`), so passing it would only add a
+        // parameter that never changes.
+        let never = AtomicBool::new(false);
+        match riviu_core::interaction_hierarchy::open_target_by_hierarchy(
+            session,
+            self.labels,
+            self.target_package,
+            &target.normalized_url,
+            &target.author,
+            &never,
+        )
+        .await
+        {
+            Ok(TargetArrival::Identified { .. }) => Ok(TargetProof::Identified),
+            Ok(TargetArrival::Structural) => Ok(TargetProof::Structural),
+            Err(refusal) => anyhow::bail!("{}: {}", refusal.code(), refusal.message()),
+        }
+    }
+
+    async fn send_root(
+        &self,
+        session: &dyn riviu_core::UiSession,
+        prepared: &PreparedThreadMessage,
+        stop: &AtomicBool,
+    ) -> Result<SendOutcome, SendFailure> {
+        let outcome = riviu_core::interaction_hierarchy::send_root_by_hierarchy(
+            session,
+            self.labels,
+            self.screen,
+            &prepared.text,
+            stop,
+            || self.frame_sha(),
+        )
+        .await
+        // A transport error out of the send flow itself: the agent stopped answering, and
+        // whether the tap landed is genuinely unknown.
+        .map_err(SendFailure::after)?;
+        Self::finish(outcome, prepared)
+    }
+
+    async fn send_reply(
+        &self,
+        session: &dyn riviu_core::UiSession,
+        parent: &CommentLocatorIdentity,
+        prepared: &PreparedThreadMessage,
+        stop: &AtomicBool,
+    ) -> Result<SendOutcome, SendFailure> {
+        let outcome = riviu_core::interaction_hierarchy::send_reply_by_hierarchy(
+            session,
+            self.labels,
+            self.screen,
+            parent,
+            &prepared.text,
+            stop,
+            || self.frame_sha(),
+        )
+        .await
+        .map_err(SendFailure::after)?;
+        match outcome {
+            Ok(outcome) => Self::finish(outcome, prepared),
+            // Every `ReplyRefusal` variant means nothing was typed — that is its
+            // documented contract and every one of them is tested for it. Flattening them
+            // into the same error as a `NotConfirmed` send would make a message that was
+            // never posted permanently unretryable.
+            Err(refusal) => Err(SendFailure::BeforeEffect(anyhow::anyhow!(
+                "{}: {}",
+                refusal.code(),
+                refusal.message()
+            ))),
+        }
+    }
+}
+
+/// Pick the driver for one assignment, from the session actually in hand.
+///
+/// `supports_element_bounds()` on the **session** is the runtime authority, and it is the
+/// only thing consulted here. `DeviceControlPlane::reports_element_bounds` answers the
+/// same question without a session and is what the pre-flight gates use; the two are
+/// separate answers from the same driver and no attempt is made to cross-check them,
+/// because there is nothing useful to do with a disagreement at this point — the session
+/// is the thing about to be driven.
+///
+/// It refuses, before any tap, when this build has no measured label set **and** when it
+/// has no measured Send control: without the latter there is nothing to aim at, and
+/// finding that out after opening the drawer leaves the phone sitting in it.
+async fn choose_target_driver<'a>(
+    engine: &'a riviu_core::NurtureEngine,
+    udid: &'a str,
+    session: &dyn riviu_core::UiSession,
+    target_package: &'a str,
+    gestures: &'a tokio::sync::Mutex<()>,
+) -> anyhow::Result<Box<dyn TargetDriver + 'a>> {
+    if !session.supports_element_bounds() {
+        return Ok(Box::new(PixelTargetDriver {
+            engine,
+            udid,
+            target_package,
+            gestures,
+        }));
+    }
+    let language = session.ui_language().await.unwrap_or_default();
+    let app_version = session
+        .app_version(target_package)
+        .await
+        .unwrap_or_default();
+    let labels = riviu_core::tiktok_labels::controls_for(target_package, &language, &app_version)
+        .ok_or_else(|| {
+        anyhow::anyhow!(
+            "chưa đo nhãn cho {target_package} + ngôn ngữ {language:?}; từ chối thay vì \
+                 dùng chuỗi của ngôn ngữ khác (nhãn nào silently không khớp thì đọc thành \
+                 'không có control đó')"
+        )
+    })?;
+    // The Send control is keyed by app *version*, so a build whose translations are
+    // catalogued can still have no Send id — which is exactly what a TikTok update
+    // produces. Refusing here rather than inside the drawer is the difference between
+    // "nothing happened" and "the phone is sitting in an open comment drawer".
+    if labels
+        .label(riviu_core::tiktok_labels::TikTokControl::CommentSend)
+        .is_none()
+    {
+        anyhow::bail!(
+            "chưa đo nút Gửi cho {target_package} phiên bản {app_version:?} — resource id của \
+             nó bị gán lại mỗi lần app rebuild nên không dùng được id của bản khác. Chạy \
+             `probe --measure-comment` trên máy này rồi thêm một entry TIKTOK_RESOURCE_SETS."
+        );
+    }
+    let screen = session
+        .window_size()
+        .await
+        .context("đọc kích thước màn hình để lập kế hoạch tap")?;
+    Ok(Box::new(HierarchyTargetDriver {
+        engine,
+        udid,
+        target_package,
+        labels,
+        screen,
+    }))
+}
+
 /// How far to hunt for the parent before giving up, and the gesture used.
 ///
 /// The drawer only ever showed its first screenful: `open_comment_for_ocr`
@@ -1269,6 +1943,98 @@ fn campaign_is_cancelled(db: &riviu_core::db::Database, campaign_id: &str) -> an
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two conditions an evidence frame has to satisfy, pinned without a device.
+    mod evidence_frames {
+        use super::*;
+        use riviu_core::{GenerationFrame, GenerationFrameStream};
+
+        /// A hub that hands back exactly one frame, for one generation.
+        struct FakeHub {
+            generation: u64,
+            sequence: u64,
+        }
+
+        impl riviu_core::FrameSource for FakeHub {
+            fn subscribe(&self, _udid: &str) -> Box<dyn riviu_core::FrameStream> {
+                unimplemented!("evidence uses the latest read, never a subscription")
+            }
+
+            /// Deliberately answers even when the generation-qualified read would not.
+            ///
+            /// That asymmetry *is* the bug this guards: the unqualified read is what the
+            /// campaign used to call, and it happily returns a dead producer's bytes.
+            fn latest(&self, _udid: &str) -> Option<riviu_core::Frame> {
+                Some(std::sync::Arc::new(vec![0xff, 0xd8, 0xff]))
+            }
+        }
+
+        impl riviu_core::GenerationFrameSource for FakeHub {
+            fn subscribe_generation(
+                &self,
+                _udid: &str,
+                _generation: u64,
+            ) -> Box<dyn GenerationFrameStream> {
+                unimplemented!("evidence uses the latest read, never a subscription")
+            }
+
+            fn latest_in_generation(
+                &self,
+                _udid: &str,
+                generation: u64,
+            ) -> Option<GenerationFrame> {
+                // A real hub answers `None` once the generation has moved on; anything else
+                // would hand out a dead producer's bytes.
+                (generation == self.generation).then(|| GenerationFrame {
+                    generation: self.generation,
+                    sequence: self.sequence,
+                    bytes: std::sync::Arc::new(vec![0xff, 0xd8, 0xff]),
+                })
+            }
+        }
+
+        #[test]
+        fn an_evidence_frame_from_before_the_send_is_not_published_as_proof_of_it() {
+            // The watermark is the frame that was current when Send was tapped. A frame at
+            // or below it shows the screen *without* the comment, and filing that as proof
+            // of the comment is worse than filing nothing — it looks checkable and is not.
+            let hub = FakeHub {
+                generation: 7,
+                sequence: 42,
+            };
+            assert!(evidence_frame_after(&hub, "udid", 7, Some(42)).is_none());
+            assert!(evidence_frame_after(&hub, "udid", 7, Some(99)).is_none());
+            assert_eq!(
+                evidence_frame_after(&hub, "udid", 7, Some(41)).map(|frame| frame.sequence),
+                Some(42)
+            );
+        }
+
+        #[test]
+        fn an_evidence_frame_is_refused_once_the_stream_generation_has_advanced() {
+            // Measured on this farm: the hub will return stale bytes for a producer that has
+            // already died (`last_frame_age_ms=11373` with the sequence unmoved), and
+            // `FrameSource::latest` promises nothing about liveness. Asking for a specific
+            // generation is what makes the answer mean something.
+            let hub = FakeHub {
+                generation: 7,
+                sequence: 42,
+            };
+            assert!(evidence_frame_after(&hub, "udid", 8, None).is_none());
+            assert!(evidence_frame_after(&hub, "udid", 6, None).is_none());
+        }
+
+        #[test]
+        fn with_no_watermark_any_frame_of_the_right_generation_is_admissible() {
+            // The pre-send seed case: a refused arrival files whatever explains it, and
+            // there is no "after the send" to be newer than.
+            let hub = FakeHub {
+                generation: 3,
+                sequence: 1,
+            };
+            assert!(evidence_frame_after(&hub, "udid", 3, None).is_some());
+        }
+    }
     use riviu_core::InteractionAssignmentRecord;
 
     fn assignment(id: &str, ordinal: u8, state: ThreadMessageState) -> InteractionAssignmentRecord {

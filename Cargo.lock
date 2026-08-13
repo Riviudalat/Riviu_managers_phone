@@ -3026,6 +3026,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "parking_lot",
+ "rand 0.8.7",
  "reqwest 0.12.28",
  "riviu-core",
  "serde",

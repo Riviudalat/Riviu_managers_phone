@@ -716,7 +716,7 @@ fn mock_snapshot() -> DeviceCapabilitySnapshot {
         driver_adapter_version: "fixture-driver-1".into(),
         transport: ActiveTransport::Mock,
         product_type: "iPhone10,1".into(),
-        ios_version: "16.7.15".into(),
+        os_version: "16.7.15".into(),
         target_app: InstalledTargetIdentity {
             bundle_id: SETTINGS.into(),
             version: "1".into(),
@@ -740,7 +740,8 @@ fn mock_device(udid: &str) -> DeviceInfo {
         udid: udid.to_string(),
         name: format!("Fixture {udid}"),
         model: "iPhone 8".into(),
-        ios_version: "16.7.15".into(),
+        platform: riviu_core::DevicePlatform::Ios,
+        os_version: "16.7.15".into(),
         connection: ConnectionKind::Mock,
         status: DeviceStatus::Ready,
         battery: Some(100),

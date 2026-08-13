@@ -99,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("udid {udid} not found"))?;
     println!(
         "device={} name={} ios={}",
-        device.udid, device.name, device.ios_version
+        device.udid, device.name, device.os_version
     );
 
     let tmp = std::env::temp_dir().join(format!("riviu-nurture-live-{}", std::process::id()));

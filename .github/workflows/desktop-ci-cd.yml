@@ -102,6 +102,14 @@ jobs:
           python scripts/collect_desktop_ci_artifacts.py verify-version
           python -m unittest -v scripts.test_collect_desktop_ci_artifacts sidecars.pymobiledevice3.test_app_control sidecars.pymobiledevice3.test_rtmmo_lifecycle sidecars.signer.test_riviu_signer sidecars.wda.test_build_and_install
 
+      # Repo-side digest check for the bundled Android tools. Deliberately in the
+      # quality job as well as in the packaged verification: a PR that replaces a
+      # binary without regenerating the pin fails in seconds here, instead of after
+      # three 120-minute platform builds.
+      - name: Verify bundled Android tools
+        shell: pwsh
+        run: python scripts/collect_desktop_ci_artifacts.py verify-android-tools
+
       - name: Verify release tag matches application version
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
@@ -240,6 +248,14 @@ jobs:
           test -f sidecars/wda/candidate-manifest.json
           test -f sidecars/wda/RiviuAgent-text.ipa
           test -f sidecars/wda/text-manifest.json
+          test -f sidecars/android/android-tools-manifest.json
+          test -f sidecars/android/noarch/minicap.apk
+          test -f sidecars/android/win-x86_64/adb.exe
+          # Both DLLs by name: Windows loads them from adb.exe's own directory, so a
+          # bundle missing one produces an adb that fails at load time on the operator's
+          # machine and nowhere in this pipeline.
+          test -f sidecars/android/win-x86_64/AdbWinApi.dll
+          test -f sidecars/android/win-x86_64/AdbWinUsbApi.dll
           python scripts/collect_desktop_ci_artifacts.py snapshot-production \
             --output target/production-wda-inputs.json \
             --require-canonical-production

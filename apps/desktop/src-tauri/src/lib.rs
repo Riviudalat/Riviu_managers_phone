@@ -2,12 +2,14 @@ mod agent_commands;
 /// Public so the live harness binaries resolve the agent exactly as the app
 /// does. Duplicating the token/manifest choice is how the two drift apart.
 pub mod agent_runtime;
+mod android_tools;
 mod command_error;
 mod commands;
 mod farm_commands;
 mod flow_commands;
 mod interaction_commands;
 pub mod interaction_ocr;
+mod interaction_target;
 mod nurture_commands;
 mod publish_commands;
 mod state;

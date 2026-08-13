@@ -2311,6 +2311,300 @@ button.danger:hover:not(:disabled) {
   grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
   gap: 0.4rem;
 }
+/* ---- Nuôi TikTok panel ----------------------------------------------------------
+   Same palette as the rest of the app (--primary, --line, --text-1/2/3, --bg-muted);
+   what changed is structure and weight, so the panel reads as a designed surface
+   instead of a stack of form rows. */
+
+/* Segmented control rather than text links with an underline: the selected group is a
+   filled pill, so which tab you are on is legible at a glance from across the screen. */
+.nurture-tabs {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  margin: 0.5rem 0 0.1rem;
+  padding: 0.15rem;
+  border-radius: 7px;
+  background: var(--bg-muted);
+}
+.nurture-tab {
+  flex: 1 1 0;
+  padding: 0.3rem 0.5rem;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: var(--text-2);
+  font-size: 0.75rem;
+  font-weight: 500;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.nurture-tab:hover {
+  color: var(--text-1);
+}
+.nurture-tab.is-on {
+  background: var(--bg);
+  color: var(--primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+.nurture-live-flag {
+  flex: 0 0 auto;
+  padding: 0 0.4rem;
+  color: var(--primary);
+  font-size: 0.62rem;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: help;
+}
+
+/* The live block stays above the tabs: it is what the panel is open to watch, and putting
+   it behind a tab would hide it exactly while settings are being tuned. */
+.nurture-live {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+/* done / attempted, four times over. `b` is confirmed, `i` attempted, `em` the unit. */
+.nurture-metrics {
+  display: flex;
+  align-items: baseline;
+  gap: 0.1rem;
+  font-family: var(--font-mono);
+  font-size: 0.63rem;
+  white-space: nowrap;
+  cursor: help;
+}
+.nurture-metrics b {
+  color: var(--text-1);
+  font-weight: 600;
+}
+.nurture-metrics i {
+  color: var(--text-3);
+  font-style: normal;
+}
+.nurture-metrics em {
+  margin-right: 0.34rem;
+  color: var(--text-3);
+  font-style: normal;
+}
+
+.nu-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+/* Micro-cap field labels. Small, spaced, quiet — the value is what should carry weight. */
+.nu-pane .nu-label {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+  color: var(--text-3);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.nu-pane .nu-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin: 0;
+}
+.nu-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.45rem;
+}
+
+/* A titled group. The rule sits behind the title so the heading reads as a divider rather
+   than as another line of text competing with the labels. */
+.nu-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.nu-group-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text-2);
+  font-size: 0.63rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.nu-group-head::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+/* One feature per row: switch, name, percentage. Aligned so the four read as a list of
+   the same kind of thing, which is what they are. */
+.nu-feature {
+  display: grid;
+  grid-template-columns: auto 1fr 4.9rem;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 1.7rem;
+}
+.nu-feature-name {
+  color: var(--text-1);
+  font-size: 0.78rem;
+}
+.nu-feature.is-off .nu-feature-name {
+  color: var(--text-3);
+}
+.nu-pane .nu-feature-pct {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.2rem;
+  color: var(--text-3);
+  font-size: 0.68rem;
+}
+.nu-pane .nu-feature-pct input {
+  width: 3.5rem;
+  min-width: 0;
+  text-align: right;
+}
+/* Dashed while switched off — the number is kept on purpose, so it must stay readable
+   rather than be greyed into looking disabled. */
+.nu-pane .nu-feature.is-off .nu-feature-pct input {
+  border-style: dashed;
+  color: var(--text-3);
+}
+.nu-summary {
+  margin: 0.1rem 0 0;
+  color: var(--text-3);
+  font-size: 0.65rem;
+  line-height: 1.45;
+}
+
+/* A switch, not a checkbox. `appearance: none` keeps it a checkbox to the accessibility
+   tree and to every test that finds it by label. */
+.nu-pane .nu-switch {
+  display: flex;
+  /* Stated, not inherited: the panel's `label` rule is `flex-direction: column`, which put
+     the switch's label underneath its track. Same trap as the restart badge. */
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.45rem;
+  min-height: 1.6rem;
+  margin: 0;
+  color: var(--text-1);
+  font-size: 0.78rem;
+  font-weight: 400;
+  cursor: pointer;
+}
+.nu-pane .nu-switch input[type="checkbox"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.nu-pane .nu-switch-track {
+  position: relative;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 15px;
+  border-radius: 999px;
+  background: var(--line-strong);
+  transition: background 0.15s ease;
+}
+.nu-pane .nu-switch-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  transition: transform 0.15s ease;
+}
+.nu-pane .nu-switch input:checked + .nu-switch-track {
+  background: var(--primary);
+}
+.nu-pane .nu-switch input:checked + .nu-switch-track::after {
+  transform: translateX(11px);
+}
+.nu-pane .nu-switch input:focus-visible + .nu-switch-track {
+  outline: 2px solid var(--primary-ring);
+  outline-offset: 1px;
+}
+.nu-pane .nu-switch-label {
+  line-height: 1.3;
+}
+.nu-pane .nu-switch-bare {
+  gap: 0;
+  min-height: 0;
+}
+
+/* The `!` after a control's name. Quiet by default so twelve of them do not read as
+   twelve warnings, and it only takes the accent on hover — at which point the tooltip is
+   about to appear anyway. `cursor: help` is the affordance; there is nothing to click. */
+.nu-info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  margin-left: 0.28rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  color: var(--text-3);
+  font-size: 0.58rem;
+  font-weight: 700;
+  font-style: normal;
+  line-height: 1;
+  letter-spacing: 0;
+  text-transform: none;
+  cursor: help;
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+.nu-info:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+/* `.nurture-sect label` is `flex-direction: column` (2244), so every child of a label in
+   the AI and Lịch tabs is its own row — a bare `!` there would sit on a line of its own
+   between the caption and the field. Wrapping the caption and the `!` in this makes them
+   one row, which is the honest fix; the alternative was a negative top margin pulling the
+   glyph back up over the line above it. */
+.nu-inline {
+  display: inline-flex;
+  align-items: center;
+}
+
+.nurture-restart-badge {
+  padding: 0 0.26rem;
+  border: 1px solid var(--warn);
+  border-radius: 3px;
+  color: var(--warn);
+  font-size: 0.55rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
+  cursor: help;
+}
+
 .nurture-sched {
   margin-top: 0.25rem;
   border-bottom: none;

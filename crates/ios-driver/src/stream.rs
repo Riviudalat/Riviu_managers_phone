@@ -130,7 +130,11 @@ impl StreamHub {
         let _ = self.device_generation_sender(udid).send(event);
     }
 
-    pub(crate) fn generation(&self, udid: &str) -> u64 {
+    /// Public because a second backend publishes through the same hub: see
+    /// `riviu_core::FrameSink`, implemented below. Keeping the generation
+    /// protocol crate-private would have forced `riviu-android-driver` to depend
+    /// on this crate, or to publish without generation qualification.
+    pub fn generation(&self, udid: &str) -> u64 {
         self.state
             .read()
             .generations
@@ -139,7 +143,7 @@ impl StreamHub {
             .unwrap_or(0)
     }
 
-    pub(crate) fn publish_if_current(&self, udid: &str, generation: u64, jpeg: Vec<u8>) -> bool {
+    pub fn publish_if_current(&self, udid: &str, generation: u64, jpeg: Vec<u8>) -> bool {
         let frame: Frame = Arc::new(jpeg);
         let sequence = {
             let mut state = self.state.write();
@@ -180,7 +184,7 @@ impl StreamHub {
         self.clear_and_advance(udid);
     }
 
-    pub(crate) fn clear_and_advance(&self, udid: &str) -> (u64, u64) {
+    pub fn clear_and_advance(&self, udid: &str) -> (u64, u64) {
         let mut state = self.state.write();
         state.latest.remove(udid);
         state.sequences.remove(udid);
@@ -324,6 +328,32 @@ impl FrameSource for StreamHub {
 
     fn latest(&self, udid: &str) -> Option<Frame> {
         StreamHub::latest(self, udid)
+    }
+}
+
+/// The publish side, so the Android backend can feed this hub without depending
+/// on this crate. Every method here already existed; the trait only names the
+/// contract at the seam.
+impl riviu_core::FrameSink for StreamHub {
+    fn generation(&self, udid: &str) -> u64 {
+        StreamHub::generation(self, udid)
+    }
+
+    fn clear_and_advance(&self, udid: &str) -> u64 {
+        // The inner call returns (previous, new); only the new generation is a
+        // contract — the previous one is an implementation detail of the reset.
+        StreamHub::clear_and_advance(self, udid).1
+    }
+
+    fn park_and_advance(&self, udid: &str) -> u64 {
+        // This hub does have parked state, so it beats the trait's destructive
+        // default: the tile keeps its last image while the dead producer's frames
+        // are still rejected by the generation bump.
+        StreamHub::park_and_advance(self, udid).1
+    }
+
+    fn publish_if_current(&self, udid: &str, generation: u64, jpeg: Vec<u8>) -> bool {
+        StreamHub::publish_if_current(self, udid, generation, jpeg)
     }
 }
 

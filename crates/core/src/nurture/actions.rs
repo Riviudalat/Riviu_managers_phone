@@ -1104,6 +1104,137 @@ impl NurtureEngine {
         Some(frames)
     }
 
+    /// Frames for grounding a comment, without the iPhone pixel gate.
+    ///
+    /// [`Self::collect_comment_frames`] rejects anything `screen::feed_ready`
+    /// dislikes, and that detector is calibrated for one iPhone 8 layout — on an
+    /// Android frame it would reject every sample and the comment would always come
+    /// out as "context unavailable". The hierarchy loop has already established
+    /// that the feed tab and the action rail are on screen, which is *stronger*
+    /// evidence than a pixel heuristic, so the gate is not merely skipped here, it
+    /// is replaced.
+    pub(super) async fn collect_grounding_frames(
+        &self,
+        udid: &str,
+        stop: &AtomicBool,
+    ) -> Option<Vec<Vec<u8>>> {
+        let mut frames = Vec::with_capacity(3);
+        for sample in 0..3 {
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                return None;
+            }
+            let frame = self.frames.latest(udid)?;
+            frames.push((*frame).clone());
+            if sample < 2 {
+                sleep_interruptible(Duration::from_millis(600), stop).await;
+            }
+        }
+        (!frames.is_empty()).then_some(frames)
+    }
+
+    /// Generate one grounded comment and record its attempt row.
+    ///
+    /// Deliberately the *same* provider path the pixel engine uses — vision when
+    /// the provider has it, OCR caption otherwise — so the two backends do not
+    /// develop separate voices or separate audit trails. Only the frame gate
+    /// differs, for the reason on [`Self::collect_grounding_frames`].
+    pub(super) async fn prepare_hierarchy_comment(
+        &self,
+        udid: &str,
+        settings: &NurtureSettings,
+        stop: &AtomicBool,
+    ) -> Option<super::hierarchy::PreparedComment> {
+        if settings.api_key.trim().is_empty() {
+            return None;
+        }
+        let frames = match self.collect_grounding_frames(udid, stop).await {
+            Some(frames) => frames,
+            None => {
+                self.record_context_skip_attempt(
+                    udid,
+                    settings,
+                    context_source(settings),
+                    "evidence_unavailable",
+                );
+                return None;
+            }
+        };
+        let direction = pick_direction_seeded(
+            &settings.ai_directions,
+            frames.first().map(|frame| frame_digest(frame)).unwrap_or(0),
+        );
+        let prepared = if provider_supports_vision(settings) {
+            prepare_grounded_comment(settings, &frames, direction.as_deref()).await
+        } else {
+            let Some(caption) = self.read_caption(frames.last()).await else {
+                self.record_context_skip_attempt(
+                    udid,
+                    settings,
+                    "ocr-caption",
+                    "caption_ocr_empty",
+                );
+                return None;
+            };
+            let fingerprint = format!(
+                "{:016x}",
+                frames.last().map(|f| frame_digest(f)).unwrap_or_default()
+            );
+            prepare_caption_comment(settings, &caption, &fingerprint, direction.as_deref()).await
+        };
+        let comment = match prepared {
+            Ok(comment) => comment,
+            Err(error) => {
+                tracing::warn!("[nurture {udid}] không soạn được bình luận: {error}");
+                self.record_context_skip_attempt(
+                    udid,
+                    settings,
+                    context_source(settings),
+                    "context_skipped",
+                );
+                return None;
+            }
+        };
+        let attempt = NurtureCommentAttempt {
+            id: Uuid::new_v4().to_string(),
+            udid: udid.to_string(),
+            outcome: "prepared".into(),
+            source: context_source(settings).into(),
+            model: comment.model.clone(),
+            base_url_host: comment.base_url_host.clone(),
+            prompt_tokens: comment.prompt_tokens,
+            completion_tokens: comment.completion_tokens,
+            usd: comment.usd,
+            preview: comment.text.chars().take(160).collect(),
+            caption_preview: comment
+                .caption
+                .as_deref()
+                .map(|caption| caption.chars().take(160).collect())
+                .unwrap_or_default(),
+            frame_sha256: comment.frame_sha256.clone(),
+            context_confidence: Some(comment.context_confidence),
+            relevance: Some(comment.relevance),
+            evidence_support: Some(comment.evidence_support),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        let attempt_id = attempt.id.clone();
+        if let Err(error) = self.db.add_nurture_comment_attempt(&attempt) {
+            tracing::warn!("[nurture {udid}] không ghi được comment attempt: {error}");
+        }
+        Some(super::hierarchy::PreparedComment {
+            text: comment.text,
+            usd: comment.usd,
+            attempt_id: Some(attempt_id),
+        })
+    }
+
+    /// Close out a hierarchy comment's audit row.
+    pub(super) fn finish_hierarchy_comment(&self, attempt_id: Option<&str>, outcome: &str) {
+        let Some(id) = attempt_id else { return };
+        if let Err(error) = self.db.update_nurture_comment_attempt_outcome(id, outcome) {
+            tracing::warn!("không cập nhật outcome comment attempt {id}: {error}");
+        }
+    }
+
     fn update_comment_attempt(&self, prepared: &PreparedTextComment, outcome: &str) {
         let Some(id) = prepared.attempt_id.as_deref() else {
             return;

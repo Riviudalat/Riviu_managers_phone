@@ -495,12 +495,24 @@ impl AppState {
         // reason is kept so the UI can say which it is.
         let mut backends: Vec<(String, Arc<dyn riviu_core::driver::DeviceDriver>)> =
             vec![("ios".to_string(), bundle.driver.clone())];
-        let android_unavailable = match riviu_android_driver::detect_driver(
-            &riviu_android_driver::AndroidDriverConfig::default(),
-        )
-        .await
-        {
+        // Verified bundled tools, offered at the **lowest** priority so an operator's
+        // own adb or `RIVIU_MINICAP_APK` still wins. A corrupt bundle costs its own
+        // tool and nothing else; see `android_tools`.
+        let android_tools = crate::android_tools::AndroidTools::load(&sidecar_root);
+        for problem in &android_tools.problems {
+            log::warn!("bundled Android tools: {problem}");
+        }
+        let android_config = riviu_android_driver::AndroidDriverConfig {
+            bundled_adb_path: android_tools.adb_path.clone(),
+            bundled_minicap_apk: android_tools.minicap_apk.clone(),
+            ..Default::default()
+        };
+        let android_unavailable = match riviu_android_driver::detect_driver(&android_config).await {
             Ok(driver) => {
+                // Frames from both platforms land in one hub, so generations and
+                // sequences stay comparable and the tile draws Android the same
+                // way it draws an iPhone.
+                driver.set_frame_sink(Arc::new(bundle.streams.clone()));
                 backends.push(("android".to_string(), driver));
                 None
             }
@@ -1475,7 +1487,8 @@ mod tests {
             udid: "fixture".to_string(),
             name: "fixture".to_string(),
             model: "fixture".to_string(),
-            ios_version: "fixture".to_string(),
+            platform: riviu_core::DevicePlatform::Ios,
+            os_version: "fixture".to_string(),
             connection: riviu_core::ConnectionKind::Mock,
             status: riviu_core::DeviceStatus::Ready,
             battery: None,
@@ -1521,7 +1534,8 @@ mod tests {
             udid: "fixture-state".to_string(),
             name: "fixture".to_string(),
             model: "fixture".to_string(),
-            ios_version: "fixture".to_string(),
+            platform: riviu_core::DevicePlatform::Ios,
+            os_version: "fixture".to_string(),
             connection: riviu_core::ConnectionKind::Mock,
             status: riviu_core::DeviceStatus::Ready,
             battery: None,
@@ -1567,7 +1581,8 @@ mod tests {
             udid: "fixture-ready".to_string(),
             name: "fixture".to_string(),
             model: "fixture".to_string(),
-            ios_version: "fixture".to_string(),
+            platform: riviu_core::DevicePlatform::Ios,
+            os_version: "fixture".to_string(),
             connection: riviu_core::ConnectionKind::Mock,
             status: riviu_core::DeviceStatus::Connected,
             battery: None,
@@ -1719,12 +1734,31 @@ mod tests {
                 "../../../sidecars/wda/Riviumanagersphone.ipa",
                 "sidecars/wda/Riviumanagersphone.ipa",
             ),
+            // One tree entry, not one per file. A tree is what gives *completeness*:
+            // `assert_same_tree` in the CI collector compares the whole directory, so a
+            // sixth bundled tool cannot appear unchecked. Five separate file entries would
+            // give five assertions and no such property.
+            ("../../../sidecars/android/", "sidecars/android/"),
         ];
 
         assert_eq!(resources.len(), expected.len());
         for (source, target) in expected {
             assert_eq!(resources.get(source).and_then(|v| v.as_str()), Some(target));
             assert!(!target.contains("_up_"));
+        }
+
+        // Every resource lands under `sidecars/`, which is the whole point of the
+        // source-to-target map: Tauri's default for a `../..` source is a mangled `_up_`
+        // path, and `resolve_sidecar_root` only knows how to find things under this one
+        // prefix. A target that escaped it would be shipped and never found.
+        for (source, target) in resources {
+            let target = target
+                .as_str()
+                .unwrap_or_else(|| panic!("target for {source} must be a string"));
+            assert!(
+                target.starts_with("sidecars/"),
+                "{source} -> {target} escapes the sidecar root"
+            );
         }
     }
 }

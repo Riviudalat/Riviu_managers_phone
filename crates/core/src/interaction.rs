@@ -180,6 +180,22 @@ pub struct ThreadCampaignRequest {
     /// deserialise into the behaviour they were created with.
     #[serde(default)]
     pub mode: ThreadMode,
+    /// Comments written by the operator, used **instead of** the AI when non-empty.
+    ///
+    /// A pool rather than a fixed list per message: it is dealt out across
+    /// (target, ordinal) by [`Self::manual_comment_for`], so ten links do not all receive
+    /// the same first comment. `instruction` and `max_words` stay on the request and are
+    /// simply unused in this mode — they are what a campaign switches back to.
+    ///
+    /// `#[serde(default)]` so every campaign persisted before this existed reads as an
+    /// empty pool, which is the AI mode it was created with.
+    #[serde(default)]
+    pub manual_comments: Vec<String>,
+    /// Also like each target, once per actor that comments on it.
+    ///
+    /// Off by default, and off is also what a stored campaign from before this reads as.
+    #[serde(default)]
+    pub like_target: bool,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -200,6 +216,10 @@ pub enum ThreadValidationError {
     DuplicateTarget,
     #[error("comment length must be between four and twenty words")]
     InvalidMaxWords,
+    #[error("a manual comment is empty")]
+    EmptyManualComment,
+    #[error("manual mode needs at least as many comments as there are messages")]
+    TooFewManualComments,
 }
 
 impl ThreadCampaignRequest {
@@ -238,7 +258,68 @@ impl ThreadCampaignRequest {
         if !(4..=20).contains(&self.max_words) {
             return Err(ThreadValidationError::InvalidMaxWords);
         }
+        if self.is_manual() {
+            if self
+                .manual_comments
+                .iter()
+                .any(|text| text.trim().is_empty())
+            {
+                return Err(ThreadValidationError::EmptyManualComment);
+            }
+            // A chain shorter than the pool is fine; a pool shorter than the chain is not.
+            // Threaded means message N answers N-1, so a pool of two on a chain of three
+            // would have an account reply to a comment word-for-word identical to its own.
+            if self.manual_comments.len() < self.message_count as usize {
+                return Err(ThreadValidationError::TooFewManualComments);
+            }
+        }
         Ok(())
+    }
+
+    /// Whether the operator's own comments are in use rather than the AI.
+    ///
+    /// One question, one place, because it decides both validation and which text the runner
+    /// asks for — and those two disagreeing is how a campaign gets validated as manual and
+    /// then run as AI.
+    pub fn is_manual(&self) -> bool {
+        !self.manual_comments.is_empty()
+    }
+
+    /// Which of the operator's comments this message uses.
+    ///
+    /// Walks the pool across targets as well as ordinals, so the first comment on link two
+    /// is not the first comment on link one. Deterministic on purpose: the same campaign
+    /// replayed sends the same text, which is what makes the stored evidence checkable.
+    ///
+    /// Returns `None` in AI mode so a caller cannot silently get an empty string.
+    pub fn manual_comment_for(&self, target_index: usize, ordinal: u8) -> Option<&str> {
+        if self.manual_comments.is_empty() {
+            return None;
+        }
+        let stride = self.message_count.max(1) as usize;
+        let index =
+            (target_index.wrapping_mul(stride) + ordinal as usize) % self.manual_comments.len();
+        self.manual_comments.get(index).map(String::as_str)
+    }
+
+    /// Whether the run has to open each target once up front just to photograph it.
+    ///
+    /// Only the AI needs that: it writes from frames of the post. A manual pool covers
+    /// **every** `(target, ordinal)` — [`Self::validate`] refuses a pool shorter than the
+    /// chain — so in manual mode those frames are never read.
+    ///
+    /// This is not a micro-optimisation, it is a correctness fix, and the mechanism is
+    /// worth stating because it is not obvious. The evidence pass opens the target on the
+    /// *same phone* that ordinal 0 will use, and nothing navigates that phone away in
+    /// between: tearing down the context stops the stream and invalidates the session, but
+    /// the next one merely resumes the app. So by the time ordinal 0 runs its own arrival
+    /// check, the post already on screen **is** the target — and the check's whole
+    /// signal is that the post *changed*. It therefore refuses, deterministically, every
+    /// ordinal 0 of every target, and blames the link. Measured on 13/08/2026: the Redmi
+    /// was refused `target_open_screen_unchanged` on the exact link the Note 8 commented
+    /// on successfully minutes later.
+    pub fn needs_ai_evidence_frames(&self) -> bool {
+        !self.is_manual()
     }
 }
 
@@ -641,6 +722,124 @@ pub struct ThreadPreview {
 
 #[cfg(test)]
 mod tests {
+    // Manual comments and the like flag. Both are additive to a persisted request, so the
+    // round-trip of an old payload is asserted too — a stored campaign must keep behaving the
+    // way it was created.
+    mod operator_written_comments {
+        use super::super::*;
+
+        fn request(pool: Vec<&str>) -> ThreadCampaignRequest {
+            ThreadCampaignRequest {
+                request_id: "r".into(),
+                targets: vec![super::target("1"), super::target("2")],
+                actor_udids: vec!["one".into(), "two".into()],
+                message_count: 2,
+                instruction: "tự nhiên".into(),
+                max_words: 12,
+                mode: ThreadMode::Threaded,
+                manual_comments: pool.into_iter().map(str::to_string).collect(),
+                like_target: false,
+            }
+        }
+
+        #[test]
+        fn an_empty_pool_means_the_ai_writes() {
+            let ai = request(vec![]);
+            assert!(!ai.is_manual());
+            assert_eq!(ai.manual_comment_for(0, 0), None);
+            assert!(ai.validate().is_ok());
+        }
+
+        #[test]
+        fn the_pool_is_dealt_across_links_not_repeated_from_the_top() {
+            // The property that matters for a ten-link campaign: link two must not open with
+            // the same sentence as link one, or every target gets an identical thread.
+            let manual = request(vec!["một", "hai", "ba", "bốn"]);
+            assert!(manual.is_manual());
+            assert_eq!(manual.manual_comment_for(0, 0), Some("một"));
+            assert_eq!(manual.manual_comment_for(0, 1), Some("hai"));
+            assert_eq!(manual.manual_comment_for(1, 0), Some("ba"));
+            assert_eq!(manual.manual_comment_for(1, 1), Some("bốn"));
+            // And it wraps rather than running out, deterministically — a replay of the same
+            // campaign sends the same text, which is what makes the stored evidence checkable.
+            assert_eq!(manual.manual_comment_for(2, 0), Some("một"));
+            assert_eq!(
+                manual.manual_comment_for(2, 0),
+                manual.manual_comment_for(2, 0)
+            );
+        }
+
+        #[test]
+        fn a_manual_pool_covers_every_message_so_no_ai_evidence_frame_is_needed() {
+            // The two halves are one claim: because the pool covers every (target,
+            // ordinal), the frames the AI would need are never read — so opening each
+            // target to photograph it is pure cost. And that cost is not neutral: the
+            // evidence open lands on ordinal 0's own phone and makes its arrival check
+            // refuse. See `needs_ai_evidence_frames`.
+            let manual = request(vec!["một", "hai", "ba", "bốn", "năm", "sáu"]);
+            assert!(!manual.needs_ai_evidence_frames());
+            for target_index in 0..3 {
+                for ordinal in 0..manual.message_count {
+                    assert!(
+                        manual.manual_comment_for(target_index, ordinal).is_some(),
+                        "manual mode must cover ({target_index}, {ordinal})"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn an_ai_campaign_still_declares_that_it_needs_evidence_frames() {
+            // Guards against "simplifying" this into always skipping: the AI writes from
+            // frames of the post, so for it the open is the whole point.
+            let ai = request(vec![]);
+            assert!(ai.needs_ai_evidence_frames());
+            assert_eq!(ai.manual_comment_for(0, 0), None);
+        }
+
+        #[test]
+        fn a_pool_smaller_than_the_chain_is_refused() {
+            // Threaded means message N answers N-1. With two messages and one comment, an
+            // account would reply to a comment word-for-word identical to its own.
+            let mut short = request(vec!["chỉ một câu"]);
+            assert_eq!(
+                short.validate(),
+                Err(ThreadValidationError::TooFewManualComments)
+            );
+            short.manual_comments.push("câu thứ hai".into());
+            assert!(short.validate().is_ok());
+        }
+
+        #[test]
+        fn a_blank_comment_is_refused_rather_than_sent() {
+            let blank = request(vec!["ổn", "   "]);
+            assert_eq!(
+                blank.validate(),
+                Err(ThreadValidationError::EmptyManualComment)
+            );
+        }
+
+        #[test]
+        fn a_campaign_stored_before_these_existed_still_reads_as_ai_and_no_like() {
+            // Both fields are `#[serde(default)]`, and this is the assertion that keeps them
+            // that way: a row written by an older build must not start liking posts.
+            let stored = serde_json::json!({
+                "requestId": "old",
+                "targets": [],
+                "actorUdids": ["one", "two"],
+                "messageCount": 2,
+                "instruction": "tự nhiên",
+                "maxWords": 12,
+                "mode": "threaded"
+            });
+            let decoded: ThreadCampaignRequest =
+                serde_json::from_value(stored).expect("an older payload must still decode");
+            assert!(decoded.manual_comments.is_empty());
+            assert!(!decoded.is_manual());
+            assert!(!decoded.like_target);
+        }
+    }
+
     use super::*;
 
     fn target(id: &str) -> ResolvedTikTokTarget {
@@ -666,7 +865,10 @@ mod tests {
             message_count: count,
             instruction: "ngắn, tự nhiên".into(),
             max_words: 12,
-
+            // Both default on the wire; a fixture spells them out so the shape stays
+            // visible and a new field cannot be forgotten silently.
+            manual_comments: Vec::new(),
+            like_target: false,
             mode: ThreadMode::Threaded,
         }
     }

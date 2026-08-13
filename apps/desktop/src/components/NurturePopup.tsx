@@ -24,6 +24,126 @@ type Props = {
   onClose: () => void;
 };
 
+/**
+ * A real switch rather than a bare checkbox.
+ *
+ * `appearance: none` on the input keeps it a checkbox to the accessibility tree and to
+ * every test that finds it by label, so nothing about the semantics changes — only that it
+ * reads as a control someone designed.
+ */
+function Switch({
+  checked,
+  onChange,
+  label,
+  what,
+}: {
+  checked: boolean;
+  onChange: (value: boolean) => void;
+  label: string;
+  what: string;
+}) {
+  return (
+    <label className="nu-switch">
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <span className="nu-switch-track" aria-hidden="true" />
+      <span className="nu-switch-label">{label}</span>
+      <Info of={label} what={what} />
+    </label>
+  );
+}
+
+/**
+ * One feature: switch, name, and its percentage, on one aligned row.
+ *
+ * The switch is not a second way to write 0. Turning a feature off by zeroing its
+ * percentage destroys the tuned number, so an operator pausing comments for one run has to
+ * remember what 4 was. The switch stops the behaviour and keeps the number — which is what
+ * the backend's `like_enabled`/`comment_enabled`/… fields are for. The number therefore
+ * stays editable while the switch is off.
+ */
+function FeatureRow({
+  label,
+  what,
+  percent,
+  enabled,
+  onPercent,
+  onEnabled,
+}: {
+  label: string;
+  what: string;
+  percent: number;
+  enabled: boolean;
+  onPercent: (value: number) => void;
+  onEnabled: (value: boolean) => void;
+}) {
+  return (
+    <div className={`nu-feature${enabled ? "" : " is-off"}`}>
+      <label className="nu-switch nu-switch-bare">
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(e) => onEnabled(e.target.checked)}
+          aria-label={`Bật ${label}`}
+        />
+        <span className="nu-switch-track" aria-hidden="true" />
+      </label>
+      <span className="nu-feature-name">
+        {label}
+        <Info of={label} what={what} />
+      </span>
+      <label className="nu-feature-pct">
+        <input
+          type="number"
+          min={0}
+          max={100}
+          value={percent}
+          onChange={(e) => onPercent(Number(e.target.value) || 0)}
+          aria-label={`${label} phần trăm`}
+        />
+        <span aria-hidden="true">%</span>
+      </label>
+    </div>
+  );
+}
+
+/**
+ * The `!` after a control's name: what that control actually does, on hover.
+ *
+ * The panel used to carry the same information as paragraphs of hint text under each
+ * field, which is why it was asked to be removed — it made a dense settings form read as
+ * documentation. The information itself was not the problem, the permanent shelf space
+ * was. So it moves into one glyph per control that costs nothing until pointed at.
+ *
+ * A `span` rather than a `button`: several of these sit inside a `<label>`, where a button
+ * would swallow the click that is meant to focus the field.
+ *
+ * `aria-hidden`, and that is deliberate rather than lazy. A `<label>`'s accessible name is
+ * its whole text content, so a glyph that is visible to the accessibility tree renames
+ * every field it sits next to — the first version of this turned "Base URL" into
+ * "Base URL !" and broke two existing tests by doing so. A field's name has to stay the
+ * field's name. The cost is that a screen reader does not get the explanation; it did not
+ * have it before this either, so nothing was taken away. Giving it one properly means an
+ * `aria-describedby` per control, which is a change worth making on its own.
+ *
+ * `data-info` is how a test finds a particular one, since every glyph reads the same.
+ */
+function Info({ of, what }: { of: string; what: string }) {
+  return (
+    <span className="nu-info" aria-hidden="true" data-info={of} title={what}>
+      !
+    </span>
+  );
+}
+
+/** Marks a field a running session will not pick up, with the reason. */
+function RestartBadge({ reason }: { reason: string }) {
+  return (
+    <span className="nurture-restart-badge" title={`${reason}. Đổi xong cần dừng và chạy lại.`}>
+      cần chạy lại
+    </span>
+  );
+}
+
 /** Map engine status English → short Vietnamese for the live log. */
 function statusVi(raw: string): string {
   const s = raw.trim();
@@ -78,8 +198,12 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
   const [statuses, setStatuses] = useState<NurtureSessionStatus[]>([]);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [showAi, setShowAi] = useState(false);
-  const [showBeh, setShowBeh] = useState(false);
+  // Tabs rather than a stack of collapsibles. The old panel put "Cấu hình AI", "Hành vi"
+  // and the schedule one under another in a column narrow enough that each of them had to
+  // be folded away, so tuning two related numbers meant scrolling past a closed section —
+  // and opening two at once pushed the live log off the bottom, which is the one thing the
+  // panel is open to watch. One group at a time, full width, log pinned above.
+  const [tab, setTab] = useState<"behaviour" | "ai" | "schedule">("behaviour");
   const [apiTesting, setApiTesting] = useState(false);
   const [apiTest, setApiTest] = useState<NurtureApiTestResult | null>(null);
   const [testUdid, setTestUdid] = useState("");
@@ -151,8 +275,20 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
 
   const actionHint = useMemo(() => {
     if (!settings) return "";
-    const none = Math.max(0, 100 - settings.likeProb - settings.commentProb);
-    return `Thích ${settings.likeProb}% · Bình luận ${settings.commentProb}% · Bỏ qua ${none}% · Follow độc lập ${settings.followProb}% · Vuốt nhanh ${settings.frenzyProb}%`;
+    // Mirrors `NurtureSettings::into_effective`: a switch that is off makes its
+    // probability zero. Reading the raw numbers here made the line contradict the
+    // switches directly above it — with Thích off at 100% it said "Thích 100% · Bỏ qua
+    // 0%", i.e. that every post would be liked, while the engine was correctly liking
+    // none. The percentage is kept on purpose when a feature is switched off, so this
+    // line is the one place that has to fold it.
+    const effective = (enabled: boolean | undefined, percent: number) =>
+      (enabled ?? true) ? percent : 0;
+    const like = effective(settings.likeEnabled, settings.likeProb);
+    const comment = effective(settings.commentEnabled, settings.commentProb);
+    const follow = effective(settings.followEnabled, settings.followProb);
+    const frenzy = effective(settings.frenzyEnabled, settings.frenzyProb);
+    const none = Math.max(0, 100 - like - comment);
+    return `Thích ${like}% · Bình luận ${comment}% · Bỏ qua ${none}% · Follow độc lập ${follow}% · Vuốt nhanh ${frenzy}%`;
   }, [settings]);
 
   const save = async (next?: NurtureSettings): Promise<boolean> => {
@@ -315,7 +451,7 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
               </div>
 
               {statuses.length > 0 && (
-                <>
+                <div className="nurture-live">
                   <div className="nurture-float-stats">
                     <div>
                       <span>Video</span>
@@ -338,36 +474,91 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                         <div className="nurture-float-log-head">
                           <span className={`nurture-dot${s.running ? " on" : ""}`} />
                           <strong title={s.udid}>{deviceLabel(devices, s.udid)}</strong>
+                          <div className="grow" />
+                          {/* The same four numbers as before, but as labelled cells: the old
+                              single string ("12/34v · ♥5/6 · BL1/1 · +0/0") packed done-vs-
+                              attempted for four different things into one line, and the only
+                              way to read it was the tooltip. The tooltip stays. */}
                           <span
-                            className="hint"
-                            title="video đã xác nhận / lượt vuốt · tim · bình luận · follow"
+                            className="nurture-metrics"
+                            title="đã xác nhận / đã thử — video · tim · bình luận · follow"
                           >
-                            {s.videosDone}/{s.swipeAttempts}v · ♥{s.likes}/{s.likeAttempts} · BL{s.comments}/{s.commentAttempts} · +{s.follows}/{s.followAttempts}
+                            <b>{s.videosDone}</b>
+                            <i>/{s.swipeAttempts}</i>
+                            <em>v</em>
+                            <b>{s.likes}</b>
+                            <i>/{s.likeAttempts}</i>
+                            <em>♥</em>
+                            <b>{s.comments}</b>
+                            <i>/{s.commentAttempts}</i>
+                            <em>BL</em>
+                            <b>{s.follows}</b>
+                            <i>/{s.followAttempts}</i>
+                            <em>+</em>
                           </span>
                         </div>
                         <p className="nurture-float-log-msg">{statusVi(s.lastMessage)}</p>
                       </div>
                     ))}
                   </div>
-                </>
+                </div>
               )}
               {msg && <p className="nurture-float-err">{msg}</p>}
 
-              <button type="button" className="nurture-sect-toggle" onClick={() => setShowAi((v) => !v)}>
-                {showAi ? "▾" : "▸"} Cấu hình AI
-              </button>
-              {showAi && (
-                <div className="nurture-sect">
+              <div className="nurture-tabs" role="tablist" aria-label="Cấu hình">
+                {(
+                  [
+                    ["behaviour", "Hành vi"],
+                    ["ai", "AI"],
+                    ["schedule", "Lịch"],
+                  ] as const
+                ).map(([key, label]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    role="tab"
+                    aria-selected={tab === key}
+                    className={`nurture-tab${tab === key ? " is-on" : ""}`}
+                    onClick={() => setTab(key)}
+                  >
+                    {label}
+                  </button>
+                ))}
+                <div className="grow" />
+                {anyRunning && (
+                  <span className="nurture-live-flag" title="Bấm Lưu là áp ngay từ bài kế tiếp">
+                    đang chạy · Lưu để áp ngay
+                  </span>
+                )}
+              </div>
+
+              {tab === "ai" && (
+                <div className="nurture-sect" role="tabpanel">
                   <label>
-                    Base URL
+                    <span className="nu-inline">
+                      Base URL
+                      <Info
+                        of="Base URL"
+                        what="Endpoint tương thích OpenAI dùng để sinh bình luận. Đổi được trong lúc phiên đang chạy, áp từ bình luận kế tiếp."
+                      />
+                    </span>
                     <input value={settings.baseUrl} onChange={(e) => patch("baseUrl", e.target.value)} />
                   </label>
                   <label>
-                    Model
+                    <span className="nu-inline">
+                      Model
+                      <Info of="Model" what="Tên model gửi kèm mỗi lần gọi endpoint ở trên." />
+                    </span>
                     <input value={settings.model} onChange={(e) => patch("model", e.target.value)} />
                   </label>
                   <label>
-                    API key
+                    <span className="nu-inline">
+                      API key
+                      <Info
+                        of="API key"
+                        what="Khoá của endpoint ở trên. Để trống thì không bật được bình luận — phiên sẽ từ chối trước khi chạy chứ không âm thầm bỏ bình luận."
+                      />
+                    </span>
                     <input
                       type="password"
                       value={settings.apiKey}
@@ -377,7 +568,10 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                   </label>
                   <div className="nurture-row">
                     <label>
-                      Ngôn ngữ
+                      <span className="nu-inline">
+                        Ngôn ngữ
+                        <Info of="Ngôn ngữ" what="Ngôn ngữ AI viết bình luận." />
+                      </span>
                       <select
                         value={settings.commentLang || "vi"}
                         onChange={(e) => patch("commentLang", e.target.value)}
@@ -387,7 +581,13 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                       </select>
                     </label>
                     <label>
-                      Tối đa từ
+                      <span className="nu-inline">
+                        Tối đa từ
+                        <Info
+                          of="Tối đa từ"
+                          what="Chặn độ dài bình luận. Bình luận dài dễ lộ là máy viết, và cũng làm việc đọc lại để tìm comment cha khó hơn."
+                        />
+                      </span>
                       <input
                         type="number"
                         min={4}
@@ -398,7 +598,13 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                     </label>
                   </div>
                   <label>
-                    Định hướng giọng điệu
+                    <span className="nu-inline">
+                      Định hướng giọng điệu
+                      <Info
+                        of="Định hướng giọng điệu"
+                        what="Mô tả giọng muốn AI viết theo, nhiều lựa chọn cách nhau bằng dấu | và mỗi bình luận lấy ngẫu nhiên một cái."
+                      />
+                    </span>
                     <input
                       value={settings.aiDirections}
                       onChange={(e) => patch("aiDirections", e.target.value)}
@@ -451,14 +657,18 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                 </div>
               )}
 
-              <button type="button" className="nurture-sect-toggle" onClick={() => setShowBeh((v) => !v)}>
-                {showBeh ? "▾" : "▸"} Hành vi
-              </button>
-              {showBeh && (
-                <div className="nurture-sect">
-                  <div className="nurture-row">
-                    <label>
-                      Giới hạn video
+              {tab === "behaviour" && (
+                <div className="nurture-sect nu-pane" role="tabpanel">
+                  <div className="nu-grid">
+                    <label className="nu-field">
+                      <span className="nu-label">
+                        Giới hạn video
+                        <Info
+                          of="Giới hạn video"
+                          what="Phiên dừng sau đúng số video này (nhân với số vòng). Thời lượng phiên vẫn là trần riêng: cái nào tới trước thì dừng."
+                        />
+                        <RestartBadge reason="Mục tiêu của phiên được tính lúc bắt đầu" />
+                      </span>
                       <input
                         type="number"
                         min={1}
@@ -467,8 +677,15 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                         onChange={(e) => patch("numVideos", Number(e.target.value) || 1)}
                       />
                     </label>
-                    <label>
-                      Vòng
+                    <label className="nu-field">
+                      <span className="nu-label">
+                        Vòng
+                        <Info
+                          of="Vòng"
+                          what="Nhân với giới hạn video để ra tổng số video của phiên: 15 video × 2 vòng = 30 video."
+                        />
+                        <RestartBadge reason="Mục tiêu của phiên được tính lúc bắt đầu" />
+                      </span>
                       <input
                         type="number"
                         min={1}
@@ -478,92 +695,209 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                       />
                     </label>
                   </div>
-                  <div className="nurture-row">
-                    <label>
-                      Thích %
-                      <input
-                        type="number"
-                        min={0}
-                        max={100}
-                        value={settings.likeProb}
-                        onChange={(e) => patch("likeProb", Number(e.target.value) || 0)}
-                      />
-                    </label>
-                    <label>
-                      Bình luận %
-                      <input
-                        type="number"
-                        min={0}
-                        max={100}
-                        value={settings.commentProb}
-                        onChange={(e) => patch("commentProb", Number(e.target.value) || 0)}
-                      />
-                    </label>
-                    <label>
-                      Follow %
-                      <input
-                        type="number"
-                        min={0}
-                        max={100}
-                        value={settings.followProb}
-                        onChange={(e) => patch("followProb", Number(e.target.value) || 0)}
-                      />
-                    </label>
-                    <label>
-                      Vuốt nhanh %
-                      <input
-                        type="number"
-                        min={0}
-                        max={100}
-                        value={settings.frenzyProb}
-                        onChange={(e) => patch("frenzyProb", Number(e.target.value) || 0)}
-                      />
-                    </label>
+
+                  <div className="nu-group">
+                    <div className="nu-group-head">Tương tác</div>
+                    <FeatureRow
+                      label="Thích"
+                      what="Tỉ lệ post được thả tim. Chỉ tính thành công khi nhãn nút tim đổi trạng thái, không phải khi tap xong — nên số 'đã tim' luôn nhỏ hơn hoặc bằng số lần thử."
+                      percent={settings.likeProb}
+                      enabled={settings.likeEnabled ?? true}
+                      onPercent={(v) => patch("likeProb", v)}
+                      onEnabled={(v) => patch("likeEnabled", v)}
+                    />
+                    <FeatureRow
+                      label="Bình luận"
+                      what="Tỉ lệ post được bình luận. AI đọc nội dung post rồi tự viết; chỉ tính là đã gửi khi nút Gửi tắt lại. Cần API key ở tab AI."
+                      percent={settings.commentProb}
+                      enabled={settings.commentEnabled ?? true}
+                      onPercent={(v) => patch("commentProb", v)}
+                      onEnabled={(v) => patch("commentEnabled", v)}
+                    />
+                    <FeatureRow
+                      label="Follow"
+                      what="Tỉ lệ post được follow tác giả, tính riêng chứ không kèm thích hay bình luận. Xác nhận bằng việc nút Follow mất khỏi thẻ."
+                      percent={settings.followProb}
+                      enabled={settings.followEnabled ?? true}
+                      onPercent={(v) => patch("followProb", v)}
+                      onEnabled={(v) => patch("followEnabled", v)}
+                    />
+                    <FeatureRow
+                      label="Vuốt nhanh"
+                      what="Tỉ lệ post bị vuốt qua nhanh, không xem hết — giống lúc người ta lướt cho qua mấy bài không quan tâm."
+                      percent={settings.frenzyProb}
+                      enabled={settings.frenzyEnabled ?? true}
+                      onPercent={(v) => patch("frenzyProb", v)}
+                      onEnabled={(v) => patch("frenzyEnabled", v)}
+                    />
+                    <p className="nu-summary">{actionHint}</p>
                   </div>
-                  <p className="hint">{actionHint}</p>
-                  <div className="nurture-row">
-                    <label>
-                      Xem min (s)
-                      <input
-                        type="number"
-                        step="0.5"
-                        min={0.5}
-                        max={120}
-                        value={settings.watchMin}
-                        onChange={(e) => patch("watchMin", Number(e.target.value) || 1)}
-                      />
-                    </label>
-                    <label>
-                      Xem max (s)
-                      <input
-                        type="number"
-                        step="0.5"
-                        min={0.5}
-                        max={120}
-                        value={settings.watchMax}
-                        onChange={(e) => patch("watchMax", Number(e.target.value) || 5)}
-                      />
-                    </label>
+
+                  <div className="nu-group">
+                    <div className="nu-group-head">Nhịp</div>
+                    <div className="nu-grid">
+                      <label className="nu-field">
+                        <span className="nu-label">
+                          Xem min
+                          <Info
+                            of="Xem min"
+                            what="Số giây ít nhất dừng lại ở mỗi post. Nhịp phiên còn nhân thêm hệ số theo tâm trạng, nên số 'xem' trong log có thể ra ngoài khoảng min–max."
+                          />
+                        </span>
+                        <input
+                          type="number"
+                          step="0.5"
+                          min={0.5}
+                          max={120}
+                          value={settings.watchMin}
+                          onChange={(e) => patch("watchMin", Number(e.target.value) || 1)}
+                        />
+                      </label>
+                      <label className="nu-field">
+                        <span className="nu-label">
+                          Xem max
+                          <Info
+                            of="Xem max"
+                            what="Số giây nhiều nhất dừng lại ở mỗi post, trước khi nhân hệ số nhịp. Đặt sát min thì phiên đều đặn hơn nhưng cũng máy móc hơn."
+                          />
+                        </span>
+                        <input
+                          type="number"
+                          step="0.5"
+                          min={0.5}
+                          max={120}
+                          value={settings.watchMax}
+                          onChange={(e) => patch("watchMax", Number(e.target.value) || 5)}
+                        />
+                      </label>
+                    </div>
+                    <Switch
+                      checked={settings.fatigue}
+                      onChange={(v) => patch("fatigue", v)}
+                      label="Mỏi dần"
+                      what="Càng về cuối phiên càng xem lâu và tương tác thưa hơn, thay vì giữ đúng một nhịp từ đầu tới cuối. Bật thì số tim thực tế thấp hơn tỉ lệ đã đặt."
+                    />
+                    <Switch
+                      checked={settings.timeOfDay}
+                      onChange={(v) => patch("timeOfDay", v)}
+                      label="Theo giờ trong ngày"
+                      what="Nhịp thay đổi theo giờ thật của máy tính: đêm và giờ làm thì chậm và ít tương tác hơn giờ cao điểm."
+                    />
+                    <Switch
+                      checked={settings.pauseSwipe}
+                      onChange={(v) => patch("pauseSwipe", v)}
+                      label="Ngập ngừng khi vuốt"
+                      what="Thỉnh thoảng vuốt nửa vời rồi mới vuốt hẩn, và thời gian mỗi cú vuốt không đều nhau."
+                    />
+                    <Switch
+                      checked={settings.humanLimits ?? false}
+                      onChange={(v) => patch("humanLimits", v)}
+                      label="Giới hạn nhịp người"
+                      what="Tắt (mặc định): các tỉ lệ bạn đặt ở trên là tỉ lệ thực. Bật: engine tự áp thêm trần 8–16 tim / 1–3 bình luản / 1–2 follow mỗi giờ, chỉ cho tương tác 2 trong 5 bài gần nhất, chờ 12–35 giây sau mỗi hành động và nghỉ 15–90 giây mỗi 7–13 bài — phiên trông giống người hơn nhưng chạy ít hơn nhiều so với số bạn đặt."
+                    />
+                    <div className="nu-grid">
+                      <label className="nu-field">
+                        <span className="nu-label">
+                          Nghỉ đêm từ
+                          <Info
+                            of="Nghỉ đêm"
+                            what="Rơi vào khoảng giờ này thì phiên tự dừng, tính theo giờ máy tính. Để 0 và 0 là không nghỉ đêm."
+                          />
+                        </span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={23}
+                          value={settings.nightStart}
+                          onChange={(e) => patch("nightStart", Number(e.target.value) || 0)}
+                        />
+                      </label>
+                      <label className="nu-field">
+                        <span className="nu-label">đến</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={23}
+                          value={settings.nightEnd}
+                          onChange={(e) => patch("nightEnd", Number(e.target.value) || 0)}
+                        />
+                      </label>
+                    </div>
                   </div>
-                  <label>
-                    Bundle TikTok
+
+                  <div className="nu-group">
+                    <div className="nu-group-head">Bài ảnh</div>
+                    <div className="nu-feature">
+                      <label className="nu-switch nu-switch-bare">
+                        <input
+                          type="checkbox"
+                          checked={settings.carouselEnabled ?? true}
+                          onChange={(e) => patch("carouselEnabled", e.target.checked)}
+                          aria-label="Bật vuốt ngang bài ảnh"
+                        />
+                        <span className="nu-switch-track" aria-hidden="true" />
+                      </label>
+                      <span className="nu-feature-name">
+                        Vuốt ngang
+                        <Info
+                          of="Vuốt ngang"
+                          what="Bài nhiều ảnh thì vuốt ngang xem tiếp, thay vì bỏ qua sau ảnh đầu. Phần trăm bên cạnh là xem bao nhiêu phần của bài."
+                        />
+                      </span>
+                      <label className="nu-feature-pct">
+                        <input
+                          type="number"
+                          min={1}
+                          max={100}
+                          step={5}
+                          value={settings.carouselPortionPercent ?? 100}
+                          onChange={(e) =>
+                            patch("carouselPortionPercent", Number(e.target.value) || 100)
+                          }
+                          aria-label="Xem bao nhiêu phần trăm bài ảnh"
+                          title="100% là xem tới hết bài — dừng khi một cú vuốt không còn làm đổi ảnh. 50% là xem khoảng nửa bài rồi vuốt sang bài khác."
+                        />
+                        <span aria-hidden="true">%</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <label className="nu-field">
+                    <span className="nu-label">
+                      Bundle TikTok
+                      <Info
+                        of="Bundle TikTok"
+                        what="App id của TikTok. Trên Android app tự tìm package đã cài trên từng máy nên thường không cần sửa ô này; nó chủ yếu dành cho iPhone."
+                      />
+                      <RestartBadge reason="App đã mở rồi; trên Android package được resolve theo từng máy" />
+                    </span>
                     <input value={settings.bundleId} onChange={(e) => patch("bundleId", e.target.value)} />
                   </label>
                 </div>
               )}
 
-              <div className="nurture-sect nurture-sched">
+              {tab === "schedule" && (
+              <div className="nurture-sect nurture-sched" role="tabpanel">
                 <label className="check">
                   <input
                     type="checkbox"
                     checked={settings.scheduleEnabled}
                     onChange={(e) => patch("scheduleEnabled", e.target.checked)}
                   />
-                  Lịch tự chạy
+                  <span className="nu-inline">
+                    Lịch tự chạy
+                    <Info
+                      of="Lịch tự chạy"
+                      what="Tự khởi động phiên theo chu kỳ, không cần bấm Bắt đầu. Chỉ chạy trên những máy đã chọn khi lưu."
+                    />
+                  </span>
                 </label>
                 <div className="nurture-row">
                   <label>
-                    Mỗi (phút)
+                    <span className="nu-inline">
+                      Mỗi (phút)
+                      <Info of="Mỗi (phút)" what="Khoảng cách giữa hai lần tự khởi động." />
+                    </span>
                     <input
                       type="number"
                       min={15}
@@ -573,7 +907,13 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                     />
                   </label>
                   <label>
-                    Thời lượng (phút)
+                    <span className="nu-inline">
+                      Thời lượng (phút)
+                      <Info
+                        of="Thời lượng (phút)"
+                        what="Phiên theo lịch chạy tối đa bấy nhiêu phút. Phiên bấm tay không dùng số này — nó được gán một trần 2–3 giờ ngẫu nhiên, nên hai máy bấm cùng lúc không dừng cùng lúc."
+                      />
+                    </span>
                     <input
                       type="number"
                       min={15}
@@ -584,6 +924,7 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                   </label>
                 </div>
               </div>
+              )}
             </>
           )}
         </div>

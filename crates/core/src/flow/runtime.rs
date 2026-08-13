@@ -5026,7 +5026,7 @@ mod tests {
             driver_adapter_version: "fixture".to_string(),
             transport: ActiveTransport::Mock,
             product_type: "fixture".to_string(),
-            ios_version: "fixture".to_string(),
+            os_version: "fixture".to_string(),
             target_app: InstalledTargetIdentity {
                 bundle_id: bundle_id.to_string(),
                 version: "1".to_string(),
@@ -5065,7 +5065,8 @@ mod tests {
             udid: udid.to_string(),
             name: udid.to_string(),
             model: "fixture".to_string(),
-            ios_version: "fixture".to_string(),
+            platform: crate::DevicePlatform::Ios,
+            os_version: "fixture".to_string(),
             connection,
             status,
             battery: None,

@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { deviceModelOsLabel } from "../types";
 import type { DeviceInfo } from "../types";
 import {
   backupDevice,
@@ -143,7 +144,23 @@ export function FocusStream({ device, onClose, groupUdids, groupMode }: Props) {
     }
   };
 
+  // Mobilebackup2 is an iOS service. There is no Android analogue: `adb backup`
+  // is deprecated and removed on modern Android, so this is a permanent platform
+  // limit rather than a feature waiting to be written. The buttons stay visible but
+  // disabled — they sit in a fixed five-icon row, and hiding two of them reflows
+  // that row per device, giving an operator dragging across the fleet a moving
+  // target.
+  const isIos = device.platform === "ios";
+  const IOS_ONLY_BACKUP = "Backup dùng Mobilebackup2 — chỉ có trên iPhone";
+  const IOS_ONLY_RESTORE = "Phục hồi backup Mobilebackup2 — chỉ có trên iPhone";
+
   const backup = async () => {
+    // `disabled` is an affordance, not a guard: a keyboard or programmatic path
+    // still reaches this.
+    if (!isIos) {
+      pushToast("info", "Không hỗ trợ", IOS_ONLY_BACKUP);
+      return;
+    }
     const dir = await pickDirectory("Chọn thư mục lưu backup");
     if (!dir) return;
     pushToast("info", "Đang backup…", `${device.name} — có thể mất vài phút.`);
@@ -156,6 +173,10 @@ export function FocusStream({ device, onClose, groupUdids, groupMode }: Props) {
   };
 
   const restore = async () => {
+    if (!isIos) {
+      pushToast("info", "Không hỗ trợ", IOS_ONLY_RESTORE);
+      return;
+    }
     const dir = await pickDirectory("Chọn thư mục backup để phục hồi");
     if (!dir) return;
     const proceed = await requestConfirm({
@@ -195,9 +216,7 @@ export function FocusStream({ device, onClose, groupUdids, groupMode }: Props) {
       <header className="focus-dock-head">
         <div className="title">
           <strong>{device.name}</strong>
-          <span className="hint">
-            {device.model} · iOS {device.iosVersion}
-          </span>
+          <span className="hint">{deviceModelOsLabel(device)}</span>
         </div>
         <button
           type="button"
@@ -260,7 +279,10 @@ export function FocusStream({ device, onClose, groupUdids, groupMode }: Props) {
         </button>
         <button
           type="button"
-          title="Backup thiết bị (Mobilebackup2 — có thể mất vài phút)"
+          disabled={!isIos}
+          title={
+            isIos ? "Backup thiết bị (Mobilebackup2 — có thể mất vài phút)" : IOS_ONLY_BACKUP
+          }
           onClick={() => void backup()}
         >
           <IconDownload size={17} />
@@ -268,7 +290,12 @@ export function FocusStream({ device, onClose, groupUdids, groupMode }: Props) {
         <button
           type="button"
           className="danger"
-          title="Phục hồi từ backup (ghi đè dữ liệu + khởi động lại)"
+          disabled={!isIos}
+          title={
+            isIos
+              ? "Phục hồi từ backup (ghi đè dữ liệu + khởi động lại)"
+              : IOS_ONLY_RESTORE
+          }
           onClick={() => void restore()}
         >
           <IconUpload size={17} />

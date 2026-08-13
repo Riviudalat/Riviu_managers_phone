@@ -1,0 +1,152 @@
+NOTICE — third-party material redistributed by Riviumanagersphone
+=================================================================
+
+This file lists material authored by other people that ships inside the
+Riviumanagersphone installer, or that the build downloads and freezes into it.
+
+Read it as two things at once:
+
+  * the attribution those licences require, and
+  * an honest record of where this project's licence exposure is **not** yet
+    reviewed. Section 1 is one of those. It is written down rather than
+    smoothed over, because a missing review that nobody recorded is worse than
+    one that everybody can see.
+
+`Cargo.toml` declares `license = "MIT"` for this workspace's own crates. That
+declaration covers **only** code written for this project. It does not cover
+anything in this file, and no entry here becomes MIT by being bundled.
+
+Digests are SHA-256 over the exact bytes committed to this repository. They are
+also pinned in machine-readable form — see
+`sidecars/android/android-tools-manifest.json` for section 1 and 2, and
+`sidecars/wda/agent-manifest.json` for section 3 — so that a build whose bytes
+drift from this file fails instead of shipping quietly.
+
+
+1. Android platform-tools — adb (Google) — LICENCE NOT REVIEWED
+---------------------------------------------------------------
+
+    sidecars/android/win-x86_64/adb.exe
+      revision 37.0.1 (adb 1.0.41, build 37.0.1-15733141)
+      8,273,560 bytes
+      sha256 b4a6b455702684652cccf7b46258b29e653538904359a58fd4931cf3ef286b3f
+
+    sidecars/android/win-x86_64/AdbWinApi.dll
+      108,184 bytes
+      sha256 c1d653030b4bde65d3e07e4d0b0979e17be56df1436cdd15528630f27808050d
+
+    sidecars/android/win-x86_64/AdbWinUsbApi.dll
+      73,368 bytes
+      sha256 0710e894d9b40f71a670c13c694079d564c92c1279da382cfe4850983aaebe1b
+
+    sidecars/android/win-x86_64/NOTICE-platform-tools.txt
+      1,154,131 bytes
+      sha256 38ec8c6f5b7799c223ffeab1f9e81c2d5fc67b5e56d6424f649630ca1ee1a811
+
+Author: Google LLC. Obtained from the Android SDK Platform-Tools package
+(https://developer.android.com/tools/releases/platform-tools). Redistributed
+**unmodified**, byte-for-byte as obtained.
+
+The two DLLs sit in the same directory as `adb.exe` because Windows resolves a
+binary's dependent DLLs relative to the executable's own directory. Separating
+them breaks adb at load time, not at build time.
+
+`NOTICE-platform-tools.txt` is Google's own aggregated third-party notice file,
+shipped from the same package. It is included **because** adb's own
+dependencies require their notices to travel with the binary; bundling adb
+without it would be the exact attribution gap this file exists to close. It is
+Google's text, reproduced unmodified, and it is not summarised here — the
+licences it lists apply on their own terms.
+
+**The unreviewed part, stated plainly.** Android SDK Platform-Tools is governed
+by the *Android Software Development Kit License Agreement*, not by
+Apache-2.0. That agreement is not the same thing as a redistribution grant, and
+nobody on this project has read it against this use. Bundling these files into
+an installer is therefore a **knowingly accepted risk**, taken as an operator
+decision to make a clean Windows machine work without a manual SDK install. It
+is not a legal conclusion, and this paragraph must not be cited as one.
+
+If that review happens and comes back negative, the fix is already designed to
+be cheap: the bundled adb is the **lowest** priority candidate in the
+resolution order (`configured -> RIVIU_ADB_PATH -> ANDROID_SDK_ROOT ->
+ANDROID_HOME -> PATH -> bundled`), so deleting these four files removes the
+exposure and leaves every machine that has its own adb working exactly as
+before.
+
+
+2. minicap (DeviceFarmer / OpenSTF) — Apache-2.0
+------------------------------------------------
+
+    sidecars/android/noarch/minicap.apk
+      4,209,669 bytes
+      sha256 6111c9b110039aefc99837e1553e876e31290530cdbdb0f789b8b327f277a97c
+
+Obtained from the npm package `@devicefarmer/minicap-prebuilt` v2.7.3
+(`npm pack`), file `prebuilt/noarch/minicap.apk`. Redistributed unmodified.
+
+Licensed under the Apache License, Version 2.0
+(https://www.apache.org/licenses/LICENSE-2.0). Apache-2.0 permits
+redistribution and requires that this notice travel with it — which is one of
+the reasons this file exists at the root of the repository rather than only in
+a build script.
+
+This APK is never installed on a device. It is pushed and executed in place via
+`CLASSPATH=<apk> app_process`, which is why the architecture-independent
+(`noarch`) variant is the one bundled.
+
+
+3. WebDriverAgent (Facebook / Meta, appium) — BSD-3-Clause
+----------------------------------------------------------
+
+    sidecars/wda/RiviuAgent-text.ipa        7,232,039 bytes
+    sidecars/wda/RiviuAgent-candidate.ipa   7,249,275 bytes
+    sidecars/wda/Riviumanagersphone.ipa     6,743,405 bytes
+
+These are built from WebDriverAgent sources and therefore contain
+BSD-3-Clause-licensed code by Facebook, Inc. and the appium project
+(https://github.com/appium/WebDriverAgent). BSD-3-Clause requires the copyright
+notice, this list of conditions, and the disclaimer to be reproduced in
+redistributions in binary form.
+
+This attribution **was missing** before this file existed, while the IPAs were
+already being shipped. Recording that rather than quietly backdating it: the
+gap was real, and it is closed here.
+
+    sidecars/wda/RiviuAgent.ipa             3,182,711 bytes
+
+This one is **not** ours and is **not** WebDriverAgent. It is a third-party
+signed IPA (`com.mrph.svc`, signer "iPhone Distribution: Beijing Hfvast
+Technology Co. ,ltd.") retained only as a rollback oracle for protocol
+comparison. Its licence is unknown and unreviewed. It is the second unreviewed
+item in this file, and it predates the decisions in section 1.
+
+
+4. pymobiledevice3 and tidevice — frozen into the iOS sidecar
+-------------------------------------------------------------
+
+The Windows installer ships `riviu-pmd.exe`, a PyInstaller onefile build of
+`sidecars/pymobiledevice3/riviu_pmd.py`. That executable **embeds** the
+following, pinned in `sidecars/pymobiledevice3/requirements.txt` and locked by
+`requirements-lock.txt`:
+
+    pymobiledevice3 == 10.1.0    https://github.com/doronz88/pymobiledevice3
+    tidevice        == 0.12.11   https://github.com/alibaba/taobao-iphone-device
+
+plus their transitive dependencies, and the CPython runtime itself. Each
+carries its own licence, reproduced by those projects; freezing them into one
+executable does not change any of them, and the aggregate is not MIT.
+
+Apple's usbmux (`AppleMobileDeviceProcess.exe`, Microsoft Store package
+`AppleInc.AppleDevices`) is a **prerequisite installed separately by the
+operator**. It is deliberately not redistributed, and nothing in this project
+bundles it.
+
+
+5. What is missing from this repository
+---------------------------------------
+
+There is no `LICENSE` file at the repository root. `Cargo.toml` says `MIT`, so
+the intent exists, but the text it refers to does not. Shipping other people's
+code while your own licence is a single word in a manifest is the worst of both
+positions, and adding that file is recommended — it is a decision for whoever
+owns this project, not something this NOTICE can settle.

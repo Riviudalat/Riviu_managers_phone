@@ -11,8 +11,6 @@ use tauri::State;
 use crate::command_error::CommandError;
 use crate::state::AppState;
 
-const TIKTOK_BUNDLE_ID: &str = "com.ss.iphone.ugc.Ame";
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupInputReport {
@@ -50,8 +48,17 @@ async fn continue_ui_context(
         .reserve_ui_capacity(exclusive)
         .await
         .map_err(CommandError::from)?;
+    // Per device, not a module constant. Manual control and Open-on-Device carried the
+    // same defect as the Interaction path: the *iOS* bundle was handed to every
+    // backend, so on Android `start_interaction_session` foregrounded nothing that
+    // exists and the foreground proof could never pass.
+    let udid = exclusive.udid().to_string();
+    let target_package = control
+        .resolve_tiktok_package(&udid)
+        .await
+        .map_err(CommandError::from)?;
     let session = control
-        .start_interaction_session(exclusive, TIKTOK_BUNDLE_ID, kind)
+        .start_interaction_session(exclusive, &target_package, kind)
         .await
         .map_err(CommandError::from)?;
     control

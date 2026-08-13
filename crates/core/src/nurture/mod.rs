@@ -26,10 +26,19 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 mod actions;
+mod hierarchy;
+mod live;
 mod recovery;
-mod touch;
+// Crate-visible, not private, because the Interaction path needs the *same* jitter
+// history rather than its own: two touch planners on one device would produce a tap
+// distribution neither of them intended. `crate::interaction_hierarchy` is the second
+// caller.
+pub(crate) mod touch;
 
 use actions::{CommentResult, LikeResult, SwipeOutcome};
+pub use hierarchy::{run_hierarchy_session, CommentTextSource, HierarchySession, PreparedComment};
+pub use live::LiveSettings;
+use live::{apply_live_settings, video_target};
 use recovery::Budget;
 pub use recovery::Outcome;
 
@@ -230,9 +239,42 @@ impl NurtureEngine {
 
     pub(super) fn tiktok_bundle(settings: &NurtureSettings) -> &str {
         if settings.bundle_id.trim().is_empty() {
-            "com.ss.iphone.ugc.Ame"
+            crate::tiktok_target::IOS_TIKTOK_BUNDLE
         } else {
             settings.bundle_id.as_str()
+        }
+    }
+
+    /// TikTok's app id **for this device**.
+    ///
+    /// Not [`Self::tiktok_bundle`] alone, and this is a measured failure rather than a
+    /// tidiness point. `NurtureSettings` is one global row shared by the whole fleet and
+    /// its `bundle_id` defaults to the **iOS** bundle, so on a mixed fleet the Android
+    /// half was sent `monkey -p com.ss.iphone.ugc.Ame`, which fails. A live run on
+    /// 12/08/2026 reported `startInteractionSession failed … monkey -p
+    /// com.ss.iphone.ugc.Ame … failed` for an SM-N950F whose TikTok was installed and
+    /// working — the fleet-wide value was simply not true of that phone.
+    ///
+    /// The driver already answers this per device and the Interaction path already asks
+    /// it (`crate::tiktok_target`, `DeviceDriver::resolve_tiktok_package`).
+    ///
+    /// An operator's explicit choice still wins. The iOS bundle is treated as "not
+    /// chosen" because it is the shipped default, and on iOS the resolver returns that
+    /// same value anyway — so this changes nothing for an iPhone.
+    pub(super) async fn tiktok_bundle_for(&self, udid: &str, settings: &NurtureSettings) -> String {
+        let configured = settings.bundle_id.trim();
+        if !configured.is_empty() && configured != crate::tiktok_target::IOS_TIKTOK_BUNDLE {
+            return configured.to_string();
+        }
+        match self.control.resolve_tiktok_package(udid).await {
+            Ok(package) => package,
+            // A driver that cannot answer leaves the configured value, which is the same
+            // behaviour as before this existed — no worse, and it keeps the reason for the
+            // failure in the driver's own error rather than inventing a package here.
+            Err(error) => {
+                tracing::warn!(udid, %error, "could not resolve TikTok's package; using the configured bundle");
+                Self::tiktok_bundle(settings).to_string()
+            }
         }
     }
 
@@ -397,6 +439,26 @@ impl NurtureEngine {
         None
     }
 
+    /// Pick up whatever the operator has changed since the last post.
+    ///
+    /// Reads the same settings row the UI writes, so there is no second channel to keep in
+    /// sync — "Lưu" in the UI *is* the live-tuning mechanism. One SQLite read of one row per
+    /// post, against a loop whose posts take seconds.
+    ///
+    /// A read that fails is ignored on purpose: the session already holds a complete, valid
+    /// snapshot, and stopping a run because the settings row was momentarily unreadable
+    /// would trade a working session for nothing. Which fields are picked up, and why the
+    /// rest are not, is [`NurtureSettings::absorb_live_changes`].
+    fn absorb_live_settings(&self, settings: &mut NurtureSettings) {
+        let Ok(fresh) = self.db.get_nurture_settings() else {
+            return;
+        };
+        settings.absorb_live_changes(&fresh);
+        // Re-fold the switches: `absorb_live_changes` copies the stored probabilities, which
+        // are the operator's numbers rather than the effective ones.
+        *settings = std::mem::take(settings).into_effective();
+    }
+
     pub async fn run_session(
         &self,
         udid: &str,
@@ -405,6 +467,10 @@ impl NurtureEngine {
         max_duration: Option<Duration>,
         on_status: impl Fn(NurtureSessionStatus) + Send + Sync,
     ) -> anyhow::Result<NurtureSessionStatus> {
+        // Folded once here so the whole loop below reads effective values: a feature whose
+        // switch is off arrives as probability 0, and no call site has to remember the
+        // switch exists (`NurtureSettings::into_effective`). Refreshed the same way.
+        let mut settings = settings.into_effective();
         let started = Instant::now();
         let mut status = NurtureSessionStatus {
             udid: udid.to_string(),
@@ -455,7 +521,7 @@ impl NurtureEngine {
         //
         // One session per device; the supervisor reuses a healthy relay and
         // runner rather than starting a second one.
-        let bundle_id = Self::tiktok_bundle(&settings).to_string();
+        let bundle_id = self.tiktok_bundle_for(udid, &settings).await;
         let fresh_text_session =
             settings.comment_prob > 0 && self.control.requires_fresh_text_session(udid);
         let session_kind = if fresh_text_session {
@@ -532,6 +598,90 @@ impl NurtureEngine {
                 return Ok(status);
             }
         };
+        // A backend that can report *where* a control is does not need a
+        // calibrated screen at all — it taps inside the rectangle the device
+        // handed back instead of multiplying an iPhone 8 fraction. So try that
+        // route first; iOS cannot answer `locate_description` and falls straight
+        // through to the pixel engine below, unchanged.
+        //
+        // This is what AGENTS.md §9 means by not porting `screen.rs` to Android:
+        // the same session policy, a different way of seeing.
+        // The hierarchy loop gets its words from the engine's own grounded
+        // generator, so a comment on Android is written from the same evidence, by
+        // the same provider, into the same audit table as one on iOS.
+        let comment_source = EngineCommentSource {
+            engine: self,
+            udid,
+            stop: &stop,
+        };
+        let live_source = EngineLiveSettings { engine: self };
+        let attempt = hierarchy::run_hierarchy_session(
+            session.as_ref(),
+            screen_size,
+            &settings,
+            &bundle_id,
+            started,
+            max_duration,
+            &stop,
+            &mut status,
+            &report,
+            Some(&comment_source),
+            Some(&live_source),
+        )
+        .await;
+        match attempt {
+            hierarchy::HierarchySession::Ran(mut outcome) => {
+                // Same judgement the pixel path applies: a session that moved no
+                // videos did not work, whatever else it reported.
+                if outcome == Outcome::Done && status.videos_done == 0 {
+                    outcome = Outcome::Failed;
+                }
+                let mut cleanup_error = None;
+                if let Err(error) = self.control.close_ui_context(ui_context).await {
+                    outcome = if status.videos_done == 0 {
+                        Outcome::Failed
+                    } else {
+                        Outcome::Partial
+                    };
+                    cleanup_error = Some(format!("device cleanup failed: {error}"));
+                }
+                let summary = format!(
+                    "{} — {}/{} video, {} tim, {} bình luận, {} follow, {:.0}s (hierarchy){}",
+                    outcome.as_str(),
+                    status.videos_done,
+                    status.swipe_attempts,
+                    status.likes,
+                    status.comments,
+                    status.follows,
+                    started.elapsed().as_secs_f64(),
+                    cleanup_error
+                        .as_ref()
+                        .map(|error| format!(", lỗi cuối: {error}"))
+                        .unwrap_or_default(),
+                );
+                status.running = false;
+                status.last_message = summary.clone();
+                on_status(status.clone());
+                let _ = self.db.log_op(
+                    "nurture.session",
+                    &format!("{udid} {summary} usd={:.4}", status.session_usd),
+                );
+                self.clear_touch_points(udid);
+                return Ok(status);
+            }
+            // The ordinary iOS case: no geometry, so use pixels.
+            hierarchy::HierarchySession::NotSupported => {}
+            // Geometry works but something measured is missing. Stop, rather than
+            // falling through to a pixel engine whose only calibrated layout is an
+            // iPhone 8. The reason is already in `status.last_message`.
+            hierarchy::HierarchySession::Refused => {
+                status.running = false;
+                let _ = self.control.close_ui_context(ui_context).await;
+                on_status(status.clone());
+                return Ok(status);
+            }
+        }
+
         let Some(layout) = screen::calibrated_layout(screen_size.0, screen_size.1) else {
             let known = screen::CALIBRATED_LAYOUTS
                 .iter()
@@ -672,34 +822,50 @@ impl NurtureEngine {
             settings.like_prob,
             settings.comment_prob,
             settings.follow_prob,
+            settings.human_limits,
         );
         let mut last_interaction_at: Option<Instant> = None;
         // `steady_mood` pins the cycle for feature tests; a normal run varies.
-        let mut moods = match settings.steady_mood.as_str() {
-            "chatty" => MoodCycle::fixed(crate::human_behavior::Mood::Chatty),
-            "liking" => MoodCycle::fixed(crate::human_behavior::Mood::Liking),
-            "skimming" => MoodCycle::fixed(crate::human_behavior::Mood::Skimming),
-            _ => MoodCycle::new(),
+        // See the same branch in `hierarchy::run_feed`: the mood multipliers are the
+        // third layer that overrides a configured probability, so full control has to
+        // neutralise them as well as the ceilings.
+        let mut moods = if !settings.human_limits {
+            MoodCycle::neutral()
+        } else {
+            match settings.steady_mood.as_str() {
+                "chatty" => MoodCycle::fixed(crate::human_behavior::Mood::Chatty),
+                "liking" => MoodCycle::fixed(crate::human_behavior::Mood::Liking),
+                "skimming" => MoodCycle::fixed(crate::human_behavior::Mood::Skimming),
+                _ => MoodCycle::new(),
+            }
         };
         let mut rail = ActionRail::fallback();
         let mut outcome = Outcome::Done;
         let mut last_error: Option<String> = None;
+        // The pixel loop's door back to the settings row. The same object the hierarchy
+        // loop is handed, so "live" means one thing across both.
+        let live_source = EngineLiveSettings { engine: self };
 
-        // A timed/manual run is bounded by its duration rather than the old
-        // short video-count cap. Keep the explicit cap for fixture/test runs.
-        let total_videos = if max_duration.is_some() {
-            u32::MAX
-        } else {
-            settings
-                .num_videos
-                .max(1)
-                .saturating_mul(settings.num_rounds.max(1))
-        };
+        // Both bounds apply: this count and, inside the loop, the run duration. See
+        // `live::video_target` for why the duration used to silently win.
+        let total_videos = video_target(&settings);
         // True when the loop ran out of videos rather than out of time.
         let mut hit_video_cap = true;
         let mut off_feed_streak = 0u32;
         let mut blocked_streak = 0u32;
         'feed: for _video in 0..total_videos {
+            // Live tuning, once per post rather than per action. The UI writes one settings
+            // row and this picks it up, so "save" means "applies to the run in progress"
+            // with no extra plumbing. Per *post* on purpose: a probability that changed
+            // between rolling an action and confirming it would make that action's own
+            // record unexplainable.
+            apply_live_settings(
+                Some(&live_source),
+                &mut settings,
+                &mut human,
+                &mut policy,
+                &mut moods,
+            );
             if stop.load(Ordering::Relaxed) {
                 outcome = Outcome::Stopped;
                 hit_video_cap = false;
@@ -961,20 +1127,44 @@ impl NurtureEngine {
                     sleep_interruptible(Duration::from_millis(700), &stop).await;
                 }
                 screen::FeedCardKind::Video if self.card_is_still(udid, &stop).await => {
-                    report(
-                        &mut status,
-                        "gặp bài ảnh (khung đứng yên) — xem vài ảnh rồi vuốt ngang".into(),
-                    );
                     let card_digest = self
                         .frames
                         .latest(udid)
                         .map(|frame| frame_digest(&frame))
                         .unwrap_or_default();
-                    let slides = 1 + (card_digest % 3) as u32;
-                    for _ in 0..slides {
-                        let dwell = Duration::from_secs(2 + (card_digest % 6));
+                    // How far through the carousel to go, from the operator's settings.
+                    //
+                    // This used to be `1 + (card_digest % 3)` — one to three slides picked
+                    // pseudo-randomly from the frame's own bytes, with no relation to how
+                    // many slides the post actually has. A seven-image post got two or
+                    // three of them.
+                    //
+                    // Now the end of the carousel is *observed*: `do_photo_swipe` already
+                    // returns whether a new frame arrived, which is exactly "the page
+                    // turned". So the traversal runs until a swipe changes nothing, and the
+                    // budget is only a ceiling for a post that never stops changing — a
+                    // video misread as a photo, or a card that animates.
+                    let budget = settings.carousel_slide_budget();
+                    if budget == 0 {
+                        report(
+                            &mut status,
+                            "gặp bài ảnh — bỏ qua vuốt ngang (tính năng đang tắt)".into(),
+                        );
+                        sleep_interruptible(Duration::from_secs(2 + (card_digest % 6)), &stop)
+                            .await;
+                        continue;
+                    }
+                    report(
+                        &mut status,
+                        format!("gặp bài ảnh (khung đứng yên) — vuốt ngang tối đa {budget} ảnh"),
+                    );
+                    let mut slides_seen = 0u32;
+                    for slide in 0..budget {
+                        // Varied per slide rather than one constant for the whole card: an
+                        // identical dwell on every image of every carousel is a tell.
+                        let dwell = Duration::from_secs(2 + ((card_digest + u64::from(slide)) % 6));
                         sleep_interruptible(dwell, &stop).await;
-                        let _ = self
+                        let advanced = self
                             .do_photo_swipe(
                                 udid,
                                 session.as_ref(),
@@ -983,7 +1173,12 @@ impl NurtureEngine {
                                 human.photo_swipe_duration_ms(),
                                 &stop,
                             )
-                            .await;
+                            .await
+                            // A swipe that could not be delivered at all is not evidence
+                            // that the carousel ended, but it is a reason to stop pushing:
+                            // treated as "did not advance", which ends the traversal
+                            // without claiming the post had exactly this many slides.
+                            .unwrap_or(false);
                         // A horizontal swipe only turns a page while the card
                         // really is a photo post; on anything else TikTok reads
                         // it as navigation and leaves the feed. Both times a
@@ -1013,6 +1208,22 @@ impl NurtureEngine {
                             );
                             break;
                         }
+                        // The swipe delivered and the screen did not change: that is the
+                        // last slide. Stopping here is what makes "swipe to the end" mean
+                        // the end of *this* post rather than a fixed number of swipes — and
+                        // it also stops the loop pushing horizontal swipes at a card that
+                        // has run out of them, which is how TikTok gets navigated off the
+                        // feed.
+                        if !advanced {
+                            break;
+                        }
+                        slides_seen += 1;
+                    }
+                    if slides_seen > 0 {
+                        report(
+                            &mut status,
+                            format!("bài ảnh: đã xem thêm {slides_seen} ảnh"),
+                        );
                     }
                     if let Some(img) = self.latest_image(udid) {
                         if let Some(found) = screen::locate_action_rail(&img) {
@@ -1631,7 +1842,8 @@ impl NurtureEngine {
         gestures: &tokio::sync::Mutex<()>,
         stop: &AtomicBool,
     ) -> anyhow::Result<bool> {
-        let bundle = Self::tiktok_bundle(settings);
+        let bundle = self.tiktok_bundle_for(udid, settings).await;
+        let bundle = bundle.as_str();
         {
             let _guard = gestures.lock().await;
             if session.launch_app_foreground(bundle).await.is_ok() {
@@ -1747,6 +1959,49 @@ impl NurtureEngine {
 }
 
 /// Short human-readable form of a gesture failure, including its class.
+/// Lets the hierarchy loop borrow the engine's comment generator.
+///
+/// Exists so `hierarchy.rs` never has to know about frames, OpenAI pricing, or the
+/// attempt table: it asks for words, gets words, and reports how the send went.
+struct EngineCommentSource<'a> {
+    engine: &'a NurtureEngine,
+    udid: &'a str,
+    stop: &'a AtomicBool,
+}
+
+/// The hierarchy loop's door back to the settings row.
+///
+/// A separate type from [`EngineCommentSource`] because the loop asks for the two
+/// independently, and one line of body because the rule itself lives in
+/// [`NurtureEngine::absorb_live_settings`] — the same call the pixel loop makes. Two
+/// loops, one definition of what "live" means.
+struct EngineLiveSettings<'a> {
+    engine: &'a NurtureEngine,
+}
+
+impl LiveSettings for EngineLiveSettings<'_> {
+    fn refresh(&self, settings: &mut NurtureSettings) {
+        self.engine.absorb_live_settings(settings);
+    }
+}
+
+#[async_trait::async_trait]
+impl hierarchy::CommentTextSource for EngineCommentSource<'_> {
+    async fn comment_for_post(
+        &self,
+        settings: &NurtureSettings,
+    ) -> Option<hierarchy::PreparedComment> {
+        self.engine
+            .prepare_hierarchy_comment(self.udid, settings, self.stop)
+            .await
+    }
+
+    async fn record_outcome(&self, prepared: &hierarchy::PreparedComment, outcome: &str) {
+        self.engine
+            .finish_hierarchy_comment(prepared.attempt_id.as_deref(), outcome);
+    }
+}
+
 fn describe(err: &anyhow::Error) -> String {
     format!("{} ({})", err, ui_error_kind(err).as_str())
 }

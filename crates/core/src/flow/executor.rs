@@ -2696,7 +2696,8 @@ mod tests {
                 udid: udid.to_string(),
                 name: "Fixture".to_string(),
                 model: "iPhone".to_string(),
-                ios_version: "16.7.15".to_string(),
+                platform: crate::DevicePlatform::Ios,
+                os_version: "16.7.15".to_string(),
                 battery: None,
                 wda_ready: false,
                 wda_expires_at: None,
@@ -4043,7 +4044,7 @@ mod tests {
             driver_adapter_version: "fixture-driver-1".to_string(),
             transport: ActiveTransport::Mock,
             product_type: "iPhone10,1".to_string(),
-            ios_version: "16.7.15".to_string(),
+            os_version: "16.7.15".to_string(),
             target_app: InstalledTargetIdentity {
                 bundle_id: TARGET.to_string(),
                 version: "1".to_string(),

@@ -30,9 +30,12 @@
 pub mod adb;
 pub mod agent;
 pub mod driver;
+pub mod frames;
+pub mod publish;
 pub mod session;
 
-pub use adb::AdbProgram;
+pub use adb::{AdbCandidate, AdbOrigin, AdbProgram};
 pub use agent::{AgentClient, Locator, Rect};
 pub use driver::{create_driver, detect_driver, AndroidDriver, AndroidDriverConfig};
+pub use frames::{MinicapBanner, MinicapOptions, MinicapStream, Projection};
 pub use session::AndroidUiSession;

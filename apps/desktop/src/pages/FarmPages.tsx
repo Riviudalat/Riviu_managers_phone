@@ -711,7 +711,18 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
 
   const selectedBundles =
     manifest?.bundles.filter((bundle) => bundleIds.includes(bundle.id)) ?? [];
-  const mappingReady = selectedBundles.length > 0 && selectedBundles.length === targets.length;
+  // Refuse before dispatch; do **not** silently drop the Android targets. The
+  // bundle -> device mapping is positional (`targets[index]` below), so removing a
+  // target re-indexes the rest and would post the wrong caption to the wrong
+  // account. Android's `stage_publish_media` is also still unimplemented, so a
+  // mixed selection half-succeeds and leaves partial campaign rows behind.
+  const androidTargets = targets.filter(
+    (udid) => devices.find((device) => device.udid === udid)?.platform === "android",
+  );
+  const mappingReady =
+    selectedBundles.length > 0 &&
+    selectedBundles.length === targets.length &&
+    androidTargets.length === 0;
 
   const scan = async (path: string) => {
     setBusy(true);
@@ -831,10 +842,22 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
         <input type="datetime-local" value={runAt} onChange={(e) => setRunAt(e.target.value)} />
       </label>
       <p className="hint">Public · âm thanh mặc định · xoá asset sau khi có bằng chứng đăng thành công.</p>
+      {androidTargets.length > 0 && (
+        <p className="error">
+          {androidTargets.length} máy Android trong danh sách: đường publish (đẩy ảnh vào
+          thư viện rồi lái composer TikTok) hiện chỉ có trên iPhone. Bỏ chúng khỏi lựa
+          chọn — ghép bundle với máy theo thứ tự, nên không thể tự bỏ qua mà giữ đúng cặp.
+        </p>
+      )}
       <button
         type="button"
         className="primary"
         disabled={!mappingReady || busy}
+        title={
+          androidTargets.length > 0
+            ? "Publish chưa hỗ trợ máy Android"
+            : undefined
+        }
         onClick={async () => {
           setBusy(true);
           setMsg(null);

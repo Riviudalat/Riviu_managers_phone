@@ -2621,8 +2621,54 @@ Số đo đầy đủ ở `docs/ANDROID_PROBE_REPORT_2026-08-09.md`. Những đi
   đã là hình dạng của `find_and_tap`/`assert_visible`/`read_text`.
 - **Locator ưu tiên `content-desc`, KHÔNG phải `resource-id`.** `resource-id`
   của TikTok bị R8 obfuscate (`a1p`, `ty9`, `ebz`) và đổi theo bản build;
-  `content-desc` thì ngữ nghĩa, tiếng Anh bất kể ngôn ngữ giao diện, và **mã hoá
-  cả trạng thái**: `Like` ⇄ `Video liked`, `Read or add comments. 15 comments`.
+  `content-desc` thì ngữ nghĩa và **mã hoá cả trạng thái**:
+  `Like` ⇄ `Video liked`, `Read or add comments. 15 comments`.
+
+  > **SỬA 10/08/2026 — `content-desc` KHÔNG phải tiếng Anh bất kể ngôn ngữ UI.**
+  > Câu đó đo trên bản TikTok *global* (`com.zhiliaoapp.musically`). Trên bản SEA
+  > `com.ss.android.ugc.trill` với UI tiếng Việt (Redmi Note 12, Android 15),
+  > dump hierarchy thật cho thấy nhãn **bị dịch**:
+  >
+  > | AGENTS.md ghi | Thực tế trên `trill` + tiếng Việt |
+  > |---|---|
+  > | `Like` | `Thích` và `Thích video. 1Tr lượt thích` |
+  > | `Video liked` | *(chưa đo trạng thái đã-thích)* |
+  > | `Read or add comments. N comments` | `Đọc hoặc viết bình luận. 21,1K bình luận` |
+  > | `For You` | `Đề xuất` |
+  > | `Tap to watch LIVE` | *(không có nhãn nào chứa)* |
+  > | `Follow <name>` | `Follow Hoàng Sơn` — **chỉ cái này giữ tiếng Anh** |
+  >
+  > Nhãn khác đo được: `Chia sẻ video. 310,6K lượt chia sẻ`, `Thêm hoặc xóa video
+  > này khỏi mục Yêu thích.`, `Chú thích`, `Hồ sơ <tên>`, `Bạn bè`, `Đã follow`,
+  > `Tìm kiếm`, `Trang chủ`, `Cửa hàng`, `Quay`, `Hộp thư`, `Hồ sơ`.
+  >
+  > **Hệ quả:** mọi `Locator::Description` tiếng Anh trong nurture/interaction sẽ
+  > **absent** trên máy UI tiếng Việt — G1 probe đo được `find("Like")` absent,
+  > `find("Video liked")` absent, `assert_visible("For You")` fail, dù rail vẫn
+  > hiển thị đầy đủ trên màn hình. Cách mã hoá trạng thái trong nhãn vẫn đúng,
+  > chỉ là **theo locale**. Muốn chạy fleet trộn locale thì locator phải tra theo
+  > (TikTok package × ngôn ngữ UI), không hard-code một chuỗi. `package.json` của
+  > GenFarmer có cột `apps.locale_input` — họ gặp đúng vấn đề này.
+  >
+  > **Đã có catalog: `riviu_core::tiktok_labels`.** Nhãn là **dữ liệu đo**, khoá theo
+  > `(package × ngôn ngữ UI)`, và `labels_for()` trả `None` cho cặp chưa đo — `None`
+  > **phải nghĩa là từ chối**, đúng như `CALIBRATED_LAYOUTS` (§10). Đừng thay bằng
+  > nhãn của ngôn ngữ khác: locator đó khớp rỗng và đọc thành "chưa thích", tức một
+  > câu trả lời **sai**, không phải câu trả lời thiếu.
+  > - Mỗi nhãn mang `Exact` hoặc `Contains` như đo được. `Contains` không phải cho
+  >   tiện: nhãn bình luận nhúng số đếm — đo được `21,1K bình luận` rồi `697 bình
+  >   luận` trên hai video khác nhau, nên exact **không bao giờ** khớp.
+  > - Cái gì chưa đo thì để `None`, **không đoán**. Hiện `Liked` và `LiveRoom` của
+  >   bản `vi` là `None`: probe thấy `Thích` present và `Đã thích` absent trên video
+  >   *chưa* thích — điều đó vừa hợp với nhãn đúng vừa hợp với nhãn sai, nên chưa
+  >   chứng minh được gì. Muốn chốt phải đo trên video **đã** thích.
+  > - **Đọc ngôn ngữ UI từ `persist.sys.locale`, KHÔNG phải `ro.product.locale`.**
+  >   Đo trên Redmi Note 12: `persist.sys.locale=vi-VN` còn
+  >   `ro.product.locale=en-GB` (mặc định xuất xưởng). Đọc sai cái là chọn nhãn tiếng
+  >   Anh cho máy UI tiếng Việt — **bẫy dòng-đầu thứ ba** cùng loại với `wm size` và
+  >   `mCurrentFocus`. Đi qua `AndroidUiSession::ui_locale()` / `adb::parse_locale`.
+  > - Verify trên máy thật: catalog tự chọn `vi`, rồi `Đề xuất`/`Thích`/`bình
+  >   luận`/`Chia sẻ video`/`Yêu thích` đều PRESENT trong 135–185 ms.
   Vì thế `supports_accessibility_readback` ở đây là `true` — backend đầu tiên
   của dự án nói được câu đó, do iOS buộc giữ `snapshotMaxDepth = 1` (§2.3).
 - **Không port `screen.rs` sang Android.** Nó là cách lách một API hỏng; Android
@@ -2647,6 +2693,100 @@ Số đo đầy đủ ở `docs/ANDROID_PROBE_REPORT_2026-08-09.md`. Những đi
   `--8<--` từng bị shell trên máy hiểu `<` là chuyển hướng input.
 - `pidof` thoát khác 0 khi tiến trình vắng mặt. Đó là **câu trả lời**, không
   phải lỗi — đi qua `AndroidDriver::pid_of`.
+- **Clipboard Android bị platform gác — ĐỪNG implement qua uiautomator2-server.**
+  Đo trên Android 15: `POST /session/{id}/appium/device/set_clipboard` **có tồn
+  tại** và trả 200 `value:null`, nhưng `get_clipboard` trả **rỗng**. Từ Android 10
+  chỉ app đang giữ focus/quyền mới đọc được clipboard, và MIUI log rõ
+  `ClipboardServiceI: checkProviderWakePathForClipboard: <pkg> is not a
+  activePermissionOwner`. Server appium không có UI nên không bao giờ là chủ quyền
+  đó. **Implement `get_clipboard` trên đường này sẽ tạo ra capability báo thành
+  công mà trả về không gì** — đúng loại "HTTP 200 không phải bằng chứng" mà §3.9
+  cấm. Vì vậy `AndroidUiSession` **cố ý** không implement clipboard, để rơi về
+  `unsupported("getClipboard")` của trait.
+
+  Ba đường khả dĩ, chưa chọn: (1) IME — GenFarmer dùng `AdbKeyboard` của openatx
+  với broadcast `ADB_KEYBOARD_GET_CLIPBOARD`, vì **IME được phép đọc clipboard**;
+  đổi default IME là xâm lấn và để lại dấu. (2) `io.appium.settings` — app helper
+  mà Appium Node driver thực sự dùng cho clipboard, cần cài thêm một APK. (3) Với
+  §3.12 Copy Link, đọc URL từ UI thay vì clipboard. Đây là **chặn thật cho
+  Interaction trên Android**, không phải việc còn thiếu vài dòng code.
+- **Pha 5 đã có câu trả lời đo được: minicap bản Java, KHÔNG phải scrcpy.**
+  `noarch/minicap.apk` của `@devicefarmer/minicap-prebuilt` chạy qua
+  `CLASSPATH=<apk> app_process / io.devicefarmer.minicap.Main`, **không cần cài** nên
+  không vướng gate MIUI, và phát **JPEG** đúng contract `Frame` hiện có (không cần
+  decoder H.264). Đã implement ở `crates/android-driver/src/frames.rs`; G1 probe đo
+  qua chính code đó trên Redmi Note 12/Android 15 khi TikTok phát video,
+  `-P 1080x2400@540x1200/0 -Q 70`: **155 frame trong 6,00 s = 25,8 FPS, 43,2
+  KB/frame**, `forward tcp:0` đọc lại được port adb cấp (50784), banner
+  `real=1080x2400 virtual=540x1200 quirks=2`. Một reader viết bằng PowerShell trên
+  cùng socket chỉ đạt 11 FPS — **chênh lệch là do reader, không phải máy**; đừng lấy
+  harness chậm làm giới hạn thiết bị.
+
+  **Đã nối vào fleet, không còn là producer rời.** `riviu_core::FrameSink` là seam
+  phía publish: `StreamHub` implement nó, `AndroidDriver::set_frame_sink` nhận nó ở
+  composition root (`state.rs`), nên frame Android vào **cùng một hub** với iOS và
+  giữ nguyên generation/sequence — không dựng hub thứ hai. `ensure_stream` trả
+  `auto-stream://{udid}` như iOS. Kết quả trên máy thật: tile Android `● Live`,
+  `Tổng quan 2/2`, badge "2 sẵn sàng".
+  - Producer publish qua `publish_if_current`; **`false` là tín hiệu dừng, không
+    phải lỗi** — stream mới đã sở hữu máy đó, byte còn trong buffer của reader cũ
+    không được phép thành bằng chứng cho stream mới.
+  - `ensure_stream` gọi lại thì **reuse** feed còn sống cùng generation, không
+    restart.
+  - **`adb forward tcp:0` cấp port MỚI mỗi lần gọi.** Retry cả forward lẫn connect
+    trong một vòng lặp làm leak một port mỗi lần thử — đo được 4 forward mắc cạn
+    sau một lần chạy. Forward đúng **một lần**, chỉ retry connect. Và vì teardown
+    không bao giờ chắc chắn chạy, `frames::forward` **prune mọi forward cũ tới đúng
+    socket của máy đó** trước khi tạo mới; socket mang tên serial nên cái gì còn
+    bám vào đó đều là rác của mình. Đã verify: vào với 1 forward cũ, ra với đúng 1.
+  minicap **native** thì đã chết trên Android nay (`.so` prebuilt chỉ tới android-30;
+  trên SDK 35 lỗi `cannot locate symbol _ZN7android2ui4Size7INVALIDE`).
+  minicap chỉ phát khi display đổi — đó là **ưu điểm**, khớp §3.4. `screencap -p` là
+  512 ms/frame và `screencap` raw là 990 ms + 10 MB/frame: cả hai **không** làm được
+  stream. Chi tiết và cách đo: `docs/re/genfarmer/README.md` §7.
+- **`dumpsys window windows` không còn mang `mCurrentFocus` trên Android 15.** Đo
+  được rỗng trên Redmi Note 12/HyperOS, trong khi đó lại là lệnh chạy được trên
+  fleet S8+ Android 9 — nên `active_app_bundle` hỏi **cả hai** nguồn
+  (`dumpsys window windows`, rồi `dumpsys window displays`) và coi việc grep thoát
+  khác 0 vì không khớp là **câu trả lời**, không phải lỗi. Chính exit code đó làm
+  G1 probe fail với thông báo rỗng. Đừng thay hẳn sang một lệnh.
+- **`probe.rs` nhận `RIVIU_TIKTOK_PACKAGE`.** Package TikTok theo vùng: global là
+  `com.zhiliaoapp.musically`, SEA là `com.ss.android.ugc.trill`. Máy mang bản kia
+  làm probe fail ngay ở `launch_app` (`monkey -p … failed`) nên **không** đo được
+  gì phía sau. Mặc định giữ nguyên giá trị cũ.
+- **G1 probe đo lại trên Android 15 (10/08/2026, Redmi Note 12):** `list_devices`
+  500 ms, `launch_app` 596 ms, `open_session` 2.160 ms, `window_size` 0 ms
+  (1080x2400 Override), `active_app_bundle` 297 ms, `screenshot_png` 844 ms
+  (571.271 byte), `inspect_app_process` 98 ms. Agent là
+  `appium-uiautomator2-server` **10.4.0**, `/status` trả `ready:true`.
+- **MIUI/HyperOS chặn cài app qua adb, và không có đường lách từ host.** Trên
+  Redmi Note 12 (`ro.miui.ui.version.name=V816`, `OS2.0.207.0.VMTMIXM`,
+  SDK 35) cả ba đường đều trả `INSTALL_FAILED_USER_RESTRICTED: Install canceled
+  by user`: `adb install`, push rồi `pm install` trong shell máy, và session
+  `pm install-create`/`install-write`/`install-commit` (create + stream **thành
+  công**, chỉ **commit** bị chặn). Đừng thử lại ba đường này — nó là policy của
+  PackageManager áp cho shell UID, không phải lỗi APK. Mở khoá bằng
+  **Tuỳ chọn nhà phát triển → "Cài đặt qua USB"** (và trên MIUI thường cần thêm
+  **"Gỡ lỗi USB (Cài đặt bảo mật)"**, đòi đăng nhập Mi account). Vì `ensure_agent`
+  **không tự cài** agent, máy nào chưa bật cờ này thì Android control dừng ở đúng
+  câu lỗi "the agent is not installed on {serial}".
+- **Retry adb là opt-in, không phải mặc định.** `run_bytes` vẫn một phát;
+  `run_bytes_idempotent` mới được retry. Lý do: `pm install`, `am start`,
+  `am force-stop` và `input` không idempotent, nên retry sau một lần đã landing
+  thật sẽ cài hai lần / mở hai lần mà **cả hai lần đều "thành công"** — lỗi vô
+  hình. Đừng gộp retry vào `run_bytes` cho gọn.
+- **`classify_fault` coi lỗi lạ là terminal, không phải transient.** Máy chưa bấm
+  Allow (`Unauthorized`) fail y như vậy mãi mãi; retry nó chỉ làm chậm đúng thông
+  báo operator cần. Chỉ `Transient` và `Timeout` được retry.
+- **"adb còn sống" = danh sách device ổn định qua hai lần đọc**, không phải một
+  lệnh trả về (`devices_stable`). Quan trọng vì `DeviceRegistry::upsert_many`
+  thay cả vector: một snapshot xấu không chỉ sai, nó **xoá máy khỏi fleet**.
+  `list_devices` hiện chỉ log khi không ổn định — registry giữ lại vector cũ khi
+  lần đọc không đáng tin là việc **chưa làm**.
+- **`adb kill-server` không bao giờ được gọi tự động.** Nó là hành động toàn cục:
+  mọi tool khác trên máy mất kết nối adb và **mọi `adb forward` chết theo**, phải
+  forward lại từng máy. Chỉ chạy khi người vận hành yêu cầu, và log lại.
+  Nền tảng cho mấy điều trên: `docs/re/genfarmer/README.md`.
 
 `MultiplexDriver` (`crates/core/src/driver_multiplex.rs`) gộp hai backend vào
 **một** `DeviceControlPlane`. Không tách hai plane: `DeviceRegistry::upsert_many`
@@ -2665,14 +2805,959 @@ Backend Android chỉ tham gia khi `adb` thực sự dùng được (`detect_dri
 `android_unavailable_reason` **riêng** với `driver_degraded_reason` — "máy này
 không có adb" và "sidecar iOS chết" là hai sự việc khác nhau.
 
-`StreamHub` vẫn thuộc bundle iOS: driver Android **chưa có nguồn frame**, và
-`ensure_stream` cố tình báo lỗi thay vì trả URL không phát gì.
+`StreamHub` **dùng chung** cho cả hai backend qua `riviu_core::FrameSink` (xem ở
+trên); `ensure_stream` của Android trả `auto-stream://<serial>` vì frame được
+producer minicap publish thẳng vào hub, không có URL riêng cho session.
 
-**Còn nợ, đừng nhầm là đã xong**: `DeviceInfo.ios_version` vẫn mang phiên bản
-Android nên giao diện hiện "iOS 9" cho máy Android — đổi tên sang `os_version` +
-`platform` là việc chưa làm. Chưa máy nào trong fleet có root (`su -c id` không
+### 9.1 Nurture Android: cùng policy, khác cách nhìn (10/08/2026)
+
+`crates/core/src/nurture/hierarchy.rs`. Đây chính là điều "**không port
+`screen.rs` sang Android**" hàm ý, không phải một ngoại lệ của nó.
+
+- **Chia đúng một chỗ: quan sát.** Vòng lặp Android **dùng lại nguyên** tầng
+  policy của engine iOS — `HumanBehavior` (dwell, swipe duration, fatigue),
+  `HumanSessionPolicy` (cap mỗi post/phiên, action gap, rest), `MoodCycle`,
+  `roll_feed_action_in_mood`, `TouchPointPlanner`. Nhân bản policy sẽ để hai
+  backend trôi thành hai người dùng khác nhau; đó là lỗi, không phải tự do.
+- **Seam là `UiSession::locate_description(value, exact)` → `ElementBox`.** Trả
+  *hình chữ nhật*, không phải text — `read_text` không đủ. iOS mặc định refuse vì
+  `snapshotMaxDepth` bị ghim ở 1 (§2.3), nên `supports_element_bounds()` là cửa
+  phân luồng: `false` → engine pixel, `true` → hierarchy. `run_session` thử
+  hierarchy **trước** cửa `calibrated_layout`, nên iOS đi qua không đổi một byte.
+- **Tính chất rơi ra từ việc định vị trước khi tap: mọi tap đều sinh từ một
+  rectangle máy trả về.** Thẻ nào vòng lặp không hiểu thì **không có tap nào**.
+  Không tồn tại lỗi "tap vào vị trí rail hoá ra không có" mà engine pixel phải
+  chống bằng `FeedCardKind`.
+- **Chứng minh tim mà không cần nhãn `Liked`**: nhãn *chưa-tim* là exact match,
+  nên khi state đổi thì đúng chuỗi đó biến mất. Bắt buộc nút bình luận **vẫn còn**
+  cùng lúc mới loại được lý do khác (thẻ đã chuyển). Đó là bằng chứng thật.
+  Nhãn `Liked` giờ **đã đo** (`Đã thích video`) nên đường chính dùng nó.
+- **Chứng minh vuốt bằng nhãn, không bằng pixel**: nhãn bình luận và chia sẻ mang
+  số đếm riêng của từng post (`… 697 bình luận` → `… 1.665 bình luận`), nên cặp
+  đó đổi theo thẻ. Fingerprint rỗng ở cả hai đầu **không** tính là video.
+- **Đừng đọc fingerprint bằng một lần đọc sau sleep cố định.** Đo thật: một phiên
+  300 s với 1 lần đọc ở 900 ms báo 6/34 lượt vuốt là "chưa chứng minh", và **mỗi
+  lần đều kéo theo một thẻ trông như không có rail** — cùng một frame giữa
+  transition bị đếm hai lần. Phải **chờ rail quay lại** (`RAIL_RETURN_WINDOW`
+  2,6 s) rồi mới fingerprint.
+- **Thẻ LIVE nhận qua việc thiếu rail, không qua nhãn.** Bản `vi` chưa đo được
+  `LiveRoom` (chưa gặp post LIVE nào), nên `Comments` vắng mặt là dấu hiệu dùng
+  thật. Đo nhãn khi nào gặp; đừng đoán.
+- **Drawer bình luận đã đo xong (10/08/2026), bằng `probe --measure-comment`.**
+  Ba thứ, đo từng cái, không đoán:
+  - **Ô nhập** là `android.widget.EditText`, định vị bằng **class**:
+    `content-desc` rỗng và `text` là placeholder (`Thêm bình luận...`) nên không
+    có nhãn nào bám được. Mở drawer **không** focus nó — phải tap; đo được ô nằm
+    ở `[199,2127]` khi chưa focus và nhảy lên `[199,1175]` khi bàn phím lên.
+  - **Nút Gửi** là `android.widget.Button` với `content-desc="@2131823284"` —
+    **một resource id chưa resolve, không phải chữ**. Hệ quả kép: không phụ thuộc
+    ngôn ngữ, nhưng **vỡ khi TikTok cập nhật** vì resource id bị gán lại. Đừng
+    coi nó cùng loại với các nhãn khác. **Và điều đó đã xảy ra thật — xem
+    §9.13.**
+  - **Bằng chứng "armed"**: đúng nút đó có `enabled="false"` khi ô rỗng và
+    `enabled="true"` ngay khi có chữ. Đây là câu trả lời của hierarchy cho
+    `CommentDrawer::SendArmed` mà engine pixel phải dò bằng màu. Vì vậy
+    `ElementBox` mang thêm `enabled`, và mặc định khi **không đọc được** là
+    `true` — mặc định `false` sẽ báo nút đang sống là chưa armed và âm thầm bỏ
+    mọi bình luận.
+  - **Đã chạy được trên máy thật tới bước armed**; **bước bấm Gửi chưa chạy** vì
+    nó đăng công khai dưới tên tài khoản thật — cần người vận hành đồng ý. Chạy
+    `--example nurture -- <serial> --comment "<chữ>"` để thực hiện.
+- **`UiSession::back()` là phím mới, không phải tiện tay thêm.** Đóng drawer bằng
+  `home()` sẽ **thoát hẳn TikTok**. iOS mặc định refuse `back()` vì không có phím
+  back hệ thống; Android dùng `KEYCODE_BACK`.
+- **Chữ bình luận đi qua `CommentTextSource`, và app cắm đúng generator của
+  iOS** (`prepare_hierarchy_comment`) nên hai nền tảng nói cùng một giọng và ghi
+  cùng một bảng audit. Nhưng **không dùng `collect_comment_frames`**: hàm đó chặn
+  bằng `screen::feed_ready` — detector hiệu chỉnh cho iPhone 8 — nên trên frame
+  Android nó loại sạch và mọi bình luận sẽ ra "context unavailable". Dùng
+  `collect_grounding_frames` (không có cửa pixel): vòng lặp đã chứng minh tab feed
+  và thanh hành động có trên màn qua hierarchy, mạnh hơn heuristic pixel.
+- **`NurtureSettings.bundle_id` mặc định là bundle iOS** (`com.ss.iphone.ugc.Ame`)
+  — không máy Android nào mở được. `ensure_tiktok_foreground` đọc foreground
+  *trước*, và nếu phải tự mở mà package cấu hình không nằm trong catalog thì
+  refuse kèm danh sách package đúng: đây là lỗi cấu hình, retry không chữa được.
+- **Gate G2 là `cargo run -p riviu-android-driver --example nurture`**, gọi thẳng
+  `riviu_core::nurture::run_hierarchy_session` — không control plane, không DB,
+  không stream. Số đo 10/08/2026 trên Redmi Note 12: **28/34 video, tim 10/10 đều
+  được nhãn xác nhận, outcome `done`, 363 s**; sau khi sửa lỗi settle: 5/6 và 2/2.
+  Lưu ý `--videos` bị **bỏ qua** khi có `--seconds`: phiên có thời hạn thì
+  `total_videos` thành vô hạn (đúng quy tắc engine iOS).
+- **`probe --measure-liked` là cách duy nhất đọc nhãn đã-tim**, và nó tự hoàn
+  nguyên: tim → đọc → bỏ tim → kiểm tra nhãn cũ trở lại, và **hét lên** nếu
+  không. Không đoán bản dịch: `Đã thích video` khác `Đã thích`, và trật tự từ
+  ngược so với `Video liked` của bản tiếng Anh.
+
+### 9.2 ĐÍNH CHÍNH (11/08/2026): clipboard KHÔNG chặn Interaction
+
+Một phiên bản trước của mục này viết *"Clipboard Android vẫn bị chặn nên
+Interaction campaign chưa chạy"*. **Sai, và sai theo hướng đắt**: nó chỉ người
+đọc đi cài IME hoặc `io.appium.settings` để mở một cái không hề chặn.
+
+Đo lại bằng cách đọc mã, không phải suy từ tài liệu:
+
+- `set_streaming_clipboard` / `get_streaming_clipboard` / `guarded_clipboard_transition`
+  **không có caller nào ngoài test** (`device_control.rs:4770`, `:4803`, `:4836`).
+  `crates/core/src/interaction.rs` không hề nhắc clipboard.
+- Interaction giao URL bằng `session.open_url` (`interaction_commands.rs:967-970`),
+  mà Android **đã có** (`session.rs:233-246`, `am start -a …VIEW -d '<url>'`).
+- Phần **đo** ở §9 về clipboard vẫn đúng nguyên (uiautomator2 `get_clipboard` trả
+  rỗng; MIUI `activePermissionOwner`). Chỉ **kết luận về Interaction** là sai.
+- §3.12 Copy Link là **đặc tả chưa ship**: `interaction_commands.rs` đi thẳng từ
+  `plan_threads` sang DB sang worker; không có sentinel, không có
+  `identity_copy_intent`. Identity được chứng minh bằng `open_url` + frame-SHA
+  đổi + `locate_action_rail` + OCR handle tác giả. Đọc mã làm hợp đồng, không đọc
+  đặc tả đó.
+
+**Chỗ tắc thật là 5 method control-plane mà `AndroidDriver` chưa implement**:
+`confirm_interaction_stream_stopped`, `start_interaction_session`,
+`start_stream_after_session`, `stop_owned_stream`, `park_owned_stream`. Chúng rơi
+về `unsupported(...)` của trait, và hệ quả rộng hơn Interaction:
+
+- **Nurture Android chưa từng chạy qua app.** `open_ui_context`
+  (`nurture/mod.rs:215-231`) → `try_start_interaction_session`
+  (`device_control.rs:718-767`) → `confirm_interaction_stream_stopped` (`:729`) →
+  refuse. Số đo §9.1 (28/34 video) đến từ `examples/nurture.rs`, mà module doc của
+  nó nói thẳng là **bỏ qua** control plane. Example đó vẫn là gate đúng cho vòng
+  lặp thuần — đừng "sửa" nó để đi qua plane.
+- **Tile Android hỏng ở bước park.** `StreamSampler` (`state.rs:298`) →
+  `stop_background_stream` → `clean_background` → `park_owned_stream`
+  (`device_control.rs:3005`) → refuse. Mỗi tile lên `● Live` rồi kết thúc lượt ở
+  `TileStreamState::Error`, sample bị giữ mãi. Bug người dùng thấy được, độc lập
+  với nurture.
+- **`reserve_ui_capacity` chết còn sớm hơn cả bước 1.**
+  `preview_foreground_victim` (`stream_budget.rs:354-390`) có thể trả về **chính
+  máy đích** làm victim khi nó đang giữ producer background, và `reserve_context`
+  gọi `stop_owned_stream` với `quarantine: true` (`device_control.rs:2812-2820`).
+- **`stop_minicap` (`driver.rs:247`) không có caller nào** — dead code. Đó là lý do
+  không ai phát hiện teardown Android chưa từng chạy.
+
+Nên **năm method phải cùng lên**; thiếu `stop_owned_stream` thì vẫn fail ở reserve.
+
+**Đã làm, đo được (11/08/2026, Redmi Note 12).** Gate là
+`cargo run -p riviu-android-driver --example control_plane -- <serial>` (G3), lái
+`DeviceControlPlane` thật:
+
+```
+start_background_stream -> auto-stream://10969614
+acquire_exclusive ok / reserve_ui_capacity ok
+start_interaction_session ok (foreground proven)
+start_reserved_stream ok      sink: generation=2 published=1 cleared=2 parked=0
+session: screen (1080,2400) foreground com.ss.android.ugc.trill
+close_ui_context -> stopped_generation: 2, next_generation: 3
+cleanup_quarantine_count = 0      forwards after: none
+```
+
+- **`cleanup_quarantine_count() == 0` là gate thật**, không phải chuỗi log ở trên.
+  Một `old_generation` sai hay `child_stopped: false` chỉ hiện ra dưới dạng ticket
+  bị quarantine; mọi thứ khác trong lần chạy vẫn trông sạch.
+- **G3 phải mở tile bằng `reserve_background_stream` + `start_background_stream`,
+  KHÔNG phải `driver.ensure_stream` trực tiếp.** Gọi driver thẳng thì
+  `StreamBudgetManager` không biết có producer nên `reserve_ui_capacity` không tìm
+  ra victim để thu hồi, trong khi driver vẫn giữ minicap — và handoff từ chối
+  đúng, nhưng gate không chứng minh được gì về đường app đi. Đã mắc lỗi này một
+  lần; comment trong example ghi lại để không mắc lại.
+- **`child_stopped: true` khi không có gì để stop.** `confirms_stop` đòi
+  `child_stopped && new > old`, và `clean_ticket` quarantine cả lease nếu không
+  thoả — trả `false` cho "không có producer" sẽ quarantine mọi teardown sau một lần
+  start stream thất bại. iOS trả lời y hệt.
+- **`first_frame_observed` là JPEG *decode được*, và timeout là lỗi chứ không phải
+  `false`.** `riviu_core::frame_source::decodes_as_jpeg` nằm ở core để hai backend
+  không thể bất đồng, và để không backend nào phải tự mang decoder. Magic byte một
+  mình không đủ: một blob đúng kích thước đúng prefix vẫn không phải ảnh.
+- **Khoá**: `starting: Mutex<HashSet<String>>` (claim, nhả trong `Drop` nên future
+  bị cancel không treo serial) thay cho việc giữ `streams` — mutex **toàn fleet** —
+  suốt `ensure_apk` (timeout 120 s) + spawn + forward + 10 s retry connect. Trước
+  đó một máy mở stream chặn mọi máy khác cả start lẫn stop.
+
+### 9.3 Hai bẫy môi trường đo được (11/08/2026) — cả hai từng trông như lỗi locator
+
+**1. `mWakefulness` KHÔNG thấy được máy đang khoá.** Máy khoá màn hình báo
+`mWakefulness=Awake`, `mAwake=true mScreenOnEarly=true mScreenOnFully=true` — màn
+hình **thật sự đang bật** — trong khi `mCurrentFocus=NotificationShade` và mọi lệnh
+đưa app lên trước im lặng không làm gì. `monkey` vẫn exit 0. Ba key nói đúng sự
+thật: `isKeyguardShowing=true`, `mKeyguardShowing=true`, `mDreamingLockscreen=true`
+(`adb::parse_keyguard_locked` nhận cả ba vì không key nào chắc chắn có trên cả dải
+Android 9 → 15). Bất kỳ true nào cũng tính là khoá: từ chối oan một máy tốt cho ra
+thông báo rõ, còn nói sai là "đã mở" thì driver đi tap lên lock screen.
+
+**2. Session uiautomator2 SỐNG LÂU bị thoái hoá, làm mọi query rơi vào chế độ
+timeout 10 s.** Triệu chứng: element query từ ~150 ms lên **10 000+ ms rồi trả
+`absent`**, kèm lỗi `Timed out … waiting for the root AccessibilityNodeInfo in the
+active window`. `am force-stop io.appium.uiautomator2.server{,.test}` khôi phục
+**118–425 ms ngay lập tức**.
+
+> **ĐÍNH CHÍNH nguyên nhân (cùng ngày).** Bản đầu của đoạn này ghi nguyên nhân là
+> **session tích tụ** — sai, và tôi tự viết nó. `GET /sessions` trên chính máy đang
+> thoái hoá trả về **đúng một** session, nên không có gì tích tụ; `POST /session`
+> thay thế chứ không cộng dồn.
+>
+> Phép thử phân định: trên session cũ, một `find` mất **10 116 ms** và lỗi. `DELETE`
+> session đó rồi `POST` session mới — **không restart agent** — thì cùng câu query
+> mất **7 ms**. Vậy thứ mục là **một session dùng lâu**, không phải một đống session.
+>
+> Điều đó làm bản sửa đầu của tôi **sai hướng**: cache-và-dùng-lại-mãi khiến app
+> desktop chạy hàng giờ ôm đúng một session đang mục dần. Bản đúng là **tự tái
+> tạo**: `AgentClient::send` bắt đúng chuỗi lỗi của server
+> (`waiting for the root AccessibilityNodeInfo`), `DELETE` + `POST` một session mới,
+> rồi thử lại **một lần**. `session_id` là `Arc<Mutex<String>>` nên việc tái tạo
+> chữa cho **mọi** clone, kể cả `AndroidUiSession` đã trao cho một vòng lặp đang
+> chạy. Chỉ retry trên **đúng** chuỗi lỗi đó — retry vô điều kiện sẽ phát lại tap và
+> các lệnh không idempotent.
+>
+> Cache session (`AndroidDriver::agents`) vẫn giữ, nhưng lý do đổi: nó tiết kiệm
+> ~2 s `POST /session` mỗi lần mở, **không** phải để tránh tích tụ.
+>
+> **Chưa quan sát được đường tự tái tạo thực sự nổ.** Bằng chứng về *nguyên nhân* thì
+> chắc (phép thử DELETE/POST bằng tay), nhưng lần chạy sau khi sửa lại lấy một session
+> mới vì tôi đã xoá session cũ trong lúc thí nghiệm — nên nó không đi qua nhánh
+> recycle. Muốn xác nhận: chạy nhiều lượt tới khi query lên 10 s, rồi chạy tiếp và
+> xem query có tự về ~150 ms không. `tracing::warn!("recycled a degraded agent
+> session")` là dấu, nhưng **example chưa nối subscriber** nên sẽ không thấy dòng đó —
+> đo bằng thời gian, hoặc nối subscriber trước.
+
+### 9.11 Bottom tab bar (11/08/2026)
+
+`probe --measure-tab-bar`, read-only. Trên `1080x2400`, năm tab đều `216x135` tại
+y=2135:
+
+| x | `content-desc` | class |
+|---|---|---|
+| 0 | `Trang chủ` | `FrameLayout` |
+| 216 | `Cửa hàng` | `FrameLayout` |
+| **432** | **`Quay`** | **`Button`** |
+| 648 | `Hộp thư` | `FrameLayout` |
+| 864 | `Hồ sơ` | `FrameLayout` |
+
+Nút mở composer mang `content-desc="Quay"` — tức "quay phim", **không** phải tên của
+việc mà đường publish dùng nó (đi tới picker thư viện). Đó là chuỗi **đo được**;
+đừng "sửa cho dễ đọc". Đã vào catalog là `TikTokControl::ComposerOpen`.
+
+Mỗi tab còn có một `TextView` nhãn riêng ở y=2219 với `content-desc` **rỗng** và chữ
+nằm ở `text` — cùng dạng như nút Reply, và là lý do nữa để `LabelAttribute` tồn tại.
+
+**Mọi thứ bên trong composer vẫn chưa đo** (mục thư viện, album picker, grid ảnh,
+Next, ô caption, Đăng, xác nhận công khai) nên `composer_open` là nhãn publish
+**duy nhất** có trong catalog, và nhánh publish hierarchy phải **từ chối** cho tới
+khi đo xong. Đo tiếp bằng cách bấm `Quay` rồi dump — nó mở camera, nên đó là một
+bước xâm lấn hơn read-only và nên chạy khi có người xem.
+
+> **Điều này làm lung lay một kết luận cũ của mục này.** §9 ghi chế độ 10 s là
+> thuộc tính của **feed đang phát** trên fleet S8+ (p50 10531 ms, 20/20 query, và
+> `waitForIdleTimeout: 0` "đã xác minh áp dụng và không đổi gì"). Phép đo hôm nay
+> trên Redmi cho thấy nguyên nhân đủ để gây ra đúng triệu chứng đó là **session
+> tích tụ**, và feed vẫn đang phát khi query trở lại 118 ms. Chưa đo lại được trên
+> S8+ nên **không kết luận** số cũ sai — nhưng ai đo lại phải khởi động agent sạch
+> trước, nếu không rất dễ đo lại chính hiện tượng này và gán cho feed.
+
+**Triệu chứng của cả hai bẫy đều là "không thấy nhãn"**, tức trông y như catalog
+nhãn sai. Trước khi nghi nhãn, kiểm hai điều này.
+
+### 9.5 Hàng comment trong drawer (11/08/2026) — nhãn nằm ở `text`, không phải `content-desc`
+
+Đo trên `com.ss.android.ugc.trill` **46.3.3** (Redmi Note 12). Một hàng comment:
+
+| thành phần | class | thuộc tính mang nhãn | x | vị trí |
+|---|---|---|---|---|
+| tên tác giả | `Button`, clickable | `text` | 174 | **trên** body |
+| nội dung | `TextView`, không clickable | `text` | 174 | — |
+| **nút Reply** | `Button`, clickable | **`text="Trả lời"`**, `content-desc` **rỗng** | 307 | **dưới** body, **phải** của body |
+| `Xem N câu trả lời` | `Button`, không clickable | `text` | 237 | dưới nút Reply |
+
+Bước dòng ~300 px, và dải dưới một body **với tới nút Reply của hàng sau** — đó là
+lý do "gần nhất phía dưới" là load-bearing, không phải "cái tìm thấy đầu tiên".
+
+- **`content-desc` không đủ.** Nút Reply có `content-desc` rỗng. Vì vậy
+  `LabelMatch` có thêm `Text`/`TextContains` và `ElementQuery` có thêm
+  `Text { value, exact }`; `LabelMatch::to_query()` là **một** chỗ dịch duy nhất,
+  vì bản copy nào quên một variant sẽ fail bằng cách *không tìm thấy gì*, không
+  phân biệt được với "control không có trên màn".
+- **Một nhãn ↔ nhiều phần tử.** `locate_all` (qua `POST /elements`) là bắt buộc:
+  đo được **4** nút Reply cùng lúc. Chọn cái nào là câu hỏi **hình học**, không phải
+  câu hỏi matching — chọn sai là đăng reply dưới comment người lạ, và điều đó vô
+  hình trong log.
+- **`locate_all` cố ý bỏ đọc `content-desc`/`enabled`.** Đó là 2 round trip **mỗi
+  phần tử**, và nó chạy trên cả danh sách. Đo: 4 phần tử 684 ms, 13 phần tử
+  1172 ms (~90–170 ms/phần tử chỉ với `rect`). Nên `description` trả `None` ở
+  đường này; ai cần nhãn thì gọi `locate` cho phần tử cụ thể.
+- **Reply lồng nhau thụt vào.** Đo: `reply[2]` ở x=**374** trong khi ba cái còn lại
+  ở x=307. Đây là dữ liệu thật cho luật "tên tác giả phải có lề trái tương đương
+  body" — một nhãn thụt vào thuộc về hàng khác.
+- **`Trả lời` là bản dịch, không phải resource id** — trái ngược `comment_send`
+  (`@2131823284`). Nên nó **phụ thuộc ngôn ngữ nhưng bền qua update**. Hai kiểu dễ
+  vỡ khác nhau, đừng đối xử giống nhau. Chuyện "vỡ âm thầm khi TikTok cập nhật"
+  **đã xảy ra và đã đo được** — xem §9.13.
+- **Luật định vị được *port*, không viết lại**
+  (`crates/core/src/interaction_hierarchy.rs`): body phải xuất hiện **đúng một
+  lần**, tác giả là nhãn gần nhất **phía trên** có lề trái tương đương, nút Reply là
+  cái **gần nhất phía dưới** và **bên phải** body. Cả bốn test đối kháng của đường
+  OCR được port sang, cộng test mới cho "body chứa chuỗi cần tìm nhưng dài hơn".
+  Verify trên máy: `RESOLVED author="Ghét tháng 9." reply at 307,1149`.
+- **Ưu thế so với đường OCR**: chuỗi đem đi so là chuỗi **chính project gõ ra** qua
+  `ACTION_SET_TEXT`, nên không mất mát phiên âm và toàn bộ bộ gấp dấu
+  (`normalize_locator_text`, `LATIN_FOLD`) **không cần** ở đây.
+### 9.6 Package TikTok theo từng máy (11/08/2026)
+
+`TIKTOK_BUNDLE_ID` từng là **hằng module ở ba file** desktop, cả ba ghi bundle
+**iOS**. Nó được truyền vào `start_interaction_session` rồi so với
+`active_app_bundle()` — trên Android không bao giờ khớp, nên vòng chờ chỉ thoát
+bằng timeout. Cùng defect ở `commands.rs`, tức manual control và Open-on-Device
+trên máy Android cũng chết y hệt.
+
+Giờ có `DeviceDriver::resolve_tiktok_package(udid)` (default = bundle iOS: với
+backend một app id cố định thì đó là **sự thật**, không phải phỏng đoán) và
+`crates/core/src/tiktok_target.rs`:
+
+- **Đọc package đã cài, không đọc foreground.** Lúc caller cần giá trị này thì chưa
+  có session và máy có thể đang ở launcher. Foreground là cách đúng để **phá thế
+  ngang bằng** khi có hai build cài cùng lúc, và là cách sai để giải từ đầu — đúng
+  chỗ `hierarchy.rs::ensure_tiktok_foreground` đọc foreground trước, vì ở đó nurture
+  đã chạy *trên feed*.
+- **`pm list packages com.foo` khớp theo substring**, nên `com.foo.bar` cũng trả về.
+  So cả payload sau `package:`, không dùng "contains" — nếu không thì bản Lite
+  (`com.zhiliaoapp.musically.go`) sẽ được nhận là bản đã đo nhãn. Có test.
+- **Hai build cùng cài là nhập nhằng**, không phải "lấy cái đầu": refuse trừ khi
+  foreground phá được thế. Đọc foreground bằng adb trực tiếp — giải một package
+  **không được** có tác dụng phụ là mở session.
+- **Danh sách build hợp lệ suy ra từ `TIKTOK_LABEL_SETS`**, không viết lại: build
+  không đọc được nhãn thì không lái được, nên hai danh sách không được phép lệch.
+  Có test khẳng định điều đó.
+- Memoise theo serial (mỗi candidate là 1–2 s adb), xoá khi `refresh_device` —
+  refresh là lúc operator nói "xem lại", cũng là lúc một build có thể vừa được cài
+  hoặc xoá.
+- `reports_element_bounds(udid)` là **dự đoán pre-flight** trả lời được không cần
+  session, để gate picker và chọn chiến lược trước khi chạm máy;
+  `UiSession::supports_element_bounds` vẫn là thẩm quyền runtime. Lệch nhau thì theo
+  session và ghi lại, đừng âm thầm chọn đường kia. Đặt tên theo **tính chất code
+  thật sự phụ thuộc**, không theo nền tảng: "android nghĩa là hierarchy" là suy diễn
+  có thể sai.
+- Verify: G3 giờ **giải** package thay vì đọc `RIVIU_TIKTOK_PACKAGE` →
+  `resolved target com.ss.android.ugc.trill`, chuỗi handoff đủ, quarantine 0.
+
+### 9.7 Composer reply (11/08/2026) — bốn câu hỏi, bốn câu trả lời đo được
+
+`probe --measure-reply`, trên `com.ss.android.ugc.trill` 46.3.3. Kết quả sạch hơn
+dự đoán, và cả bốn đều là điều **không suy ra được**:
+
+| Câu hỏi | Đo được | Hệ quả thiết kế |
+|---|---|---|
+| Có `EditText` thứ ba không? | **Không** — vẫn đúng **1**; composer **thay** ô chứ không xếp lên. `.focused(true)` tìm được. | Bẫy hai-`EditText` không bật ở đây. `type_text` dùng nguyên. |
+| `@nickname` có prefill? | **Không có `@` nào.** `text` là **placeholder** `"Trả lời Ghét tháng 9."`, không phải nội dung. | `set_text` an toàn — không có mention phải giữ. Đây là ẩn số hệ quả nhất và câu trả lời là câu đơn giản. |
+| Nút Send có đổi? | **Cùng `@2131823284`**, `enabled` **cùng false→true**. | `crate::tiktok_drawer` dùng lại **không sửa gì** cho reply. Không cần `CommentReplySend`. |
+| Back từ composer đi đâu? | **Về danh sách comment**, drawer **vẫn mở** (feed tab chưa hiện). | Đúng thứ Interaction cần: đọc lại reply vừa đăng từ danh sách còn mở. |
+
+**Phát hiện thêm, đáng xây trên đó**: placeholder `"Trả lời <tên tác giả>"` **nêu
+tên người đang được reply**. Đó là một bằng chứng **độc lập** rằng đã bấm đúng nút
+Reply — mạnh hơn chỉ tin vào hình học. `send_reply` nên đọc nó và kiểm **trước khi
+gõ**; lệch thì từ chối, vì tới lúc đó chưa có gì được đăng.
+
+Cách kiểm đúng là **`text` của ô có chứa `author_label`** đã lưu trong
+`CommentLocatorIdentity`, chứ **không** phải so tiền tố: `"Trả lời Ghét tháng 9."`
+chứa `"Ghét tháng 9."`. Nhờ vậy phép kiểm **không phụ thuộc ngôn ngữ** và không cần
+thêm entry catalog nào — tiền tố `"Trả lời "` là bản dịch, nên nếu đem nó vào thì
+lại tự tạo ra một nhãn nữa phải đo cho mỗi ngôn ngữ, để đổi lấy đúng số 0.
+
+**Chưa đo**: trang bài mở từ link (`--measure-target-open`, cần một link TikTok
+thật). Gate Threaded cần **hai** máy Android có nhãn đã đo; hiện chỉ một máy cắm.
+
+### 9.8 `tiktok_drawer` — tách dùng chung, không nhân bản
+
+`crates/core/src/tiktok_drawer.rs`. Nurture và Interaction dùng **một** bản, vì
+drawer là thứ đo đắt nhất trong repo và hai bản sao của "cờ `enabled` của nút Gửi
+là bằng chứng armed" sẽ trôi — trôi ở đó nghĩa là hoặc bình luận bị bỏ âm thầm,
+hoặc **cùng một bình luận đăng hai lần**.
+
+- **Các bước để rời, và `leave` là quyết định của caller.** Nurture muốn đóng drawer
+  về feed; Interaction cần **để mở** sau khi gửi, vì evidence của nó đọc lại bình
+  luận từ danh sách và luồng reply làm việc trong cùng drawer đó. Một
+  `post_comment` luôn đóng drawer không phục vụ được cả hai.
+- **`TapPlanner` là generic, không phải `&mut dyn FnMut`.** Trait object buộc phải
+  gọi tên mọi auto trait mà future cần (thử `+ Send` rồi vẫn đòi `Sync`); generic
+  để closure của caller tự mang. Nhờ vậy nurture vẫn giữ lịch sử jitter của
+  `TouchPointPlanner`, còn probe truyền tâm phần tử là xong.
+- **Bẫy khi viết test cho state machine này**: fake trả lời theo hàng đợi thì khi
+  hết đáp án nó báo phần tử **absent**, mà "nút Gửi biến mất" thì flow **đúng** khi
+  coi là đã gửi (drawer đóng). Nên tình huống *mơ hồ* thật — nút còn đó và vẫn
+  armed — cần fake trả lời **bền**. Test đầu tiên tôi viết fail vì lý do này, và
+  đó là fixture sai chứ không phải code sai.
+
+### 9.9 Gate actor Interaction: theo *tính chất*, không theo nền tảng
+
+`require_parent_locator` thay `require_vietnamese_reader`. Lý do cũ nói yêu cầu OCR
+là thuộc tính của **máy tính chạy app** — sai: nó là thuộc tính của **actor**. Máy
+đọc được hierarchy không gọi `interaction_ocr` lần nào, nên ngôn ngữ OCR của host
+không liên quan tới nó.
+
+Và một ràng buộc **mã cũ không có khái niệm**, vì tình huống chưa thể xảy ra:
+**campaign Threaded trộn hai loại máy phải bị từ chối** (`MixedPlatformThread`).
+Chuỗi là tuyến tính và mỗi message gửi từ actor **khác**, nên message N phải tìm
+được bình luận của N−1. Actor hierarchy lưu `author_label` đọc từ `text` node;
+actor pixel sau đó phải tìm lại hàng đó bằng OCR và **khớp author label**. Phần
+body sẽ khớp — cả hai so với chuỗi chính project gõ ra — nhưng author label có thể
+không: badge, truncation, khác biệt rendered-vs-attribute. Từ chối bây giờ không
+mất gì vì chưa ai chạy campaign trộn, và rẻ hơn nhiều một mắt xích đứt giữa chừng
+không rõ lý do. `Standalone` không bị ảnh hưởng — nó không có cha để tìm.
+
+Gate UI actor picker **vẫn lọc về iPhone** cho tới khi nhánh `TargetDriver` có
+thật: đường gửi hierarchy chưa nối vào `execute_thread_campaign`, nên nới picker ra
+bây giờ chỉ cho operator chọn máy rồi fail.
+
+### 9.10 MediaStore (11/08/2026) — `adb push` là đủ, không cần scan
+
+`probe`/`media_probe` trên Redmi Note 12, Android 15. Trước phép đo này repo **không
+có một dòng nào** về MediaStore, nên toàn bộ đường publish Android là suy đoán. Kết
+quả nhẹ hơn nhiều so với dự kiến:
+
+| Câu hỏi | Đo được |
+|---|---|
+| `adb push` có đủ để MediaStore thấy file? | **Có, và không cần scan.** Cả ba thư mục thử đều thấy trong ~1,5 s: `/sdcard/DCIM/Camera`, `/sdcard/Pictures`, `/sdcard/Movies`. |
+| Có cần `MEDIA_SCANNER_SCAN_FILE`? | **Không.** Nhờ vậy tránh hẳn bẫy `result=0` mà §"ĐÍNH CHÍNH" đã ghi cho `ADB_INPUT_TEXT`. |
+| `_id` đọc được để xoá đúng row? | Có: `1000011139`, `1000011140`, `1000011141`. |
+| Thứ tự có giữ? | **Có.** `content query` trả đúng thứ tự push (`date_added` cách nhau ~1 s/file). |
+| Cleanup có idempotent? | **Có.** `content delete --where "_data LIKE '%riviu-media-probe%'"` lần 1 → 0 row, lần 2 → 0 row, không lỗi. 5582 ms cả chu trình. |
+
+**Hệ quả thiết kế**: staging + import Android **không cần** helper trên máy, không
+cần MediaStore insert API, không cần root. Chỉ `adb push` vào một thư mục công khai
+với tên có tiền tố riviu — cùng convention `frames.rs` đã đặt cho `minicap.apk` để
+bản của một farm tool khác không bị nhận lẫn. Cleanup chạy hai lần vẫn `cleaned` —
+đúng thứ `publish_commands.rs` assert. (Phép đo dùng `--where "_data LIKE …"` cho
+tiện; **code thì không được** — xem luật `_id` ở dưới.)
+
+**Cách kiểm là `content query`, không phải exit code của push hay của broadcast.**
+Probe cố ý viết theo hướng đó, vì "file có trên đĩa" không phải "app khác thấy
+được file".
+
+**Tách được `stage` khỏi `import` bằng thư mục có dấu chấm đầu — đo được:**
+
+| đường dẫn | file trên đĩa | MediaStore |
+|---|---|---|
+| `/sdcard/Pictures/.riviu-stage-test/dot.png` | **có** (1 104 834 bytes) | **No result found** |
+| `/sdcard/Pictures/riviu-plain-test/plain.png` | có | **thấy** |
+| sau `mv` dot-dir → `/sdcard/Pictures/riviu-import-test/` | có | **thấy** (`_id=1000011143`) |
+
+Nên hợp đồng publish map sạch sang Android, và **giữ đúng ngữ nghĩa hai bước** của
+iOS (stage vào sandbox không thấy được, import mới hiện ra):
+
+- **stage** → `adb push` vào một thư mục **có dấu chấm đầu**: file ở trên máy, và
+  MediaStore (do đó cả picker TikTok) **không thấy**.
+- **import** → `mv` sang thư mục thường. MediaStore thấy ngay, **không cần**
+  broadcast scan. `mv` trong cùng volume là rename, nên rẻ và nguyên tử.
+- **cleanup** → xoá row theo `_id` rồi `rm` file.
+
+**Xoá theo `_id`, đừng xoá theo `_data LIKE '%riviu%'`.** Trên máy này có sẵn
+`/storage/emulated/0/riviufarm-shot.png` — của **GenFarmer**, không phải của mình.
+Một mẫu `LIKE '%riviu%'` sẽ xoá luôn nó. Tiền tố phải hẹp và cleanup phải nhắm `_id`
+đã biết.
+
+#### MediaStore thấy là **cần và chưa đủ** — `is_pending` mới là điều kiện đủ
+
+Đây là phép đo đắt nhất của mục này, và nó phủ định kết luận ở trên nếu chỉ đọc tới
+đó. **Picker của TikTok không liệt kê một row nào có `is_pending=1`.** Row do
+`adb push` sinh ra **luôn** có `is_pending=1` — cờ scoped storage nghĩa "một app còn
+đang ghi file này" — và row pending thì **mọi app khác đều không thấy**, kể cả khi
+file đã nằm trên đĩa và đã có row trong MediaStore.
+
+So hai row cạnh nhau trên cùng máy:
+
+| | ảnh do camera chụp | row của `adb push` |
+|---|---|---|
+| `_size` | 2117779 | **NULL** |
+| `width`/`height` | 3072 / 3072 | **NULL** / **NULL** |
+| `is_pending` | **0** | **1** |
+| `owner_package_name` | `com.android.camera` | `com.android.shell` |
+
+`content update --uri content://media/external/images/media/<id> --bind is_pending:i:0`
+— **chỉ một lệnh đó, không gì khác** — làm ảnh import hiện ra ở **ô đầu tiên** của
+picker (đối chiếu từng dòng với ảnh gốc: `Wi-Fi … Riviu 4 Zbtlink 2.4G`,
+`Bluetooth`, `Mạng di động`). Hết pending thì MediaProvider **tự** scan file và tự
+điền `_size=160276`, `width=1080`, `height=2400`, `date_modified`.
+
+Bốn nghi phạm đã bị loại bằng phép đo, đừng đi lại:
+
+- **Không phải thư mục.** Vẫn vắng khi row ở `DCIM/Camera`.
+- **Không phải cache của TikTok.** Vẫn vắng sau khi tắt hẳn và mở lại TikTok.
+- **Không phải timestamp.** Row mà picker **đã nhận** vẫn có `datetaken=NULL`. Đoạn
+  code stamp `datetaken`/`date_added` bằng tay trước đó là cargo-cult, đã bỏ.
+- **Không phải `owner_package_name`.** Không đổi được nó và cũng không cần.
+
+Nên `crate::publish::import` làm đúng một update đó cho từng row rồi **đọc cờ lại**
+bằng `--projection _id:_data:is_pending` (`parse_pending_rows`), vì exit code 0 của
+`content update` không phải bằng chứng — cùng lý do `result=0` của `am broadcast`
+không phải bằng chứng. Và nó **sort row theo `_data`** trước khi update: thứ tự
+carousel là một phần của bài đăng, `content query` không hứa thứ tự nào.
+
+#### Mục thư viện trong composer: ô **không có nhãn** ở góc dưới-trái
+
+Nó **không có `content-desc` lẫn `text`**, nên không đọc được từ tree. Ba `View`
+clickable 204x204 xếp hàng ở y=1780 bên phải nút chụp trông giống ứng viên nhất, và
+bấm thử hai cái (x=642, x=846) thì **cả hai mở bảng hiệu ứng** (`Mọi hiệu ứng`) —
+sai cả hai.
+
+Thứ tìm ra nó không phải là đọc tree kỹ hơn mà là **xem ảnh chụp màn hình**: thư
+viện là `FrameLayout` **không nhãn** ở `y=2077 x=0`, `220x165` — góc dưới-trái, dưới
+tab chế độ. Ghi lại đây vì bài học lặp lại: khi tree không có nhãn cho một control,
+nhìn pixel trước khi bấm thử, chứ bấm thử trên máy thật thì mỗi lần sai là một trạng
+thái phải dọn.
+
+Nhãn composer đã đo được: `Lật`, `Thêm âm thanh`, `Flash`, `Hẹn giờ`, `Bố cục`,
+`Mic`, `Tỷ lệ`, `Menu thả xuống`, nút chụp `@2131823324`, tab chế độ
+(`10 phút`/`60s`/`15s`/`ẢNH`/`VĂN BẢN`), và `ĐĂNG`/`TẠO` ở y=2112.
+
+#### Hai máy Android hành xử KHÁC NHAU — import phải hỏi, không được suy ra
+
+Đo cùng ngày trên máy thứ hai: **SM-N950F, Android 8.0 (API 26)**, locale `vi-VN`,
+TikTok `com.ss.android.ugc.trill` **46.4.3** (Redmi là 46.3.3), `wm size` Override
+`1080x2220`.
+
+| | Redmi Note 12 / API 35 | SM-N950F / API 26 |
+|---|---|---|
+| `adb push` đủ để MediaStore thấy | **có** | **không** |
+| `mv` vào thư mục thường đủ | **có**, ~1,5 s | **không bao giờ** |
+| `MEDIA_SCANNER_SCAN_FILE` | không cần | **cần, và có tác dụng** |
+| Cột `is_pending` | có, và bắt đầu ở 1 | **không có cột này** |
+
+Nên kết luận "`adb push` là đủ, không cần scan" ở đầu mục này **chỉ đúng cho API 35**.
+`crate::publish::import` xử theo *hành vi máy trả lời*, không theo API level: poll →
+nếu rỗng thì broadcast scan từng file → poll lại → chỉ clear `is_pending` trên máy
+**báo có cột đó**. Evidence JSON trả `scanBroadcast` và `pendingModel` để nhánh đã đi
+là thứ đọc được, không phải thứ suy ra. Gate `media_probe --contract` pass trên cả
+hai, và in đúng hai nhánh khác nhau:
+
+```
+API 26: import: files=2 scan=broadcast   pending=absent
+API 35: import: files=2 scan=not-needed  pending=cleared
+```
+
+**BẪY: `content` báo lỗi ra stderr và vẫn exit 0.** Trên API 26,
+`content update --bind is_pending:i:0` vào một MediaStore không có cột đó in cả
+`SQLiteException` kèm stack trace và trả `rc=0`. `AdbProgram::shell` trả **stdout** và
+coi exit 0 là thành công, nên lỗi đó về tới code dưới dạng chuỗi rỗng + `Ok` — và
+lượt chạy đầu của tôi **báo `pendingModel: "cleared"` cho một cột máy không có**.
+Cùng họ với bẫy `am broadcast … result=0`. Cách sửa: mọi lệnh `content` trong module
+thêm `2>&1` **phía máy** (device-side `sh`, portable) và kiểm bằng `content_error()`;
+`content query` lỗi cũng **không được** đọc thành "0 row", vì mọi caller đọc danh sách
+rỗng như một sự thật về thư viện.
+
+#### `importId` là **khoá chọn ảnh trong picker của TikTok**, không chỉ là handle cleanup
+
+Đây là phát hiện có giá trị nhất cho đường publish. Sau import, mở dropdown album
+(`Gần đây` + `Xuống`) thì TikTok liệt kê **đúng chuỗi `importId`** làm một album:
+
+```
+[273,504][1034,554]  TextView  text='riviu-picker-check-one-8e69493351ef'
+[273,565][289,607]   TextView  text='1'        <- số file
+```
+
+Nên `HierarchyPublishDriver` chọn album của campaign bằng **một chuỗi do chính code
+này viết ra** — không OCR, không phiên âm, không nhập nhằng — rồi grid chỉ còn ảnh
+của campaign đó. Thay được hẳn giả định "mấy ảnh mới nhất trong `Gần đây` là của
+mình", vốn là rủi ro đúng-sai lớn nhất còn lại của đường publish Android.
+
+**Chưa đo:** id dài có bị cắt bằng ellipsis trong dropdown đó không. Cái đã đo dài 36
+ký tự và hiện đủ. `wda.rs:1493` vốn đã chặn `import_id.len() <= 65`, nên giữ id ngắn
+là điều kiện đã có sẵn lý do — giờ có lý do thứ hai.
+
+#### Picker: cấu trúc đọc được, và `Tiếp` là cờ armed
+
+Đo trên SM-N950F (1080x2220), TikTok 46.4.3:
+
+- Tab picker **có `content-desc`**: `Tất cả` (đang chọn), `Video`, `Ảnh`, `Thư viện AI`
+  — định vị được bằng `Description`, không cần toạ độ.
+- Grid **3 cột**, ô `FrameLayout` clickable **không nhãn**, 354x357, x = 5 / 364 / 722,
+  y = 312 / 674 / 1036 / 1398 / 1760. Gần trùng số đo Redmi (352x357, x = 6/364/722).
+  Ô không có nhãn nên chọn theo **hình học trong container**, nhưng bounds là số máy
+  trả về chứ không phải point iPhone hard-code.
+- `Chọn nhiều` (TextView, wrapper clickable `[32,1894][326,2094]`) và `Tiếp`
+  (`Button [550,1936][1048,2052]`).
+- **`Tiếp` có `clickable=false` khi chưa chọn ảnh nào** — cùng loại bằng chứng với cờ
+  `enabled` của nút Gửi trong drawer comment. Nên "đã chọn đủ ảnh" **kiểm được**, không
+  phải chờ theo thời gian.
+
+**Và một bẫy nữa:** dump lúc picker đang mở **vẫn chứa node của màn camera phía dưới**
+(`Lật`, `Flash`, `Hẹn giờ`, `Bố cục`, `Tỷ lệ`, `Làm đẹp`, `ĐĂNG`/`TẠO`/`LIVE`). Nên
+**thấy `Lật` không chứng minh đang ở màn camera**. Muốn biết đang ở picker thì tìm
+thứ chỉ picker có (`Thư viện AI`, `Chọn nhiều`, `Tiếp`).
+
+#### Overlay của app khác che được control không nhãn
+
+Trên SM-N950F có bong bóng chat Messenger nổi ở `[53,1952][158,2057]`, **nằm đúng
+trong** ô thư viện `FrameLayout [0,1920][210,2070]`. Tap vào **tâm** ô thư viện là tap
+vào bong bóng. Tôi phải tap `(188, 1936)` — vẫn trong ô, ngoài overlay — mới mở được
+picker.
+
+Vì ô thư viện **không có nhãn**, driver không có cách nào biết mình vừa bấm vào app
+khác. Nên đường publish hierarchy phải **xác minh sau khi tap** bằng một node chỉ
+picker có (xem trên) và bằng `active_app_bundle()`, chứ không coi tap là xong.
+
+### 9.12 BẪY MÔI TRƯỜNG: Git Bash mangle đường dẫn `adb push`
+
+Nó làm tôi kết luận sai **ba lần liên tiếp** trong một buổi, nên ghi lại.
+
+Trong Git Bash (MSYS2), `adb push <local> /sdcard/x.png` bị dịch đích thành
+`C:/Program Files/Git/sdcard/x.png`. `adb` tạo đường dẫn vô nghĩa đó **trên máy** và
+báo `1 file pushed, 0 skipped. 28.0 MB/s` — thành công hoàn toàn thuyết phục. Rồi
+`adb shell ls /sdcard/x.png` báo không có file, và người đọc kết luận "push nói dối"
+hoặc "scoped storage chặn" hoặc "second space lệch user" — tôi đã đi qua đủ cả ba.
+
+Dấu vết duy nhất chỉ đúng chỗ là `adb pull`:
+`failed to stat remote object 'C:/Program Files/Git/sdcard/...'`.
+
+- `MSYS_NO_PATHCONV=1` sửa được đích nhưng **làm hỏng path local** (`/c/Users/...`
+  không phải path Windows).
+- **Cách đúng: chạy `adb push` từ PowerShell, hoặc từ Rust** (`AdbProgram::device`,
+  không qua shell). `media_probe` chạy đúng ngay từ đầu chính vì nó là Rust.
+- `mkdir -p /sdcard/...` **bên trong** `adb shell '...'` thì an toàn — chuỗi được
+  quote nên MSYS không chạm.
+
+Cùng họ với các bẫy shell đã ghi: `>` của PowerShell làm hỏng stdout nhị phân, và
+`--8<--` bị device shell hiểu là redirection.
+
+### 9.13 Resource id nút Gửi ĐÃ đổi giữa hai phiên bản app (11/08/2026)
+
+Phần trên viết rằng `comment_send = @2131823284` "có thể vỡ khi TikTok cập nhật".
+Máy Android thứ hai chứng minh điều đó **đã xảy ra**, và nó cho thấy khoá catalog
+`(package, language)` là **sai** cho loại nhãn này.
+
+| máy | Android | app version | nút Gửi trong drawer |
+|---|---|---|---|
+| Redmi Note 12 | 15 (API 35) | 46.3.3 | `@2131823284` |
+| SM-N950F | 8.0 (API 26) | **46.4.3** | **`@2131823293`** |
+
+Cùng package `com.ss.android.ugc.trill`, **cùng UI tiếng Việt**. Trên 46.4.3,
+`@2131823284` **không xuất hiện ở bất kỳ node nào** — nên tra theo ngôn ngữ sẽ
+**từ chối một máy đang chạy tốt**. Và nếu resource id được gán lại cho một nút
+*khác*, nó sẽ bấm sai nút.
+
+Hợp đồng armed thì **y nguyên** (đo từng bước trên 46.4.3): drawer mở, ô rỗng →
+`enabled=false`; tap focus, vẫn rỗng → `enabled=false`; gõ `riviu` →
+`enabled=true`. Vậy chỉ có *id* dịch chỗ, `crate::tiktok_drawer` không phải sửa gì.
+
+**Giải: tách catalog theo *kiểu dễ vỡ*, không theo tiện tay.**
+
+- `TIKTOK_LABEL_SETS` — khoá `(package, language)`, chứa **bản dịch**: phụ thuộc
+  ngôn ngữ, bền qua update.
+- `TIKTOK_RESOURCE_SETS` — khoá `(package, app_version)`, chứa **resource id**:
+  không phụ thuộc ngôn ngữ, gán lại mỗi lần build app.
+- `controls_for(package, language, app_version)` là **cửa duy nhất**. Không có
+  `label()` trên riêng bảng nào, nên **không caller nào đọc lẫn** một id keyed
+  theo version ra khỏi bảng keyed theo ngôn ngữ.
+
+**Version chưa đo thì chỉ từ chối resource id, không từ chối cả set.** Đây là khác
+biệt giữa backend suy giảm và backend chết: TikTok update xong thì like/đọc vẫn
+chạy (bản dịch), chỉ nút Gửi từ chối cho tới khi có người đo lại. Kiểm bằng
+`an_unmeasured_app_version_refuses_only_the_resource_ids`.
+
+Version đọc bằng `UiSession::app_version(bundle)` → `dumpsys package <pkg>` →
+`parse_version_name`, **một lần mỗi session** (`dumpsys` 1–2 s trên fleet này),
+không phải mỗi `locate`. Verify trên máy thật, cả hai đều tự lấy đúng bảng của mình:
+
+```
+ce06…646f0d7e  app version = "46.4.3"  resource id đo trên 46.4.3 (SM-N950F)
+10969614       app version = "46.3.3"  resource id đo trên 46.3.3 (Redmi Note 12)
+```
+
+**Bài học chung, không chỉ cho nhãn này:** khi hai thứ trong cùng một bảng có
+*chiều dễ vỡ khác nhau*, một khoá không thể đúng cho cả hai. Chỗ khác trong repo có
+cùng hình dạng — `screen::CALIBRATED_LAYOUTS` keyed theo lớp máy — nên nếu thêm nhãn
+mới, hỏi trước: **cái này vỡ khi đổi ngôn ngữ, hay khi đổi bản app?**
+
+### 9.14 `TargetDriver`: một refactor và một lỗi nó tự gây ra (11/08/2026)
+
+Interaction Android chạy qua app bằng cách đưa **ba** bước phụ thuộc thiết bị vào
+`TargetDriver` (`apps/desktop/src-tauri/src/interaction_target.rs`):
+`open_target`, `send_root`, `send_reply`. `PixelTargetDriver` bọc code iOS **nguyên
+văn**; `HierarchyTargetDriver` gọi `crate::interaction_hierarchy`. Chọn **một lần mỗi
+assignment** theo `session.supports_element_bounds()`.
+
+Vì sao là trait chứ không phải `if` trong hai hàm send: nhánh **không phải hai hàm mà
+là sáu**, và `open_target_confirmed` một mình đã giết lượt chạy Android trước khi tới
+hàm send nào.
+
+**LỖI TÔI TỰ GÂY RA, và phải hiểu nó trước khi sửa file này lần nữa.**
+
+Bản refactor đầu tiên dời cả cụm "đi tìm comment cha" (mở drawer, cuộn, khớp hàng)
+từ **trên** dòng `effect_intent = true` xuống **trong** `driver.send_reply`, tức là
+**dưới** nó. Mọi bước đó có thể fail mà **chưa gõ chữ nào và chưa bấm Gửi** — thường
+gặp nhất là cha không có trong danh sách, vì mỗi reply gửi từ máy khác và TikTok xếp
+lại hạng giữa các lần. Hậu quả:
+
+`effect_intent == true` → nhánh lỗi ghi `Uncertain` → `retryable_assignments`
+**loại `Uncertain`** → `interaction_retry` trả `RetryNotAllowed`. **Một message chưa
+bao giờ được đăng thành không thể gửi lại, vĩnh viễn.** Trước refactor nó là `Failed`
+và retry được.
+
+Tệ hơn ở nhánh hierarchy: `ReplyRefusal` có doc ghi rõ *"Every variant means nothing
+was typed"* và có test cho từng variant, nhưng call site **gộp hết** vào cùng một
+`anyhow::bail!` với `NotConfirmed` — đúng cái verdict duy nhất **không được** retry.
+
+Và comment tôi viết trong cùng commit đó nói **ngược lại** với code
+(*"everything above this point failed with nothing posted, and must stay
+retryable"*) — đúng loại lỗi repo này gọi là "compiling is not evidence".
+
+**Cách sửa (giữ nguyên hình dạng này):** trait trả `Result<SendOutcome, SendFailure>`
+với `SendFailure::{BeforeEffect, AfterEffect}`. Chỉ **driver** biết nó đã làm gì, nên
+chính nó phân loại; caller đặt `effect_intent = failure.effect_may_have_gone_out()`
+**sau** khi gọi, không phải trước.
+
+- `PixelTargetDriver`: ba bước định vị → `BeforeEffect`; `send_prepared_thread_*` →
+  `AfterEffect` (giữ **đúng** hành vi iOS trước đây, vì hàm đó cũng có thể fail trước
+  khi bấm Gửi và đổi hướng đó là đổi hành vi iOS).
+- `HierarchyTargetDriver`: phân loại theo `CommentVerdict` — **chỉ `NotConfirmed` là
+  `AfterEffect`**, vì hợp đồng của enum đó ghi mọi variant khác nghĩa là chưa đăng gì.
+  Mọi `ReplyRefusal` → `BeforeEffect`.
+
+**Luật rút ra, rộng hơn cái bug:** `effect_intent` không phải một cờ tiện tay, nó là
+**ranh giới** giữa "retry được" và "retry sẽ đăng hai lần". Dời code qua ranh giới đó
+là đổi ngữ nghĩa dữ liệu, kể cả khi diff trông như chỉ di chuyển hàm. Ai chạm
+`execute_thread_campaign` phải hỏi: **bước này có thể fail mà chưa có tác dụng gì
+không?** Nếu có, nó phải nằm ở phía `BeforeEffect`.
+
+**Ba lỗi khác cùng lượt review đó, đã sửa:**
+
+- **`await_composer` chờ sai điều kiện.** Nó chờ "có `EditText` nào text không rỗng"
+  — nhưng ô nhập **đã** mang placeholder `Thêm bình luận...` **trước** khi bấm Trả
+  lời, nên điều kiện đó đúng ngay từ đầu: hàm trả về **tức thì** với hint của drawer
+  gốc, rồi phép kiểm tên tác giả so với chuỗi sai. Sửa: đọc placeholder **trước** khi
+  tap, rồi chờ nó **đổi**. Có regression test.
+- **`starts_with` không có dấu `/`.** `riviu-req1-<sha>` là tiền tố của
+  `riviu-req1x-<sha>`, nên cleanup campaign thứ nhất sẽ tìm thấy — và xoá — row của
+  campaign thứ hai.
+- **`cleanup` nhận id nào cũng chạy.** "Shell-safe" không phải "của mình":
+  `Camera`, `Screenshots`, `DCIM` đều shell-safe, và `cleanup` `rm -rf` thư mục mà id
+  đó trỏ tới. Giờ đòi tiền tố `riviu-`.
+
+Cộng hai chỗ comment nói quá đã sửa cho khớp code: `rows.sort_by(_data)` **không**
+quyết thứ tự carousel (picker xếp mới-nhất-trước, thứ tự thật do thứ tự *tap* quyết,
+và đường post chưa có), và `choose_target_driver` **không** cross-check
+`reports_element_bounds` với session.
+
+### 9.15 `open_url` mở link TikTok vào HỘP THOẠI CHỌN APP, không vào TikTok (11/08/2026)
+
+Đo bằng `cmd package resolve-activity` trên Redmi Note 12. Đây là intent mà
+`UiSession::open_url` dựng **trước khi sửa**:
+
+```
+resolve-activity -a VIEW -d 'https://www.tiktok.com/@x/video/123'
+  -> com.android.intentresolver.ResolverActivity        ← hộp thoại chọn app
+resolve-activity -a VIEW -c BROWSABLE -d '<url>' com.ss.android.ugc.trill
+  -> com.ss.android.ugc.aweme.deeplink.AppLinkHandlerV2  ← đúng chỗ
+```
+
+Vì sao: `pm get-app-links` cho thấy `www.tiktok.com` **đã verified cho TikTok**, nhưng
+**Chrome cũng nhận** cùng URL. Hai app cùng khớp → Android trả `ResolverActivity`. Nên
+link **không bao giờ tới bài viết**; nó tới một dialog. Đây chính là thất bại
+`ArrivalRefusal::WrongApp` được viết ra để bắt — nhưng không để nó xảy ra thì tốt hơn
+là phát hiện sau.
+
+**Sửa:** thêm `UiSession::open_url_in_app(url, bundle_id)`, default delegate sang
+`open_url` (đúng cho backend chỉ có một handler). Android override bằng
+`am start -a VIEW -c android.intent.category.BROWSABLE -d <url> -p <package>`.
+`BROWSABLE` cần vì đó là category mà intent filter của app link khai báo. Package
+được `validate_package_name` như mọi chuỗi khác vào `adb shell`.
+
+Verify trên máy sau khi sửa: logcat ghi
+`START ... cmp=com.ss.android.ugc.trill/...deeplink.AppLinkHandlerV2` — không còn
+chooser.
+
+**Bẫy thứ hai, tốn của tôi bốn lượt đo:** một link **bài không truy cập được** trông
+y hệt một link hỏng ở đường code. TikTok nhận intent, resolve bài trên server, thất
+bại, rồi **âm thầm rơi về feed**. Trên màn hình đó vẫn có `Đọc hoặc viết bình luận`,
+nên `Comments` một mình sẽ coi là "đã tới bài" và campaign sẽ bình luận vào **video
+nào đang phát trên feed**.
+
+Ba dấu hiệu phân biệt được, đo được:
+- `Đề xuất` **vẫn có mặt** → predicate `Comments && !FeedTab` từ chối. **Đây là lúc nó
+  cứu.**
+- Số bình luận **đổi giữa các lần chạy** (`7.613` → `9` → `4.324`) — feed đang chạy,
+  không phải một trang đứng yên.
+- `Follow <tên>` là tên **người khác** với handle trong URL.
+
+Kiểm link còn sống từ host, đừng đoán trên máy: `curl -L <url>` rồi tìm
+`Video currently unavailable` và sự **vắng mặt** của `"uniqueId"`/`"nickname"` trong
+HTML. Link đã đo (`@user52722048530408/photo/7668965946924666113`) trả HTTP **200** kèm
+`<title>TikTok - Make Your Day</title>` — nên **status code không phải bằng chứng**,
+cùng họ với `result=0` và `content ... exit 0`.
+
+#### ĐÃ ĐO trên link còn sống: `!FeedTab` là mệnh đề SAI, đã bỏ
+
+Ba link thật (`@mongquynh.dalat`, `@n.sp.i.hoang`, `@huongthao.dalat`), Redmi Note 12,
+11/08/2026. **Bài mở từ link không phải một trang riêng** — TikTok render nó thành
+**card hiện tại của feed pager**: hàng tab trên (`Đề xuất` vẫn sáng) và tab bar dưới
+đều còn trên màn. Nên **không có khác biệt cấu trúc nào** giữa "bài đích" và "video
+đang phát".
+
+Bản đầu của `open_target_by_hierarchy` đòi `Comments && !FeedTab`. Nó sẽ **từ chối mọi
+arrival thật**. Đo được `feed tab present` = `false` ở một lần và `true` ở hai lần khác
+trên **cùng** đường đi, nên nó cũng không dùng được theo chiều nào.
+
+**Thay bằng: rail có, và bài trên màn ĐÃ ĐỔI.** Đọc nhãn tác giả *trước* khi mở link
+rồi đòi nó khác. Đây là bản hierarchy của phép so frame-SHA bên pixel, và nó bắt đúng
+ca link chết đã đo (tác giả giữ nguyên `Follow Bích Vân` qua bốn lần thử).
+
+Kèm một mức mạnh hơn khi may: nickname có tiết lộ handle không. Đo trên bốn account —
+**hai khớp, hai không**:
+
+| handle | nickname | khớp |
+|---|---|---|
+| `mongquynh.dalat` | `Mộng Quỳnh` | **có** |
+| `huongthao.dalat` | `Hương Thảo` | **có** |
+| `n.sp.i.hoang` | `Ăn Sập Đi Hoang` | không |
+| `nguyenvantoan8584` | `Lúc này lúc kia` | không |
+
+Hàng thứ ba đáng nhớ: handle là **bộ xương phụ âm** của nickname (`Ăn Sập Đi` →
+`n.sp.i`), gấp dấu không phục hồi được. Nên nó **nâng** mức bằng chứng khi hit, **không
+bao giờ** làm điều kiện. Và phải so theo **cụm từ liên tiếp**, không phải cả chuỗi:
+nhãn là `Follow <nickname>` nên squash cả chuỗi ra `followmongquynh`, không nằm trong
+gì cả.
+
+Độ trễ rail đo được: **1272 / 2178 / 2460 / 2653 ms** khi app đã warm trên feed.
+`ARRIVAL_WINDOW = 14 s` thừa sức.
+
+#### GATE H4 PASSED (11/08/2026) — Standalone Interaction chạy thật trên Android
+
+Qua đúng hàm shipped (`probe --gate-standalone`), không phải bản chép lại:
+
+```
+arrival: Identified (Follow Mộng Quỳnh) in 2761 ms
+verdict = Sent (đã gửi) in 13376 ms
+read back from the open list: author="Mítt zới còiii"
+                              text="lịch trình chi tiết quá, lưu lại"
+                              locator=android-hierarchy-v1
+```
+
+Xác nhận **bằng mắt** trên máy: bình luận nằm đúng bài, `1 giây` trước, drawer từ
+`3 bình luận` lên `4`, và **drawer để mở** — đúng thứ `publish_evidence_frame` cần.
+
+Nên chuỗi arrival → armed → disarm → đọc lại đã chạy trọn trên Android.
+
+### 9.16 GATE H5 PASSED — reply gắn đúng cha, hai máy thật (11/08/2026)
+
+`threaded_gate` (example mới): máy A đăng comment gốc, máy B **mở link độc lập**, định
+vị comment của A bằng chuỗi A tự gõ, bấm `Trả lời` của **chính hàng đó**, gửi. Redmi
+Note 12 = A, SM-N950F = B.
+
+```
+A: arrival Structural 6836 ms → verdict Sent
+   parent identity: author="Mítt zới còiii" text="set này gọn mà đủ ghê"
+B: arrival Structural 5765 ms → verdict Sent
+   read back: author="Hoàng Hồng Nam" text="đúng ý mình luôn, lưu lại"
+```
+
+**Xác nhận bằng mắt** (bắt buộc — reply gắn sai cha cho ra log y hệt): drawer mở, hàng
+của B **thụt vào** so với hàng của A (avatar/text/`Trả lời` đều lệch phải), header đọc
+`2 bình luận`. Đây là phép thử duy nhất chứng minh nesting.
+
+Gate này tìm ra **hai lỗi thật**, cả hai đã sửa:
+
+**1. Nhãn `Follow` khớp cả tab "Following".** Catalog ghi `Contains("Follow")`, và
+`descriptionContains` của uiautomator **không phân biệt hoa thường** — nên nó khớp
+`content-desc="Đã follow"`, tức **tab feed**. Hậu quả kép: đọc tên tác giả ra
+`Đã follow` (làm B từ chối một arrival thật), và **hành động follow của nurture sẽ bấm
+vào tab** rồi đổi feed thay vì follow ai. Sửa: `Contains("Follow ")` — **dấu cách cuối
+là load-bearing**. Mọi giá trị đo được đều là `Follow <tên>`. Có test khẳng định nhãn
+không khớp `Đã follow`/`Following` mà vẫn khớp cả ba tên tác giả đã đo.
+
+**2. Sau khi Send, `Back` đóng CẢ DRAWER, không chỉ composer.** §9.7 đo "Back từ
+composer → về danh sách, drawer vẫn mở" — nhưng đó là đo **trước** Send. Sau Send,
+composer đã tự thu lại, nên cú Back thừa thoát luôn drawer: đọc lại reply thất bại, và
+drawer-để-mở mà `publish_evidence_frame` cần thì mất. Sửa: **hỏi trước rồi mới Back** —
+placeholder chính là trạng thái (trong composer nó nêu tên cha, ở danh sách nó là hint
+chung). Chỉ composer mới được Back.
+
+**Bài học chung:** một phép đo lấy ở trạng thái A không dùng được cho trạng thái B, kể
+cả khi cùng một control. §9.7 hoàn toàn đúng cho *trước* Send. Ai dựa vào một dòng
+trong tài liệu này phải hỏi: **đo ở thời điểm nào?**
+
+### 9.17 Link nào mở được: chỉ máy trả lời được, host thì không (11/08/2026)
+
+`target_check` (example mới, chỉ-đọc) chạy `open_target_by_hierarchy` trên một danh
+sách link. Trên 12 link thật: **4 mở được, 8 không.**
+
+| verdict | số | nghĩa |
+|---|---|---|
+| `ARRIVED` (Structural) | 4 | campaign dùng được |
+| `target_open_screen_unchanged` | 7 | bài xoá/riêng tư/chặn vùng — TikTok nhận intent rồi để nguyên feed |
+| `target_open_no_post_page` | 1 | `http://tiktok.com/...` (không `https`, không `www`) — **fail sau 684 ms** |
+
+Ca cuối đáng ghi: intent filter của TikTok chỉ nhận `https` + đúng danh sách host
+(`pm get-app-links`), nên `http://tiktok.com/...` không ai nhận, `am start -p` không
+resolve được, và nó **fail nhanh và khác** với ca bài chết. Hai mã lỗi khác nhau là
+đúng: một cái sửa được bằng chuẩn hoá URL, cái kia thì không.
+
+**Đừng kiểm link từ host.** `curl -L` trả `200` + `<title>TikTok - Make Your Day</title>`
+cho **cả** bài sống và bài chết, phục vụ captcha shell thay vì dữ liệu bài, và báo
+`Video currently unavailable` cho một bài **mở hoàn hảo trên máy**. Máy là thẩm quyền
+duy nhất, và `target_check` là cách hỏi nó.
+
+### 9.4 `platform` + `os_version` (11/08/2026) — và ba chỗ cố ý KHÔNG đổi
+
+`DeviceInfo` giờ có `platform: DevicePlatform` (`Ios` | `Android`) và
+`os_version`. `DevicePlatform` **cố ý không có `Default`** và không
+`#[serde(default)]`: default hợp lý duy nhất là `Ios`, đúng cái bug field này sinh
+ra để diệt. Backend không trả lời được thì phải fail compile; payload thiếu khoá
+thì phải fail decode (có test cho cả hai).
+
+**Từng driver tự đóng dấu, không phải `MultiplexDriver`.** `backend_name` có sẵn
+nhưng thứ duy nhất để đóng dấu *từ* đó là `backend.name` — một `String` mà doc của
+nó ghi rõ là "human-readable name for the operator". Biến chuỗi hiển thị thành
+load-bearing, và nhánh `_ =>` không có câu trả lời toàn phần. Thêm nữa
+`refresh_device` cũng trả `DeviceInfo`, và `examples/` + `bin/` dựng driver trực
+tiếp không qua multiplexer. Rule ở `driver_multiplex.rs` (*route chỉ từ
+`list_devices`, không bao giờ đoán nền tảng từ udid*) giữ nguyên.
+
+**Ba chỗ cố ý không đổi — đừng "dọn" chúng:**
+
+1. **`flow/model.rs` — khoá literal `"iosVersion"` trong `json!` dựng hash.** Đó là
+   hash material, không phải tên field. SHA-256 đó là
+   `ImageCoordinateTarget::profile_id`, **persist** trong `flow_revisions` và
+   `flow_node_attempts.canonical_input_json`, và `flow::executor` từ chối chạy node
+   khi profile id lệch preflight. Đổi khoá = mọi flow đã lưu có image-coordinate tap
+   bắt đầu fail. Golden hash trong test `crate::flow` là chốt: **nó dịch nghĩa là
+   khối đó đã bị sửa.**
+2. **`DeviceCapabilitySnapshot`: field Rust là `os_version`, khoá serde đóng băng ở
+   `iosVersion`.** Nó persist trong `flow_device_runs.capability_snapshot_json` dưới
+   `deny_unknown_fields` → đổi khoá làm mọi row cũ fail decode, lỗi cứng chứ không
+   phải default. Migration để dịch khoá còn phải tính lại mọi `profile_id` đã lưu
+   trong cùng transaction — hiểm hoạ toàn vẹn dữ liệu để lấy 0. **Migration count
+   giữ ở 6**, và có test khẳng định điều đó.
+3. **Wire sidecar và `iosMin/MaxInclusive`.** `riviu_pmd.py` là iOS-only —
+   `lockdown.product_version` **thật là** phiên bản iOS, tên đúng chứ không phải
+   misnomer — và `InteractionInspection` là `deny_unknown_fields` với sidecar
+   resolve lúc runtime, nên binary mới có thể gặp bản cũ. `iosMinInclusive` nằm
+   trong `required` **và** `pattern` của JSON Schema với producer Python. Ranh giới
+   rename là **đúng một dòng**: `os_version: response.ios_version` ở `pmd.rs`.
+
+**Mirror TS là viết tay, không có codegen** (không ts-rs/specta). Nên rename thuần
+Rust compile sạch cả hai phía và render ra `undefined`. Hai fixture `tsc` **không**
+thấy: `apps/desktop/e2e/` nằm ngoài `include: ["src"]` của `tsconfig.app.json`, và
+`InteractionPopup.test.tsx` có `as never[]` vô hiệu hoá kiểm assignability. Cả hai
+đã sửa tay. `types.ts` giữ `DeviceCapabilitySnapshot.iosVersion` **có chủ ý** —
+mirror phản chiếu *wire*, không phải tên field Rust.
+
+**Gate UI theo platform.** Backup/Restore: `disabled` + tooltip **và** early-return
+trong handler (`disabled` là affordance, không phải guard); không ẩn, vì hai nút
+nằm trong hàng `<nav>` 5 icon và ẩn đi làm hàng co lại theo từng máy. Interaction
+actor picker: **lọc**, không disable tại chỗ — cùng danh sách nuôi checkbox,
+auto-select `slice(0,6)` và số đếm "N thiết bị", nên để máy không đủ điều kiện nằm
+lại sẽ báo quá fleet dùng được và bắn "Chọn từ 2 đến 6" khi đang thấy sáu máy;
+backend **không** lọc actor theo platform nên gate UI là gate duy nhất, có test
+regression. Publish: **từ chối trước khi dispatch**, không âm thầm bỏ máy — mapping
+bundle→máy theo **vị trí** (`targets[index]`) nên bỏ một máy sẽ lệch index và đăng
+sai caption cho sai tài khoản.
+
+**Hoãn có lý do: `wda_ready`, `wda_expires_at`.** `wda_ready` đúng là misnomer
+(Android nạp từ `agent_ready()`), nhưng **không consumer nào render chữ "WDA"** —
+tất cả đọc nó như boolean — nên khác `iOS {version}`, nó không sinh chuỗi sai cho
+người dùng. Rename sẽ chạm lại đúng 21 chỗ dựng `DeviceInfo` mà thay đổi này đã
+chạm, làm diff to gấp ba và không revert độc lập được. Để commit riêng; tên gợi ý
+`agent_ready`. `wda_expires_at` Android giữ `None` và vòng cảnh báo guard bằng
+`if let Some` → không có defect sống.
+
+**Còn nợ, đừng nhầm là đã xong**: Chưa máy nào trong fleet có root (`su -c id` không
 trả `uid=0`, không có Magisk/SuperSU/KernelSU), nên toàn bộ tính năng cần root
-vẫn chưa đo được.
+vẫn chưa đo được. `backup_device`/`restore_device` trên Android **không phải việc
+hoãn mà là không có đường**: `adb backup` đã bị bỏ trên Android hiện đại và không
+có tương đương Mobilebackup2 — việc đúng là gate UI, đừng đi tìm lại.
 
 ## 10. Mở đường cho thiết bị mới (09/08/2026)
 
@@ -2720,3 +3805,822 @@ chạy được (`detect_driver`); nếu không, lý do nằm ở `android_unava
 chứng frame thật; `RiviuAgent.ipa` (RT-MMO `com.mrph.svc`) chỉ còn là rollback
 oracle. Ràng buộc thật là **free provisioning 7 ngày** và profile nhúng chỉ có
 hai UDID test — fleet 20 máy cần tài khoản Apple Developer trả phí.
+
+### 9.18 Nurture Android chạy được qua app — và hai lỗi chỉ có máy thật mới thấy (12/08/2026)
+
+**minicap: APK ở đâu ra, và số đo trên cả hai máy.** Đường stream Android là
+minicap **noarch APK** chạy bằng `CLASSPATH=<apk> app_process`, không phải
+scrcpy — quyết định đó cùng lý do đã ghi ở mục 9. APK lấy từ npm package
+`@devicefarmer/minicap-prebuilt` (`npm pack`, v2.7.3), file
+`prebuilt/noarch/minicap.apk`, 4.209.669 byte, magic `50 4B 03 04`. ~~Đặt ngoài
+repo tại `~/.riviu/minicap/noarch/minicap.apk` và trỏ bằng
+`RIVIU_MINICAP_APK` (biến User, không phải per-shell).~~ **Câu vừa gạch đã bị
+đảo — xem 9.27 ngay dưới.** Không có APK thì `ensure_stream` từ chối và **mọi
+thứ phía sau nó sụp theo** — kể cả nurture, vì `open_ui_context` đòi stream.
+
+| Máy | Android | Banner | Số đo |
+|---|---|---|---|
+| Redmi Note 12 (`23021RAAEG`) | 15 | `real=1080x2400 virtual=540x1200 quirks=2` | **172 frame / 6,00 s = 28,7 FPS**, 70,8 KB/frame |
+| SM-N950F Note 8 (`ce0617…`) | 8.0 | `real=1080x2220 virtual=540x1110 quirks=2` | **145 frame / 6,01 s = 24,1 FPS**, 67,8 KB/frame |
+
+Note 8 **lần đầu được đo** ở đây; con số 25,8 FPS trong tài liệu cũ là của
+Redmi. Cả hai ≥ `STREAM_FPS = 24`, Note 8 vừa đúng ngưỡng.
+
+**Tile Android lạnh thì KHÔNG ready, và đó là đúng.** `agent_ready` trả `false`
+khi `self.forwarded` chưa chứa serial — một `HashSet` **trong process**. App
+vừa mở thì set rỗng, nên tile Android là `Parked / No stream` và fleet đếm
+`1/3`. Bấm **Start** trên tile là đủ; sau đó forward tồn tại trong adb server
+nên lần mở app kế tiếp cả hai tile tự lên `● Live` ngay. Đừng đi tìm lỗi ở
+minicap khi thấy `Parked` trên một app vừa khởi động.
+
+**H5 đạt qua app:** chọn Note 8 → `Nuôi TT` → `Bắt đầu`, tile giữ `● Live`
+suốt phiên, kết thúc `stopped — 61/68 video, 8 tim, 0 bình luận, 1 follow,
+907s (hierarchy)` và tile về `● Live`, fleet vẫn `2/2`. Đây là lần đầu nurture
+Android chạy trọn vòng **qua app** thay vì qua example.
+
+#### Lỗi 1 — vòng hierarchy chưa từng đọc lại settings; và đọc lại row cũng chưa đủ
+
+Panel ghi được vào DB (kiểm trực tiếp: `likeProb 100`, `fatigue false`,
+`frenzyProb 0`, `followEnabled false`) mà phiên đang chạy **không đổi hành vi**:
+16 post liên tiếp sau khi lưu vẫn `lướt`, số tim đứng nguyên. Hai nguyên nhân
+xếp lớp, và lớp thứ hai là lớp đắt:
+
+1. `run_feed` nhận `settings: &NurtureSettings` **một lần** và giữ nguyên cả
+   phiên. `absorb_live_settings` chỉ được gọi trong vòng pixel. Nên trên
+   Android **không một công tắc nào trong panel có tác dụng**.
+2. Nghiêm trọng hơn, **cả hai vòng** dựng `HumanBehavior` và
+   `HumanSessionPolicy` *trước* vòng lặp. Hai struct đó giữ bản sao riêng:
+   `fatigue`/`time_of_day`/`pause_swipe` chỉ đọc trong `HumanBehavior::new`, và
+   `HumanSessionPolicy::new` biến xác suất thành **trần theo giờ** (`like_cap`
+   8–16, `0` khi prob `0`) mà `can_attempt` đọc `0` là *không bao giờ*. Nên một
+   tính năng **tắt lúc khởi động rồi bật giữa phiên là không bao giờ chạy được**,
+   im lặng, dù UI hiển thị đã bật.
+
+Điểm cần nhớ: **test unit của `absorb_live_changes` pass hoàn hảo trên cả hai
+lỗi này.** Nó kiểm việc sao chép trường, không kiểm việc giá trị có tới chỗ ra
+quyết định. Đó chính là "compile được không phải bằng chứng" ở dạng test.
+
+Sửa: `crates/core/src/nurture/live.rs` — trait `LiveSettings` + một hàm
+`apply_live_settings` làm cả ba bước (refresh row → `HumanBehavior::retune` →
+`HumanSessionPolicy::retune`), **cả hai vòng gọi cùng hàm đó**. `retune` của
+`HumanBehavior` là phép gán chứ không dựng lại: `session_start` là mốc đo
+fatigue, dựng lại sẽ cho một phiên chạy hai giờ hoá thành vừa nghỉ xong.
+`retune` của policy **chỉ tác động lên chuyển trạng thái** — đóng trần khi prob
+về 0, mở trần mới khi prob rời 0, còn trần đang mở thì giữ nguyên số, vì
+re-roll mỗi post sẽ làm "tối đa 8–16 mỗi giờ" thành vô nghĩa.
+
+`CommentTextSource::comment_for_post` giờ **nhận** `&NurtureSettings` thay vì
+implementor giữ một borrow từ lúc khởi phiên — nếu không thì vòng lặp giữ bản
+live còn nguồn chữ giữ bản cũ, tức hai câu trả lời cho cùng một câu hỏi.
+
+**Nghiệm thu trên máy thật (Note 8), chọn phép thử không thể hiểu nhầm:** khởi
+động với **Thích tắt**, bình luận 0, follow tắt, vuốt nhanh 0 → 9 post đầu
+`0/0♥`, không một tương tác nào. Bật **Thích** giữa phiên rồi `Lưu`
+(DB xác nhận `likeEnabled True`) → `2/2♥` ở video 27, kết `stopped — 27/36
+video, 2 tim, 344s`. Trước bản sửa, cùng thao tác đó cho `0/0♥` mãi mãi.
+
+Test bắt được lỗi: 5 test trong `nurture::live`. Đã kiểm chúng **fail** khi bỏ
+hai lời gọi `retune` (3/5 fail, 2 test bất biến vẫn pass đúng như phải vậy) —
+một test không fail trước khi sửa thì không phải test.
+
+#### Lỗi 2 — TikTok khởi động lạnh không đọc được foreground trong 5 s
+
+`start_interaction_session` chờ `active_app_bundle()` khớp trong **5 s / 250 ms**.
+Với TikTok đã chạy sẵn thì tức thì. Với TikTok **lạnh** trên Note 8 (Android 8),
+start thất bại:
+
+```
+startInteractionSession failed … com.ss.android.ugc.trill did not reach the
+foreground … within 5s; the phone is showing <unreadable: could not read the
+foreground package. Tried: `dumpsys window windows | grep mCurrentFocus` had no
+mCurrentFocus line …
+```
+
+Đo lại ngay sau đó bằng tay: lệnh đó **chạy tốt** và trả
+`mCurrentFocus=Window{… com.ss.android.ugc.trill/…splash.SplashActivity}`. Nên
+lệnh không sai — cửa sổ 5 s quá ngắn cho một lần mở lạnh, và trong lúc chuyển
+cảnh launcher→app `dumpsys window windows` **có lúc không có dòng
+`mCurrentFocus` nào cả**. Chưa sửa; ghi lại để không ai đi thay lệnh dumpsys.
+Thêm nữa, ngay sau khi mở lạnh, TikTok có thể ở thẻ không có action rail: một
+lần chạy kết `partial — 0/0 video, 14s` vì `OFF_FEED_LIMIT` = 6 lượt liên tiếp
+không thấy tab feed. Lần chạy lại sau khi app đã vào feed thì bình thường.
+
+#### `GIỚI HẠN VIDEO` và `VÒNG` không có tác dụng trên đường app
+
+`NurturePopup.tsx:295` gọi `nurtureStart(targets)` **không truyền duration**, và
+`nurture_commands.rs:284-288` khi đó gán một horizon **2–3 giờ ngẫu nhiên** (có
+chủ ý: để các phiên không cùng kết ở một số video). `max_duration.is_some()` làm
+`total_videos = u32::MAX`, nên hai ô đó chỉ còn tác dụng cho fixture/test. Đo
+được: đặt `GIỚI HẠN VIDEO = 15` rồi chạy, phiên đi tới video **68** và **36**
+trong hai lần. Hai ô này đang hiển thị kèm badge `cần chạy lại` như thể chúng
+chặn phiên. Chưa sửa — đổi cái gì bị chặn phiên là quyết định về hành vi, không
+phải sửa lỗi.
+
+### 9.19 Ba chỗ ở §9.18 đã sửa, kèm số đo (12/08/2026)
+
+**1. Cửa sổ chờ foreground: 5 s → 40 s.** Đo trên SM-N950F, ba lần từ
+`am force-stop com.ss.android.ugc.trill`: TikTok lên foreground sau
+**15,86 / 19,71 / 19,42 s**, một lần thứ tư với chu kỳ poll thưa hơn cho **26,9 s**.
+Nên 5 s sai gấp bốn lần, và hệ quả người vận hành thấy là
+`did not reach the foreground … <unreadable>` cho một máy đang mở TikTok bình thường.
+40 s = lần chậm nhất đo được cộng biên, trên máy cũ nhất trong fleet. Vẫn là
+**deadline chứ không phải fallback**: màn hình khoá làm `monkey` báo thành công mà
+không có gì chuyển động, và cái đó phải kết thúc bằng từ chối.
+
+**2. `active_app_bundle`: hỏi dạng lệnh chạy được trên cả hai máy trước.** Đo cả ba dạng,
+và chúng chia đôi hoàn toàn:
+
+| Lệnh | Note 8 / Android 8 | Redmi Note 12 / Android 15 |
+|---|---|---|
+| `dumpsys window windows \| grep mCurrentFocus` | chạy, 88–148 ms | **luôn rỗng** |
+| `dumpsys window displays \| grep mCurrentFocus` | **luôn rỗng** | chạy, 105–107 ms |
+| `dumpsys window \| grep mCurrentFocus` | chạy, 84–97 ms | chạy, 129–172 ms |
+
+Dạng không có subcommand là dạng duy nhất trả lời được cả hai, giá tương đương (grep
+chạy trên máy nên chỉ một dòng về host). Đưa nó lên đầu; hai dạng kia giữ làm fallback.
+Trước đó `windows` đứng đầu nên **mọi** lần gọi trên máy Android 15 tốn một round trip
+vô ích 122–167 ms.
+
+Kèm một phát hiện quan trọng hơn: ngay sau `launch_app`, có những giây mà **cả ba** lệnh
+đều không có dòng `mCurrentFocus` — probe bắt được đúng lúc đó và in
+`Tried: … had no mCurrentFocus line; … had no mCurrentFocus line; …`. Nên
+`active_app_bundle` trả lỗi trong lúc chuyển launcher→app là **trạng thái tạm bình
+thường**, không phải lệnh sai. Vòng poll của `start_interaction_session` phải chịu được
+nó, và đó là lý do thứ hai để cửa sổ đủ dài.
+
+**3. Chờ feed lên trước khi vào vòng lặp.** Đo: sau `am force-stop`, tab feed `Đề xuất`
+đọc được **23,8 s** sau intent, còn package lên foreground ở 16–27 s — hai mốc cách nhau
+vài giây, khoảng giữa là màn splash. Hệ quả cũ: một phiên khởi động ngay sau lần mở lạnh
+báo `partial — 0/0 video, 14s`, vì nhánh off-feed đốt hết `OFF_FEED_LIMIT` = 6 cú vuốt
+vào màn splash trong 14 s. Nhánh off-feed đúng cho thẻ quảng cáo / LIVE / đang chuyển; nó
+sai cho một app chưa khởi động xong. `await_feed` chờ tối đa 30 s rồi **từ chối có lý
+do** — một máy đang ở trang chọn chủ đề thì không bao giờ có feed, và nói ra hơn là vuốt
+mù sáu lần.
+
+**4. `GIỚI HẠN VIDEO` / `VÒNG` giờ chặn thật.** `video_target` trong
+`nurture/live.rs` là nguồn duy nhất cho cả hai vòng, và không còn nhánh
+`if max_duration.is_some() { u32::MAX }`. Cả hai giới hạn cùng áp: **cái nào tới trước thì
+dừng**. Thời lượng vẫn giữ đúng việc của nó — trần chặn một phiên bị bỏ quên, và giá trị
+mặc định ngẫu nhiên 2–3 giờ vẫn khiến hai máy bấm cùng lúc không dừng cùng lúc.
+Nghiệm thu qua app: đặt 5, chạy → `done — 3/5 video, 0 tim, 36s (hierarchy)`. Cùng cấu
+hình đó trước bản sửa cho 68 và 36 video.
+
+**BẪY: `adb shell uiautomator dump` giết agent mà không giết process.** Trong lúc đo mốc
+feed tôi poll `uiautomator dump` hơn hai chục lần. Cả nó và
+`appium-uiautomator2-server` đều cần `UiAutomation`, mà chỉ một bên giữ được — server
+**vẫn sống**, `/status` vẫn trả lời, nên `agent_ready` vẫn báo ready, nhưng **mọi truy vấn
+element treo**. Biểu hiện: `await_feed` hết 30 s trong khi tile đang hiện feed rõ ràng.
+Phục hồi: `am force-stop io.appium.uiautomator2.server{,.test}` rồi để `open_session`
+instrument lại (đo được 4040 ms). **Không dùng `uiautomator dump` để đo trên máy mà app
+đang điều khiển** — dùng chính agent qua probe.
+
+### 9.20 Vuốt ngang bài ảnh trên Android — và ba kết luận sai phải sửa để làm được (12/08/2026)
+
+Tính năng này đã hứa trong UI (`Vuốt ngang` + phần trăm) mà **trên Android chưa có một
+dòng nào**. Lý do nó bị bỏ là một kết luận sai tôi tự ghi vào code:
+`carousel_portion_percent` nói *"a dump of every TextView on a photo post contains no
+`1 / 7` counter (measured 11/08/2026)"*. Bộ đếm **có**, nó chỉ **bị tách thành ba node
+rời**: `"1"`, `" / "`, `"5"`. Tìm một node chứa dấu gạch thì không thấy gì.
+
+**Đo lại, trên hai bài ảnh thật của người dùng, SM-N950F:**
+
+| Bề mặt | Bộ đếm | Hành vi |
+|---|---|---|
+| Trang bài mở từ link | 3 node `TextView` bền vững | `1 / 5` → `2 / 5` → … → `5 / 5`, rồi **mất** sau ảnh cuối |
+| Feed | node `" / "` **không phải TextView**, `content-desc` rỗng | chữ số chỉ **xuất hiện từ cú vuốt đầu**: `+ "2" + " / " + "7"` |
+
+`ImageView` **không đổi** suốt quá trình (22 hình chữ nhật đứng yên), nhãn `Comments`
+cũng không đổi — đó là cách biết vẫn còn ở cùng một bài. Nên hình học không phải tín
+hiệu; bộ đếm mới là.
+
+**Sai lần hai: lấy bộ đếm làm gate.** Hai lần chạy 30 video không duyệt được bài ảnh nào.
+Bộ đếm ở góc trên phải là **overlay tạm thời** — đo được 3/14 thẻ có, rồi 0/14 thẻ có
+trên cùng loại feed — nó mờ đi sau khi thẻ vừa tới, còn vòng lặp tới đó sau khi đã xem
+1–2 s và tương tác xong. Gate đọc bộ đếm gần như không bao giờ nổ.
+
+**Sai lần ba: nghĩ thẻ bài ảnh không có action rail.** Giả thuyết "vòng lặp coi nó là thẻ
+LIVE rồi bỏ qua" — đo ra `Comments=CÓ` trên **14/14** thẻ, kể cả thẻ bài ảnh. Sai.
+
+**Cái đúng: nhãn `Ảnh`.** Nó nằm cạnh caption và **bền**; thẻ 10 trong một lượt đo có
+`Ảnh` mà không có bộ đếm. Nên nó vào catalog như mọi nhãn khác —
+`TikTokControl::PhotoBadge`, `LabelMatch::Text("Ảnh")`, khớp trên `text` vì node này
+**không có `content-desc`**. Là bản dịch nên fail-closed theo ngôn ngữ: build `en` để
+`None` và **không vuốt ngang gì cả**. Đó là hướng an toàn đúng, vì **vuốt ngang trên thẻ
+video là cử chỉ mở trang tác giả của TikTok** — gate sai một lần là phiên đi khỏi feed.
+
+**Hình dạng cuối, theo đúng thứ tự hai bề mặt thật sự làm việc:**
+
+1. Gate bằng nhãn `Ảnh` — bền, có xuất xứ, fail-closed.
+2. Vuốt lần đầu **trước khi biết tổng số ảnh**, vì trên feed chữ số chỉ hiện khi bắt đầu
+   lật. Tổng về cùng cú vuốt đầu, rồi phần trăm áp lên **tổng thật của bài**.
+3. Mỗi lượt lật phải **chứng minh được** bằng bộ đếm nhích lên. Bộ đếm đọc được mà không
+   nhích = hết bài, dừng.
+4. Bộ đếm **không đọc được** thì *không phải* hết bài — coi vậy làm một bài 15 ảnh dừng ở
+   `1/15`. Cho phép tối đa `CAROUSEL_UNPROVEN_LIMIT = 3` lượt liên tiếp không chứng minh
+   được rồi dừng.
+5. Dừng ở `current == total`, không vuốt tới khi bộ đếm mất: đo được là nó chỉ mất **sau**
+   ảnh cuối, nên chờ điều đó là tốn thêm một cử chỉ quá cuối bài.
+
+**Nghiệm thu qua `run_hierarchy_session` (code đã ship), 20 video:**
+
+```
+gặp bài ảnh — vuốt ngang        →  bài ảnh: đã xem 8/8 ảnh
+gặp bài ảnh — vuốt ngang        →  bài ảnh 11 ảnh — xem 11 (100%)  →  đã xem 11/11 ảnh
+gặp bài ảnh — vuốt ngang        →  đã xem 4 ảnh (bản build không hiện số ảnh)
+```
+
+**Hai nền tảng giờ khác nhau và phải nói thẳng:** trên Android `50%` là nửa **của bài
+đó**; trên iOS là nửa **của trần**, vì engine pixel không có bộ đếm để đọc, nó chỉ biết
+"frame có đổi không". `NurtureSettings::carousel_ceiling()` (trần thuần) và
+`carousel_slide_budget()` (trần đã gấp phần trăm vào) là hai số cho hai đường — dùng lẫn
+sẽ áp phần trăm **hai lần**, và tôi đã tự làm đúng lỗi đó trước khi tách ra.
+
+**Sàn trên feed là 2 ảnh** khi tính năng đang bật, vì không đọc được tổng trước cú vuốt
+đầu. Phần trăm 1% không giúp một phiên khỏi lật một lần.
+
+### 9.21 Agent còn sống mà cây đã chết: `/status` không phải bằng chứng (12/08/2026)
+
+`ensure_agent` tin `AgentClient::is_alive()`, mà nó gọi `window_size()`. **Đo được:
+`window_size` trả `0 ms ok` trên một agent đã mất `UiAutomation`**, trong khi mọi truy vấn
+element treo tới hết timeout. `/status` cũng trả lời. Nên `agent_ready` báo ready,
+`ensure_agent` tái dùng session, và vòng nurture chờ feed 30 s trong khi feed đang hiện rõ
+trên tile.
+
+Ba chỗ sửa:
+
+* `is_alive()` giờ **truy vấn một element** (`FrameLayout`, có trên mọi màn hình, nên agent
+  khoẻ trả lời từ node đầu tiên). Locator *vắng* thì sai: nó chờ hết timeout root-node của
+  server và làm agent khoẻ trông như đã chết.
+* Timeout HTTP **120 s → 30 s**. Truy vấn element chậm nhất từng đo là 10,2–10,5 s (S8+
+  dưới feed đang phát), `/source` 3,4 s, và không có gì chậm đi qua client này — push/
+  install APK là adb. 120 s không phải giới hạn, nó là treo: `locate` (4 round trip) đứng
+  tám phút, đủ giết một lần chạy probe ở mức 600 s.
+* `ensure_agent` không còn tin `/status`: session mới **phải tự chứng minh**, không thì
+  force-stop cả hai nửa instrumentation rồi khởi động lại (đo bằng tay: `open_session` sau
+  đó trả lời trong 4040 ms). Vẫn bị blind sau khi restart thì **báo lỗi nêu tên nguyên
+  nhân** thay vì thử lại vô hạn — có thứ khác trên máy đang giữ `UiAutomation`.
+
+Và một chỗ thứ hai của lỗi cửa sổ 5 s ở §9.19: `ensure_tiktok_foreground` trong
+`nurture/hierarchy.rs` chờ 10 × 800 ms = **8 s**, nên gate G2 với TikTok đã tắt từ chối
+bằng `đã gọi mở … nhưng nó không lên foreground` trong khi app đang mở bình thường. Đưa
+lên 40 s, cùng số đo. Sau khi sửa: `đã đưa TikTok lên foreground` ở **16,3 s**.
+
+### 9.22 Toàn quyền: `human_limits` mặc định TẮT (12/08/2026)
+
+Quyết định của người vận hành, sau khi phát hiện tỉ lệ đặt trong panel không phải tỉ lệ
+nhận được. `HumanSessionPolicy` giữ **sáu** thứ đè lên số đã đặt:
+
+| Thứ | Giá trị | Hệ quả lên "Thích 100%" |
+|---|---|---|
+| `can_interact_with_post` | tối đa 2 trong 5 thẻ gần nhất | **Không bao giờ vượt 40% số bài**, bất kể đặt gì |
+| `like_cap` | 8–16 / giờ | Dừng ở 8 sau ~15 phút |
+| `comment_cap` / `follow_cap` | 1–3 và 1–2 / giờ | |
+| `min_action_gap` | 12–35 s sau mỗi hành động | ~2–5 hành động/phút |
+| `rest_after_video` | 15–90 s mỗi 7–13 bài | `nghỉ tự nhiên 85s` trong log |
+| `should_take_block_break` | nghỉ 20–45 phút | |
+
+Sửa ở **một chỗ**: `HumanSessionPolicy` có field `limits`, và cả sáu cửa trên trả lời nó.
+Hơn 20 call site trong hai vòng lặp không đổi một dòng. `NurtureSettings::human_limits`
+mặc định `false` (`#[serde(default)]`, nên row cũ đọc ra cũng là tắt), live-tunable, có
+công tắc riêng trong panel kèm `!` liệt kê đúng những con số ở trên.
+
+**Cái duy nhất giữ lại khi tắt là một `UNPACED_ACTION_GAP = 800 ms`** — và nó không phải
+nhịp, nó là *settle*. Mọi hành động ở đây tự chứng minh bằng cách đọc lại màn hình, nên
+bắn cử chỉ kế tiếp vào một màn hình còn đang animate là cách để tap rơi vào thứ trượt vào
+dưới nó.
+
+**Nghiệm thu qua `run_hierarchy_session`, Thích 100%, 12 video:**
+
+```
+done — 10/12 video, tim 10/10, follow 0/0, 131s
+```
+
+**10/10**: mọi bài được thả tim, mọi lượt xác nhận được bằng nhãn đổi trạng thái. Không
+một dòng `bỏ qua tim: nhịp phiên hiện tại đã đủ`, không một `nghỉ tự nhiên` nào trong
+131 s. Cùng cấu hình đó khi `human_limits` bật cho tối đa ~4/10 bài.
+
+**Giá phải trả, ghi để không ai tưởng đây là nâng cấp thuần:** chính nhịp đó là thứ làm
+phiên trông giống người. Tắt đi thì nhanh hơn, dày hơn, và **dễ bị nhận ra hơn**. Người
+vận hành đã chọn đánh đổi đó một cách rõ ràng và có thể bật lại bằng một công tắc.
+
+#### Hai chuyện đo được trong lúc nghiệm thu
+
+**`on_feed()` không phân biệt được feed thật với trang bài mở từ link.** §9.16 đã ghi rằng
+trang bài deep-link vẫn hiện `Đề xuất`; hệ quả chưa ai ghi là vòng lặp bị **kẹt** ở đó:
+`video đã tim từ trước — bỏ qua` bốn lần trên **cùng một thẻ**, rồi
+`feed không đổi thẻ sau nhiều lượt vuốt — dừng`. Dưới một bài mở từ link không có thẻ nào
+để vuốt tới. Máy bị các phép đo `--measure-carousel` của tôi để lại ở trạng thái đó; một
+lần chạy từ TikTok khởi động lạnh thì không hề kẹt. **Chẩn đoán: cùng một thẻ lặp lại +
+vuốt không đổi = đang ở trang bài, không phải feed.**
+
+**Dấu vân tay phải lấy lại sau khi lật ảnh.** `before` lấy ở đầu bài, rồi carousel lật cả
+chục ảnh, rồi cú vuốt dọc lại bị xử theo dấu vân tay cũ đó. Trước khi sửa: một lần chạy
+lật 4 bài ảnh báo `vuốt chưa chứng minh được đổi thẻ` 4 lần và dừng ở `1/5 video` — tính
+năng báo feed bị kẹt chính là traversal vừa chạy xong.
+
+**Màn hình khoá cho ra đúng triệu chứng "app không lên foreground".** `monkey` báo thành
+công, `dumpsys window` cho `isStatusBarKeyguard=true`, TikTok chạy suốt. Thông báo từ chối
+giờ nói thẳng câu đó.
+
+### 9.23 Cử chỉ: đường vuốt thật thay vì một đoạn thẳng (12/08/2026)
+
+Người vận hành nói thao tác chưa giống người, và **điểm chạm** thì đã tốt sẵn:
+`TouchPointPlanner` jitter trong đúng hình chữ nhật control, không lặp toạ độ, giữ khoảng
+cách với vết chạm gần đây. Chỗ lộ nằm ở ba tính chất khác, cả ba đều **hằng số**:
+
+| Thứ | Trước | Sau |
+|---|---|---|
+| Đường vuốt | **một** `pointerMove` = đoạn thẳng tuyệt đối | Bézier bậc hai, 12 chân, bow 1,2–4,5% chiều dài, chiều bow ngẫu nhiên từng cử chỉ |
+| Vận tốc | không đổi từ pixel đầu tới pixel cuối | smoothstep — tăng, chạy, dịu; thời lượng chia theo profile đó |
+| Điểm đầu/cuối | phân số cố định, **cùng hai pixel mọi lần** | jitter ±18 px, clamp trong màn |
+| Nhấc ngón | ngay khi hết di chuyển | còn tiếp xúc 12–45 ms |
+| Tap | `pause 60` cố định, **không dịch** khi đang chạm | tiếp xúc 45–130 ms + trôi ±2 px dưới tiếp xúc |
+
+Transport không phải rào cản: agent nói **W3C pointer actions**, nhận số `pointerMove` tuỳ
+ý với thời lượng riêng từng bước — nên cả đường cong đi trong **một** round trip, y như cũ.
+Hình dạng cũ đơn giản là thứ đơn giản nhất mà chạy được.
+
+`SwipePath` là type mới trong `types.rs`; `UiSession::swipe_path` có **default** thu path về
+hai đầu, nên iOS và mọi fake session không phải hiện thực gì. Android override nó.
+`SwipeGesture` giữ nguyên vì nó được persist trong flow script và mang trong evidence.
+
+`total_ms` vẫn là số của caller: chỉ hình dạng đổi, thời lượng không — nên không có hằng số
+nào đã tinh chỉnh phải tinh chỉnh lại.
+
+Test kiểm **tính chất** chứ không kiểm ảnh: đường có rời khỏi dây cung (36/40 lần), chân dài
+nhất ≥ 2× chân ngắn nhất, tổng thời lượng đúng bằng yêu cầu, hai lần xin cùng một cử chỉ ra
+hai cử chỉ khác nhau, và không điểm nào ra khỏi màn (kiểm cả ba dạng vuốt sát mép).
+Nghiệm thu trên máy là "vẫn lái được TikTok": `done — 10/12 video, 89s`.
+
+**Không thể chứng minh "TikTok thấy giống người"** — không ai chứng minh được điều đó từ
+đây. Chứng minh được là: những tính chất trước đây **hằng số** thì giờ không còn hằng số.
+
+#### Lớp thứ ba của "toàn quyền": mood multipliers
+
+`human_limits = false` ở §9.22 chưa đủ. Đo được ngay sau đó: một lần chạy 12 video với
+`like_prob = 100` ra **`tim 0/0`**, mọi post ghi `(lướt)`. `Mood::Skimming.like_mult()` là
+**`0.0`** — không phải giảm, là tắt — và Skimming chiếm ~60% số video. Nên dỡ hết trần vẫn
+còn một lớp đè.
+
+Thêm `Mood::Neutral`: mọi multiplier bằng 1.0, kể cả `watch_mult`, nên `xem min/max` cũng là
+cửa sổ thật. `MoodCycle::neutral()` được chọn khi `human_limits` tắt, và `MoodCycle::retune`
+đổi được giữa phiên theo cả hai chiều vì công tắc là live-tunable. Nhãn của nó trong log là
+`theo đúng tỉ lệ đặt`, để đọc log biết ngay đang ở chế độ nào.
+
+Các multiplier theo mood **vẫn đúng cho việc của chúng** — chúng bình quân về 1.0 qua một
+phiên dài, giữ cho *cài đặt* trung thực theo giờ. Chúng chỉ không phải thứ một người đặt
+"100% nghĩa là mọi bài" đang yêu cầu.
+
+Nghiệm thu: `tim 6/6`, mọi post ghi `theo đúng tỉ lệ đặt`.
+
+### 9.24 Vị trí chạm: cụm có lệch, không phải random đều (12/08/2026)
+
+Người vận hành nói "cảm giác lướt, bấm, vị trí nó random á" — và đúng. §9.23 sửa **đường**
+vuốt; chỗ này là **phân bố**, và nó sai theo hướng ngược với trực giác: cái cũ *quá* ngẫu
+nhiên.
+
+Ba luật cũ, cộng lại cho một phân bố **đều hơn cả tình cờ**:
+
+* `gen_range` **đều** trên toàn hình chữ nhật của control — góc cực biên được chạm nhiều
+  bằng giữa nút. Không ngón tay nào làm vậy.
+* `used: HashSet` — **không bao giờ trả lại một toạ độ đã dùng**. Lấy mẫu không hoàn lại
+  trên một ô nhỏ tự nó là một dấu hiệu nhận ra được.
+* `RECENT_MIN_DISTANCE = 3.0` — mỗi tap phải cách 96 tap gần nhất ≥3 px. Đẩy về blue noise.
+
+Ngón tay thật cho một **cụm**: gần chuẩn tắc, tâm lệch vài pixel theo hướng bàn tay đang
+nghiêng, **và có lặp lại**. Nên giờ là:
+
+* chuẩn tắc hai chiều quanh `tâm + bias`, σ = bán kính / 3 (Box–Muller, sáu dòng, không
+  thêm dependency);
+* `HAND_BIAS`: lệch ±7 px **rút một lần cho mỗi máy** rồi giữ nguyên cả phiên — đó mới là
+  "bàn tay", chứ rút lại mỗi tap thì chỉ là thêm nhiễu. Đơn vị pixel, không phải phân số
+  của nút: ngón tay không biết nút to bao nhiêu;
+* **bỏ hẳn** luật chống lặp. Chạm đúng một pixel hai lần trong năm mươi lần chạm là chuyện
+  thật;
+* cùng `bias` đó áp cho hai đầu đường vuốt, và jitter ở đó cũng đổi từ đều sang chuẩn tắc.
+
+Luật duy nhất giữ lại là luật chịu lực: **tap không bao giờ ra khỏi hình chữ nhật của
+control** — nút tim và nút bình luận cách nhau một khoảng rail, chạm lệch là mở drawer.
+
+**Một lỗi tôi tự tạo khi làm việc này, đáng ghi vì rất dễ lặp:** clamp vào biên `.5` rồi mới
+`round()` thì làm điểm nhảy **ra ngoài** biên. Với phép rút đều thì đó là sự kiện xác suất
+0; với chuẩn tắc bị clamp thì nó bão hoà đúng vào biên liên tục nên nổ ngay. Thứ tự đúng là
+quantize rồi clamp trên biên đã làm tròn.
+
+**Và ba lần test chập chờn, cả ba do tôi viết sai chứ không do code:**
+
+1. Đo độ tụm quanh **tâm hình học** trong khi bàn tay có lệch cố định — phải đo quanh tâm
+   của chính mẫu. Fail ~1/6.
+2. Khẳng định **hai** số ngẫu nhiên trong [-7,7] cách nhau >0,5 px — tự tạo ~7% fail. Thay
+   bằng: đo độ tản của lệch trên **12** planner.
+3. Dung sai ±2 px cho trung bình của **400** mẫu với σ = 20 px — sai số chuẩn 1 px, tức chỉ
+   2 SE, fail ~1/10. Nâng mẫu lên 4000 (SE 0,32 px) thì cùng dung sai thành 5 SE.
+
+Sau đó: **0 fail / 25 lần chạy**. Một test chập chờn còn tệ hơn không có test, và cả ba lần
+lỗi đều là "đo may mắn thay vì đo tính chất".
+
+Nghiệm thu trên máy: `done — 10/12 video, tim 11/11, 120s`. Mọi tap vẫn trúng nút tim và
+đều xác nhận được bằng nhãn đổi trạng thái — cụm có lệch không làm giảm độ chính xác.
+
+### 9.25 Nhịp thời gian: bỏ luật chống lặp và một cái lỗ trong histogram (12/08/2026)
+
+Sau §9.24, hai chỗ còn lại mắc **đúng** hai lỗi đó:
+
+**`watch_seconds` có luật chống lặp.** `min_delta` = 15 % cửa sổ, nên hai bài liền nhau
+không được xem gần bằng nhau. Thấy nguyên trong log thật, cửa sổ 3–5 s:
+`2,5 · 3,6 · 2,8 · 3,2 · 2,7 · 2,3 · 2,9 · 2,0` — so le, không bao giờ gần hai lần. Người
+xem hai clip xấp xỉ bằng nhau là chuyện bình thường. Và phép rút là **ba dải đều rời nhau**
+(20 % thấp, 10 % cao, 70 % giữa) nên hình dạng có cạnh cứng ở ranh dải, phẳng bên trong.
+
+Giờ là **một** phép rút liên tục lệch về phía ngắn — đúng hình dạng thời gian xem thật: phần
+lớn bài chỉ được nhìn qua, ít bài giữ được chú ý. `persona` chuyển từ "chọn dải nào" sang
+"độ lệch bao nhiêu": một núm thay ba khoảng cứng.
+
+**`swipe_duration_ms` để lại một cái lỗ.** Ba dải rời: 190–280, 300–520, 520–820 — nên
+**không cú vuốt nào dài 281–299 ms**. Một histogram có lỗ là dấu hiệu mạnh hơn bất kỳ giá
+trị đơn lẻ nào. Giờ một dải liên tục 190–820 lệch ngắn, giữ nguyên ý của hình cũ mà không có
+đường may.
+
+**Biên của vuốt nhanh giữ nguyên 150–240.** Tôi đã nới thành 140–260 rồi test cũ bắt được —
+và test đúng: không có phép đo nào nói biên đó sai, lỗi cần sửa là cái lỗ chứ không phải
+cạnh. Đổi một con số đã đo mà không đo lại là chính điều repo này cấm.
+
+### 9.26 Interaction: thả tim, và bình luận thủ công (12/08/2026)
+
+**Đã có sẵn, không phải làm:** `ThreadMode::{Threaded, Standalone}` — "acc sau trả lời acc
+trước" / "mỗi acc một bình luận gốc" — cùng dropdown trong UI.
+
+**Thêm `manual_comments: Vec<String>`** trên `ThreadCampaignRequest`. Không rỗng thì dùng
+thay AI; `instruction`/`max_words` vẫn nằm đó và là thứ chiến dịch quay về. `#[serde(default)]`
+nên mọi chiến dịch đã lưu đọc ra là pool rỗng, tức đúng chế độ AI nó được tạo ra với.
+
+Chia theo `(target, ordinal)` chứ không lấy lại từ đầu mỗi link — mười link không mở đầu
+bằng cùng một câu — và **tất định**, nên chạy lại một chiến dịch gửi đúng chữ đó, điều làm
+cho bằng chứng đã lưu kiểm được. Từ chối khi pool ít câu hơn số message: Threaded nghĩa là
+message N trả lời N-1, nên pool hai câu trên chuỗi ba câu sẽ có một acc trả lời một bình luận
+giống nguyên văn của chính nó.
+
+**Thêm `like_target: bool`.** `TargetDriver` có method thứ tư `like_target`, **default là từ
+chối** chứ không phải im lặng — "người vận hành yêu cầu thả tim mà không có gì xảy ra" phải
+nhìn thấy được. Đường hierarchy override nó; đường pixel không, vì thả tim trên trang bài ở
+đó cần toạ độ chưa ai đo, và bịa ra thì đúng là điều `screen.rs` từ chối làm với màn hình
+chưa calibrate.
+
+Phần thả tim **tách** vào `crates/core/src/tiktok_like.rs` chứ không copy — cùng lý do
+`tiktok_drawer` đã tách: hợp đồng này là **đo được**, và hai bản của "nhãn liked xuất hiện
+là bằng chứng" sẽ lệch. Lệch ở đây nghĩa là báo tim không có, hoặc từ chối tim đã có.
+`nurture::hierarchy::HierarchyRun::like` giờ là một lời gọi tới nó; chỗ đặt điểm chạm vẫn ở
+lại vòng lặp, vì lịch sử chạm và bàn tay của máy đó thuộc về phiên, không thuộc về cái tim.
+
+Gọi **sau** khi chứng minh đã tới bài và **trước** khi gõ gì: thanh rail đang ở đúng chỗ
+arrival check vừa tìm thấy, và một lần thả tim thất bại **không** làm mất bình luận — nó
+được ghi log rồi message đi tiếp. Không fatal có chủ ý: từ chối ở đây là "backend không làm
+được" hoặc "nhãn không đổi", không cái nào là lý do bỏ một bình luận đã xếp hàng.
+
+**Chưa chạy live.** Gate H4/H5 (probe, máy thật, reply lồng đúng cha kiểm bằng mắt) là của
+đường cũ. Đường **qua app** — `interaction_start_thread` từ UI, DB states, artifact — vẫn
+chưa chạy lần nào, và hai tính năng này chưa có lần chạy máy nào cả.
+
+### 9.27 Đảo quyết định: minicap vào bộ cài, không để ngoài repo (12/08/2026)
+
+**Đảo cái gì.** Câu bị gạch ở §9.18 nói đặt APK ngoài repo tại
+`~/.riviu/minicap/noarch/minicap.apk` và trỏ bằng biến User `RIVIU_MINICAP_APK`. Từ đây
+`minicap.apk` là **resource trong bộ cài**: `sidecars/android/noarch/minicap.apk`, khai báo
+ở `bundle.resources` của `tauri.conf.json`.
+
+**Vì sao.** Quyết định cũ không sai lúc nó được viết — nó viết khi minicap là prerequisite
+của **người phát triển**, và một biến User trên máy dev là hợp lý. Hợp đồng của **bản phát
+hành** thì khác: máy Windows sạch cài xong phải chạy được ngay. Với hợp đồng đó, "tải APK
+ngoài repo rồi đặt một biến User" có ba khuyết điểm không sửa được bằng tài liệu:
+
+1. Nó là **một bước tay CI không kiểm được**. Không gate nào fail được khi APK thiếu, vì nó
+   không nằm trong cây nguồn.
+2. Nó **vô hình cho tới lần stream đầu tiên**. Máy vẫn hiện trong fleet, tile vẫn vẽ, rồi mới
+   đổ ở `ensure_stream`. Đo được hôm nay: launch qua `driver.ps1` (script này **không** đặt
+   biến đó) cho **cả hai** máy tile `● Error` với
+   `startBackgroundStream failed for device …: no minicap apk configured`, fleet `0/2`, dù APK
+   nằm sẵn ở `~/.riviu`. Launch lại với `$env:RIVIU_MINICAP_APK` đặt trong **cùng** shell:
+   cả hai `● Live`, fleet `2/2`, không đổi một dòng code nào. Cùng một máy, cùng một APK, khác
+   nhau đúng một biến môi trường — đó là hình dạng của lỗi này khi nó xảy ra với người vận hành.
+3. Nó **không chỉ chết stream**. `open_ui_context` đòi stream, nên nurture và interaction chết
+   theo, và người vận hành thấy một app không làm được gì.
+
+**`RIVIU_MINICAP_APK` vẫn override.** Thứ tự là `config → env → bundled`, bản đóng gói ưu tiên
+**thấp nhất**. Nó là lưới an toàn cho máy sạch, không tước quyền của ai đang trỏ vào APK khác.
+
+**Giá phải trả, ghi rõ:** +4,2 MB cho **mọi** bộ cài, kể cả macOS nơi minicap hoàn toàn vô
+dụng. Chấp nhận có ý thức — 4,2 MB đổi lấy việc bỏ một bước tay không kiểm được. Xuất xứ
+(`@devicefarmer/minicap-prebuilt` v2.7.3) và bảng FPS ở §9.18 vẫn nguyên giá trị: cùng đúng
+file byte-for-byte, chỉ đổi chỗ nó nằm.
+
+**Giấy phép:** minicap là Apache-2.0 — phân phối lại được, kèm điều kiện truyền NOTICE. Xem
+file `NOTICE` ở gốc repo, cũng là nơi ghi mức phơi nhiễm của `adb.exe` đóng gói cùng đợt
+(platform-tools theo *Android SDK License Agreement*, **chưa ai review** — quyết định của
+người vận hành, ghi lại chứ không giả vờ đã thẩm định).
+
+### 9.28 Đóng gói xong: số đo, và bốn thứ suýt hỏng im lặng (12/08/2026)
+
+**Nghiệm thu nhánh bundled minicap.** Launch qua `driver.ps1` (script **không** đặt
+`RIVIU_MINICAP_APK`), shell xác nhận biến không tồn tại: cả hai máy `● Live`, `2 sẵn sàng`,
+`Thiết bị 2/2`, đều đang stream, và log **không còn** dòng `no minicap apk configured` mà cùng
+lệnh đó đã in ở đầu phiên. `tauri-build` copy đủ 7 file vào `target/debug/sidecars/android/`
+với kích thước khớp manifest, nên nhánh packaged được đi vào **ngay trong dev** — không cần
+build bộ cài mới kiểm được.
+
+**Bundled adb chạy được từ layout của nó.** `sidecars/android/win-x86_64/adb.exe version` →
+`1.0.41 / 37.0.1-15733141`, `Installed as <đường dẫn trong repo>`, exit 0, và `adb devices`
+thấy cả hai máy. Đây là bằng chứng cho việc hai DLL nằm cạnh exe là đủ. Chạy được an toàn vì
+bản đóng gói **cùng revision 37.0.1** với platform-tools đang giữ server ở 5037 — khác revision
+là đúng cái sẽ in `adb server version doesn't match this client; killing...`.
+
+**Vẫn chưa kiểm được, và không kiểm được từ máy này:** nhánh candidate bundled **chưa bao giờ
+được chạy** — theo thiết kế, `PATH` thắng trên mọi máy dev. Cần máy Windows sạch. Ghi ở mục
+2.7 của plan.
+
+**Bốn thứ suýt hỏng im lặng, tìm ra trong lúc làm:**
+
+1. **`core.autocrlf = true` sẽ phá digest ngay lần clone đầu.** Ship `adb.exe` mà bỏ
+   `NOTICE.txt` của Google là đúng lỗ attribution đang bịt, nên mang nó theo — nhưng file đó
+   **thuần LF** (21.893 bare LF, 0 CRLF). Không có `-text`, checkout sẽ viết lại thành CRLF,
+   file cộng thêm 21.893 byte, và **cả** `bytes` **lẫn** `sha256` ghim cho nó đều sai trên mọi
+   máy khác máy đã sinh ra chúng — xanh cho tác giả, đỏ cho tất cả người khác. Chặn bằng
+   `sidecars/android/** -text`. Kiểm bằng `git checkout-index` qua một `GIT_INDEX_FILE` tạm
+   (không chạm index thật): cả hai digest tái tạo đúng.
+2. **`bundle.resources` có 6 resource mà không ai kiểm.** Danh sách viết tay trong
+   `verify_packaged_resources` đã lệch khỏi config và không gate nào biết:
+   `signer/requirements.txt`, `wda/candidate-manifest.json`, `wda/text-manifest.json`,
+   `wda/interaction-capabilities.json`, `wda/interaction-capabilities.schema.json`,
+   `wda/interaction_vision_ocr.swift`. Sáu cái này **được ship và không được verify**. Tìm ra
+   bởi chính `assert_every_sidecar_resource_is_verified` mới thêm, không phải bởi đọc code —
+   đó là lý lẽ cho việc có nó.
+3. **Đặt thẳng `minicap_apk = Some(bundled)` sẽ phá cả hai override**, vì config được ưu tiên
+   **trước** env. Nên có hai field riêng `bundled_*` ở ưu tiên thấp nhất. Field mà người vận
+   hành không thể vượt lên không phải lưới an toàn, nó là chiếm quyền.
+4. **`detect_driver` cũ có một lỗi thật.** Nó resolve **một** đường rồi chỉ probe đường đó, mà
+   `resolve` lấy candidate đầu tiên **tồn tại**. Một `ANDROID_HOME` cũ trỏ vào SDK đã xoá là đủ
+   để nó tuyên bố Android không khả dụng trên máy có adb tốt ở vị trí sau. Giờ là vòng thử từng
+   candidate, và refusal kể tên **cả sáu** kèm nguồn (`AdbOrigin::label`) — người vận hành cần
+   thấy `RIVIU_ADB_PATH` của họ *đã được đọc và bị từ chối*, không phải đoán xem có được đọc.
+
+**Bẫy test đã tránh:** bản đầu tôi viết `resolve_never_picks_the_bare_name_over_a_real_file`
+kỳ vọng bundled thắng. Máy này `ANDROID_HOME` rỗng nên nó xanh — nhưng **image Windows của
+GitHub Actions có đặt `ANDROID_HOME`** trỏ vào SDK thật, nên test đó sẽ đỏ trên CI. Viết lại
+thành claim không phụ thuộc môi trường (qua `configured`). Cùng loại lỗi với ba test flaky ở
+§9.24–9.25: test đo cái mà môi trường quyết định.
+
+**Gate sau đợt này:** 846 test Rust / 0 fail (trước 831), 78 test Python, 95 test frontend / 18
+file, `cargo fmt` + `clippy -D warnings` sạch, `npm run build`, e2e 6/6,
+`collect_desktop_ci_artifacts.py verify-android-tools` ok. Ba nhánh phủ định đã tự kiểm: file
+không ghim bị từ chối, hỏng cùng kích thước bị từ chối theo SHA-256, resource khai báo mà không
+ai kiểm bị từ chối.
+
+### 9.29 Sidecar iOS hỏng mà app báo khoẻ: sự im lặng là HAI lỗi (12/08/2026)
+
+**Việc tha exit code 2 không sai — nó có mục đích thật.** Nó làm `verifiedProcessControl` *fail
+closed*: giữ driver, bỏ hợp đồng (mục 968-973), và ba test ở
+`verified_process_control_requires_a_versioned_ready_ping_handshake` ghim đúng điều đó. Không
+đụng vào. Lỗi là **lý do bị mất**, không phải việc tha.
+
+**Điểm mù tệ hơn exit 2, và nó exit 0.** `riviu_pmd.py` phát
+`{"ok": true, "pymobiledevice3": false, …}` với **exit 0** khi import thất bại. Nên nhánh cũ
+không có gì sai về exit status — payload mới là chỗ sai — và
+`crates/ios-driver/src/lib.rs:80` trả `degraded_reason: None` **vô điều kiện** cho mọi `Ok`.
+Kết quả: app báo một bản cài hoàn toàn khoẻ trong khi mọi lời gọi thiết bị đều chết. Banner đỏ
+**đã có sẵn**; nó chỉ chưa bao giờ được cho một lý do để hiện.
+
+Sửa: `classify_sidecar_ping` phán xét **payload**, không phán xét exit code — nên bắt luôn cả
+hai ca. Nêu **mọi** lỗi tìm được, không chỉ cái đầu (một bản cài hỏng thường hỏng nhiều thứ, và
+báo một cái là đưa người ta đi sửa triệu chứng). Payload không parse được thì kèm exit code +
+400 ký tự cuối stderr, vì traceback Python là thứ duy nhất nói ra nguyên nhân.
+
+**Chỗ im lặng thứ hai: `list_devices`.** Nó bỏ **cả** error của `run_json` **và** key `error`
+trong payload. Sửa một chỗ thôi thì đường liệt kê fleet vẫn im. Giờ ghi vào
+`last_list_error: Arc<Mutex<Option<String>>>`, set ở cả hai nguồn, **xoá khi liệt kê sạch** — đó
+là cách "người vận hành vừa cài Apple Devices" hiện ra mà không cần khởi động lại app.
+
+**Bác bỏ có lý do:** cho `list_devices` trả `Err`. `AppState::bootstrap` hard-fail lần scan đầu
+**có chủ ý** vì Flow recovery cần snapshot đáng tin, nên `Err` ở đó biến "chưa cài Apple Devices"
+thành app không mở được. Ghi vào doc comment tại chỗ để lần sau không ai "sửa" lại.
+
+`boot_degraded_reason` đã nối vào banner đỏ đang có. `last_list_error()` **chưa có ai đọc** —
+nó chờ panel chẩn đoán ở 2.3. Gate: 851 test Rust / 0 fail (ios-driver 137 → 142).
+
+### 9.30 Interaction chạy thật lần đầu qua app — và cửa arrival FAIL OPEN (13/08/2026)
+
+Campaign `08f3c2cc`: Riêng lẻ, 2 target (1 `/video/` + 1 `/photo/`), 2 actor Android,
+`messageCount=2`, pool 4 câu tay, không thả tim.
+
+**Đạt:** một bình luận đã đăng **thật qua UI** (`succeeded`, `effect_intent=post_comment`).
+Luật chia pool và xoay actor đúng **y bảng dự đoán** trên cả 4 dòng —
+`actor_index = (target_index + ordinal) % 2`, `pool_index = (target_index*2 + ordinal) % 4`.
+Bằng chứng gửi là thật: `armedFrameSha256 ≠ clearedFrameSha256`, và app **đọc lại được chính
+chữ nó vừa gõ** (`postedIdentity.text`).
+
+**`/photo/` là target hạng nhất, đã xác nhận.** `parse_one` nhận cả `video` và `photo`
+(`interaction.rs:129-133`), `target_key = content:<id>` nên 9 link không thể trùng,
+`kind` chỉ được đọc **một chỗ**: chuỗi cho câu INSERT (`db.rs:1146-1148`). Không driver, cửa
+arrival hay khay bình luận nào rẽ nhánh theo `kind`. Link `@.lt.iu.ngh` cũng qua vì điều kiện
+chỉ là bắt đầu bằng `@` và dài ≥ 2.
+
+#### Cửa arrival FAIL OPEN — lỗi nặng nhất tìm được trong phiên
+
+```rust
+let before = read_author_label(session, labels).await.unwrap_or_default();   // :443
+if on_post && !author.is_empty() && author != before {                       // :481 → Structural → gõ và gửi
+```
+
+`before` rỗng ⇒ `author != before` **luôn đúng** ⇒ cửa tụt xuống còn "TikTok foreground + có
+khay bình luận", mà **chính cái feed cũng thoả**. `ScreenNeverChanged` trở thành không thể xảy
+ra. Và `Structural` chỉ được `log::warn!` rồi **vẫn gửi**. Nghĩa là: **bình luận vào bài người
+lạ và vẫn ghi `Succeeded`.**
+
+`before` rỗng không hề hiếm: `read_author_label` (`:1102`) dùng `.ok().flatten()?`, nên **lỗi
+locate** (agent trục trặc, timeout, cây accessibility chết §9.21) biến thành `None` y như "không
+có node Follow".
+
+**Sửa:** thêm `ArrivalRefusal::NoBaseline` (`target_open_no_baseline`), `before` giữ `Option`,
+thử lại **một lần** sau `ARRIVAL_POLL` rồi từ chối — **trước** `open_url_in_app`, nên máy không
+baseline được thì không tốn side effect nào. Ghim bởi
+`an_arrival_check_that_cannot_read_the_baseline_refuses_before_opening_the_link` (khẳng định
+`opened` rỗng) và `an_unreadable_baseline_is_retried_once_before_it_is_refused`.
+
+**Hai fixture cũ phải sửa, và đó là dấu hiệu tốt:** chúng không có baseline nào, nên giờ bị
+`NoBaseline` trước khi kịp tới `WrongApp`/`NoPostPage`. Cho chúng baseline thật chứ **không** nới
+cửa — `a_post_that_never_changes_is_refused_as_an_unresolved_link` vẫn xanh, tức
+`ScreenNeverChanged` vẫn tới được.
+
+#### Ordinal 0 bị từ chối TẤT ĐỊNH — app vấp vào dấu chân của chính nó
+
+Redmi bị `target_open_screen_unchanged` trên **đúng cái link** mà Note 8 đăng thành công vài phút
+sau. Không phải máy hỏng, không phải link chết. Pha thu frame bằng chứng mở target trên
+`target_root_actor` — **chính là máy của ordinal 0** — và không gì đưa máy đi đâu giữa hai
+context (`clean_ticket` chỉ dừng stream + invalidate session; phiên sau chỉ *resume* app bằng
+`monkey -c LAUNCHER`). Nên tới pha send, `before` **đã là nhãn tác giả của bài đích**, và
+`author != before` không bao giờ đúng.
+
+Trong chế độ **thủ công** pha đó còn vô ích: pool phủ mọi `(target, ordinal)` nên `frames` chỉ
+được đọc ở nhánh AI. **Sửa:** `needs_ai_evidence_frames()`; manual thì không mở gì cả.
+
+**Bản sửa ngây thơ đã bị bác bỏ:** đổi `?` thành `continue` là chưa đủ — nó sẽ cho một lần chạy
+mà **mọi** ordinal 0 của **mọi** target đều bị từ chối sai, mỗi dòng lại nói "bài đã bị
+xoá/riêng tư/chặn vùng", đẩy người vận hành đi kiểm link trong khi code đang từ chối dấu chân
+của nó.
+
+#### Một target lỗi không được giết cả chiến dịch
+
+Dấu `?` ở khối evidence nằm trong thân trần của `execute_thread_campaign`, nên Err chạy thẳng ra
+ngoài: target 2 chưa từng được đặt `Preparing`, `prepared_json` vẫn `NULL`, hai dòng của nó nằm
+`queued` **không có lỗi riêng**, và campaign mang lỗi của target khác. Tách
+`collect_target_evidence_frames` + `fail_whole_target`; lỗi giờ đánh `Failed` cho đúng các
+assignment của target đó rồi `continue`. `queued` im lặng còn nguy hiểm ở chỗ khác: đó **là**
+state mà retry coi là retryable.
+
+#### Retry sẽ đăng trùng, qua hai bước
+
+`retryable_assignments` loại `Succeeded` đúng, kèm comment "tapping Send is not idempotent".
+Nhưng vòng chuẩn bị ghi `Preparing` cho **mọi** assignment của target, **không** lọc
+`only_assignments` (bộ lọc đó chỉ có ở vòng gửi). Nên retry lần một không gửi lại nhưng **xoá
+mất** dấu vết thành công; retry lần hai đọc `Preparing`, thấy retryable, và **gửi lại một bình
+luận đã công khai**. Sửa bằng một guard `continue` trong vòng chuẩn bị.
+
+#### Câu warn chỉ sai nguyên nhân
+
+"OCR không khả dụng trên nền tảng này" sai kép: điều kiện chỉ xét **mức proof**, không biết gì
+về platform hay driver; đường hierarchy không gọi OCR bao giờ; và đường pixel cũng rơi vào
+`Structural` khi OCR chạy tốt mà chỉ không thấy handle trong grace. Đổi thành câu nêu đúng cái
+*không* đọc được, kèm `reader=`. Và **không** gate việc gửi vào `Identified`: nickname folds lên
+handle khoảng **1 trên 3** account (§9.5 đã đo), gate vào đó là từ chối gần hết bài mở tốt.
+
+Thêm `TargetProof::as_str()` và ghi `"arrival"` vào evidence — trước đó mức proof bị bỏ
+(`let _proof`) và chỉ tồn tại trong log.
+
+#### Còn hở, chưa sửa
+
+- **Không có byte artifact nào trên đĩa.** `publish_evidence_frame` trả `None` vì
+  `close_ui_context` đã **xoá cache frame của UDID đó ở dòng ngay trước**
+  (`clean_ticket → teardown_stream → clear_and_advance → state.latest.remove`). Hàng
+  `comment-root-evidence` có `sha256` (lấy nhầm từ `postedIdentity.frameSha256`) nhưng
+  `relative_path=NULL`, và `artifacts/interactions/` chỉ có `.staging`/`.quarantine` rỗng. Chỉ
+  hoist lên trước teardown là **chưa đủ** — `FrameSource::latest` không có hợp đồng liveness nào
+  và farm này đã đo hub trả bytes của producer đã chết (`last_frame_age_ms=11373`,
+  `baseline_sequence == latest_sequence`). Phải qualify theo **generation + sequence >
+  watermark** (`GenerationFrameSource` đã có sẵn, pha interaction chưa dùng).
+- `interaction_events` rỗng 0 dòng; `interaction_targets.state` và `interaction_dispatch` không
+  bao giờ tiến.
+- **API key AI là bắt buộc kể cả chế độ thủ công** (`:591-593` bail *sau khi* campaign đã
+  `running`), và lý do vô hình trên UI vì `InteractionCampaignSummary` không có `error_code`.
+- H6-e (trộn iPhone+Android ở Threaded) **không quan sát được**: gate phân hoạch theo
+  `reports_element_bounds`, hai máy Android thì nhóm pixel rỗng nên gate luôn cho qua. Cần một
+  iPhone, không có cách lách.
+
+#### Bẫy của harness, không phải của app
+
+**EVKey64** (bộ gõ tiếng Việt bên thứ ba, hook bàn phím toàn cục, **không** hiện trong
+`Get-WinUserLanguageList`) ăn keystroke của SendKeys: `www`→`ww`, `@user`→`@ùe`, `photo`→`phồt`
+(`f`=huyền, `s`=sắc, `r`=hỏi, `oo`=ô). Cả hai link đầu tiên bị `unsupportedHost`. Cách đúng:
+`Set-Clipboard` rồi `fill x y "^a{DEL}^v"` — Ctrl+V là tổ hợp phím, EVKey không biến đổi.
+
+**`uiautomator dump` không phải dụng cụ đo được cây khi TikTok đang phát video**:
+`ERROR: could not get idle state.` Agent uiautomator2 mà app dùng đọc `AccessibilityNodeInfo`
+trực tiếp, **không** chờ idle — nên dump thất bại **không** chứng minh app đọc không được.
+
+**`mCurrentFocus=…SplashActivity` không có nghĩa là đang ở màn splash** — đó là tên activity
+chính của TikTok. Đừng kết luận "máy đang treo ở splash" từ dòng đó.
+
+Gate: **855 test Rust / 0 fail** (851 → 855), `cargo fmt` + `clippy -D warnings` sạch.
+
+### 9.31 H6-a ĐẠT sau ba lần chạy — và link chết trông giống hệt lỗi code (13/08/2026)
+
+Sau khi sửa xong §9.30 cộng A3 (artifact), chạy lại **hai** lần nữa. Cả hai lần đều đáng ghi vì
+chúng nói hai chuyện khác nhau.
+
+**Lần 2 (`3e617811`): cả 4 assignment `target_open_screen_unchanged`, 0 bình luận.** Nhưng A2
+đã hoạt động — chiến dịch **không** còn dừng ở lỗi đầu, nó chạy hết cả 4 và target 2 được chạm
+tới (lần 1 nằm `queued`). Nguyên nhân không phải code: **hai link photo tôi chọn không resolve
+được**. Chứng minh bằng ảnh màn hình thật: bắn intent rồi `adb exec-out screencap` cho thấy máy
+vẫn ở tab `Đề xuất` với video của `KietFei` — TikTok nhận intent rồi để nguyên feed. Cửa từ chối
+đúng, và câu "thường là bài đã bị xoá/riêng tư/chặn vùng" đúng nguyên nhân.
+
+**Phân biệt được "link photo" với "bài này chết":** cùng máy, `@tuyt.hoa7225/photo/…` **mở
+được** (thấy badge `Ảnh`, 7 dấu carousel, caption đúng) và `@user497553423635/video/…` cũng mở
+được. Nên deep link `/photo/` chạy tốt; chỉ hai bài kia là chết. **Bài học đo lường:** một link
+chết và một lỗi code cho ra **cùng một** `error_code`. Cách duy nhất tách được là chụp màn hình
+máy. Đừng sửa code trước khi làm việc đó.
+
+Cũng xác nhận A1 là bug thật: bài mà link `/video/` mở ra có tác giả **`Xuân`** — đúng
+`Follow Xuân` trong thông báo lỗi của **lần 1**. Tức là pha evidence đã để Redmi đứng sẵn trên
+bài đích, y như suy luận.
+
+**Lần 3 (`44edce27`), hai link đã chứng minh mở được — `state=partial`:**
+
+| line | kind | ord | actor | text dự đoán | kết quả |
+|---|---|---|---|---|---|
+| 1 | photo | 0 | Redmi | nhìn cuốn thật đấy | `failed: target_open_no_baseline` |
+| 1 | photo | 1 | Note 8 | màu lên đẹp quá | **succeeded**, `arrival=structural` |
+| 2 | video | 0 | Note 8 | xem đi xem lại mấy lần | **succeeded**, `arrival=structural` |
+| 2 | video | 1 | Redmi | cái này hợp gu mình | `failed: target_open_no_baseline` |
+
+**Cả 4 dòng khớp y bảng dự đoán** về actor và text, và **cả hai target đều chạy** — nên chiều
+*target* của luật chia pool (chỉ số 2, 3) giờ đã chứng minh được, không chỉ chiều ordinal. Cả
+hai lần thành công đều đọc lại được **đúng** chữ đã gõ khỏi màn hình (`postedIdentity.text ==
+prepared.text`).
+
+**Đăng được lên bài `/photo/`** — đó là điều lần 1 và lần 2 chưa chứng minh được.
+
+**`NoBaseline` nổ hai lần trong thực tế, và nổ đúng.** Cả hai lần trên Redmi, vì máy đang ở một
+thẻ **LIVE** (không có node `Follow `) nên không baseline được ⇒ từ chối **trước khi gửi
+intent**. Đây đúng là rủi ro mà kế hoạch đã cảnh báo, và nó fail-closed: thà mất một assignment
+hơn là bình luận mù. **Hệ quả vận hành:** máy đang ở thẻ LIVE thì assignment đó bị bỏ. Nếu tỉ lệ
+này cao, việc cần làm là đưa máy về thẻ bài thường trước khi chạy, **không** phải nới cửa.
+
+**Artifact có thật trên đĩa, và mở ra xem được.** 4 file JPEG (`ffd8ff`), 38–71 KB, sha256 khác
+nhau, cả hai loại `comment-root-evidence` và `comment-failure-evidence` — đường lỗi cũng lưu
+ảnh. Mở file lớn nhất ra xem: khay bình luận đang mở trên đúng bài photo mục tiêu, hiện
+`màu lên đẹp quá` của `Hoàng Hồng Nam`, nhãn `Bình luận đầu tiên`, `1 giây` trước, header
+`1 bình luận`. Đúng thứ dùng để phân xử về sau.
+
+`arrival=structural` giờ nằm trong `evidence_json` (A4.3). `state=partial` là báo cáo trung
+thực: không phải `failed`, không phải `succeeded`.
+
+**H6-a: ĐẠT.** Còn nợ: `interaction_events` vẫn rỗng, `interaction_targets.state` và
+`interaction_dispatch` vẫn không tiến, `error_code` của campaign vẫn không hiện trên UI.
+
+### 9.32 H6-b và H6-c ĐẠT trong một lần chạy (13/08/2026)
+
+Chiến dịch `e851ce3f`: **Qua lại** (threaded) + **thả tim bật** + comment thủ công, 2 target đã
+chứng minh mở được, 2 actor Android. `state=partial`.
+
+| line | kind | ord | actor | text | kết quả |
+|---|---|---|---|---|---|
+| 1 | photo | 0 | Redmi | công nhận nhìn thích mắt | `uncertain` — đã bấm Gửi, không xác nhận được |
+| 1 | photo | 1 | Note 8 | đúng ý mình luôn | `skipped_parent` at ordinal 0 |
+| 2 | video | 0 | Note 8 | chỗ này trông yên tĩnh | **succeeded**, `post_comment` |
+| 2 | video | 1 | Redmi | save lại để dành | **succeeded**, `reply_comment` |
+
+Cả 4 text và cả 4 actor khớp y bảng dự đoán (`actor_index = (target_index + ordinal) % 2`).
+
+**H6-b — reply lồng đúng cha, kiểm bằng mắt.** `2v/1` có `parent_assignment_id` trỏ đúng `2v/0`,
+và evidence ghi `parent.author='Hoàng Hồng Nam'`, `parent.text='chỗ này trông yên tĩnh'` — tức
+nó khớp cha theo **cả tác giả và nguyên văn**, không phải theo vị trí. Mở
+`comment-reply-evidence` (45.400 byte) ra xem: `save lại để dành` của **`Mítt zới còiii`** thụt
+vào **dưới** `chỗ này trông yên tĩnh` của **`Hoàng Hồng Nam`** — hai tài khoản khác nhau, đúng
+cấu trúc chuỗi. Ảnh đó cũng cho thấy comment của lần chạy 1 (`1 giờ`) và lần 3 (`8 phút`) vẫn
+còn, khớp mốc thời gian.
+
+**Chuỗi đứt được xử lý đúng.** Root `1p/0` thành `uncertain` ("đã bấm Gửi nhưng không xác nhận
+được; không retry vì trạng thái giao nhận mơ hồ") ⇒ `1p/1` thành `skipped_parent` kèm
+`parent_identity_not_confirmed_at_ordinal_0`. Nó **không** trả lời một cha không xác định, và
+`Uncertain` không retry được — đúng thiết kế. Đây cũng là ca `comment-failure-evidence` có ảnh
+trên đĩa, tức đúng cái state cần người mở ra xem thì có thứ để xem.
+
+**H6-c — thả tim.** Ba dòng `đã thả tim (nhãn đổi trạng thái)` đúng nguyên văn chuỗi mong đợi:
+`content:7668985481056587029` bởi Redmi, `content:7669277385455340807` bởi Note 8 rồi bởi Redmi.
+Ba chứ không bốn, vì `1p/1` bị `skipped_parent` trước khi tới bước tim — đúng.
+
+**Và điều quan trọng nhất của H6-c: thả tim không bao giờ làm mất bình luận.** `1p/0` thả tim
+thành công *và* vẫn gửi comment (rồi mới `uncertain` ở bước xác nhận); `2v/0` và `2v/1` thả tim
+thành công *và* comment `succeeded`. Không có ca nào tim làm chết comment.
+
+**Trạng thái còn lại của H6:** H6-d (AI thật, `commentProb > 0`) chưa chạy. H6-e (trộn
+iPhone+Android ở Threaded ⇒ `MixedPlatformThread`) **gác lại theo yêu cầu người vận hành** — gate
+phân hoạch theo `reports_element_bounds` nên hai máy Android không bao giờ trip được nó.

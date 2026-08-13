@@ -25,3 +25,8 @@ futures-util = "0.3"
 
 [dev-dependencies]
 riviu-script-engine = { workspace = true }
+# `test-util` only, and only for tests: it unlocks `#[tokio::test(start_paused = true)]`,
+# which is what lets a 14-second arrival timeout be tested in milliseconds instead of
+# actually waiting. A feature on a crate already in the graph, so `Cargo.lock` is
+# untouched — verified with `cargo metadata --locked`.
+tokio = { workspace = true, features = ["test-util"] }

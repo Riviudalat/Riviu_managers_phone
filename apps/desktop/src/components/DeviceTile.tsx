@@ -1,5 +1,5 @@
 import { memo, useRef, useState } from "react";
-import { tileStreamStateView } from "../types";
+import { deviceModelOsLabel, tileStreamStateView } from "../types";
 import type { DeviceInfo, TileSize } from "../types";
 import { deviceSwipe, deviceTap, groupInput, latestFrame } from "../api";
 import { useDeviceFrame, useHydratedDeviceFrame } from "../frameStore";
@@ -224,9 +224,7 @@ function DeviceTileInner({
           {streamState.label}
         </span>
         <span>{device.connection.toUpperCase()}</span>
-        <span>
-          {device.model} · {device.iosVersion}
-        </span>
+        <span>{deviceModelOsLabel(device)}</span>
       </footer>
     </article>
   );

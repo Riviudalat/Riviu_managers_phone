@@ -19,9 +19,11 @@
 //! is already the shape of `UiSession` — `find_and_tap`, `assert_visible` and
 //! `read_text` are all targeted queries.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context};
+use parking_lot::Mutex;
 use serde_json::{json, Value};
 
 /// W3C returns the element id under this key; older servers use `ELEMENT`.
@@ -44,6 +46,14 @@ pub enum Locator {
     /// labels embed a count (`Read or add comments. 15 comments`).
     DescriptionContains(String),
     ClassName(String),
+    /// The rendered `text`, exact match.
+    ///
+    /// Not interchangeable with [`Self::Description`]: the Reply button in TikTok's
+    /// comment drawer has an **empty** `content-desc` and carries `Trả lời` here, and
+    /// a comment body's content *is* its text.
+    Text(String),
+    /// The rendered `text`, substring match.
+    TextContains(String),
     /// Fully-qualified `resource-id`. Obfuscated in TikTok; use sparingly.
     ResourceId(String),
     /// Raw `UiSelector` expression, for the cases the above cannot express.
@@ -67,6 +77,17 @@ impl Locator {
             Self::ClassName(value) => json!({
                 "strategy": "class name",
                 "selector": value,
+            }),
+            // `quote_java` is not optional here: a comment body can contain a double
+            // quote, and an unescaped one turns the selector into a parse error at
+            // best and a different selector at worst.
+            Self::Text(value) => json!({
+                "strategy": "-android uiautomator",
+                "selector": format!("new UiSelector().text({})", quote_java(value)),
+            }),
+            Self::TextContains(value) => json!({
+                "strategy": "-android uiautomator",
+                "selector": format!("new UiSelector().textContains({})", quote_java(value)),
             }),
             Self::ResourceId(value) => json!({
                 "strategy": "id",
@@ -98,6 +119,10 @@ impl Locator {
             ),
             Self::ClassName(value) => {
                 format!("new UiSelector().className({})", quote_java(&value))
+            }
+            Self::Text(value) => format!("new UiSelector().text({})", quote_java(&value)),
+            Self::TextContains(value) => {
+                format!("new UiSelector().textContains({})", quote_java(&value))
             }
             Self::ResourceId(value) => {
                 format!("new UiSelector().resourceId({})", quote_java(&value))
@@ -140,19 +165,37 @@ impl Rect {
     }
 }
 
+/// The server's own words when its accessibility connection has gone bad.
+///
+/// Matched as a substring because the message carries a varying millisecond count.
+const STALE_TREE_MARKER: &str = "waiting for the root AccessibilityNodeInfo";
+
 #[derive(Clone)]
 pub struct AgentClient {
     http: reqwest::Client,
     base: String,
-    session_id: String,
+    /// Shared and swappable, so recycling a degraded session fixes **every** clone —
+    /// including the `AndroidUiSession` already handed to a running loop.
+    session_id: Arc<Mutex<String>>,
 }
 
 impl AgentClient {
     /// Open a session against an agent already listening on `base`.
     pub async fn connect(base: impl Into<String>) -> anyhow::Result<Self> {
         let base = base.into().trim_end_matches('/').to_string();
+        // 30 s, from measurements rather than from caution. The slowest *legitimate*
+        // element query recorded against this server is 10,2–10,5 s (the S8+ fleet under a
+        // playing feed, `docs/ANDROID_PROBE_REPORT_2026-08-09.md`), and a rotten session
+        // answers at 10,1 s before erroring; `/source` is 3,4 s. Nothing measured comes
+        // near 30 s, and nothing slow goes through this client at all — APK pushes and
+        // installs are adb.
+        //
+        // The old 120 s was not a limit anyone would notice, it was a hang: an agent that
+        // had lost `UiAutomation` made `locate` — four round trips — stall for eight
+        // minutes, which is how a probe run got killed at its 600 s cap on 12/08/2026.
+        // A timeout is only useful if it fires before the operator gives up.
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
+            .timeout(Duration::from_secs(30))
             .build()
             .context("dựng HTTP client cho agent Android")?;
         let response: Value = http
@@ -173,7 +216,7 @@ impl AgentClient {
         let client = Self {
             http,
             base,
-            session_id,
+            session_id: Arc::new(Mutex::new(session_id)),
         };
         client.prime_session().await?;
         Ok(client)
@@ -194,8 +237,11 @@ impl AgentClient {
     /// neither did `enableTopmostWindowFromActivePackage` or
     /// `deferAccessibilityCacheReset`. Measured 20/20 queries at p50 10531 ms.
     /// See `docs/ANDROID_PROBE_REPORT_2026-08-09.md`.
+    /// Uses [`Self::send_once`] deliberately: this runs against a session that was
+    /// *just* created, so a recycle here would be a loop, and a fresh session having
+    /// a rotten tree is not a case that recycling can fix.
     async fn prime_session(&self) -> anyhow::Result<()> {
-        self.send(
+        self.send_once(
             reqwest::Method::POST,
             "/appium/settings",
             Some(json!({ "settings": { "waitForIdleTimeout": 0 } })),
@@ -204,7 +250,49 @@ impl AgentClient {
         .map(|_| ())
     }
 
-    /// Is the agent listening at all? Cheap; used for liveness.
+    /// Delete this session on the device.
+    ///
+    /// **Not hygiene — a measured fix.** `connect` POSTs `/session` and nothing used
+    /// to remove it, so every `open_session` left one behind. Measured on a Redmi
+    /// Note 12 (11/08/2026) after roughly ten accumulated sessions in one afternoon:
+    /// every element query went from ~150 ms to the server's hardcoded
+    /// root-`AccessibilityNodeInfo` timeout — 10 000+ ms, then `absent` — and a
+    /// force-stop of the instrumentation restored 118–425 ms immediately. The
+    /// symptom looks exactly like a wrong locator, which is what makes it expensive:
+    /// AGENTS.md §9 records the same 10 s regime for the S8+ fleet as if it were a
+    /// property of a playing feed.
+    pub async fn close(&self) -> anyhow::Result<()> {
+        self.send(reqwest::Method::DELETE, "", None)
+            .await
+            .map(|_| ())
+    }
+
+    /// Whether this session can still **read the screen**, used before reuse.
+    ///
+    /// It queries an element, and that is the whole point — `window_size` is not
+    /// evidence and used to be what this asked. Measured on an SM-N950F on
+    /// 12/08/2026, on an agent whose `UiAutomation` connection had been taken away by
+    /// an out-of-band `adb shell uiautomator dump`: the server process was alive,
+    /// `/status` answered, `window_size` answered in **0 ms**, and every element query
+    /// blocked until the HTTP timeout. `is_alive` said yes, so
+    /// [`AndroidDriver::ensure_agent`] reused the session, and the nurture loop then
+    /// timed out waiting for a feed that was plainly on screen.
+    ///
+    /// `FrameLayout` because it is present on every Android screen, so a healthy agent
+    /// answers from the first node it walks — a locator that is *absent* would instead
+    /// wait out the server's hardcoded root-node timeout and make a healthy agent look
+    /// broken. `find` maps a genuine absence to `Ok(None)`, which counts as alive: this
+    /// asks whether the tree is readable, not what is in it.
+    pub async fn is_alive(&self) -> bool {
+        self.find(&Locator::ClassName("android.widget.FrameLayout".into()))
+            .await
+            .is_ok()
+    }
+
+    /// Is the agent **listening**? Cheap, and deliberately weaker than
+    /// [`Self::is_alive`]: `/status` says a server is bound to the port, not that it can
+    /// read the screen. Good enough for the operator's tile, not good enough to hand a
+    /// session to a loop.
     pub async fn is_ready(base: &str) -> bool {
         let Ok(http) = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
@@ -220,10 +308,73 @@ impl AgentClient {
     }
 
     fn url(&self, suffix: &str) -> String {
-        format!("{}/session/{}{suffix}", self.base, self.session_id)
+        format!("{}/session/{}{suffix}", self.base, self.session_id.lock())
+    }
+
+    /// Replace a degraded session with a fresh one, in place.
+    ///
+    /// **Measured, and it corrects an earlier wrong conclusion.** On a Redmi Note 12
+    /// (11/08/2026) a session that had been in use for a while answered every element
+    /// query with the server's hardcoded root-`AccessibilityNodeInfo` timeout — 10 116 ms
+    /// and then an error, which reads exactly like a wrong locator. `GET /sessions`
+    /// showed **one** session, so sessions were not accumulating. Deleting that session
+    /// and creating another, **without restarting the agent**, dropped the same query to
+    /// **7 ms**. So it is a long-lived session that rots, not a pile of them.
+    ///
+    /// That is why holding one session forever is the wrong fix: the desktop app runs
+    /// for hours. Recycling on the server's own error message is self-healing and needs
+    /// no timing heuristic.
+    async fn recreate_session(&self) -> anyhow::Result<()> {
+        let previous = self.session_id.lock().clone();
+        // Best effort: the point is the new session, and the old one is already broken.
+        let _ = self
+            .http
+            .delete(format!("{}/session/{previous}", self.base))
+            .send()
+            .await;
+        let response: Value = self
+            .http
+            .post(format!("{}/session", self.base))
+            .json(&json!({ "capabilities": { "firstMatch": [{}], "alwaysMatch": {} } }))
+            .send()
+            .await
+            .context("mở lại session sau khi cây accessibility hỏng")?
+            .json()
+            .await
+            .context("đọc phản hồi mở lại session")?;
+        let fresh = response
+            .pointer("/value/sessionId")
+            .and_then(Value::as_str)
+            .or_else(|| response.get("sessionId").and_then(Value::as_str))
+            .ok_or_else(|| anyhow!("agent không trả sessionId khi mở lại: {response}"))?
+            .to_string();
+        tracing::warn!(
+            previous = %previous,
+            fresh = %fresh,
+            "recycled a degraded agent session"
+        );
+        *self.session_id.lock() = fresh;
+        self.prime_session().await
     }
 
     async fn send(
+        &self,
+        method: reqwest::Method,
+        suffix: &str,
+        body: Option<Value>,
+    ) -> anyhow::Result<Value> {
+        match self.send_once(method.clone(), suffix, body.clone()).await {
+            Err(error) if error.to_string().contains(STALE_TREE_MARKER) => {
+                // One retry, on one specific server message. Anything else propagates:
+                // a blanket retry would re-issue taps and non-idempotent calls.
+                self.recreate_session().await?;
+                self.send_once(method, suffix, body).await
+            }
+            other => other,
+        }
+    }
+
+    async fn send_once(
         &self,
         method: reqwest::Method,
         suffix: &str,
@@ -277,6 +428,32 @@ impl AgentClient {
                 }
             }
         }
+    }
+
+    /// Every element matching, in the order the server walks the tree.
+    ///
+    /// An empty vector is an observation, not a failure — the same rule
+    /// [`Self::find`] follows.
+    pub async fn find_all(&self, locator: &Locator) -> anyhow::Result<Vec<String>> {
+        let value = match self
+            .send(reqwest::Method::POST, "/elements", Some(locator.to_body()))
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                let text = error.to_string();
+                if text.contains("no such element") || text.contains("could not be located") {
+                    return Ok(Vec::new());
+                }
+                return Err(error);
+            }
+        };
+        let entries = value
+            .get("value")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok(entries.iter().filter_map(element_id_from).collect())
     }
 
     pub async fn require(&self, locator: &Locator) -> anyhow::Result<String> {
@@ -378,7 +555,27 @@ impl AgentClient {
     /// Deliberately not `ACTION_CLICK`: an accessibility click is trivially
     /// distinguishable from a person and bypasses the gesture layer the
     /// touch-jitter work depends on.
+    /// One tap, with a contact time and a drift rather than a fixed 60 ms hold.
+    ///
+    /// The old version held for exactly 60 ms and never moved while down, on every tap, on
+    /// every device, forever. A finger does neither: contact is tens of milliseconds and
+    /// varies, and the pad rolls a pixel or two against the glass before it lifts. Both are
+    /// in the touch stream the app receives, and both were constant.
+    ///
+    /// The drift is deliberately smaller than the jitter
+    /// [`TouchPointPlanner`](riviu_core::nurture) already applies to *where* the tap lands —
+    /// this is the finger settling, not a different target, so it must never carry the point
+    /// out of the control that was located.
     pub async fn tap(&self, x: f64, y: f64) -> anyhow::Result<()> {
+        let (contact_ms, drift_x, drift_y) = {
+            use rand::Rng;
+            let mut rng = rand::thread_rng();
+            (
+                rng.gen_range(45..=130),
+                rng.gen_range(-2..=2),
+                rng.gen_range(-2..=2),
+            )
+        };
         let actions = json!({
             "actions": [{
                 "type": "pointer",
@@ -387,12 +584,53 @@ impl AgentClient {
                 "actions": [
                     { "type": "pointerMove", "duration": 0, "x": x as i64, "y": y as i64 },
                     { "type": "pointerDown", "button": 0 },
-                    { "type": "pause", "duration": 60 },
+                    { "type": "pause", "duration": contact_ms },
+                    // The roll happens under contact, so it is part of the same touch.
+                    { "type": "pointerMove", "duration": 12,
+                      "x": x as i64 + drift_x, "y": y as i64 + drift_y },
                     { "type": "pointerUp", "button": 0 }
                 ]
             }]
         });
         self.send(reqwest::Method::POST, "/actions", Some(actions))
+            .await
+            .map(|_| ())
+    }
+
+    /// A swipe as the planned path: one `pointerMove` per leg, then a settle before the lift.
+    ///
+    /// The whole reason [`riviu_core::types::SwipePath`] exists. [`Self::swipe`] sends a
+    /// single move, which the framework reconstructs as a straight line at constant
+    /// velocity; this sends the curve and the velocity profile that were planned, in the
+    /// same one round trip.
+    pub async fn swipe_path(&self, path: &riviu_core::types::SwipePath) -> anyhow::Result<()> {
+        let mut actions = Vec::with_capacity(path.steps.len() + 3);
+        actions.push(json!({
+            "type": "pointerMove", "duration": 0,
+            "x": path.start.x as i64, "y": path.start.y as i64
+        }));
+        actions.push(json!({ "type": "pointerDown", "button": 0 }));
+        for step in &path.steps {
+            actions.push(json!({
+                "type": "pointerMove",
+                "duration": step.duration_ms.max(1) as i64,
+                "x": step.point.x as i64,
+                "y": step.point.y as i64
+            }));
+        }
+        if path.settle_ms > 0 {
+            actions.push(json!({ "type": "pause", "duration": path.settle_ms as i64 }));
+        }
+        actions.push(json!({ "type": "pointerUp", "button": 0 }));
+        let body = json!({
+            "actions": [{
+                "type": "pointer",
+                "id": "finger1",
+                "parameters": { "pointerType": "touch" },
+                "actions": actions
+            }]
+        });
+        self.send(reqwest::Method::POST, "/actions", Some(body))
             .await
             .map(|_| ())
     }
@@ -463,11 +701,18 @@ impl AgentClient {
 }
 
 fn element_id(value: &Value) -> Option<String> {
-    let inner = value.get("value")?;
-    if let Some(id) = inner.get(W3C_ELEMENT_KEY).and_then(Value::as_str) {
+    element_id_from(value.get("value")?)
+}
+
+/// The id out of one element object, W3C key or the legacy one.
+///
+/// Split out because `/elements` returns an **array of these**, unwrapped, while
+/// `/element` wraps a single one under `value`.
+fn element_id_from(element: &Value) -> Option<String> {
+    if let Some(id) = element.get(W3C_ELEMENT_KEY).and_then(Value::as_str) {
         return Some(id.to_string());
     }
-    if let Some(id) = inner.get("ELEMENT").and_then(Value::as_str) {
+    if let Some(id) = element.get("ELEMENT").and_then(Value::as_str) {
         return Some(id.to_string());
     }
     None

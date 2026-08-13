@@ -779,6 +779,17 @@ pub fn qualified_geometry_profile_id(
         return Err("geometry is invalid");
     }
 
+    // FROZEN HASH INPUT. These keys are hash material, not field names, and they
+    // must not be "tidied" to match the struct. This SHA-256 is
+    // `ImageCoordinateTarget::profile_id`, persisted inside compiled plans
+    // (`flow_revisions`) and attempt inputs (`flow_node_attempts.canonical_input_json`),
+    // and `flow::executor` refuses to run a node whose target profile id does not
+    // match preflight. Change a key here and every saved flow with an
+    // image-coordinate tap starts failing. The golden hash asserted in
+    // `crate::flow` tests is the guard — if it moves, this block was edited.
+    //
+    // `iosVersion` in particular is deliberately out of step with the Rust field
+    // `snapshot.os_version`; that is why the value is written out explicitly.
     let material = serde_json::json!({
         "selectedArtifactSha256": &snapshot.selected_artifact_sha256,
         "installedAgent": &snapshot.installed_agent,
@@ -787,7 +798,7 @@ pub fn qualified_geometry_profile_id(
         "driverAdapterVersion": &snapshot.driver_adapter_version,
         "transport": snapshot.transport,
         "productType": &snapshot.product_type,
-        "iosVersion": &snapshot.ios_version,
+        "iosVersion": &snapshot.os_version,
         "targetApp": &snapshot.target_app,
         "geometry": geometry,
     });

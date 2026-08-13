@@ -49,6 +49,8 @@ LEGACY_WDA_SOURCE_LOCK = (
 )
 LEGACY_WDA_SOURCE = REPOSITORY_ROOT / "sidecars" / "wda" / "WebDriverAgent"
 LEGACY_WDA_ICONSET = REPOSITORY_ROOT / "sidecars" / "wda" / "AppIcon.appiconset"
+ANDROID_TOOLS_ROOT = REPOSITORY_ROOT / "sidecars" / "android"
+ANDROID_TOOLS_MANIFEST_NAME = "android-tools-manifest.json"
 BRANDING_LOGO = REPOSITORY_ROOT / "logo.jpg"
 TAURI_CONFIG = REPOSITORY_ROOT / "apps" / "desktop" / "src-tauri" / "tauri.conf.json"
 TAURI_CARGO_MANIFEST = (
@@ -629,6 +631,99 @@ def assert_same_file(source: Path, packaged: Path) -> None:
         )
 
 
+def verify_android_tools(root: Path) -> dict[str, Any]:
+    """Check every bundled Android tool against `android-tools-manifest.json`.
+
+    Runs against the repository tree *and* against the packaged copy, because they
+    answer different questions: in the repo it catches a binary swapped without
+    regenerating the pin, and in the package it catches the bundler dropping or
+    rewriting a file.
+
+    Both size and digest, in that order. `ensure_apk` on the Rust side decides
+    whether to re-push minicap by comparing byte counts on the device, so a corrupt
+    APK of the right size would be trusted forever — the size check is the cheap one
+    and the digest is the one that actually closes that hole.
+
+    Also asserts the manifest is *complete*: any file present in the tree but absent
+    from the manifest is an error. Without that, adding a fifth binary and forgetting
+    the pin would ship an unverified file and pass every check here.
+    """
+
+    manifest_path = root / ANDROID_TOOLS_MANIFEST_NAME
+    manifest = load_json(manifest_path)
+    if manifest.get("manifestVersion") != 1:
+        raise ArtifactError(
+            f"{manifest_path} has unsupported manifestVersion "
+            f"{manifest.get('manifestVersion')!r}"
+        )
+    entries = manifest.get("files")
+    if not isinstance(entries, list) or not entries:
+        raise ArtifactError(f"{manifest_path} lists no files")
+
+    verified: dict[str, str] = {}
+    for entry in entries:
+        relative = entry.get("path")
+        if not isinstance(relative, str) or not relative:
+            raise ArtifactError(f"{manifest_path} has an entry with no path")
+        if relative.startswith("/") or ".." in Path(relative).parts:
+            raise ArtifactError(f"{manifest_path} path escapes the tree: {relative}")
+        target = root / relative
+        if not target.is_file():
+            raise ArtifactError(f"bundled Android tool is missing: {target}")
+        size = target.stat().st_size
+        if size != entry.get("bytes"):
+            raise ArtifactError(
+                f"bundled Android tool has the wrong size: {relative} is {size} bytes, "
+                f"manifest says {entry.get('bytes')}"
+            )
+        digest = sha256_file(target)
+        if digest.lower() != str(entry.get("sha256", "")).lower():
+            raise ArtifactError(
+                f"bundled Android tool has the wrong SHA-256: {relative} is {digest}, "
+                f"manifest says {entry.get('sha256')}"
+            )
+        verified[relative] = digest
+
+    on_disk = {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file()
+    } - {ANDROID_TOOLS_MANIFEST_NAME, "README.md"}
+    unpinned = sorted(on_disk - set(verified))
+    if unpinned:
+        raise ArtifactError(
+            "bundled Android tools present but not pinned by "
+            f"{ANDROID_TOOLS_MANIFEST_NAME}: {unpinned}"
+        )
+
+    return {"root": str(root), "files": verified}
+
+
+def assert_every_sidecar_resource_is_verified(checked_targets: set[str]) -> None:
+    """Fail when `bundle.resources` ships something no check above looks at.
+
+    The list in `verify_packaged_resources` is hand-written, and until now nothing
+    connected it to the config: a resource added to `tauri.conf.json` and forgotten
+    here would be shipped and never verified, silently. This closes that by reading
+    the declaration itself and demanding every `sidecars/` target be accounted for.
+    """
+
+    resources = load_json(TAURI_CONFIG).get("bundle", {}).get("resources", {})
+    if not isinstance(resources, dict):
+        raise ArtifactError("bundle.resources must be a source-to-target map")
+    declared = {
+        target.rstrip("/")
+        for target in resources.values()
+        if isinstance(target, str) and target.startswith("sidecars/")
+    }
+    unverified = sorted(declared - {target.rstrip("/") for target in checked_targets})
+    if unverified:
+        raise ArtifactError(
+            "bundle.resources declares resources that no packaged-resource check "
+            f"covers: {unverified}"
+        )
+
+
 def verify_packaged_resources(
     sidecars_root: Path, runtime_dir: Path, runtime_manifest: dict[str, Any]
 ) -> dict[str, Any]:
@@ -667,6 +762,27 @@ def verify_packaged_resources(
     )
     for source in production_paths():
         assert_same_file(source, sidecars_root / "wda" / source.name)
+
+    # Six resources that `bundle.resources` shipped and nothing here checked. Found by
+    # the completeness assertion below rather than by reading — which is the argument
+    # for having it: the hand-written list above had drifted from the config and no
+    # gate noticed, so these were being shipped unverified.
+    for relative in (
+        "signer/requirements.txt",
+        "wda/candidate-manifest.json",
+        "wda/text-manifest.json",
+        "wda/interaction-capabilities.json",
+        "wda/interaction-capabilities.schema.json",
+        "wda/interaction_vision_ocr.swift",
+    ):
+        assert_same_file(REPOSITORY_ROOT / "sidecars" / relative, sidecars_root / relative)
+
+    # The bundled Android tools: the tree is compared whole, then each file is checked
+    # against its own manifest. The tree comparison is what gives completeness — a
+    # sixth binary cannot appear in the package without showing up here.
+    packaged_android_root = sidecars_root / "android"
+    assert_same_tree(ANDROID_TOOLS_ROOT, packaged_android_root, "bundled Android tools")
+    android_tools = verify_android_tools(packaged_android_root)
 
     assert_same_tree(runtime_dir, packaged_runtime, "frozen runtime")
 
@@ -777,8 +893,38 @@ def verify_packaged_resources(
             f"packaged signing resource contract failed: {signing_payload!r}"
         )
 
+    # Last, so it runs after every check above has declared what it covers. The set is
+    # written out here rather than accumulated, because the value of the assertion is
+    # that a human has to name a resource for it to count as verified.
+    assert_every_sidecar_resource_is_verified(
+        {
+            "sidecars/pymobiledevice3/requirements.txt",
+            "sidecars/pymobiledevice3/requirements-lock.txt",
+            "sidecars/pymobiledevice3/riviu_pmd.py",
+            "sidecars/signer/requirements.txt",
+            "sidecars/signer/riviu_signer.py",
+            "sidecars/wda/logo.jpg",
+            "sidecars/wda/AppIcon.appiconset",
+            "sidecars/wda/WebDriverAgent",
+            "sidecars/wda/build_and_install.py",
+            "sidecars/wda/legacy-wda-source-lock.json",
+            "sidecars/wda/agent-manifest.json",
+            "sidecars/wda/candidate-manifest.json",
+            "sidecars/wda/text-manifest.json",
+            "sidecars/wda/interaction-capabilities.json",
+            "sidecars/wda/interaction-capabilities.schema.json",
+            "sidecars/wda/interaction_vision_ocr.swift",
+            "sidecars/wda/RiviuAgent.ipa",
+            "sidecars/wda/RiviuAgent-candidate.ipa",
+            "sidecars/wda/RiviuAgent-text.ipa",
+            "sidecars/wda/Riviumanagersphone.ipa",
+            "sidecars/android",
+        }
+    )
+
     return {
         "resourceTree": "PASS",
+        "androidTools": android_tools["files"],
         "ping": "PASS",
         "embeddedTidevice": "PASS",
         "embeddedSigner": "PASS",
@@ -1338,6 +1484,11 @@ def parse_checksum_file(path: Path) -> list[tuple[str, str]]:
     return entries
 
 
+def verify_android_tools_command(_args: argparse.Namespace) -> dict[str, Any]:
+    result = verify_android_tools(ANDROID_TOOLS_ROOT)
+    return {"ok": True, "command": "verify-android-tools", **result}
+
+
 def verify_release_command(args: argparse.Namespace) -> dict[str, Any]:
     root = args.root.resolve()
     source_commit = validate_source_commit(args.source_commit)
@@ -1514,6 +1665,12 @@ def parse_args() -> argparse.Namespace:
     collect.add_argument("--output", type=Path, required=True)
     collect.add_argument("--source-commit", required=True)
     collect.set_defaults(handler=collect_command)
+
+    # Repo-side only: no build inputs, so the quality job can run it in seconds. A PR
+    # that swaps a bundled binary without regenerating the pin fails here instead of
+    # after three 120-minute platform builds.
+    verify_android = subparsers.add_parser("verify-android-tools")
+    verify_android.set_defaults(handler=verify_android_tools_command)
 
     verify_release = subparsers.add_parser("verify-release")
     verify_release.add_argument("--root", type=Path, required=True)

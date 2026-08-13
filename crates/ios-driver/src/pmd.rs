@@ -27,7 +27,6 @@ use tokio::process::{Child, Command};
 use crate::config::{DriverConfig, DriverTarget};
 use crate::interaction_runtime::{
     repair_install_only_locked, InstallOnlyInspection, InstallOnlyRuntime,
-    InteractionLifecycleRegistry,
 };
 use crate::process_tree::background_command;
 use crate::stream::StreamHub;
@@ -35,6 +34,7 @@ use crate::supervisor::{DeviceOwned, OwnedChild, ProcessRegistry, Role, SlotMap}
 use crate::telemetry;
 use crate::wda::{WdaBackend, WdaClient, WdaProfile};
 use crate::{decide_install, AgentArtifact, AgentInstallDecision, InstalledAppMetadata};
+use riviu_core::InteractionLifecycleRegistry;
 
 /// First local port used for the USB tunnel to device WDA (8100).
 const WDA_LOCAL_PORT_BASE: u16 = 18100;
@@ -252,7 +252,12 @@ fn parse_interaction_inspection(
         driver_adapter_version: INTERACTION_DRIVER_ADAPTER_VERSION.to_string(),
         transport: response.transport,
         product_type: response.product_type,
-        ios_version: response.ios_version,
+        // The rename boundary. `InteractionInspection::ios_version` keeps its name
+        // on purpose: it decodes the Python sidecar's `iosVersion` under
+        // `deny_unknown_fields`, the sidecar is resolved at runtime so a new binary
+        // can meet an older copy, and on iOS `lockdown.product_version` genuinely
+        // *is* an iOS version — the name is correct there, not a misnomer.
+        os_version: response.ios_version,
         target_app: InstalledTargetIdentity {
             bundle_id: target.bundle_id,
             version: target.version,
@@ -389,6 +394,91 @@ fn verified_process_control_from_ping(stdout: &[u8], command_succeeded: bool) ->
             .any(|contract| contract == VERIFIED_PROCESS_CONTROL_CONTRACT)
 }
 
+/// What a `ping` said about the sidecar, split into the two things callers need.
+///
+/// Separate fields because they are decided differently and used differently.
+/// `verified_app_termination` gates a *contract* and must fail closed — see
+/// [`verified_process_control_from_ping`]. `degraded_reason` is the operator-facing
+/// sentence, and it is `Some` whenever the payload does not say the sidecar is
+/// healthy, **regardless of exit code**.
+///
+/// That last clause is the fix. `probe` tolerates exit code 2 on purpose, so that a
+/// sidecar which cannot prove verified process control still yields a usable driver
+/// rather than blocking startup. But nothing recorded *why*, so a sidecar with
+/// `pymobiledevice3: false` — which exits **0** — produced a driver the UI reported as
+/// perfectly healthy while every device call was doomed. Judging the payload rather
+/// than the exit status catches that blind spot as well as the exit-2 one.
+#[derive(Debug, Clone, Default)]
+pub struct SidecarHealth {
+    pub verified_app_termination: bool,
+    pub degraded_reason: Option<String>,
+}
+
+/// Classify a `ping`, instead of bailing or silently shrugging.
+fn classify_sidecar_ping(stdout: &[u8], stderr: &[u8], exit_code: Option<i32>) -> SidecarHealth {
+    let verified_app_termination = verified_process_control_from_ping(stdout, exit_code == Some(0));
+
+    let response = match serde_json::from_slice::<SidecarPingResponse>(stdout) {
+        Ok(response) => response,
+        Err(error) => {
+            // No parseable payload at all. Report the exit code and a slice of stderr:
+            // this is the shape a missing interpreter or an import crash takes, and the
+            // Python traceback is the only thing that names the cause.
+            let detail = String::from_utf8_lossy(stderr);
+            let detail = detail.trim();
+            let detail = if detail.is_empty() {
+                error.to_string()
+            } else {
+                detail
+                    .chars()
+                    .rev()
+                    .take(400)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect()
+            };
+            return SidecarHealth {
+                verified_app_termination,
+                degraded_reason: Some(format!(
+                    "sidecar iOS trả lời không đọc được (exit {}): {detail}",
+                    exit_code.map_or_else(|| "?".to_string(), |code| code.to_string())
+                )),
+            };
+        }
+    };
+
+    let mut faults: Vec<&str> = Vec::new();
+    if !response.ok {
+        faults.push("ping báo ok=false");
+    }
+    if !response.pymobiledevice3 {
+        // The one that used to be invisible: exit 0, valid JSON, and every device call
+        // dead. `riviu_pmd.py` emits exactly this when the import fails.
+        faults.push("chưa cài pymobiledevice3");
+    }
+    if response.sidecar_protocol_version != PMD_SIDECAR_PROTOCOL_VERSION {
+        faults.push("phiên bản giao thức sidecar không khớp bản dựng này");
+    }
+    if !response
+        .contracts
+        .iter()
+        .any(|contract| contract == VERIFIED_PROCESS_CONTROL_CONTRACT)
+    {
+        faults.push("thiếu hợp đồng verifiedProcessControl (tắt app không có bằng chứng)");
+    }
+    if faults.is_empty() {
+        return SidecarHealth {
+            verified_app_termination,
+            degraded_reason: None,
+        };
+    }
+    SidecarHealth {
+        verified_app_termination,
+        degraded_reason: Some(format!("sidecar iOS bị suy giảm: {}", faults.join("; "))),
+    }
+}
+
 #[derive(Clone)]
 pub struct PmdIosDriver {
     sidecar: Option<SidecarProgram>,
@@ -408,6 +498,17 @@ pub struct PmdIosDriver {
     agent_statuses: Arc<Mutex<HashMap<String, AgentStatus>>>,
     agent_settings: Arc<RwLock<AgentSettings>>,
     artifact: Option<AgentArtifact>,
+    /// What `ping` said at boot, if it was not healthy.
+    ///
+    /// A snapshot, and honestly one: it describes the sidecar the driver was built
+    /// around, which does not change while the process lives.
+    boot_degraded_reason: Option<String>,
+    /// Why the last device listing came back empty, if it did.
+    ///
+    /// Live rather than a snapshot, and that is the point: this is how "the operator
+    /// installed Apple Devices just now" becomes visible without restarting the app.
+    /// Cleared on the first listing that succeeds, so a fixed machine stops nagging.
+    last_list_error: Arc<Mutex<Option<String>>>,
 }
 
 impl PmdIosDriver {
@@ -426,8 +527,15 @@ impl PmdIosDriver {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-        let verified_app_termination =
-            verified_process_control_from_ping(&output.stdout, output.status.success());
+        // Exit 2 is still tolerated, and for the reason it always was: it makes
+        // `verifiedProcessControl` fail *closed* — keep the driver, drop the contract
+        // (AGENTS.md 968-973). What is new is that the reason no longer vanishes.
+        let health = classify_sidecar_ping(&output.stdout, &output.stderr, output.status.code());
+        if let Some(reason) = &health.degraded_reason {
+            tracing::warn!("{reason}");
+        }
+        let verified_app_termination = health.verified_app_termination;
+        let degraded_reason = health.degraded_reason;
         tracing::info!(
             distribution = if sidecar.is_bundled() {
                 "bundled"
@@ -441,6 +549,7 @@ impl PmdIosDriver {
         let driver = Self::build(
             Some(sidecar),
             verified_app_termination,
+            degraded_reason,
             profile,
             artifact,
             settings,
@@ -460,6 +569,10 @@ impl PmdIosDriver {
         Ok(Self::build(
             None,
             false,
+            // The caller owns the reason on this path: `create_driver` already has the
+            // error that sent it here, and it is more specific than anything this
+            // constructor could invent.
+            None,
             profile,
             artifact,
             settings,
@@ -467,9 +580,21 @@ impl PmdIosDriver {
         ))
     }
 
+    /// The boot-time verdict on the sidecar, or `None` when it answered healthy.
+    pub fn boot_degraded_reason(&self) -> Option<String> {
+        self.boot_degraded_reason.clone()
+    }
+
+    /// Why the most recent device listing was empty, or `None` if it was not.
+    pub fn last_list_error(&self) -> Option<String> {
+        self.last_list_error.lock().clone()
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn build(
         sidecar: Option<SidecarProgram>,
         verified_app_termination: bool,
+        boot_degraded_reason: Option<String>,
         profile: WdaProfile,
         artifact: Option<AgentArtifact>,
         agent_settings: AgentSettings,
@@ -478,6 +603,8 @@ impl PmdIosDriver {
         Self {
             sidecar,
             verified_app_termination,
+            boot_degraded_reason,
+            last_list_error: Arc::new(Mutex::new(None)),
             streams: StreamHub::new(),
             wda_host: "127.0.0.1".into(),
             profile,
@@ -2791,15 +2918,34 @@ impl DeviceDriver for PmdIosDriver {
             Err(error) => {
                 // A transient sidecar failure must not silently read as an empty
                 // fleet. Surface it, then degrade to empty so the UI stays alive.
+                //
+                // Returning `Err` here was considered and rejected: `AppState::bootstrap`
+                // hard-fails the first scan on purpose, because Flow recovery needs a
+                // trustworthy snapshot, so an `Err` would turn "Apple Devices is not
+                // installed" into an app that will not open at all.
                 tracing::warn!("device list scan failed: {error:#}");
+                *self.last_list_error.lock() = Some(format!("không liệt kê được máy: {error:#}"));
                 return Ok(Vec::new());
             }
         };
+        // The second half of the same silence: `riviu_pmd.py` emits
+        // `{"devices": [], "error": "pymobiledevice3 not installed"}` with **exit 0**, so
+        // `run_json` succeeds and the key was simply dropped. Reading it is what makes a
+        // missing dependency distinguishable from a farm with nothing plugged in.
+        let payload_error = value
+            .get("error")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|error| !error.is_empty());
         let devices = value
             .get("devices")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
+        {
+            let mut slot = self.last_list_error.lock();
+            *slot = payload_error.map(|error| format!("sidecar iOS báo lỗi: {error}"));
+        }
         let mut out = Vec::new();
         for d in devices {
             let udid = d
@@ -2831,7 +2977,8 @@ impl DeviceDriver for PmdIosDriver {
                     .and_then(|v| v.as_str())
                     .unwrap_or("Unknown")
                     .to_string(),
-                ios_version: d
+                platform: riviu_core::DevicePlatform::Ios,
+                os_version: d
                     .get("iosVersion")
                     .and_then(|v| v.as_str())
                     .unwrap_or("?")
@@ -3669,6 +3816,94 @@ print(json.dumps({'ok': True, 'note': 'terminate best-effort'}), flush=True)
             assert_eq!(
                 driver.supports_verified_app_termination("fixture-udid"),
                 expected
+            );
+        }
+    }
+
+    #[test]
+    fn a_ping_that_exits_zero_but_says_pymobiledevice3_is_absent_is_degraded() {
+        // The blind spot the exit-2 tolerance left behind. `riviu_pmd.py` emits exactly
+        // this shape with exit **0** when the import fails, so nothing about the exit
+        // status is wrong — the payload is. Before this, the app reported a perfectly
+        // healthy install while every device call was doomed.
+        let health = classify_sidecar_ping(
+            br#"{"ok": true, "pymobiledevice3": false, "sidecarProtocolVersion": 2,
+                 "contracts": ["verifiedProcessControl"]}"#,
+            b"",
+            Some(0),
+        );
+        let reason = health
+            .degraded_reason
+            .expect("a sidecar without pymobiledevice3 must be reported");
+        assert!(reason.contains("pymobiledevice3"), "{reason}");
+        assert!(!health.verified_app_termination);
+    }
+
+    #[test]
+    fn a_healthy_ping_reports_no_reason_so_the_banner_stays_hidden() {
+        // The other half: this must be silent, or the red banner is permanent and
+        // therefore worthless.
+        let health = classify_sidecar_ping(
+            br#"{"ok": true, "pymobiledevice3": true, "sidecarProtocolVersion": 2,
+                 "contracts": ["verifiedProcessControl"]}"#,
+            b"",
+            Some(0),
+        );
+        assert_eq!(health.degraded_reason, None);
+        assert!(health.verified_app_termination);
+    }
+
+    #[test]
+    fn exit_two_keeps_a_usable_driver_while_naming_the_missing_contract() {
+        // Exit 2 is still tolerated on purpose — it makes `verifiedProcessControl` fail
+        // closed rather than blocking startup (AGENTS.md 968-973). What changed is that
+        // the reason is now carried out instead of discarded.
+        let health = classify_sidecar_ping(
+            br#"{"ok": true, "pymobiledevice3": true, "sidecarProtocolVersion": 2,
+                 "contracts": []}"#,
+            b"",
+            Some(2),
+        );
+        let reason = health.degraded_reason.expect("exit 2 must be explained");
+        assert!(reason.contains("verifiedProcessControl"), "{reason}");
+        assert!(!health.verified_app_termination);
+    }
+
+    #[test]
+    fn an_unparseable_ping_reports_the_exit_code_and_the_tail_of_stderr() {
+        // The shape a missing interpreter or an import crash takes. The Python traceback
+        // is the only thing that names the cause, so it has to survive into the message.
+        let health = classify_sidecar_ping(
+            b"not json at all",
+            b"Traceback (most recent call last):\n  ImportError: no module named x\n",
+            Some(1),
+        );
+        let reason = health.degraded_reason.expect("garbage must be explained");
+        assert!(reason.contains("exit 1"), "{reason}");
+        assert!(reason.contains("ImportError"), "{reason}");
+        assert!(!health.verified_app_termination);
+    }
+
+    #[test]
+    fn several_faults_are_all_named_rather_than_only_the_first() {
+        // A bad install tends to break more than one thing, and reporting only the
+        // first sends the operator to fix a symptom.
+        let health = classify_sidecar_ping(
+            br#"{"ok": false, "pymobiledevice3": false, "sidecarProtocolVersion": 1,
+                 "contracts": []}"#,
+            b"",
+            Some(0),
+        );
+        let reason = health.degraded_reason.expect("faults must be reported");
+        for expected in [
+            "ok=false",
+            "pymobiledevice3",
+            "giao thức",
+            "verifiedProcessControl",
+        ] {
+            assert!(
+                reason.contains(expected),
+                "{expected} missing from {reason}"
             );
         }
     }

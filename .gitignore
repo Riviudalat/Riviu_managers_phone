@@ -7,7 +7,8 @@ apps/desktop/node_modules
 *.db
 .idea
 .vscode
-.claude/
+.claude/*
+!.claude/skills/
 *.db-journal
 __pycache__/
 *.py[cod]

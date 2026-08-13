@@ -1740,6 +1740,10 @@ mod interaction_tests {
             message_count: 2,
             instruction: "tự nhiên".into(),
             max_words: 12,
+            // Both default on the wire; a fixture spells them out so the shape stays
+            // visible and a new field cannot be forgotten silently.
+            manual_comments: Vec::new(),
+            like_target: false,
 
             mode: ThreadMode::Threaded,
         }

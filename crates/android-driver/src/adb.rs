@@ -26,53 +26,159 @@ pub struct AdbProgram {
     path: PathBuf,
 }
 
+/// One place `adb` might be, and where that guess came from.
+///
+/// The origin exists so a refusal can say *which* of the six sources produced the
+/// binary that failed. "adb is not usable" naming only a path leaves the operator
+/// guessing whether the app read their `RIVIU_ADB_PATH` at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdbCandidate {
+    pub path: PathBuf,
+    pub origin: AdbOrigin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdbOrigin {
+    /// Passed in by the caller, from app config.
+    Configured,
+    /// `RIVIU_ADB_PATH`, pointing straight at the executable.
+    RiviuAdbPath,
+    /// `<ANDROID_SDK_ROOT>/platform-tools/adb`.
+    AndroidSdkRoot,
+    /// `<ANDROID_HOME>/platform-tools/adb`.
+    AndroidHome,
+    /// The bare name, left for the OS to find on `PATH`.
+    Path,
+    /// The copy shipped inside our own installer.
+    Bundled,
+}
+
+impl AdbOrigin {
+    /// How this source reads to an operator, in the language the UI uses.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Configured => "cấu hình của app",
+            Self::RiviuAdbPath => "RIVIU_ADB_PATH",
+            Self::AndroidSdkRoot => "ANDROID_SDK_ROOT",
+            Self::AndroidHome => "ANDROID_HOME",
+            Self::Path => "PATH",
+            Self::Bundled => "bản đóng gói trong bộ cài",
+        }
+    }
+}
+
 impl AdbProgram {
-    /// Resolve `adb`, preferring an explicitly configured binary, then
-    /// `RIVIU_ADB_PATH`, then the standard SDK locations, then `PATH`.
+    /// Every place to look for `adb`, best first.
     ///
-    /// `RIVIU_ADB_PATH` points straight at the executable, which matters
-    /// because a machine can have platform-tools unpacked somewhere without an
-    /// SDK layout around it. Without it the only way to be found is to sit in
-    /// `<ANDROID_SDK_ROOT>/platform-tools/` or on `PATH`, and an operator with
-    /// a loose copy has no way to say where it is.
+    /// `configured -> RIVIU_ADB_PATH -> ANDROID_SDK_ROOT -> ANDROID_HOME -> PATH ->
+    /// bundled`. One implementation, because two callers need the same order and
+    /// disagreeing is how the diagnostics panel comes to report a different adb than
+    /// the one the fleet is actually driving.
     ///
-    /// Named for the repo's existing convention (`RIVIU_STREAM_CAPACITY`,
+    /// **The bundled copy is deliberately last, after `PATH`.** A machine that
+    /// already has platform-tools (Android Studio, scrcpy) has that copy's adb server
+    /// holding port 5037, and a client of a different revision forces
+    /// `adb server version doesn't match this client; killing...`, tearing down the
+    /// other tool's session. The operator's adb wins **if it runs**; ours is the
+    /// safety net for a clean machine. Being last also means the bundled branch is
+    /// never exercised on a developer machine — see AGENTS.md, it needs a second
+    /// clean host to test.
+    ///
+    /// `RIVIU_ADB_PATH` points straight at the executable, which matters because a
+    /// machine can have platform-tools unpacked somewhere without an SDK layout
+    /// around it. Named for the repo's existing convention (`RIVIU_STREAM_CAPACITY`,
     /// `RIVIU_DEFAULT_AGENT_MODE`, `RIVIU_FRAME_DUMP`).
-    pub fn resolve(configured: Option<&Path>) -> anyhow::Result<Self> {
-        let mut tried: Vec<String> = Vec::new();
-        let mut candidates: Vec<PathBuf> = Vec::new();
+    pub fn candidates(configured: Option<&Path>, bundled: Option<&Path>) -> Vec<AdbCandidate> {
+        let mut candidates: Vec<AdbCandidate> = Vec::new();
         if let Some(path) = configured {
-            candidates.push(path.to_path_buf());
+            candidates.push(AdbCandidate {
+                path: path.to_path_buf(),
+                origin: AdbOrigin::Configured,
+            });
         }
         if let Ok(direct) = std::env::var("RIVIU_ADB_PATH") {
             if !direct.trim().is_empty() {
-                candidates.push(PathBuf::from(direct.trim()));
+                candidates.push(AdbCandidate {
+                    path: PathBuf::from(direct.trim()),
+                    origin: AdbOrigin::RiviuAdbPath,
+                });
             }
         }
-        for key in ["ANDROID_SDK_ROOT", "ANDROID_HOME"] {
+        for (key, origin) in [
+            ("ANDROID_SDK_ROOT", AdbOrigin::AndroidSdkRoot),
+            ("ANDROID_HOME", AdbOrigin::AndroidHome),
+        ] {
             if let Ok(root) = std::env::var(key) {
                 if !root.trim().is_empty() {
-                    candidates.push(Path::new(&root).join("platform-tools").join(exe_name()));
+                    candidates.push(AdbCandidate {
+                        path: Path::new(root.trim())
+                            .join("platform-tools")
+                            .join(exe_name()),
+                        origin,
+                    });
                 }
             }
         }
+        // Bare name: let the OS search PATH. Always a candidate — there is nothing to
+        // stat, and whether it resolves is only knowable by running it.
+        candidates.push(AdbCandidate {
+            path: PathBuf::from(exe_name()),
+            origin: AdbOrigin::Path,
+        });
+        if let Some(path) = bundled {
+            candidates.push(AdbCandidate {
+                path: path.to_path_buf(),
+                origin: AdbOrigin::Bundled,
+            });
+        }
+        candidates
+    }
+
+    /// Pick a binary without running anything.
+    ///
+    /// First candidate that exists on disk, else the bare name for the OS to search.
+    /// Kept sync and infallible because [`crate::AndroidDriver::new`] is both, and a
+    /// driver that exists is useful even when adb turns out to be broken — the
+    /// probing version is [`crate::detect_driver`], which is the one that decides
+    /// whether the backend joins the fleet.
+    pub fn resolve(configured: Option<&Path>, bundled: Option<&Path>) -> anyhow::Result<Self> {
+        let candidates = Self::candidates(configured, bundled);
         for candidate in &candidates {
-            if candidate.is_file() {
+            if candidate.origin == AdbOrigin::Path {
+                continue;
+            }
+            if candidate.path.is_file() {
                 return Ok(Self {
-                    path: candidate.clone(),
+                    path: candidate.path.clone(),
                 });
             }
-            tried.push(candidate.display().to_string());
         }
-        // Bare name: let the OS search PATH.
-        tried.push(format!("{} (trên PATH)", exe_name()));
         Ok(Self {
             path: PathBuf::from(exe_name()),
         })
     }
 
+    /// Use exactly this binary, no searching.
+    ///
+    /// For [`crate::detect_driver`], which has already proved a specific candidate
+    /// answers `adb version` and must not have that choice re-derived underneath it.
+    pub fn at(path: PathBuf) -> Self {
+        Self { path }
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// An `adb` that is deliberately not runnable, for ordering tests.
+    ///
+    /// Lets a test prove a method refused **before** attempting any device call: if
+    /// it had reached adb, the failure would be a spawn error instead of the
+    /// expected refusal. `resolve` cannot express this — it falls back to the bare
+    /// name on `PATH`, which on a developer machine usually *is* runnable.
+    #[cfg(test)]
+    pub(crate) fn unrunnable_for_test(path: PathBuf) -> Self {
+        Self { path }
     }
 
     fn command(&self) -> Command {
@@ -120,6 +226,106 @@ impl AdbProgram {
     pub async fn run(&self, args: &[&str], timeout: Duration) -> anyhow::Result<String> {
         let bytes = self.run_bytes(args, timeout).await?;
         Ok(String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    /// Run a **read-only or otherwise idempotent** command, retrying a transport
+    /// blip instead of surfacing it.
+    ///
+    /// Deliberately *not* folded into [`Self::run_bytes`]. `pm install`,
+    /// `am start`, `am force-stop` and `input` are not idempotent, and a blind
+    /// retry after a first attempt that actually landed installs twice or
+    /// launches twice — the failure is invisible because both attempts "succeed".
+    /// Retry is therefore opt-in per call site, and only [`AdbFault::Transient`]
+    /// and [`AdbFault::Timeout`] are retried: an unaccepted USB-debugging prompt
+    /// or an unknown serial needs a human or a rescan, not another attempt.
+    pub async fn run_bytes_idempotent(
+        &self,
+        args: &[&str],
+        timeout: Duration,
+        attempts: u32,
+    ) -> anyhow::Result<Vec<u8>> {
+        let attempts = attempts.max(1);
+        let mut last: Option<anyhow::Error> = None;
+        for attempt in 1..=attempts {
+            match self.run_bytes(args, timeout).await {
+                Ok(bytes) => return Ok(bytes),
+                Err(error) => {
+                    let fault = classify_fault(&error.to_string());
+                    if !fault.is_worth_retrying() || attempt == attempts {
+                        return Err(error.context(format!(
+                            "adb {} gave up after {attempt} attempt(s) ({fault:?})",
+                            args.join(" ")
+                        )));
+                    }
+                    tracing::warn!(
+                        args = %args.join(" "),
+                        attempt,
+                        ?fault,
+                        "retrying a transient adb failure"
+                    );
+                    last = Some(error);
+                    tokio::time::sleep(retry_backoff(attempt)).await;
+                }
+            }
+        }
+        Err(last.unwrap_or_else(|| anyhow!("adb {} failed with no error", args.join(" "))))
+    }
+
+    /// Read `adb devices -l` until two consecutive reads agree.
+    ///
+    /// "adb is healthy" is not "one command returned" — a wedged or
+    /// mid-restart server happily answers one call and then reports a different
+    /// fleet on the next. The signal that matters is a *stable* list, so this
+    /// reads, settles, and reads again.
+    ///
+    /// Returns what it saw either way: an unstable fleet still has to be shown
+    /// to the operator rather than swallowed, so the caller decides what an
+    /// unstable reading is worth (see [`DeviceListReading::stable`]).
+    pub async fn devices_stable(&self, settle: Duration, deadline: Duration) -> DeviceListReading {
+        let started = tokio::time::Instant::now();
+        let mut previous: Option<Vec<AdbDeviceLine>> = None;
+        let mut attempts = 0u32;
+        loop {
+            attempts += 1;
+            let reading = match self.run(&["devices", "-l"], DEFAULT_TIMEOUT).await {
+                Ok(stdout) => parse_devices(&stdout),
+                Err(error) => {
+                    tracing::warn!(%error, "adb devices failed while waiting for a stable list");
+                    Vec::new()
+                }
+            };
+            if let Some(before) = previous.as_ref() {
+                if same_fleet(before, &reading) {
+                    return DeviceListReading {
+                        devices: reading,
+                        stable: true,
+                        attempts,
+                    };
+                }
+            }
+            if started.elapsed() >= deadline {
+                return DeviceListReading {
+                    devices: reading,
+                    stable: false,
+                    attempts,
+                };
+            }
+            previous = Some(reading);
+            tokio::time::sleep(settle).await;
+        }
+    }
+
+    /// `adb kill-server`.
+    ///
+    /// **Global, and never called automatically.** It drops the adb connection
+    /// of every other tool on the machine — another farm app mid-run included
+    /// (`docs/re/genfarmer/README.md` §9) — and every `adb forward` on the host
+    /// dies with it, so each device has to be re-forwarded afterwards. Reach for
+    /// it only when an operator asked for it, and log that you did.
+    pub async fn kill_server(&self) -> anyhow::Result<()> {
+        tracing::warn!("adb kill-server: every tool on this machine loses its adb connection");
+        self.run(&["kill-server"], DEFAULT_TIMEOUT).await?;
+        Ok(())
     }
 
     /// Run `adb -s <serial> <args>` and return raw stdout bytes.
@@ -215,6 +421,100 @@ pub enum AdbDeviceState {
     Other,
 }
 
+/// Why an `adb` invocation failed, and therefore whether another attempt helps.
+///
+/// The point of splitting these apart is that "retry" and "tell someone" are
+/// different answers. A device that has not had its USB-debugging prompt
+/// accepted will fail identically forever, and burning three attempts on it just
+/// delays the message the operator actually needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdbFault {
+    /// The transport blipped. The same command can succeed on the next attempt.
+    Transient,
+    /// The command outlived its deadline.
+    Timeout,
+    /// The USB-debugging prompt has not been accepted on the device. A human
+    /// must act.
+    Unauthorized,
+    /// adb does not know this serial — it was unplugged, or the scan is stale.
+    UnknownDevice,
+    /// Anything unrecognised. Treated as terminal on purpose: guessing that an
+    /// unknown failure is transient turns one clear error into three slow ones.
+    Terminal,
+}
+
+impl AdbFault {
+    pub fn is_worth_retrying(self) -> bool {
+        matches!(self, Self::Transient | Self::Timeout)
+    }
+}
+
+/// Classify a failed adb invocation from its message.
+///
+/// Matching is on the substrings adb itself emits. Order matters: an
+/// unauthorised device also mentions the serial, so the more specific families
+/// are tested first.
+pub fn classify_fault(message: &str) -> AdbFault {
+    let text = message.to_ascii_lowercase();
+    if text.contains("timed out after") {
+        return AdbFault::Timeout;
+    }
+    if text.contains("unauthorized") {
+        return AdbFault::Unauthorized;
+    }
+    if text.contains("not found")
+        || text.contains("no devices/emulators found")
+        || text.contains("more than one device")
+    {
+        return AdbFault::UnknownDevice;
+    }
+    const TRANSIENT: [&str; 8] = [
+        "device offline",
+        "protocol fault",
+        "connection reset",
+        "device still authorizing",
+        "cannot connect to daemon",
+        "daemon not running",
+        "broken pipe",
+        "error: closed",
+    ];
+    if TRANSIENT.iter().any(|marker| text.contains(marker)) {
+        return AdbFault::Transient;
+    }
+    AdbFault::Terminal
+}
+
+/// Backoff before retrying attempt `attempt` (1-based). Short on purpose: a USB
+/// blip clears in milliseconds, and a lifecycle call already costs 1–2 s.
+fn retry_backoff(attempt: u32) -> Duration {
+    Duration::from_millis(250u64.saturating_mul(1u64 << (attempt.min(4) - 1)))
+}
+
+/// One `adb devices -l` reading, with whether it settled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceListReading {
+    pub devices: Vec<AdbDeviceLine>,
+    /// Two consecutive reads agreed. `false` means the deadline passed while the
+    /// fleet was still changing — the list is the last thing seen, not a promise.
+    pub stable: bool,
+    pub attempts: u32,
+}
+
+/// Whether two readings describe the same fleet, ignoring the order adb happens
+/// to print devices in.
+pub fn same_fleet(left: &[AdbDeviceLine], right: &[AdbDeviceLine]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut left: Vec<&AdbDeviceLine> = left.iter().collect();
+    let mut right: Vec<&AdbDeviceLine> = right.iter().collect();
+    left.sort_by(|a, b| a.serial.cmp(&b.serial));
+    right.sort_by(|a, b| a.serial.cmp(&b.serial));
+    left.iter()
+        .zip(right.iter())
+        .all(|(a, b)| a.serial == b.serial && a.state == b.state)
+}
+
 /// Parse `adb devices -l`. The header line and blank lines are skipped.
 pub fn parse_devices(stdout: &str) -> Vec<AdbDeviceLine> {
     stdout
@@ -301,20 +601,187 @@ pub fn parse_pidof(stdout: &str) -> Option<u64> {
 }
 
 /// Parse the package name out of `dumpsys window windows | grep mCurrentFocus`.
-pub fn parse_current_focus_package(stdout: &str) -> Option<String> {
-    let line = stdout.lines().find(|line| line.contains("mCurrentFocus"))?;
-    let inside = line.rsplit_once('/')?.0;
-    let package = inside.rsplit_once(' ')?.1;
-    if package.is_empty() {
-        None
-    } else {
-        Some(package.to_string())
+/// The UI language the operator is actually looking at.
+///
+/// **`persist.sys.locale`, never `ro.product.locale`.** Measured on the Redmi Note
+/// 12: `persist.sys.locale=vi-VN` while `ro.product.locale=en-GB`. The second is the
+/// factory default, so reading it says "English" about a phone whose TikTok labels
+/// are all Vietnamese — the same first-line trap as `wm size` and `mCurrentFocus`.
+///
+/// Returns the raw tag (`vi-VN`); reduce it with
+/// `riviu_core::tiktok_labels::normalise_language`.
+pub fn parse_locale(persist_locale: &str, system_locales: &str) -> Option<String> {
+    for candidate in [persist_locale, system_locales] {
+        // `settings get` prints `null` when unset, and that is a string, not None.
+        let value = candidate.trim();
+        if value.is_empty() || value.eq_ignore_ascii_case("null") {
+            continue;
+        }
+        // `system_locales` can be a comma-separated preference list; the first is
+        // the active one.
+        let first = value.split(',').next().unwrap_or(value).trim();
+        if !first.is_empty() {
+            return Some(first.to_string());
+        }
     }
+    None
+}
+
+/// Whether the display is composing, from `dumpsys power`.
+///
+/// `None` means the line was not found — **unknown**, which callers must not treat
+/// as "asleep". MIUI and Android 9 do not print the same `dumpsys` bodies, and an
+/// unreadable line is not evidence the screen is off.
+///
+/// Not sufficient on its own: see [`parse_keyguard_locked`]. A locked phone
+/// reports `Awake`.
+pub fn parse_display_awake(stdout: &str) -> Option<bool> {
+    stdout.lines().find_map(|line| {
+        let value = line.trim().strip_prefix("mWakefulness=")?.trim();
+        match value {
+            "Awake" => Some(true),
+            "Asleep" | "Dozing" | "Dreaming" => Some(false),
+            _ => None,
+        }
+    })
+}
+
+/// Whether the lock screen is up, from `dumpsys window`.
+///
+/// **This is the check `mWakefulness` cannot make.** Measured on a locked Redmi
+/// Note 12 (Android 15, HyperOS `OS2.0.207.0`) on 11/08/2026: `dumpsys power` said
+/// `mWakefulness=Awake` and `mAwake=true mScreenOnEarly=true mScreenOnFully=true`
+/// — the screen genuinely *was* on — while the phone sat on the lock screen and
+/// `mCurrentFocus` read `NotificationShade`. Every attempt to foreground an app
+/// silently did nothing. So a wakefulness-only pre-check passes a phone nothing
+/// can drive.
+///
+/// Three keys carried the truth on that build, and all three are accepted because
+/// no single one is guaranteed across the fleet's Android 9 → 15 range:
+/// `isKeyguardShowing=true`, `mKeyguardShowing=true`, `mDreamingLockscreen=true`.
+///
+/// **Any** of them reading `true` means locked. That direction is deliberate: a
+/// false "locked" refuses a working phone with a clear message, while a false
+/// "unlocked" sends the driver to tap a lock screen. The foreground proof in
+/// `start_interaction_session` is the backstop for both.
+pub fn parse_keyguard_locked(stdout: &str) -> Option<bool> {
+    const KEYS: [&str; 3] = [
+        "isKeyguardShowing=",
+        "mKeyguardShowing=",
+        "mDreamingLockscreen=",
+    ];
+    let mut seen = false;
+    for line in stdout.lines() {
+        for key in KEYS {
+            let Some(index) = line.find(key) else {
+                continue;
+            };
+            let value = line[index + key.len()..]
+                .split_whitespace()
+                .next()
+                .unwrap_or_default();
+            match value {
+                "true" => return Some(true),
+                "false" => seen = true,
+                _ => {}
+            }
+        }
+    }
+    seen.then_some(false)
+}
+
+/// Scans **every** `mCurrentFocus` line, not the first.
+///
+/// A device with more than one display prints one line per display and the
+/// unfocused ones say `mCurrentFocus=null`. Taking the first match therefore
+/// reports "no foreground app" while TikTok is plainly on screen — measured on a
+/// Redmi Note 12, where `null` came first. Same shape of trap as `wm size`
+/// printing two lines (§9): the first line is not the answer.
+pub fn parse_current_focus_package(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .filter(|line| line.contains("mCurrentFocus"))
+        .find_map(|line| {
+            let inside = line.rsplit_once('/')?.0;
+            let package = inside.rsplit_once(' ')?.1;
+            (!package.is_empty()).then(|| package.to_string())
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pending_usb_prompt_is_not_a_transport_blip() {
+        // The distinction that matters: this fails the same way forever, so
+        // retrying it only delays telling the operator to tap Allow.
+        assert_eq!(
+            classify_fault("adb -s X shell id failed: error: device unauthorized."),
+            AdbFault::Unauthorized
+        );
+        assert!(!AdbFault::Unauthorized.is_worth_retrying());
+    }
+
+    #[test]
+    fn transport_blips_are_retried_and_unknown_failures_are_not() {
+        for message in [
+            "adb -s X shell id failed: error: device offline",
+            "adb devices failed: protocol fault (couldn't read status): connection reset",
+            "adb -s X shell id failed: error: device still authorizing",
+            "adb devices failed: * daemon not running; starting now",
+            "adb -s X push failed: error: closed",
+        ] {
+            assert_eq!(classify_fault(message), AdbFault::Transient, "{message}");
+            assert!(AdbFault::Transient.is_worth_retrying());
+        }
+        // Anything unrecognised stays terminal on purpose.
+        let unknown =
+            classify_fault("adb -s X install failed: INSTALL_FAILED_INSUFFICIENT_STORAGE");
+        assert_eq!(unknown, AdbFault::Terminal);
+        assert!(!unknown.is_worth_retrying());
+    }
+
+    #[test]
+    fn a_deadline_is_retryable_but_a_missing_serial_is_a_rescan() {
+        assert_eq!(
+            classify_fault("adb -s X shell wm size timed out after 60s"),
+            AdbFault::Timeout
+        );
+        assert!(AdbFault::Timeout.is_worth_retrying());
+        assert_eq!(
+            classify_fault("adb -s X shell id failed: error: device 'X' not found"),
+            AdbFault::UnknownDevice
+        );
+        assert!(!AdbFault::UnknownDevice.is_worth_retrying());
+    }
+
+    #[test]
+    fn fleet_equality_ignores_the_order_adb_prints() {
+        let first = parse_devices("List of devices attached\na device\nb device\n");
+        let reversed = parse_devices("List of devices attached\nb device\na device\n");
+        assert!(same_fleet(&first, &reversed));
+    }
+
+    #[test]
+    fn a_state_change_is_not_a_stable_fleet() {
+        // The case this guards: the serial set is identical while a device is
+        // still coming up, which is exactly when a scan must not be trusted.
+        let authorizing = parse_devices("List of devices attached\na unauthorized\n");
+        let ready = parse_devices("List of devices attached\na device\n");
+        assert!(!same_fleet(&authorizing, &ready));
+        let gained = parse_devices("List of devices attached\na device\nb device\n");
+        assert!(!same_fleet(&ready, &gained));
+    }
+
+    #[test]
+    fn retry_backoff_grows_and_stays_bounded() {
+        assert_eq!(retry_backoff(1), Duration::from_millis(250));
+        assert_eq!(retry_backoff(2), Duration::from_millis(500));
+        assert_eq!(retry_backoff(3), Duration::from_millis(1000));
+        // Clamped, so a large attempt count cannot shift its way to a stall.
+        assert_eq!(retry_backoff(9), retry_backoff(4));
+    }
 
     #[test]
     fn device_listing_keeps_authorized_and_unauthorized_apart() {
@@ -422,5 +889,240 @@ mod tests {
             Some("com.zhiliaoapp.musically")
         );
         assert_eq!(parse_current_focus_package("mCurrentFocus=null"), None);
+    }
+
+    #[test]
+    fn current_focus_reads_the_regional_tiktok_and_an_empty_dump() {
+        // Measured on Android 15: the SEA build is a different package, and the
+        // line arrives from `dumpsys window displays` because
+        // `dumpsys window windows` returns nothing there.
+        let stdout = "  mCurrentFocus=Window{f567298 u0 com.ss.android.ugc.trill/com.ss.android.ugc.aweme.splash.SplashActivity}";
+        assert_eq!(
+            parse_current_focus_package(stdout).as_deref(),
+            Some("com.ss.android.ugc.trill")
+        );
+        // An empty dump is the case that used to surface as a bare failure.
+        assert_eq!(parse_current_focus_package(""), None);
+    }
+
+    #[test]
+    fn ui_locale_comes_from_the_user_setting_not_the_factory_default() {
+        // Verbatim from the Redmi Note 12: the two properties disagree, and only
+        // the first describes what is on screen.
+        assert_eq!(parse_locale("vi-VN", "vi-VN").as_deref(), Some("vi-VN"));
+        // Falls back to the settings value when the property is unset.
+        assert_eq!(parse_locale("", "vi-VN").as_deref(), Some("vi-VN"));
+        // `settings get` prints the word null when unset.
+        assert_eq!(parse_locale("null", "null"), None);
+        // A preference list: the active locale is the first entry.
+        assert_eq!(parse_locale("", "vi-VN,en-GB").as_deref(), Some("vi-VN"));
+        assert_eq!(parse_locale("  ", "  "), None);
+    }
+
+    #[test]
+    fn a_null_focus_line_does_not_hide_the_focused_display() {
+        // Verbatim from `dumpsys window displays` on a Redmi Note 12: two
+        // displays, the unfocused one first. Reading only the first line reported
+        // no foreground app while TikTok was on screen.
+        let stdout = "  mCurrentFocus=null\n  \
+             mCurrentFocus=Window{823a4a6 u0 com.ss.android.ugc.trill/com.ss.android.ugc.aweme.splash.SplashActivity}\n";
+        assert_eq!(
+            parse_current_focus_package(stdout).as_deref(),
+            Some("com.ss.android.ugc.trill")
+        );
+        // Every display unfocused is still None, not a panic.
+        assert_eq!(
+            parse_current_focus_package("mCurrentFocus=null\nmCurrentFocus=null\n"),
+            None
+        );
+    }
+
+    /// The exact `dumpsys power` body read off a **locked** Redmi Note 12 on
+    /// 11/08/2026. Kept verbatim because it is the counter-example: every field
+    /// here says the screen is on, and the phone could not be driven at all.
+    const LOCKED_POWER: &str = "  mWakefulness=Awake\n  mWakefulnessChanging=false\n  \
+                                mHoldingDisplaySuspendBlocker=true\n";
+
+    /// The matching `dumpsys window` extract from the same locked phone.
+    const LOCKED_WINDOW: &str = "    KeyguardServiceDelegate\n      showing=true\n        \
+                                 mIsShowing=true\n    mIsImeShowing=false\n    mAwake=true \
+                                 mScreenOnEarly=true mScreenOnFully=true\n    \
+                                 mShowingDream=false mDreamingLockscreen=true\n    \
+                                 isKeyguardShowing=true\n";
+
+    #[test]
+    fn wakefulness_alone_cannot_see_a_locked_phone() {
+        // This is the whole reason `parse_keyguard_locked` exists. If this ever
+        // starts returning `Some(false)`, the pre-check has been weakened.
+        assert_eq!(parse_display_awake(LOCKED_POWER), Some(true));
+        assert_eq!(parse_keyguard_locked(LOCKED_WINDOW), Some(true));
+    }
+
+    #[test]
+    fn display_wakefulness_reads_the_states_that_stop_composition() {
+        assert_eq!(parse_display_awake("mWakefulness=Asleep"), Some(false));
+        assert_eq!(parse_display_awake("  mWakefulness=Dozing  "), Some(false));
+        assert_eq!(parse_display_awake("mWakefulness=Dreaming"), Some(false));
+    }
+
+    #[test]
+    fn an_unreadable_dumpsys_is_unknown_and_must_not_block() {
+        // A build that prints neither key is not evidence of anything. Returning
+        // `Some(false)` here would let a start proceed on a phone we cannot read;
+        // returning `Some(true)` would refuse every such build outright.
+        assert_eq!(parse_display_awake(""), None);
+        assert_eq!(parse_display_awake("mWakefulness=SomethingNew"), None);
+        assert_eq!(parse_keyguard_locked(""), None);
+        assert_eq!(parse_keyguard_locked("Window #0 mCurrentFocus=null"), None);
+    }
+
+    #[test]
+    fn an_unlocked_phone_reports_unlocked_on_every_accepted_key() {
+        for key in [
+            "isKeyguardShowing",
+            "mKeyguardShowing",
+            "mDreamingLockscreen",
+        ] {
+            assert_eq!(
+                parse_keyguard_locked(&format!("    {key}=false\n")),
+                Some(false),
+                "{key}"
+            );
+            assert_eq!(
+                parse_keyguard_locked(&format!("    {key}=true\n")),
+                Some(true),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_key_saying_locked_outweighs_another_saying_unlocked() {
+        // Deliberate asymmetry: refusing a working phone is a clear message, while
+        // proceeding onto a lock screen taps something nobody chose.
+        let mixed = "    mDreamingLockscreen=false\n    isKeyguardShowing=true\n";
+        assert_eq!(parse_keyguard_locked(mixed), Some(true));
+        let reversed = "    isKeyguardShowing=true\n    mDreamingLockscreen=false\n";
+        assert_eq!(parse_keyguard_locked(reversed), Some(true));
+    }
+
+    #[test]
+    fn a_trailing_field_on_the_same_line_does_not_bleed_into_the_value() {
+        // The real body packs several fields per line
+        // (`mShowingDream=false mDreamingLockscreen=true`), so the parser must stop
+        // at whitespace rather than taking the rest of the line.
+        assert_eq!(
+            parse_keyguard_locked("    mShowingDream=false mDreamingLockscreen=true\n"),
+            Some(true)
+        );
+        assert_eq!(
+            parse_keyguard_locked("    mDreamingLockscreen=false mShowingDream=true\n"),
+            Some(false)
+        );
+    }
+
+    /// These read the environment rather than setting it, on purpose: mutating
+    /// `ANDROID_HOME` here would race every other test in the binary, and the
+    /// properties worth pinning — where `configured`, `PATH` and `bundled` sit
+    /// relative to each other — hold whatever the environment happens to contain.
+    mod candidate_order {
+        use super::*;
+
+        fn positions(candidates: &[AdbCandidate], origin: AdbOrigin) -> Vec<usize> {
+            candidates
+                .iter()
+                .enumerate()
+                .filter(|(_, candidate)| candidate.origin == origin)
+                .map(|(index, _)| index)
+                .collect()
+        }
+
+        fn only(candidates: &[AdbCandidate], origin: AdbOrigin) -> usize {
+            let found = positions(candidates, origin);
+            assert_eq!(found.len(), 1, "expected exactly one {origin:?}");
+            found[0]
+        }
+
+        #[test]
+        fn the_bundled_copy_is_tried_after_path_not_before_it() {
+            // The load-bearing one. A bundled adb of a different revision than the
+            // operator's kills their adb server on port 5037, so ours may only be
+            // reached once everything they installed has failed to answer.
+            let candidates = AdbProgram::candidates(None, Some(Path::new("/bundle/adb")));
+            assert!(
+                only(&candidates, AdbOrigin::Bundled) > only(&candidates, AdbOrigin::Path),
+                "bundled must come after PATH, got {candidates:?}"
+            );
+            assert_eq!(
+                candidates.last().map(|c| c.origin),
+                Some(AdbOrigin::Bundled)
+            );
+        }
+
+        #[test]
+        fn a_configured_path_outranks_everything_including_the_bundled_copy() {
+            let candidates =
+                AdbProgram::candidates(Some(Path::new("/chosen/adb")), Some(Path::new("/b/adb")));
+            assert_eq!(only(&candidates, AdbOrigin::Configured), 0);
+        }
+
+        #[test]
+        fn path_is_always_a_candidate_because_only_running_it_can_answer() {
+            // There is nothing to stat for a bare name, so it cannot be filtered out
+            // the way a missing file can. Leaving it out when some SDK variable is set
+            // is how a machine with adb on PATH gets reported as having none.
+            assert_eq!(
+                positions(&AdbProgram::candidates(None, None), AdbOrigin::Path).len(),
+                1
+            );
+        }
+
+        #[test]
+        fn nothing_bundled_means_no_bundled_candidate_rather_than_an_empty_path() {
+            // A `Some(PathBuf::new())` here would become a candidate that spawns the
+            // current directory. Absent must stay absent.
+            let candidates = AdbProgram::candidates(None, None);
+            assert!(positions(&candidates, AdbOrigin::Bundled).is_empty());
+        }
+
+        #[test]
+        fn resolve_takes_a_configured_file_that_exists() {
+            // Deliberately asserted through `configured` rather than `bundled`: the
+            // bundled slot sits after the SDK variables, and a CI runner has
+            // `ANDROID_HOME` set to a real SDK (GitHub's windows images do), so a test
+            // expecting the bundled copy to win would pass here and fail there. Same
+            // code path, environment-independent claim.
+            let dir = std::env::temp_dir().join("riviu-adb-resolve-test");
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            let chosen = dir.join(exe_name());
+            std::fs::write(&chosen, b"not really adb").expect("write");
+            let resolved = AdbProgram::resolve(Some(&chosen), None).expect("resolve");
+            assert_eq!(resolved.path(), chosen.as_path());
+            std::fs::remove_file(&chosen).ok();
+        }
+
+        #[test]
+        fn resolve_falls_back_to_the_bare_name_when_nothing_on_disk_matches() {
+            // The PATH entry is skipped while stat-ing (a bare name is never a file),
+            // so with no real candidate the answer is the bare name for the OS to
+            // search — not the first non-existent path, which would be unspawnable.
+            let missing = std::env::temp_dir().join("riviu-adb-absent").join("adb");
+            let resolved = AdbProgram::resolve(Some(&missing), None).expect("resolve");
+            assert_eq!(resolved.path(), Path::new(exe_name()));
+        }
+
+        #[test]
+        fn every_origin_explains_itself_in_the_operator_s_language() {
+            for origin in [
+                AdbOrigin::Configured,
+                AdbOrigin::RiviuAdbPath,
+                AdbOrigin::AndroidSdkRoot,
+                AdbOrigin::AndroidHome,
+                AdbOrigin::Path,
+                AdbOrigin::Bundled,
+            ] {
+                assert!(!origin.label().is_empty(), "{origin:?} has no label");
+            }
+        }
     }
 }
