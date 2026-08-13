@@ -40,6 +40,19 @@ pub struct DriverBundle {
     /// from an unplugged cable, and wrong whenever the real cause is a broken
     /// sidecar. Carrying the reason lets the operator be told what to fix.
     pub degraded_reason: Option<String>,
+    /// Why the **last** device listing came back empty, asked fresh each time.
+    ///
+    /// Separate from [`Self::degraded_reason`], which is a boot snapshot: this one changes
+    /// while the app runs, so "the operator just installed Apple Devices" becomes visible
+    /// without a restart, and a listing that succeeds clears it.
+    ///
+    /// A closure rather than a trait method on `DeviceDriver`. The reason is `MultiplexDriver`:
+    /// with two backends there is no single answer to "why was the listing empty", so a
+    /// trait method would have to invent one. The closure is captured from the concrete iOS
+    /// driver at construction, where the question does have an answer.
+    ///
+    /// `None` for the mock and for a driver that never started.
+    pub list_error: Option<Arc<dyn Fn() -> Option<String> + Send + Sync>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +78,7 @@ pub async fn create_driver(config: DriverConfig) -> anyhow::Result<DriverBundle>
             mode: DriverMode::Mock,
             interaction_capabilities,
             degraded_reason: None,
+            list_error: None,
         });
     }
 
@@ -82,12 +96,16 @@ pub async fn create_driver(config: DriverConfig) -> anyhow::Result<DriverBundle>
             if let Some(reason) = &degraded_reason {
                 tracing::error!("iOS sidecar started degraded: {reason}");
             }
+            let driver = Arc::new(driver);
+            // Captured from the concrete driver, before it is erased to `dyn DeviceDriver`.
+            let probe = driver.clone();
             Ok(DriverBundle {
-                driver: Arc::new(driver),
+                driver,
                 streams,
                 mode: DriverMode::Pymobiledevice3,
                 interaction_capabilities,
                 degraded_reason,
+                list_error: Some(Arc::new(move || probe.last_list_error())),
             })
         }
         Err(err) => {
@@ -106,6 +124,9 @@ pub async fn create_driver(config: DriverConfig) -> anyhow::Result<DriverBundle>
                 mode: DriverMode::Pymobiledevice3,
                 interaction_capabilities,
                 degraded_reason: Some(reason),
+                // No sidecar means no listing, so there is no listing error to report —
+                // `degraded_reason` already carries the more specific fact.
+                list_error: None,
             })
         }
     }

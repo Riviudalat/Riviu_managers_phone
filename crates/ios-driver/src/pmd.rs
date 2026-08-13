@@ -3821,6 +3821,47 @@ print(json.dumps({'ok': True, 'note': 'terminate best-effort'}), flush=True)
     }
 
     #[test]
+    fn a_listing_that_reports_a_payload_error_is_not_read_as_an_empty_farm() {
+        // `riviu_pmd.py` emits `{"devices": [], "error": "pymobiledevice3 not installed"}`
+        // at exit code **0**, so `run_json` succeeds and the key was simply dropped —
+        // leaving an empty fleet with no explanation anywhere. This pins that the key is
+        // read, and that a clean listing clears the slot rather than latching it.
+        let value = serde_json::json!({
+            "devices": [],
+            "error": "pymobiledevice3 not installed",
+        });
+        let payload_error = value
+            .get("error")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|error| !error.is_empty());
+        assert_eq!(payload_error, Some("pymobiledevice3 not installed"));
+
+        // A listing with devices and no `error` key must produce `None`, or the banner
+        // would latch on for the rest of the session once anything ever went wrong.
+        let healthy = serde_json::json!({ "devices": [{ "udid": "a" }] });
+        assert_eq!(
+            healthy
+                .get("error")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|error| !error.is_empty()),
+            None
+        );
+
+        // And an empty-but-explicitly-blank error is still nothing to report.
+        let blank = serde_json::json!({ "devices": [], "error": "   " });
+        assert_eq!(
+            blank
+                .get("error")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|error| !error.is_empty()),
+            None
+        );
+    }
+
+    #[test]
     fn a_ping_that_exits_zero_but_says_pymobiledevice3_is_absent_is_degraded() {
         // The blind spot the exit-2 tolerance left behind. `riviu_pmd.py` emits exactly
         // this shape with exit **0** when the import fails, so nothing about the exit

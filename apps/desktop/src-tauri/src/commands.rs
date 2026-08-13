@@ -777,9 +777,23 @@ pub fn driver_mode(state: State<'_, AppState>) -> String {
 
 /// Why real devices cannot be listed, or `None` when the sidecar is healthy.
 /// Read-only, so it needs no admission gate.
+///
+/// Two sources, boot snapshot first. The snapshot is the more specific fact when it
+/// exists — the sidecar never started, so there is nothing to list from. The live listing
+/// error is what covers everything after boot: a sidecar that started fine and then had
+/// `list` fail, or answered with `{"devices": [], "error": "pymobiledevice3 not installed"}`
+/// at exit code 0. That second case used to be dropped entirely, so the fleet went empty
+/// and the UI said nothing (AGENTS.md 9.29).
+///
+/// It is asked, not stored, so it clears itself: a listing that succeeds sets it back to
+/// `None` and an operator who fixes the machine stops being told it is broken without
+/// restarting the app.
 #[tauri::command]
 pub fn driver_degraded_reason(state: State<'_, AppState>) -> Option<String> {
-    state.driver_degraded_reason.clone()
+    if let Some(reason) = state.driver_degraded_reason.clone() {
+        return Some(reason);
+    }
+    state.driver_list_error.as_ref().and_then(|probe| probe())
 }
 
 /// Why the Android half of the fleet is absent, or `None` when it joined.

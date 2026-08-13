@@ -86,6 +86,12 @@ pub struct AppState {
     /// Set when the device sidecar failed to start; the UI shows it so an empty
     /// device list is never mistaken for "nothing plugged in".
     pub driver_degraded_reason: Option<String>,
+    /// Asked fresh, not stored: why the **last** listing was empty.
+    ///
+    /// `driver_degraded_reason` above is a boot snapshot and cannot change. This one can,
+    /// which is the point — an operator who installs Apple Devices while the app is open
+    /// should stop being told it is missing, and a listing that succeeds clears it.
+    pub driver_list_error: Option<Arc<dyn Fn() -> Option<String> + Send + Sync>>,
     /// Why the Android backend is absent, when it is. `None` means it joined
     /// the fleet. Kept separate from `driver_degraded_reason`, which is about
     /// the iOS sidecar: "no adb on this machine" and "the iOS sidecar died"
@@ -591,6 +597,7 @@ impl AppState {
             streams: bundle.streams,
             driver_mode: bundle.mode,
             driver_degraded_reason: bundle.degraded_reason,
+            driver_list_error: bundle.list_error,
             android_unavailable_reason: android_unavailable,
             jobs,
             flows,
