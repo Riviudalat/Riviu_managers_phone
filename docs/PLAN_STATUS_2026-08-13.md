@@ -177,8 +177,17 @@ nhật mãi mà không bao giờ thoả**.
   `gh release create` (`build-updater-manifest`), và UI ở **Settings → Bản cập nhật**. Việc
   còn lại **không phải code**: tăng version rồi tạo tag để `latest.json` đầu tiên ra đời, và
   một máy sạch để đi hết vòng cài-rồi-cập-nhật. Xem `AGENTS.md` 9.41.
-- **`interaction_events` rỗng.** Bảng có sẵn, không writer, không reader. Chưa quyết: ghi ở các
-  transition đã có, hoặc xoá bảng.
+- **`interaction_events` rỗng — và giờ nói rõ ngay trong schema.** Bảng có sẵn, không writer,
+  không reader. Cái bẫy thật không phải bảng rỗng mà là **nó giống `flow_events` từng dòng**,
+  nên đọc như một audit trail: người sau thấy 0 dòng sẽ kết luận "không có gì xảy ra" trong khi
+  sự thật là chưa bao giờ có gì ghi vào. Đã ghi cảnh báo đó vào chính migration, chỗ người ta
+  gặp nó.
+
+  **Vẫn để nguyên, có chủ đích.** Thêm writer là tính năng không ai yêu cầu và giá trị nhỏ khi
+  chưa có reader; xoá bảng là một migration lên schema đang chuẩn bị phát hành. Ai quyết cũng
+  có đường sẵn: ghi một dòng mỗi lần campaign đổi state, khoá theo revision của campaign, và
+  `UNIQUE (campaign_id, revision)` là thứ làm một lần ghi lặp trở thành idempotent — đúng tính
+  chất `flow_events` đang dựa vào.
 - **`TikTokControl::ALL` khó trôi, không phải không thể trôi.** Hai match exhaustive
   (`ordinal()`, `translated()`) buộc compile error khi thêm variant, và độ dài mảng cố định buộc
   bump số khi đã thêm vào `ALL`. Nhưng **không gì cơ học buộc variant mới phải vào `ALL`**:

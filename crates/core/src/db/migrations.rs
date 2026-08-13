@@ -434,6 +434,19 @@ CREATE TABLE interaction_retry_requests (
   FOREIGN KEY (campaign_id) REFERENCES interaction_campaigns(id) ON DELETE CASCADE
 );
 
+-- NOTHING WRITES THIS TABLE, AND NOTHING READS IT. It is always empty.
+--
+-- Said here rather than only in a plan document, because this is where somebody meets it:
+-- the shape copies `flow_events` exactly, so it reads like an audit trail of interaction
+-- campaigns, and an empty table that looks like an audit trail is worse than no table —
+-- it invites "there are no events, so nothing happened" when the truth is that nothing
+-- ever recorded anything.
+--
+-- Deliberately left rather than resolved either way. Adding a writer is a feature nobody
+-- asked for, and its value is small without a reader; dropping it is a migration against a
+-- schema that is about to ship. Whoever decides: writing means one row per campaign state
+-- transition keyed by the campaign's revision, where `UNIQUE (campaign_id, revision)` is
+-- what makes a retried write idempotent — the same property `flow_events` relies on.
 CREATE TABLE interaction_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id TEXT NOT NULL,
