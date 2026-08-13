@@ -9,11 +9,14 @@ import {
   driverMode,
   getAppleId,
   setAppleId,
+  updateCheck,
+  updateInstall,
 } from "../api";
 import { agentStatusView } from "../agentStatus";
+import { updateView } from "../updateView";
 import { EmptyState } from "./States";
 import { IconPhone } from "./Icons";
-import type { AgentRuntimeView, AgentStatus, DeviceInfo } from "../types";
+import type { AgentRuntimeView, AgentStatus, DeviceInfo, UpdateStatus } from "../types";
 
 interface Props {
   devices: DeviceInfo[];
@@ -32,6 +35,10 @@ export function SettingsPanel({ devices }: Props) {
   const [busy, setBusy] = useState<Record<string, AgentAction>>({});
   const [savingSettings, setSavingSettings] = useState(false);
   const [agentMessage, setAgentMessage] = useState<string | null>(null);
+  const [update, setUpdate] = useState<UpdateStatus | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [installingUpdate, setInstallingUpdate] = useState(false);
 
   const connectedDevices = useMemo(
     () => devices.filter((device) => device.status !== "disconnected"),
@@ -84,6 +91,8 @@ export function SettingsPanel({ devices }: Props) {
       });
     }
   };
+
+  const updateStatusView = updateView(update, updateError, installingUpdate);
 
   const protocolVersion =
     Object.values(statuses).find((status) => status.protocolVersion > 0)?.protocolVersion ?? null;
@@ -221,6 +230,56 @@ export function SettingsPanel({ devices }: Props) {
             })}
           </div>
         )}
+      </section>
+
+      <section className="settings-section">
+        <h3>Bản cập nhật</h3>
+        <p>
+          <span className={`chip ${updateStatusView.tone}`}>{updateStatusView.headline}</span>
+        </p>
+        {updateStatusView.detail && <p className="hint">{updateStatusView.detail}</p>}
+        <div className="row">
+          <button
+            type="button"
+            className="ghost"
+            disabled={checkingUpdate || installingUpdate}
+            onClick={async () => {
+              setCheckingUpdate(true);
+              setUpdateError(null);
+              try {
+                setUpdate(await updateCheck());
+              } catch (error) {
+                setUpdate(null);
+                setUpdateError(String(error));
+              } finally {
+                setCheckingUpdate(false);
+              }
+            }}
+          >
+            {checkingUpdate ? "Đang kiểm..." : "Kiểm bản mới"}
+          </button>
+          <button
+            type="button"
+            className="primary"
+            disabled={!updateStatusView.canInstall}
+            onClick={async () => {
+              setInstallingUpdate(true);
+              setUpdateError(null);
+              try {
+                await updateInstall();
+                // Reached on macOS only: the archive is unpacked in place and the app has
+                // to be reopened. On Windows the process is gone before this line.
+                setUpdateError("Đã cài xong — mở lại app để dùng bản mới.");
+              } catch (error) {
+                setUpdateError(String(error));
+              } finally {
+                setInstallingUpdate(false);
+              }
+            }}
+          >
+            Tải và cài đặt
+          </button>
+        </div>
       </section>
 
       <section className="settings-section">

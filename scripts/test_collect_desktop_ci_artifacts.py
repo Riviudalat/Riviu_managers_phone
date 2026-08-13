@@ -601,5 +601,260 @@ class ArtifactContractTests(unittest.TestCase):
         self.assertIn("unreadable", summary)
 
 
+def fake_signature(comment: str = "signature from tauri secret key") -> str:
+    import base64
+
+    return base64.b64encode(
+        f"untrusted comment: {comment}\nRWRaNhHELnCx0000\n".encode("ascii")
+    ).decode("ascii")
+
+
+class UpdaterManifestTests(unittest.TestCase):
+    """The `latest.json` contract, which nothing on this machine can retry once shipped."""
+
+    def test_a_name_with_a_space_is_renamed_the_way_github_would_rename_it(self):
+        self.assertEqual(
+            artifacts.release_asset_name("windows-x64--Riviu Full_0.1.0-setup.exe"),
+            "windows-x64--Riviu.Full_0.1.0-setup.exe",
+        )
+
+    def test_a_name_github_would_leave_alone_is_returned_unchanged(self):
+        for name in (
+            "windows-x64--Riviu_0.1.0_x64-setup.exe",
+            "macos-arm64--Riviu.app.tar.gz.sig",
+        ):
+            self.assertEqual(artifacts.release_asset_name(name), name)
+
+    def test_a_name_that_would_lose_a_leading_period_is_refused_not_trimmed(self):
+        # Trimming would put back the very mismatch this function exists to remove.
+        with self.assertRaises(artifacts.ArtifactError):
+            artifacts.release_asset_name(" leading-space.exe")
+
+    def test_a_signature_that_is_not_base64_is_refused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "x.sig"
+            path.write_text("untrusted comment: raw minisign\n", encoding="ascii")
+            with self.assertRaises(artifacts.ArtifactError):
+                artifacts.read_updater_signature(path)
+
+    def test_base64_that_is_not_minisign_is_refused(self):
+        import base64
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "x.sig"
+            path.write_text(
+                base64.b64encode(b"hello there").decode("ascii"), encoding="ascii"
+            )
+            with self.assertRaises(artifacts.ArtifactError):
+                artifacts.read_updater_signature(path)
+
+    def test_an_archive_without_a_signature_beside_it_fails_the_release(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary) / "bundle" / "nsis"
+            bundle.mkdir(parents=True)
+            (bundle / "Riviu_0.1.0_x64-setup.exe").write_bytes(b"installer")
+            with self.assertRaises(artifacts.ArtifactError) as caught:
+                artifacts.find_updater_artifacts(
+                    Path(temporary) / "bundle", "x86_64-pc-windows-msvc"
+                )
+
+        # The message has to name both suspects; the operator cannot see the runner.
+        self.assertIn("createUpdaterArtifacts", str(caught.exception))
+        self.assertIn("TAURI_SIGNING_PRIVATE_KEY", str(caught.exception))
+
+    def test_two_candidate_archives_refuse_rather_than_pick_one(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary) / "bundle"
+            (bundle / "nsis").mkdir(parents=True)
+            (bundle / "other").mkdir(parents=True)
+            for relative in ("nsis/a-setup.exe", "other/b-setup.exe"):
+                (bundle / relative).write_bytes(b"installer")
+                (bundle / f"{relative}.sig").write_text(
+                    fake_signature(), encoding="ascii"
+                )
+            with self.assertRaises(artifacts.ArtifactError):
+                artifacts.find_updater_artifacts(bundle, "x86_64-pc-windows-msvc")
+
+    def write_label(
+        self,
+        root: Path,
+        label: str,
+        *,
+        archive: str,
+        signature: str | None = None,
+        platform: str | None = None,
+    ) -> Path:
+        target = artifacts.RELEASE_LABEL_TARGETS[label]
+        directory = root / f"desktop-{label}"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / archive).write_bytes(archive.encode("utf-8"))
+        signature_name = f"{archive}.sig"
+        signature_text = fake_signature() if signature is None else signature
+        (directory / signature_name).write_text(signature_text, encoding="ascii")
+        manifest_name = f"{label}-artifact-manifest.json"
+        manifest = {
+            "schemaVersion": 2,
+            "label": label,
+            "target": target,
+            "updater": {
+                "platform": platform or artifacts.UPDATER_PLATFORMS[target],
+                "archive": archive,
+                "archiveBytes": (directory / archive).stat().st_size,
+                "archiveSha256": artifacts.sha256_file(directory / archive),
+                "signatureFile": signature_name,
+                "signature": signature_text,
+            },
+        }
+        artifacts.write_json(directory / manifest_name, manifest)
+        names = sorted(
+            path.name
+            for path in directory.iterdir()
+            if path.is_file() and not path.name.endswith("SHA256SUMS")
+        )
+        (directory / f"{label}-SHA256SUMS").write_text(
+            "".join(
+                f"{artifacts.sha256_file(directory / name)}  {name}\n" for name in names
+            ),
+            encoding="ascii",
+            newline="\n",
+        )
+        return directory
+
+    def complete_release(self, root: Path) -> None:
+        self.write_label(root, "windows-x64", archive="windows-x64--Riviu-setup.exe")
+        self.write_label(root, "macos-arm64", archive="macos-arm64--Riviu.app.tar.gz")
+        self.write_label(root, "macos-x64", archive="macos-x64--Riviu.app.tar.gz")
+
+    def build(self, root: Path, output: Path, **overrides):
+        arguments = {
+            "root": root,
+            "labels": ["windows-x64", "macos-arm64", "macos-x64"],
+            "repo": "Riviudalat/Riviu_managers_phone",
+            "tag": "v0.1.1",
+            "version": "0.1.1",
+            "output": output,
+            "notes": None,
+            "pub_date": "2026-08-13T00:00:00Z",
+        }
+        arguments.update(overrides)
+        return artifacts.build_updater_manifest_command(
+            argparse.Namespace(**arguments)
+        )
+
+    def test_every_platform_url_is_pinned_to_the_tag_not_to_latest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.complete_release(root)
+            output = root / "out" / "latest.json"
+            self.build(root, output)
+            manifest = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["version"], "0.1.1")
+        self.assertEqual(
+            sorted(manifest["platforms"]),
+            ["darwin-aarch64", "darwin-x86_64", "windows-x86_64"],
+        )
+        for platform, entry in manifest["platforms"].items():
+            # A client that already holds the manifest must reach an immutable asset,
+            # so every URL names the tag. Only the endpoint itself may say "latest".
+            self.assertIn("/releases/download/v0.1.1/", entry["url"], platform)
+            self.assertNotIn("/latest/", entry["url"])
+            self.assertTrue(entry["signature"])
+
+    def test_windows_points_at_the_nsis_installer_it_can_actually_apply(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.complete_release(root)
+            output = root / "out" / "latest.json"
+            self.build(root, output)
+            manifest = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertTrue(
+            manifest["platforms"]["windows-x86_64"]["url"].endswith("-setup.exe")
+        )
+
+    def test_a_missing_platform_fails_instead_of_shipping_a_partial_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_label(root, "windows-x64", archive="windows-x64--Riviu-setup.exe")
+            with self.assertRaises(artifacts.ArtifactError) as caught:
+                self.build(root, root / "out" / "latest.json", labels=["windows-x64"])
+
+        self.assertIn("darwin-aarch64", str(caught.exception))
+
+    def test_a_tag_that_disagrees_with_the_version_is_refused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.complete_release(root)
+            with self.assertRaises(artifacts.ArtifactError):
+                self.build(root, root / "out" / "latest.json", tag="v0.1.2")
+
+    def test_a_signature_edited_after_collection_is_caught_before_upload(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.complete_release(root)
+            signature = root / "desktop-windows-x64" / "windows-x64--Riviu-setup.exe.sig"
+            signature.write_text(fake_signature("tampered"), encoding="ascii")
+            with self.assertRaises(artifacts.ArtifactError) as caught:
+                self.build(root, root / "out" / "latest.json")
+
+        self.assertIn("differs from", str(caught.exception))
+
+    def test_an_archive_whose_bytes_changed_is_caught_before_upload(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.complete_release(root)
+            archive = root / "desktop-macos-arm64" / "macos-arm64--Riviu.app.tar.gz"
+            archive.write_bytes(b"a different archive entirely")
+            with self.assertRaises(artifacts.ArtifactError) as caught:
+                self.build(root, root / "out" / "latest.json")
+
+        self.assertIn("does not match asset", str(caught.exception))
+
+    def test_an_asset_name_github_would_rewrite_is_refused_before_it_becomes_a_url(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.complete_release(root)
+            self.write_label(
+                root, "windows-x64", archive="windows-x64--Riviu Full-setup.exe"
+            )
+            with self.assertRaises(artifacts.ArtifactError) as caught:
+                self.build(root, root / "out" / "latest.json")
+
+        self.assertIn("renamed by GitHub", str(caught.exception))
+
+    def test_a_label_claiming_the_wrong_platform_is_refused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.complete_release(root)
+            self.write_label(
+                root,
+                "macos-x64",
+                archive="macos-x64--Riviu.app.tar.gz",
+                platform="darwin-aarch64",
+            )
+            with self.assertRaises(artifacts.ArtifactError) as caught:
+                self.build(root, root / "out" / "latest.json")
+
+        self.assertIn("platform mismatch", str(caught.exception))
+
+    def test_an_updater_asset_outside_the_checksum_file_is_refused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.complete_release(root)
+            directory = root / "desktop-windows-x64"
+            checksums = directory / "windows-x64-SHA256SUMS"
+            kept = [
+                line
+                for line in checksums.read_text(encoding="ascii").splitlines(True)
+                if not line.endswith("-setup.exe.sig\n")
+            ]
+            checksums.write_text("".join(kept), encoding="ascii", newline="\n")
+            with self.assertRaises(artifacts.ArtifactError) as caught:
+                self.build(root, root / "out" / "latest.json")
+
+        self.assertIn("not a checksummed release asset", str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

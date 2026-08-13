@@ -10,7 +10,7 @@ use parking_lot::{Mutex, RwLock};
 use riviu_core::db::Database;
 use riviu_core::{
     AppEvent, BackgroundStreamLease, DeviceControlPlane, DeviceRegistry, DeviceWorkCoordinator,
-    EventBus, FlowArtifactStore, FlowId, FlowRuntime, FlowRuntimeDeps, Frame, JobQueue,
+    EventBus, FlowArtifactStore, FlowId, FlowRuntime, FlowRuntimeDeps, Frame, JobQueue, JobStatus,
     NurtureEngine, StreamBudgetManager, StreamSettings, STREAM_FPS,
 };
 use riviu_ios_driver::{create_driver, DriverMode, DriverTarget, StreamHub};
@@ -32,6 +32,14 @@ const PREVIEW_TOTAL_FPS: u32 = 240;
 const PREVIEW_MAX_FPS_PER_DEVICE: u32 = STREAM_FPS;
 const PREVIEW_TICK: Duration = Duration::from_millis(4);
 const PREVIEW_IDLE_EVICTION: Duration = Duration::from_secs(10);
+/// How far back [`AppState::busy_reason`] looks for unfinished jobs.
+///
+/// `list_jobs` orders newest first, and anything queued or running is recent by nature,
+/// so a bounded scan answers the question without reading the whole table. The residual:
+/// a job stuck in `Running` for longer than the last 500 records would fall outside the
+/// window and be missed. Left bounded rather than unbounded because this runs on every
+/// update check.
+const BUSY_JOB_SCAN_LIMIT: usize = 500;
 
 fn preview_fps_for_device_count(count: usize) -> u32 {
     (PREVIEW_TOTAL_FPS / count.max(1) as u32).clamp(1, PREVIEW_MAX_FPS_PER_DEVICE)
@@ -632,21 +640,43 @@ impl AppState {
     /// shutdown releases — so an operator deciding whether to take an update now needs to
     /// know *what* they would be cutting off, not merely that something is there.
     ///
-    /// Nurture sessions are the only source consulted for now, because they are the only
-    /// long-running work whose liveness is queryable without touching a device. Flow and job
-    /// runs are equally disruptive; that they are not listed here is a known gap, and the
-    /// honest consequence is that "idle" here means "no nurture session", not "nothing at
-    /// all". Better to name the gap than to imply a completeness this does not have.
+    /// Nurture sessions and the job queue are both consulted. Flow runs are not, and that
+    /// is the remaining gap: `FlowRuntime` exposes no liveness query, its runs live in the
+    /// database, and inventing one here would mean a second source of truth for "is this
+    /// flow alive". So "idle" means "no nurture session and no unfinished job", not
+    /// "nothing at all" — named rather than implied.
+    ///
+    /// An unreadable job queue counts as busy. Failing closed is the whole point: the cost
+    /// of a wrong "idle" is cutting a live session off mid-run to swap the binary, while the
+    /// cost of a wrong "busy" is an operator who waits and asks again.
     pub(crate) fn busy_reason(&self) -> Option<String> {
-        let running = self
+        let mut reasons: Vec<String> = Vec::new();
+        let sessions = self
             .nurture
             .list_status()
             .into_iter()
             .filter(|status| status.running)
             .count();
-        (running > 0).then(|| {
+        if sessions > 0 {
+            reasons.push(format!("{sessions} phiên Nuôi TT đang chạy"));
+        }
+        match self.jobs.list_jobs(BUSY_JOB_SCAN_LIMIT) {
+            Ok(jobs) => {
+                let unfinished = jobs
+                    .iter()
+                    .filter(|job| matches!(job.status, JobStatus::Queued | JobStatus::Running))
+                    .count();
+                if unfinished > 0 {
+                    reasons.push(format!("{unfinished} việc trong hàng đợi chưa xong"));
+                }
+            }
+            Err(error) => reasons.push(format!("không đọc được hàng đợi việc ({error})")),
+        }
+        (!reasons.is_empty()).then(|| {
             format!(
-                "đang có {running} phiên Nuôi TT chạy — dừng hết trước khi cập nhật,                  vì bản cài mới thay thế tiến trình đang giữ session và lease của các máy"
+                "{} — dừng hết trước khi cập nhật, vì bản cài mới thay thế tiến trình \
+                 đang giữ session và lease của các máy",
+                reasons.join("; ")
             )
         })
     }

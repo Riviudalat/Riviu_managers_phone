@@ -72,8 +72,12 @@ lỗi của `collect_target_evidence_frames`, và **chỉ ở chế độ AI** (
 đó). Mọi đường lỗi khác trong thân vòng lặp per-target — tra id, `prepare_interaction_assignment`,
 `streaming_session`, mọi lệnh ghi DB — vẫn là `?` và vẫn kết thúc cả campaign.
 
-**Gate hiện tại:** 872 test Rust / 0 fail, 98 test frontend / 18 file, e2e 6/6, `cargo fmt` +
-`clippy -D warnings` sạch, 19 test Python. Toàn bộ CI xanh ở `c11c9ac`.
+**Gate hiện tại:** 874 test Rust / 0 fail, 106 test frontend / 19 file, e2e 6/6, `cargo fmt` +
+`clippy -D warnings` sạch, 35 test Python.
+
+Một test thời gian trong `crates/core` từng làm gate đỏ vì ngưỡng treo ở rìa: cùng code, cùng
+ảnh vào, số đo đi từ 166 ms (chạy riêng) tới 424 ms (cả workspace) — ngưỡng cũ 400 ms. Đã nâng
+có căn cứ, xem `AGENTS.md` 9.42.
 
 ---
 
@@ -136,9 +140,11 @@ nằm sau `Cài đặt quyền riêng tư`.
 
 ### D. Còn thiếu để một tính năng hoàn chỉnh
 
-- **Auto-update chưa chạy đầu-cuối.** Đã có: khoá, ký lúc build (đã xác nhận trên CI), plugin,
-  capability, command `update_check`. **Chưa có**: sinh + upload `latest.json` trong cùng một
-  `gh release create`, và **UI để bấm**. Không có `latest.json` thì bản đã cài không biết hỏi ai.
+- **Auto-update: code xong hết, còn chờ một tag thật.** Đã có: khoá, ký lúc build, plugin,
+  capability, `update_check`, `update_install`, sinh + upload `latest.json` trong **cùng một**
+  `gh release create` (`build-updater-manifest`), và UI ở **Settings → Bản cập nhật**. Việc
+  còn lại **không phải code**: tăng version rồi tạo tag để `latest.json` đầu tiên ra đời, và
+  một máy sạch để đi hết vòng cài-rồi-cập-nhật. Xem `AGENTS.md` 9.41.
 - **`interaction_events` rỗng.** Bảng có sẵn, không writer, không reader. Chưa quyết: ghi ở các
   transition đã có, hoặc xoá bảng.
 - **`TikTokControl::ALL` khó trôi, không phải không thể trôi.** Hai match exhaustive
@@ -174,15 +180,17 @@ cargo build -q -p riviu-android-driver --example probe        # build TRƯỚC, 
 Kết quả: **nguyên văn** (mức tốt nhất trong bảng nguyên văn / ≥24 / 1–23 / 0). Nên caption
 **không** phải chỗ chặn xoá tự động; chỗ chặn là nút xoá không có nhãn.
 
-### 2. Hoàn thiện auto-update
+### 2. ~~Hoàn thiện auto-update~~ — code xong, chờ tag
 
-Thứ tự: sinh `latest.json` trong collector → upload nó **trong cùng** `gh release create` (không
-`edit`, không `--clobber`, để gate bất biến còn nguyên) → UI gọi `update_check` và **chỉ** hiện
-nút cài khi `busyReason` là `null`.
+Đã làm: collector thu `.sig` và `.app.tar.gz` (trước đó **không thu**, nên chữ ký chưa bao giờ
+ra khỏi máy build), `build-updater-manifest` sinh `latest.json` upload **trong cùng**
+`gh release create`, `update_install` với thứ tự tải → nhả máy → cài, và UI ở Settings.
 
-**Watch-item đã xác nhận bằng CI log:** overlay release đổi `productName` thành
-`Riviumanagersphone Full`, và artifact ký ra là `Riviumanagersphone Full_0.1.0_x64-setup.exe.sig`.
-Nên URL Windows trong `latest.json` **phải** trỏ đúng tên **Full**.
+**Watch-item đã xử lý, không chỉ ghi nhận:** tên có dấu cách bị GitHub đổi thành dấu chấm, nên
+collector **đổi tên từ đầu** (`release_asset_name`) để tên trên đĩa đúng bằng tên GitHub phục vụ,
+và `verify_updater_record` từ chối mọi tên GitHub *sẽ* viết lại.
+
+Việc còn lại là quyết định của người vận hành: tăng version cả ba file rồi tạo tag.
 
 ### 3. Chạy gate như CI, không như máy này
 

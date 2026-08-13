@@ -854,6 +854,71 @@ pub async fn update_check(
     })
 }
 
+/// Download the published update and hand over to its installer.
+///
+/// Only ever reached by an explicit press, and it re-asks [`AppState::busy_reason`] rather
+/// than trusting what the UI was showing: the check and the press are separated by however
+/// long the operator took to read it, and a nurture session can start in between.
+///
+/// **The order is the whole point.** Download first, because a failed download must leave
+/// the fleet exactly as it was. Only once the bytes are in hand does the app let go of the
+/// phones, and only then does the installer run — on Windows `install` calls
+/// `std::process::exit` itself, which skips `RunEvent::Exit` entirely. Waiting for the normal
+/// exit path to release anything would leak a WDA relay, an XCTest runner and an adb
+/// forward per device, and on a sixteen-phone farm that is sixteen of each.
+///
+/// **No admission gate, and not merely because it is read-only.** Holding a
+/// [`CommandAdmission`](crate::state::AppState::ensure_accepting_work) would deadlock:
+/// `graceful_shutdown` waits for in-flight mutating commands to drain, and this command
+/// would be one of them, waiting for itself.
+#[tauri::command]
+pub async fn update_install(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    if let Some(reason) = state.busy_reason() {
+        return Err(reason);
+    }
+
+    let update = app
+        .updater()
+        .map_err(|error| format!("không dựng được updater: {error}"))?
+        .check()
+        .await
+        .map_err(|error| format!("không kiểm được bản mới: {error}"))?
+        .ok_or_else(|| "không có bản mới để cài".to_string())?;
+
+    let bytes = update
+        .download(|_, _| {}, || {})
+        .await
+        .map_err(|error| format!("không tải được bản mới: {error}"))?;
+
+    // A plain OS thread, not `spawn_blocking`: `graceful_shutdown` blocks on futures
+    // through the global runtime, and doing that from inside a runtime-managed thread is
+    // the one way to turn an orderly shutdown into a panic during shutdown.
+    let handle = app.clone();
+    let worker = std::thread::Builder::new()
+        .name("riviu-updater-install".into())
+        .spawn(move || {
+            crate::graceful_shutdown(&handle);
+            update.install(bytes)
+        })
+        .map_err(|error| format!("không tạo được luồng cài đặt: {error}"))?;
+
+    // On Windows this join never returns — the installer exits the process from under it,
+    // which is the success path. Elsewhere the archive is unpacked in place and the
+    // operator reopens the app, which the fleet is already released for.
+    match worker.join() {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(format!(
+            "cài bản mới thất bại sau khi đã dừng phiên — mở lại app: {error}"
+        )),
+        Err(_) => Err("luồng cài đặt dừng bất thường — mở lại app".to_string()),
+    }
+}
+
 /// What [`update_check`] found, and whether acting on it is safe right now.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]

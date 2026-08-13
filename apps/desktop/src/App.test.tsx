@@ -32,6 +32,16 @@ vi.mock("./api", () => ({
   refreshDevices: vi.fn(async () => []),
   setStreamSettings: vi.fn(async (settings: unknown) => settings),
   startupError: vi.fn(async () => null),
+  // Settings renders the update section on mount, but nothing checks on mount — the
+  // resting state is "not asked". Mocked anyway: an unmocked export is `undefined`,
+  // and the button's onClick would throw synchronously if anyone pressed it.
+  updateCheck: vi.fn(async () => ({
+    available: false,
+    version: null,
+    current: "0.1.0",
+    busyReason: null,
+  })),
+  updateInstall: vi.fn(async () => undefined),
 }));
 
 vi.mock("./components/flow/FlowWorkspace", () => ({

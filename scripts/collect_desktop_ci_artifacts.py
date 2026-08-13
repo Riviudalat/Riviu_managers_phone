@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 from dataclasses import dataclass
 import hashlib
@@ -92,6 +93,28 @@ RELEASE_LABEL_TARGETS = {
     "windows-x64": "x86_64-pc-windows-msvc",
     "macos-arm64": "aarch64-apple-darwin",
     "macos-x64": "x86_64-apple-darwin",
+}
+# Tauri's updater keys `latest.json` by its own platform strings, which are not the
+# Rust target triples. Spelled out rather than derived, so a mistake is a KeyError in
+# this file instead of a release that one platform silently cannot update from.
+UPDATER_PLATFORMS = {
+    "x86_64-pc-windows-msvc": "windows-x86_64",
+    "aarch64-apple-darwin": "darwin-aarch64",
+    "x86_64-apple-darwin": "darwin-x86_64",
+}
+# One archive per platform, because `latest.json` holds exactly one URL per platform.
+#
+# Windows takes the NSIS installer and not the MSI: `installMode: currentUser` lets it
+# run without a UAC prompt, which is what makes the updater's install step possible at
+# all. An MSI install therefore updates by hand — recorded in the README, not left to
+# be discovered in the field.
+#
+# macOS takes `.app.tar.gz`, the only thing its updater accepts; a `.dmg` is a
+# first-install medium and cannot be applied in place.
+UPDATER_ARCHIVE_GLOBS = {
+    "x86_64-pc-windows-msvc": "*-setup.exe",
+    "aarch64-apple-darwin": "*.app.tar.gz",
+    "x86_64-apple-darwin": "*.app.tar.gz",
 }
 
 
@@ -523,6 +546,74 @@ def find_installers(bundle_dir: Path, target: str) -> list[Path]:
         )
 
     return installers
+
+
+def release_asset_name(name: str) -> str:
+    """The name GitHub will serve this asset under, decided here instead of guessed later.
+
+    GitHub rewrites characters it dislikes in release asset filenames — a space
+    becomes a period — so `Riviumanagersphone Full_0.1.0_x64-setup.exe` is uploaded
+    under one name and served from a URL carrying another. `latest.json` has to
+    contain that URL exactly, and a wrong one fails for an operator months later
+    with nothing on this side to notice it.
+
+    So the rename happens up front: what the collector writes to disk is already
+    what GitHub will serve, the checksum file covers that name, and the two cannot
+    drift apart. Leading and trailing periods are refused rather than trimmed,
+    because trimming would silently reintroduce the same mismatch.
+    """
+    sanitized = re.sub(r"[^A-Za-z0-9._+-]", ".", name)
+    if sanitized.startswith(".") or sanitized.endswith("."):
+        raise ArtifactError(f"release asset name is not URL-stable: {name!r}")
+    return sanitized
+
+
+def read_updater_signature(path: Path) -> str:
+    """The detached signature exactly as `latest.json` must carry it.
+
+    Tauri writes the `.sig` as base64 wrapping a minisign signature, and the
+    manifest field takes that base64 verbatim. Both layers are checked: base64 that
+    decodes to something other than a minisign blob would be accepted by this
+    collector and rejected by every client, which is the worst place to find out.
+    """
+    text = path.read_text(encoding="ascii").strip()
+    if not text:
+        raise ArtifactError(f"updater signature is empty: {path}")
+    try:
+        decoded = base64.b64decode(text, validate=True)
+    except ValueError as error:
+        raise ArtifactError(f"updater signature is not base64: {path}: {error}") from error
+    if not decoded.startswith(b"untrusted comment:"):
+        raise ArtifactError(f"updater signature is not a minisign signature: {path}")
+    return text
+
+
+def find_updater_artifacts(bundle_dir: Path, target: str) -> tuple[Path, Path]:
+    """The one archive this platform can update from, and its detached signature.
+
+    Fails closed, and the asymmetry is deliberate: the public key is baked into
+    every binary already shipped, so a release that omits a platform's entry cannot
+    be corrected in place — the immutability gate forbids editing a published
+    release, and the only repair is publishing a higher version. Failing the release
+    job costs one re-tag; shipping the gap costs every installed copy.
+    """
+    pattern = UPDATER_ARCHIVE_GLOBS[target]
+    archives = sorted(path for path in bundle_dir.rglob(pattern) if path.is_file())
+    if len(archives) != 1:
+        raise ArtifactError(
+            f"expected exactly one updater archive matching {pattern!r} under "
+            f"{bundle_dir}, found {[path.name for path in archives]!r}"
+        )
+    archive = archives[0]
+    signature = archive.with_name(archive.name + ".sig")
+    if not signature.is_file():
+        raise ArtifactError(
+            f"updater archive {archive.name} has no signature beside it: expected "
+            f"{signature}. Check that bundle.createUpdaterArtifacts is still true and "
+            "that TAURI_SIGNING_PRIVATE_KEY reached the build step."
+        )
+    read_updater_signature(signature)
+    return archive, signature
 
 
 MSI_LOG_ERROR_PATTERN = re.compile(
@@ -1409,8 +1500,29 @@ def collect_command(args: argparse.Namespace) -> dict[str, Any]:
     copied_installers = []
     for installer in installers:
         copied_installers.append(
-            copy_release_file(installer, output_dir, f"{args.label}--{installer.name}")
+            copy_release_file(
+                installer,
+                output_dir,
+                release_asset_name(f"{args.label}--{installer.name}"),
+            )
         )
+
+    updater_archive, updater_signature = find_updater_artifacts(bundle_dir, target)
+    archive_asset = release_asset_name(f"{args.label}--{updater_archive.name}")
+    # On Windows the archive *is* the NSIS installer already copied above, so reuse
+    # that record rather than copying the same 200 MB twice under two names — two
+    # names for one file is also two things `latest.json` could point at.
+    archive_record = next(
+        (record for record in copied_installers if record["file"] == archive_asset),
+        None,
+    )
+    if archive_record is None:
+        archive_record = copy_release_file(updater_archive, output_dir, archive_asset)
+    signature_record = copy_release_file(
+        updater_signature,
+        output_dir,
+        release_asset_name(f"{args.label}--{updater_signature.name}"),
+    )
 
     runtime_manifest_name = f"{args.label}-runtime-manifest.json"
     overlay_name = f"{args.label}-tauri-overlay.json"
@@ -1441,6 +1553,18 @@ def collect_command(args: argparse.Namespace) -> dict[str, Any]:
         "productionInputs": production["files"],
         "packagedVerification": packaged,
         "installers": copied_installers,
+        # Kept out of `installers` on purpose: that list is gated on carrying exactly
+        # the platform's installer suffixes, and a `.sig` or a `.app.tar.gz` in it
+        # would fail that check for a good reason — neither is something a person
+        # installs.
+        "updater": {
+            "platform": UPDATER_PLATFORMS[target],
+            "archive": archive_record["file"],
+            "archiveBytes": archive_record["bytes"],
+            "archiveSha256": archive_record["sha256"],
+            "signatureFile": signature_record["file"],
+            "signature": read_updater_signature(updater_signature),
+        },
     }
     write_json(output_dir / artifact_manifest_name, artifact_manifest)
 
@@ -1487,6 +1611,152 @@ def parse_checksum_file(path: Path) -> list[tuple[str, str]]:
 def verify_android_tools_command(_args: argparse.Namespace) -> dict[str, Any]:
     result = verify_android_tools(ANDROID_TOOLS_ROOT)
     return {"ok": True, "command": "verify-android-tools", **result}
+
+
+def verify_updater_record(
+    manifest: dict[str, Any],
+    manifest_path: Path,
+    expected_target: str,
+    checksummed_names: set[str],
+) -> dict[str, Any]:
+    """Check that a label's updater block describes assets that are really here.
+
+    Shared by `verify-release` and `build-updater-manifest` so the URL written into
+    `latest.json` can only ever name a file whose digest was confirmed on this run.
+    """
+    updater = manifest.get("updater")
+    if not isinstance(updater, dict):
+        raise ArtifactError(f"artifact manifest has no updater block: {manifest_path}")
+    expected_platform = UPDATER_PLATFORMS[expected_target]
+    if updater.get("platform") != expected_platform:
+        raise ArtifactError(
+            f"updater platform mismatch in {manifest_path}: expected "
+            f"{expected_platform!r}, got {updater.get('platform')!r}"
+        )
+    names: dict[str, str] = {}
+    for key in ("archive", "signatureFile"):
+        name = updater.get(key)
+        if not isinstance(name, str) or Path(name).name != name or not name:
+            raise ArtifactError(f"invalid updater {key} in {manifest_path}: {name!r}")
+        if name not in checksummed_names:
+            raise ArtifactError(
+                f"updater {key} {name!r} is not a checksummed release asset "
+                f"({manifest_path})"
+            )
+        if release_asset_name(name) != name:
+            raise ArtifactError(
+                f"updater {key} {name!r} would be renamed by GitHub, so its URL in "
+                f"latest.json could not be predicted ({manifest_path})"
+            )
+        names[key] = name
+
+    archive = manifest_path.parent / names["archive"]
+    if not archive.is_file():
+        raise ArtifactError(f"updater archive is missing: {archive}")
+    if updater.get("archiveBytes") != archive.stat().st_size or updater.get(
+        "archiveSha256"
+    ) != sha256_file(archive):
+        raise ArtifactError(f"updater archive record does not match asset: {archive}")
+
+    signature_path = manifest_path.parent / names["signatureFile"]
+    if not signature_path.is_file():
+        raise ArtifactError(f"updater signature is missing: {signature_path}")
+    signature = read_updater_signature(signature_path)
+    if updater.get("signature") != signature:
+        raise ArtifactError(
+            f"updater signature recorded in {manifest_path} differs from "
+            f"{signature_path}"
+        )
+    return {
+        "platform": expected_platform,
+        "archive": names["archive"],
+        "signature": signature,
+    }
+
+
+def read_label_manifest(root: Path, label: str) -> tuple[Path, dict[str, Any], set[str]]:
+    """A label's artifact manifest, plus the set of names its checksum file covers."""
+    manifest_matches = list(root.rglob(f"{label}-artifact-manifest.json"))
+    checksum_matches = list(root.rglob(f"{label}-SHA256SUMS"))
+    if len(manifest_matches) != 1 or len(checksum_matches) != 1:
+        raise ArtifactError(
+            f"expected one checksum and artifact manifest for {label!r}"
+        )
+    manifest_path = manifest_matches[0]
+    checksummed = {name for _, name in parse_checksum_file(checksum_matches[0])}
+    return manifest_path, load_json(manifest_path), checksummed
+
+
+def build_updater_manifest_command(args: argparse.Namespace) -> dict[str, Any]:
+    """Write the `latest.json` that already-installed copies will ask for.
+
+    Published as an asset of the very release it describes, inside the same
+    `gh release create` — never by editing a release afterwards, so the immutability
+    gate stays exactly as strict as it is. What makes that work is that GitHub
+    resolves `/releases/latest/download/latest.json` at request time: publishing a
+    higher version re-points the endpoint without touching a byte of the older
+    release. Every per-platform URL inside the manifest is pinned to this tag, so a
+    client that has already fetched the manifest downloads an immutable asset.
+    """
+    root = args.root.resolve()
+    if not root.is_dir():
+        raise ArtifactError(f"downloaded artifact directory is missing: {root}")
+    version = args.version.strip()
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise ArtifactError(f"release version must be MAJOR.MINOR.PATCH: {version!r}")
+    if args.tag != f"v{version}":
+        raise ArtifactError(f"release tag mismatch: expected v{version}, got {args.tag!r}")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", args.repo):
+        raise ArtifactError(f"repository must be owner/name: {args.repo!r}")
+
+    platforms: dict[str, dict[str, str]] = {}
+    for label in args.labels:
+        expected_target = RELEASE_LABEL_TARGETS.get(label)
+        if expected_target is None:
+            raise ArtifactError(f"unknown desktop release label: {label!r}")
+        manifest_path, manifest, checksummed = read_label_manifest(root, label)
+        record = verify_updater_record(
+            manifest, manifest_path, expected_target, checksummed
+        )
+        if record["platform"] in platforms:
+            raise ArtifactError(
+                f"two labels claim updater platform {record['platform']!r}"
+            )
+        platforms[record["platform"]] = {
+            "signature": record["signature"],
+            "url": (
+                f"https://github.com/{args.repo}/releases/download/"
+                f"{args.tag}/{record['archive']}"
+            ),
+        }
+
+    # Every known platform or none. A manifest missing an entry does not degrade
+    # gracefully — that platform's installed copies get "no update available"
+    # forever, and cannot be told otherwise without a new version.
+    missing = sorted(set(UPDATER_PLATFORMS.values()) - set(platforms))
+    if missing:
+        raise ArtifactError(f"updater manifest would omit platform(s): {missing!r}")
+
+    output = args.output.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    write_json(
+        output,
+        {
+            "version": version,
+            "notes": args.notes or f"Riviumanagersphone {version}",
+            "pub_date": args.pub_date
+            or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "platforms": platforms,
+        },
+    )
+    return {
+        "ok": True,
+        "command": "build-updater-manifest",
+        "version": version,
+        "tag": args.tag,
+        "output": str(output),
+        "platforms": sorted(platforms),
+    }
 
 
 def verify_release_command(args: argparse.Namespace) -> dict[str, Any]:
@@ -1622,6 +1892,7 @@ def verify_release_command(args: argparse.Namespace) -> dict[str, Any]:
                 f"installer types mismatch for {label}: expected "
                 f"{sorted(expected_suffixes)!r}, got {sorted(actual_suffixes)!r}"
             )
+        verify_updater_record(manifest, manifest_path, expected_target, checksummed_names)
 
     all_resolved = {path.resolve() for path in all_files}
     if covered_files != all_resolved:
@@ -1677,6 +1948,17 @@ def parse_args() -> argparse.Namespace:
     verify_release.add_argument("--labels", nargs="+", required=True)
     verify_release.add_argument("--source-commit", required=True)
     verify_release.set_defaults(handler=verify_release_command)
+
+    updater_manifest = subparsers.add_parser("build-updater-manifest")
+    updater_manifest.add_argument("--root", type=Path, required=True)
+    updater_manifest.add_argument("--labels", nargs="+", required=True)
+    updater_manifest.add_argument("--repo", required=True)
+    updater_manifest.add_argument("--tag", required=True)
+    updater_manifest.add_argument("--version", required=True)
+    updater_manifest.add_argument("--output", type=Path, required=True)
+    updater_manifest.add_argument("--notes")
+    updater_manifest.add_argument("--pub-date")
+    updater_manifest.set_defaults(handler=build_updater_manifest_command)
     return parser.parse_args()
 
 

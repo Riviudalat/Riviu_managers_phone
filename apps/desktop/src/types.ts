@@ -1149,3 +1149,16 @@ export interface RevisionConflict {
   expected: number;
   actual: number;
 }
+
+/**
+ * What an update check found, plus whether acting on it now would cut work off.
+ *
+ * `busyReason` is a sentence rather than a boolean so the operator is told *what* is
+ * running. The backend re-reads it at install time regardless of what this said.
+ */
+export interface UpdateStatus {
+  available: boolean;
+  version: string | null;
+  current: string;
+  busyReason: string | null;
+}

@@ -125,6 +125,7 @@ pub fn run() {
             commands::driver_degraded_reason,
             commands::android_unavailable_reason,
             commands::update_check,
+            commands::update_install,
             farm_commands::auth_session,
             farm_commands::auth_login,
             farm_commands::auth_register,
@@ -224,14 +225,19 @@ pub fn run() {
 /// Stop taking work, let what is in flight finish, then release every device.
 ///
 /// Extracted from the `RunEvent::Exit` closure so a **second** exit path can call the same
-/// sequence. The updater is that second path: it quits the app to hand over to the
-/// installer, and an exit that goes through `process::exit` never emits `RunEvent::Exit` —
-/// so none of this would run. On a 16-phone farm that means leaked WDA relays, leaked
-/// XCTest runners and leaked adb forwards, on every update.
+/// sequence. The updater is that second path, and it calls this directly — before handing
+/// the bytes to the installer, not from an exit hook. Two reasons it cannot be a hook: the
+/// plugin's `install` ends by calling `process::exit` itself, which never emits
+/// `RunEvent::Exit`, and
+/// its `on_before_exit` callback fires inside the async runtime where the `block_on` calls
+/// below would panic. Skipping the sequence would leak a WDA relay, an XCTest runner and an
+/// adb forward per phone, on every update.
+///
+/// Called from a plain OS thread there, for the same `block_on` reason.
 ///
 /// Idempotent by construction: every step is either a flag set to the value it already has
 /// or a shutdown that no-ops once done, so being called from both paths is safe.
-fn graceful_shutdown(handle: &tauri::AppHandle) {
+pub(crate) fn graceful_shutdown(handle: &tauri::AppHandle) {
     let Some(state) = handle.try_state::<AppState>() else {
         return;
     };
@@ -413,6 +419,41 @@ mod tests {
                 .find(operation)
                 .unwrap_or_else(|| panic!("missing shutdown operation {operation}"));
             offset += position + operation.len();
+        }
+    }
+
+    #[test]
+    fn the_updater_releases_the_fleet_between_downloading_and_installing() {
+        // Three steps, and the order carries all the safety:
+        //   busy check first — the press happens however long after the check the operator
+        //                      took to read it, and a session can start in between
+        //   download next    — a failed download must leave the fleet exactly as it was
+        //   shutdown then    — `install` ends in `process::exit(0)` on Windows, so the
+        //                      normal exit path never runs and every relay would leak
+        //   install last     — nothing irreversible until the phones are already released
+        //
+        // Re-ordering any pair still compiles and still works on a farm with no phones
+        // plugged in, which is exactly why this is pinned rather than left to review.
+        let source = include_str!("commands.rs");
+        let start = source
+            .find("pub async fn update_install(")
+            .expect("update_install present");
+        let body = &source[start..];
+        // Column-zero brace: the function's own close, since every inner block is indented.
+        let end = body.find("\n}\n").expect("update_install has a body");
+        let body = &body[..end];
+        let ordered = [
+            "state.busy_reason()",
+            ".download(",
+            "graceful_shutdown(&handle)",
+            ".install(bytes)",
+        ];
+        let mut offset = 0;
+        for step in ordered {
+            let position = body[offset..]
+                .find(step)
+                .unwrap_or_else(|| panic!("update_install is missing or re-orders {step}"));
+            offset += position + step.len();
         }
     }
 

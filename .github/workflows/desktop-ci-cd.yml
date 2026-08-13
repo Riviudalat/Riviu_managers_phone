@@ -354,6 +354,22 @@ jobs:
             --source-commit "${GITHUB_SHA}" \
             --labels windows-x64 macos-arm64 macos-x64
 
+      # Written outside release-artifacts on purpose: that tree is under a
+      # coverage check that fails on any file its checksum lists do not name, and
+      # this manifest is signed for by the per-platform signatures it carries
+      # rather than by a checksum of its own.
+      - name: Build updater manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/collect_desktop_ci_artifacts.py build-updater-manifest \
+            --root release-artifacts \
+            --labels windows-x64 macos-arm64 macos-x64 \
+            --repo "${{ github.repository }}" \
+            --tag "${GITHUB_REF_NAME}" \
+            --version "${GITHUB_REF_NAME#v}" \
+            --output release-updater/latest.json
+
       - name: Create immutable GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -388,6 +404,15 @@ jobs:
             echo "No verified release assets found" >&2
             exit 1
           fi
+          # Uploaded in this same create call. An installed copy asks
+          # /releases/latest/download/latest.json, which GitHub resolves per request,
+          # so publishing a higher version re-points it without editing anything
+          # already published — the immutability gate below stays untouched.
+          if [[ ! -f release-updater/latest.json ]]; then
+            echo "Updater manifest was not built" >&2
+            exit 1
+          fi
+          assets+=("release-updater/latest.json")
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             echo "Release $GITHUB_REF_NAME already exists; publish a new version/tag instead" >&2
             exit 1

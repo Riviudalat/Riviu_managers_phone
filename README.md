@@ -37,6 +37,22 @@ link tĩnh CRT nên không cần cài Visual C++ Redistributable.
 có adb thì bản đó được ưu tiên trước bản đóng gói — cố ý, xem "Thứ tự tìm adb"
 dưới đây.
 
+### Cập nhật
+
+App **không tự kiểm** bản mới lúc mở — máy farm thường offline và không ai yêu cầu nó gọi
+về. Vào **Settings → Bản cập nhật** rồi bấm **Kiểm bản mới**.
+
+Nút **Tải và cài đặt** chỉ bật khi fleet đang rảnh. Đang có phiên Nuôi TT hoặc việc trong
+hàng đợi thì nút tắt và panel nói rõ đang chạy cái gì — bộ cài thay chính tiến trình đang
+giữ session và lease của các máy. Hàng đợi **không đọc được** cũng tính là đang chạy.
+
+Khi bấm cài: tải xong trước, rồi app dừng mọi phiên và nhả hết máy, rồi mới chạy bộ cài.
+Trên Windows app tự đóng và mở lại; trên macOS phải mở lại tay.
+
+**Bản cài từ `.msi` không tự cập nhật được.** `latest.json` chỉ mang một URL cho mỗi
+platform, và URL Windows trỏ bộ cài NSIS — vì `installMode: currentUser` mới cài được mà
+không cần UAC. Ai cài bằng MSI thì tải bộ cài mới và cài tay.
+
 Các prerequisite thuộc hệ điều hành/nhà cung cấp:
 
 - Windows cần Apple Devices hoặc Apple Mobile Device Support để có USB driver và

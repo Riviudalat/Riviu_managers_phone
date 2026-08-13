@@ -46,6 +46,7 @@ import type {
   ThreadCampaignRequest,
   ThreadPreview,
   TikTokLinkLine,
+  UpdateStatus,
 } from "./types";
 
 export async function startupError() {
@@ -264,6 +265,28 @@ export async function driverDegradedReason() {
  */
 export async function androidUnavailableReason() {
   return invoke<string | null>("android_unavailable_reason");
+}
+
+/**
+ * Ask GitHub whether a newer release exists, and whether taking it now is safe.
+ *
+ * Never called on mount. A farm machine is often offline and nobody asked it to phone
+ * home, so this is only ever a press.
+ */
+export async function updateCheck() {
+  return invoke<UpdateStatus>("update_check");
+}
+
+/**
+ * Download the update and hand over to its installer.
+ *
+ * On Windows the process is replaced from under us, so this promise never settles on
+ * success — treat a resolve as "unpacked, reopen the app" and a reject as the reason.
+ * The backend re-checks `busyReason` itself; the disabled button here is courtesy, not
+ * the guard.
+ */
+export async function updateInstall() {
+  return invoke<void>("update_install");
 }
 
 export async function authSession() {

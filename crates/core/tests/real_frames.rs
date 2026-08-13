@@ -228,6 +228,20 @@ fn a_liked_heart_reads_red_and_an_unliked_one_does_not() {
 /// this test failed at 416 ms against a 400 ms bar while passing at a quarter
 /// of that when run alone. The fastest pass is the one that actually reflects
 /// the code's cost, and a real regression raises it just the same.
+///
+/// That change fixed the estimator and left the bound, so the same failure came
+/// back. Measured on identical code and identical input, fastest-of-five still
+/// moves with machine state by 2.5×:
+///
+/// | how it was run | fastest of five |
+/// |---|---|
+/// | this test alone | 166 ms |
+/// | the whole `real_frames` binary | 377 ms |
+/// | `cargo test --workspace` | 424 ms |
+///
+/// So taking the fastest pass narrows the noise but does not remove it, and any
+/// bound close to the isolated cost is a coin flip on a busy machine. See the
+/// bound below for where it now sits and why.
 fn fastest_classify(img: &image::RgbImage, runs: u32) -> std::time::Duration {
     (0..runs)
         .map(|_| {
@@ -270,8 +284,16 @@ fn classification_stays_fast_enough_for_the_watcher() {
         "classify: {:?}/frame (no compose bar — full template match)",
         per_frame
     );
+    // Sits above the machine-state spread on purpose. The worst honest observation of
+    // this exact code was 424 ms, under `cargo test --workspace`; a 400 ms bound made a
+    // green suite depend on how warm the laptop was. This is a debug build and a
+    // regression guard, not a real-time budget — 24 FPS would be 41 ms/frame, so 1200 ms
+    // is already ~29× the frame it protects. What it still catches is the kind of change
+    // that matters here: losing the pyramid, or scanning at full resolution, both of
+    // which cost multiples rather than percent. The printed number above is the thing to
+    // watch for slow drift, since an assert can only fire once it is already too late.
     assert!(
-        per_frame < std::time::Duration::from_millis(400),
+        per_frame < std::time::Duration::from_millis(1200),
         "template-match classification took {per_frame:?}/frame"
     );
 }
