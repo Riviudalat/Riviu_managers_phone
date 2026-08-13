@@ -4730,6 +4730,37 @@ Nó cũng báo có `Follow ` trên trang không, vì đó là từ chối dứt 
 
 **Chưa chạy.** Đây là số đo M4/M5 và nó cần một bài thật của người vận hành.
 
+### 9.44 Đường Đăng bài cho máy Android đi qua, và bốn version chỉ kiểm ba (13/08/2026)
+
+Hai lỗi tìm ra khi hiện thực quyết định "chưa đăng gì từ Android", không phải khi thiết kế.
+
+**1. Không có gate nền tảng nào cho Đăng bài.** Gate duy nhất là `supports_push_media`, và
+driver Android trả **`true`** — đúng, vì đẩy ảnh vào gallery là phần nó **có** làm thật. Thứ
+thiếu là composer, và không capability nào nói điều đó. Nên một máy Android map được vào
+campaign, bấm Transfer rồi Post, và `publish_commands` tap **toạ độ logic iOS** với **bundle
+iOS** lên nó — đúng loại "bịa toạ độ cho cú tap không lùi được" mà mục 10 cấm, mà lần này là
+đăng bài.
+
+Nặng hơn: doc comment trong chính file ghi *"the Publish page refuses an Android target before
+dispatch"*. **Không có gate nào như vậy** — không ở UI (`FarmPages.tsx` chỉ gọi thẳng), không ở
+backend. Một câu doc tự nhận có bảo vệ là tệ hơn không có câu nào, vì nó làm người đọc sau
+không đi kiểm.
+
+Sửa: `refuse_devices_this_path_cannot_drive` gate theo **`reports_element_bounds`** — cùng tín
+hiệu đường tương tác dùng để phân hoạch pixel/cây — gọi ở **cả hai** cửa vào trước mọi thay đổi
+trạng thái. Từ chối ở `publish_transfer` nữa, không chỉ `publish_post`: transfer trước sẽ đẩy
+ảnh lên một máy không bao giờ đăng được rồi để đó. Nhận predicate thay vì control plane để test
+được mà không cần fleet. Thông báo **nêu tên đúng máy vi phạm**, vì fleet trộn và "một máy nào
+đó" bắt người ta đi mò 16 cái.
+
+**2. Bốn trường version, `verify-version` chỉ kiểm ba.** Nó kiểm `tauri.conf.json`,
+`package.json`, `Cargo.toml` — và bỏ **`tauri.full.conf.json`**, chính overlay mà bản release
+build bằng, tức chính file quyết định version binary **tự báo lúc chạy**.
+
+Hậu quả chỉ xuất hiện **sau khi phát hành**: `latest.json` quảng cáo `0.1.1`, binary tự nhận
+`0.1.0`, nên mọi bản đã cài được mời đúng bản cập nhật đó **mãi mãi** và không bao giờ thoả —
+một vòng lặp không có gì ở phía này nhận ra. Đã thêm vào hợp đồng version.
+
 ### 9.43 Hai lối xoá còn lại: đã đo, đều đóng — và một lối khác mở ra (13/08/2026)
 
 Mục 9.37 kết luận xoá tự động không dựng được từ trang bài, và ghi lại **hai lối chưa thử**.

@@ -29,10 +29,24 @@
 // anything, because the question they answer — "can this backend take the post down
 // again?" — must be settled before the first post, not after.
 //
+// It is now settled, and the answer is no. Four surfaces on trill 46.3.3 were measured and
+// none carries a labelled delete control: the own-post page, the sheet behind its `...`, a
+// long-press in the profile grid, and the privacy sheet (AGENTS.md 9.43). The caption half of
+// the proof chain does work — a caption reads back verbatim well past the threshold the design
+// needed (9.40) — so what is missing is only the last tap, and there is no honest way to
+// synthesise it. Asked with that measurement in hand, the operator chose to publish nothing
+// from Android rather than post and remove by hand, so `publish_commands` refuses an Android
+// target outright instead of gating on this trait.
+//
+// Kept rather than deleted because the decision is about *this* build of TikTok. If a
+// labelled delete path appears — a different app version, a different locale, or the
+// only-me visibility control in the privacy sheet if the operator ever counts that as
+// removal — the shape it has to fit is already here, along with the tests that say what
+// counts as proof.
+//
 // Comes off the moment `publish_commands` gates a post-then-delete campaign on
-// `can_remove_its_own_post`. If you are reading this and that gate exists, delete the
-// attribute; if it does not, the skeleton is still waiting for it and this comment is still
-// true. Scoped to the module so real dead code elsewhere still fails the build.
+// `can_remove_its_own_post`. Scoped to the module so real dead code elsewhere still fails
+// the build.
 #![allow(dead_code)]
 
 use std::fmt;

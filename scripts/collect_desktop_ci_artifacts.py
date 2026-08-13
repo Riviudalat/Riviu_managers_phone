@@ -54,6 +54,14 @@ ANDROID_TOOLS_ROOT = REPOSITORY_ROOT / "sidecars" / "android"
 ANDROID_TOOLS_MANIFEST_NAME = "android-tools-manifest.json"
 BRANDING_LOGO = REPOSITORY_ROOT / "logo.jpg"
 TAURI_CONFIG = REPOSITORY_ROOT / "apps" / "desktop" / "src-tauri" / "tauri.conf.json"
+# The release build runs with this overlay, so *this* is the version the shipped binary
+# reports at runtime. Left out of the version contract it drifted silently, and the
+# consequence only appears after a release: latest.json would advertise 0.1.1 to a binary
+# that identifies as 0.1.0, so every installed copy would be offered the same update
+# forever and never satisfy it.
+TAURI_FULL_CONFIG = (
+    REPOSITORY_ROOT / "apps" / "desktop" / "src-tauri" / "tauri.full.conf.json"
+)
 TAURI_CARGO_MANIFEST = (
     REPOSITORY_ROOT / "apps" / "desktop" / "src-tauri" / "Cargo.toml"
 )
@@ -296,6 +304,7 @@ def snapshot_command(args: argparse.Namespace) -> dict[str, Any]:
 
 def verify_version_command(args: argparse.Namespace) -> dict[str, Any]:
     tauri_version = load_json(TAURI_CONFIG).get("version")
+    tauri_full_version = load_json(TAURI_FULL_CONFIG).get("version")
     npm_version = load_json(DESKTOP_PACKAGE_JSON).get("version")
     try:
         cargo_document = tomllib.loads(
@@ -306,6 +315,7 @@ def verify_version_command(args: argparse.Namespace) -> dict[str, Any]:
         raise ArtifactError(f"invalid desktop Cargo version: {error}") from error
     versions = {
         "tauri": tauri_version,
+        "tauriFull": tauri_full_version,
         "npm": npm_version,
         "cargo": cargo_version,
     }

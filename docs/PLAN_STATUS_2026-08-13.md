@@ -128,6 +128,25 @@ chọn được.
 **Đây là chỗ cần người vận hành quyết**, vì "gỡ bài" và "để chỉ mình xem" là hai việc khác nhau:
 bài vẫn còn trên tài khoản.
 
+### A-bis. Đã sửa nhân lúc đo: đường Đăng bài cho máy Android đi qua
+
+Gate duy nhất trước khi đăng là `supports_push_media`, và **driver Android trả `true`** — đúng,
+vì đẩy ảnh vào gallery là phần nó có làm thật. Thiếu là composer, và không capability nào nói
+điều đó. Nên một máy Android map được vào campaign, bấm Transfer rồi Post, và module sẽ tap
+**toạ độ logic của iOS** với **bundle id của iOS** lên nó. Doc comment trong file còn ghi
+"Publish page refuses an Android target before dispatch" — **không đúng**, không UI lẫn backend
+có gate nào.
+
+Đã sửa: `refuse_devices_this_path_cannot_drive` gate theo `reports_element_bounds` (đúng tín
+hiệu mà đường tương tác dùng để phân hoạch pixel/cây), gọi ở **cả hai** cửa vào
+(`publish_transfer` và `publish_post`) trước mọi thay đổi trạng thái, nêu tên đúng máy vi phạm,
+kèm 3 test.
+
+Và `verify-version` giờ kiểm **cả overlay release**. Trước đó nó kiểm ba file mà bỏ
+`tauri.full.conf.json` — chính file quyết định version của bản phát hành thật. Lệch một cái là
+`latest.json` quảng cáo 0.1.1 cho một binary tự nhận 0.1.0, tức **mọi bản đã cài được mời cập
+nhật mãi mà không bao giờ thoả**.
+
 ### B. Chặn bởi phần cứng không có mặt
 
 | Việc | Cần gì |
@@ -138,10 +157,12 @@ bài vẫn còn trên tài khoản.
 
 ### C. Viết rồi nhưng **chưa ai gọi** (nên chưa tính là xong)
 
-- **`publish_driver.rs`** — trait `PublishDriver`, `PostProof`, `DeleteFailure` và 8 test đã có,
-  nhưng **không caller nào**. Module mang `allow(dead_code)` với điều kiện tháo ghi rõ trong
-  chính file: *khi `publish_commands` gate campaign post-then-delete vào
-  `can_remove_its_own_post`*.
+- **`publish_driver.rs`** — trait `PublishDriver`, `PostProof`, `DeleteFailure` và 9 test đã có,
+  vẫn **không caller nào**, nhưng giờ là **có chủ đích và đã chốt**: người vận hành chọn
+  **không đăng gì từ Android** sau khi thấy số đo, nên `publish_commands` **từ chối thẳng máy
+  Android** thay vì gate vào trait này. Giữ module chứ không xoá, vì quyết định này gắn với
+  *bản TikTok này*: nếu sau có đường xoá có nhãn thì hình dạng cần khớp đã sẵn, kèm test nói
+  cái gì tính là bằng chứng.
 
   **Một chỗ tôi từng nói quá, đã sửa lại trong doc của code:** `PostProof::new` là `pub`, nên
   bất kỳ code nào trong crate cũng gọi được mà không đi qua một hiện thực `prove_own_post`.
@@ -169,7 +190,7 @@ bài vẫn còn trên tài khoản.
 
 - **Ký số Windows.** Chưa ký. Giá cụ thể: SmartScreen hiện "Windows protected your PC" ở lần
   chạy `.exe` đầu, **và bảo vệ theo reputation có thể chặn thẳng bước cài im lặng của updater**.
-- **Tag `v0.1.1`.** Tạo GitHub Release công khai. Version hiện là `0.1.0` ở cả ba file, 0 tag.
+- ~~**Tag `v0.1.1`.**~~ **Đã quyết: tăng và tag.** Bốn trường version (kể cả overlay release) đã lên `0.1.1`.
 - **Review giấy phép Google platform-tools.** Hoãn có ý thức; mức phơi nhiễm ghi ở `NOTICE`.
 - **Backup private key của updater.** Xem Phần IV.
 

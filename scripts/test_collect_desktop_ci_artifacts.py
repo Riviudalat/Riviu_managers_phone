@@ -412,11 +412,26 @@ class ArtifactContractTests(unittest.TestCase):
                 artifacts.load_json(path)
 
     def test_desktop_version_contract_matches_and_rejects_a_wrong_tag(self):
-        result = artifacts.verify_version_command(argparse.Namespace(tag="v0.1.0"))
-        self.assertEqual(result["version"], "0.1.0")
+        # Asks the repo what the version is instead of naming it. The earlier version
+        # asserted "0.1.0" literally, so bumping to 0.1.1 broke a test about tag matching
+        # for a reason that had nothing to do with tag matching. What is worth pinning is
+        # the property: whatever the four files agree on, that tag is accepted and any
+        # other is refused.
+        version = artifacts.verify_version_command(argparse.Namespace(tag=None))["version"]
+        result = artifacts.verify_version_command(argparse.Namespace(tag=f"v{version}"))
+        self.assertEqual(result["version"], version)
 
         with self.assertRaisesRegex(artifacts.ArtifactError, "tag mismatch"):
             artifacts.verify_version_command(argparse.Namespace(tag="v9.9.9"))
+
+    def test_the_release_overlay_is_inside_the_version_contract(self):
+        # The overlay decides what the shipped binary reports at runtime, and it sat outside
+        # the check. A mismatch there is invisible until after a release, when latest.json
+        # advertises a version no installed copy can ever claim to have reached.
+        overlay = artifacts.load_json(artifacts.TAURI_FULL_CONFIG)
+        version = artifacts.verify_version_command(argparse.Namespace(tag=None))["version"]
+
+        self.assertEqual(overlay.get("version"), version)
 
     def test_source_commit_requires_an_exact_git_object_id(self):
         commit = "A" * 40

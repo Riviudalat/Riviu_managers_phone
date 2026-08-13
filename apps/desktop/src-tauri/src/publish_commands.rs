@@ -191,6 +191,15 @@ pub(crate) async fn transfer_publish_campaign_inner(
     if detail.bundles.is_empty() || detail.assignments.is_empty() {
         anyhow::bail!("publish campaign has no staged bundle or assignment");
     }
+    // Refused here too, not only before posting. Transferring first would push media onto a
+    // phone that can never be posted from, and then leave it there.
+    refuse_devices_this_path_cannot_drive(
+        detail
+            .assignments
+            .iter()
+            .map(|assignment| assignment.udid.as_str()),
+        |udid| control.reports_element_bounds(udid),
+    )?;
     let source_root = Path::new(&detail.bundles[0].source_path)
         .parent()
         .ok_or_else(|| anyhow::anyhow!("managed publish root is missing"))?
@@ -306,11 +315,13 @@ pub(crate) async fn transfer_publish_campaign_inner(
         .ok_or_else(|| anyhow::anyhow!("campaign disappeared after transfer"))
 }
 
-/// The publish path is iOS-only until the Android media pipeline exists.
+/// The publish path is iOS-only, and [`refuse_devices_this_path_cannot_drive`] enforces it.
 ///
-/// Not a resolved value: `stage_publish_media` and friends are unimplemented on
-/// Android, and the Publish page refuses an Android target before dispatch. Kept as
-/// the shared constant so nobody mistakes it for a per-device answer.
+/// Not a resolved value. The previous version of this comment claimed the Publish page
+/// refuses an Android target before dispatch; it did not, and neither did anything else —
+/// an Android phone could be mapped into a campaign and posted, which meant pressing iOS
+/// logical coordinates against a different app's layout. Kept as the shared constant so
+/// nobody mistakes it for a per-device answer.
 const TIKTOK_BUNDLE_ID: &str = riviu_core::tiktok_target::IOS_TIKTOK_BUNDLE;
 const PLUS_BUTTON: TapPoint = TapPoint { x: 187.0, y: 640.0 };
 const GALLERY_BUTTON: TapPoint = TapPoint { x: 32.0, y: 632.0 };
@@ -321,6 +332,38 @@ const EDIT_NEXT: TapPoint = TapPoint { x: 280.0, y: 635.0 };
 const CAPTION_FIELD: TapPoint = TapPoint { x: 180.0, y: 240.0 };
 const POST_BUTTON: TapPoint = TapPoint { x: 330.0, y: 42.0 };
 const PUBLIC_POST_CONFIRM: TapPoint = TapPoint { x: 275.0, y: 444.0 };
+
+/// Refuse a campaign holding a device this module has no coordinates for.
+///
+/// Every tap constant above is an **iOS logical coordinate** and `TIKTOK_BUNDLE_ID` is the
+/// iOS bundle, so an Android assignment would press arbitrary places in a layout nobody
+/// measured — the exact thing the label-driven Android work exists to avoid, and worse here
+/// because posting cannot be undone.
+///
+/// `supports_push_media` does not catch this. The Android driver answers `true` there,
+/// correctly: pushing media into the gallery is the part it really does implement. What is
+/// missing is the composer, and there is no capability that says so.
+///
+/// So the gate is `reports_element_bounds`, the same signal that partitions the interaction
+/// path: a device that reports bounds is driven by label, and this module drives by pixel.
+/// Taking a predicate rather than the control plane keeps it testable without a fleet.
+fn refuse_devices_this_path_cannot_drive<'a>(
+    udids: impl IntoIterator<Item = &'a str>,
+    driven_by_label: impl Fn(&str) -> bool,
+) -> anyhow::Result<()> {
+    let by_label: Vec<&str> = udids
+        .into_iter()
+        .filter(|udid| driven_by_label(udid))
+        .collect();
+    anyhow::ensure!(
+        by_label.is_empty(),
+        "đường Đăng bài này chỉ chạy trên iPhone. {} điều khiển theo cây giao diện, còn mọi \
+         toạ độ ở đây là toạ độ logic của iOS — chạy tiếp là bấm bừa lên một màn hình chưa ai \
+         đo. Composer cho Android chưa được dựng.",
+        by_label.join(", ")
+    );
+    Ok(())
+}
 
 #[tauri::command]
 pub async fn publish_post(
@@ -361,6 +404,13 @@ pub(crate) async fn post_publish_campaign_inner(
             detail.campaign.state
         );
     }
+    refuse_devices_this_path_cannot_drive(
+        detail
+            .assignments
+            .iter()
+            .map(|assignment| assignment.udid.as_str()),
+        |udid| control.reports_element_bounds(udid),
+    )?;
     // Asked per device, not once for the campaign. A campaign spans several
     // phones and a fleet can be mixed, so a single fleet-wide answer would
     // report one device's agent on behalf of the rest. Still fails fast, before
@@ -873,6 +923,38 @@ fn parse_run_at(raw: &str) -> Result<NaiveDateTime, String> {
 #[cfg(test)]
 mod tests {
     use super::account_status_text_is_locked;
+    use super::refuse_devices_this_path_cannot_drive;
+
+    #[test]
+    fn a_campaign_holding_an_android_phone_is_refused_before_anything_is_touched() {
+        // The hazard is not abstract: `supports_push_media` answers true for Android, so
+        // the only pre-existing gate waved it through and the module would then press iOS
+        // logical coordinates against TikTok's Android layout.
+        let error = refuse_devices_this_path_cannot_drive(
+            ["00008030-iphone", "ce0617164585646f0d7e"],
+            |udid| udid == "ce0617164585646f0d7e",
+        )
+        .expect_err("an Android target must be refused");
+        let message = format!("{error:#}");
+        // Names the offending device: a fleet is mixed, and "some device" sends the
+        // operator hunting through sixteen phones.
+        assert!(message.contains("ce0617164585646f0d7e"), "{message}");
+        assert!(!message.contains("00008030-iphone"), "{message}");
+    }
+
+    #[test]
+    fn an_all_iphone_campaign_still_runs() {
+        refuse_devices_this_path_cannot_drive(["a-iphone", "b-iphone"], |_| false)
+            .expect("the pixel path is what this module is for");
+    }
+
+    #[test]
+    fn an_empty_assignment_list_is_not_the_refusal_this_gate_is_for() {
+        // Emptiness is checked by its own error with its own message; this gate must not
+        // steal that case and report a platform problem instead.
+        refuse_devices_this_path_cannot_drive(std::iter::empty(), |_| true)
+            .expect("nothing to refuse");
+    }
 
     #[test]
     fn account_lock_alert_is_rejected_in_vietnamese() {
