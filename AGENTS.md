@@ -4670,6 +4670,26 @@ câu trước ..." vì `previous` đã có. Đáng nói là **ở chế độ Ri
 luận độc lập không trả lời ai — nhưng chính nó lại làm chữ neo tốt hơn và đậu gate. Tức tỉ lệ
 loại ~50% ở lần đầu mỗi target là **có thể sửa được**, và chỗ sửa là prompt, không phải gate.
 
+### 9.35 Tách `graceful_shutdown`, và một lo ngại bị nói quá (13/08/2026)
+
+Thân của handler `RunEvent::Exit` tách thành `graceful_shutdown(handle)` và được gọi từ **cả**
+`RunEvent::Exit` **lẫn** `RunEvent::ExitRequested`. Lý do: updater thoát app để trao cho
+installer, và một lần thoát bằng `process::exit` **không** phát `Exit` — nên toàn bộ chuỗi
+(`reject_new_work` → drain command → `shutdown_cleanup`) sẽ không chạy. Gọi hai lần ở một lần
+thoát bình thường là vô hại vì mọi bước đều idempotent, và dọn hai lần tốt hơn bỏ qua một lần.
+
+Test `exit_order_...` **chuyển** sang nhắm vào hàm đã tách (nó scan vùng literal, nên tách hàm là
+phá nó). Thêm `every_exit_path_runs_the_graceful_shutdown` khẳng định có call site **và** không
+có `process::exit(` / `process::abort(` nào trong thân production — vì đó là lỗi rò im lặng quay
+lại. Chi tiết đáng ghi: bản đầu của test tự bắt chính mình, vì **doc comment giải thích vì sao
+cấm `process::exit`** cũng chứa chuỗi đó. Phải tìm dạng có dấu mở ngoặc; văn xuôi không viết thế.
+
+**Lo ngại "rò adb forward" trong kế hoạch là nói quá.** Đo sau khi WM_CLOSE: không còn tiến trình
+`riviu-pmd` nào (WDA relay và XCTest runner sạch — đó là rò thật mà việc tách này ngăn), nhưng
+`adb forward --list` **vẫn còn hai forward**. Đó là **cố ý**, không phải rò: §9.18 đã ghi forward
+tồn tại trong adb server chính là thứ làm lần mở app kế tiếp lên `● Live` ngay, và `agent_ready`
+dựa vào `HashSet` trong process chứ không dựa vào adb server. Đừng "sửa".
+
 ### 9.33 Ba lỗi làm chế độ AI không debug được (13/08/2026)
 
 Chiến dịch `a6abbe41`: chế độ **AI viết**, Riêng lẻ, cùng hai link đã chứng minh mở được. Chết

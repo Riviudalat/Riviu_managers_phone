@@ -196,12 +196,40 @@ pub fn run() {
         .expect("error while building tauri application");
 
     app.run(|handle, event| {
-        if !matches!(event, RunEvent::Exit) {
+        // Two events, one sequence, and both are needed.
+        //
+        // `ExitRequested` fires when something *asks* the app to quit — which is the path
+        // an updater takes before handing over to the installer, and the only one it is
+        // guaranteed to reach. `Exit` fires on the way out for a normal quit. Wiring only
+        // `Exit` is what left the sequence skippable: an updater that calls `process::exit`
+        // after requesting the quit never reaches it, and every phone keeps its WDA relay,
+        // its XCTest runner and its adb forward.
+        //
+        // Calling it twice on a normal quit is harmless — see `graceful_shutdown`, every
+        // step is idempotent — and a doubled cleanup is a far better failure than a
+        // skipped one.
+        if !matches!(event, RunEvent::Exit | RunEvent::ExitRequested { .. }) {
             return;
         }
-        let Some(state) = handle.try_state::<AppState>() else {
-            return;
-        };
+        graceful_shutdown(handle);
+    });
+}
+
+/// Stop taking work, let what is in flight finish, then release every device.
+///
+/// Extracted from the `RunEvent::Exit` closure so a **second** exit path can call the same
+/// sequence. The updater is that second path: it quits the app to hand over to the
+/// installer, and an exit that goes through `process::exit` never emits `RunEvent::Exit` —
+/// so none of this would run. On a 16-phone farm that means leaked WDA relays, leaked
+/// XCTest runners and leaked adb forwards, on every update.
+///
+/// Idempotent by construction: every step is either a flag set to the value it already has
+/// or a shutdown that no-ops once done, so being called from both paths is safe.
+fn graceful_shutdown(handle: &tauri::AppHandle) {
+    let Some(state) = handle.try_state::<AppState>() else {
+        return;
+    };
+    {
         state.reject_new_work();
         state.nurture.begin_shutdown();
         state.flows.stop_all();
@@ -220,7 +248,7 @@ pub fn run() {
         if let Err(error) = tauri::async_runtime::block_on(control.shutdown_cleanup()) {
             log::error!("device cleanup shutdown failed: {error}");
         }
-    });
+    }
 }
 
 #[cfg(test)]
@@ -347,8 +375,16 @@ mod tests {
         // Scope the search to the app.run(...) exit closure. Searching the whole
         // file matched the `ordered` array literal below — which is, of course,
         // already in order — so the test passed regardless of the real sequence.
+        //
+        // Retargeted from the `app.run(...)` closure when the body moved out into
+        // `graceful_shutdown`, so a second exit path — the updater, which quits the app to
+        // hand over to the installer — could call the same sequence.
+        // `every_exit_path_runs_the_graceful_shutdown` is the other half: this test checks
+        // the order, that one checks nothing exits around it.
         let source = include_str!("lib.rs");
-        let run_start = source.find("app.run(").expect("app.run present in run()");
+        let run_start = source
+            .find("fn graceful_shutdown(")
+            .expect("graceful_shutdown present");
         let run_end = source[run_start..]
             .find("\n#[cfg(test)]")
             .map(|index| run_start + index)
@@ -371,6 +407,36 @@ mod tests {
                 .find(operation)
                 .unwrap_or_else(|| panic!("missing shutdown operation {operation}"));
             offset += position + operation.len();
+        }
+    }
+
+    #[test]
+    fn every_exit_path_runs_the_graceful_shutdown() {
+        // The leak this guards is silent and fleet-wide: an exit that skips the sequence
+        // leaves WDA relays, XCTest runners and adb forwards behind on every phone, and
+        // nothing reports it. `process::exit` is exactly such an exit, and it is what an
+        // updater does by default — so the rule is that any exit path routes through
+        // `graceful_shutdown`, and this asserts the routing instead of trusting it.
+        let source = include_str!("lib.rs");
+        assert!(
+            source.contains("graceful_shutdown(handle)"),
+            "no exit path calls graceful_shutdown; the whole sequence would be dead code"
+        );
+
+        // Nothing may bypass it by killing the process directly. Checked over the file
+        // outside this test module, so the assertion cannot match its own text.
+        let end = source
+            .find("\n#[cfg(test)]")
+            .expect("the test module marks the end of the production body");
+        let production = &source[..end];
+        // The open paren matters: prose about `process::exit` — including the doc comment
+        // on `graceful_shutdown` explaining why it is forbidden — must not trip this. Only
+        // a call site has it.
+        for forbidden in ["process::exit(", "process::abort("] {
+            assert!(
+                !production.contains(forbidden),
+                "{forbidden} bypasses graceful_shutdown; route that exit through it instead"
+            );
         }
     }
 }
