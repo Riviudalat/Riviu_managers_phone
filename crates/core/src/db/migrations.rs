@@ -361,6 +361,11 @@ CREATE TABLE interaction_targets (
   target_key TEXT NOT NULL,
   content_id TEXT NOT NULL,
   kind TEXT NOT NULL CHECK (kind IN ('video','photo')),
+  -- DEAD as of 13/08/2026: nothing writes this and nothing reads it. Measured on a live
+  -- run, every row stayed 'queued' including a target whose assignment succeeded.
+  -- Deliberately left unwritten rather than filled in: the per-assignment rows are the
+  -- real record, and a target-level state maintained beside them is a second source of
+  -- truth that can disagree with the first. Read `interaction_assignments.state` instead.
   state TEXT NOT NULL DEFAULT 'queued',
   context_json TEXT,
   error_code TEXT,
@@ -405,6 +410,12 @@ CREATE TABLE interaction_artifacts (
   FOREIGN KEY (assignment_id) REFERENCES interaction_assignments(id) ON DELETE SET NULL
 );
 
+-- DEAD as of 13/08/2026, and the one with a hazard attached. It was shaped as a
+-- single-owner lease (`owner`, `claimed_at`) so two app instances could not run the same
+-- campaign, but nothing ever claims it: the only write is the INSERT of 'queued' at
+-- creation. So the row is not evidence of an owner, and any future reader must not treat
+-- it as one. If two instances on one data directory ever becomes possible, this is where
+-- the guard belongs -- it is not there yet.
 CREATE TABLE interaction_dispatch (
   campaign_id TEXT PRIMARY KEY,
   state TEXT NOT NULL DEFAULT 'queued',

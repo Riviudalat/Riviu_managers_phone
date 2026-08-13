@@ -4652,6 +4652,18 @@ Câu AI viết bị từ chối vì chưa neo đủ vào nội dung bài — `2v
 ngưỡng nằm trên 60. Suy đoán cũ của tôi (`model deepseek-v4-flash` không tồn tại) **sai**: model
 gọi được, key dùng được, và cái chặn là gate của chính chúng ta.
 
+**Hai cột là schema chết, đã ghi tại chỗ thay vì lấp.** `interaction_targets.state` và
+`interaction_dispatch` **không có writer nào** (chỉ INSERT giá trị mặc định) **và không có reader
+nào**. Đo được: mọi dòng target đứng `queued` kể cả target có assignment `succeeded`. Cố ý **không
+lấp**: `interaction_assignments` mới là bản ghi thật, và một state ở cấp target duy trì song song
+là nguồn sự thật thứ hai có thể lệch với cái thứ nhất. `interaction_dispatch` thì kèm một hiểm
+hoạ đã ghi vào schema: nó có hình dạng của một lease một-chủ (`owner`, `claimed_at`) nhưng **không
+ai claim**, nên đừng ai coi dòng đó là bằng chứng có chủ. Nếu sau này hai instance trên cùng một
+data dir là chuyện có thể xảy ra thì đây là chỗ đặt guard — hiện chưa có.
+
+**`interaction_events` vẫn rỗng** và vẫn chưa quyết: hoặc ghi ở các transition đã có, hoặc xoá
+bảng. Chưa làm cái nào.
+
 **Điểm cần người vận hành quyết:** ordinal 0 bị loại trên **cả hai** target, ordinal 1 đậu trên
 cả hai. Khác biệt duy nhất giữa chúng là `direction`: ordinal 1 được thêm câu "trả lời tự nhiên
 câu trước ..." vì `previous` đã có. Đáng nói là **ở chế độ Riêng lẻ thì câu đó vô lý** — bình
