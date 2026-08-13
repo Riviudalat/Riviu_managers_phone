@@ -4774,9 +4774,26 @@ giữ tay" nếu caption không đọc được. Số đo này đưa tới cùng
 sớm hơn**: chưa cần biết caption có bị cắt không, vì **nút xoá còn chưa định vị được bằng
 nhãn**. Xoá tự động trên build này chỉ làm được nếu chấp nhận toạ độ — tôi không đề nghị điều đó.
 
-**Hai điều còn ngỏ, ghi để không ai tưởng đã đóng:** bản dump lấy lúc TikTok tự mở share sheet
-che phần trên, và chỉ trên **một** build; nhìn lại trên trang sạch vẫn có thể thấy nhãn. Và
-sheet mở ra *sau* khi tap `...` có thể có nhãn — cái không có nhãn là **chỗ bấm để mở nó**.
+**Đã đóng nốt câu hỏi "sheet mở ra sau khi tap `...` có nhãn không".** Tap thẳng vào cụm ba
+chấm (996, 1754) — nó mở sheet **`Gửi đến`**, tức là **chia sẻ**, không phải tuỳ chọn bài. Dump
+qua agent, inventory đầy đủ (hàng thứ hai cuộn ngang nên mắt không thấy hết, cây thì thấy):
+
+`Chiếu`, `Facebook`, `Ghim`, `Gửi đến`, `Instagram Direct`, `Messenger`,
+`Mời bạn bè trò chuyện`, `Phân tích`, `Sao chép Liên kết`, `SMS`, `Tải về`,
+`Tăng lượt xem`, `Tạo nhóm`, `Zalo`, cùng vài tên liên hệ.
+
+**Không có mục xoá nào.** Nên trên build này, **hành động xoá không tới được từ trang bài của
+mình** — không có trigger có nhãn, và cái sheet mà `...` mở ra cũng không chứa nó. Xoá nằm ở
+chỗ khác: có thể long-press trong grid hồ sơ, hoặc sau `Cài đặt quyền riêng tư`. **Chưa đo.**
+
+**Kết luận cho quyết định của người vận hành, bằng số đo:** xoá tự động **không dựng được từ
+trang bài** trên `com.ss.android.ugc.trill` 46.3.3. Câu trả lời trung thực là **từ chối xoá tự
+động, giữ tay** — đúng phương án dự phòng kế hoạch đã nêu, nhưng tới bằng một đường ngắn hơn:
+không phải vì caption bị cắt, mà vì **nút xoá không có ở đó**.
+
+Vẫn còn một điều ngỏ: bản dump trang bài lấy lúc share sheet che phần trên, và chỉ trên **một**
+build. Và hai lối xoá chưa thử (long-press grid, `Cài đặt quyền riêng tư`) là việc đo tiếp nếu
+người vận hành muốn theo đuổi xoá tự động.
 
 **Chưa đo được M4** (caption nguyên văn) vì hai bài sẵn có của tài khoản **không có caption**.
 Muốn trả lời M4 phải có một bài có caption.
