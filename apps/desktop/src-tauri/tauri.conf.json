@@ -26,9 +26,18 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/Riviudalat/Riviu_managers_phone/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQxQjE3MDJFQzQxMTM2NUEKUldSYU5oSEVMbkN4MFVXQ0NpZWNRZUZHM2NjdTlKbFVjOGxYZnhwdXFFdVpmaE5pZzdBRUhrSDcK"
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "macOS": {
       "signingIdentity": "-"
     },

@@ -37,6 +37,7 @@ riviu-script-engine = { workspace = true }
 async-trait = "0.1"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 reqwest = { workspace = true }
+tauri-plugin-updater = "2"
 
 # Windows ships an OCR engine in the OS (Windows.Media.Ocr, Windows 10+). These
 # are Microsoft's own WinRT projections, pure bindings with no runtime of their

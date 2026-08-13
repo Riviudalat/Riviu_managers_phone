@@ -34,6 +34,10 @@ pub fn run() {
         .expect("failed to establish process-tree ownership");
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // Registered, but nothing checks on its own. A farm machine is often offline and
+        // nobody asked it to phone home at startup, so the check is an explicit operator
+        // action — see `update_check`.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let window = if let Some(window) = app.get_webview_window("main") {
                 window
@@ -120,6 +124,7 @@ pub fn run() {
             commands::driver_mode,
             commands::driver_degraded_reason,
             commands::android_unavailable_reason,
+            commands::update_check,
             farm_commands::auth_session,
             farm_commands::auth_login,
             farm_commands::auth_register,

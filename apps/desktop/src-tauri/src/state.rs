@@ -625,6 +625,32 @@ impl AppState {
         Ok(state)
     }
 
+    /// What is running that an update would interrupt, or `None` when the fleet is idle.
+    ///
+    /// A sentence, not a bool. Installing an update replaces the running binary, and this
+    /// process holds the WDA relays, XCTest runners and device leases that only its own
+    /// shutdown releases — so an operator deciding whether to take an update now needs to
+    /// know *what* they would be cutting off, not merely that something is there.
+    ///
+    /// Nurture sessions are the only source consulted for now, because they are the only
+    /// long-running work whose liveness is queryable without touching a device. Flow and job
+    /// runs are equally disruptive; that they are not listed here is a known gap, and the
+    /// honest consequence is that "idle" here means "no nurture session", not "nothing at
+    /// all". Better to name the gap than to imply a completeness this does not have.
+    pub(crate) fn busy_reason(&self) -> Option<String> {
+        let running = self
+            .nurture
+            .list_status()
+            .into_iter()
+            .filter(|status| status.running)
+            .count();
+        (running > 0).then(|| {
+            format!(
+                "đang có {running} phiên Nuôi TT chạy — dừng hết trước khi cập nhật,                  vì bản cài mới thay thế tiến trình đang giữ session và lease của các máy"
+            )
+        })
+    }
+
     pub(crate) fn ensure_accepting_work(&self) -> Result<CommandAdmission, CommandError> {
         self.command_admission.ensure_accepting_work()
     }

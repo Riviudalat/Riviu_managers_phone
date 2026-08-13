@@ -807,6 +807,68 @@ pub fn android_unavailable_reason(state: State<'_, AppState>) -> Option<String> 
     state.android_unavailable_reason.clone()
 }
 
+/// Whether a newer release is published, and whether now is a safe moment to take it.
+///
+/// Two answers in one call, and deliberately so. An updater that reports "an update is
+/// available" without saying "you have sixteen phones mid-session" invites an operator to
+/// take it at the worst possible moment: installing replaces the running binary, and this app
+/// holds WDA relays, XCTest runners and device leases that only its own shutdown releases.
+///
+/// **Never installs.** It reports, and the operator decides. Nor does it run at startup — a
+/// farm machine is frequently offline and nobody asked it to phone home, so the network call
+/// happens when somebody asks for it and not before.
+///
+/// Read-only with respect to devices, so no admission gate — but it *reads* the admission
+/// state, which is the whole point.
+#[tauri::command]
+pub async fn update_check(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<UpdateStatus, String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    // Asked before the network call, so a busy fleet is reported even if GitHub is
+    // unreachable: "do not update now" is the more urgent half of the answer.
+    let busy = state.busy_reason();
+
+    let update = app
+        .updater()
+        .map_err(|error| format!("không dựng được updater: {error}"))?
+        .check()
+        .await
+        .map_err(|error| format!("không kiểm được bản mới: {error}"))?;
+
+    Ok(match update {
+        Some(update) => UpdateStatus {
+            available: true,
+            version: Some(update.version.clone()),
+            current: update.current_version.clone(),
+            busy_reason: busy,
+        },
+        None => UpdateStatus {
+            available: false,
+            version: None,
+            current: app.package_info().version.to_string(),
+            busy_reason: busy,
+        },
+    })
+}
+
+/// What [`update_check`] found, and whether acting on it is safe right now.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateStatus {
+    pub available: bool,
+    /// The published version, when one is newer than this build.
+    pub version: Option<String>,
+    pub current: String,
+    /// Why installing now would interrupt work, or `None` when the fleet is idle.
+    ///
+    /// The frontend must refuse to offer the install while this is `Some`. Carried as a
+    /// sentence rather than a bool so the operator is told *what* is running.
+    pub busy_reason: Option<String>,
+}
+
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }

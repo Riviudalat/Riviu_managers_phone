@@ -4730,6 +4730,55 @@ Nó cũng báo có `Follow ` trên trang không, vì đó là từ chối dứt 
 
 **Chưa chạy.** Đây là số đo M4/M5 và nó cần một bài thật của người vận hành.
 
+### 9.39 Auto-update: khoá, và hai chỗ cố ý KHÔNG tự động (13/08/2026)
+
+**Khoá.** Sinh bằng `tauri signer generate` **ngoài repo**, có mật khẩu:
+
+| thứ | ở đâu |
+|---|---|
+| private key + mật khẩu | `C:\Users\cattfan\Documents\riviu-updater-key\` — **ngoài** repo, `~/.riviu`, scratchpad |
+| private key (dùng cho CI) | GitHub secret `TAURI_SIGNING_PRIVATE_KEY` |
+| mật khẩu (dùng cho CI) | GitHub secret `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` |
+| **public** key | commit trong `tauri.conf.json` — không mật, và **phải** commit |
+
+Có mật khẩu chứ không để trống: một secret GitHub bị lộ khi đó vẫn chưa phải một khoá dùng
+được. Đổi lại thư mục backup chứa cả hai, tức nó tự đủ để phục hồi — **và tự đủ để mất**. Đó là
+đánh đổi có ý thức, chọn hướng "phục hồi được" vì hậu quả bên kia nặng hơn nhiều:
+
+> **Mất private key = mọi bản đã cài không bao giờ update được nữa.** Pubkey nướng vào từng
+> binary đã ship, nên không có đường phát hành lại bằng khoá khác. Backup thư mục đó offline.
+
+**Hai chỗ cố ý không tự động.**
+
+1. **Không kiểm lúc mở app.** Máy farm thường offline và không ai yêu cầu nó gọi mạng. Kiểm là
+   hành động của người vận hành, qua command `update_check`.
+2. **Không bao giờ tự cài.** `update_check` **báo cáo**, không cài. Và nó trả về **hai** câu trả
+   lời trong một lần gọi: có bản mới không, **và** giờ có phải lúc an toàn không. Một updater
+   nói "có bản mới" mà không nói "anh đang có 16 máy giữa phiên" là mời người ta cập nhật vào
+   đúng lúc tệ nhất — cài đặt thay thế binary đang chạy, mà tiến trình đó đang giữ WDA relay,
+   XCTest runner và lease của các máy, những thứ chỉ chính nó khi shutdown mới nhả.
+
+`busy_reason` được hỏi **trước** lời gọi mạng, để một fleet đang chạy vẫn được báo dù GitHub
+không tới được — "đừng cập nhật lúc này" là nửa gấp hơn của câu trả lời. Nó trả về **một câu**
+chứ không phải bool, để người vận hành biết mình sẽ cắt cái gì.
+
+**Một khoảng trống đã nêu tên chứ không giả vờ đầy đủ:** `busy_reason` hiện chỉ hỏi phiên nurture
+— đó là việc dài hạn duy nhất kiểm được liveness mà không chạm máy. Flow run và job run cũng
+gây gián đoạn y như thế. Nên "rảnh" ở đây nghĩa là "không có phiên nurture", **không** phải
+"không có gì cả".
+
+**Ràng buộc bất biến của release vẫn nguyên.** `createUpdaterArtifacts: true` làm bundler ký và
+ghi `.sig` cạnh archive; thiếu secret thì **build đổ** chứ không ship artifact không ký — đúng
+hướng, vì bản đã cài chỉ nhận update có chữ ký khớp pubkey nướng trong nó, nên một release
+không ký đơn giản là không ai lấy được. Endpoint là
+`/releases/latest/download/latest.json`, được GitHub phân giải **lúc request**, nên phát hành
+bản mới tự trỏ lại mà **không chạm byte nào** của release cũ — gate "không ghi đè release đã
+có" ở workflow giữ nguyên.
+
+**Chưa làm:** sinh và upload `latest.json` trong cùng `gh release create`, và UI để bấm. Nên
+hiện tại chuỗi này **chưa chạy được đầu-cuối**; phần đã có là khoá, ký lúc build, và command
+báo cáo.
+
 ### 9.38 CI đỏ bốn lần vì đúng cái bẫy tôi đã tự cảnh báo (13/08/2026)
 
 `cargo test` local 872/0, CI đỏ **bốn lần liên tiếp** ở `Test Rust workspace`. Một test:
