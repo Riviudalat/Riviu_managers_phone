@@ -706,6 +706,11 @@ export async function installTauriMock(
     })]]);
     commandHandlers.set("save_script", () => null);
     commandHandlers.set("list_schedules", () => []);
+    // Both fleet-health probes. `invoke` throws `Unknown mock command` for anything
+    // unregistered, so an added probe breaks every spec until it is listed here — which
+    // is the point: the registry is the contract, not a convenience.
+    commandHandlers.set("driver_degraded_reason", () => null);
+    commandHandlers.set("android_unavailable_reason", () => null);
 
     async function invoke(command: string, args: JsonRecord = {}) {
       if (command === "plugin:event|listen") {

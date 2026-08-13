@@ -8,6 +8,12 @@ import { resetToasts } from "./toastStore";
 vi.mock("./api", () => ({
   agentBulkRepair: vi.fn(async () => []),
   agentListStatuses: vi.fn(async () => []),
+  // Both fleet-health probes are mocked explicitly. `driverDegradedReason` was absent
+  // and survived only because the call site wraps it in `.catch` — an unmocked export is
+  // `undefined`, so calling it throws synchronously and would have surfaced as a boot
+  // error rather than as the missing mock it is.
+  androidUnavailableReason: vi.fn(async () => null),
+  driverDegradedReason: vi.fn(async () => null),
   authSession: vi.fn(async () => ({ showAuthUi: false, bypassed: true, user: null })),
   exampleScript: vi.fn(async () => "{}"),
   getStreamSettings: vi.fn(async () => ({
@@ -45,6 +51,45 @@ afterEach(() => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+describe("fleet health banners", () => {
+  it("says why the Android half of the fleet is absent", async () => {
+    // The command existed and was registered from the start; nothing called it, so an
+    // Android phone that failed to join simply did not appear and gave no reason. This is
+    // the assertion that keeps the caller wired.
+    const api = await import("./api");
+    vi.mocked(api.androidUnavailableReason).mockResolvedValueOnce(
+      "adb is not usable (adb.exe): program not found",
+    );
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByText(/adb is not usable/)).toBeInTheDocument(),
+    );
+    // Says out loud that it is a boot snapshot: `MultiplexDriver::new` fixes the backend
+    // list at construction, so installing adb now needs a restart to take effect.
+    expect(screen.getByText(/khởi động lại app/)).toBeInTheDocument();
+  });
+
+  it("shows no Android banner on a farm whose Android half is fine", async () => {
+    // A farm with no Android phones is the common case and is not a fault. A banner that
+    // is always on is a banner nobody reads.
+    render(<App />);
+    await waitFor(() => expect(screen.queryByText(/adb/i)).not.toBeInTheDocument());
+  });
+
+  it("keeps the iOS sidecar failure a separate, louder message", async () => {
+    // Two different facts with two different fixes. Collapsing them into one string sends
+    // the operator looking in the wrong place; the iOS one is an `error` banner because an
+    // empty fleet there really is broken.
+    const api = await import("./api");
+    vi.mocked(api.driverDegradedReason).mockResolvedValueOnce("sidecar iOS bị suy giảm");
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByText(/sidecar iOS bị suy giảm/)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/khởi động lại app/)).not.toBeInTheDocument();
+  });
 });
 
 describe("Flow page integration", () => {

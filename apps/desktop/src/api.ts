@@ -254,6 +254,18 @@ export async function driverDegradedReason() {
   return invoke<string | null>("driver_degraded_reason");
 }
 
+/**
+ * Why the Android half of the fleet is absent, or null when it joined.
+ *
+ * Deliberately not folded into `driverDegradedReason`: "this machine has no adb" and
+ * "the iOS sidecar failed" are different facts with different fixes. The command existed
+ * and was registered from the start; nothing on this side ever called it, so an Android
+ * phone simply did not appear and said nothing about why.
+ */
+export async function androidUnavailableReason() {
+  return invoke<string | null>("android_unavailable_reason");
+}
+
 export async function authSession() {
   return invoke<AuthSession>("auth_session");
 }

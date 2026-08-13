@@ -3,6 +3,7 @@ import {
   agentBulkRepair,
   agentListStatuses,
   authSession,
+  androidUnavailableReason,
   driverDegradedReason,
   getStreamSettings,
   listenRiviuEvents,
@@ -91,6 +92,7 @@ function App() {
   const [jobsScriptSeed, setJobsScriptSeed] = useState<string | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
   const [driverIssue, setDriverIssue] = useState<string | null>(null);
+  const [androidIssue, setAndroidIssue] = useState<string | null>(null);
   const [startupIssue, setStartupIssue] = useState<string | null | undefined>(undefined);
   const [user, setUser] = useState<LocalUser | null>(null);
   const [showAuthUi, setShowAuthUi] = useState(false);
@@ -157,6 +159,9 @@ function App() {
       // An empty list can mean "nothing plugged in" or "the device sidecar never
       // started". Ask which, so the UI does not report the wrong one.
       setDriverIssue(await driverDegradedReason().catch(() => null));
+      // Asked separately, because the two halves of the fleet fail for different
+      // reasons and an Android phone that never appears used to say nothing at all.
+      setAndroidIssue(await androidUnavailableReason().catch(() => null));
     } catch (e) {
       setBootError(String(e));
     }
@@ -384,6 +389,20 @@ function App() {
             <Banner tone="error">
               Không đọc được thiết bị thật — danh sách sẽ luôn trống cho tới khi
               sửa xong. Nguyên nhân: {driverIssue}
+            </Banner>
+          )}
+
+          {/* `warn`, not `error`, and the difference is deliberate: unlike a dead iOS
+              sidecar, this is usually simply true — a farm with no Android phones in it.
+              A red banner for a correct state trains the operator to ignore banners.
+
+              It is also a boot snapshot, and says so: `MultiplexDriver::new` fixes the
+              backend list at construction, so installing adb now cannot make Android join
+              without restarting the app. Claiming otherwise would be the worse lie. */}
+          {androidIssue && (
+            <Banner tone="warn">
+              Máy Android không tham gia fleet (kiểm lúc mở app — cài adb xong phải
+              khởi động lại app). Nguyên nhân: {androidIssue}
             </Banner>
           )}
 
