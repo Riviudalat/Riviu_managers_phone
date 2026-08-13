@@ -695,30 +695,46 @@ class UpdaterManifestTests(unittest.TestCase):
         root: Path,
         label: str,
         *,
-        archive: str,
+        archives: dict[str, str],
         signature: str | None = None,
-        platform: str | None = None,
+        platform_override: tuple[str, str] | None = None,
     ) -> Path:
+        """Lay out one label's release directory the way `collect` would.
+
+        `archives` maps each platform key to the asset name serving it, so the Windows
+        case can share one file across two keys exactly as the real collector does.
+        """
         target = artifacts.RELEASE_LABEL_TARGETS[label]
         directory = root / f"desktop-{label}"
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / archive).write_bytes(archive.encode("utf-8"))
-        signature_name = f"{archive}.sig"
         signature_text = fake_signature() if signature is None else signature
-        (directory / signature_name).write_text(signature_text, encoding="ascii")
+        entries = []
+        for key, _pattern in artifacts.UPDATER_ARCHIVES[target]:
+            archive = archives[key]
+            path = directory / archive
+            if not path.exists():
+                path.write_bytes(archive.encode("utf-8"))
+            signature_name = f"{archive}.sig"
+            (directory / signature_name).write_text(signature_text, encoding="ascii")
+            entries.append(
+                {
+                    "platform": key,
+                    "archive": archive,
+                    "archiveBytes": path.stat().st_size,
+                    "archiveSha256": artifacts.sha256_file(path),
+                    "signatureFile": signature_name,
+                    "signature": signature_text,
+                }
+            )
+        if platform_override is not None:
+            index, value = platform_override
+            entries[int(index)]["platform"] = value
         manifest_name = f"{label}-artifact-manifest.json"
         manifest = {
             "schemaVersion": 2,
             "label": label,
             "target": target,
-            "updater": {
-                "platform": platform or artifacts.UPDATER_PLATFORMS[target],
-                "archive": archive,
-                "archiveBytes": (directory / archive).stat().st_size,
-                "archiveSha256": artifacts.sha256_file(directory / archive),
-                "signatureFile": signature_name,
-                "signature": signature_text,
-            },
+            "updater": entries,
         }
         artifacts.write_json(directory / manifest_name, manifest)
         names = sorted(
@@ -735,10 +751,22 @@ class UpdaterManifestTests(unittest.TestCase):
         )
         return directory
 
+    WINDOWS_ARCHIVES = {
+        "windows-x86_64-nsis": "windows-x64--Riviu-setup.exe",
+        "windows-x86_64-msi": "windows-x64--Riviu_en-US.msi",
+        "windows-x86_64": "windows-x64--Riviu-setup.exe",
+    }
+
     def complete_release(self, root: Path) -> None:
-        self.write_label(root, "windows-x64", archive="windows-x64--Riviu-setup.exe")
-        self.write_label(root, "macos-arm64", archive="macos-arm64--Riviu.app.tar.gz")
-        self.write_label(root, "macos-x64", archive="macos-x64--Riviu.app.tar.gz")
+        self.write_label(root, "windows-x64", archives=dict(self.WINDOWS_ARCHIVES))
+        self.write_label(
+            root,
+            "macos-arm64",
+            archives={"darwin-aarch64": "macos-arm64--Riviu.app.tar.gz"},
+        )
+        self.write_label(
+            root, "macos-x64", archives={"darwin-x86_64": "macos-x64--Riviu.app.tar.gz"}
+        )
 
     def build(self, root: Path, output: Path, **overrides):
         arguments = {
@@ -767,7 +795,13 @@ class UpdaterManifestTests(unittest.TestCase):
         self.assertEqual(manifest["version"], "0.1.1")
         self.assertEqual(
             sorted(manifest["platforms"]),
-            ["darwin-aarch64", "darwin-x86_64", "windows-x86_64"],
+            [
+                "darwin-aarch64",
+                "darwin-x86_64",
+                "windows-x86_64",
+                "windows-x86_64-msi",
+                "windows-x86_64-nsis",
+            ],
         )
         for platform, entry in manifest["platforms"].items():
             # A client that already holds the manifest must reach an immutable asset,
@@ -784,14 +818,48 @@ class UpdaterManifestTests(unittest.TestCase):
             self.build(root, output)
             manifest = json.loads(output.read_text(encoding="utf-8"))
 
+        # The bare key is the answer for a bundle type the plugin cannot identify, and it
+        # points at NSIS because installMode: currentUser lets that one run without UAC.
         self.assertTrue(
             manifest["platforms"]["windows-x86_64"]["url"].endswith("-setup.exe")
         )
+        self.assertTrue(
+            manifest["platforms"]["windows-x86_64-nsis"]["url"].endswith("-setup.exe")
+        )
+
+    def test_an_msi_install_updates_with_an_msi_and_not_with_the_nsis_build(self):
+        # The plugin looks up {os}-{arch}-{installer} and falls back to {os}-{arch}. With
+        # only the bare key, an MSI-installed copy falls through and installs the NSIS build
+        # over itself: one app, two uninstall entries, two registry identities. So the -msi
+        # key has to exist and has to point at the MSI.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.complete_release(root)
+            output = root / "out" / "latest.json"
+            self.build(root, output)
+            manifest = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertTrue(
+            manifest["platforms"]["windows-x86_64-msi"]["url"].endswith(".msi"),
+            manifest["platforms"]["windows-x86_64-msi"]["url"],
+        )
+
+    def test_every_key_the_plugin_could_ask_for_is_present(self):
+        # Mirrors the plugin's own lookup rather than a list written here: whatever keys
+        # UPDATER_ARCHIVES declares, the manifest must serve all of them.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.complete_release(root)
+            output = root / "out" / "latest.json"
+            self.build(root, output)
+            manifest = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(set(manifest["platforms"]), set(artifacts.REQUIRED_UPDATER_KEYS))
 
     def test_a_missing_platform_fails_instead_of_shipping_a_partial_manifest(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            self.write_label(root, "windows-x64", archive="windows-x64--Riviu-setup.exe")
+            self.write_label(root, "windows-x64", archives=dict(self.WINDOWS_ARCHIVES))
             with self.assertRaises(artifacts.ArtifactError) as caught:
                 self.build(root, root / "out" / "latest.json", labels=["windows-x64"])
 
@@ -831,7 +899,13 @@ class UpdaterManifestTests(unittest.TestCase):
             root = Path(temporary)
             self.complete_release(root)
             self.write_label(
-                root, "windows-x64", archive="windows-x64--Riviu Full-setup.exe"
+                root,
+                "windows-x64",
+                archives={
+                    "windows-x86_64-nsis": "windows-x64--Riviu Full-setup.exe",
+                    "windows-x86_64-msi": "windows-x64--Riviu_en-US.msi",
+                    "windows-x86_64": "windows-x64--Riviu Full-setup.exe",
+                },
             )
             with self.assertRaises(artifacts.ArtifactError) as caught:
                 self.build(root, root / "out" / "latest.json")
@@ -845,13 +919,13 @@ class UpdaterManifestTests(unittest.TestCase):
             self.write_label(
                 root,
                 "macos-x64",
-                archive="macos-x64--Riviu.app.tar.gz",
-                platform="darwin-aarch64",
+                archives={"darwin-x86_64": "macos-x64--Riviu.app.tar.gz"},
+                platform_override=("0", "darwin-aarch64"),
             )
             with self.assertRaises(artifacts.ArtifactError) as caught:
                 self.build(root, root / "out" / "latest.json")
 
-        self.assertIn("platform mismatch", str(caught.exception))
+        self.assertIn("platform keys mismatch", str(caught.exception))
 
     def test_an_updater_asset_outside_the_checksum_file_is_refused(self):
         with tempfile.TemporaryDirectory() as temporary:

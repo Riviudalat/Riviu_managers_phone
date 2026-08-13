@@ -1,10 +1,10 @@
 # Kế hoạch và trạng thái — 13/08/2026
 
-Ảnh chụp trạng thái ở commit `c11c9ac` trên `main`. Viết để bàn giao: ai đọc file này phải
-biết được **cái gì chạy được**, **cái gì chưa**, và **vì sao chưa** — mà không phải đọc lại
-lịch sử git.
+Viết để bàn giao: ai đọc file này phải biết được **cái gì chạy được**, **cái gì chưa**, và
+**vì sao chưa** — mà không phải đọc lại lịch sử git. Cập nhật lần cuối ở `165d65e`, version
+`0.1.1`.
 
-Số đo chi tiết nằm ở `AGENTS.md` mục 9.18–9.39. File này là bản đồ, không lặp lại số đo.
+Số đo chi tiết nằm ở `AGENTS.md` mục 9.18–9.44. File này là bản đồ, không lặp lại số đo.
 
 ---
 
@@ -17,8 +17,13 @@ Ba thứ, do người vận hành đặt ra:
 2. **App đã cài tự biết có bản mới.**
 3. **Ba đường Android chạy thật qua UI**: nuôi tài khoản, tương tác (tim + bình luận), đăng bài.
 
-Trạng thái: (1) xong, (2) gần xong, (3) hai trong ba đường xong, đường đăng bài **bị số đo
-chặn lại** — xem Phần III.
+Trạng thái: **(1) xong. (2) code xong hết, chờ một tag để `latest.json` đầu tiên ra đời.
+(3) hai trong ba đường xong — nuôi tài khoản và tương tác chạy thật qua UI; đường đăng bài
+**đã đo và người vận hành chốt không đăng gì từ Android**, nên nó không phải "chưa làm" mà là
+"đã quyết không làm", và app từ chối máy Android thẳng thay vì để nó tap toạ độ iOS.**
+
+Ba thứ còn lại đều **không** chặn bởi code: một iPhone (H6-e), một máy Windows sạch (nhánh adb
+đóng gói + cả vòng update), và quyết định về `interaction_events`.
 
 ---
 

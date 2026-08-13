@@ -49,9 +49,11 @@ giữ session và lease của các máy. Hàng đợi **không đọc được**
 Khi bấm cài: tải xong trước, rồi app dừng mọi phiên và nhả hết máy, rồi mới chạy bộ cài.
 Trên Windows app tự đóng và mở lại; trên macOS phải mở lại tay.
 
-**Bản cài từ `.msi` không tự cập nhật được.** `latest.json` chỉ mang một URL cho mỗi
-platform, và URL Windows trỏ bộ cài NSIS — vì `installMode: currentUser` mới cài được mà
-không cần UAC. Ai cài bằng MSI thì tải bộ cài mới và cài tay.
+**Cài bằng `.msi` hay `.exe` đều cập nhật được, và cập nhật đúng loại của mình.**
+`latest.json` mang một khoá riêng cho từng loại bộ cài, nên bản cài MSI nhận MSI và bản cài
+NSIS nhận NSIS. Chỗ này từng là một cái bẫy: updater tra `windows-x86_64-msi` rồi mới lùi về
+`windows-x86_64`, nên nếu thiếu khoá MSI thì bản cài MSI sẽ **âm thầm cài bản NSIS đè lên** —
+một app mà hai mục gỡ cài đặt.
 
 Các prerequisite thuộc hệ điều hành/nhà cung cấp:
 

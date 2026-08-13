@@ -4833,6 +4833,18 @@ không. CI đã in `Finished 2 updater signatures at:` nên chữ ký *có sinh*
 mang nó ra khỏi máy build. Chữ ký không tới được release thì `latest.json` không có gì để
 ghi, và updater bắt buộc phải có nó.
 
+**Trap thứ hai, tìm ra bằng cách đọc code plugin chứ không đoán: bản cài MSI.** Plugin tra
+khoá theo thứ tự `{os}-{arch}-{installer}` **rồi mới lùi về** `{os}-{arch}`
+(`updater.rs:568-598`), trong đó `installer` là loại bộ cài mà **bản đang chạy** được cài từ.
+Nên một `latest.json` chỉ có khoá trơn `windows-x86_64` **không** làm bản MSI "không cập nhật
+được" như tôi viết trong README lúc đầu — nó làm bản MSI **âm thầm cài bản NSIS đè lên**: một
+app, hai mục gỡ cài đặt, hai danh tính registry. Sửa: mỗi loại bộ cài một khoá
+(`windows-x86_64-nsis`, `windows-x86_64-msi`, và khoá trơn trỏ NSIS làm câu trả lời cho loại
+bundle plugin không nhận ra). Chữ ký MSI vốn đã sinh sẵn — CI in "Finished 2 updater
+signatures" — chỉ là chưa ai mang ra.
+
+Đây là loại lỗi chỉ sửa được **trước** lần phát hành đầu: asset của một release là bất biến.
+
 **Trap về tên asset.** GitHub **đổi tên** asset có ký tự nó không thích — dấu cách thành
 dấu chấm. Bản Windows tên `Riviumanagersphone Full_0.1.0_x64-setup.exe`, nên URL phục vụ
 sẽ khác tên đã upload, và `latest.json` phải chứa URL **đúng từng ký tự**. Chọn cách
