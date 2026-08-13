@@ -8,6 +8,10 @@ và macOS Intel.
 Phần mềm của người khác đi kèm trong bộ cài được liệt kê ở [`NOTICE`](NOTICE),
 gồm cả một mục ghi rõ chỗ giấy phép **chưa được thẩm định**.
 
+Trạng thái công việc — cái gì chạy được, cái gì chưa, và **vì sao chưa** —
+ở [`docs/PLAN_STATUS_2026-08-13.md`](docs/PLAN_STATUS_2026-08-13.md).
+Số đo chi tiết ở `AGENTS.md` mục 9.
+
 ## Cài bản dựng
 
 Mỗi lần push lên `main`, workflow **Desktop CI/CD** tạo ba artifact trong trang

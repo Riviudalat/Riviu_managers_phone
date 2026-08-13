@@ -125,9 +125,10 @@ pub trait PublishDriver: Send + Sync {
 
     /// Remove the post that `proof` identifies.
     ///
-    /// Defaults to a refusal, and takes a [`PostProof`] rather than a caption so the type
-    /// system carries the ordering: a proof can only be made by [`Self::prove_own_post`],
-    /// so there is no way to call this without having proved something first.
+    /// Defaults to a refusal, and takes a [`PostProof`] rather than a caption so the ordering
+    /// is visible in the signature: a caller must hold a proof, and a proof can only come from
+    /// [`PostProof::new`], which refuses unless the observations line up. Note the limit —
+    /// `new` is `pub`, so this is not proof that a driver produced it; see [`PostProof`].
     fn delete_proved_post(&self, proof: &PostProof) -> Result<(), DeleteFailure> {
         let _ = proof;
         Err(DeleteFailure::BeforeEffect(format!(
@@ -140,11 +141,16 @@ pub trait PublishDriver: Send + Sync {
 
 /// Evidence that the post on screen is the one this campaign published.
 ///
-/// Constructible only by a [`PublishDriver::prove_own_post`] implementation — the fields are
-/// private and the constructor takes the observations rather than a bare "yes". That is the
-/// point: `delete_proved_post` cannot be called with a proof nobody produced, so the
-/// ordering "prove, then delete" is a type-level fact rather than a convention someone has
-/// to remember.
+/// Cannot be **forged by struct literal** from outside this module — the fields are private
+/// and [`Self::new`] takes the observations rather than a bare "yes", so every proof has run
+/// the refusals below.
+///
+/// Stated precisely, because an earlier version of this comment claimed more than the code
+/// gives: `new` is `pub`, so any code in this crate *can* call it without going through a
+/// [`PublishDriver::prove_own_post`] implementation. What enforces "prove, then delete" is
+/// therefore the checks inside `new`, not the visibility — binding it to the trait would need
+/// a sealed token, which is not there. Do not read the type as proof that a driver produced
+/// it; read it as proof that the observations passed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostProof {
     caption: String,

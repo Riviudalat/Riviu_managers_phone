@@ -699,10 +699,19 @@ async fn collect_target_evidence_frames(
 /// The alternative — which is what happened — is leaving them in `queued`, where they read
 /// as "not started yet" for ever. `queued` is also the one state a retry treats as
 /// retryable, so silent `queued` rows are a re-send waiting to happen.
+///
+/// **`protected` is load-bearing, and its absence was a real defect.** The first version of
+/// this function stamped `Failed` over *every* assignment of the target, including ones that
+/// had already reached `Succeeded`. `Failed` is retryable, so on a retry whose evidence pass
+/// failed it erased the record of a comment that was already public and made the next retry
+/// re-send it — reintroducing exactly the duplicate-post hazard the `only_assignments` guard
+/// in the preparation loop had just closed. Caught by an adversarial re-read of the claim
+/// "a retry cannot overwrite a Succeeded state", which was true of the loop and false here.
 fn fail_whole_target(
     db: &Arc<riviu_core::db::Database>,
     plan: &riviu_core::ThreadPlan,
     assignment_ids: &HashMap<(String, u8), String>,
+    protected: &std::collections::HashSet<String>,
     target: &riviu_core::ResolvedTikTokTarget,
     error_code: &str,
 ) -> anyhow::Result<()> {
@@ -715,6 +724,11 @@ fn fail_whole_target(
         else {
             continue;
         };
+        if protected.contains(id) {
+            // Whatever went wrong with this target, it did not un-post a comment that is
+            // already live. Leaving the state alone is what keeps it out of a retry.
+            continue;
+        }
         db.update_interaction_assignment_state(
             id,
             ThreadMessageState::Failed,
@@ -724,6 +738,27 @@ fn fail_whole_target(
         )?;
     }
     Ok(())
+}
+
+/// Assignments a failure must not overwrite, because their delivery is settled or in flight.
+///
+/// The same three states `retryable_assignments` excludes, for the same reason: tapping Send
+/// is not idempotent. Built once from the campaign detail rather than re-queried per target.
+fn protected_assignment_ids(
+    assignments: &[riviu_core::InteractionAssignmentRecord],
+) -> std::collections::HashSet<String> {
+    assignments
+        .iter()
+        .filter(|assignment| {
+            matches!(
+                assignment.state,
+                ThreadMessageState::Sending
+                    | ThreadMessageState::Succeeded
+                    | ThreadMessageState::Uncertain
+            )
+        })
+        .map(|assignment| assignment.id.clone())
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -748,6 +783,7 @@ async fn execute_thread_campaign(
     let detail = db
         .get_interaction_campaign(&campaign_id)?
         .context("campaign không tồn tại")?;
+    let protected = protected_assignment_ids(&detail.assignments);
     let assignment_ids: HashMap<(String, u8), String> = detail
         .assignments
         .into_iter()
@@ -802,6 +838,7 @@ async fn execute_thread_campaign(
                         &db,
                         &plan,
                         &assignment_ids,
+                        &protected,
                         target,
                         &format!("target_evidence_unavailable: {error}"),
                     )?;
@@ -1983,6 +2020,58 @@ fn campaign_is_cancelled(db: &riviu_core::db::Database, campaign_id: &str) -> an
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The states a target-level failure must not touch.
+    mod protected_deliveries {
+        use super::*;
+        use riviu_core::InteractionAssignmentRecord;
+
+        fn assignment(id: &str, state: ThreadMessageState) -> InteractionAssignmentRecord {
+            InteractionAssignmentRecord {
+                id: id.to_string(),
+                target_key: "content:1".to_string(),
+                ordinal: 0,
+                actor_udid: "udid".to_string(),
+                parent_assignment_id: None,
+                state,
+                prepared_text: None,
+                error_code: None,
+            }
+        }
+
+        #[test]
+        fn a_target_failure_never_reopens_a_comment_that_is_already_public() {
+            // The defect this guards was mine and it was subtle: the `only_assignments` guard
+            // in the preparation loop stopped a retry overwriting `Succeeded`, and then
+            // `fail_whole_target` overwrote it anyway from a different path. `Failed` is
+            // retryable, so that erased the record of a live comment and let the next retry
+            // post it a second time.
+            let assignments = vec![
+                assignment("done", ThreadMessageState::Succeeded),
+                assignment("in-flight", ThreadMessageState::Sending),
+                assignment("unproven", ThreadMessageState::Uncertain),
+                assignment("waiting", ThreadMessageState::Queued),
+                assignment("broken", ThreadMessageState::Failed),
+            ];
+            let protected = protected_assignment_ids(&assignments);
+
+            // The same three `retryable_assignments` excludes, for the same reason.
+            for settled in ["done", "in-flight", "unproven"] {
+                assert!(
+                    protected.contains(settled),
+                    "{settled} must survive a target-level failure"
+                );
+            }
+            // And the ones a retry is *for* stay writable, or a failed target could never be
+            // recorded as failed at all.
+            for retryable in ["waiting", "broken"] {
+                assert!(
+                    !protected.contains(retryable),
+                    "{retryable} must stay writable"
+                );
+            }
+        }
+    }
 
     /// The two conditions an evidence frame has to satisfy, pinned without a device.
     mod evidence_frames {

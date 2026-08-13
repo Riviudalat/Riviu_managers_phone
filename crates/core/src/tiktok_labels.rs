@@ -126,7 +126,8 @@ pub enum TikTokControl {
     /// match the `Đã follow` tab. Description matching is case-insensitive, which makes a
     /// loose match likelier still.
     ///
-    /// **Not measured.** Left `None` in both sets: the delete path refuses without it.
+    /// **Measured** on a Redmi Note 12 (`trill` 46.3.3, vi) 13/08/2026 — see AGENTS.md 9.36.
+    /// `None` on `musically`/en, which has not been looked at.
     ProfileTab,
     /// Advances out of the picker's edit step toward the post screen.
     ///
@@ -175,11 +176,17 @@ pub enum TikTokControl {
 impl TikTokControl {
     /// Every control, for tests that must cover all of them.
     ///
-    /// Kept honest by [`Self::ordinal`] rather than by care: that function matches
-    /// exhaustively, so the compiler refuses a new variant until it is listed there, and
-    /// `every_control_appears_in_all` then refuses it until it is listed here too. The
-    /// completeness test used to iterate a hand-written array, which meant a new control
-    /// was simply never checked — silently.
+    /// **What actually holds, stated narrowly.** Two exhaustive matches — [`Self::ordinal`] and
+    /// [`TikTokLabels::translated`] — make the compiler refuse a new variant until it is
+    /// handled in both, and the fixed length below forces a bump once it *is* added here. So
+    /// adding a control without noticing this file is not possible.
+    ///
+    /// But nothing mechanically forces a new variant *into* `ALL`: a variant given an ordinal
+    /// and left out of this array would still pass `every_control_appears_in_all`, because
+    /// that test sizes itself from `ALL` and iterates `ALL`. Closing that would take a macro
+    /// generating enum and array together. Until then, treat `ALL` as hard to drift rather
+    /// than impossible — which is still a long way from the hand-written list it replaced,
+    /// where a new control was simply never checked.
     pub const ALL: [Self; 23] = [
         Self::FeedTab,
         Self::PhotoBadge,
@@ -963,10 +970,10 @@ mod tests {
 
     #[test]
     fn every_control_appears_in_all() {
-        // `ALL` cannot drift. `ordinal` matches exhaustively, so the compiler refuses a new
-        // variant until it is listed there; this then refuses it until it is listed in
-        // `ALL` too. Together they make "the completeness test covers every control" a
-        // fact rather than a habit.
+        // Catches a duplicate or a hole in the ordinals. It does **not** catch a variant left
+        // out of `ALL` entirely — this sizes itself from `ALL` and iterates `ALL`, so a
+        // variant with ordinal 23 that nobody added here is invisible to it. See `ALL`'s doc
+        // for what does hold: two exhaustive matches plus the fixed array length.
         let mut seen = [false; TikTokControl::ALL.len()];
         for control in TikTokControl::ALL {
             let ordinal = control.ordinal();
