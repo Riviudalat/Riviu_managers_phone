@@ -4730,6 +4730,44 @@ Nó cũng báo có `Follow ` trên trang không, vì đó là từ chối dứt 
 
 **Chưa chạy.** Đây là số đo M4/M5 và nó cần một bài thật của người vận hành.
 
+### 9.47 v0.1.1 đã phát hành, và chuỗi updater nghiệm thu từ ngoài (13/08/2026)
+
+Lần tag thứ ba xanh cả năm job. Release `v0.1.1` là **Latest**, 23 asset.
+
+**Nghiệm thu từ ngoài bản build, không phải từ log CI.** Gọi đúng cái URL đã nướng vào mọi
+binary — `/releases/latest/download/latest.json` — rồi đi tiếp từng URL bên trong nó:
+
+| khoá | HTTP | magic 4 byte | là gì |
+|---|---|---|---|
+| `darwin-aarch64` | 206 | `1f8b0800` | gzip ⇒ `.app.tar.gz` |
+| `darwin-x86_64` | 206 | `1f8b0800` | gzip |
+| `windows-x86_64` | 206 | `4d5a9000` | `MZ` ⇒ NSIS setup.exe |
+| `windows-x86_64-msi` | 206 | `d0cf11e0` | OLE compound ⇒ **MSI thật** |
+| `windows-x86_64-nsis` | 206 | `4d5a9000` | cùng file, cùng 58.206.452 byte với khoá trơn |
+
+Dòng `-msi` là bằng chứng cái sửa ở 9.41 chạy thật, không chỉ chạy trong test: khoá đó trả một
+tệp OLE, tức MSI, chứ không phải PE của NSIS.
+
+**Chữ ký khớp byte.** Chuỗi inline trong `latest.json` bằng đúng nội dung asset `.sig` đã
+publish, và giải base64 ra `untrusted comment: signature from tauri secret key`.
+
+**Tên asset không bị GitHub đổi** — đúng như thiết kế ở 9.41: cái ghi ra đĩa đã là cái GitHub
+phục vụ, nên URL trong manifest đoán được.
+
+**Ba lần tag, ba lỗi thật khác nhau, không lần nào do thay đổi cùng ngày:**
+
+1. `packaging` thiếu ở job release (9.45) — job đó **chưa bao giờ chạy** trong lịch sử repo.
+2. Ngân sách cleanup 10ms trong test (9.46) — flake thời gian thực.
+3. Xanh.
+
+Cả ba lần đều fail **trước** `gh release create`, nên không release nào bị tạo dở và gate bất
+biến không bị chạm — tag chưa có release đằng sau thì dời được, không phải đốt version. Đó là
+lý do vẫn ra `v0.1.1` chứ không phải `v0.1.3`.
+
+**Ghi chú về HEAD:** `curl -I` lên asset của GitHub Release trả `HTTP 000` (CDN từ chối), nên
+muốn kiểm URL phải dùng **GET một phần** (`Range: bytes=0-63` → `206`). Nếu tin HEAD thì sẽ
+kết luận sai là cả năm URL chết.
+
 ### 9.46 Ngân sách 10 mili-giây trong test, và lần thứ hai cùng một loại lỗi (13/08/2026)
 
 Lần tag thứ hai: **quality fail**, `TimeoutError: app process-control deadline expired` ở

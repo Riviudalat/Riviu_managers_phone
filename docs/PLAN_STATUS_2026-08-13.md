@@ -17,7 +17,8 @@ Ba thứ, do người vận hành đặt ra:
 2. **App đã cài tự biết có bản mới.**
 3. **Ba đường Android chạy thật qua UI**: nuôi tài khoản, tương tác (tim + bình luận), đăng bài.
 
-Trạng thái: **(1) xong. (2) code xong hết, chờ một tag để `latest.json` đầu tiên ra đời.
+Trạng thái: **(1) xong. (2) XONG — `v0.1.1` đã phát hành, `latest.json` đã sống và nghiệm thu
+từ ngoài (xem `AGENTS.md` 9.47).
 (3) hai trong ba đường xong — nuôi tài khoản và tương tác chạy thật qua UI; đường đăng bài
 **đã đo và người vận hành chốt không đăng gì từ Android**, nên nó không phải "chưa làm" mà là
 "đã quyết không làm", và app từ chối máy Android thẳng thay vì để nó tap toạ độ iOS.**
@@ -177,11 +178,15 @@ nhật mãi mà không bao giờ thoả**.
 
 ### D. Còn thiếu để một tính năng hoàn chỉnh
 
-- **Auto-update: code xong hết, còn chờ một tag thật.** Đã có: khoá, ký lúc build, plugin,
-  capability, `update_check`, `update_install`, sinh + upload `latest.json` trong **cùng một**
-  `gh release create` (`build-updater-manifest`), và UI ở **Settings → Bản cập nhật**. Việc
-  còn lại **không phải code**: tăng version rồi tạo tag để `latest.json` đầu tiên ra đời, và
-  một máy sạch để đi hết vòng cài-rồi-cập-nhật. Xem `AGENTS.md` 9.41.
+- ~~**Auto-update**~~ — **XONG tới mức kiểm được từ đây.** `v0.1.1` đã phát hành với 23 asset,
+  và chuỗi đã nghiệm thu **từ ngoài bản build**: gọi đúng URL đã nướng vào mọi binary, đi tiếp
+  từng URL bên trong `latest.json`, cả năm khoá trả `206` và **magic byte đúng loại file** — kể
+  cả khoá `-msi` trả một tệp OLE thật. Chữ ký inline khớp byte với asset `.sig`. Xem `AGENTS.md`
+  9.41 và 9.47.
+
+  Còn lại **không kiểm được từ đây**: cài `v0.1.1` trên một máy sạch, phát hành `v0.1.2`, rồi
+  bấm nút — để thấy SmartScreen, thấy `installMode: currentUser` chạy không cần UAC, và kiểm
+  không còn tiến trình `riviu-pmd`/`adb` mồ côi sau khi app tự đóng.
 - **`interaction_events` rỗng — và giờ nói rõ ngay trong schema.** Bảng có sẵn, không writer,
   không reader. Cái bẫy thật không phải bảng rỗng mà là **nó giống `flow_events` từng dòng**,
   nên đọc như một audit trail: người sau thấy 0 dòng sẽ kết luận "không có gì xảy ra" trong khi
