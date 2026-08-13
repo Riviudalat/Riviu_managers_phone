@@ -4730,6 +4730,37 @@ Nó cũng báo có `Follow ` trên trang không, vì đó là từ chối dứt 
 
 **Chưa chạy.** Đây là số đo M4/M5 và nó cần một bài thật của người vận hành.
 
+#### `ProfileTab` đã đo, và cái bẫy hoá ra nằm ngay trên cùng một màn
+
+Redmi Note 12, `com.ss.android.ugc.trill`, UI tiếng Việt, 13/08/2026 — thanh tab dưới ở
+y=2135: `Trang chủ`, `Cửa hàng`, `Quay`, `Hộp thư`, **`Hồ sơ`**. (`Quay` khớp lại số đo
+`ComposerOpen` đã có.) Nên `ProfileTab = Exact("Hồ sơ")`, một trong sáu nhãn hết còn từ chối.
+
+**Và bẫy `Contains` không còn là dự đoán.** Cùng **một** bản dump đó chứa cả hai:
+
+```
+content-desc="Hồ sơ"            <- tab của mình, thanh dưới
+content-desc="Hồ sơ Ánh đây"    <- link hồ sơ TÁC GIẢ, trên action rail
+```
+
+Chuỗi nguy hiểm là **tiền tố** của chuỗi an toàn, nên chỉ tính exact mới tách được. Đúng hình
+dạng của `Follow ` / `Đã follow` (mục 9.5): trên build này, khoảng trắng hoặc tính exact là
+toàn bộ khác biệt giữa "nút của tác giả" và "thứ ta muốn bấm". Ghim bởi
+`the_profile_tab_cannot_match_the_author_profile_link`.
+
+**Cách đo:** `probe -- <serial> --measure-tab-bar` (chỉ đọc) rồi đọc `target/tab-bar.xml`.
+
+#### Probe KHÔNG treo — lần đó là cargo đang build
+
+Tôi đã báo sai một lần: `cargo run -q --example probe` "treo" 600s. Nó không treo, nó đang
+**compile** example đó lần đầu. Build riêng trước rồi chạy binary thì probe chạy trọn vòng:
+`screenshot_png` 1622 ms, minicap **29,2 FPS** trên Redmi, `inspect_app_process` ok.
+
+```powershell
+cargo build -q -p riviu-android-driver --example probe
+.\target\debug\examples\probe.exe <serial> --measure-tab-bar
+```
+
 #### Hai biến môi trường probe cần, và lỗi nó báo khi thiếu
 
 Đã mất một lượt vì cái này, ghi lại. `probe` **không** dùng đường resolve adb của app và

@@ -648,10 +648,17 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // `clickable=false` until something is selected: an armed signal, not just a
         // button.
         picker_next: Some(LabelMatch::Text("Tiếp")),
-        // Publish tail and the whole delete path: declared, not measured. `None` here is
-        // the refusal — the composer stops before opening and the delete driver is not
-        // offered at all, which is the only safe order for an action with no undo.
-        profile_tab: None,
+        // Measured on a Redmi Note 12, 13/08/2026, from the bottom tab bar at y=2135:
+        // `Trang chủ`, `Cửa hàng`, `Quay`, `Hộp thư`, `Hồ sơ`.
+        //
+        // `Exact`, and the hazard is no longer a prediction: the **same dump** carried
+        // `content-desc="Hồ sơ Ánh đây"` — the author's profile link on the action rail —
+        // beside `content-desc="Hồ sơ"`. `Contains("Hồ sơ")` matches both, and picking the
+        // wrong one walks the delete path onto a stranger's profile.
+        profile_tab: Some(LabelMatch::Exact("Hồ sơ")),
+        // The rest of the publish tail and the whole delete path: declared, not measured.
+        // `None` is the refusal — the composer stops before opening and the delete driver
+        // is not offered at all, which is the only safe order for an action with no undo.
         composer_next: None,
         post_button: None,
         post_delete_menu: None,
@@ -963,6 +970,41 @@ mod tests {
     }
 
     #[test]
+    fn the_profile_tab_cannot_match_the_author_profile_link() {
+        // Measured hazard, not a hypothetical: one dump from a Redmi Note 12 on 13/08/2026
+        // carried BOTH `Hồ sơ` (our own tab, bottom bar) and `Hồ sơ Ánh đây` (the author's
+        // profile link on the action rail). A `Contains` label would match either, and the
+        // delete path following the wrong one lands on a stranger's profile.
+        //
+        // The same shape as `the_follow_label_cannot_match_the_following_tab`, and the
+        // reason both tests exist: on this build the dangerous string is a *prefix* of the
+        // safe one, so only exactness separates them.
+        let mut measured = 0;
+        for set in TIKTOK_LABEL_SETS {
+            let Some(label) = set.translated(TikTokControl::ProfileTab) else {
+                continue;
+            };
+            measured += 1;
+            assert!(
+                matches!(label, LabelMatch::Exact(_)),
+                "{} ProfileTab must be Exact; Contains would match the author's profile link",
+                set.package
+            );
+            // The author link *starts with* the tab's text, which is exactly why a
+            // substring match cannot separate them.
+            assert!(
+                format!("{} Ánh đây", label.value()).starts_with(label.value()),
+                "{} the author link is a superstring of the tab label",
+                set.package
+            );
+        }
+        assert_eq!(
+            measured, 1,
+            "exactly one set has ProfileTab measured so far"
+        );
+    }
+
+    #[test]
     fn the_publish_tail_and_the_delete_path_are_unmeasured_and_therefore_refuse() {
         // The point of the whole catalogue, applied to the one action that cannot be
         // undone. These six are declared so the code can name them and refuse; measuring
@@ -970,7 +1012,6 @@ mod tests {
         // AGENTS.md, this test is what fails.
         for set in TIKTOK_LABEL_SETS {
             for control in [
-                TikTokControl::ProfileTab,
                 TikTokControl::ComposerNext,
                 TikTokControl::PostButton,
                 TikTokControl::PostDeleteMenu,
