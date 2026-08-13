@@ -341,6 +341,21 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      # This job runs the same collector script as the other two, and the script imports
+      # `packaging` at module scope. The other jobs get it as a side effect of installing
+      # the sidecar build requirements; this one installed nothing, so every invocation
+      # here died on ModuleNotFoundError. It only ever runs on a tag push, so the first tag
+      # in the repository was the first time anything executed it.
+      #
+      # Just the one dependency, and its version read from the lock rather than repeated
+      # here — a second copy of a pin is a second thing to forget.
+      - name: Install release tooling dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          pin="$(grep -E '^packaging==' sidecars/pymobiledevice3/requirements-lock.txt)"
+          python -m pip install --disable-pip-version-check "$pin"
+
       - name: Download desktop artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:

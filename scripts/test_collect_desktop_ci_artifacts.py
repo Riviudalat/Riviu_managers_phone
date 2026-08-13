@@ -609,6 +609,60 @@ class ArtifactContractTests(unittest.TestCase):
                         str(temporary).startswith(str(fallback_parent))
                     )
 
+    def test_every_job_running_the_collector_installs_what_it_imports(self):
+        """Catch the class, not the instance.
+
+        The release job runs this very script and installed nothing, so it died on
+        `ModuleNotFoundError: packaging`. It only runs on a tag push, so nothing exercised
+        it until the first tag in the repository — the failure mode is a job that is never
+        rehearsed. Asserting the structure is the only thing that runs on every push.
+        """
+        workflow = (
+            artifacts.REPOSITORY_ROOT / ".github" / "workflows" / "desktop-ci-cd.yml"
+        ).read_text(encoding="utf-8")
+        script = "collect_desktop_ci_artifacts.py"
+
+        # Split into jobs by their two-space-indented keys, so "runs the script" and
+        # "installs a dependency" are compared within one job rather than across the file.
+        # The `on:` triggers land in here as pseudo-jobs, which is harmless: they never
+        # mention the script, so they can never be offenders. Verified by deleting the fix
+        # and watching this report exactly `['release']`.
+        jobs: dict[str, list[str]] = {}
+        current: str | None = None
+        for line in workflow.splitlines():
+            if line and not line.startswith(" ") and not line.startswith("#"):
+                current = None
+            elif line.startswith("  ") and not line.startswith("   ") and line.rstrip().endswith(":"):
+                current = line.strip().rstrip(":")
+                jobs[current] = []
+            elif current is not None:
+                jobs[current].append(line)
+
+        offenders = []
+        for name, body in jobs.items():
+            text = "\n".join(body)
+            if script in text and "pip install" not in text:
+                offenders.append(name)
+
+        self.assertEqual(
+            offenders,
+            [],
+            f"job(s) {offenders!r} run {script} without installing its dependencies",
+        )
+
+    def test_the_packaging_pin_the_release_job_reads_is_really_in_the_lock(self):
+        # The release job greps the pin out of the lock instead of repeating it. If the
+        # lock ever stops naming packaging that way, the grep yields nothing and pip is
+        # called with an empty argument — so the shape of that line is worth pinning.
+        lock = artifacts.SIDECAR_REQUIREMENTS_LOCK.read_text(encoding="utf-8")
+        pins = [
+            line
+            for line in lock.splitlines()
+            if line.startswith("packaging==")
+        ]
+
+        self.assertEqual(len(pins), 1, pins)
+
     def test_msi_log_absence_is_reported_rather_than_raising(self):
         with tempfile.TemporaryDirectory() as temporary:
             summary = artifacts.read_msi_log(Path(temporary) / "missing.log")

@@ -4730,6 +4730,30 @@ Nó cũng báo có `Follow ` trên trang không, vì đó là từ chối dứt 
 
 **Chưa chạy.** Đây là số đo M4/M5 và nó cần một bài thật của người vận hành.
 
+### 9.45 Tag đầu tiên: job release chưa bao giờ chạy, và nó hỏng (13/08/2026)
+
+Push tag `v0.1.1`. Quality xanh, cả ba build xanh, **job release fail** —
+`ModuleNotFoundError: No module named 'packaging'` ở bước `verify-release`.
+
+**Không phải do thay đổi nào của tôi.** Job release chạy cùng script collector như hai job kia,
+mà script `import packaging` ở mức module. Hai job kia có nó **như tác dụng phụ** của việc cài
+`requirements-build.txt`; job release **không cài gì cả**. Nó chỉ chạy khi push tag, nên đây là
+lần đầu tiên trong lịch sử repo có gì đó thực thi nó.
+
+**May ở chỗ nó fail đúng chỗ**: trước `gh release create`, nên **không release nào được tạo** và
+gate bất biến không bị chạm. Tag tồn tại mà không có release là trạng thái sửa được — dời tag
+sang commit đã fix, chứ không phải bump lên `v0.1.2`.
+
+Sửa: cài **đúng một** dependency, và **đọc pin từ lock** chứ không viết lại số vào workflow —
+một bản sao thứ hai của pin là một chỗ thứ hai để quên.
+
+**Và đóng cả lớp lỗi, không chỉ ca này.** Cái nguy hiểm ở đây là *một job không bao giờ được
+tổng duyệt*: nó chỉ chạy trên tag, nên mọi lần push đều không chứng minh gì về nó. Thêm
+`every_job_running_the_collector_installs_what_it_imports` — đọc workflow, tách theo job, và
+đòi job nào chạy collector thì job đó phải cài dependency. Đã kiểm ngược: bỏ fix ra thì nó chỉ
+đúng `['release']`. Đây là thứ chạy trên **mọi** push, tức thứ duy nhất có thể canh một job
+không ai diễn thử.
+
 ### 9.44 Đường Đăng bài cho máy Android đi qua, và bốn version chỉ kiểm ba (13/08/2026)
 
 Hai lỗi tìm ra khi hiện thực quyết định "chưa đăng gì từ Android", không phải khi thiết kế.
