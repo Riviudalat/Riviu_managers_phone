@@ -118,6 +118,112 @@ pub enum TikTokControl {
     /// something is — the same armed-signal shape as the comment drawer's Send button,
     /// so "enough images are selected" is *checkable* rather than timed.
     PickerNext,
+    /// The bottom-bar tab that opens **our own** profile.
+    ///
+    /// `Exact`, and that is not a style choice. `Hồ sơ <tên>` appears on the action rail
+    /// as the author link, so `Contains` would match the *author's* profile and walk the
+    /// session onto a stranger's page — the same trap that once made `Contains("Follow")`
+    /// match the `Đã follow` tab. Description matching is case-insensitive, which makes a
+    /// loose match likelier still.
+    ///
+    /// **Not measured.** Left `None` in both sets: the delete path refuses without it.
+    ProfileTab,
+    /// Advances out of the picker's edit step toward the post screen.
+    ///
+    /// **Not measured.** Everything after `Tiếp` is unmeasured — see AGENTS.md 9.10, the
+    /// picker labels stop there.
+    ComposerNext,
+    /// The button that actually publishes the post.
+    ///
+    /// **Not measured**, and the most consequential of the three: without it the composer
+    /// refuses *before* opening, which is the only point where refusing is free.
+    PostButton,
+    /// Opens the sheet on our own post that contains the delete row.
+    ///
+    /// **Not measured.** One of the three whose absence refuses at *driver selection*
+    /// rather than mid-run: a post that went out and cannot be taken down is a promise the
+    /// session cannot keep, so the refusal has to happen before anything is published.
+    PostDeleteMenu,
+    /// The delete row inside that sheet.
+    ///
+    /// **Not measured**, and it needs `locate_all` rather than `locate` when it is: the
+    /// rail already carries `Thêm hoặc xóa video này khỏi mục Yêu thích` (AGENTS.md 2641),
+    /// so a `Xóa` locator matching more than one node is a real hazard and must refuse.
+    PostDelete,
+    /// The confirm button in the delete dialog.
+    ///
+    /// **Not measured.** Absent means refuse before the sheet is even opened — reaching a
+    /// confirmation dialog with no idea which button confirms is the worst place to stop.
+    PostDeleteConfirm,
+}
+
+impl TikTokControl {
+    /// Every control, for tests that must cover all of them.
+    ///
+    /// Kept honest by [`Self::ordinal`] rather than by care: that function matches
+    /// exhaustively, so the compiler refuses a new variant until it is listed there, and
+    /// `every_control_appears_in_all` then refuses it until it is listed here too. The
+    /// completeness test used to iterate a hand-written array, which meant a new control
+    /// was simply never checked — silently.
+    pub const ALL: [Self; 23] = [
+        Self::FeedTab,
+        Self::PhotoBadge,
+        Self::Like,
+        Self::Liked,
+        Self::Comments,
+        Self::Share,
+        Self::Bookmark,
+        Self::Follow,
+        Self::LiveRoom,
+        Self::CommentSend,
+        Self::CommentReply,
+        Self::ComposerOpen,
+        Self::PickerAlbumMenu,
+        Self::PickerTabAll,
+        Self::PickerTabPhotos,
+        Self::PickerMultiSelect,
+        Self::PickerNext,
+        Self::ProfileTab,
+        Self::ComposerNext,
+        Self::PostButton,
+        Self::PostDeleteMenu,
+        Self::PostDelete,
+        Self::PostDeleteConfirm,
+    ];
+
+    /// A stable position per variant, matched exhaustively on purpose.
+    ///
+    /// `#[cfg(test)]` rather than `#[allow(dead_code)]`: it exists to make the completeness
+    /// test un-driftable and has no production caller, and saying that with the attribute
+    /// keeps clippy honest about the rest of the file.
+    #[cfg(test)]
+    fn ordinal(self) -> usize {
+        match self {
+            Self::FeedTab => 0,
+            Self::PhotoBadge => 1,
+            Self::Like => 2,
+            Self::Liked => 3,
+            Self::Comments => 4,
+            Self::Share => 5,
+            Self::Bookmark => 6,
+            Self::Follow => 7,
+            Self::LiveRoom => 8,
+            Self::CommentSend => 9,
+            Self::CommentReply => 10,
+            Self::ComposerOpen => 11,
+            Self::PickerAlbumMenu => 12,
+            Self::PickerTabAll => 13,
+            Self::PickerTabPhotos => 14,
+            Self::PickerMultiSelect => 15,
+            Self::PickerNext => 16,
+            Self::ProfileTab => 17,
+            Self::ComposerNext => 18,
+            Self::PostButton => 19,
+            Self::PostDeleteMenu => 20,
+            Self::PostDelete => 21,
+            Self::PostDeleteConfirm => 22,
+        }
+    }
 }
 
 /// Which attribute a label lives in.
@@ -255,6 +361,13 @@ pub struct TikTokLabels {
     picker_tab_photos: Option<LabelMatch>,
     picker_multi_select: Option<LabelMatch>,
     picker_next: Option<LabelMatch>,
+    /// Our own profile tab. `Exact` when measured — see [`TikTokControl::ProfileTab`].
+    profile_tab: Option<LabelMatch>,
+    composer_next: Option<LabelMatch>,
+    post_button: Option<LabelMatch>,
+    post_delete_menu: Option<LabelMatch>,
+    post_delete: Option<LabelMatch>,
+    post_delete_confirm: Option<LabelMatch>,
 }
 
 impl TikTokLabels {
@@ -290,6 +403,12 @@ impl TikTokLabels {
             TikTokControl::PickerTabPhotos => self.picker_tab_photos,
             TikTokControl::PickerMultiSelect => self.picker_multi_select,
             TikTokControl::PickerNext => self.picker_next,
+            TikTokControl::ProfileTab => self.profile_tab,
+            TikTokControl::ComposerNext => self.composer_next,
+            TikTokControl::PostButton => self.post_button,
+            TikTokControl::PostDeleteMenu => self.post_delete_menu,
+            TikTokControl::PostDelete => self.post_delete,
+            TikTokControl::PostDeleteConfirm => self.post_delete_confirm,
             // Version-keyed, not language-keyed. See the module docs.
             TikTokControl::CommentSend => None,
         }
@@ -475,6 +594,15 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         picker_tab_photos: None,
         picker_multi_select: None,
         picker_next: None,
+        // Publish tail and the whole delete path: declared, not measured. `None` here is
+        // the refusal — the composer stops before opening and the delete driver is not
+        // offered at all, which is the only safe order for an action with no undo.
+        profile_tab: None,
+        composer_next: None,
+        post_button: None,
+        post_delete_menu: None,
+        post_delete: None,
+        post_delete_confirm: None,
     },
     // SEA build, Vietnamese UI. Read off a Redmi Note 12 (Android 15) on
     // 10/08/2026; see `docs/re/genfarmer/README.md` and AGENTS.md §9.
@@ -520,6 +648,15 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // `clickable=false` until something is selected: an armed signal, not just a
         // button.
         picker_next: Some(LabelMatch::Text("Tiếp")),
+        // Publish tail and the whole delete path: declared, not measured. `None` here is
+        // the refusal — the composer stops before opening and the delete driver is not
+        // offered at all, which is the only safe order for an action with no undo.
+        profile_tab: None,
+        composer_next: None,
+        post_button: None,
+        post_delete_menu: None,
+        post_delete: None,
+        post_delete_confirm: None,
     },
 ];
 
@@ -803,6 +940,53 @@ mod tests {
     }
 
     #[test]
+    fn every_control_appears_in_all() {
+        // `ALL` cannot drift. `ordinal` matches exhaustively, so the compiler refuses a new
+        // variant until it is listed there; this then refuses it until it is listed in
+        // `ALL` too. Together they make "the completeness test covers every control" a
+        // fact rather than a habit.
+        let mut seen = [false; TikTokControl::ALL.len()];
+        for control in TikTokControl::ALL {
+            let ordinal = control.ordinal();
+            assert!(
+                !seen[ordinal],
+                "{control:?} appears twice in ALL (ordinal {ordinal})"
+            );
+            seen[ordinal] = true;
+        }
+        for (ordinal, covered) in seen.iter().enumerate() {
+            assert!(
+                *covered,
+                "a control with ordinal {ordinal} exists but is missing from ALL"
+            );
+        }
+    }
+
+    #[test]
+    fn the_publish_tail_and_the_delete_path_are_unmeasured_and_therefore_refuse() {
+        // The point of the whole catalogue, applied to the one action that cannot be
+        // undone. These six are declared so the code can name them and refuse; measuring
+        // them is a device task. If a future edit fills one in without a measurement in
+        // AGENTS.md, this test is what fails.
+        for set in TIKTOK_LABEL_SETS {
+            for control in [
+                TikTokControl::ProfileTab,
+                TikTokControl::ComposerNext,
+                TikTokControl::PostButton,
+                TikTokControl::PostDeleteMenu,
+                TikTokControl::PostDelete,
+                TikTokControl::PostDeleteConfirm,
+            ] {
+                assert!(
+                    set.translated(control).is_none(),
+                    "{} {control:?} claims a measurement that AGENTS.md does not record;                      add the measurement first, then this assertion",
+                    set.package
+                );
+            }
+        }
+    }
+
+    #[test]
     fn no_entry_carries_an_empty_label() {
         for set in TIKTOK_LABEL_SETS {
             assert!(!set.package.is_empty());
@@ -812,23 +996,10 @@ mod tests {
                 "{} needs provenance",
                 set.package
             );
-            for control in [
-                TikTokControl::FeedTab,
-                TikTokControl::Like,
-                TikTokControl::Liked,
-                TikTokControl::Comments,
-                TikTokControl::Share,
-                TikTokControl::Bookmark,
-                TikTokControl::Follow,
-                TikTokControl::LiveRoom,
-                TikTokControl::CommentReply,
-                TikTokControl::ComposerOpen,
-                TikTokControl::PickerAlbumMenu,
-                TikTokControl::PickerTabAll,
-                TikTokControl::PickerTabPhotos,
-                TikTokControl::PickerMultiSelect,
-                TikTokControl::PickerNext,
-            ] {
+            // Every control, not a hand-written subset. The old list omitted whatever was
+            // added last, so a new label simply went unchecked — silently, which is the
+            // failure mode this module exists to prevent.
+            for control in TikTokControl::ALL {
                 if let Some(label) = set.translated(control) {
                     assert!(
                         !label.value().trim().is_empty(),
