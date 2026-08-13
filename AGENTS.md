@@ -4621,6 +4621,76 @@ Ba chứ không bốn, vì `1p/1` bị `skipped_parent` trước khi tới bư�
 thành công *và* vẫn gửi comment (rồi mới `uncertain` ở bước xác nhận); `2v/0` và `2v/1` thả tim
 thành công *và* comment `succeeded`. Không có ca nào tim làm chết comment.
 
-**Trạng thái còn lại của H6:** H6-d (AI thật, `commentProb > 0`) chưa chạy. H6-e (trộn
-iPhone+Android ở Threaded ⇒ `MixedPlatformThread`) **gác lại theo yêu cầu người vận hành** — gate
-phân hoạch theo `reports_element_bounds` nên hai máy Android không bao giờ trip được nó.
+**H6-e** (trộn iPhone+Android ở Threaded ⇒ `MixedPlatformThread`) **gác lại theo yêu cầu người
+vận hành** — gate phân hoạch theo `reports_element_bounds` nên hai máy Android không bao giờ trip
+được nó.
+
+### 9.34 H6-d ĐẠT sau khi sửa ba chỗ ở 9.33 (13/08/2026)
+
+Chiến dịch `9b1ddc61`: AI viết, Riêng lẻ, hai link đã chứng minh. `state=partial`, và lần này
+**cả bốn assignment đều chạy**.
+
+**Chữ AI viết đăng được, đọc lại đúng nguyên văn:**
+
+| line | ord | kết quả |
+|---|---|---|
+| 1 photo | 1 | `'Nghe ổn áp thật, gom đồ vô là đi thôi!'` — read back khớp |
+| 2 video | 1 | `'Ảnh sóng ảo chất quá, muốn ghé quá!'` — read back khớp |
+
+**Ba bản sửa đều nghiệm thu được ngay trong lần chạy này:** lỗi AI ở `1p/0` **không** còn giết
+chiến dịch (trước đó `1p/0` chết là hết); assignment đó có `error_code` **riêng**; và lỗi đó
+**nêu nguyên nhân**.
+
+**Và nguyên nhân hoá ra không phải API chết.** Nó là một **cửa chất lượng bên trong app**:
+
+```
+1p/0: comment_context_rejected: context=0  overall=0  instruction=100 genericity=0
+2v/0: comment_context_rejected: context=60 overall=60 instruction=90  genericity=40
+```
+
+Câu AI viết bị từ chối vì chưa neo đủ vào nội dung bài — `2v/0` đạt 60 mà vẫn bị loại, nên
+ngưỡng nằm trên 60. Suy đoán cũ của tôi (`model deepseek-v4-flash` không tồn tại) **sai**: model
+gọi được, key dùng được, và cái chặn là gate của chính chúng ta.
+
+**Điểm cần người vận hành quyết:** ordinal 0 bị loại trên **cả hai** target, ordinal 1 đậu trên
+cả hai. Khác biệt duy nhất giữa chúng là `direction`: ordinal 1 được thêm câu "trả lời tự nhiên
+câu trước ..." vì `previous` đã có. Đáng nói là **ở chế độ Riêng lẻ thì câu đó vô lý** — bình
+luận độc lập không trả lời ai — nhưng chính nó lại làm chữ neo tốt hơn và đậu gate. Tức tỉ lệ
+loại ~50% ở lần đầu mỗi target là **có thể sửa được**, và chỗ sửa là prompt, không phải gate.
+
+### 9.33 Ba lỗi làm chế độ AI không debug được (13/08/2026)
+
+Chiến dịch `a6abbe41`: chế độ **AI viết**, Riêng lẻ, cùng hai link đã chứng minh mở được. Chết
+**ngay lập tức**: `1p/0` đứng ở `preparing`, ba assignment còn lại `queued`, campaign `failed`.
+Không assignment nào có `error_code` riêng.
+
+**Ba việc phải sửa, tất cả cùng một họ với §9.30.**
+
+1. **Còn một dấu `?` nữa của đúng loại đã sửa.** Bản sửa A2 chỉ bọc khối thu frame; lời gọi AI
+   trong vòng chuẩn bị vẫn `?` trên thân hàm trả `anyhow::Result<()>`, nên **một** lần AI lỗi ở
+   assignment đầu tiên giết cả chiến dịch và để ba assignment kia `queued` không lý do. Đây là
+   cái `?` mà kế hoạch patch đã cảnh báo là "có `?` thứ hai cùng loại".
+2. **Chuỗi nguyên nhân bị bỏ.** `error_code` chỉ có `AI chuẩn bị assignment 0` — đó là lớp
+   `.with_context()` ngoài cùng. Handler dùng `error.to_string()` chứ không `{:#}`, nên nguyên
+   nhân thật (HTTP status, body, timeout) **mất hẳn**. Log cũng không có dòng nào: đường AI không
+   log lỗi ở đâu cả. Kết quả là một lần fail live mà **không thể chẩn đoán từ bằng chứng nó để
+   lại** — đúng loại lỗi mục 9 tồn tại để tránh.
+3. **Và `error_code` của campaign vẫn không hiện trên UI**, nên người vận hành thấy "Lỗi" và
+   không có gì khác. Ba thứ này cộng lại làm chế độ AI không debug được từ ghế người vận hành.
+
+**Đã sửa cả ba** và nghiệm thu ở §9.34: lỗi AI giờ đánh `Failed` cho đúng assignment rồi
+`continue`; `error_code` giữ cả chuỗi bằng `{:#}` và có `log::error!`; `error_code` của campaign
+**và** của assignment đều được select và render (`InteractionCampaignSummary.error_code` mới, và
+`assignment.errorCode` thì đã có trong type từ trước mà chưa ai render).
+
+Một lỗi tôi tự tạo trong lúc sửa, và test bắt được: chèn `c.error_code` vào giữa hai câu SELECT
+làm **mọi index của ba subquery đếm dịch một chỗ**, nên `target_count` đọc vào cột lý do. Ghim
+bởi `a_campaign_summary_carries_the_error_code_that_ended_it`, và test đó kiểm **cả hai** đường
+đọc (list và detail) vì chúng là hai câu SELECT riêng.
+
+Suy đoán ban đầu của tôi — `model: "deepseek-v4-flash"` không phải id hợp lệ — **sai**. Xem
+§9.34: API gọi được, và cái chặn là gate chất lượng của chính chúng ta.
+
+**Ghi thêm, không liên quan tới H6-d:** `apiKey` của AI nằm **plaintext** trong bảng `settings`
+(`nurture.settings` là một chuỗi JSON). Không phải lỗi do đợt này gây ra, và không nằm trong
+phạm vi đã thống nhất — ghi lại để đừng ai phải phát hiện lại.

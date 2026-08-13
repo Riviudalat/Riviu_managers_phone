@@ -677,6 +677,12 @@ pub struct InteractionCampaignSummary {
     /// could report "1 succeeded, 0 failed" while five were silently dropped.
     /// The per-assignment chip already distinguished them; only the total lied.
     pub failed_messages: u32,
+    /// Why the campaign ended, when something ended it.
+    ///
+    /// Selected and rendered rather than only written. It was stored from the start and
+    /// read by nobody: a live AI failure on 13/08/2026 put the whole reason in this
+    /// column and the operator's only signal was the word "Lỗi".
+    pub error_code: Option<String>,
     pub updated_at: String,
 }
 

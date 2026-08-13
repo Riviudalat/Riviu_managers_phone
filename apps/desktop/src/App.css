@@ -2930,3 +2930,21 @@ button.danger:hover:not(:disabled) {
   max-height: 420px;
   object-fit: contain;
 }
+
+/* The refusal reason, wherever one exists. Wraps rather than truncates: these strings
+   name the cause ("bài đã bị xoá/riêng tư/chặn vùng", "không đọc được nhãn tác giả")
+   and a clipped one sends the reader to the wrong fix. */
+/* Selector carries the parent class on purpose: `.interaction-campaign small` already sets
+   `white-space: nowrap` + ellipsis and outranks a bare `.interaction-error`, so without
+   this the reason would be clipped to one line — which is the failure this whole change
+   exists to undo. */
+.interaction-campaign small.interaction-error,
+.interaction-assignment small.interaction-error {
+  color: var(--danger, #c0392b);
+  white-space: pre-wrap;
+  overflow: visible;
+  text-overflow: clip;
+  word-break: break-word;
+  line-height: 1.35;
+  margin-top: 0.15rem;
+}

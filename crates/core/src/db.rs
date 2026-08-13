@@ -1210,7 +1210,7 @@ impl Database {
     ) -> anyhow::Result<Vec<crate::interaction::InteractionCampaignSummary>> {
         let conn = self.conn()?;
         let mut statement = conn.prepare(
-            "SELECT c.id,c.request_id,c.state,c.message_count,c.updated_at,
+            "SELECT c.id,c.request_id,c.state,c.message_count,c.updated_at,c.error_code,
                     (SELECT COUNT(*) FROM interaction_targets t WHERE t.campaign_id=c.id),
                     (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state='succeeded'),
                     (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state IN ('failed','uncertain','skipped_parent'))
@@ -1227,7 +1227,7 @@ impl Database {
         let conn = self.conn()?;
         let summary = conn
             .query_row(
-                "SELECT c.id,c.request_id,c.state,c.message_count,c.updated_at,
+                "SELECT c.id,c.request_id,c.state,c.message_count,c.updated_at,c.error_code,
                         (SELECT COUNT(*) FROM interaction_targets t WHERE t.campaign_id=c.id),
                         (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state='succeeded'),
                         (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state IN ('failed','uncertain','skipped_parent'))
@@ -1519,9 +1519,14 @@ fn interaction_summary_from_row(
         },
         message_count: row.get::<_, i64>(3)? as u8,
         updated_at: row.get(4)?,
-        target_count: row.get::<_, i64>(5)? as u32,
-        succeeded_messages: row.get::<_, i64>(6)? as u32,
-        failed_messages: row.get::<_, i64>(7)? as u32,
+        // Index 5 is `c.error_code`, which sits between the plain columns and the three
+        // counting subqueries in both SELECTs — so adding it shifted every index after it.
+        // A test caught that; the shift was silent otherwise, because the counts and the
+        // reason are all readable as the wrong type only sometimes.
+        error_code: row.get(5)?,
+        target_count: row.get::<_, i64>(6)? as u32,
+        succeeded_messages: row.get::<_, i64>(7)? as u32,
+        failed_messages: row.get::<_, i64>(8)? as u32,
     })
 }
 
@@ -1747,6 +1752,55 @@ mod interaction_tests {
 
             mode: ThreadMode::Threaded,
         }
+    }
+
+    #[test]
+    fn a_campaign_summary_carries_the_error_code_that_ended_it() {
+        // The column was written from the start and selected by nobody, so a live AI failure
+        // put the whole reason in the row and the operator's only signal was the word
+        // "Lỗi" (AGENTS.md 9.33). Both read paths are pinned: the list and the detail, since
+        // they are two separate SELECTs and fixing one would have left the other blind.
+        let (db, path) = fixture();
+        let request = request();
+        let plan = plan_threads(&request).expect("plan");
+        let campaign_id = db
+            .create_interaction_campaign(&request, &plan)
+            .expect("create campaign");
+
+        assert_eq!(
+            db.get_interaction_campaign(&campaign_id)
+                .expect("get")
+                .expect("exists")
+                .summary
+                .error_code,
+            None,
+            "a campaign that has not failed must not invent a reason"
+        );
+
+        let reason = "ai_comment_unavailable: ordinal 0 — HTTP 400: Model Not Exist";
+        db.update_interaction_campaign_state(
+            &campaign_id,
+            crate::interaction::ThreadCampaignState::Failed,
+            Some(reason),
+        )
+        .expect("fail the campaign");
+
+        assert_eq!(
+            db.get_interaction_campaign(&campaign_id)
+                .expect("get")
+                .expect("exists")
+                .summary
+                .error_code
+                .as_deref(),
+            Some(reason)
+        );
+        let listed = db.list_interaction_campaigns(10).expect("list");
+        let found = listed
+            .iter()
+            .find(|summary| summary.id == campaign_id)
+            .expect("the failed campaign is listed");
+        assert_eq!(found.error_code.as_deref(), Some(reason));
+        drop(path);
     }
 
     #[test]

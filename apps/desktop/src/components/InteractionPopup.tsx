@@ -416,6 +416,10 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
                   <span className="grow">
                     <strong>{campaign.requestId.slice(0, 14)}</strong>
                     <small>{campaign.targetCount} link · {campaign.succeededMessages}/{campaign.messageCount * campaign.targetCount} message · {stateLabel(campaign.state)}</small>
+                    {/* The reason, not just the word "Lỗi". It was stored from the start and
+                        read by nobody, so a failed AI run left the operator with no signal
+                        at all — see AGENTS.md 9.33. */}
+                    {campaign.errorCode && <small className="interaction-error">{campaign.errorCode}</small>}
                   </span>
                 </button>
               ))}
@@ -434,7 +438,14 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
                   return (
                     <div key={assignment.id} className="interaction-assignment">
                       <span>#{assignment.ordinal + 1}</span>
-                      <span className="grow"><strong>{assignment.actorUdid.slice(0, 8)}</strong><small>{assignment.preparedText ?? "Chưa chuẩn bị"}</small></span>
+                      <span className="grow">
+                        <strong>{assignment.actorUdid.slice(0, 8)}</strong>
+                        <small>{assignment.preparedText ?? "Chưa chuẩn bị"}</small>
+                        {/* Selected and typed already; simply never shown. A refusal that
+                            names its cause is the difference between "Lỗi" and knowing
+                            whether the link is dead or the phone was on a LIVE card. */}
+                        {assignment.errorCode && <small className="interaction-error">{assignment.errorCode}</small>}
+                      </span>
                       {shot && (
                         <button type="button" className="ghost" onClick={() => void showShot(shot.id)}>
                           Ảnh

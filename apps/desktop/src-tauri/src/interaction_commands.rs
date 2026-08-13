@@ -248,10 +248,16 @@ pub async fn interaction_start_thread(
         )
         .await
         {
+            // `{:#}` not `to_string()`: anyhow keeps the cause chain and `to_string`
+            // returns only the outermost context, which is how a live AI failure came
+            // to record `AI chuẩn bị assignment 0` and nothing about the HTTP status
+            // behind it. Logged too, because this is the only place the reason exists.
+            let detail = format!("{error:#}");
+            log::error!("interaction campaign thất bại: {detail}");
             let _ = db.update_interaction_campaign_state(
                 &campaign_id,
                 ThreadCampaignState::Failed,
-                Some(&error.to_string()),
+                Some(&detail),
             );
             events.emit(AppEvent::InteractionUpdated {
                 campaign_id,
@@ -403,10 +409,16 @@ pub fn interaction_retry(
         )
         .await
         {
+            // `{:#}` not `to_string()`: anyhow keeps the cause chain and `to_string`
+            // returns only the outermost context, which is how a live AI failure came
+            // to record `AI chuẩn bị assignment 0` and nothing about the HTTP status
+            // behind it. Logged too, because this is the only place the reason exists.
+            let detail = format!("{error:#}");
+            log::error!("interaction campaign thất bại: {detail}");
             let _ = db.update_interaction_campaign_state(
                 &worker_id,
                 ThreadCampaignState::Failed,
-                Some(&error.to_string()),
+                Some(&detail),
             );
         }
     });
@@ -849,16 +861,44 @@ async fn execute_thread_campaign(
                     } else {
                         request.instruction.clone()
                     };
-                    let (grounded, _evidence_mode) =
-                        crate::nurture_commands::prepare_comment_for_frames(
-                            &scoped,
-                            &frames,
-                            Some(&direction),
-                        )
-                        .await
-                        .with_context(|| {
-                            format!("AI chuẩn bị assignment {}", assignment.ordinal)
-                        })?;
+                    // `{:#}` on the way out, and a log line here. This used to be a bare `?`
+                    // on a function returning `anyhow::Result<()>`, so one AI failure on the
+                    // first assignment ended the whole campaign, left the rest in `queued`
+                    // with no reason of their own, and recorded only the outermost context
+                    // (`error.to_string()` keeps one layer). Measured 13/08/2026: a live run
+                    // failed with `AI chuẩn bị assignment 0` and the HTTP status, body and
+                    // timeout were all unrecoverable — a failure that cannot be diagnosed
+                    // from the evidence it left.
+                    let prepared_text = match crate::nurture_commands::prepare_comment_for_frames(
+                        &scoped,
+                        &frames,
+                        Some(&direction),
+                    )
+                    .await
+                    {
+                        Ok(value) => value,
+                        Err(error) => {
+                            let detail = format!("{error:#}");
+                            log::error!(
+                                "interaction {}: AI không viết được cho ordinal {}: {detail}",
+                                target.target_key,
+                                assignment.ordinal
+                            );
+                            db.update_interaction_assignment_state(
+                                id,
+                                ThreadMessageState::Failed,
+                                Some(&format!(
+                                    "ai_comment_unavailable: ordinal {} — {detail}",
+                                    assignment.ordinal
+                                )),
+                                None,
+                                None,
+                            )?;
+                            failed += 1;
+                            continue;
+                        }
+                    };
+                    let (grounded, _evidence_mode) = prepared_text;
                     grounded.text
                 }
             };

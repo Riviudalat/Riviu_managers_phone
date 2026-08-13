@@ -637,6 +637,8 @@ export interface InteractionCampaignSummary {
   targetCount: number;
   succeededMessages: number;
   failedMessages: number;
+  /** Why the campaign ended, when something ended it. Rendered — see InteractionPopup. */
+  errorCode: string | null;
   updatedAt: string;
 }
 
