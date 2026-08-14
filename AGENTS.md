@@ -5061,6 +5061,71 @@ Overlay chay ~2 phut khong bi watchdog ha ve tile. Hinh doc duoc tung dong thong
 chu Trung. Vi mot producer nuoi ca hai surface, tile phia sau **cung net len theo** khi
 overlay mo -- khong phai loi, nhung dang biet truoc khi ai do di tim vi sao tile thay doi.
 
+### 9.64 Man den bao gom mot cai treo cua chinh dien thoai, va mot diem mu 8 phut (15/08/2026)
+
+Nguoi van hanh bao overlay den + `agent /actions 400 Bad Request: Unable to perform W3C
+actions`. Do duoc, va hai thu **khong lien quan nhau** nhu ve ngoai goi y.
+
+**1. Man hinh chinh cai dien thoai treo, khong phai stream.** `screencap -p` (duong hoan
+toan doc lap voi scrcpy) tra ve anh **den tuyen 1080x2400, 15.580 byte**, hai lan, ke ca sau
+`KEYCODE_WAKEUP`. Trong khi do PowerManager khai `Display State=ON`, `mScreenOn=true`,
+`mAwake=true`, `mScreenOnFully=true` -- nen predicate "display awake" cua watchdog **tin vao
+tin hieu sai**. Dau hieu that nam o cho khac: `mKeyguardDrawComplete=false`
+`mWindowManagerDrawComplete=false`, focus dinh cung o `NotificationShade`, va swipe/keyevent
+tiem vao khong doi duoc focus. SystemUI treo.
+
+Chua: `am crash com.android.systemui` (pid 3731 -> 17347). Sau do screencap tu **15.580 len
+2.565.870 byte** va may ve lai binh thuong. **Khong phai loi cua app:** `ignored SIGTERM`
+dem duoc **0**, nen `kill -9` moi them o 9.60 chua tung chay tren may nay.
+
+Keo theo ca loi W3C: `InvalidElementStateException` tai `W3CActions.java:82` la cho
+uiautomator2 nem khi **injection tra ve false**, khong phai khi JSON sai hinh -- va
+`/appium/settings` + `/element` ngay truoc do deu thanh cong, nen session hop le. May thi
+`deviceLocked=1`, `isKeyguardShowing=true`. Dang chu y: `adb shell input tap` **exit 0** cung
+luc do, vi shell dung duong injection khac (`INJECT_EVENTS`, uid shell) chu khong qua
+`UiAutomation`. Nen exit code cua `input` **khong** chung minh duoc input da den dich.
+
+**2. Watchdog mu 8 phut, do duoc.** Stream dung tu `17:24`, watchdog chi ban luc `17:32`.
+Ly do: `state.rs` do `view_hub.last_packet_age`, dong dau trong `publish` -- tuc **byte tu
+may ve**, khong phai frame da ve. Decode chet thi packet van chay, nen no im. Va
+`decodeUnsupported` ma worker gui thi **khong co ai nghe** -- grep ra dung mot cho gui,
+khong cho nao nhan.
+
+Chua: heartbeat frame that trong worker (`paintBeat`, throttle 1s). `painted` cu **khong
+dung duoc** vi `notifyPainted` return som khi size/generation khong doi, nen mot stream
+decode on dinh gui no dung mot lan roi thoi. Frontend bat stall trong **6 giay** thay vi 8
+phut, ha tile khoi Live, va goi `view_ensure`.
+
+**3. Hoi quy toi tu gay ra roi tu bat duoc, ghi lai vi no day.** Cooldown phang 20s **khong
+du**: mot lan restart producer mat **~44 giay** do duoc (17:51:54 -> 17:52:45), dai hon
+cooldown, nen moi stall lai re-arm giua luc restart chua xong va may bi teardown khoang moi
+phut mot lan, mai mai. Log that:
+
+```
+12:51:10 painted nothing -> gen=3 luc 17:51:54 -> 12:52:02 painted nothing
+      -> gen=4 luc 17:52:45 -> 12:52:52 painted nothing ...
+```
+
+Do te hon cai canvas cu no dinh thay the. Chua bang backoff nhan doi voi base **30s**, chon
+de **lan retry thu hai** (60s) da vuot `OBSERVED_RESTART_MS = 44000`; lan restart dau van
+tuc thi cho su co thoang qua. Va bo dem chi reset khi **co frame duoc ve**, khong phai khi
+restart "thanh cong" -- restart thanh cong ma van khong ve gi la dung cai da xay ra.
+
+**4. `stop_view_stream` khong duoc quen preset, cung la loi toi vua gay.** Duong restart cua
+watchdog la stop-roi-start (`state.rs:837` roi `852`), ma toi cho `stop_view_stream` xoa
+`desired_presets`, nen moi restart doc lai default: quan sat truc tiep `gen=5 tile 216x480`
+trong khi overlay **van dang mo**. Desire thuoc ve viec operator mo overlay, khong thuoc
+vong doi producer -- no bi ghi de, khong bao gio bi xoa. `view_ensure` cung phai doc
+`desired_view_preset` chu khong cung `Tile`, khong thi chinh duong hoi phuc lai ha cap
+overlay.
+
+**Con lai chua giai thich duoc tu code, can do them:** sau khi may da khoe
+(`mKeyguardDrawComplete=true`, screencap 2 MB, dung mot scrcpy server chay), Redmi **van
+khong ve frame nao** trong khi packet ve deu (watchdog byte im). Do la decode that bai chu
+khong phai may -- nhung `decodeUnsupported` khong ban, nen decoder khong bao loi, no chi
+khong xuat frame. Nghi van hang dau: `shouldDecodeH264Sample` bo het frame khi
+`decodeQueueSize` khong bao gio thoat. Do cai nay can dem frame vao/ra decoder, chua co.
+
 ### 9.60 `adb forward` song lau hon app, va vi sao no lam man hinh den (14/08/2026)
 
 Nguoi van hanh bao "stream den". Do duoc, khong doan:

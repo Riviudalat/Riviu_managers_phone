@@ -846,7 +846,14 @@ impl AndroidDriver {
     /// Stop the view for one serial. `true` when nothing is left running,
     /// including when there was nothing to stop.
     pub async fn stop_view_stream(&self, serial: &str) -> bool {
-        self.desired_presets.lock().remove(serial);
+        // Deliberately does NOT forget the desired preset. Measured: it used to, and the
+        // watchdog's restart path is stop-then-start (state.rs), so every restart read back
+        // the default and an open overlay silently dropped to the tile encode -- observed
+        // live as `gen=5 tile 216x480` while the overlay was still on screen.
+        //
+        // The desire belongs to the operator having an overlay open, not to a producer's
+        // lifetime. It is overwritten, never cleared: closing the overlay asks for `tile`,
+        // which is the same insert.
         self.take_and_stop_view(serial).await
     }
 
@@ -2525,6 +2532,46 @@ mod tests {
             .expect("a session without a recorded handoff must be refused");
 
         assert!(error.to_string().contains("stop_owned_stream"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn stopping_a_producer_does_not_forget_which_preset_the_operator_asked_for() {
+        // Regression, observed live: the watchdog's restart path is stop-then-start
+        // (apps/desktop/src-tauri/src/state.rs), and `stop_view_stream` used to clear the
+        // desired preset. So every restart read the default back and an open overlay
+        // dropped to the tile encode -- logged as `gen=5 tile 216x480` with the overlay
+        // still on screen. Asserted here rather than in the desktop crate because this is
+        // the invariant the desktop relies on.
+        let driver = AndroidDriver::new(&AndroidDriverConfig::default()).expect("driver");
+        assert_eq!(
+            driver.desired_view_preset("serial-a"),
+            crate::scrcpy::ViewPreset::Tile,
+            "a device never asked for anything must restart as a tile"
+        );
+
+        driver
+            .desired_presets
+            .lock()
+            .insert("serial-a".to_string(), crate::scrcpy::ViewPreset::Overlay);
+
+        // No producer is running, so this is the cheap half of stop-then-start; what
+        // matters is that it leaves the recorded desire alone.
+        driver.stop_view_stream("serial-a").await;
+        assert_eq!(
+            driver.desired_view_preset("serial-a"),
+            crate::scrcpy::ViewPreset::Overlay,
+            "stopping the producer must not change what the operator asked for"
+        );
+
+        // Closing the overlay overwrites rather than clears -- that is the only path back.
+        driver
+            .desired_presets
+            .lock()
+            .insert("serial-a".to_string(), crate::scrcpy::ViewPreset::Tile);
+        assert_eq!(
+            driver.desired_view_preset("serial-a"),
+            crate::scrcpy::ViewPreset::Tile
+        );
     }
 
     #[test]

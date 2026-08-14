@@ -63,7 +63,21 @@ interface Slot {
   lastNotifiedW: number;
   lastNotifiedH: number;
   lastNotifiedGen: number;
+  /// Frames actually drawn, and when the last heartbeat for them went out.
+  ///
+  /// `painted` cannot serve as a liveness signal: `notifyPainted` returns early unless the
+  /// size or generation changed, so a stream that decodes steadily posts it once and never
+  /// again. Measured consequence -- a producer whose frames stopped decoding held a stale
+  /// canvas for 8 minutes while the Rust watchdog, which counts bytes arriving rather than
+  /// frames drawn, stayed silent throughout.
+  framesPainted: number;
+  lastBeatAt: number;
+  lastBeatFrames: number;
 }
+
+/// How often the worker reports that it is still drawing. Small enough that a stall is
+/// noticed in seconds, large enough that it is not a message per frame.
+const PAINT_BEAT_MS = 1000;
 
 const slots = new Map<string, Slot>();
 const pending = new Map<string, ViewEnvelope>();
@@ -106,6 +120,20 @@ function closeDecoder(slot: Slot) {
   slot.codec = null;
 }
 
+function beatPainted(slot: Slot) {
+  slot.framesPainted += 1;
+  const now = performance.now();
+  if (now - slot.lastBeatAt < PAINT_BEAT_MS) return;
+  slot.lastBeatAt = now;
+  slot.lastBeatFrames = slot.framesPainted;
+  postMessage({
+    type: "paintBeat",
+    udid: slot.udid,
+    generation: slot.generation,
+    frames: slot.framesPainted,
+  });
+}
+
 function notifyPainted(udid: string, slot: Slot) {
   if (
     slot.lastNotifiedW === slot.width &&
@@ -137,6 +165,7 @@ async function configureDecoder(slot: Slot, codec: string): Promise<VideoDecoder
       paintSize(slot, width, height);
       drawFrame(slot, frame);
       notifyPainted(slot.udid, slot);
+      beatPainted(slot);
     } finally {
       frame.close();
     }
@@ -263,6 +292,7 @@ async function handleJpeg(udid: string, slot: Slot, envelope: NonNullable<Return
     paintSize(slot, envelope.width || bitmap.width, envelope.height || bitmap.height);
     drawFrame(slot, bitmap);
     notifyPainted(udid, slot);
+    beatPainted(slot);
   } finally {
     bitmap.close();
   }
@@ -284,6 +314,9 @@ self.onmessage = (event: MessageEvent<InMessage>) => {
       height: 0,
       accelIndex: 0,
       codecIndex: 0,
+      framesPainted: 0,
+      lastBeatAt: 0,
+      lastBeatFrames: 0,
       lastNotifiedW: 0,
       lastNotifiedH: 0,
       lastNotifiedGen: -1,

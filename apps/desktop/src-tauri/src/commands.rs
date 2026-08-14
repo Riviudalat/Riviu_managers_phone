@@ -832,8 +832,12 @@ pub async fn view_ensure(state: State<'_, AppState>, udid: String) -> Result<(),
         return Ok(());
     }
     android.stop_view_stream(&udid).await;
+    // Whatever the operator last asked for, not an unconditional Tile. The frontend calls
+    // this to recover a stalled stream, and a recovery that silently downgrades an open
+    // overlay to the tile encode is how the picture used to go soft on its own.
+    let preset = android.desired_view_preset(&udid);
     android
-        .start_view_stream(&udid, riviu_android_driver::ViewPreset::Tile)
+        .start_view_stream(&udid, preset)
         .await
         .map_err(CommandError::operation)?;
     crate::state::mark_android_view_live(&state.registry, &udid);
