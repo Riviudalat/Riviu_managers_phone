@@ -64,6 +64,40 @@ pub enum ViewPreset {
     Overlay,
 }
 
+/// Macroblocks a level-3.0 decoder must accept (H.264 Table A-1, MaxFS).
+///
+/// Load-bearing because every entry of the desktop's codec candidate ladder is level 3.0
+/// (`avc1.42E01E`, `avc1.42001E`, `avc1.4D401E`). Encode above this and the phone produces
+/// a stream its own SPS says is out of level, which WebView2 is entitled to refuse -- and
+/// the refusal arrives asynchronously, as a black canvas.
+pub const LEVEL_3_0_MAX_MACROBLOCKS: u32 = 1620;
+
+/// Squarest screen this cap is computed for: 16:9.
+///
+/// The budget is on frame **area**, so the safe long edge depends on the aspect ratio, and
+/// the squarer the screen the smaller it gets. Deriving the cap from the two phones that
+/// happen to be plugged in here would have shipped a number that breaks on the next one:
+/// at a long edge of 900, this fleet's 19.5:9 and 18.5:9 both fit, but a plain 18:9 comes
+/// out at 1653 macroblocks and 16:9 at 1824. Both over.
+pub const SQUAREST_SUPPORTED_ASPECT: (u32, u32) = (9, 16);
+
+/// Long edge the overlay asks for, and the ceiling every preset is clamped to.
+///
+/// 832 is the largest multiple of 16 that keeps a 16:9 screen inside level 3.0 (1560 of
+/// 1620 macroblocks); the true break-even is 848 and the next step, 864, is already over.
+/// An earlier commit put 1600 here, which is ~4500 macroblocks -- 2.8x the limit -- and it
+/// only escaped notice because `view_set_preset` had no caller, so no phone was ever asked
+/// for it.
+///
+/// **Known limit:** a 4:3 screen exceeds the budget even at 832. This is a phone farm and
+/// no such device has appeared, but a tablet would need the cap derived per device from the
+/// resolution scrcpy reports rather than from a constant.
+pub const MAX_LONG_EDGE: u32 = 832;
+
+/// Long edge the overlay asks for. One phone at a time rather than sixteen tiles is what
+/// makes the larger encode affordable.
+pub const OVERLAY_LONG_EDGE: u32 = MAX_LONG_EDGE;
+
 impl ViewPreset {
     pub fn parse(value: &str) -> anyhow::Result<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
@@ -103,7 +137,7 @@ impl ViewPreset {
     pub fn max_size(self) -> u32 {
         match self {
             Self::Tile => 480,
-            Self::Overlay => 1600,
+            Self::Overlay => OVERLAY_LONG_EDGE,
         }
     }
 
@@ -155,7 +189,11 @@ impl ViewPreset {
             riviu_core::StreamQuality::Extra => (floor * 2, base * 2),
         };
         ViewTuning {
-            max_size: size,
+            // Capped after the multiplier, deliberately. High and Extra scale the size up,
+            // so leaving the cap on the base would let a quality setting walk the encode
+            // out of level 3.0 -- which is a black canvas, not a soft picture, because the
+            // refusal comes back asynchronously from the decoder.
+            max_size: size.min(MAX_LONG_EDGE),
             bit_rate,
             max_fps: fps.clamp(MIN_VIEW_FPS, self.max_fps()),
         }
@@ -646,16 +684,38 @@ mod tests {
     }
 
     #[test]
-    fn the_overlay_encode_is_wide_enough_for_the_size_it_is_shown_at() {
-        // The bug the operator reported as a broken picture. `max_size` caps the LONG
-        // edge, so on a 1080x2400 phone the encoded width is max_size * 1080/2400. The
-        // overlay displays up to 760 px wide (FOCUS_ZOOM.max in zoom.ts), and an encode
-        // narrower than that is upscaled — 600 gave 270 px and a 2.81x stretch.
+    fn the_overlay_encode_covers_its_default_width_and_bounds_the_rest() {
+        // `max_size` caps the LONG edge, so on a 1080x2400 phone the encoded width is
+        // `max_size * 1080/2400`. The overlay shows 400 px by default and up to 760 at full
+        // zoom (`FOCUS_ZOOM` in zoom.ts), and anything narrower than the displayed width is
+        // upscaled -- which is what the operator reported as a broken picture.
+        //
+        // This test used to demand the encode cover the *maximum* zoom. It cannot, and
+        // saying so is the point: 760 px wide on this aspect needs a long edge of ~1689,
+        // which is over 4x the level-3.0 macroblock budget the codec ladder is built on.
+        // Removing the residual upscale means putting a level-4.0 candidate in front of
+        // that ladder, not raising this constant -- an earlier commit raised it to 1600 and
+        // the only reason no phone went black is that the call site did not exist yet.
+        const FOCUS_DEFAULT_WIDTH: u32 = 400;
         const FOCUS_MAX_DISPLAY_WIDTH: u32 = 760;
         let encoded_width = ViewPreset::Overlay.max_size() * 1080 / 2400;
         assert!(
-            encoded_width >= FOCUS_MAX_DISPLAY_WIDTH * 9 / 10,
-            "overlay encodes {encoded_width}px wide but is shown at up to              {FOCUS_MAX_DISPLAY_WIDTH}px"
+            encoded_width >= FOCUS_DEFAULT_WIDTH * 9 / 10,
+            "overlay encodes {encoded_width}px wide, under its {FOCUS_DEFAULT_WIDTH}px              default -- the default view must not be an upscale"
+        );
+        // Bounded and named rather than left to be rediscovered. Measured on hardware at
+        // 832: 376x832, which reads sharply enough to make out individual notification
+        // text; the 600 this replaced gave 270 px and a 2.81x stretch.
+        let worst_upscale_x100 = FOCUS_MAX_DISPLAY_WIDTH * 100 / encoded_width;
+        assert!(
+            worst_upscale_x100 <= 210,
+            "full zoom upscales {}.{:02}x, worse than the 2.10x this cap allows",
+            worst_upscale_x100 / 100,
+            worst_upscale_x100 % 100
+        );
+        assert!(
+            ViewPreset::Overlay.max_size() > ViewPreset::Tile.max_size(),
+            "the overlay must ask for more than the tile encode or it has no reason to exist"
         );
     }
 
@@ -735,7 +795,10 @@ mod tests {
             1,
             ViewPreset::Overlay.tuned(riviu_core::StreamQuality::Medium, riviu_core::STREAM_FPS),
         );
-        assert!(command.contains("max_size=1600"), "{command}");
+        assert!(
+            command.contains(&format!("max_size={MAX_LONG_EDGE}")),
+            "{command}"
+        );
         assert!(
             command.contains(&format!("max_fps={}", riviu_core::STREAM_FPS)),
             "{command}"
@@ -761,6 +824,46 @@ mod tests {
                 "socket_name({scid:#x}) escaped FORWARD_PREFIX"
             );
         }
+    }
+
+    #[test]
+    fn no_preset_at_any_quality_leaves_level_3_0() {
+        // The property that keeps the picture from going black rather than merely soft: a
+        // stream whose SPS declares a level the decoder was configured for, and then
+        // exceeds, is refused asynchronously -- which surfaces as a black canvas.
+        //
+        // Checked against real aspect ratios, squarest first, because the budget is on
+        // area. 16:9 is the binding case and the reason the cap is 832 and not the 900 an
+        // earlier plan of mine asserted was fleet-safe.
+        let aspects = [
+            ("16:9", 9u32, 16u32),
+            ("18:9", 9, 18),
+            ("18.5:9 Note 8", 1440, 2960),
+            ("19.5:9 Redmi", 1080, 2400),
+        ];
+        for preset in [ViewPreset::Tile, ViewPreset::Overlay] {
+            for quality in [
+                riviu_core::StreamQuality::Low,
+                riviu_core::StreamQuality::Medium,
+                riviu_core::StreamQuality::High,
+                riviu_core::StreamQuality::Extra,
+            ] {
+                let long_edge = preset.tuned(quality.clone(), 24).max_size;
+                for (name, short, long) in aspects {
+                    let short_edge = long_edge * short / long;
+                    let blocks = short_edge.div_ceil(16) * long_edge.div_ceil(16);
+                    assert!(
+                        blocks <= LEVEL_3_0_MAX_MACROBLOCKS,
+                        "{preset:?}/{quality:?} on {name}: {short_edge}x{long_edge} is                          {blocks} macroblocks, over {LEVEL_3_0_MAX_MACROBLOCKS}"
+                    );
+                }
+                assert!(
+                    long_edge >= ViewPreset::Tile.max_size(),
+                    "{preset:?}/{quality:?} dropped below the measured encoder floor"
+                );
+            }
+        }
+        assert_eq!(SQUAREST_SUPPORTED_ASPECT, (9, 16));
     }
 
     #[tokio::test]

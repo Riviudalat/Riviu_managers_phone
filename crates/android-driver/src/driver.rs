@@ -178,6 +178,13 @@ pub struct AndroidDriver {
     /// serial -> the scrcpy view we started for it. Held only across map
     /// access, same rule as [`Self::streams`].
     views: tokio::sync::Mutex<HashMap<String, ViewProducer>>,
+    /// Preset each serial was last *asked* for, which is not the same as the one running.
+    ///
+    /// Separate from `views` on purpose: the watchdog restarts a dead producer, and at that
+    /// moment there is no producer left to read the preset off. It used to hard-code
+    /// `Tile`, so an overlay the operator had open silently dropped back to the tile encode
+    /// a few seconds later and the picture went soft again with nothing to point at.
+    desired_presets: parking_lot::Mutex<HashMap<String, crate::scrcpy::ViewPreset>>,
     /// Serials with a view start in flight.
     view_starting: Mutex<HashSet<String>>,
     /// The operator's quality and frame-rate choice for the tile grid.
@@ -289,6 +296,7 @@ impl AndroidDriver {
             view_sink: Mutex::new(None),
             streams: tokio::sync::Mutex::new(HashMap::new()),
             views: tokio::sync::Mutex::new(HashMap::new()),
+            desired_presets: parking_lot::Mutex::new(HashMap::new()),
             view_starting: Mutex::new(HashSet::new()),
             // Medium reproduces the bitrate and size that shipped. The frame rate does
             // change: the launch used to ask for a hardcoded 30 while
@@ -822,6 +830,9 @@ impl AndroidDriver {
     ) -> anyhow::Result<u64> {
         let sink = self.view_sink()?;
         let claim = self.claim_view_start(serial)?;
+        self.desired_presets
+            .lock()
+            .insert(serial.to_string(), preset);
         if self.view_is_running(serial, preset).await {
             return Ok(sink.generation(serial));
         }
@@ -835,7 +846,18 @@ impl AndroidDriver {
     /// Stop the view for one serial. `true` when nothing is left running,
     /// including when there was nothing to stop.
     pub async fn stop_view_stream(&self, serial: &str) -> bool {
+        self.desired_presets.lock().remove(serial);
         self.take_and_stop_view(serial).await
+    }
+
+    /// What this serial should be restarted at. `Tile` for anything never asked for, which
+    /// is the pre-existing behaviour for every device the operator has not opened.
+    pub fn desired_view_preset(&self, serial: &str) -> crate::scrcpy::ViewPreset {
+        self.desired_presets
+            .lock()
+            .get(serial)
+            .copied()
+            .unwrap_or(crate::scrcpy::ViewPreset::Tile)
     }
 
     /// Set the quality and frame rate new views will start with.

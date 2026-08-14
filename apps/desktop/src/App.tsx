@@ -16,6 +16,7 @@ import {
   screenshot,
   setScreenRotation,
   startupError,
+  viewSetPreset,
 } from "./api";
 import { startDevicePreview, startFleetPreview } from "./startPreview";
 import { summarizeBulkRepair } from "./agentStatus";
@@ -399,6 +400,29 @@ function App() {
     () => devices.find((d) => d.udid === focusUdid) ?? null,
     [devices, focusUdid],
   );
+
+  // Ask for the overlay's own encode while it is open, and give it back on close.
+  //
+  // The overlay CSS-scales one shared stream, so without this it displays the tile encode
+  // -- 216x480 on this fleet -- across 400 to 760 px, a 1.8x to 3.5x upscale. The call
+  // existed and had no caller, which is why raising the overlay's resolution in an earlier
+  // commit changed nothing on a real phone.
+  //
+  // Keyed on the udid rather than on focusDevice: the memo produces a new object on every
+  // device poll, and restarting the encoder a few times a second is worse than a soft
+  // picture. Failure is deliberately swallowed to a log -- the tile encode still plays, so
+  // a phone that refuses the larger one should look worse, not stop.
+  useEffect(() => {
+    if (!focusUdid) return;
+    void viewSetPreset(focusUdid, "overlay").catch((error) => {
+      console.warn("overlay preset refused", error);
+    });
+    return () => {
+      void viewSetPreset(focusUdid, "tile").catch(() => {
+        // The device may be gone -- that is often what closing the overlay means.
+      });
+    };
+  }, [focusUdid]);
 
   const readyCount = useMemo(
     () => devices.filter((d) => d.wdaReady || d.status === "ready").length,

@@ -5011,6 +5011,56 @@ JPEG preview không đè UDID đang có H.264. Nurture vẫn `tap()` cũ. Không
 `pkill` GenFarmer `Server 2.4`. WebSocket xem nối lại khi đứt; keeper
 restart scrcpy im > 5 s.
 
+### 9.63 Overlay cuoi cung co encode rieng, va con so 900 trong ke hoach cua toi la sai (15/08/2026)
+
+`viewSetPreset` da ton tai va **khong co caller nao**, nen commit truoc nang overlay len
+1600 la vo hieu -- khong may nao tung duoc yeu cau preset do. Gio no duoc goi khi mo overlay
+va tra ve `tile` khi dong.
+
+Ba manh phai xong cung luc, thieu mot manh la khong thay gi:
+
+1. Goi `viewSetPreset(udid, "overlay")` khi mo, `"tile"` khi dong. Khoa theo **udid** chu
+   khong theo `focusDevice`: memo tao object moi moi lan poll thiet bi, va restart encoder
+   vai lan mot giay con te hon hinh mem.
+2. Watchdog trong `state.rs` restart bang `ViewPreset::Tile` **cung nhac**, nen overlay dang
+   mo se tu tut ve encode tile sau vai giay. Driver gio giu `desired_presets` rieng khoi
+   `views` -- luc watchdog restart thi khong con producer nao de doc preset ra.
+3. Cap phai ap **sau** he so quality. High = base*3/2, Extra = base*2.
+
+**Con so 900 trong ke hoach cua toi la sai, va test bat duoc.** Toi suy ra 900 tu dung hai
+may dang cam (19.5:9 va 18.5:9). Ngan sach la tren **dien tich** frame, nen canh dai an
+toan phu thuoc ti le, va cang vuong thi cang nho:
+
+| canh dai | 16:9 | 18:9 | 19.5:9 |
+|---|---|---|---|
+| 832 | 1560 | 1352 | 1248 |
+| 848 | 1590 | 1431 | 1272 |
+| 864 | **1674 vuot** | 1458 | 1350 |
+| 900 | **1824 vuot** | **1653 vuot** | 1482 |
+
+18:9 la ti le cuc pho thong. Nen cap la **832** (boi cua 16, dem 1560/1620), suy ra tu ti le
+vuong nhat duoc ho tro chu khong tu may co san. Do duoc: 4:3 van vuot ngay ca o 832 -- day
+la nong dien thoai nen chua gap, nhung tablet thi phai suy cap tu resolution scrcpy bao ve
+thay vi tu mot hang so.
+
+**Mot dieu khong the co ca hai, noi thang:** overlay hien toi 760px o zoom toi da, ma 760px
+tren ti le nay can canh dai ~1689 -- gap hon 4 lan ngan sach level 3.0. Nen van con upscale
+2.02x o zoom toi da (truoc la 2.81x), va **mac dinh 400px thi khong con upscale**. Bo hoan
+toan phai them candidate level 4.0 vao dau ladder codec, khong phai nang hang so nay len.
+Test cu doi encode phu duoc zoom toi da; no da duoc viet lai de phat bieu dung dieu do.
+
+**Nghiem thu tren may that**, doc tu log (thu ma truoc 9.61 khong the doc duoc):
+
+```
+gen=1 tile    216x480
+gen=2 overlay 376x832   <- mo overlay
+gen=3 tile    216x480   <- dong overlay
+```
+
+Overlay chay ~2 phut khong bi watchdog ha ve tile. Hinh doc duoc tung dong thong bao, ke ca
+chu Trung. Vi mot producer nuoi ca hai surface, tile phia sau **cung net len theo** khi
+overlay mo -- khong phai loi, nhung dang biet truoc khi ai do di tim vi sao tile thay doi.
+
 ### 9.60 `adb forward` song lau hon app, va vi sao no lam man hinh den (14/08/2026)
 
 Nguoi van hanh bao "stream den". Do duoc, khong doan:

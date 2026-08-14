@@ -846,10 +846,11 @@ impl AppState {
                         let registry = registry.clone();
                         let udid = device.udid.clone();
                         starts.push(tokio::spawn(async move {
-                            match android
-                                .start_view_stream(&udid, riviu_android_driver::ViewPreset::Tile)
-                                .await
-                            {
+                            // The preset the operator asked for, not a hard-coded Tile:
+                            // restarting an open overlay at the tile encode is how it used
+                            // to quietly lose its resolution a few seconds after opening.
+                            let preset = android.desired_view_preset(&udid);
+                            match android.start_view_stream(&udid, preset).await {
                                 Ok(_) => set_stream_state(
                                     &registry,
                                     &udid,
