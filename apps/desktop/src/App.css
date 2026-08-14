@@ -2961,3 +2961,38 @@ button.danger:hover:not(:disabled) {
   font-size: 0.72rem;
   word-break: break-all;
 }
+
+/* Scrim behind the tile caption.
+   text-shadow alone was not enough: over a bright stream — a white TikTok profile, a
+   pale lock screen — white text with a soft shadow disappears, and the tile stops
+   saying which phone it is at exactly the moment the phone is working. A gradient
+   costs nothing on a dark screen and rescues the bright ones. */
+.dev-phone-info::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    to bottom,
+    rgb(0 0 0 / 62%) 0%,
+    rgb(0 0 0 / 38%) 55%,
+    rgb(0 0 0 / 0%) 100%
+  );
+  pointer-events: none;
+}
+.dev-phone-info > * {
+  position: relative;
+}
+
+/* Tile-size slider in the device toolbar. */
+.tile-zoom {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.72rem;
+  color: #64748b;
+  white-space: nowrap;
+}
+.tile-zoom input[type="range"] {
+  width: 104px;
+  accent-color: #f97316;
+}

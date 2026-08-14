@@ -467,7 +467,12 @@ function App() {
                 }}
               />
 
-              <FilterToolbar viewMode={viewMode} onViewMode={setViewMode} />
+              <FilterToolbar
+                viewMode={viewMode}
+                onViewMode={setViewMode}
+                tileWidth={tileWidth}
+                onTileWidth={setTileWidth}
+              />
 
               {viewMode === "list" && (
                 <table className="device-table">
