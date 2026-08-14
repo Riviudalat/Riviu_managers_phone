@@ -1,22 +1,15 @@
-import { memo, useState } from "react";
+import { memo } from "react";
 import { deviceModelOsLabel, tileStreamStateView } from "../types";
-import type { DeviceInfo, TileSize } from "../types";
-import { latestFrame } from "../api";
-import { useDeviceFrame, useHydratedDeviceFrame } from "../frameStore";
-
-const DEFAULT_W = 375;
-const DEFAULT_H = 667;
-
-const TILE_W: Record<TileSize, number> = {
-  thumbnail: 120,
-  medium: 160,
-  large: 200,
-  extraLarge: 248,
-};
+import type { DeviceInfo } from "../types";
+import { useViewLive } from "../viewStore";
+import { PhoneCanvas } from "./PhoneCanvas";
 
 interface Props {
   device: DeviceInfo;
-  tileSize: TileSize;
+  /** Tile width in px, driven by the wheel zoom. */
+  width: number;
+  /** 1-based position in the visible grid, shown like GenFarmer's big number. */
+  index: number;
   selected: boolean;
   focused?: boolean;
   onSelect: (udid: string, additive: boolean) => void;
@@ -24,30 +17,20 @@ interface Props {
   onPrepare: (udid: string) => void;
 }
 
-function statusText(device: DeviceInfo) {
-  if (device.status === "ready" && device.wdaReady) return "Running";
-  if (device.status === "preparing" || device.status === "busy") return "Starting";
-  if (device.status === "error") return "Error";
-  return device.status;
-}
-
 function DeviceTileInner({
   device,
-  tileSize,
+  width,
+  index,
   selected,
   focused,
   onSelect,
   onOpen,
   onPrepare,
 }: Props) {
-  useHydratedDeviceFrame(device.udid, latestFrame);
-  const frame = useDeviceFrame(device.udid);
-  const [ratio, setRatio] = useState(DEFAULT_H / DEFAULT_W);
-  const width = TILE_W[tileSize];
-  const status = statusText(device);
+  const hasView = useViewLive(device.udid);
   const streamState = tileStreamStateView(
     device.tileStreamState,
-    Boolean(frame),
+    hasView,
     Boolean(device.lastError),
   );
   const emptyLabel =
@@ -55,60 +38,18 @@ function DeviceTileInner({
 
   return (
     <article
-      className={`dev-window ${selected ? "selected" : ""} ${focused ? "focused" : ""}`}
-      style={{ width: width + 2 }}
+      className={`dev-phone ${selected ? "selected" : ""} ${focused ? "focused" : ""}`}
+      style={{ width, height: width * 2 }}
+      onClick={(e) => onSelect(device.udid, e.metaKey || e.ctrlKey || e.shiftKey)}
+      onDoubleClick={() => onOpen(device.udid)}
     >
-      <header
-        className="dev-window-bar"
-        onClick={(e) => onSelect(device.udid, e.metaKey || e.ctrlKey || e.shiftKey)}
-        onDoubleClick={() => onOpen(device.udid)}
-      >
-        <label className="dev-window-check" onClick={(e) => e.stopPropagation()}>
-          <input
-            type="checkbox"
-            checked={selected}
-            onChange={() => onSelect(device.udid, true)}
-          />
-        </label>
-        <span className="dev-window-title" title={device.name}>
-          {device.name}
-        </span>
-        <span className={`dev-window-dot ${device.wdaReady ? "on" : ""}`} title={status} />
-        <button
-          type="button"
-          className="dev-window-x"
-          title="Mở điều khiển"
-          onClick={(e) => {
-            e.stopPropagation();
-            onOpen(device.udid);
-          }}
-        >
-          ↗
-        </button>
-      </header>
-
-      <div
-        className="dev-window-screen"
-        style={{ aspectRatio: `1 / ${ratio}` }}
-        title="Bấm để mở điều khiển"
-      >
-        {frame ? (
-          <img
-            src={`data:image/jpeg;base64,${frame}`}
-            alt={device.name}
-            draggable={false}
-            className="dev-window-touch"
-            onLoad={(e) => {
-              const el = e.currentTarget;
-              if (el.naturalWidth > 0) {
-                const next = el.naturalHeight / el.naturalWidth;
-                setRatio((prev) => (Math.abs(prev - next) > 0.01 ? next : prev));
-              }
-            }}
-            onClick={() => onOpen(device.udid)}
-          />
-        ) : (
-          <div className="dev-window-empty">
+      {/* Every tile keeps the same phone-shaped frame regardless of stream
+          state or the stream's own aspect, so the grid never reflows when a
+          frame arrives — the "fixed frame" the operator asked for. */}
+      <div className="dev-phone-screen">
+        <PhoneCanvas udid={device.udid} surfaceId="tile" />
+        {!hasView && (
+          <div className="dev-phone-empty">
             <span>{emptyLabel}</span>
             <button
               type="button"
@@ -122,19 +63,38 @@ function DeviceTileInner({
             </button>
           </div>
         )}
-      </div>
 
-      <footer className="dev-window-foot">
-        <span
-          className={`dev-window-stream-state is-${streamState.state}`}
-          title={`Stream: ${streamState.label}; device: ${status}`}
+        <span className="dev-phone-conn">{device.connection.toUpperCase()}</span>
+
+        <div className="dev-phone-info">
+          <span className="dev-phone-index-row">
+            <span className="dev-phone-index">{index}</span>
+            <input
+              type="checkbox"
+              title="Chọn máy"
+              checked={selected}
+              onClick={(e) => e.stopPropagation()}
+              onChange={() => onSelect(device.udid, true)}
+            />
+          </span>
+          <span className="dev-phone-name" title={device.name}>
+            {device.name}
+          </span>
+          <span className="dev-phone-model">{deviceModelOsLabel(device)}</span>
+        </div>
+
+        <button
+          type="button"
+          className="dev-phone-open"
+          title="Mở điều khiển"
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpen(device.udid);
+          }}
         >
-          <span aria-hidden="true" className="dev-window-stream-dot" />
-          {streamState.label}
-        </span>
-        <span>{device.connection.toUpperCase()}</span>
-        <span>{deviceModelOsLabel(device)}</span>
-      </footer>
+          ↗
+        </button>
+      </div>
     </article>
   );
 }

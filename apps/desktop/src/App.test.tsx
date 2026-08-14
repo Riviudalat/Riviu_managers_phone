@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { resetConfirms } from "./confirmStore";
 import { resetToasts } from "./toastStore";
+import type { DeviceInfo } from "./types";
 
 vi.mock("./api", () => ({
   agentBulkRepair: vi.fn(async () => []),
@@ -29,6 +30,10 @@ vi.mock("./api", () => ({
   listSchedules: vi.fn(async () => []),
   listScripts: vi.fn(async () => [["fixture", "{}"]]),
   prepareDevice: vi.fn(async () => undefined),
+  viewEndpoint: vi.fn(async () => null),
+  viewEnsure: vi.fn(async () => undefined),
+  viewSetPreset: vi.fn(async () => undefined),
+  saveViewSnapshot: vi.fn(async () => ""),
   refreshDevices: vi.fn(async () => []),
   setStreamSettings: vi.fn(async (settings: unknown) => settings),
   startupError: vi.fn(async () => null),
@@ -61,6 +66,54 @@ afterEach(() => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+const androidPhone: DeviceInfo = {
+  udid: "10969614",
+  name: "Redmi",
+  model: "23021RAAEG",
+  platform: "android",
+  osVersion: "15",
+  connection: "usb",
+  status: "ready",
+  wdaReady: false,
+};
+
+const iphone: DeviceInfo = {
+  udid: "a99f4bd9f877b2a0e3682ee24fd1c68f75ba6982",
+  name: "iPhone 8",
+  model: "iPhone10,1",
+  platform: "ios",
+  osVersion: "16.7.15",
+  connection: "usb",
+  status: "ready",
+  wdaReady: true,
+};
+
+describe("toolbar Start", () => {
+  it("uses viewEnsure on Android and does not call prepareDevice", async () => {
+    const api = await import("./api");
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
+    await userEvent.click(
+      screen.getByTitle("Prepare / start stream (selected hoặc tất cả)"),
+    );
+    await waitFor(() => expect(api.viewEnsure).toHaveBeenCalledWith("10969614"));
+    expect(api.prepareDevice).not.toHaveBeenCalled();
+  });
+
+  it("uses prepareDevice on iPhone and does not call viewEnsure", async () => {
+    const api = await import("./api");
+    vi.mocked(api.listDevices).mockResolvedValue([iphone]);
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("iPhone 8")).toBeInTheDocument());
+    await userEvent.click(
+      screen.getByTitle("Prepare / start stream (selected hoặc tất cả)"),
+    );
+    await waitFor(() => expect(api.prepareDevice).toHaveBeenCalledWith(iphone.udid));
+    expect(api.viewEnsure).not.toHaveBeenCalled();
+  });
 });
 
 describe("fleet health banners", () => {

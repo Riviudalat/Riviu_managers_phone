@@ -250,6 +250,7 @@ jobs:
           test -f sidecars/wda/text-manifest.json
           test -f sidecars/android/android-tools-manifest.json
           test -f sidecars/android/noarch/minicap.apk
+          test -f sidecars/android/noarch/scrcpy-server
           test -f sidecars/android/win-x86_64/adb.exe
           # Both DLLs by name: Windows loads them from adb.exe's own directory, so a
           # bundle missing one produces an adb that fails at load time on the operator's

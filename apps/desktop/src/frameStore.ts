@@ -33,7 +33,8 @@ function scheduleFlush() {
   }
 }
 
-/** Push a JPEG base64 frame from the Tauri stream event bus. */
+/** Push a JPEG base64 frame for Flow / evidence hydrate. Tiles and the
+ *  overlay no longer read this — they paint from the view worker. */
 export function pushFrame(udid: string, jpegBase64: string) {
   if (!udid || !jpegBase64) return;
   // Coalesce bursts from Tauri into one commit per browser frame. The Rust

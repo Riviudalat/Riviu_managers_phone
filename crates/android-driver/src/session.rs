@@ -8,6 +8,7 @@ use riviu_core::{HardwareKey, SwipeGesture, TapPoint};
 
 use crate::adb::AdbProgram;
 use crate::agent::{AgentClient, Locator};
+use crate::riviu_agent::HelperClient;
 
 /// `KEYCODE_HOME`.
 const KEYCODE_HOME: i64 = 3;
@@ -43,6 +44,10 @@ pub struct AndroidUiSession {
     /// Rendered screen size in device pixels — the *override* size, which is
     /// what everything on screen is measured in.
     screen: (f64, f64),
+    /// Present only when `com.riviu.agent` answered `/status`. Missing means
+    /// clipboard stays the trait default (`unsupported`) — never the empty
+    /// uiautomator2 body.
+    helper: Option<HelperClient>,
 }
 
 impl AndroidUiSession {
@@ -52,7 +57,13 @@ impl AndroidUiSession {
             adb,
             serial,
             screen,
+            helper: None,
         }
+    }
+
+    pub(crate) fn with_helper(mut self, helper: Option<HelperClient>) -> Self {
+        self.helper = helper;
+        self
     }
 
     pub fn agent(&self) -> &AgentClient {
@@ -181,7 +192,9 @@ impl UiSession for AndroidUiSession {
 
     async fn tap_image(&self, x: f64, y: f64, image_w: f64, image_h: f64) -> anyhow::Result<()> {
         let (x, y) = self.image_to_screen(x, y, image_w, image_h);
-        self.agent.tap(x, y).await
+        // Overlay / Open-on-Device: a 16 ms contact, no nurture drift.
+        // `tap()` keeps the 45–130 ms human contact for the farm loop.
+        self.agent.tap_direct(x, y).await
     }
 
     async fn swipe_image(
@@ -212,6 +225,25 @@ impl UiSession for AndroidUiSession {
             .await?
             .ok_or_else(|| anyhow!("no focused text field to type into"))?;
         self.agent.set_text(&element, text).await
+    }
+
+    async fn set_clipboard(&self, content_type: &str, bytes: &[u8]) -> anyhow::Result<()> {
+        let helper = self
+            .helper
+            .as_ref()
+            .ok_or_else(|| anyhow!(crate::riviu_agent::clipboard_unavailable(&self.serial)))?;
+        helper.set_clipboard(content_type, bytes).await
+    }
+
+    async fn get_clipboard(
+        &self,
+        maximum_decoded_bytes: usize,
+    ) -> anyhow::Result<(String, Vec<u8>)> {
+        let helper = self
+            .helper
+            .as_ref()
+            .ok_or_else(|| anyhow!(crate::riviu_agent::clipboard_unavailable(&self.serial)))?;
+        helper.get_clipboard(maximum_decoded_bytes).await
     }
 
     /// True, and measured rather than assumed: the text is read back off the

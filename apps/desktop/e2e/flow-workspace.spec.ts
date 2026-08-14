@@ -10,10 +10,10 @@ const FLOW_NODE_TITLE = ".flow-node-title";
 
 async function openFlow(page: Page, selectDevices = false): Promise<void> {
   await page.goto("/");
-  await expect(page.locator(".dev-window")).toHaveCount(2);
+  await expect(page.locator(".dev-phone")).toHaveCount(2);
   if (selectDevices) {
     for (const udid of ["MOCK-IPHONE-01", "MOCK-IPHONE-02"]) {
-      await page.locator(".dev-window", { hasText: udid.replace("MOCK-IPHONE-", "Fixture iPhone ") })
+      await page.locator(".dev-phone", { hasText: udid.replace("MOCK-IPHONE-", "Fixture iPhone ") })
         .getByRole("checkbox")
         .check({ force: true });
     }

@@ -97,6 +97,41 @@ This APK is never installed on a device. It is pushed and executed in place via
 (`noarch`) variant is the one bundled.
 
 
+2b. scrcpy-server (Genymobile) — Apache-2.0
+------------------------------------------
+
+    sidecars/android/noarch/scrcpy-server
+      90,980 bytes
+      sha256 8588238c9a5a00aa542906b6ec7e6d5541d9ffb9b5d0f6e1bc0e365e2303079e
+
+Taken from the official `scrcpy-win64-v3.3.4.zip` release
+(https://github.com/Genymobile/scrcpy/releases/tag/v3.3.4), file `scrcpy-server`.
+Redistributed unmodified. Licensed under the Apache License, Version 2.0
+(https://www.apache.org/licenses/LICENSE-2.0).
+
+This is the **view** encoder only (H.264 tiles and overlay). It is not a
+`FrameSource` and is not the nurture/interaction evidence path. The desktop
+scrcpy client is not shipped.
+
+
+2c. Riviu Android helper (`com.riviu.agent`) — project source, no pinned APK yet
+-------------------------------------------------------------------------------
+
+    sidecars/riviu-android-agent/     Java source (minSdk 26)
+    sidecars/android/noarch/riviu-agent.apk   **not present**
+
+This is Riviu-authored. It is a helper, not an iPhone-Agent equivalent: loopback
+HTTP for clipboard (brief IME) and MediaStore insert/delete. It does not replace
+uiautomator2, scrcpy, or minicap, and it must not stay the default keyboard.
+
+There is no APK in the installer until a machine with JDK 17 + Android SDK 34
+runs `sidecars/riviu-android-agent/build.ps1` and the output is pinned here
+**and** in `sidecars/android/android-tools-manifest.json` with
+`role: riviuAgentApk` (bytes + SHA-256). Inventing those numbers without a
+built file is the digest lie that gate exists to catch. Runtime override:
+`RIVIU_ANDROID_AGENT_APK`, lowest priority is a future bundled copy.
+
+
 3. WebDriverAgent (Facebook / Meta, appium) — BSD-3-Clause
 ----------------------------------------------------------
 

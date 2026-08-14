@@ -4375,6 +4375,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn two_manual_sessions_on_the_same_device_are_busy() {
+        let driver = Arc::new(TestDriver::default());
+        let control = control_plane(driver, 1);
+        let first = control
+            .open_manual_session("iphone-a", crate::DeviceWorkOwner::ManualControl)
+            .await
+            .expect("first manual session");
+        let error = match control
+            .open_manual_session("iphone-a", crate::DeviceWorkOwner::ManualControl)
+            .await
+        {
+            Ok(_) => panic!("a second manual session must fail busy"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            DeviceControlError::Busy(crate::DeviceBusy {
+                requested_owner: crate::DeviceWorkOwner::ManualControl,
+                current_owner: crate::DeviceWorkOwner::ManualControl,
+                ..
+            })
+        ));
+        control
+            .close_manual_session(first)
+            .expect("release the first session");
+        control.shutdown_cleanup().await.expect("control shutdown");
+    }
+
+    #[tokio::test]
+    async fn a_held_manual_session_serves_two_gestures_without_parking() {
+        let driver = Arc::new(TestDriver::default());
+        let control = control_plane(driver.clone(), 1);
+        let background = control
+            .reserve_background_stream("iphone-a")
+            .expect("background reservation");
+        control
+            .start_background_stream(&background)
+            .await
+            .expect("background producer");
+
+        let session = control
+            .open_manual_session("iphone-a", crate::DeviceWorkOwner::ManualControl)
+            .await
+            .expect("overlay session");
+        let handle = control.session(&session).expect("session handle");
+        handle
+            .tap(TapPoint { x: 10.0, y: 10.0 })
+            .await
+            .expect("first tap");
+        handle
+            .tap(TapPoint { x: 20.0, y: 20.0 })
+            .await
+            .expect("second tap");
+        assert_eq!(driver.stop_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(driver.invalidate_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(driver.ui_session_starts.load(Ordering::SeqCst), 1);
+
+        control.close_manual_session(session).expect("end overlay");
+        assert_eq!(driver.invalidate_calls.load(Ordering::SeqCst), 0);
+
+        driver.complete_stop();
+        control.shutdown_cleanup().await.expect("control shutdown");
+    }
+
+    #[tokio::test]
+    async fn ending_a_manual_session_lets_another_owner_acquire() {
+        let driver = Arc::new(TestDriver::default());
+        let control = control_plane(driver, 1);
+        let session = control
+            .open_manual_session("iphone-a", crate::DeviceWorkOwner::ManualControl)
+            .await
+            .expect("overlay session");
+        control.close_manual_session(session).expect("end overlay");
+        let script = control
+            .try_acquire_exclusive("iphone-a", crate::DeviceWorkOwner::Script)
+            .await
+            .expect("script can acquire after overlay ends");
+        drop(script);
+        control.shutdown_cleanup().await.expect("control shutdown");
+    }
+
+    #[tokio::test]
+    async fn screenshot_without_parking_keeps_the_live_preview() {
+        let driver = Arc::new(TestDriver::default());
+        let control = control_plane(driver.clone(), 1);
+        let background = control
+            .reserve_background_stream("iphone-a")
+            .expect("background reservation");
+        control
+            .start_background_stream(&background)
+            .await
+            .expect("background producer");
+
+        let exclusive = control
+            .try_acquire_exclusive_keeping_stream("iphone-a", crate::DeviceWorkOwner::ManualControl)
+            .await
+            .expect("screenshot exclusive keeps the stream");
+        let dest = std::env::temp_dir().join("riviu-fixture-manual-screenshot.jpg");
+        control
+            .screenshot(&exclusive, &dest)
+            .await
+            .expect("screenshot");
+        assert_eq!(driver.stop_calls.load(Ordering::SeqCst), 0);
+        drop(exclusive);
+
+        driver.complete_stop();
+        control.shutdown_cleanup().await.expect("control shutdown");
+    }
+
+    #[tokio::test]
     async fn shared_device_owner_manual_control_becomes_typed_interaction_skip() {
         let driver = Arc::new(TestDriver::default());
         let control = control_plane(driver, 1);

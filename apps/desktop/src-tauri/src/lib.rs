@@ -14,6 +14,7 @@ mod nurture_commands;
 mod publish_commands;
 mod publish_driver;
 mod state;
+mod view_hub;
 
 use state::AppState;
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
@@ -107,10 +108,16 @@ pub fn run() {
             commands::device_type_text,
             commands::device_home,
             commands::device_key,
+            commands::device_control_begin,
+            commands::device_control_end,
             commands::group_input,
             commands::get_stream_settings,
             commands::set_stream_settings,
             commands::latest_frame,
+            commands::view_endpoint,
+            commands::view_ensure,
+            commands::view_set_preset,
+            commands::save_view_snapshot,
             commands::list_jobs,
             commands::run_script,
             commands::cancel_job,
@@ -248,6 +255,8 @@ pub(crate) fn graceful_shutdown(handle: &tauri::AppHandle) {
         state.flows.stop_all();
         state.jobs.stop_all();
         tauri::async_runtime::block_on(state.wait_for_mutating_commands());
+        tauri::async_runtime::block_on(state.close_all_overlay_sessions());
+        tauri::async_runtime::block_on(state.shutdown_android_views());
         let control = state.control.clone();
         if let Err(error) = tauri::async_runtime::block_on(state.shutdown_background_sampler()) {
             log::error!("background sampler shutdown failed: {error:#}");
@@ -300,8 +309,13 @@ mod tests {
                     "device_type_text",
                     "device_home",
                     "device_key",
+                    "device_control_begin",
+                    "device_control_end",
                     "group_input",
                     "set_stream_settings",
+                    "view_ensure",
+                    "view_set_preset",
+                    "save_view_snapshot",
                     "run_script",
                     "cancel_job",
                     "save_script",
@@ -410,6 +424,8 @@ mod tests {
             "state.flows.stop_all()",
             "state.jobs.stop_all()",
             "state.wait_for_mutating_commands()",
+            "state.close_all_overlay_sessions()",
+            "state.shutdown_android_views()",
             "state.shutdown_background_sampler()",
             "state.flows.shutdown()",
             "state.jobs.shutdown()",

@@ -711,6 +711,10 @@ export async function installTauriMock(
     // is the point: the registry is the contract, not a convenience.
     commandHandlers.set("driver_degraded_reason", () => null);
     commandHandlers.set("android_unavailable_reason", () => null);
+    commandHandlers.set("view_endpoint", () => null);
+    commandHandlers.set("view_ensure", () => null);
+    commandHandlers.set("view_set_preset", () => null);
+    commandHandlers.set("save_view_snapshot", () => "");
     // Registered because `invoke` throws `Unknown mock command` for anything absent,
     // and the Settings tab calls neither on mount but offers both as buttons.
     commandHandlers.set("update_check", () => ({

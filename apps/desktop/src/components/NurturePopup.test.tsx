@@ -25,11 +25,11 @@ import type { NurtureSettings } from "../types";
 const saved = vi.hoisted(() => ({ saveSettings: vi.fn() }));
 
 const settings: NurtureSettings = {
-  baseUrl: "https://api.deepseek.com",
-  model: "deepseek-v4-flash",
+  baseUrl: "https://openrouter.ai/api/v1",
+  model: "openai/gpt-5.6-luna",
   apiKey: "",
-  inputPricePer1m: 1.25,
-  outputPricePer1m: 10,
+  inputPricePer1m: 0.1,
+  outputPricePer1m: 0.6,
   bundleId: "com.ss.iphone.ugc.Ame",
   numVideos: 120,
   numRounds: 1,

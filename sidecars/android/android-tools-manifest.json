@@ -4,13 +4,20 @@
   "adbRevision": "37.0.1",
   "adbVersion": "1.0.41",
   "adbBuild": "37.0.1-15733141",
-  "minicapSource": "@devicefarmer/minicap-prebuilt@2.7.3 prebuilt/noarch/minicap.apk",
-  "files": [
+    "minicapSource": "@devicefarmer/minicap-prebuilt@2.7.3 prebuilt/noarch/minicap.apk",
+    "scrcpySource": "Genymobile/scrcpy v3.3.4 scrcpy-server (Apache-2.0)",
+    "files": [
     {
       "path": "noarch/minicap.apk",
       "bytes": 4209669,
       "sha256": "6111c9b110039aefc99837e1553e876e31290530cdbdb0f789b8b327f277a97c",
       "role": "minicapApk"
+    },
+    {
+      "path": "noarch/scrcpy-server",
+      "bytes": 90980,
+      "sha256": "8588238c9a5a00aa542906b6ec7e6d5541d9ffb9b5d0f6e1bc0e365e2303079e",
+      "role": "scrcpyServer"
     },
     {
       "path": "win-x86_64/adb.exe",

@@ -62,6 +62,10 @@ pub struct AndroidTools {
     pub adb_path: Option<PathBuf>,
     /// The bundled `minicap.apk`, same conditions.
     pub minicap_apk: Option<PathBuf>,
+    /// The bundled scrcpy 3.3.4 server JAR, used only for the H.264 view path.
+    pub scrcpy_server: Option<PathBuf>,
+    /// The bundled Riviu helper APK, when a build has pinned one.
+    pub riviu_agent_apk: Option<PathBuf>,
     /// Everything that went wrong, in the operator's language.
     ///
     /// A list rather than a single `Option` because a bad checkout tends to damage
@@ -107,7 +111,7 @@ impl AndroidTools {
             Ok(manifest) => manifest,
             Err(error) => {
                 tools.problems.push(format!(
-                    "{MANIFEST_NAME} không đọc được ({error}) — bỏ qua adb và minicap đóng gói"
+                    "{MANIFEST_NAME} không đọc được ({error}) — bỏ qua adb, minicap, scrcpy và helper đóng gói"
                 ));
                 return tools;
             }
@@ -150,6 +154,8 @@ impl AndroidTools {
                     }
                 }
                 Some("minicapApk") => tools.minicap_apk = Some(path),
+                Some("scrcpyServer") => tools.scrcpy_server = Some(path),
+                Some("riviuAgentApk") => tools.riviu_agent_apk = Some(path),
                 // A role this build does not know is not an error. The bytes were still
                 // verified above; the manifest is simply describing something newer.
                 Some(_) | None => {}
@@ -238,6 +244,7 @@ mod tests {
         std::fs::create_dir_all(android.join("noarch")).expect("noarch");
         std::fs::create_dir_all(android.join("win-x86_64")).expect("win dir");
         std::fs::write(android.join("noarch/minicap.apk"), b"apk bytes").expect("apk");
+        std::fs::write(android.join("noarch/scrcpy-server"), b"jar bytes").expect("scrcpy");
         std::fs::write(android.join("win-x86_64/adb.exe"), b"adb bytes").expect("adb");
 
         let manifest = serde_json::json!({
@@ -248,6 +255,12 @@ mod tests {
                     "bytes": 9,
                     "sha256": sha_of(b"apk bytes"),
                     "role": "minicapApk"
+                },
+                {
+                    "path": "noarch/scrcpy-server",
+                    "bytes": 9,
+                    "sha256": sha_of(b"jar bytes"),
+                    "role": "scrcpyServer"
                 },
                 {
                     "path": "win-x86_64/adb.exe",
@@ -288,6 +301,7 @@ mod tests {
             tools.problems
         );
         assert!(tools.minicap_apk.is_some());
+        assert!(tools.scrcpy_server.is_some());
         // adb is Windows-only by design; asserting it per platform keeps this honest
         // rather than passing for the wrong reason on a Mac.
         #[cfg(windows)]
@@ -304,6 +318,8 @@ mod tests {
         assert!(tools.problems.is_empty());
         assert!(tools.adb_path.is_none());
         assert!(tools.minicap_apk.is_none());
+        assert!(tools.scrcpy_server.is_none());
+        assert!(tools.riviu_agent_apk.is_none());
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -405,7 +421,12 @@ mod tests {
         .expect("manifest");
 
         let tools = AndroidTools::load(&root);
-        assert!(tools.adb_path.is_none() && tools.minicap_apk.is_none());
+        assert!(
+            tools.adb_path.is_none()
+                && tools.minicap_apk.is_none()
+                && tools.scrcpy_server.is_none()
+                && tools.riviu_agent_apk.is_none()
+        );
         assert!(
             tools.problems[0].contains("phiên bản 2"),
             "{:?}",
@@ -434,7 +455,124 @@ mod tests {
             tools.problems
         );
         assert!(tools.minicap_apk.is_some(), "minicap.apk did not resolve");
+        assert!(
+            tools.scrcpy_server.is_some(),
+            "scrcpy-server did not resolve"
+        );
         #[cfg(windows)]
         assert!(tools.adb_path.is_some(), "adb.exe did not resolve");
+    }
+
+    #[test]
+    fn an_unknown_role_is_verified_but_does_not_fail_the_bundle() {
+        // A newer installer can describe a tool this build does not resolve.
+        // The bytes still have to match; the role itself must not be fatal.
+        let root = scratch("unknown-role");
+        let bundle = good_bundle(&root);
+        let android = bundle.join("android");
+        std::fs::write(android.join("noarch/extra.bin"), b"extra").expect("extra");
+        let manifest = serde_json::json!({
+            "manifestVersion": 1,
+            "files": [
+                {
+                    "path": "noarch/minicap.apk",
+                    "bytes": 9,
+                    "sha256": sha_of(b"apk bytes"),
+                    "role": "minicapApk"
+                },
+                {
+                    "path": "noarch/scrcpy-server",
+                    "bytes": 9,
+                    "sha256": sha_of(b"jar bytes"),
+                    "role": "scrcpyServer"
+                },
+                {
+                    "path": "win-x86_64/adb.exe",
+                    "bytes": 9,
+                    "sha256": sha_of(b"adb bytes"),
+                    "role": "adbExe"
+                },
+                {
+                    "path": "noarch/extra.bin",
+                    "bytes": 5,
+                    "sha256": sha_of(b"extra"),
+                    "role": "futureTool"
+                }
+            ]
+        });
+        std::fs::write(
+            android.join(MANIFEST_NAME),
+            serde_json::to_vec_pretty(&manifest).expect("manifest json"),
+        )
+        .expect("manifest");
+
+        let tools = AndroidTools::load(&bundle);
+        assert!(tools.problems.is_empty(), "{:?}", tools.problems);
+        assert!(tools.minicap_apk.is_some());
+        assert!(tools.scrcpy_server.is_some());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_riviu_agent_role_resolves_when_the_bytes_match() {
+        let root = scratch("helper-role");
+        let bundle = good_bundle(&root);
+        let android = bundle.join("android");
+        std::fs::write(android.join("noarch/riviu-agent.apk"), b"helperapk").expect("apk");
+        let manifest = serde_json::json!({
+            "manifestVersion": 1,
+            "files": [
+                {
+                    "path": "noarch/minicap.apk",
+                    "bytes": 9,
+                    "sha256": sha_of(b"apk bytes"),
+                    "role": "minicapApk"
+                },
+                {
+                    "path": "noarch/scrcpy-server",
+                    "bytes": 9,
+                    "sha256": sha_of(b"jar bytes"),
+                    "role": "scrcpyServer"
+                },
+                {
+                    "path": "win-x86_64/adb.exe",
+                    "bytes": 9,
+                    "sha256": sha_of(b"adb bytes"),
+                    "role": "adbExe"
+                },
+                {
+                    "path": "noarch/riviu-agent.apk",
+                    "bytes": 9,
+                    "sha256": sha_of(b"helperapk"),
+                    "role": "riviuAgentApk"
+                }
+            ]
+        });
+        std::fs::write(
+            android.join(MANIFEST_NAME),
+            serde_json::to_vec_pretty(&manifest).expect("manifest json"),
+        )
+        .expect("manifest");
+
+        let tools = AndroidTools::load(&bundle);
+        assert!(tools.problems.is_empty(), "{:?}", tools.problems);
+        assert_eq!(
+            tools.riviu_agent_apk.as_deref(),
+            Some(android.join("noarch/riviu-agent.apk").as_path())
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_corrupt_scrcpy_server_does_not_take_minicap_with_it() {
+        let root = scratch("scrcpy-partial");
+        let bundle = good_bundle(&root);
+        std::fs::write(bundle.join("android/noarch/scrcpy-server"), b"corrupted").expect("rewrite");
+
+        let tools = AndroidTools::load(&bundle);
+        assert!(tools.scrcpy_server.is_none());
+        assert!(tools.minicap_apk.is_some());
+        assert_eq!(tools.problems.len(), 1);
+        std::fs::remove_dir_all(&root).ok();
     }
 }

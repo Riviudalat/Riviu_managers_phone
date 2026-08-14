@@ -11,7 +11,8 @@ accepted, unreviewed** risk, not as a cleared one.
 
 ```
 android-tools-manifest.json      bytes + SHA-256 for every file below
-noarch/minicap.apk               stream source, pushed and run in place
+noarch/minicap.apk               JPEG evidence stream, pushed and run in place
+noarch/scrcpy-server             H.264 view stream (scrcpy 3.3.4), not evidence
 win-x86_64/adb.exe               platform-tools 37.0.1
 win-x86_64/AdbWinApi.dll         must sit beside adb.exe
 win-x86_64/AdbWinUsbApi.dll      must sit beside adb.exe
@@ -24,9 +25,12 @@ binary's dependent DLLs relative to the executable's own directory, so an
 be reproduced on a developer machine that has platform-tools on `PATH`, which is
 why it is written here rather than left to be discovered.
 
-`noarch` is the architecture-independent minicap variant. The APK is never
+`noarch` holds the architecture-independent Android payloads. minicap is never
 installed — it is pushed and executed via `CLASSPATH=<apk> app_process`, so one
-file covers every ABI.
+file covers every ABI. `scrcpy-server` is the official Genymobile 3.3.4 JAR,
+pushed to `/data/local/tmp/riviu-scrcpy-server` and launched the same way.
+It is the **view** path (H.264 tiles/overlay). minicap stays the JPEG
+**evidence** path. The desktop scrcpy client (FFmpeg/SDL) is not bundled.
 
 ## The manifest pins both size and digest, on purpose
 
@@ -66,3 +70,9 @@ Two things still cannot come from here:
 
 Without the uiautomator2 pair a phone still appears in the fleet and still
 streams; every label-based read or tap fails. See the README at the repo root.
+
+A fourth payload, the Riviu helper APK (`com.riviu.agent`), is **source** under
+`sidecars/riviu-android-agent/` and is not in this tree until someone builds it
+and pins `noarch/riviu-agent.apk` with `role: riviuAgentApk`. Clipboard on
+Android 10+ needs that APK; uiautomator2 must not advertise an empty
+`get_clipboard`. See `AGENTS.md` §9.52.

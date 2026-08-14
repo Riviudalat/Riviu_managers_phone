@@ -4,7 +4,7 @@
 > hay danh sách "đừng làm lại" thì cập nhật ngay trong cùng lần thay đổi đó.
 > File này là thứ đầu tiên agent sau đọc.
 >
-> **Cập nhật lần cuối:** 13/08/2026.
+> **Cập nhật lần cuối:** 14/08/2026.
 
 ---
 
@@ -2573,9 +2573,9 @@ Fixture hiện có: `feed-iphone8.jpg`, `feed-iphone8-b.jpg`, `feed-rail-variant
   tạm nhường `LiveRoom` khi engine đang sở hữu phòng để không tự đóng nhầm.
 - Production DeepSeek text-only đi qua `FrameTextSource` của desktop, OCR
   caption rồi `prepare_caption_comment`; provider vision vẫn dùng 3-frame
-  grounded path. Default mới là `https://api.deepseek.com`/
-  `deepseek-v4-flash`. Windows adapter hiện báo thiếu Vision OCR thay vì giả
-  nhận diện.
+  grounded path. Default **cũ** (06/08) là `https://api.deepseek.com` /
+  `deepseek-v4-flash`. Từ 14/08 default là OpenRouter + Luna — xem §9.55.
+  Windows adapter hiện báo thiếu Vision OCR thay vì giả nhận diện.
 - Harness headless gọi preflight install/auth bằng context `Repair`, thả
   context trước khi chạy nurture, và dùng token env trực tiếp để tránh Keychain
   prompt. Trình tự live xác nhận: relay/auth -> session -> stream -> foreground.
@@ -2633,6 +2633,12 @@ Fixture hiện có: `feed-iphone8.jpg`, `feed-iphone8-b.jpg`, `feed-rail-variant
 (`docs/superpowers/specs/2026-07-25-riviu-managers-phone-design.md:7`) viết
 *"…multiple iPhones, with Android deferred behind a `DeviceDriver` trait"*.
 `crates/android-driver` lấp chỗ đó và **không phải sửa `DeviceDriver`/`UiSession`**.
+
+**Không viết Riviu Agent APK trên Android để “giống iPhone”.** Agent iPhone là
+XCTest runner, không phải admin; Android không root cũng không có “toàn quyền”.
+Nuôi và tương tác đã chạy trên `adb` + uiautomator2 + scrcpy/minicap. Helper
+`com.riviu.agent` (§9.52) chỉ bù clipboard / MediaStore — không thay server UI,
+không phải bàn phím mặc định, chưa pin binary cho tới khi có SDK build.
 
 Số đo đầy đủ ở `docs/ANDROID_PROBE_REPORT_2026-08-09.md`. Những điều không được
 đoán lại:
@@ -4756,13 +4762,269 @@ Nó cũng báo có `Follow ` trên trang không, vì đó là từ chối dứt 
 
 **Chưa chạy.** Đây là số đo M4/M5 và nó cần một bài thật của người vận hành.
 
-### 9.48 Điều khiển từ máy tính không được park stream (13/08/2026)
+### 9.48 Điều khiển từ máy tính không được park stream (14/08/2026)
 
-Bấm ô máy trên lưới **mở overlay giữa màn** (preview lớn + phím Back/Home/Recents/âm lượng/Power/thông báo/chụp), không gửi gesture từ thumbnail. Gesture chỉ chạy trên preview lớn.
+Bấm ô máy trên lưới **mở overlay giữa màn** kiểu GenFarmer: cửa sổ hai cột — màn hình 1:2 chiếm hết cột trái, cột phải là menu trắng có header `{index} {tên}` + copy + đóng, danh sách chức năng (Vol±/Chụp/Nguồn/Thông báo/Khởi động lại; iOS thêm Backup/Restore), và Recents/Home/Back **ở đáy sidebar**. Không có ô "Nội dung cần gõ". Không gửi gesture từ thumbnail — gesture chỉ chạy trên preview lớn. Lưới tile cũng là khung 1:2 cố định (stream letterbox bên trong, không reflow khi frame đến). Zoom lưới và overlay chỉ khi **Ctrl + lăn chuột**; kích thước là đúng pixel đã chọn (lưu `riviu.tile.width` / `riviu.focus.width`), không shrink-to-fit viewport. Không còn cụm lọc Connection/Trạng thái/tìm kiếm/slider Zoom. Tag USB sát góc trên-trái của khung; không hiện chữ Live trên tile.
 
-`device_tap` / `device_swipe` / `device_type_text` / `device_home` / `device_key` / `group_input` đi qua `DeviceControlPlane::open_manual_session`: exclusive **không** `submit_park`, **không** `start_interaction_session`, **không** foreground TikTok, **không** tạo MJPEG mới, và `close_manual_session` **không** `invalidate_ui_session`. iOS tái dùng session WDA đang cache khi stream còn sống; `POST /session` lúc MJPEG đang chạy vẫn bị cấm. Android `open_session` độc lập với minicap. Nurture đang giữ exclusive thì tap trả `DeviceBusy`.
+Overlay giữ **một** `UiSessionContext` (`device_control_begin` / `device_control_end`) suốt lúc mở. Cử chỉ tái dùng session đó qua `control.session`; không acquire/release từng tap. Hai `open_manual_session` trên cùng UDID vẫn Busy — exclusive không chia sẻ. Unmount / Escape / đóng luôn `end`, kể cả khi begin lỗi. `group_input` cũng tái dùng session overlay; không mở `GroupSync` đè lên `ManualControl`.
 
-Đừng quay lại `open_ui_context` cho thao tác tay: path đó park tile, `monkey` TikTok, chờ 40 s, rồi teardown stream.
+`open_manual_session` / `close_manual_session`: exclusive **không** `submit_park`, **không** `start_interaction_session`, **không** foreground TikTok, **không** tạo MJPEG mới, và close **không** `invalidate_ui_session`. iOS tái dùng session WDA đang cache khi stream còn sống; `POST /session` lúc MJPEG đang chạy vẫn bị cấm. Android `open_session` độc lập với minicap. Nurture đang giữ exclusive thì begin trả `DeviceBusy`.
+
+Chụp màn hình ghi JPEG đang có trên stream hub; command `screenshot` fallback dùng `try_acquire_exclusive_keeping_stream` nên không park tile. UI một `inFlight` chặn gesture/phím chồng. Backup/Restore ẩn trên Android; iOS để chữ nhỏ dưới màn, không cạnh phím cứng.
+
+Đừng quay lại `open_ui_context` cho thao tác tay: path đó park tile, `monkey` TikTok, chờ 40 s, rồi teardown stream. Shutdown phải `close_all_overlay_sessions` trước `control.shutdown_cleanup()` — lease overlay làm `outstanding() != 0` và deadlock phần chờ đó.
+
+Overlay canvas **phải** `position:absolute; inset:0; width/height:100%; object-fit:fill`. CSS `width:auto` + `contain` vẽ bitmap scrcpy (~288×600, `max_size=600`) thành tem giữa ô đen 400×832 — tap trên ảnh rồi scale theo cả ô là trượt. Ánh xạ pointer qua `viewHit` trên **rect của canvas**, không phải pane; click vào letterbox trả `null`, không kẹp vào viền. Tile giữ contain và **không** gửi gesture. Chi tiết §9.53.
+
+### 9.49 GenFarmer mượt vì codec + canvas, không vì CSS (14/08/2026)
+
+Đã đọc renderer đã cài (`app.asar`, Vue 3). **Không** copy source của họ vào repo. Khảo sát `docs/re/genfarmer/README.md` §4.5 vẫn đúng: xem ≠ tự động hoá.
+
+**Vì sao xem mượt.** Tile và overlay đều là H.264 (scrcpy-server 2.4 → WebSocket), decode bằng `VideoDecoder` (`optimizeForLatency`, ưu tiên hardware rồi software) rồi `canvas.drawImage` trong `requestAnimationFrame`. Canvas `object-fit: fill`, absolute, 100% ô. Mỗi máy một worker `postMessage` — decode không nằm trên luồng Vue. Lưới mặc định rất nhỏ: `width=176`, `bitrate=25_000`, `iFrameInterval=10`; overlay chế độ `quality=speed` là `width = 400 + 40 * bigScreenSize` (mặc định size 5 → 600) và `maxFps=30`. `deviceFrameRate` mặc định 15. Họ **không** đẩy JPEG base64 vào `<img>` mỗi frame.
+
+**Bố cục overlay.** Cột màn hình chỉ có canvas (viền `#5671FF` 4px, radius 14). Toolbox riêng: header `{index} {tên}` + copy/pin/đóng, menu, Recents/Home/Back ở đáy toolbox. Setting `sidebar` mặc định `"left"` (đổi được). Overlay lấy **tỉ lệ thật** `screenHeight/screenWidth` (fallback 2.1), không khóa 1:2. Lăn chuột trên canvas = `scroll_up/down` xuống máy, **không** zoom; phóng to là `bigScreenSize`. Ctrl+C/V là clipboard.
+
+**Hệ quả Riviu.** Preview hiện tại (`state.rs` 240 FPS toàn fleet → base64 → `frameStore` → `<img src="data:image/jpeg;base64">`) không thể bắt kịp đường đó bằng CSS. JPEG minicap/MJPEG vẫn là nguồn bằng chứng; muốn mượt khi *xem* thì phải thêm đường view riêng (H.264/canvas hoặc ít nhất blob URL + canvas). Không thay minicap bằng scrcpy cho nurture/interaction. Không vendor code GenFarmer.
+
+### 9.50 Đường xem H.264 / canvas — xem ≠ bằng chứng (14/08/2026)
+
+Đã tách **xem** khỏi **bằng chứng**, cùng ý GenFarmer, không copy source của họ và không kéo `@yume-chan` ADB vào WebView.
+
+| Đường | Android | iOS |
+|---|---|---|
+| Xem (tile / overlay) | scrcpy-server **3.3.4**, chỉ H.264 | MJPEG như cũ, JPEG **binary** qua cùng ViewHub |
+| Bằng chứng (`Frame` / `StreamHub`) | minicap JPEG, chỉ khi nurture / interaction / watcher cần `FrameSource` | MJPEG vào `StreamHub` như cũ |
+
+**Pin.** `sidecars/android/noarch/scrcpy-server` — 90.980 byte, SHA-256
+`8588238c9a5a00aa542906b6ec7e6d5541d9ffb9b5d0f6e1bc0e365e2303079e`,
+Apache-2.0, lấy từ release chính thức `scrcpy-win64-v3.3.4.zip`. Đẩy tới
+`/data/local/tmp/riviu-scrcpy-server`. Client scrcpy (FFmpeg/SDL) **không** đóng gói.
+`RIVIU_SCRCPY_SERVER` vẫn override; bundled là ưu tiên thấp nhất, cùng bẫy minicap ở §9.27.
+
+**Vì sao không 4.1.** Plan chọn 4.1; live Note 8 (API 26) chết ở
+`OMX.Exynos.AVC.Encoder` / `dequeueOutputBuffer` dù `ignore_video_encoder_constraints`
+và 150 kbps. 3.3.4 trên cùng máy trả dummy + header `88×176` + packet config Annex-B.
+Redmi API 35 chạy được cả 3.3.4 lẫn 4.1 **khi** `max_size≥320`; cả hai gãy
+`MediaCodec.configure` ở 176 px (`80×176`). Một JAR + một protocol, không đoán theo API.
+
+**Preset.** Tile `max_size=480 bitrate=1_200_000 max_fps=30`. Overlay **không** đổi preset: CSS fill phóng bitmap tile, không `stop` + `app_process` lại. Mở overlay từng restart encoder → canvas trống / tap trượt / cảm giác lag. Vì overlay xem đúng encode tile, 15 fps / 400 kbps làm cửa sổ lớn trông chậm dù encoder sống — đó là lag sau khi hết lỗi `exited before it accepted a connection`. `video_codec_options=i-frame-interval:int=1` — form `key[:type]=value` của 3.3.4. Dấu hai chấm thứ ba (`int:2`) làm `CodecOption.parseOption` ném `'=' expected` rồi process thoát trước khi bind socket; tile hiện `scrcpy-server exited before it accepted a connection`. Overlay session (§9.48) không park, không `open_ui_context`.
+
+**ViewHub không được xếp hàng video.** `broadcast` cap 256 từng giữ ~8 s frame; WebSocket `send().await` từng packet rồi mới vẽ quá khứ. Cap 8, `Lagged` phát lại key mới nhất, `coalesce` một packet/UDID, TCP `nodelay`. Worker decode tuần tự, giữ packet mới nhất, timestamp +1 ms (`optimizeForLatency`) — không +66 ms/frame. Không đưa scrcpy vào `StreamHub`.
+
+**Handshake 3.3.4.** `tunnel_forward` = máy **listen**, host connect. Spawn `app_process` trước, rồi `adb forward`, rồi TCP (thử ngay, nghỉ 50 ms khi `NotListening`). `start_view_stream` chỉ `Ok` sau sample **sync** đầu (IDR hoặc cờ key, config đã merge); hello không đủ — Note 8 từng `Live` mà canvas trống vì encoder dừng sau SPS, hoặc Exynos gửi AU đầu **không** `BUFFER_FLAG_KEY_FRAME`. ADB trên Windows **từ chối** abstract socket nếu server chưa bind — TCP mở trước listen EOF ngay và không bao giờ thành video socket. Dummy được ghi trong cùng `accept()`; chưa thấy dummy thì TCP đó **chưa** consume accept, được phép thử lại. Đã thấy dummy thì đây là socket video duy nhất: server đóng `LocalServerSocket` ngay. Hello = dummy + tên 64 byte + **12 byte** `codec/width/height` (`writeVideoHeader(Size)`). Packet: config **bit 63**, key **bit 62**, **không** có session packet — parser 4.1 sẽ đọc config thành size và nuốt payload. Hai máy Android start song song.
+
+**Leftover.** Argv của encoder là `app_process / com.genymobile.scrcpy.Server 3.3.4 …` — `CLASSPATH` nằm ở **environ**, nên grep cmdline theo `riviu-scrcpy-server` chỉ trúng `sh -c` và **để lại** process đang giữ OMX. Fingerprint đúng: cmdline có `scrcpy.Server` **và** `3.3.4`. Không `pkill` `genscrcpy.jar` / `Server 2.4`. Hai encoder trên một máy tranh Surface — Redmi (API 35) chịu được cả hai; Note 8 (Exynos) thì tile Riviu có thể hello mà không IDR khi GenFarmer 2.4 còn sống. Worker decode lỗi hardware thì thử software; đừng mở lại base64 `<img>`.
+
+**Frontend.** Worker `VideoDecoder` (`optimizeForLatency`, hardware rồi software) + `OffscreenCanvas`. iOS dùng `createImageBitmap`. Tile và overlay là `<canvas>`, **không** `<img src="data:image/jpeg;base64">`. Zoom lưới/overlay vẫn Ctrl + lăn. Lăn không Ctrl trên overlay gửi vuốt dọc xuống máy. ViewHub và worker giữ keyframe H.264 / JPEG mới nhất: canvas gắn sau khi stream đã chạy vẫn vẽ được, không chờ IDR kế. Không hiện banner "bấm Agent để sửa Riviu Agent" khi `wdaReady` còn false — cờ đó là minicap/iPhone, Android xem bằng scrcpy và canvas Live không đi qua Agent.
+
+**Start theo nền tảng.** Toolbar Start và tile Start dùng chung `startDevicePreview`: Android → `viewEnsure` (stop rồi start scrcpy tile), iOS → `prepareDevice` (session trước MJPEG). Nhiều máy Android `Promise.all`; iOS tuần tự. Đừng gọi `prepareDevice` cho Android — đó là đường nuôi (TikTok lên trước, chờ 40 s, `tileStreamState=Parked`). Toast danh sách trống nói USB chung, không chỉ iPhone.
+
+**WebSocket xem nối lại.** `viewStore` reconnect khi socket đứt hoặc `viewEndpoint` chưa bind, backoff 200 ms → ~2 s, cùng URL. `started` không chặn reconnect. Test mode vẫn một lần.
+
+**Watchdog producer im.** `ViewHub::publish` ghi `last_packet_at` theo UDID; `advance` xoá. Keeper 2 s: `view_is_running` và im > 5 s (không tính lúc `view_starting`) → `stop_view_stream` rồi start lại; registry `Sampling` rồi `Live`/`Error`. `view_is_running` **không** đổi thành “đã vẽ canvas” — frontend không phải nguồn sự thật phía Rust.
+
+**Note 8 SPS.** Đo được cạnh GenFarmer 2.4: hello `152×320`, config 21 byte `67 42 00 0d` = `avc1.42000D` (Baseline level 1.3), rồi IDR 2025 byte cờ key. Encoder **không** chết; WebView2 `isConfigSupported` có thể từ chối level 1.3. Worker thử thêm `avc1.42E01E` / `42001E` / `4D401E` trên cùng Annex-B và vẫn `configure` khi `isConfigSupported` là false. Nút Start gọi `stop` rồi `start` — `view_is_running` không được biến Start thành no-op khi canvas trống.
+
+**Live 14/08/2026.** Tile `max_size=480`: cả hai máy vẽ canvas — Redmi (`23021RAAEG`) lock screen, Note 8 (`SM-N950F`) home. Overlay Redmi retune vẽ cùng màn, tile nền không Parked. Đóng overlay về tile: cả hai vẫn vẽ, fleet `2/2`. Minicap không chiếm `StreamBudgetManager` cho tile. Đừng mở lại base64 `<img>`.
+
+**Đừng.** Đưa scrcpy vào `StreamHub` / `FrameSource`. Quảng bá H.265. Mở lại base64 `<img>` trên tile/overlay. Nâng trần minicap/MJPEG vì H.264 rẻ. Decode trên luồng React. Thêm `h264-converter`.
+
+### 9.51 Riviu Agent trên Android — không phải toàn quyền (14/08/2026)
+
+Một app Riviu trên Android **không** làm được “toàn quyền”: tắt app ẩn, cài im,
+VPN/proxy hệ thống, xóa máy, đọc sandbox TikTok. Agent iPhone cũng **không**.
+
+Hai nền tảng chỉ giống nhau ở lớp UI (xem, chạm, gõ, một phần clipboard/media).
+Phần máy (cài app, reboot, file) nằm ở cầu USB trên desktop — iOS là Device
+Bridge, Android là `adb`. MDM/root là phase khác (§3.11); fleet Android hiện
+không có root (`su -c id` không trả `uid=0`).
+
+**Agent iPhone là gì.** XCTest runner `com.riviu.managersphone.agent.xctrunner`
+— Apple cho bơm touch/phím vào app khác. Sandbox vẫn còn. Capability live:
+`stream` / `tap` / `swipe` / `clipboard` / `text` / (candidate) `pushMedia`.
+Cây accessibility gần như chết (`snapshotMaxDepth=1`); Agent tồn tại vì
+gesture + text + MJPEG, không vì admin.
+
+**Android hôm nay — helper APK là tùy chọn, không phải Agent iPhone.**
+
+| Việc | iPhone Agent | Android (không APK Riviu) |
+|---|---|---|
+| Xem | MJPEG trong Agent | scrcpy 3.3.4 (xem) + minicap JPEG (bằng chứng) |
+| Tap / swipe | XCTest | uiautomator2 W3C pointer — đã đo |
+| Đọc cây / nhãn | Gần như không | Có — catalog theo locale |
+| Gõ Unicode | `/wda/keys` | `ACTION_SET_TEXT` — comment thật đã gửi |
+| Mở link | `/url` | `am start -p <package>` |
+| Clipboard | Có, Agent foreground | Helper APK + IME tạm (§9.52). **Không** qua uiautomator2 |
+| Ảnh gallery | HouseArrest + media route | `adb push` + MediaStore (đã đo API 26 và 35) |
+| Composer Đăng bài | Pixel đã đo | Từ chối — chưa đo hết nhãn |
+| Backup/restore | mobilebackup2 | Không có đường — `adb backup` đã chết |
+
+Nuôi + tương tác: Android mạnh hơn iPhone ở quan sát (cây), yếu hơn ở clipboard
+và composer đăng bài.
+
+**App GenFarmer trên máy không chỉ là bàn phím.** `com.genfarmer.uiautomator`
+là **server điều khiển** (JSON-RPC) kèm AdbKeyboard. Họ *thay* uiautomator2,
+không chỉ thêm IME. Riviu đang dùng `io.appium.uiautomator2.server`. Nếu viết
+APK thì lựa chọn lớn là thay server đó, không phải vẽ overlay.
+
+**APK không-root thêm được gì** — phần lớn đã có qua adb (tap/swipe/`SET_TEXT`/
+cây/Home/mở app/scrcpy/minicap/`adb push`). APK chỉ bù chỗ yếu:
+
+- Clipboard đọc — IME hoặc app đang focus. Việc §9 gọi là chặn thật.
+- Server UI của mình — hết session 10 s / cây chết khi `/status` vẫn OK (§9.21).
+- Sự kiện cửa sổ — app nào lên, keyguard, dialog; ổn hơn `dumpsys` lúc splash.
+- Bấm hộp quyền hệ thống (Allow Photos).
+- MediaStore `insert` + `is_pending=0` từ đầu, album đúng `importId`.
+- Foreground service giữ sống khi tắt màn.
+- Chụp dự phòng (Accessibility / MediaProjection) nếu minicap chết.
+- NotificationListener (OTP, “tài khoản bị khóa”) — bật tay.
+- `adb pm grant WRITE_SECURE_SETTINGS` — tắt animation, stay-awake, mock GPS.
+  Không vượt cổng cài MIUI.
+- `VpnService` nếu user bấm OK — không phải proxy MDM, dấu rất lớn.
+- Overlay — ít khi cần; hay đụng control không nhãn.
+
+Cần bật tay từng máy: Accessibility, IME mặc định, notification, MediaProjection,
+overlay, VPN, “cài không rõ nguồn”.
+
+**Vẫn đóng** (APK thường, không Device Owner, không root): cài im khi MIUI tắt
+USB install (đã đo ba đường `INSTALL_FAILED_USER_RESTRICTED`); đọc DB/file
+TikTok; ẩn icon; kiosk; wipe; proxy HTTP toàn máy; mở khóa passcode.
+`REQUEST_INSTALL_PACKAGES` vẫn ra hộp. Shizuku gần adb-từ-app, vẫn không root.
+
+**Đừng.** Viết APK chỉ để có chữ “Riviu Agent” cho đồng bộ với iPhone. Đổi IME
+mặc định chỉ để gõ — `ACTION_SET_TEXT` đã đủ. Implement `get_clipboard` trên
+uiautomator2 rồi advertise thành công (HTTP 200, body rỗng). Nhét lockdown/
+backup vào APK — cùng lỗi “một IPA làm hết” đã bác trên iOS. Để helper làm
+bàn phím mặc định — đó là dấu GenFarmer, không phải của Riviu.
+
+Helper đã mở đường clipboard/MediaStore ở §9.52. Vẫn **không** thay
+uiautomator2, không quảng bá toàn quyền, không pin APK khi chưa assemble.
+
+### 9.52 Helper APK `com.riviu.agent` — clipboard + MediaStore, IME phải trả lại (14/08/2026)
+
+Source: `sidecars/riviu-android-agent/` (Java, minSdk 26 cho Note 8). Binary
+**chưa** pin vào `sidecars/android/noarch/` — APK debug vừa assemble trên
+máy này không phải artifact phát hành; manifest ghim bytes + SHA-256 nên
+không được bịa số. Build: `sidecars/riviu-android-agent/build.ps1`
+(fail-closed khi thiếu JDK 17 / `platforms;android-34` / gradle). Pin sau
+đó: copy APK, ghi `role: riviuAgentApk` vào `android-tools-manifest.json`,
+cùng digest ở `NOTICE` §2c. Override: `RIVIU_ANDROID_AGENT_APK`. Thứ tự
+`config → env → bundled` — đừng nhét bundled vào field ưu tiên cao (§9.27).
+
+**Việc helper làm.** HTTP/1.1 trên `127.0.0.1:17980` (host qua
+`adb forward tcp:0 tcp:17980`, prune forward cũ trước khi tạo — cùng bẫy
+minicap). `GET /status` → `ok`, `agentVersion=0.1.0`, `protocolVersion=1`,
+`features: clipboard, pushMedia`. Protocol lệch số thì từ chối, không đọc nửa.
+Clipboard: `POST /v1/clipboard/set|get`. Media: `POST /v1/media/import|delete`
+— file stage trong `inbox/<tên>`, tên một segment; xoá theo `_id` số, không
+`_data LIKE '%riviu%'`.
+
+**IME là tạm.** Trước khi đọc/ghi clipboard: đọc
+`settings get secure default_input_method`, từ chối nếu rỗng/không phải IME
+id hợp lệ (chuỗi vào `adb shell` là code), `ime set com.riviu.agent/.RiviuIme`,
+gọi HTTP, **luôn** `ime set` lại id cũ. Op thành mà restore lỗi → lỗi restore
+thắng (máy có thể còn dính helper IME). Không đọc được IME hiện tại thì
+**không** đổi — cùng hình với cửa arrival không có baseline. IME không vẽ
+bàn phím (`onCreateInputView=null`). Không `ime set` rồi để đó.
+
+**Driver.** `HelperClient` trong `crates/android-driver/src/riviu_agent.rs`.
+`open_session` gắn helper nếu APK đã cài **hoặc** có đường APK để cài; thiếu
+cả hai thì `Ok(None)` — nurture không chết vì clipboard. Cài/status lỗi chỉ
+`warn`, session vẫn mở, `get/set_clipboard` trả unsupported có tên máy và
+cấm đường uiautomator2. MIUI `INSTALL_FAILED_USER_RESTRICTED` nêu đúng cổng
+USB install; không retry ba đường `adb install` / `pm install` / session
+(§9). `am start-foreground-service -n com.riviu.agent/.AgentService`.
+
+**Hai lỗi chỉ máy thật mới thấy (14/08/2026).**
+
+1. `AgentService` `exported=false` → `am start-foreground-service` từ adb
+   shell báo `Requires permission not exported from uid …`. HTTP vẫn chỉ
+   bind `127.0.0.1`; `exported=true` là để **shell start được**, không phải
+   để mở cổng ra ngoài.
+2. `ClipboardManager` trên luồng HTTP (không có Looper) nổ
+   `Can't create handler inside thread that has not called Looper.prepare()`.
+   `ClipboardStore` phải `Handler(Looper.getMainLooper())` rồi đợi; không
+   gọi thẳng từ accept loop.
+
+**Live 14/08/2026.**
+
+| Máy | Cài | `/status` | Clipboard set→get | IME sau cùng |
+|---|---|---|---|---|
+| SM-N950F (`ce0617…`) Android 8 | `Success` | `200` `agentVersion=0.1.0` `protocolVersion=1` | `riviu-helper-probe-20260814` khớp | `com.genfarmer.uiautomator/.AdbKeyboard` — **đúng IME cũ** |
+| Redmi Note 12 (`10969614`) | `INSTALL_FAILED_USER_RESTRICTED` | — | — | không đụng |
+
+Redmi: không retry `adb install` / `pm install` / session. Bật
+Developer options → *Cài đặt qua USB* rồi bảo cài lại. Note 8 mặc định
+đang là AdbKeyboard của GenFarmer — helper **enable** thêm, không để
+mặc định.
+
+Publish vẫn đi `adb push` + MediaStore đã đo (§9.10); helper import chưa
+thay contract hai máy. Không chuyển nurture/interaction sang HTTP của
+helper. APK debug chưa pin vào bộ cài.
+
+### 9.53 Overlay tap trượt vì map cả ô đen, không phải canvas (14/08/2026)
+
+Ảnh Note 8 overlay: màn máy là tem nhỏ giữa hình chữ nhật đen, bấm icon
+TikTok không trúng. Backend `tap_image` / `swipe_image` **đúng** — Android
+`scale_to_screen` đổi toạ độ ảnh encode sang kích thước thật. Lỗi ở frontend.
+
+Scrcpy overlay encode `max_size=600` nên bitmap ~288×600, không phải
+1080×2220. Worker gán `canvas.width/height` bằng số đó. Pane overlay lấy
+`riviu.focus.width` (mặc định 400) × tỉ lệ encode, lớn hơn bitmap. CSS
+`width:auto; object-fit:contain` giữ kích thước nội tại và căn giữa —
+đúng tem trên ảnh. `mapToDevice` cũ lấy `getBoundingClientRect` của
+`.focus-phone-screen` (cả ô đen) rồi kẹp mép: bấm góc trên-trái của ảnh
+thành ~(40, 84) trên frame 288×600 thay vì (0, 0).
+
+Sửa: `apps/desktop/src/viewHit.ts` — `fittedContentRect` + `mapClientToImage`
+(`contain` | `fill`), click ngoài vùng vẽ là `null`. Overlay hỏi
+`paintedViewBox` (rect canvas), fill. CSS overlay canvas fill 100% ô.
+`FlowCoordinatePicker` dùng cùng mapper `contain`. Tile không đổi.
+
+Đừng sửa form chiến dịch Tương tác vì cái này — campaign đi hierarchy,
+không tap overlay. Đừng gửi gesture từ thumbnail.
+
+### 9.54 Overlay lag: restart encoder + khoá pointer + render mỗi frame (14/08/2026)
+
+Ba thứ cộng lại làm "điều khiển chậm / stream lỗi":
+
+1. `view_set_preset(overlay)` mỗi lần mở — dừng scrcpy tile, encode lại
+   600/30. Stream mất IDR, canvas trống, tap map size cũ.
+2. `setBusy(true)` trên **mọi** tap/vuốt → CSS `pointer-events:none` trên
+   cả preview tới khi `/actions` về (130–280 ms, cộng contact 45–130 ms
+   của `tap()` nurture).
+3. Worker `postMessage("painted")` mỗi frame → `useViewSize` object mới
+   → React render overlay + tile 15–30 lần/giây.
+
+Sửa: không retune; overlay `tap_image` đi `tap_direct` (pause 16 ms, không
+drift); `busy` chỉ chụp/reboot/backup; worker/store chỉ emit khi
+width/height/generation đổi. Decoder **không** bỏ delta để chờ IDR —
+`decodeQueueSize > 1` + chờ key từng đứng ảnh hết cả `i-frame-interval`
+(1–2 s) dù encoder đang 30 fps. Chỉ bỏ sample khi hàng decode > 2; pump
+giữ packet mới nhất. ViewHub `Lagged` không phát lại key cũ (GOP gãy).
+JPEG preview không đè UDID đang có H.264. Nurture vẫn `tap()` cũ. Không
+đưa scrcpy vào `StreamHub`. Không retune overlay khi bấm Start. Không
+`pkill` GenFarmer `Server 2.4`. WebSocket xem nối lại khi đứt; keeper
+restart scrcpy im > 5 s.
+
+### 9.55 Default AI OpenRouter Luna, và scrcpy chết vì sai form codec option (14/08/2026)
+
+**AI.** `NurtureSettings` mặc định giờ là
+`https://openrouter.ai/api/v1` + `openai/gpt-5.6-luna` (giá ước lượng
+$0.10 / $0.60). Host không phải `api.deepseek.com` nên app gửi 3-frame
+vision, không OCR Windows. Người vận hành chỉ điền API key OpenRouter.
+
+Migration `nurture.settings.migration.v3` chỉ đổi đúng cặp shipped cũ
+(`api.deepseek.com` + `deepseek-v4-flash`). Model/host tự chọn giữ nguyên.
+Key không đụng. Đã có marker v3 thì không đổi lại — ai cố ý để DeepSeek
+sau lần mở đầu vẫn giữ DeepSeek.
+
+**Stream.** Tile `scrcpy-server exited before it accepted a connection`
+đo được trên Redmi 14/08: stderr
+`[server] ERROR: '=' expected` / `CodecOption.parseOption`. Nguyên nhân
+là `i-frame-interval:int:2` (ba dấu hai chấm). Sửa thành `int=2`.
+Lỗi thoát giờ kèm đuôi stderr, đừng đoán encoder/GenFarmer trước khi
+đọc câu đó. Không `pkill` `Server 2.4`.
 
 ### 9.47 v0.1.1 đã phát hành, và chuỗi updater nghiệm thu từ ngoài (13/08/2026)
 

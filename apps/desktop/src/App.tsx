@@ -1,19 +1,17 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   agentBulkRepair,
   agentListStatuses,
   authSession,
   androidUnavailableReason,
   driverDegradedReason,
-  getStreamSettings,
   listenRiviuEvents,
   listDevices,
   listJobs,
-  prepareDevice,
   refreshDevices,
-  setStreamSettings,
   startupError,
 } from "./api";
+import { startDevicePreview, startFleetPreview } from "./startPreview";
 import { summarizeBulkRepair } from "./agentStatus";
 import { requestConfirm } from "./confirmStore";
 import { pushToast, toastError } from "./toastStore";
@@ -31,7 +29,7 @@ import { ProfileToolbar } from "./components/ProfileToolbar";
 import { ScriptsPanel } from "./components/ScriptsPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Sidebar } from "./components/Sidebar";
-import { pushFrame } from "./frameStore";
+import { useViewClient } from "./viewStore";
 import {
   AccountPage,
   ApiPage,
@@ -49,9 +47,9 @@ import type {
   JobRecord,
   LocalUser,
   PageId,
-  StreamSettings,
 } from "./types";
 import { deviceModelOsLabel, markDeviceFrameLive } from "./types";
+import { loadZoom, stepZoom, storeZoom, TILE_ZOOM, wheelWantsZoom } from "./zoom";
 import "./App.css";
 
 const FlowWorkspace = lazy(async () => {
@@ -83,12 +81,6 @@ function App() {
   const [selected, setSelected] = useState<string[]>([]);
   const [groupMode, setGroupMode] = useState(false);
   const [focusUdid, setFocusUdid] = useState<string | null>(null);
-  const [settings, setSettings] = useState<StreamSettings>({
-    fps: 24,
-    tileSize: "medium",
-    gridQuality: "medium",
-    focusQuality: "high",
-  });
   const [jobsScriptSeed, setJobsScriptSeed] = useState<string | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
   const [driverIssue, setDriverIssue] = useState<string | null>(null);
@@ -98,13 +90,13 @@ function App() {
   const [showAuthUi, setShowAuthUi] = useState(false);
   const [authForced, setAuthForced] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("window");
-  const [filterQuery, setFilterQuery] = useState("");
-  const [filterConn, setFilterConn] = useState("");
-  const [filterStatus, setFilterStatus] = useState("");
+  const [tileWidth, setTileWidth] = useState(() => loadZoom(TILE_ZOOM));
+  const canvasRef = useRef<HTMLDivElement | null>(null);
   const [nurtureOpen, setNurtureOpen] = useState(false);
   const [interactionOpen, setInteractionOpen] = useState(false);
   const [flowDirty, setFlowDirty] = useState(false);
   const [automationView, setAutomationView] = useState<"flow" | "legacy">("flow");
+  useViewClient();
 
   const confirmDiscardFlow = useCallback(
     () =>
@@ -145,16 +137,30 @@ function App() {
     return () => window.removeEventListener("beforeunload", preventUnload);
   }, [flowDirty]);
 
+  useEffect(() => {
+    storeZoom(TILE_ZOOM, tileWidth);
+  }, [tileWidth]);
+
+  // Wheel over the phone grid zooms the tiles. Registered by hand because
+  // React's synthetic onWheel is passive and cannot preventDefault the page
+  // scroll. Re-runs when the canvas mounts (control page, window view).
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const onWheel = (event: WheelEvent) => {
+      if (!wheelWantsZoom(event)) return;
+      event.preventDefault();
+      setTileWidth((width) => stepZoom(TILE_ZOOM, width, event.deltaY));
+    };
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheel);
+  }, [page, viewMode]);
+
   const reload = useCallback(async () => {
     try {
-      const [d, j, s] = await Promise.all([
-        listDevices(),
-        listJobs(),
-        getStreamSettings(),
-      ]);
+      const [d, j] = await Promise.all([listDevices(), listJobs()]);
       setDevices(d);
       setJobs(j);
-      setSettings(s);
       setBootError(null);
       // An empty list can mean "nothing plugged in" or "the device sidecar never
       // started". Ask which, so the UI does not report the wrong one.
@@ -214,7 +220,6 @@ function App() {
             });
           }
           if (p.type === "streamFrame" && typeof p.udid === "string") {
-            pushFrame(p.udid as string, String(p.jpegBase64 ?? ""));
             setDevices((prev) => markDeviceFrameLive(prev, p.udid as string));
           }
         }).then((fn) => {
@@ -252,24 +257,6 @@ function App() {
     () => jobs.filter((j) => j.status === "running" || j.status === "queued").length,
     [jobs],
   );
-
-  const filtered = useMemo(() => {
-    const q = filterQuery.trim().toLowerCase();
-    return devices.filter((d) => {
-      if (filterConn && d.connection !== filterConn) return false;
-      if (filterStatus === "ready") {
-        if (!(d.wdaReady || d.status === "ready")) return false;
-      } else if (filterStatus && d.status !== filterStatus) {
-        return false;
-      }
-      if (!q) return true;
-      return (
-        d.name.toLowerCase().includes(q) ||
-        d.udid.toLowerCase().includes(q) ||
-        d.model.toLowerCase().includes(q)
-      );
-    });
-  }, [devices, filterQuery, filterConn, filterStatus]);
 
   const selectedDevices = useMemo(
     () => devices.filter((d) => selected.includes(d.udid)),
@@ -423,14 +410,14 @@ function App() {
                 }}
                 onStart={async () => {
                   const targets = selected.length
-                    ? selected
-                    : filtered.map((d) => d.udid);
+                    ? devices.filter((device) => selected.includes(device.udid))
+                    : devices;
                   if (!targets.length) {
-                    pushToast("warn", "Chưa có thiết bị", "Cắm iPhone qua USB rồi bấm Làm mới.");
+                    pushToast("warn", "Chưa có thiết bị", "Cắm máy qua USB rồi bấm Làm mới.");
                     return;
                   }
                   try {
-                    for (const u of targets) await prepareDevice(u);
+                    await startFleetPreview(targets);
                     await reload();
                     pushToast("ok", "Đã khởi động", `Chuẩn bị ${targets.length} máy`);
                   } catch (error) {
@@ -480,31 +467,7 @@ function App() {
                 }}
               />
 
-              <FilterToolbar
-                query={filterQuery}
-                connection={filterConn}
-                status={filterStatus}
-                viewMode={viewMode}
-                tileSize={settings.tileSize}
-                onQuery={setFilterQuery}
-                onConnection={setFilterConn}
-                onStatus={setFilterStatus}
-                onViewMode={setViewMode}
-                onTileSize={async (v) => {
-                  const saved = await setStreamSettings({
-                    ...settings,
-                    tileSize: v as StreamSettings["tileSize"],
-                  });
-                  setSettings(saved);
-                }}
-              />
-
-              {!!devices.length && !devices.some((d) => d.wdaReady) && (
-                <Banner>
-                  Chưa máy nào phát được màn hình. Chọn máy rồi bấm{" "}
-                  <strong>Agent</strong> để kiểm tra và sửa Riviu Agent.
-                </Banner>
-              )}
+              <FilterToolbar viewMode={viewMode} onViewMode={setViewMode} />
 
               {viewMode === "list" && (
                 <table className="device-table">
@@ -520,7 +483,7 @@ function App() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filtered.map((device) => {
+                    {devices.map((device) => {
                       const sel = selected.includes(device.udid);
                       const running = device.wdaReady || device.status === "ready";
                       return (
@@ -567,17 +530,22 @@ function App() {
               )}
 
               {viewMode === "window" && (
-                <div className="window-canvas">
-                  {filtered.map((device) => (
+                <div className="window-canvas" ref={canvasRef}>
+                  {devices.map((device, i) => (
                     <DeviceTile
                       key={device.udid}
                       device={device}
-                      tileSize={settings.tileSize}
+                      width={tileWidth}
+                      index={i + 1}
                       selected={selected.includes(device.udid)}
                       focused={focusUdid === device.udid}
                       onSelect={onSelect}
                       onOpen={setFocusUdid}
-                      onPrepare={(udid) => prepareDevice(udid).then(reload)}
+                      onPrepare={(udid) => {
+                        const device = devices.find((item) => item.udid === udid);
+                        if (!device) return;
+                        void startDevicePreview(device).then(reload);
+                      }}
                     />
                   ))}
                 </div>
@@ -715,6 +683,7 @@ function App() {
       {focusDevice && (
         <FocusStream
           device={focusDevice}
+          index={devices.findIndex((d) => d.udid === focusDevice.udid) + 1 || 1}
           onClose={() => setFocusUdid(null)}
           groupUdids={selected}
           groupMode={groupMode}

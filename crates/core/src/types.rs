@@ -768,14 +768,16 @@ fn default_carousel_portion_percent() -> u32 {
 impl Default for NurtureSettings {
     fn default() -> Self {
         Self {
-            // Vilao AI is an OpenAI-compatible gateway; any other compatible
-            // endpoint works by changing these two fields. The key is never
-            // stored here — it comes from the settings row or RIVIU_AI_API_KEY.
-            base_url: "https://api.deepseek.com".into(),
-            model: "deepseek-v4-flash".into(),
+            // OpenRouter chat/completions + Luna vision. The operator only
+            // fills the key. A custom gateway still works by changing these.
+            base_url: "https://openrouter.ai/api/v1".into(),
+            model: "openai/gpt-5.6-luna".into(),
             api_key: String::new(),
-            input_price_per_1m: 1.25,
-            output_price_per_1m: 10.0,
+            // OpenRouter's OpenAI route listed $0.10 / $0.60 on 14/08/2026
+            // (50% off the $0.20 / $1.20 list). Display only; the panel can
+            // edit these if the promo ends.
+            input_price_per_1m: 0.10,
+            output_price_per_1m: 0.60,
             bundle_id: "com.ss.iphone.ugc.Ame".into(),
             // Manual runs use a varied 2–3 hour horizon; this remains the
             // legacy fixture ceiling for callers that do not pass a duration.
@@ -976,6 +978,31 @@ impl NurtureSettings {
 
         changed
     }
+
+    /// One-time remap of the *shipped* DeepSeek pair onto OpenRouter Luna.
+    ///
+    /// Only `api.deepseek.com` + `deepseek-v4-flash` — the values a fresh
+    /// install used to write. A custom model or host stays put. The API key
+    /// is left alone; a DeepSeek key will not work on OpenRouter and the
+    /// operator replaces it.
+    pub(crate) fn adopt_openrouter_luna_if_still_shipped_deepseek(&mut self) -> bool {
+        let host = crate::openai_client::host_of(&self.base_url);
+        if !host.eq_ignore_ascii_case("api.deepseek.com")
+            || self.model.trim() != "deepseek-v4-flash"
+        {
+            return false;
+        }
+        let defaults = Self::default();
+        self.base_url = defaults.base_url;
+        self.model = defaults.model;
+        if (self.input_price_per_1m - 1.25).abs() < f64::EPSILON
+            && (self.output_price_per_1m - 10.0).abs() < f64::EPSILON
+        {
+            self.input_price_per_1m = defaults.input_price_per_1m;
+            self.output_price_per_1m = defaults.output_price_per_1m;
+        }
+        true
+    }
 }
 
 #[cfg(test)]
@@ -1008,6 +1035,9 @@ mod nurture_settings_tests {
     #[test]
     fn defaults_allow_a_first_run_without_ai_credentials() {
         let settings = NurtureSettings::default();
+        assert_eq!(settings.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(settings.model, "openai/gpt-5.6-luna");
+        assert!(settings.api_key.is_empty());
         assert_eq!(settings.comment_prob, 0);
         assert_eq!(settings.like_prob, 35);
         assert_eq!(settings.follow_prob, 3);
@@ -1049,6 +1079,40 @@ mod nurture_settings_tests {
         assert_eq!(settings.model, "custom-model");
         assert_eq!(settings.persona, "custom-persona");
         assert!(!settings.migrate_legacy_defaults());
+    }
+
+    #[test]
+    fn shipped_deepseek_defaults_move_to_openrouter_luna_and_keep_the_key() {
+        let mut settings = NurtureSettings {
+            base_url: "https://api.deepseek.com/".into(),
+            model: "deepseek-v4-flash".into(),
+            api_key: "sk-or-keep-me".into(),
+            input_price_per_1m: 1.25,
+            output_price_per_1m: 10.0,
+            like_prob: 80,
+            ..NurtureSettings::default()
+        };
+        assert!(settings.adopt_openrouter_luna_if_still_shipped_deepseek());
+        assert_eq!(settings.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(settings.model, "openai/gpt-5.6-luna");
+        assert_eq!(settings.api_key, "sk-or-keep-me");
+        assert_eq!(settings.like_prob, 80);
+        assert!((settings.input_price_per_1m - 0.10).abs() < f64::EPSILON);
+        assert!((settings.output_price_per_1m - 0.60).abs() < f64::EPSILON);
+        assert!(!settings.adopt_openrouter_luna_if_still_shipped_deepseek());
+    }
+
+    #[test]
+    fn a_custom_deepseek_model_is_left_alone() {
+        let mut settings = NurtureSettings {
+            base_url: "https://api.deepseek.com".into(),
+            model: "deepseek-v4-pro".into(),
+            api_key: "ds-key".into(),
+            ..NurtureSettings::default()
+        };
+        assert!(!settings.adopt_openrouter_luna_if_still_shipped_deepseek());
+        assert_eq!(settings.model, "deepseek-v4-pro");
+        assert_eq!(settings.api_key, "ds-key");
     }
 }
 

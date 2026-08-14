@@ -19,6 +19,8 @@ pub struct Database {
 }
 
 const NURTURE_SETTINGS_MIGRATION_V2: &str = "nurture.settings.migration.v2";
+const NURTURE_SETTINGS_MIGRATION_V3: &str = "nurture.settings.migration.v3";
+const NURTURE_SETTINGS_MIGRATION_V3_VALUE: &str = "2026-08-14-openrouter-luna";
 
 impl Database {
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
@@ -921,8 +923,15 @@ impl Database {
             Some(raw) => {
                 let mut settings: crate::types::NurtureSettings = serde_json::from_str(&raw)
                     .context("invalid JSON in stored setting nurture.settings")?;
-                if self.get_setting(NURTURE_SETTINGS_MIGRATION_V2)?.is_none() {
+                let need_v2 = self.get_setting(NURTURE_SETTINGS_MIGRATION_V2)?.is_none();
+                let need_v3 = self.get_setting(NURTURE_SETTINGS_MIGRATION_V3)?.is_none();
+                if need_v2 {
                     settings.migrate_legacy_defaults();
+                }
+                if need_v3 {
+                    settings.adopt_openrouter_luna_if_still_shipped_deepseek();
+                }
+                if need_v2 || need_v3 {
                     // Re-serializing also drops obsolete risk-guard keys that
                     // were accepted by the old profile schema.
                     self.save_nurture_settings(&settings)?;
@@ -938,7 +947,8 @@ impl Database {
         settings: &crate::types::NurtureSettings,
     ) -> anyhow::Result<()> {
         self.set_setting("nurture.settings", &serde_json::to_string(settings)?)?;
-        self.set_setting(NURTURE_SETTINGS_MIGRATION_V2, "2026-08-06-human-v2")
+        self.set_setting(NURTURE_SETTINGS_MIGRATION_V2, "2026-08-06-human-v2")?;
+        self.set_setting(NURTURE_SETTINGS_MIGRATION_V3, NURTURE_SETTINGS_MIGRATION_V3_VALUE)
     }
 
     pub fn get_agent_settings(&self) -> anyhow::Result<crate::types::AgentSettings> {
@@ -1712,6 +1722,48 @@ mod nurture_settings_migration_tests {
                 .as_deref(),
             Some("2026-08-06-human-v2")
         );
+        assert_eq!(
+            db.get_setting(NURTURE_SETTINGS_MIGRATION_V3)
+                .expect("read v3 marker")
+                .as_deref(),
+            Some(NURTURE_SETTINGS_MIGRATION_V3_VALUE)
+        );
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    #[test]
+    fn a_v2_row_still_on_shipped_deepseek_moves_to_openrouter_luna_once() {
+        let (db, path) = fixture();
+        let mut shipped = NurtureSettings::default();
+        shipped.base_url = "https://api.deepseek.com".into();
+        shipped.model = "deepseek-v4-flash".into();
+        shipped.api_key = "replace-me".into();
+        shipped.input_price_per_1m = 1.25;
+        shipped.output_price_per_1m = 10.0;
+        db.set_setting("nurture.settings", &serde_json::to_string(&shipped).unwrap())
+            .expect("store shipped DeepSeek row");
+        db.set_setting(NURTURE_SETTINGS_MIGRATION_V2, "2026-08-06-human-v2")
+            .expect("mark v2 already applied");
+
+        let migrated = db.get_nurture_settings().expect("load remapped profile");
+        assert_eq!(migrated.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(migrated.model, "openai/gpt-5.6-luna");
+        assert_eq!(migrated.api_key, "replace-me");
+        assert_eq!(
+            db.get_setting(NURTURE_SETTINGS_MIGRATION_V3)
+                .expect("read v3 marker")
+                .as_deref(),
+            Some(NURTURE_SETTINGS_MIGRATION_V3_VALUE)
+        );
+
+        let mut stayed = migrated.clone();
+        stayed.base_url = "https://api.deepseek.com".into();
+        stayed.model = "deepseek-v4-flash".into();
+        db.save_nurture_settings(&stayed)
+            .expect("operator put DeepSeek back");
+        let second = db.get_nurture_settings().expect("reload after manual revert");
+        assert_eq!(second.base_url, "https://api.deepseek.com");
+        assert_eq!(second.model, "deepseek-v4-flash");
         std::fs::remove_file(path).expect("remove fixture database");
     }
 }

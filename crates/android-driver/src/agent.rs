@@ -597,6 +597,26 @@ impl AgentClient {
             .map(|_| ())
     }
 
+    /// Overlay tap: one short contact, no drift. Nurture must keep [`Self::tap`].
+    pub async fn tap_direct(&self, x: f64, y: f64) -> anyhow::Result<()> {
+        let actions = json!({
+            "actions": [{
+                "type": "pointer",
+                "id": "finger1",
+                "parameters": { "pointerType": "touch" },
+                "actions": [
+                    { "type": "pointerMove", "duration": 0, "x": x as i64, "y": y as i64 },
+                    { "type": "pointerDown", "button": 0 },
+                    { "type": "pause", "duration": 16 },
+                    { "type": "pointerUp", "button": 0 }
+                ]
+            }]
+        });
+        self.send(reqwest::Method::POST, "/actions", Some(actions))
+            .await
+            .map(|_| ())
+    }
+
     /// A swipe as the planned path: one `pointerMove` per leg, then a settle before the lift.
     ///
     /// The whole reason [`riviu_core::types::SwipePath`] exists. [`Self::swipe`] sends a

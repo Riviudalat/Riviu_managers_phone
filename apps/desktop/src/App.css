@@ -1217,17 +1217,6 @@ button:disabled {
   flex-wrap: wrap;
   flex-shrink: 0;
 }
-.filter-toolbar select,
-.filter-toolbar input {
-  max-width: 160px;
-  border: 1px solid var(--line-strong);
-  border-radius: 4px;
-  padding: 0.35rem 0.55rem;
-  background: #fff;
-  color: var(--text);
-  font-size: 0.85rem;
-  height: 32px;
-}
 .filter-toolbar .grow {
   flex: 1;
 }
@@ -1257,7 +1246,7 @@ button:disabled {
   color: var(--primary);
 }
 
-/* ——— Swarmote floating-window grid (mini screens always on) ——— */
+/* ——— GenFarmer-style phone grid: fixed frames, wheel-zoomed ——— */
 .window-canvas {
   display: flex;
   flex-wrap: wrap;
@@ -1266,102 +1255,66 @@ button:disabled {
   padding: 4px 0 12px;
 }
 
-.dev-window {
-  background: #fff;
-  border-radius: 6px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-  overflow: hidden;
-  border: 1px solid #e5e7eb;
-  display: flex;
-  flex-direction: column;
-  transition: box-shadow 0.15s, outline 0.15s;
+.dev-phone {
+  position: relative;
+  border-radius: 18px;
+  background: #000;
+  border: 1px solid #1a1d24;
+  padding: 0;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+  transition: box-shadow 0.15s, outline-color 0.15s;
+  container-type: inline-size;
   contain: layout paint;
   content-visibility: auto;
-  contain-intrinsic-size: 200px 400px;
+  contain-intrinsic-size: 190px 380px;
 }
-.dev-window:hover {
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.1);
+.dev-phone:hover {
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
 }
-.dev-window.focused {
+.dev-phone.selected,
+.dev-phone.focused {
   outline: 2px solid var(--primary);
   outline-offset: 2px;
-  box-shadow: 0 8px 24px rgba(255, 106, 0, 0.2);
+}
+.dev-phone.focused {
+  box-shadow: 0 8px 24px rgba(255, 106, 0, 0.22);
 }
 
-.dev-window-bar {
-  height: 32px;
-  flex-shrink: 0;
+/* One fixed 1:2 frame for every tile: the grid never reflows when a stream
+   starts, stops, or has a different native aspect — it letterboxes instead. */
+.dev-phone-screen {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 18px;
+  background: #000;
+  overflow: hidden;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 6px 0 8px;
-  background: #f3f4f6;
+  justify-content: center;
+}
+.dev-phone-screen img,
+.dev-phone-screen .phone-canvas {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  display: block;
   user-select: none;
-  cursor: default;
 }
-.dev-window-check {
-  display: grid;
-  place-items: center;
-  margin: 0;
+.phone-canvas-host {
+  display: contents;
 }
-.dev-window-check input {
-  margin: 0;
-  accent-color: var(--primary);
-}
-.dev-window-title {
-  flex: 1;
-  min-width: 0;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-1);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.dev-window-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #c0c4cc;
-  flex-shrink: 0;
-}
-.dev-window-dot.on {
-  background: #67c23a;
-}
-.dev-window-x {
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-3);
-  font-size: 12px;
-  display: grid;
-  place-items: center;
-}
-.dev-window-x:hover {
-  background: #e5e7eb;
-  color: var(--primary);
-  border-color: transparent;
-}
-
-.dev-window-screen {
-  width: 100%;
-  background: #f5f7fa;
-  position: relative;
-  cursor: pointer;
-  overflow: hidden;
-}
-.dev-window-screen img {
+.phone-canvas {
   width: 100%;
   height: 100%;
   object-fit: contain;
-  object-position: center top;
-  display: block;
-  background: #f5f7fa;
-  user-select: none;
-  cursor: pointer;
+  background: #000;
+}
+.phone-canvas.is-fill {
+  object-fit: fill;
 }
 .focus-screen img.focus-touch,
 .focus-touch {
@@ -1369,7 +1322,7 @@ button:disabled {
   touch-action: none;
   user-select: none;
 }
-.dev-window-empty {
+.dev-phone-empty {
   position: absolute;
   inset: 0;
   display: flex;
@@ -1377,56 +1330,92 @@ button:disabled {
   align-items: center;
   justify-content: center;
   gap: 0.35rem;
-  color: var(--text-3);
-  font-size: 0.75rem;
-  background: #f5f7fa;
+  color: rgb(255 255 255 / 45%);
+  font-size: 0.72rem;
+  text-align: center;
+  padding: 0.5rem;
 }
 
-.dev-window-foot {
+.dev-phone-info {
+  position: absolute;
+  inset: 0 0 auto 0;
+  padding: 8px 28px 16px;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 0.45rem;
-  padding: 4px 8px;
-  font-size: 10px;
-  color: var(--text-3);
-  background: #fafafa;
-  border-top: 1px solid #f0f0f0;
-  white-space: nowrap;
-  overflow: hidden;
+  gap: 1px;
+  text-align: center;
+  color: #fff;
+  pointer-events: none;
 }
-.dev-window-foot span:first-child {
-  color: var(--text-2);
-  font-weight: 600;
-}
-.dev-window-stream-state {
+.dev-phone-index-row {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
+  gap: 6px;
 }
-.dev-window-stream-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #9ca3af;
-  flex-shrink: 0;
+.dev-phone-index {
+  font-size: clamp(18px, 14cqw, 44px);
+  font-weight: 700;
+  line-height: 1.05;
+  text-shadow: 0 1px 8px rgb(0 0 0 / 70%);
 }
-.dev-window-stream-state.is-live .dev-window-stream-dot {
-  background: #16a34a;
+.dev-phone-index-row input {
+  margin: 0;
+  width: 13px;
+  height: 13px;
+  accent-color: #fff;
+  pointer-events: auto;
+  cursor: pointer;
 }
-.dev-window-stream-state.is-sampling .dev-window-stream-dot {
-  background: #f97316;
-}
-.dev-window-stream-state.is-stale .dev-window-stream-dot {
-  background: #d97706;
-}
-.dev-window-stream-state.is-error .dev-window-stream-dot {
-  background: #dc2626;
-}
-.dev-window-foot > span:last-child {
-  min-width: 0;
+.dev-phone-name {
+  max-width: 100%;
+  font-size: clamp(11px, 7.2cqw, 18px);
+  font-weight: 700;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  text-shadow: 0 1px 6px rgb(0 0 0 / 70%);
+}
+.dev-phone-model {
+  max-width: 100%;
+  font-size: clamp(9px, 5.2cqw, 12px);
+  color: rgb(255 255 255 / 82%);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-shadow: 0 1px 4px rgb(0 0 0 / 70%);
+}
+
+.dev-phone-conn {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: 3px 8px 4px;
+  border-radius: 18px 0 8px 0;
+  background: #2f6fed;
+  color: #fff;
+  font-size: clamp(8px, 4.6cqw, 11px);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.dev-phone-open {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgb(0 0 0 / 45%);
+  color: #fff;
+  font-size: 11px;
+  display: grid;
+  place-items: center;
+}
+.dev-phone-open:hover {
+  background: var(--primary);
 }
 
 .screen-empty {
@@ -1437,11 +1426,10 @@ button:disabled {
   align-items: center;
   justify-content: center;
   gap: 0.25rem;
-  color: var(--text-3);
-  font-size: 0.75rem;
+  color: rgb(255 255 255 / 55%);
+  font-size: 0.85rem;
   text-align: center;
   padding: 0.75rem;
-  background: #f5f7fa;
 }
 
 /* List / table view */
@@ -1714,8 +1702,7 @@ button.linkish,
 }
 .panel textarea,
 .panel input,
-.panel select,
-.focus-phone-tools input {
+.panel select {
   border: 1px solid var(--line-strong);
   border-radius: 4px;
   padding: 0.4rem 0.55rem;
@@ -1784,89 +1771,59 @@ button.linkish,
   color: #c45656;
 }
 
-/* Focus = centered overlay with a large phone + hardware keys */
+/* Focus = GenFarmer-style window: phone fills the left pane, white menu on the right. */
 .focus-overlay {
   position: fixed;
   inset: 0;
   z-index: 40;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
-  padding: 1.5rem;
+  padding: 12px;
+  overflow: auto;
   background: rgb(15 23 42 / 58%);
 }
 .focus-stage {
   display: flex;
+  flex-direction: row;
   align-items: stretch;
-  gap: 0.85rem;
-  max-height: 92vh;
-  max-width: min(980px, 96vw);
-}
-.focus-phone {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  background: #111318;
-  border-radius: 22px;
-  padding: 0.7rem 0.7rem 0.85rem;
+  margin: auto;
+  background: #fff;
+  border: 1px solid #7aa7d9;
+  border-radius: 4px;
+  overflow: hidden;
   box-shadow: 0 28px 80px rgb(0 0 0 / 45%);
 }
-.focus-phone-head {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.15rem 0.2rem 0.55rem;
-}
-.focus-phone-head .title {
-  flex: 1;
-  min-width: 0;
-}
-.focus-phone-head .title strong {
-  display: block;
-  font-size: 0.88rem;
-  font-weight: 600;
-  color: #fff;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.focus-phone-head .hint {
-  display: block;
-  color: rgb(255 255 255 / 55%);
-  font-size: 0.7rem;
-}
-.focus-phone-head button.close {
-  flex-shrink: 0;
-  width: 28px;
-  height: 28px;
-  display: grid;
-  place-items: center;
-  border: none;
-  border-radius: 50%;
-  background: rgb(255 255 255 / 8%);
-  color: #fff;
-}
-.focus-phone-head button.close:hover {
-  background: rgb(245 108 108 / 28%);
-  color: #fff;
-}
+/* Exact width/height come from the inline style (wheel zoom). Do not
+   max-height the pane to the viewport — that made zoom-in look like a no-op. */
 .focus-phone-screen {
-  flex: 1;
-  min-height: 0;
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
   background: #000;
-  border-radius: 12px;
   overflow: hidden;
+  flex-shrink: 0;
 }
+.focus-phone-screen.is-busy,
+.focus-touch.is-busy {
+  pointer-events: none;
+  cursor: wait;
+}
+/* Overlay canvas fills the pane. `width:auto` + contain used the encoded
+   bitmap (~288×600 from scrcpy max_size=600) as a postage stamp in the
+   middle of a 400×832 box, so taps on the image mapped against the black
+   letterbox and missed. Tiles keep contain — they do not send gestures. */
 .focus-phone-screen img,
-.focus-touch {
-  width: auto;
-  height: auto;
-  max-width: min(420px, 68vw);
-  max-height: calc(92vh - 170px);
-  object-fit: contain;
+.focus-phone-screen .phone-canvas,
+.focus-phone-screen .focus-touch {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  object-fit: fill;
   object-position: center;
   background: #000;
   display: block;
@@ -1874,89 +1831,114 @@ button.linkish,
   touch-action: none;
   user-select: none;
 }
-.focus-phone-screen .screen-empty {
-  color: rgb(255 255 255 / 55%);
-  padding: 3rem 1.5rem;
-  font-size: 0.85rem;
-}
-.focus-phone-tools {
+.focus-menu {
+  width: 220px;
   display: flex;
   flex-direction: column;
-  gap: 0.4rem;
-  padding-top: 0.7rem;
+  background: #fff;
+  min-height: 0;
 }
-.focus-phone-tools label {
+.focus-menu-head {
   display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  color: rgb(255 255 255 / 72%);
-  font-size: 0.74rem;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 8px 8px 12px;
+  background: #dce6f5;
+  border-bottom: 1px solid #c5d4e8;
+  flex-shrink: 0;
 }
-.focus-phone-tools .hint {
-  margin: 0;
-  color: rgb(255 255 255 / 48%);
-  font-size: 0.68rem;
-  line-height: 1.45;
-}
-.focus-phone-tools button.primary {
-  padding: 0.45rem;
-  border: 1px solid var(--primary);
-  border-radius: 6px;
-  background: var(--primary);
-  color: #fff;
-  font-size: 0.78rem;
-  font-weight: 600;
-}
-.focus-phone-tools button.primary:hover {
-  border-color: var(--primary-deep);
-  background: var(--primary-deep);
-}
-.focus-phone-extra {
-  display: flex;
-  gap: 0.35rem;
-}
-.focus-phone-extra button {
+.focus-menu-head strong {
   flex: 1;
-  padding: 0.35rem 0.4rem;
-  border: 1px solid rgb(255 255 255 / 14%);
-  border-radius: 6px;
-  background: rgb(255 255 255 / 6%);
-  color: rgb(255 255 255 / 82%);
-  font-size: 0.72rem;
+  min-width: 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #303133;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.focus-phone-extra button:hover:not(:disabled) {
-  background: rgb(255 255 255 / 12%);
+.focus-menu-group {
+  flex-shrink: 0;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: #5a6a80;
 }
-.focus-phone-extra button:disabled {
-  opacity: 0.4;
-}
-.focus-phone-extra button.danger:hover:not(:disabled) {
-  background: rgb(245 108 108 / 22%);
-  color: #fecaca;
-}
-.focus-keys {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  justify-content: center;
-}
-.focus-keys button {
-  width: 44px;
-  height: 44px;
+.focus-menu-head button.ghost,
+.focus-menu-head button.close {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
   display: grid;
   place-items: center;
   border: none;
-  border-radius: 50%;
-  background: #fff;
-  color: var(--text-2);
-  box-shadow: 0 8px 18px rgb(15 23 42 / 18%);
+  border-radius: 4px;
+  background: none;
+  color: #5a6a80;
 }
-.focus-keys button:hover:not(:disabled) {
-  background: var(--primary-soft);
-  color: var(--primary);
+.focus-menu-head button.ghost:hover {
+  background: rgb(0 0 0 / 6%);
+  color: #303133;
 }
-.focus-keys button:disabled {
+.focus-menu-head button.close:hover {
+  background: #fde2e2;
+  color: #c45656;
+}
+.focus-menu-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.focus-menu-list button {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  width: 100%;
+  padding: 0.52rem 0.9rem;
+  border: none;
+  border-radius: 0;
+  background: none;
+  color: #4a5568;
+  font-size: 0.8rem;
+  text-align: left;
+  white-space: nowrap;
+}
+.focus-menu-list button:hover:not(:disabled) {
+  background: #f3f6fb;
+  color: #2b6cb0;
+}
+.focus-menu-list button:disabled {
   opacity: 0.38;
+  cursor: not-allowed;
+}
+.focus-menu-list button.danger:hover:not(:disabled) {
+  background: #fef0f0;
+  color: #c45656;
+}
+.focus-navbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  padding: 0.55rem 0.4rem 0.65rem;
+  border-top: 1px solid #e8edf4;
+  flex-shrink: 0;
+}
+.focus-navbar button {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: #5a6a80;
+}
+.focus-navbar button:hover:not(:disabled) {
+  background: #f3f6fb;
+  color: #2b6cb0;
+}
+.focus-navbar button:disabled {
+  opacity: 0.32;
   cursor: not-allowed;
 }
 

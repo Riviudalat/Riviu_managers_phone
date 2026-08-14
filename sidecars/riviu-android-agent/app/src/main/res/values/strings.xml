@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Riviu helper</string>
+    <string name="ime_name">Riviu clipboard</string>
+    <string name="notification_title">Riviu helper</string>
+    <string name="notification_text">USB helper đang chạy — không phải bàn phím mặc định</string>
+</resources>

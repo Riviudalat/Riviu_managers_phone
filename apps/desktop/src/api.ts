@@ -122,13 +122,14 @@ export async function deviceSwipe(
   toY: number,
   imageW?: number,
   imageH?: number,
+  durationMs = 280,
 ) {
   return invoke<void>("device_swipe", {
     udid,
     gesture: {
       from: { x: fromX, y: fromY },
       to: { x: toX, y: toY },
-      durationMs: 280,
+      durationMs,
     },
     imageW: imageW ?? null,
     imageH: imageH ?? null,
@@ -145,6 +146,14 @@ export async function deviceHome(udid: string) {
 
 export async function deviceKey(udid: string, key: HardwareKey) {
   return invoke<void>("device_key", { udid, key });
+}
+
+export async function deviceControlBegin(udid: string) {
+  return invoke<void>("device_control_begin", { udid });
+}
+
+export async function deviceControlEnd(udid: string) {
+  return invoke<void>("device_control_end", { udid });
 }
 
 export async function groupInput(payload: {
@@ -183,6 +192,22 @@ export async function setStreamSettings(settings: StreamSettings) {
 
 export async function latestFrame(udid: string) {
   return invoke<string | null>("latest_frame", { udid });
+}
+
+export async function viewEndpoint() {
+  return invoke<string | null>("view_endpoint");
+}
+
+export async function viewEnsure(udid: string) {
+  return invoke<void>("view_ensure", { udid });
+}
+
+export async function viewSetPreset(udid: string, preset: "tile" | "overlay") {
+  return invoke<void>("view_set_preset", { udid, preset });
+}
+
+export async function saveViewSnapshot(udid: string, jpeg: number[]) {
+  return invoke<string>("save_view_snapshot", { udid, jpeg });
 }
 
 export async function listJobs() {

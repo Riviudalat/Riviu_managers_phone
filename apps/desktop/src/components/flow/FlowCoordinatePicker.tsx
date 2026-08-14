@@ -1,4 +1,5 @@
 import type { FlowCoordinateFrame, ImageCoordinateTarget } from "../../types";
+import { mapClientToImage } from "../../viewHit";
 
 export function projectContainedImageClick(
   frame: FlowCoordinateFrame,
@@ -6,30 +7,18 @@ export function projectContainedImageClick(
   clientX: number,
   clientY: number,
 ): ImageCoordinateTarget | null {
-  if (
-    frame.imageWidth <= 0 ||
-    frame.imageHeight <= 0 ||
-    rect.width <= 0 ||
-    rect.height <= 0
-  ) {
-    return null;
-  }
-  const scale = Math.min(rect.width / frame.imageWidth, rect.height / frame.imageHeight);
-  const shownWidth = frame.imageWidth * scale;
-  const shownHeight = frame.imageHeight * scale;
-  const left = rect.left + (rect.width - shownWidth) / 2;
-  const top = rect.top + (rect.height - shownHeight) / 2;
-  if (
-    clientX < left ||
-    clientX > left + shownWidth ||
-    clientY < top ||
-    clientY > top + shownHeight
-  ) {
-    return null;
-  }
+  const hit = mapClientToImage(
+    { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+    clientX,
+    clientY,
+    frame.imageWidth,
+    frame.imageHeight,
+    "contain",
+  );
+  if (!hit) return null;
   return {
-    x: (clientX - left) / scale,
-    y: (clientY - top) / scale,
+    x: hit.x,
+    y: hit.y,
     imageWidth: frame.imageWidth,
     imageHeight: frame.imageHeight,
     orientation: frame.orientation,

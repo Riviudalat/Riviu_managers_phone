@@ -5,18 +5,18 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use parking_lot::{Mutex, RwLock};
 use riviu_core::db::Database;
 use riviu_core::{
     AppEvent, BackgroundStreamLease, DeviceControlPlane, DeviceRegistry, DeviceWorkCoordinator,
-    EventBus, FlowArtifactStore, FlowId, FlowRuntime, FlowRuntimeDeps, Frame, JobQueue, JobStatus,
-    NurtureEngine, StreamBudgetManager, StreamSettings, STREAM_FPS,
+    DeviceWorkOwner, EventBus, FlowArtifactStore, FlowId, FlowRuntime, FlowRuntimeDeps, Frame,
+    JobQueue, JobStatus, NurtureEngine, StreamBudgetManager, StreamSettings, UiSession,
+    UiSessionContext, STREAM_FPS,
 };
 use riviu_ios_driver::{create_driver, DriverMode, DriverTarget, StreamHub};
 use riviu_signing::{CredentialStore, SigningService};
 use tauri::{AppHandle, Emitter};
-use tokio::sync::Notify;
+use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 use crate::agent_runtime::{resolve_desktop_agent_runtime_with_candidate, ResolvedAgentRuntime};
 use crate::command_error::CommandError;
@@ -32,6 +32,9 @@ const PREVIEW_TOTAL_FPS: u32 = 240;
 const PREVIEW_MAX_FPS_PER_DEVICE: u32 = STREAM_FPS;
 const PREVIEW_TICK: Duration = Duration::from_millis(4);
 const PREVIEW_IDLE_EVICTION: Duration = Duration::from_secs(10);
+/// Scrcpy child + reader can stay "running" with no packets (Exynos hello
+/// without IDR, WebView2 refusing the codec). The keeper restarts after this.
+const ANDROID_VIEW_SILENCE: Duration = Duration::from_secs(5);
 /// How far back [`AppState::busy_reason`] looks for unfinished jobs.
 ///
 /// `list_jobs` orders newest first, and anything queued or running is recent by nature,
@@ -105,6 +108,10 @@ pub struct AppState {
     /// the iOS sidecar: "no adb on this machine" and "the iOS sidecar died"
     /// are different facts and must not be reported as one.
     pub android_unavailable_reason: Option<String>,
+    /// Concrete Android backend, kept so view start/stop/retune do not go
+    /// through `DeviceDriver` or `StreamBudgetManager`.
+    pub android: Option<Arc<riviu_android_driver::AndroidDriver>>,
+    pub view_hub: Arc<crate::view_hub::ViewHub>,
     pub jobs: JobQueue,
     pub flows: FlowRuntime,
     pub flow_artifacts: FlowArtifactStore,
@@ -125,6 +132,9 @@ pub struct AppState {
     pub nurture: NurtureRuntime,
     pub nurture_engine: NurtureEngine,
     pub(crate) flow_mutations: FlowMutationCoordinator,
+    /// One ManualControl session per UDID while the overlay is open.
+    /// Gestures reuse it; closing the overlay is the only release.
+    overlay_sessions: AsyncMutex<HashMap<String, UiSessionContext>>,
     command_admission: Arc<CommandAdmissionState>,
     background_stop: Arc<AtomicBool>,
     background_stopped: Arc<AtomicBool>,
@@ -516,22 +526,28 @@ impl AppState {
         for problem in &android_tools.problems {
             log::warn!("bundled Android tools: {problem}");
         }
+        let view_hub = crate::view_hub::ViewHub::new();
         let android_config = riviu_android_driver::AndroidDriverConfig {
             bundled_adb_path: android_tools.adb_path.clone(),
             bundled_minicap_apk: android_tools.minicap_apk.clone(),
+            bundled_scrcpy_server: android_tools.scrcpy_server.clone(),
+            bundled_riviu_agent_apk: android_tools.riviu_agent_apk.clone(),
             ..Default::default()
         };
-        let android_unavailable = match riviu_android_driver::detect_driver(&android_config).await {
-            Ok(driver) => {
-                // Frames from both platforms land in one hub, so generations and
-                // sequences stay comparable and the tile draws Android the same
-                // way it draws an iPhone.
-                driver.set_frame_sink(Arc::new(bundle.streams.clone()));
-                backends.push(("android".to_string(), driver));
-                None
-            }
-            Err(reason) => Some(reason),
-        };
+        let (android, android_unavailable) =
+            match riviu_android_driver::detect_driver(&android_config).await {
+                Ok(driver) => {
+                    // JPEG evidence still lands in StreamHub. H.264 view samples
+                    // go to ViewHub and never become a Frame.
+                    driver.set_frame_sink(Arc::new(bundle.streams.clone()));
+                    driver.set_view_sink(
+                        Arc::clone(&view_hub) as Arc<dyn riviu_android_driver::ViewSink>
+                    );
+                    backends.push(("android".to_string(), driver.clone()));
+                    (Some(driver), None)
+                }
+                Err(reason) => (None, Some(reason)),
+            };
         let fleet: Arc<dyn riviu_core::driver::DeviceDriver> =
             Arc::new(riviu_core::driver_multiplex::MultiplexDriver::new(backends));
 
@@ -607,6 +623,8 @@ impl AppState {
             driver_degraded_reason: bundle.degraded_reason,
             driver_list_error: bundle.list_error,
             android_unavailable_reason: android_unavailable,
+            android,
+            view_hub,
             jobs,
             flows,
             flow_artifacts,
@@ -623,6 +641,7 @@ impl AppState {
             nurture: NurtureRuntime::new(),
             nurture_engine,
             flow_mutations: FlowMutationCoordinator::default(),
+            overlay_sessions: AsyncMutex::new(HashMap::new()),
             command_admission,
             background_stop: Arc::new(AtomicBool::new(false)),
             background_stopped: Arc::new(AtomicBool::new(false)),
@@ -631,6 +650,58 @@ impl AppState {
         };
 
         Ok(state)
+    }
+
+    /// Open one ManualControl session for the overlay, or reuse the one already held.
+    ///
+    /// The map lock is held across `open_manual_session` so two begins cannot
+    /// race into DeviceBusy on the same UDID.
+    pub async fn begin_overlay_session(&self, udid: &str) -> Result<(), CommandError> {
+        let mut sessions = self.overlay_sessions.lock().await;
+        if sessions.contains_key(udid) {
+            return Ok(());
+        }
+        let context = self
+            .control
+            .open_manual_session(udid, DeviceWorkOwner::ManualControl)
+            .await
+            .map_err(CommandError::from)?;
+        sessions.insert(udid.to_string(), context);
+        Ok(())
+    }
+
+    pub async fn end_overlay_session(&self, udid: &str) -> Result<(), CommandError> {
+        let context = {
+            let mut sessions = self.overlay_sessions.lock().await;
+            sessions.remove(udid)
+        };
+        let Some(context) = context else {
+            return Ok(());
+        };
+        self.control
+            .close_manual_session(context)
+            .map_err(CommandError::from)?;
+        Ok(())
+    }
+
+    pub async fn overlay_ui_session(&self, udid: &str) -> Option<Arc<dyn UiSession>> {
+        let sessions = self.overlay_sessions.lock().await;
+        let context = sessions.get(udid)?;
+        self.control.session(context).ok()
+    }
+
+    /// Release every overlay lease before `shutdown_cleanup` waits for
+    /// `lifecycle.outstanding() == 0`. A held ManualControl deadlocks that wait.
+    pub async fn close_all_overlay_sessions(&self) {
+        let contexts: Vec<UiSessionContext> = {
+            let mut sessions = self.overlay_sessions.lock().await;
+            sessions.drain().map(|(_, context)| context).collect()
+        };
+        for context in contexts {
+            if let Err(error) = self.control.close_manual_session(context) {
+                log::error!("overlay session close failed during shutdown: {error}");
+            }
+        }
     }
 
     /// What is running that an update would interrupt, or `None` when the fleet is idle.
@@ -694,6 +765,101 @@ impl AppState {
     }
 
     pub fn spawn_background_tasks(&self, app: AppHandle) {
+        let view_hub = self.view_hub.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = view_hub.listen().await {
+                log::error!("view websocket failed to bind: {error:#}");
+            }
+        });
+
+        if let Some(android) = self.android.clone() {
+            let registry = self.registry.clone();
+            let background_stop = self.background_stop.clone();
+            let view_hub = self.view_hub.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(2));
+                loop {
+                    interval.tick().await;
+                    if background_stop.load(Ordering::Acquire) {
+                        android.stop_all_views().await;
+                        return;
+                    }
+                    let mut starts = Vec::new();
+                    for device in registry.list() {
+                        if device.platform != riviu_core::DevicePlatform::Android {
+                            continue;
+                        }
+                        if matches!(
+                            device.status,
+                            riviu_core::DeviceStatus::Disconnected
+                                | riviu_core::DeviceStatus::Pairing
+                                | riviu_core::DeviceStatus::Preparing
+                                | riviu_core::DeviceStatus::Busy
+                        ) {
+                            continue;
+                        }
+                        if android.view_start_in_flight(&device.udid) {
+                            continue;
+                        }
+                        let running = android
+                            .view_is_running(&device.udid, riviu_android_driver::ViewPreset::Tile)
+                            .await
+                            || android
+                                .view_is_running(
+                                    &device.udid,
+                                    riviu_android_driver::ViewPreset::Overlay,
+                                )
+                                .await;
+                        if running {
+                            if !android_view_is_silent(
+                                false,
+                                view_hub.last_packet_age(&device.udid),
+                            ) {
+                                continue;
+                            }
+                            log::warn!(
+                                "android view for {} published nothing for {}s; restarting scrcpy",
+                                device.udid,
+                                ANDROID_VIEW_SILENCE.as_secs()
+                            );
+                            android.stop_view_stream(&device.udid).await;
+                        }
+                        set_stream_state(
+                            &registry,
+                            &device.udid,
+                            riviu_core::TileStreamState::Sampling,
+                            None,
+                        );
+                        let android = android.clone();
+                        let registry = registry.clone();
+                        let udid = device.udid.clone();
+                        starts.push(tokio::spawn(async move {
+                            match android
+                                .start_view_stream(&udid, riviu_android_driver::ViewPreset::Tile)
+                                .await
+                            {
+                                Ok(_) => set_stream_state(
+                                    &registry,
+                                    &udid,
+                                    riviu_core::TileStreamState::Live,
+                                    None,
+                                ),
+                                Err(error) => set_stream_state(
+                                    &registry,
+                                    &udid,
+                                    riviu_core::TileStreamState::Error,
+                                    Some(error.to_string()),
+                                ),
+                            }
+                        }));
+                    }
+                    for start in starts {
+                        let _ = start.await;
+                    }
+                }
+            });
+        }
+
         // One sampler owns the bounded background stream budget. It yields a
         // device after the first fresh frame or five seconds.
         let control = self.control.clone();
@@ -755,10 +921,10 @@ impl AppState {
 
         // Forward a bounded latest-frame preview to the UI. The raw StreamHub
         // feed stays lossless enough for automation; this path only keeps one
-        // Arc per device and emits the newest frame on a fair round-robin
-        // schedule. That prevents base64 encoding and WebView events from
-        // growing as O(device_count * source_fps).
+        // Arc per device and publishes JPEG **bytes** onto ViewHub — no
+        // base64, no `<img src=data:...>`.
         let streams = self.streams.clone();
+        let view_hub = self.view_hub.clone();
         let app_frames = app.clone();
         tauri::async_runtime::spawn(async move {
             let mut rx = streams.subscribe();
@@ -815,10 +981,10 @@ impl AppState {
                                 continue;
                             };
                             next_due.insert(udid.clone(), now + gap);
+                            view_hub.publish_jpeg(udid, frame.as_slice().to_vec());
                             let payload = serde_json::json!({
                                 "type": "streamFrame",
                                 "udid": udid,
-                                "jpegBase64": B64.encode(frame.as_slice()),
                                 "fps": per_device_fps,
                             });
                             let _ = app_frames.emit("riviu://event", payload);
@@ -1093,6 +1259,12 @@ impl AppState {
         });
     }
 
+    pub async fn shutdown_android_views(&self) {
+        if let Some(android) = &self.android {
+            android.stop_all_views().await;
+        }
+    }
+
     pub async fn shutdown_background_sampler(&self) -> anyhow::Result<()> {
         let stopped = self.background_stopped_notify.notified();
         self.background_stop.store(true, Ordering::Release);
@@ -1127,6 +1299,9 @@ fn background_sample_candidate(
     device: &riviu_core::DeviceInfo,
     status: &riviu_core::AgentStatus,
 ) -> bool {
+    if device.platform == riviu_core::DevicePlatform::Android {
+        return false;
+    }
     !matches!(
         device.status,
         riviu_core::DeviceStatus::Disconnected
@@ -1139,6 +1314,26 @@ fn background_sample_candidate(
             | riviu_core::AgentState::Ready
             | riviu_core::AgentState::Error
     ) || (status.state == riviu_core::AgentState::Starting && device.wda_ready))
+}
+
+/// A start still in flight is not silent. A running producer with no
+/// accepted packet, or none for [`ANDROID_VIEW_SILENCE`], is.
+///
+/// Canvas paint is not an input — the frontend is not the source of truth.
+pub(crate) fn android_view_is_silent(
+    start_in_flight: bool,
+    last_packet_age: Option<Duration>,
+) -> bool {
+    if start_in_flight {
+        return false;
+    }
+    last_packet_age
+        .map(|age| age >= ANDROID_VIEW_SILENCE)
+        .unwrap_or(true)
+}
+
+pub(crate) fn mark_android_view_live(registry: &DeviceRegistry, udid: &str) {
+    set_stream_state(registry, udid, riviu_core::TileStreamState::Live, None);
 }
 
 fn set_stream_parked(registry: &DeviceRegistry, udid: &str) {
@@ -1216,6 +1411,15 @@ fn resolve_sidecar_root_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_live_scrcpy_producer_is_silent_only_after_five_seconds_without_packets() {
+        assert!(!android_view_is_silent(true, None));
+        assert!(!android_view_is_silent(true, Some(Duration::from_secs(30))));
+        assert!(android_view_is_silent(false, None));
+        assert!(!android_view_is_silent(false, Some(Duration::from_secs(4))));
+        assert!(android_view_is_silent(false, Some(Duration::from_secs(5))));
+    }
 
     #[test]
     fn preview_budget_is_smooth_for_small_fleet_and_bounded_for_large_fleet() {
@@ -1587,6 +1791,14 @@ mod tests {
         assert!(!background_sample_candidate(&device, &status));
         device.status = riviu_core::DeviceStatus::Busy;
         assert!(!background_sample_candidate(&device, &status));
+
+        device.platform = riviu_core::DevicePlatform::Android;
+        device.status = riviu_core::DeviceStatus::Ready;
+        status.state = riviu_core::AgentState::Ready;
+        assert!(
+            !background_sample_candidate(&device, &status),
+            "Android tiles must not take a minicap budget slot"
+        );
     }
 
     #[test]

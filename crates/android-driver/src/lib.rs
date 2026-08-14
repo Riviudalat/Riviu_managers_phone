@@ -25,17 +25,26 @@
 //! so `screen.rs`-style pixel geometry is not needed: TikTok labels its own
 //! controls (`Like` flips to `Video liked`) and those labels are English
 //! whatever the UI language. Vietnamese types cleanly through
-//! `ACTION_SET_TEXT`, which is why no custom keyboard is shipped here.
+//! `ACTION_SET_TEXT`. A helper APK (`com.riviu.agent`) is only for clipboard
+//! and MediaStore — it is switched in as the IME for one request and then
+//! restored. It is not the default keyboard and it does not replace
+//! uiautomator2.
 
 pub mod adb;
 pub mod agent;
 pub mod driver;
 pub mod frames;
 pub mod publish;
+pub mod riviu_agent;
+pub mod scrcpy;
 pub mod session;
+pub mod view;
 
 pub use adb::{AdbCandidate, AdbOrigin, AdbProgram};
 pub use agent::{AgentClient, Locator, Rect};
 pub use driver::{create_driver, detect_driver, AndroidDriver, AndroidDriverConfig};
 pub use frames::{MinicapBanner, MinicapOptions, MinicapStream, Projection};
+pub use riviu_agent::{HelperClient, PACKAGE as RIVIU_HELPER_PACKAGE};
+pub use scrcpy::{ViewPreset, SERVER_VERSION};
 pub use session::AndroidUiSession;
+pub use view::{ViewKind, ViewPacket, ViewSink};

@@ -58,7 +58,7 @@ async fn continue_ui_context(
 }
 
 async fn with_manual_session<F, Fut>(
-    control: &DeviceControlPlane,
+    state: &AppState,
     udid: &str,
     owner: DeviceWorkOwner,
     f: F,
@@ -67,13 +67,20 @@ where
     F: FnOnce(Arc<dyn UiSession>) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<()>>,
 {
-    let context = control
+    if let Some(session) = state.overlay_ui_session(udid).await {
+        return f(session).await.map_err(CommandError::operation);
+    }
+    let context = state
+        .control
         .open_manual_session(udid, owner)
         .await
         .map_err(CommandError::from)?;
-    let session = control.session(&context).map_err(CommandError::from)?;
+    let session = state
+        .control
+        .session(&context)
+        .map_err(CommandError::from)?;
     let result = f(session).await;
-    let cleanup = control.close_manual_session(context);
+    let cleanup = state.control.close_manual_session(context);
     result.map_err(CommandError::operation)?;
     cleanup.map_err(CommandError::from)?;
     Ok(())
@@ -320,9 +327,16 @@ pub async fn screenshot(state: State<'_, AppState>, udid: String) -> Result<Stri
         "{udid}-{}.jpg",
         chrono::Utc::now().timestamp_millis()
     ));
+    if let Some(bytes) = state.streams.latest(&udid) {
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(CommandError::operation)?;
+        }
+        std::fs::write(&dest, bytes.as_slice()).map_err(CommandError::operation)?;
+        return Ok(dest.display().to_string());
+    }
     let context = state
         .control
-        .try_acquire_exclusive(&udid, DeviceWorkOwner::ManualControl)
+        .try_acquire_exclusive_keeping_stream(&udid, DeviceWorkOwner::ManualControl)
         .await
         .map_err(CommandError::from)?;
     let path = state
@@ -416,7 +430,7 @@ pub async fn device_tap(
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     with_manual_session(
-        &state.control,
+        &state,
         &udid,
         DeviceWorkOwner::ManualControl,
         |session| async move {
@@ -439,7 +453,7 @@ pub async fn device_swipe(
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     with_manual_session(
-        &state.control,
+        &state,
         &udid,
         DeviceWorkOwner::ManualControl,
         |session| async move {
@@ -464,7 +478,7 @@ pub async fn device_type_text(
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     with_manual_session(
-        &state.control,
+        &state,
         &udid,
         DeviceWorkOwner::ManualControl,
         |session| async move { session.type_text(&text).await },
@@ -476,7 +490,7 @@ pub async fn device_type_text(
 pub async fn device_home(state: State<'_, AppState>, udid: String) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     with_manual_session(
-        &state.control,
+        &state,
         &udid,
         DeviceWorkOwner::ManualControl,
         |session| async move { session.home().await },
@@ -492,12 +506,30 @@ pub async fn device_key(
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     with_manual_session(
-        &state.control,
+        &state,
         &udid,
         DeviceWorkOwner::ManualControl,
         move |session| async move { session.press_hardware_key(key).await },
     )
     .await
+}
+
+#[tauri::command]
+pub async fn device_control_begin(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    state.begin_overlay_session(&udid).await
+}
+
+#[tauri::command]
+pub async fn device_control_end(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    state.end_overlay_session(&udid).await
 }
 
 #[tauri::command]
@@ -527,29 +559,41 @@ pub async fn group_input(
         skipped: Vec::new(),
     };
     for udid in udids {
-        let context = match state
-            .control
-            .open_manual_session(&udid, DeviceWorkOwner::GroupSync)
-            .await
-        {
-            Ok(context) => context,
-            Err(error) => {
-                let error = CommandError::from(error);
-                if error.code == "DeviceBusy" {
-                    report.skipped.push(GroupInputSkip {
-                        udid,
-                        code: error.code,
-                        current_owner: error.current_owner,
-                    });
-                    continue;
+        let overlay_session = state.overlay_ui_session(&udid).await;
+        let owned = if overlay_session.is_none() {
+            match state
+                .control
+                .open_manual_session(&udid, DeviceWorkOwner::GroupSync)
+                .await
+            {
+                Ok(context) => Some(context),
+                Err(error) => {
+                    let error = CommandError::from(error);
+                    if error.code == "DeviceBusy" {
+                        report.skipped.push(GroupInputSkip {
+                            udid,
+                            code: error.code,
+                            current_owner: error.current_owner,
+                        });
+                        continue;
+                    }
+                    return Err(error);
                 }
-                return Err(error);
             }
+        } else {
+            None
         };
-        let session = state
-            .control
-            .session(&context)
-            .map_err(CommandError::from)?;
+        let session = match overlay_session {
+            Some(session) => session,
+            None => state
+                .control
+                .session(
+                    owned
+                        .as_ref()
+                        .expect("group input opened a session when no overlay is held"),
+                )
+                .map_err(CommandError::from)?,
+        };
         let action = match kind.as_str() {
             "tap" => {
                 let x = x.unwrap_or(0.0);
@@ -590,8 +634,12 @@ pub async fn group_input(
             "key" => match key {
                 Some(key) => session.press_hardware_key(key).await,
                 None => {
-                    let cleanup = state.control.close_manual_session(context);
-                    cleanup.map_err(CommandError::from)?;
+                    if let Some(context) = owned {
+                        state
+                            .control
+                            .close_manual_session(context)
+                            .map_err(CommandError::from)?;
+                    }
                     return Err(CommandError::operation(
                         "group input kind key requires a hardware key",
                     ));
@@ -599,9 +647,13 @@ pub async fn group_input(
             },
             _ => unreachable!("group input kind was validated"),
         };
-        let cleanup = state.control.close_manual_session(context);
-        action.map_err(CommandError::operation)?;
-        cleanup.map_err(CommandError::from)?;
+        if let Some(context) = owned {
+            let cleanup = state.control.close_manual_session(context);
+            action.map_err(CommandError::operation)?;
+            cleanup.map_err(CommandError::from)?;
+        } else {
+            action.map_err(CommandError::operation)?;
+        }
         report.completed_udids.push(udid);
     }
     Ok(report)
@@ -629,6 +681,84 @@ pub fn latest_frame(state: State<'_, AppState>, udid: String) -> Result<Option<S
     Ok(state.streams.latest(&udid).map(|bytes| {
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes.as_slice())
     }))
+}
+
+#[tauri::command]
+pub fn view_endpoint(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    Ok(state.view_hub.endpoint())
+}
+
+#[tauri::command]
+pub async fn view_ensure(state: State<'_, AppState>, udid: String) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Ok(());
+    };
+    let platform = state
+        .registry
+        .get(&udid)
+        .map(|device| device.platform)
+        .unwrap_or(riviu_core::DevicePlatform::Ios);
+    if platform != riviu_core::DevicePlatform::Android {
+        return Ok(());
+    }
+    android.stop_view_stream(&udid).await;
+    android
+        .start_view_stream(&udid, riviu_android_driver::ViewPreset::Tile)
+        .await
+        .map_err(CommandError::operation)?;
+    crate::state::mark_android_view_live(&state.registry, &udid);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn view_set_preset(
+    state: State<'_, AppState>,
+    udid: String,
+    preset: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Ok(());
+    };
+    let platform = state
+        .registry
+        .get(&udid)
+        .map(|device| device.platform)
+        .unwrap_or(riviu_core::DevicePlatform::Ios);
+    if platform != riviu_core::DevicePlatform::Android {
+        return Ok(());
+    }
+    let preset = match preset.as_str() {
+        "overlay" => riviu_android_driver::ViewPreset::Overlay,
+        _ => riviu_android_driver::ViewPreset::Tile,
+    };
+    android
+        .set_view_preset(&udid, preset)
+        .await
+        .map_err(CommandError::operation)
+        .map(|_| ())
+}
+
+#[tauri::command]
+pub fn save_view_snapshot(
+    state: State<'_, AppState>,
+    udid: String,
+    jpeg: Vec<u8>,
+) -> Result<String, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    if jpeg.len() < 3 || jpeg[0] != 0xff || jpeg[1] != 0xd8 {
+        return Err(CommandError::operation("view snapshot is not a JPEG"));
+    }
+    let dest = state.artifacts_dir.join("screenshots").join(format!(
+        "{udid}-{}.jpg",
+        chrono::Utc::now().timestamp_millis()
+    ));
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(CommandError::operation)?;
+    }
+    std::fs::write(&dest, jpeg).map_err(CommandError::operation)?;
+    Ok(dest.display().to_string())
 }
 
 #[tauri::command]

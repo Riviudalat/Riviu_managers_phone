@@ -113,6 +113,18 @@ pub struct AndroidDriverConfig {
     /// configured value is preferred over `RIVIU_MINICAP_APK`. See AGENTS.md 9.27 —
     /// keeping that env override working is part of the decision to bundle at all.
     pub bundled_minicap_apk: Option<PathBuf>,
+    /// Explicit path to the scrcpy 3.3.4 server JAR. Falls back to
+    /// `RIVIU_SCRCPY_SERVER`, then [`Self::bundled_scrcpy_server`].
+    pub scrcpy_server: Option<PathBuf>,
+    /// The `scrcpy-server` shipped inside the installer. Lowest priority, same
+    /// reason as [`Self::bundled_minicap_apk`].
+    pub bundled_scrcpy_server: Option<PathBuf>,
+    /// Explicit path to the Riviu helper APK (`com.riviu.agent`). Falls back to
+    /// `RIVIU_ANDROID_AGENT_APK`, then [`Self::bundled_riviu_agent_apk`].
+    pub riviu_agent_apk: Option<PathBuf>,
+    /// The helper APK shipped inside the installer. Lowest priority, same
+    /// reason as [`Self::bundled_minicap_apk`].
+    pub bundled_riviu_agent_apk: Option<PathBuf>,
 }
 
 /// One running minicap feed, owned so a second `ensure_stream` reuses it and a
@@ -135,12 +147,26 @@ struct StreamProducer {
     device_pid: u32,
 }
 
+/// One running scrcpy view. Separate from [`StreamProducer`]: a phone can keep
+/// this H.264 encode while nurture owns a minicap JPEG producer.
+struct ViewProducer {
+    generation: u64,
+    preset: crate::scrcpy::ViewPreset,
+    host_port: u16,
+    child: tokio::process::Child,
+    reader: tokio::task::JoinHandle<()>,
+}
+
 pub struct AndroidDriver {
     adb: AdbProgram,
     minicap_apk: Option<PathBuf>,
+    scrcpy_server: Option<PathBuf>,
     /// Where frames go. Injected by the composition root, which owns the hub —
     /// this crate must not depend on whichever crate that is.
     frame_sink: Mutex<Option<Arc<dyn riviu_core::FrameSink>>>,
+    /// Where H.264 view samples go. Missing is a configuration error for the
+    /// view path, not a reason to refuse minicap.
+    view_sink: Mutex<Option<Arc<dyn crate::view::ViewSink>>>,
     /// serial -> the minicap feed we started for it.
     ///
     /// Held **only** across map access — `get` / `insert` / `remove` — never across
@@ -149,6 +175,11 @@ pub struct AndroidDriver {
     /// phone's start *and* stop. [`AndroidDriver::starting`] is what makes the
     /// short critical section safe.
     streams: tokio::sync::Mutex<HashMap<String, StreamProducer>>,
+    /// serial -> the scrcpy view we started for it. Held only across map
+    /// access, same rule as [`Self::streams`].
+    views: tokio::sync::Mutex<HashMap<String, ViewProducer>>,
+    /// Serials with a view start in flight.
+    view_starting: Mutex<HashSet<String>>,
     /// Serials with a producer start in flight.
     ///
     /// The atomic claim that replaces holding [`Self::streams`] across the slow
@@ -186,6 +217,13 @@ pub struct AndroidDriver {
     /// this one's. Measured: a Xiaomi with no agent installed came back
     /// `agent=true` because it drew a port an S8+ was using.
     forwarded: Mutex<HashSet<String>>,
+    /// Helper APK used for clipboard / MediaStore. Missing is normal: a source
+    /// checkout has no pinned binary until someone builds
+    /// `sidecars/riviu-android-agent`.
+    riviu_agent_apk: Option<PathBuf>,
+    /// serial -> a live helper client. Same reuse rule as [`Self::agents`]:
+    /// opening a second forward per session leaks a host port.
+    helpers: Mutex<HashMap<String, crate::riviu_agent::HelperClient>>,
 }
 
 impl AndroidDriver {
@@ -218,17 +256,39 @@ impl AndroidDriver {
                     .map(PathBuf::from)
             })
             .or_else(|| config.bundled_minicap_apk.clone());
+        let scrcpy_server = config
+            .scrcpy_server
+            .clone()
+            .or_else(|| {
+                std::env::var("RIVIU_SCRCPY_SERVER")
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+            })
+            .or_else(|| config.bundled_scrcpy_server.clone());
+        let riviu_agent_apk = crate::riviu_agent::resolve_apk_path(
+            config.riviu_agent_apk.clone(),
+            std::env::var("RIVIU_ANDROID_AGENT_APK").ok(),
+            config.bundled_riviu_agent_apk.clone(),
+        );
         Self {
             adb,
             minicap_apk,
+            scrcpy_server,
             frame_sink: Mutex::new(None),
+            view_sink: Mutex::new(None),
             streams: tokio::sync::Mutex::new(HashMap::new()),
+            views: tokio::sync::Mutex::new(HashMap::new()),
+            view_starting: Mutex::new(HashSet::new()),
             starting: Mutex::new(HashSet::new()),
             interaction: riviu_core::InteractionLifecycleRegistry::default(),
             agents: Mutex::new(HashMap::new()),
             tiktok_packages: Mutex::new(HashMap::new()),
             ports: Mutex::new(HashMap::new()),
             forwarded: Mutex::new(HashSet::new()),
+            riviu_agent_apk,
+            helpers: Mutex::new(HashMap::new()),
         }
     }
 
@@ -238,6 +298,12 @@ impl AndroidDriver {
     /// can read.
     pub fn set_frame_sink(&self, sink: Arc<dyn riviu_core::FrameSink>) {
         *self.frame_sink.lock() = Some(sink);
+    }
+
+    /// Point the H.264 view path at the desktop hub. Separate from
+    /// [`Self::set_frame_sink`]: a missing view sink must not refuse minicap.
+    pub fn set_view_sink(&self, sink: Arc<dyn crate::view::ViewSink>) {
+        *self.view_sink.lock() = Some(sink);
     }
 
     /// The hub, or a refusal that names the fix.
@@ -628,6 +694,339 @@ impl AndroidDriver {
         self.take_and_stop_producer(serial).await;
     }
 
+    fn view_sink(&self) -> anyhow::Result<Arc<dyn crate::view::ViewSink>> {
+        self.view_sink.lock().clone().ok_or_else(|| {
+            anyhow!(
+                "no view sink is wired to the Android driver; call set_view_sink before \
+                 starting a view stream"
+            )
+        })
+    }
+
+    fn claim_view_start(&self, serial: &str) -> anyhow::Result<StartClaim<'_>> {
+        if !self.view_starting.lock().insert(serial.to_string()) {
+            anyhow::bail!("a scrcpy view start for {serial} is already in flight");
+        }
+        Ok(StartClaim {
+            starting: &self.view_starting,
+            serial: serial.to_string(),
+        })
+    }
+
+    /// A `start_view_stream` that still holds the claim. The keeper must not
+    /// treat this as a silent producer — there has been no packet yet.
+    pub fn view_start_in_flight(&self, serial: &str) -> bool {
+        self.view_starting.lock().contains(serial)
+    }
+
+    /// Live producer at either preset, or a start that still holds the claim.
+    /// The desktop keeper must not spawn a tile while overlay retune is mid-flight.
+    pub async fn view_is_active(&self, serial: &str) -> bool {
+        if self.view_start_in_flight(serial) {
+            return true;
+        }
+        self.view_is_running(serial, crate::scrcpy::ViewPreset::Tile)
+            .await
+            || self
+                .view_is_running(serial, crate::scrcpy::ViewPreset::Overlay)
+                .await
+    }
+
+    /// Whether this serial already has a live view at `preset`.
+    pub async fn view_is_running(&self, serial: &str, preset: crate::scrcpy::ViewPreset) -> bool {
+        let mut views = self.views.lock().await;
+        match views.get_mut(serial) {
+            Some(existing) => {
+                let alive = existing
+                    .child
+                    .try_wait()
+                    .map(|status| status.is_none())
+                    .unwrap_or(false);
+                alive
+                    && existing.preset == preset
+                    && !existing.reader.is_finished()
+                    && existing.generation > 0
+            }
+            None => false,
+        }
+    }
+
+    /// Start or retune the scrcpy view. Same process, new options: a live
+    /// producer at a different preset is stopped first. Does not touch minicap
+    /// or `StreamBudgetManager`.
+    pub async fn start_view_stream(
+        &self,
+        serial: &str,
+        preset: crate::scrcpy::ViewPreset,
+    ) -> anyhow::Result<u64> {
+        let sink = self.view_sink()?;
+        let claim = self.claim_view_start(serial)?;
+        if self.view_is_running(serial, preset).await {
+            return Ok(sink.generation(serial));
+        }
+        self.take_and_stop_view(serial).await;
+        let generation = sink.advance(serial);
+        self.spawn_view(serial, generation, preset).await?;
+        drop(claim);
+        Ok(generation)
+    }
+
+    /// Stop the view for one serial. `true` when nothing is left running,
+    /// including when there was nothing to stop.
+    pub async fn stop_view_stream(&self, serial: &str) -> bool {
+        self.take_and_stop_view(serial).await
+    }
+
+    /// Retune by restarting the same producer. Not a second `app_process`.
+    pub async fn set_view_preset(
+        &self,
+        serial: &str,
+        preset: crate::scrcpy::ViewPreset,
+    ) -> anyhow::Result<u64> {
+        self.start_view_stream(serial, preset).await
+    }
+
+    pub async fn stop_all_views(&self) {
+        let serials: Vec<String> = self.views.lock().await.keys().cloned().collect();
+        for serial in serials {
+            self.take_and_stop_view(&serial).await;
+        }
+    }
+
+    async fn take_and_stop_view(&self, serial: &str) -> bool {
+        let producer = self.views.lock().await.remove(serial);
+        match producer {
+            Some(producer) => self.stop_view_producer(serial, producer).await,
+            None => true,
+        }
+    }
+
+    async fn stop_view_producer(&self, serial: &str, mut producer: ViewProducer) -> bool {
+        producer.reader.abort();
+        let _ = producer.child.start_kill();
+        let confirmed = matches!(
+            tokio::time::timeout(CHILD_EXIT_TIMEOUT, producer.child.wait()).await,
+            Ok(Ok(_))
+        );
+        if !confirmed {
+            tracing::warn!(serial, "could not confirm the scrcpy child exited");
+        }
+        if let Err(error) =
+            crate::frames::remove_forward(&self.adb, serial, producer.host_port).await
+        {
+            tracing::warn!(
+                serial,
+                port = producer.host_port,
+                %error,
+                "could not remove the scrcpy forward"
+            );
+        }
+        confirmed
+    }
+
+    /// Kill leftover *our* 3.3.4 rows. The encoder argv has `Server 3.3.4`
+    /// and not the JAR path (`CLASSPATH` is environ). A grep for the JAR
+    /// only hits the `sh -c` wrapper and leaves OMX held — Note 8 then
+    /// hellos without an IDR. Never match GenFarmer (`Server 2.4`).
+    async fn stop_our_scrcpy_leftovers(&self, serial: &str) {
+        let listing = self
+            .adb
+            .shell(serial, crate::scrcpy::LEFTOVER_LIST_SCRIPT)
+            .await
+            .unwrap_or_default();
+        let mut unique = Vec::new();
+        for pid in listing
+            .split_whitespace()
+            .filter_map(|token| token.parse::<u32>().ok())
+            .filter(|pid| *pid > 0)
+        {
+            if !unique.contains(&pid) {
+                unique.push(pid);
+            }
+        }
+        for pid in &unique {
+            let _ = self.adb.shell(serial, &format!("kill {pid}")).await;
+        }
+        if !unique.is_empty() {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    }
+
+    async fn spawn_view(
+        &self,
+        serial: &str,
+        generation: u64,
+        preset: crate::scrcpy::ViewPreset,
+    ) -> anyhow::Result<()> {
+        let sink = self.view_sink()?;
+        let server = self.scrcpy_server.clone().ok_or_else(|| {
+            anyhow!(
+                "no scrcpy server configured: set RIVIU_SCRCPY_SERVER or ship \
+                 sidecars/android/noarch/scrcpy-server (AGENTS.md 9.50)"
+            )
+        })?;
+
+        crate::scrcpy::ensure_server(&self.adb, serial, &server).await?;
+        self.stop_our_scrcpy_leftovers(serial).await;
+
+        let scid = (rand::random::<u32>() & 0x7fff_ffff).max(1);
+        // Device listens (`tunnel_forward`). Spawn first. This Windows adb
+        // refuses the abstract socket if nothing is bound yet, so a TCP
+        // opened before listen EOFs and never becomes the video socket.
+        // Retry TCP only while dummy has not arrived (`NotListening`).
+        let mut child = tokio::process::Command::new(self.adb.path());
+        child
+            .args([
+                "-s",
+                serial,
+                "shell",
+                &crate::scrcpy::launch_command(scid, preset),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        child.creation_flags(0x0800_0000);
+        let mut child = child.spawn().context("spawn scrcpy-server")?;
+
+        let host_port = match crate::scrcpy::forward(&self.adb, serial, scid).await {
+            Ok(port) => port,
+            Err(error) => {
+                let _ = child.kill().await;
+                return Err(error);
+            }
+        };
+        let mut stream = None;
+        let mut last_error = None;
+        for attempt in 0..40 {
+            if child.try_wait().ok().flatten().is_some() {
+                crate::frames::remove_forward(&self.adb, serial, host_port)
+                    .await
+                    .ok();
+                anyhow::bail!(
+                    "scrcpy-server exited before it accepted a connection{}",
+                    scrcpy_exit_detail(&mut child).await
+                );
+            }
+            match crate::scrcpy::ScrcpyStream::try_accept(host_port).await {
+                Ok(accepted) => {
+                    stream = Some(accepted);
+                    break;
+                }
+                Err(crate::scrcpy::AcceptError::NotListening(error)) => {
+                    last_error = Some(error);
+                    if attempt + 1 < 40 {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+                Err(crate::scrcpy::AcceptError::Protocol(error)) => {
+                    crate::frames::remove_forward(&self.adb, serial, host_port)
+                        .await
+                        .ok();
+                    let _ = child.kill().await;
+                    return Err(error);
+                }
+            }
+        }
+        let Some(mut stream) = stream else {
+            crate::frames::remove_forward(&self.adb, serial, host_port)
+                .await
+                .ok();
+            let _ = child.kill().await;
+            return Err(last_error.unwrap_or_else(|| anyhow!("scrcpy never accepted a connection")));
+        };
+        let first =
+            match tokio::time::timeout(Duration::from_secs(8), stream.next_sync_sample()).await {
+                Ok(Ok(sample)) => sample,
+                Ok(Err(error)) => {
+                    crate::frames::remove_forward(&self.adb, serial, host_port)
+                        .await
+                        .ok();
+                    let _ = child.kill().await;
+                    return Err(error);
+                }
+                Err(_) => {
+                    crate::frames::remove_forward(&self.adb, serial, host_port)
+                        .await
+                        .ok();
+                    let _ = child.kill().await;
+                    anyhow::bail!("scrcpy produced no keyframe after the hello");
+                }
+            };
+        tracing::info!(
+            serial,
+            host_port,
+            generation,
+            preset = preset.as_str(),
+            codec = stream.hello.codec,
+            device = %stream.hello.device_name,
+            width = first.width,
+            height = first.height,
+            key = first.key,
+            bytes = first.bytes.len(),
+            idr = crate::scrcpy::annexb_has_idr(&first.bytes),
+            sps = crate::scrcpy::annexb_has_sps(&first.bytes),
+            "scrcpy view started"
+        );
+
+        let udid = serial.to_string();
+        let publisher = Arc::clone(&sink);
+        let first_packet = crate::view::ViewPacket {
+            udid: udid.clone(),
+            generation,
+            kind: crate::view::ViewKind::H264,
+            width: first.width,
+            height: first.height,
+            key: first.key,
+            bytes: first.bytes,
+        };
+        if !publisher.publish(first_packet) {
+            crate::frames::remove_forward(&self.adb, serial, host_port)
+                .await
+                .ok();
+            let _ = child.kill().await;
+            anyhow::bail!("view sink refused the first scrcpy sample");
+        }
+        let reader = tokio::spawn(async move {
+            loop {
+                match stream.next_sample().await {
+                    Ok(sample) => {
+                        let packet = crate::view::ViewPacket {
+                            udid: udid.clone(),
+                            generation,
+                            kind: crate::view::ViewKind::H264,
+                            width: sample.width,
+                            height: sample.height,
+                            key: sample.key,
+                            bytes: sample.bytes,
+                        };
+                        if !publisher.publish(packet) {
+                            tracing::info!(udid, generation, "scrcpy view superseded; stopping");
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(udid, generation, %error, "scrcpy view reader stopped");
+                        return;
+                    }
+                }
+            }
+        });
+
+        self.views.lock().await.insert(
+            serial.to_string(),
+            ViewProducer {
+                generation,
+                preset,
+                host_port,
+                child,
+                reader,
+            },
+        );
+        Ok(())
+    }
+
     fn host_port(&self, serial: &str) -> u16 {
         let mut ports = self.ports.lock();
         if let Some(port) = ports.get(serial) {
@@ -717,12 +1116,56 @@ impl AndroidDriver {
     pub async fn open_session(&self, udid: &str) -> anyhow::Result<AndroidUiSession> {
         let agent = self.ensure_agent(udid).await?;
         let screen = self.screen_size(udid).await?;
-        Ok(AndroidUiSession::new(
-            agent,
+        let helper = match self.try_attach_helper(udid).await {
+            Ok(helper) => helper,
+            Err(error) => {
+                tracing::warn!(
+                    serial = udid,
+                    %error,
+                    "Riviu helper is not attached; clipboard stays unsupported"
+                );
+                None
+            }
+        };
+        Ok(
+            AndroidUiSession::new(agent, self.adb.clone(), udid.to_string(), screen)
+                .with_helper(helper),
+        )
+    }
+
+    /// Attach the helper when it is already on the phone, or when an APK is
+    /// configured so we can install it. Missing both is normal and not an
+    /// error — nurture must not die because clipboard is unavailable.
+    async fn try_attach_helper(
+        &self,
+        serial: &str,
+    ) -> anyhow::Result<Option<crate::riviu_agent::HelperClient>> {
+        let cached = self.helpers.lock().get(serial).cloned();
+        if let Some(helper) = cached {
+            if helper.is_alive().await {
+                return Ok(Some(helper));
+            }
+            self.helpers.lock().remove(serial);
+        }
+        let installed = self
+            .adb
+            .shell(serial, &format!("pm path {}", crate::riviu_agent::PACKAGE))
+            .await
+            .unwrap_or_default()
+            .contains("package:");
+        if !installed && self.riviu_agent_apk.is_none() {
+            return Ok(None);
+        }
+        let helper = crate::riviu_agent::HelperClient::ensure(
             self.adb.clone(),
-            udid.to_string(),
-            screen,
-        ))
+            serial,
+            self.riviu_agent_apk.as_deref(),
+        )
+        .await?;
+        self.helpers
+            .lock()
+            .insert(serial.to_string(), helper.clone());
+        Ok(Some(helper))
     }
 
     /// Make sure the agent is installed, running and forwarded.
@@ -884,6 +1327,30 @@ impl AndroidDriver {
             .spawn()
             .with_context(|| format!("start the agent on {serial}"))?;
         Ok(())
+    }
+}
+
+/// Last stderr from a dead `adb shell` scrcpy. 3.3.4 prints the real
+/// reason there (`'=' expected` on a bad codec option) and then exits;
+/// without this the tile only says "exited before it accepted".
+async fn scrcpy_exit_detail(child: &mut tokio::process::Child) -> String {
+    use tokio::io::AsyncReadExt;
+    let Some(mut stderr) = child.stderr.take() else {
+        return String::new();
+    };
+    let mut buf = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_millis(200), stderr.read_to_end(&mut buf)).await;
+    let text: String = String::from_utf8_lossy(&buf)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(6)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", text.chars().take(280).collect::<String>())
     }
 }
 
