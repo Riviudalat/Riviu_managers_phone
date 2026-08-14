@@ -541,6 +541,53 @@ impl AndroidDriver {
         Ok(first_frame_observed)
     }
 
+    /// What the phone says about its own display, for a caller that needs to explain
+    /// itself rather than act.
+    ///
+    /// `None` is unknown, never "asleep": this fleet spans Android 9 to 15 and they do
+    /// not print the same `dumpsys` bodies. Exposed because the desktop's view watchdog
+    /// logs through `log` while this crate emits `tracing`, which currently reaches no
+    /// sink — so the only way an operator sees *why* a view went silent is for the app
+    /// layer to ask and say it.
+    pub async fn display_is_awake(&self, serial: &str) -> Option<bool> {
+        let power = self.adb.shell(serial, "dumpsys power").await.ok()?;
+        adb::parse_display_awake(&power)
+    }
+
+    /// Wake the screen before capturing it, because a sleeping one encodes nothing.
+    ///
+    /// [`Self::refuse_undrivable_screen`] already knew this for minicap and *refuses*;
+    /// the view path must not, and the difference is the caller. Nurture is asking to
+    /// drive a phone and a refusal sends the operator to unlock it. The tile grid is
+    /// asking to watch every phone at once: refusing there gives a black tile and a
+    /// watchdog that restarts the encoder every five seconds forever, which is exactly
+    /// what a sleeping Redmi did on 14/08/2026 until one keyevent fixed it.
+    ///
+    /// Best effort on purpose. A phone that will not wake may still have a screen worth
+    /// capturing, and trading a working tile for none because a keyevent failed is a
+    /// worse outcome than a dim one. Logged at info when the display really was asleep,
+    /// so the watchdog's "published nothing" line has a cause next to it instead of
+    /// repeating anonymously.
+    async fn wake_display_for_capture(&self, serial: &str) {
+        let awake = match self.adb.shell(serial, "dumpsys power").await {
+            Ok(power) => adb::parse_display_awake(&power),
+            Err(_) => None,
+        };
+        if !adb::should_wake_before_capture(awake) {
+            return;
+        }
+        match self.adb.shell(serial, adb::WAKE_KEYEVENT).await {
+            Ok(_) => {
+                if awake == Some(false) {
+                    tracing::info!(%serial, "display was asleep; woke it before capturing");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%serial, %error, "could not wake before capturing");
+            }
+        }
+    }
+
     /// Refuse a screen minicap cannot compose from, before anything is spawned.
     ///
     /// Two separate conditions, and the second is the one that bites: measured on a
@@ -865,6 +912,8 @@ impl AndroidDriver {
                  sidecars/android/noarch/scrcpy-server (AGENTS.md 9.50)"
             )
         })?;
+
+        self.wake_display_for_capture(serial).await;
 
         crate::scrcpy::ensure_server(&self.adb, serial, &server).await?;
         self.stop_our_scrcpy_leftovers(serial).await;

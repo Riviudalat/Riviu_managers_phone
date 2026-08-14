@@ -35,9 +35,13 @@ bình luận, tự đóng popup. Hai nền tảng sau một control plane: iPhon
 | Literal `riviu-managers-phone` ở `state.rs::resolve_desktop_data_dir` và `SERVICE` trong `credentials.rs` — **không** suy ra từ `identifier`. Giữ nguyên chính là thứ bảo toàn SQLite (campaign, flow, cấu hình) và token agent trong Keychain. Đổi chúng là mất dữ liệu thuần, đổi lại con số 0. |
 | Tên crate/binary `riviu-managers-phone` — không lộ ra người dùng, đổi thì lan sang workflow và `driver.ps1` `$ProcName` mà không được gì. |
 
-Hệ quả đã biết và đã chấp nhận: `identifier` đổi nên máy đang chạy `v0.1.1` sẽ nhận
-bản cập nhật kế tiếp thành **một app thứ hai nằm cạnh**, không phải nâng cấp đè.
-Dữ liệu không mất (thư mục data không đổi), nhưng người vận hành phải tự gỡ bản cũ.
+Hệ quả đã biết và đã chấp nhận: máy đang chạy `v0.1.1` sẽ nhận bản cập nhật kế tiếp
+thành **một app thứ hai nằm cạnh**, không phải nâng cấp đè. SQLite và token không mất
+(chúng khoá theo tên crate, không theo `identifier`), nhưng người vận hành phải tự gỡ
+bản cũ. **Đính chính 14/08 — xem 9.56:** nguyên nhân là **`productName`**, không phải
+`identifier` như câu này viết ban đầu; và cái giá thật nặng hơn "phải tự gỡ": bộ cài do
+updater chạy kèm `/UPDATE` nên **không tạo shortcut**, khiến mọi shortcut cũ vẫn mở
+`v0.1.1` và bản cập nhật bị mời lại **mãi mãi**.
 
 ```
 apps/desktop/          Tauri app (React UI + lệnh Rust)
@@ -5006,6 +5010,87 @@ JPEG preview không đè UDID đang có H.264. Nurture vẫn `tap()` cũ. Không
 đưa scrcpy vào `StreamHub`. Không retune overlay khi bấm Start. Không
 `pkill` GenFarmer `Server 2.4`. WebSocket xem nối lại khi đứt; keeper
 restart scrcpy im > 5 s.
+
+### 9.56 Tile đen vì máy ngủ; và ba đính chính cho hồ sơ đổi tên (14/08/2026)
+
+**Triệu chứng người vận hành thấy:** mở app lên, một máy hiện tile đen với "Đang mở
+stream…" mãi, `Thiết bị 1/2`. Máy còn lại stream bình thường.
+
+**Nguyên nhân, đo được:** máy đó đang **ngủ** (`mWakefulness=Asleep`). Màn hình tắt thì
+display ảo scrcpy quay **không sinh frame nào**, nên watchdog 5 giây coi là producer im
+lặng và khởi động lại encoder — **mỗi 30 giây, vô tận**. Producer vẫn sống; chỉ là không
+có gì để encode. Một `KEYCODE_WAKEUP` là tile sống ngay, `1/2 → 2/2`.
+
+**Điều đáng nói nhất: repo đã biết chuyện này từ 11/08 và đường mới không thừa hưởng.**
+`refuse_undrivable_screen` (`driver.rs`) có đúng câu "minicap composes nothing while the
+screen is off" — nhưng nó chỉ được gọi **một chỗ**, đường stream minicap. `spawn_view`
+của scrcpy thêm sau đó **không kiểm màn hình gì cả**. Bài học không phải "thiếu kiến
+thức" mà là **kiến thức đã có mà đường mới không đi qua chỗ giữ nó**.
+
+**Sửa: đánh thức, không từ chối.** Cùng một sự thật nhưng người gọi khác nhau, nên câu
+trả lời khác nhau: nurture *đòi điều khiển* một máy nên từ chối là đúng, người vận hành
+đi mở khoá. Lưới tile *chỉ xem*, mà ở đó từ chối cho ra tile đen cộng vòng restart vô
+tận. Nên `spawn_view` gọi `wake_display_for_capture` — chỗ nghẽn duy nhất mà mọi lối mở
+view đều đi qua (tile, overlay, retune).
+
+Ba chi tiết chống chân:
+
+* **`KEYCODE_WAKEUP`, tuyệt đối không `KEYCODE_POWER`.** POWER **đảo trạng thái**, nên
+  trên máy đang thức nó sẽ **tắt màn hình** — tái tạo đúng triệu chứng cần chữa. Có test
+  ghim vì hai hằng số đọc gần như y nhau.
+* **Không đọc được `dumpsys` thì vẫn đánh thức.** Hai cái giá không đối xứng: đánh thức
+  một máy đang thức tốn một keyevent idempotent, còn bỏ qua một máy đang ngủ tốn một tile
+  đen vĩnh viễn. Ngược hẳn với mặc định của bên *từ chối*, và doc nói rõ vì sao.
+* **Best effort.** Máy không đánh thức được vẫn có thể có màn hình đáng quay; đổi một
+  tile đang chạy lấy không có gì vì một keyevent lỗi là tệ hơn.
+
+**Cảnh báo giờ nêu nguyên nhân.** Suốt hai tuần dòng log chỉ có một dạng, giống nhau dù
+encoder chết hay máy ngủ — mà gần như luôn là cái thứ hai. Giờ là
+`published nothing for 5s (display asleep|display awake|display state unreadable)`.
+Nghiệm thu: cho Redmi ngủ, không chạm gì thêm — `Dozing → Asleep → Awake ở t+12s`, tile
+sống lại, và log in đúng `(display asleep)`. Lần Note 8 im lặng **khi đang thức** cũng
+xuất hiện trong log — đó mới là ca restart là câu trả lời đúng, và giờ phân biệt được.
+
+#### Việc chưa làm, tìm ra khi sửa cái trên: `tracing` không có sink nào
+
+`crates/android-driver` và `crates/core` phát `tracing::warn!`/`info!`, nhưng app **không
+cài subscriber nào** và `tracing-subscriber`/`tracing-log` **không có trong `Cargo.lock`**.
+Nghĩa là mọi cảnh báo của hai crate đó **đi vào hư không** — kể cả
+`adb kill-server: every tool on this machine loses its adb connection`, đúng loại câu cần
+đọc được nhất. Chỉ `log::` (dùng ở `apps/desktop/src-tauri`) mới ra `tauri-plugin-log`.
+
+**Cố ý chưa sửa ở đây:** nối tracing là chạm dependency của binary phát hành, việc riêng
+với cái bug UI này. Đó cũng là lý do `display_is_awake` được để `pub` và câu nêu nguyên
+nhân đặt ở `state.rs` chứ không ở driver: để thông báo ra được cái log đang hoạt động.
+
+#### Đính chính hồ sơ đổi tên: lever là `productName`, không phải `identifier`
+
+Đọc thẳng template NSIS của Tauri 2.11.4 (không đoán):
+
+| thứ quyết định nâng-cấp-hay-cài-song-song | dựng từ |
+|---|---|
+| khoá Add/Remove Programs (`UNINSTKEY`) | `${PRODUCTNAME}` |
+| khoá nhớ nơi đã cài (`MANUPRODUCTKEY`) | `Software\${MANUFACTURER}\${PRODUCTNAME}` |
+| thư mục cài mặc định (`$INSTDIR`) | `$LOCALAPPDATA\${PRODUCTNAME}` |
+
+`BUNDLEID` **không xuất hiện** trong bất kỳ dòng nào trong ba dòng đó — nó chỉ dùng để dọn
+thư mục app-data lúc gỡ, cho protocol deep-link, và cho AppUserModelId của shortcut. Nên:
+
+* Đổi `productName` **một mình đã đủ** biến cập nhật thành cài song song.
+* Đổi `identifier` **không** ảnh hưởng quyết định đó, nhưng nó **di chuyển profile
+  WebView2** (`$LOCALAPPDATA\${BUNDLEID}`) — tức `localStorage` mất, gồm `riviu.tile.width`
+  và `riviu.focus.width`. Câu "dữ liệu không mất" đúng với SQLite, không đúng với cái này.
+* Hai bản dùng **cùng tên tiến trình** `riviu-managers-phone.exe`, nên `CheckIfAppIsRunning`
+  không phân biệt được và bộ cài mới **giết bản cũ đang chạy** mà không hỏi (passive mode).
+* Nặng nhất: updater chạy bộ cài với `/UPDATE`, cờ này **chặn tạo shortcut**. Bản thứ hai
+  không có shortcut nào, shortcut cũ vẫn mở `v0.1.1`, nên **app cứ mời lại đúng bản cập
+  nhật đó mãi** — "cập nhật thành công" mà không có gì đổi.
+
+**Thực tế hiện tại làm chuyện này còn là lý thuyết:** đếm tải của `v0.1.1` cho 2 lượt
+`setup.exe` (**cả hai là của tôi** lúc nghiệm thu bằng range-GET) và 3 lượt `.msi` (1 của
+tôi). Máy này **không có bản nào được cài** — không entry uninstall, không khoá
+`HKCU\Softwareiviu`. Nên quyết định đã ghi vẫn giữ; chỉ nguyên nhân và cái giá là cần
+viết lại cho đúng.
 
 ### 9.55 Default AI OpenRouter Luna, và scrcpy chết vì sai form codec option (14/08/2026)
 

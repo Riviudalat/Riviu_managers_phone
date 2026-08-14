@@ -646,6 +646,32 @@ pub fn parse_display_awake(stdout: &str) -> Option<bool> {
     })
 }
 
+/// The keyevent that wakes a screen without ever putting one to sleep.
+///
+/// `KEYCODE_POWER` **toggles**, so on a phone that is already awake it would blank the
+/// screen — the exact opposite of what a caller starting a capture wants, and a failure
+/// that would look like the bug it was meant to fix. `KEYCODE_WAKEUP` only wakes, and is
+/// a no-op on an awake phone.
+pub const WAKE_KEYEVENT: &str = "input keyevent KEYCODE_WAKEUP";
+
+/// Whether to send [`WAKE_KEYEVENT`] before capturing this phone's screen.
+///
+/// Measured 14/08/2026 on a Redmi Note 12 (Android 15) whose screen had gone to sleep:
+/// scrcpy started, encoded nothing at all, and the desktop's five-second watchdog
+/// restarted it every cycle forever — the producer was alive, there was simply no frame
+/// to encode. One `KEYCODE_WAKEUP` and the tile went live immediately, fleet count
+/// `1/2` → `2/2`. The same fact was already recorded for minicap on 11/08 in
+/// `refuse_undrivable_screen`; the scrcpy view path added later never inherited it.
+///
+/// Unknown counts as "send it". Waking an awake phone costs one idempotent keyevent,
+/// while skipping it on a sleeping one costs a permanently black tile — so when
+/// `dumpsys` cannot be read, the cheap side is the safe side. This is deliberately the
+/// opposite default from [`parse_display_awake`]'s callers that *refuse*: refusing on a
+/// guess strands a working phone, waking on a guess costs nothing.
+pub fn should_wake_before_capture(display_awake: Option<bool>) -> bool {
+    !matches!(display_awake, Some(true))
+}
+
 /// Whether the lock screen is up, from `dumpsys window`.
 ///
 /// **This is the check `mWakefulness` cannot make.** Measured on a locked Redmi
@@ -963,6 +989,25 @@ mod tests {
         assert_eq!(parse_display_awake("mWakefulness=Asleep"), Some(false));
         assert_eq!(parse_display_awake("  mWakefulness=Dozing  "), Some(false));
         assert_eq!(parse_display_awake("mWakefulness=Dreaming"), Some(false));
+    }
+
+    #[test]
+    fn a_sleeping_or_unreadable_display_is_woken_before_capture() {
+        // Unknown deliberately errs toward waking. The two costs are not symmetric: a
+        // wake on an awake phone is one idempotent keyevent, while skipping it on a
+        // sleeping one is a black tile and a watchdog restarting the encoder forever.
+        assert!(should_wake_before_capture(Some(false)));
+        assert!(should_wake_before_capture(None));
+        assert!(!should_wake_before_capture(Some(true)));
+    }
+
+    #[test]
+    fn the_wake_keyevent_can_never_put_a_screen_to_sleep() {
+        // KEYCODE_POWER toggles, so using it here would blank an already-awake phone
+        // and reproduce the very symptom this exists to remove. Pinned because the two
+        // constants read almost identically at a glance.
+        assert!(WAKE_KEYEVENT.contains("KEYCODE_WAKEUP"), "{WAKE_KEYEVENT}");
+        assert!(!WAKE_KEYEVENT.contains("KEYCODE_POWER"), "{WAKE_KEYEVENT}");
     }
 
     #[test]

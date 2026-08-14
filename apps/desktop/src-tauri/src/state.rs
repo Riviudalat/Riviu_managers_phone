@@ -817,8 +817,20 @@ impl AppState {
                             ) {
                                 continue;
                             }
+                            // Name the cause, because for the first two weeks of this
+                            // path there was only ever one line and it was the same
+                            // whether the encoder had died or the phone had simply gone
+                            // to sleep — and it is nearly always the second, which the
+                            // restart now fixes by waking the screen. An anonymous
+                            // "published nothing" sent the reader looking at scrcpy.
+                            let display = match android.display_is_awake(&device.udid).await {
+                                Some(true) => "display awake",
+                                Some(false) => "display asleep",
+                                None => "display state unreadable",
+                            };
                             log::warn!(
-                                "android view for {} published nothing for {}s; restarting scrcpy",
+                                "android view for {} published nothing for {}s ({display}); \
+                                 restarting scrcpy",
                                 device.udid,
                                 ANDROID_VIEW_SILENCE.as_secs()
                             );
