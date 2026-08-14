@@ -53,13 +53,19 @@ pub fn run() {
             };
             window.show()?;
             window.set_focus()?;
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
+            // Registered in release too, at Warn. It used to be debug-only, which meant
+            // an operator hitting a driver failure had no record of it anywhere -- and
+            // the driver's warnings are exactly the ones worth keeping: a scrcpy server
+            // that ignored SIGTERM, a reclaimed leaked forward, a producer restart.
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(if cfg!(debug_assertions) {
+                        log::LevelFilter::Info
+                    } else {
+                        log::LevelFilter::Warn
+                    })
+                    .build(),
+            )?;
 
             let handle = app.handle().clone();
             let resource_dir = app.path().resource_dir().ok();

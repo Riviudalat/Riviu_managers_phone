@@ -70,6 +70,7 @@ public class RiviuWin32 {
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
     [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, IntPtr extra);
+    [DllImport("user32.dll")] public static extern uint GetDoubleClickTime();
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
@@ -525,6 +526,38 @@ function Invoke-Click {
     [void][RiviuWin32]::SetCursorPos($saved.X, $saved.Y)
 }
 
+function Invoke-DblClick {
+    if ($Rest.Count -lt 2) { throw 'usage: driver.ps1 dblclick <x> <y>   (window-relative)' }
+    $x = [int]$Rest[0]; $y = [int]$Rest[1]
+    $saved = New-Object 'RiviuWin32+POINT'
+    [void][RiviuWin32]::GetCursorPos([ref]$saved)
+    # Both clicks in ONE process, for the same reason `fill` exists: two `click`
+    # invocations are two processes and the gap between them is far wider than the
+    # double-click interval, so they arrive as two single clicks. Device tiles open
+    # their control overlay on double-click and merely select on a single click, so
+    # the difference is not cosmetic.
+    Use-RaisedWindow -SettleMs 900 -Activate -Body {
+        param($win)
+        $sx = $win.Left + $x; $sy = $win.Top + $y
+        Write-Step "dblclick window($x,$y) -> screen($sx,$sy)"
+        [void][RiviuWin32]::SetCursorPos($sx, $sy)
+        Start-Sleep -Milliseconds 250
+        # Measured, not assumed: at a 125 ms gap this arrived as two SINGLE clicks --
+        # the tile toggled selection on and back off and its dblclick handler never
+        # ran. `Start-Sleep` has ~15 ms granularity here, so the nominal gap is not
+        # what the window sees. Both clicks now go out back-to-back with no sleep
+        # between them, which is well inside GetDoubleClickTime on any setting.
+        $dctime = [RiviuWin32]::GetDoubleClickTime()
+        Write-Step "double-click interval is ${dctime}ms; sending both clicks with no gap"
+        [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [IntPtr]::Zero)
+        [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [IntPtr]::Zero)
+        [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [IntPtr]::Zero)
+        [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 1200
+    }
+    [void][RiviuWin32]::SetCursorPos($saved.X, $saved.Y)
+}
+
 function Invoke-Fill {
     if ($Rest.Count -lt 3) { throw 'usage: driver.ps1 fill <x> <y> <text>' }
     $x = [int]$Rest[0]; $y = [int]$Rest[1]
@@ -781,6 +814,7 @@ switch ($Command.ToLowerInvariant()) {
     'status'  { Invoke-Status }
     'shot'    { Invoke-Shot }
     'click'   { Invoke-Click }
+    'dblclick' { Invoke-DblClick }
     'fill'    { Invoke-Fill }
     'type'    { Invoke-Type }
     'key'     { Invoke-Key }

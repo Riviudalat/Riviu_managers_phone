@@ -5011,6 +5011,84 @@ JPEG preview không đè UDID đang có H.264. Nurture vẫn `tap()` cũ. Không
 `pkill` GenFarmer `Server 2.4`. WebSocket xem nối lại khi đứt; keeper
 restart scrcpy im > 5 s.
 
+### 9.60 `adb forward` song lau hon app, va vi sao no lam man hinh den (14/08/2026)
+
+Nguoi van hanh bao "stream den". Do duoc, khong doan:
+
+| do duoc | y nghia |
+|---|---|
+| `adb forward --list` co 5 forward tro toi socket scrcpy da chet, tren 2 may | rac tich luy |
+| moi forward mot `scid` khac nhau | `prune_forwards` khop **dung ten** nen khong bao gio thay |
+| Redmi con 2 `app_process` giu encoder | server phia may song sot |
+| `ps -A -o CMD \| grep genymobile` tra ve **0** ca hai may | `ps` cat argv -- phai doc `/proc/*/cmdline` |
+
+**`adb forward` nam trong adb server, khong nam trong app.** Nen crash, force-quit, hay
+bat ky kieu dung tien trinh nao khong chay `stop_view_producer` deu de lai forward ma
+khong con ai xoa. Moi duong loi trong `spawn_view` **da** goi `remove_forward`, nen ro ri
+khong nam trong mot lan chay -- no nam **giua cac lan chay**.
+
+Hau qua khong phai mot cong bi lang phi: mot ket noi TCP moi roi vao forward chet se khong
+bao gio nhan byte dummy cua scrcpy, desktop bao "published nothing for 5s" roi thu lai mai,
+moi vong lai ro them mot cai.
+
+Sua: `prune_scrcpy_forwards(adb, serial, FORWARD_PREFIX, keep)` -- khop theo **tien to**
+(`localabstract:scrcpy_`), tru nhung host port ma producer dang song dang giu (`keep` lay
+tu `self.views`). `keep` la thu khien no an toan khi may khac dang stream.
+
+Danh doi da biet, noi thang: scrcpy cua ben thu ba tren cung may cung dat ten socket
+`scrcpy_*` va khong co cach nao phan biet trong listing. Prune se cat phien cua no. Repo da
+ghi cung loai hiem hoa nay cho `adb kill-server`; khac biet la cai nay chi trong pham vi
+mot serial ma ta sap dieu khien.
+
+Nua thu hai: `stop_our_scrcpy_leftovers` gui `kill` (SIGTERM) roi **khong kiem lai**. Server
+dang tac trong MediaCodec khong buoc phai nghe. No giu encoder, nen server moi that
+`MediaCodec.configure` va tile den. Gio co mot vong xac nhan roi `kill -9`, dung mot lan --
+neu SIGKILL khong an thi ta khong the giet duoc va thu lai cung vo nghia.
+
+**Nghiem thu tren may that:** forward chet cua ca hai may bi thu hoi, `tcp:6790` cua agent
+**van song**, moi may dung mot forward khop `host_port` da log. Chay 3 phut lien: khong
+restart, khong warning, ca hai tile ve that (danh sach thong bao cua Redmi doi noi dung
+giua hai lan chup -- bang chung no khong dong bang).
+
+### 9.61 `tracing` khong co sink: mot gio chan doan bi mu (14/08/2026)
+
+`tauri-dev.log` **khong co mot dong nao** cua driver trong khi hai may restart producer
+theo vong lap. Ly do: moi chan doan trong workspace la macro `tracing::`, va khong he co
+subscriber nao duoc cai. `tauri-plugin-log` co dang ky nhung no thu `log`, khong thu
+`tracing`.
+
+Sua nho nhat va du: bat feature `log` cua `tracing` -- khi khong co subscriber, `tracing`
+phat ra ban ghi `log`, dung cai ma plugin dang thu. Mot dong trong `Cargo.toml`, mot dong
+trong `Cargo.lock`, khong can mang.
+
+Cung luc do bo `cfg!(debug_assertions)` quanh viec dang ky plugin: truoc day ban release
+**khong ghi gi ca**, nen nguoi van hanh gap loi driver thi khong co dau vet o dau. Release
+gio ghi tu Warn -- va warning cua driver dung la loai dang giu: server phot lo SIGTERM,
+forward ro ri duoc thu hoi, producer restart.
+
+Ngay sau khi bat, dong dau tien doc duoc da tra loi cau hoi ma truoc do phai doan:
+
+```
+[riviu_android_driver::driver][INFO] scrcpy view started serial="ce06..." host_port=58449
+  generation=1 preset="tile" codec=1748121140 device=SM-N950F width=232 height=480
+  key=true bytes=11517 idr=true sps=true
+```
+
+Bai hoc de lai: **truoc khi chan doan bat cu gi o duong video, kiem `tauri-dev.log` co dong
+`riviu_android_driver` nao khong.** Neu khong co thi khong phai "im lang binh thuong", la
+log dang bi bo di.
+
+### 9.62 `dblclick` trong `driver.ps1`: hai click roi rac khong phai mot double-click (14/08/2026)
+
+Tile mo overlay bang double-click va chi **chon** bang click don, nen khong co lenh nao
+trong harness mo duoc overlay -- `click` hai lan la hai tien trinh, khoang cach giua chung
+rong hon nhieu so voi khoang double-click.
+
+Lan dau viet voi `$gap = GetDoubleClickTime() / 4` (125ms) van **that**: tile chon roi bo
+chon (`Da chon 0`) va `onDoubleClick` khong bao gio chay. `Start-Sleep` o day co do hat
+~15ms nen khoang danh nghia khong phai khoang ma cua so nhan duoc. Gui ca hai click lien
+tiep khong sleep thi dat -- overlay mo va ve video that.
+
 ### 9.59 Bon hanh dong thiet bi, va ba thu do duoc lat nguoc thiet ke (14/08/2026)
 
 Nguoi van hanh xin bon thu con thieu so voi GenFarmer, tru Wallpaper: **AdbCommand,
