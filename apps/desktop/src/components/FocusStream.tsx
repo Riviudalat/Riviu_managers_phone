@@ -9,11 +9,15 @@ import {
   deviceTap,
   groupInput,
   rebootDevice,
+  installIpa,
   restoreDevice,
   saveViewSnapshot,
   screenshot,
+  setScreenRotation,
 } from "../api";
 import { InstalledApps } from "./InstalledApps";
+import { AdbConsole } from "./AdbConsole";
+import { pickFile } from "../pickFile";
 import { pickDirectory } from "../pickFile";
 import { requestConfirm } from "../confirmStore";
 import { pushToast, toastError } from "../toastStore";
@@ -64,6 +68,7 @@ export function FocusStream({ device, index, onClose, groupUdids, groupMode }: P
   const viewSize = useViewSize(device.udid);
   const [busy, setBusy] = useState(false);
   const [showApps, setShowApps] = useState(false);
+  const [showAdb, setShowAdb] = useState(false);
   const [frameWidth, setFrameWidth] = useState(() => loadZoom(FOCUS_ZOOM));
   const screenRef = useRef<HTMLDivElement>(null);
   const drag = useRef<{ x: number; y: number } | null>(null);
@@ -325,6 +330,57 @@ export function FocusStream({ device, index, onClose, groupUdids, groupMode }: P
       run: () => void pressKey("power"),
     },
     {
+      // GenFarmer has this row here, in this panel, immediately after Power button —
+      // which is why it also lives here and not only in the tile's right-click menu.
+      id: "rotate",
+      label: "Quay màn hình",
+      Icon: IconRefresh,
+      androidOnly: true,
+      disabled: busy,
+      run: () => {
+        void setScreenRotation(device.udid, 1)
+          .then((observed) =>
+            observed === 1
+              ? pushToast("ok", "Đã quay ngang")
+              : pushToast(
+                  "warn",
+                  "Máy không quay",
+                  "App đang mở khoá hướng dọc nên hệ thống bỏ qua yêu cầu.",
+                ),
+          )
+          .catch((error) => toastError("Quay màn hình thất bại", error));
+      },
+    },
+    {
+      id: "installApk",
+      label: "Cài APK",
+      Icon: IconUpload,
+      androidOnly: true,
+      disabled: busy,
+      run: () => {
+        void (async () => {
+          const path = await pickFile({
+            title: "Chọn APK",
+            filters: [{ name: "APK", extensions: ["apk"] }],
+          });
+          if (!path) return;
+          try {
+            await installIpa(device.udid, path);
+            pushToast("ok", "Đã cài APK");
+          } catch (error) {
+            toastError("Cài APK thất bại", error);
+          }
+        })();
+      },
+    },
+    {
+      id: "adb",
+      label: "Lệnh adb",
+      Icon: IconGrid,
+      androidOnly: true,
+      run: () => setShowAdb(true),
+    },
+    {
       id: "notification",
       label: "Thông báo",
       Icon: IconBell,
@@ -470,6 +526,7 @@ export function FocusStream({ device, index, onClose, groupUdids, groupMode }: P
             })}
           </div>
           {showApps && <InstalledApps udid={device.udid} deviceName={device.name} />}
+          {showAdb && <AdbConsole device={device} onClose={() => setShowAdb(false)} />}
           <nav className="focus-navbar" aria-label="Phím điều hướng">
             {navKeys.map(({ key, title, Icon }) => (
               <button

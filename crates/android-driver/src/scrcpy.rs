@@ -89,10 +89,21 @@ impl ViewPreset {
     /// refuse. 480 is the size that returned a packet on the Redmi in the 3.3.4/4.1
     /// probe and lifts the level off 1.3 (14/08/2026). So quality below Medium buys a
     /// smaller bitrate, never a smaller frame.
+    ///
+    /// **Overlay is sized from how large it is displayed, not from what encodes.**
+    ///
+    /// 600 was upscaling badly and the operator saw it as a broken picture. The
+    /// arithmetic: `max_size` caps the **long** edge, so a 1080×2400 phone encoded at 600
+    /// is 270 px wide, while the overlay displays it at 400 px by default and up to 760
+    /// (`FOCUS_ZOOM` in `zoom.ts`) — a 1.48× upscale at rest and 2.81× at full zoom.
+    ///
+    /// 1600 on the long edge is 720 px wide on that phone, so the default 400 is a
+    /// downscale and even full zoom is 1.06×. This is one phone at a time, not sixteen
+    /// tiles, which is what makes the larger encode affordable.
     pub fn max_size(self) -> u32 {
         match self {
             Self::Tile => 480,
-            Self::Overlay => 600,
+            Self::Overlay => 1600,
         }
     }
 
@@ -104,7 +115,10 @@ impl ViewPreset {
     pub fn bit_rate(self) -> u32 {
         match self {
             Self::Tile => 1_200_000,
-            Self::Overlay => 1_500_000,
+            // Raised with the frame size above. 1.5 Mbps was chosen for a 270-px-wide
+            // encode; spending the same on 720 px would trade a soft upscale for a
+            // blocky one on TikTok motion.
+            Self::Overlay => 4_000_000,
         }
     }
 
@@ -129,11 +143,16 @@ impl ViewPreset {
     /// scrcpy for an unbounded rate and a 120 asks for one no phone here delivers.
     pub fn tuned(self, quality: riviu_core::StreamQuality, fps: u32) -> ViewTuning {
         let floor = self.max_size();
+        let base = self.bit_rate();
+        // Relative to the preset's own bitrate, not absolute numbers. Absolute ones made
+        // High *worse* than Medium the moment Overlay's base moved to 4 Mbps — a higher
+        // setting that degrades the picture is the kind of thing nobody reports as a bug,
+        // they just stop trusting the control.
         let (size, bit_rate) = match quality {
-            riviu_core::StreamQuality::Low => (floor, 600_000),
-            riviu_core::StreamQuality::Medium => (floor, self.bit_rate()),
-            riviu_core::StreamQuality::High => (floor * 3 / 2, 2_000_000),
-            riviu_core::StreamQuality::Extra => (floor * 2, 3_000_000),
+            riviu_core::StreamQuality::Low => (floor, base / 2),
+            riviu_core::StreamQuality::Medium => (floor, base),
+            riviu_core::StreamQuality::High => (floor * 3 / 2, base * 3 / 2),
+            riviu_core::StreamQuality::Extra => (floor * 2, base * 2),
         };
         ViewTuning {
             max_size: size,
@@ -619,6 +638,20 @@ mod tests {
     }
 
     #[test]
+    fn the_overlay_encode_is_wide_enough_for_the_size_it_is_shown_at() {
+        // The bug the operator reported as a broken picture. `max_size` caps the LONG
+        // edge, so on a 1080x2400 phone the encoded width is max_size * 1080/2400. The
+        // overlay displays up to 760 px wide (FOCUS_ZOOM.max in zoom.ts), and an encode
+        // narrower than that is upscaled — 600 gave 270 px and a 2.81x stretch.
+        const FOCUS_MAX_DISPLAY_WIDTH: u32 = 760;
+        let encoded_width = ViewPreset::Overlay.max_size() * 1080 / 2400;
+        assert!(
+            encoded_width >= FOCUS_MAX_DISPLAY_WIDTH * 9 / 10,
+            "overlay encodes {encoded_width}px wide but is shown at up to              {FOCUS_MAX_DISPLAY_WIDTH}px"
+        );
+    }
+
+    #[test]
     fn low_quality_lowers_the_bitrate_and_never_the_frame_size() {
         // The load-bearing safety property. 176 fails MediaCodec.configure on the Redmi
         // and 320 gives the Note 8 a Baseline L1.3 SPS WebView2 can refuse, so a
@@ -658,6 +691,24 @@ mod tests {
         .map(|q| ViewPreset::Tile.tuned(q.clone(), 24).max_size)
         .collect();
         assert!(sizes.windows(2).all(|w| w[0] <= w[1]), "{sizes:?}");
+
+        // Bitrate too, on BOTH presets. Checking only the size is what let an absolute
+        // mapping ship High at 2 Mbps against Medium's 4 — higher and visibly worse.
+        for preset in [ViewPreset::Tile, ViewPreset::Overlay] {
+            let rates: Vec<u32> = [
+                riviu_core::StreamQuality::Low,
+                riviu_core::StreamQuality::Medium,
+                riviu_core::StreamQuality::High,
+                riviu_core::StreamQuality::Extra,
+            ]
+            .iter()
+            .map(|q| preset.tuned(q.clone(), 24).bit_rate)
+            .collect();
+            assert!(
+                rates.windows(2).all(|w| w[0] <= w[1]),
+                "{preset:?} {rates:?}"
+            );
+        }
     }
 
     #[test]
@@ -676,12 +727,12 @@ mod tests {
             1,
             ViewPreset::Overlay.tuned(riviu_core::StreamQuality::Medium, riviu_core::STREAM_FPS),
         );
-        assert!(command.contains("max_size=600"), "{command}");
+        assert!(command.contains("max_size=1600"), "{command}");
         assert!(
             command.contains(&format!("max_fps={}", riviu_core::STREAM_FPS)),
             "{command}"
         );
-        assert!(command.contains("video_bit_rate=1500000"), "{command}");
+        assert!(command.contains("video_bit_rate=4000000"), "{command}");
         assert_eq!(ViewPreset::parse("overlay").unwrap(), ViewPreset::Overlay);
         assert!(ViewPreset::parse("hevc").is_err());
     }
