@@ -10,11 +10,15 @@ import type { DeviceInfo } from "./types";
  * 40 s, then force `tileStreamState = Parked`. Tile Start already did the
  * right thing; this is the one function both buttons must share.
  */
-export function startDevicePreview(device: DeviceInfo): Promise<void> {
+export async function startDevicePreview(device: DeviceInfo): Promise<void> {
   if (device.platform === "android") {
-    return viewEnsure(device.udid);
+    await viewEnsure(device.udid);
+    return;
   }
-  return prepareDevice(device.udid);
+  // `prepareDevice` answers with the refreshed DeviceInfo, which neither caller uses —
+  // the registry event carries the same update. Discarded rather than widening the return
+  // type, so the two platform paths keep one shape.
+  await prepareDevice(device.udid);
 }
 
 /** Android phones start in parallel; iPhones stay sequential (USB / WDA). */

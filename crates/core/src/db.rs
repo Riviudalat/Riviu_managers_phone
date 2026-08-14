@@ -948,7 +948,10 @@ impl Database {
     ) -> anyhow::Result<()> {
         self.set_setting("nurture.settings", &serde_json::to_string(settings)?)?;
         self.set_setting(NURTURE_SETTINGS_MIGRATION_V2, "2026-08-06-human-v2")?;
-        self.set_setting(NURTURE_SETTINGS_MIGRATION_V3, NURTURE_SETTINGS_MIGRATION_V3_VALUE)
+        self.set_setting(
+            NURTURE_SETTINGS_MIGRATION_V3,
+            NURTURE_SETTINGS_MIGRATION_V3_VALUE,
+        )
     }
 
     pub fn get_agent_settings(&self) -> anyhow::Result<crate::types::AgentSettings> {
@@ -1734,14 +1737,19 @@ mod nurture_settings_migration_tests {
     #[test]
     fn a_v2_row_still_on_shipped_deepseek_moves_to_openrouter_luna_once() {
         let (db, path) = fixture();
-        let mut shipped = NurtureSettings::default();
-        shipped.base_url = "https://api.deepseek.com".into();
-        shipped.model = "deepseek-v4-flash".into();
-        shipped.api_key = "replace-me".into();
-        shipped.input_price_per_1m = 1.25;
-        shipped.output_price_per_1m = 10.0;
-        db.set_setting("nurture.settings", &serde_json::to_string(&shipped).unwrap())
-            .expect("store shipped DeepSeek row");
+        let shipped = NurtureSettings {
+            base_url: "https://api.deepseek.com".into(),
+            model: "deepseek-v4-flash".into(),
+            api_key: "replace-me".into(),
+            input_price_per_1m: 1.25,
+            output_price_per_1m: 10.0,
+            ..Default::default()
+        };
+        db.set_setting(
+            "nurture.settings",
+            &serde_json::to_string(&shipped).unwrap(),
+        )
+        .expect("store shipped DeepSeek row");
         db.set_setting(NURTURE_SETTINGS_MIGRATION_V2, "2026-08-06-human-v2")
             .expect("mark v2 already applied");
 
@@ -1761,7 +1769,9 @@ mod nurture_settings_migration_tests {
         stayed.model = "deepseek-v4-flash".into();
         db.save_nurture_settings(&stayed)
             .expect("operator put DeepSeek back");
-        let second = db.get_nurture_settings().expect("reload after manual revert");
+        let second = db
+            .get_nurture_settings()
+            .expect("reload after manual revert");
         assert_eq!(second.base_url, "https://api.deepseek.com");
         assert_eq!(second.model, "deepseek-v4-flash");
         std::fs::remove_file(path).expect("remove fixture database");

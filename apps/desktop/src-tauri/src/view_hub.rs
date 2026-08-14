@@ -333,13 +333,13 @@ mod tests {
         assert!(hub.last_h264.lock().get("a").is_none());
     }
 
-    #[test]
-    fn the_view_channel_cannot_hold_seconds_of_video() {
-        assert!(
-            BROADCAST_CAP <= 16,
-            "a large broadcast cap turns a slow WebSocket into delayed video"
-        );
-    }
+    // Both operands are constants, so this is decided at compile time and belongs there.
+    // As a `#[test]` it was a bound nobody learned about until the suite ran, and clippy
+    // rejected it for exactly that reason; as an anonymous const it fails the build.
+    const _: () = assert!(
+        BROADCAST_CAP <= 16,
+        "a large broadcast cap turns a slow WebSocket into delayed video"
+    );
 
     #[test]
     fn a_backed_up_view_keeps_the_newest_packet_per_device() {
