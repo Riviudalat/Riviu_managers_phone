@@ -5011,6 +5011,64 @@ JPEG preview không đè UDID đang có H.264. Nurture vẫn `tap()` cũ. Không
 `pkill` GenFarmer `Server 2.4`. WebSocket xem nối lại khi đứt; keeper
 restart scrcpy im > 5 s.
 
+### 9.58 Layout theo GenFarmer: tab nhóm + menu chuột phải, và cách tìm ra đúng file (14/08/2026)
+
+Người vận hành nói giao diện quản lý máy "chưa giống", và khi được hỏi thì nêu đúng ba
+chỗ: **tab/phân nhóm**, **hành động trên từng tile**, **bố trí/mật độ lưới** — *không*
+phải panel trái (thứ kế hoạch cũ đã loại khỏi phạm vi).
+
+**Không quan sát được UI trực tiếp:** `GenFarmer.exe` chạy rồi thoát ngay, không để lại
+cửa sổ nào, và vùng đó là licensing — thứ mục 1 cấm phân tích. Người vận hành cho phép
+đọc source trên máy họ, nên đường đi là đọc renderer.
+
+**Cái bẫy đầu tiên, và nó suýt làm sai cả việc:** 6 chunk mà ai đó đã đổ vào
+`apps/desktop/` (và tôi chuyển ra) **không phải trang lưới máy nội bộ**.
+`Device-DlF-mfgx.js` toàn nhãn `Page.Cloud.Label.*` (Extend, DueDate, Pricing, Share,
+PowerOn) — đó là trang **thuê máy cloud**, và CSS kèm theo có `.payment-info`. Đọc chúng
+mà tưởng là trang thiết bị sẽ cho ra một đặc tả hoàn toàn lệch. Tôi đã dừng workflow đang
+chạy trên đúng bộ file sai đó.
+
+**Cách tìm đúng file, ghi lại vì nó tổng quát hoá:** grep **namespace i18n** trên mọi
+chunk renderer rồi đếm, thay vì tin tên file. `dist/render/assets/*.js` cho ra bản đồ
+chunk → namespace, và trang cần tìm là `Page.ControlCenter.*` ở `index-DYsx88Ep.js` (90
+lần); `StreamControlModal` là overlay của nó (38 lần). Tên chunk nói sai, khoá i18n nói
+đúng.
+
+**Rồi chính khoá i18n trả lời cả ba câu, bằng ngôn từ của họ:**
+
+| người vận hành nêu | GenFarmer có |
+|---|---|
+| tab/phân nhóm | `Label.Groups`, `GroupAllDevices`, `GroupNamePlaceholder`, `DeleteGroupConfirm`, `ContextMenu.AddToGroup`; và class `n-tabs--top w-250` — tức **tabs thật ở trên**, không phải dropdown |
+| hành động trên tile | **`ContextMenu.*`** — menu **chuột phải**: Screenshot, Reboot, Reload, Rotate, ChangeDeviceName, ChangeDeviceNumber, CopyIds, AddToGroup, InstallAPK, AdbCommand, ChangeProxy, ChangeWallpaper, Automation, QuickPhase, DeleteDevices, AscendingOrder, StandardizeOrder |
+| mật độ lưới | `Label.BigScreen` / `SmallScreen` / `SmallQuality` / `SmallFrameRate`; `gap-12px`, `p-12px rounded-[12` |
+
+**Chuột phải, không phải hover toolbar** — tôi đã đoán sai trước khi đọc. Và nó cũng là
+lựa chọn đúng độc lập: tile là một frame video đang chạy có caption đè lên, một hàng nút
+luôn hiện sẽ che đúng cái màn hình người ta đang xem.
+
+**Chỉ đưa vào hành động đã có backend.** Menu của ta có Mở điều khiển, Chụp màn hình, Sao
+chép ID, Làm mới, Khởi động lại (có confirm), + "Thêm vào nhóm" theo nhóm đang có. Cố ý
+**không** dựng AdbCommand / Rotate / Wallpaper / InstallAPK / DeleteDevices: một dòng menu
+gọi lệnh ta chưa viết là một cái nút hỏng, tệ hơn là không có.
+
+**Tab nhóm dùng backend đã có** — `DeviceGroup`/`listGroups`/`saveGroup` có sẵn từ trước
+mà `App.tsx` chưa từng gọi. Hai quyết định trong helper thuần: **đếm máy đang có mặt**,
+không đếm udid mà nhóm ghi nhớ (nhóm nhớ cả máy đã rút; badge theo số ghi nhớ là hứa
+những dòng lưới không tạo ra được), và **nhóm không còn tồn tại thì hiện tất cả**, không
+hiện rỗng — lưới rỗng vì nhóm bị xoá ở cửa sổ khác trông y hệt fleet biến mất.
+
+**E2E bắt được một lỗi thật, không phải lỗi test.** `reload` gộp `listGroups()` vào cùng
+`Promise.all` với `listDevices()`, nên **nhóm lỗi là trắng cả fleet** — lưới rỗng vì
+không vẽ được dải tab. Nhóm là phụ trợ nên giờ load riêng có `.catch`, giống
+`driverDegradedReason`: mất tab nhỏ hơn mất mọi máy.
+
+**Hai thứ sửa trước đó trong cùng đợt**, xác lập từ chính app đang chạy chứ không đoán:
+caption trên tile chỉ có `text-shadow` nên **chìm hẳn** trên nội dung sáng (trang TikTok
+trắng, lock screen nhạt) — thêm gradient; và cỡ tile có wheel zoom **cần giữ Ctrl** mà
+không có control nào thấy được, dù kế hoạch cũ ghi mục "slider thay select S/M/L/XL" là
+đã xong — slider không có ở đó. Giờ có, ghi cùng giá trị đã clamp qua cùng một range nên
+hai đường không thể lệch nhau.
+
 ### 9.57 Danh sách app trên máy: `cmd package`, và nhãn thì không có (14/08/2026)
 
 Người vận hành muốn thấy app đã cài trên từng máy. Trước việc này **không có capability

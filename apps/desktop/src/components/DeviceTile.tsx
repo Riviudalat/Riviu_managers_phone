@@ -15,10 +15,13 @@ interface Props {
   onSelect: (udid: string, additive: boolean) => void;
   onOpen: (udid: string) => void;
   onPrepare: (udid: string) => void;
+  /** Right-click. The tile owns no menu itself; the page places one. */
+  onContextMenu?: (udid: string, x: number, y: number) => void;
 }
 
 function DeviceTileInner({
   device,
+  onContextMenu,
   width,
   index,
   selected,
@@ -41,6 +44,11 @@ function DeviceTileInner({
       className={`dev-phone ${selected ? "selected" : ""} ${focused ? "focused" : ""}`}
       style={{ width, height: width * 2 }}
       onClick={(e) => onSelect(device.udid, e.metaKey || e.ctrlKey || e.shiftKey)}
+      onContextMenu={(e) => {
+        if (!onContextMenu) return;
+        e.preventDefault();
+        onContextMenu(device.udid, e.clientX, e.clientY);
+      }}
       onDoubleClick={() => onOpen(device.udid)}
     >
       {/* Every tile keeps the same phone-shaped frame regardless of stream

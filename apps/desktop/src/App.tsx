@@ -7,8 +7,12 @@ import {
   driverDegradedReason,
   listenRiviuEvents,
   listDevices,
+  listGroups,
   listJobs,
+  rebootDevice,
   refreshDevices,
+  saveGroup,
+  screenshot,
   startupError,
 } from "./api";
 import { startDevicePreview, startFleetPreview } from "./startPreview";
@@ -19,6 +23,9 @@ import { ConfirmHost } from "./components/ConfirmHost";
 import { ToastHost } from "./components/ToastHost";
 import { DeviceTile } from "./components/DeviceTile";
 import { FilterToolbar, type ViewMode } from "./components/FilterToolbar";
+import { GroupTabs } from "./components/GroupTabs";
+import { DeviceContextMenu, type DeviceMenuAction } from "./components/DeviceContextMenu";
+import { ALL_DEVICES_TAB, devicesInTab, groupTabs, withDeviceAdded } from "./deviceGroups";
 import { FocusStream } from "./components/FocusStream";
 import { IconPhone, IconRefresh, IconUser } from "./components/Icons";
 import { Banner, EmptyState, LoadingState } from "./components/States";
@@ -43,6 +50,7 @@ import {
   SyncPage,
 } from "./pages/FarmPages";
 import type {
+  DeviceGroup,
   DeviceInfo,
   JobRecord,
   LocalUser,
@@ -77,6 +85,9 @@ function App() {
   const [page, setPage] = useState<PageId>("control");
   const [asideCollapsed, setAsideCollapsed] = useState(false);
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
+  const [groups, setGroups] = useState<DeviceGroup[]>([]);
+  const [groupTab, setGroupTab] = useState<string>(ALL_DEVICES_TAB);
+  const [tileMenu, setTileMenu] = useState<{ udid: string; x: number; y: number } | null>(null);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [groupMode, setGroupMode] = useState(false);
@@ -156,11 +167,27 @@ function App() {
     return () => canvas.removeEventListener("wheel", onWheel);
   }, [page, viewMode]);
 
+  const tabs = useMemo(() => groupTabs(devices, groups), [devices, groups]);
+  const visibleDevices = useMemo(
+    () => devicesInTab(devices, groups, groupTab),
+    [devices, groups, groupTab],
+  );
+  const menuDevice = useMemo(
+    () => (tileMenu ? (devices.find((d) => d.udid === tileMenu.udid) ?? null) : null),
+    [tileMenu, devices],
+  );
+
   const reload = useCallback(async () => {
     try {
       const [d, j] = await Promise.all([listDevices(), listJobs()]);
       setDevices(d);
       setJobs(j);
+      // Groups are auxiliary and load separately, on purpose. Inside the Promise.all
+      // above, a group-listing failure rejected the whole reload and left the grid empty
+      // — the fleet blanked because a tab strip could not be drawn. Caught by e2e, which
+      // had no handler registered for it. Losing the tabs is a smaller loss than losing
+      // every phone, so this failure degrades to "no groups".
+      setGroups(await listGroups().catch(() => []));
       setBootError(null);
       // An empty list can mean "nothing plugged in" or "the device sidecar never
       // started". Ask which, so the UI does not report the wrong one.
@@ -172,6 +199,69 @@ function App() {
       setBootError(String(e));
     }
   }, []);
+
+  /**
+   * Tile menu rows, and every one of them is a command this app already has.
+   *
+   * The reference product also offers an adb command box, rotate, wallpaper, APK
+   * install and device deletion. They are absent on purpose: a row that calls a
+   * command we never wrote is a button that fails, which is worse than its absence.
+   */
+  const tileActions = useCallback(
+    (device: DeviceInfo): DeviceMenuAction[] => [
+      {
+        id: "open",
+        label: "Mở điều khiển",
+        run: () => setFocusUdid(device.udid),
+      },
+      {
+        id: "screenshot",
+        label: "Chụp màn hình",
+        run: () => {
+          void screenshot(device.udid)
+            .then((path) => pushToast("ok", "Đã lưu ảnh", path))
+            .catch((error) => toastError("Chụp màn hình thất bại", error));
+        },
+      },
+      {
+        id: "copy",
+        label: "Sao chép ID máy",
+        run: () => {
+          void navigator.clipboard
+            .writeText(device.udid)
+            .then(() => pushToast("ok", "Đã sao chép ID máy"))
+            .catch((error) => toastError("Sao chép thất bại", error));
+        },
+      },
+      {
+        id: "reload",
+        label: "Làm mới danh sách",
+        run: () => {
+          void refreshDevices().then(reload).catch((error) => toastError("Làm mới thất bại", error));
+        },
+      },
+      {
+        id: "reboot",
+        label: "Khởi động lại máy",
+        danger: true,
+        run: () => {
+          void requestConfirm({
+            title: `Khởi động lại ${device.name}?`,
+            message: "Máy sẽ mất kết nối vài phút và mọi phiên đang chạy trên nó sẽ dừng.",
+            confirmLabel: "Khởi động lại",
+            danger: true,
+          }).then((ok) => {
+            if (!ok) return;
+            void rebootDevice(device.udid)
+              .then(() => pushToast("ok", "Đã gửi lệnh khởi động lại"))
+              .catch((error) => toastError("Khởi động lại thất bại", error));
+          });
+        },
+      },
+    ],
+    [reload],
+  );
+
 
   useEffect(() => {
     let cancelled = false;
@@ -467,6 +557,8 @@ function App() {
                 }}
               />
 
+              <GroupTabs tabs={tabs} active={groupTab} onSelect={setGroupTab} />
+
               <FilterToolbar
                 viewMode={viewMode}
                 onViewMode={setViewMode}
@@ -536,12 +628,13 @@ function App() {
 
               {viewMode === "window" && (
                 <div className="window-canvas" ref={canvasRef}>
-                  {devices.map((device, i) => (
+                  {visibleDevices.map((device, i) => (
                     <DeviceTile
                       key={device.udid}
                       device={device}
                       width={tileWidth}
                       index={i + 1}
+                      onContextMenu={(udid, x, y) => setTileMenu({ udid, x, y })}
                       selected={selected.includes(device.udid)}
                       focused={focusUdid === device.udid}
                       onSelect={onSelect}
@@ -554,6 +647,30 @@ function App() {
                     />
                   ))}
                 </div>
+              )}
+
+              {tileMenu && menuDevice && (
+                <DeviceContextMenu
+                  device={menuDevice}
+                  groups={groups}
+                  x={tileMenu.x}
+                  y={tileMenu.y}
+                  onClose={() => setTileMenu(null)}
+                  actions={tileActions(menuDevice)}
+                  onAddToGroup={async (groupId) => {
+                    const next = withDeviceAdded(groups, groupId, menuDevice.udid);
+                    // null means the device is already in that group, or the group is
+                    // gone. Saving anyway would rewrite the record for nothing.
+                    if (!next) return;
+                    try {
+                      await saveGroup(next);
+                      await reload();
+                      pushToast("ok", `Đã thêm vào nhóm ${next.name}`);
+                    } catch (error) {
+                      toastError("Thêm vào nhóm thất bại", error);
+                    }
+                  }}
+                />
               )}
 
               {!devices.length && (

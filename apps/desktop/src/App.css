@@ -2996,3 +2996,117 @@ button.danger:hover:not(:disabled) {
   width: 104px;
   accent-color: #f97316;
 }
+
+/* Group tabs above the device grid.
+   Always rendered, even with no groups: a strip that appears and disappears as groups
+   are created moves the grid up and down under the cursor. */
+.group-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px;
+  border-bottom: 1px solid #e8edf4;
+  overflow-x: auto;
+}
+.group-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.42rem 0.7rem;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  color: #64748b;
+  font-size: 0.78rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.group-tabs button:hover {
+  color: #1f2937;
+}
+.group-tabs button.active {
+  color: #ea580c;
+  border-bottom-color: #f97316;
+  font-weight: 600;
+}
+.group-tabs-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+.group-tabs-count {
+  padding: 0 0.32rem;
+  border-radius: 8px;
+  background: #eef2f7;
+  color: #64748b;
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+}
+.group-tabs button.active .group-tabs-count {
+  background: #ffedd5;
+  color: #c2410c;
+}
+
+/* Right-click menu on a tile. Fixed position: the coordinates come from the pointer
+   event, and an absolutely-positioned menu would be offset by whatever scrolled. */
+.device-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 196px;
+  padding: 4px;
+  border: 1px solid #dfe6ef;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 12px 32px rgb(15 23 42 / 18%);
+  display: flex;
+  flex-direction: column;
+}
+.device-menu-head {
+  margin: 0;
+  padding: 0.32rem 0.55rem 0.4rem;
+  border-bottom: 1px solid #eef2f7;
+  color: #0f172a;
+  font-size: 0.76rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.device-menu-label {
+  margin: 0.25rem 0 0.1rem;
+  padding: 0 0.55rem;
+  color: #94a3b8;
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.device-menu button {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: 100%;
+  padding: 0.4rem 0.55rem;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: #334155;
+  font-size: 0.78rem;
+  text-align: left;
+  cursor: pointer;
+}
+.device-menu button:hover {
+  background: #f1f5f9;
+}
+.device-menu button.danger {
+  color: #b91c1c;
+}
+.device-menu button.danger:hover {
+  background: #fef2f2;
+}
+.device-menu-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
