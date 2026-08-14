@@ -1188,3 +1188,16 @@ export interface InstalledApp {
   kind: InstalledAppKind;
   label: string | null;
 }
+
+/**
+ * What one operator-typed shell command produced.
+ *
+ * All three fields, because a non-zero exit is a normal answer here: `ls` on a missing
+ * path, `grep` with no match and `dumpsys` on an unknown service all exit non-zero and
+ * put the useful text on stderr. Showing only stdout would hide the answer.
+ */
+export interface ShellOutcome {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}

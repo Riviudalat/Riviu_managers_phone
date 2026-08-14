@@ -567,6 +567,20 @@ pub struct MaterialItem {
     pub created_at: String,
 }
 
+/// What one operator-typed shell command produced.
+///
+/// All three fields, because a non-zero exit is a normal answer here rather than a
+/// failure: `ls` on a missing path, `grep` with no match and `dumpsys` on an unknown
+/// service all exit non-zero and put the useful text on stderr. Returning only stdout, or
+/// turning a non-zero exit into an error, would hide the answer the operator asked for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellOutcome {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
 /// Whether an app came with the phone or was installed onto it.
 ///
 /// **Tagged, never inferred, and never used as a filter.** Listing only third-party

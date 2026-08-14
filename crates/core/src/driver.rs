@@ -13,8 +13,8 @@ use crate::flow::QualifiedElementLocator;
 use crate::stream_budget::StreamStopProof;
 use crate::types::{
     ActiveAppIdentity, AgentSettings, AgentStatus, DeviceInfo, HardwareKey, InstalledApp,
-    InteractionSessionKind, StreamHandoffProof, StreamStartProof, SwipeGesture, SwipePath,
-    TapPoint,
+    InteractionSessionKind, ShellOutcome, StreamHandoffProof, StreamStartProof, SwipeGesture,
+    SwipePath, TapPoint,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -321,6 +321,27 @@ pub trait DeviceDriver: Send + Sync {
     ) -> anyhow::Result<AppProcessState> {
         unsupported("inspectAppProcess")
     }
+    /// Run one shell script on the device and return its combined output.
+    ///
+    /// An operator escape hatch, not an automation seam — nothing in this codebase may
+    /// call it to get work done, because a string typed by a person is the one input no
+    /// contract can describe. Defaulted to a refusal so a backend without a device shell
+    /// says so instead of returning empty output that reads as a command that did nothing.
+    async fn device_shell(&self, _udid: &str, _script: &str) -> anyhow::Result<ShellOutcome> {
+        unsupported("deviceShell")
+    }
+
+    /// Turn the screen to `rotation` (0, 1, 2, 3 = 0°, 90°, 180°, 270°) and report what
+    /// the device actually ended up at.
+    ///
+    /// Returns the rotation the device reports **after** the attempt, which is often not
+    /// the one asked for: measured 14/08/2026 on both fleet phones, a portrait-locked
+    /// foreground app wins over every mechanism tried, so a caller that assumed success
+    /// would tell the operator the screen turned when it did not.
+    async fn set_screen_rotation(&self, _udid: &str, _rotation: u8) -> anyhow::Result<u8> {
+        unsupported("setScreenRotation")
+    }
+
     /// Every app the phone reports as present, tagged user or system.
     ///
     /// Defaults to a refusal rather than an empty list, and the difference is the whole

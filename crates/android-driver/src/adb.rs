@@ -222,6 +222,36 @@ impl AdbProgram {
         Err(anyhow!("adb {} failed: {detail}", args.join(" ")))
     }
 
+    /// Run one shell script and return stdout, stderr and the exit code together.
+    ///
+    /// Deliberately **not** [`Self::run_bytes`], which treats a non-zero exit as failure
+    /// and throws stdout away. For an operator's own command that is a lie: measured
+    /// 14/08/2026 on both fleet phones, `ls /nope/nothing` exits 1 with the message on
+    /// **stderr** and stdout empty, and the same is true of `grep` with no match or
+    /// `dumpsys` on an unknown service. Every one of those is a normal answer to a
+    /// question, so all three fields come back and the caller decides what they mean.
+    ///
+    /// Still `Err` for the things that really are failures: adb not running, the device
+    /// gone, or the call outliving its timeout.
+    pub async fn shell_output(
+        &self,
+        serial: &str,
+        script: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<ShellOutput> {
+        let mut command = self.command();
+        command.args(["-s", serial, "shell", script]);
+        let output = tokio::time::timeout(timeout, command.output())
+            .await
+            .map_err(|_| anyhow!("adb shell timed out after {timeout:?}"))?
+            .context("run adb shell")?;
+        Ok(ShellOutput {
+            exit_code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+
     /// Run `adb <args>` and return stdout as text.
     pub async fn run(&self, args: &[&str], timeout: Duration) -> anyhow::Result<String> {
         let bytes = self.run_bytes(args, timeout).await?;
@@ -677,6 +707,53 @@ pub fn parse_package_list(stdout: &str) -> Vec<String> {
     names
 }
 
+/// Everything one shell call produced, with nothing discarded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellOutput {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// The rotation the device reports, from `dumpsys window`.
+///
+/// **Two formats, and both are in this fleet.** Measured 14/08/2026: the Redmi
+/// (SDK 35) prints `mRotation=ROTATION_0` while the Note 8 (SDK 26) prints
+/// `mRotation=0` and also `mCurrentRotation=0`. A parser written against either one
+/// alone reads the other as unknown — the same shape as the one-line versus two-line
+/// `wm size` trap already recorded for `parse_wm_size`.
+///
+/// `None` is unknown, never zero: zero is a real rotation and returning it for an
+/// unreadable dump would tell a caller the screen is upright when nobody knows.
+pub fn parse_screen_rotation(stdout: &str) -> Option<u8> {
+    for key in ["mRotation=", "mCurrentRotation="] {
+        for line in stdout.lines() {
+            let Some(at) = line.find(key) else { continue };
+            let value = line[at + key.len()..]
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_end_matches(&[',', '}'][..]);
+            // Two number systems, not one. `ROTATION_90` is the *name* of
+            // `Surface.ROTATION_90`, whose value is 1 — so the named form carries
+            // degrees and the bare form carries the index. Parsing the digits out of the
+            // name would read 270 as an impossible rotation and drop it.
+            let rotation = match value.strip_prefix("ROTATION_") {
+                Some("0") => Some(0),
+                Some("90") => Some(1),
+                Some("180") => Some(2),
+                Some("270") => Some(3),
+                Some(_) => None,
+                None => value.parse::<u8>().ok().filter(|value| *value < 4),
+            };
+            if let Some(rotation) = rotation {
+                return Some(rotation);
+            }
+        }
+    }
+    None
+}
+
 /// The keyevent that wakes a screen without ever putting one to sleep.
 ///
 /// `KEYCODE_POWER` **toggles**, so on a phone that is already awake it would blank the
@@ -1075,6 +1152,28 @@ mod tests {
         let stdout = "package:com.dup.app\npackage:com.dup.app\n";
 
         assert_eq!(parse_package_list(stdout), ["com.dup.app"]);
+    }
+
+    #[test]
+    fn rotation_is_read_from_both_formats_this_fleet_prints() {
+        // Redmi SDK 35 and Note 8 SDK 26, measured verbatim.
+        assert_eq!(parse_screen_rotation("  mRotation=ROTATION_0"), Some(0));
+        // The named form is degrees; its value is the index. 270 degrees is index 3.
+        assert_eq!(parse_screen_rotation("  mRotation=ROTATION_90"), Some(1));
+        assert_eq!(parse_screen_rotation("  mRotation=ROTATION_270"), Some(3));
+        assert_eq!(
+            parse_screen_rotation("  mCurrentRotation=1 mRotation=1"),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn an_unreadable_rotation_is_unknown_and_never_upright() {
+        // Zero is a real rotation. Returning it for a dump nobody could read would tell
+        // a caller the screen is upright when in fact nobody knows.
+        assert_eq!(parse_screen_rotation(""), None);
+        assert_eq!(parse_screen_rotation("mRotation=ROTATION_SIDEWAYS"), None);
+        assert_eq!(parse_screen_rotation("mRotation=9"), None);
     }
 
     #[test]

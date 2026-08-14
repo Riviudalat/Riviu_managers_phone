@@ -5011,6 +5011,82 @@ JPEG preview không đè UDID đang có H.264. Nurture vẫn `tap()` cũ. Không
 `pkill` GenFarmer `Server 2.4`. WebSocket xem nối lại khi đứt; keeper
 restart scrcpy im > 5 s.
 
+### 9.59 Bon hanh dong thiet bi, va ba thu do duoc lat nguoc thiet ke (14/08/2026)
+
+Nguoi van hanh xin bon thu con thieu so voi GenFarmer, tru Wallpaper: **AdbCommand,
+Rotate, InstallAPK, va SmallQuality/SmallFrameRate**.
+
+#### Rotate: do xong thi no khong con la "gui lenh quay"
+
+Do tren ca hai may, va **khong co che nao quay duoc man hinh**:
+
+| may | co che | ket qua |
+|---|---|---|
+| Redmi SDK 35 | `settings put system user_rotation 1` | key doi, `mRotation` van 0 |
+| Redmi | `cmd window user-rotation lock 1` | state bao `lock 1`, van 0 |
+| Redmi | them `set-ignore-orientation-request true` | van 0 |
+| Note 8 SDK 26 | `settings put ...` | key doi, van 0; va `cmd window` **khong ton tai** |
+
+Hai ket luan. `cmd window` chi co tren SDK 35 (`No shell command implementation.` tren
+SDK 26) nen **khong co lenh dung chung** - phai thu ca hai. Va quan trong hon: **app dang
+foreground quyet dinh**, ca hai may dang o app khoa doc. Vi TikTok la thu farm nay chay,
+mot nut "Rotate" bao thanh cong se **noi doi o dung ca pho bien nhat**. Nen ham tra ve
+**rotation quan sat duoc sau khi thu**, va UI so sanh: khop thi "da quay", khong khop thi
+"may khong quay - app dang khoa huong doc".
+
+`parse_screen_rotation` phai chiu **hai he so khac nhau**: Redmi in `mRotation=ROTATION_0`
+con Note 8 in `mRotation=0`. Va bay that nam o cho `ROTATION_90` la **ten hang so
+`Surface.ROTATION_90`, gia tri 1** - parse chu so ra khoi ten se doc 270 thanh mot rotation
+bat kha va bo mat. Test ghim ca hai dang.
+
+#### AdbCommand: phan bien tim ra hai loi trong dung code toi vua viet
+
+1. **`run_bytes` coi exit khac 0 la that bai va bo luon stdout.** Do duoc: `ls /nope` exit 1,
+   thong bao o **stderr**, stdout rong - tren ca hai SDK. Voi mot hop lenh tu do thi
+   exit khac 0 la **cau tra loi binh thuong** (`grep` khong khop, `dumpsys` service la), nen
+   tra `Result<String>` qua duong loi la vua bao sai vua mat output. Them
+   `AdbProgram::shell_output` tra `{exit_code, stdout, stderr}` va `ShellOutcome` xuyen
+   suot cac tang.
+2. **`try_acquire_exclusive` park tile dang song.** `screenshot` dung
+   `_keeping_stream` chinh vi the, con `syslog` la tien le **khong nen** copy - ma toi da
+   copy. Ca `device_shell` lan `set_screen_rotation` gio dung ban keeping-stream: ca hai
+   ton tai de nguoi ta *xem* tile phan ung.
+
+Be mat bi chan cung: **chi `adb shell <script>`**, khong co duong toi `adb <subcommand>`.
+Nang nhat la `kill-server` - no la host-global, va trong app nay agent uiautomator2 cung
+moi producer video deu song tren `adb forward`, nen mot lenh do giet control va video cua
+**ca fleet** cong moi tool khac tren may. Script rong bi tu choi vi do duoc `adb shell ""`
+**exit 0 voi output rong** - adb khong tu choi ho ta, no bao thanh cong vi da khong lam gi.
+
+#### InstallAPK: backend da co san toan bo
+
+`install_app` la trait method **bat buoc** (khong default nen khong the roi vao mot
+thanh-cong-nghe-hop-ly), da forward, control plane da lay lease, va Android chay
+`adb install -r -g`. `installIpa(udid, path)` co trong `api.ts` ma **chua ai goi**. Nen
+day la mot dong menu, khong phai viec backend.
+
+#### SmallQuality/SmallFrameRate: ca hai la setting luu-roi-bo
+
+`StreamSettings` co bon field va o HEAD **khong field nao anh huong toi mot lan encode**:
+`grid_quality`/`focus_quality` khong co reader nao trong ca cay, `tile_size` cung vay, va
+`set_stream_settings` **ghi de `fps` bang hang so** truoc khi luu. Nguoi van hanh keo
+control va tuyet doi khong co gi xay ra.
+
+Noi lai qua `ViewPreset::tuned(quality, fps)`, voi **tinh chat chiu luc**: quality thap ha
+bitrate va **khong bao gio** ha frame size, vi phia duoi la cho cac loi encoder da do nam
+(176 fail `MediaCodec.configure` tren Redmi; 320 cho Note 8 mot SPS Baseline L1.3 ma
+WebView2 co the tu choi). Co test quet ca bon muc tren ca hai preset de khong muc nao roi
+xuong duoi nguong. fps clamp vao 5..=30.
+
+Mot thay doi hanh vi phai noi ro: launch truoc day xin cung `max_fps=30` trong khi
+`get_stream_settings` noi voi nguoi van hanh la 24 - **UI va encoder noi khac nhau va khong
+ai bao**. Gio chung khop, mac dinh la 24. Doi settings **khoi dong lai cac tile dang chay**,
+vi mot setting chi ap cho may bat sau chinh la cai no-op im lang vua duoc sua.
+
+**Con thieu, da do:** khong co gi **persist** `StreamSettings` - `db.rs` co
+`set_setting`/`get_setting` chung nhung khong co khoa stream nao, nen quality va fps mat
+sau khi khoi dong lai app. Day la gap co san tu truoc, ghi lai chu chua sua.
+
 ### 9.58 Layout theo GenFarmer: tab nhóm + menu chuột phải, và cách tìm ra đúng file (14/08/2026)
 
 Người vận hành nói giao diện quản lý máy "chưa giống", và khi được hỏi thì nêu đúng ba

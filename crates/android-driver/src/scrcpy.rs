@@ -80,33 +80,79 @@ impl ViewPreset {
         }
     }
 
+    /// The smallest encode this preset may ever ask for.
+    ///
+    /// A **floor**, not a default, and the difference is what keeps an operator's
+    /// "low quality" from breaking the stream outright: 176 fails
+    /// `MediaCodec.configure` on Redmi API 35, and 320 encodes on both phones but
+    /// gives the Note 8 a Baseline *level 1.3* SPS (`avc1.42000D`) that WebView2 may
+    /// refuse. 480 is the size that returned a packet on the Redmi in the 3.3.4/4.1
+    /// probe and lifts the level off 1.3 (14/08/2026). So quality below Medium buys a
+    /// smaller bitrate, never a smaller frame.
     pub fn max_size(self) -> u32 {
         match self {
-            // 176 fails MediaCodec.configure on Redmi API 35. 320 encodes on
-            // both phones but Note 8's SPS is Baseline *level 1.3*
-            // (`avc1.42000D`) and WebView2 may refuse that hint. 480 is the
-            // size that returned a packet on Redmi in the 3.3.4/4.1 probe
-            // and lifts the level off 1.3 (14/08/2026).
             Self::Tile => 480,
             Self::Overlay => 600,
         }
     }
 
+    /// The bitrate at [`StreamQuality::Medium`], which is what shipped before quality
+    /// was settable — so the default path encodes exactly as it did.
+    ///
+    /// Overlay CSS-scales this same encode. 400 kbps / 15 fps was a slide show;
+    /// 800 kbps still blocks on TikTok motion.
     pub fn bit_rate(self) -> u32 {
         match self {
-            // Overlay CSS-scales this same encode. 400 kbps / 15 fps was a
-            // slide show; 800 kbps still blocks on TikTok motion.
             Self::Tile => 1_200_000,
             Self::Overlay => 1_500_000,
         }
     }
 
+    /// The highest frame rate measured to work on this fleet.
     pub fn max_fps(self) -> u32 {
         match self {
             Self::Tile => 30,
             Self::Overlay => 30,
         }
     }
+
+    /// Apply the operator's quality and frame-rate choice to this preset.
+    ///
+    /// Both halves of this were settings the app **stored and never read**:
+    /// `StreamSettings::grid_quality` had no reader anywhere in the tree, and
+    /// `set_stream_settings` overwrote `fps` with the compiled-in constant. So an
+    /// operator could move either control and nothing whatsoever happened.
+    ///
+    /// Quality moves the bitrate freely and the frame size only **upward**, because
+    /// downward is where the measured encoder failures live (see [`Self::max_size`]).
+    /// Frame rate is clamped into a range the fleet has actually run at; a 0 would ask
+    /// scrcpy for an unbounded rate and a 120 asks for one no phone here delivers.
+    pub fn tuned(self, quality: riviu_core::StreamQuality, fps: u32) -> ViewTuning {
+        let floor = self.max_size();
+        let (size, bit_rate) = match quality {
+            riviu_core::StreamQuality::Low => (floor, 600_000),
+            riviu_core::StreamQuality::Medium => (floor, self.bit_rate()),
+            riviu_core::StreamQuality::High => (floor * 3 / 2, 2_000_000),
+            riviu_core::StreamQuality::Extra => (floor * 2, 3_000_000),
+        };
+        ViewTuning {
+            max_size: size,
+            bit_rate,
+            max_fps: fps.clamp(MIN_VIEW_FPS, self.max_fps()),
+        }
+    }
+}
+
+/// The lowest frame rate worth encoding at. Below this the tile reads as a series of
+/// stills, and an operator who wanted that would turn the view off instead.
+pub const MIN_VIEW_FPS: u32 = 5;
+
+/// What one view will actually ask the encoder for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewTuning {
+    pub max_size: u32,
+    pub bit_rate: u32,
+    pub max_fps: u32,
 }
 
 /// One parsed media packet after the video header.
@@ -138,15 +184,13 @@ pub struct ScrcpyHello {
 /// colon (`i-frame-interval:int:2`) makes 3.3.4 throw `'=' expected` in
 /// `CodecOption.parseOption` and exit before it binds the abstract socket
 /// — the tile then shows "exited before it accepted a connection".
-pub fn launch_command(scid: u32, preset: ViewPreset) -> String {
+pub fn launch_command(scid: u32, tuning: ViewTuning) -> String {
     format!(
         "CLASSPATH={REMOTE_SERVER} app_process / {MAIN_CLASS} {SERVER_VERSION} \
          scid={scid:08x} tunnel_forward=true audio=false control=false video=true \
          video_codec=h264 max_size={} max_fps={} video_bit_rate={} \
          video_codec_options=i-frame-interval:int=1 cleanup=false",
-        preset.max_size(),
-        preset.max_fps(),
-        preset.bit_rate()
+        tuning.max_size, tuning.max_fps, tuning.bit_rate
     )
 }
 
@@ -537,7 +581,10 @@ mod tests {
 
     #[test]
     fn launch_command_pins_version_h264_and_the_named_jar() {
-        let command = launch_command(0x00ab_12cd, ViewPreset::Tile);
+        let command = launch_command(
+            0x00ab_12cd,
+            ViewPreset::Tile.tuned(riviu_core::StreamQuality::Medium, riviu_core::STREAM_FPS),
+        );
         assert!(command.contains(REMOTE_SERVER), "{command}");
         assert!(command.contains(" 3.3.4 "), "{command}");
         assert!(!command.contains(" 4.1 "), "{command}");
@@ -547,7 +594,13 @@ mod tests {
         assert!(command.contains("audio=false"), "{command}");
         assert!(command.contains("control=false"), "{command}");
         assert!(command.contains("max_size=480"), "{command}");
-        assert!(command.contains("max_fps=30"), "{command}");
+        // The app's own declared rate, not a hardcoded 30. Before quality and fps were
+        // wired, `get_stream_settings` told the operator 24 while the launch asked for
+        // 30 — the UI and the encoder disagreed and neither said so. They agree now.
+        assert!(
+            command.contains(&format!("max_fps={}", riviu_core::STREAM_FPS)),
+            "{command}"
+        );
         assert!(command.contains("video_bit_rate=1200000"), "{command}");
         assert!(
             command.contains("video_codec_options=i-frame-interval:int=1"),
@@ -566,10 +619,68 @@ mod tests {
     }
 
     #[test]
+    fn low_quality_lowers_the_bitrate_and_never_the_frame_size() {
+        // The load-bearing safety property. 176 fails MediaCodec.configure on the Redmi
+        // and 320 gives the Note 8 a Baseline L1.3 SPS WebView2 can refuse, so a
+        // quality control that shrank the frame would let an operator turn a working
+        // tile into a dead one from a dropdown.
+        for preset in [ViewPreset::Tile, ViewPreset::Overlay] {
+            let floor = preset.max_size();
+            for quality in [
+                riviu_core::StreamQuality::Low,
+                riviu_core::StreamQuality::Medium,
+                riviu_core::StreamQuality::High,
+                riviu_core::StreamQuality::Extra,
+            ] {
+                let tuned = preset.tuned(quality.clone(), 24);
+                assert!(
+                    tuned.max_size >= floor,
+                    "{preset:?} at {quality:?} asked for {}, below the measured floor {floor}",
+                    tuned.max_size
+                );
+            }
+        }
+        let low = ViewPreset::Tile.tuned(riviu_core::StreamQuality::Low, 24);
+        let medium = ViewPreset::Tile.tuned(riviu_core::StreamQuality::Medium, 24);
+        assert_eq!(low.max_size, medium.max_size);
+        assert!(low.bit_rate < medium.bit_rate);
+    }
+
+    #[test]
+    fn quality_rises_monotonically_so_a_higher_setting_is_never_worse() {
+        let sizes: Vec<u32> = [
+            riviu_core::StreamQuality::Low,
+            riviu_core::StreamQuality::Medium,
+            riviu_core::StreamQuality::High,
+            riviu_core::StreamQuality::Extra,
+        ]
+        .iter()
+        .map(|q| ViewPreset::Tile.tuned(q.clone(), 24).max_size)
+        .collect();
+        assert!(sizes.windows(2).all(|w| w[0] <= w[1]), "{sizes:?}");
+    }
+
+    #[test]
+    fn an_absurd_frame_rate_is_clamped_into_what_the_fleet_has_run_at() {
+        // 0 would ask scrcpy for an unbounded rate; 240 asks for one no phone here
+        // delivers. Both are reachable from a settings row, so both are clamped.
+        let fast = ViewPreset::Tile.tuned(riviu_core::StreamQuality::Medium, 240);
+        let stopped = ViewPreset::Tile.tuned(riviu_core::StreamQuality::Medium, 0);
+        assert_eq!(fast.max_fps, ViewPreset::Tile.max_fps());
+        assert_eq!(stopped.max_fps, MIN_VIEW_FPS);
+    }
+
+    #[test]
     fn overlay_preset_is_the_larger_encode_not_a_second_process() {
-        let command = launch_command(1, ViewPreset::Overlay);
+        let command = launch_command(
+            1,
+            ViewPreset::Overlay.tuned(riviu_core::StreamQuality::Medium, riviu_core::STREAM_FPS),
+        );
         assert!(command.contains("max_size=600"), "{command}");
-        assert!(command.contains("max_fps=30"), "{command}");
+        assert!(
+            command.contains(&format!("max_fps={}", riviu_core::STREAM_FPS)),
+            "{command}"
+        );
         assert!(command.contains("video_bit_rate=1500000"), "{command}");
         assert_eq!(ViewPreset::parse("overlay").unwrap(), ViewPreset::Overlay);
         assert!(ViewPreset::parse("hevc").is_err());

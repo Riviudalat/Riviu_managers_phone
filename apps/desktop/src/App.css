@@ -3110,3 +3110,37 @@ button.danger:hover:not(:disabled) {
   border-radius: 50%;
   flex: 0 0 auto;
 }
+
+/* adb shell console. Output is preformatted and scrolls on both axes: device output is
+   wide and a wrapped `dumpsys` line is unreadable. */
+.adb-console {
+  width: min(680px, 92vw);
+}
+.adb-console header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-bottom: 0.35rem;
+}
+.adb-console .row input {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+}
+.adb-output {
+  margin: 0.55rem 0 0;
+  padding: 0.5rem 0.6rem;
+  max-height: 320px;
+  overflow: auto;
+  border-radius: 8px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  white-space: pre;
+}
+.adb-output.failed {
+  border-left: 3px solid #f87171;
+}

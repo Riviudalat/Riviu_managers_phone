@@ -376,6 +376,66 @@ pub async fn screenshot(state: State<'_, AppState>, udid: String) -> Result<Stri
     Ok(path.display().to_string())
 }
 
+/// Run one operator-typed shell command on a device and return its output.
+///
+/// An escape hatch for a person, deliberately not a seam for code: nothing in this app
+/// may call it to get work done, because a string typed by a human is the one input no
+/// contract can describe. `adb shell <script>` only — never `adb <subcommand>`, which
+/// would put `install`, `reboot`, `root` and above all `kill-server` one typo away.
+/// AGENTS.md records that `adb kill-server` tears down every other tool's connection on
+/// the machine, so it must not be reachable from a text box.
+///
+/// Takes an exclusive lease like `syslog`, and for a stronger reason: an arbitrary script
+/// can reboot the phone or kill the app a running session is driving, so firing one at a
+/// device somebody else holds has to be refused rather than raced.
+#[tauri::command]
+pub async fn device_shell(
+    state: State<'_, AppState>,
+    udid: String,
+    script: String,
+) -> Result<riviu_core::ShellOutcome, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    // `_keeping_stream`, following `screenshot` and deliberately not `syslog`: the plain
+    // acquire parks the live preview, so running a command would black the tile the
+    // operator is watching for its effect.
+    let context = state
+        .control
+        .try_acquire_exclusive_keeping_stream(&udid, DeviceWorkOwner::ManualControl)
+        .await
+        .map_err(CommandError::from)?;
+    state
+        .control
+        .device_shell(&context, &script)
+        .await
+        .map_err(CommandError::from)
+}
+
+/// Ask a device to rotate, and report the rotation it actually settled at.
+///
+/// Returns the observed rotation, not `()`, because measured on both fleet phones the
+/// request is frequently ignored: a portrait-locked foreground app wins over every
+/// mechanism tried. The caller compares what it asked for with what came back and tells
+/// the operator the truth.
+#[tauri::command]
+pub async fn set_screen_rotation(
+    state: State<'_, AppState>,
+    udid: String,
+    rotation: u8,
+) -> Result<u8, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    // Keeps the stream for the same reason: the whole point is to watch the tile turn.
+    let context = state
+        .control
+        .try_acquire_exclusive_keeping_stream(&udid, DeviceWorkOwner::ManualControl)
+        .await
+        .map_err(CommandError::from)?;
+    state
+        .control
+        .set_screen_rotation(&context, rotation)
+        .await
+        .map_err(CommandError::from)
+}
+
 #[tauri::command]
 pub async fn syslog(
     state: State<'_, AppState>,
@@ -693,15 +753,55 @@ pub fn get_stream_settings(state: State<'_, AppState>) -> StreamSettings {
     state.stream_settings.read().clone()
 }
 
+/// Save the stream settings, and make the two that used to be ignored take effect.
+///
+/// `fps` was **overwritten** with the compiled-in constant here, so an operator could
+/// move the frame-rate control and the value never left this function. `grid_quality`
+/// had no reader anywhere in the tree. Both are now clamped rather than discarded and
+/// pushed into the Android view path.
+///
+/// Running tiles are restarted so the change is visible: a settings row that only
+/// applies to phones started later is the same silent no-op this replaces. The restart
+/// is the path the watchdog already takes several times an hour, so it costs a second
+/// of black tile and nothing else.
 #[tauri::command]
-pub fn set_stream_settings(
+pub async fn set_stream_settings(
     state: State<'_, AppState>,
     settings: StreamSettings,
 ) -> Result<StreamSettings, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let mut s = settings;
-    s.fps = riviu_core::STREAM_FPS;
+    s.fps = s
+        .fps
+        .clamp(riviu_android_driver::MIN_VIEW_FPS, MAX_SETTABLE_VIEW_FPS);
     *state.stream_settings.write() = s.clone();
+
+    if let Some(android) = &state.android {
+        android.set_view_tuning(s.grid_quality.clone(), s.fps);
+        for device in state.registry.list() {
+            if device.platform != riviu_core::DevicePlatform::Android {
+                continue;
+            }
+            if !android
+                .view_is_running(&device.udid, riviu_android_driver::ViewPreset::Tile)
+                .await
+            {
+                continue;
+            }
+            // Retune restarts the same producer rather than spawning a second one.
+            // A failure here is logged and skipped: one phone that will not retune must
+            // not stop the setting from reaching the rest of the fleet.
+            if let Err(error) = android
+                .set_view_preset(&device.udid, riviu_android_driver::ViewPreset::Tile)
+                .await
+            {
+                log::warn!(
+                    "could not retune {} after a settings change: {error:#}",
+                    device.udid
+                );
+            }
+        }
+    }
     Ok(s)
 }
 
@@ -1094,6 +1194,13 @@ pub struct UpdateStatus {
     /// sentence rather than a bool so the operator is told *what* is running.
     pub busy_reason: Option<String>,
 }
+
+/// The highest frame rate a settings row may ask for.
+///
+/// The scrcpy presets top out at 30 and the fleet measured 24–29 FPS, so a row offering
+/// 60 would promise a rate no phone here delivers. Clamped rather than validated so a
+/// stored value from an older build cannot refuse the whole save.
+const MAX_SETTABLE_VIEW_FPS: u32 = 30;
 
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()

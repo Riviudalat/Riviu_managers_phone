@@ -673,6 +673,37 @@ impl DeviceControlPlane {
             .map_err(|error| driver_error(lease.udid(), "syslogTail", error))
     }
 
+    /// Run one operator-typed shell script on the device.
+    ///
+    /// Behind an exclusive lease on purpose, unlike the read-only queries above. An
+    /// arbitrary script can reboot the phone, kill the app a session is driving, or
+    /// change a setting under it — so it must not be possible to fire one at a device
+    /// another piece of work is holding.
+    pub async fn device_shell(
+        &self,
+        context: &DeviceExclusiveContext,
+        script: &str,
+    ) -> Result<crate::types::ShellOutcome, DeviceControlError> {
+        let lease = self.validate_exclusive(context)?;
+        self.driver
+            .device_shell(lease.udid(), script)
+            .await
+            .map_err(|error| driver_error(lease.udid(), "deviceShell", error))
+    }
+
+    /// Ask for a rotation and report what the device actually settled at.
+    pub async fn set_screen_rotation(
+        &self,
+        context: &DeviceExclusiveContext,
+        rotation: u8,
+    ) -> Result<u8, DeviceControlError> {
+        let lease = self.validate_exclusive(context)?;
+        self.driver
+            .set_screen_rotation(lease.udid(), rotation)
+            .await
+            .map_err(|error| driver_error(lease.udid(), "setScreenRotation", error))
+    }
+
     pub async fn reboot(&self, context: &DeviceExclusiveContext) -> Result<(), DeviceControlError> {
         let lease = self.validate_exclusive(context)?;
         self.driver

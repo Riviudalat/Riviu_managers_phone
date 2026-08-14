@@ -34,7 +34,7 @@ use crate::driver::{
 };
 use crate::stream_budget::StreamStopProof;
 use crate::types::{
-    AgentSettings, AgentStatus, DeviceInfo, InstalledApp, InteractionSessionKind,
+    AgentSettings, AgentStatus, DeviceInfo, InstalledApp, InteractionSessionKind, ShellOutcome,
     StreamHandoffProof, StreamStartProof,
 };
 
@@ -326,6 +326,14 @@ impl DeviceDriver for MultiplexDriver {
         bundle_id: &str,
     ) -> anyhow::Result<AppProcessState> {
         self.route(udid)?.inspect_app_process(udid, bundle_id).await
+    }
+
+    async fn device_shell(&self, udid: &str, script: &str) -> anyhow::Result<ShellOutcome> {
+        self.route(udid)?.device_shell(udid, script).await
+    }
+
+    async fn set_screen_rotation(&self, udid: &str, rotation: u8) -> anyhow::Result<u8> {
+        self.route(udid)?.set_screen_rotation(udid, rotation).await
     }
 
     // Hand-written, and it has to be: this type implements the trait itself, so a

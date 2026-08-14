@@ -6,6 +6,7 @@ import {
   androidUnavailableReason,
   driverDegradedReason,
   listenRiviuEvents,
+  installIpa,
   listDevices,
   listGroups,
   listJobs,
@@ -13,6 +14,7 @@ import {
   refreshDevices,
   saveGroup,
   screenshot,
+  setScreenRotation,
   startupError,
 } from "./api";
 import { startDevicePreview, startFleetPreview } from "./startPreview";
@@ -25,6 +27,7 @@ import { DeviceTile } from "./components/DeviceTile";
 import { FilterToolbar, type ViewMode } from "./components/FilterToolbar";
 import { GroupTabs } from "./components/GroupTabs";
 import { DeviceContextMenu, type DeviceMenuAction } from "./components/DeviceContextMenu";
+import { AdbConsole } from "./components/AdbConsole";
 import { ALL_DEVICES_TAB, devicesInTab, groupTabs, withDeviceAdded } from "./deviceGroups";
 import { FocusStream } from "./components/FocusStream";
 import { IconPhone, IconRefresh, IconUser } from "./components/Icons";
@@ -57,6 +60,7 @@ import type {
   PageId,
 } from "./types";
 import { deviceModelOsLabel, markDeviceFrameLive } from "./types";
+import { pickFile } from "./pickFile";
 import { loadZoom, stepZoom, storeZoom, TILE_ZOOM, wheelWantsZoom } from "./zoom";
 import "./App.css";
 
@@ -88,6 +92,7 @@ function App() {
   const [groups, setGroups] = useState<DeviceGroup[]>([]);
   const [groupTab, setGroupTab] = useState<string>(ALL_DEVICES_TAB);
   const [tileMenu, setTileMenu] = useState<{ udid: string; x: number; y: number } | null>(null);
+  const [adbFor, setAdbFor] = useState<string | null>(null);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [groupMode, setGroupMode] = useState(false);
@@ -172,6 +177,10 @@ function App() {
     () => devicesInTab(devices, groups, groupTab),
     [devices, groups, groupTab],
   );
+  const menuAdbDevice = useMemo(
+    () => (adbFor ? (devices.find((d) => d.udid === adbFor) ?? null) : null),
+    [adbFor, devices],
+  );
   const menuDevice = useMemo(
     () => (tileMenu ? (devices.find((d) => d.udid === tileMenu.udid) ?? null) : null),
     [tileMenu, devices],
@@ -240,6 +249,59 @@ function App() {
           void refreshDevices().then(reload).catch((error) => toastError("Làm mới thất bại", error));
         },
       },
+      ...(device.platform === "android"
+        ? [
+            {
+              id: "rotate",
+              label: "Quay màn hình",
+              run: () => {
+                // The backend returns the rotation the phone actually settled at, which
+                // is often not the one asked for: a portrait-locked app wins, and on
+                // this farm that is TikTok. Saying "rotated" regardless would be the
+                // button that lies.
+                void setScreenRotation(device.udid, 1)
+                  .then((observed) => {
+                    if (observed === 1) {
+                      pushToast("ok", "Đã quay ngang");
+                    } else {
+                      pushToast(
+                        "warn",
+                        "Máy không quay",
+                        "App đang mở khoá hướng dọc nên hệ thống bỏ qua yêu cầu.",
+                      );
+                    }
+                  })
+                  .catch((error) => toastError("Quay màn hình thất bại", error));
+              },
+            },
+            {
+              id: "apk",
+              label: "Cài APK...",
+              run: () => {
+                void (async () => {
+                  const path = await pickFile({
+                    title: "Chọn APK",
+                    filters: [{ name: "APK", extensions: ["apk"] }],
+                  });
+                  if (!path) return;
+                  try {
+                    // Same command the iOS path uses; the driver behind it runs
+                    // `adb install -r -g` for an Android serial.
+                    await installIpa(device.udid, path);
+                    pushToast("ok", "Đã cài APK");
+                  } catch (error) {
+                    toastError("Cài APK thất bại", error);
+                  }
+                })();
+              },
+            },
+            {
+              id: "adb",
+              label: "Lệnh adb...",
+              run: () => setAdbFor(device.udid),
+            },
+          ]
+        : []),
       {
         id: "reboot",
         label: "Khởi động lại máy",
@@ -671,6 +733,10 @@ function App() {
                     }
                   }}
                 />
+              )}
+
+              {adbFor && menuAdbDevice && (
+                <AdbConsole device={menuAdbDevice} onClose={() => setAdbFor(null)} />
               )}
 
               {!devices.length && (

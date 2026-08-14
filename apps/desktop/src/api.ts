@@ -48,6 +48,7 @@ import type {
   ThreadPreview,
   TikTokLinkLine,
   InstalledApp,
+  ShellOutcome,
   UpdateStatus,
 } from "./types";
 
@@ -334,6 +335,27 @@ export async function updateInstall() {
  */
 export async function listInstalledApps(udid: string) {
   return invoke<InstalledApp[]>("list_installed_apps", { udid });
+}
+
+/**
+ * Run one operator-typed shell command on a device.
+ *
+ * `adb shell <script>` only. The backend has no path to `adb <subcommand>`, so install,
+ * reboot, root and kill-server are not one typo away from a text box.
+ */
+export async function deviceShell(udid: string, script: string) {
+  return invoke<ShellOutcome>("device_shell", { udid, script });
+}
+
+/**
+ * Ask a device to rotate, and get back the rotation it ACTUALLY settled at.
+ *
+ * The returned value is frequently not the one requested: a portrait-locked foreground
+ * app wins, which on this farm is most of the time. Compare before telling the operator
+ * anything happened.
+ */
+export async function setScreenRotation(udid: string, rotation: 0 | 1 | 2 | 3) {
+  return invoke<number>("set_screen_rotation", { udid, rotation });
 }
 
 export async function authSession() {

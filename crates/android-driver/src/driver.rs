@@ -180,6 +180,15 @@ pub struct AndroidDriver {
     views: tokio::sync::Mutex<HashMap<String, ViewProducer>>,
     /// Serials with a view start in flight.
     view_starting: Mutex<HashSet<String>>,
+    /// The operator's quality and frame-rate choice for the tile grid.
+    ///
+    /// Held here rather than threaded through `start_view_stream` because every caller
+    /// wants the current value and none of them wants to know it: the watchdog, the
+    /// tile Start button and the overlay all start views, and passing tuning through
+    /// each would make three places able to disagree about it. Set from the app when
+    /// stream settings are saved; read when a producer is spawned, so a change reaches
+    /// a tile on its next restart and never mid-stream.
+    view_tuning: Mutex<(riviu_core::StreamQuality, u32)>,
     /// Serials with a producer start in flight.
     ///
     /// The atomic claim that replaces holding [`Self::streams`] across the slow
@@ -281,6 +290,11 @@ impl AndroidDriver {
             streams: tokio::sync::Mutex::new(HashMap::new()),
             views: tokio::sync::Mutex::new(HashMap::new()),
             view_starting: Mutex::new(HashSet::new()),
+            // Medium reproduces the bitrate and size that shipped. The frame rate does
+            // change: the launch used to ask for a hardcoded 30 while
+            // `get_stream_settings` told the operator 24, so the UI and the encoder
+            // disagreed silently. The default is now the declared rate, and the two agree.
+            view_tuning: Mutex::new((riviu_core::StreamQuality::Medium, riviu_core::STREAM_FPS)),
             starting: Mutex::new(HashSet::new()),
             interaction: riviu_core::InteractionLifecycleRegistry::default(),
             agents: Mutex::new(HashMap::new()),
@@ -824,6 +838,15 @@ impl AndroidDriver {
         self.take_and_stop_view(serial).await
     }
 
+    /// Set the quality and frame rate new views will start with.
+    ///
+    /// Does **not** touch running producers. Restarting sixteen encoders because a
+    /// slider moved is a fleet-wide stall the operator did not ask for, so the caller
+    /// decides which views to restart and when — see `set_view_preset`.
+    pub fn set_view_tuning(&self, quality: riviu_core::StreamQuality, fps: u32) {
+        *self.view_tuning.lock() = (quality, fps);
+    }
+
     /// Retune by restarting the same producer. Not a second `app_process`.
     pub async fn set_view_preset(
         &self,
@@ -913,6 +936,14 @@ impl AndroidDriver {
             )
         })?;
 
+        // Read once per spawn: a producer keeps whatever tuning it started with, so a
+        // settings change takes effect on the next restart rather than half-way through
+        // an encode.
+        let tuning = {
+            let guard = self.view_tuning.lock();
+            preset.tuned(guard.0.clone(), guard.1)
+        };
+
         self.wake_display_for_capture(serial).await;
 
         crate::scrcpy::ensure_server(&self.adb, serial, &server).await?;
@@ -929,7 +960,7 @@ impl AndroidDriver {
                 "-s",
                 serial,
                 "shell",
-                &crate::scrcpy::launch_command(scid, preset),
+                &crate::scrcpy::launch_command(scid, tuning),
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -1741,6 +1772,81 @@ impl DeviceDriver for AndroidDriver {
     /// System apps are listed and tagged, never filtered out. A `-3`-only listing would
     /// omit a preinstalled TikTok and then disagree with `resolve_tiktok_package` about
     /// what is on the same phone; hiding them is the UI's visible choice.
+    /// One operator-typed script, through the phone's own `sh`.
+    ///
+    /// No host shell is involved: `AdbProgram` spawns with argv and `Stdio::null()`
+    /// stdin, so there is no `cmd.exe` and host-side escaping would be theatre. The
+    /// script reaches the device exactly as typed, which is the point of an escape hatch
+    /// — and the reason this is not an automation seam.
+    ///
+    /// Refuses an empty script rather than running one: `adb shell ""` opens an
+    /// interactive shell that never returns, and the caller would see only a timeout.
+    async fn device_shell(
+        &self,
+        udid: &str,
+        script: &str,
+    ) -> anyhow::Result<riviu_core::ShellOutcome> {
+        // adb will not refuse this for us: measured, `adb shell ""` exits 0 with empty
+        // output, so an accidental Enter on an empty box would read as a command that
+        // ran and produced nothing.
+        anyhow::ensure!(!script.trim().is_empty(), "empty command");
+        let output = self
+            .adb
+            .shell_output(udid, script, adb::DEFAULT_TIMEOUT)
+            .await?;
+        Ok(riviu_core::ShellOutcome {
+            exit_code: output.exit_code,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
+
+    /// Ask for a rotation, then read back what the device actually did.
+    ///
+    /// Measured 14/08/2026 on both fleet phones, and the measurement is why this returns
+    /// the observed rotation rather than `()`: **neither mechanism turned either screen.**
+    /// `settings put system user_rotation 1` set the key and left `mRotation` at 0;
+    /// `cmd window user-rotation lock 1` reported `lock 1` and left it at 0; and
+    /// `set-ignore-orientation-request true` did not help either. A portrait-locked
+    /// foreground app — a lock screen, TikTok — wins. Since TikTok is what this farm
+    /// drives, a Rotate that claimed success would be a button that lies about the most
+    /// common case.
+    ///
+    /// Both mechanisms are attempted because neither is universal: `cmd window` does not
+    /// exist on the Note 8 at all (`No shell command implementation.` on SDK 26), and the
+    /// `settings` keys alone are what older Android honours. Individual failures are
+    /// ignored; the read-back is the only thing that decides the answer.
+    async fn set_screen_rotation(&self, udid: &str, rotation: u8) -> anyhow::Result<u8> {
+        anyhow::ensure!(rotation < 4, "rotation must be 0, 1, 2 or 3");
+        // Auto-rotate has to come off first, or the sensor overrides the request on a
+        // phone that is lying flat.
+        let _ = self
+            .adb
+            .shell(udid, "settings put system accelerometer_rotation 0")
+            .await;
+        let _ = self
+            .adb
+            .shell(
+                udid,
+                &format!("settings put system user_rotation {rotation}"),
+            )
+            .await;
+        // SDK 35 route. Absent on SDK 26, where this simply fails and is ignored.
+        let _ = self
+            .adb
+            .shell(udid, &format!("cmd window user-rotation lock {rotation}"))
+            .await;
+        let observed = self
+            .adb
+            .shell(udid, "dumpsys window")
+            .await
+            .ok()
+            .and_then(|dump| adb::parse_screen_rotation(&dump));
+        observed.ok_or_else(|| {
+            anyhow::anyhow!("could not read {udid} rotation back after asking for {rotation}")
+        })
+    }
+
     async fn list_installed_apps(
         &self,
         udid: &str,
