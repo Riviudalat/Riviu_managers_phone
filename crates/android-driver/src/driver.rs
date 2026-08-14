@@ -917,9 +917,43 @@ impl AndroidDriver {
         for pid in &unique {
             let _ = self.adb.shell(serial, &format!("kill {pid}")).await;
         }
-        if !unique.is_empty() {
-            tokio::time::sleep(Duration::from_millis(300)).await;
+        if unique.is_empty() {
+            return;
         }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Confirm, then escalate. `kill` is SIGTERM, and a server blocked inside
+        // MediaCodec does not have to honour it -- measured on the Redmi, two
+        // `app_process` were still holding the encoder after this function had already
+        // run and reported nothing, because it never looked again. A survivor is not
+        // harmless: it keeps the hardware encoder, so the fresh server we are about to
+        // start fails `MediaCodec.configure` and the tile stays black.
+        //
+        // One escalation, not a loop: if SIGKILL does not take, the process is unkillable
+        // by us and retrying cannot change that, so say so and let the spawn attempt
+        // produce the real error.
+        let survivors = self
+            .adb
+            .shell(serial, crate::scrcpy::LEFTOVER_LIST_SCRIPT)
+            .await
+            .unwrap_or_default();
+        let survivors: Vec<u32> = survivors
+            .split_whitespace()
+            .filter_map(|token| token.parse::<u32>().ok())
+            .filter(|pid| *pid > 0 && unique.contains(pid))
+            .collect();
+        if survivors.is_empty() {
+            return;
+        }
+        tracing::warn!(
+            serial,
+            ?survivors,
+            "scrcpy server ignored SIGTERM; sending SIGKILL"
+        );
+        for pid in &survivors {
+            let _ = self.adb.shell(serial, &format!("kill -9 {pid}")).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
     }
 
     async fn spawn_view(
@@ -948,6 +982,32 @@ impl AndroidDriver {
 
         crate::scrcpy::ensure_server(&self.adb, serial, &server).await?;
         self.stop_our_scrcpy_leftovers(serial).await;
+
+        // Drop forwards left over from a run that never cleaned up. Every failure path
+        // below removes its own forward, so this is not for the current process -- it is
+        // for the previous one. `adb forward` lives in the adb server, so a crash, a
+        // force-quit, or a kill that skips `stop_view_producer` leaves the forward behind
+        // with nothing to remove it, and `prune_forwards` cannot find it because it
+        // matches the socket name exactly while scrcpy randomises the `scid`. Measured
+        // after several development restarts: five stranded forwards across two phones,
+        // each to a dead socket, plus two orphaned `app_process` on one of them.
+        //
+        // `keep` is every port a live producer holds, which is what makes this safe to
+        // run on a device that is already streaming into another window.
+        let live_ports: Vec<u16> = self
+            .views
+            .lock()
+            .await
+            .values()
+            .map(|producer| producer.host_port)
+            .collect();
+        crate::frames::prune_scrcpy_forwards(
+            &self.adb,
+            serial,
+            crate::scrcpy::FORWARD_PREFIX,
+            &live_ports,
+        )
+        .await;
 
         let scid = (rand::random::<u32>() & 0x7fff_ffff).max(1);
         // Device listens (`tunnel_forward`). Spawn first. This Windows adb

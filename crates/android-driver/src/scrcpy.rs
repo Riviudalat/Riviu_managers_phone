@@ -213,6 +213,14 @@ pub fn launch_command(scid: u32, tuning: ViewTuning) -> String {
     )
 }
 
+/// Longest stable prefix of the remote socket for every server we start.
+///
+/// Only a prefix is available: [`socket_name`] appends a random `scid`, so this is as
+/// specific as a match against `adb forward --list` can be. Tied to `socket_name` by a
+/// test rather than by eye, because the two drifting apart would silently turn a prune
+/// into a no-op.
+pub const FORWARD_PREFIX: &str = "localabstract:scrcpy_";
+
 /// Abstract socket the server binds when `scid` is set.
 pub fn socket_name(scid: u32) -> String {
     format!("scrcpy_{scid:08x}")
@@ -741,6 +749,18 @@ mod tests {
     fn socket_name_matches_the_server_format() {
         assert_eq!(socket_name(0x00ab_12cd), "scrcpy_00ab12cd");
         assert_eq!(socket_name(1), "scrcpy_00000001");
+    }
+
+    #[test]
+    fn forward_prefix_matches_every_socket_name() {
+        // A prune keyed on this prefix goes silently dead if `socket_name` is ever
+        // reworded, so assert the relationship instead of trusting two literals to agree.
+        for scid in [1u32, 0x62e3_7875, 0x7fff_ffff] {
+            assert!(
+                format!("localabstract:{}", socket_name(scid)).starts_with(FORWARD_PREFIX),
+                "socket_name({scid:#x}) escaped FORWARD_PREFIX"
+            );
+        }
     }
 
     #[tokio::test]

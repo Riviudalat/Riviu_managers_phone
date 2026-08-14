@@ -201,6 +201,74 @@ pub fn parse_forward_ports(stdout: &str, serial: &str, remote: &str) -> Vec<u16>
         .collect()
 }
 
+/// Host ports this serial has forwarded to any socket whose name starts with `prefix`.
+///
+/// Exists because [`parse_forward_ports`] matches the socket name **exactly**, and scrcpy's
+/// name carries a random `scid` (`scrcpy_%08x`). Every start picks a new one, so an
+/// exact-match prune can never find the previous forward — minicap's fixed name hid this
+/// for as long as minicap was the only producer.
+///
+/// It matters beyond a wasted port. `adb forward` lives in the **adb server**, not in this
+/// app, so a forward outlives a crash, a force-quit, or anything that stops the process
+/// without running its cleanup. They accumulate across runs, and a new TCP connect that
+/// lands on a dead one never receives scrcpy's dummy byte — which the desktop reports as
+/// "published nothing for 5s" and then retries forever, leaking one more each cycle.
+pub fn parse_forward_ports_with_prefix(stdout: &str, serial: &str, prefix: &str) -> Vec<u16> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let line_serial = parts.next()?;
+            let local = parts.next()?;
+            let line_remote = parts.next()?;
+            if line_serial != serial || !line_remote.starts_with(prefix) {
+                return None;
+            }
+            local.strip_prefix("tcp:")?.parse().ok()
+        })
+        .collect()
+}
+
+/// Drop every forward this serial has to one of our scrcpy sockets, except the ports the
+/// caller is still using.
+///
+/// `keep` is what stops this from cutting a live view: the driver knows the host port of
+/// every producer it currently holds, so anything else with our socket prefix is by
+/// definition a leftover from a run that did not get to clean up.
+///
+/// **Known trade-off, stated rather than guessed at:** a co-resident third-party scrcpy on
+/// this machine also names its sockets `scrcpy_*`, and its forward is in the same listing
+/// with no way to tell it apart. Pruning would end that tool's session. This repo already
+/// documents the same class of hazard for `adb kill-server`; the difference is that this one
+/// is scoped to a single serial we are about to drive anyway.
+pub async fn prune_scrcpy_forwards(
+    adb: &AdbProgram,
+    serial: &str,
+    prefix: &str,
+    keep: &[u16],
+) -> usize {
+    let listing = match adb
+        .run(&["forward", "--list"], Duration::from_secs(30))
+        .await
+    {
+        Ok(listing) => listing,
+        Err(_) => return 0,
+    };
+    let mut removed = 0;
+    for port in parse_forward_ports_with_prefix(&listing, serial, prefix) {
+        if keep.contains(&port) {
+            continue;
+        }
+        if remove_forward(adb, serial, port).await.is_ok() {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        tracing::info!(serial, removed, "reclaimed leaked scrcpy forwards");
+    }
+    removed
+}
+
 /// Reclaim host ports already forwarded to our socket for this device.
 ///
 /// The socket name carries the serial and our own prefix, so anything forwarded
@@ -389,6 +457,49 @@ pub fn is_jpeg(bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn prefix_match_finds_the_randomised_scrcpy_sockets() {
+        // Verbatim from `adb forward --list` on this fleet after several restarts of the
+        // desktop, serials redacted. Each scid differs, which is exactly why the
+        // exact-name prune in `prune_forwards` found none of them.
+        let listing = "serialA tcp:59060 localabstract:scrcpy_62e37875
+serialB tcp:59401 localabstract:scrcpy_61fcea8f
+serialB tcp:55599 localabstract:scrcpy_3bea3bb3
+serialA tcp:53232 localabstract:scrcpy_6bcfe5b0
+serialA tcp:6790 tcp:6790
+serialA tcp:60001 localabstract:riviu_minicap
+";
+        let mut a = parse_forward_ports_with_prefix(listing, "serialA", "localabstract:scrcpy_");
+        a.sort_unstable();
+        assert_eq!(a, vec![53232, 59060]);
+        let mut b = parse_forward_ports_with_prefix(listing, "serialB", "localabstract:scrcpy_");
+        b.sort_unstable();
+        assert_eq!(b, vec![55599, 59401]);
+
+        // The agent forward and minicap must survive: this prune runs while the agent is
+        // driving the phone, and killing 6790 would drop control, not just video.
+        assert!(
+            parse_forward_ports_with_prefix(listing, "serialA", "localabstract:scrcpy_")
+                .iter()
+                .all(|port| *port != 6790 && *port != 60001)
+        );
+    }
+
+    #[test]
+    fn exact_match_cannot_see_a_randomised_socket() {
+        // Records the defect this exists for, so a future "simplify back to
+        // parse_forward_ports" reintroduces it as a failure rather than as black screens.
+        let listing = "serialA tcp:59060 localabstract:scrcpy_62e37875
+";
+        assert!(
+            parse_forward_ports(listing, "serialA", "localabstract:scrcpy_ffffffff").is_empty()
+        );
+        assert_eq!(
+            parse_forward_ports_with_prefix(listing, "serialA", "localabstract:scrcpy_"),
+            vec![59060]
+        );
+    }
+
     use super::*;
 
     /// The exact banner measured on the Redmi Note 12 at half scale.
