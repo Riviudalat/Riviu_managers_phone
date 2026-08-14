@@ -5011,6 +5011,79 @@ JPEG preview không đè UDID đang có H.264. Nurture vẫn `tap()` cũ. Không
 `pkill` GenFarmer `Server 2.4`. WebSocket xem nối lại khi đứt; keeper
 restart scrcpy im > 5 s.
 
+### 9.57 Danh sách app trên máy: `cmd package`, và nhãn thì không có (14/08/2026)
+
+Người vận hành muốn thấy app đã cài trên từng máy. Trước việc này **không có capability
+nào** làm được: `list_apps_library` là thư viện IPA trong DB của **ta**, còn
+`pm list packages` chỉ từng được gọi với một tên cụ thể để dò TikTok/agent — chưa bao giờ
+để liệt kê.
+
+**`cmd package`, không phải `pm` — và điều này đính chính một con số đã ghi trong repo.**
+Đo trên cả hai máy đang cắm: `/system/bin/pm` trên SDK 26 là
+`exec app_process … com.android.commands.pm.Pm`, tức **một lần khởi động VM mỗi lệnh**, nên
+`pm list packages -3` tốn **786–820 ms** còn `cmd package list packages -3` tốn **274 ms**;
+trên SDK 35 `pm` đúng nghĩa là `cmd package "$@"` (290 vs 199 ms). Câu "`pm list packages`
+là một adb round trip 1–2 s" ghi ở `driver.rs` là giá của **wrapper**, không phải của
+package service. Cả hai phân vùng cộng lại: **521–606 ms**.
+
+**`--user 0` không phải tuỳ chọn.** Redmi có Second Space của MIUI
+(`UserInfo{11:security space}`); thiếu cờ đó thì listing trả về cả hàng của user 11 — app
+không nằm trên màn hình ai đang xem.
+
+**Liệt kê cả hai phân vùng và gắn nhãn, không lọc.** `-3` một mình sẽ **bỏ sót một TikTok
+cài sẵn**, và khi đó panel và `resolve_tiktok_package` nói khác nhau về cùng một máy. Nên
+`kind: User|System` là dữ liệu, còn ẩn app hệ thống là lựa chọn **hiện rõ** của UI.
+
+**Dùng dạng không cờ `-f`, và đó là cách cái bẫy `=` biến mất.** Với `-f` mỗi dòng là
+`package:<apkPath>=<name>`, mà chính apkPath **chứa `=`** — đo được:
+`~~t4zKiXKBJ07rbvGFo_JJsA==/com.microsoft.office.officehubrow-lSzImKSf8a5Gv78FCOkWUg==/base.apk`.
+Cắt ở `=` đầu thì mất path, cắt ở `=` cuối thì lấy nhầm phần sau — đó là cách cờ đó tạo ra
+một parse **rỗng trong im lặng**. Không có `-f` thì dòng đúng là `package:<name>`, y hệt
+shape `tiktok_target` đã đọc. Bỏ `-f` cũng bỏ luôn chỗ duy nhất mà **một đường dẫn do máy
+cung cấp** sẽ chạm vào shell của máy. `str::lines()` là bắt buộc: adb trả CRLF.
+
+**Nhãn app: không lấy được qua adb, và panel phải nói thế chứ không được bịa.**
+`cmd package query-activities` trả nhãn dưới dạng resource id
+(`labelRes=0x7f14026a nonLocalizedLabel=null`), cần resource table của APK cộng locale của
+máy mới giải được; 257/273 bản ghi trên Redmi có `nonLocalizedLabel=null`, **không máy nào
+có `aapt`/`aapt2`**, và kéo APK về để đọc là vô lý ở kích thước đo được (một `base.apk`
+nặng **261 MB**). Nên panel hiện **tên gói** và nói ra một câu vì sao. Đường *sẽ* chạy được
+là helper `com.riviu.agent` trên máy gọi `PackageManager.getApplicationLabel`, một HTTP
+call cho cả danh sách — việc riêng; field `label: Option` để sẵn nên thêm sau không đổi
+shape.
+
+**Từ chối, không trả mảng rỗng.** Trait mặc định `unsupported("listInstalledApps")`. Một
+`Vec` rỗng từ backend không liệt kê được thì **không phân biệt được với một máy trống**, và
+UI sẽ vẽ điều đó ra như sự thật. Kèm theo: forward trong `driver_multiplex` là **viết tay và
+buộc phải có** — type đó tự implement trait, nên method không forward sẽ âm thầm trả *mặc
+định* cho mọi máy và hiện thực thật của backend thành dead code vẫn compile và vẫn test
+xanh. Có test riêng ghim đúng chuyện đó, vì không có gì khác ghim tính đầy đủ của forward.
+
+**Không gate cứng theo nền tảng ở UI.** Máy nào liệt kê được là **câu trả lời của backend**
+đến dạng một refusal có lý do; một `androidOnly` viết cứng là phỏng đoán sẽ hỏng ngay khi
+đường iOS xuất hiện. iOS **chưa làm** ở đây: `pymobiledevice3` 10.1.0 làm được qua
+`InstallationProxyService.get_apps` không cần tunnel lẫn developer image, và sidecar đã gọi
+đúng hàm đó cho **một** bundle id (`cmd_is_installed`) — bỏ tham số lọc là toàn bộ thay đổi
+phía máy. Chưa làm vì **không có iPhone cắm để đo**, và ghi một field `label` dựa trên giả
+định "iOS cho tên miễn phí" là đúng loại điều repo này cấm.
+
+**Nghiệm thu trên máy thật:** Redmi báo **160 app đã cài, 376 hệ thống**, danh sách tên gói
+thật cuộn được trong overlay. Con số khớp với lần đo độc lập (160 + 377).
+
+**Một lỗi layout đáng ghi:** panel lần đầu **không hiện gì** và còn đẩy navbar ra ngoài. Nó
+là flex item cạnh một list `flex: 1`, nên mặc định `flex: 0 1 auto` cho phép co, và với
+`overflow: hidden` nó co về **0 chiều cao**; `max-height` theo phần trăm cũng cần chiều cao
+cha xác định mà nó không có. Sửa: `flex: 0 0 auto` + `max-height` theo px, và đặt **trước**
+navbar để navbar ở lại đáy cột.
+
+**Một artefact của harness, đã xác minh chứ không đoán:** một mock reject **trong
+`useEffect`** làm vitest 4 báo unhandled error và fail test **dù `catch` đã chạy** — chứng
+minh bằng cách chèn log vào `catch` (`live=true`, catch chạy, DOM có `role="alert"`). Đổi
+`Error` thành chuỗi, thêm `.catch(()=>{})`, đổi chain sang `async/await` đều không hết. Nên
+ý nghĩa hiển thị (từ-chối vs máy trống vs filter không khớp) chuyển vào `installedAppsView`
+— hàm **thuần**, test không cần promise, đúng tiền lệ `updateView`/`agentStatus`. Test
+component chỉ còn phần dây nối. Đây là thiết kế tốt hơn, không phải né test.
+
 ### 9.56 Tile đen vì máy ngủ; và ba đính chính cho hồ sơ đổi tên (14/08/2026)
 
 **Triệu chứng người vận hành thấy:** mở app lên, một máy hiện tile đen với "Đang mở
@@ -5089,7 +5162,8 @@ thư mục app-data lúc gỡ, cho protocol deep-link, và cho AppUserModelId c�
 **Thực tế hiện tại làm chuyện này còn là lý thuyết:** đếm tải của `v0.1.1` cho 2 lượt
 `setup.exe` (**cả hai là của tôi** lúc nghiệm thu bằng range-GET) và 3 lượt `.msi` (1 của
 tôi). Máy này **không có bản nào được cài** — không entry uninstall, không khoá
-`HKCU\Softwareiviu`. Nên quyết định đã ghi vẫn giữ; chỉ nguyên nhân và cái giá là cần
+`HKCU\Software
+iviu`. Nên quyết định đã ghi vẫn giữ; chỉ nguyên nhân và cái giá là cần
 viết lại cho đúng.
 
 ### 9.55 Default AI OpenRouter Luna, và scrcpy chết vì sai form codec option (14/08/2026)

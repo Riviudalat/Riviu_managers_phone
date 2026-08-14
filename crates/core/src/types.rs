@@ -567,6 +567,50 @@ pub struct MaterialItem {
     pub created_at: String,
 }
 
+/// Whether an app came with the phone or was installed onto it.
+///
+/// **Tagged, never inferred, and never used as a filter.** Listing only third-party
+/// packages would hide the very app the rest of this product drives: TikTok ships
+/// preinstalled on some phones, so a `-3`-only listing can disagree with
+/// `resolve_tiktok_package` about what is on the same device. Both partitions are read
+/// and each row says which one it came from; hiding system apps is the UI's choice to
+/// make visibly, not the driver's to make silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InstalledAppKind {
+    /// Installed onto the phone: `cmd package list packages -3`.
+    User,
+    /// Shipped with the phone or its ROM: `cmd package list packages -s`.
+    System,
+}
+
+/// One app present on a phone, as the phone itself reports it.
+///
+/// `label` is `Option` because on Android it is **not obtainable over adb at all**, and
+/// this type refuses to pretend otherwise. Measured 14/08/2026 on both attached phones:
+/// `cmd package query-activities` returns the label as a resource id
+/// (`labelRes=0x7f14026a nonLocalizedLabel=null`), which needs the APK's resource table
+/// plus the device locale to resolve; 257 of 273 records on the Redmi carried a null
+/// `nonLocalizedLabel`, neither phone has `aapt`/`aapt2`, and pulling APKs to read them
+/// is absurd at the measured sizes (one base.apk was 261 MB). So a listing shows package
+/// names, and a `None` here means "this phone cannot tell us", not "unnamed".
+///
+/// The route that *would* work is the on-device `com.riviu.agent` helper calling
+/// `PackageManager.getApplicationLabel`, one HTTP call for the whole list. That is a
+/// separate piece of work; the field exists so adding it later changes no shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledApp {
+    /// `bundle_id` and not `package`: the house term across `uninstall_app`,
+    /// `install_library_app` and the whole iOS path, and the same string both platforms
+    /// use to name an app.
+    pub bundle_id: String,
+    pub kind: InstalledAppKind,
+    /// Human-readable name where the platform gives one for free. Always `None` on
+    /// Android — see the type doc.
+    pub label: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppLibraryItem {

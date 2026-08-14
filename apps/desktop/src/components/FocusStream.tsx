@@ -13,6 +13,7 @@ import {
   saveViewSnapshot,
   screenshot,
 } from "../api";
+import { InstalledApps } from "./InstalledApps";
 import { pickDirectory } from "../pickFile";
 import { requestConfirm } from "../confirmStore";
 import { pushToast, toastError } from "../toastStore";
@@ -27,6 +28,7 @@ import {
   IconClose,
   IconCopy,
   IconDownload,
+  IconGrid,
   IconHome,
   IconPower,
   IconRecents,
@@ -61,6 +63,7 @@ export function FocusStream({ device, index, onClose, groupUdids, groupMode }: P
   const hasView = useViewLive(device.udid);
   const viewSize = useViewSize(device.udid);
   const [busy, setBusy] = useState(false);
+  const [showApps, setShowApps] = useState(false);
   const [frameWidth, setFrameWidth] = useState(() => loadZoom(FOCUS_ZOOM));
   const screenRef = useRef<HTMLDivElement>(null);
   const drag = useRef<{ x: number; y: number } | null>(null);
@@ -335,6 +338,15 @@ export function FocusStream({ device, index, onClose, groupUdids, groupMode }: P
       Icon: IconRefresh,
       run: () => void reboot(),
     },
+    {
+      // No `androidOnly`. Whether a phone can be enumerated is the backend's answer,
+      // arriving as a refusal with a reason; a hardcoded platform gate here would be a
+      // guess that goes stale the moment the iOS route lands.
+      id: "apps",
+      label: showApps ? "Ẩn ứng dụng" : "Ứng dụng",
+      Icon: IconGrid,
+      run: () => setShowApps((open) => !open),
+    },
     ...(isIos
       ? [
           {
@@ -457,6 +469,7 @@ export function FocusStream({ device, index, onClose, groupUdids, groupMode }: P
               );
             })}
           </div>
+          {showApps && <InstalledApps udid={device.udid} deviceName={device.name} />}
           <nav className="focus-navbar" aria-label="Phím điều hướng">
             {navKeys.map(({ key, title, Icon }) => (
               <button

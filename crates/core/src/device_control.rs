@@ -287,6 +287,23 @@ impl DeviceControlPlane {
             .map_err(|error| driver_error(udid, "resolveTikTokPackage", error))
     }
 
+    /// Every app the phone reports as present.
+    ///
+    /// Lease-free on purpose, following `resolve_tiktok_package` directly above: this
+    /// reads and changes nothing, and taking an exclusive lease to answer it would let a
+    /// panel refresh evict a running session. The interaction path already relies on that
+    /// property — it resolves a package *before* acquiring anything so a phone with no
+    /// drivable build refuses without consuming a lease or a capacity slot.
+    pub async fn list_installed_apps(
+        &self,
+        udid: &str,
+    ) -> Result<Vec<crate::types::InstalledApp>, DeviceControlError> {
+        self.driver
+            .list_installed_apps(udid)
+            .await
+            .map_err(|error| driver_error(udid, "listInstalledApps", error))
+    }
+
     pub fn driver_contract_ids(&self, udid: &str) -> BTreeSet<String> {
         let mut contracts = BTreeSet::new();
         if self.driver.supports_verified_app_termination(udid) {

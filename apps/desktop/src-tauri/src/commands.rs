@@ -320,6 +320,35 @@ pub async fn uninstall_app(
         .map_err(CommandError::from)
 }
 
+/// Every app one phone reports as present.
+///
+/// One device at a time, deliberately not a `udids: Vec<String>` batch. The batch shape
+/// in this app belongs to `agent_list_statuses`, which touches no phone at all — copying
+/// it here would turn opening a panel into one blocking call that paints nothing until
+/// the slowest phone in the fleet answers. The frontend fans out instead, so each row
+/// appears when its own phone replies.
+///
+/// Takes admission but **no exclusive lease**: this reads and mutates nothing, and a
+/// lease would let a panel refresh evict a running session. Admission is still right,
+/// because it touches a device and shutdown must drain it before releasing the fleet.
+///
+/// A backend that cannot enumerate **refuses**, and the refusal names
+/// `listInstalledApps`. It must never be flattened into an empty list — an iPhone that
+/// answers `[]` reads as a phone with nothing installed, which is a lie the panel would
+/// render as fact.
+#[tauri::command]
+pub async fn list_installed_apps(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<Vec<riviu_core::InstalledApp>, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    state
+        .control
+        .list_installed_apps(&udid)
+        .await
+        .map_err(CommandError::from)
+}
+
 #[tauri::command]
 pub async fn screenshot(state: State<'_, AppState>, udid: String) -> Result<String, CommandError> {
     let _admission = state.ensure_accepting_work()?;

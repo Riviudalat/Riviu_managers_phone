@@ -47,6 +47,7 @@ import type {
   ThreadCampaignRequest,
   ThreadPreview,
   TikTokLinkLine,
+  InstalledApp,
   UpdateStatus,
 } from "./types";
 
@@ -319,6 +320,20 @@ export async function updateCheck() {
  */
 export async function updateInstall() {
   return invoke<void>("update_install");
+}
+
+/**
+ * Every app one phone reports as present.
+ *
+ * One udid per call on purpose. The backend has no batch form, because a batch would
+ * paint nothing until the slowest phone in the fleet answered; callers fan out and each
+ * row appears when its own phone replies.
+ *
+ * Rejects rather than returning `[]` when a backend cannot enumerate — an empty array
+ * would read as a phone with nothing installed. Show the rejection text.
+ */
+export async function listInstalledApps(udid: string) {
+  return invoke<InstalledApp[]>("list_installed_apps", { udid });
 }
 
 export async function authSession() {

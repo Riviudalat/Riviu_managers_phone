@@ -34,8 +34,8 @@ use crate::driver::{
 };
 use crate::stream_budget::StreamStopProof;
 use crate::types::{
-    AgentSettings, AgentStatus, DeviceInfo, InteractionSessionKind, StreamHandoffProof,
-    StreamStartProof,
+    AgentSettings, AgentStatus, DeviceInfo, InstalledApp, InteractionSessionKind,
+    StreamHandoffProof, StreamStartProof,
 };
 
 /// A backend plus how its last listing went.
@@ -328,6 +328,14 @@ impl DeviceDriver for MultiplexDriver {
         self.route(udid)?.inspect_app_process(udid, bundle_id).await
     }
 
+    // Hand-written, and it has to be: this type implements the trait itself, so a
+    // method left un-forwarded silently answers with the trait *default* — a refusal —
+    // for every device, turning the backend's real implementation into dead code that
+    // compiles and tests green. Nothing pins forward-completeness.
+    async fn list_installed_apps(&self, udid: &str) -> anyhow::Result<Vec<InstalledApp>> {
+        self.route(udid)?.list_installed_apps(udid).await
+    }
+
     async fn backup_device(&self, udid: &str, dest: &Path) -> anyhow::Result<()> {
         self.route(udid)?.backup_device(udid, dest).await
     }
@@ -517,6 +525,22 @@ mod tests {
             }
             Ok(self.udids.iter().map(|udid| device(udid)).collect())
         }
+
+        // Only the backend that says it can enumerate does. The other inherits the
+        // trait's refusal, which is what makes a missing forward visible.
+        async fn list_installed_apps(&self, udid: &str) -> anyhow::Result<Vec<InstalledApp>> {
+            if !self.text_comments {
+                return Err(crate::driver::UnsupportedCapability {
+                    capability: "listInstalledApps",
+                }
+                .into());
+            }
+            Ok(vec![InstalledApp {
+                bundle_id: format!("com.stub.{udid}"),
+                kind: crate::types::InstalledAppKind::User,
+                label: None,
+            }])
+        }
         async fn refresh_device(&self, udid: &str) -> anyhow::Result<DeviceInfo> {
             Ok(device(udid))
         }
@@ -590,6 +614,33 @@ mod tests {
         driver.list_devices().await.expect("list");
         assert!(!driver.supports_text_comments("ios-a"));
         assert!(driver.supports_text_comments("droid-a"));
+    }
+
+    #[tokio::test]
+    async fn an_async_capability_reaches_the_owning_backend_rather_than_the_trait_default() {
+        // This type implements the trait itself, so a method nobody forwarded answers
+        // with the *default* for every device — a refusal — and the backend's real
+        // implementation becomes dead code that still compiles and still tests green.
+        // Nothing else in the file pins forward-completeness, so each async forward
+        // needs one of these.
+        let driver = multiplex();
+        driver.list_devices().await.expect("list");
+
+        let apps = driver
+            .list_installed_apps("droid-a")
+            .await
+            .expect("the android backend enumerates");
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].bundle_id, "com.stub.droid-a");
+
+        let refused = driver
+            .list_installed_apps("ios-a")
+            .await
+            .expect_err("a backend that cannot enumerate must refuse, not return empty");
+        assert!(
+            refused.to_string().contains("listInstalledApps"),
+            "the refusal must name the capability: {refused}"
+        );
     }
 
     #[tokio::test]

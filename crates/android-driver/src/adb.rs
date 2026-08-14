@@ -646,6 +646,37 @@ pub fn parse_display_awake(stdout: &str) -> Option<bool> {
     })
 }
 
+/// Package names out of `cmd package list packages`, in the order the phone gave them.
+///
+/// **The flagless form, on purpose.** Adding `-f` makes each line
+/// `package:<apkPath>=<name>`, and the apk path itself contains `=` — measured on the
+/// Redmi: `~~t4zKiXKBJ07rbvGFo_JJsA==/com.microsoft.office.officehubrow-lSzImKSf8a5Gv78FCOkWUg==/base.apk`.
+/// Splitting on the first `=` destroys the path and splitting on the last grabs whatever
+/// came after it, which is how that flag produces a silently empty parse. Without `-f`
+/// the line is exactly `package:<name>` — the shape `tiktok_target` already reads — and
+/// the trap cannot occur.
+///
+/// A row that is not a legal package name is **dropped, not repaired**: this output is
+/// device-supplied, and a malformed row means the parse has desynchronised rather than
+/// that the phone has an oddly-named app. `str::lines` is required rather than splitting
+/// on `\n` because adb returns CRLF.
+pub fn parse_package_list(stdout: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for line in stdout.lines() {
+        let Some(name) = line.trim().strip_prefix("package:") else {
+            continue;
+        };
+        let name = name.trim();
+        if validate_package_name(name).is_err() {
+            continue;
+        }
+        if !names.iter().any(|seen| seen == name) {
+            names.push(name.to_string());
+        }
+    }
+    names
+}
+
 /// The keyevent that wakes a screen without ever putting one to sleep.
 ///
 /// `KEYCODE_POWER` **toggles**, so on a phone that is already awake it would blank the
@@ -989,6 +1020,61 @@ mod tests {
         assert_eq!(parse_display_awake("mWakefulness=Asleep"), Some(false));
         assert_eq!(parse_display_awake("  mWakefulness=Dozing  "), Some(false));
         assert_eq!(parse_display_awake("mWakefulness=Dreaming"), Some(false));
+    }
+
+    #[test]
+    fn a_package_listing_keeps_device_order_and_drops_nothing_real() {
+        // Real stdout shape, CRLF as adb actually returns it.
+        let stdout = "package:com.zhiliaoapp.musically\r\npackage:com.riviu.agent\r\n\
+                      package:com.ss.android.ugc.trill\r\n";
+
+        assert_eq!(
+            parse_package_list(stdout),
+            [
+                "com.zhiliaoapp.musically",
+                "com.riviu.agent",
+                "com.ss.android.ugc.trill"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_listing_row_that_is_not_a_package_name_is_dropped_not_repaired() {
+        // Device-supplied output. A row that fails the name rules means the parse
+        // desynchronised, not that the phone has an oddly-named app — so it must not
+        // reach a caller that might paste it into a device shell.
+        let stdout = "package:com.good.app\n\
+                      package:\n\
+                      package:9bad.start\n\
+                      package:nodots\n\
+                      Exception occurred while executing:\n\
+                      package:com.other.app\n";
+
+        assert_eq!(
+            parse_package_list(stdout),
+            ["com.good.app", "com.other.app"]
+        );
+    }
+
+    #[test]
+    fn the_flagless_form_is_what_keeps_the_equals_trap_from_existing() {
+        // With `-f` the line is `package:<apkPath>=<name>` and the apk path itself
+        // contains `=`, measured on the Redmi. Such a row is not a package name, so it is
+        // dropped rather than silently mis-split — the parse cannot half-succeed.
+        let with_f = "package:/data/app/~~t4zKiXKBJ07rbvGFo_JJsA==/\
+                      com.microsoft.office.officehubrow-lSzImKSf8a5Gv78FCOkWUg==/base.apk=\
+                      com.microsoft.office.officehubrow\n";
+
+        assert!(parse_package_list(with_f).is_empty());
+    }
+
+    #[test]
+    fn a_package_listed_twice_appears_once() {
+        // The two partitions are read in sequence into one list; a phone that reports a
+        // package in both must not produce a duplicate row.
+        let stdout = "package:com.dup.app\npackage:com.dup.app\n";
+
+        assert_eq!(parse_package_list(stdout), ["com.dup.app"]);
     }
 
     #[test]

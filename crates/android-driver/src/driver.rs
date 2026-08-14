@@ -1724,6 +1724,49 @@ impl DeviceDriver for AndroidDriver {
     ///
     /// Memoised because `pm list packages` is a 1–2 s adb round trip per candidate
     /// and this is on the path to every session.
+    /// Two calls, both partitions, tagged rather than filtered.
+    ///
+    /// `cmd package` and **not** `pm`. Measured 14/08/2026 on both attached phones:
+    /// `/system/bin/pm` on SDK 26 is `exec app_process … com.android.commands.pm.Pm`, one
+    /// JVM start per invocation, so `pm list packages -3` costs 786–820 ms while
+    /// `cmd package list packages -3` costs 274 ms; on SDK 35 `pm` is literally
+    /// `cmd package "$@"` (290 ms vs 199 ms). The "1–2 s per `pm list packages`" recorded
+    /// elsewhere in this file is the cost of that **wrapper**, not of the package service.
+    /// Both partitions together measured 521–606 ms.
+    ///
+    /// `--user 0` is not optional. The Redmi carries a MIUI Second Space
+    /// (`UserInfo{11:security space}`) and without it the listing returns rows from user
+    /// 11 as well — apps that are not on the screen anyone is looking at.
+    ///
+    /// System apps are listed and tagged, never filtered out. A `-3`-only listing would
+    /// omit a preinstalled TikTok and then disagree with `resolve_tiktok_package` about
+    /// what is on the same phone; hiding them is the UI's visible choice.
+    async fn list_installed_apps(
+        &self,
+        udid: &str,
+    ) -> anyhow::Result<Vec<riviu_core::InstalledApp>> {
+        let mut apps: Vec<riviu_core::InstalledApp> = Vec::new();
+        for (flag, kind) in [
+            ("-3", riviu_core::InstalledAppKind::User),
+            ("-s", riviu_core::InstalledAppKind::System),
+        ] {
+            let stdout = self
+                .adb
+                .shell(udid, &format!("cmd package list packages {flag} --user 0"))
+                .await?;
+            for bundle_id in adb::parse_package_list(&stdout) {
+                apps.push(riviu_core::InstalledApp {
+                    bundle_id,
+                    kind,
+                    // Not obtainable over adb at any price worth paying. See the doc on
+                    // `InstalledApp`.
+                    label: None,
+                });
+            }
+        }
+        Ok(apps)
+    }
+
     async fn resolve_tiktok_package(&self, udid: &str) -> anyhow::Result<String> {
         if let Some(known) = self.tiktok_packages.lock().get(udid) {
             return Ok(known.clone());

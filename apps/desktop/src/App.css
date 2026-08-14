@@ -2901,3 +2901,63 @@ button.danger:hover:not(:disabled) {
   line-height: 1.35;
   margin-top: 0.15rem;
 }
+
+/* Installed-apps panel inside the control overlay's right-hand menu.
+   Bounded height with its own scroll: a phone reports hundreds of packages and the
+   panel must not push the navbar off the bottom of the overlay. */
+.installed-apps {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  /* `flex: 0 0 auto` and a px cap, not a percentage. As a shrinkable item next to a
+     `flex: 1` list this collapsed to zero height and rendered nothing at all, and a
+     percentage max-height needs a definite parent height it does not reliably have. */
+  flex: 0 0 auto;
+  max-height: 340px;
+  padding: 0.55rem 0.9rem 0.7rem;
+  border-top: 1px solid #e2e8f0;
+  overflow: hidden;
+}
+.installed-apps-controls {
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.installed-apps-controls input[type="text"],
+.installed-apps-controls input:not([type]) {
+  flex: 1;
+  min-width: 0;
+  padding: 0.3rem 0.45rem;
+  font-size: 0.75rem;
+}
+.installed-apps-controls label {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.72rem;
+  color: #4a5568;
+  white-space: nowrap;
+}
+.installed-apps .hint {
+  margin: 0;
+  font-size: 0.72rem;
+}
+.installed-apps-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+  min-height: 0;
+}
+.installed-apps-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  padding: 0.22rem 0;
+  border-bottom: 1px solid #f1f5f9;
+}
+.installed-apps-list code {
+  font-size: 0.72rem;
+  word-break: break-all;
+}

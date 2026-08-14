@@ -12,8 +12,9 @@ use crate::device_capabilities::{
 use crate::flow::QualifiedElementLocator;
 use crate::stream_budget::StreamStopProof;
 use crate::types::{
-    ActiveAppIdentity, AgentSettings, AgentStatus, DeviceInfo, HardwareKey, InteractionSessionKind,
-    StreamHandoffProof, StreamStartProof, SwipeGesture, SwipePath, TapPoint,
+    ActiveAppIdentity, AgentSettings, AgentStatus, DeviceInfo, HardwareKey, InstalledApp,
+    InteractionSessionKind, StreamHandoffProof, StreamStartProof, SwipeGesture, SwipePath,
+    TapPoint,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -319,6 +320,18 @@ pub trait DeviceDriver: Send + Sync {
         _bundle_id: &str,
     ) -> anyhow::Result<AppProcessState> {
         unsupported("inspectAppProcess")
+    }
+    /// Every app the phone reports as present, tagged user or system.
+    ///
+    /// Defaults to a refusal rather than an empty list, and the difference is the whole
+    /// point: an empty `Vec` from a backend that cannot enumerate is indistinguishable
+    /// from a phone with nothing on it, which is a lie the UI would render as fact.
+    ///
+    /// Deliberately **no** companion `supports_list_installed_apps`. That shape exists
+    /// for pre-flight predictions that pick a strategy before touching a phone; here the
+    /// call is already the cheapest possible probe and its failure is already typed.
+    async fn list_installed_apps(&self, _udid: &str) -> anyhow::Result<Vec<InstalledApp>> {
+        unsupported("listInstalledApps")
     }
     /// Full device backup into `dest`/<udid> via Mobilebackup2. Long-running.
     async fn backup_device(&self, _udid: &str, _dest: &Path) -> anyhow::Result<()> {

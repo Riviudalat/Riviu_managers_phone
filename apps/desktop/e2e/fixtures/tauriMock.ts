@@ -724,6 +724,7 @@ export async function installTauriMock(
       busyReason: null,
     }));
     commandHandlers.set("update_install", () => null);
+    commandHandlers.set("list_installed_apps", () => []);
 
     async function invoke(command: string, args: JsonRecord = {}) {
       if (command === "plugin:event|listen") {

@@ -1171,3 +1171,20 @@ export interface UpdateStatus {
   current: string;
   busyReason: string | null;
 }
+
+/** Whether an app came with the phone or was installed onto it. */
+export type InstalledAppKind = "user" | "system";
+
+/**
+ * One app present on a phone, as the phone itself reports it.
+ *
+ * `label` is null on Android and always will be over adb: the phone returns the name as
+ * a resource id needing the APK's resource table plus the device locale, neither phone
+ * has aapt, and pulling a 261 MB APK to read one string is not a trade worth making. So
+ * null means "this phone cannot tell us", never "unnamed" — render the bundle id.
+ */
+export interface InstalledApp {
+  bundleId: string;
+  kind: InstalledAppKind;
+  label: string | null;
+}
