@@ -53,29 +53,48 @@ describe("stalled view detection", () => {
   // simply is not changing.
   const now = 1_000_000;
 
-  it("flags a live view whose last drawn frame is older than the window", () => {
-    const painted = new Map([
-      ["fresh", now - 1_000],
-      ["stale", now - PAINT_STALL_MS - 1],
-    ]);
-    expect(collectStalledViews(now, ["fresh", "stale"], painted)).toEqual(["stale"]);
+  const beat = (at: number, receivedCount: number, frames: number) => ({
+    at,
+    received: receivedCount,
+    frames,
+  });
+
+  it("flags a view whose packets kept arriving while it drew nothing", () => {
+    const painted = new Map([["stale", beat(now - PAINT_STALL_MS - 1, 100, 50)]]);
+    const latest = new Map([["stale", beat(now, 340, 50)]]);
+    expect(collectStalledViews(now, ["stale"], painted, latest)).toEqual(["stale"]);
+  });
+
+  it("leaves a static screen alone even though it has drawn nothing for ages", () => {
+    // The mistake the first version of this rule made, and the expensive one: scrcpy only
+    // encodes when the screen changes, so a phone parked on a lock screen sends nothing and
+    // paints nothing and is entirely healthy. Restarting it cost ~45s of real downtime.
+    const painted = new Map([["idle", beat(now - 10 * PAINT_STALL_MS, 100, 50)]]);
+    const latest = new Map([["idle", beat(now, 100, 50)]]);
+    expect(collectStalledViews(now, ["idle"], painted, latest)).toEqual([]);
+  });
+
+  it("leaves a view alone while it is still painting", () => {
+    const painted = new Map([["fresh", beat(now - 1000, 100, 50)]]);
+    const latest = new Map([["fresh", beat(now, 124, 74)]]);
+    expect(collectStalledViews(now, ["fresh"], painted, latest)).toEqual([]);
   });
 
   it("leaves a view exactly at the boundary alone", () => {
-    // Strictly greater than, so a phone painting at exactly the threshold is not churned.
-    const painted = new Map([["edge", now - PAINT_STALL_MS]]);
-    expect(collectStalledViews(now, ["edge"], painted)).toEqual([]);
+    const painted = new Map([["edge", beat(now - PAINT_STALL_MS, 100, 50)]]);
+    const latest = new Map([["edge", beat(now, 300, 50)]]);
+    expect(collectStalledViews(now, ["edge"], painted, latest)).toEqual([]);
   });
 
   it("does not flag a view that has never painted", () => {
-    // A stream that has not drawn yet is starting up, not stalled. Treating "never" as
-    // "stalled" would restart every producer the instant its device appeared.
-    expect(collectStalledViews(now, ["starting"], new Map())).toEqual([]);
+    const latest = new Map([["starting", beat(now, 5, 0)]]);
+    expect(collectStalledViews(now, ["starting"], new Map(), latest)).toEqual([]);
   });
 
-  it("ignores a stale paint time for a view that is not live", () => {
-    const painted = new Map([["gone", now - 10 * PAINT_STALL_MS]]);
-    expect(collectStalledViews(now, [], painted)).toEqual([]);
+  it("ignores a stalled view that is not live", () => {
+    const painted = new Map([["gone", beat(now - 10 * PAINT_STALL_MS, 100, 50)]]);
+    const latest = new Map([["gone", beat(now, 900, 50)]]);
+    expect(collectStalledViews(now, [], painted, latest)).toEqual([]);
   });
 
   it("rate limits recovery so an undecodable stream cannot be restarted every tick", () => {

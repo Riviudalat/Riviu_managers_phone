@@ -14,7 +14,9 @@ const live = new Set<string>();
 const listeners = new Map<string, Set<Listener>>();
 const pendingExports = new Map<number, (bytes: Uint8Array | null) => void>();
 /// When each udid last reported a drawn frame, and when we last acted on a stall.
-const lastPaintAt = new Map<string, number>();
+/// The beat at which each udid last actually drew, and the newest beat of any kind.
+const lastPaintBeat = new Map<string, ViewBeat>();
+const latestBeat = new Map<string, ViewBeat>();
 const lastRecoveryAt = new Map<string, number>();
 /// How many restarts this udid has had without a single frame drawn since.
 const recoveryAttempts = new Map<string, number>();
@@ -22,12 +24,21 @@ const recoveryAttempts = new Map<string, number>();
 /// nothing to wait for, so retrying the same stream cannot help.
 const decodeFailed = new Set<string>();
 
-/// A stream is considered stalled after this long with no drawn frame.
+/// A stream is stalled after this long of packets arriving that produce no drawn frame.
 ///
-/// Six seconds, not one: scrcpy only encodes when the screen changes, so a phone sitting
-/// on a static screen legitimately paints nothing for a while, and a shorter window would
-/// restart healthy streams. The Rust watchdog's own threshold is 5s of no *bytes*.
-export const PAINT_STALL_MS = 6000;
+/// The predicate matters more than the number, and the first version of this got it wrong:
+/// it treated "no frames drawn" as the fault. scrcpy only encodes when the screen changes,
+/// so a phone parked on a static lock screen paints nothing for minutes and is perfectly
+/// healthy -- the comment here said exactly that and the rule ignored it. Measured cost of
+/// that mistake on a Redmi sitting on its lock screen: a restart every ~7 s of uptime
+/// against ~45 s of spawn, leaving the stream up 14-18% of the time, and the restarts stole
+/// the exclusive start claim so the overlay's own encode request came back
+/// "already in flight" and never landed.
+///
+/// Arrivals climbing while paints stay flat is the condition that actually means broken, and
+/// it needs both counters. 12s rather than 6: at 24 fps a healthy stream paints within a
+/// frame or two of an arrival, so anything this long is not a slow decoder.
+export const PAINT_STALL_MS = 12000;
 /// Delay before the FIRST retry for one udid. Each further attempt doubles it.
 ///
 /// A flat cooldown is not enough, and this was measured the hard way: a producer restart
@@ -52,7 +63,15 @@ export function viewDecodeFailed(udid: string): boolean {
   return decodeFailed.has(udid);
 }
 
-/// The udids that look stalled: live, but no drawn frame within [`PAINT_STALL_MS`].
+/// One udid's most recent worker beat: how many envelopes arrived and how many frames were
+/// drawn, as of `at`.
+export interface ViewBeat {
+  at: number;
+  received: number;
+  frames: number;
+}
+
+/// The udids that look stalled: packets kept arriving and no frame was drawn for them.
 ///
 /// Takes its inputs rather than reading module state, so the policy can be tested without a
 /// worker, a socket, or a timer. That matters here more than usual: the defect this exists
@@ -65,13 +84,21 @@ export function viewDecodeFailed(udid: string): boolean {
 export function collectStalledViews(
   now: number,
   liveUdids: Iterable<string>,
-  paintedAt: Map<string, number>,
+  lastPaint: Map<string, ViewBeat>,
+  latest: Map<string, ViewBeat>,
   stallMs: number = PAINT_STALL_MS,
 ): string[] {
   const stalled: string[] = [];
   for (const udid of liveUdids) {
-    const seen = paintedAt.get(udid);
-    if (seen === undefined || now - seen <= stallMs) continue;
+    const painted = lastPaint.get(udid);
+    const now_ = latest.get(udid);
+    // Never drawn, or no beat at all: starting up, not stalled. Restarting a producer the
+    // instant its device appears is how the previous rule made the outage it was reporting.
+    if (painted === undefined || now_ === undefined) continue;
+    if (now - painted.at <= stallMs) continue;
+    // The whole point: only a stream whose packets kept coming is broken. A static screen
+    // stops producing packets too, and restarting it fixes nothing while costing ~45 s.
+    if (now_.received <= painted.received) continue;
     stalled.push(udid);
   }
   return stalled;
@@ -135,7 +162,7 @@ function ensureWorker(): Worker | null {
   } catch {
     return null;
   }
-  worker.onmessage = (event: MessageEvent<{ type: string; udid?: string; width?: number; height?: number; generation?: number; requestId?: number; bytes?: Uint8Array | null; frames?: number; codecs?: string[] }>) => {
+  worker.onmessage = (event: MessageEvent<{ type: string; udid?: string; width?: number; height?: number; generation?: number; requestId?: number; bytes?: Uint8Array | null; frames?: number; received?: number; codecs?: string[] }>) => {
     const message = event.data;
     if (message.type === "painted" && message.udid) {
       const next: ViewSize = {
@@ -156,12 +183,22 @@ function ensureWorker(): Worker | null {
       return;
     }
     if (message.type === "paintBeat" && message.udid) {
-      lastPaintAt.set(message.udid, Date.now());
-      // A drawn frame is the only thing that clears the backoff. A restart that "succeeded"
-      // and still painted nothing must not buy itself another fast retry.
-      recoveryAttempts.delete(message.udid);
-      lastRecoveryAt.delete(message.udid);
-      if (decodeFailed.delete(message.udid)) emit(message.udid);
+      const beat: ViewBeat = {
+        at: Date.now(),
+        received: message.received ?? 0,
+        frames: message.frames ?? 0,
+      };
+      const previous = lastPaintBeat.get(message.udid);
+      latestBeat.set(message.udid, beat);
+      if (previous === undefined || beat.frames > previous.frames) {
+        // A frame was genuinely drawn since the last check. That, and only that, clears the
+        // backoff -- a restart that "succeeded" and still painted nothing must not buy
+        // itself another fast retry.
+        lastPaintBeat.set(message.udid, beat);
+        recoveryAttempts.delete(message.udid);
+        lastRecoveryAt.delete(message.udid);
+        if (decodeFailed.delete(message.udid)) emit(message.udid);
+      }
       return;
     }
     if (message.type === "decodeUnsupported" && message.udid) {
@@ -239,16 +276,19 @@ function startStallWatch() {
   if (stallTimer != null) return;
   stallTimer = setInterval(() => {
     const now = Date.now();
-    for (const udid of collectStalledViews(now, live, lastPaintAt)) {
+    for (const udid of collectStalledViews(now, live, lastPaintBeat, latestBeat)) {
       live.delete(udid);
       emit(udid);
       if (!shouldAttemptViewRecovery(udid, now, lastRecoveryAt, recoveryAttempts)) continue;
       const attempt = (recoveryAttempts.get(udid) ?? 0) + 1;
       recoveryAttempts.set(udid, attempt);
       lastRecoveryAt.set(udid, now);
+      const painted = lastPaintBeat.get(udid);
+      const current = latestBeat.get(udid);
       console.warn(
-        `view painted nothing for ${PAINT_STALL_MS}ms; restarting ${udid} (attempt ${attempt}, ` +
-          `next retry in ${Math.round(viewRecoveryDelayMs(attempt) / 1000)}s)`,
+        `view received ${(current?.received ?? 0) - (painted?.received ?? 0)} packets and drew ` +
+          `nothing for ${PAINT_STALL_MS}ms; restarting ${udid} (attempt ${attempt}, next retry ` +
+          `in ${Math.round(viewRecoveryDelayMs(attempt) / 1000)}s)`,
       );
       // viewEnsure restarts the producer at whatever preset the operator last asked for.
       void viewEnsure(udid).catch(() => {

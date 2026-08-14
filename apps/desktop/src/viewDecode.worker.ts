@@ -75,9 +75,17 @@ interface Slot {
   lastBeatFrames: number;
 }
 
-/// How often the worker reports that it is still drawing. Small enough that a stall is
-/// noticed in seconds, large enough that it is not a message per frame.
+/// How often the worker reports what it received versus what it drew.
 const PAINT_BEAT_MS = 1000;
+
+/// Envelopes accepted off the socket per udid, painted frames aside.
+///
+/// Load-bearing for the stall rule, and the reason the first version of that rule was wrong:
+/// scrcpy only encodes when the screen changes, so a phone parked on a static lock screen
+/// legitimately paints nothing for minutes. "No frames drawn" therefore cannot mean broken.
+/// The signal that does mean broken is packets arriving that produce no paint, which needs
+/// both counts side by side.
+const received = new Map<string, number>();
 
 const slots = new Map<string, Slot>();
 const pending = new Map<string, ViewEnvelope>();
@@ -126,12 +134,32 @@ function beatPainted(slot: Slot) {
   if (now - slot.lastBeatAt < PAINT_BEAT_MS) return;
   slot.lastBeatAt = now;
   slot.lastBeatFrames = slot.framesPainted;
+  emitBeat(slot.udid, slot.generation, slot.framesPainted);
+}
+
+/// Report received-vs-painted for one udid. Sent from the paint path AND from the arrival
+/// path, because the case worth catching is arrivals climbing while paints do not, and the
+/// paint path by definition is not running then.
+function emitBeat(udid: string, generation: number, frames: number) {
   postMessage({
     type: "paintBeat",
-    udid: slot.udid,
-    generation: slot.generation,
-    frames: slot.framesPainted,
+    udid,
+    generation,
+    frames,
+    received: received.get(udid) ?? 0,
   });
+}
+
+const lastArrivalBeatAt = new Map<string, number>();
+
+function beatArrival(udid: string) {
+  received.set(udid, (received.get(udid) ?? 0) + 1);
+  const now = performance.now();
+  const last = lastArrivalBeatAt.get(udid) ?? 0;
+  if (now - last < PAINT_BEAT_MS) return;
+  lastArrivalBeatAt.set(udid, now);
+  const slot = slots.get(udid);
+  emitBeat(udid, slot?.generation ?? 0, slot?.framesPainted ?? 0);
 }
 
 function notifyPainted(udid: string, slot: Slot) {
@@ -373,6 +401,7 @@ self.onmessage = (event: MessageEvent<InMessage>) => {
   if (message.type !== "packet") return;
   const envelope = decodeViewEnvelope(message.buffer);
   if (!envelope) return;
+  beatArrival(envelope.udid);
   const previous = pending.get(envelope.udid);
   if (previous && previous.generation !== envelope.generation) {
     pending.delete(envelope.udid);
