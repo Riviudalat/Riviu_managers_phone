@@ -1250,35 +1250,34 @@ button:disabled {
 .window-canvas {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: 8px;
   align-items: flex-start;
   padding: 4px 0 12px;
 }
 
+/* The reference draws no outer card: a 3px border at an 8px radius over the video, and
+   selection recolours that same border rather than adding a second ring. Ours was the
+   opposite — an 18px pill with two shadows plus a detached 2px outline offset outside the
+   tile — which is what the operator meant by the frame not matching. */
 .dev-phone {
   position: relative;
-  border-radius: 18px;
+  border-radius: 8px;
   background: #000;
-  border: 1px solid #1a1d24;
+  border: 3px solid #3a4150;
   padding: 0;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
   cursor: pointer;
-  transition: box-shadow 0.15s, outline-color 0.15s;
+  transition: border-color 0.15s;
   container-type: inline-size;
   contain: layout paint;
   content-visibility: auto;
   contain-intrinsic-size: 190px 380px;
 }
 .dev-phone:hover {
-  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
+  border-color: #58627a;
 }
 .dev-phone.selected,
 .dev-phone.focused {
-  outline: 2px solid var(--primary);
-  outline-offset: 2px;
-}
-.dev-phone.focused {
-  box-shadow: 0 8px 24px rgba(255, 106, 0, 0.22);
+  border-color: #5671ff;
 }
 
 /* One fixed 1:2 frame for every tile: the grid never reflows when a stream
@@ -1287,7 +1286,7 @@ button:disabled {
   position: relative;
   width: 100%;
   height: 100%;
-  border-radius: 18px;
+  border-radius: 5px;
   background: #000;
   overflow: hidden;
   display: flex;
@@ -1339,7 +1338,7 @@ button:disabled {
 .dev-phone-info {
   position: absolute;
   inset: 0 0 auto 0;
-  padding: 8px 28px 16px;
+  padding: 8px 10px 16px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1391,31 +1390,12 @@ button:disabled {
   top: 0;
   left: 0;
   padding: 3px 8px 4px;
-  border-radius: 18px 0 8px 0;
+  border-radius: 5px 0 4px 0;
   background: #2f6fed;
   color: #fff;
   font-size: clamp(8px, 4.6cqw, 11px);
   font-weight: 700;
   letter-spacing: 0.04em;
-}
-
-.dev-phone-open {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: none;
-  border-radius: 50%;
-  background: rgb(0 0 0 / 45%);
-  color: #fff;
-  font-size: 11px;
-  display: grid;
-  place-items: center;
-}
-.dev-phone-open:hover {
-  background: var(--primary);
 }
 
 .screen-empty {
@@ -3005,7 +2985,6 @@ button.danger:hover:not(:disabled) {
   align-items: center;
   gap: 2px;
   padding: 0 4px;
-  border-bottom: 1px solid #e8edf4;
   overflow-x: auto;
 }
 .group-tabs button {
@@ -3143,4 +3122,43 @@ button.danger:hover:not(:disabled) {
 }
 .adb-output.failed {
   border-left: 3px solid #f87171;
+}
+
+/* Selection tick, pinned to the outer top-right corner.
+   On `.dev-phone` and not `.dev-phone-screen`: the screen clips (`overflow: hidden`), so a
+   corner-pinned control inside it loses half of itself. */
+.dev-phone-pick {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  z-index: 6;
+  margin: 0;
+  width: 15px;
+  height: 15px;
+  accent-color: #5671ff;
+  cursor: pointer;
+}
+
+/* Group tabs and the size/view controls share one row.
+   The border lives here, not on `.group-tabs`, so the rule spans the whole width instead
+   of stopping where the tabs stop. `.group-tabs` keeps `overflow-x: auto` for the tab
+   buttons alone; the controls are `flex-shrink: 0` so they cannot be scrolled out of
+   reach with them. */
+.device-toolrow {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  border-bottom: 1px solid #e8edf4;
+}
+.device-toolrow .group-tabs {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-bottom: none;
+}
+.device-toolrow .filter-toolbar {
+  flex: 0 0 auto;
+  padding: 0 4px;
+}
+.device-toolrow .filter-toolbar .grow {
+  display: none;
 }

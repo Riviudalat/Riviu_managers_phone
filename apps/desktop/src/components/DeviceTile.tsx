@@ -75,34 +75,29 @@ function DeviceTileInner({
         <span className="dev-phone-conn">{device.connection.toUpperCase()}</span>
 
         <div className="dev-phone-info">
-          <span className="dev-phone-index-row">
-            <span className="dev-phone-index">{index}</span>
-            <input
-              type="checkbox"
-              title="Chọn máy"
-              checked={selected}
-              onClick={(e) => e.stopPropagation()}
-              onChange={() => onSelect(device.udid, true)}
-            />
-          </span>
+          <span className="dev-phone-index">{index}</span>
           <span className="dev-phone-name" title={device.name}>
             {device.name}
           </span>
           <span className="dev-phone-model">{deviceModelOsLabel(device)}</span>
         </div>
-
-        <button
-          type="button"
-          className="dev-phone-open"
-          title="Mở điều khiển"
-          onClick={(e) => {
-            e.stopPropagation();
-            onOpen(device.udid);
-          }}
-        >
-          ↗
-        </button>
       </div>
+
+      {/* Outside `.dev-phone-screen` on purpose. That element has `overflow: hidden`,
+          so a checkbox pinned to the outer corner from inside it would be clipped —
+          this sits on `.dev-phone`, which does not clip.
+
+          There is no expand button any more: double-click on the tile opens the
+          overlay, which `onDoubleClick` above has always done. */}
+      <input
+        className="dev-phone-pick"
+        type="checkbox"
+        title="Chọn máy"
+        checked={selected}
+        onClick={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => e.stopPropagation()}
+        onChange={() => onSelect(device.udid, true)}
+      />
     </article>
   );
 }

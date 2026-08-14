@@ -619,14 +619,18 @@ function App() {
                 }}
               />
 
-              <GroupTabs tabs={tabs} active={groupTab} onSelect={setGroupTab} />
-
-              <FilterToolbar
-                viewMode={viewMode}
-                onViewMode={setViewMode}
-                tileWidth={tileWidth}
-                onTileWidth={setTileWidth}
-              />
+              {/* One row, not two: tabs on the left, size and view mode on the right.
+                  The tab strip keeps its own horizontal scroll and the controls do not
+                  join it — otherwise the slider scrolls away with the tabs. */}
+              <div className="device-toolrow">
+                <GroupTabs tabs={tabs} active={groupTab} onSelect={setGroupTab} />
+                <FilterToolbar
+                  viewMode={viewMode}
+                  onViewMode={setViewMode}
+                  tileWidth={tileWidth}
+                  onTileWidth={setTileWidth}
+                />
+              </div>
 
               {viewMode === "list" && (
                 <table className="device-table">

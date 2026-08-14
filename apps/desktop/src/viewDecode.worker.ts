@@ -54,6 +54,12 @@ interface Slot {
   width: number;
   height: number;
   accelIndex: number;
+  /// Which entry of `codecCandidatesFromAnnexB` is being tried.
+  ///
+  /// Exists because the async failure path had no way to advance the candidate list: it
+  /// only moved `accelIndex`, and when that ran out it returned, so the fallback strings
+  /// written for a decoder that rejects a valid config could never be reached.
+  codecIndex: number;
   lastNotifiedW: number;
   lastNotifiedH: number;
   lastNotifiedGen: number;
@@ -154,8 +160,22 @@ async function configureDecoder(slot: Slot, codec: string): Promise<VideoDecoder
         error: () => {
           closeDecoder(slot);
           const held = pending.get(slot.udid);
-          if (!held || slot.accelIndex + 1 >= ACCELS.length) return;
-          slot.accelIndex += 1;
+          if (!held) return;
+          // Advance the ladder in BOTH dimensions. This used to move `accelIndex` only
+          // and give up silently once it ran out, which meant the codec candidates
+          // written for exactly this failure — a config the decoder accepts
+          // syntactically and then rejects asynchronously — were unreachable. Three
+          // accels later the slot had no decoder, nothing was reported, and every
+          // surface on that udid stayed black while packets kept arriving.
+          if (slot.accelIndex + 1 < ACCELS.length) {
+            slot.accelIndex += 1;
+          } else {
+            slot.accelIndex = 0;
+            slot.codecIndex += 1;
+            // Clears the "already configured for this codec" check in `handleH264` so
+            // the candidate loop runs again from the new cursor.
+            slot.codec = null;
+          }
           void handleH264(slot, held);
         },
       });
@@ -180,6 +200,7 @@ async function handleH264(slot: Slot, envelope: ViewEnvelope) {
     closeDecoder(slot);
     slot.generation = envelope.generation;
     slot.accelIndex = 0;
+    slot.codecIndex = 0;
   }
   paintSize(slot, envelope.width, envelope.height);
   if (
@@ -195,10 +216,27 @@ async function handleH264(slot: Slot, envelope: ViewEnvelope) {
   if (!slot.decoder || !codecs.includes(slot.codec ?? "")) {
     if (!annexBIsSyncSample(envelope.payload, envelope.key)) return;
     closeDecoder(slot);
-    for (const codec of codecs) {
+    if (slot.codecIndex >= codecs.length) {
+      // Every candidate x every acceleration mode has been refused. Say so once per
+      // generation: a black canvas with a silent worker is the state this whole ladder
+      // exists to avoid, and the operator cannot tell it from a phone that stopped
+      // sending.
+      if (slot.lastNotifiedGen !== slot.generation) {
+        slot.lastNotifiedGen = slot.generation;
+        postMessage({
+          type: "decodeUnsupported",
+          udid: slot.udid,
+          generation: slot.generation,
+          codecs,
+        });
+      }
+      return;
+    }
+    for (let candidate = slot.codecIndex; candidate < codecs.length; candidate += 1) {
+      slot.codecIndex = candidate;
       slot.accelIndex = 0;
-      slot.decoder = await configureDecoder(slot, codec);
-      slot.codec = codec;
+      slot.decoder = await configureDecoder(slot, codecs[candidate]);
+      slot.codec = codecs[candidate];
       if (slot.decoder) break;
     }
     if (!slot.decoder) return;
@@ -245,6 +283,7 @@ self.onmessage = (event: MessageEvent<InMessage>) => {
       width: 0,
       height: 0,
       accelIndex: 0,
+      codecIndex: 0,
       lastNotifiedW: 0,
       lastNotifiedH: 0,
       lastNotifiedGen: -1,
