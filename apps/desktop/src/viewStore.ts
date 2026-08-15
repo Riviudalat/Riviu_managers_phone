@@ -197,7 +197,14 @@ function ensureWorker(): Worker | null {
         lastPaintBeat.set(message.udid, beat);
         recoveryAttempts.delete(message.udid);
         lastRecoveryAt.delete(message.udid);
-        if (decodeFailed.delete(message.udid)) emit(message.udid);
+        // Painting again is what makes a view live again. Only the `painted` message used to
+        // do this, and that fires solely when the size or generation CHANGES -- so after a
+        // stall marked a device not-live, a stream that recovered at the same resolution kept
+        // "Dang cho stream..." printed over a picture that was visibly running.
+        const recovered = decodeFailed.delete(message.udid);
+        const wasDark = !live.has(message.udid);
+        live.add(message.udid);
+        if (recovered || wasDark) emit(message.udid);
       }
       return;
     }

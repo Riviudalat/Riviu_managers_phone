@@ -73,7 +73,25 @@ interface Slot {
   framesPainted: number;
   lastBeatAt: number;
   lastBeatFrames: number;
+  /// Consecutive samples refused because the decoder's queue was not draining.
+  ///
+  /// `shouldDecodeH264Sample` returns `decodeQueueSize <= 2` once a decoder exists, and
+  /// nothing in the old code could ever get out of that: a decoder that stops producing
+  /// output keeps its queue above the cap, so every subsequent sample is refused --
+  /// keyframes included, which are the only thing that could have rebuilt it. Packets keep
+  /// arriving, nothing paints, no error is raised, and the codec ladder is never reached so
+  /// `decodeUnsupported` cannot fire either. That is exactly the black overlay that survived
+  /// two rounds of diagnosis.
+  queueRefusals: number;
 }
+
+/// Consecutive queue refusals after which the decoder is rebuilt.
+///
+/// 48 is ~2 s at 24 fps -- comfortably longer than a decoder briefly running behind (which
+/// is what the cap is for) and short enough that the operator sees a blip rather than a dead
+/// canvas. Rebuilding is cheap: close, wait for the next keyframe, which scrcpy emits every
+/// `i-frame-interval` (1 s here).
+const MAX_QUEUE_REFUSALS = 48;
 
 /// How often the worker reports what it received versus what it drew.
 const PAINT_BEAT_MS = 1000;
@@ -86,6 +104,66 @@ const PAINT_BEAT_MS = 1000;
 /// The signal that does mean broken is packets arriving that produce no paint, which needs
 /// both counts side by side.
 const received = new Map<string, number>();
+
+/// Per-envelope diagnostics, dev builds only.
+///
+/// Exists because the same question has now been unanswerable twice from code alone: an
+/// overlay canvas stays black while packets demonstrably arrive, `decodeUnsupported` never
+/// fires, and the Rust watchdog counts bytes rather than frames so it sees nothing wrong.
+/// The three candidate mechanisms -- a keyframe that never arrived, a decoder that was fed
+/// and produced no output, and a sample gate that refuses everything -- are indistinguishable
+/// without counting each one separately.
+const DIAG = import.meta.env?.DEV === true;
+
+interface Diag {
+  received: number;
+  keys: number;
+  fed: number;
+  output: number;
+  refusedNoDecoder: number;
+  refusedQueue: number;
+  refusedNotSync: number;
+  closes: number;
+  lastGeneration: number;
+  lastReportAt: number;
+}
+
+const diag = new Map<string, Diag>();
+
+function diagFor(udid: string): Diag {
+  let entry = diag.get(udid);
+  if (!entry) {
+    entry = {
+      received: 0,
+      keys: 0,
+      fed: 0,
+      output: 0,
+      refusedNoDecoder: 0,
+      refusedQueue: 0,
+      refusedNotSync: 0,
+      closes: 0,
+      lastGeneration: -1,
+      lastReportAt: 0,
+    };
+    diag.set(udid, entry);
+  }
+  return entry;
+}
+
+/// Print at most once a second per device, and only when something moved.
+function diagReport(udid: string, note: string) {
+  if (!DIAG) return;
+  const d = diagFor(udid);
+  const now = performance.now();
+  if (now - d.lastReportAt < 1000) return;
+  d.lastReportAt = now;
+  console.info(
+    `[viewdiag] ${udid} gen=${d.lastGeneration} recv=${d.received} keys=${d.keys} ` +
+      `fed=${d.fed} out=${d.output} closes=${d.closes} ` +
+      `refused(nodec=${d.refusedNoDecoder} queue=${d.refusedQueue} notsync=${d.refusedNotSync}) ` +
+      `${note}`,
+  );
+}
 
 const slots = new Map<string, Slot>();
 const pending = new Map<string, ViewEnvelope>();
@@ -117,6 +195,7 @@ function drawFrame(slot: Slot, source: CanvasImageSource) {
 }
 
 function closeDecoder(slot: Slot) {
+  if (DIAG) diagFor(slot.udid).closes += 1;
   if (slot.decoder && slot.decoder.state !== "closed") {
     try {
       slot.decoder.close();
@@ -154,6 +233,7 @@ const lastArrivalBeatAt = new Map<string, number>();
 
 function beatArrival(udid: string) {
   received.set(udid, (received.get(udid) ?? 0) + 1);
+  if (DIAG) diagFor(udid).received += 1;
   const now = performance.now();
   const last = lastArrivalBeatAt.get(udid) ?? 0;
   if (now - last < PAINT_BEAT_MS) return;
@@ -194,6 +274,7 @@ async function configureDecoder(slot: Slot, codec: string): Promise<VideoDecoder
       drawFrame(slot, frame);
       notifyPainted(slot.udid, slot);
       beatPainted(slot);
+      if (DIAG) diagFor(slot.udid).output += 1;
     } finally {
       frame.close();
     }
@@ -214,7 +295,15 @@ async function configureDecoder(slot: Slot, codec: string): Promise<VideoDecoder
     try {
       const decoder = new Ctor({
         output,
-        error: () => {
+        error: (cause: unknown) => {
+          // Decoder errors were 100% invisible before this: the callback logged nothing, the
+          // worker has no `onerror` wired, and the only channel that ever surfaced a decode
+          // problem was `decodeUnsupported`, which this very path made unreachable.
+          console.warn(
+            `view decoder rejected ${slot.udid} codec=${codec} accel=${slot.accelIndex} ` +
+              `candidate=${slot.codecIndex}`,
+            cause,
+          );
           closeDecoder(slot);
           const held = pending.get(slot.udid);
           if (!held) return;
@@ -260,18 +349,54 @@ async function handleH264(slot: Slot, envelope: ViewEnvelope) {
     slot.codecIndex = 0;
   }
   paintSize(slot, envelope.width, envelope.height);
-  if (
-    !shouldDecodeH264Sample(
-      Boolean(slot.decoder),
-      slot.decoder?.decodeQueueSize ?? 0,
-      annexBIsSyncSample(envelope.payload, envelope.key),
-    )
-  ) {
-    return;
+  const isSync = annexBIsSyncSample(envelope.payload, envelope.key);
+  if (DIAG) {
+    const d = diagFor(slot.udid);
+    d.lastGeneration = slot.generation;
+    if (isSync) d.keys += 1;
   }
-  const codecs = codecCandidatesFromAnnexB(envelope.payload);
-  if (!slot.decoder || !codecs.includes(slot.codec ?? "")) {
-    if (!annexBIsSyncSample(envelope.payload, envelope.key)) return;
+  if (!shouldDecodeH264Sample(Boolean(slot.decoder), slot.decoder?.decodeQueueSize ?? 0, isSync)) {
+    if (!slot.decoder) {
+      // Waiting for a keyframe to build a decoder with. Normal and self-clearing.
+      if (DIAG) {
+        diagFor(slot.udid).refusedNoDecoder += 1;
+        diagReport(slot.udid, "no decoder yet");
+      }
+      return;
+    }
+    // A decoder exists and its queue is over the cap. Brief is normal; permanent is the
+    // trap, because the refusal also blocks the keyframes that would fix it.
+    slot.queueRefusals += 1;
+    if (DIAG) {
+      diagFor(slot.udid).refusedQueue += 1;
+      diagReport(slot.udid, `queue=${slot.decoder.decodeQueueSize} refusals=${slot.queueRefusals}`);
+    }
+    if (slot.queueRefusals < MAX_QUEUE_REFUSALS) return;
+    // Break out. Closing sets slot.decoder to null, so the next sync sample rebuilds from
+    // scratch instead of feeding a decoder that has stopped producing output.
+    console.warn(
+      `view decoder for ${slot.udid} stopped draining (${slot.queueRefusals} refusals); rebuilding`,
+    );
+    closeDecoder(slot);
+    slot.queueRefusals = 0;
+    slot.accelIndex = 0;
+    slot.codecIndex = 0;
+    if (!isSync) return;
+  } else {
+    slot.queueRefusals = 0;
+  }
+  // Only a sample that CARRIES an SPS can say anything about which codec is right. A delta
+  // has none, so `codecFromAnnexB` falls back to the literal "avc1.42E01E" and the candidate
+  // list it produces is fiction -- if `slot.codec` was derived from a real SPS, that fiction
+  // never contains it, every delta was therefore sent down the rebuild path, and the
+  // `!isSync` guard dropped it. Every P-frame discarded, and the decoder town down and
+  // rebuilt once per keyframe.
+  const needsCodecCheck = !slot.decoder || isSync;
+  if (!needsCodecCheck) {
+    // Live decoder, ordinary delta: feed it.
+  } else if (!slot.decoder || !codecCandidatesFromAnnexB(envelope.payload).includes(slot.codec ?? "")) {
+    const codecs = codecCandidatesFromAnnexB(envelope.payload);
+    if (!isSync) return;
     closeDecoder(slot);
     if (slot.codecIndex >= codecs.length) {
       // Every candidate x every acceleration mode has been refused. Say so once per
@@ -289,19 +414,41 @@ async function handleH264(slot: Slot, envelope: ViewEnvelope) {
       }
       return;
     }
-    for (let candidate = slot.codecIndex; candidate < codecs.length; candidate += 1) {
+    // `slot.accelIndex` must survive re-entry. The async `error` callback advances it and
+    // then calls back into here; resetting it unconditionally destroyed that advance, so the
+    // ladder retried the SAME codec at the SAME acceleration forever -- a hot spin, one
+    // VideoDecoder construct+configure per rejected frame, nothing painted, and `codecIndex`
+    // frozen at 0 because it only moves once `accelIndex` reaches the last mode. That is why
+    // `decodeUnsupported` was provably unreachable while the canvas stayed black.
+    const startCandidate = slot.codecIndex;
+    for (let candidate = startCandidate; candidate < codecs.length; candidate += 1) {
+      // A genuinely new candidate starts at hardware again; the one we were already on keeps
+      // whatever mode the error path had moved it to.
+      if (candidate !== startCandidate) slot.accelIndex = 0;
       slot.codecIndex = candidate;
-      slot.accelIndex = 0;
       slot.decoder = await configureDecoder(slot, codecs[candidate]);
       slot.codec = codecs[candidate];
       if (slot.decoder) break;
     }
-    if (!slot.decoder) return;
+    if (!slot.decoder) {
+      // Every candidate refused `configure()` outright. The loop leaves `codecIndex` at
+      // `length - 1`, so the exhaustion test above could never fire and the next sync sample
+      // would retry only the last fallback, forever and silently. Mark it truly exhausted so
+      // the operator is told; a generation change resets this.
+      slot.codecIndex = codecs.length;
+      return;
+    }
   }
+  // Narrows for the compiler, and is a real guard: the branch above can decline to rebuild.
+  if (!slot.decoder) return;
   const Chunk = (self as unknown as { EncodedVideoChunk: typeof EncodedVideoChunk }).EncodedVideoChunk;
   // 1 ms, not 1/15 s: some WebView2 decoders pace to the timestamp and a
   // 66 ms step turns a 3-frame queue into ~200 ms of extra glass delay.
   slot.timestamp += 1_000;
+  if (DIAG) {
+    diagFor(slot.udid).fed += 1;
+    diagReport(slot.udid, `queue=${slot.decoder.decodeQueueSize}`);
+  }
   slot.decoder.decode(
     new Chunk({
       type: envelope.key ? "key" : "delta",
@@ -345,6 +492,7 @@ self.onmessage = (event: MessageEvent<InMessage>) => {
       framesPainted: 0,
       lastBeatAt: 0,
       lastBeatFrames: 0,
+      queueRefusals: 0,
       lastNotifiedW: 0,
       lastNotifiedH: 0,
       lastNotifiedGen: -1,

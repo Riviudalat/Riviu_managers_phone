@@ -67,3 +67,31 @@ describe("viewProtocol", () => {
     expect(shouldDecodeH264Sample(true, 3, true)).toBe(false);
   });
 });
+
+describe("the sample gate refuses keyframes too, which is why callers need an escape", () => {
+  it("refuses a sync sample once a decoder exists and its queue is over the cap", () => {
+    // This is the trap that produced a black overlay nothing could report: the gate is
+    // `decodeQueueSize <= 2` for any existing decoder, with no exception for a keyframe. A
+    // decoder that stops producing output keeps its queue above the cap forever, so every
+    // later sample is refused -- including the keyframes that are the only thing that could
+    // rebuild it. Packets keep arriving, nothing paints, no error is raised, and the codec
+    // ladder is never reached so decodeUnsupported cannot fire either.
+    //
+    // The gate itself is correct: it bounds how far a live decoder may run behind. What was
+    // missing is a caller that gives up on a decoder that never drains, which
+    // viewDecode.worker.ts now does after MAX_QUEUE_REFUSALS. If this assertion ever starts
+    // failing because the gate learned to let keyframes through, that escape can go.
+    expect(shouldDecodeH264Sample(true, 3, true)).toBe(false);
+    expect(shouldDecodeH264Sample(true, 99, true)).toBe(false);
+  });
+
+  it("still lets a keyframe build the first decoder, and still refuses a delta", () => {
+    expect(shouldDecodeH264Sample(false, 0, true)).toBe(true);
+    expect(shouldDecodeH264Sample(false, 0, false)).toBe(false);
+  });
+
+  it("keeps feeding a decoder that is keeping up", () => {
+    expect(shouldDecodeH264Sample(true, 0, false)).toBe(true);
+    expect(shouldDecodeH264Sample(true, 2, false)).toBe(true);
+  });
+});

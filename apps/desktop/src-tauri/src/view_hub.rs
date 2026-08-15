@@ -174,32 +174,33 @@ impl ViewSink for ViewHub {
 async fn serve_client(hub: Arc<ViewHub>, stream: tokio::net::TcpStream) -> anyhow::Result<()> {
     let _ = stream.set_nodelay(true);
     let mut ws = tokio_tungstenite::accept_async(stream).await?;
-    replay_latest(&hub, &mut ws).await?;
+    // Subscribe BEFORE replaying. The other order loses every packet published between the
+    // replay's awaited writes and the subscribe -- silently, permanently, for that client --
+    // and the window is one `ws.send().await` per device, which grew with the overlay's
+    // larger encode. A duplicate frame from the overlap is harmless; a missing keyframe is
+    // a black canvas.
     let mut rx = hub.tx.subscribe();
+    replay_latest(&hub, &mut ws).await?;
     loop {
+        let mut lagged_by = 0u64;
         let first = match rx.recv().await {
             Ok(packet) => packet,
             Err(RecvError::Lagged(dropped)) => {
-                // Skipping the backlog is right -- a stale last-key plus live deltas is a
-                // broken GOP. Skipping it *silently* was not: the old code hoped a key would
-                // turn up in some later batch, and until one did the decoder had nothing to
-                // decode. With `i-frame-interval:int=1` that is up to a second of frozen
-                // picture per lag event, which is the stutter the operator sees when
-                // scrolling.
-                //
-                // The keyframe is already here. `last_h264` holds the newest one per device,
-                // kept for exactly this shape of problem, so resync from it immediately
-                // instead of waiting for the encoder to produce another.
-                log::debug!(
-                    "view subscriber lagged, dropped {dropped} packets; resyncing from last key"
-                );
-                let keys: Vec<ViewPacket> = hub.last_h264.lock().values().cloned().collect();
-                for packet in keys {
-                    ws.feed(Message::Binary(encode_packet(&packet).into()))
-                        .await?;
+                // Skipping the backlog is right -- a stale key plus live deltas is a broken
+                // GOP. Resyncing here was NOT: at this point the receiver's cursor sits at
+                // the oldest retained value, so a keyframe written now is followed by up to a
+                // ring's worth of traffic that PREDATES it. Across a generation bump that is
+                // a gen-N key followed by gen-N-1 packets, the worker flips generation and
+                // closes its decoder, and nothing reopens it. Resync happens after the drain
+                // below, once the cursor has actually reached the present.
+                lagged_by = dropped;
+                match rx.try_recv() {
+                    Ok(packet) => packet,
+                    Err(_) => {
+                        resync_from_last_key(&hub, &mut ws, lagged_by).await?;
+                        continue;
+                    }
                 }
-                ws.flush().await?;
-                continue;
             }
             Err(RecvError::Closed) => break,
         };
@@ -208,9 +209,26 @@ async fn serve_client(hub: Arc<ViewHub>, stream: tokio::net::TcpStream) -> anyho
             match rx.try_recv() {
                 Ok(packet) => batch.push(packet),
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Lagged(_)) => break,
+                Err(TryRecvError::Lagged(dropped)) => {
+                    // Do NOT break here. `try_recv` reporting Lagged has already advanced the
+                    // cursor and CONSUMED the lag report, so breaking meant the outer
+                    // `RecvError::Lagged` arm could never fire: no resync, no log, and any
+                    // keyframe in the skipped span silently gone while every later delta was
+                    // delivered normally. That is precisely "packets keep arriving and
+                    // nothing paints". Record it and keep draining to the present.
+                    lagged_by += dropped;
+                    batch.clear();
+                }
                 Err(TryRecvError::Closed) => break,
             }
+        }
+        if lagged_by > 0 {
+            // Everything drained after a lag is history relative to the newest keyframe, so
+            // it is dropped rather than painted, and the client is resynced from the newest
+            // key now that the cursor has reached the present.
+            batch.clear();
+            resync_from_last_key(&hub, &mut ws, lagged_by).await?;
+            continue;
         }
         for packet in coalesce_for_live(batch) {
             ws.feed(Message::Binary(encode_packet(&packet).into()))
@@ -218,6 +236,24 @@ async fn serve_client(hub: Arc<ViewHub>, stream: tokio::net::TcpStream) -> anyho
         }
         ws.flush().await?;
     }
+    Ok(())
+}
+
+/// Hand the client the newest keyframe of every device, after a lag.
+///
+/// Only correct once the receiver's cursor has reached the present -- see the call sites.
+async fn resync_from_last_key(
+    hub: &ViewHub,
+    ws: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    dropped: u64,
+) -> anyhow::Result<()> {
+    log::debug!("view subscriber lagged, dropped {dropped} packets; resyncing from last key");
+    let keys: Vec<ViewPacket> = hub.last_h264.lock().values().cloned().collect();
+    for packet in keys {
+        ws.feed(Message::Binary(encode_packet(&packet).into()))
+            .await?;
+    }
+    ws.flush().await?;
     Ok(())
 }
 
