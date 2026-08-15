@@ -34,7 +34,47 @@ const PREVIEW_TICK: Duration = Duration::from_millis(4);
 const PREVIEW_IDLE_EVICTION: Duration = Duration::from_secs(10);
 /// Scrcpy child + reader can stay "running" with no packets (Exynos hello
 /// without IDR, WebView2 refusing the codec). The keeper restarts after this.
-const ANDROID_VIEW_SILENCE: Duration = Duration::from_secs(5);
+/// How long a running producer may publish nothing before the keeper restarts it.
+///
+/// Raised from 5s after measuring what 5s actually costs. scrcpy encodes only when the
+/// screen CHANGES, so a phone sitting on a static home screen publishes its first keyframe
+/// and then legitimately nothing at all. At 5s with no cooldown the keeper read that as a
+/// fault and restarted forever: one run reached **generation 569 on a single Redmi** while
+/// the phone was demonstrably healthy -- screencap 2.7 MB, keyguard drawn, focus on the
+/// launcher -- against generation 12 on the other phone in the same run. Every restart also
+/// took the exclusive start claim, which is what made the operator's overlay request come
+/// back "already in flight" and left the overlay on the tile encode.
+///
+/// This rule can only ever prove "no samples arrived". It cannot tell a dead reader from a
+/// screen that is not moving. The frontend's received-vs-painted rule is the one that can,
+/// so this is now the coarse backstop it should always have been.
+const ANDROID_VIEW_SILENCE: Duration = Duration::from_secs(45);
+
+/// Minimum gap between two keeper restarts of the same device, doubling per consecutive
+/// attempt up to [`ANDROID_VIEW_RESTART_MAX_BACKOFF`].
+///
+/// The keeper had no cooldown at all. A restart costs roughly 45 s of real downtime on this
+/// fleet, so restarting on a 5 s rule guaranteed the device spent more time restarting than
+/// streaming.
+const ANDROID_VIEW_RESTART_BACKOFF: Duration = Duration::from_secs(60);
+const ANDROID_VIEW_RESTART_MAX_BACKOFF: Duration = Duration::from_secs(600);
+
+/// When the keeper last restarted each device, and how many times in a row without the
+/// device going quiet-then-healthy in between.
+fn android_view_restart_is_due(
+    attempts: u32,
+    since_last: Option<Duration>,
+    base: Duration,
+    max: Duration,
+) -> bool {
+    let Some(since) = since_last else {
+        return true;
+    };
+    // `attempts - 1`, so the wait after the FIRST restart is one base interval rather than
+    // two. Saturating because attempts is 0 only on the never-restarted path above.
+    let factor = 1u32 << attempts.saturating_sub(1).min(4);
+    since >= base.saturating_mul(factor).min(max)
+}
 /// How far back [`AppState::busy_reason`] looks for unfinished jobs.
 ///
 /// `list_jobs` orders newest first, and anything queued or running is recent by nature,
@@ -778,6 +818,9 @@ impl AppState {
             let view_hub = self.view_hub.clone();
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(2));
+                // Per-device restart history for the backoff. Lives outside the loop so it
+                // survives ticks; bounded by the fleet size.
+                let mut view_restarts: HashMap<String, (Instant, u32)> = HashMap::new();
                 loop {
                     interval.tick().await;
                     if background_stop.load(Ordering::Acquire) {
@@ -815,8 +858,24 @@ impl AppState {
                                 false,
                                 view_hub.last_packet_age(&device.udid),
                             ) {
+                                view_restarts.remove(&device.udid);
                                 continue;
                             }
+                            // Back off, per device. Without this the keeper restarted a
+                            // healthy phone on a static screen every few seconds forever.
+                            let record = view_restarts.get(&device.udid).copied();
+                            let since = record.map(|(at, _): (Instant, u32)| at.elapsed());
+                            let attempts = record.map(|(_, n)| n).unwrap_or(0);
+                            if !android_view_restart_is_due(
+                                attempts,
+                                since,
+                                ANDROID_VIEW_RESTART_BACKOFF,
+                                ANDROID_VIEW_RESTART_MAX_BACKOFF,
+                            ) {
+                                continue;
+                            }
+                            view_restarts
+                                .insert(device.udid.clone(), (Instant::now(), attempts + 1));
                             // Name the cause, because for the first two weeks of this
                             // path there was only ever one line and it was the same
                             // whether the encoder had died or the phone had simply gone
@@ -1423,15 +1482,85 @@ fn resolve_sidecar_root_from(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_keeper_backs_off_instead_of_restarting_a_static_screen_forever() {
+        // The measurement this encodes: with no cooldown and a 5s silence rule, one Redmi
+        // reached generation 569 in a single run while the phone was healthy -- screencap
+        // 2.7 MB, keyguard drawn, focus on the launcher -- because scrcpy encodes only when
+        // the screen CHANGES and a static home screen publishes nothing at all. The other
+        // phone in the same run, which was being used, reached generation 12.
+        let base = Duration::from_secs(60);
+        let max = Duration::from_secs(600);
+
+        // Never restarted: go immediately, so a genuinely dead reader is not delayed.
+        assert!(android_view_restart_is_due(0, None, base, max));
+        // First failure waits one base interval, which already exceeds the ~45s a restart
+        // itself costs -- the property that stops a restart from re-arming mid-restart.
+        assert!(!android_view_restart_is_due(
+            1,
+            Some(Duration::from_secs(59)),
+            base,
+            max
+        ));
+        assert!(android_view_restart_is_due(
+            1,
+            Some(Duration::from_secs(60)),
+            base,
+            max
+        ));
+        // Doubling.
+        assert!(!android_view_restart_is_due(
+            2,
+            Some(Duration::from_secs(119)),
+            base,
+            max
+        ));
+        assert!(android_view_restart_is_due(
+            2,
+            Some(Duration::from_secs(120)),
+            base,
+            max
+        ));
+        // Capped, and the shift cannot overflow however many attempts accumulate.
+        assert!(android_view_restart_is_due(u32::MAX, Some(max), base, max));
+        assert!(!android_view_restart_is_due(
+            u32::MAX,
+            Some(max - Duration::from_secs(1)),
+            base,
+            max
+        ));
+    }
+
+    #[test]
+    fn the_silence_window_clears_a_restart_by_a_wide_margin() {
+        // A restart costs ~45s of downtime on this fleet. A silence window at or below that
+        // means the keeper judges a producer that has not finished starting.
+        assert!(ANDROID_VIEW_SILENCE >= Duration::from_secs(45));
+        assert!(
+            ANDROID_VIEW_RESTART_BACKOFF
+                > ANDROID_VIEW_SILENCE.saturating_sub(Duration::from_secs(30))
+        );
+    }
     use super::*;
 
     #[test]
-    fn a_live_scrcpy_producer_is_silent_only_after_five_seconds_without_packets() {
+    fn a_live_scrcpy_producer_is_silent_only_after_the_whole_silence_window() {
+        // Written against the constant, not against a literal. The name used to say "five
+        // seconds" and the body asserted 4 and 5, so raising the window meant editing a
+        // test whose name then lied -- and the number had to be raised, because five
+        // seconds is shorter than a static screen legitimately stays quiet.
+        let window = ANDROID_VIEW_SILENCE;
+        // A start still in flight is never silent, however long the clock says.
         assert!(!android_view_is_silent(true, None));
-        assert!(!android_view_is_silent(true, Some(Duration::from_secs(30))));
+        assert!(!android_view_is_silent(true, Some(window * 10)));
+        // No packet ever seen, and nothing in flight, is silent immediately.
         assert!(android_view_is_silent(false, None));
-        assert!(!android_view_is_silent(false, Some(Duration::from_secs(4))));
-        assert!(android_view_is_silent(false, Some(Duration::from_secs(5))));
+        assert!(!android_view_is_silent(
+            false,
+            Some(window - Duration::from_secs(1))
+        ));
+        assert!(android_view_is_silent(false, Some(window)));
     }
 
     #[test]
