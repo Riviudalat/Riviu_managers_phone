@@ -20,6 +20,18 @@ const latestBeat = new Map<string, ViewBeat>();
 const lastRecoveryAt = new Map<string, number>();
 /// How many restarts this udid has had without a single frame drawn since.
 const recoveryAttempts = new Map<string, number>();
+/// `framesPainted` at the moment of the last recovery attempt, so "it recovered" can mean
+/// sustained painting rather than a single frame.
+const framesAtRecovery = new Map<string, number>();
+
+/// Frames a device must draw after a restart before its backoff is considered cleared.
+///
+/// One frame is not recovery, and treating it as such defeated the backoff completely:
+/// measured over three overlay open/close cycles, a stream painted a frame or two after each
+/// restart and then stopped, which reset the counter, so every stall logged "attempt 1" and
+/// the loop ran 33 times. 48 frames is ~2 s at 24 fps -- long enough that a stream which
+/// merely twitched does not count as healthy.
+export const SUSTAINED_PAINT_FRAMES = 48;
 /// UDIDs whose every codec candidate was refused. Distinct from "not live": there is
 /// nothing to wait for, so retrying the same stream cannot help.
 const decodeFailed = new Set<string>();
@@ -195,8 +207,14 @@ function ensureWorker(): Worker | null {
         // backoff -- a restart that "succeeded" and still painted nothing must not buy
         // itself another fast retry.
         lastPaintBeat.set(message.udid, beat);
-        recoveryAttempts.delete(message.udid);
-        lastRecoveryAt.delete(message.udid);
+        // Clear the backoff only on SUSTAINED painting. A restart that produced a couple of
+        // frames and stopped is the failure being retried, not a recovery from it.
+        const since = beat.frames - (framesAtRecovery.get(message.udid) ?? 0);
+        if (!recoveryAttempts.has(message.udid) || since >= SUSTAINED_PAINT_FRAMES) {
+          recoveryAttempts.delete(message.udid);
+          lastRecoveryAt.delete(message.udid);
+          framesAtRecovery.delete(message.udid);
+        }
         // Painting again is what makes a view live again. Only the `painted` message used to
         // do this, and that fires solely when the size or generation CHANGES -- so after a
         // stall marked a device not-live, a stream that recovered at the same resolution kept
@@ -290,6 +308,7 @@ function startStallWatch() {
       const attempt = (recoveryAttempts.get(udid) ?? 0) + 1;
       recoveryAttempts.set(udid, attempt);
       lastRecoveryAt.set(udid, now);
+      framesAtRecovery.set(udid, latestBeat.get(udid)?.frames ?? 0);
       const painted = lastPaintBeat.get(udid);
       const current = latestBeat.get(udid);
       console.warn(

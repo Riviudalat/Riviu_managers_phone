@@ -7,6 +7,7 @@ import {
   PAINT_RECOVERY_MAX_MS,
   PAINT_STALL_MS,
   shouldAttemptViewRecovery,
+  SUSTAINED_PAINT_FRAMES,
   viewRecoveryDelayMs,
   startViewClient,
   VIEW_RECONNECT_MAX_MS,
@@ -135,5 +136,16 @@ describe("stalled view detection", () => {
     // would restart healthy streams.
     expect(PAINT_STALL_MS).toBeGreaterThan(5000);
     expect(PAINT_RECOVERY_COOLDOWN_MS).toBeGreaterThan(PAINT_STALL_MS);
+  });
+});
+
+describe("recovery backoff is not cleared by a twitch", () => {
+  it("requires more painted frames than a restart incidentally produces", () => {
+    // Measured: three overlay open/close cycles produced 33 restarts, every one logged
+    // "attempt 1", because each restart painted a frame or two before stopping and a single
+    // frame was enough to clear the counter. The backoff could therefore never advance.
+    // 48 frames is ~2s at 24fps.
+    expect(SUSTAINED_PAINT_FRAMES).toBeGreaterThan(2);
+    expect(SUSTAINED_PAINT_FRAMES).toBeGreaterThanOrEqual(24);
   });
 });
