@@ -59,6 +59,14 @@ const ANDROID_VIEW_SILENCE: Duration = Duration::from_secs(45);
 const ANDROID_VIEW_RESTART_BACKOFF: Duration = Duration::from_secs(60);
 const ANDROID_VIEW_RESTART_MAX_BACKOFF: Duration = Duration::from_secs(600);
 
+/// Floor between two attempts to retune a device to a different preset.
+///
+/// Shorter than the silence backoff on purpose: a retune follows an operator action -- they
+/// opened or closed an overlay -- so it should feel immediate, and the first attempt is not
+/// delayed at all. The floor exists only so a phone that cannot encode the larger preset is
+/// not retried on every 2 s tick forever.
+const ANDROID_VIEW_RETUNE_FLOOR: Duration = Duration::from_secs(15);
+
 /// When the keeper last restarted each device, and how many times in a row without the
 /// device going quiet-then-healthy in between.
 fn android_view_restart_is_due(
@@ -821,6 +829,7 @@ impl AppState {
                 // Per-device restart history for the backoff. Lives outside the loop so it
                 // survives ticks; bounded by the fleet size.
                 let mut view_restarts: HashMap<String, (Instant, u32)> = HashMap::new();
+                let mut view_retunes: HashMap<String, (Instant, u32)> = HashMap::new();
                 loop {
                     interval.tick().await;
                     if background_stop.load(Ordering::Acquire) {
@@ -844,15 +853,54 @@ impl AppState {
                         if android.view_start_in_flight(&device.udid) {
                             continue;
                         }
-                        let running = android
-                            .view_is_running(&device.udid, riviu_android_driver::ViewPreset::Tile)
-                            .await
-                            || android
+                        // Reconcile toward the preset the operator asked for, rather than
+                        // accepting either one as "running".
+                        //
+                        // The bug this fixes was observed live: opening an overlay races the
+                        // keeper for the exclusive start claim, `view_set_preset` loses and
+                        // returns "a scrcpy view start is already in flight", and the
+                        // frontend logs that to the console and never asks again. The
+                        // overlay then spends its whole life on the tile encode -- 232x480
+                        // stretched across 760 px, which is the broken picture the operator
+                        // reported. Making the desire authoritative here means a lost race
+                        // costs one keeper tick instead of the entire session.
+                        let desired = android.desired_view_preset(&device.udid);
+                        let running = android.view_is_running(&device.udid, desired).await;
+                        let wrong_preset = !running
+                            && (android
                                 .view_is_running(
                                     &device.udid,
-                                    riviu_android_driver::ViewPreset::Overlay,
+                                    riviu_android_driver::ViewPreset::Tile,
                                 )
-                                .await;
+                                .await
+                                || android
+                                    .view_is_running(
+                                        &device.udid,
+                                        riviu_android_driver::ViewPreset::Overlay,
+                                    )
+                                    .await);
+                        if wrong_preset {
+                            // A retune, not a failure, so it does not go through the silence
+                            // backoff -- but it does need its own floor, or a phone that
+                            // cannot encode the larger preset would be retuned every tick.
+                            let record = view_retunes.get(&device.udid).copied();
+                            if !android_view_restart_is_due(
+                                record.map(|(_, n): (Instant, u32)| n).unwrap_or(0),
+                                record.map(|(at, _)| at.elapsed()),
+                                ANDROID_VIEW_RETUNE_FLOOR,
+                                ANDROID_VIEW_RESTART_MAX_BACKOFF,
+                            ) {
+                                continue;
+                            }
+                            let attempts = record.map(|(_, n)| n).unwrap_or(0) + 1;
+                            view_retunes.insert(device.udid.clone(), (Instant::now(), attempts));
+                            log::info!(
+                                "android view for {} is running the wrong preset; retuning to                                  {desired:?} (attempt {attempts})",
+                                device.udid
+                            );
+                        } else if running {
+                            view_retunes.remove(&device.udid);
+                        }
                         if running {
                             if !android_view_is_silent(
                                 false,
@@ -1482,6 +1530,25 @@ fn resolve_sidecar_root_from(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_retune_is_immediate_the_first_time_and_floored_after_that() {
+        // A retune follows an operator action -- they opened or closed an overlay -- so the
+        // first attempt must not wait. The floor exists only so a phone that cannot encode
+        // the larger preset is not retried on every 2s tick forever.
+        let floor = ANDROID_VIEW_RETUNE_FLOOR;
+        let max = ANDROID_VIEW_RESTART_MAX_BACKOFF;
+        assert!(android_view_restart_is_due(0, None, floor, max));
+        assert!(!android_view_restart_is_due(
+            1,
+            Some(floor - Duration::from_secs(1)),
+            floor,
+            max
+        ));
+        assert!(android_view_restart_is_due(1, Some(floor), floor, max));
+        // Faster than the silence backoff, because a retune is a response to a person.
+        assert!(ANDROID_VIEW_RETUNE_FLOOR < ANDROID_VIEW_RESTART_BACKOFF);
+    }
 
     #[test]
     fn the_keeper_backs_off_instead_of_restarting_a_static_screen_forever() {

@@ -831,6 +831,13 @@ pub async fn view_ensure(state: State<'_, AppState>, udid: String) -> Result<(),
     if platform != riviu_core::DevicePlatform::Android {
         return Ok(());
     }
+    // Do not tear down a producer somebody else is already replacing. This stops before it
+    // claims, so losing that race used to leave the device with NO producer at all until the
+    // keeper's next tick -- a stream the operator was watching went away because a recovery
+    // for it started somewhere else. A start already in flight satisfies "ensure".
+    if android.view_start_in_flight(&udid) {
+        return Ok(());
+    }
     android.stop_view_stream(&udid).await;
     // Whatever the operator last asked for, not an unconditional Tile. The frontend calls
     // this to recover a stalled stream, and a recovery that silently downgrades an open
