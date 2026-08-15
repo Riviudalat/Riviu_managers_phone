@@ -24,11 +24,26 @@ pub const VIEW_KIND_H264: u8 = 1;
 pub const VIEW_KIND_JPEG: u8 = 2;
 pub const VIEW_FLAG_KEY: u8 = 1;
 
-/// Live view, not a DVR. 256 held ~8 s at 30 fps and the WebSocket then
-/// drained the past — that is the lag the operator sees after the encoder
-/// is already healthy. 8 trips `Lagged` in ~250 ms so we resync from the
-/// last key instead of painting a backlog.
-const BROADCAST_CAP: usize = 8;
+/// Live view, not a DVR — but 8 was paying for that with the operator's smoothness.
+///
+/// The original reasoning was sound and its fix landed elsewhere: 256 held ~8 s at 30 fps
+/// and the WebSocket drained the past, so the operator watched history. What actually
+/// prevents that is [`coalesce_for_live`], which collapses a drained batch to the newest
+/// packet per device; the ring size stopped being what bounds the lag the moment that
+/// existed.
+///
+/// What 8 does bound is how much host-side jitter it takes to lose the stream. This is ONE
+/// channel for the whole fleet, so two phones at 24 fps put ~48 packets/s through it and 8
+/// slots is ~166 ms. Any WebView2 hitch past that trips `Lagged`, and a `Lagged` costs far
+/// more than a dropped frame: the backlog goes, keyframes included, and with
+/// `i-frame-interval:int=1` the decoder has nothing to decode until the next IDR — up to a
+/// full second of frozen picture, every time. Scrolling is when the encoder emits the most
+/// data, which is exactly when the operator reported the stutter.
+///
+/// 128 is ~2.7 s of the same two-phone fleet, enough that ordinary jitter rides through,
+/// and coalescing means a full ring is collapsed to one frame per device rather than
+/// replayed.
+const BROADCAST_CAP: usize = 128;
 
 pub struct ViewHub {
     generations: Mutex<HashMap<String, u64>>,
@@ -164,10 +179,26 @@ async fn serve_client(hub: Arc<ViewHub>, stream: tokio::net::TcpStream) -> anyho
     loop {
         let first = match rx.recv().await {
             Ok(packet) => packet,
-            Err(RecvError::Lagged(_)) => {
-                // A stale last-key plus live deltas is a broken GOP: the
-                // decoder freezes until the next IDR. Skip the backlog;
-                // coalesce keeps a key from the live batch when one lands.
+            Err(RecvError::Lagged(dropped)) => {
+                // Skipping the backlog is right -- a stale last-key plus live deltas is a
+                // broken GOP. Skipping it *silently* was not: the old code hoped a key would
+                // turn up in some later batch, and until one did the decoder had nothing to
+                // decode. With `i-frame-interval:int=1` that is up to a second of frozen
+                // picture per lag event, which is the stutter the operator sees when
+                // scrolling.
+                //
+                // The keyframe is already here. `last_h264` holds the newest one per device,
+                // kept for exactly this shape of problem, so resync from it immediately
+                // instead of waiting for the encoder to produce another.
+                log::debug!(
+                    "view subscriber lagged, dropped {dropped} packets; resyncing from last key"
+                );
+                let keys: Vec<ViewPacket> = hub.last_h264.lock().values().cloned().collect();
+                for packet in keys {
+                    ws.feed(Message::Binary(encode_packet(&packet).into()))
+                        .await?;
+                }
+                ws.flush().await?;
                 continue;
             }
             Err(RecvError::Closed) => break,
@@ -203,13 +234,57 @@ async fn replay_latest(
     Ok(())
 }
 
-/// Newest packet per UDID. If that newest is a delta and the same batch
-/// still holds a key, emit the key first so a lagged decoder can resync
-/// without waiting another `i-frame-interval`.
+/// How far behind one device may fall before its intermediate frames are discarded.
+///
+/// This is the difference between smooth motion and a slideshow, and the old policy had no
+/// such threshold: ANY batch of more than one packet collapsed to the newest per device.
+/// A batch grows whenever the WebSocket is a beat behind, which during a scroll -- the
+/// moment the encoder produces the most data -- is constantly. So exactly when there was
+/// the most motion to show, every intermediate frame was thrown away and the operator saw
+/// the endpoints.
+///
+/// Dropping is still right when a device is genuinely far behind, because painting a
+/// backlog is watching the past. Three frames is ~125 ms at 24 fps: short enough that
+/// catching up is imperceptible, long enough that ordinary jitter no longer costs frames.
+const COALESCE_AFTER_FRAMES: usize = 3;
+
+/// Forward a drained batch, dropping intermediate frames only for a device that is more
+/// than [`COALESCE_AFTER_FRAMES`] behind.
+///
+/// For a device at or under that, every packet is forwarded in order -- that is what makes
+/// motion look like motion. Past it, the device collapses to its newest packet, preceded by
+/// the newest key in the same batch if that newest is a delta, so a decoder that lost its
+/// GOP can resync without waiting another `i-frame-interval`.
 fn coalesce_for_live(packets: Vec<ViewPacket>) -> Vec<ViewPacket> {
     if packets.len() <= 1 {
         return packets;
     }
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for packet in &packets {
+        *counts.entry(packet.udid.as_str()).or_insert(0) += 1;
+    }
+    if counts.values().all(|count| *count <= COALESCE_AFTER_FRAMES) {
+        // Nobody is meaningfully behind. Forwarding the batch untouched is the whole point:
+        // these are consecutive frames of a moving screen.
+        return packets;
+    }
+    let behind: std::collections::HashSet<String> = counts
+        .iter()
+        .filter(|(_, count)| **count > COALESCE_AFTER_FRAMES)
+        .map(|(udid, _)| (*udid).to_string())
+        .collect();
+    // A device that is keeping up must not lose frames just because another device on the
+    // same shared channel fell behind.
+    let (packets, passthrough): (Vec<ViewPacket>, Vec<ViewPacket>) = packets
+        .into_iter()
+        .partition(|packet| behind.contains(&packet.udid));
+    let collapsed = collapse_to_newest(packets);
+    let mut out = passthrough;
+    out.extend(collapsed);
+    out
+}
+
+fn collapse_to_newest(packets: Vec<ViewPacket>) -> Vec<ViewPacket> {
     struct Acc {
         last: ViewPacket,
         last_key: Option<ViewPacket>,
@@ -333,54 +408,103 @@ mod tests {
         assert!(hub.last_h264.lock().get("a").is_none());
     }
 
-    // Both operands are constants, so this is decided at compile time and belongs there.
-    // As a `#[test]` it was a bound nobody learned about until the suite ran, and clippy
-    // rejected it for exactly that reason; as an anonymous const it fails the build.
+    // Still decided at compile time, and still the same worry -- a ring that a slow
+    // WebSocket can drain as history turns live video into delayed video. What changed is
+    // what enforces it. `coalesce_for_live` collapses a drained batch to the newest packet
+    // per device, so the ring cannot be replayed as a backlog whatever its size; the bound
+    // that matters now is against the OTHER failure, where a ring too small to absorb host
+    // jitter trips `Lagged` and costs a whole GOP. 8 was ~166 ms for two phones, which any
+    // WebView2 hitch clears.
+    //
+    // The upper bound stays, well above the old one and well below a DVR: 128 packets is
+    // ~2.7 s of that fleet, and it only ever materialises as one frame per device.
     const _: () = assert!(
-        BROADCAST_CAP <= 16,
-        "a large broadcast cap turns a slow WebSocket into delayed video"
+        BROADCAST_CAP <= 512,
+        "a broadcast cap this large is a DVR, not a live view, even with coalescing"
+    );
+    const _: () = assert!(
+        BROADCAST_CAP >= 64,
+        "a ring under ~1s of fleet traffic trips Lagged on ordinary jitter, and every Lagged costs a full i-frame-interval of frozen picture"
     );
 
+    fn h264(udid: &str, key: bool, byte: u8) -> ViewPacket {
+        ViewPacket {
+            udid: udid.into(),
+            generation: 1,
+            kind: ViewKind::H264,
+            width: 10,
+            height: 20,
+            key,
+            bytes: vec![byte],
+        }
+    }
+
     #[test]
-    fn a_backed_up_view_keeps_the_newest_packet_per_device() {
-        let packets = vec![
-            ViewPacket {
-                udid: "a".into(),
-                generation: 1,
-                kind: ViewKind::H264,
-                width: 10,
-                height: 20,
-                key: true,
-                bytes: vec![1],
-            },
-            ViewPacket {
-                udid: "b".into(),
-                generation: 1,
-                kind: ViewKind::H264,
-                width: 10,
-                height: 20,
-                key: true,
-                bytes: vec![2],
-            },
-            ViewPacket {
-                udid: "a".into(),
-                generation: 1,
-                kind: ViewKind::H264,
-                width: 10,
-                height: 20,
-                key: false,
-                bytes: vec![3],
-            },
-        ];
-        let live = coalesce_for_live(packets);
+    fn a_batch_that_is_barely_behind_keeps_every_frame_in_order() {
+        // The change that makes motion look like motion. Any batch of more than one packet
+        // used to collapse to the newest per device, and a batch grows whenever the
+        // WebSocket is one beat behind -- which during a scroll is constantly, because a
+        // scroll is when the encoder emits the most data. The operator saw the endpoints of
+        // every movement and nothing between them.
+        let live = coalesce_for_live(vec![
+            h264("a", true, 1),
+            h264("b", true, 2),
+            h264("a", false, 3),
+        ]);
         assert_eq!(live.len(), 3);
-        assert_eq!(live[0].udid, "a");
+        assert_eq!(live[0].bytes, vec![1]);
+        assert_eq!(live[1].bytes, vec![2]);
+        assert_eq!(live[2].bytes, vec![3]);
+    }
+
+    #[test]
+    fn a_device_far_behind_collapses_to_its_newest_key_and_frame() {
+        // Past the threshold, dropping is still right: painting a backlog is watching the
+        // past. The newest key goes first so a decoder that lost its GOP can resync without
+        // waiting another i-frame-interval.
+        let mut packets = vec![h264("a", true, 1)];
+        for byte in 2..=8 {
+            packets.push(h264("a", false, byte));
+        }
+        let live = coalesce_for_live(packets);
+        assert_eq!(live.len(), 2, "{live:?}");
         assert!(live[0].key);
         assert_eq!(live[0].bytes, vec![1]);
-        assert_eq!(live[1].udid, "a");
-        assert_eq!(live[1].bytes, vec![3]);
-        assert_eq!(live[2].udid, "b");
-        assert_eq!(live[2].bytes, vec![2]);
+        assert_eq!(live[1].bytes, vec![8]);
+    }
+
+    #[test]
+    fn a_device_keeping_up_does_not_lose_frames_because_another_fell_behind() {
+        // One shared channel for the whole fleet, so this is the failure mode that matters
+        // at scale: one slow phone must not turn every other phone into a slideshow.
+        let mut packets = vec![h264("slow", true, 1)];
+        for byte in 2..=8 {
+            packets.push(h264("slow", false, byte));
+        }
+        packets.push(h264("fast", true, 100));
+        packets.push(h264("fast", false, 101));
+
+        let live = coalesce_for_live(packets);
+        let fast: Vec<u8> = live
+            .iter()
+            .filter(|p| p.udid == "fast")
+            .map(|p| p.bytes[0])
+            .collect();
+        assert_eq!(
+            fast,
+            vec![100, 101],
+            "the device keeping up kept both frames"
+        );
+        let slow: Vec<u8> = live
+            .iter()
+            .filter(|p| p.udid == "slow")
+            .map(|p| p.bytes[0])
+            .collect();
+        assert_eq!(
+            slow,
+            vec![1, 8],
+            "the device far behind kept its key and newest"
+        );
     }
 
     #[test]
