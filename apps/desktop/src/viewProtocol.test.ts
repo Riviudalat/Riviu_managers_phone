@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  annexBHasSps,
   annexBIsSyncSample,
   codecCandidatesFromAnnexB,
   codecFromAnnexB,
@@ -93,5 +94,42 @@ describe("the sample gate refuses keyframes too, which is why callers need an es
   it("keeps feeding a decoder that is keeping up", () => {
     expect(shouldDecodeH264Sample(true, 0, false)).toBe(true);
     expect(shouldDecodeH264Sample(true, 2, false)).toBe(true);
+  });
+});
+
+describe("codecFromAnnexB fabricates a default, so callers must check for an SPS first", () => {
+  const annexB = (...nals: number[][]) => {
+    const out: number[] = [];
+    for (const nal of nals) out.push(0, 0, 0, 1, ...nal);
+    return new Uint8Array(out);
+  };
+  // NAL header byte: type is the low 5 bits. 0x67 = SPS(7), 0x65 = IDR(5), 0x41 = non-IDR(1).
+  const sps = [0x67, 0x42, 0x00, 0x15, 0xaa];
+  const idr = [0x65, 0x88, 0x84];
+  const delta = [0x41, 0x9a, 0x02];
+
+  it("reports no SPS for an IDR that does not carry one", () => {
+    // The measured case. scrcpy sends config NALs separately, so a keyframe frequently has no
+    // SPS -- and annexBIsSyncSample still calls it a sync sample, which is correct and is
+    // exactly why "is it a keyframe" cannot stand in for "does it say which codec this is".
+    expect(annexBHasSps(annexB(idr))).toBe(false);
+    expect(annexBIsSyncSample(annexB(idr), false)).toBe(true);
+  });
+
+  it("reports an SPS when one is present", () => {
+    expect(annexBHasSps(annexB(sps, idr))).toBe(true);
+  });
+
+  it("returns the hard-coded default for a blob with no SPS", () => {
+    // Not a bug in this function -- a sensible last resort for building a FIRST decoder. The
+    // bug was trusting it while a decoder already existed: on a real Galaxy S8 stream the
+    // live codec was avc1.420015 and this fabrication is avc1.42E01E, so the comparison failed
+    // on every SPS-less keyframe and rebuilt the decoder against the wrong string.
+    expect(codecFromAnnexB(annexB(idr))).toBe("avc1.42E01E");
+    expect(codecFromAnnexB(annexB(delta))).toBe("avc1.42E01E");
+  });
+
+  it("derives the real codec when the SPS is there", () => {
+    expect(codecFromAnnexB(annexB(sps, idr))).toBe("avc1.420015");
   });
 });

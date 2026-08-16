@@ -1,4 +1,5 @@
 import {
+  annexBHasSps,
   annexBIsSyncSample,
   codecCandidatesFromAnnexB,
   decodeViewEnvelope,
@@ -36,7 +37,15 @@ interface ExportMessage {
   requestId: number;
 }
 
-type InMessage = AttachMessage | DetachMessage | PacketMessage | ExportMessage;
+/// Turns the per-envelope counters on. Sent by the main thread rather than read from
+/// `import.meta.env` in here: the worker's own DEV flag came back false under this build, so
+/// the diagnostics silently printed nothing at exactly the moment they were needed.
+interface DiagMessage {
+  type: "diag";
+  enabled: boolean;
+}
+
+type InMessage = AttachMessage | DetachMessage | PacketMessage | ExportMessage | DiagMessage;
 
 interface Surface {
   id: string;
@@ -113,7 +122,7 @@ const received = new Map<string, number>();
 /// The three candidate mechanisms -- a keyframe that never arrived, a decoder that was fed
 /// and produced no output, and a sample gate that refuses everything -- are indistinguishable
 /// without counting each one separately.
-const DIAG = import.meta.env?.DEV === true;
+let DIAG = false;
 
 interface Diag {
   received: number;
@@ -124,6 +133,10 @@ interface Diag {
   refusedQueue: number;
   refusedNotSync: number;
   closes: number;
+  rebuilds: number;
+  genChanges: number;
+  lastCodec: string;
+  lastCandidates: string;
   lastGeneration: number;
   lastReportAt: number;
 }
@@ -142,6 +155,10 @@ function diagFor(udid: string): Diag {
       refusedQueue: 0,
       refusedNotSync: 0,
       closes: 0,
+      rebuilds: 0,
+      genChanges: 0,
+      lastCodec: "",
+      lastCandidates: "",
       lastGeneration: -1,
       lastReportAt: 0,
     };
@@ -157,7 +174,10 @@ function diagReport(udid: string, note: string) {
   const now = performance.now();
   if (now - d.lastReportAt < 1000) return;
   d.lastReportAt = now;
-  console.info(
+  // console.warn, not console.info: vite forwards only warn/error from a client to the
+  // terminal, so an info line here is visible in devtools and nowhere else -- which for a
+  // diagnostic added to answer a question from the logs is the same as not existing.
+  console.warn(
     `[viewdiag] ${udid} gen=${d.lastGeneration} recv=${d.received} keys=${d.keys} ` +
       `fed=${d.fed} out=${d.output} closes=${d.closes} ` +
       `refused(nodec=${d.refusedNoDecoder} queue=${d.refusedQueue} notsync=${d.refusedNotSync}) ` +
@@ -220,12 +240,32 @@ function beatPainted(slot: Slot) {
 /// path, because the case worth catching is arrivals climbing while paints do not, and the
 /// paint path by definition is not running then.
 function emitBeat(udid: string, generation: number, frames: number) {
+  const d = DIAG ? diagFor(udid) : undefined;
   postMessage({
     type: "paintBeat",
     udid,
     generation,
     frames,
     received: received.get(udid) ?? 0,
+    // Carried on the beat rather than logged from in here. Vite forwards the PAGE's console
+    // to the terminal, not a Web Worker's, so every diagnostic printed from this file went
+    // to devtools and nowhere else -- which is why the counters read zero at exactly the
+    // moment they were supposed to answer the question.
+    diag: d
+      ? {
+          fed: d.fed,
+          output: d.output,
+          closes: d.closes,
+          noDecoder: d.refusedNoDecoder,
+          queue: d.refusedQueue,
+          notSync: d.refusedNotSync,
+          keys: d.keys,
+          rebuilds: d.rebuilds,
+          genChanges: d.genChanges,
+          lastCodec: d.lastCodec,
+          lastCandidates: d.lastCandidates,
+        }
+      : undefined,
   });
 }
 
@@ -299,11 +339,18 @@ async function configureDecoder(slot: Slot, codec: string): Promise<VideoDecoder
           // Decoder errors were 100% invisible before this: the callback logged nothing, the
           // worker has no `onerror` wired, and the only channel that ever surfaced a decode
           // problem was `decodeUnsupported`, which this very path made unreachable.
-          console.warn(
-            `view decoder rejected ${slot.udid} codec=${codec} accel=${slot.accelIndex} ` +
-              `candidate=${slot.codecIndex}`,
-            cause,
-          );
+          // postMessage, not console: vite forwards the page's console to the terminal but
+          // NOT a worker's, so every decoder error logged from in here went to devtools and
+          // nowhere else. That is why "decoder rejected" read zero in the logs while the
+          // counters showed the decoder being closed and rebuilt four times per device.
+          postMessage({
+            type: "decoderError",
+            udid: slot.udid,
+            codec,
+            accel: slot.accelIndex,
+            candidate: slot.codecIndex,
+            errorMessage: cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause),
+          });
           closeDecoder(slot);
           const held = pending.get(slot.udid);
           if (!held) return;
@@ -343,6 +390,7 @@ async function configureDecoder(slot: Slot, codec: string): Promise<VideoDecoder
 async function handleH264(slot: Slot, envelope: ViewEnvelope) {
   if (envelope.kind !== "h264") return;
   if (envelope.generation !== slot.generation) {
+    if (DIAG) diagFor(slot.udid).genChanges += 1;
     closeDecoder(slot);
     slot.generation = envelope.generation;
     slot.accelIndex = 0;
@@ -391,11 +439,27 @@ async function handleH264(slot: Slot, envelope: ViewEnvelope) {
   // never contains it, every delta was therefore sent down the rebuild path, and the
   // `!isSync` guard dropped it. Every P-frame discarded, and the decoder town down and
   // rebuilt once per keyframe.
-  const needsCodecCheck = !slot.decoder || isSync;
-  if (!needsCodecCheck) {
-    // Live decoder, ordinary delta: feed it.
-  } else if (!slot.decoder || !codecCandidatesFromAnnexB(envelope.payload).includes(slot.codec ?? "")) {
+  // Re-derive the codec ONLY from a packet that actually carries an SPS. A sync sample is not
+  // enough: scrcpy sends config NALs separately, so an IDR often arrives without one, and
+  // `codecFromAnnexB` answers that with a hard-coded `avc1.42E01E` rather than "I don't know".
+  // Comparing a live `slot.codec` against that fabrication fails every time, which tore the
+  // decoder down on each such keyframe and rebuilt it against a codec string the stream was
+  // not. Measured across a 20-device fleet: `codec=avc1.420015` versus
+  // `cands=avc1.42E01E,avc1.42001E,avc1.4D401E`, and output stopped at ~50 frames each.
+  const canJudgeCodec = annexBHasSps(envelope.payload);
+  if (!slot.decoder) {
+    // Nothing to keep; fall through and build one.
+  } else if (!canJudgeCodec) {
+    // Live decoder and no evidence about the codec: feed it.
+  }
+  if (!slot.decoder || (canJudgeCodec && !codecCandidatesFromAnnexB(envelope.payload).includes(slot.codec ?? ""))) {
     const codecs = codecCandidatesFromAnnexB(envelope.payload);
+    if (DIAG) {
+      const d = diagFor(slot.udid);
+      d.rebuilds += 1;
+      d.lastCodec = slot.codec ?? "(none)";
+      d.lastCandidates = codecs.join(",");
+    }
     if (!isSync) return;
     closeDecoder(slot);
     if (slot.codecIndex >= codecs.length) {
@@ -512,6 +576,10 @@ self.onmessage = (event: MessageEvent<InMessage>) => {
         void handleJpeg(message.udid, slot, held);
       }
     }
+    return;
+  }
+  if (message.type === "diag") {
+    DIAG = message.enabled === true;
     return;
   }
   if (message.type === "detach") {

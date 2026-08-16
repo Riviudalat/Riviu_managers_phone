@@ -32,6 +32,22 @@ const framesAtRecovery = new Map<string, number>();
 /// the loop ran 33 times. 48 frames is ~2 s at 24 fps -- long enough that a stream which
 /// merely twitched does not count as healthy.
 export const SUSTAINED_PAINT_FRAMES = 48;
+
+/// Whether a stall report also restarts the producer. **Off.**
+///
+/// Restarting on "packets arrive but nothing paints" is a positive feedback loop, and it got
+/// worse with every scale it was measured at: 2 phones produced 33 producer starts for 3
+/// overlay open/close cycles, and 20 phones produced **291**. Each restart costs adb work and
+/// CPU, which makes more devices miss their paint window, which triggers more restarts. At
+/// fleet scale the recovery destroys the thing it is recovering.
+///
+/// The report is kept because it is the only signal that distinguishes a decoder producing
+/// nothing from a phone whose screen is simply not changing, and the underlying cause is
+/// still open. Marking the tile not-live is honest and costs nothing; the Rust keeper still
+/// restarts on genuine silence from the device, which is a different and safe predicate.
+///
+/// Turn this back on only alongside a fleet-wide concurrency cap on recoveries.
+export const AUTO_RESTART_ON_STALL = false;
 /// UDIDs whose every codec candidate was refused. Distinct from "not live": there is
 /// nothing to wait for, so retrying the same stream cannot help.
 const decodeFailed = new Set<string>();
@@ -77,10 +93,25 @@ export function viewDecodeFailed(udid: string): boolean {
 
 /// One udid's most recent worker beat: how many envelopes arrived and how many frames were
 /// drawn, as of `at`.
+export interface ViewDiag {
+  fed: number;
+  output: number;
+  closes: number;
+  noDecoder: number;
+  queue: number;
+  notSync: number;
+  keys: number;
+  rebuilds: number;
+  genChanges: number;
+  lastCodec: string;
+  lastCandidates: string;
+}
+
 export interface ViewBeat {
   at: number;
   received: number;
   frames: number;
+  diag?: ViewDiag;
 }
 
 /// The udids that look stalled: packets kept arriving and no frame was drawn for them.
@@ -174,7 +205,13 @@ function ensureWorker(): Worker | null {
   } catch {
     return null;
   }
-  worker.onmessage = (event: MessageEvent<{ type: string; udid?: string; width?: number; height?: number; generation?: number; requestId?: number; bytes?: Uint8Array | null; frames?: number; received?: number; codecs?: string[] }>) => {
+  // The worker's own `import.meta.env.DEV` came back false under this build, so its
+  // diagnostics never printed. Read the flag here, where it demonstrably works, and tell the
+  // worker.
+  // Always on: the counters are only emitted on a beat that is already being sent, and
+  // they are only printed when a device is reported stalled, so the cost is a few fields.
+  worker.postMessage({ type: "diag", enabled: true });
+  worker.onmessage = (event: MessageEvent<{ type: string; udid?: string; width?: number; height?: number; generation?: number; requestId?: number; bytes?: Uint8Array | null; frames?: number; received?: number; diag?: ViewDiag; codecs?: string[]; codec?: string; accel?: number; candidate?: number; errorMessage?: string }>) => {
     const message = event.data;
     if (message.type === "painted" && message.udid) {
       const next: ViewSize = {
@@ -199,6 +236,7 @@ function ensureWorker(): Worker | null {
         at: Date.now(),
         received: message.received ?? 0,
         frames: message.frames ?? 0,
+        diag: message.diag,
       };
       const previous = lastPaintBeat.get(message.udid);
       latestBeat.set(message.udid, beat);
@@ -224,6 +262,13 @@ function ensureWorker(): Worker | null {
         live.add(message.udid);
         if (recovered || wasDark) emit(message.udid);
       }
+      return;
+    }
+    if (message.type === "decoderError" && message.udid) {
+      console.warn(
+        `view decoder error ${message.udid} codec=${message.codec} accel=${message.accel} ` +
+          `candidate=${message.candidate}: ${message.errorMessage}`,
+      );
       return;
     }
     if (message.type === "decodeUnsupported" && message.udid) {
@@ -313,9 +358,17 @@ function startStallWatch() {
       const current = latestBeat.get(udid);
       console.warn(
         `view received ${(current?.received ?? 0) - (painted?.received ?? 0)} packets and drew ` +
-          `nothing for ${PAINT_STALL_MS}ms; restarting ${udid} (attempt ${attempt}, next retry ` +
-          `in ${Math.round(viewRecoveryDelayMs(attempt) / 1000)}s)`,
+          `nothing for ${PAINT_STALL_MS}ms on ${udid} (report ${attempt}); ` +
+          `${AUTO_RESTART_ON_STALL ? "restarting" : "not restarting"}` +
+          (current?.diag
+            ? ` [fed=${current.diag.fed} out=${current.diag.output} keys=${current.diag.keys} ` +
+              `closes=${current.diag.closes} refused(nodec=${current.diag.noDecoder} ` +
+              `queue=${current.diag.queue} notsync=${current.diag.notSync}) ` +
+              `rebuilds=${current.diag.rebuilds} genchg=${current.diag.genChanges} ` +
+              `codec=${current.diag.lastCodec} cands=${current.diag.lastCandidates}]`
+            : ""),
       );
+      if (!AUTO_RESTART_ON_STALL) continue;
       // viewEnsure restarts the producer at whatever preset the operator last asked for.
       void viewEnsure(udid).catch(() => {
         // The device may be unplugged, which is one of the reasons frames stop.
