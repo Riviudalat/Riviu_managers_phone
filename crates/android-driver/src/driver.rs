@@ -1983,6 +1983,14 @@ impl DeviceDriver for AndroidDriver {
         crate::publish::cleanup(&self.adb, udid, import_id).await
     }
 
+    async fn pull_media(
+        &self,
+        udid: &str,
+        dest_dir: &Path,
+    ) -> anyhow::Result<Vec<std::path::PathBuf>> {
+        crate::publish::pull_media(&self.adb, udid, dest_dir).await
+    }
+
     /// Which regional TikTok build this phone actually has.
     ///
     /// Reads the installed packages rather than the foreground app: at the time a

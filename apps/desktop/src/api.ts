@@ -401,6 +401,16 @@ export async function listInstalledApps(udid: string) {
  * `adb shell <script>` only. The backend has no path to `adb <subcommand>`, so install,
  * reboot, root and kill-server are not one typo away from a text box.
  */
+/** Put one picture or video into the phone's gallery, where it is actually visible. */
+export async function importMedia(udid: string, path: string) {
+  return invoke<string>("import_media", { udid, path });
+}
+
+/** Copy the phone's photos and videos into `destDir`. Returns how many files landed. */
+export async function exportMedia(udid: string, destDir: string) {
+  return invoke<number>("export_media", { udid, destDir });
+}
+
 export async function deviceShell(udid: string, script: string) {
   return invoke<ShellOutcome>("device_shell", { udid, script });
 }

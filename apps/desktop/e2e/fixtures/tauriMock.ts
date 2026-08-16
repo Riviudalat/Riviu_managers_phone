@@ -719,6 +719,10 @@ export async function installTauriMock(
     // The view store posts this on its own 2 s tick as soon as any device has a beat, so it
     // is reached without a spec doing anything.
     commandHandlers.set("view_report_paint", () => null);
+    // Overlay rows: only reached on a click, but `invoke` throws for anything unregistered
+    // and the registry here is the contract rather than a convenience.
+    commandHandlers.set("import_media", () => "ok");
+    commandHandlers.set("export_media", () => 0);
     commandHandlers.set("save_view_snapshot", () => "");
     // Registered because `invoke` throws `Unknown mock command` for anything absent,
     // and the Settings tab calls neither on mount but offers both as buttons.

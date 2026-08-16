@@ -412,6 +412,124 @@ pub async fn device_shell(
         .map_err(CommandError::from)
 }
 
+/// Put a picture or a video into the phone's gallery, where the operator can see it.
+///
+/// Stage, prepare, then import — all three, which is the difference between this and
+/// `push_material`. That one stops after staging, and staging lands the file in a hidden
+/// dot-directory that MediaStore does not index: a row labelled "Import" that puts a file
+/// somewhere the operator cannot find it would be the same lying button the Rotate row was
+/// written to avoid. The import step is what moves it into a visible directory and tells
+/// MediaStore about it.
+///
+/// One file per call, staged as a single-file campaign because that is the shape the
+/// measured pipeline takes. `_keeping_stream`, because the operator is watching the tile to
+/// see the picture appear.
+#[tauri::command]
+pub async fn import_media(
+    state: State<'_, AppState>,
+    udid: String,
+    path: String,
+) -> Result<String, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let source = PathBuf::from(&path);
+    if !source.is_file() {
+        return Err(CommandError::invalid_argument(format!(
+            "không thấy file {path}"
+        )));
+    }
+    let name = source
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "media".to_string());
+
+    // A staging tree of exactly one file. The campaign id is per-call rather than per-file
+    // so two imports of the same picture do not collide in the device's staging directory.
+    let campaign_id = uuid::Uuid::new_v4().to_string();
+    let staged = state
+        .artifacts_dir
+        .join("import-staging")
+        .join(&udid)
+        .join(&campaign_id);
+    std::fs::create_dir_all(&staged).map_err(CommandError::operation)?;
+    std::fs::copy(&source, staged.join(&name)).map_err(CommandError::operation)?;
+
+    let context = state
+        .control
+        .try_acquire_exclusive_keeping_stream(&udid, DeviceWorkOwner::ManualControl)
+        .await
+        .map_err(CommandError::from)?;
+
+    let staged_evidence = state
+        .control
+        .stage_publish_media(
+            &context,
+            &state.active_agent_bundle_id,
+            &campaign_id,
+            &staged,
+        )
+        .await
+        .map_err(CommandError::from)?;
+    // The manifest hash the phone computed, which prepare and import both key on. Reading it
+    // back from the staging evidence rather than recomputing it here is the point: the two
+    // sides have to agree about what landed.
+    let manifest = staged_evidence
+        .get("manifestSha256")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            CommandError::operation("staging did not report a manifest hash to import against")
+        })?
+        .to_string();
+    state
+        .control
+        .prepare_publish_media(&context, &campaign_id, &manifest)
+        .await
+        .map_err(CommandError::from)?;
+    let imported = state
+        .control
+        .import_publish_media(&context, &campaign_id, &manifest)
+        .await
+        .map_err(CommandError::from)?;
+
+    // Best effort: the file is on the phone either way, and failing the whole import because
+    // a temporary directory survived would report a success as a failure.
+    let _ = std::fs::remove_dir_all(&staged);
+    Ok(format!("Đã đưa {name} vào thư viện máy ({imported})"))
+}
+
+/// Copy the phone's photos and videos onto this machine.
+///
+/// The other direction, and a genuinely different operation: the import path above knows
+/// about campaigns and manifests, this one knows only that the operator wants whatever is in
+/// the camera roll right now.
+#[tauri::command]
+pub async fn export_media(
+    state: State<'_, AppState>,
+    udid: String,
+    dest_dir: String,
+) -> Result<u32, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let dest = PathBuf::from(&dest_dir);
+    if !dest.is_dir() {
+        return Err(CommandError::invalid_argument(format!(
+            "không thấy thư mục {dest_dir}"
+        )));
+    }
+    // Per device, so exporting two phones into one folder does not interleave their camera
+    // rolls into an unsortable pile.
+    let into = dest.join(format!("riviu-{udid}"));
+    let context = state
+        .control
+        .try_acquire_exclusive_keeping_stream(&udid, DeviceWorkOwner::ManualControl)
+        .await
+        .map_err(CommandError::from)?;
+    let pulled = state
+        .control
+        .pull_media(&context, &into)
+        .await
+        .map_err(CommandError::from)?;
+    Ok(pulled.len() as u32)
+}
+
 /// Ask a device to rotate, and report the rotation it actually settled at.
 ///
 /// Returns the observed rotation, not `()`, because measured on both fleet phones the

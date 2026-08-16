@@ -411,6 +411,27 @@ pub trait DeviceDriver: Send + Sync {
     ) -> anyhow::Result<serde_json::Value> {
         unsupported("cleanupPublishMedia")
     }
+    /// Copy the phone's own photos and videos off it, into `dest_dir`.
+    ///
+    /// The other direction from the publish pipeline above, and deliberately not built on
+    /// it: that path exists to put a *campaign* on a phone and knows about manifests and
+    /// import ids. This one knows nothing about what it is fetching — it is the operator
+    /// asking for whatever the camera roll currently holds.
+    ///
+    /// Returns the files actually written on this host, so a caller can report a count
+    /// rather than a shrug. An empty gallery is `Ok(vec![])`, not an error: nothing went
+    /// wrong, there was simply nothing there.
+    ///
+    /// Defaults to a refusal that names itself rather than to an empty success, the same
+    /// rule as every capability above — "no media" and "this backend cannot fetch media"
+    /// must not look alike to a caller.
+    async fn pull_media(
+        &self,
+        _udid: &str,
+        _dest_dir: &Path,
+    ) -> anyhow::Result<Vec<std::path::PathBuf>> {
+        unsupported("pullMedia")
+    }
     async fn uninstall_app(&self, udid: &str, bundle_id: &str) -> anyhow::Result<()>;
     async fn screenshot(&self, udid: &str, dest: &Path) -> anyhow::Result<PathBuf>;
     async fn syslog_tail(&self, udid: &str, lines: usize) -> anyhow::Result<String>;

@@ -10,7 +10,9 @@ import {
   deviceSwipePath,
   deviceTap,
   deviceTypeText,
+  exportMedia,
   groupInput,
+  importMedia,
   rebootDevice,
   installIpa,
   restoreDevice,
@@ -50,6 +52,7 @@ import {
   IconDownload,
   IconGrid,
   IconHome,
+  IconImage,
   IconKeyboard,
   IconPhone,
   IconPower,
@@ -338,6 +341,44 @@ export function FocusStream({
     }
   };
 
+  const importFile = async () => {
+    const path = await pickFile({
+      title: "Chọn ảnh hoặc video",
+      filters: [{ name: "Ảnh / video", extensions: ["jpg", "jpeg", "png", "webp", "gif", "mp4", "mov", "3gp"] }],
+    });
+    if (!path) return;
+    pushToast("info", "Đang đưa vào máy…", device.name);
+    try {
+      await runBusy(async () => {
+        pushToast("ok", "Đã vào thư viện", await importMedia(device.udid, path));
+      });
+    } catch (error) {
+      toastError("Đưa file vào máy thất bại", error);
+    }
+  };
+
+  const exportFiles = async () => {
+    const dir = await pickDirectory("Chọn thư mục lưu ảnh/video lấy từ máy");
+    if (!dir) return;
+    // A full camera roll over USB 2.0 takes minutes, so say so before it starts rather than
+    // leaving the operator watching a disabled button.
+    pushToast("info", "Đang lấy ảnh/video…", `${device.name} — có thể mất vài phút.`);
+    try {
+      await runBusy(async () => {
+        const count = await exportMedia(device.udid, dir);
+        if (count === 0) {
+          // Not an error: an empty gallery is an answer, and reporting it as a failure
+          // would send the operator looking for a bug that is not there.
+          pushToast("info", "Máy không có ảnh/video nào", device.name);
+        } else {
+          pushToast("ok", `Đã lấy ${count} file`, dir);
+        }
+      });
+    } catch (error) {
+      toastError("Lấy ảnh/video thất bại", error);
+    }
+  };
+
   const savePhrase = () => {
     const { phrases: next, error } = addQuickPhrase(
       phrases,
@@ -525,6 +566,24 @@ export function FocusStream({
           }
         })();
       },
+    },
+    {
+      // Beside Cài APK, because both are "put a file on this phone" — and GenFarmer keeps
+      // ImportFile / ExportFile adjacent in its own menu.
+      id: "importMedia",
+      label: "Đưa ảnh/video vào máy",
+      Icon: IconImage,
+      androidOnly: true,
+      disabled: busy,
+      run: () => void importFile(),
+    },
+    {
+      id: "exportMedia",
+      label: "Lấy ảnh/video từ máy",
+      Icon: IconDownload,
+      androidOnly: true,
+      disabled: busy,
+      run: () => void exportFiles(),
     },
     {
       id: "adb",

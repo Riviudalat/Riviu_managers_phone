@@ -394,6 +394,14 @@ impl DeviceDriver for MultiplexDriver {
             .await
     }
 
+    async fn pull_media(
+        &self,
+        udid: &str,
+        dest_dir: &Path,
+    ) -> anyhow::Result<Vec<std::path::PathBuf>> {
+        self.route(udid)?.pull_media(udid, dest_dir).await
+    }
+
     async fn cleanup_publish_media(
         &self,
         udid: &str,
@@ -552,6 +560,22 @@ mod tests {
         async fn refresh_device(&self, udid: &str) -> anyhow::Result<DeviceInfo> {
             Ok(device(udid))
         }
+        // Same shape as `list_installed_apps` above and for the same reason: only one
+        // backend implements it, so a forward this type forgets to write answers with the
+        // trait's refusal for every device and the real implementation becomes dead code.
+        async fn pull_media(
+            &self,
+            udid: &str,
+            dest_dir: &Path,
+        ) -> anyhow::Result<Vec<std::path::PathBuf>> {
+            if !self.text_comments {
+                return Err(crate::driver::UnsupportedCapability {
+                    capability: "pullMedia",
+                }
+                .into());
+            }
+            Ok(vec![dest_dir.join(format!("{udid}.jpg"))])
+        }
         async fn install_app(&self, _udid: &str, _path: &Path) -> anyhow::Result<()> {
             Ok(())
         }
@@ -647,6 +671,35 @@ mod tests {
             .expect_err("a backend that cannot enumerate must refuse, not return empty");
         assert!(
             refused.to_string().contains("listInstalledApps"),
+            "the refusal must name the capability: {refused}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pulling_media_reaches_the_owning_backend_rather_than_the_trait_default() {
+        // The forward this file's own comment warns about: without it, Export would answer
+        // "unsupported" on every phone while the Android implementation sat there compiling
+        // and passing its own tests. A refusal that names the capability is the only
+        // acceptable answer for a backend that cannot do it -- never an empty success, which
+        // reads to the operator as "this phone has no photos".
+        let driver = multiplex();
+        driver.list_devices().await.expect("list");
+
+        let pulled = driver
+            .pull_media("droid-a", Path::new("/tmp/export"))
+            .await
+            .expect("the android backend fetches media");
+        assert_eq!(
+            pulled,
+            vec![PathBuf::from("/tmp/export").join("droid-a.jpg")]
+        );
+
+        let refused = driver
+            .pull_media("ios-a", Path::new("/tmp/export"))
+            .await
+            .expect_err("a backend that cannot fetch media must refuse, not return empty");
+        assert!(
+            refused.to_string().contains("pullMedia"),
             "the refusal must name the capability: {refused}"
         );
     }

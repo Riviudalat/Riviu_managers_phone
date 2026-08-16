@@ -21,6 +21,8 @@ vi.mock("../api", () => ({
   deviceSwipe: vi.fn(async () => undefined),
   deviceTap: vi.fn(async () => undefined),
   deviceTypeText: vi.fn(async () => undefined),
+  exportMedia: vi.fn(async () => 0),
+  importMedia: vi.fn(async () => ""),
   groupInput: vi.fn(async () => ({ completedUdids: [], skipped: [] })),
   installIpa: vi.fn(async () => undefined),
   rebootDevice: vi.fn(),

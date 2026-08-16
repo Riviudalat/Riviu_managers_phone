@@ -704,6 +704,24 @@ impl DeviceControlPlane {
             .map_err(|error| driver_error(lease.udid(), "setScreenRotation", error))
     }
 
+    /// Copy the phone's photos and videos onto this host.
+    ///
+    /// Takes a lease like every other device action, but the caller is expected to have used
+    /// the keeping-stream variant: an export can run for minutes on a full camera roll, and
+    /// parking the operator's live tile for that long — while they watch — is the behaviour
+    /// `device_shell` and `set_screen_rotation` were both deliberately moved off.
+    pub async fn pull_media(
+        &self,
+        context: &DeviceExclusiveContext,
+        dest_dir: &std::path::Path,
+    ) -> Result<Vec<std::path::PathBuf>, DeviceControlError> {
+        let lease = self.validate_exclusive(context)?;
+        self.driver
+            .pull_media(lease.udid(), dest_dir)
+            .await
+            .map_err(|error| driver_error(lease.udid(), "pullMedia", error))
+    }
+
     pub async fn reboot(&self, context: &DeviceExclusiveContext) -> Result<(), DeviceControlError> {
         let lease = self.validate_exclusive(context)?;
         self.driver

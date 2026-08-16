@@ -5169,6 +5169,36 @@ moi lan doi preset va moi lan xoay may la mot cua so cham bien mat — upstream 
 agent **von khong cham** — 130–280 ms mot click do tren chinh Galaxy S8+. Con so 1502 ms la
 `adb shell input`, **khong phai** agent, dung nham hai cai.
 
+### 9.75 Import/Export anh-video hai chieu, va cai bay `.thumbnails` (16/08/2026)
+
+**Import** (dua file vao thu vien may) khong phai code moi: `stage` → `prepare` → `import` da
+do xong tu §9.10. Cai *thieu* la khong co gi goi ca ba. `push_material` dung lai o `stage`,
+ma stage lai do vao thu muc **co dau cham dau** — MediaStore khong quet, nen file nam tren may
+o cho nguoi van hanh khong tim thay. Mot dong menu ten "Import" ma lam the la dung cai nut noi
+doi ma §9.59 da bo cho Rotate. `import_media` chay du ba buoc, doc `manifestSha256` **tu chinh
+bang chung cua stage** chu khong tu tinh lai — hai phia phai dong y ve cai da len may.
+
+Do that tren SM-G955F: `staged {hiddenFromMediaStore:true}` → `prepared {state:"ready"}` →
+`imported {state:"imported", mediaIds:["606"], scanBroadcast:true}` → `cleanup {state:"cleaned"}`.
+
+**Export** (lay anh/video ve may tinh) la nang luc moi: `pull_media` xuyen trait →
+`driver_multiplex` (**forward viet tay**, khong co no thi moi may deu tra ve refusal mac dinh
+va ban Android thanh code chet ma van xanh) → control plane (`_keeping_stream`, vi export mot
+camera roll day mat vai phut va park tile cua nguoi dang xem la sai) → command → api.
+
+**Bay, va chi thay khi test tren du lieu that:** loc theo *ten file* co dau cham dau la khong
+du — phai loc theo **moi thanh phan cua duong dan**. Do tren mot may: `find` ra **136 dong**,
+trong do **46 dong** nam trong thu muc an (`/sdcard/DCIM/.thumbnails/…`) va deu la `.jpg` that.
+Loc kieu cu se keo ca dong thumbnail ve may nguoi ta. Sau khi sua: **45 file, 139,3 MB, 12,3 s**.
+
+**`adb pull` exit 0 ma khong ghi gi la co that** (§9.12: Git Bash mangle duong dan). Nen: doc
+lai `metadata().len()` cua tung file, va neu **tim thay media ma khong file nao ve** thi bao
+loi — khong duoc tra ve 0 giong nhu "may khong co anh nao". Hai truong hop do cung mot con so
+va nguoc nghia nhau.
+
+Probe: `cargo run -p riviu-android-driver --example media_export_probe -- <serial>`
+(`--import <file>`, `--cleanup <importId>`). Phai la Rust chu khong phai bash — chinh vi §9.12.
+
 ### 9.74 `app_process` chet o 255 byte argv — nguyen nhan that su cua §9.71 (16/08/2026)
 
 Do tren **SM-G955F va SM-G950F (Android 9)**, app da dung, giet leftover truoc moi lan do.
