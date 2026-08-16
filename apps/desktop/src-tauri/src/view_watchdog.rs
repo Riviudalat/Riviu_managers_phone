@@ -104,12 +104,28 @@ pub(crate) const VIEW_RETUNE_FLOOR: Duration = Duration::from_secs(15);
 
 /// Frames a device must draw after a recovery before its backoff is considered cleared.
 ///
+/// **Derived, not chosen** — and it is on its second value because the first one was chosen.
+///
 /// One frame is not recovery, and treating it as such defeated the backoff completely:
 /// measured over three overlay open/close cycles, a stream painted a frame or two after
 /// each restart and then stopped, which reset the counter, so every stall logged
-/// "attempt 1" and the loop ran 33 times. 48 frames is ~2 s at 24 fps — long enough that a
-/// stream which merely twitched does not count as healthy.
-pub(crate) const SUSTAINED_PAINT_FRAMES: u64 = 48;
+/// "attempt 1" and the loop ran 33 times. The answer to that was 48 frames — about two
+/// seconds — sized against a twitch of *one or two* frames.
+///
+/// This fleet then produced a bigger twitch. Measured 16/08/2026 on one S8+ over six
+/// consecutive restarts: `frames` went 1 → 52 → 97 → 148 → 201 → 256, so the stream painted
+/// **about fifty frames** after each restart and then stopped. Fifty clears forty-eight, so
+/// the backoff was wiped every time and the device was restarted every ~18 s — the same
+/// unbounded loop, with a threshold that merely made it harder to see.
+///
+/// So the number is no longer picked at all. Recovery means **painting for longer than the
+/// window that would have called it broken**: `VIEW_PAINT_STALL` at the fleet's frame rate.
+/// A device that paints continuously for that long cannot have been stalled during it, by
+/// the definition of stalled — and any twitch shorter than the stall window is, definitionally,
+/// not a recovery. At 12 s and 24 fps that is 288 frames, against the ~50 a failed recovery
+/// here produces.
+pub(crate) const SUSTAINED_PAINT_FRAMES: u64 =
+    VIEW_PAINT_STALL.as_secs() * riviu_core::STREAM_FPS as u64;
 
 /// How many phones may be recovering at once, fleet-wide.
 ///
@@ -879,6 +895,51 @@ mod tests {
             )
             .is_some());
     }
+
+    #[test]
+    fn a_fifty_frame_twitch_does_not_clear_the_backoff() {
+        // The regression this fleet actually produced, in its own numbers. One S8+ over six
+        // consecutive restarts reported frames 1, 52, 97, 148, 201, 256 -- about fifty
+        // frames of painting after each restart and then nothing. Against the old threshold
+        // of 48 that cleared the backoff every time and the device was torn down every ~18
+        // seconds; the doubling never advanced past the first step.
+        let gate = ViewRecoveryGate::with_limit(4);
+        let permit = gate
+            .try_admit("a", 1, VIEW_RESTART_BACKOFF, VIEW_RESTART_MAX_BACKOFF)
+            .expect("first attempt is always due");
+        drop(permit);
+
+        gate.note_painted("a", 52);
+
+        assert!(
+            gate.try_admit("a", 52, VIEW_RESTART_BACKOFF, VIEW_RESTART_MAX_BACKOFF)
+                .is_none(),
+            "fifty frames is a twitch, not a recovery, and must not buy an immediate retry"
+        );
+    }
+
+    #[test]
+    fn recovery_is_defined_as_outlasting_the_window_that_calls_a_stream_broken() {
+        // The threshold is derived rather than picked, and this is the derivation: a device
+        // that paints continuously for longer than the stall window cannot have been stalled
+        // during it. Anything shorter is, by that same definition, not evidence of recovery
+        // -- which is what both previous values got wrong by being chosen against whatever
+        // twitch had most recently been seen.
+        assert_eq!(
+            SUSTAINED_PAINT_FRAMES,
+            VIEW_PAINT_STALL.as_secs() * riviu_core::STREAM_FPS as u64
+        );
+    }
+
+    /// And comfortably past the biggest false recovery this fleet has produced: fifty frames.
+    /// A build-time wall, because it is a relation between constants — if the stall window is
+    /// ever shortened enough to bring this back under what a twitch produces, that should
+    /// stop the build rather than wait for a phone to be torn down every eighteen seconds.
+    const _: () = assert!(
+        SUSTAINED_PAINT_FRAMES > 50,
+        "one S8+ painted ~50 frames after each restart and then stopped; a threshold at or \
+         below that reads a twitch as a recovery and the backoff never advances"
+    );
 
     #[test]
     fn the_windows_stay_separate_because_they_were_measured_separately() {

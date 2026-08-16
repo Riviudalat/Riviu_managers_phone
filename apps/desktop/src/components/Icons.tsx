@@ -238,6 +238,37 @@ export function IconPower({ size = 18, className }: IconProps) {
   );
 }
 
+export function IconBattery({ size = 18, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <rect x="2" y="7" width="17" height="10" rx="2.5" stroke="currentColor" strokeWidth="1.75" />
+      <path d="M21.5 10.5v3" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function IconKeyboard({ size = 18, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <rect x="2" y="6" width="20" height="12" rx="2.5" stroke="currentColor" strokeWidth="1.75" />
+      <path
+        d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+export function IconText({ size = 18, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <path d="M5 6h14M5 12h14M5 18h9" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function IconCopy({ size = 18, className }: IconProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden>

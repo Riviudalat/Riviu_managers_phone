@@ -5,9 +5,11 @@ import {
   deviceControlBegin,
   deviceControlEnd,
   deviceKey,
+  deviceShell,
   deviceSwipe,
   deviceSwipePath,
   deviceTap,
+  deviceTypeText,
   groupInput,
   rebootDevice,
   installIpa,
@@ -16,6 +18,18 @@ import {
   screenshot,
   setScreenRotation,
 } from "../api";
+import {
+  parseCurrentInputMethod,
+  parseInputMethods,
+  type InputMethod,
+} from "../imeList";
+import {
+  addQuickPhrase,
+  loadQuickPhrases,
+  removeQuickPhrase,
+  storeQuickPhrases,
+  type QuickPhrase,
+} from "../quickPhrases";
 import { InstalledApps } from "./InstalledApps";
 import { AdbConsole } from "./AdbConsole";
 import { pickFile } from "../pickFile";
@@ -28,6 +42,7 @@ import { FOCUS_ZOOM, loadZoom, stepZoom, storeZoom, wheelWantsZoom } from "../zo
 import { PhoneCanvas } from "./PhoneCanvas";
 import {
   IconBack,
+  IconBattery,
   IconBell,
   IconCamera,
   IconClose,
@@ -35,9 +50,12 @@ import {
   IconDownload,
   IconGrid,
   IconHome,
+  IconKeyboard,
+  IconPhone,
   IconPower,
   IconRecents,
   IconRefresh,
+  IconText,
   IconUpload,
   IconVolumeDown,
   IconVolumeUp,
@@ -50,6 +68,14 @@ interface Props {
   onClose: () => void;
   groupUdids: string[];
   groupMode: boolean;
+  /**
+   * The phones the operator can switch to without closing the overlay.
+   *
+   * Must be the same array the `index` above is computed from, or the header number and the
+   * picker will disagree about which phone is #3.
+   */
+  devices: DeviceInfo[];
+  onSelectDevice: (udid: string) => void;
 }
 
 function mapToDevice(
@@ -64,12 +90,29 @@ function mapToDevice(
   return mapClientToImage(box, clientX, clientY, width, height, "fill");
 }
 
-export function FocusStream({ device, index, onClose, groupUdids, groupMode }: Props) {
+export function FocusStream({
+  device,
+  index,
+  onClose,
+  groupUdids,
+  groupMode,
+  devices,
+  onSelectDevice,
+}: Props) {
   const hasView = useViewLive(device.udid);
   const viewSize = useViewSize(device.udid);
   const [busy, setBusy] = useState(false);
   const [showApps, setShowApps] = useState(false);
   const [showAdb, setShowAdb] = useState(false);
+  const [showDevices, setShowDevices] = useState(false);
+  const [showPhrases, setShowPhrases] = useState(false);
+  const [showKeyboards, setShowKeyboards] = useState(false);
+  const [phrases, setPhrases] = useState<QuickPhrase[]>(() => loadQuickPhrases());
+  const [phraseName, setPhraseName] = useState("");
+  const [phraseContent, setPhraseContent] = useState("");
+  const [phraseError, setPhraseError] = useState<string | null>(null);
+  const [keyboards, setKeyboards] = useState<InputMethod[] | null>(null);
+  const [currentKeyboard, setCurrentKeyboard] = useState<string | null>(null);
   const [frameWidth, setFrameWidth] = useState(() => loadZoom(FOCUS_ZOOM));
   const screenRef = useRef<HTMLDivElement>(null);
   /// The drag in progress: where it started, every sample since, and when the last one was
@@ -233,6 +276,83 @@ export function FocusStream({ device, index, onClose, groupUdids, groupMode }: P
     }
   };
 
+  /// Type a saved phrase onto every phone the overlay is driving.
+  ///
+  /// Goes through the same `group_input` `type` path the keyboard uses, which reaches the
+  /// agent's `ACTION_SET_TEXT` — the only route here that carries Vietnamese diacritics.
+  /// `adb shell input text` is killed outright by them.
+  const sendPhrase = async (phrase: QuickPhrase) => {
+    try {
+      await runBusy(async () => {
+        if (targets.length > 1) {
+          await groupInput({ udids: targets, kind: "type", text: phrase.content });
+        } else {
+          await deviceTypeText(device.udid, phrase.content);
+        }
+      });
+      pushToast("ok", "Đã gõ câu nhanh", phrase.name);
+    } catch (error) {
+      toastError("Gõ câu nhanh thất bại", error);
+    }
+  };
+
+  /// Read the phone's keyboards, and which one is current.
+  ///
+  /// Two shells rather than one round trip because they answer different questions and a
+  /// failure of the second should not hide the first. The ids come back from the phone and
+  /// are only ever sent back verbatim — see `imeList.ts`.
+  const loadKeyboards = async () => {
+    try {
+      await runBusy(async () => {
+        const listed = await deviceShell(device.udid, "ime list -s");
+        setKeyboards(parseInputMethods(listed.stdout));
+        try {
+          const current = await deviceShell(
+            device.udid,
+            "settings get secure default_input_method",
+          );
+          setCurrentKeyboard(parseCurrentInputMethod(current.stdout));
+        } catch {
+          setCurrentKeyboard(null);
+        }
+      });
+    } catch (error) {
+      setKeyboards([]);
+      toastError("Không đọc được danh sách bàn phím", error);
+    }
+  };
+
+  const chooseKeyboard = async (method: InputMethod) => {
+    // Only an id the phone itself just printed, looked up in the parsed list rather than
+    // taken from the event: the value reaches a real shell.
+    const known = keyboards?.find((candidate) => candidate.id === method.id);
+    if (!known) return;
+    try {
+      await runBusy(async () => {
+        await deviceShell(device.udid, `ime set ${known.id}`);
+        setCurrentKeyboard(known.id);
+      });
+      pushToast("ok", "Đã đổi bàn phím", known.label);
+    } catch (error) {
+      toastError("Đổi bàn phím thất bại", error);
+    }
+  };
+
+  const savePhrase = () => {
+    const { phrases: next, error } = addQuickPhrase(
+      phrases,
+      phraseName,
+      phraseContent,
+      `${Date.now()}-${phrases.length}`,
+    );
+    setPhraseError(error);
+    if (error) return;
+    setPhrases(next);
+    storeQuickPhrases(next);
+    setPhraseName("");
+    setPhraseContent("");
+  };
+
   const copySerial = async () => {
     try {
       await navigator.clipboard.writeText(device.udid);
@@ -323,6 +443,15 @@ export function FocusStream({ device, index, onClose, groupUdids, groupMode }: P
 
   const menuRows: MenuRow[] = [
     {
+      // First, because switching phone is navigation rather than an action on this one —
+      // and because it is the row that stops the operator closing and reopening the overlay
+      // twenty times to walk the fleet.
+      id: "switchDevice",
+      label: showDevices ? "Ẩn danh sách máy" : "Đổi máy",
+      Icon: IconPhone,
+      run: () => setShowDevices((open) => !open),
+    },
+    {
       id: "volumeUp",
       label: "Vol+",
       Icon: IconVolumeUp,
@@ -403,6 +532,30 @@ export function FocusStream({ device, index, onClose, groupUdids, groupMode }: P
       Icon: IconGrid,
       androidOnly: true,
       run: () => setShowAdb(true),
+    },
+    {
+      // GenFarmer keeps these two next to Adb command, and both are text-input adjacent, so
+      // they sit here rather than at the end of the list.
+      id: "quickPhrase",
+      label: showPhrases ? "Ẩn câu nhanh" : "Câu nhanh",
+      Icon: IconText,
+      androidOnly: true,
+      disabled: busy,
+      run: () => setShowPhrases((open) => !open),
+    },
+    {
+      id: "switchKeyboard",
+      label: showKeyboards ? "Ẩn bàn phím" : "Đổi bàn phím",
+      Icon: IconKeyboard,
+      androidOnly: true,
+      disabled: busy,
+      run: () => {
+        setShowKeyboards((open) => {
+          const next = !open;
+          if (next && keyboards === null) void loadKeyboards();
+          return next;
+        });
+      },
     },
     {
       id: "notification",
@@ -554,6 +707,21 @@ export function FocusStream({ device, index, onClose, groupUdids, groupMode }: P
                 ×{targets.length}
               </span>
             )}
+            {/* Read-only, from the device poll that already carries it. `—` rather than a
+                made-up 0% or 100% when the value is absent: the driver returns None for a
+                phone it could not read, and a battery chip that invents a number is the
+                same lying button the Rotate row was written to avoid. */}
+            <span
+              className="focus-menu-battery"
+              title={
+                device.battery == null
+                  ? "Chưa đọc được mức pin"
+                  : `Pin ${device.battery}%`
+              }
+            >
+              <IconBattery size={13} />
+              {device.battery == null ? "—" : `${device.battery}%`}
+            </span>
             <button
               type="button"
               className="ghost"
@@ -585,6 +753,111 @@ export function FocusStream({ device, index, onClose, groupUdids, groupMode }: P
               );
             })}
           </div>
+          {/* Every one of these sits BEFORE the navbar and carries its own height. The menu
+              list is `flex: 1`, so a sibling added after the navbar collapses to nothing and
+              pushes the navbar out of the column (AGENTS.md §9.57). */}
+          {showDevices && (
+            <div className="focus-menu-panel" role="group" aria-label="Đổi máy">
+              {devices.length <= 1 ? (
+                <p className="hint">Chỉ có một máy đang hiển thị.</p>
+              ) : (
+                devices.map((candidate, position) => (
+                  <button
+                    key={candidate.udid}
+                    type="button"
+                    className={candidate.udid === device.udid ? "is-current" : ""}
+                    title={candidate.udid}
+                    onClick={() => {
+                      if (candidate.udid === device.udid) return;
+                      // Lift the swap to the parent rather than swapping a local device:
+                      // the overlay's preset effect and this component's control lease are
+                      // both keyed on the udid, so changing it there releases the old phone
+                      // and claims the new one with no extra code.
+                      onSelectDevice(candidate.udid);
+                      setShowDevices(false);
+                    }}
+                  >
+                    <span className="focus-device-index">{position + 1}</span>
+                    <span>{candidate.name}</span>
+                  </button>
+                ))
+              )}
+            </div>
+          )}
+          {showPhrases && (
+            <div className="focus-menu-panel" role="group" aria-label="Câu nhanh">
+              <input
+                type="text"
+                value={phraseName}
+                placeholder="Tên (không bắt buộc)"
+                onChange={(event) => setPhraseName(event.target.value)}
+              />
+              <input
+                type="text"
+                value={phraseContent}
+                placeholder="Nội dung (vd: xin chào)"
+                onChange={(event) => setPhraseContent(event.target.value)}
+                onKeyUp={(event) => {
+                  if (event.key === "Enter") savePhrase();
+                }}
+              />
+              <button type="button" className="ghost" onClick={() => savePhrase()}>
+                Lưu câu
+              </button>
+              {phraseError && <p className="error">{phraseError}</p>}
+              {!phrases.length ? (
+                <p className="hint">Chưa có câu nào.</p>
+              ) : (
+                phrases.map((phrase) => (
+                  <div className="focus-phrase-row" key={phrase.id}>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      title={phrase.content}
+                      onClick={() => void sendPhrase(phrase)}
+                    >
+                      {phrase.name}
+                    </button>
+                    <button
+                      type="button"
+                      className="danger"
+                      aria-label={`Xoá ${phrase.name}`}
+                      onClick={() => {
+                        const next = removeQuickPhrase(phrases, phrase.id);
+                        setPhrases(next);
+                        storeQuickPhrases(next);
+                      }}
+                    >
+                      <IconClose size={12} />
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+          {showKeyboards && (
+            <div className="focus-menu-panel" role="group" aria-label="Đổi bàn phím">
+              {keyboards === null ? (
+                <p className="hint">Đang đọc…</p>
+              ) : !keyboards.length ? (
+                <p className="hint">Không đọc được bàn phím nào.</p>
+              ) : (
+                keyboards.map((method) => (
+                  <button
+                    key={method.id}
+                    type="button"
+                    disabled={busy}
+                    className={method.id === currentKeyboard ? "is-current" : ""}
+                    title={method.id}
+                    onClick={() => void chooseKeyboard(method)}
+                  >
+                    {method.label}
+                    {method.id === currentKeyboard && <span> ✓</span>}
+                  </button>
+                ))
+              )}
+            </div>
+          )}
           {showApps && <InstalledApps udid={device.udid} deviceName={device.name} />}
           {showAdb && <AdbConsole device={device} onClose={() => setShowAdb(false)} />}
           <nav className="focus-navbar" aria-label="Phím điều hướng">

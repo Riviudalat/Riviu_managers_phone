@@ -1,7 +1,14 @@
-import { fireEvent, render, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DeviceInfo } from "../types";
-import { deviceSwipe, deviceSwipePath, deviceTap } from "../api";
+import {
+  deviceShell,
+  deviceSwipe,
+  deviceSwipePath,
+  deviceTap,
+  deviceTypeText,
+  groupInput,
+} from "../api";
 import { FocusStream } from "./FocusStream";
 
 vi.mock("../api", () => ({
@@ -9,14 +16,18 @@ vi.mock("../api", () => ({
   deviceControlBegin: vi.fn(async () => undefined),
   deviceControlEnd: vi.fn(async () => undefined),
   deviceKey: vi.fn(),
+  deviceShell: vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" })),
   deviceSwipePath: vi.fn(async () => undefined),
   deviceSwipe: vi.fn(async () => undefined),
   deviceTap: vi.fn(async () => undefined),
-  groupInput: vi.fn(),
+  deviceTypeText: vi.fn(async () => undefined),
+  groupInput: vi.fn(async () => ({ completedUdids: [], skipped: [] })),
+  installIpa: vi.fn(async () => undefined),
   rebootDevice: vi.fn(),
   restoreDevice: vi.fn(),
   saveViewSnapshot: vi.fn(),
   screenshot: vi.fn(),
+  setScreenRotation: vi.fn(async () => 0),
 }));
 
 vi.mock("../viewStore", async (importOriginal) => {
@@ -27,6 +38,10 @@ vi.mock("../viewStore", async (importOriginal) => {
     useViewSize: () => ({ width: 288, height: 600, generation: 1 }),
   };
 });
+
+// `render` binds its queries to document.body, not to the container it returns, so without
+// this every test after the first searches the leftovers of the ones before it.
+afterEach(cleanup);
 
 const fixture: DeviceInfo = {
   udid: "ce06",
@@ -65,7 +80,7 @@ describe("FocusStream hit mapping", () => {
 
   it("taps through the painted canvas, not the black pane", async () => {
     const { container } = render(
-      <FocusStream device={fixture} index={2} onClose={() => undefined} groupUdids={[]} groupMode={false} />,
+      <FocusStream device={fixture} index={2} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined} />,
     );
     const screen = container.querySelector(".focus-phone-screen");
     const canvas = container.querySelector("canvas");
@@ -86,7 +101,7 @@ describe("FocusStream hit mapping", () => {
     // `end` alone, so a curved, accelerating drag reached the phone as a straight line at
     // constant speed. Every intermediate sample was discarded before it left the browser.
     const { container } = render(
-      <FocusStream device={fixture} index={2} onClose={() => undefined} groupUdids={[]} groupMode={false} />,
+      <FocusStream device={fixture} index={2} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined} />,
     );
     const screen = container.querySelector(".focus-phone-screen");
     const canvas = container.querySelector("canvas");
@@ -124,7 +139,7 @@ describe("FocusStream hit mapping", () => {
     // A flick the browser only sampled once is not a curve, and pretending otherwise would
     // send a one-step path whose duration is the whole gesture.
     const { container } = render(
-      <FocusStream device={fixture} index={2} onClose={() => undefined} groupUdids={[]} groupMode={false} />,
+      <FocusStream device={fixture} index={2} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined} />,
     );
     const screen = container.querySelector(".focus-phone-screen");
     const canvas = container.querySelector("canvas");
@@ -141,7 +156,7 @@ describe("FocusStream hit mapping", () => {
 
   it("ignores a click on the letterbox so it cannot become a bezel tap", async () => {
     const { container } = render(
-      <FocusStream device={fixture} index={2} onClose={() => undefined} groupUdids={[]} groupMode={false} />,
+      <FocusStream device={fixture} index={2} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined} />,
     );
     const screen = container.querySelector(".focus-phone-screen");
     const canvas = container.querySelector("canvas");
@@ -152,5 +167,135 @@ describe("FocusStream hit mapping", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(deviceTap).not.toHaveBeenCalled();
+  });
+});
+
+describe("overlay panel rows", () => {
+  const other: DeviceInfo = { ...fixture, udid: "ce07", name: "S8+" };
+
+  beforeEach(() => {
+    localStorage.clear();
+    vi.mocked(deviceShell).mockClear();
+    vi.mocked(deviceTypeText).mockClear();
+  });
+
+  it("switches the overlay to another phone through the parent, not a local copy", async () => {
+    // Lifting the swap to `setFocusUdid` is what releases the old phone's control lease and
+    // claims the new one: both the overlay preset effect and the lease effect are keyed on
+    // the udid, so a locally swapped device would leave the old lease open.
+    const onSelectDevice = vi.fn();
+    const { getByText, findByTitle } = render(
+      <FocusStream
+        device={fixture}
+        index={1}
+        onClose={() => undefined}
+        groupUdids={[]}
+        groupMode={false}
+        devices={[fixture, other]}
+        onSelectDevice={onSelectDevice}
+      />,
+    );
+
+    fireEvent.click(getByText("Đổi máy"));
+    fireEvent.click(await findByTitle("ce07"));
+
+    expect(onSelectDevice).toHaveBeenCalledWith("ce07");
+  });
+
+  it("shows the battery it was given, and a dash when there is none", () => {
+    const { getByTitle, unmount } = render(
+      <FocusStream
+        device={{ ...fixture, battery: 58 }}
+        index={1}
+        onClose={() => undefined}
+        groupUdids={[]}
+        groupMode={false}
+        devices={[fixture]}
+        onSelectDevice={() => undefined}
+      />,
+    );
+    expect(getByTitle("Pin 58%").textContent).toContain("58%");
+    unmount();
+
+    // Never a fabricated 0% or 100%: the driver returns None for a phone it could not read.
+    const absent = render(
+      <FocusStream
+        device={fixture}
+        index={1}
+        onClose={() => undefined}
+        groupUdids={[]}
+        groupMode={false}
+        devices={[fixture]}
+        onSelectDevice={() => undefined}
+      />,
+    );
+    expect(absent.getByTitle("Chưa đọc được mức pin").textContent).toContain("—");
+  });
+
+  it("types a saved phrase onto every phone the overlay is driving", async () => {
+    // The group path, because that is the case the feature exists for: the same bio onto
+    // twenty phones. It goes through `group_input` `type`, which reaches ACTION_SET_TEXT --
+    // the only route here that carries Vietnamese diacritics.
+    const { getByText, getByPlaceholderText } = render(
+      <FocusStream
+        device={fixture}
+        index={1}
+        onClose={() => undefined}
+        groupUdids={["ce06", "ce07"]}
+        groupMode
+        devices={[fixture, other]}
+        onSelectDevice={() => undefined}
+      />,
+    );
+
+    fireEvent.click(getByText("Câu nhanh"));
+    fireEvent.change(getByPlaceholderText("Nội dung (vd: xin chào)"), {
+      target: { value: "xin chào các bạn" },
+    });
+    fireEvent.click(getByText("Lưu câu"));
+    fireEvent.click(getByText("xin chào các bạn"));
+
+    await waitFor(() =>
+      expect(vi.mocked(groupInput)).toHaveBeenCalledWith({
+        udids: ["ce06", "ce07"],
+        kind: "type",
+        text: "xin chào các bạn",
+      }),
+    );
+  });
+
+  it("offers only keyboards the phone itself listed, never the helper IME", async () => {
+    vi.mocked(deviceShell).mockImplementation(async (_udid: string, script: string) => ({
+      exitCode: 0,
+      stdout: script.startsWith("ime list")
+        ? "com.riviu.agent/.RiviuIme\ncom.sec.android.inputmethod/.SamsungKeypad\n"
+        : "com.sec.android.inputmethod/.SamsungKeypad\n",
+      stderr: "",
+    }));
+    const { getByText, findByText, queryByText } = render(
+      <FocusStream
+        device={fixture}
+        index={1}
+        onClose={() => undefined}
+        groupUdids={[]}
+        groupMode={false}
+        devices={[fixture]}
+        onSelectDevice={() => undefined}
+      />,
+    );
+
+    fireEvent.click(getByText("Đổi bàn phím"));
+    await findByText(/SamsungKeypad/);
+    // Leaving the helper IME as the phone's keyboard is ruled out, so it must not be
+    // offerable in the first place.
+    expect(queryByText(/RiviuIme/)).toBeNull();
+
+    fireEvent.click(await findByText(/SamsungKeypad/));
+    await waitFor(() =>
+      expect(vi.mocked(deviceShell)).toHaveBeenCalledWith(
+        "ce06",
+        "ime set com.sec.android.inputmethod/.SamsungKeypad",
+      ),
+    );
   });
 });

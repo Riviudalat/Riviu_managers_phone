@@ -1895,6 +1895,107 @@ button.linkish,
   background: #fef0f0;
   color: #c45656;
 }
+.focus-menu-battery {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: #5a6a80;
+  white-space: nowrap;
+}
+/* `flex: 0 0 auto` plus a pixel ceiling, never `flex: 1`. The menu list above is the
+   flex: 1 child; a second growing sibling collapses it and pushes the navbar out of the
+   column, which is the layout trap recorded in AGENTS.md 9.57. */
+.focus-menu-panel {
+  flex: 0 0 auto;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-top: 1px solid #e3eaf4;
+  background: #f8fafd;
+}
+.focus-menu-panel input {
+  width: 100%;
+  padding: 0.32rem 0.5rem;
+  border: 1px solid #d3dce8;
+  border-radius: 4px;
+  font-size: 0.75rem;
+}
+.focus-menu-panel > button {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.36rem 0.5rem;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: #4a5568;
+  font-size: 0.76rem;
+  text-align: left;
+}
+.focus-menu-panel > button:hover:not(:disabled) {
+  background: #eaf1fb;
+  color: #2b6cb0;
+}
+.focus-menu-panel > button.is-current {
+  color: #2b6cb0;
+  font-weight: 600;
+}
+.focus-menu-panel .hint,
+.focus-menu-panel .error {
+  margin: 0;
+  font-size: 0.72rem;
+}
+.focus-device-index {
+  flex-shrink: 0;
+  min-width: 1.4em;
+  color: #8a95a5;
+  font-variant-numeric: tabular-nums;
+}
+.focus-phrase-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.focus-phrase-row button:first-child {
+  flex: 1;
+  min-width: 0;
+  padding: 0.36rem 0.5rem;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: #4a5568;
+  font-size: 0.76rem;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.focus-phrase-row button:first-child:hover:not(:disabled) {
+  background: #eaf1fb;
+  color: #2b6cb0;
+}
+.focus-phrase-row button.danger {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: #a0aec0;
+}
+.focus-phrase-row button.danger:hover {
+  background: #fde2e2;
+  color: #c45656;
+}
 .focus-navbar {
   display: flex;
   align-items: center;

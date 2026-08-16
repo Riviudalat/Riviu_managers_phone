@@ -903,6 +903,10 @@ function App() {
           onClose={() => setFocusUdid(null)}
           groupUdids={selected}
           groupMode={groupMode}
+          // The same array `index` above is computed from, so the picker's numbering and the
+          // header's cannot disagree about which phone is #3.
+          devices={devices}
+          onSelectDevice={setFocusUdid}
         />
       )}
 
