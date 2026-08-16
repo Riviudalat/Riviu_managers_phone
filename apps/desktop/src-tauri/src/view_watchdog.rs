@@ -570,6 +570,13 @@ pub(crate) async fn start_android_view(
         }
         Err(error) => {
             let message = format!("{error:#}");
+            // Say it out loud, not only into the registry. This arm used to do nothing but
+            // set `TileStreamState::Error`, and the tile showing an error is not something
+            // anyone is watching at three in the morning: when turning on the scrcpy control
+            // socket broke the handshake on all twenty phones, the app ran **six minutes with
+            // zero producers and not one warning** (AGENTS.md 9.71). The failure was never
+            // silent — nobody was printing it.
+            log::warn!("android view for {udid} failed to start: {message}");
             crate::state::set_stream_error(registry, udid, message.clone());
             Err(message)
         }

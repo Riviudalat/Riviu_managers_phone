@@ -231,6 +231,41 @@ pub struct ScrcpyHello {
     pub height: u32,
 }
 
+/// The most bytes `app_process` will take in its **argv** on this fleet before it dies.
+///
+/// Measured 16/08/2026 on SM-G955F and SM-G950F (Android 9), and the threshold is identical
+/// and razor sharp on both: **254 bytes of argv runs, 255 aborts.** Past it the server prints
+///
+/// ```text
+/// stack corruption detected (-fstack-protector)
+/// Aborted
+/// ```
+///
+/// to its stdout and dies — *after* it has answered the handshake and sent the device name
+/// and video header, so the host sees a perfectly good hello followed by no video at all.
+///
+/// It is argv specifically, not the command. Sixty extra bytes added to the shell line as an
+/// **environment** assignment stream fine; twelve added to argv abort. So `CLASSPATH` (44 of
+/// those bytes) is free and shortening it buys nothing.
+///
+/// This is the real cause of AGENTS.md 9.71 — twenty phones, zero producers, no warning. The
+/// suspicion recorded there, that `power_on=false` was not a valid option name, is wrong:
+/// it is a valid key, unknown keys are only warned about, and an unknown key of the same
+/// length crashes exactly the same way. What broke it was that turning the control socket on
+/// added 24 bytes to a budget with 14 left.
+pub const MAX_SERVER_ARGV: usize = 254;
+
+/// The part of a launch command that [`MAX_SERVER_ARGV`] applies to.
+///
+/// Everything from `app_process` onward. The `CLASSPATH=` assignment in front of it is
+/// environment, not argv, and does not count against the budget.
+pub fn server_argv(command: &str) -> &str {
+    match command.find("app_process") {
+        Some(at) => &command[at..],
+        None => command,
+    }
+}
+
 /// Build the `adb shell` payload. Version must be exact `3.3.4`.
 ///
 /// `scid` is hex (`Integer.parseInt(value, 16)`). Socket name is
@@ -241,6 +276,11 @@ pub struct ScrcpyHello {
 /// colon (`i-frame-interval:int:2`) makes 3.3.4 throw `'=' expected` in
 /// `CodecOption.parseOption` and exit before it binds the abstract socket
 /// — the tile then shows "exited before it accepted a connection".
+///
+/// **Every option here is spent from a 254-byte budget** — see [`MAX_SERVER_ARGV`]. There
+/// are about fourteen bytes of headroom at the longest tuning, so an option cannot simply be
+/// added: one must come out first, and the guard test in this module is what says so before
+/// twenty phones do.
 pub fn launch_command(scid: u32, tuning: ViewTuning) -> String {
     format!(
         "CLASSPATH={REMOTE_SERVER} app_process / {MAIN_CLASS} {SERVER_VERSION} \
@@ -681,6 +721,87 @@ mod tests {
         );
         assert!(!command.contains("hevc"), "{command}");
         assert!(!command.contains("av1"), "{command}");
+    }
+
+    #[test]
+    fn no_tuning_can_push_the_server_argv_past_what_app_process_survives() {
+        // The guard that would have saved twenty phones. Past 254 bytes of argv, Android 9
+        // `app_process` on this fleet dies with `stack corruption detected
+        // (-fstack-protector)` -- and it dies AFTER answering the handshake, so the host
+        // reads a healthy hello and then simply never receives a frame. That is the "6
+        // minutes, 0 producers, not one warning" of AGENTS.md 9.71.
+        //
+        // Swept over every preset and quality rather than the default tile, because the
+        // budget is spent by the numbers: `max_size`, `max_fps` and `video_bit_rate` all
+        // grow with quality, and Extra on Overlay is the longest line this can emit.
+        let mut worst = 0usize;
+        let mut worst_command = String::new();
+        for preset in [ViewPreset::Tile, ViewPreset::Overlay] {
+            for quality in [
+                riviu_core::StreamQuality::Low,
+                riviu_core::StreamQuality::Medium,
+                riviu_core::StreamQuality::High,
+                riviu_core::StreamQuality::Extra,
+            ] {
+                for fps in [MIN_VIEW_FPS, riviu_core::STREAM_FPS, 30] {
+                    // 0xffffffff is the widest scid the formatter can produce.
+                    let command = launch_command(u32::MAX, preset.tuned(quality.clone(), fps));
+                    let argv = server_argv(&command).len();
+                    if argv > worst {
+                        worst = argv;
+                        worst_command = command;
+                    }
+                }
+            }
+        }
+        assert!(
+            worst <= MAX_SERVER_ARGV,
+            "the longest launch is {worst} bytes of argv, over the measured {MAX_SERVER_ARGV} \
+             this fleet survives; app_process will abort AFTER the handshake and the tile \
+             will look like a phone that simply stopped sending: {worst_command}"
+        );
+    }
+
+    #[test]
+    fn only_argv_is_counted_against_the_budget_not_the_classpath() {
+        // Measured: sixty extra bytes added to the shell line as an environment assignment
+        // stream perfectly, twelve added to argv abort. So `CLASSPATH=` -- 45 of the
+        // command's bytes -- is free, and anyone hunting for room must not go looking there.
+        let command = launch_command(
+            0x00ab_12cd,
+            ViewPreset::Tile.tuned(riviu_core::StreamQuality::Medium, riviu_core::STREAM_FPS),
+        );
+        assert!(command.starts_with("CLASSPATH="));
+        assert!(server_argv(&command).starts_with("app_process "));
+        assert!(
+            command.len() - server_argv(&command).len() > 40,
+            "the CLASSPATH assignment is a large part of the command and none of it counts"
+        );
+    }
+
+    #[test]
+    fn the_control_socket_does_not_fit_in_the_remaining_budget() {
+        // Written so the next person does not spend a session rediscovering it. Turning the
+        // control socket on needs `control=true` (one byte cheaper than `control=false`) plus
+        // ` clipboard_autosync=false`, which defaults to TRUE and would otherwise push a
+        // clipboard message into a socket we only drain. That is +24 against ~14 spare.
+        //
+        // This asserts the shortfall rather than the fix, because there is no fix that does
+        // not first remove a pinned option -- and each of them is pinned for a measured
+        // reason of its own.
+        let command = launch_command(
+            u32::MAX,
+            ViewPreset::Overlay.tuned(riviu_core::StreamQuality::Extra, 30),
+        );
+        let with_control = server_argv(&command)
+            .replace("control=false", "control=true")
+            .len()
+            + " clipboard_autosync=false".len();
+        assert!(
+            with_control > MAX_SERVER_ARGV,
+            "if this ever passes the budget has changed and part 3 became possible; \
+             re-measure on hardware before believing it"
+        );
     }
 
     #[test]

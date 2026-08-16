@@ -1084,7 +1084,18 @@ impl AndroidDriver {
                 &crate::scrcpy::launch_command(scid, tuning),
             ])
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            // Piped, not null. `Ln.i` goes to FD 1, so discarding stdout threw away the
+            // server's account of itself -- which encoder it chose, the `Device: [...]` line,
+            // and `Video capture reset`. A handshake that hangs instead of exiting then left
+            // no host-side evidence whatsoever; the one measured instance ran six minutes
+            // with nothing logged (AGENTS.md 9.71).
+            //
+            // Safe against the obvious hazard: the pipe is only ever read by
+            // `scrcpy_exit_detail`, which runs on failure paths and then the child is killed.
+            // A healthy server logs a handful of lines at startup and then nothing, so the
+            // pipe cannot fill in normal operation -- and if it ever did, the writer blocking
+            // is the server, not this process.
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         #[cfg(windows)]
@@ -1125,8 +1136,12 @@ impl AndroidDriver {
                     crate::frames::remove_forward(&self.adb, serial, host_port)
                         .await
                         .ok();
+                    // The server's own words BEFORE the kill, on this path too. A protocol
+                    // failure is exactly the case where it usually has something to say and
+                    // is usually still alive to say it.
+                    let said = scrcpy_exit_detail(&mut child).await;
                     let _ = child.kill().await;
-                    return Err(error);
+                    return Err(error.context(format!("scrcpy handshake failed{said}")));
                 }
             }
         }
@@ -1134,8 +1149,12 @@ impl AndroidDriver {
             crate::frames::remove_forward(&self.adb, serial, host_port)
                 .await
                 .ok();
+            let said = scrcpy_exit_detail(&mut child).await;
             let _ = child.kill().await;
-            return Err(last_error.unwrap_or_else(|| anyhow!("scrcpy never accepted a connection")));
+            let error = last_error.unwrap_or_else(|| anyhow!("scrcpy never accepted a connection"));
+            return Err(error.context(format!(
+                "scrcpy never accepted a connection after 40 attempts{said}"
+            )));
         };
         let first =
             match tokio::time::timeout(Duration::from_secs(8), stream.next_sync_sample()).await {
@@ -1144,15 +1163,17 @@ impl AndroidDriver {
                     crate::frames::remove_forward(&self.adb, serial, host_port)
                         .await
                         .ok();
+                    let said = scrcpy_exit_detail(&mut child).await;
                     let _ = child.kill().await;
-                    return Err(error);
+                    return Err(error.context(format!("scrcpy stream failed{said}")));
                 }
                 Err(_) => {
                     crate::frames::remove_forward(&self.adb, serial, host_port)
                         .await
                         .ok();
+                    let said = scrcpy_exit_detail(&mut child).await;
                     let _ = child.kill().await;
-                    anyhow::bail!("scrcpy produced no keyframe after the hello");
+                    anyhow::bail!("scrcpy produced no keyframe after the hello{said}");
                 }
             };
         tracing::info!(
@@ -1571,27 +1592,43 @@ impl AndroidDriver {
     }
 }
 
-/// Last stderr from a dead `adb shell` scrcpy. 3.3.4 prints the real
-/// reason there (`'=' expected` on a bad codec option) and then exits;
-/// without this the tile only says "exited before it accepted".
+/// Whatever the scrcpy server has said for itself, on **any** failure path.
+///
+/// 3.3.4 prints the real reason for a refusal on stderr (`'=' expected` on a bad codec
+/// option) and then exits; without this the tile only said "exited before it accepted".
+///
+/// It now reads stdout too, and is called from every failure arm rather than only from the
+/// already-exited one. Both changes are the same lesson: `Ln.i` goes to FD 1, so the
+/// server's account of what it chose — the encoder it picked, `Device: [...]`, and
+/// `Video capture reset` — was being written into `Stdio::null()`. A handshake that hangs
+/// rather than exits produced no host-side evidence at all, and the one measured instance of
+/// that ran **six minutes with zero warnings** (AGENTS.md 9.71).
+///
+/// Non-blocking by construction: a short timeout on each pipe, because the server may still
+/// be alive and holding them open. Nothing here may wait on a process that is not going to
+/// exit.
 async fn scrcpy_exit_detail(child: &mut tokio::process::Child) -> String {
     use tokio::io::AsyncReadExt;
-    let Some(mut stderr) = child.stderr.take() else {
-        return String::new();
-    };
-    let mut buf = Vec::new();
-    let _ = tokio::time::timeout(Duration::from_millis(200), stderr.read_to_end(&mut buf)).await;
-    let text: String = String::from_utf8_lossy(&buf)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .take(6)
-        .collect::<Vec<_>>()
-        .join(" ");
-    if text.is_empty() {
+    async fn drain(pipe: Option<impl tokio::io::AsyncRead + Unpin>, tag: &str) -> Vec<String> {
+        let Some(mut pipe) = pipe else {
+            return Vec::new();
+        };
+        let mut buf = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_millis(200), pipe.read_to_end(&mut buf)).await;
+        String::from_utf8_lossy(&buf)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .take(6)
+            .map(|line| format!("{tag} {line}"))
+            .collect()
+    }
+    let mut said = drain(child.stderr.take(), "[err]").await;
+    said.extend(drain(child.stdout.take(), "[out]").await);
+    if said.is_empty() {
         String::new()
     } else {
-        format!(": {}", text.chars().take(280).collect::<String>())
+        format!(": {}", said.join(" ").chars().take(400).collect::<String>())
     }
 }
 
@@ -2752,5 +2789,57 @@ mod tests {
                 battery: None,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn a_failing_server_is_quoted_from_both_of_its_pipes() {
+        // scrcpy writes `Ln.i` to stdout and `Ln.w`/`Ln.e` to stderr, and this used to read
+        // stderr only -- with stdout going to `Stdio::null()`, so the server's account of
+        // what it chose was discarded at the source. A handshake that hangs rather than
+        // exits then leaves no host-side evidence at all, which is how turning on the
+        // control socket produced six minutes of silence (AGENTS.md 9.71).
+        let mut command = tokio::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        if cfg!(windows) {
+            command.args(["/c", "echo picked-encoder & echo refused 1>&2"]);
+        } else {
+            command.args(["-c", "echo picked-encoder; echo refused 1>&2"]);
+        }
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn a process that writes to both pipes");
+
+        let detail = scrcpy_exit_detail(&mut child).await;
+
+        assert!(detail.contains("refused"), "stderr is quoted: {detail}");
+        assert!(
+            detail.contains("picked-encoder"),
+            "stdout is quoted too -- that is the half that used to be thrown away: {detail}"
+        );
+        assert!(
+            detail.contains("[out]") && detail.contains("[err]"),
+            "{detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_that_says_nothing_adds_nothing_to_the_error() {
+        // The detail is appended to a message that already reads as a sentence, so an empty
+        // one must be genuinely empty rather than a dangling colon.
+        let mut command = tokio::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        if cfg!(windows) {
+            command.args(["/c", "exit 1"]);
+        } else {
+            command.args(["-c", "exit 1"]);
+        }
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn a silent process");
+        assert_eq!(scrcpy_exit_detail(&mut child).await, "");
     }
 }

@@ -5133,8 +5133,15 @@ dang chay** nhung **khong co `adb forward` nao** cho serial do. No chan im lang 
 
 Da **stash** (`part3-control-socket-WIP`) va tra `control=false`; fleet chay lai 20/20 ngay.
 
-Nghi van hang dau **chua kiem**: `power_on=false` co the khong phai ten option hop le cua
-3.3.4, lam server thoat theo kieu ta chua bat. `clipboard_autosync` thi **da** xac nhan la co
+> **DA TIM RA NGUYEN NHAN 16/08/2026 — va nghi van ghi o duoi la SAI. Xem §9.74.**
+> Khong phai `power_on` khong hop le: no la key hop le, va key **khong** hop le thi server chi
+> `Ln.w` chu khong chet. Thu that su giet 20 may la **do dai argv cua `app_process`**: qua
+> **254 byte** thi tien trinh chet bang `stack corruption detected (-fstack-protector)`, va
+> chet **sau** khi da tra loi bat tay — nen host doc duoc hello hoan hao roi khong nhan duoc
+> frame nao. Bat control ton them 24 byte tren mot ngan sach con 14.
+
+Nghi van hang dau luc do, **da bi bac bo**: `power_on=false` co the khong phai ten option hop le
+cua 3.3.4, lam server thoat theo kieu ta chua bat. `clipboard_autosync` thi **da** xac nhan la co
 (dich nguoc `Options.parse`), `power_on` thi **chua**.
 
 Nhung dieu **da** xac lap ve giao thuc, hai nguon doc lap dong y (dich nguoc `classes.dex` cua
@@ -5161,6 +5168,46 @@ moi lan doi preset va moi lan xoay may la mot cua so cham bien mat — upstream 
 `INJECT_TEXT` di tung ky tu qua `KeyCharacterMap` nen **khong go duoc tieng Viet co dau**; va
 agent **von khong cham** — 130–280 ms mot click do tren chinh Galaxy S8+. Con so 1502 ms la
 `adb shell input`, **khong phai** agent, dung nham hai cai.
+
+### 9.74 `app_process` chet o 255 byte argv — nguyen nhan that su cua §9.71 (16/08/2026)
+
+Do tren **SM-G955F va SM-G950F (Android 9)**, app da dung, giet leftover truoc moi lan do.
+Nguong **giong het nhau tren ca hai may va rat sac**:
+
+| argv | ket qua |
+|---|---|
+| 254 byte | chay, co video |
+| **255 byte** | `stack corruption detected (-fstack-protector)` → `Aborted`, **0 byte video** |
+
+**Cho hiem cua no:** tien trinh chet **sau khi** da tra loi bat tay — dummy byte, 64 byte ten
+may, 12 byte video header deu ve dung. Nen host doc duoc mot hello **hoan hao** roi khong bao
+gio nhan frame. Nhin tu phia app no giong het "may ngung gui", khong giong loi.
+
+**La argv, khong phai ca dong lenh.** Them **60 byte** vao dong shell bang mot phep gan **bien
+moi truong** thi chay tot (13950 byte video). Them **12 byte** vao argv thi chet. Nen
+`CLASSPATH=` (45 byte) **khong tinh vao ngan sach**, va rut ngan duong dan JAR khong mua duoc
+gi ca.
+
+**Khong phai ten option.** `zz=1` va `zz=1 yy=2` (khong phai option cua scrcpy, chi bi
+`WARN: Unknown server option`) chay binh thuong; `send_frame_meta=true` — mot option **hop le
+va dung dung gia tri mac dinh cua no** — thi chet. Bien so duy nhat la **so byte**.
+
+Do la ly do bay dau: `power_on=false` (14 byte) chet, `log_level=verbose` (17) chet,
+`clipboard_autosync=false` (24) chet — nen ba lan do trong nhu "option nao cung chet", va
+nghi van cua §9.71 doc no thanh "`power_on` khong hop le". Ca ba deu chi la **du dai**.
+
+**Ngan sach hien tai: argv 240 byte, con 14 byte** o moi preset va moi muc quality
+(`max_size` cap o 832 va `video_bit_rate` deu 7 chu so, nen do dai khong doi theo quality).
+
+**Phan 3 khong vua.** `control=true` (re hon `control=false` 1 byte) cong
+` clipboard_autosync=false` (+25) la **+24 tren 14**. Bo `video=true` de lay 11 byte thi con
+**1 byte** du — khong phai mot bien do an toan tren mot loi giet ca fleet. Bo
+`video_codec=h264` thi thao mot thu duoc ghim co chu dich. **Nen chua bat control.**
+
+Da ghim bang test: `MAX_SERVER_ARGV = 254` va `server_argv()` trong `scrcpy.rs`, cong ba test —
+mot quet **moi preset × moi quality × fps bien** de khong tuning nao vuot nguong, mot ghim rang
+`CLASSPATH` khong tinh, va mot ghim dung cai thieu hut cua Phan 3 (test do **that bai neu Phan 3
+tro nen kha thi**, tuc la luc do phai do lai tren may that truoc khi tin).
 
 ### 9.73 Mot kenh moi may — va cai bay chi mot test socket that moi thay (16/08/2026)
 
