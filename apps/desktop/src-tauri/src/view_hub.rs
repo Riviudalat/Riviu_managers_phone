@@ -24,26 +24,34 @@ pub const VIEW_KIND_H264: u8 = 1;
 pub const VIEW_KIND_JPEG: u8 = 2;
 pub const VIEW_FLAG_KEY: u8 = 1;
 
-/// Live view, not a DVR — but 8 was paying for that with the operator's smoothness.
+/// Live view, not a DVR — and the number has to be read as a rate, not a size.
 ///
-/// The original reasoning was sound and its fix landed elsewhere: 256 held ~8 s at 30 fps
-/// and the WebSocket drained the past, so the operator watched history. What actually
-/// prevents that is [`coalesce_for_live`], which collapses a drained batch to the newest
-/// packet per device; the ring size stopped being what bounds the lag the moment that
-/// existed.
+/// This is ONE channel for the whole fleet, so its capacity in *time* shrinks linearly as
+/// phones are added. That is the property every previous value here got wrong. At 24 fps:
 ///
-/// What 8 does bound is how much host-side jitter it takes to lose the stream. This is ONE
-/// channel for the whole fleet, so two phones at 24 fps put ~48 packets/s through it and 8
-/// slots is ~166 ms. Any WebView2 hitch past that trips `Lagged`, and a `Lagged` costs far
-/// more than a dropped frame: the backlog goes, keyframes included, and with
-/// `i-frame-interval:int=1` the decoder has nothing to decode until the next IDR — up to a
-/// full second of frozen picture, every time. Scrolling is when the encoder emits the most
-/// data, which is exactly when the operator reported the stutter.
+/// | devices | cap 128 | cap 2048 |
+/// |---|---|---|
+/// | 2 | 2667 ms | 42667 ms |
+/// | 20 | **267 ms** | 4267 ms |
+/// | 50 | 107 ms | 1707 ms |
+/// | 100 | **53 ms** | 853 ms |
 ///
-/// 128 is ~2.7 s of the same two-phone fleet, enough that ordinary jitter rides through,
-/// and coalescing means a full ring is collapsed to one frame per device rather than
-/// replayed.
-const BROADCAST_CAP: usize = 128;
+/// 8 was chosen against a two-phone bench and 128 against the same bench; a 20-phone box
+/// then reduced 128 to 267 ms, which any WebView2 hitch clears. What a lag costs is no longer
+/// catastrophic — `serve_client` drains to the present and resyncs from the newest keyframe —
+/// but it is still a visible hiccup, so headroom is worth buying.
+///
+/// The DVR worry that produced the original 8 is handled elsewhere and no longer bounds this:
+/// [`coalesce_for_live`] collapses any device more than a few frames behind to its newest
+/// packet, so a full ring materialises as one frame per device rather than as history. That
+/// is what makes a large ring safe.
+///
+/// **The structural fix is a channel per device**, which would make the capacity independent
+/// of fleet size instead of merely generous. Until then this is sized so a 100-device farm
+/// still has most of a second: 2048 packets is ~4.3 s at twenty phones and ~0.85 s at a
+/// hundred. Memory is bounded by what the ring holds, roughly 61 KB/s per device at 24 fps
+/// with a 1 s i-frame interval, so ~5 MB for twenty phones.
+const BROADCAST_CAP: usize = 2048;
 
 pub struct ViewHub {
     generations: Mutex<HashMap<String, u64>>,
@@ -444,25 +452,19 @@ mod tests {
         assert!(hub.last_h264.lock().get("a").is_none());
     }
 
-    // Still decided at compile time, and still the same worry -- a ring that a slow
-    // WebSocket can drain as history turns live video into delayed video. What changed is
-    // what enforces it. `coalesce_for_live` collapses a drained batch to the newest packet
-    // per device, so the ring cannot be replayed as a backlog whatever its size; the bound
-    // that matters now is against the OTHER failure, where a ring too small to absorb host
-    // jitter trips `Lagged` and costs a whole GOP. 8 was ~166 ms for two phones, which any
-    // WebView2 hitch clears.
-    //
-    // The upper bound stays, well above the old one and well below a DVR: 128 packets is
-    // ~2.7 s of that fleet, and it only ever materialises as one frame per device.
+    // Both walls, still decided at compile time. The upper one is no longer about replaying
+    // history — `coalesce_for_live` prevents that whatever the size — it is about how much
+    // memory one channel may hold. The lower one is the real hazard now: this ring is shared
+    // by the whole fleet, so a value that felt generous against two phones is a fraction of a
+    // second against twenty.
     const _: () = assert!(
-        BROADCAST_CAP <= 512,
-        "a broadcast cap this large is a DVR, not a live view, even with coalescing"
+        BROADCAST_CAP <= 8192,
+        "a ring this large holds tens of MB of video once a fleet fills it"
     );
     const _: () = assert!(
-        BROADCAST_CAP >= 64,
-        "a ring under ~1s of fleet traffic trips Lagged on ordinary jitter, and every Lagged costs a full i-frame-interval of frozen picture"
+        BROADCAST_CAP >= 1024,
+        "at 24 fps a shared ring under 1024 gives a 20-phone fleet well under a second, and          any host hitch past that costs a resync"
     );
-
     fn h264(udid: &str, key: bool, byte: u8) -> ViewPacket {
         ViewPacket {
             udid: udid.into(),
