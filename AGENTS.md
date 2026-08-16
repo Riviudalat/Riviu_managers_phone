@@ -4813,7 +4813,9 @@ Redmi API 35 chạy được cả 3.3.4 lẫn 4.1 **khi** `max_size≥320`; cả
 
 **Preset.** Tile `max_size=480 bitrate=1_200_000 max_fps=30`. Overlay **không** đổi preset: CSS fill phóng bitmap tile, không `stop` + `app_process` lại. Mở overlay từng restart encoder → canvas trống / tap trượt / cảm giác lag. Vì overlay xem đúng encode tile, 15 fps / 400 kbps làm cửa sổ lớn trông chậm dù encoder sống — đó là lag sau khi hết lỗi `exited before it accepted a connection`. `video_codec_options=i-frame-interval:int=1` — form `key[:type]=value` của 3.3.4. Dấu hai chấm thứ ba (`int:2`) làm `CodecOption.parseOption` ném `'=' expected` rồi process thoát trước khi bind socket; tile hiện `scrcpy-server exited before it accepted a connection`. Overlay session (§9.48) không park, không `open_ui_context`.
 
-**ViewHub không được xếp hàng video.** `broadcast` cap 256 từng giữ ~8 s frame; WebSocket `send().await` từng packet rồi mới vẽ quá khứ. Cap 8, `Lagged` phát lại key mới nhất, `coalesce` một packet/UDID, TCP `nodelay`. Worker decode tuần tự, giữ packet mới nhất, timestamp +1 ms (`optimizeForLatency`) — không +66 ms/frame. Không đưa scrcpy vào `StreamHub`.
+**ViewHub không được xếp hàng video.** `broadcast` cap 256 từng giữ ~8 s frame; WebSocket `send().await` từng packet rồi mới vẽ quá khứ. `Lagged` phát lại key mới nhất, `coalesce` gộp khi một máy tụt quá 3 frame, TCP `nodelay`. Worker decode tuần tự, giữ packet mới nhất, timestamp +1 ms (`optimizeForLatency`) — không +66 ms/frame. Không đưa scrcpy vào `StreamHub`.
+
+**Một kênh mỗi máy, một socket cho cả fleet** (§9.68, §9.73). Cap là `DEVICE_BROADCAST_CAP = 128` **mỗi máy** = 5,3 s ở 24 fps **bất kể fleet bao nhiêu máy** — không còn con số nào phải chỉnh lại khi cắm thêm máy. Socket vẫn dùng chung vì giao thức một chiều và worker tự tách theo udid; thứ tách theo máy là bộ đệm phía sau nó. Client subscribe từng máy, một forwarder mỗi máy đổ vào một `mpsc` chung, nên `Lagged` **quy được về đúng máy gây ra** và chỉ máy đó bị resync. Máy mới được báo qua kênh `roster`; **subscribe trước rồi mới replay cache của máy đó** — ngược lại là mất frame im lặng. `forget` chỉ gọi khi máy **rời fleet** (vòng quét `list_devices`), không gọi khi restart producer.
 
 **Handshake 3.3.4.** `tunnel_forward` = máy **listen**, host connect. Spawn `app_process` trước, rồi `adb forward`, rồi TCP (thử ngay, nghỉ 50 ms khi `NotListening`). `start_view_stream` chỉ `Ok` sau sample **sync** đầu (IDR hoặc cờ key, config đã merge); hello không đủ — Note 8 từng `Live` mà canvas trống vì encoder dừng sau SPS, hoặc Exynos gửi AU đầu **không** `BUFFER_FLAG_KEY_FRAME`. ADB trên Windows **từ chối** abstract socket nếu server chưa bind — TCP mở trước listen EOF ngay và không bao giờ thành video socket. Dummy được ghi trong cùng `accept()`; chưa thấy dummy thì TCP đó **chưa** consume accept, được phép thử lại. Đã thấy dummy thì đây là socket video duy nhất: server đóng `LocalServerSocket` ngay. Hello = dummy + tên 64 byte + **12 byte** `codec/width/height` (`writeVideoHeader(Size)`). Packet: config **bit 63**, key **bit 62**, **không** có session packet — parser 4.1 sẽ đọc config thành size và nuốt payload. Hai máy Android start song song.
 
@@ -4825,7 +4827,7 @@ Redmi API 35 chạy được cả 3.3.4 lẫn 4.1 **khi** `max_size≥320`; cả
 
 **WebSocket xem nối lại.** `viewStore` reconnect khi socket đứt hoặc `viewEndpoint` chưa bind, backoff 200 ms → ~2 s, cùng URL. `started` không chặn reconnect. Test mode vẫn một lần.
 
-**Watchdog producer im.** `ViewHub::publish` ghi `last_packet_at` theo UDID; `advance` xoá. Keeper 2 s: `view_is_running` và im > 5 s (không tính lúc `view_starting`) → `stop_view_stream` rồi start lại; registry `Sampling` rồi `Live`/`Error`. `view_is_running` **không** đổi thành “đã vẽ canvas” — frontend không phải nguồn sự thật phía Rust.
+**Watchdog producer — MỘT quyết định, xem §9.72.** `ViewHub::publish` ghi `last_packet_at` theo UDID; `advance` xoá. Keeper 2 s gọi `view_verdict` trên **cả hai** loại bằng chứng: byte về (im > **45 s** → `Silent`) và frame đã vẽ do frontend báo qua `view_report_paint` (packet vẫn tới mà không vẽ > 12 s → `PaintStalled`). Báo cáo cũ hơn 6 s **không tính là bằng chứng** — tụt về luật byte, không bao giờ coi là hỏng. Mọi lần restart producer, tự động hay do người bấm, đi qua `restart_android_view` và **phải cầm permit** của `ViewRecoveryGate`; start lần đầu thì không, vì nó không tháo cái gì đang chạy. Frontend **không còn** restart gì cả (`AUTO_RESTART_ON_STALL` đã xoá, không phải bật lên).
 
 **Note 8 SPS.** Đo được cạnh GenFarmer 2.4: hello `152×320`, config 21 byte `67 42 00 0d` = `avc1.42000D` (Baseline level 1.3), rồi IDR 2025 byte cờ key. Encoder **không** chết; WebView2 `isConfigSupported` có thể từ chối level 1.3. Worker thử thêm `avc1.42E01E` / `42001E` / `4D401E` trên cùng Annex-B và vẫn `configure` khi `isConfigSupported` là false. Nút Start gọi `stop` rồi `start` — `view_is_running` không được biến Start thành no-op khi canvas trống.
 
@@ -5160,6 +5162,43 @@ moi lan doi preset va moi lan xoay may la mot cua so cham bien mat — upstream 
 agent **von khong cham** — 130–280 ms mot click do tren chinh Galaxy S8+. Con so 1502 ms la
 `adb shell input`, **khong phai** agent, dung nham hai cai.
 
+### 9.73 Mot kenh moi may — va cai bay chi mot test socket that moi thay (16/08/2026)
+
+§9.68 ket luan cach sua dung ve cau truc la mot kenh broadcast **moi may** chu khong phai mot
+`BROADCAST_CAP` du rong. Da lam.
+
+Cap gio la `DEVICE_BROADCAST_CAP = 128` **moi may**: **5,3 s o 24 fps bat ke fleet bao nhieu
+may**. Con so **giam** tu 2048 chu khong giu nguyen, va do la co y — **danh doi bi lat nguoc**.
+Truoc: thoi gian co lai theo so may, bo nho co dinh. Gio: thoi gian **hang so**, bo nho tang
+tuyen tinh theo so may. O ~2,6 KB moi packet, 128 slot la ~325 KB moi may, ~6,5 MB cho 20 may;
+de nguyen 2048 se la ~104 MB — va tokio cap phat **toan bo slot ngay luc tao kenh**, nen cai
+gia do roi vao luc phat hien may chu khong phai luc tai cao.
+
+Duoc them, khong phai phu: **`Lagged` gio quy duoc ve dung may gay ra**. Truoc kia mot may
+cham lam cho `batch.clear()` va `resync` **moi may** cho moi client. Gio moi may mot forwarder,
+chi may do mat batch va chi may do duoc resync.
+
+Bon map bien thanh mot `DeviceView`: `publish` chay 480 lan/giay o 20 may × 24 fps va truoc do
+lay **bon lock lien tiep** voi cua so rach giua chung.
+
+**Cai bay, va no chi lo ra khi viet test socket that:** khi mot may moi duoc bao qua `roster`,
+client phai **subscribe truoc, replay cache cua may do sau**. Lam nguoc lai — hoac khong replay
+— thi packet nao duoc publish giua luc bao va luc subscribe se **mat vinh vien va im lang** cho
+client do. Do dung la thu xay ra: producer goi `advance` (bao) roi publish keyframe dau ngay
+sau. Test loopback dau tien cua file nay bat duoc; khong test nao truoc do tung chay
+`serve_client`, `replay_latest` hay duong resync — **toan bo phan mang nhieu comment ve mat
+frame im lang nhat lai la phan khong co test nao**.
+
+Va: `publish_jpeg` chay **moi frame preview**, nen bao roster vo dieu kien se lam moi client
+thay `Lagged` tren roster va re-snapshot ca fleet vai lan mot giay. Chi bao **luc tao**.
+
+`advance` **khong** duoc dong kenh: duong restart cua watchdog la stop-roi-start, dong kenh moi
+lan bump generation se giet canvas cua may do o moi lan hoi phuc. Chi `forget` — goi tu vong
+quet `list_devices`, noi duy nhat nhin thay may **roi fleet** — moi dong.
+
+**Do tren 20 may:** 20 producer trong 8 giay, **0 stall, 0 lagged, 0 decoder error, 0 restart**,
+va `20/20 android devices reporting painted frames`.
+
 ### 9.72 Tran dong thoi cho recovery: da do, va phep do BAC BO ly do ban dau (16/08/2026)
 
 §9.67 ket luan detector frontend chi duoc restart lai **khi da co tran dong thoi toan fleet**,
@@ -5291,7 +5330,7 @@ Hai thu khien ring lon la an toan, va **khong** cai nao dung khi 8 duoc chon: `c
 chan viec phat lai lich su bat ke kich thuoc, va mot lan `Lagged` khong con la tham hoa vi
 `serve_client` drain toi hien tai roi resync tu keyframe moi nhat.
 
-Sua dung ve cau truc la **mot kenh moi may** — ghi lai, chua lam.
+Sua dung ve cau truc la **mot kenh moi may** — **da lam, xem §9.73.**
 
 ### 9.64 Man den bao gom mot cai treo cua chinh dien thoai, va mot diem mu 8 phut (15/08/2026)
 

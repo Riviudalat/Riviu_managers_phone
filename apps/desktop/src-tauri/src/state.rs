@@ -1034,6 +1034,7 @@ impl AppState {
         let background_stopped = self.background_stopped.clone();
         let background_stopped_notify = self.background_stopped_notify.clone();
         let background_shutdown_error = self.background_shutdown_error.clone();
+        let sweep_view_hub = self.view_hub.clone();
         tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(250));
             let mut last_scan = Instant::now() - Duration::from_secs(3);
@@ -1077,6 +1078,28 @@ impl AppState {
                             })
                             .collect();
                         registry.upsert_many(merged);
+                        // This scan is the only place a device DEPARTURE is observed —
+                        // `upsert_many` replaces the roster wholesale, so nothing else is
+                        // ever told a phone was unplugged. The hub needs to hear it now that
+                        // each device owns a channel: without this it keeps one
+                        // fully-allocated ring per udid it has ever seen, and the rings are
+                        // allocated eagerly.
+                        //
+                        // Departure only, never a producer restart or a status flap: a phone
+                        // whose view is merely being restarted is still there, and closing
+                        // its channel would make every client tear down a canvas that is
+                        // about to be repainted.
+                        let live: std::collections::HashSet<String> = registry
+                            .list()
+                            .into_iter()
+                            .map(|device| device.udid)
+                            .collect();
+                        for udid in sweep_view_hub.known_devices() {
+                            if !live.contains(&udid) {
+                                log::debug!("view hub forgetting {udid}: it left the fleet");
+                                sweep_view_hub.forget(&udid);
+                            }
+                        }
                     }
                 }
 

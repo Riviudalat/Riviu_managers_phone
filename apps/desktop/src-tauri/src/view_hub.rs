@@ -3,8 +3,14 @@
 //! JPEG evidence stays on `StreamHub`. This hub carries H.264 samples from
 //! scrcpy and JPEG bytes from the iOS preview loop, multiplexed onto one
 //! loopback WebSocket so the WebView never base64-encodes a frame.
+//!
+//! **One channel per device, one socket for the fleet.** Those are different axes and the
+//! file used to conflate them: a single shared ring meant a device's buffer *in time* shrank
+//! linearly as phones were added, and a lag could not be attributed to the phone that caused
+//! it. The socket stays shared because the wire protocol is one-way and the worker
+//! demultiplexes by udid; what is now per-device is the buffering behind it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
@@ -14,8 +20,9 @@ use futures_util::SinkExt;
 use parking_lot::Mutex;
 use riviu_android_driver::{ViewKind, ViewPacket, ViewSink};
 use tokio::net::TcpListener;
-use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+use tokio::sync::{broadcast, mpsc};
+use tokio::task::JoinSet;
 use tokio_tungstenite::tungstenite::Message;
 
 /// ASCII `RVU1`.
@@ -24,53 +31,89 @@ pub const VIEW_KIND_H264: u8 = 1;
 pub const VIEW_KIND_JPEG: u8 = 2;
 pub const VIEW_FLAG_KEY: u8 = 1;
 
-/// Live view, not a DVR — and the number has to be read as a rate, not a size.
+/// Live view, not a DVR — and now a **per-device** rate, which is the whole point.
 ///
-/// This is ONE channel for the whole fleet, so its capacity in *time* shrinks linearly as
-/// phones are added. That is the property every previous value here got wrong. At 24 fps:
+/// This used to be one ring for the entire fleet, and that made its capacity in *time* a
+/// function of how many phones were plugged in. Every value it ever held got that wrong: at
+/// 24 fps a shared 128 was 2667 ms against two phones and **267 ms** against twenty, and the
+/// 2048 that replaced it was 4267 ms at twenty but 853 ms at a hundred. The number kept
+/// being re-tuned because the shape was wrong, not the size.
 ///
-/// | devices | cap 128 | cap 2048 |
-/// |---|---|---|
-/// | 2 | 2667 ms | 42667 ms |
-/// | 20 | **267 ms** | 4267 ms |
-/// | 50 | 107 ms | 1707 ms |
-/// | 100 | **53 ms** | 853 ms |
+/// Per device, 128 slots is **5.3 s at any fleet size** — twenty phones, a hundred, one. A
+/// lag also became attributable: a device that falls behind exhausts its own ring and gets
+/// its own resync, instead of a slow phone spending the fleet's shared budget and every
+/// client resyncing every device (see [`replay_device`]).
 ///
-/// 8 was chosen against a two-phone bench and 128 against the same bench; a 20-phone box
-/// then reduced 128 to 267 ms, which any WebView2 hitch clears. What a lag costs is no longer
-/// catastrophic — `serve_client` drains to the present and resyncs from the newest keyframe —
-/// but it is still a visible hiccup, so headroom is worth buying.
+/// **The tradeoff inverts, and that is why this number went DOWN rather than staying put.**
+/// Time per device is now constant; memory now scales with fleet size. At the ~2.6 KB
+/// average packet this path carries (61 KB/s per device at 24 fps), 128 slots is ~325 KB per
+/// device, ~6.5 MB across twenty phones. Keeping 2048 here would have been ~5.2 MB per
+/// device and **~104 MB at twenty** — and tokio allocates every slot when the channel is
+/// created, rounded up to a power of two, so that cost lands on device discovery rather than
+/// on load.
 ///
-/// The DVR worry that produced the original 8 is handled elsewhere and no longer bounds this:
-/// [`coalesce_for_live`] collapses any device more than a few frames behind to its newest
-/// packet, so a full ring materialises as one frame per device rather than as history. That
-/// is what makes a large ring safe.
+/// What makes a ring this size safe is unchanged: [`coalesce_for_live`] collapses any device
+/// more than a few frames behind to its newest packet, so a full ring materialises as one
+/// frame rather than as history, and a lag is no longer catastrophic because the forwarder
+/// drains to the present and resyncs from the newest keyframe.
+const DEVICE_BROADCAST_CAP: usize = 128;
+
+/// How many events one client may have queued across all its devices before its forwarders
+/// block.
 ///
-/// **The structural fix is a channel per device**, which would make the capacity independent
-/// of fleet size instead of merely generous. Until then this is sized so a 100-device farm
-/// still has most of a second: 2048 packets is ~4.3 s at twenty phones and ~0.85 s at a
-/// hundred. Memory is bounded by what the ring holds, roughly 61 KB/s per device at 24 fps
-/// with a 1 s i-frame interval, so ~5 MB for twenty phones.
-const BROADCAST_CAP: usize = 2048;
+/// This is the head-of-line buffer, not the capacity that matters: when the socket is slow
+/// the forwarders block here and **each device's own ring absorbs its own backlog**, which
+/// is exactly the property the per-device split exists for. Delay is shared, capacity loss
+/// is not. 256 is a little over five devices' worth of a 48-frame burst — deep enough that
+/// an ordinary WebView2 hitch never reaches the rings at all.
+const CLIENT_QUEUE_CAP: usize = 256;
+
+/// Everything the hub knows about one device, including its own channel.
+///
+/// Consolidated from four separate maps. That was not cosmetic: `publish` runs per frame per
+/// device — 480 acquisitions a second at twenty phones and 24 fps — and took four locks in
+/// sequence with a torn window between them, so a reader could see a new `last_packet_at`
+/// against a stale `last_h264`.
+struct DeviceView {
+    generation: u64,
+    last_jpeg: Option<ViewPacket>,
+    last_h264: Option<ViewPacket>,
+    last_packet_at: Option<Instant>,
+    tx: broadcast::Sender<ViewPacket>,
+}
+
+impl DeviceView {
+    fn new(generation: u64) -> Self {
+        let (tx, _) = broadcast::channel(DEVICE_BROADCAST_CAP);
+        Self {
+            generation,
+            last_jpeg: None,
+            last_h264: None,
+            last_packet_at: None,
+            tx,
+        }
+    }
+}
 
 pub struct ViewHub {
-    generations: Mutex<HashMap<String, u64>>,
-    last_jpeg: Mutex<HashMap<String, ViewPacket>>,
-    last_h264: Mutex<HashMap<String, ViewPacket>>,
-    last_packet_at: Mutex<HashMap<String, Instant>>,
-    tx: broadcast::Sender<ViewPacket>,
+    devices: Mutex<HashMap<String, DeviceView>>,
+    /// Announces a udid the first time the hub sees it.
+    ///
+    /// Clients connect once, at app start, before any phone has been enumerated. Without
+    /// this a client would only ever forward the devices that existed at the instant it
+    /// connected, and every phone discovered afterwards would be a canvas that never paints.
+    roster: broadcast::Sender<String>,
     port: AtomicU16,
 }
 
 impl ViewHub {
     pub fn new() -> Arc<Self> {
-        let (tx, _) = broadcast::channel(BROADCAST_CAP);
+        // The roster carries one short string per device ever seen, so it can be generous;
+        // a client that lags it re-snapshots rather than losing anything.
+        let (roster, _) = broadcast::channel(256);
         Arc::new(Self {
-            generations: Mutex::new(HashMap::new()),
-            last_jpeg: Mutex::new(HashMap::new()),
-            last_h264: Mutex::new(HashMap::new()),
-            last_packet_at: Mutex::new(HashMap::new()),
-            tx,
+            devices: Mutex::new(HashMap::new()),
+            roster,
             port: AtomicU16::new(0),
         })
     }
@@ -111,13 +154,23 @@ impl ViewHub {
     /// An Android UDID that already has H.264 must not receive these — the
     /// worker would paint a still over the live decode.
     pub fn publish_jpeg(&self, udid: &str, bytes: Vec<u8>) -> bool {
-        if self.last_h264.lock().contains_key(udid) {
-            return true;
-        }
-        let generation = {
-            let mut gens = self.generations.lock();
-            *gens.entry(udid.to_string()).or_insert(1)
+        let (generation, created) = {
+            let mut devices = self.devices.lock();
+            match devices.get(udid) {
+                Some(device) if device.last_h264.is_some() => return true,
+                Some(device) => (device.generation, false),
+                None => {
+                    devices.insert(udid.to_string(), DeviceView::new(1));
+                    (1, true)
+                }
+            }
         };
+        // Only on creation. This runs once per preview frame, so announcing unconditionally
+        // would fill the roster with one device's name and make every other client
+        // re-snapshot on a `Lagged` several times a second.
+        if created {
+            let _ = self.roster.send(udid.to_string());
+        }
         self.publish(ViewPacket {
             udid: udid.to_string(),
             generation,
@@ -133,7 +186,11 @@ impl ViewHub {
     /// `advance` and before the first accepted publish — the keeper treats
     /// that as silent once the producer claims to be running.
     pub fn last_packet_age(&self, udid: &str) -> Option<Duration> {
-        self.last_packet_at.lock().get(udid).map(Instant::elapsed)
+        self.devices
+            .lock()
+            .get(udid)
+            .and_then(|device| device.last_packet_at)
+            .map(|at| at.elapsed())
     }
 
     /// Which producer is current for this device.
@@ -144,131 +201,335 @@ impl ViewHub {
     /// running or the one it replaced — counters from before a restart show arrivals far
     /// ahead of frames forever, and acting on them is a restart loop.
     pub fn current_generation(&self, udid: &str) -> u64 {
-        self.generations.lock().get(udid).copied().unwrap_or(0)
+        self.devices
+            .lock()
+            .get(udid)
+            .map(|device| device.generation)
+            .unwrap_or(0)
+    }
+
+    /// Drop a device that has left the fleet, closing its channel.
+    ///
+    /// Every subscribed forwarder sees `Closed` and exits; the client's socket is untouched
+    /// and its other devices keep flowing. Without this the hub keeps one fully-allocated
+    /// ring per udid it has ever seen — a leak that was harmless when the maps held only a
+    /// generation and a cached frame, and is not harmless now that each entry owns a channel.
+    ///
+    /// Deliberately **not** called on a producer stop or a status flap: a device whose view
+    /// is merely being restarted is still there, and closing its channel would make every
+    /// client tear down a canvas that is about to be repainted.
+    pub fn forget(&self, udid: &str) {
+        self.devices.lock().remove(udid);
+    }
+
+    /// The udids the hub currently knows about. For reconciling against the registry.
+    pub fn known_devices(&self) -> Vec<String> {
+        self.devices.lock().keys().cloned().collect()
+    }
+
+    /// A receiver for every device that exists right now.
+    ///
+    /// `subscribe` is synchronous, so every cursor is pinned before the caller awaits
+    /// anything — which is what preserves the subscribe-before-replay rule even though the
+    /// forwarders that use these receivers are spawned afterwards.
+    fn subscribe_all(&self) -> Vec<(String, broadcast::Receiver<ViewPacket>)> {
+        self.devices
+            .lock()
+            .iter()
+            .map(|(udid, device)| (udid.clone(), device.tx.subscribe()))
+            .collect()
+    }
+
+    fn subscribe_one(&self, udid: &str) -> Option<broadcast::Receiver<ViewPacket>> {
+        self.devices
+            .lock()
+            .get(udid)
+            .map(|device| device.tx.subscribe())
+    }
+
+    /// The newest independently-decodable frames this device has: its JPEG, its keyframe, or
+    /// both. What a client needs to paint something immediately without waiting for the next
+    /// i-frame interval.
+    fn cached_frames(&self, udid: &str) -> Vec<ViewPacket> {
+        self.devices
+            .lock()
+            .get(udid)
+            .map(|device| {
+                device
+                    .last_jpeg
+                    .iter()
+                    .chain(device.last_h264.iter())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    fn peek_last_h264(&self, udid: &str) -> Option<ViewPacket> {
+        self.devices
+            .lock()
+            .get(udid)
+            .and_then(|device| device.last_h264.clone())
+    }
+
+    #[cfg(test)]
+    fn peek_last_jpeg(&self, udid: &str) -> Option<ViewPacket> {
+        self.devices
+            .lock()
+            .get(udid)
+            .and_then(|device| device.last_jpeg.clone())
     }
 }
 
 impl ViewSink for ViewHub {
     fn generation(&self, udid: &str) -> u64 {
-        self.generations.lock().get(udid).copied().unwrap_or(0)
+        self.current_generation(udid)
     }
 
     fn advance(&self, udid: &str) -> u64 {
-        let mut gens = self.generations.lock();
-        let next = gens.get(udid).copied().unwrap_or(0).saturating_add(1);
-        gens.insert(udid.to_string(), next);
-        self.last_h264.lock().remove(udid);
-        self.last_packet_at.lock().remove(udid);
+        let (next, created) = {
+            let mut devices = self.devices.lock();
+            match devices.get_mut(udid) {
+                Some(device) => {
+                    device.generation = device.generation.saturating_add(1);
+                    // The producer is being replaced, so its cached keyframe and its clock
+                    // are about to describe something that no longer exists. The CHANNEL is
+                    // kept: the watchdog's restart path is stop-then-start, and dropping the
+                    // sender on every generation bump would close and reopen the device
+                    // stream on every restart.
+                    device.last_h264 = None;
+                    device.last_packet_at = None;
+                    (device.generation, false)
+                }
+                None => {
+                    devices.insert(udid.to_string(), DeviceView::new(1));
+                    (1, true)
+                }
+            }
+        };
+        if created {
+            let _ = self.roster.send(udid.to_string());
+        }
         next
     }
 
     fn publish(&self, packet: ViewPacket) -> bool {
-        let current = self
-            .generations
-            .lock()
-            .get(&packet.udid)
-            .copied()
-            .unwrap_or(0);
-        if packet.kind == ViewKind::H264 && packet.generation != current {
-            return false;
+        let (tx, created) = {
+            let mut devices = self.devices.lock();
+            // The stale-generation refusal comes FIRST so a packet from a producer that has
+            // already been replaced can never create an entry for a device the hub has
+            // forgotten.
+            if packet.kind == ViewKind::H264 {
+                let current = devices
+                    .get(&packet.udid)
+                    .map(|device| device.generation)
+                    .unwrap_or(0);
+                if packet.generation != current {
+                    return false;
+                }
+            }
+            let created = !devices.contains_key(&packet.udid);
+            let device = devices
+                .entry(packet.udid.clone())
+                .or_insert_with(|| DeviceView::new(packet.generation));
+            match packet.kind {
+                ViewKind::Jpeg => device.last_jpeg = Some(packet.clone()),
+                ViewKind::H264 if packet.key => device.last_h264 = Some(packet.clone()),
+                ViewKind::H264 => {}
+            }
+            device.last_packet_at = Some(Instant::now());
+            (device.tx.clone(), created)
+        };
+        if created {
+            let _ = self.roster.send(packet.udid.clone());
         }
-        if packet.kind == ViewKind::Jpeg {
-            self.last_jpeg
-                .lock()
-                .insert(packet.udid.clone(), packet.clone());
-        }
-        if packet.kind == ViewKind::H264 && packet.key {
-            self.last_h264
-                .lock()
-                .insert(packet.udid.clone(), packet.clone());
-        }
-        self.last_packet_at
-            .lock()
-            .insert(packet.udid.clone(), Instant::now());
-        let _ = self.tx.send(packet);
+        // Outside the lock: `send` walks the receiver list, and this runs per frame per
+        // device.
+        let _ = tx.send(packet);
         true
+    }
+}
+
+/// One thing that happened to one of a client's devices.
+enum ClientEvent {
+    Packet(ViewPacket),
+    /// This device outran its own ring. Carries the udid, which is the whole gain of the
+    /// per-device split: a lag is now attributable and costs only the device that caused it.
+    Lagged {
+        udid: String,
+        dropped: u64,
+    },
+}
+
+/// Move one device's packets onto the client's queue, classifying that device's own lag.
+///
+/// This is where the two hard-won rules about `Lagged` now live, and both were bugs first:
+///
+/// * **Never return on `Lagged`.** It is not a disconnect; the device is still producing.
+/// * **Drain to the present BEFORE reporting it.** At the moment `recv` reports a lag the
+///   cursor sits at the oldest retained value, so a keyframe written now would be followed
+///   by up to a ring's worth of traffic that predates it. Across a generation bump that is a
+///   gen-N key followed by gen-N-1 packets: the worker flips generation, closes its decoder,
+///   and nothing reopens it.
+///
+/// `try_recv` reporting `Lagged` has already advanced the cursor and consumed the report, so
+/// it has to be accumulated here rather than left for the outer arm — leaving it meant no
+/// resync, no log, and any keyframe in the skipped span silently gone while every later
+/// delta was delivered normally. That is precisely "packets keep arriving and nothing
+/// paints".
+async fn forward_device(
+    udid: String,
+    mut rx: broadcast::Receiver<ViewPacket>,
+    tx: mpsc::Sender<ClientEvent>,
+) {
+    loop {
+        match rx.recv().await {
+            Ok(packet) => {
+                if tx.send(ClientEvent::Packet(packet)).await.is_err() {
+                    return;
+                }
+            }
+            Err(RecvError::Lagged(mut dropped)) => {
+                loop {
+                    match rx.try_recv() {
+                        // Everything still in the ring is history relative to the keyframe
+                        // the resync is about to send, so it is discarded rather than
+                        // forwarded.
+                        Ok(_) => {}
+                        Err(TryRecvError::Lagged(more)) => dropped += more,
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Closed) => return,
+                    }
+                }
+                if tx
+                    .send(ClientEvent::Lagged {
+                        udid: udid.clone(),
+                        dropped,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Err(RecvError::Closed) => return,
+        }
     }
 }
 
 async fn serve_client(hub: Arc<ViewHub>, stream: tokio::net::TcpStream) -> anyhow::Result<()> {
     let _ = stream.set_nodelay(true);
     let mut ws = tokio_tungstenite::accept_async(stream).await?;
-    // Subscribe BEFORE replaying. The other order loses every packet published between the
-    // replay's awaited writes and the subscribe -- silently, permanently, for that client --
-    // and the window is one `ws.send().await` per device, which grew with the overlay's
-    // larger encode. A duplicate frame from the overlap is harmless; a missing keyframe is
+    // Roster BEFORE the device snapshot, and the snapshot before the replay. Two ordering
+    // windows now, and both lose a device permanently and silently if got wrong: a phone
+    // created between the snapshot and the roster subscribe would never be forwarded to this
+    // client at all, and a packet published between the replay's awaited writes and the
+    // subscribe would be lost for that client. A duplicate is harmless; a missing keyframe is
     // a black canvas.
-    let mut rx = hub.tx.subscribe();
+    let mut roster = hub.roster.subscribe();
+    let subscriptions = hub.subscribe_all();
+    let mut known: HashSet<String> = subscriptions.iter().map(|(udid, _)| udid.clone()).collect();
     replay_latest(&hub, &mut ws).await?;
+
+    let (tx, mut rx) = mpsc::channel::<ClientEvent>(CLIENT_QUEUE_CAP);
+    // Held here rather than detached, so that dropping this future on client disconnect
+    // aborts every forwarder with it.
+    let mut forwarders = JoinSet::new();
+    for (udid, receiver) in subscriptions {
+        forwarders.spawn(forward_device(udid, receiver, tx.clone()));
+    }
+
     loop {
-        let mut lagged_by = 0u64;
-        let first = match rx.recv().await {
-            Ok(packet) => packet,
-            Err(RecvError::Lagged(dropped)) => {
-                // Skipping the backlog is right -- a stale key plus live deltas is a broken
-                // GOP. Resyncing here was NOT: at this point the receiver's cursor sits at
-                // the oldest retained value, so a keyframe written now is followed by up to a
-                // ring's worth of traffic that PREDATES it. Across a generation bump that is
-                // a gen-N key followed by gen-N-1 packets, the worker flips generation and
-                // closes its decoder, and nothing reopens it. Resync happens after the drain
-                // below, once the cursor has actually reached the present.
-                lagged_by = dropped;
-                match rx.try_recv() {
-                    Ok(packet) => packet,
-                    Err(_) => {
-                        resync_from_last_key(&hub, &mut ws, lagged_by).await?;
+        let first = tokio::select! {
+            biased;
+            event = rx.recv() => match event {
+                Some(event) => event,
+                // Every forwarder is gone and so is the last sender clone; nothing else can
+                // arrive. `tx` is still held below, so in practice this cannot fire.
+                None => break,
+            },
+            announced = roster.recv() => {
+                let fresh = match announced {
+                    Ok(udid) => vec![udid],
+                    // Missing an announcement must never kill a client, so re-snapshot and
+                    // pick up whatever was missed.
+                    Err(RecvError::Lagged(_)) => hub.known_devices(),
+                    Err(RecvError::Closed) => Vec::new(),
+                };
+                for udid in fresh {
+                    if !known.insert(udid.clone()) {
                         continue;
                     }
+                    let Some(receiver) = hub.subscribe_one(&udid) else {
+                        continue;
+                    };
+                    forwarders.spawn(forward_device(udid.clone(), receiver, tx.clone()));
+                    // Then replay what the device has already cached. A device is announced
+                    // when the hub first sees it, and its producer publishes its first
+                    // keyframe immediately afterwards -- so between the announcement and this
+                    // client subscribing there is a window in which a broadcast receiver that
+                    // did not exist yet cannot be handed anything. A loopback test found it:
+                    // the client got the replay and then nothing at all for the new device.
+                    //
+                    // Subscribing FIRST and replaying second is what makes this safe in both
+                    // directions: anything published after the subscribe arrives on the
+                    // channel, anything before it is in the cache, and the overlap is a
+                    // duplicate frame. A duplicate is invisible; a missing keyframe is a
+                    // black canvas.
+                    replay_device(&hub, &mut ws, &udid).await?;
                 }
+                continue;
             }
-            Err(RecvError::Closed) => break,
         };
-        let mut batch = vec![first];
-        loop {
-            match rx.try_recv() {
-                Ok(packet) => batch.push(packet),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Lagged(dropped)) => {
-                    // Do NOT break here. `try_recv` reporting Lagged has already advanced the
-                    // cursor and CONSUMED the lag report, so breaking meant the outer
-                    // `RecvError::Lagged` arm could never fire: no resync, no log, and any
-                    // keyframe in the skipped span silently gone while every later delta was
-                    // delivered normally. That is precisely "packets keep arriving and
-                    // nothing paints". Record it and keep draining to the present.
-                    lagged_by += dropped;
-                    batch.clear();
-                }
-                Err(TryRecvError::Closed) => break,
-            }
+
+        let mut batch: Vec<ViewPacket> = Vec::new();
+        let mut lagged: Vec<(String, u64)> = Vec::new();
+        let mut take = |event: ClientEvent| match event {
+            ClientEvent::Packet(packet) => batch.push(packet),
+            ClientEvent::Lagged { udid, dropped } => lagged.push((udid, dropped)),
+        };
+        take(first);
+        while let Ok(event) = rx.try_recv() {
+            take(event);
         }
-        if lagged_by > 0 {
-            // Everything drained after a lag is history relative to the newest keyframe, so
-            // it is dropped rather than painted, and the client is resynced from the newest
-            // key now that the cursor has reached the present.
-            batch.clear();
-            resync_from_last_key(&hub, &mut ws, lagged_by).await?;
-            continue;
+
+        for (udid, dropped) in &lagged {
+            // Only the device that lagged loses its batch. The blanket clear this replaces
+            // punished every phone on the socket for one slow one, purely because a shared
+            // ring could not say which had fallen behind.
+            batch.retain(|packet| &packet.udid != udid);
+            log::debug!("view subscriber lagged on {udid}, dropped {dropped} packets; resyncing");
         }
         for packet in coalesce_for_live(batch) {
             ws.feed(Message::Binary(encode_packet(&packet).into()))
                 .await?;
+        }
+        for (udid, _) in lagged {
+            replay_device(&hub, &mut ws, &udid).await?;
         }
         ws.flush().await?;
     }
     Ok(())
 }
 
-/// Hand the client the newest keyframe of every device, after a lag.
+/// Hand the client everything **one** device can be caught up from: its newest JPEG and its
+/// newest keyframe.
 ///
-/// Only correct once the receiver's cursor has reached the present -- see the call sites.
-async fn resync_from_last_key(
+/// Used for two different catch-ups that want exactly the same bytes — a device the client
+/// has just subscribed to, and a device whose forwarder has drained its receiver to the
+/// present after a lag. In the lag case it is only correct after that drain; see
+/// [`forward_device`].
+///
+/// After a lag it used to rewrite the newest keyframe of *every* device, which was never
+/// about correctness: a shared ring could not attribute a lag, so the only safe answer was
+/// to resync everything. Per-device channels make the question answerable.
+async fn replay_device(
     hub: &ViewHub,
     ws: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
-    dropped: u64,
+    udid: &str,
 ) -> anyhow::Result<()> {
-    log::debug!("view subscriber lagged, dropped {dropped} packets; resyncing from last key");
-    let keys: Vec<ViewPacket> = hub.last_h264.lock().values().cloned().collect();
-    for packet in keys {
+    for packet in hub.cached_frames(udid) {
         ws.feed(Message::Binary(encode_packet(&packet).into()))
             .await?;
     }
@@ -280,8 +541,19 @@ async fn replay_latest(
     hub: &ViewHub,
     ws: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
 ) -> anyhow::Result<()> {
-    let mut replay: Vec<ViewPacket> = hub.last_jpeg.lock().values().cloned().collect();
-    replay.extend(hub.last_h264.lock().values().cloned());
+    let replay: Vec<ViewPacket> = {
+        let devices = hub.devices.lock();
+        devices
+            .values()
+            .flat_map(|device| {
+                device
+                    .last_jpeg
+                    .iter()
+                    .chain(device.last_h264.iter())
+                    .cloned()
+            })
+            .collect()
+    };
     for packet in replay {
         ws.send(Message::Binary(encode_packet(&packet).into()))
             .await?;
@@ -306,10 +578,15 @@ const COALESCE_AFTER_FRAMES: usize = 3;
 /// Forward a drained batch, dropping intermediate frames only for a device that is more
 /// than [`COALESCE_AFTER_FRAMES`] behind.
 ///
-/// For a device at or under that, every packet is forwarded in order -- that is what makes
-/// motion look like motion. Past it, the device collapses to its newest packet, preceded by
-/// the newest key in the same batch if that newest is a delta, so a decoder that lost its
-/// GOP can resync without waiting another `i-frame-interval`.
+/// Still per-device even though the channels are, because the batch drained from one
+/// client's queue interleaves every device that had traffic in that window — the shared
+/// thing is now the socket rather than the ring, and one slow phone must still not turn
+/// every other phone into a slideshow.
+///
+/// For a device at or under the threshold, every packet is forwarded in order -- that is
+/// what makes motion look like motion. Past it, the device collapses to its newest packet,
+/// preceded by the newest key in the same batch if that newest is a delta, so a decoder that
+/// lost its GOP can resync without waiting another `i-frame-interval`.
 fn coalesce_for_live(packets: Vec<ViewPacket>) -> Vec<ViewPacket> {
     if packets.len() <= 1 {
         return packets;
@@ -323,13 +600,13 @@ fn coalesce_for_live(packets: Vec<ViewPacket>) -> Vec<ViewPacket> {
         // these are consecutive frames of a moving screen.
         return packets;
     }
-    let behind: std::collections::HashSet<String> = counts
+    let behind: HashSet<String> = counts
         .iter()
         .filter(|(_, count)| **count > COALESCE_AFTER_FRAMES)
         .map(|(udid, _)| (*udid).to_string())
         .collect();
     // A device that is keeping up must not lose frames just because another device on the
-    // same shared channel fell behind.
+    // same socket fell behind.
     let (packets, passthrough): (Vec<ViewPacket>, Vec<ViewPacket>) = packets
         .into_iter()
         .partition(|packet| behind.contains(&packet.udid));
@@ -455,27 +732,28 @@ mod tests {
             bytes: vec![2],
         };
         assert!(hub.publish(current));
-        assert_eq!(
-            hub.last_h264.lock().get("a").map(|p| p.bytes.as_slice()),
-            Some(&[2][..])
-        );
+        assert_eq!(hub.peek_last_h264("a").map(|p| p.bytes), Some(vec![2]));
         hub.advance("a");
-        assert!(hub.last_h264.lock().get("a").is_none());
+        assert!(hub.peek_last_h264("a").is_none());
     }
 
-    // Both walls, still decided at compile time. The upper one is no longer about replaying
-    // history — `coalesce_for_live` prevents that whatever the size — it is about how much
-    // memory one channel may hold. The lower one is the real hazard now: this ring is shared
-    // by the whole fleet, so a value that felt generous against two phones is a fraction of a
-    // second against twenty.
+    // Both walls, still decided at compile time — but the arithmetic behind them inverted
+    // with the per-device split, so both numbers and both reasons changed. The upper one is
+    // now fleet-MULTIPLIED: every device pays this ring in full, which is what makes a
+    // generous value expensive rather than merely wasteful. The lower one is now expressed
+    // purely in time, and must contain no mention of fleet size at all — that independence
+    // is the entire point of the change.
     const _: () = assert!(
-        BROADCAST_CAP <= 8192,
-        "a ring this large holds tens of MB of video once a fleet fills it"
+        DEVICE_BROADCAST_CAP <= 512,
+        "every device pays this ring in full: 512 x ~2.6 KB x 20 phones is ~27 MB of video \
+         held in memory, and tokio allocates the slots when the channel is created"
     );
     const _: () = assert!(
-        BROADCAST_CAP >= 1024,
-        "at 24 fps a shared ring under 1024 gives a 20-phone fleet well under a second, and          any host hitch past that costs a resync"
+        DEVICE_BROADCAST_CAP >= 96,
+        "at 24 fps a device needs about four seconds of its own ring to survive a host \
+         hitch without a resync; this is per device, so the fleet size does not enter into it"
     );
+
     fn h264(udid: &str, key: bool, byte: u8) -> ViewPacket {
         ViewPacket {
             udid: udid.into(),
@@ -524,8 +802,9 @@ mod tests {
 
     #[test]
     fn a_device_keeping_up_does_not_lose_frames_because_another_fell_behind() {
-        // One shared channel for the whole fleet, so this is the failure mode that matters
-        // at scale: one slow phone must not turn every other phone into a slideshow.
+        // The shared thing is now the SOCKET rather than the channel, and this is still the
+        // failure mode that matters at scale: one slow phone must not turn every other phone
+        // into a slideshow.
         let mut packets = vec![h264("slow", true, 1)];
         for byte in 2..=8 {
             packets.push(h264("slow", false, byte));
@@ -570,11 +849,8 @@ mod tests {
             bytes: vec![9],
         }));
         assert!(hub.publish_jpeg("a", vec![0xff, 0xd8]));
-        assert!(hub.last_jpeg.lock().get("a").is_none());
-        assert_eq!(
-            hub.last_h264.lock().get("a").map(|p| p.bytes.as_slice()),
-            Some(&[9][..])
-        );
+        assert!(hub.peek_last_jpeg("a").is_none());
+        assert_eq!(hub.peek_last_h264("a").map(|p| p.bytes), Some(vec![9]));
         assert!(hub.last_packet_age("a").is_some());
     }
 
@@ -606,5 +882,139 @@ mod tests {
         assert!(hub.last_packet_age("a").is_some());
         hub.advance("a");
         assert!(hub.last_packet_age("a").is_none());
+    }
+
+    #[test]
+    fn a_flood_from_one_device_does_not_cost_another_device_a_frame() {
+        // The direct assertion of AGENTS.md 9.68, and it cannot even be written against a
+        // shared ring: there, `a` overrunning the channel evicts `b`'s packets too, so `b`
+        // lags without having produced anything.
+        let hub = ViewHub::new();
+        hub.advance("a");
+        hub.advance("b");
+        let mut a = hub.subscribe_one("a").expect("a exists");
+        let mut b = hub.subscribe_one("b").expect("b exists");
+
+        assert!(hub.publish(h264("b", true, 1)));
+        for byte in 0..(DEVICE_BROADCAST_CAP as u8 + 50) {
+            assert!(hub.publish(h264("a", false, byte)));
+        }
+
+        // `b` produced one packet and receives exactly it, unaffected by the flood.
+        match b.try_recv() {
+            Ok(packet) => assert_eq!(packet.bytes, vec![1]),
+            other => panic!("b should be untouched by a's flood, got {other:?}"),
+        }
+        // `a` overran its own ring and only `a` did.
+        assert!(matches!(a.try_recv(), Err(TryRecvError::Lagged(_))));
+    }
+
+    #[test]
+    fn advance_keeps_the_device_channel_open() {
+        // The watchdog restarts producers routinely, and a restart is stop-then-start, so a
+        // generation bump that closed the channel would tear down every client's canvas for
+        // this device on every recovery.
+        let hub = ViewHub::new();
+        hub.advance("a");
+        let mut rx = hub.subscribe_one("a").expect("a exists");
+        assert_eq!(hub.advance("a"), 2);
+        assert!(hub.publish(ViewPacket {
+            udid: "a".into(),
+            generation: 2,
+            kind: ViewKind::H264,
+            width: 10,
+            height: 20,
+            key: true,
+            bytes: vec![7],
+        }));
+        let packet = rx.try_recv().expect("the same receiver still delivers");
+        assert_eq!(packet.generation, 2);
+        assert_eq!(packet.bytes, vec![7]);
+    }
+
+    #[test]
+    fn forget_closes_only_that_device() {
+        let hub = ViewHub::new();
+        hub.advance("a");
+        hub.advance("b");
+        let mut a = hub.subscribe_one("a").expect("a exists");
+        let mut b = hub.subscribe_one("b").expect("b exists");
+        hub.forget("a");
+        assert!(matches!(a.try_recv(), Err(TryRecvError::Closed)));
+        assert!(hub.publish(h264("b", true, 5)));
+        assert_eq!(b.try_recv().expect("b still flows").bytes, vec![5]);
+        assert_eq!(hub.known_devices(), vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn a_device_that_appears_after_a_client_connected_is_announced() {
+        // Clients connect once, at app start, before any phone is enumerated. Without the
+        // roster every device discovered later would be a canvas that never paints.
+        let hub = ViewHub::new();
+        let mut roster = hub.roster.subscribe();
+        hub.advance("late");
+        assert_eq!(roster.try_recv().expect("announced"), "late".to_string());
+        // Announced once, not on every generation bump.
+        hub.advance("late");
+        assert!(roster.try_recv().is_err());
+    }
+
+    #[test]
+    fn an_ios_preview_announces_its_device_once_not_once_per_frame() {
+        // `publish_jpeg` runs per preview frame. Announcing unconditionally would fill the
+        // roster with one udid several times a second, and every client would then see
+        // `Lagged` on the roster and re-snapshot the whole fleet for nothing.
+        let hub = ViewHub::new();
+        let mut roster = hub.roster.subscribe();
+        for _ in 0..10 {
+            assert!(hub.publish_jpeg("phone", vec![0xff, 0xd8]));
+        }
+        assert_eq!(roster.try_recv().expect("announced"), "phone".to_string());
+        assert!(roster.try_recv().is_err(), "announced exactly once");
+    }
+
+    #[tokio::test]
+    async fn a_client_receives_a_replay_then_live_packets_over_a_real_socket() {
+        // The first test ever to run `serve_client`, `replay_latest` or the forwarder path.
+        // Those had zero coverage while carrying every comment in this file about silent
+        // frame loss, and this change rewrites all three.
+        use futures_util::StreamExt;
+
+        let hub = ViewHub::new();
+        hub.advance("a");
+        assert!(hub.publish(h264("a", true, 1)));
+        let port = Arc::clone(&hub).listen().await.expect("bind loopback");
+
+        // `client_async` over a socket we dial ourselves, rather than `connect_async`: the
+        // latter is behind tokio-tungstenite's `connect` feature, which this crate
+        // deliberately does not enable — it would pull in DNS and TLS for a loopback
+        // listener that will never need either.
+        let socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("dial the loopback listener");
+        let (mut client, _) =
+            tokio_tungstenite::client_async(format!("ws://127.0.0.1:{port}/"), socket)
+                .await
+                .expect("websocket handshake");
+
+        // Replay: the cached keyframe of every device that already existed.
+        let replayed = client.next().await.expect("a message").expect("no error");
+        assert_eq!(
+            replayed.into_data().to_vec(),
+            encode_packet(&h264("a", true, 1))
+        );
+
+        // A device discovered after the client connected still reaches it, via the roster.
+        hub.advance("b");
+        assert!(hub.publish(h264("b", true, 2)));
+        let live = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .expect("a packet for a device added after connect")
+            .expect("a message")
+            .expect("no error");
+        assert_eq!(
+            live.into_data().to_vec(),
+            encode_packet(&h264("b", true, 2))
+        );
     }
 }
