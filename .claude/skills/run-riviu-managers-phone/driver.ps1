@@ -71,6 +71,7 @@ public class RiviuWin32 {
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
     [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, IntPtr extra);
     [DllImport("user32.dll")] public static extern uint GetDoubleClickTime();
+    public const uint MOUSEEVENTF_MOVE = 0x0001;
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
@@ -558,6 +559,40 @@ function Invoke-DblClick {
     [void][RiviuWin32]::SetCursorPos($saved.X, $saved.Y)
 }
 
+function Invoke-Drag {
+    if ($Rest.Count -lt 4) { throw 'usage: driver.ps1 drag <x1> <y1> <x2> <y2> [steps] [stepMs]   (window-relative)' }
+    $x1 = [int]$Rest[0]; $y1 = [int]$Rest[1]; $x2 = [int]$Rest[2]; $y2 = [int]$Rest[3]
+    $steps  = if ($Rest.Count -ge 5) { [int]$Rest[4] } else { 20 }
+    $stepMs = if ($Rest.Count -ge 6) { [int]$Rest[5] } else { 16 }
+    $saved = New-Object 'RiviuWin32+POINT'
+    [void][RiviuWin32]::GetCursorPos([ref]$saved)
+    # One process, like `fill`: a drag split across invocations is a press and a release
+    # with no relationship. And the intermediate moves are the whole point -- `click` only
+    # ever produces pointerdown/pointerup, so it cannot exercise a path at all.
+    Use-RaisedWindow -SettleMs 900 -Activate -Body {
+        param($win)
+        Write-Step "drag window($x1,$y1)->($x2,$y2) in $steps steps of ${stepMs}ms"
+        [void][RiviuWin32]::SetCursorPos(($win.Left + $x1), ($win.Top + $y1))
+        Start-Sleep -Milliseconds 120
+        [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 60
+        for ($i = 1; $i -le $steps; $i++) {
+            $t = $i / $steps
+            # Ease-in-out, so the gesture has a velocity profile rather than a constant one
+            # -- a straight constant drag would pass a test that a real finger would fail.
+            $e = if ($t -lt 0.5) { 2 * $t * $t } else { 1 - [Math]::Pow(-2 * $t + 2, 2) / 2 }
+            $x = [int]($x1 + ($x2 - $x1) * $e)
+            $y = [int]($y1 + ($y2 - $y1) * $e)
+            [void][RiviuWin32]::SetCursorPos(($win.Left + $x), ($win.Top + $y))
+            [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_MOVE, 0, 0, 0, [IntPtr]::Zero)
+            Start-Sleep -Milliseconds $stepMs
+        }
+        [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 600
+    }
+    [void][RiviuWin32]::SetCursorPos($saved.X, $saved.Y)
+}
+
 function Invoke-Fill {
     if ($Rest.Count -lt 3) { throw 'usage: driver.ps1 fill <x> <y> <text>' }
     $x = [int]$Rest[0]; $y = [int]$Rest[1]
@@ -815,6 +850,7 @@ switch ($Command.ToLowerInvariant()) {
     'shot'    { Invoke-Shot }
     'click'   { Invoke-Click }
     'dblclick' { Invoke-DblClick }
+    'drag'     { Invoke-Drag }
     'fill'    { Invoke-Fill }
     'type'    { Invoke-Type }
     'key'     { Invoke-Key }
