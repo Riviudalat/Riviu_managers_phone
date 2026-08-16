@@ -568,6 +568,8 @@ export async function installTauriMock(
       gridQuality: "medium",
       focusQuality: "high",
     }));
+    // The Settings panel can now write these, and `invoke` throws for anything unregistered.
+    commandHandlers.set("set_stream_settings", (args) => clone(args?.settings ?? null));
     commandHandlers.set("auth_session", () => ({ showAuthUi: false, bypassed: true, user: null }));
     commandHandlers.set("flow_action_catalog", () => clone(catalog));
     commandHandlers.set("flow_list", () => {

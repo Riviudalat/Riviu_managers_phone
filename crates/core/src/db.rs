@@ -969,6 +969,31 @@ impl Database {
         self.set_setting("agent.settings.v1", &serde_json::to_string(settings)?)
     }
 
+    /// The operator's stream quality and frame rate, or the defaults.
+    ///
+    /// No migration: the `settings` key/value table has existed since the first one, and
+    /// both other persisted settings blobs already live in it. A new schema object here
+    /// would buy nothing and drag the migration ledger tests with it — the "migration" is a
+    /// new key string.
+    ///
+    /// Strict about malformed JSON, like its neighbours: a stored value that cannot be read
+    /// is a fact worth surfacing, not something to quietly replace with defaults. The
+    /// startup caller decides whether that is fatal; here it is reported.
+    pub fn get_stream_settings(&self) -> anyhow::Result<crate::types::StreamSettings> {
+        match self.get_setting("stream.settings.v1")? {
+            Some(raw) => serde_json::from_str(&raw)
+                .context("invalid JSON in stored setting stream.settings.v1"),
+            None => Ok(crate::types::StreamSettings::default()),
+        }
+    }
+
+    pub fn save_stream_settings(
+        &self,
+        settings: &crate::types::StreamSettings,
+    ) -> anyhow::Result<()> {
+        self.set_setting("stream.settings.v1", &serde_json::to_string(settings)?)
+    }
+
     pub fn add_nurture_comment_cost(
         &self,
         cost: &crate::types::NurtureCommentCost,
@@ -1618,6 +1643,89 @@ mod agent_settings_tests {
             .expect_err("malformed settings must fail");
 
         assert!(error.to_string().contains("agent.settings.v1"));
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+}
+
+#[cfg(test)]
+mod stream_settings_tests {
+    use super::*;
+    use crate::types::{StreamQuality, StreamSettings, TileSize};
+
+    fn fixture() -> (Database, PathBuf) {
+        let path =
+            std::env::temp_dir().join(format!("riviu-stream-settings-test-{}.db", Uuid::new_v4()));
+        (Database::open(&path).expect("open fixture database"), path)
+    }
+
+    #[test]
+    fn an_untouched_install_reads_the_defaults_rather_than_failing() {
+        let (db, path) = fixture();
+        assert_eq!(
+            db.get_stream_settings()
+                .expect("absent key is not an error"),
+            StreamSettings::default()
+        );
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    #[test]
+    fn stream_settings_survive_a_restart() {
+        // The whole point of the change: quality and frame rate used to live only in an
+        // `Arc<RwLock<_>>` built from `Default` at bootstrap, so every setting the operator
+        // chose was gone the next time the app opened.
+        let (db, path) = fixture();
+        let chosen = StreamSettings {
+            fps: 18,
+            tile_size: TileSize::Large,
+            grid_quality: StreamQuality::Extra,
+            focus_quality: StreamQuality::Low,
+        };
+
+        db.save_stream_settings(&chosen).expect("save");
+
+        assert_eq!(db.get_stream_settings().expect("load"), chosen);
+        let raw = db
+            .get_setting("stream.settings.v1")
+            .expect("read raw setting")
+            .expect("stored setting");
+        assert_eq!(
+            raw,
+            r#"{"fps":18,"tileSize":"large","gridQuality":"extra","focusQuality":"low"}"#
+        );
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    #[test]
+    fn a_blob_missing_a_field_still_loads() {
+        // `#[serde(default)]` earns its place here rather than in review: the load runs at
+        // startup, so without it the first field ever added to this struct would turn every
+        // existing install's stored row into a failure to boot.
+        let (db, path) = fixture();
+        db.set_setting("stream.settings.v1", r#"{"fps":12}"#)
+            .expect("store a blob from an older build");
+
+        let loaded = db
+            .get_stream_settings()
+            .expect("a partial blob still loads");
+
+        assert_eq!(loaded.fps, 12);
+        assert_eq!(loaded.tile_size, StreamSettings::default().tile_size);
+        assert_eq!(loaded.grid_quality, StreamSettings::default().grid_quality);
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    #[test]
+    fn invalid_stream_settings_json_is_not_silently_defaulted() {
+        let (db, path) = fixture();
+        db.set_setting("stream.settings.v1", "{not-json")
+            .expect("store malformed fixture");
+
+        let error = db
+            .get_stream_settings()
+            .expect_err("malformed settings must fail");
+
+        assert!(error.to_string().contains("stream.settings.v1"));
         std::fs::remove_file(path).expect("remove fixture database");
     }
 }

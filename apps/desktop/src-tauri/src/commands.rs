@@ -803,6 +803,11 @@ pub fn get_stream_settings(state: State<'_, AppState>) -> StreamSettings {
 /// had no reader anywhere in the tree. Both are now clamped rather than discarded and
 /// pushed into the Android view path.
 ///
+/// And the whole row now **survives a restart**. It did not: the value lived only in an
+/// `Arc<RwLock<_>>` built from `Default` at bootstrap, so an operator's choice lasted until
+/// they closed the app — a save that quietly forgets is not much better than the no-op this
+/// already replaced once.
+///
 /// Running tiles are restarted so the change is visible: a settings row that only
 /// applies to phones started later is the same silent no-op this replaces. The restart
 /// is the path the watchdog already takes several times an hour, so it costs a second
@@ -814,9 +819,13 @@ pub async fn set_stream_settings(
 ) -> Result<StreamSettings, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let mut s = settings;
-    s.fps = s
-        .fps
-        .clamp(riviu_android_driver::MIN_VIEW_FPS, MAX_SETTABLE_VIEW_FPS);
+    s.fps = clamp_stream_fps(s.fps);
+    // Persist before applying. A save that takes effect for this session and vanishes on
+    // restart is worse than one that reports it could not be written.
+    state
+        .db
+        .save_stream_settings(&s)
+        .map_err(CommandError::operation)?;
     *state.stream_settings.write() = s.clone();
 
     if let Some(android) = &state.android {
@@ -1353,6 +1362,15 @@ pub struct UpdateStatus {
 /// 60 would promise a rate no phone here delivers. Clamped rather than validated so a
 /// stored value from an older build cannot refuse the whole save.
 const MAX_SETTABLE_VIEW_FPS: u32 = 30;
+
+/// The one place the settable frame rate is bounded.
+///
+/// Two callers now that the value is persisted — the save, and the load at startup — and
+/// they must not drift: `get_stream_settings` reporting one number while the encoder runs
+/// another is precisely the silent disagreement AGENTS.md 9.59 records as already fixed once.
+pub(crate) fn clamp_stream_fps(fps: u32) -> u32 {
+    fps.clamp(riviu_android_driver::MIN_VIEW_FPS, MAX_SETTABLE_VIEW_FPS)
+}
 
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()

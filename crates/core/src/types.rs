@@ -402,7 +402,7 @@ pub struct JobRecord {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TileSize {
     Thumbnail,
@@ -411,7 +411,7 @@ pub enum TileSize {
     ExtraLarge,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum StreamQuality {
     Low,
@@ -420,12 +420,25 @@ pub enum StreamQuality {
     Extra,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// What the operator asked the view path for. Persisted under `stream.settings.v1`.
+///
+/// `#[serde(default)]` is not decoration: this round-trips through the database now, so a
+/// blob written by an older build has to keep loading when a field is added. Without it the
+/// first new field would make every stored row fail to deserialize — and the load happens at
+/// startup, so that is a boot failure over a quality setting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct StreamSettings {
     pub fps: u32,
+    /// **No reader anywhere in the tree yet** — the grid's tile width is a frontend
+    /// `localStorage` value today (`zoom.ts`). Persisted because it is part of the wire type
+    /// and dropping it would be a breaking change to the TS interface, not because storing
+    /// it makes it take effect.
     pub tile_size: TileSize,
+    /// Reaches the encoder: `set_view_tuning` -> `ViewPreset::tuned`.
     pub grid_quality: StreamQuality,
+    /// **No reader yet.** The driver holds one tuning pair for both presets, so the overlay
+    /// currently encodes at `grid_quality`. Wiring this means a per-preset tuning map.
     pub focus_quality: StreamQuality,
 }
 

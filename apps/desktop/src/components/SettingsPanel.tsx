@@ -8,7 +8,9 @@ import {
   clearAppleId,
   driverMode,
   getAppleId,
+  getStreamSettings,
   setAppleId,
+  setStreamSettings,
   updateCheck,
   updateInstall,
 } from "../api";
@@ -16,13 +18,25 @@ import { agentStatusView } from "../agentStatus";
 import { updateView } from "../updateView";
 import { EmptyState } from "./States";
 import { IconPhone } from "./Icons";
-import type { AgentRuntimeView, AgentStatus, DeviceInfo, UpdateStatus } from "../types";
+import type {
+  AgentRuntimeView,
+  AgentStatus,
+  DeviceInfo,
+  StreamSettings,
+  UpdateStatus,
+} from "../types";
 
 interface Props {
   devices: DeviceInfo[];
 }
 
 type AgentAction = "check" | "repair";
+
+/// Kept in step with `MIN_VIEW_FPS` and `MAX_SETTABLE_VIEW_FPS` on the Rust side. Rust
+/// clamps regardless — these only stop the field from displaying a number the encoder will
+/// never run at while the operator waits to see it take effect.
+const MIN_STREAM_FPS = 5;
+const MAX_STREAM_FPS = 30;
 
 export function SettingsPanel({ devices }: Props) {
   const [email, setEmail] = useState("");
@@ -39,6 +53,26 @@ export function SettingsPanel({ devices }: Props) {
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState(false);
+  const [streamSettings, setStreamSettingsState] = useState<StreamSettings | null>(null);
+  const [savingStream, setSavingStream] = useState(false);
+  const [streamMessage, setStreamMessage] = useState<string | null>(null);
+
+  /// Send the whole row, not the one field that changed: the command takes a complete
+  /// `StreamSettings` and a partial one would reset the fields it omitted to their defaults.
+  const saveStream = async (change: Partial<StreamSettings>) => {
+    if (!streamSettings) return;
+    setSavingStream(true);
+    setStreamMessage(null);
+    try {
+      // The reply is the clamped value Rust actually stored, so the field shows what took
+      // effect rather than what was typed.
+      setStreamSettingsState(await setStreamSettings({ ...streamSettings, ...change }));
+    } catch (error) {
+      setStreamMessage(String(error));
+    } finally {
+      setSavingStream(false);
+    }
+  };
 
   const connectedDevices = useMemo(
     () => devices.filter((device) => device.status !== "disconnected"),
@@ -60,6 +94,9 @@ export function SettingsPanel({ devices }: Props) {
       })
       .catch(() => undefined);
     driverMode().then(setMode).catch(() => setMode("unknown"));
+    getStreamSettings()
+      .then(setStreamSettingsState)
+      .catch((error) => setStreamMessage(String(error)));
   }, []);
 
   useEffect(() => {
@@ -230,6 +267,57 @@ export function SettingsPanel({ devices }: Props) {
             })}
           </div>
         )}
+      </section>
+
+      {/* The row this panel was missing. `StreamSettings` has been in the Rust command
+          surface the whole time with nothing on the frontend calling it, so quality and
+          frame rate were unreachable — which is also why "they are lost on restart" was
+          only half the story. */}
+      <section className="settings-section">
+        <h3>Chất lượng stream</h3>
+        <p className="hint">
+          Áp cho Android. Đổi xong sẽ khởi động lại các tile đang chạy, mất khoảng một giây
+          hình đen mỗi máy.
+        </p>
+        <div className="row">
+          <label>
+            Chất lượng lưới
+            <select
+              value={streamSettings?.gridQuality ?? "medium"}
+              disabled={!streamSettings || savingStream}
+              onChange={(event) => {
+                void saveStream({
+                  gridQuality: event.target.value as StreamSettings["gridQuality"],
+                });
+              }}
+            >
+              <option value="low">Thấp</option>
+              <option value="medium">Vừa</option>
+              <option value="high">Cao</option>
+              <option value="extra">Rất cao</option>
+            </select>
+          </label>
+          <label>
+            FPS
+            <input
+              type="number"
+              min={MIN_STREAM_FPS}
+              max={MAX_STREAM_FPS}
+              value={streamSettings?.fps ?? MAX_STREAM_FPS}
+              disabled={!streamSettings || savingStream}
+              onChange={(event) => {
+                const fps = Number(event.target.value);
+                if (!Number.isFinite(fps)) return;
+                // Clamped here as well as in Rust, so the field cannot show a number the
+                // encoder will never run at while the operator waits for it to take effect.
+                void saveStream({
+                  fps: Math.min(Math.max(Math.round(fps), MIN_STREAM_FPS), MAX_STREAM_FPS),
+                });
+              }}
+            />
+          </label>
+        </div>
+        {streamMessage && <p className="error">{streamMessage}</p>}
       </section>
 
       <section className="settings-section">

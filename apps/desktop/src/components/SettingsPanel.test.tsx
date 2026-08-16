@@ -19,6 +19,15 @@ vi.mock("../api", () => ({
   driverMode: vi.fn(async () => "real"),
   getAppleId: vi.fn(async () => ({ email: "", hasPassword: false })),
   setAppleId: vi.fn(async () => undefined),
+  // A whole-module factory: anything the panel imports but this omits is `undefined` and
+  // throws on the first call. Both of these are reached on mount.
+  getStreamSettings: vi.fn(async () => ({
+    fps: 24,
+    tileSize: "medium",
+    gridQuality: "medium",
+    focusQuality: "high",
+  })),
+  setStreamSettings: vi.fn(async (settings: unknown) => settings),
   updateCheck: vi.fn(),
   updateInstall: vi.fn(async () => undefined),
 }));
@@ -115,5 +124,50 @@ describe("SettingsPanel update section", () => {
     await userEvent.click(installButton());
 
     await waitFor(() => expect(screen.getByText(/đã dừng phiên/)).toBeTruthy());
+  });
+});
+
+describe("stream quality", () => {
+  it("sends the whole row, not only the field that changed", async () => {
+    // `set_stream_settings` takes a complete `StreamSettings`; posting a partial one would
+    // silently reset every field the operator did not touch back to its default.
+    const api = await import("../api");
+    const save = vi.mocked(api.setStreamSettings);
+    save.mockClear();
+    render(<SettingsPanel devices={[]} />);
+    await waitFor(() => expect(screen.getByLabelText("Chất lượng lưới")).toBeTruthy());
+
+    await userEvent.selectOptions(screen.getByLabelText("Chất lượng lưới"), "extra");
+
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expect(save.mock.calls[0][0]).toEqual({
+      fps: 24,
+      tileSize: "medium",
+      gridQuality: "extra",
+      focusQuality: "high",
+    });
+  });
+
+  it("shows the value the host stored, not the one that was typed", async () => {
+    // Rust clamps the frame rate into the range the fleet actually runs at, and the reply is
+    // the clamped row. Rendering the typed value instead would tell the operator a rate no
+    // phone here delivers -- the UI-and-encoder disagreement AGENTS.md 9.59 records.
+    const api = await import("../api");
+    const save = vi.mocked(api.setStreamSettings);
+    save.mockClear();
+    save.mockResolvedValueOnce({
+      fps: 30,
+      tileSize: "medium",
+      gridQuality: "medium",
+      focusQuality: "high",
+    });
+    render(<SettingsPanel devices={[]} />);
+    await waitFor(() => expect(screen.getByLabelText("FPS")).toBeTruthy());
+
+    const fps = screen.getByLabelText("FPS");
+    await userEvent.clear(fps);
+    await userEvent.type(fps, "99");
+
+    await waitFor(() => expect((fps as HTMLInputElement).value).toBe("30"));
   });
 });

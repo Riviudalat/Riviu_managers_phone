@@ -551,6 +551,23 @@ impl AppState {
             bundled_agent_test_apk: android_tools.agent_test_apk.clone(),
             ..Default::default()
         };
+        // Restored from the database rather than rebuilt from `Default`, which is what made
+        // every quality and frame-rate choice last exactly as long as the app was open.
+        //
+        // Warn-and-default rather than propagate: the helper is strict so a corrupt row is
+        // reported, but refusing to open the app over a stream-quality setting would trade a
+        // cosmetic loss for a total one. The clamp is applied on the way in as well as on
+        // the way out, so a value stored by an older build cannot make `get_stream_settings`
+        // report a rate the encoder will never run at.
+        let stream_settings = {
+            let mut settings = db.get_stream_settings().unwrap_or_else(|error| {
+                log::warn!("stored stream settings could not be read ({error:#}); using defaults");
+                StreamSettings::default()
+            });
+            settings.fps = crate::commands::clamp_stream_fps(settings.fps);
+            settings
+        };
+
         let (android, android_unavailable) =
             match riviu_android_driver::detect_driver(&android_config).await {
                 Ok(driver) => {
@@ -560,6 +577,13 @@ impl AppState {
                     driver.set_view_sink(
                         Arc::clone(&view_hub) as Arc<dyn riviu_android_driver::ViewSink>
                     );
+                    // The restored choice has to reach the driver before the first producer
+                    // spawns: `spawn_view` reads `view_tuning` and takes no argument for it,
+                    // so without this the settings panel would report the operator's values
+                    // while every tile started at the compiled-in defaults until they saved
+                    // again. That is the UI-and-encoder disagreement of AGENTS.md 9.59.
+                    driver
+                        .set_view_tuning(stream_settings.grid_quality.clone(), stream_settings.fps);
                     backends.push(("android".to_string(), driver.clone()));
                     (Some(driver), None)
                 }
@@ -654,7 +678,7 @@ impl AppState {
             active_agent_artifact_id,
             active_agent_artifact_version,
             active_agent_bundle_id,
-            stream_settings: Arc::new(RwLock::new(StreamSettings::default())),
+            stream_settings: Arc::new(RwLock::new(stream_settings)),
             artifacts_dir,
             legacy_wda_bundle: sidecar_root.join("wda").join("Riviumanagersphone.ipa"),
             nurture: NurtureRuntime::new(),
