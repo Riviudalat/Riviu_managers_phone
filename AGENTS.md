@@ -5061,6 +5061,105 @@ Overlay chay ~2 phut khong bi watchdog ha ve tile. Hinh doc duoc tung dong thong
 chu Trung. Vi mot producer nuoi ca hai surface, tile phia sau **cung net len theo** khi
 overlay mo -- khong phai loi, nhung dang biet truoc khi ai do di tim vi sao tile thay doi.
 
+### 9.69 App bao nguoi van hanh cai hai APK ma no khong he ship (16/08/2026)
+
+Cam mot box **20 may Galaxy S8**. Video chay **20/20**, dieu khien chay **0/20**, va loi noi
+dung nguyen nhan: `openControlSession failed ... the agent is not installed on <serial>.
+Install both appium-uiautomator2-server APKs`.
+
+`sidecars/android/noarch/` luc do chi co `minicap.apk` va `scrcpy-server`. **Do dung la ly do
+video chay con dieu khien thi khong** — `scrcpy-server` duoc dong goi va day sang may, hai APK
+kia khong co gi day ca. Bao ai do cai mot file khong nam trong hop thi khong phai thong bao
+loi, do la **mot tinh nang con thieu deo mat na thong bao loi**.
+
+Da dong goi `appium-uiautomator2-server v10.6.2` (Apache-2.0), lay tu release upstream tren
+GitHub, **khong** lay tu thu muc cai cua san pham khac. Pin SHA-256 trong
+`android-tools-manifest.json` y het minicap va scrcpy. `minSdkVersion 26` — phu Android 9 cua
+fleet nay va Android 15 cua may truoc do.
+
+`pm install -r -g -t`: cai de len ban cu, cap quyen runtime khong hien dialog, va **cho phep
+APK test-only** — nua `androidTest` build voi `android:testOnly` ma `pm install` mac dinh tu
+choi. Server cai truoc vi APK test khai mot instrumentation tro toi package cua server.
+
+**Ca hai nua hoac khong nua nao, ep tu kieu du lieu.** Cap APK la mot `zip` cua hai lan phan
+giai nen trang thai nua voi khong bieu dien duoc. Nua instrumentation cai sach se roi that bai
+o `am instrument` voi **dung cai refusal cu**, va nguoi di sua se soi nham cai nua dang co.
+
+**Do dau-cuoi:** mo overlay mot may → tu cai ca hai APK trong ~3 giay → `pm list packages` thay
+du hai → agent tra `/status` qua dung forward cua app voi `version 10.6.2, versionCode 274` →
+logcat may ghi `MotionEvent { ACTION_DOWN, x=336.0, y=594.0, toolType=TOOL_TYPE_FINGER,
+source=0x1002 }` **success** ca DOWN lan UP.
+
+### 9.70 Overlay quyet dinh ca cu keo tu DUNG HAI DIEM (16/08/2026)
+
+Nguoi van hanh bao keo khong bam tay. No khong the bam: `runGesture` quyet dinh toan bo cu chi
+**luc nha tay** tu `pointerdown` va `pointerup`, va **khong he co handler `pointermove` nao
+trong ca cay** (grep toan `apps/desktop/src` ra dung mot cho, o `NurturePopup`). Moi thu ngon
+tay lam o giua bi vut truoc khi roi trinh duyet, nen moi cu keo toi may la **mot duong thang o
+toc do deu**.
+
+Do **khong bao gio** la gioi han cua transport. `SwipePath` da ton tai trong `crates/core` tu
+khi viet cho nurture, `UiSession::swipe_path` co ban Android gui no, va `/actions` cua agent
+nhan **so `pointerMove` tuy y voi thoi luong rieng tung buoc trong MOT round trip**. Thu thieu
+la mot Tauri command: khong gi ngoai `crates/core` voi toi duoc.
+
+Them `swipe_path_image` vao `UiSession` (overlay do trong khung da encode, `SwipePath` mang
+pixel thiet bi — cung phep scale ma `swipe_image` da lam, giu trong session vi do la noi biet
+kich thuoc man hinh). Mac dinh cua trait gop ve diem-dau→diem-cuoi nen iOS va moi backend khac
+van chay, chi mat duong cong.
+
+Lay mau **co chu dich la mat mat o giua va chinh xac o hai dau**: bo mau gan hon 8 ms hoac 2 px,
+va qua 64 buoc thi **gop ve phia truoc** chu khong bo — giu nguyen tong thoi luong va ca hai
+dau mut, chi lam tho phan giua ma mat khong thay. Diem nha tay **luon** duoc them vao du bo loc
+da tu choi no.
+
+Hai mau tro xuong van di bang duong hai-diem cu. Mot cu flick trinh duyet chi lay mau mot lan
+khong phai duong cong, va gui no thanh path mot buoc se doi ca thoi luong cu chi cho mot move.
+
+**Do duoc: mot cu keo gio sinh 84 `ACTION_MOVE` tren may. Truoc do la 1.**
+
+Nhom van dung hai dau mut: khong co command path cho nhom, va viec fan mot chuoi 64 buoc ra
+hai muoi may la mot quyet dinh khac voi cai gia khac.
+
+### 9.71 Bat `control=true` lam mat video ca 20 may — va no chan IM LANG (16/08/2026)
+
+Ke hoach la bat control chi de gui `RESET_VIDEO` (type 17), cach upstream tu ket luan la dung
+de xin keyframe ma khong phai restart tien trinh (~44 giay tren fleet nay).
+
+Ket qua do duoc: **6 phut, 0 producer, khong mot warning nao.** Tren may thi **co server scrcpy
+dang chay** nhung **khong co `adb forward` nao** cho serial do. No chan im lang chu khong loi.
+
+Da **stash** (`part3-control-socket-WIP`) va tra `control=false`; fleet chay lai 20/20 ngay.
+
+Nghi van hang dau **chua kiem**: `power_on=false` co the khong phai ten option hop le cua
+3.3.4, lam server thoat theo kieu ta chua bat. `clipboard_autosync` thi **da** xac nhan la co
+(dich nguoc `Options.parse`), `power_on` thi **chua**.
+
+Nhung dieu **da** xac lap ve giao thuc, hai nguon doc lap dong y (dich nguoc `classes.dex` cua
+chinh file ta ship, va upstream tag `v3.3.4`; SHA-256 khop dung `SHA256SUMS.txt` chinh thuc):
+
+* Server accept **mot lan moi kenh bat**, thu tu **video → audio → control**, roi moi dong
+  listener. `sendDeviceMeta` chi chay **sau khi** `open()` tra ve. Nen host phai mo socket thu
+  hai **giua** luc doc dummy va luc doc device name. Do tren 3 may: socket #1 nhan dummy ngay,
+  roi **3,00 s / 0 byte**; mo socket #2 toi **cung host port** la nha ca hai header. **Mot
+  `adb forward` phuc vu ca hai socket.**
+* Dummy byte chi ghi vao socket **dau tien**. Socket control **khong** co dummy.
+* **Mot loi tren socket control giet CA server, ke ca video** — `Controller.start()` o `finally`
+  → `fatalError` → `Looper.quitSafely()`, ke ca vi **mot type byte la**. Nen reader phai khoan
+  dung va moi message phai di bang **mot** `write_all`: stream nay **khong co framing**.
+* `RESET_VIDEO` = type **17**, mot byte. `INJECT_TOUCH_EVENT` = type `0x02`, **32 byte**, toan
+  big-endian, pressure Q0.16 voi `0xFFFF` = dung 1.0.
+
+**Quyet dinh: input o lai uiautomator2, KHONG chuyen sang control socket.** Nguoi van hanh chon
+"bam theo cac du an lon", va do chinh la dieu he sinh thai lam — nhanh **soi guong** (scrcpy,
+QtScrcpy, ws-scrcpy) dung control socket vi the gioi cua ho la pixel; nhanh **farm** (STF,
+Airtest+Poco, Appium, uiautomator2) cai agent vi the gioi cua ho la element. **Ta o nhanh farm.**
+Ba ly do cu the: scrcpy rang toa do vao kich thuoc khung video va **bo im lang** khi lech (nen
+moi lan doi preset va moi lan xoay may la mot cua so cham bien mat — upstream #4925 **con mo**);
+`INJECT_TEXT` di tung ky tu qua `KeyCharacterMap` nen **khong go duoc tieng Viet co dau**; va
+agent **von khong cham** — 130–280 ms mot click do tren chinh Galaxy S8+. Con so 1502 ms la
+`adb shell input`, **khong phai** agent, dung nham hai cai.
+
 ### 9.65 Keyframe khong phai bang chung co SPS — va vi sao chan doan im lang suot 3 vong (15/08/2026)
 
 Mot box **20 may Galaxy S8** cam vao la loi man den tu in ra nguyen nhan cua no. Chu ky
