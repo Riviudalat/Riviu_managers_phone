@@ -92,12 +92,10 @@ export interface DeviceInfo {
   lastError?: string | null;
 }
 
-export type TileSize = "thumbnail" | "medium" | "large" | "extraLarge";
 export type StreamQuality = "low" | "medium" | "high" | "extra";
 
 export interface StreamSettings {
   fps: number;
-  tileSize: TileSize;
   gridQuality: StreamQuality;
   focusQuality: StreamQuality;
 }

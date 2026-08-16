@@ -582,8 +582,11 @@ impl AppState {
                     // so without this the settings panel would report the operator's values
                     // while every tile started at the compiled-in defaults until they saved
                     // again. That is the UI-and-encoder disagreement of AGENTS.md 9.59.
-                    driver
-                        .set_view_tuning(stream_settings.grid_quality.clone(), stream_settings.fps);
+                    driver.set_view_tuning(
+                        stream_settings.grid_quality.clone(),
+                        stream_settings.focus_quality.clone(),
+                        stream_settings.fps,
+                    );
                     backends.push(("android".to_string(), driver.clone()));
                     (Some(driver), None)
                 }

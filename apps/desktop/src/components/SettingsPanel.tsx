@@ -276,8 +276,9 @@ export function SettingsPanel({ devices }: Props) {
       <section className="settings-section">
         <h3>Chất lượng stream</h3>
         <p className="hint">
-          Áp cho Android. Đổi xong sẽ khởi động lại các tile đang chạy, mất khoảng một giây
-          hình đen mỗi máy.
+          Áp cho Android. Lưới và overlay mã hoá riêng — overlay là một máy chiếm cả cửa sổ
+          nên để cao hơn được. Đổi xong sẽ khởi động lại các tile đang chạy, mất khoảng một
+          giây hình đen mỗi máy.
         </p>
         <div className="row">
           <label>
@@ -288,6 +289,23 @@ export function SettingsPanel({ devices }: Props) {
               onChange={(event) => {
                 void saveStream({
                   gridQuality: event.target.value as StreamSettings["gridQuality"],
+                });
+              }}
+            >
+              <option value="low">Thấp</option>
+              <option value="medium">Vừa</option>
+              <option value="high">Cao</option>
+              <option value="extra">Rất cao</option>
+            </select>
+          </label>
+          <label>
+            Chất lượng overlay
+            <select
+              value={streamSettings?.focusQuality ?? "high"}
+              disabled={!streamSettings || savingStream}
+              onChange={(event) => {
+                void saveStream({
+                  focusQuality: event.target.value as StreamSettings["focusQuality"],
                 });
               }}
             >

@@ -404,15 +404,6 @@ pub struct JobRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum TileSize {
-    Thumbnail,
-    Medium,
-    Large,
-    ExtraLarge,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub enum StreamQuality {
     Low,
     Medium,
@@ -430,15 +421,10 @@ pub enum StreamQuality {
 #[serde(rename_all = "camelCase", default)]
 pub struct StreamSettings {
     pub fps: u32,
-    /// **No reader anywhere in the tree yet** — the grid's tile width is a frontend
-    /// `localStorage` value today (`zoom.ts`). Persisted because it is part of the wire type
-    /// and dropping it would be a breaking change to the TS interface, not because storing
-    /// it makes it take effect.
-    pub tile_size: TileSize,
-    /// Reaches the encoder: `set_view_tuning` -> `ViewPreset::tuned`.
+    /// What a grid tile encodes at.
     pub grid_quality: StreamQuality,
-    /// **No reader yet.** The driver holds one tuning pair for both presets, so the overlay
-    /// currently encodes at `grid_quality`. Wiring this means a per-preset tuning map.
+    /// What the overlay encodes at, which is a separate choice because it is a separate
+    /// picture: one phone filling a window rather than one of twenty tiles.
     pub focus_quality: StreamQuality,
 }
 
@@ -446,7 +432,6 @@ impl Default for StreamSettings {
     fn default() -> Self {
         Self {
             fps: STREAM_FPS,
-            tile_size: TileSize::Medium,
             grid_quality: StreamQuality::Medium,
             focus_quality: StreamQuality::High,
         }

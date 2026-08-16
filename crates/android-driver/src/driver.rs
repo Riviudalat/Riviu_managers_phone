@@ -166,6 +166,19 @@ struct StreamProducer {
 
 /// One running scrcpy view. Separate from [`StreamProducer`]: a phone can keep
 /// this H.264 encode while nurture owns a minicap JPEG producer.
+/// The operator's quality choices, one per preset, plus the frame rate they share.
+#[derive(Debug, Clone)]
+struct ViewTuningChoice {
+    /// What a grid tile encodes at.
+    grid: riviu_core::StreamQuality,
+    /// What the overlay encodes at. Higher by default: it is one phone at a time, which is
+    /// exactly what makes the larger encode affordable.
+    focus: riviu_core::StreamQuality,
+    /// Shared, because it is a property of what the fleet can deliver rather than of how big
+    /// the picture is.
+    fps: u32,
+}
+
 struct ViewProducer {
     generation: u64,
     preset: crate::scrcpy::ViewPreset,
@@ -236,7 +249,11 @@ pub struct AndroidDriver {
     /// each would make three places able to disagree about it. Set from the app when
     /// stream settings are saved; read when a producer is spawned, so a change reaches
     /// a tile on its next restart and never mid-stream.
-    view_tuning: Mutex<(riviu_core::StreamQuality, u32)>,
+    /// Per preset, because the two are displayed at very different sizes and the operator
+    /// gets a control for each. One shared pair meant the overlay silently encoded at the
+    /// grid's quality and `focus_quality` had no reader at all — a settings row that stored
+    /// a value and changed nothing.
+    view_tuning: Mutex<ViewTuningChoice>,
     /// Serials with a producer start in flight.
     ///
     /// The atomic claim that replaces holding [`Self::streams`] across the slow
@@ -366,7 +383,11 @@ impl AndroidDriver {
             // change: the launch used to ask for a hardcoded 30 while
             // `get_stream_settings` told the operator 24, so the UI and the encoder
             // disagreed silently. The default is now the declared rate, and the two agree.
-            view_tuning: Mutex::new((riviu_core::StreamQuality::Medium, riviu_core::STREAM_FPS)),
+            view_tuning: Mutex::new(ViewTuningChoice {
+                grid: riviu_core::StreamQuality::Medium,
+                focus: riviu_core::StreamQuality::High,
+                fps: riviu_core::STREAM_FPS,
+            }),
             starting: Mutex::new(HashSet::new()),
             interaction: riviu_core::InteractionLifecycleRegistry::default(),
             agents: Mutex::new(HashMap::new()),
@@ -937,8 +958,13 @@ impl AndroidDriver {
     /// Does **not** touch running producers. Restarting sixteen encoders because a
     /// slider moved is a fleet-wide stall the operator did not ask for, so the caller
     /// decides which views to restart and when — see `set_view_preset`.
-    pub fn set_view_tuning(&self, quality: riviu_core::StreamQuality, fps: u32) {
-        *self.view_tuning.lock() = (quality, fps);
+    pub fn set_view_tuning(
+        &self,
+        grid: riviu_core::StreamQuality,
+        focus: riviu_core::StreamQuality,
+        fps: u32,
+    ) {
+        *self.view_tuning.lock() = ViewTuningChoice { grid, focus, fps };
     }
 
     /// Retune by restarting the same producer. Not a second `app_process`.
@@ -1079,7 +1105,14 @@ impl AndroidDriver {
         // an encode.
         let tuning = {
             let guard = self.view_tuning.lock();
-            preset.tuned(guard.0.clone(), guard.1)
+            // The overlay is one phone filling a window; a tile is one of twenty. They are
+            // different pictures at different sizes, so they get the operator's two separate
+            // quality choices rather than sharing one.
+            let quality = match preset {
+                crate::scrcpy::ViewPreset::Tile => guard.grid.clone(),
+                crate::scrcpy::ViewPreset::Overlay => guard.focus.clone(),
+            };
+            preset.tuned(quality, guard.fps)
         };
 
         self.wake_display_for_capture(serial).await;

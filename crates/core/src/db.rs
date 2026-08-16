@@ -1650,7 +1650,7 @@ mod agent_settings_tests {
 #[cfg(test)]
 mod stream_settings_tests {
     use super::*;
-    use crate::types::{StreamQuality, StreamSettings, TileSize};
+    use crate::types::{StreamQuality, StreamSettings};
 
     fn fixture() -> (Database, PathBuf) {
         let path =
@@ -1677,7 +1677,6 @@ mod stream_settings_tests {
         let (db, path) = fixture();
         let chosen = StreamSettings {
             fps: 18,
-            tile_size: TileSize::Large,
             grid_quality: StreamQuality::Extra,
             focus_quality: StreamQuality::Low,
         };
@@ -1691,7 +1690,7 @@ mod stream_settings_tests {
             .expect("stored setting");
         assert_eq!(
             raw,
-            r#"{"fps":18,"tileSize":"large","gridQuality":"extra","focusQuality":"low"}"#
+            r#"{"fps":18,"gridQuality":"extra","focusQuality":"low"}"#
         );
         std::fs::remove_file(path).expect("remove fixture database");
     }
@@ -1710,7 +1709,6 @@ mod stream_settings_tests {
             .expect("a partial blob still loads");
 
         assert_eq!(loaded.fps, 12);
-        assert_eq!(loaded.tile_size, StreamSettings::default().tile_size);
         assert_eq!(loaded.grid_quality, StreamSettings::default().grid_quality);
         std::fs::remove_file(path).expect("remove fixture database");
     }

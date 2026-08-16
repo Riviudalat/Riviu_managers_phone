@@ -19,7 +19,6 @@ vi.mock("./api", () => ({
   exampleScript: vi.fn(async () => "{}"),
   getStreamSettings: vi.fn(async () => ({
     fps: 24,
-    tileSize: "medium",
     gridQuality: "medium",
     focusQuality: "high",
   })),

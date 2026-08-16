@@ -564,7 +564,6 @@ export async function installTauriMock(
     commandHandlers.set("list_jobs", () => []);
     commandHandlers.set("get_stream_settings", () => ({
       fps: 24,
-      tileSize: "medium",
       gridQuality: "medium",
       focusQuality: "high",
     }));

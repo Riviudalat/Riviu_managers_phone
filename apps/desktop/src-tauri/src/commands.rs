@@ -947,7 +947,7 @@ pub async fn set_stream_settings(
     *state.stream_settings.write() = s.clone();
 
     if let Some(android) = &state.android {
-        android.set_view_tuning(s.grid_quality.clone(), s.fps);
+        android.set_view_tuning(s.grid_quality.clone(), s.focus_quality.clone(), s.fps);
         for device in state.registry.list() {
             if device.platform != riviu_core::DevicePlatform::Android {
                 continue;

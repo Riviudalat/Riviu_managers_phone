@@ -23,7 +23,6 @@ vi.mock("../api", () => ({
   // throws on the first call. Both of these are reached on mount.
   getStreamSettings: vi.fn(async () => ({
     fps: 24,
-    tileSize: "medium",
     gridQuality: "medium",
     focusQuality: "high",
   })),
@@ -142,7 +141,6 @@ describe("stream quality", () => {
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
     expect(save.mock.calls[0][0]).toEqual({
       fps: 24,
-      tileSize: "medium",
       gridQuality: "extra",
       focusQuality: "high",
     });
@@ -157,7 +155,6 @@ describe("stream quality", () => {
     save.mockClear();
     save.mockResolvedValueOnce({
       fps: 30,
-      tileSize: "medium",
       gridQuality: "medium",
       focusQuality: "high",
     });

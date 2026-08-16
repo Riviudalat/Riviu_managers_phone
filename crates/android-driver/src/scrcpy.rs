@@ -1027,6 +1027,25 @@ mod tests {
     }
 
     #[test]
+    fn the_two_presets_can_be_tuned_apart() {
+        // `focus_quality` had no reader for as long as it existed: the driver held ONE
+        // quality for both presets, so the overlay silently encoded at the grid's setting
+        // and moving the overlay control did nothing at all. The two are different pictures
+        // — one phone filling a window against one of twenty tiles — so they have to be able
+        // to differ, and this is what says so.
+        let tile_low = ViewPreset::Tile.tuned(riviu_core::StreamQuality::Low, 24);
+        let overlay_extra = ViewPreset::Overlay.tuned(riviu_core::StreamQuality::Extra, 24);
+        assert!(
+            overlay_extra.bit_rate > tile_low.bit_rate * 4,
+            "a low grid and an extra overlay must be far apart: {tile_low:?} vs {overlay_extra:?}"
+        );
+        // And the same quality on both still differs, because the presets themselves do.
+        let tile = ViewPreset::Tile.tuned(riviu_core::StreamQuality::Medium, 24);
+        let overlay = ViewPreset::Overlay.tuned(riviu_core::StreamQuality::Medium, 24);
+        assert!(overlay.max_size > tile.max_size);
+    }
+
+    #[test]
     fn socket_name_matches_the_server_format() {
         assert_eq!(socket_name(0x00ab_12cd), "scrcpy_00ab12cd");
         assert_eq!(socket_name(1), "scrcpy_00000001");
