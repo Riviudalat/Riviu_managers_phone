@@ -190,6 +190,37 @@ impl UiSession for AndroidUiSession {
         self.agent.swipe_path(&path).await
     }
 
+    /// Scale every point of the path, then send the whole curve in one round trip.
+    ///
+    /// One request, not one per step: the agent's `/actions` takes an arbitrary number of
+    /// `pointerMove`s with individual durations, so a fifty-point drag costs the same trip
+    /// as a two-point one. That is the whole reason the overlay can afford to send what the
+    /// finger actually did instead of a straight line between the endpoints.
+    async fn swipe_path_image(
+        &self,
+        path: riviu_core::types::SwipePath,
+        image_w: f64,
+        image_h: f64,
+    ) -> anyhow::Result<()> {
+        let scale = |point: &riviu_core::types::TapPoint| {
+            let (x, y) = self.image_to_screen(point.x, point.y, image_w, image_h);
+            riviu_core::types::TapPoint { x, y }
+        };
+        let scaled = riviu_core::types::SwipePath {
+            start: scale(&path.start),
+            steps: path
+                .steps
+                .iter()
+                .map(|step| riviu_core::types::SwipeStep {
+                    point: scale(&step.point),
+                    duration_ms: step.duration_ms,
+                })
+                .collect(),
+            settle_ms: path.settle_ms,
+        };
+        self.agent.swipe_path(&scaled).await
+    }
+
     async fn tap_image(&self, x: f64, y: f64, image_w: f64, image_h: f64) -> anyhow::Result<()> {
         let (x, y) = self.image_to_screen(x, y, image_w, image_h);
         // Overlay / Open-on-Device: a 16 ms contact, no nurture drift.

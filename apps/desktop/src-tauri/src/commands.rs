@@ -532,6 +532,47 @@ pub async fn device_tap(
     .await
 }
 
+/// A drag as the path the finger actually took, not as its two endpoints.
+///
+/// `device_swipe` sends one `pointerMove`, which the framework receives as a perfectly
+/// straight line at a perfectly constant velocity between the same two points every time.
+/// The overlay was deciding the whole gesture at release from exactly two samples, so that
+/// is all it could ever produce -- which is what "not sticking to the finger" was.
+///
+/// The agent's `/actions` takes an arbitrary number of moves with individual durations in
+/// ONE round trip, so the curve costs no more than the straight line did.
+#[tauri::command]
+pub async fn device_swipe_path(
+    state: State<'_, AppState>,
+    udid: String,
+    path: riviu_core::types::SwipePath,
+    image_w: Option<f64>,
+    image_h: Option<f64>,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    // A path with no steps is not a drag; refuse it here rather than letting it reach the
+    // device as a touch that never moves and never lifts.
+    if path.steps.is_empty() {
+        return Err(CommandError::operation(anyhow::anyhow!(
+            "a swipe path needs at least one step"
+        )));
+    }
+    with_manual_session(
+        &state,
+        &udid,
+        DeviceWorkOwner::ManualControl,
+        |session| async move {
+            match (image_w, image_h) {
+                (Some(w), Some(h)) if w > 0.0 && h > 0.0 => {
+                    session.swipe_path_image(path, w, h).await
+                }
+                _ => session.swipe_path(path).await,
+            }
+        },
+    )
+    .await
+}
+
 #[tauri::command]
 pub async fn device_swipe(
     state: State<'_, AppState>,

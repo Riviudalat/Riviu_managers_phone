@@ -490,6 +490,33 @@ pub trait UiSession: Send + Sync {
     async fn swipe_path(&self, path: SwipePath) -> anyhow::Result<()> {
         self.swipe(path.as_gesture()).await
     }
+    /// [`Self::swipe_path`] with the points in stream/screenshot pixel space.
+    ///
+    /// The overlay measures a drag in the encoded frame it is painting, not in device
+    /// pixels, so a path from the UI needs the same scaling [`Self::swipe_image`] does.
+    /// Kept as its own method rather than making the caller scale, because the scale
+    /// factor lives in the session (it knows the screen size) and a caller that guesses it
+    /// produces a gesture that is subtly the wrong shape rather than an error.
+    ///
+    /// The default collapses to first-point -> last-point, so a backend that cannot draw a
+    /// path keeps working and simply loses the curve.
+    async fn swipe_path_image(
+        &self,
+        path: SwipePath,
+        image_w: f64,
+        image_h: f64,
+    ) -> anyhow::Result<()> {
+        let gesture = path.as_gesture();
+        self.swipe_image(
+            gesture.from,
+            gesture.to,
+            image_w,
+            image_h,
+            gesture.duration_ms,
+        )
+        .await
+    }
+
     /// Tap using coordinates in stream/screenshot pixel space.
     async fn tap_image(&self, x: f64, y: f64, image_w: f64, image_h: f64) -> anyhow::Result<()> {
         let _ = (image_w, image_h);

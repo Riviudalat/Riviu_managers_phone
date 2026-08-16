@@ -116,6 +116,43 @@ export async function deviceTap(
   });
 }
 
+export interface SwipeSample {
+  x: number;
+  y: number;
+  /// Milliseconds since the previous sample. The agent gives each `pointerMove` its own
+  /// duration, so this is what carries the gesture's velocity -- a drag that starts slow
+  /// and eases out reaches the phone as exactly that.
+  durationMs: number;
+}
+
+/// A drag as the path the finger took, in encoded-frame pixels.
+///
+/// `deviceSwipe` sends two endpoints, which the framework receives as a straight line at
+/// constant speed. This sends the samples, and the whole curve goes in ONE round trip
+/// because the agent's `/actions` accepts any number of moves.
+export async function deviceSwipePath(
+  udid: string,
+  start: { x: number; y: number },
+  steps: SwipeSample[],
+  imageW: number,
+  imageH: number,
+  settleMs = 40,
+) {
+  return invoke<void>("device_swipe_path", {
+    udid,
+    path: {
+      start,
+      steps: steps.map((step) => ({
+        point: { x: step.x, y: step.y },
+        durationMs: Math.max(1, Math.round(step.durationMs)),
+      })),
+      settleMs,
+    },
+    imageW,
+    imageH,
+  });
+}
+
 export async function deviceSwipe(
   udid: string,
   fromX: number,

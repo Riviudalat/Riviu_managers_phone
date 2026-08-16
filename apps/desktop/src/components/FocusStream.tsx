@@ -6,6 +6,7 @@ import {
   deviceControlEnd,
   deviceKey,
   deviceSwipe,
+  deviceSwipePath,
   deviceTap,
   groupInput,
   rebootDevice,
@@ -71,7 +72,14 @@ export function FocusStream({ device, index, onClose, groupUdids, groupMode }: P
   const [showAdb, setShowAdb] = useState(false);
   const [frameWidth, setFrameWidth] = useState(() => loadZoom(FOCUS_ZOOM));
   const screenRef = useRef<HTMLDivElement>(null);
-  const drag = useRef<{ x: number; y: number } | null>(null);
+  /// The drag in progress: where it started, every sample since, and when the last one was
+  /// taken. Held in a ref rather than state because a pointer fires far too often to
+  /// re-render on, and none of it is rendered.
+  const drag = useRef<{
+    start: { x: number; y: number };
+    steps: { x: number; y: number; durationMs: number }[];
+    lastAt: number;
+  } | null>(null);
   const inFlight = useRef(false);
   const targets = groupMode && groupUdids.length > 1 ? groupUdids : [device.udid];
   const targetKey = targets.join("\0");
@@ -159,7 +167,19 @@ export function FocusStream({ device, index, onClose, groupUdids, groupMode }: P
     return () => screen.removeEventListener("wheel", onWheel);
   }, [device.udid, encodedH, encodedW]);
 
-  const runGesture = async (start: { x: number; y: number }, end: { x: number; y: number }) => {
+  /// The most samples a single drag is allowed to carry.
+  ///
+  /// A pointer fires at 60-120 Hz, so a two-second drag would otherwise become a couple of
+  /// hundred `pointerMove`s. Past this the oldest movement is merged forward rather than
+  /// dropped, which keeps the total duration and both endpoints exact and only coarsens the
+  /// middle -- the part a human cannot see anyway.
+  const MAX_PATH_STEPS = 64;
+
+  const runGesture = async (
+    start: { x: number; y: number },
+    end: { x: number; y: number },
+    steps: { x: number; y: number; durationMs: number }[],
+  ) => {
     const iw = encodedW;
     const ih = encodedH;
     if (!iw || !ih) return;
@@ -179,6 +199,7 @@ export function FocusStream({ device, index, onClose, groupUdids, groupMode }: P
           await deviceTap(device.udid, end.x, end.y, iw, ih);
         }
       } else if (targets.length > 1) {
+        // Group control has no path command; the endpoints are what every device gets.
         await groupInput({
           udids: targets,
           kind: "swipe",
@@ -189,7 +210,10 @@ export function FocusStream({ device, index, onClose, groupUdids, groupMode }: P
           imageW: iw,
           imageH: ih,
         });
+      } else if (steps.length >= 2) {
+        await deviceSwipePath(device.udid, start, steps, iw, ih);
       } else {
+        // Too few samples to be a path -- a fast flick the pointer only reported twice.
         await deviceSwipe(device.udid, start.x, start.y, end.x, end.y, iw, ih, 160);
       }
     });
@@ -453,8 +477,34 @@ export function FocusStream({ device, index, onClose, groupUdids, groupMode }: P
             const start = mapToDevice(e.currentTarget, e.clientX, e.clientY, encodedW, encodedH);
             if (!start) return;
             e.preventDefault();
-            drag.current = start;
+            drag.current = { start, steps: [], lastAt: performance.now() };
             e.currentTarget.setPointerCapture(e.pointerId);
+          }}
+          onPointerMove={(e) => {
+            // The whole point of this handler: without it the gesture is decided at release
+            // from two samples, so every drag reaches the phone as a straight line at
+            // constant speed no matter what the finger did.
+            const held = drag.current;
+            if (!held || !encodedW || !encodedH) return;
+            const now = performance.now();
+            const elapsed = now - held.lastAt;
+            // Ignore a sample that is neither far enough nor late enough to carry
+            // information; a pointer reports far more often than a gesture changes.
+            if (elapsed < 8) return;
+            const point = mapToDevice(e.currentTarget, e.clientX, e.clientY, encodedW, encodedH);
+            if (!point) return;
+            const previous = held.steps.at(-1) ?? held.start;
+            if (Math.hypot(point.x - previous.x, point.y - previous.y) < 2) return;
+            held.lastAt = now;
+            if (held.steps.length >= MAX_PATH_STEPS) {
+              // Merge forward: the endpoint and the total duration stay exact.
+              const last = held.steps[held.steps.length - 1];
+              last.x = point.x;
+              last.y = point.y;
+              last.durationMs += elapsed;
+              return;
+            }
+            held.steps.push({ x: point.x, y: point.y, durationMs: elapsed });
           }}
           onPointerUp={async (e) => {
             if (e.button !== 0 || !drag.current || !encodedW || !encodedH) {
@@ -462,12 +512,22 @@ export function FocusStream({ device, index, onClose, groupUdids, groupMode }: P
               return;
             }
             e.preventDefault();
-            const start = drag.current;
+            const held = drag.current;
             const end = mapToDevice(e.currentTarget, e.clientX, e.clientY, encodedW, encodedH);
             drag.current = null;
             if (!end) return;
+            // The release point is always the last step, so the gesture ends exactly where
+            // the operator let go even if that sample was filtered out above.
+            const steps = [...held.steps];
+            const lastElapsed = Math.max(1, performance.now() - held.lastAt);
+            const tail = steps.at(-1);
+            if (tail && tail.x === end.x && tail.y === end.y) {
+              tail.durationMs += lastElapsed;
+            } else {
+              steps.push({ x: end.x, y: end.y, durationMs: lastElapsed });
+            }
             try {
-              await runGesture(start, end);
+              await runGesture(held.start, end, steps);
             } catch (error) {
               toastError("Điều khiển thất bại", error);
             }
