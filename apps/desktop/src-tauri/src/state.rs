@@ -580,6 +580,8 @@ impl AppState {
             bundled_minicap_apk: android_tools.minicap_apk.clone(),
             bundled_scrcpy_server: android_tools.scrcpy_server.clone(),
             bundled_riviu_agent_apk: android_tools.riviu_agent_apk.clone(),
+            bundled_agent_server_apk: android_tools.agent_server_apk.clone(),
+            bundled_agent_test_apk: android_tools.agent_test_apk.clone(),
             ..Default::default()
         };
         let (android, android_unavailable) =

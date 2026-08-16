@@ -51,6 +51,8 @@ const INTERACTION_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(12);
 /// lock screen. 40 s is the slowest measured start plus room, on the oldest phone here.
 const FOREGROUND_PROOF_TIMEOUT: Duration = Duration::from_secs(40);
 const FOREGROUND_PROOF_POLL: Duration = Duration::from_millis(250);
+/// `pm install` of an 18 MB APK over USB, with room for a slow phone.
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(180);
 /// How long a killed minicap child gets to actually exit before we stop claiming
 /// it is gone.
 const CHILD_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -125,6 +127,20 @@ pub struct AndroidDriverConfig {
     /// The helper APK shipped inside the installer. Lowest priority, same
     /// reason as [`Self::bundled_minicap_apk`].
     pub bundled_riviu_agent_apk: Option<PathBuf>,
+    /// Explicit path to `appium-uiautomator2-server.apk`. Falls back to
+    /// `RIVIU_AGENT_SERVER_APK`, then [`Self::bundled_agent_server_apk`].
+    pub agent_server_apk: Option<PathBuf>,
+    /// The server APK shipped inside the installer. Lowest priority, same reason as
+    /// [`Self::bundled_minicap_apk`].
+    pub bundled_agent_server_apk: Option<PathBuf>,
+    /// Explicit path to the `androidTest` half. Falls back to `RIVIU_AGENT_TEST_APK`,
+    /// then [`Self::bundled_agent_test_apk`].
+    ///
+    /// Both halves or neither: the runner lives in the test APK and `am instrument` names
+    /// it, so a device with only the server installed refuses exactly as if it had nothing.
+    pub agent_test_apk: Option<PathBuf>,
+    /// The test APK shipped inside the installer. Lowest priority.
+    pub bundled_agent_test_apk: Option<PathBuf>,
 }
 
 /// One running minicap feed, owned so a second `ensure_stream` reuses it and a
@@ -237,6 +253,8 @@ pub struct AndroidDriver {
     /// checkout has no pinned binary until someone builds
     /// `sidecars/riviu-android-agent`.
     riviu_agent_apk: Option<PathBuf>,
+    /// Both halves of the uiautomator2 instrumentation, resolved once at construction.
+    agent_apks: Option<(PathBuf, PathBuf)>,
     /// serial -> a live helper client. Same reuse rule as [`Self::agents`]:
     /// opening a second forward per session leaks a host port.
     helpers: Mutex<HashMap<String, crate::riviu_agent::HelperClient>>,
@@ -288,10 +306,24 @@ impl AndroidDriver {
             std::env::var("RIVIU_ANDROID_AGENT_APK").ok(),
             config.bundled_riviu_agent_apk.clone(),
         );
+        // Both halves or neither. Half an instrumentation installs cleanly and then fails
+        // at `am instrument` with the same "not installed" refusal, which sends whoever
+        // debugs it looking at the wrong half.
+        let agent_apks = crate::riviu_agent::resolve_apk_path(
+            config.agent_server_apk.clone(),
+            std::env::var("RIVIU_AGENT_SERVER_APK").ok(),
+            config.bundled_agent_server_apk.clone(),
+        )
+        .zip(crate::riviu_agent::resolve_apk_path(
+            config.agent_test_apk.clone(),
+            std::env::var("RIVIU_AGENT_TEST_APK").ok(),
+            config.bundled_agent_test_apk.clone(),
+        ));
         Self {
             adb,
             minicap_apk,
             scrcpy_server,
+            agent_apks,
             frame_sink: Mutex::new(None),
             view_sink: Mutex::new(None),
             streams: tokio::sync::Mutex::new(HashMap::new()),
@@ -1388,11 +1420,7 @@ impl AndroidDriver {
             .await
             .unwrap_or_default();
         if !installed.contains(AGENT_PACKAGE) {
-            return Err(anyhow!(
-                "the agent is not installed on {serial}. Install both \
-                 appium-uiautomator2-server APKs (server and \
-                 debug-androidTest) and try again"
-            ));
+            self.install_agent_apks(serial).await?;
         }
 
         self.instrument_and_wait(serial, &base).await
@@ -1432,6 +1460,50 @@ impl AndroidDriver {
     /// 12/08/2026 — `open_session` then re-instrumented and answered in 4040 ms. The
     /// server holds `UiAutomation` for its lifetime, so nothing short of ending the
     /// process gets it back.
+    /// Push and install both halves of the uiautomator2 instrumentation.
+    ///
+    /// Until 16/08/2026 this was a message telling the operator to install two APKs the
+    /// app did not ship. Measured on a freshly plugged 20-device Galaxy S8 box: video
+    /// worked on 20/20 because `scrcpy-server` is bundled and pushed, and control worked
+    /// on **0/20** because nothing pushed these. Telling someone to install a file that is
+    /// not in the box is not an error message, it is a missing feature.
+    ///
+    /// `-r -g -t`: reinstall over a stale copy, grant the runtime permissions the server
+    /// needs without a dialog, and allow a test-only APK -- the `androidTest` half is
+    /// built with `android:testOnly`, which `pm install` refuses by default.
+    async fn install_agent_apks(&self, serial: &str) -> anyhow::Result<()> {
+        let Some((server, test)) = self.agent_apks.as_ref() else {
+            return Err(anyhow!(
+                "the agent is not installed on {serial} and this build has no agent APK                  to install. Set RIVIU_AGENT_SERVER_APK and RIVIU_AGENT_TEST_APK, or use                  an installer that bundles them"
+            ));
+        };
+        // Server first: the test APK declares an instrumentation targeting the server's
+        // package, and installing it against a missing target fails on some builds.
+        for (apk, package) in [(server, AGENT_PACKAGE), (test, AGENT_TEST_PACKAGE)] {
+            let path = apk.to_string_lossy().to_string();
+            tracing::info!(serial, package, apk = %path, "installing the uiautomator2 agent");
+            self.adb
+                .run(
+                    &["-s", serial, "install", "-r", "-g", "-t", &path],
+                    INSTALL_TIMEOUT,
+                )
+                .await
+                .with_context(|| format!("install {package} on {serial} from {path}"))?;
+        }
+        // Prove it rather than trust the exit code: `pm install` has been observed to
+        // report success for a package that is not then listed.
+        let installed = self
+            .adb
+            .shell(serial, &format!("pm list packages {AGENT_PACKAGE}"))
+            .await
+            .unwrap_or_default();
+        anyhow::ensure!(
+            installed.contains(AGENT_PACKAGE),
+            "installed the agent on {serial} but `pm list packages` still does not show              {AGENT_PACKAGE}"
+        );
+        Ok(())
+    }
+
     async fn restart_instrumentation(&self, serial: &str) -> anyhow::Result<()> {
         for package in [AGENT_PACKAGE, AGENT_TEST_PACKAGE] {
             if let Err(error) = self
@@ -2571,6 +2643,48 @@ mod tests {
         assert_eq!(
             driver.desired_view_preset("serial-a"),
             crate::scrcpy::ViewPreset::Tile
+        );
+    }
+
+    #[test]
+    fn half_an_agent_is_no_agent() {
+        // Both halves or neither. The runner lives in the `androidTest` APK and
+        // `am instrument` names it, so a device with only the server installed refuses
+        // exactly as if it had nothing -- and whoever debugs that goes looking at the
+        // half that IS installed. `zip` makes the pair unrepresentable when one is
+        // missing, so the refusal happens at construction with a message that says so.
+        let only_server = AndroidDriverConfig {
+            agent_server_apk: Some(PathBuf::from("server.apk")),
+            ..Default::default()
+        };
+        assert!(
+            AndroidDriver::new(&only_server)
+                .expect("driver")
+                .agent_apks
+                .is_none(),
+            "a server APK without its androidTest half must not look installable"
+        );
+
+        let only_test = AndroidDriverConfig {
+            agent_test_apk: Some(PathBuf::from("test.apk")),
+            ..Default::default()
+        };
+        assert!(
+            AndroidDriver::new(&only_test)
+                .expect("driver")
+                .agent_apks
+                .is_none(),
+            "the androidTest half alone is not an agent either"
+        );
+
+        let both = AndroidDriverConfig {
+            agent_server_apk: Some(PathBuf::from("server.apk")),
+            agent_test_apk: Some(PathBuf::from("test.apk")),
+            ..Default::default()
+        };
+        assert_eq!(
+            AndroidDriver::new(&both).expect("driver").agent_apks,
+            Some((PathBuf::from("server.apk"), PathBuf::from("test.apk")))
         );
     }
 
