@@ -32,57 +32,12 @@ const PREVIEW_TOTAL_FPS: u32 = 240;
 const PREVIEW_MAX_FPS_PER_DEVICE: u32 = STREAM_FPS;
 const PREVIEW_TICK: Duration = Duration::from_millis(4);
 const PREVIEW_IDLE_EVICTION: Duration = Duration::from_secs(10);
-/// Scrcpy child + reader can stay "running" with no packets (Exynos hello
-/// without IDR, WebView2 refusing the codec). The keeper restarts after this.
-/// How long a running producer may publish nothing before the keeper restarts it.
+/// How often the keeper states whether the frontend's paint evidence is arriving at all.
 ///
-/// Raised from 5s after measuring what 5s actually costs. scrcpy encodes only when the
-/// screen CHANGES, so a phone sitting on a static home screen publishes its first keyframe
-/// and then legitimately nothing at all. At 5s with no cooldown the keeper read that as a
-/// fault and restarted forever: one run reached **generation 569 on a single Redmi** while
-/// the phone was demonstrably healthy -- screencap 2.7 MB, keyguard drawn, focus on the
-/// launcher -- against generation 12 on the other phone in the same run. Every restart also
-/// took the exclusive start claim, which is what made the operator's overlay request come
-/// back "already in flight" and left the overlay on the tile encode.
-///
-/// This rule can only ever prove "no samples arrived". It cannot tell a dead reader from a
-/// screen that is not moving. The frontend's received-vs-painted rule is the one that can,
-/// so this is now the coarse backstop it should always have been.
-const ANDROID_VIEW_SILENCE: Duration = Duration::from_secs(45);
-
-/// Minimum gap between two keeper restarts of the same device, doubling per consecutive
-/// attempt up to [`ANDROID_VIEW_RESTART_MAX_BACKOFF`].
-///
-/// The keeper had no cooldown at all. A restart costs roughly 45 s of real downtime on this
-/// fleet, so restarting on a 5 s rule guaranteed the device spent more time restarting than
-/// streaming.
-const ANDROID_VIEW_RESTART_BACKOFF: Duration = Duration::from_secs(60);
-const ANDROID_VIEW_RESTART_MAX_BACKOFF: Duration = Duration::from_secs(600);
-
-/// Floor between two attempts to retune a device to a different preset.
-///
-/// Shorter than the silence backoff on purpose: a retune follows an operator action -- they
-/// opened or closed an overlay -- so it should feel immediate, and the first attempt is not
-/// delayed at all. The floor exists only so a phone that cannot encode the larger preset is
-/// not retried on every 2 s tick forever.
-const ANDROID_VIEW_RETUNE_FLOOR: Duration = Duration::from_secs(15);
-
-/// When the keeper last restarted each device, and how many times in a row without the
-/// device going quiet-then-healthy in between.
-fn android_view_restart_is_due(
-    attempts: u32,
-    since_last: Option<Duration>,
-    base: Duration,
-    max: Duration,
-) -> bool {
-    let Some(since) = since_last else {
-        return true;
-    };
-    // `attempts - 1`, so the wait after the FIRST restart is one base interval rather than
-    // two. Saturating because attempts is 0 only on the never-restarted path above.
-    let factor = 1u32 << attempts.saturating_sub(1).min(4);
-    since >= base.saturating_mul(factor).min(max)
-}
+/// Rare enough not to be noise across a long run, frequent enough that opening the log after
+/// a report of "the picture is stuck" answers immediately whether the fine rule was even
+/// running. Every 15 ticks of the 2 s loop.
+const VIEW_EVIDENCE_LOG_EVERY: Duration = Duration::from_secs(30);
 /// How far back [`AppState::busy_reason`] looks for unfinished jobs.
 ///
 /// `list_jobs` orders newest first, and anything queued or running is recent by nature,
@@ -160,6 +115,18 @@ pub struct AppState {
     /// through `DeviceDriver` or `StreamBudgetManager`.
     pub android: Option<Arc<riviu_android_driver::AndroidDriver>>,
     pub view_hub: Arc<crate::view_hub::ViewHub>,
+    /// What the frontend last reported painting, per device.
+    ///
+    /// Written by the `view_report_paint` command and read by the keeper. This is the half
+    /// of the evidence the host cannot gather for itself: bytes arriving prove a phone is
+    /// talking, not that anything came out of the decoder.
+    pub view_paint: Arc<crate::view_watchdog::ViewPaintLedger>,
+    /// The fleet-wide ceiling every producer restart passes through, automatic or not.
+    ///
+    /// On `AppState` because it is the one object both the keeper task and every Tauri
+    /// command can reach, and because a ceiling that only one of the two respects is not a
+    /// ceiling — which is exactly the state AGENTS.md 9.67 measured at 291 restarts.
+    pub view_recovery: Arc<crate::view_watchdog::ViewRecoveryGate>,
     pub jobs: JobQueue,
     pub flows: FlowRuntime,
     pub flow_artifacts: FlowArtifactStore,
@@ -675,6 +642,8 @@ impl AppState {
             android_unavailable_reason: android_unavailable,
             android,
             view_hub,
+            view_paint: crate::view_watchdog::ViewPaintLedger::new(),
+            view_recovery: crate::view_watchdog::ViewRecoveryGate::new(),
             jobs,
             flows,
             flow_artifacts,
@@ -826,17 +795,41 @@ impl AppState {
             let registry = self.registry.clone();
             let background_stop = self.background_stop.clone();
             let view_hub = self.view_hub.clone();
+            let view_paint = self.view_paint.clone();
+            let view_recovery = self.view_recovery.clone();
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(2));
-                // Per-device restart history for the backoff. Lives outside the loop so it
-                // survives ticks; bounded by the fleet size.
-                let mut view_restarts: HashMap<String, (Instant, u32)> = HashMap::new();
+                // Retune history stays task-local: it is a per-preset floor, not a recovery,
+                // and it does not consume the fleet ceiling because it is not triggered by a
+                // fault. Restart history moved into `ViewRecoveryGate`, which is where it has
+                // to live now that operator commands share the same accounting.
                 let mut view_retunes: HashMap<String, (Instant, u32)> = HashMap::new();
+                let mut last_evidence_log = Instant::now() - VIEW_EVIDENCE_LOG_EVERY;
                 loop {
                     interval.tick().await;
                     if background_stop.load(Ordering::Acquire) {
                         android.stop_all_views().await;
                         return;
+                    }
+                    // Say out loud whether the fine rule has anything to work with. When
+                    // nobody is reporting paints the watchdog correctly falls back to the
+                    // byte rule -- and that fallback is invisible, so a dead reporting path
+                    // and a healthy one produce exactly the same (empty) log. AGENTS.md 9.66
+                    // is three diagnosis rounds lost to precisely that shape.
+                    if last_evidence_log.elapsed() >= VIEW_EVIDENCE_LOG_EVERY {
+                        last_evidence_log = Instant::now();
+                        let fresh = view_paint.fresh_count(Instant::now());
+                        let android_devices = registry
+                            .list()
+                            .iter()
+                            .filter(|device| device.platform == riviu_core::DevicePlatform::Android)
+                            .count();
+                        log::info!(
+                            "view watchdog evidence: {fresh}/{android_devices} android devices \
+                             reporting painted frames; {} of {} recovery slots in use",
+                            view_recovery.in_flight(),
+                            view_recovery.limit()
+                        );
                     }
                     let mut starts = Vec::new();
                     for device in registry.list() {
@@ -882,50 +875,81 @@ impl AppState {
                                     )
                                     .await);
                         if wrong_preset {
-                            // A retune, not a failure, so it does not go through the silence
+                            // A retune, not a failure, so it does not go through the fault
                             // backoff -- but it does need its own floor, or a phone that
                             // cannot encode the larger preset would be retuned every tick.
                             let record = view_retunes.get(&device.udid).copied();
-                            if !android_view_restart_is_due(
+                            if !crate::view_watchdog::view_restart_is_due(
                                 record.map(|(_, n): (Instant, u32)| n).unwrap_or(0),
                                 record.map(|(at, _)| at.elapsed()),
-                                ANDROID_VIEW_RETUNE_FLOOR,
-                                ANDROID_VIEW_RESTART_MAX_BACKOFF,
+                                crate::view_watchdog::VIEW_RETUNE_FLOOR,
+                                crate::view_watchdog::VIEW_RESTART_MAX_BACKOFF,
                             ) {
                                 continue;
                             }
                             let attempts = record.map(|(_, n)| n).unwrap_or(0) + 1;
                             view_retunes.insert(device.udid.clone(), (Instant::now(), attempts));
                             log::info!(
-                                "android view for {} is running the wrong preset; retuning to                                  {desired:?} (attempt {attempts})",
+                                "android view for {} is running the wrong preset; retuning to \
+                                 {desired:?} (attempt {attempts})",
                                 device.udid
                             );
                         } else if running {
                             view_retunes.remove(&device.udid);
                         }
+                        // The merged decision. One predicate over both kinds of evidence --
+                        // bytes off the wire, and frames the frontend says it drew -- so a
+                        // device cannot be judged healthy by one rule and broken by another,
+                        // which is what two independent watchdogs were doing to each other.
                         if running {
-                            if !android_view_is_silent(
+                            let paint = view_paint.sample(&device.udid);
+                            let report_age =
+                                paint.as_ref().map(|report| report.reported_at.elapsed());
+                            let reporting = report_age
+                                .map(|age| age < crate::view_watchdog::VIEW_PAINT_REPORT_STALE)
+                                .unwrap_or(false);
+                            let verdict = crate::view_watchdog::view_verdict(
                                 false,
                                 view_hub.last_packet_age(&device.udid),
-                            ) {
-                                view_restarts.remove(&device.udid);
+                                paint.as_ref(),
+                                report_age,
+                            );
+                            let fault = match verdict {
+                                crate::view_watchdog::ViewVerdict::Restart(fault) => fault,
+                                // Starting cannot occur here: in-flight starts were skipped
+                                // above.
+                                _ => {
+                                    // Healthy clears the backoff, but only on the coarse
+                                    // rule's terms. With nobody reporting paints, "bytes are
+                                    // arriving" is the whole of what healthy can mean and
+                                    // clearing on it is the keeper's original, safe
+                                    // behaviour. With a live reporter it is NOT enough: a
+                                    // stream that painted two frames after a restart and
+                                    // stopped reads as healthy for one tick, and treating
+                                    // that as recovery is exactly what made every stall log
+                                    // "attempt 1" while the loop ran 33 times. In that regime
+                                    // only sustained painting clears it, via `note_painted`.
+                                    if !reporting {
+                                        view_recovery.forget(&device.udid);
+                                    }
+                                    continue;
+                                }
+                            };
+                            // Capacity and backoff in one place, shared with every operator
+                            // command. A refusal is not an error -- the next tick asks again,
+                            // and the device keeps whatever tile state it already had rather
+                            // than flickering into Sampling for work that is not happening.
+                            // The frame count at the moment of the attempt, so "it recovered"
+                            // can later mean SUSTAINED painting rather than a single frame.
+                            let frames = paint.as_ref().map(|report| report.frames).unwrap_or(0);
+                            let Some(permit) = view_recovery.try_admit(
+                                &device.udid,
+                                frames,
+                                crate::view_watchdog::VIEW_RESTART_BACKOFF,
+                                crate::view_watchdog::VIEW_RESTART_MAX_BACKOFF,
+                            ) else {
                                 continue;
-                            }
-                            // Back off, per device. Without this the keeper restarted a
-                            // healthy phone on a static screen every few seconds forever.
-                            let record = view_restarts.get(&device.udid).copied();
-                            let since = record.map(|(at, _): (Instant, u32)| at.elapsed());
-                            let attempts = record.map(|(_, n)| n).unwrap_or(0);
-                            if !android_view_restart_is_due(
-                                attempts,
-                                since,
-                                ANDROID_VIEW_RESTART_BACKOFF,
-                                ANDROID_VIEW_RESTART_MAX_BACKOFF,
-                            ) {
-                                continue;
-                            }
-                            view_restarts
-                                .insert(device.udid.clone(), (Instant::now(), attempts + 1));
+                            };
                             // Name the cause, because for the first two weeks of this
                             // path there was only ever one line and it was the same
                             // whether the encoder had died or the phone had simply gone
@@ -937,42 +961,61 @@ impl AppState {
                                 Some(false) => "display asleep",
                                 None => "display state unreadable",
                             };
+                            // The counters come from a Web Worker, which vite does not
+                            // forward to the terminal (AGENTS.md 9.66) -- so printing them
+                            // here, on the line that says what is being done about them, is
+                            // the only place they are readable at all.
+                            let evidence = paint
+                                .as_ref()
+                                .map(|report| {
+                                    format!(
+                                        " [gen={} received={} frames={} since_paint={}ms]",
+                                        report.generation,
+                                        report.received,
+                                        report.frames,
+                                        report.since_paint.as_millis()
+                                    )
+                                })
+                                .unwrap_or_default();
                             log::warn!(
-                                "android view for {} published nothing for {}s ({display}); \
-                                 restarting scrcpy",
+                                "android view for {} {} ({display}){evidence}; restarting \
+                                 scrcpy ({} of {} recovery slots in use)",
                                 device.udid,
-                                ANDROID_VIEW_SILENCE.as_secs()
+                                fault.reason(),
+                                view_recovery.in_flight(),
+                                view_recovery.limit()
                             );
-                            android.stop_view_stream(&device.udid).await;
+                            let android = android.clone();
+                            let registry = registry.clone();
+                            let view_paint = view_paint.clone();
+                            let udid = device.udid.clone();
+                            starts.push(tokio::spawn(async move {
+                                let _ = crate::view_watchdog::restart_android_view(
+                                    &android,
+                                    &registry,
+                                    &view_paint,
+                                    &udid,
+                                    permit,
+                                )
+                                .await;
+                            }));
+                            continue;
                         }
-                        set_stream_state(
-                            &registry,
-                            &device.udid,
-                            riviu_core::TileStreamState::Sampling,
-                            None,
-                        );
+                        // Not running at all: a first start, not a recovery. It takes NO
+                        // permit. Nothing is being torn down, so there is no working picture
+                        // to risk -- and the bench says twenty concurrent clean starts cost
+                        // no more per start than one does, while gating them made a cold
+                        // start of the fleet take 55 s instead of 15 s (AGENTS.md 9.72).
+                        // `view_start_in_flight`, checked above, is what stops two of these
+                        // racing for the same device.
                         let android = android.clone();
                         let registry = registry.clone();
                         let udid = device.udid.clone();
                         starts.push(tokio::spawn(async move {
-                            // The preset the operator asked for, not a hard-coded Tile:
-                            // restarting an open overlay at the tile encode is how it used
-                            // to quietly lose its resolution a few seconds after opening.
-                            let preset = android.desired_view_preset(&udid);
-                            match android.start_view_stream(&udid, preset).await {
-                                Ok(_) => set_stream_state(
-                                    &registry,
-                                    &udid,
-                                    riviu_core::TileStreamState::Live,
-                                    None,
-                                ),
-                                Err(error) => set_stream_state(
-                                    &registry,
-                                    &udid,
-                                    riviu_core::TileStreamState::Error,
-                                    Some(error.to_string()),
-                                ),
-                            }
+                            let _ = crate::view_watchdog::start_android_view(
+                                &android, &registry, &udid,
+                            )
+                            .await;
                         }));
                     }
                     for start in starts {
@@ -1438,24 +1481,26 @@ fn background_sample_candidate(
     ) || (status.state == riviu_core::AgentState::Starting && device.wda_ready))
 }
 
-/// A start still in flight is not silent. A running producer with no
-/// accepted packet, or none for [`ANDROID_VIEW_SILENCE`], is.
-///
-/// Canvas paint is not an input — the frontend is not the source of truth.
-pub(crate) fn android_view_is_silent(
-    start_in_flight: bool,
-    last_packet_age: Option<Duration>,
-) -> bool {
-    if start_in_flight {
-        return false;
-    }
-    last_packet_age
-        .map(|age| age >= ANDROID_VIEW_SILENCE)
-        .unwrap_or(true)
-}
-
 pub(crate) fn mark_android_view_live(registry: &DeviceRegistry, udid: &str) {
     set_stream_state(registry, udid, riviu_core::TileStreamState::Live, None);
+}
+
+/// A restart has been admitted and is under way.
+///
+/// Set only once a permit is actually held, never on the deferral path: a device the gate
+/// declined has not started anything, and flickering its tile into Sampling would report
+/// work that is not happening.
+pub(crate) fn set_stream_sampling(registry: &DeviceRegistry, udid: &str) {
+    set_stream_state(registry, udid, riviu_core::TileStreamState::Sampling, None);
+}
+
+pub(crate) fn set_stream_error(registry: &DeviceRegistry, udid: &str, error: String) {
+    set_stream_state(
+        registry,
+        udid,
+        riviu_core::TileStreamState::Error,
+        Some(error),
+    );
 }
 
 fn set_stream_parked(registry: &DeviceRegistry, udid: &str) {
@@ -1533,104 +1578,7 @@ fn resolve_sidecar_root_from(
 #[cfg(test)]
 mod tests {
 
-    #[test]
-    fn a_retune_is_immediate_the_first_time_and_floored_after_that() {
-        // A retune follows an operator action -- they opened or closed an overlay -- so the
-        // first attempt must not wait. The floor exists only so a phone that cannot encode
-        // the larger preset is not retried on every 2s tick forever.
-        let floor = ANDROID_VIEW_RETUNE_FLOOR;
-        let max = ANDROID_VIEW_RESTART_MAX_BACKOFF;
-        assert!(android_view_restart_is_due(0, None, floor, max));
-        assert!(!android_view_restart_is_due(
-            1,
-            Some(floor - Duration::from_secs(1)),
-            floor,
-            max
-        ));
-        assert!(android_view_restart_is_due(1, Some(floor), floor, max));
-        // Faster than the silence backoff, because a retune is a response to a person.
-        assert!(ANDROID_VIEW_RETUNE_FLOOR < ANDROID_VIEW_RESTART_BACKOFF);
-    }
-
-    #[test]
-    fn the_keeper_backs_off_instead_of_restarting_a_static_screen_forever() {
-        // The measurement this encodes: with no cooldown and a 5s silence rule, one Redmi
-        // reached generation 569 in a single run while the phone was healthy -- screencap
-        // 2.7 MB, keyguard drawn, focus on the launcher -- because scrcpy encodes only when
-        // the screen CHANGES and a static home screen publishes nothing at all. The other
-        // phone in the same run, which was being used, reached generation 12.
-        let base = Duration::from_secs(60);
-        let max = Duration::from_secs(600);
-
-        // Never restarted: go immediately, so a genuinely dead reader is not delayed.
-        assert!(android_view_restart_is_due(0, None, base, max));
-        // First failure waits one base interval, which already exceeds the ~45s a restart
-        // itself costs -- the property that stops a restart from re-arming mid-restart.
-        assert!(!android_view_restart_is_due(
-            1,
-            Some(Duration::from_secs(59)),
-            base,
-            max
-        ));
-        assert!(android_view_restart_is_due(
-            1,
-            Some(Duration::from_secs(60)),
-            base,
-            max
-        ));
-        // Doubling.
-        assert!(!android_view_restart_is_due(
-            2,
-            Some(Duration::from_secs(119)),
-            base,
-            max
-        ));
-        assert!(android_view_restart_is_due(
-            2,
-            Some(Duration::from_secs(120)),
-            base,
-            max
-        ));
-        // Capped, and the shift cannot overflow however many attempts accumulate.
-        assert!(android_view_restart_is_due(u32::MAX, Some(max), base, max));
-        assert!(!android_view_restart_is_due(
-            u32::MAX,
-            Some(max - Duration::from_secs(1)),
-            base,
-            max
-        ));
-    }
-
-    #[test]
-    fn the_silence_window_clears_a_restart_by_a_wide_margin() {
-        // A restart costs ~45s of downtime on this fleet. A silence window at or below that
-        // means the keeper judges a producer that has not finished starting.
-        assert!(ANDROID_VIEW_SILENCE >= Duration::from_secs(45));
-        assert!(
-            ANDROID_VIEW_RESTART_BACKOFF
-                > ANDROID_VIEW_SILENCE.saturating_sub(Duration::from_secs(30))
-        );
-    }
     use super::*;
-
-    #[test]
-    fn a_live_scrcpy_producer_is_silent_only_after_the_whole_silence_window() {
-        // Written against the constant, not against a literal. The name used to say "five
-        // seconds" and the body asserted 4 and 5, so raising the window meant editing a
-        // test whose name then lied -- and the number had to be raised, because five
-        // seconds is shorter than a static screen legitimately stays quiet.
-        let window = ANDROID_VIEW_SILENCE;
-        // A start still in flight is never silent, however long the clock says.
-        assert!(!android_view_is_silent(true, None));
-        assert!(!android_view_is_silent(true, Some(window * 10)));
-        // No packet ever seen, and nothing in flight, is silent immediately.
-        assert!(android_view_is_silent(false, None));
-        assert!(!android_view_is_silent(
-            false,
-            Some(window - Duration::from_secs(1))
-        ));
-        assert!(android_view_is_silent(false, Some(window)));
-    }
 
     #[test]
     fn preview_budget_is_smooth_for_small_fleet_and_bounded_for_large_fleet() {

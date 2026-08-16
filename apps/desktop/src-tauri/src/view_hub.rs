@@ -135,6 +135,17 @@ impl ViewHub {
     pub fn last_packet_age(&self, udid: &str) -> Option<Duration> {
         self.last_packet_at.lock().get(udid).map(Instant::elapsed)
     }
+
+    /// Which producer is current for this device.
+    ///
+    /// Same value [`ViewSink::generation`] returns, as an inherent method so callers that
+    /// only need to date a piece of evidence do not have to import the sink trait. The
+    /// watchdog uses it to decide whether a paint report describes the producer that is
+    /// running or the one it replaced — counters from before a restart show arrivals far
+    /// ahead of frames forever, and acting on them is a restart loop.
+    pub fn current_generation(&self, udid: &str) -> u64 {
+        self.generations.lock().get(udid).copied().unwrap_or(0)
+    }
 }
 
 impl ViewSink for ViewHub {

@@ -15,6 +15,7 @@ mod publish_commands;
 mod publish_driver;
 mod state;
 mod view_hub;
+mod view_watchdog;
 
 use state::AppState;
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
@@ -125,6 +126,7 @@ pub fn run() {
             commands::set_stream_settings,
             commands::latest_frame,
             commands::view_endpoint,
+            commands::view_report_paint,
             commands::view_ensure,
             commands::view_set_preset,
             commands::save_view_snapshot,

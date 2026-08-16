@@ -10,6 +10,8 @@ use riviu_script_engine::{example_script_json, parse_script};
 use serde::Serialize;
 use tauri::State;
 
+use crate::view_watchdog::PaintReport;
+
 use crate::command_error::CommandError;
 use crate::state::AppState;
 
@@ -832,6 +834,31 @@ pub async fn set_stream_settings(
             // Retune restarts the same producer rather than spawning a second one.
             // A failure here is logged and skipped: one phone that will not retune must
             // not stop the setting from reaching the rest of the fleet.
+            //
+            // Under the same ceiling as every other producer restart. The loop is already
+            // sequential, so on an idle fleet it never waits; the permit is what stops it
+            // stacking on top of recoveries the keeper started, which is how a settings
+            // change used to become a twenty-first concurrent scrcpy spawn.
+            let frames = state
+                .view_paint
+                .sample(&device.udid)
+                .map(|report| report.frames)
+                .unwrap_or(0);
+            let permit = match state
+                .view_recovery
+                .admit_operator(&device.udid, frames)
+                .await
+            {
+                Ok(permit) => permit,
+                Err(error) => {
+                    log::warn!(
+                        "could not retune {} after a settings change: {}",
+                        device.udid,
+                        error.message
+                    );
+                    continue;
+                }
+            };
             if let Err(error) = android
                 .set_view_preset(&device.udid, riviu_android_driver::ViewPreset::Tile)
                 .await
@@ -841,6 +868,8 @@ pub async fn set_stream_settings(
                     device.udid
                 );
             }
+            drop(permit);
+            state.view_paint.clear(&device.udid);
         }
     }
     Ok(s)
@@ -856,6 +885,36 @@ pub fn latest_frame(state: State<'_, AppState>, udid: String) -> Result<Option<S
 #[tauri::command]
 pub fn view_endpoint(state: State<'_, AppState>) -> Result<Option<String>, String> {
     Ok(state.view_hub.endpoint())
+}
+
+/// What the frontend painted, for every device it is tracking, as of its last tick.
+///
+/// The frontend is the only thing that can see whether a frame came out of the decoder, and
+/// AGENTS.md 9.66 is why it cannot simply log it: vite forwards the page's console but not a
+/// Web Worker's, so counters that stay inside the worker are invisible by construction. This
+/// carries them to the one place that can act on them.
+///
+/// Deliberately **not** on the mutating-command inventory and deliberately without
+/// `ensure_accepting_work`: it writes a ledger, touches no device, and must keep working
+/// while the app is draining so the last reports before a quit are not lost.
+///
+/// One call per tick for the whole fleet rather than one per device per beat — at twenty
+/// phones and a 1 s beat the per-device shape would be twenty IPC round trips a second to
+/// say "still fine".
+#[tauri::command]
+pub fn view_report_paint(state: State<'_, AppState>, reports: Vec<PaintReport>) {
+    let now = std::time::Instant::now();
+    for report in &reports {
+        // The hub's generation is the authority on which producer is current. A report from
+        // before a restart is not evidence about the producer that replaced it.
+        let current = state.view_hub.current_generation(&report.udid);
+        state.view_paint.record(report, current, now);
+        if report.generation == current {
+            state
+                .view_recovery
+                .note_painted(&report.udid, report.frames);
+        }
+    }
 }
 
 #[tauri::command]
@@ -879,16 +938,35 @@ pub async fn view_ensure(state: State<'_, AppState>, udid: String) -> Result<(),
     if android.view_start_in_flight(&udid) {
         return Ok(());
     }
-    android.stop_view_stream(&udid).await;
-    // Whatever the operator last asked for, not an unconditional Tile. The frontend calls
-    // this to recover a stalled stream, and a recovery that silently downgrades an open
-    // overlay to the tile encode is how the picture used to go soft on its own.
-    let preset = android.desired_view_preset(&udid);
-    android
-        .start_view_stream(&udid, preset)
-        .await
-        .map_err(CommandError::operation)?;
-    crate::state::mark_android_view_live(&state.registry, &udid);
+    // "Ensure" means two different operations depending on what is there, and only one of
+    // them is rationed. With no producer running this is a first start: nothing is torn down,
+    // so it takes no permit -- which is what keeps `startFleetPreview`'s twenty-way fan-out
+    // (startPreview.ts) as fast as the bench says it can be. With one running, ensuring it
+    // means replacing a picture that may be working, and that is precisely what the ceiling
+    // is for.
+    if !android.view_is_active(&udid).await {
+        crate::view_watchdog::start_android_view(android, &state.registry, &udid)
+            .await
+            .map_err(CommandError::operation)?;
+        return Ok(());
+    }
+    let frames = state
+        .view_paint
+        .sample(&udid)
+        .map(|report| report.frames)
+        .unwrap_or(0);
+    let permit = state.view_recovery.admit_operator(&udid, frames).await?;
+    // Stop-then-start, the preset the operator last asked for, and the ledger cleared -- all
+    // of it in one place now, so the keeper and this command cannot drift apart.
+    crate::view_watchdog::restart_android_view(
+        android,
+        &state.registry,
+        &state.view_paint,
+        &udid,
+        permit,
+    )
+    .await
+    .map_err(CommandError::operation)?;
     Ok(())
 }
 
@@ -914,11 +992,33 @@ pub async fn view_set_preset(
         "overlay" => riviu_android_driver::ViewPreset::Overlay,
         _ => riviu_android_driver::ViewPreset::Tile,
     };
-    android
+    // A retune restarts the same producer, so it costs the adb server exactly what a
+    // recovery costs and it belongs under the same ceiling. It uses the operator lane
+    // because it *is* an operator action — opening or closing an overlay — and that lane has
+    // no per-device backoff: refusing a person's second click because their first was 40 s
+    // ago would read as the app being broken.
+    //
+    // A refusal here is not the end of it. The keeper reconciles toward
+    // `desired_view_preset` on its own tick, which is what makes this safe to refuse at all;
+    // `set_view_preset` records the desire before it does any work.
+    let frames = state
+        .view_paint
+        .sample(&udid)
+        .map(|report| report.frames)
+        .unwrap_or(0);
+    let permit = state.view_recovery.admit_operator(&udid, frames).await?;
+    let outcome = android
         .set_view_preset(&udid, preset)
         .await
         .map_err(CommandError::operation)
-        .map(|_| ())
+        .map(|_| ());
+    // Held across the retune for the same reason the recovery path holds it: a producer
+    // that has spawned and not yet published is still using the resource being rationed.
+    drop(permit);
+    // The producer was replaced, so evidence about the old one is not evidence about this
+    // one -- the same rule `restart_android_view` applies.
+    state.view_paint.clear(&udid);
+    outcome
 }
 
 #[tauri::command]

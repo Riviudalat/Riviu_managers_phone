@@ -714,6 +714,9 @@ export async function installTauriMock(
     commandHandlers.set("view_endpoint", () => null);
     commandHandlers.set("view_ensure", () => null);
     commandHandlers.set("view_set_preset", () => null);
+    // The view store posts this on its own 2 s tick as soon as any device has a beat, so it
+    // is reached without a spec doing anything.
+    commandHandlers.set("view_report_paint", () => null);
     commandHandlers.set("save_view_snapshot", () => "");
     // Registered because `invoke` throws `Unknown mock command` for anything absent,
     // and the Settings tab calls neither on mount but offers both as buttons.

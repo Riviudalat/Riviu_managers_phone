@@ -5160,6 +5160,44 @@ moi lan doi preset va moi lan xoay may la mot cua so cham bien mat — upstream 
 agent **von khong cham** — 130–280 ms mot click do tren chinh Galaxy S8+. Con so 1502 ms la
 `adb shell input`, **khong phai** agent, dung nham hai cai.
 
+### 9.72 Tran dong thoi cho recovery: da do, va phep do BAC BO ly do ban dau (16/08/2026)
+
+§9.67 ket luan detector frontend chi duoc restart lai **khi da co tran dong thoi toan fleet**,
+va khong noi tran do la bao nhieu. Chon mot con so tu hu khong chinh la cach `BROADCAST_CAP`
+(8, roi 128) da duoc chon tren ban thu hai may. Nen da do:
+`crates/android-driver/examples/view_concurrency_bench.rs`, 20 may Galaxy S8/S8+, app da dung.
+
+| dong thoi | p50 toi keyframe dau | p90 | max | wall cho 20 may |
+|---|---|---|---|---|
+| 1 | 11,4 s | 12,9 s | 14,7 s | 230,0 s |
+| 2 | 11,5 s | 13,0 s | 14,8 s | 115,5 s |
+| 4 | 11,4 s | 13,3 s | 14,7 s | 59,3 s |
+| 8 | 11,5 s | 13,1 s | 14,6 s | 34,0 s |
+| 20 | 11,5 s | 13,3 s | 14,9 s | 14,9 s |
+
+**Do tre moi lan start PHANG tu 1 den 20**, va wall giam tuyen tinh hoan hao. Mot adb server
+nhan 20 lan spawn scrcpy dong thoi ma **khong lam cham lan nao**. Hai he qua, ca hai nguoc voi
+dieu vẫn được tin:
+
+1. **Cau chuyen "291 restart vi cac lan start tranh nhau adb" la sai.** Tranh chap adb khong ton
+   tai o quy mo nay. Vong lap that la **tu kich hoat**: mot lan restart lam may khong ve gi
+   trong ~12 s, ma 12 s **dung bang** `VIEW_PAINT_STALL`, nen chinh lan restart do lam luat da
+   ra lenh cho no ban lai. Thu giet vong lap la (a) bang chung duoc **gan generation** va bi vut
+   khi producer bi thay, va (b) backoff moi may vuot han mot lan restart — khong phai cai tran.
+2. **~44 giay la con so cua duong RESTART trong app dang tai, khong phai cua mot lan start
+   sach.** Start sach toi keyframe dau la **~11,5 s**. Trich 44 s cho mot lan start moi la noi
+   qua gia cua viec hoi phuc len bon lan; §9.64 §3 van dung cho canh no do.
+
+Tran **van giu**, nhung ly do phai ghi cho dung: no khong bao ve thong luong adb (thu do khong
+he bi de doa), no chan **so may co the toi cung luc vi mot cach chua ta chua chac**. Mac dinh
+**4** — mot phan nam fleet, va cung la cho so hoc tu roi vao: 20 may voi backoff 60 s chiu duoc
+20/60 s lan thu, moi lan ~11,5 s, tuc ~3,8 chay song song o trang thai on dinh. Nen no chi can
+thiep khi ca fleet hong cung luc, con binh thuong thi khong ton gi.
+
+`RIVIU_VIEW_RECOVERY_CONCURRENCY` ghi de duoc, kep trong 1..=8, sai thi **fail closed** ve mac
+dinh. Tran o `view_watchdog.rs`; `restart_android_view` nhan permit **theo gia tri** nen khong
+goi duoc neu chua duoc cap — tran khong phai mot cai co ai do co the quen kiem.
+
 ### 9.65 Keyframe khong phai bang chung co SPS — va vi sao chan doan im lang suot 3 vong (15/08/2026)
 
 Mot box **20 may Galaxy S8** cam vao la loi man den tu in ra nguyen nhan cua no. Chu ky

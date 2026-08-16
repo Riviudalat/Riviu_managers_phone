@@ -241,6 +241,27 @@ export async function viewEnsure(udid: string) {
   return invoke<void>("view_ensure", { udid });
 }
 
+/** One device's decoder counters, as the host's watchdog needs them. */
+export interface ViewPaintReport {
+  udid: string;
+  /** Which producer these counters belong to. Evidence about a replaced one is dropped. */
+  generation: number;
+  received: number;
+  frames: number;
+  /**
+   * Age of the last drawn frame, in ms, by *this* clock.
+   *
+   * An age rather than a timestamp on purpose: the WebView and the host keep different
+   * clocks, and comparing them across the IPC boundary turns a sleeping laptop into a
+   * fleet-wide restart.
+   */
+  sincePaintMs: number;
+}
+
+export async function viewReportPaint(reports: ViewPaintReport[]) {
+  return invoke<void>("view_report_paint", { reports });
+}
+
 export async function viewSetPreset(udid: string, preset: "tile" | "overlay") {
   return invoke<void>("view_set_preset", { udid, preset });
 }

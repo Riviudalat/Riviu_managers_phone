@@ -1,22 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  collectPaintReports,
   collectStalledViews,
   nextViewReconnectDelay,
-  PAINT_RECOVERY_COOLDOWN_MS,
-  OBSERVED_RESTART_MS,
-  PAINT_RECOVERY_MAX_MS,
   PAINT_STALL_MS,
-  shouldAttemptViewRecovery,
-  SUSTAINED_PAINT_FRAMES,
-  viewRecoveryDelayMs,
   startViewClient,
   VIEW_RECONNECT_MAX_MS,
   VIEW_RECONNECT_MIN_MS,
 } from "./viewStore";
 
+// A whole-module factory: vitest throws on any export this omits, and `startViewClient`
+// below reaches into it. Every api function `viewStore` imports must be listed here.
 vi.mock("./api", () => ({
   viewEndpoint: vi.fn(async () => null),
-  viewEnsure: vi.fn(async () => undefined),
+  viewReportPaint: vi.fn(async () => undefined),
 }));
 
 describe("view WebSocket reconnect", () => {
@@ -54,8 +51,9 @@ describe("stalled view detection", () => {
   // simply is not changing.
   const now = 1_000_000;
 
-  const beat = (at: number, receivedCount: number, frames: number) => ({
+  const beat = (at: number, receivedCount: number, frames: number, generation = 1) => ({
     at,
+    generation,
     received: receivedCount,
     frames,
   });
@@ -98,54 +96,67 @@ describe("stalled view detection", () => {
     expect(collectStalledViews(now, [], painted, latest)).toEqual([]);
   });
 
-  it("rate limits recovery so an undecodable stream cannot be restarted every tick", () => {
-    const recovered = new Map<string, number>();
-    const attempts = new Map<string, number>();
-    expect(shouldAttemptViewRecovery("a", now, recovered, attempts)).toBe(true);
-    recovered.set("a", now);
-    attempts.set("a", 1);
-    expect(shouldAttemptViewRecovery("a", now, recovered, attempts)).toBe(false);
-    expect(
-      shouldAttemptViewRecovery("a", now + PAINT_RECOVERY_COOLDOWN_MS - 1, recovered, attempts),
-    ).toBe(false);
-    expect(
-      shouldAttemptViewRecovery("a", now + PAINT_RECOVERY_COOLDOWN_MS, recovered, attempts),
-    ).toBe(true);
-    // Per udid, not global: one wedged phone must not block another's recovery.
-    expect(shouldAttemptViewRecovery("b", now, recovered, attempts)).toBe(true);
-  });
-
-  it("backs off doubling so a restart slower than the cooldown cannot loop", () => {
-    // The regression this encodes, measured live: a producer restart takes ~44 s end to
-    // end, longer than the flat 20 s floor, so every stall re-armed before the previous
-    // restart had finished and the phone was torn down roughly once a minute forever.
-    expect(viewRecoveryDelayMs(1)).toBe(PAINT_RECOVERY_COOLDOWN_MS);
-    expect(viewRecoveryDelayMs(2)).toBe(PAINT_RECOVERY_COOLDOWN_MS * 2);
-    expect(viewRecoveryDelayMs(3)).toBe(PAINT_RECOVERY_COOLDOWN_MS * 4);
-    expect(viewRecoveryDelayMs(99)).toBe(PAINT_RECOVERY_MAX_MS);
-    // By the second attempt the wait already exceeds how long a restart takes, which is
-    // the property that breaks the loop.
-    expect(viewRecoveryDelayMs(2)).toBeGreaterThan(OBSERVED_RESTART_MS);
-    // And the FIRST restart is still immediate, so a one-off transient costs no delay.
-    expect(shouldAttemptViewRecovery("never-tried", now, new Map(), new Map())).toBe(true);
-  });
-
-  it("keeps the stall window longer than the Rust watchdog's byte window", () => {
+  it("keeps the stall window well above a static screen's quiet period", () => {
     // scrcpy only encodes when the screen changes, so a phone on a static screen paints
     // nothing for a while quite legitimately. A window at or below the 5s byte threshold
     // would restart healthy streams.
     expect(PAINT_STALL_MS).toBeGreaterThan(5000);
-    expect(PAINT_RECOVERY_COOLDOWN_MS).toBeGreaterThan(PAINT_STALL_MS);
   });
 });
 
-describe("recovery backoff is not cleared by a twitch", () => {
-  it("requires more painted frames than a restart incidentally produces", () => {
-    // Measured: three overlay open/close cycles produced 33 restarts, every one logged
-    // "attempt 1", because each restart painted a frame or two before stopping and a single
-    // frame was enough to clear the counter. The backoff could therefore never advance.
-    // 48 frames is ~2s at 24fps.
-    expect(SUSTAINED_PAINT_FRAMES).toBeGreaterThan(2);
-    expect(SUSTAINED_PAINT_FRAMES).toBeGreaterThanOrEqual(24);
+describe("paint reports sent to the host watchdog", () => {
+  const now = 1_000_000;
+  const beat = (at: number, receivedCount: number, frames: number, generation = 1) => ({
+    at,
+    generation,
+    received: receivedCount,
+    frames,
+  });
+
+  it("reports healthy devices too, so silence means nobody is watching", () => {
+    // The distinction the host cannot make for itself: "no device is stalled" and "no window
+    // is reporting" must lead to different behaviour, because the second one has to fall
+    // back to the coarse byte rule rather than trust a paint rule nothing is feeding.
+    const latest = new Map([
+      ["healthy", beat(now, 300, 300)],
+      ["stalled", beat(now, 900, 200)],
+    ]);
+    const painted = new Map([
+      ["healthy", beat(now - 20, 300, 300)],
+      ["stalled", beat(now - 30_000, 200, 200)],
+    ]);
+    const reports = collectPaintReports(now, latest, painted);
+    expect(reports.map((report) => report.udid).sort()).toEqual(["healthy", "stalled"]);
+  });
+
+  it("sends the generation, so the host can date the evidence", () => {
+    // Counters captured before a restart show arrivals far ahead of frames forever. Without
+    // the generation the host would act on them the instant the restart completed, which is
+    // the 291-restart loop with an extra hop in it.
+    const latest = new Map([["a", beat(now, 900, 200, 7)]]);
+    const painted = new Map([["a", beat(now - 30_000, 200, 200, 7)]]);
+    expect(collectPaintReports(now, latest, painted)[0]).toMatchObject({
+      generation: 7,
+      received: 900,
+      frames: 200,
+      sincePaintMs: 30_000,
+    });
+  });
+
+  it("sends an age rather than a timestamp", () => {
+    // The WebView's clock and the host's are different clocks; comparing them across the IPC
+    // boundary is how a sleeping laptop becomes a fleet-wide restart. Never negative, even
+    // if the beat is somehow ahead of `now`.
+    const latest = new Map([["a", beat(now + 5_000, 10, 10)]]);
+    expect(collectPaintReports(now, latest, new Map())[0].sincePaintMs).toBe(0);
+  });
+
+  it("dates a device that has never painted from its own first beat", () => {
+    // `frames === 0` is what tells the host this is a device starting up. The age must not
+    // be an invented zero, or a device that never paints at all would look freshly drawn.
+    const latest = new Map([["starting", beat(now - 4_000, 5, 0)]]);
+    const report = collectPaintReports(now, latest, new Map())[0];
+    expect(report.frames).toBe(0);
+    expect(report.sincePaintMs).toBe(4_000);
   });
 });

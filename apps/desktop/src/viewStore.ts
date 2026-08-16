@@ -1,5 +1,5 @@
 import { useEffect, useSyncExternalStore } from "react";
-import { viewEndpoint, viewEnsure } from "./api";
+import { viewEndpoint, viewReportPaint, type ViewPaintReport } from "./api";
 
 export interface ViewSize {
   width: number;
@@ -13,41 +13,26 @@ const sizes = new Map<string, ViewSize>();
 const live = new Set<string>();
 const listeners = new Map<string, Set<Listener>>();
 const pendingExports = new Map<number, (bytes: Uint8Array | null) => void>();
-/// When each udid last reported a drawn frame, and when we last acted on a stall.
 /// The beat at which each udid last actually drew, and the newest beat of any kind.
 const lastPaintBeat = new Map<string, ViewBeat>();
 const latestBeat = new Map<string, ViewBeat>();
-const lastRecoveryAt = new Map<string, number>();
-/// How many restarts this udid has had without a single frame drawn since.
-const recoveryAttempts = new Map<string, number>();
-/// `framesPainted` at the moment of the last recovery attempt, so "it recovered" can mean
-/// sustained painting rather than a single frame.
-const framesAtRecovery = new Map<string, number>();
 
-/// Frames a device must draw after a restart before its backoff is considered cleared.
+/// This module does not restart anything, and that is the design rather than a limitation.
 ///
-/// One frame is not recovery, and treating it as such defeated the backoff completely:
-/// measured over three overlay open/close cycles, a stream painted a frame or two after each
-/// restart and then stopped, which reset the counter, so every stall logged "attempt 1" and
-/// the loop ran 33 times. 48 frames is ~2 s at 24 fps -- long enough that a stream which
-/// merely twitched does not count as healthy.
-export const SUSTAINED_PAINT_FRAMES = 48;
-
-/// Whether a stall report also restarts the producer. **Off.**
+/// It used to. Restarting on "packets arrive but nothing paints" is a positive feedback
+/// loop, and it got worse with every scale it was measured at: 2 phones produced 33 producer
+/// starts for 3 overlay open/close cycles, and 20 phones produced **291**. Each restart
+/// costs adb work and CPU, which makes more devices miss their paint window, which triggers
+/// more restarts. At fleet scale the recovery destroyed the thing it was recovering, so the
+/// behaviour was left switched off behind a flag.
 ///
-/// Restarting on "packets arrive but nothing paints" is a positive feedback loop, and it got
-/// worse with every scale it was measured at: 2 phones produced 33 producer starts for 3
-/// overlay open/close cycles, and 20 phones produced **291**. Each restart costs adb work and
-/// CPU, which makes more devices miss their paint window, which triggers more restarts. At
-/// fleet scale the recovery destroys the thing it is recovering.
-///
-/// The report is kept because it is the only signal that distinguishes a decoder producing
-/// nothing from a phone whose screen is simply not changing, and the underlying cause is
-/// still open. Marking the tile not-live is honest and costs nothing; the Rust keeper still
-/// restarts on genuine silence from the device, which is a different and safe predicate.
-///
-/// Turn this back on only alongside a fleet-wide concurrency cap on recoveries.
-export const AUTO_RESTART_ON_STALL = false;
+/// The flag is gone now because the split it guarded is gone. Deciding here was never the
+/// right shape: this process cannot see whether a start is already in flight, cannot see
+/// what another window is doing, loses every counter on reload, and cannot bound anything
+/// fleet-wide. What it *can* see — and nothing else can — is whether a frame came out of the
+/// decoder. So that is all it does: it reports the counters (`view_report_paint`) and drops
+/// its own tile out of Live, which is honest and costs nothing. One decision, one backoff
+/// and one fleet-wide ceiling now live in `view_watchdog.rs` on the Rust side.
 /// UDIDs whose every codec candidate was refused. Distinct from "not live": there is
 /// nothing to wait for, so retrying the same stream cannot help.
 const decodeFailed = new Set<string>();
@@ -66,23 +51,12 @@ const decodeFailed = new Set<string>();
 /// Arrivals climbing while paints stay flat is the condition that actually means broken, and
 /// it needs both counters. 12s rather than 6: at 24 fps a healthy stream paints within a
 /// frame or two of an arrival, so anything this long is not a slow decoder.
+/// Kept in step with `VIEW_PAINT_STALL` in `view_watchdog.rs`. Two copies because two
+/// processes need it and there is no shared constant between them — but only one of them
+/// decides anything with it. Here it draws the tile's "not live" state; there it decides
+/// whether a producer is restarted. If they ever disagree the tile is briefly honest about
+/// something the host has not acted on yet, which is the harmless direction.
 export const PAINT_STALL_MS = 12000;
-/// Delay before the FIRST retry for one udid. Each further attempt doubles it.
-///
-/// A flat cooldown is not enough, and this was measured the hard way: a producer restart
-/// takes about 44 s end to end on this fleet, so with a flat 20 s floor every stall
-/// re-armed before the previous restart had even finished publishing, and a phone whose
-/// frames could not be decoded was restarted forever -- roughly once a minute, each one
-/// tearing down a working-but-undecodable stream. That is worse than the stale canvas it
-/// was meant to replace.
-export const PAINT_RECOVERY_COOLDOWN_MS = 30000;
-/// How long a producer restart takes end to end, measured on this fleet (scrcpy push check,
-/// leftover kill, forward, spawn, first keyframe). The backoff has to clear this by the
-/// second retry or it re-arms mid-restart, which is the loop that was observed.
-export const OBSERVED_RESTART_MS = 44000;
-/// Ceiling on the backoff. Past this a device is checked occasionally rather than hammered;
-/// a phone that has not painted in five minutes needs an operator, not another restart.
-export const PAINT_RECOVERY_MAX_MS = 300000;
 const STALL_TICK_MS = 2000;
 
 let stallTimer: ReturnType<typeof setInterval> | null = null;
@@ -109,12 +83,24 @@ export interface ViewDiag {
 
 export interface ViewBeat {
   at: number;
+  /// Which producer these counters belong to.
+  ///
+  /// The worker has always sent it and this store used to throw it away. It is what lets
+  /// the host tell evidence about the running producer from evidence about the one it just
+  /// replaced — counters captured before a restart show arrivals far ahead of frames
+  /// forever, and a host that acted on them would restart the moment each restart finished.
+  generation: number;
   received: number;
   frames: number;
   diag?: ViewDiag;
 }
 
 /// The udids that look stalled: packets kept arriving and no frame was drawn for them.
+///
+/// This decides the tile's Live flag and nothing else — the restart decision it used to feed
+/// now lives in Rust, where the fleet-wide ceiling is. Kept here because dropping a tile out
+/// of Live the moment its decoder stops producing is honest, immediate and free, and because
+/// this is the predicate that distinguishes a dead decoder from a screen that is not moving.
 ///
 /// Takes its inputs rather than reading module state, so the policy can be tested without a
 /// worker, a socket, or a timer. That matters here more than usual: the defect this exists
@@ -147,33 +133,33 @@ export function collectStalledViews(
   return stalled;
 }
 
-/// The delay required before attempt number `attempts` (0-based) for one udid.
+/// Everything the host's watchdog needs, for every device this window is tracking.
 ///
-/// Doubling, capped. Kept separate from the decision so the schedule can be asserted
-/// directly rather than inferred from timing.
-export function viewRecoveryDelayMs(
-  attempts: number,
-  baseMs: number = PAINT_RECOVERY_COOLDOWN_MS,
-  maxMs: number = PAINT_RECOVERY_MAX_MS,
-): number {
-  if (attempts <= 0) return 0;
-  const doubled = baseMs * 2 ** (attempts - 1);
-  return Math.min(doubled, maxMs);
-}
-
-/// Whether enough time has passed to try recovering this udid again.
+/// Healthy devices are included deliberately. A report that only ever named broken devices
+/// would leave the host unable to tell "nothing is wrong" from "nobody is reporting", and
+/// those two must lead to different behaviour: the second one has to fall back to the coarse
+/// byte rule rather than trust a paint rule nobody is feeding.
 ///
-/// `attempts` is reset only by a frame actually being drawn, not by a restart succeeding:
-/// the restart succeeding is exactly what kept happening while nothing painted.
-export function shouldAttemptViewRecovery(
-  udid: string,
+/// Ages, not timestamps: the WebView's clock and the host's are different clocks.
+export function collectPaintReports(
   now: number,
-  recoveredAt: Map<string, number>,
-  attemptCounts: Map<string, number> = new Map(),
-): boolean {
-  const last = recoveredAt.get(udid);
-  if (last === undefined) return true;
-  return now - last >= viewRecoveryDelayMs(attemptCounts.get(udid) ?? 1);
+  latest: Map<string, ViewBeat>,
+  lastPaint: Map<string, ViewBeat>,
+): ViewPaintReport[] {
+  const reports: ViewPaintReport[] = [];
+  for (const [udid, beat] of latest) {
+    const painted = lastPaint.get(udid);
+    reports.push({
+      udid,
+      generation: beat.generation,
+      received: beat.received,
+      frames: beat.frames,
+      // Never painted: report the age of the stream itself, and let `frames === 0` be what
+      // tells the host this is a device starting up rather than one that stopped.
+      sincePaintMs: Math.max(0, now - (painted?.at ?? beat.at)),
+    });
+  }
+  return reports;
 }
 
 export const VIEW_RECONNECT_MIN_MS = 200;
@@ -234,6 +220,7 @@ function ensureWorker(): Worker | null {
     if (message.type === "paintBeat" && message.udid) {
       const beat: ViewBeat = {
         at: Date.now(),
+        generation: message.generation ?? 0,
         received: message.received ?? 0,
         frames: message.frames ?? 0,
         diag: message.diag,
@@ -241,18 +228,8 @@ function ensureWorker(): Worker | null {
       const previous = lastPaintBeat.get(message.udid);
       latestBeat.set(message.udid, beat);
       if (previous === undefined || beat.frames > previous.frames) {
-        // A frame was genuinely drawn since the last check. That, and only that, clears the
-        // backoff -- a restart that "succeeded" and still painted nothing must not buy
-        // itself another fast retry.
+        // A frame was genuinely drawn since the last check.
         lastPaintBeat.set(message.udid, beat);
-        // Clear the backoff only on SUSTAINED painting. A restart that produced a couple of
-        // frames and stopped is the failure being retried, not a recovery from it.
-        const since = beat.frames - (framesAtRecovery.get(message.udid) ?? 0);
-        if (!recoveryAttempts.has(message.udid) || since >= SUSTAINED_PAINT_FRAMES) {
-          recoveryAttempts.delete(message.udid);
-          lastRecoveryAt.delete(message.udid);
-          framesAtRecovery.delete(message.udid);
-        }
         // Painting again is what makes a view live again. Only the `painted` message used to
         // do this, and that fires solely when the size or generation CHANGES -- so after a
         // stall marked a device not-live, a stream that recovered at the same resolution kept
@@ -341,25 +318,34 @@ function connectSocket(url: string) {
 
 function startStallWatch() {
   // Test mode stays timer-free so Vitest does not leak an interval; the policy is covered
-  // through `collectStalledViews` / `shouldAttemptViewRecovery` instead.
+  // through `collectStalledViews` / `collectPaintReports` instead.
   if (import.meta.env.MODE === "test") return;
   if (stallTimer != null) return;
   stallTimer = setInterval(() => {
     const now = Date.now();
+    // Every device, not only the stalled ones. The host has to be able to tell a healthy
+    // fleet from a window that has stopped reporting, and it can only do that if a healthy
+    // report is a thing that arrives.
+    if (latestBeat.size > 0) {
+      void viewReportPaint(collectPaintReports(now, latestBeat, lastPaintBeat)).catch(() => {
+        // The host is shutting down, or the command is not registered in a harness. Losing a
+        // report costs the watchdog its fine rule for a few seconds, not its coarse one.
+      });
+    }
     for (const udid of collectStalledViews(now, live, lastPaintBeat, latestBeat)) {
+      // Dropping the tile out of Live is this module's whole remaining job on a stall. It is
+      // honest, it is instant, and it costs nothing to be wrong about for one tick.
       live.delete(udid);
       emit(udid);
-      if (!shouldAttemptViewRecovery(udid, now, lastRecoveryAt, recoveryAttempts)) continue;
-      const attempt = (recoveryAttempts.get(udid) ?? 0) + 1;
-      recoveryAttempts.set(udid, attempt);
-      lastRecoveryAt.set(udid, now);
-      framesAtRecovery.set(udid, latestBeat.get(udid)?.frames ?? 0);
       const painted = lastPaintBeat.get(udid);
       const current = latestBeat.get(udid);
+      // vite forwards the PAGE's console, never a Web Worker's (AGENTS.md 9.66), so this is
+      // the only line on which the worker's counters ever reach a terminal. It stays on the
+      // main thread for that reason, and it prints where a reader is already looking: on the
+      // line that says something is wrong.
       console.warn(
         `view received ${(current?.received ?? 0) - (painted?.received ?? 0)} packets and drew ` +
-          `nothing for ${PAINT_STALL_MS}ms on ${udid} (report ${attempt}); ` +
-          `${AUTO_RESTART_ON_STALL ? "restarting" : "not restarting"}` +
+          `nothing for ${PAINT_STALL_MS}ms on ${udid}; reported to the host watchdog` +
           (current?.diag
             ? ` [fed=${current.diag.fed} out=${current.diag.output} keys=${current.diag.keys} ` +
               `closes=${current.diag.closes} refused(nodec=${current.diag.noDecoder} ` +
@@ -368,11 +354,6 @@ function startStallWatch() {
               `codec=${current.diag.lastCodec} cands=${current.diag.lastCandidates}]`
             : ""),
       );
-      if (!AUTO_RESTART_ON_STALL) continue;
-      // viewEnsure restarts the producer at whatever preset the operator last asked for.
-      void viewEnsure(udid).catch(() => {
-        // The device may be unplugged, which is one of the reasons frames stop.
-      });
     }
   }, STALL_TICK_MS);
 }
