@@ -5550,6 +5550,21 @@ con Note 8 in `mRotation=0`. Va bay that nam o cho `ROTATION_90` la **ten hang s
 `Surface.ROTATION_90`, gia tri 1** - parse chu so ra khoi ten se doc 270 thanh mot rotation
 bat kha va bo mat. Test ghim ca hai dang.
 
+**`wm size` KHONG chay theo rotation — do 16/08/2026 tren SM-G955F.** Xoay ngang that (mo
+Settings truoc, vi launcher khoa doc nen no nuot yeu cau):
+
+| | doc | ngang |
+|---|---|---|
+| `wm size` Override | 1080x2220 | **1080x2220** — khong doi |
+| `dumpsys display` real (override) | 1080 x 2220 | **2220 x 1080** — dao |
+| `dumpsys window displays` app | 1080 x 2094 | **2094 x 1080** |
+
+Nen doc lai `wm size` sau khi xoay **tra ve dung con so cu va khong sua duoc gi**. No la
+kich thuoc *cau hinh* cua display, khong co khai niem huong trong do — cung ly do `frames.rs`
+dua tuple do cho minicap la `real=WxH` con rotation la **tham so rieng**. Nguon lam moi phai
+la `/window/current/size` cua agent. `wm size` van dung lam **hat giong** luc mo session, khi
+agent co the chua san sang.
+
 #### AdbCommand: phan bien tim ra hai loi trong dung code toi vua viet
 
 1. **`run_bytes` coi exit khac 0 la that bai va bo luon stdout.** Do duoc: `ls /nope` exit 1,

@@ -239,6 +239,13 @@ pub struct AndroidDriver {
     /// path to every session. Invalidated by `refresh_device`, because a build can be
     /// installed or removed while the app is running.
     tiktok_packages: Mutex<HashMap<String, String>>,
+    /// serial -> the phone's current screen size, shared with every session for it.
+    ///
+    /// One handle per serial rather than a copy per session, for the same reason `agents`
+    /// is keyed this way: invalidating has to reach the sessions already handed out.
+    /// `session.rs` used to hold this as a plain tuple captured at open, so a rotation made
+    /// every later coordinate wrong and nothing said so.
+    screens: Mutex<HashMap<String, crate::session::ScreenCache>>,
     /// serial -> forwarded host port.
     ports: Mutex<HashMap<String, u16>>,
     /// Serials for which *we* established the `adb forward`.
@@ -339,6 +346,7 @@ impl AndroidDriver {
             interaction: riviu_core::InteractionLifecycleRegistry::default(),
             agents: Mutex::new(HashMap::new()),
             tiktok_packages: Mutex::new(HashMap::new()),
+            screens: Mutex::new(HashMap::new()),
             ports: Mutex::new(HashMap::new()),
             forwarded: Mutex::new(HashSet::new()),
             riviu_agent_apk,
@@ -1335,9 +1343,34 @@ impl AndroidDriver {
     /// `start_ui_session` boxes this. Callers that need the Android-specific
     /// surface — locator queries, element bounds — take this instead of
     /// downcasting a trait object.
+    /// Drop what we believe about a serial's screen size.
+    ///
+    /// Cheap enough to call speculatively — the next gesture pays one agent read, and only
+    /// if it actually needs a size.
+    pub(crate) fn invalidate_screen(&self, serial: &str) {
+        if let Some(cache) = self.screens.lock().get(serial) {
+            cache.invalidate();
+        }
+    }
+
     pub async fn open_session(&self, udid: &str) -> anyhow::Result<AndroidUiSession> {
         let agent = self.ensure_agent(udid).await?;
-        let screen = self.screen_size(udid).await?;
+        let screen = {
+            let cache = self
+                .screens
+                .lock()
+                .entry(udid.to_string())
+                .or_default()
+                .clone();
+            // Seed from `wm size` only when there is nothing cached. It is the right *seed*
+            // -- available before the agent is primed -- and the wrong *refresh*, because it
+            // does not follow rotation (see `ScreenCache`). Re-opening a session for a phone
+            // we already know now costs no adb round trip at all.
+            if cache.peek().is_none() {
+                cache.store(self.screen_size(udid).await?);
+            }
+            cache
+        };
         let helper = match self.try_attach_helper(udid).await {
             Ok(helper) => helper,
             Err(error) => {
@@ -1350,7 +1383,10 @@ impl AndroidDriver {
             }
         };
         Ok(
-            AndroidUiSession::new(agent, self.adb.clone(), udid.to_string(), screen)
+            // `new` still takes a tuple so the public constructor is unchanged; the shared
+            // handle replaces the private cache it seeds.
+            AndroidUiSession::new(agent, self.adb.clone(), udid.to_string(), (0.0, 0.0))
+                .with_screen_cache(screen)
                 .with_helper(helper),
         )
     }
@@ -1785,8 +1821,11 @@ impl DeviceDriver for AndroidDriver {
 
     async fn refresh_device(&self, udid: &str) -> anyhow::Result<DeviceInfo> {
         // A refresh is the operator saying "look again", which is also the moment a
-        // TikTok build may have been installed or removed.
+        // TikTok build may have been installed or removed -- or the display resolution
+        // changed under us, which is the one stale-screen case an aspect-ratio check cannot
+        // see, because `wm size 1080x2220` keeps the shape and moves the numbers.
         self.tiktok_packages.lock().remove(udid);
+        self.invalidate_screen(udid);
         let mut device = probe_device(self.adb.clone(), udid.to_string(), None).await;
         device.wda_ready = self.agent_ready(udid).await;
         if device.wda_ready {
@@ -2016,6 +2055,11 @@ impl DeviceDriver for AndroidDriver {
     /// ignored; the read-back is the only thing that decides the answer.
     async fn set_screen_rotation(&self, udid: &str, rotation: u8) -> anyhow::Result<u8> {
         anyhow::ensure!(rotation < 4, "rotation must be 0, 1, 2 or 3");
+        // Invalidate BEFORE asking, not after. Once the shells below have run there is no
+        // way to tell from a failed read-back whether the screen moved, so the cached size
+        // has to be dropped either way — and dropping it costs one lazy agent read on the
+        // next gesture, while keeping a stale one costs every coordinate after this.
+        self.invalidate_screen(udid);
         // Auto-rotate has to come off first, or the sensor overrides the request on a
         // phone that is lying flat.
         let _ = self
