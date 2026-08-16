@@ -5061,6 +5061,101 @@ Overlay chay ~2 phut khong bi watchdog ha ve tile. Hinh doc duoc tung dong thong
 chu Trung. Vi mot producer nuoi ca hai surface, tile phia sau **cung net len theo** khi
 overlay mo -- khong phai loi, nhung dang biet truoc khi ai do di tim vi sao tile thay doi.
 
+### 9.65 Keyframe khong phai bang chung co SPS — va vi sao chan doan im lang suot 3 vong (15/08/2026)
+
+Mot box **20 may Galaxy S8** cam vao la loi man den tu in ra nguyen nhan cua no. Chu ky
+giong het nhau tren moi may:
+
+```
+fed=206 out=50 keys=4 closes=4 refused(nodec=0 queue=0 notsync=0)
+rebuilds=2 genchg=1 codec=avc1.420015 cands=avc1.42E01E,avc1.42001E,avc1.4D401E
+```
+
+`codecFromAnnexB` tra ve hang so `"avc1.42E01E"` khi blob **khong co SPS**. Do la lua chon
+hop ly cho viec dung decoder **dau tien**, va la cai bay cho bat ky cho nao so sanh voi mot
+codec **dang dung**: scrcpy gui config NAL **tach rieng**, nen IDR rat hay toi ma khong kem
+SPS. `annexBIsSyncSample` van coi do la sync sample — **dung** — nen "co phai keyframe khong"
+**khong** dong nghia "goi nay noi duoc codec la gi khong".
+
+Stream that la `avc1.420015` — **level 2.1**, khong he gan tran level 3.0 ma toi lo suot ba
+commit. Moi keyframe khong-SPS sinh ra danh sach candidate hu cau, danh sach do khong the
+chua codec dang dung, nhanh mismatch pha decoder va dung lai bang mot chuoi codec **sai voi
+stream**. Output chet o ~50 frame moi may.
+
+Sua: them `annexBHasSps`, va chi suy lai codec tu goi **that su mang SPS**.
+
+**Do duoc sau khi sua, cung 20 may, hon mot phut:** 20 producer, **0 stall, 0 decoder error,
+0 lagged**. Truoc do la 20 stall trong dung khoang ay.
+
+### 9.66 Vite khong chuyen tiep console cua Web Worker — ba vong chan doan bi mu vi dieu nay
+
+Day la ly do 9.65 mat lau den the, va no dang mot muc rieng vi no se lam nguoi tiep theo mat
+y het thoi gian.
+
+**Vite chuyen tiep console cua TRANG ra terminal, khong chuyen cua Web Worker.** Moi chan doan
+`console.warn`/`console.error`/`console.info` viet trong `viewDecode.worker.ts` deu di vao
+devtools va khong di dau khac. Hau qua thuc te:
+
+| doc duoc trong log | toi ket luan | su that |
+|---|---|---|
+| `decoder rejected` = 0 | decoder khong bao loi | dong log do chua bao gio ra duoc log |
+| `viewdiag` = 0 | bo dem khong chay | `console.info` con bi loc them mot lan nua |
+| `decode unsupported` = 0 | ladder chua can | dung, nhung khong phai vi ly do toi nghi |
+
+Va `import.meta.env.DEV` trong worker o build nay **la false**, nen mot co gate theo no cung
+im not.
+
+Cach lam dung, da ap dung: **so lieu di kem message `postMessage` va do main thread in ra.**
+`paintBeat` da ton tai nen bo dem di ghep vao do, con loi decoder thi thanh message rieng.
+In ra ngay trong dong bao stall — dung cho no tra loi cau hoi.
+
+**Truoc khi chan doan bat cu gi trong worker: kiem xem dong log do co that su ra duoc terminal
+khong.** Mot bo dem bang 0 vi khong ai in no thi khong phai bang chung khoe manh, no khong
+phai bang chung gi ca.
+
+### 9.67 Detector stall tu restart la vong phan hoi duong — cang nhieu may cang chet (15/08/2026)
+
+Do duoc o hai quy mo, va no te di theo so may:
+
+| may | chu ky mo/dong overlay | producer khoi dong |
+|---|---|---|
+| 2 | 3 | **33** |
+| 20 | 0 (chi chay len) | **291** |
+
+Moi restart ton adb va CPU, lam them may truot cua so ve, sinh them restart. O quy mo fleet,
+cach "hoi phuc" do **pha chinh thu no dinh cuu**.
+
+Va backoff nhan doi **khong cuu duoc**, vi toi cho no reset khi "co frame duoc ve" — ma sau
+moi restart stream ve duoc mot hai frame roi tat, nen moi lan deu ghi `attempt 1`. Sua bang
+`SUSTAINED_PAINT_FRAMES = 48` (~2 s o 24 fps) van chua du: `AUTO_RESTART_ON_STALL` gio **tat**.
+
+Phan **bao hieu** giu lai — no la tin hieu duy nhat tach duoc "decoder khong xuat frame" khoi
+"man hinh khong doi", va chinh no dan toi 9.65. Keeper phia Rust van restart khi may **im
+that**, do la vi ngu khac va an toan.
+
+Bat lai `AUTO_RESTART_ON_STALL` **chi khi** da co tran dong thoi cho recovery tren toan fleet.
+
+### 9.68 `BROADCAST_CAP` phai doc nhu mot toc do, khong phai mot kich thuoc (15/08/2026)
+
+Mot kenh broadcast cho **ca fleet**, nen dung luong tinh bang **thoi gian** co lai tuyen tinh
+theo so may. O 24 fps:
+
+| may | cap 128 | cap 2048 |
+|---|---|---|
+| 2 | 2667 ms | 42667 ms |
+| 20 | **267 ms** | 4267 ms |
+| 50 | 107 ms | 1707 ms |
+| 100 | **53 ms** | 853 ms |
+
+Ca hai gia tri truoc do (8, roi 128) deu chon tren ban thu **hai may**, va khong comment nao
+noi dieu gi xay ra khi ban thu dong len. Gio la 2048.
+
+Hai thu khien ring lon la an toan, va **khong** cai nao dung khi 8 duoc chon: `coalesce_for_live`
+chan viec phat lai lich su bat ke kich thuoc, va mot lan `Lagged` khong con la tham hoa vi
+`serve_client` drain toi hien tai roi resync tu keyframe moi nhat.
+
+Sua dung ve cau truc la **mot kenh moi may** — ghi lai, chua lam.
+
 ### 9.64 Man den bao gom mot cai treo cua chinh dien thoai, va mot diem mu 8 phut (15/08/2026)
 
 Nguoi van hanh bao overlay den + `agent /actions 400 Bad Request: Unable to perform W3C
