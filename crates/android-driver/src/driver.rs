@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use riviu_core::driver::{AppProcessState, DeviceDriver, ProcessAbsenceProof, UiSession};
 use riviu_core::{ConnectionKind, DeviceInfo, DeviceStatus};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::adb::{self, AdbDeviceState, AdbProgram};
 use crate::agent::AgentClient;
@@ -171,6 +172,30 @@ struct ViewProducer {
     host_port: u16,
     child: tokio::process::Child,
     reader: tokio::task::JoinHandle<()>,
+    /// The write half of the scrcpy control socket.
+    ///
+    /// Behind its own async mutex, and that is a correctness requirement rather than a
+    /// style: `ControlMessageReader` on the device has **no framing**, so two interleaved
+    /// writes desynchronise it permanently — and a desynchronised control stream is not a
+    /// dropped message, it is `ControlProtocolException` -> `Looper.quitSafely()`, which
+    /// kills the video too. One message, one `write_all`, one lock.
+    ///
+    /// Separate from `views` so the lock is never held across the send: `views` is taken by
+    /// every keeper tick and holding it through a socket write would make a slow phone stall
+    /// the reconciliation of every other one.
+    control: Arc<tokio::sync::Mutex<tokio::net::tcp::OwnedWriteHalf>>,
+    /// Reads the device→host half and throws it away.
+    ///
+    /// With `clipboard_autosync` left at its default the phone sends a message every time
+    /// its clipboard changes. Measured: holding that socket unread for 75 s while the
+    /// clipboard changed twelve times did not disturb the server — `DeviceMessageSender`
+    /// offers onto a bounded queue and drops rather than blocking. So this is insurance, not
+    /// a load-bearing part: it keeps the socket honest over hours rather than minutes, and it
+    /// costs one idle task per phone.
+    ///
+    /// Tolerant by construction — it never parses, so it cannot object to a message type it
+    /// does not know, and objecting is the one thing that would be fatal.
+    control_drain: tokio::task::JoinHandle<()>,
 }
 
 pub struct AndroidDriver {
@@ -942,6 +967,16 @@ impl AndroidDriver {
 
     async fn stop_view_producer(&self, serial: &str, mut producer: ViewProducer) -> bool {
         producer.reader.abort();
+        // The control socket goes first, and shut down rather than merely dropped.
+        // `DesktopConnection.shutdown` on the device closes all three sockets; giving its
+        // reader a clean EOF is what stops a teardown that races a `write_all` from leaving
+        // a half-written message behind — and a half-written message on this stream is not a
+        // lost byte, it is `ControlProtocolException` on a server we are about to kill
+        // anyway, but which would log a fatal error and confuse the next reader of the log.
+        producer.control_drain.abort();
+        if let Ok(mut socket) = producer.control.try_lock() {
+            let _ = socket.shutdown().await;
+        }
         let _ = producer.child.start_kill();
         let confirmed = matches!(
             tokio::time::timeout(CHILD_EXIT_TIMEOUT, producer.child.wait()).await,
@@ -1118,6 +1153,7 @@ impl AndroidDriver {
             }
         };
         let mut stream = None;
+        let mut control = None;
         let mut last_error = None;
         for attempt in 0..40 {
             if child.try_wait().ok().flatten().is_some() {
@@ -1130,8 +1166,9 @@ impl AndroidDriver {
                 );
             }
             match crate::scrcpy::ScrcpyStream::try_accept(host_port).await {
-                Ok(accepted) => {
+                Ok((accepted, accepted_control)) => {
                     stream = Some(accepted);
+                    control = Some(accepted_control);
                     break;
                 }
                 Err(crate::scrcpy::AcceptError::NotListening(error)) => {
@@ -1164,6 +1201,8 @@ impl AndroidDriver {
                 "scrcpy never accepted a connection after 40 attempts{said}"
             )));
         };
+        // Set in the same arm as `stream`, so this cannot be reached without it.
+        let control = control.expect("try_accept returns both sockets or neither");
         let first =
             match tokio::time::timeout(Duration::from_secs(8), stream.next_sync_sample()).await {
                 Ok(Ok(sample)) => sample,
@@ -1244,6 +1283,26 @@ impl AndroidDriver {
             }
         });
 
+        // Split so the write half can live behind its own lock while a task reads the other
+        // end. `into_split` rather than `split` because the two halves outlive this function
+        // in different places.
+        let (mut control_read, control_write) = control.into_split();
+        let control_write = Arc::new(tokio::sync::Mutex::new(control_write));
+        let drain_serial = serial.to_string();
+        let control_drain = tokio::spawn(async move {
+            let mut scratch = [0u8; 1024];
+            // Read and discard, never parse. The only thing that arrives is a clipboard
+            // notification we did not ask for; the one thing that would be fatal is
+            // objecting to a message type we do not know, and a reader that never
+            // interprets cannot object.
+            while let Ok(read) = control_read.read(&mut scratch).await {
+                if read == 0 {
+                    break;
+                }
+            }
+            tracing::debug!(serial = %drain_serial, "scrcpy control socket closed");
+        });
+
         self.views.lock().await.insert(
             serial.to_string(),
             ViewProducer {
@@ -1252,9 +1311,47 @@ impl AndroidDriver {
                 host_port,
                 child,
                 reader,
+                control: control_write,
+                control_drain,
             },
         );
         Ok(())
+    }
+
+    /// Ask the phone for a fresh keyframe, without restarting anything.
+    ///
+    /// This is what the control socket is for. The alternative cure for a decoder that has
+    /// stopped producing frames is a full producer restart, measured at ~11.5 s of black
+    /// tile on this fleet; a keyframe request is one byte and the server answers by logging
+    /// `Video capture reset` and emitting a fresh IDR. Measured over a 75 s soak: twelve
+    /// requests, twelve resets, video flowing throughout.
+    ///
+    /// `Ok(false)` means there is no producer to ask — not a failure, just nothing to do.
+    ///
+    /// The `views` lock is released before the write. Holding it across a socket send would
+    /// let one unresponsive phone stall the keeper's reconciliation of the whole fleet.
+    pub async fn request_keyframe(&self, serial: &str) -> anyhow::Result<bool> {
+        let control = {
+            let views = self.views.lock().await;
+            match views.get(serial) {
+                Some(producer) => Arc::clone(&producer.control),
+                None => return Ok(false),
+            }
+        };
+        let message = crate::scrcpy::reset_video();
+        let mut socket = control.lock().await;
+        // ONE `write_all`, under the lock. The device's reader has no framing, so a partial
+        // or interleaved write desynchronises it permanently — and that is not a lost
+        // message, it is the whole server going down, video included.
+        socket
+            .write_all(&message)
+            .await
+            .with_context(|| format!("send RESET_VIDEO to {serial}"))?;
+        socket
+            .flush()
+            .await
+            .with_context(|| format!("flush RESET_VIDEO to {serial}"))?;
+        Ok(true)
     }
 
     fn host_port(&self, serial: &str) -> u16 {

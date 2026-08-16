@@ -30,6 +30,7 @@ vi.mock("../api", () => ({
   saveViewSnapshot: vi.fn(),
   screenshot: vi.fn(),
   setScreenRotation: vi.fn(async () => 0),
+  viewRequestKeyframe: vi.fn(async () => true),
 }));
 
 vi.mock("../viewStore", async (importOriginal) => {

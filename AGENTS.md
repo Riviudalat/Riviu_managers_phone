@@ -5133,7 +5133,7 @@ dang chay** nhung **khong co `adb forward` nao** cho serial do. No chan im lang 
 
 Da **stash** (`part3-control-socket-WIP`) va tra `control=false`; fleet chay lai 20/20 ngay.
 
-> **DA TIM RA NGUYEN NHAN 16/08/2026 — va nghi van ghi o duoi la SAI. Xem §9.74.**
+> **DA TIM RA NGUYEN NHAN 16/08/2026, va Phan 3 gio DA CHAY. Xem §9.74 va §9.76.**
 > Khong phai `power_on` khong hop le: no la key hop le, va key **khong** hop le thi server chi
 > `Ln.w` chu khong chet. Thu that su giet 20 may la **do dai argv cua `app_process`**: qua
 > **254 byte** thi tien trinh chet bang `stack corruption detected (-fstack-protector)`, va
@@ -5159,6 +5159,7 @@ chinh file ta ship, va upstream tag `v3.3.4`; SHA-256 khop dung `SHA256SUMS.txt`
 * `RESET_VIDEO` = type **17**, mot byte. `INJECT_TOUCH_EVENT` = type `0x02`, **32 byte**, toan
   big-endian, pressure Q0.16 voi `0xFFFF` = dung 1.0.
 
+**Socket control gio DA bat** (§9.76) — nhung chi de gui `RESET_VIDEO`, khong gui input.
 **Quyet dinh: input o lai uiautomator2, KHONG chuyen sang control socket.** Nguoi van hanh chon
 "bam theo cac du an lon", va do chinh la dieu he sinh thai lam — nhanh **soi guong** (scrcpy,
 QtScrcpy, ws-scrcpy) dung control socket vi the gioi cua ho la pixel; nhanh **farm** (STF,
@@ -5168,6 +5169,50 @@ moi lan doi preset va moi lan xoay may la mot cua so cham bien mat — upstream 
 `INJECT_TEXT` di tung ky tu qua `KeyCharacterMap` nen **khong go duoc tieng Viet co dau**; va
 agent **von khong cham** — 130–280 ms mot click do tren chinh Galaxy S8+. Con so 1502 ms la
 `adb shell input`, **khong phai** agent, dung nham hai cai.
+
+### 9.76 Phan 3 xong: socket control, `RESET_VIDEO`, va mot ket luan tu bac bo (16/08/2026)
+
+§9.71 bo Phan 3 vi "bat control lam mat video ca 20 may". §9.74 tim ra nguyen nhan that
+(argv > 254 byte) va **van ket luan sai** rang Phan 3 khong vua — vi no cong ca
+`clipboard_autosync=false`. **Chua ai do `control=true` MOT MINH.** Do roi thi:
+
+| cau hinh | argv | ket qua |
+|---|---|---|
+| `control=false` (cu) | 240 | chay |
+| **`control=true` mot minh** | **239** | **chay** — re hon 1 byte |
+| `control=true` + `clipboard_autosync=false` | 264 | vuot tran, abort |
+
+Nen thu khong vua **chi la viec tat clipboard sync**, khong phai socket control. Ta de
+clipboard sync **bat** va **drain** socket. Do 75 giay tren SM-G955F, socket control mo va
+**co y khong doc**, clipboard doi 12 lan: **2.197.388 byte video**, 12/12 `RESET_VIDEO` deu
+duoc dap ung, server song. `DeviceMessageSender` dung bounded queue voi `offer` nen no **drop**
+chu khong block — drain la bao hiem, khong phai dieu kien song con.
+
+**Hai thu phai dung, khong phai style:**
+
+* **Socket #2 mo GIUA luc doc dummy va luc doc device name.** Server accept mot socket moi
+  kenh roi moi dong listener; `sendDeviceMeta` chay sau `open()`. Doc name truoc khi mo socket
+  #2 la treo vinh vien. Do: socket #1 nhan dummy ngay, roi **3,00 s / 0 byte**, mo socket #2 la
+  nha ca 64 byte name lan 12 byte header.
+* **Lo hong retry, va no du de tai hien §9.71.** Vong retry 40 lan key tren `NotListening`.
+  Voi `control=true`, neu doc dummy that bai *cham* (khong phai kieu refuse tuc thi cua adb
+  Windows) thi server **da an TCP nay lam kenh video**, va lan retry se bi an lam kenh
+  **control** — server dong listener, ghi name vao socket khong ai doc, retry treo het
+  `META_DEADLINE` roi chet. Sua bang `REFUSAL_WINDOW = 300 ms`: hong *nhanh* moi la
+  `NotListening`, hong *cham* la `Protocol`.
+
+**`RESET_VIDEO` gio la cach chua RE, thu truoc khi restart.** Watchdog gap `PaintStalled` thi
+xin keyframe (1 byte) va cho `VIEW_KEYFRAME_GRACE = 15 s`; het han ma van khong ve thi moi
+restart (~11,5 s man den). Xin keyframe **khong** tieu permit cua tran — no khong ha may nao
+xuong. Co ca dong menu "Lam moi hinh" cho nguoi van hanh.
+
+**Do dau-cuoi tren may that:** bam "Lam moi hinh" trong overlay → logcat cua chinh dien thoai
+ghi `I scrcpy : Video capture reset`. Fleet sau do: 21 producer, 0 stall, 0 lagged, 0 decoder
+error, 0 restart, 20/20 bao frame, khong mot `Controller error` nao.
+
+**Bai hoc, dat hon phan code:** toi da ghi mot ket luan ("khong vua") vao AGENTS.md khi no dua
+tren mot gia dinh chua do, va no da suyt thanh su that vinh vien. Gia dinh do — "tat
+clipboard_autosync la bat buoc" — chua bao gio duoc kiem, chi duoc **chep lai** tu ke hoach.
 
 ### 9.75 Import/Export anh-video hai chieu, va cai bay `.thumbnails` (16/08/2026)
 
@@ -5229,10 +5274,11 @@ nghi van cua §9.71 doc no thanh "`power_on` khong hop le". Ca ba deu chi la **d
 **Ngan sach hien tai: argv 240 byte, con 14 byte** o moi preset va moi muc quality
 (`max_size` cap o 832 va `video_bit_rate` deu 7 chu so, nen do dai khong doi theo quality).
 
-**Phan 3 khong vua.** `control=true` (re hon `control=false` 1 byte) cong
-` clipboard_autosync=false` (+25) la **+24 tren 14**. Bo `video=true` de lay 11 byte thi con
-**1 byte** du — khong phai mot bien do an toan tren mot loi giet ca fleet. Bo
-`video_codec=h264` thi thao mot thu duoc ghim co chu dich. **Nen chua bat control.**
+**Phan 3 VUA, va da bat — xem §9.76.** Ket luan dau tien o day ("khong vua, +24 tren 14") dua
+tren mot gia dinh **chua do**: rang `clipboard_autosync=false` la bat buoc. No khong bat buoc.
+`control=true` mot minh **re hon `control=false` dung 1 byte**, tuc argv 239/254 — thua 15.
+Cai khong vua chi la viec *tat* clipboard sync; nen ta de no bat va **drain** socket thay vi
+tat no.
 
 Da ghim bang test: `MAX_SERVER_ARGV = 254` va `server_argv()` trong `scrcpy.rs`, cong ba test —
 mot quet **moi preset × moi quality × fps bien** de khong tuning nao vuot nguong, mot ghim rang

@@ -170,6 +170,28 @@ pub(crate) const DEFAULT_VIEW_RECOVERY_CONCURRENCY: usize = 4;
 /// state this exists to prevent, whatever the throughput allows.
 const MAX_VIEW_RECOVERY_CONCURRENCY: usize = 8;
 
+/// How long a keyframe request gets to work before the expensive cure is used instead.
+///
+/// A `RESET_VIDEO` costs one byte and the server answers with a fresh IDR immediately; a
+/// producer restart costs ~11.5 s of black tile. So the cheap cure goes first, and this is
+/// how long it is given to show an effect.
+///
+/// Slightly longer than [`VIEW_PAINT_STALL`] on purpose: a device that starts painting again
+/// stops being reported as stalled only once its `since_paint` falls back under that window,
+/// so a grace shorter than the window would escalate a device that had already recovered.
+pub(crate) const VIEW_KEYFRAME_GRACE: Duration = Duration::from_secs(15);
+
+/// What to do about a device that is receiving packets and painting nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyframeStep {
+    /// Nothing has been tried yet. Ask for a keyframe; it is nearly free.
+    Ask,
+    /// A request is in its grace window. Give it time rather than stacking cures.
+    Wait,
+    /// The cheap cure has had its chance and the device is still not painting.
+    Escalate,
+}
+
 /// How long an operator-initiated recovery waits for a permit before it is refused.
 ///
 /// It has to be bounded rather than patient: `graceful_shutdown` blocks on
@@ -403,6 +425,13 @@ struct RestartRecord {
 pub struct ViewRecoveryGate {
     permits: Arc<Semaphore>,
     history: Mutex<HashMap<String, RestartRecord>>,
+    /// When each device was last asked for a keyframe.
+    ///
+    /// Deliberately **not** behind the permit semaphore. A keyframe request tears nothing
+    /// down and takes ~1 ms, so rationing it would be rationing the wrong thing: the ceiling
+    /// exists to bound how much of the fleet goes dark at once, and this makes no device go
+    /// dark at all.
+    keyframe_asks: Mutex<HashMap<String, Instant>>,
     limit: usize,
 }
 
@@ -435,6 +464,7 @@ impl ViewRecoveryGate {
         Arc::new(Self {
             permits: Arc::new(Semaphore::new(limit)),
             history: Mutex::new(HashMap::new()),
+            keyframe_asks: Mutex::new(HashMap::new()),
             limit,
         })
     }
@@ -444,6 +474,7 @@ impl ViewRecoveryGate {
         Arc::new(Self {
             permits: Arc::new(Semaphore::new(limit)),
             history: Mutex::new(HashMap::new()),
+            keyframe_asks: Mutex::new(HashMap::new()),
             limit,
         })
     }
@@ -553,9 +584,42 @@ impl ViewRecoveryGate {
         }
     }
 
+    /// What to do about a device that is receiving packets and painting nothing.
+    ///
+    /// Try the byte before the teardown. A `RESET_VIDEO` makes the phone emit a fresh IDR,
+    /// which is a genuine candidate cure for the failure AGENTS.md 9.64 leaves open —
+    /// "packets arrive and nothing paints" is what a decoder that has lost its GOP looks
+    /// like, and an IDR is exactly what such a decoder needs. It costs one byte against the
+    /// ~11.5 s of black tile a restart costs, so it is not a close call.
+    ///
+    /// Escalating only after the grace window is what stops the two cures stacking: without
+    /// it, the same stall would ask for a keyframe AND tear the producer down two seconds
+    /// later, and the restart would get the credit for whichever one worked.
+    pub(crate) fn keyframe_step(&self, udid: &str, grace: Duration) -> KeyframeStep {
+        let mut asks = self.keyframe_asks.lock();
+        match asks.get(udid) {
+            None => {
+                asks.insert(udid.to_string(), Instant::now());
+                KeyframeStep::Ask
+            }
+            Some(asked) if asked.elapsed() < grace => KeyframeStep::Wait,
+            Some(_) => KeyframeStep::Escalate,
+        }
+    }
+
+    /// Forget that a keyframe was ever asked for.
+    ///
+    /// Called when the device paints again and when its producer is replaced: either way the
+    /// next stall is a new problem and deserves the cheap cure first, rather than inheriting
+    /// a verdict about a producer that no longer exists.
+    pub(crate) fn clear_keyframe_ask(&self, udid: &str) {
+        self.keyframe_asks.lock().remove(udid);
+    }
+
     /// Forget a device entirely — it left the fleet.
     pub(crate) fn forget(&self, udid: &str) {
         self.history.lock().remove(udid);
+        self.keyframe_asks.lock().remove(udid);
     }
 }
 
@@ -622,8 +686,11 @@ pub(crate) async fn restart_android_view(
 ) -> Result<u64, String> {
     crate::state::set_stream_sampling(registry, udid);
     android.stop_view_stream(udid).await;
-    // Evidence from the producer that is being replaced must not survive it.
+    // Evidence from the producer that is being replaced must not survive it — including the
+    // record of having asked it for a keyframe, which was a fact about a process that no
+    // longer exists.
     paint.clear(udid);
+    permit.gate.clear_keyframe_ask(udid);
     let outcome = start_android_view(android, registry, udid).await;
     // Released here, after the start has returned — see the struct doc.
     drop(permit);
@@ -894,6 +961,60 @@ mod tests {
                 VIEW_RESTART_MAX_BACKOFF
             )
             .is_some());
+    }
+
+    #[test]
+    fn the_cheap_cure_is_tried_first_and_only_once_before_escalating() {
+        // Ask, then wait, then tear down -- in that order and never two at once. Without the
+        // Wait step the same stall would ask for a keyframe and restart the producer two
+        // seconds later, and the restart would take the credit for whichever one worked,
+        // which is how a cheap cure gets removed as "not helping".
+        let gate = ViewRecoveryGate::with_limit(2);
+        let grace = Duration::from_secs(15);
+
+        assert_eq!(gate.keyframe_step("a", grace), KeyframeStep::Ask);
+        assert_eq!(gate.keyframe_step("a", grace), KeyframeStep::Wait);
+        assert_eq!(gate.keyframe_step("a", grace), KeyframeStep::Wait);
+        // Past the grace window with the device still stalled: the byte did not work.
+        assert_eq!(
+            gate.keyframe_step("a", Duration::ZERO),
+            KeyframeStep::Escalate
+        );
+
+        // Per device, so one wedged phone does not spend another's chance at the cheap cure.
+        assert_eq!(gate.keyframe_step("b", grace), KeyframeStep::Ask);
+
+        // Painting again, or a replaced producer, makes the next stall a new problem.
+        gate.clear_keyframe_ask("a");
+        assert_eq!(gate.keyframe_step("a", grace), KeyframeStep::Ask);
+    }
+
+    #[test]
+    fn a_keyframe_request_is_not_rationed_by_the_recovery_ceiling() {
+        // The ceiling bounds how much of the fleet goes dark at once. A keyframe request
+        // makes nothing go dark, so putting it behind a permit would ration the wrong thing
+        // -- and would mean a full fleet fault could not even try the cheap cure.
+        let gate = ViewRecoveryGate::with_limit(1);
+        let _permit = gate
+            .try_admit("busy", 0, VIEW_RESTART_BACKOFF, VIEW_RESTART_MAX_BACKOFF)
+            .expect("takes the only permit");
+        assert_eq!(gate.in_flight(), gate.limit());
+
+        for index in 0..20 {
+            assert_eq!(
+                gate.keyframe_step(&format!("serial-{index}"), Duration::from_secs(15)),
+                KeyframeStep::Ask,
+                "every device may still ask while the ceiling is full"
+            );
+        }
+    }
+
+    #[test]
+    fn the_keyframe_grace_outlasts_the_window_that_reports_the_stall() {
+        // A device that starts painting again stops being reported as stalled only once its
+        // `since_paint` falls back under the stall window. A grace shorter than that window
+        // would escalate a phone the keyframe had already fixed.
+        assert!(VIEW_KEYFRAME_GRACE > VIEW_PAINT_STALL);
     }
 
     #[test]

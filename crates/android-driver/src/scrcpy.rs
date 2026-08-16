@@ -4,8 +4,19 @@
 //! protocol here is the official 3.3.4 socket: dummy byte, 64-byte name,
 //! 12-byte video header (`codec` + width + height), then 12-byte media
 //! packets. 3.3.4 has no session packets; config is bit 63 and key is bit
-//! 62. Control and audio stay off; tap and swipe still go through the
-//! uiautomator session / overlay lease.
+//! 62. Audio stays off.
+//!
+//! **Control is on, for exactly one message.** The socket exists so the host can send
+//! `RESET_VIDEO` and get a fresh keyframe without restarting the producer — one byte against
+//! ~11.5 s of black tile. That changes the handshake: the server accepts one socket per
+//! enabled channel and only then closes its listener, so the control socket must be opened
+//! **between** reading the dummy byte and reading the device name (see
+//! [`ScrcpyStream::try_accept`]). One `adb forward` serves both.
+//!
+//! **Input still goes through uiautomator2 and not through this socket**, which is a
+//! decision rather than an omission: scrcpy binds touch coordinates to the video frame size
+//! and drops them silently when they disagree, `INJECT_TEXT` cannot type Vietnamese
+//! diacritics, and the agent is not slow. See [`CONTROL_MESSAGE_INJECT_TOUCH`].
 //!
 //! 4.1 is not pinned: live Note 8 (API 26) dies in `dequeueOutputBuffer`
 //! on `OMX.Exynos.AVC.Encoder`. 3.3.4 on the same phone returns Annex-B.
@@ -284,12 +295,42 @@ pub fn server_argv(command: &str) -> &str {
 pub fn launch_command(scid: u32, tuning: ViewTuning) -> String {
     format!(
         "CLASSPATH={REMOTE_SERVER} app_process / {MAIN_CLASS} {SERVER_VERSION} \
-         scid={scid:08x} tunnel_forward=true audio=false control=false video=true \
+         scid={scid:08x} tunnel_forward=true audio=false control=true video=true \
          video_codec=h264 max_size={} max_fps={} video_bit_rate={} \
          video_codec_options=i-frame-interval:int=1 cleanup=false",
         tuning.max_size, tuning.max_fps, tuning.bit_rate
     )
 }
+
+/// The one control message this project sends: **ask for a keyframe**.
+///
+/// `ControlMessage.TYPE_RESET_VIDEO = 17`, one byte, no payload — confirmed against the
+/// static values in the shipped jar. It reaches `Controller.resetVideo` ->
+/// `SurfaceCapture.requestInvalidate`, and the server answers by logging
+/// `Video capture reset` and emitting a fresh IDR.
+///
+/// **Why one byte matters.** `ControlMessageReader` has no framing: it reads a type byte and
+/// then however many bytes that type implies. A partial write, or two writes interleaved from
+/// different tasks, desynchronises it permanently — and one bad byte is not a dropped message,
+/// it is `ControlProtocolException` -> `Ln.e("Controller error")` -> `onTerminated` ->
+/// `Looper.quitSafely()`, which takes the **video** down too, on that phone. So this returns a
+/// whole message as one array and the caller sends it with a single `write_all` under a lock.
+/// There is deliberately no builder and no second message type: the blast radius of getting
+/// this stream wrong is every tile on the device going black.
+pub const fn reset_video() -> [u8; 1] {
+    [17]
+}
+
+/// Deliberately not sent, and this is the reason.
+///
+/// `INJECT_TOUCH_EVENT` is type `0x02`, 32 bytes, big-endian, pressure as Q0.16 with `0xFFFF`
+/// meaning exactly 1.0 — all decoded and all correct. Input still goes through uiautomator2:
+/// scrcpy binds touch coordinates to the **video frame size** and drops silently when they do
+/// not match, so every preset change and every rotation would be a window where taps vanish
+/// (upstream #4925, still open); `INJECT_TEXT` walks a `KeyCharacterMap` and cannot type
+/// Vietnamese diacritics at all; and the agent is not slow — 130–280 ms a click, measured on
+/// this fleet. See AGENTS.md 9.71.
+pub const CONTROL_MESSAGE_INJECT_TOUCH: u8 = 0x02;
 
 /// Longest stable prefix of the remote socket for every server we start.
 ///
@@ -380,32 +421,80 @@ impl ScrcpyStream {
         Ok(stream)
     }
 
-    /// One attempt: TCP + dummy. Retry only on [`AcceptError::NotListening`].
-    pub async fn try_accept(local_port: u16) -> Result<Self, AcceptError> {
+    /// How quickly a refused connection announces itself.
+    ///
+    /// The documented Windows-adb refusal EOFs the host socket essentially at once, so a
+    /// dummy read that fails *inside* this window is that refusal and a retry is free.
+    /// Anything slower is not: with `control=true` the server has already consumed this TCP
+    /// as its video socket, and the retry's fresh connection would be taken as the **control**
+    /// socket. The server then closes its listener and writes the device name to a socket
+    /// nobody is reading, while the retry blocks out the whole `META_DEADLINE` and dies. End
+    /// state: server alive and parked, forward removed, nothing logged, zero producers —
+    /// which is exactly the signature AGENTS.md 9.71 recorded.
+    const REFUSAL_WINDOW: std::time::Duration = std::time::Duration::from_millis(300);
+
+    /// One attempt at the whole handshake, including the control socket.
+    ///
+    /// The ordering is the protocol and it is not negotiable (two independent sources, see
+    /// AGENTS.md 9.71): the server accepts **one socket per enabled channel**, video then
+    /// control, and only then closes its listener. `sendDeviceMeta` runs after `open()`
+    /// returns, so with control enabled the device name and video header are not sent until
+    /// the *second* socket lands. Reading them before connecting socket #2 blocks forever.
+    ///
+    /// Measured on SM-G955F: socket #1 gets the dummy byte immediately, then **3.00 s of
+    /// nothing**; connecting socket #2 to the same forwarded port releases both the 64-byte
+    /// name and the 12-byte video header at once. One `adb forward` serves both.
+    ///
+    /// Returns the control socket alongside the stream. The caller owns it: dropping it
+    /// closes the channel, and one malformed byte written to it takes the whole server down
+    /// including video.
+    pub async fn try_accept(local_port: u16) -> Result<(Self, TcpStream), AcceptError> {
         let stream = Self::connect_host(local_port)
             .await
             .map_err(AcceptError::NotListening)?;
+        let connected_at = std::time::Instant::now();
         let mut reader = tokio::io::BufReader::new(stream);
         match tokio::time::timeout(DUMMY_DEADLINE, read_dummy(&mut reader)).await {
             Ok(Ok(())) => {}
-            Ok(Err(error)) => return Err(AcceptError::NotListening(error)),
+            Ok(Err(error)) => {
+                // The only failure a retry may follow. See `REFUSAL_WINDOW`.
+                return Err(if connected_at.elapsed() < Self::REFUSAL_WINDOW {
+                    AcceptError::NotListening(error)
+                } else {
+                    AcceptError::Protocol(error.context(
+                        "the video socket was accepted and then failed; retrying would be \
+                         taken as the control connection",
+                    ))
+                });
+            }
             Err(_) => {
                 return Err(AcceptError::NotListening(anyhow::anyhow!(
                     "dummy byte did not arrive"
                 )));
             }
         }
+
+        // Between the dummy and the meta, never before or after. This is the whole
+        // ordering constraint of the 3.3.4 handshake.
+        let control = Self::connect_host(local_port)
+            .await
+            .map_err(|error| AcceptError::Protocol(error.context("open the control socket")))?;
+
         match tokio::time::timeout(META_DEADLINE, read_name_and_video_header(&mut reader)).await {
-            Ok(Ok(hello)) => Ok(Self {
-                width: hello.width,
-                height: hello.height,
-                hello,
-                reader,
-                pending_config: None,
-            }),
+            Ok(Ok(hello)) => Ok((
+                Self {
+                    width: hello.width,
+                    height: hello.height,
+                    hello,
+                    reader,
+                    pending_config: None,
+                },
+                control,
+            )),
             Ok(Err(error)) => Err(AcceptError::Protocol(error)),
             Err(_) => Err(AcceptError::Protocol(anyhow::anyhow!(
-                "timed out waiting for the scrcpy device name / video header"
+                "timed out waiting for the scrcpy device name / video header; with control \
+                 enabled that means the control socket never reached the server"
             ))),
         }
     }
@@ -697,7 +786,12 @@ mod tests {
         assert!(command.contains("scid=00ab12cd"), "{command}");
         assert!(command.contains("tunnel_forward=true"), "{command}");
         assert!(command.contains("audio=false"), "{command}");
-        assert!(command.contains("control=false"), "{command}");
+        assert!(command.contains("control=true"), "{command}");
+        // Exactly once. `control` defaults to TRUE in Options.<init>, so a refactor that
+        // drops the flag does not disable the control socket -- it enables it on a host
+        // that has no second socket to offer, which parks the server in accept() forever
+        // and looks exactly like a phone that stopped sending.
+        assert_eq!(command.matches("control=").count(), 1, "{command}");
         assert!(command.contains("max_size=480"), "{command}");
         // The app's own declared rate, not a hardcoded 30. Before quality and fps were
         // wired, `get_stream_settings` told the operator 24 while the launch asked for
@@ -780,27 +874,30 @@ mod tests {
     }
 
     #[test]
-    fn the_control_socket_does_not_fit_in_the_remaining_budget() {
-        // Written so the next person does not spend a session rediscovering it. Turning the
-        // control socket on needs `control=true` (one byte cheaper than `control=false`) plus
-        // ` clipboard_autosync=false`, which defaults to TRUE and would otherwise push a
-        // clipboard message into a socket we only drain. That is +24 against ~14 spare.
+    fn turning_clipboard_autosync_off_would_not_fit_which_is_why_it_is_left_on() {
+        // The control socket itself fits with room to spare -- it is one byte CHEAPER than
+        // `control=false`. What does not fit is the option everyone assumes goes with it.
         //
-        // This asserts the shortfall rather than the fix, because there is no fix that does
-        // not first remove a pinned option -- and each of them is pinned for a measured
-        // reason of its own.
+        // `clipboard_autosync` defaults to TRUE, so with control enabled the phone pushes a
+        // message every time its clipboard changes. Turning that off costs 25 bytes against
+        // roughly 14 spare, which is what took twenty phones down when all three of
+        // `control=true clipboard_autosync=false power_on=false` were added at once
+        // (AGENTS.md 9.71, 9.74).
+        //
+        // So it stays on and the host drains the socket instead. Measured, 75 s soak on
+        // SM-G955F with the control socket deliberately never read and the clipboard changed
+        // twelve times: 2.2 MB of video, twelve keyframe requests all honoured, server alive.
         let command = launch_command(
             u32::MAX,
             ViewPreset::Overlay.tuned(riviu_core::StreamQuality::Extra, 30),
         );
-        let with_control = server_argv(&command)
-            .replace("control=false", "control=true")
-            .len()
-            + " clipboard_autosync=false".len();
         assert!(
-            with_control > MAX_SERVER_ARGV,
-            "if this ever passes the budget has changed and part 3 became possible; \
-             re-measure on hardware before believing it"
+            server_argv(&command).len() <= MAX_SERVER_ARGV,
+            "the control socket as shipped must fit"
+        );
+        assert!(
+            server_argv(&command).len() + " clipboard_autosync=false".len() > MAX_SERVER_ARGV,
+            "if this ever fits, the drain stops being a requirement and this comment is stale"
         );
     }
 
@@ -1126,5 +1223,129 @@ shell  91    1 grep riviu-scrcpy-server /proc/1/cmdline\n";
             }
         );
         assert_eq!(header[0], 0x40, "key must be bit 62, not the 4.1 bit 61");
+    }
+}
+
+#[cfg(test)]
+mod handshake_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    /// A fake server with 3.3.4's exact ordering: accept the video socket and write the
+    /// dummy, then **block until a second socket lands** before sending the name and video
+    /// header. That is `DesktopConnection.open()` returning only once every enabled channel
+    /// has been accepted, with `sendDeviceMeta` after it.
+    ///
+    /// This shape is the whole reason the handshake is written the way it is, and until now
+    /// nothing exercised it: `try_accept` needed a live socket, so it had no test at all —
+    /// while being the function whose ordering, got wrong, produced twenty phones with a
+    /// perfect hello and no video.
+    async fn fake_server(hold_sockets: bool) -> (u16, tokio::task::JoinHandle<bool>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let handle = tokio::spawn(async move {
+            let (mut video, _) = listener.accept().await.expect("video socket");
+            video.write_all(&[0u8]).await.expect("dummy");
+            video.flush().await.expect("flush dummy");
+            // Nothing else until the control socket arrives.
+            let control = listener.accept().await.expect("control socket");
+            let hello = encode_hello("SM-G955F", 232, 480);
+            // `encode_hello` includes the dummy, which has already gone.
+            video.write_all(&hello[1..]).await.expect("meta");
+            video.flush().await.expect("flush meta");
+            if hold_sockets {
+                // Keep both alive so the caller can write to the control socket.
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            drop(control);
+            true
+        });
+        (port, handle)
+    }
+
+    #[tokio::test]
+    async fn the_control_socket_is_opened_between_the_dummy_and_the_device_name() {
+        // If `try_accept` read the name before connecting the control socket it would block
+        // here forever, because the server has not sent it and cannot until socket #2 lands.
+        let (port, server) = fake_server(true).await;
+
+        let accepted = tokio::time::timeout(Duration::from_secs(5), ScrcpyStream::try_accept(port))
+            .await
+            .expect("the handshake must not block waiting for meta that needs socket #2")
+            .expect("handshake succeeds");
+
+        let (stream, _control) = accepted;
+        assert_eq!(stream.hello.device_name, "SM-G955F");
+        assert_eq!(stream.size(), (232, 480));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn the_returned_control_socket_carries_a_keyframe_request() {
+        // One byte, type 17, and nothing else on the wire — the device's reader has no
+        // framing, so anything extra desynchronises it permanently and takes the video down
+        // with it.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let server = tokio::spawn(async move {
+            let (mut video, _) = listener.accept().await.expect("video socket");
+            video.write_all(&[0u8]).await.expect("dummy");
+            video.flush().await.expect("flush");
+            let (mut control, _) = listener.accept().await.expect("control socket");
+            let hello = encode_hello("SM-G955F", 232, 480);
+            video.write_all(&hello[1..]).await.expect("meta");
+            video.flush().await.expect("flush");
+            let mut received = Vec::new();
+            let mut buf = [0u8; 8];
+            // Read exactly what the host sends, then report it.
+            if let Ok(read) = control.read(&mut buf).await {
+                received.extend_from_slice(&buf[..read]);
+            }
+            received
+        });
+
+        let (_stream, control) = ScrcpyStream::try_accept(port).await.expect("handshake");
+        let (_read, mut write) = control.into_split();
+        write.write_all(&reset_video()).await.expect("send reset");
+        write.flush().await.expect("flush reset");
+
+        let received = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("server responded")
+            .expect("join");
+        assert_eq!(
+            received,
+            vec![17],
+            "RESET_VIDEO is one byte with no payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_socket_accepted_and_then_dropped_is_a_protocol_error_not_a_retry() {
+        // The hole that made the first attempt at this unfixable. A retry is only free while
+        // the server has accepted nothing; once it has taken this TCP as the video channel,
+        // the retry's fresh connection is consumed as the CONTROL channel, the server closes
+        // its listener and writes the device name to the socket nobody is reading — and the
+        // retry then blocks out the whole META_DEADLINE. Server alive and parked, forward
+        // removed, nothing logged: the exact signature of AGENTS.md 9.71.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            let (video, _) = listener.accept().await.expect("video socket");
+            // Accepted, then closed without ever writing the dummy, and slowly enough that
+            // it cannot be the immediate Windows-adb refusal.
+            tokio::time::sleep(ScrcpyStream::REFUSAL_WINDOW * 3).await;
+            drop(video);
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        match ScrcpyStream::try_accept(port).await {
+            Err(AcceptError::Protocol(_)) => {}
+            Err(AcceptError::NotListening(error)) => panic!(
+                "a slow failure must not be retried; retrying eats the control accept: {error:#}"
+            ),
+            Ok(_) => panic!("the server never sent a dummy byte"),
+        }
     }
 }

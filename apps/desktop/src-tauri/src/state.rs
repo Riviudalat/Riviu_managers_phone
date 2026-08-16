@@ -956,9 +956,42 @@ impl AppState {
                                     if !reporting {
                                         view_recovery.forget(&device.udid);
                                     }
+                                    // Painting again means the next stall is a new problem
+                                    // and gets the cheap cure first.
+                                    view_recovery.clear_keyframe_ask(&device.udid);
                                     continue;
                                 }
                             };
+                            // Packets arriving and nothing painting is what a decoder that
+                            // lost its GOP looks like, and a fresh IDR is exactly what such a
+                            // decoder needs — so ask for one before tearing anything down.
+                            // One byte against ~11.5 s of black tile.
+                            if fault == crate::view_watchdog::ViewFault::PaintStalled {
+                                match view_recovery.keyframe_step(
+                                    &device.udid,
+                                    crate::view_watchdog::VIEW_KEYFRAME_GRACE,
+                                ) {
+                                    crate::view_watchdog::KeyframeStep::Ask => {
+                                        match android.request_keyframe(&device.udid).await {
+                                            Ok(true) => log::info!(
+                                                "android view for {} drew nothing; asked for a \
+                                                 keyframe before restarting",
+                                                device.udid
+                                            ),
+                                            Ok(false) => {}
+                                            Err(error) => log::warn!(
+                                                "could not ask {} for a keyframe: {error:#}",
+                                                device.udid
+                                            ),
+                                        }
+                                        continue;
+                                    }
+                                    // Asked recently. Let the cheap cure finish rather than
+                                    // stacking a teardown on top of it.
+                                    crate::view_watchdog::KeyframeStep::Wait => continue,
+                                    crate::view_watchdog::KeyframeStep::Escalate => {}
+                                }
+                            }
                             // Capacity and backoff in one place, shared with every operator
                             // command. A refusal is not an error -- the next tick asks again,
                             // and the device keeps whatever tile state it already had rather

@@ -716,6 +716,7 @@ export async function installTauriMock(
     commandHandlers.set("view_endpoint", () => null);
     commandHandlers.set("view_ensure", () => null);
     commandHandlers.set("view_set_preset", () => null);
+    commandHandlers.set("view_request_keyframe", () => true);
     // The view store posts this on its own 2 s tick as soon as any device has a beat, so it
     // is reached without a spec doing anything.
     commandHandlers.set("view_report_paint", () => null);

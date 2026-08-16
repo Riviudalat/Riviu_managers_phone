@@ -1097,6 +1097,27 @@ pub async fn view_ensure(state: State<'_, AppState>, udid: String) -> Result<(),
     Ok(())
 }
 
+/// Ask the phone for a fresh keyframe. The cheap half of "the picture is stuck".
+///
+/// Takes **no recovery permit**, deliberately: it tears nothing down, so the ceiling that
+/// bounds how much of the fleet can go dark at once has nothing to bound here. It is also
+/// the operator-facing half of what the watchdog now tries first — one byte and a fresh IDR,
+/// against ~11.5 s of black tile for a restart.
+#[tauri::command]
+pub async fn view_request_keyframe(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<bool, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Ok(false);
+    };
+    android
+        .request_keyframe(&udid)
+        .await
+        .map_err(CommandError::operation)
+}
+
 #[tauri::command]
 pub async fn view_set_preset(
     state: State<'_, AppState>,

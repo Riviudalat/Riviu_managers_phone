@@ -262,6 +262,15 @@ export async function viewReportPaint(reports: ViewPaintReport[]) {
   return invoke<void>("view_report_paint", { reports });
 }
 
+/**
+ * Ask the phone for a fresh keyframe without restarting its producer.
+ *
+ * Returns false when there is no producer to ask, which is not a failure.
+ */
+export async function viewRequestKeyframe(udid: string) {
+  return invoke<boolean>("view_request_keyframe", { udid });
+}
+
 export async function viewSetPreset(udid: string, preset: "tile" | "overlay") {
   return invoke<void>("view_set_preset", { udid, preset });
 }

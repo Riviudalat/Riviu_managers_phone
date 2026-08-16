@@ -19,6 +19,7 @@ import {
   saveViewSnapshot,
   screenshot,
   setScreenRotation,
+  viewRequestKeyframe,
 } from "../api";
 import {
   parseCurrentInputMethod,
@@ -58,6 +59,7 @@ import {
   IconPower,
   IconRecents,
   IconRefresh,
+  IconSync,
   IconText,
   IconUpload,
   IconVolumeDown,
@@ -507,6 +509,25 @@ export function FocusStream({
       androidOnly: true,
       disabled: busy,
       run: () => void pressKey("volumeDown"),
+    },
+    {
+      // Before "restart the stream", because it is the cheaper half of the same complaint:
+      // one byte and a fresh keyframe against ~11.5 s of black tile. The watchdog tries this
+      // first for the same reason.
+      id: "refreshPicture",
+      label: "Làm mới hình",
+      Icon: IconSync,
+      androidOnly: true,
+      disabled: busy,
+      run: () => {
+        void viewRequestKeyframe(device.udid)
+          .then((asked) =>
+            asked
+              ? pushToast("ok", "Đã xin hình mới")
+              : pushToast("warn", "Máy chưa có stream để làm mới"),
+          )
+          .catch((error) => toastError("Không xin được hình mới", error));
+      },
     },
     {
       id: "screenshot",
