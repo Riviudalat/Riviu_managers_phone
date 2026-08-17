@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   interactionCancel,
   interactionGet,
@@ -132,13 +132,40 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
 
   useEffect(() => {
     void reloadCampaigns();
-    // Pre-select from ONE group, never across both: a default selection that is already
-    // invalid for Threaded would make the operator undo the app's own choice before they
-    // could start. The larger group wins so the default covers as much of the fleet as
-    // one thread can.
+  }, [reloadCampaigns]);
+
+  /// Seed the default **once**, and never again.
+  ///
+  /// This used to share an effect with the campaign reload and depend on the actor lists,
+  /// which are memos over `devices` — a fresh array every three seconds from the fleet
+  /// poll. So `setActors` ran every three seconds and threw away whatever the operator had
+  /// just chosen. Selecting actors for a threaded campaign was a race against the next
+  /// tick, and nobody wins that.
+  ///
+  /// Pre-selects from ONE group, never across both: a default that is already invalid for
+  /// Threaded would make the operator undo the app's own choice before they could start.
+  /// The larger group wins so the default covers as much of the fleet as one thread can.
+  const seededActors = useRef(false);
+  useEffect(() => {
+    if (seededActors.current) return;
+    if (!hierarchyActors.length && !pixelActors.length) return;
+    seededActors.current = true;
     const group = hierarchyActors.length > pixelActors.length ? hierarchyActors : pixelActors;
     setActors(group.slice(0, 6).map((device) => device.udid));
-  }, [hierarchyActors, pixelActors, reloadCampaigns]);
+  }, [hierarchyActors, pixelActors]);
+
+  /// A phone that has left the fleet drops out of the selection, and nothing else moves.
+  ///
+  /// Returning `prev` unchanged when nothing departed is what keeps this from being the old
+  /// bug in a new shape: a new array on every poll would re-render the list forever.
+  useEffect(() => {
+    setActors((previous) => {
+      const present = previous.filter((udid) =>
+        inScope.some((device) => device.udid === udid),
+      );
+      return present.length === previous.length ? previous : present;
+    });
+  }, [inScope]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;

@@ -422,6 +422,71 @@ export async function exportViewJpegBurst(
   return frames;
 }
 
+/// Every per-device store this module keeps, so the pruning rule can be tested on maps a
+/// test owns rather than on module state a test would have to reach through the worker.
+export interface ViewMemory {
+  sizes: Map<string, ViewSize>;
+  live: Set<string>;
+  decodeFailed: Set<string>;
+  lastPaintBeat: Map<string, ViewBeat>;
+  latestBeat: Map<string, ViewBeat>;
+}
+
+/**
+ * Drop everything remembered about devices no longer in the fleet, and say which those were.
+ *
+ * Nothing here was ever pruned. Every store is keyed by udid and only ever written, so a
+ * phone that was unplugged or rebooted left its entries behind for the life of the page —
+ * and two of them are load-bearing:
+ *
+ * * `live` decides whether a tile says the stream is up. A phone that goes away while live
+ *   and comes back is *already* live before a single packet arrives, so its tile shows a
+ *   white canvas labelled as working.
+ * * `latestBeat` is what `collectPaintReports` iterates, so the host's watchdog kept being
+ *   handed counters for devices that had left — every two seconds, for as long as the page
+ *   stayed open.
+ */
+export function collectDepartedViews(roster: Set<string>, memory: ViewMemory): string[] {
+  const known = new Set([
+    ...memory.sizes.keys(),
+    ...memory.live,
+    ...memory.decodeFailed,
+    ...memory.lastPaintBeat.keys(),
+    ...memory.latestBeat.keys(),
+  ]);
+  const departed: string[] = [];
+  for (const udid of known) {
+    if (roster.has(udid)) continue;
+    memory.sizes.delete(udid);
+    memory.live.delete(udid);
+    memory.decodeFailed.delete(udid);
+    memory.lastPaintBeat.delete(udid);
+    memory.latestBeat.delete(udid);
+    departed.push(udid);
+  }
+  return departed;
+}
+
+/**
+ * Forget the departed devices in this module's own stores.
+ *
+ * `listeners` is deliberately untouched: React owns those, `subscribe` already removes the
+ * last one, and deleting a set a mounted component still holds would silence its updates.
+ * What each of them does get is an `emit`, so anything still rendering a departed device
+ * hears that it is no longer live instead of keeping the last thing it was told.
+ */
+export function forgetDepartedViews(present: Iterable<string>): string[] {
+  const departed = collectDepartedViews(present instanceof Set ? present : new Set(present), {
+    sizes,
+    live,
+    decodeFailed,
+    lastPaintBeat,
+    latestBeat,
+  });
+  for (const udid of departed) emit(udid);
+  return departed;
+}
+
 function subscribe(udid: string, onStoreChange: Listener) {
   let set = listeners.get(udid);
   if (!set) {

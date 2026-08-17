@@ -191,12 +191,85 @@ impl FlowRuntime {
         caller_result
     }
 
+    /// Recover every interrupted run, and let a run that cannot be recovered fail alone.
+    ///
+    /// **One unrecoverable row used to stop the app from opening at all.** This loop was
+    /// `self.recover_run_context(context).await?`, so the first context that failed aborted
+    /// recovery, `recover_startup` returned `Err`, `AppState::bootstrap` failed, and the
+    /// desktop came up on its startup-failure screen. Nothing in the UI could clear it —
+    /// the row is in the database and the app that owns the database will not start — so
+    /// the only remedy was editing SQLite by hand.
+    ///
+    /// A run that cannot be recovered is a failed run, which the schema can already
+    /// express. Its devices are marked terminal with the reason, the rest of the fleet's
+    /// runs recover as usual, and the app opens with the failure visible on the Flow page
+    /// where an operator can read it.
     async fn recover_startup_contexts(
         &self,
         contexts: Vec<crate::db::FlowRecoveryRunContext>,
     ) -> anyhow::Result<()> {
+        let mut unrecoverable = Vec::new();
         for context in contexts {
-            self.recover_run_context(context).await?;
+            let run_id = context.run.id;
+            // Captured before the move: after a failure the context is gone, and these are
+            // what say which device runs are still owed a terminal state.
+            let pending = context
+                .devices
+                .iter()
+                .filter(|device| !device.state.is_terminal())
+                .map(|device| (device.id, device.udid.clone()))
+                .collect::<Vec<_>>();
+            let context_plan = context.plan.context_plan.clone();
+            let Err(error) = self.recover_run_context(context).await else {
+                continue;
+            };
+            let message = format!("{error:#}");
+            tracing::error!(%run_id, error = %message, "Flow run could not be recovered");
+            for (device_id, udid) in pending {
+                if let Err(mark) = self.inner.database.mark_device_terminal(
+                    device_id,
+                    &[FlowDeviceRunState::Preflight, FlowDeviceRunState::Running],
+                    FlowDeviceRunState::Failed,
+                    Some(FlowErrorRecord {
+                        code: "RecoveryFailed".to_string(),
+                        message: format!("startup recovery could not restore this run: {message}"),
+                        node_id: None,
+                        field: None,
+                        udid: Some(udid.clone()),
+                        attempt_id: None,
+                    }),
+                    recovery_release_proof(&udid, &context_plan),
+                ) {
+                    // The database is the thing that is broken; saying so and carrying on is
+                    // still better than refusing to open. The run stays where it is and the
+                    // log names it.
+                    tracing::error!(
+                        %run_id,
+                        %udid,
+                        error = %format!("{mark:#}"),
+                        "could not mark an unrecoverable Flow device run as failed"
+                    );
+                }
+            }
+            // The devices are terminal; the run has to say so too. Without this the run
+            // aggregate stays `Queued` — a run that will never move, described as one that
+            // has not started yet.
+            if let Err(project) = self.inner.database.recompute_run_projection(run_id) {
+                tracing::error!(
+                    %run_id,
+                    error = %format!("{project:#}"),
+                    "could not settle the aggregate state of an unrecoverable Flow run"
+                );
+            }
+            let _ = self.emit_run_updated(run_id);
+            unrecoverable.push(run_id);
+        }
+        if !unrecoverable.is_empty() {
+            tracing::warn!(
+                count = unrecoverable.len(),
+                "startup recovery failed {} Flow run(s) and continued",
+                unrecoverable.len()
+            );
         }
         self.inner
             .lifecycle
@@ -2697,6 +2770,105 @@ mod tests {
             FlowAttemptState::Uncertain
         );
         assert!(detail.artifacts.is_empty());
+        fixture.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn one_unrecoverable_run_fails_alone_instead_of_stopping_the_app() {
+        // This loop was `self.recover_run_context(context).await?`, so the first row it
+        // could not recover aborted recovery, `recover_startup` returned Err,
+        // `AppState::bootstrap` failed, and the desktop came up on its startup-failure
+        // screen. Nothing in the UI could clear that: the row is in the database and the
+        // app that owns the database will not start. Editing SQLite by hand was the remedy.
+        let fixture = RuntimeFixture::new_recovering(&["iphone-a", "iphone-b"], single_wait_plan());
+        let mut seeded = Vec::new();
+        for udid in ["iphone-a", "iphone-b"] {
+            let (run, devices) = fixture
+                .database
+                .create_flow_run_with_devices(
+                    &fixture.revision,
+                    FlowSelectionSnapshot {
+                        requested: FlowTargetSelection::One { udid: udid.into() },
+                        target_udids: vec![udid.into()],
+                    },
+                )
+                .expect("seed run");
+            fixture
+                .database
+                .transition_flow_device_run(
+                    devices[0].id,
+                    FlowDeviceRunState::Queued,
+                    FlowDeviceRunState::Preflight,
+                    None,
+                )
+                .expect("seed preflight device");
+            seeded.push(run.id);
+        }
+
+        let mut contexts = fixture
+            .database
+            .load_flow_recovery_contexts()
+            .expect("load recovery contexts");
+        contexts.sort_by_key(|context| seeded.iter().position(|id| *id == context.run.id));
+        let broken_run = contexts[0].run.id;
+        let healthy_run = contexts[1].run.id;
+        // The bad row: an attempt that points at a `flow_node_attempts` id which is not in
+        // the database. Recovery loads it to normalise the device and finds nothing there.
+        let device_run_id = contexts[0].devices[0].id;
+        let node_id = *fixture
+            .revision
+            .compiled_plan
+            .execution_order
+            .first()
+            .expect("a node");
+        contexts[0].attempts.push(FlowNodeAttemptRecord {
+            id: Uuid::new_v4(),
+            device_run_id,
+            node_id,
+            action_kind: ActionKind::Wait,
+            attempt_no: 1,
+            side_effect_class: SideEffectClass::None,
+            state: FlowAttemptState::Queued,
+            canonical_input: None,
+            evidence_baseline: None,
+            evidence_result: None,
+            chosen_port: None,
+            retry_allowed: true,
+            error: None,
+            started_at: None,
+            updated_at: chrono::Utc::now(),
+            finished_at: None,
+        });
+
+        fixture
+            .runtime
+            .recover_startup_contexts(contexts)
+            .await
+            .expect("one unrecoverable run must not abort startup recovery");
+
+        // The healthy run recovered, which is what the abort used to prevent.
+        let healthy = fixture
+            .database
+            .get_flow_run(healthy_run)
+            .expect("load healthy run")
+            .expect("healthy run");
+        assert_eq!(healthy.run.state, FlowAggregateState::Succeeded);
+
+        // And the bad one is a failed run with a reason, rather than a run that stopped the
+        // app from opening.
+        let broken = fixture
+            .database
+            .get_flow_run(broken_run)
+            .expect("load broken run")
+            .expect("broken run");
+        assert_eq!(broken.run.state, FlowAggregateState::Failed);
+        let failure = broken.device_runs[0]
+            .error
+            .as_ref()
+            .expect("a reason on the failed device");
+        assert_eq!(failure.code, "RecoveryFailed");
+        assert!(failure.message.contains("disappeared"), "{failure:?}");
+
         fixture.shutdown().await;
     }
 

@@ -189,23 +189,38 @@ export function FocusStream({
     storeZoom(FOCUS_ZOOM, frameWidth);
   }, [frameWidth]);
 
+  /// Open a manual session while the overlay is up, and give it back when it goes.
+  ///
+  /// **Each `end` is chained behind its own `begin`, and that ordering is the fix.** The
+  /// cleanup used to fire `deviceControlEnd` immediately while `deviceControlBegin` was
+  /// still in flight. `end_overlay_session` is a no-op when there is no session yet, so an
+  /// `end` that overtook its `begin` succeeded quietly — and the `begin` landing a moment
+  /// later left a live manual session with nobody to close it. That lease is then held
+  /// until the app restarts, and every background job that wants the phone is refused for
+  /// as long as it lasts.
+  ///
+  /// Opening, closing and reopening the overlay quickly is exactly the timing that produces
+  /// it, which is why it could not be dismissed as unlikely.
   useEffect(() => {
     const udids = targetKey.split("\0").filter(Boolean);
     let cancelled = false;
-    void (async () => {
-      try {
-        await Promise.all(udids.map((udid) => deviceControlBegin(udid)));
-      } catch (error) {
+    // One promise per device, kept so the cleanup queues behind the right one rather than
+    // behind all of them: a slow phone must not delay releasing a fast one.
+    const opening = new Map(udids.map((udid) => [udid, deviceControlBegin(udid)] as const));
+    for (const begin of opening.values()) {
+      void begin.catch((error) => {
         if (!cancelled) toastError("Không mở được điều khiển", error);
-      }
-      if (cancelled) {
-        await Promise.all(udids.map((udid) => deviceControlEnd(udid).catch(() => undefined)));
-      }
-    })();
+      });
+    }
     return () => {
       cancelled = true;
-      for (const udid of udids) {
-        void deviceControlEnd(udid);
+      for (const [udid, begin] of opening) {
+        // `.catch` before `.then`, so a device whose begin rejected is still asked to
+        // close: the failure may have come after the session was created.
+        void begin
+          .catch(() => undefined)
+          .then(() => deviceControlEnd(udid))
+          .catch(() => undefined);
       }
     };
   }, [targetKey]);

@@ -125,6 +125,50 @@ describe("InteractionPopup", () => {
     expect(request.actorUdids).toEqual(["actor-a", "actor-b"]);
   });
 
+  it("keeps the operator's actor selection across a fleet poll", async () => {
+    // The seeding effect depended on the actor lists, which are memos over `devices` -- a
+    // fresh array every three seconds from the fleet poll. So `setActors` re-ran on every
+    // tick and threw away whatever had just been chosen: selecting actors for a threaded
+    // campaign was a race against the next poll, and nobody wins that. A re-render with an
+    // equal-but-new `devices` array is exactly what the poll does.
+    const { rerender } = render(
+      <InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />,
+    );
+    // Drop one of the two defaults; the operator's choice is now one iPhone.
+    fireEvent.click(screen.getByLabelText("Phone B"));
+    expect(screen.getByLabelText("Phone B")).not.toBeChecked();
+
+    rerender(
+      <InteractionPopup
+        devices={devices.map((device) => ({ ...(device as object) })) as never[]}
+        selected={[]}
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(screen.getByLabelText("Phone B")).not.toBeChecked();
+    expect(screen.getByLabelText("Phone A")).toBeChecked();
+  });
+
+  it("drops an actor that left the fleet without touching the others", async () => {
+    const { rerender } = render(
+      <InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />,
+    );
+    expect(screen.getByLabelText("Phone A")).toBeChecked();
+    expect(screen.getByLabelText("Phone B")).toBeChecked();
+
+    rerender(
+      <InteractionPopup
+        devices={devices.filter((device) => (device as { udid: string }).udid !== "actor-b")}
+        selected={[]}
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(screen.queryByLabelText("Phone B")).toBeNull();
+    expect(screen.getByLabelText("Phone A")).toBeChecked();
+  });
+
   it("refuses a nested thread that mixes a pixel actor with a hierarchy actor", async () => {
     // The chain is linear and each message is sent from a different actor, so message N
     // must find message N-1's comment. The two readers get the author label from

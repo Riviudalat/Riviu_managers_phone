@@ -20,6 +20,41 @@ mod view_watchdog;
 use state::AppState;
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 
+/// How much log one file holds before it is rotated, and how many are kept.
+///
+/// Named constants rather than literals at the call site so the test below can assert the
+/// property that matters — that neither of them is the plugin's default — instead of
+/// re-stating the numbers.
+const LOG_FILE_BYTES: u128 = 8 * 1024 * 1024;
+const LOG_FILES_KEPT: usize = 5;
+
+/// The plugin's own defaults, restated so a change to them is visible from here.
+///
+/// From `tauri-plugin-log` 2.9: `DEFAULT_MAX_FILE_SIZE = 40_000` with
+/// `DEFAULT_ROTATION_STRATEGY = KeepOne`.
+const PLUGIN_DEFAULT_MAX_FILE_SIZE: u128 = 40_000;
+
+/// The rules the two constants above have to satisfy, checked at compile time.
+///
+/// A `#[test]` was the first shape of this and clippy was right to refuse it: these are
+/// constants, so the question is answerable while the crate is being built, and a compile
+/// error is a stronger guarantee than a test somebody has to run. Anyone who drops the size
+/// back toward the plugin's 40 KB — the value that made the log useless — will not get a
+/// binary out of it.
+const _: () = {
+    assert!(
+        LOG_FILE_BYTES > PLUGIN_DEFAULT_MAX_FILE_SIZE,
+        "40 KB of Warn output is minutes on a twenty-device farm; that default is the bug"
+    );
+    // A working day of Warn output with room for a burst...
+    assert!(LOG_FILE_BYTES >= 4 * 1024 * 1024);
+    // ...and a worst case that is still trivial on a machine driving twenty phones.
+    assert!(LOG_FILE_BYTES * LOG_FILES_KEPT as u128 <= 64 * 1024 * 1024);
+    // More than one file: the rotation has to leave something behind, which is the half
+    // `KeepOne` got wrong -- it deletes rather than archives.
+    assert!(LOG_FILES_KEPT > 1);
+};
+
 /// Why the app could not start, if it could not — and the lock that lets it try again.
 ///
 /// The message used to be a plain `Option<String>` fixed at setup, which is what made the
@@ -111,6 +146,22 @@ pub fn run() {
                     } else {
                         log::LevelFilter::Warn
                     })
+                    // **The defaults threw the log away, which is worse than not writing
+                    // one.** `tauri-plugin-log` ships `max_file_size = 40_000` bytes with
+                    // `RotationStrategy::KeepOne`, and `KeepOne` *deletes* the file when it
+                    // rotates rather than archiving it. Forty kilobytes is a few hundred
+                    // lines; on a twenty-device farm that is minutes. Opening the log after
+                    // an incident showed the seconds *after* the incident and nothing else,
+                    // and the whole reason release logging was turned on was to have a
+                    // record of driver failures — a scrcpy server that ignored SIGTERM, a
+                    // reclaimed leaked forward, a producer restart.
+                    //
+                    // Five files of 8 MB is 40 MB at worst on a machine that runs a device
+                    // farm, and it covers a full working day of Warn-level output with room
+                    // for a burst. `KeepSome` archives with a date in the name, so the file
+                    // an operator is asked for still exists an hour later.
+                    .max_file_size(LOG_FILE_BYTES)
+                    .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(LOG_FILES_KEPT))
                     .build(),
             )?;
 

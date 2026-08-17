@@ -40,7 +40,7 @@ import { ProfileToolbar } from "./components/ProfileToolbar";
 import { ScriptsPanel } from "./components/ScriptsPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Sidebar } from "./components/Sidebar";
-import { useViewClient } from "./viewStore";
+import { forgetDepartedViews, useViewClient } from "./viewStore";
 import {
   ApiPage,
   AppsPage,
@@ -414,6 +414,22 @@ function App() {
       setControlCenter(null);
     }
   }, [devices, controlCenter]);
+
+  /// The view store keeps one entry per udid and never used to drop one.
+  ///
+  /// Two of those entries matter. `live` decides whether a tile says the stream is up, so a
+  /// phone that goes away while live and comes back is *already* live before a single
+  /// packet arrives — its tile shows a white canvas labelled as working. And the paint
+  /// counters are what the host's watchdog is handed every two seconds, so it kept
+  /// receiving evidence about devices that had left.
+  ///
+  /// Guarded on a non-empty roster: an empty `devices` is what this app looks like for the
+  /// first moment after boot and during a failed scan, and forgetting everything then would
+  /// blank every tile that is about to be listed again.
+  useEffect(() => {
+    if (!devices.length) return;
+    forgetDepartedViews(devices.map((device) => device.udid));
+  }, [devices]);
 
   // Ask for the overlay's own encode while it is open, and give it back on close.
   //

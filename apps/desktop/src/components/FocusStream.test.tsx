@@ -6,6 +6,8 @@ import {
   deviceSwipe,
   deviceSwipePath,
   deviceTap,
+  deviceControlBegin,
+  deviceControlEnd,
   deviceTypeText,
   exportMedia,
   groupInput,
@@ -484,5 +486,70 @@ describe("FocusStream media export", () => {
     const empty = renderOverlay();
     fireEvent.click(empty.getByRole("button", { name: "Lấy ảnh/video từ máy" }));
     expect(await empty.findByText("Máy không có ảnh/video nào")).toBeTruthy();
+  });
+});
+
+describe("FocusStream control lease lifecycle", () => {
+  it("never releases the lease before the call that took it has landed", async () => {
+    // The cleanup fired `deviceControlEnd` immediately while `deviceControlBegin` was still
+    // in flight. `end_overlay_session` is a no-op when there is no session yet, so an `end`
+    // that overtook its `begin` succeeded quietly -- and the `begin` landing a moment later
+    // left a live manual session with nobody to close it. That lease is held until the app
+    // restarts, and every background job that wants the phone is refused meanwhile.
+    const order: string[] = [];
+    let releaseBegin: (() => void) | undefined;
+    vi.mocked(deviceControlBegin).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseBegin = () => {
+            order.push("begin");
+            resolve();
+          };
+        }),
+    );
+    vi.mocked(deviceControlEnd).mockImplementation(async () => {
+      order.push("end");
+    });
+
+    const { unmount } = render(
+      <FocusStream
+        device={fixture}
+        index={1}
+        onClose={() => undefined}
+        groupUdids={[]}
+        groupMode={false}
+        devices={[fixture]}
+        onSelectDevice={() => undefined}
+      />,
+    );
+    // Close it while the begin is still open, which is the fast open-close an operator does
+    // by mistake and the timing the defect needs.
+    unmount();
+    expect(order).toEqual([]);
+
+    releaseBegin?.();
+    await waitFor(() => expect(order).toEqual(["begin", "end"]));
+  });
+
+  it("still releases a device whose begin rejected", async () => {
+    // The failure can arrive after the session was created, so skipping the release on a
+    // rejected begin would leak exactly the lease this is about.
+    vi.mocked(deviceControlBegin).mockRejectedValueOnce(new Error("device busy"));
+    vi.mocked(deviceControlEnd).mockResolvedValue(undefined);
+
+    const { unmount } = render(
+      <FocusStream
+        device={fixture}
+        index={1}
+        onClose={() => undefined}
+        groupUdids={[]}
+        groupMode={false}
+        devices={[fixture]}
+        onSelectDevice={() => undefined}
+      />,
+    );
+    unmount();
+
+    await waitFor(() => expect(deviceControlEnd).toHaveBeenCalledWith(fixture.udid));
   });
 });

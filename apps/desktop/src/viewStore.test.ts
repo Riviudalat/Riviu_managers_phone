@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  collectDepartedViews,
   collectPaintReports,
   collectStalledViews,
   nextViewReconnectDelay,
@@ -158,5 +159,60 @@ describe("paint reports sent to the host watchdog", () => {
     const report = collectPaintReports(now, latest, new Map())[0];
     expect(report.frames).toBe(0);
     expect(report.sincePaintMs).toBe(4_000);
+  });
+});
+
+describe("forgetting devices that left the fleet", () => {
+  const beat = (at: number) => ({ at, generation: 1, received: 10, frames: 10 });
+
+  function memory() {
+    return {
+      sizes: new Map([
+        ["stays", { width: 1080, height: 2400, generation: 1 }],
+        ["left", { width: 1080, height: 2220, generation: 1 }],
+      ]),
+      live: new Set(["stays", "left"]),
+      decodeFailed: new Set(["left"]),
+      lastPaintBeat: new Map([["stays", beat(1)], ["left", beat(1)]]),
+      latestBeat: new Map([["stays", beat(2)], ["left", beat(2)]]),
+    };
+  }
+
+  it("drops every trace of a departed phone and keeps the rest untouched", () => {
+    // Nothing here was ever pruned, and two of these stores are load-bearing. `live` says
+    // whether the tile claims the stream is up, so a phone that went away while live came
+    // back *already* live -- a white canvas labelled as working. `latestBeat` is what the
+    // host's watchdog is handed every two seconds, so it kept receiving evidence about
+    // devices that had left, for the life of the page.
+    const stores = memory();
+
+    expect(collectDepartedViews(new Set(["stays"]), stores)).toEqual(["left"]);
+
+    expect(stores.live.has("left")).toBe(false);
+    expect(stores.sizes.has("left")).toBe(false);
+    expect(stores.decodeFailed.has("left")).toBe(false);
+    expect(stores.lastPaintBeat.has("left")).toBe(false);
+    expect(stores.latestBeat.has("left")).toBe(false);
+
+    expect(stores.live.has("stays")).toBe(true);
+    expect(stores.sizes.get("stays")?.height).toBe(2400);
+    expect(stores.latestBeat.has("stays")).toBe(true);
+  });
+
+  it("stops the departed phone reaching the host's watchdog", () => {
+    // The two rules together: what the watchdog is sent is exactly what `latestBeat` holds,
+    // so pruning is what actually stops the reports rather than merely tidying up.
+    const stores = memory();
+    collectDepartedViews(new Set(["stays"]), stores);
+
+    const reports = collectPaintReports(1_000, stores.latestBeat, stores.lastPaintBeat);
+
+    expect(reports.map((report) => report.udid)).toEqual(["stays"]);
+  });
+
+  it("forgets nothing when every device is still present", () => {
+    const stores = memory();
+    expect(collectDepartedViews(new Set(["stays", "left"]), stores)).toEqual([]);
+    expect(stores.live.size).toBe(2);
   });
 });
