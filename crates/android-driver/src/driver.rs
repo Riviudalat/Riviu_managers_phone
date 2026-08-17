@@ -2390,6 +2390,45 @@ fn parse_inventory(stdout: &str) -> Inventory {
     }
 }
 
+/// Where an Android screenshot goes, given where the caller asked for it.
+///
+/// Only the extension moves. The directory and stem are the caller's -- they carry the
+/// serial and the timestamp that keep two phones' captures apart -- and a path that already
+/// says `.png` is left exactly as it is.
+fn screenshot_destination(dest: &Path) -> PathBuf {
+    dest.with_extension("png")
+}
+
+/// A row for a phone adb can see but cannot drive.
+///
+/// Every field it can honestly fill is filled and the rest are left empty rather than
+/// guessed: there is no OS version or battery to read from a device that will not answer.
+/// The status is what the grid sorts and colours by, and the reason is the sentence the
+/// operator acts on.
+fn unusable_device(serial: &str, model: Option<String>, state: AdbDeviceState) -> DeviceInfo {
+    DeviceInfo {
+        udid: serial.to_string(),
+        name: model.clone().unwrap_or_else(|| serial.to_string()),
+        model: model.unwrap_or_default(),
+        platform: riviu_core::DevicePlatform::Android,
+        os_version: String::new(),
+        connection: ConnectionKind::Usb,
+        // `Pairing` for the one state a human can clear from the device itself;
+        // `Disconnected` for the rest, which are about the cable, the hub or the mode the
+        // phone booted into.
+        status: match state {
+            AdbDeviceState::Unauthorized => DeviceStatus::Pairing,
+            _ => DeviceStatus::Disconnected,
+        },
+        battery: None,
+        wda_ready: false,
+        wda_expires_at: None,
+        stream_url: None,
+        tile_stream_state: Default::default(),
+        last_error: state.operator_reason(),
+    }
+}
+
 #[async_trait]
 impl DeviceDriver for AndroidDriver {
     async fn list_devices(&self) -> anyhow::Result<Vec<DeviceInfo>> {
@@ -2419,38 +2458,27 @@ impl DeviceDriver for AndroidDriver {
         // Fan out: the fleet is 16 phones and every one of them costs a round
         // trip we would otherwise pay in series.
         let mut inflight = Vec::new();
-        let mut unauthorized = Vec::new();
+        let mut unreachable_devices = Vec::new();
         for line in lines {
             match line.state {
                 AdbDeviceState::Device => {
                     let adb = self.adb.clone();
                     inflight.push(tokio::spawn(probe_device(adb, line.serial, line.model)));
                 }
-                // Report it, do not hide it. A phone whose USB-debugging prompt
-                // has not been accepted is a normal fleet state with an obvious
-                // fix, and dropping it from the list makes it look unplugged.
-                AdbDeviceState::Unauthorized => unauthorized.push(DeviceInfo {
-                    udid: line.serial.clone(),
-                    name: line.model.clone().unwrap_or_else(|| line.serial.clone()),
-                    model: line.model.unwrap_or_default(),
-                    platform: riviu_core::DevicePlatform::Android,
-                    os_version: String::new(),
-                    connection: ConnectionKind::Usb,
-                    status: DeviceStatus::Pairing,
-                    battery: None,
-                    wda_ready: false,
-                    wda_expires_at: None,
-                    stream_url: None,
-                    tile_stream_state: Default::default(),
-                    last_error: Some(
-                        "USB debugging not allowed yet — accept the prompt on the device".into(),
-                    ),
-                }),
-                AdbDeviceState::Offline | AdbDeviceState::Other => {}
+                // **Report it, do not hide it**, and that now covers every state rather
+                // than one of them. A phone whose USB-debugging prompt has not been
+                // accepted is a normal fleet state with an obvious fix; so is one that has
+                // gone `offline` because its cable or hub dropped, or because it is
+                // mid-reboot. Dropping those from the list makes them look unplugged, which
+                // is the one thing they are not — adb can see them, and it can say why.
+                //
+                // `offline` in particular was silently discarded, so a phone that lost its
+                // connection simply vanished from the grid with no row and no reason.
+                state => unreachable_devices.push(unusable_device(&line.serial, line.model, state)),
             }
         }
 
-        let mut devices = Vec::with_capacity(inflight.len() + unauthorized.len());
+        let mut devices = Vec::with_capacity(inflight.len() + unreachable_devices.len());
         for handle in inflight {
             let Ok(mut device) = handle.await else {
                 continue;
@@ -2461,7 +2489,7 @@ impl DeviceDriver for AndroidDriver {
             }
             devices.push(device);
         }
-        devices.extend(unauthorized);
+        devices.extend(unreachable_devices);
         Ok(devices)
     }
 
@@ -2501,6 +2529,18 @@ impl DeviceDriver for AndroidDriver {
             .map(|_| ())
     }
 
+    /// `screencap -p`, written under the extension it actually is.
+    ///
+    /// The caller names the file before it knows which backend will answer, and it names it
+    /// `.jpg` because that is what the iOS path and the stream hub produce. `screencap -p`
+    /// produces a PNG — the assertion two lines down has always said so — and the old code
+    /// wrote those bytes straight into the `.jpg` the caller asked for, then handed back
+    /// that path for the toast to display. Every Android screenshot this app has ever taken
+    /// is a PNG with a lie for a file extension.
+    ///
+    /// Corrected here rather than at the call site because this is where the format is
+    /// known, and the return value already exists for exactly this: callers use the path
+    /// that comes back, not the one they passed in.
     async fn screenshot(&self, udid: &str, dest: &Path) -> anyhow::Result<PathBuf> {
         let png = self
             .adb
@@ -2515,10 +2555,11 @@ impl DeviceDriver for AndroidDriver {
             "screencap returned {} bytes that are not a PNG",
             png.len()
         );
-        tokio::fs::write(dest, &png)
+        let dest = screenshot_destination(dest);
+        tokio::fs::write(&dest, &png)
             .await
             .with_context(|| format!("write {}", dest.display()))?;
-        Ok(dest.to_path_buf())
+        Ok(dest)
     }
 
     async fn syslog_tail(&self, udid: &str, lines: usize) -> anyhow::Result<String> {
@@ -3171,6 +3212,71 @@ mod tests {
     use super::*;
 
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn a_phone_adb_can_see_but_not_drive_gets_a_row_and_a_reason() {
+        // `offline` was discarded outright, so a phone whose cable or hub dropped simply
+        // vanished from the grid: no row, no reason, indistinguishable from unplugged. The
+        // comment beside the `unauthorized` arm had already made the argument -- "report
+        // it, do not hide it" -- and it applies to every state that is not `device`.
+        let offline = unusable_device("ce06", Some("SM-N950F".into()), AdbDeviceState::Offline);
+        assert_eq!(offline.udid, "ce06");
+        assert_eq!(offline.name, "SM-N950F");
+        assert_eq!(offline.status, DeviceStatus::Disconnected);
+        assert!(offline
+            .last_error
+            .as_deref()
+            .expect("a reason")
+            .contains("not answering"));
+
+        // Unauthorised keeps `Pairing`: it is the one state a human clears from the device
+        // itself, and the grid treats it differently for that reason.
+        let unauthorised = unusable_device("ce07", None, AdbDeviceState::Unauthorized);
+        assert_eq!(unauthorised.status, DeviceStatus::Pairing);
+        assert_eq!(
+            unauthorised.name, "ce07",
+            "no model, so the serial has to do"
+        );
+        assert!(unauthorised
+            .last_error
+            .as_deref()
+            .expect("a reason")
+            .contains("accept the prompt"));
+
+        // And an unrecognised state says which one it was, because `recovery`,
+        // `sideload` and `no permissions` have different fixes.
+        let recovery = unusable_device("ce08", None, AdbDeviceState::Other("recovery".into()));
+        assert_eq!(recovery.status, DeviceStatus::Disconnected);
+        assert!(recovery
+            .last_error
+            .as_deref()
+            .expect("a reason")
+            .contains("`recovery`"));
+    }
+
+    #[test]
+    fn an_android_screenshot_is_saved_under_the_extension_it_actually_is() {
+        // `screencap -p` returns a PNG; the caller names the file `.jpg` because that is
+        // what the iOS path and the stream hub produce. The old code wrote PNG bytes into
+        // that `.jpg` and handed the path back for the toast, so every Android screenshot
+        // this app has ever taken is a PNG with a lie for a file extension -- and the
+        // operator is told exactly that path.
+        let asked = Path::new("C:/riviu/screenshots/ce06-1755400000000.jpg");
+        let actual = screenshot_destination(asked);
+
+        assert_eq!(
+            actual.extension().and_then(|value| value.to_str()),
+            Some("png")
+        );
+        // The stem is what keeps two phones' captures apart; only the extension moves.
+        assert_eq!(actual.file_stem(), asked.file_stem());
+        assert_eq!(actual.parent(), asked.parent());
+        // Already correct stays correct.
+        assert_eq!(
+            screenshot_destination(Path::new("/tmp/shot.png")),
+            PathBuf::from("/tmp/shot.png")
+        );
+    }
 
     #[test]
     fn the_producer_publishes_the_pixels_the_snapshot_claims_the_device_has() {

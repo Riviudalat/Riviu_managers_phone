@@ -515,7 +515,12 @@ pub struct AdbDeviceLine {
     pub model: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Not `Copy`, because [`Self::Other`] carries the word adb actually printed.
+///
+/// Carrying it is the point: `recovery`, `sideload`, `bootloader` and `no permissions` all
+/// land here, and each has a different fix. A variant that forgets which one it was can
+/// only produce a message nobody can act on.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdbDeviceState {
     /// Authorised and usable.
     Device,
@@ -523,8 +528,33 @@ pub enum AdbDeviceState {
     /// on the fleet: one device sat in this state, so it is a normal condition
     /// to report rather than an error to hide.
     Unauthorized,
+    /// Known to adb and not answering — the usual shape of a phone whose cable or hub has
+    /// dropped, and the usual shape of one that is mid-reboot.
     Offline,
-    Other,
+    /// Anything else adb printed, kept verbatim.
+    Other(String),
+}
+
+impl AdbDeviceState {
+    /// What to tell an operator looking at a phone in this state.
+    ///
+    /// `None` for a device that is simply usable. Everything else has a sentence, because a
+    /// device that cannot be driven and cannot say why is a device that looks unplugged.
+    pub fn operator_reason(&self) -> Option<String> {
+        match self {
+            Self::Device => None,
+            Self::Unauthorized => Some(
+                "USB debugging not allowed yet — accept the prompt on the device".to_string(),
+            ),
+            Self::Offline => Some(
+                "adb sees this device but it is not answering — check the cable or the USB hub,                  or wait if it is rebooting"
+                    .to_string(),
+            ),
+            Self::Other(state) => {
+                Some(format!("adb reports this device as `{state}`, which cannot be driven"))
+            }
+        }
+    }
 }
 
 /// Why an `adb` invocation failed, and therefore whether another attempt helps.
@@ -636,7 +666,7 @@ pub fn parse_devices(stdout: &str) -> Vec<AdbDeviceLine> {
                 "device" => AdbDeviceState::Device,
                 "unauthorized" => AdbDeviceState::Unauthorized,
                 "offline" => AdbDeviceState::Offline,
-                _ => AdbDeviceState::Other,
+                other => AdbDeviceState::Other(other.to_string()),
             };
             let model = parts.find_map(|token| {
                 token

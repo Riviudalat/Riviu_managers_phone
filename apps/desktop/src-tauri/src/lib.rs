@@ -20,14 +20,60 @@ mod view_watchdog;
 use state::AppState;
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 
-#[derive(Clone, Default)]
+/// Why the app could not start, if it could not — and the lock that lets it try again.
+///
+/// The message used to be a plain `Option<String>` fixed at setup, which is what made the
+/// startup screen's only button useless: it called `window.location.reload()`, the WebView
+/// came back, asked `startup_error` again and was handed the same stored sentence.
+/// `AppState::bootstrap` had run once and would never run again, so the operator could fix
+/// whatever was wrong — plug in adb, start the sidecar — and had no way to tell the app.
+/// The only real remedy was quitting and reopening.
+#[derive(Default)]
 struct StartupState {
-    error: Option<String>,
+    error: parking_lot::Mutex<Option<String>>,
+    /// Serialises retries, so two impatient clicks cannot bootstrap twice.
+    attempt: tokio::sync::Mutex<()>,
 }
 
 #[tauri::command]
 fn startup_error(state: tauri::State<'_, StartupState>) -> Option<String> {
-    state.error.clone()
+    state.error.lock().clone()
+}
+
+/// Try the bootstrap again, and answer with whatever is wrong *now*.
+///
+/// `None` means the app is up: either this attempt succeeded, or another one already did.
+/// A second success is impossible rather than merely unlikely — `Manager::manage` refuses a
+/// type that is already managed, and a bootstrap that ran twice would leave two of every
+/// background task running against one database.
+#[tauri::command]
+async fn retry_startup(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, StartupState>,
+) -> Result<Option<String>, String> {
+    let _attempt = state.attempt.lock().await;
+    if app.try_state::<AppState>().is_some() {
+        *state.error.lock() = None;
+        return Ok(None);
+    }
+    let resource_dir = app.path().resource_dir().ok();
+    match AppState::bootstrap(resource_dir).await {
+        Ok(fresh) => {
+            fresh.spawn_background_tasks(app.clone());
+            if !app.manage(fresh) {
+                // Lost a race this lock exists to prevent. Whoever won is the live state.
+                log::warn!("a concurrent startup retry had already installed the app state");
+            }
+            *state.error.lock() = None;
+            Ok(None)
+        }
+        Err(error) => {
+            let message = format!("{error:#}");
+            log::error!("desktop startup retry is still blocked: {message}");
+            *state.error.lock() = Some(message.clone());
+            Ok(Some(message))
+        }
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -81,7 +127,8 @@ pub fn run() {
                         let message = format!("{error:#}");
                         log::error!("desktop startup is blocked: {message}");
                         StartupState {
-                            error: Some(message),
+                            error: parking_lot::Mutex::new(Some(message)),
+                            ..Default::default()
                         }
                     }
                 };
@@ -92,6 +139,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             startup_error,
+            retry_startup,
             agent_commands::agent_get_settings,
             agent_commands::agent_save_settings,
             agent_commands::agent_list_statuses,

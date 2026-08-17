@@ -34,7 +34,8 @@ vi.mock("./api", () => ({
   saveViewSnapshot: vi.fn(async () => ""),
   refreshDevices: vi.fn(async () => []),
   setStreamSettings: vi.fn(async (settings: unknown) => settings),
-  startupError: vi.fn(async () => null),
+  startupError: vi.fn(async () => null as string | null),
+  retryStartup: vi.fn(async () => null as string | null),
   // Settings renders the update section on mount, but nothing checks on mount — the
   // resting state is "not asked". Mocked anyway: an unmocked export is `undefined`,
   // and the button's onClick would throw synchronously if anyone pressed it.
@@ -300,5 +301,39 @@ describe("buttons that used to fail in silence", () => {
 
     expect(await screen.findByText("Không mở lại được Redmi")).toBeInTheDocument();
     expect(await screen.findByText("scrcpy server refused")).toBeInTheDocument();
+  });
+});
+
+describe("the startup failure screen", () => {
+  it("actually retries the bootstrap instead of reloading the same stored error", async () => {
+    // The button called `window.location.reload()`. The WebView came back, asked
+    // `startup_error` again, and was handed the sentence stored at setup -- `bootstrap` had
+    // run once and would never run again. An operator who fixed the cause (plugged in adb,
+    // started the sidecar) had no way to tell the app short of quitting it.
+    const api = await import("./api");
+    vi.mocked(api.startupError).mockResolvedValueOnce("adb is not on PATH");
+    vi.mocked(api.retryStartup).mockResolvedValueOnce(null);
+    render(<App />);
+    expect(await screen.findByText("adb is not on PATH")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Thử lại" }));
+
+    expect(api.retryStartup).toHaveBeenCalledTimes(1);
+    // The failure screen is gone, which is the whole point: the app is up.
+    await waitFor(() =>
+      expect(screen.queryByText("Chưa sẵn sàng khởi động")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("shows what is still wrong when the retry finds the same problem", async () => {
+    const api = await import("./api");
+    vi.mocked(api.startupError).mockResolvedValueOnce("adb is not on PATH");
+    vi.mocked(api.retryStartup).mockResolvedValueOnce("adb is still not on PATH");
+    render(<App />);
+    expect(await screen.findByText("adb is not on PATH")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Thử lại" }));
+
+    expect(await screen.findByText("adb is still not on PATH")).toBeInTheDocument();
   });
 });

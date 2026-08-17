@@ -179,7 +179,18 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
   const [groups, setGroups] = useState<DeviceGroup[]>([]);
   const [groupId, setGroupId] = useState("");
   const [groupResults, setGroupResults] = useState<GroupInstallResult[]>([]);
-  const targets = targetsOf(selected, devices);
+  // **iPhones only, and never the whole fleet by default.** This library holds `.ipa`
+  // files; `targetsOf` falls back to every connected device when nothing is selected, so
+  // an unselected click used to push an iOS app at every Android serial in the room and
+  // collect one failure per phone. Android apps are installed from the device overlay's
+  // "Cài APK", which is a different file and a different command.
+  const iosDevices = devices.filter((device) => device.platform !== "android");
+  const targets = targetsOf(selected, iosDevices).filter((udid) =>
+    iosDevices.some((device) => device.udid === udid),
+  );
+  const androidSelected = selected.filter((udid) =>
+    devices.some((device) => device.udid === udid && device.platform === "android"),
+  ).length;
 
   const reload = () => listAppsLibrary().then(setItems).catch((e) => flashError(e));
   useEffect(() => {
@@ -222,6 +233,12 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
         onClear={() => onSelectUdids([])}
         onSelectUdids={onSelectUdids}
       />
+      {androidSelected > 0 && (
+        <p className="hint" role="status">
+          Bỏ qua {androidSelected} máy Android đang chọn — thư viện này là IPA, chỉ cài được
+          lên iPhone. Cài APK cho Android trong menu điều khiển của từng máy.
+        </p>
+      )}
       <div className="row" style={{ marginTop: 8 }}>
         <label style={{ flex: 1 }}>
           Cài hàng loạt theo nhóm
@@ -290,6 +307,11 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
                 type="button"
                 className="primary"
                 disabled={!targets.length || busy}
+                title={
+                  targets.length
+                    ? `Cài lên ${targets.length} iPhone`
+                    : "Không có iPhone nào để cài — IPA chỉ cài được lên iOS"
+                }
                 onClick={async () => {
                   setBusy(true);
                   try {
@@ -302,13 +324,13 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
                       }
                     }
                     if (errors.length) flash(`Một số máy lỗi:\n${errors.join("\n")}`);
-                    else flash(`Đã cài lên ${targets.length} máy`);
+                    else flash(`Đã cài lên ${targets.length} iPhone`);
                   } finally {
                     setBusy(false);
                   }
                 }}
               >
-                Install → {targets.length} máy
+                Install → {targets.length} iPhone
               </button>
               <button
                 type="button"

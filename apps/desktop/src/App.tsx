@@ -14,6 +14,7 @@ import {
   saveGroup,
   screenshot,
   setScreenRotation,
+  retryStartup,
   startupError,
   viewSetPreset,
 } from "./api";
@@ -100,6 +101,7 @@ function App() {
   const [driverIssue, setDriverIssue] = useState<string | null>(null);
   const [androidIssue, setAndroidIssue] = useState<string | null>(null);
   const [startupIssue, setStartupIssue] = useState<string | null | undefined>(undefined);
+  const [retryingStartup, setRetryingStartup] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("window");
   const [tileWidth, setTileWidth] = useState(() => loadZoom(TILE_ZOOM));
   const canvasRef = useRef<HTMLDivElement | null>(null);
@@ -474,8 +476,26 @@ function App() {
             app. Bản Full tự tạo credential cục bộ; bản production yêu cầu token
             RT-MMO được cấu hình một lần.
           </p>
-          <button type="button" className="primary" onClick={() => window.location.reload()}>
-            Thử lại
+          <button
+            type="button"
+            className="primary"
+            disabled={retryingStartup}
+            onClick={async () => {
+              setRetryingStartup(true);
+              try {
+                const stillBlocked = await retryStartup();
+                setStartupIssue(stillBlocked);
+                // Came up: the effect that boots the fleet has already run and found an
+                // error, so the rest of the startup work is kicked off here.
+                if (!stillBlocked) await reload();
+              } catch (error) {
+                setStartupIssue(describeError(error));
+              } finally {
+                setRetryingStartup(false);
+              }
+            }}
+          >
+            {retryingStartup ? "Đang thử lại…" : "Thử lại"}
           </button>
         </div>
       </main>

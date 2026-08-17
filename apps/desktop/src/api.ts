@@ -55,6 +55,18 @@ export async function startupError() {
   return invoke<string | null>("startup_error");
 }
 
+/**
+ * Run the bootstrap again and report what is wrong *now*.
+ *
+ * `null` means the app came up. The startup screen's button used to call
+ * `window.location.reload()`, which reloaded the WebView and got the same stored sentence
+ * back — the bootstrap had run once at setup and would never run again, so fixing the cause
+ * (plugging in adb, starting the sidecar) had no way to reach the app short of quitting it.
+ */
+export async function retryStartup() {
+  return invoke<string | null>("retry_startup");
+}
+
 export async function listDevices() {
   return invoke<DeviceInfo[]>("list_devices");
 }
