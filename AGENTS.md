@@ -5170,6 +5170,43 @@ moi lan doi preset va moi lan xoay may la mot cua so cham bien mat — upstream 
 agent **von khong cham** — 130–280 ms mot click do tren chinh Galaxy S8+. Con so 1502 ms la
 `adb shell input`, **khong phai** agent, dung nham hai cai.
 
+### 9.78 Keo truc tiep qua socket control — va cai bay "no chay roi" (17/08/2026)
+
+§9.77 tìm ra chỗ đau: `FocusStream` gom mẫu `pointerMove` rồi chỉ bắn một swipe trong
+`onPointerUp`. Nay phần giữa của thao tác kéo đi thẳng xuống socket control của scrcpy
+(`INJECT_TOUCH_EVENT`, 32 byte). **Chỉ phần giữa**: chạm đơn, phím và chữ vẫn ở uiautomator2
+— `INJECT_TEXT` không gõ được dấu tiếng Việt, và một cú chạm rời không đủ chậm để đáng đánh
+đổi rủi ro toạ độ.
+
+**Bẫy toạ độ (upstream #4925) và cách bịt.** Server gọi `Device.getPhysicalPoint`, so kích
+thước khai báo trong thông điệp với kích thước nó **đang mã hoá**, lệch thì **bỏ im lặng**.
+Nên kích thước ghi lên dây không bao giờ là của người gọi: `ViewProducer.frame_size` (một
+`AtomicU32`, w<<16|h, tác vụ đọc cập nhật mỗi khung **trước** khi publish) là nguồn chuẩn, và
+toạ độ của người gọi được scale vào đó. Người gọi chậm một thế hệ thì bị scale lại, chứ không
+mất cú chạm.
+
+**Ngưỡng kéo dùng chung một hằng số.** `TAP_SLOP = 10` quyết định cả "khi nào bắt đầu bơm
+live" lẫn "khi nào `runGesture` gọi đây là tap". Tách đôi là một kéo ngắn vừa được bơm live
+vừa bị phát lại thành tap.
+
+**Cái bẫy tốn nhiều thời gian nhất không phải kỹ thuật.** Lần thử đầu qua UI: máy không nhúc
+nhích. Nhưng `liveDrag` **nuốt lỗi im lặng** theo đúng thiết kế (rơi về đường cũ, thao tác vẫn
+tới máy) — nên không có gì để đọc, và "hỏng" trông y hệt "chạy". Hai bài học:
+
+1. Đã thêm `onFallback` báo một lần mỗi lần kéo. Đường dự phòng **im lặng là đường dự phòng
+   không ai biết là đang chết**. Chính nó nói ra câu trả lời: `down refused: no producer`.
+2. Nguyên nhân thật: đúng lúc đó producer đang được dựng lại (log cùng giây: *19/20 …
+   1 of 4 recovery slots in use*). Tức là **không có lỗi nào cả** — dự phòng làm đúng việc.
+   Thử lại khi fleet ổn định thì chạy ngay.
+
+**Cách kiểm chứng, vì hai lần đầu tôi tự lừa mình.** Ảnh chụp cửa sổ không kết luận được
+(stream có thể trễ), và chụp máy khi đang mở TikTok cũng không (video tự đổi khung — tôi suýt
+đọc đó là thành công). Cách đúng: `examples/touch_probe.rs` tách riêng nửa Rust, và chụp
+`adb exec-out screencap` trên một màn hình **tĩnh mà cuộn được** (Cài đặt) **trong lúc chuột
+vẫn đang giữ**. Kết quả: danh sách đã cuộn lên hiện "Biometrics and security" / "Accounts and
+backup" trước khi nhả tay. Ở chiều ngược lại danh sách đã ở đáy nên chỉ có **thanh cuộn hiện
+ra** — Android chỉ vẽ nó khi có ngón tay đang cuộn, nên đó cũng là bằng chứng.
+
 ### 9.77 Do "khong muot" thay vi doan: CPU khong phai thu phanh, va cho no that su nam (17/08/2026)
 
 Mục tiêu là "điều khiển mượt, stream không lỗi, hạn chế mất kết nối". Trước khi sửa gì, đo.

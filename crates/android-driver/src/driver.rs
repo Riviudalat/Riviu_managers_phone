@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -179,12 +180,41 @@ struct ViewTuningChoice {
     fps: u32,
 }
 
+/// Width and height in one atomic, so a touch can never be built from one frame's width and
+/// the next frame's height.
+///
+/// Samples carry these as `u32` and the control message declares them as `u16`. Saturating
+/// rather than truncating: a `as u16` on a hypothetical 70000-pixel frame would wrap to a
+/// small number that looks perfectly plausible on the wire, and the touch would land in the
+/// wrong place instead of being refused. Nothing on this fleet comes near it — `MAX_LONG_EDGE`
+/// is 832 — which is exactly why a silent wrap would never be found.
+fn pack_frame_size(width: u32, height: u32) -> u32 {
+    let clamp = |value: u32| u16::try_from(value).unwrap_or(u16::MAX);
+    (u32::from(clamp(width)) << 16) | u32::from(clamp(height))
+}
+
+fn unpack_frame_size(packed: u32) -> (u16, u16) {
+    ((packed >> 16) as u16, (packed & 0xffff) as u16)
+}
+
 struct ViewProducer {
     generation: u64,
     preset: crate::scrcpy::ViewPreset,
     host_port: u16,
     child: tokio::process::Child,
     reader: tokio::task::JoinHandle<()>,
+    /// Width in the high 16 bits, height in the low 16, as of the last sample read.
+    ///
+    /// This exists so that a touch can declare the size the server is *currently* encoding
+    /// rather than the size some caller last saw. `Device.getPhysicalPoint` on the device
+    /// compares the two and silently ignores the event when they differ, so a value that
+    /// lags a preset change or a rotation is not a slightly-off tap — it is no tap at all.
+    ///
+    /// Packed into one atomic rather than kept behind the `views` mutex because the reader
+    /// task writes it on every frame and `inject_touch` reads it on every pointer sample;
+    /// neither should ever wait on the other, and the pair must move together or a touch
+    /// could be built from one frame's width and the next frame's height.
+    frame_size: Arc<AtomicU32>,
     /// The write half of the scrcpy control socket.
     ///
     /// Behind its own async mutex, and that is a correctness requirement rather than a
@@ -1274,6 +1304,8 @@ impl AndroidDriver {
 
         let udid = serial.to_string();
         let publisher = Arc::clone(&sink);
+        let frame_size = Arc::new(AtomicU32::new(pack_frame_size(first.width, first.height)));
+        let reader_frame_size = Arc::clone(&frame_size);
         let first_packet = crate::view::ViewPacket {
             udid: udid.clone(),
             generation,
@@ -1294,6 +1326,12 @@ impl AndroidDriver {
             loop {
                 match stream.next_sample().await {
                     Ok(sample) => {
+                        // Before publishing, not after: a touch that races the publish should
+                        // see the newer size, because the *server* has already moved to it.
+                        reader_frame_size.store(
+                            pack_frame_size(sample.width, sample.height),
+                            Ordering::Release,
+                        );
                         let packet = crate::view::ViewPacket {
                             udid: udid.clone(),
                             generation,
@@ -1344,11 +1382,71 @@ impl AndroidDriver {
                 host_port,
                 child,
                 reader,
+                frame_size,
                 control: control_write,
                 control_drain,
             },
         );
         Ok(())
+    }
+
+    /// Put one touch event on the phone, in the coordinate space of the picture on screen.
+    ///
+    /// `image_w`/`image_h` are the dimensions the *caller* was looking at when the operator
+    /// moved their finger. They are not passed on: the message declares this host's latest
+    /// observed frame size and the coordinates are rescaled into it. The device compares the
+    /// declared size against what it is encoding and drops the event outright when they
+    /// differ, so a caller one generation behind would otherwise lose the touch entirely
+    /// rather than land it a few pixels off.
+    ///
+    /// `Ok(false)` means no producer — the overlay is not streaming this phone, so there is
+    /// nothing to touch and nothing has gone wrong.
+    pub async fn inject_touch(
+        &self,
+        serial: &str,
+        action: crate::scrcpy::TouchAction,
+        x: f64,
+        y: f64,
+        image_w: f64,
+        image_h: f64,
+    ) -> anyhow::Result<bool> {
+        if !(image_w > 0.0 && image_h > 0.0) {
+            anyhow::bail!("touch needs the size of the picture it came from");
+        }
+        let (control, packed) = {
+            let views = self.views.lock().await;
+            match views.get(serial) {
+                Some(producer) => (
+                    Arc::clone(&producer.control),
+                    producer.frame_size.load(Ordering::Acquire),
+                ),
+                None => return Ok(false),
+            }
+        };
+        let (frame_w, frame_h) = unpack_frame_size(packed);
+        if frame_w == 0 || frame_h == 0 {
+            anyhow::bail!("no frame seen from {serial} yet");
+        }
+        // Clamped, because a pointer can leave the element between two samples and a
+        // coordinate outside the picture is a coordinate outside the phone.
+        let scaled_x = (x / image_w * f64::from(frame_w)).round();
+        let scaled_y = (y / image_h * f64::from(frame_h)).round();
+        let clamped_x = scaled_x.clamp(0.0, f64::from(frame_w - 1)) as i32;
+        let clamped_y = scaled_y.clamp(0.0, f64::from(frame_h - 1)) as i32;
+        let message = crate::scrcpy::inject_touch(action, clamped_x, clamped_y, frame_w, frame_h);
+        let mut socket = control.lock().await;
+        // ONE `write_all`, under the lock, for the same reason as RESET_VIDEO: the reader on
+        // the device has no framing, so an interleaved write desynchronises it permanently
+        // and takes the video down with it.
+        socket
+            .write_all(&message)
+            .await
+            .with_context(|| format!("send touch to {serial}"))?;
+        socket
+            .flush()
+            .await
+            .with_context(|| format!("flush touch to {serial}"))?;
+        Ok(true)
     }
 
     /// Ask the phone for a fresh keyframe, without restarting anything.

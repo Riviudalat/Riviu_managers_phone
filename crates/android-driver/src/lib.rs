@@ -45,6 +45,6 @@ pub use agent::{AgentClient, Locator, Rect};
 pub use driver::{create_driver, detect_driver, AndroidDriver, AndroidDriverConfig};
 pub use frames::{MinicapBanner, MinicapOptions, MinicapStream, Projection};
 pub use riviu_agent::{HelperClient, PACKAGE as RIVIU_HELPER_PACKAGE};
-pub use scrcpy::{ViewPreset, ViewTuning, MIN_VIEW_FPS, SERVER_VERSION};
+pub use scrcpy::{TouchAction, ViewPreset, ViewTuning, MIN_VIEW_FPS, SERVER_VERSION};
 pub use session::AndroidUiSession;
 pub use view::{ViewKind, ViewPacket, ViewSink};

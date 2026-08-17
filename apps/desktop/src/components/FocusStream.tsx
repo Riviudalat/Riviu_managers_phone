@@ -19,8 +19,10 @@ import {
   saveViewSnapshot,
   screenshot,
   setScreenRotation,
+  viewInjectTouch,
   viewRequestKeyframe,
 } from "../api";
+import { createLiveDrag, type LiveDrag } from "../liveDrag";
 import {
   parseCurrentInputMethod,
   parseInputMethods,
@@ -127,11 +129,21 @@ export function FocusStream({
     start: { x: number; y: number };
     steps: { x: number; y: number; durationMs: number }[];
     lastAt: number;
+    /// Non-null once the gesture has travelled far enough to be a drag rather than a tap.
+    /// Until then nothing is injected, so a tap keeps the uiautomator2 path it has always
+    /// had and the control socket only ever sees gestures that benefit from being live.
+    live: LiveDrag | null;
   } | null>(null);
   const inFlight = useRef(false);
   const targets = groupMode && groupUdids.length > 1 ? groupUdids : [device.udid];
   const targetKey = targets.join("\0");
   const isIos = device.platform === "ios";
+  /// Whether this gesture may go down the scrcpy control socket.
+  ///
+  /// iOS has no such socket, and group mode has no such thing as *one* socket — the whole
+  /// point there is that every selected phone gets the same gesture, which only the group
+  /// command can do. Both keep the path they already had.
+  const canDragLive = !isIos && targets.length === 1;
   const encodedW = viewSize?.width && viewSize.width > 0 ? viewSize.width : 0;
   const encodedH = viewSize?.height && viewSize.height > 0 ? viewSize.height : 0;
   const aspect = encodedW > 0 && encodedH > 0 ? encodedH / encodedW : 2;
@@ -223,6 +235,11 @@ export function FocusStream({
   /// middle -- the part a human cannot see anyway.
   const MAX_PATH_STEPS = 64;
 
+  /// Below this a gesture is a tap, above it a drag. One constant for both decisions on
+  /// purpose: if the live path started before `runGesture` stopped calling it a tap, a short
+  /// drag would be injected live *and* replayed as a tap on release.
+  const TAP_SLOP = 10;
+
   const runGesture = async (
     start: { x: number; y: number },
     end: { x: number; y: number },
@@ -233,7 +250,7 @@ export function FocusStream({
     if (!iw || !ih) return;
     const dist = Math.hypot(end.x - start.x, end.y - start.y);
     await runExclusive(async () => {
-      if (dist < 10) {
+      if (dist < TAP_SLOP) {
         if (targets.length > 1) {
           await groupInput({
             udids: targets,
@@ -710,7 +727,7 @@ export function FocusStream({
             const start = mapToDevice(e.currentTarget, e.clientX, e.clientY, encodedW, encodedH);
             if (!start) return;
             e.preventDefault();
-            drag.current = { start, steps: [], lastAt: performance.now() };
+            drag.current = { start, steps: [], lastAt: performance.now(), live: null };
             e.currentTarget.setPointerCapture(e.pointerId);
           }}
           onPointerMove={(e) => {
@@ -728,6 +745,25 @@ export function FocusStream({
             if (!point) return;
             const previous = held.steps.at(-1) ?? held.start;
             if (Math.hypot(point.x - previous.x, point.y - previous.y) < 2) return;
+            // Past the tap threshold this is a drag, and a drag the phone can follow while
+            // it happens instead of replaying it after release. Started from `held.start`,
+            // not from here: the finger has to land where the operator put it.
+            if (
+              !held.live &&
+              canDragLive &&
+              Math.hypot(point.x - held.start.x, point.y - held.start.y) >= TAP_SLOP
+            ) {
+              held.live = createLiveDrag(
+                (action, x, y) =>
+                  viewInjectTouch(device.udid, action, x, y, encodedW, encodedH),
+                // Not a toast: the gesture still reaches the phone the old way, so there is
+                // nothing for the operator to do about it. It goes to the console so that a
+                // silently dead live path is findable.
+                (reason) => console.warn(`live drag fell back on ${device.udid}: ${reason}`),
+              );
+              held.live.begin(held.start.x, held.start.y);
+            }
+            held.live?.move(point.x, point.y);
             held.lastAt = now;
             if (held.steps.length >= MAX_PATH_STEPS) {
               // Merge forward: the endpoint and the total duration stay exact.
@@ -760,13 +796,21 @@ export function FocusStream({
               steps.push({ x: end.x, y: end.y, durationMs: lastElapsed });
             }
             try {
+              // A live drag has already happened on the phone, sample by sample. Replaying
+              // it as a swipe would scroll everything a second time.
+              if (held.live && (await held.live.end(end.x, end.y)) === "live") return;
               await runGesture(held.start, end, steps);
             } catch (error) {
               toastError("Điều khiển thất bại", error);
             }
           }}
           onPointerCancel={() => {
+            const held = drag.current;
             drag.current = null;
+            // A cancelled drag has a finger on the phone that nothing else will lift, and a
+            // pointer left down joins itself to whatever the operator does next.
+            const last = held?.steps.at(-1) ?? held?.start;
+            if (held?.live && last) void held.live.end(last.x, last.y);
           }}
         >
           <PhoneCanvas

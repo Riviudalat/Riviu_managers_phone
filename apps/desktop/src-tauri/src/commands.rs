@@ -1118,6 +1118,44 @@ pub async fn view_request_keyframe(
         .map_err(CommandError::operation)
 }
 
+/// One touch event, live, on the scrcpy control socket.
+///
+/// **Not a replacement for `device_tap`.** Taps, keys and text stay on uiautomator2, which
+/// handles Vietnamese diacritics and does not care what size the video is. This exists for
+/// the continuous middle of a drag, which until now reached the phone only after the operator
+/// let go — `FocusStream` buffered the samples and posted a single swipe on release, so the
+/// picture stood still under a moving finger. See AGENTS.md 9.77.
+///
+/// Deliberately outside `with_manual_session`. That helper claims device ownership and opens
+/// a uiautomator2 session, neither of which this path needs — and a pointer at 60 Hz would be
+/// claiming and releasing ownership sixty times a second. The control socket already belongs
+/// to the producer that is drawing the picture being touched.
+///
+/// `Ok(false)` means the phone is not streaming, so the caller should fall back to the agent
+/// rather than report a failure. A refusal to admit work still throws, because a drag during
+/// shutdown should stop like everything else.
+#[tauri::command]
+pub async fn view_inject_touch(
+    state: State<'_, AppState>,
+    udid: String,
+    action: String,
+    x: f64,
+    y: f64,
+    image_w: f64,
+    image_h: f64,
+) -> Result<bool, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Ok(false);
+    };
+    let action =
+        riviu_android_driver::TouchAction::parse(&action).map_err(CommandError::operation)?;
+    android
+        .inject_touch(&udid, action, x, y, image_w, image_h)
+        .await
+        .map_err(CommandError::operation)
+}
+
 #[tauri::command]
 pub async fn view_set_preset(
     state: State<'_, AppState>,

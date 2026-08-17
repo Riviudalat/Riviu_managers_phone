@@ -271,6 +271,28 @@ export async function viewRequestKeyframe(udid: string) {
   return invoke<boolean>("view_request_keyframe", { udid });
 }
 
+export type TouchAction = "down" | "move" | "up";
+
+/// One live touch on the scrcpy control socket. Resolves false when the phone is not
+/// streaming, which means the caller should fall back to the agent rather than report an error.
+export async function viewInjectTouch(
+  udid: string,
+  action: TouchAction,
+  x: number,
+  y: number,
+  imageW: number,
+  imageH: number,
+) {
+  return invoke<boolean>("view_inject_touch", {
+    udid,
+    action,
+    x,
+    y,
+    imageW,
+    imageH,
+  });
+}
+
 export async function viewSetPreset(udid: string, preset: "tile" | "overlay") {
   return invoke<void>("view_set_preset", { udid, preset });
 }

@@ -13,10 +13,12 @@
 //! **between** reading the dummy byte and reading the device name (see
 //! [`ScrcpyStream::try_accept`]). One `adb forward` serves both.
 //!
-//! **Input still goes through uiautomator2 and not through this socket**, which is a
-//! decision rather than an omission: scrcpy binds touch coordinates to the video frame size
-//! and drops them silently when they disagree, `INJECT_TEXT` cannot type Vietnamese
-//! diacritics, and the agent is not slow. See [`CONTROL_MESSAGE_INJECT_TOUCH`].
+//! **Input is split between the two paths, on purpose.** Taps, keys and text stay on
+//! uiautomator2 — `INJECT_TEXT` cannot type Vietnamese diacritics, and a discrete tap is not
+//! slow enough there to be worth the coordinate risk. The continuous middle of a drag goes
+//! through this socket, because it previously went nowhere at all: samples were buffered and
+//! replayed as one swipe on release, so the phone stood still under the operator's finger.
+//! See [`CONTROL_MESSAGE_INJECT_TOUCH`] for the coordinate trap and how it is closed.
 //!
 //! 4.1 is not pinned: live Note 8 (API 26) dies in `dequeueOutputBuffer`
 //! on `OMX.Exynos.AVC.Encoder`. 3.3.4 on the same phone returns Annex-B.
@@ -344,16 +346,104 @@ pub const fn reset_video() -> [u8; 1] {
     [17]
 }
 
-/// Deliberately not sent, and this is the reason.
+/// `INJECT_TOUCH_EVENT`, type `0x02`, 32 bytes.
 ///
-/// `INJECT_TOUCH_EVENT` is type `0x02`, 32 bytes, big-endian, pressure as Q0.16 with `0xFFFF`
-/// meaning exactly 1.0 — all decoded and all correct. Input still goes through uiautomator2:
-/// scrcpy binds touch coordinates to the **video frame size** and drops silently when they do
-/// not match, so every preset change and every rotation would be a window where taps vanish
-/// (upstream #4925, still open); `INJECT_TEXT` walks a `KeyCharacterMap` and cannot type
-/// Vietnamese diacritics at all; and the agent is not slow — 130–280 ms a click, measured on
-/// this fleet. See AGENTS.md 9.71.
+/// **Sent now, where it was not before, and the reason for the change is a measurement.**
+/// The old note here said the agent "is not slow — 130–280 ms a click", which is true and
+/// beside the point: a *drag* never went through it at all. `FocusStream` buffered every
+/// `pointerMove` and posted one swipe on release, so the phone did not move until the
+/// operator let go. That is the thing that felt broken, and no round-trip figure shows it.
+/// See AGENTS.md 9.77.
+///
+/// What has not changed is the rest of that note. `INJECT_TEXT` still walks a
+/// `KeyCharacterMap` and still cannot type Vietnamese diacritics, so text stays on
+/// uiautomator2, and so does every discrete tap: this path is for the continuous middle of a
+/// gesture, where the win is real and a dropped sample costs nothing.
+///
+/// **The coordinate trap (upstream #4925).** The server calls `Device.getPhysicalPoint`,
+/// which compares the size declared in this message against the size it is *currently*
+/// encoding and returns null — silently ignoring the touch — when they differ. So the size
+/// written here is never the caller's: it is the dimension of the last sample this host
+/// actually received from that device, which is by construction the size the server is
+/// encoding. A stale caller gets its coordinates rescaled rather than its touch dropped.
+///
+/// Layout, all big-endian: type, action, `u64` pointer id, `i32` x, `i32` y, `u16` width,
+/// `u16` height, `u16` pressure as Q0.16 with `0xFFFF` meaning exactly 1.0, `u32` action
+/// button, `u32` buttons.
+///
+/// One array, one `write_all`, same as [`reset_video`] and for the same reason: the reader on
+/// the device has no framing, and desynchronising it kills the video too.
 pub const CONTROL_MESSAGE_INJECT_TOUCH: u8 = 0x02;
+
+/// Which end of a gesture a touch message carries.
+///
+/// The values are `AMOTION_EVENT_ACTION_*` and must stay these numbers — the server passes
+/// them to `MotionEvent.obtain` unmapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TouchAction {
+    Down,
+    Up,
+    Move,
+}
+
+impl TouchAction {
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Down => 0,
+            Self::Up => 1,
+            Self::Move => 2,
+        }
+    }
+
+    pub fn parse(raw: &str) -> anyhow::Result<Self> {
+        match raw {
+            "down" => Ok(Self::Down),
+            "up" => Ok(Self::Up),
+            "move" => Ok(Self::Move),
+            other => anyhow::bail!("unknown touch action {other:?}"),
+        }
+    }
+}
+
+/// A finger rather than a mouse.
+///
+/// The server reads this as a signed 64-bit value and treats `-1` — and only `-1` — as
+/// `TOOL_TYPE_MOUSE`; every other id becomes `TOOL_TYPE_FINGER`. Apps that discriminate on
+/// tool type (scroll physics, long-press timing) behave like a real touchscreen only on the
+/// finger path, so this is 0 deliberately and not the mouse constant scrcpy's own client uses.
+const TOUCH_POINTER_ID: u64 = 0;
+
+/// `MotionEvent.BUTTON_PRIMARY`, which a finger holds while it is down and never on release.
+const BUTTON_PRIMARY: u32 = 1;
+
+pub fn inject_touch(
+    action: TouchAction,
+    x: i32,
+    y: i32,
+    frame_width: u16,
+    frame_height: u16,
+) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[0] = CONTROL_MESSAGE_INJECT_TOUCH;
+    out[1] = action.code();
+    out[2..10].copy_from_slice(&TOUCH_POINTER_ID.to_be_bytes());
+    out[10..14].copy_from_slice(&x.to_be_bytes());
+    out[14..18].copy_from_slice(&y.to_be_bytes());
+    out[18..20].copy_from_slice(&frame_width.to_be_bytes());
+    out[20..22].copy_from_slice(&frame_height.to_be_bytes());
+    // Full pressure while the finger is down, exactly zero once it is lifted. A non-zero
+    // pressure on an UP is what a stuck finger looks like to the framework.
+    let (pressure, buttons) = match action {
+        TouchAction::Up => (0u16, 0u32),
+        _ => (u16::MAX, BUTTON_PRIMARY),
+    };
+    out[22..24].copy_from_slice(&pressure.to_be_bytes());
+    // Action button stays 0: it names *which* mouse button changed state, and a finger has
+    // none. Sending BUTTON_PRIMARY here would make the server report a mouse click.
+    out[24..28].copy_from_slice(&0u32.to_be_bytes());
+    out[28..32].copy_from_slice(&buttons.to_be_bytes());
+    out
+}
 
 /// Longest stable prefix of the remote socket for every server we start.
 ///
@@ -1028,6 +1118,68 @@ mod tests {
                 "{preset:?} {rates:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_touch_message_is_thirty_two_bytes_in_the_order_the_server_reads_them() {
+        // Pinned byte by byte because `ControlMessageReader` has no framing: it takes the
+        // type byte and then reads exactly as many bytes as that type implies. Get the
+        // length wrong and the next message starts mid-field forever; get it wrong enough
+        // and the server raises ControlProtocolException and quits the looper, which takes
+        // the video down on that phone. A wrong *value* is a bad touch; a wrong *length* is
+        // a black screen.
+        let down = inject_touch(TouchAction::Down, 0x0011_2233, -2, 832, 1560);
+        assert_eq!(down.len(), 32);
+        assert_eq!(down[0], CONTROL_MESSAGE_INJECT_TOUCH);
+        assert_eq!(down[1], 0);
+        assert_eq!(&down[2..10], &0u64.to_be_bytes(), "a finger, not the mouse");
+        assert_eq!(&down[10..14], &0x0011_2233i32.to_be_bytes());
+        assert_eq!(&down[14..18], &(-2i32).to_be_bytes(), "y is signed");
+        assert_eq!(&down[18..20], &832u16.to_be_bytes());
+        assert_eq!(&down[20..22], &1560u16.to_be_bytes());
+        assert_eq!(&down[22..24], &[0xff, 0xff], "Q0.16: 0xFFFF is exactly 1.0");
+        assert_eq!(
+            &down[24..28],
+            &0u32.to_be_bytes(),
+            "a finger presses no button"
+        );
+        assert_eq!(
+            &down[28..32],
+            &1u32.to_be_bytes(),
+            "BUTTON_PRIMARY while held"
+        );
+    }
+
+    #[test]
+    fn only_the_release_reports_no_pressure_and_no_button() {
+        // A finger that lifts while still reporting pressure is a finger the framework
+        // thinks is stuck: the next DOWN then arrives as part of the same gesture and the
+        // phone behaves as if the operator never let go.
+        let held = [TouchAction::Down, TouchAction::Move];
+        for action in held {
+            let bytes = inject_touch(action, 10, 10, 480, 1000);
+            assert_eq!(&bytes[22..24], &u16::MAX.to_be_bytes(), "{action:?}");
+            assert_eq!(&bytes[28..32], &1u32.to_be_bytes(), "{action:?}");
+        }
+        let up = inject_touch(TouchAction::Up, 10, 10, 480, 1000);
+        assert_eq!(&up[22..24], &0u16.to_be_bytes());
+        assert_eq!(&up[28..32], &0u32.to_be_bytes());
+
+        // The action codes are AMOTION_EVENT_ACTION_*, passed to MotionEvent.obtain
+        // unmapped, so they are not ours to renumber.
+        assert_eq!(TouchAction::Down.code(), 0);
+        assert_eq!(TouchAction::Up.code(), 1);
+        assert_eq!(TouchAction::Move.code(), 2);
+        assert_eq!(TouchAction::parse("move").unwrap(), TouchAction::Move);
+        assert!(TouchAction::parse("hover").is_err());
+    }
+
+    #[test]
+    fn a_touch_can_never_be_confused_with_the_keyframe_request() {
+        // The two messages share one socket and one lock. They are different lengths, so the
+        // only thing keeping them apart is the type byte -- if these ever collide, every
+        // touch becomes a video reset and the stream stutters on every drag.
+        assert_ne!(CONTROL_MESSAGE_INJECT_TOUCH, reset_video()[0]);
     }
 
     #[test]
