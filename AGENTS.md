@@ -5170,6 +5170,48 @@ moi lan doi preset va moi lan xoay may la mot cua so cham bien mat — upstream 
 agent **von khong cham** — 130–280 ms mot click do tren chinh Galaxy S8+. Con so 1502 ms la
 `adb shell input`, **khong phai** agent, dung nham hai cai.
 
+### 9.82 Thay nong producer: giu hinh cu toi khi hinh moi co keyframe (17/08/2026)
+
+§9.81 cắt độ hở khi mở overlay từ 17,8 s xuống 1,65 s. Người vận hành vẫn báo "vẫn có delay",
+và đo lại thì đúng: **1.742 ms không có khung hình nào**. Ảnh không đen — canvas giữ khung
+cuối — nên nó *đóng băng* gần hai giây mỗi lần mở một máy.
+
+Chia nhỏ 1.683 ms của lần spawn đó: quét tiến trình thừa **691 ms**, khởi động server trên máy
++ keyframe đầu **687 ms**, còn lại ~305 ms. Cắt sạch bước quét cũng vẫn còn ~1 giây. **Nên
+hướng đi không phải làm spawn nhanh hơn mà là đừng mất hình.**
+
+**Giả định phải đo trước, vì §9.50 cảnh báo đúng chỗ này.** §9.50 ghi hai encoder trên một máy
+gây hại (tile Riviu hello mà không IDR khi GenFarmer 2.4 còn sống). Nhưng đó là server **2.4
+của app khác**. Đo hai server **3.3.4 của chính mình** trên Galaxy S8+ (Exynos, encoder khó
+tính nhất dàn): server thứ hai nối vào lúc server thứ nhất vẫn đang stream, trả config packet
+rồi **IDR thật sau 284 ms**. Cảnh báo cũ không áp cho trường hợp này.
+
+Một cái bẫy khi tự đo, đáng ghi vì tôi sập vào chính ghi chú của mình: probe đầu nhận được
+dummy rồi **treo** ở tên thiết bị. Không phải máy hỏng — với `control=true`, server chờ socket
+điều khiển được mở **giữa** dummy và tên thiết bị (§9.76). Probe thiếu socket thứ hai.
+
+**Thay đổi.** `spawn_view` nhận `ViewStart`: `Fresh` (chưa có gì chạy, thế hệ đã tăng) hoặc
+`Replace` (đang có producer sống). Trên `Replace`:
+
+* **bỏ `stop_our_scrcpy_leftovers`** — nó khớp mọi server 3.3.4 của ta trên máy đó, mà một
+  trong số đó chính là producer đang vẽ màn hình người dùng;
+* điểm đổi thế hệ dời xuống **sau** khi đã cầm chắc keyframe: `take_and_stop_view` rồi
+  `sink.advance` chỉ chạy khi stream mới đã chứng minh được mình.
+
+Hệ quả phụ đáng giá: **thất bại giờ rẻ hơn hẳn**. Thứ tự cũ đã phá producer cũ *trước*, nên
+spawn hỏng là máy tối thui; nay hỏng thì người dùng giữ nguyên stream đang có.
+
+Đo lại, cùng phép đo:
+
+| | trước | sau |
+|---|---|---|
+| mở overlay (tile→overlay) | 1.742 ms | **182 ms** |
+| đóng overlay (overlay→tile) | 17.792 ms | **112 ms** |
+
+Soak 4 vòng mở/đóng: số tiến trình server trên máy đứng yên ở 2 (không rò), 0 máy rớt, 0
+producer hỏng, 20/20 vẫn vẽ. `swap_ms` 940–1193 ms — đó là toàn bộ thời gian dựng stream mới,
+và giờ nó là thời gian người dùng đang nhìn **ảnh sống** chứ không phải ảnh đứng.
+
 ### 9.81 95% thoi gian mo mot view nam trong MOT dong shell (17/08/2026)
 
 Người vận hành báo: chọn một máy để điều khiển thì phải chờ. Đo bằng cách nối thêm một client

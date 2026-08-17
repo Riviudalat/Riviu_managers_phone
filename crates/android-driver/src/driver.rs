@@ -236,6 +236,30 @@ fn unpack_frame_size(packed: u32) -> (u16, u16) {
     ((packed >> 16) as u16, (packed & 0xffff) as u16)
 }
 
+/// Whether this spawn is taking over from a producer that is still painting.
+///
+/// **The picture must not go away while the operator is looking at it.** Opening the overlay
+/// switches preset, which means a new encode, and the old shape of this — stop, advance the
+/// generation, then spawn — left the canvas frozen on its last tile frame for the whole
+/// spawn. Measured on this fleet: **1.7 s** of a stuck picture every time a phone is opened,
+/// which is what "vẫn có delay" was.
+///
+/// `Replace` keeps the live producer running through the spawn and only swaps once the new
+/// stream has a keyframe in hand, so nothing on screen ever stops moving. Two scrcpy servers
+/// briefly share the device, which AGENTS.md 9.50 warned about — but that warning was about
+/// GenFarmer's 2.4 server, and this was measured rather than assumed: on a Galaxy S8+
+/// (Exynos, the fleet's fussiest encoder) a second 3.3.4 server connected alongside a live
+/// one returned its config packet and a real IDR **284 ms** after connect.
+///
+/// A failed `Replace` is also strictly safer than the old order: the operator keeps the
+/// stream they had instead of being left with a dead device.
+enum ViewStart {
+    /// Nothing is streaming this serial. The generation has already been advanced.
+    Fresh { generation: u64 },
+    /// A producer is live. Hold it until the replacement is proven, then stop it.
+    Replace,
+}
+
 struct ViewProducer {
     generation: u64,
     preset: crate::scrcpy::ViewPreset,
@@ -994,9 +1018,12 @@ impl AndroidDriver {
         }
     }
 
-    /// Start or retune the scrcpy view. Same process, new options: a live
-    /// producer at a different preset is stopped first. Does not touch minicap
-    /// or `StreamBudgetManager`.
+    /// Start or retune the scrcpy view. Same process, new options.
+    ///
+    /// A producer that is already painting is **kept until the replacement has a keyframe**
+    /// (see [`ViewStart`]) rather than stopped up front. That is what the operator feels when
+    /// they open a phone: the picture keeps moving through the switch instead of freezing for
+    /// the length of a spawn. Does not touch minicap or `StreamBudgetManager`.
     pub async fn start_view_stream(
         &self,
         serial: &str,
@@ -1010,11 +1037,19 @@ impl AndroidDriver {
         if self.view_is_running(serial, preset).await {
             return Ok(sink.generation(serial));
         }
-        self.take_and_stop_view(serial).await;
-        let generation = sink.advance(serial);
-        self.spawn_view(serial, generation, preset).await?;
+        // "Is something alive on this serial" rather than "is it at the preset we want":
+        // anything still running is a picture worth keeping until the new one is proven.
+        let replacing = self.views.lock().await.contains_key(serial);
+        let start = if replacing {
+            ViewStart::Replace
+        } else {
+            ViewStart::Fresh {
+                generation: sink.advance(serial),
+            }
+        };
+        self.spawn_view(serial, start, preset).await?;
         drop(claim);
-        Ok(generation)
+        Ok(sink.generation(serial))
     }
 
     /// Stop the view for one serial. `true` when nothing is left running,
@@ -1177,7 +1212,7 @@ impl AndroidDriver {
     async fn spawn_view(
         &self,
         serial: &str,
-        generation: u64,
+        start: ViewStart,
         preset: crate::scrcpy::ViewPreset,
     ) -> anyhow::Result<()> {
         let sink = self.view_sink()?;
@@ -1213,7 +1248,13 @@ impl AndroidDriver {
 
         crate::scrcpy::ensure_server(&self.adb, serial, &server).await?;
         let served = spawn_started.elapsed();
-        self.stop_our_scrcpy_leftovers(serial).await;
+        // NOT on the replace path, and this is load-bearing rather than an optimisation: the
+        // sweep matches every 3.3.4 server of ours on the device, and on that path one of
+        // them is the producer still painting the operator's screen. Sweeping here would kill
+        // the picture we are going through all this to preserve.
+        if matches!(start, ViewStart::Fresh { .. }) {
+            self.stop_our_scrcpy_leftovers(serial).await;
+        }
         let swept = spawn_started.elapsed();
 
         // Drop forwards left over from a run that never cleaned up. Every failure path
@@ -1355,6 +1396,22 @@ impl AndroidDriver {
                     anyhow::bail!("scrcpy produced no keyframe after the hello{said}");
                 }
             };
+
+        // The swap point, and it is deliberately *here* rather than before the spawn.
+        //
+        // Everything above can fail, and until this line the producer the operator is
+        // watching is untouched: a failed replacement costs them nothing, where the old
+        // order left the device dark. From here on the new stream is proven -- it has a
+        // keyframe in hand -- so the handover is a hand-off rather than a gamble.
+        let generation = match start {
+            ViewStart::Fresh { generation } => generation,
+            ViewStart::Replace => {
+                self.take_and_stop_view(serial).await;
+                sink.advance(serial)
+            }
+        };
+        let swapped = spawn_started.elapsed();
+
         tracing::info!(
             serial,
             host_port,
@@ -1377,6 +1434,11 @@ impl AndroidDriver {
             prune_ms = pruned.as_millis() as u64,
             spawn_ms = spawned.as_millis() as u64,
             forward_ms = forwarded.as_millis() as u64,
+            // How long the old producer kept painting before it was handed over. On a
+            // replace this is the whole spawn, and it is time the operator spent looking at
+            // a *live* picture rather than a frozen one.
+            swap_ms = swapped.as_millis() as u64,
+            replaced = matches!(start, ViewStart::Replace),
             total_ms = spawn_started.elapsed().as_millis() as u64,
             "scrcpy view started"
         );
