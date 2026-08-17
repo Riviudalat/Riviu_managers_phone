@@ -735,10 +735,31 @@ pub async fn read_name_and_video_header<R: AsyncRead + Unpin>(
 /// `CLASSPATH` is environ, so a cmdline grep for the JAR path only hits the
 /// `sh -c` wrapper and leaves the OMX holder alive. GenFarmer is
 /// `Server 2.4` + `genscrcpy.jar` — this script must not match it.
+/// PIDs of our leftover servers, in one pass instead of one process per PID.
+///
+/// **This was 95 % of the cost of starting a view.** The previous form looped over
+/// `/proc/[0-9]*/cmdline` and forked *two* `grep`s inside the loop — on a Galaxy S8 with 648
+/// processes that is ~1300 process spawns through one `sh`, and it measured **5.5 s idle and
+/// 21 s** with twenty phones starting at once. Since every preset switch stops the old
+/// producer and starts a new one, that is what the operator waited, staring at a frozen
+/// picture, after double-clicking a phone: **17.8 s of no frames at all**, of which this was
+/// nearly all. One sweeping `grep -al` over the same files costs **230 ms**.
+///
+/// The second `grep` stays, but now runs only for the handful of files the first one
+/// matched rather than for all 648.
+///
+/// **The `/proc/` exclusion is not cosmetic.** This script's own text contains the pattern it
+/// searches for, so the transient shell running it matches itself — the old form did too, and
+/// that self-match is why `stop_our_scrcpy_leftovers` never took its "nothing to do" early
+/// return: it always found at least one PID, always slept, and always listed a second time.
+/// A real server's command line never contains `/proc/`; this script's always does. Anything
+/// mentioning it is the sweep looking at its own reflection.
+///
+/// Still version-pinned to 3.3.4, which is what keeps GenFarmer's 2.4 servers out of it.
 pub const LEFTOVER_LIST_SCRIPT: &str = "\
-for f in /proc/[0-9]*/cmdline; do \
-grep -aq com.genymobile.scrcpy.Server \"$f\" || continue; \
-grep -aq 3.3.4 \"$f\" || continue; \
+for f in $(grep -al com.genymobile.scrcpy.Server /proc/[0-9]*/cmdline 2>/dev/null); do \
+grep -aq 3.3.4 \"$f\" 2>/dev/null || continue; \
+grep -aq /proc/ \"$f\" 2>/dev/null && continue; \
 pid=${f#/proc/}; echo ${pid%/cmdline}; \
 done";
 
@@ -1380,6 +1401,26 @@ shell  91    1 grep riviu-scrcpy-server /proc/1/cmdline\n";
         assert!(LEFTOVER_LIST_SCRIPT.contains("scrcpy.Server"));
         assert!(!LEFTOVER_LIST_SCRIPT.contains("genscrcpy"));
         assert!(!LEFTOVER_LIST_SCRIPT.contains("riviu-scrcpy-server"));
+
+        // One sweeping grep over every cmdline, not one grep per cmdline. Measured on a
+        // 648-process Galaxy S8: 230 ms against 5.5 s idle, and 21 s with the fleet starting
+        // at once -- which was 95 % of what the operator waited when they opened an overlay.
+        // Losing this is not a small regression, so it is pinned by shape.
+        assert!(
+            LEFTOVER_LIST_SCRIPT.contains("grep -al"),
+            "the sweep must match every cmdline in one pass"
+        );
+        assert!(
+            !LEFTOVER_LIST_SCRIPT.contains("for f in /proc/"),
+            "iterating /proc and grepping per file is the slow form that was removed"
+        );
+        // The script's own text contains the pattern it hunts, so without this the transient
+        // shell matches itself, `stop_our_scrcpy_leftovers` never takes its early return, and
+        // every spawn pays a sleep and a second listing for a process that is already gone.
+        assert!(
+            LEFTOVER_LIST_SCRIPT.contains("grep -aq /proc/"),
+            "the sweep must exclude its own reflection"
+        );
     }
 
     #[test]

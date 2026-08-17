@@ -5170,6 +5170,36 @@ moi lan doi preset va moi lan xoay may la mot cua so cham bien mat — upstream 
 agent **von khong cham** — 130–280 ms mot click do tren chinh Galaxy S8+. Con so 1502 ms la
 `adb shell input`, **khong phai** agent, dung nham hai cai.
 
+### 9.81 95% thoi gian mo mot view nam trong MOT dong shell (17/08/2026)
+
+Người vận hành báo: chọn một máy để điều khiển thì phải chờ. Đo bằng cách nối thêm một client
+vào view hub và bấm mở overlay: **17.8 giây không có khung hình nào**. Ảnh không đen — canvas
+giữ khung cuối — nên nó *đóng băng* 18 giây, thứ mà log không thể phân biệt với "đang chạy".
+
+Không đoán chỗ chậm. Đã tính giờ từng bước của `spawn_view` và in vào chính dòng
+`scrcpy view started`:
+
+| bước | trước | sau |
+|---|---|---|
+| wake display | 216 ms | 290 ms |
+| kiểm JAR | 139 ms | 260 ms |
+| **quét tiến trình thừa** | **21.082 ms** | **367 ms** |
+| prune forward | 73 ms | 207 ms |
+| spawn + forward | 382 ms | 487 ms |
+| bắt tay + keyframe đầu | 361 ms | 584 ms |
+| **tổng** | **22.253 ms** | **2.195 ms** |
+
+`LEFTOVER_LIST_SCRIPT` lặp `/proc/[0-9]*/cmdline` và fork **hai `grep` mỗi PID**. Galaxy S8
+có 648 tiến trình → ~1300 lần spawn qua một `sh`. Một `grep -al` quét hết trong một lượt rồi
+chỉ grep lại vài file khớp: **5,5 s → 230 ms** lúc rảnh, 21 s → 0,37 s khi cả fleet cùng khởi
+động. Khoảng trống mở overlay: **17.792 ms → 1.652 ms**.
+
+Kèm theo, một lỗi tiềm ẩn lộ ra khi đo: **script tự khớp với chính nó** — dòng lệnh của shell
+tạm chứa đúng chuỗi nó đang tìm, cả `scrcpy.Server` lẫn `3.3.4`. Bản cũ cũng thế, và hậu quả
+là `stop_our_scrcpy_leftovers` **không bao giờ** đi vào nhánh "không có gì để dọn": luôn tìm
+thấy ít nhất một PID, luôn ngủ 300 ms, luôn liệt kê lần hai. Nay loại bằng `/proc/` — dòng
+lệnh scrcpy thật không bao giờ chứa nó, dòng lệnh của script thì luôn.
+
 ### 9.80 Cham cung di socket control — de agent thoi la diem chet duy nhat (17/08/2026)
 
 Nối tiếp §9.79. Sau khi làm cho lỗi agent **hỏng nhanh và tự chữa được**, việc còn lại là để

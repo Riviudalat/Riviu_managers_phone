@@ -1203,10 +1203,18 @@ impl AndroidDriver {
             preset.tuned(quality, guard.fps)
         };
 
+        // Timed step by step, because "a start takes about eleven seconds" is not something
+        // anyone can act on. Measured on this fleet a preset switch left the operator with
+        // **17.8 s of no frames at all** after double-clicking a phone, and the only way to
+        // know which of these five adb round trips to attack is to charge each of them.
+        let spawn_started = std::time::Instant::now();
         self.wake_display_for_capture(serial).await;
+        let woke = spawn_started.elapsed();
 
         crate::scrcpy::ensure_server(&self.adb, serial, &server).await?;
+        let served = spawn_started.elapsed();
         self.stop_our_scrcpy_leftovers(serial).await;
+        let swept = spawn_started.elapsed();
 
         // Drop forwards left over from a run that never cleaned up. Every failure path
         // below removes its own forward, so this is not for the current process -- it is
@@ -1233,6 +1241,7 @@ impl AndroidDriver {
             &live_ports,
         )
         .await;
+        let pruned = spawn_started.elapsed();
 
         let scid = (rand::random::<u32>() & 0x7fff_ffff).max(1);
         // Device listens (`tunnel_forward`). Spawn first. This Windows adb
@@ -1266,6 +1275,7 @@ impl AndroidDriver {
         child.creation_flags(0x0800_0000);
         let mut child = child.spawn().context("spawn scrcpy-server")?;
 
+        let spawned = spawn_started.elapsed();
         let host_port = match crate::scrcpy::forward(&self.adb, serial, scid).await {
             Ok(port) => port,
             Err(error) => {
@@ -1273,6 +1283,7 @@ impl AndroidDriver {
                 return Err(error);
             }
         };
+        let forwarded = spawn_started.elapsed();
         let mut stream = None;
         let mut control = None;
         let mut last_error = None;
@@ -1357,6 +1368,16 @@ impl AndroidDriver {
             bytes = first.bytes.len(),
             idr = crate::scrcpy::annexb_has_idr(&first.bytes),
             sps = crate::scrcpy::annexb_has_sps(&first.bytes),
+            // Cumulative, so each is "by the time this step finished". Differences are the
+            // per-step cost; the total is what the operator waits when a preset switch takes
+            // their picture away.
+            wake_ms = woke.as_millis() as u64,
+            jar_ms = served.as_millis() as u64,
+            sweep_ms = swept.as_millis() as u64,
+            prune_ms = pruned.as_millis() as u64,
+            spawn_ms = spawned.as_millis() as u64,
+            forward_ms = forwarded.as_millis() as u64,
+            total_ms = spawn_started.elapsed().as_millis() as u64,
             "scrcpy view started"
         );
 

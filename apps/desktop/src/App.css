@@ -1335,6 +1335,57 @@ button:disabled {
   padding: 0.5rem;
 }
 
+/* What a tile shows while its stream is still coming up.
+   Deliberately wordless. "No stream" next to a "Start" button reads as a broken phone
+   waiting to be told what to do, when in fact the app is already starting it -- and until
+   the sweep was fixed that lie was on screen for the better part of twenty seconds. */
+.dev-phone-loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+}
+.dev-phone-loading img {
+  width: 34%;
+  max-width: 54px;
+  border-radius: 24%;
+  opacity: 0.85;
+  animation: tile-logo-breathe 1.8s ease-in-out infinite;
+}
+/* The ring is sized from the tile rather than in px: tiles are zoomable and a fixed ring
+   would swallow the logo at the small end and float away from it at the large one. */
+.dev-phone-loading::before {
+  content: "";
+  position: absolute;
+  width: 48%;
+  max-width: 76px;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  border: 2px solid var(--line-strong);
+  border-top-color: var(--primary);
+  animation: spin 0.9s linear infinite;
+}
+@keyframes tile-logo-breathe {
+  0%,
+  100% {
+    opacity: 0.5;
+    transform: scale(0.94);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dev-phone-loading::before {
+    animation-duration: 2.4s;
+  }
+  .dev-phone-loading img {
+    animation: none;
+    opacity: 0.85;
+  }
+}
+
 .dev-phone-info {
   position: absolute;
   inset: 0 0 auto 0;
