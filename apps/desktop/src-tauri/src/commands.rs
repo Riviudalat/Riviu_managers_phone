@@ -13,7 +13,7 @@ use tauri::State;
 use crate::view_watchdog::PaintReport;
 
 use crate::command_error::CommandError;
-use crate::state::AppState;
+use crate::state::{AppState, LeaseStream};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -162,10 +162,8 @@ pub async fn install_ipa(
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let context = state
-        .control
-        .try_acquire_exclusive(&udid, DeviceWorkOwner::Repair)
-        .await
-        .map_err(CommandError::from)?;
+        .device_lease(&udid, DeviceWorkOwner::Repair, LeaseStream::Park)
+        .await?;
     state
         .control
         .install_app(&context, &PathBuf::from(path))
@@ -311,10 +309,8 @@ pub async fn uninstall_app(
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let context = state
-        .control
-        .try_acquire_exclusive(&udid, DeviceWorkOwner::Repair)
-        .await
-        .map_err(CommandError::from)?;
+        .device_lease(&udid, DeviceWorkOwner::Repair, LeaseStream::Park)
+        .await?;
     state
         .control
         .uninstall_app(&context, &bundle_id)
@@ -366,10 +362,8 @@ pub async fn screenshot(state: State<'_, AppState>, udid: String) -> Result<Stri
         return Ok(dest.display().to_string());
     }
     let context = state
-        .control
-        .try_acquire_exclusive_keeping_stream(&udid, DeviceWorkOwner::ManualControl)
-        .await
-        .map_err(CommandError::from)?;
+        .device_lease(&udid, DeviceWorkOwner::ManualControl, LeaseStream::Keep)
+        .await?;
     let path = state
         .control
         .screenshot(&context, &dest)
@@ -401,10 +395,8 @@ pub async fn device_shell(
     // acquire parks the live preview, so running a command would black the tile the
     // operator is watching for its effect.
     let context = state
-        .control
-        .try_acquire_exclusive_keeping_stream(&udid, DeviceWorkOwner::ManualControl)
-        .await
-        .map_err(CommandError::from)?;
+        .device_lease(&udid, DeviceWorkOwner::ManualControl, LeaseStream::Keep)
+        .await?;
     state
         .control
         .device_shell(&context, &script)
@@ -454,10 +446,8 @@ pub async fn import_media(
     std::fs::copy(&source, staged.join(&name)).map_err(CommandError::operation)?;
 
     let context = state
-        .control
-        .try_acquire_exclusive_keeping_stream(&udid, DeviceWorkOwner::ManualControl)
-        .await
-        .map_err(CommandError::from)?;
+        .device_lease(&udid, DeviceWorkOwner::ManualControl, LeaseStream::Keep)
+        .await?;
 
     let staged_evidence = state
         .control
@@ -518,10 +508,8 @@ pub async fn export_media(
     // rolls into an unsortable pile.
     let into = dest.join(format!("riviu-{udid}"));
     let context = state
-        .control
-        .try_acquire_exclusive_keeping_stream(&udid, DeviceWorkOwner::ManualControl)
-        .await
-        .map_err(CommandError::from)?;
+        .device_lease(&udid, DeviceWorkOwner::ManualControl, LeaseStream::Keep)
+        .await?;
     let pulled = state
         .control
         .pull_media(&context, &into)
@@ -545,10 +533,8 @@ pub async fn set_screen_rotation(
     let _admission = state.ensure_accepting_work()?;
     // Keeps the stream for the same reason: the whole point is to watch the tile turn.
     let context = state
-        .control
-        .try_acquire_exclusive_keeping_stream(&udid, DeviceWorkOwner::ManualControl)
-        .await
-        .map_err(CommandError::from)?;
+        .device_lease(&udid, DeviceWorkOwner::ManualControl, LeaseStream::Keep)
+        .await?;
     state
         .control
         .set_screen_rotation(&context, rotation)
@@ -564,10 +550,8 @@ pub async fn syslog(
 ) -> Result<String, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let context = state
-        .control
-        .try_acquire_exclusive(&udid, DeviceWorkOwner::ManualControl)
-        .await
-        .map_err(CommandError::from)?;
+        .device_lease(&udid, DeviceWorkOwner::ManualControl, LeaseStream::Park)
+        .await?;
     state
         .control
         .syslog_tail(&context, lines.unwrap_or(100))
@@ -579,10 +563,8 @@ pub async fn syslog(
 pub async fn reboot_device(state: State<'_, AppState>, udid: String) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let context = state
-        .control
-        .try_acquire_exclusive(&udid, DeviceWorkOwner::Repair)
-        .await
-        .map_err(CommandError::from)?;
+        .device_lease(&udid, DeviceWorkOwner::Repair, LeaseStream::Park)
+        .await?;
     state
         .control
         .reboot(&context)
@@ -598,10 +580,8 @@ pub async fn backup_device(
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let context = state
-        .control
-        .try_acquire_exclusive(&udid, DeviceWorkOwner::Repair)
-        .await
-        .map_err(CommandError::from)?;
+        .device_lease(&udid, DeviceWorkOwner::Repair, LeaseStream::Park)
+        .await?;
     state
         .control
         .backup_device(&context, std::path::Path::new(&dest))
@@ -617,10 +597,8 @@ pub async fn restore_device(
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let context = state
-        .control
-        .try_acquire_exclusive(&udid, DeviceWorkOwner::Repair)
-        .await
-        .map_err(CommandError::from)?;
+        .device_lease(&udid, DeviceWorkOwner::Repair, LeaseStream::Park)
+        .await?;
     state
         .control
         .restore_device(&context, std::path::Path::new(&src))

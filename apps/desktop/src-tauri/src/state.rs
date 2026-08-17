@@ -8,10 +8,10 @@ use anyhow::Context;
 use parking_lot::{Mutex, RwLock};
 use riviu_core::db::Database;
 use riviu_core::{
-    AppEvent, BackgroundStreamLease, DeviceControlPlane, DeviceRegistry, DeviceWorkCoordinator,
-    DeviceWorkOwner, EventBus, FlowArtifactStore, FlowId, FlowRuntime, FlowRuntimeDeps, Frame,
-    JobQueue, JobStatus, NurtureEngine, StreamBudgetManager, StreamSettings, UiSession,
-    UiSessionContext, STREAM_FPS,
+    AppEvent, BackgroundStreamLease, DeviceControlPlane, DeviceExclusiveContext, DeviceRegistry,
+    DeviceWorkCoordinator, DeviceWorkOwner, EventBus, FlowArtifactStore, FlowId, FlowRuntime,
+    FlowRuntimeDeps, Frame, JobQueue, JobStatus, NurtureEngine, StreamBudgetManager,
+    StreamSettings, UiSession, UiSessionContext, STREAM_FPS,
 };
 use riviu_ios_driver::{create_driver, DriverMode, DriverTarget, StreamHub};
 use riviu_signing::{CredentialStore, SigningService};
@@ -91,6 +91,40 @@ fn desktop_stream_budget() -> StreamBudgetManager {
     }
 }
 
+/// Which lease a device command is running under.
+///
+/// Both arms hand out the same thing to the control plane — a live lease it can validate —
+/// so the caller stops caring which one it got. The difference is only in the release:
+/// `Owned` drops with the command, `Overlay` outlives it.
+pub enum DeviceLease {
+    /// The overlay already holds this phone; the command rides that lease.
+    Overlay(Arc<UiSessionContext>),
+    /// Nothing held it, so this command took its own and gives it back on drop.
+    Owned(DeviceExclusiveContext),
+}
+
+/// So a command can keep writing `&context` and not care which arm it got.
+impl<'a> From<&'a DeviceLease> for riviu_core::DeviceLeaseRef<'a> {
+    fn from(lease: &'a DeviceLease) -> Self {
+        match lease {
+            DeviceLease::Overlay(context) => context.as_ref().into(),
+            DeviceLease::Owned(context) => context.into(),
+        }
+    }
+}
+
+/// Whether a command that has to take its own lease should park the live preview.
+///
+/// Only consulted on the `Owned` path: an overlay that is already open has a running stream
+/// by definition, and parking it underneath the operator would be absurd.
+#[derive(Clone, Copy)]
+pub enum LeaseStream {
+    /// Keep the preview running — the point of the action is to watch it happen.
+    Keep,
+    /// Park it; the action is long or disruptive enough that the stream is in the way.
+    Park,
+}
+
 pub struct AppState {
     pub registry: DeviceRegistry,
     pub events: EventBus,
@@ -149,7 +183,15 @@ pub struct AppState {
     pub(crate) flow_mutations: FlowMutationCoordinator,
     /// One ManualControl session per UDID while the overlay is open.
     /// Gestures reuse it; closing the overlay is the only release.
-    overlay_sessions: AsyncMutex<HashMap<String, UiSessionContext>>,
+    /// The lease the control overlay holds, per device, for as long as it is open.
+    ///
+    /// `Arc` rather than the bare context because the overlay's own actions now *borrow* this
+    /// lease instead of asking for a second one (see [`AppState::device_lease`]). A borrower
+    /// holds its clone for the whole run of a command — an export or a reboot is not
+    /// instant — and it has to outlive an overlay the operator closes half-way through.
+    /// Dropping a `UiSessionContext` releases the lease and the activity permit and nothing
+    /// else, so "the last holder releases it" is already the semantics rather than a new one.
+    overlay_sessions: AsyncMutex<HashMap<String, Arc<UiSessionContext>>>,
     command_admission: Arc<CommandAdmissionState>,
     background_stop: Arc<AtomicBool>,
     background_stopped: Arc<AtomicBool>,
@@ -712,7 +754,7 @@ impl AppState {
             .open_manual_session(udid, DeviceWorkOwner::ManualControl)
             .await
             .map_err(CommandError::from)?;
-        sessions.insert(udid.to_string(), context);
+        sessions.insert(udid.to_string(), Arc::new(context));
         Ok(())
     }
 
@@ -724,6 +766,12 @@ impl AppState {
         let Some(context) = context else {
             return Ok(());
         };
+        // A command may still be riding this lease — a reboot, an export, an APK install.
+        // Whoever is last to let go releases it; closing the overlay must not yank the phone
+        // out from under work the operator started from that very overlay.
+        let Some(context) = Arc::into_inner(context) else {
+            return Ok(());
+        };
         self.control
             .close_manual_session(context)
             .map_err(CommandError::from)?;
@@ -733,17 +781,57 @@ impl AppState {
     pub async fn overlay_ui_session(&self, udid: &str) -> Option<Arc<dyn UiSession>> {
         let sessions = self.overlay_sessions.lock().await;
         let context = sessions.get(udid)?;
-        self.control.session(context).ok()
+        self.control.session(context.as_ref()).ok()
+    }
+
+    /// The lease a command should run under: the overlay's if it has one, otherwise its own.
+    ///
+    /// **This is what makes ten rows of the control overlay work at all.** Rotate, install
+    /// APK, import, export, adb, change keyboard, reboot, backup, restore and screenshot each
+    /// used to take their own exclusive lease — on a phone this process was already holding
+    /// open, because the overlay is the only place those rows exist. Every one of them was
+    /// refused `DeviceBusy`. See AGENTS.md 9.83.
+    ///
+    /// The map is the *only* thing consulted. A phone held by nurture, a flow, a script or a
+    /// repair is still refused, with the real owner named — a lease is only ever lent by the
+    /// UI that opened it, never taken from someone else.
+    pub async fn device_lease(
+        &self,
+        udid: &str,
+        owner: DeviceWorkOwner,
+        stream: LeaseStream,
+    ) -> Result<DeviceLease, CommandError> {
+        if let Some(context) = self.overlay_sessions.lock().await.get(udid).cloned() {
+            return Ok(DeviceLease::Overlay(context));
+        }
+        let context = match stream {
+            LeaseStream::Keep => {
+                self.control
+                    .try_acquire_exclusive_keeping_stream(udid, owner)
+                    .await
+            }
+            LeaseStream::Park => self.control.try_acquire_exclusive(udid, owner).await,
+        }
+        .map_err(CommandError::from)?;
+        Ok(DeviceLease::Owned(context))
     }
 
     /// Release every overlay lease before `shutdown_cleanup` waits for
     /// `lifecycle.outstanding() == 0`. A held ManualControl deadlocks that wait.
     pub async fn close_all_overlay_sessions(&self) {
-        let contexts: Vec<UiSessionContext> = {
+        let contexts: Vec<Arc<UiSessionContext>> = {
             let mut sessions = self.overlay_sessions.lock().await;
             sessions.drain().map(|(_, context)| context).collect()
         };
         for context in contexts {
+            // Every borrower holds a `CommandAdmission`, and shutdown drains those before
+            // reaching here, so nothing should still be riding a lease at this point. If one
+            // is, dropping our `Arc` is still correct — the borrower releases it — and the
+            // wait below would be the thing to notice, not this.
+            let Some(context) = Arc::into_inner(context) else {
+                log::warn!("an overlay lease was still borrowed at shutdown");
+                continue;
+            };
             if let Err(error) = self.control.close_manual_session(context) {
                 log::error!("overlay session close failed during shutdown: {error}");
             }
