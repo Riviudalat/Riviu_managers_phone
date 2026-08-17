@@ -5170,6 +5170,32 @@ moi lan doi preset va moi lan xoay may la mot cua so cham bien mat — upstream 
 agent **von khong cham** — 130–280 ms mot click do tren chinh Galaxy S8+. Con so 1502 ms la
 `adb shell input`, **khong phai** agent, dung nham hai cai.
 
+### 9.80 Cham cung di socket control — de agent thoi la diem chet duy nhat (17/08/2026)
+
+Nối tiếp §9.79. Sau khi làm cho lỗi agent **hỏng nhanh và tự chữa được**, việc còn lại là để
+thao tác thường dùng nhất **không phụ thuộc vào nó nữa**. Chạm nay đi socket control trước,
+rơi về agent khi máy chưa có producer.
+
+**Đây là chịu lỗi, không phải tốc độ.** 55 ms của agent chưa bao giờ là vấn đề. Vấn đề là
+agent là điểm chết duy nhất cho mọi thao tác, với chế độ hỏng tính bằng chục giây (§9.79).
+Socket control không biết `UiAutomation` là gì nên không dính. Chữ và phím vẫn ở agent —
+`INJECT_TEXT` không gõ được dấu tiếng Việt, không socket nào đổi được điều đó.
+
+`TAP_HOLD_MS = 60`: DOWN và UP trong cùng một mili-giây không phải thứ ngón tay làm được, và
+một số view bỏ qua nó. 60 ms là một cú click người thật, xa ngưỡng long-press 500 ms.
+
+Kiểm chứng trên máy thật: hai cú chạm trong overlay đi sâu hai cấp trong Cài đặt và **bật
+được một toggle** — toggle chỉ phản ứng với cặp DOWN/UP thật, nên nó là bằng chứng mạnh hơn
+một cú điều hướng. (Đã trả lại trạng thái toggle sau khi thử.)
+
+**Một khoảng hở đã biết, không sửa:** mở overlay làm đổi preset, tức dựng lại producer, nên
+trong ~1–3 s đầu **không có producer** và cú chạm đầu tiên luôn rơi về agent. Quan sát đúng
+như vậy trong lượt kiểm chứng: cú 1 lúc 11:01:15 rơi về agent (vẫn tới máy), producer overlay
+lên lúc 11:01:16, cú 2 đi live. Dự phòng làm đúng việc nên đây không phải lỗi — nhưng nó có
+nghĩa là **tương tác đầu tiên sau khi mở overlay vẫn đi đường mong manh**. Sửa được bằng cách
+giữ producer tile sống tới khi producer overlay sẵn sàng; chưa làm vì đó là thay đổi lớn hơn
+nhiều so với thứ nó mua.
+
 ### 9.79 Duong phuc hoi agent KHONG VOI TOI DUOC, va cooldown cho no (17/08/2026)
 
 Đọc `GENFARMER-SOURCE-PATHS.md` → `docs/re/genfarmer` §12.6 chỉ đúng hai bài học: **cooldown

@@ -22,7 +22,7 @@ import {
   viewInjectTouch,
   viewRequestKeyframe,
 } from "../api";
-import { createLiveDrag, type LiveDrag } from "../liveDrag";
+import { createLiveDrag, liveTap, type LiveDrag } from "../liveDrag";
 import {
   parseCurrentInputMethod,
   parseInputMethods,
@@ -251,6 +251,19 @@ export function FocusStream({
     const dist = Math.hypot(end.x - start.x, end.y - start.y);
     await runExclusive(async () => {
       if (dist < TAP_SLOP) {
+        // Down the control socket first, and not for the milliseconds: it is the one input
+        // path that does not depend on uiautomator2, so it still works on a phone whose
+        // agent has lost UiAutomation -- the state that otherwise costs tens of seconds per
+        // tap, or refuses every one of them (AGENTS.md 9.79).
+        if (canDragLive) {
+          const outcome = await liveTap(
+            (action, x, y) => viewInjectTouch(device.udid, action, x, y, iw, ih),
+            end.x,
+            end.y,
+            (reason) => console.warn(`live tap fell back on ${device.udid}: ${reason}`),
+          );
+          if (outcome === "live") return;
+        }
         if (targets.length > 1) {
           await groupInput({
             udids: targets,

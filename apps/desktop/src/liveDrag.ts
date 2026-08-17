@@ -44,6 +44,56 @@ export interface LiveDrag {
 /// find that out the first time.
 export type OnFallback = (reason: string) => void;
 
+/// How long a live tap keeps the finger down.
+///
+/// Android calls a press a tap below `ViewConfiguration`'s 500 ms long-press threshold, and
+/// views that measure a press at all want more than zero — a DOWN and UP in the same
+/// millisecond is not something a finger can do, and some views ignore it. 60 ms is what a
+/// quick human click measures, comfortably short of long-press and comfortably above nothing.
+const TAP_HOLD_MS = 60;
+
+/// One tap, down the control socket, without asking uiautomator2 for anything.
+///
+/// **This is fault tolerance, not speed.** The 55 ms the agent costs was never the problem.
+/// The problem is that the agent is a single point of failure for every operator action and
+/// it has a failure mode measured in tens of seconds: when something takes `UiAutomation`
+/// away, a tap costs two 10 s queries and an instrumentation restart, and if the server
+/// wedges into the state where it will not open a session at all it costs an error and
+/// nothing else, forever (AGENTS.md §9.79). The control socket does not know what
+/// `UiAutomation` is, so none of that can reach it.
+///
+/// Text and keys stay on the agent regardless — `INJECT_TEXT` cannot type Vietnamese
+/// diacritics, and no socket makes that untrue.
+///
+/// Resolves `"fallback"` when the phone has no producer to touch, which is the caller's cue
+/// to use the agent exactly as it always did.
+export async function liveTap(
+  send: SendTouch,
+  x: number,
+  y: number,
+  onFallback?: OnFallback,
+): Promise<DragOutcome> {
+  try {
+    if (!(await send("down", x, y))) {
+      onFallback?.("tap down refused: no producer");
+      return "fallback";
+    }
+  } catch (error) {
+    onFallback?.(`tap down threw: ${String(error)}`);
+    return "fallback";
+  }
+  await new Promise((resolve) => setTimeout(resolve, TAP_HOLD_MS));
+  try {
+    await send("up", x, y);
+  } catch (error) {
+    // The finger is down and this is the only thing that lifts it. Nothing left to try, and
+    // reporting a fallback would be worse than useless: the caller would tap again on top of
+    // a pointer that never came up.
+    onFallback?.(`tap up threw, the pointer may be stuck: ${String(error)}`);
+  }
+  return "live";
+}
+
 export function createLiveDrag(send: SendTouch, onFallback?: OnFallback): LiveDrag {
   let chain: Promise<void> = Promise.resolve();
   let pending: { x: number; y: number } | null = null;

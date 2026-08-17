@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createLiveDrag, type SendTouch } from "./liveDrag";
+import { createLiveDrag, liveTap, type SendTouch } from "./liveDrag";
 
 /// A sink that records what it was asked to send and lets the test decide when each call
 /// finishes, so the ordering guarantees can be tested against a slow phone rather than an
@@ -117,6 +117,42 @@ describe("live drag", () => {
 
     expect(await done).toBe("fallback");
     expect(calls.filter((c) => c.startsWith("up"))).toHaveLength(1);
+  });
+
+  it("taps by pressing and releasing the same point, in that order", async () => {
+    const calls: string[] = [];
+    const send: SendTouch = async (action, x, y) => {
+      calls.push(`${action} ${x},${y}`);
+      return true;
+    };
+    expect(await liveTap(send, 30, 40)).toBe("live");
+    expect(calls).toEqual(["down 30,40", "up 30,40"]);
+  });
+
+  it("leaves the tap to the agent when the phone has no producer", async () => {
+    // And sends nothing else: an UP with no DOWN behind it is a release of a touch that
+    // never happened, and the caller is about to tap properly through uiautomator2 anyway.
+    const calls: string[] = [];
+    const reasons: string[] = [];
+    const send: SendTouch = async (action) => {
+      calls.push(action);
+      return false;
+    };
+    expect(await liveTap(send, 1, 1, (reason) => reasons.push(reason))).toBe("fallback");
+    expect(calls).toEqual(["down"]);
+    expect(reasons).toHaveLength(1);
+  });
+
+  it("reports a stuck pointer rather than asking for a second tap on top of it", async () => {
+    // The DOWN landed and the UP did not. Falling back here would tap again over a pointer
+    // that never came up, so this stays "live" and says what happened instead.
+    const reasons: string[] = [];
+    const send: SendTouch = async (action) => {
+      if (action === "up") throw new Error("socket closed");
+      return true;
+    };
+    expect(await liveTap(send, 1, 1, (reason) => reasons.push(reason))).toBe("live");
+    expect(reasons[0]).toContain("stuck");
   });
 
   it("does nothing at all when the caller never began", async () => {
