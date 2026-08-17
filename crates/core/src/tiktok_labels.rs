@@ -50,6 +50,13 @@
 pub enum TikTokControl {
     /// The "For You" / `Đề xuất` feed tab.
     FeedTab,
+    /// The bottom bar's Home tab — the way *back* to the feed from anywhere else.
+    ///
+    /// Distinct from [`Self::FeedTab`], which is a tab *inside* the feed and is therefore
+    /// only visible once you are already there. A phone parked on Profile, Shop or Inbox
+    /// shows this one and not that one, and telling them apart is the difference between
+    /// a session that recovers and one that waits thirty seconds and gives up.
+    HomeTab,
     /// The badge that marks a card as a **photo post** rather than a video.
     ///
     /// The gate for paging sideways, and it has to be this rather than the page
@@ -244,6 +251,7 @@ impl TikTokControl {
             Self::PostDeleteMenu => 20,
             Self::PostDelete => 21,
             Self::PostDeleteConfirm => 22,
+            Self::HomeTab => 23,
         }
     }
 }
@@ -339,6 +347,9 @@ pub struct TikTokLabels {
     /// keyed by this value rather than merely recording it.
     pub measured_app_version: &'static str,
     feed_tab: Option<LabelMatch>,
+    /// The bottom bar's Home tab. `None` means a session that finds TikTok on another tab
+    /// cannot get back to the feed and will refuse rather than swipe somewhere unknown.
+    home_tab: Option<LabelMatch>,
     /// Matched on the node's rendered `text`, not its `content-desc`: measured as a
     /// plain `TextView` reading `Ảnh` beside the caption, with no description at all.
     photo_badge: Option<LabelMatch>,
@@ -410,6 +421,7 @@ impl TikTokLabels {
     fn translated(&self, control: TikTokControl) -> Option<LabelMatch> {
         match control {
             TikTokControl::FeedTab => self.feed_tab,
+            TikTokControl::HomeTab => self.home_tab,
             TikTokControl::PhotoBadge => self.photo_badge,
             TikTokControl::Like => self.like,
             TikTokControl::Liked => self.liked,
@@ -613,6 +625,9 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // Not recorded at the time; that is the gap `measured_app_version` closes.
         measured_app_version: "",
         feed_tab: Some(LabelMatch::Exact("For You")),
+        // Not read on the 09/08 sweep, which only ever saw the feed. `None` costs this
+        // build the recovery path and nothing else.
+        home_tab: None,
         // Never measured on this build; the S8+ fleet work never looked at a photo
         // post. Absent means no sideways swipe, which is the safe direction.
         photo_badge: None,
@@ -651,6 +666,10 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         measured_on: "Redmi Note 12, Android 15, 10/08/2026",
         measured_app_version: "46.3.3",
         feed_tab: Some(LabelMatch::Exact("Đề xuất")),
+        // Not a new measurement: the `composer_open` note below already records this
+        // build's five bottom tabs as read off a real dump on 11/08/2026 —
+        // `Trang chủ`, `Cửa hàng`, `Quay`, `Hộp thư`, `Hồ sơ`. This is the first of them.
+        home_tab: Some(LabelMatch::Exact("Trang chủ")),
         // Read off an SM-N950F on 12/08/2026, on photo cards in the For-You feed and
         // on a post page opened from a link — the same string on both.
         photo_badge: Some(LabelMatch::Text("Ảnh")),
@@ -698,6 +717,58 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // The rest of the publish tail and the whole delete path: declared, not measured.
         // `None` is the refusal — the composer stops before opening and the delete driver
         // is not offered at all, which is the only safe order for an action with no undo.
+        composer_next: None,
+        post_button: None,
+        post_delete_menu: None,
+        post_delete: None,
+        post_delete_confirm: None,
+    },
+    // SEA build, **English** UI. Sixteen of the eighteen phones on this fleet, and a pair
+    // that had never been read — so every one of them refused to nurture with
+    // "chưa đo nhãn TikTok cho com.ss.android.ugc.trill + ngôn ngữ en".
+    //
+    // Read off an SM-G955F (Android 9, app 38.3.2) on 18/08/2026 with
+    // `cargo run -p riviu-android-driver --example label_scout`: once on the Profile tab
+    // the phone happened to be parked on, and once on the For-You feed after tapping Home.
+    // Everything below appeared in one of those two dumps; everything that did not is
+    // `None`, which is this table's whole contract.
+    TikTokLabels {
+        package: "com.ss.android.ugc.trill",
+        language: "en",
+        measured_on: "SM-G955F, Android 9, 18/08/2026 (example label_scout)",
+        measured_app_version: "38.3.2",
+        feed_tab: Some(LabelMatch::Exact("For You")),
+        // The bottom bar, read on the Profile screen: `Home`, `Shop`, `Create`, `Inbox`,
+        // `Profile`. This is the one that gets a parked session back to the feed.
+        home_tab: Some(LabelMatch::Exact("Home")),
+        // `Photo` appears in `text` on this card, and the card is a photo post — but the
+        // vi build's badge was confirmed on *two* devices and on a post page before being
+        // written down, and one screen is not that. Left unmeasured: the cost is that a
+        // carousel is never paged sideways, and the cost of being wrong is a sideways
+        // swipe on a video, which opens the author's profile and walks the session off
+        // the feed.
+        photo_badge: None,
+        like: Some(LabelMatch::Exact("Like")),
+        // Not seen: reading it needs a post to be liked and then unliked
+        // (`probe --measure-liked`). The engine confirms a like without it — the
+        // not-liked label is an exact match, so its disappearance is the proof.
+        liked: None,
+        comments: Some(LabelMatch::Contains("comments")),
+        share: Some(LabelMatch::Contains("Share video")),
+        bookmark: Some(LabelMatch::Contains("Favorites")),
+        // Absent from the measured screen, whose author was already followed. The vi
+        // build keeps the English `Follow ` and this build very likely does too — which
+        // is exactly the kind of "very likely" this table exists to refuse.
+        follow: None,
+        live_room: None,
+        comment_reply: None,
+        composer_open: None,
+        picker_album_menu: None,
+        picker_tab_all: None,
+        picker_tab_photos: None,
+        picker_multi_select: None,
+        picker_next: None,
+        profile_tab: Some(LabelMatch::Exact("Profile")),
         composer_next: None,
         post_button: None,
         post_delete_menu: None,
@@ -1049,17 +1120,37 @@ mod tests {
                 "{} ProfileTab must be Exact; Contains would match the author's profile link",
                 set.package
             );
-            // The author link *starts with* the tab's text, which is exactly why a
-            // substring match cannot separate them.
-            assert!(
-                format!("{} Ánh đây", label.value()).starts_with(label.value()),
-                "{} the author link is a superstring of the tab label",
-                set.package
-            );
+            // The hazard has two measured shapes, and the tab text is a substring of both.
+            // vi (Redmi, 13/08/2026): `Hồ sơ` and the author link `Hồ sơ Ánh đây` — prefix.
+            // en (SM-G955F, 18/08/2026): `Profile` and the author link `Ngọc Lệ profile` —
+            // suffix, and lowercase, so it only collides once case is folded, which
+            // description matching does.
+            //
+            // This used to assert `format!("{X} …").starts_with(X)`, which is true of every
+            // string and therefore proved nothing. What matters is that `Exact` separates
+            // the two and `Contains` would not.
+            for author_link in [
+                format!("{} Ánh đây", label.value()),
+                format!("Ngọc Lệ {}", label.value().to_lowercase()),
+            ] {
+                assert!(
+                    author_link
+                        .to_lowercase()
+                        .contains(&label.value().to_lowercase()),
+                    "{}: the author link must be the collision this Exact label avoids",
+                    set.package
+                );
+                assert_ne!(
+                    author_link.as_str(),
+                    label.value(),
+                    "{}: Exact is what keeps the author link out",
+                    set.package
+                );
+            }
         }
         assert_eq!(
-            measured, 1,
-            "exactly one set has ProfileTab measured so far"
+            measured, 2,
+            "both measured sets carry ProfileTab; bump this when another is measured"
         );
     }
 

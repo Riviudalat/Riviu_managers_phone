@@ -849,6 +849,7 @@ async fn await_feed(
 ) -> bool {
     let deadline = Instant::now() + FEED_READY_WINDOW;
     let mut said = false;
+    let mut nudged = false;
     loop {
         if stop.load(Ordering::Relaxed) {
             return false;
@@ -858,6 +859,32 @@ async fn await_feed(
                 report(status, "feed đã lên".into());
             }
             return true;
+        }
+        // **Try to go there before giving up.** A phone is left wherever the last session
+        // or the last person left it, and Profile / Shop / Inbox are each one tap from the
+        // feed — but `FeedTab` is a tab *inside* the feed, so on any of them this loop saw
+        // nothing and waited out the whole window. Measured 18/08/2026: phones parked on
+        // Profile failed every session, with a message that guessed at a splash screen or a
+        // login page while the app was logged in and perfectly healthy.
+        //
+        // Once, not on every poll. The tap is cheap but not free, and a phone that does not
+        // reach the feed after being sent there has something wrong that tapping again will
+        // not fix.
+        if !nudged && present(run.session, run.labels, TikTokControl::HomeTab).await {
+            nudged = true;
+            report(
+                status,
+                "TikTok đang ở tab khác — bấm Home để về feed".into(),
+            );
+            if let Some(element) = locate(run.session, run.labels, TikTokControl::HomeTab)
+                .await
+                .ok()
+                .flatten()
+            {
+                let _ = run.session.tap(element.centre()).await;
+            }
+            sleep_interruptible(FEED_READY_POLL, stop).await;
+            continue;
         }
         if Instant::now() >= deadline {
             report(
