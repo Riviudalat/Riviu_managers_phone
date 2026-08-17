@@ -9,11 +9,26 @@ use uuid::Uuid;
 use crate::DeviceWorkOwner;
 
 const DEFAULT_STREAM_LIMIT: usize = 1;
-/// Hard ceiling on concurrent MJPEG producers on one desktop (AGENTS.md §3.5/
-/// §3.12: default 1, hard max 2). The managed fleet may hold 20-100 phones, but
-/// only this many ever stream at once — the desktop shows at most two tiles.
-/// Accepting a larger configured limit would silently drop that guarantee.
-const MAXIMUM_STREAM_LIMIT: usize = 2;
+/// Hard ceiling on concurrent producers on one desktop.
+///
+/// **Raised from 2 to 32 on 18/08/2026, and the old number's reason is why.** It read: "the
+/// managed fleet may hold 20-100 phones, but only this many ever stream at once — the
+/// desktop shows at most two tiles." That was a statement about *tiles*, and it stopped
+/// being true twice over: Android tiles moved to the H.264 view path, which does not take a
+/// slot here at all, and every nurture session takes a **foreground** slot for its whole
+/// run. So the ceiling was not bounding previews, it was bounding how many phones could be
+/// nurtured at once — two, on a fleet of twenty, with the other eighteen refused
+/// `CapacityExhausted` before they started.
+///
+/// Measured before changing it: six concurrent Android nurture sessions, each with its own
+/// exclusive lease, UI session and minicap producer, all six returned and five watched
+/// video. 32 is a fleet-shaped ceiling above that, not a measured maximum.
+///
+/// **The iOS caveat survives.** Its producers are MJPEG over usbmux, where contention has a
+/// history in this project, and nothing here has been measured at that scale on that
+/// transport. What protects an iOS desktop is the *default*, which is still one per
+/// `Default` and is sized from the connected fleet by the desktop — not this ceiling.
+const MAXIMUM_STREAM_LIMIT: usize = 32;
 const BACKGROUND_TURN_TIMEOUT: Duration = Duration::from_secs(5);
 const BACKGROUND_FAILURE_BACKOFF: Duration = Duration::from_secs(30);
 
@@ -799,27 +814,30 @@ mod tests {
     use crate::DeviceWorkOwner;
 
     #[test]
-    fn defaults_to_one_and_rejects_limits_above_the_hard_max_of_two() {
+    fn defaults_to_one_and_rejects_a_limit_past_the_fleet_shaped_ceiling() {
         let default_budget = StreamBudgetManager::default();
         assert_eq!(default_budget.configured_limit(), 1);
         assert_eq!(default_budget.turn_timeout(), Duration::from_secs(5));
         assert_eq!(default_budget.failure_backoff(), Duration::from_secs(30));
         assert_eq!(StreamBudgetManager::new(2).unwrap().configured_limit(), 2);
+        // A fleet-sized limit is now expressible. It used to be refused at three, which is
+        // what capped concurrent nurture at two phones however many were plugged in.
+        assert_eq!(
+            StreamBudgetManager::new(MAXIMUM_STREAM_LIMIT)
+                .unwrap()
+                .configured_limit(),
+            MAXIMUM_STREAM_LIMIT
+        );
+        // Zero is still not a limit, and past the ceiling is still refused rather than
+        // silently clamped — an operator who asks for 100 must be told, not quietly given
+        // something else.
         assert!(matches!(
             StreamBudgetManager::new(0),
-            Err(StreamBudgetError::InvalidLimit {
-                requested: 0,
-                maximum: 2
-            })
+            Err(StreamBudgetError::InvalidLimit { requested: 0, .. })
         ));
-        // The hard max is 2 (AGENTS.md §3.5/§3.12): three concurrent producers
-        // must be rejected, not silently accepted.
         assert!(matches!(
-            StreamBudgetManager::new(3),
-            Err(StreamBudgetError::InvalidLimit {
-                requested: 3,
-                maximum: 2
-            })
+            StreamBudgetManager::new(MAXIMUM_STREAM_LIMIT + 1),
+            Err(StreamBudgetError::InvalidLimit { .. })
         ));
     }
 

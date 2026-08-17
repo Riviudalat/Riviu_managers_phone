@@ -50,6 +50,14 @@
 pub enum TikTokControl {
     /// The "For You" / `Đề xuất` feed tab.
     FeedTab,
+    /// The post's sound strip — `Original sound by <creator>`.
+    ///
+    /// Not something to tap. It is read for its *value*, because it is the one description
+    /// on the rail that differs between two ordinary posts: comments and shares both read
+    /// `0` on a low-engagement feed, so a fingerprint built from them alone cannot tell two
+    /// cards apart and every swipe looks unproven. Measured 18/08/2026 — see
+    /// `nurture::hierarchy::PostFingerprint`.
+    SoundLink,
     /// The bottom bar's Home tab — the way *back* to the feed from anywhere else.
     ///
     /// Distinct from [`Self::FeedTab`], which is a tab *inside* the feed and is therefore
@@ -252,6 +260,7 @@ impl TikTokControl {
             Self::PostDelete => 21,
             Self::PostDeleteConfirm => 22,
             Self::HomeTab => 23,
+            Self::SoundLink => 24,
         }
     }
 }
@@ -350,6 +359,8 @@ pub struct TikTokLabels {
     /// The bottom bar's Home tab. `None` means a session that finds TikTok on another tab
     /// cannot get back to the feed and will refuse rather than swipe somewhere unknown.
     home_tab: Option<LabelMatch>,
+    /// The sound strip, matched by its stable prefix and read for its whole value.
+    sound_link: Option<LabelMatch>,
     /// Matched on the node's rendered `text`, not its `content-desc`: measured as a
     /// plain `TextView` reading `Ảnh` beside the caption, with no description at all.
     photo_badge: Option<LabelMatch>,
@@ -422,6 +433,7 @@ impl TikTokLabels {
         match control {
             TikTokControl::FeedTab => self.feed_tab,
             TikTokControl::HomeTab => self.home_tab,
+            TikTokControl::SoundLink => self.sound_link,
             TikTokControl::PhotoBadge => self.photo_badge,
             TikTokControl::Like => self.like,
             TikTokControl::Liked => self.liked,
@@ -628,6 +640,7 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // Not read on the 09/08 sweep, which only ever saw the feed. `None` costs this
         // build the recovery path and nothing else.
         home_tab: None,
+        sound_link: None,
         // Never measured on this build; the S8+ fleet work never looked at a photo
         // post. Absent means no sideways swipe, which is the safe direction.
         photo_badge: None,
@@ -670,6 +683,8 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // build's five bottom tabs as read off a real dump on 11/08/2026 —
         // `Trang chủ`, `Cửa hàng`, `Quay`, `Hộp thư`, `Hồ sơ`. This is the first of them.
         home_tab: Some(LabelMatch::Exact("Trang chủ")),
+        // Unmeasured on the vi build: the 10/08 dump was not kept for this strip.
+        sound_link: None,
         // Read off an SM-N950F on 12/08/2026, on photo cards in the For-You feed and
         // on a post page opened from a link — the same string on both.
         photo_badge: Some(LabelMatch::Text("Ảnh")),
@@ -741,6 +756,10 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // The bottom bar, read on the Profile screen: `Home`, `Shop`, `Create`, `Inbox`,
         // `Profile`. This is the one that gets a parked session back to the feed.
         home_tab: Some(LabelMatch::Exact("Home")),
+        // `Original sound by Jacketkat` and `Original sound by BapMidnight`, read off two
+        // different phones on 18/08/2026. Matched on the prefix and read for the whole
+        // value — the creator's name is what makes two cards distinguishable.
+        sound_link: Some(LabelMatch::Contains("Original sound by")),
         // `Photo` appears in `text` on this card, and the card is a photo post — but the
         // vi build's badge was confirmed on *two* devices and on a post page before being
         // written down, and one screen is not that. Left unmeasured: the cost is that a

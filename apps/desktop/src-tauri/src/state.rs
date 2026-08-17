@@ -54,18 +54,18 @@ fn preview_fps_for_device_count(count: usize) -> u32 {
 /// Keep the current two-phone behavior as the default while allowing a farm
 /// deployment to opt into one producer per connected phone. Invalid values
 /// fail closed to the default instead of creating an accidental USB storm.
-fn configured_desktop_stream_capacity() -> usize {
-    match std::env::var("RIVIU_STREAM_CAPACITY") {
-        Ok(raw) => match raw.trim().parse::<usize>() {
-            Ok(value) if (1..=MAX_DESKTOP_STREAM_CAPACITY).contains(&value) => value,
-            _ => {
-                log::warn!(
-                    "invalid RIVIU_STREAM_CAPACITY={raw:?}; using default {DEFAULT_DESKTOP_STREAM_CAPACITY}"
-                );
-                DEFAULT_DESKTOP_STREAM_CAPACITY
-            }
-        },
-        Err(_) => DEFAULT_DESKTOP_STREAM_CAPACITY,
+/// What the operator asked for, or `None` if they said nothing usable.
+///
+/// `None` rather than the default, so the caller can tell "not configured" from
+/// "configured as 2" — the first is sized from the fleet, the second is an instruction.
+fn configured_desktop_stream_capacity() -> Option<usize> {
+    let raw = std::env::var("RIVIU_STREAM_CAPACITY").ok()?;
+    match raw.trim().parse::<usize>() {
+        Ok(value) if (1..=MAX_DESKTOP_STREAM_CAPACITY).contains(&value) => Some(value),
+        _ => {
+            log::warn!("invalid RIVIU_STREAM_CAPACITY={raw:?}; sizing from the fleet instead");
+            None
+        }
     }
 }
 
@@ -76,8 +76,17 @@ fn configured_desktop_stream_capacity() -> usize {
 /// `RIVIU_STREAM_CAPACITY=3` used to panic the app at startup through an
 /// `expect`. The env var's own contract is to fail closed to the default, and
 /// that is what a farm-sized value gets now, with the reason logged.
-fn desktop_stream_budget() -> StreamBudgetManager {
-    let requested = configured_desktop_stream_capacity();
+/// The stream budget this desktop runs with.
+///
+/// `fleet_size` is how many phones the first scan found. The budget is sized to it so a
+/// two-phone bench gets two and a twenty-phone farm gets twenty — the operator's explicit
+/// `RIVIU_STREAM_CAPACITY` still wins, and a fleet of zero (nothing plugged in yet, or a
+/// scan that failed) falls back to the conservative default rather than reserving for
+/// phones that may never arrive.
+fn desktop_stream_budget(fleet_size: usize) -> StreamBudgetManager {
+    let requested = configured_desktop_stream_capacity().unwrap_or_else(|| {
+        fleet_size.clamp(DEFAULT_DESKTOP_STREAM_CAPACITY, MAX_DESKTOP_STREAM_CAPACITY)
+    });
     match StreamBudgetManager::new(requested) {
         Ok(manager) => manager,
         Err(error) => {
@@ -643,13 +652,30 @@ impl AppState {
         let fleet: Arc<dyn riviu_core::driver::DeviceDriver> =
             Arc::new(riviu_core::driver_multiplex::MultiplexDriver::new(backends));
 
+        // **How many phones may hold a producer at once — sized from the fleet that is
+        // actually plugged in.**
+        //
+        // This was the constant 2, chosen when the desktop was a two-iPhone dev box and
+        // described as "the desktop shows at most two tiles". Every nurture session holds a
+        // *foreground* slot for its whole run, so on a twenty-phone farm that constant was
+        // not bounding previews — it was refusing eighteen of twenty sessions outright with
+        // `CapacityExhausted`. Measured 18/08/2026 before changing it: six concurrent
+        // Android sessions all ran.
+        //
+        // Counting first costs one device scan, and it is the scan the registry needs a few
+        // lines below anyway, so it is done here and reused rather than run twice. A scan
+        // that fails falls back to the old constant rather than guessing high: an unknown
+        // fleet is not a licence to start twenty producers.
+        let initial_devices = fleet.list_devices().await.unwrap_or_else(|error| {
+            log::warn!(
+                "initial device scan failed ({error:#}); stream budget falls back to the default"
+            );
+            Vec::new()
+        });
         let control = Arc::new(DeviceControlPlane::new_with_capability_registry(
             fleet,
             Arc::new(DeviceWorkCoordinator::new()),
-            // Keep both connected phone tiles live. Core flow fixtures retain
-            // the conservative default; the desktop has two USB devices in
-            // its live fleet and the driver supports two producers.
-            Arc::new(desktop_stream_budget()),
+            Arc::new(desktop_stream_budget(initial_devices.len())),
             bundle.interaction_capabilities.clone(),
         ));
         let signing = SigningService::with_credentials(sidecar_root.join("signer"), credentials);
@@ -676,12 +702,18 @@ impl AppState {
         )
         .with_frame_text_source(Arc::new(crate::interaction_ocr::DesktopFrameTextSource));
 
-        // Recovery must see an authoritative initial fleet snapshot. Flow target
-        // selection and startup reconciliation both fail closed on absent devices.
-        let devices = control
-            .list_devices()
-            .await
-            .context("initial metadata device scan failed before Flow recovery")?;
+        // Recovery must see an authoritative initial fleet snapshot. Flow target selection
+        // and startup reconciliation both fail closed on absent devices. Reuses the scan the
+        // stream budget was sized from — two scans of twenty phones is two seconds of
+        // startup for one answer.
+        let devices = if initial_devices.is_empty() {
+            control
+                .list_devices()
+                .await
+                .context("initial metadata device scan failed before Flow recovery")?
+        } else {
+            initial_devices
+        };
         registry.upsert_many(devices);
 
         let command_admission = Arc::new(CommandAdmissionState::new(false));
@@ -1876,6 +1908,22 @@ fn resolve_sidecar_root_from(
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn the_stream_budget_follows_the_fleet_that_is_plugged_in() {
+        // The constant this replaced was 2, described as "the desktop shows at most two
+        // tiles". Every nurture session holds a foreground slot for its whole run, so on a
+        // twenty-phone farm that constant refused eighteen of twenty sessions outright.
+        assert_eq!(desktop_stream_budget(20).configured_limit(), 20);
+        assert_eq!(desktop_stream_budget(6).configured_limit(), 6);
+        // A two-phone bench is unchanged, and a fleet of zero -- nothing plugged in yet, or
+        // a scan that failed -- does not reserve for phones that may never arrive.
+        assert_eq!(desktop_stream_budget(2).configured_limit(), 2);
+        assert_eq!(
+            desktop_stream_budget(0).configured_limit(),
+            DEFAULT_DESKTOP_STREAM_CAPACITY
+        );
+    }
 
     #[test]
     fn preview_budget_is_smooth_for_small_fleet_and_bounded_for_large_fleet() {

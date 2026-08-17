@@ -158,23 +158,40 @@ async fn main() -> anyhow::Result<()> {
             tokio::time::sleep(Duration::from_millis(index as u64 * 700)).await;
             let began = Instant::now();
             say(&format!("  [{udid}] session starting"));
+            // Keep the trail. A session that ends "0/2 video" has already said *why* in
+            // its intermediate status lines, and throwing them away leaves only the number.
+            let trail = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let collector = Arc::clone(&trail);
             let outcome = engine
                 .run_session(
                     &udid,
                     settings,
                     stop,
                     Some(Duration::from_secs(args.minutes * 60)),
-                    |_| {},
+                    move |status| {
+                        let mut seen = collector.lock().expect("status trail");
+                        if seen.last().map(String::as_str) != Some(status.last_message.as_str()) {
+                            seen.push(status.last_message.clone());
+                        }
+                    },
                 )
                 .await;
+            let trail = trail.lock().expect("status trail").clone();
             match &outcome {
-                Ok(status) => say(&format!(
-                    "  [{udid}] done in {:.0}s: videos={} likes={} — {}",
-                    began.elapsed().as_secs_f64(),
-                    status.videos_done,
-                    status.likes,
-                    status.last_message
-                )),
+                Ok(status) => {
+                    say(&format!(
+                        "  [{udid}] done in {:.0}s: videos={} likes={} — {}",
+                        began.elapsed().as_secs_f64(),
+                        status.videos_done,
+                        status.likes,
+                        status.last_message
+                    ));
+                    if status.videos_done == 0 {
+                        for line in &trail {
+                            say(&format!("      [{udid}] {line}"));
+                        }
+                    }
+                }
                 Err(error) => say(&format!(
                     "  [{udid}] FAILED after {:.0}s: {error:#}",
                     began.elapsed().as_secs_f64()

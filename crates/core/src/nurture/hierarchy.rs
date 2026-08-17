@@ -155,9 +155,28 @@ const CAROUSEL_SETTLE: Duration = Duration::from_millis(900);
 struct PostFingerprint {
     comments: Option<String>,
     share: Option<String>,
+    /// The sound strip's whole description, which is the only part of this that reliably
+    /// differs between two ordinary posts.
+    ///
+    /// **Measured 18/08/2026, and the reason this field exists.** Comments and shares both
+    /// read zero on a low-engagement feed — `Read or add comments. 0 comments` and
+    /// `Share video.  shares` — so two different cards produced an identical fingerprint,
+    /// every swipe was recorded as unproven, no video was ever counted, and the session
+    /// stopped at `STUCK_SWIPE_LIMIT` believing it was stuck. On a six-phone run the
+    /// sessions were watching and swiping correctly the whole time and reported `0/2 video`.
+    ///
+    /// `None` on a build whose sound strip has not been measured, and on a post using
+    /// licensed music rather than an original sound — in both cases this degrades to
+    /// exactly the previous behaviour rather than to something worse.
+    sound: Option<String>,
 }
 
 impl PostFingerprint {
+    /// Whether the card showed an action rail at all.
+    ///
+    /// Deliberately unchanged by `sound`: this answers "is there a rail here", which is what
+    /// distinguishes an ordinary post from a LIVE card, and the sound strip is not part of
+    /// that question.
     fn is_empty(&self) -> bool {
         self.comments.is_none() && self.share.is_none()
     }
@@ -233,6 +252,7 @@ async fn fingerprint(session: &dyn UiSession, labels: TikTokControls) -> PostFin
     PostFingerprint {
         comments: read(TikTokControl::Comments).await,
         share: read(TikTokControl::Share).await,
+        sound: read(TikTokControl::SoundLink).await,
     }
 }
 
@@ -803,6 +823,7 @@ pub async fn run_hierarchy_session(
     if !await_feed(&run, stop, status, report).await {
         return HierarchySession::Refused;
     }
+    await_first_rail(&run, stop).await;
     let outcome = run_feed(
         run,
         settings,
@@ -836,6 +857,63 @@ pub async fn run_hierarchy_session(
 /// interest-picker onboarding never shows a feed, and saying so beats six blind swipes.
 const FEED_READY_WINDOW: Duration = Duration::from_secs(30);
 const FEED_READY_POLL: Duration = Duration::from_millis(1_000);
+
+/// Give the first card's action rail the same grace every later card already gets.
+///
+/// **The feed's chrome renders before its first card does.** `await_feed` is satisfied by the
+/// `For You` tab, which is part of the tab bar and appears while the video underneath is
+/// still loading — so the loop's first read found no rail, called the card railless, swiped,
+/// and did it again until `OFF_FEED_LIMIT` ran out. Measured 18/08/2026 on a six-phone run:
+/// three sessions ended `0/2 video` in about fifteen seconds, having swiped past six cards
+/// that were never given time to draw, on phones that showed a complete rail when scouted a
+/// minute later.
+///
+/// `swipe_next` has waited for the incoming rail since the day it was measured
+/// ([`RAIL_RETURN_WINDOW`]); only the card the session *starts* on was missing it, because no
+/// swipe precedes it.
+///
+/// Absence is tolerated rather than treated as failure, for the same reason as there: a LIVE
+/// card or a photo carousel genuinely has no rail, and it simply uses up the window.
+async fn await_first_rail(run: &HierarchyRun<'_>, stop: &AtomicBool) {
+    // Twice: once for a card that is merely slow, and once more after selecting the For-You
+    // tab, for a phone that is on the feed but not on *that* part of it.
+    //
+    // **`For You` being on screen does not mean it is the tab in front.** It sits in a strip
+    // beside `Following`, `Friends` and `Explore`, all four visible whichever is selected —
+    // and Explore is a grid with no per-post rail at all. So `on_feed` was satisfied,
+    // the loop found no rail, and it swiped through its whole off-feed budget on a screen
+    // that has nothing to swipe. Measured 18/08/2026: three phones of six failed this way in
+    // about twenty seconds each, and the same phones showed a complete rail a minute later
+    // once something had tapped For You.
+    for attempt in 0..2 {
+        if attempt == 1 {
+            let Some(element) = locate(run.session, run.labels, TikTokControl::FeedTab)
+                .await
+                .ok()
+                .flatten()
+            else {
+                return;
+            };
+            if run.session.tap(element.centre()).await.is_err() {
+                return;
+            }
+            sleep_interruptible(SWIPE_SETTLE, stop).await;
+        }
+        let deadline = Instant::now() + RAIL_RETURN_WINDOW;
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            if !fingerprint(run.session, run.labels).await.is_empty() {
+                return;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            sleep_interruptible(RAIL_RETURN_POLL, stop).await;
+        }
+    }
+}
 
 /// Wait for the feed to be on screen. `false` means it never was.
 ///
@@ -1420,13 +1498,41 @@ mod tests {
         let first = PostFingerprint {
             comments: Some("Đọc hoặc viết bình luận. 697 bình luận".into()),
             share: Some("Chia sẻ video. 45,4K lượt chia sẻ".into()),
+            sound: None,
         };
         let second = PostFingerprint {
             comments: Some("Đọc hoặc viết bình luận. 12 bình luận".into()),
             share: first.share.clone(),
+            sound: None,
         };
         assert_ne!(first, second);
         assert!(!first.is_empty());
+    }
+
+    #[test]
+    fn two_zero_engagement_posts_are_still_told_apart() {
+        // Verbatim from two phones on 18/08/2026. Counts alone are identical on a
+        // low-engagement feed, so a fingerprint without the sound strip reported every
+        // swipe as unproven: no video was counted, and the session stopped at
+        // `STUCK_SWIPE_LIMIT` while it was in fact watching and swiping correctly.
+        let counts_only = |sound: Option<&str>| PostFingerprint {
+            comments: Some("Read or add comments. 0 comments".into()),
+            share: Some("Share video.  shares".into()),
+            sound: sound.map(str::to_string),
+        };
+
+        assert_eq!(
+            counts_only(None),
+            counts_only(None),
+            "this equality is the defect: two different cards, one fingerprint"
+        );
+        assert_ne!(
+            counts_only(Some("Original sound by Jacketkat")),
+            counts_only(Some("Original sound by BapMidnight"))
+        );
+        // A post on licensed music has no `Original sound by` strip. That degrades to the
+        // old behaviour rather than to something worse, and the rail is still detected.
+        assert!(!counts_only(None).is_empty());
     }
 
     #[test]
