@@ -10,7 +10,9 @@
 //!
 //! Comments are off (`comment_prob = 0`) and cannot be switched on here: writing a comment
 //! needs an AI key and puts text on a real account, which is not a thing a measurement
-//! harness should do. What it does exercise is everything underneath — an exclusive lease, a
+//! harness should do. That promise is kept by *persisting* the settings rather than by
+//! passing them — see the note at the call, and the follow that happened before it did.
+//! What it does exercise is everything underneath — an exclusive lease, a
 //! stream-budget slot, a UI session, TikTok in the foreground, watch and swipe and like —
 //! per device, concurrently. That is the part that decides whether the feature works for a
 //! whole fleet or only for the first couple of phones.
@@ -117,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(budget),
     ));
     let engine = NurtureEngine::new(
-        database,
+        database.clone(),
         control.clone(),
         Arc::new(streams.as_ref().clone()),
         scratch.join("artifacts"),
@@ -138,6 +140,19 @@ async fn main() -> anyhow::Result<()> {
         stagger_delay_max: 3,
         ..Default::default()
     };
+
+    // **Write them down before running, or they are not the settings that run.**
+    //
+    // `run_session` re-reads the stored settings row once per post — that is the desktop's
+    // live-tuning mechanism, where "Lưu" in the panel *is* how a running session is
+    // retuned — and what it reads overwrites what was passed in. A fresh database answers
+    // with `NurtureSettings::default()`, whose `follow_prob` is 3.
+    //
+    // Measured, not reasoned: on 18/08/2026 ce0717171c2a64d50d followed an author during a
+    // run whose settings said `follow_prob: 0`. A follow is a real relationship on a real
+    // account, and the same channel governs `comment_prob`, which this harness promises in
+    // its own header never to switch on. Persisting first makes both promises true.
+    database.save_nurture_settings(&settings)?;
 
     println!(
         "nurturing {} device(s) for up to {} minute(s), {} video(s) each\n",

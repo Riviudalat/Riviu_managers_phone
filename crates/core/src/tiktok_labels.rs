@@ -658,10 +658,16 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // Profile tab — the same `Home` the SEA build shows, which is why it is written
         // down rather than assumed from it.
         home_tab: Some(LabelMatch::Exact("Home")),
-        // Neither was on the Profile screen that was dumped. `sound_link` costs this build
-        // the zero-engagement fingerprint and `dialog_dismiss` costs it modal clearing;
-        // both degrade to the behaviour this set already had.
-        sound_link: None,
+        // `Sound: Drops of Light by everyoneyusuke`, read off ce0517155ab38c390d's feed on
+        // 18/08/2026. Matched on the prefix because the rest is the track and its author,
+        // which is exactly the part that has to differ between two cards for a swipe to be
+        // proved. Not the same string as the SEA build's `Original sound by`, which is why
+        // each set is measured rather than shared.
+        sound_link: Some(LabelMatch::Contains("Sound:")),
+        // Left unmeasured deliberately. The dialog this build actually produced — "Get
+        // updates sent to your email?" — has no decline worth tapping: its one labelled
+        // button *accepts*, subscribing a real account to marketing email, and the decline
+        // is an unlabelled X. `await_feed` presses Back instead, which cleared it.
         dialog_dismiss: None,
         // Never measured on this build; the S8+ fleet work never looked at a photo
         // post. Absent means no sideways swipe, which is the safe direction.
@@ -669,7 +675,9 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         like: Some(LabelMatch::Exact("Like")),
         liked: Some(LabelMatch::Exact("Video liked")),
         comments: Some(LabelMatch::Contains("comments")),
-        share: None,
+        // `Share video.  shares` on the same 18/08/2026 feed dump — the count sits between
+        // the two words on a card with no shares yet, so only the prefix can be matched.
+        share: Some(LabelMatch::Contains("Share video")),
         bookmark: None,
         follow: Some(LabelMatch::Contains("Follow ")),
         live_room: Some(LabelMatch::Contains("Tap to watch LIVE")),

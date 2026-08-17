@@ -858,6 +858,14 @@ pub async fn run_hierarchy_session(
 const FEED_READY_WINDOW: Duration = Duration::from_secs(30);
 const FEED_READY_POLL: Duration = Duration::from_millis(1_000);
 
+/// How long a blocked screen is given to resolve itself before Back is pressed on it.
+///
+/// A third of the window, and the reason is the one case Back would make worse: TikTok's
+/// splash shows neither a feed tab nor a bottom bar either, and Back at a splash closes the
+/// app rather than a dialog. Ten seconds is long enough that a phone still starting is past
+/// it, and short enough to leave two thirds of the window for the feed to arrive afterwards.
+const MODAL_BACK_DELAY: Duration = Duration::from_secs(10);
+
 /// Give the first card's action rail the same grace every later card already gets.
 ///
 /// **The feed's chrome renders before its first card does.** `await_feed` is satisfied by the
@@ -925,9 +933,11 @@ async fn await_feed(
     status: &mut NurtureSessionStatus,
     report: &(dyn Fn(&mut NurtureSessionStatus, String) + Send + Sync),
 ) -> bool {
-    let deadline = Instant::now() + FEED_READY_WINDOW;
+    let started = Instant::now();
+    let deadline = started + FEED_READY_WINDOW;
     let mut said = false;
     let mut nudged = false;
+    let mut backed = false;
     loop {
         if stop.load(Ordering::Relaxed) {
             return false;
@@ -983,6 +993,36 @@ async fn await_feed(
             sleep_interruptible(FEED_READY_POLL, stop).await;
             continue;
         }
+
+        // **Nothing on this screen carries a label, so use the way out that needs none.**
+        //
+        // Measured 18/08/2026 on ce0517155ab38c390d: TikTok held the phone behind "Get
+        // updates sent to your email?", and the whole dump had *no* `content-desc` at all —
+        // no feed tab, no bottom bar, nothing any branch above could find. The dialog's only
+        // labelled control was its accept button, and accepting subscribes a real account to
+        // marketing email; the decline is an unlabelled `ImageView`. So no label can reach
+        // it. Back can, and did: one press dismissed it and the feed was underneath.
+        //
+        // This is why it is worth having as well as [`TikTokControl::DialogDismiss`] rather
+        // than instead of it. A measured decline is better when it exists — it is the button
+        // a person would choose. But dialogs arrive faster than anyone can measure them, in
+        // languages nobody has dumped, and this one had no reachable decline at all.
+        //
+        // Safe *here specifically*, because every branch above has already failed. Back on
+        // the feed would leave TikTok — but then `on_feed` would have returned. On Profile,
+        // Inbox or Shop the Home tab would have been found. What is left is a screen with
+        // neither, which is a dialog or a splash.
+        if !backed && started.elapsed() >= MODAL_BACK_DELAY {
+            backed = true;
+            report(
+                status,
+                "màn hình bị chặn và không có nút nào đọc được — bấm Back".into(),
+            );
+            let _ = run.session.back().await;
+            sleep_interruptible(FEED_READY_POLL, stop).await;
+            continue;
+        }
+
         if Instant::now() >= deadline {
             report(
                 status,
@@ -1730,6 +1770,124 @@ mod tests {
         assert!(
             said.iter().any(|line| line.contains("hộp thoại")),
             "the operator is told what was in the way, not left with a guess: {said:?}"
+        );
+    }
+
+    /// A phone behind a dialog that offers nothing anybody could tap.
+    ///
+    /// Measured on ce0517155ab38c390d, 18/08/2026: "Get updates sent to your email?" dumped
+    /// **no** `content-desc` at all, and its one labelled button was the one that subscribes
+    /// the account. So this fake answers nothing, whatever it is asked — which is exactly
+    /// the state every label-driven recovery is blind to, including the measured decline.
+    #[derive(Default)]
+    struct UnlabelledModalPhone {
+        cleared: std::sync::atomic::AtomicBool,
+        backs: std::sync::atomic::AtomicUsize,
+        taps: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for UnlabelledModalPhone {
+        async fn tap(&self, _point: TapPoint) -> anyhow::Result<()> {
+            self.taps.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn back(&self) -> anyhow::Result<()> {
+            self.backs.fetch_add(1, Ordering::Relaxed);
+            self.cleared.store(true, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn swipe(&self, _gesture: crate::types::SwipeGesture) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn type_text(&self, _text: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn home(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn find_and_tap(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn assert_visible(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+
+        async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            // Behind the dialog: nothing, for any query. Underneath it: the feed.
+            let found = self.cleared.load(Ordering::Relaxed)
+                && matches!(query, ElementQuery::Description { value, .. } if value == "For You");
+            Ok(found.then_some(ElementBox {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 80.0,
+                description: None,
+                enabled: true,
+            }))
+        }
+    }
+
+    /// Takes about eleven seconds on purpose: [`MODAL_BACK_DELAY`] is most of it, and the
+    /// delay is the part being asserted as much as the keypress is. A splash screen looks
+    /// identical to this one — no feed tab, no bottom bar — and Back at a splash closes
+    /// TikTok, so pressing it immediately would trade one broken session for a worse one.
+    #[tokio::test]
+    async fn a_dialog_with_no_decline_is_backed_out_of_rather_than_waited_out() {
+        let phone = UnlabelledModalPhone::default();
+        let screen = (1_080.0, 2_220.0);
+        let run = HierarchyRun {
+            session: &phone,
+            // The set *with* a measured decline, to prove this path is not that one: the
+            // dialog carries no text at all, so `Not now` finds nothing either.
+            labels: controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("measured set"),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        };
+        let stop = AtomicBool::new(false);
+        let mut status = NurtureSessionStatus {
+            udid: "unlabelled-modal".into(),
+            running: true,
+            videos_done: 0,
+            swipe_attempts: 0,
+            like_attempts: 0,
+            comment_attempts: 0,
+            follow_attempts: 0,
+            likes: 0,
+            comments: 0,
+            follows: 0,
+            last_message: String::new(),
+            session_usd: 0.0,
+        };
+        let report = |status: &mut NurtureSessionStatus, message: String| {
+            status.last_message = message;
+        };
+
+        let started = Instant::now();
+        assert!(await_feed(&run, &stop, &mut status, &report).await);
+        assert!(
+            started.elapsed() >= MODAL_BACK_DELAY,
+            "Back must not be pressed before a starting app has had its chance"
+        );
+        assert_eq!(
+            phone.backs.load(Ordering::Relaxed),
+            1,
+            "once — a screen that Back did not fix is not fixed by Back again"
+        );
+        assert_eq!(
+            phone.taps.load(Ordering::Relaxed),
+            0,
+            "nothing on that screen was safe to tap, so nothing was tapped"
         );
     }
 }
