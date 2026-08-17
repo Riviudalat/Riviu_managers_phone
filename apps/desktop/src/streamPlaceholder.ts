@@ -40,6 +40,18 @@ export interface StreamPlaceholderView {
 export function streamPlaceholder(input: StreamPlaceholderInput): StreamPlaceholderView {
   const blocksInput = !input.hasGeometry;
 
+  // **A picture beats every reason not to have one, and this test must stay first.**
+  //
+  // `lastError` is sticky on the Rust side — the 3 s device merge re-applies the previous
+  // error whenever the fresh scan has none — so a phone that failed once and recovered keeps
+  // the field forever. Checking it before this returned a full-bleed failure panel over live
+  // video, permanently, on both the tile and the overlay. The code this helper replaced was
+  // gated on `!hasView` and did not have that flaw; collapsing two callers into one decision
+  // is exactly where it slipped in.
+  if (input.hasView && !input.decodeFailed) {
+    return { view: { kind: "none" }, blocksInput };
+  }
+
   if (input.decodeFailed) {
     return {
       // Deliberately not retryable. `decodeUnsupported` means every codec candidate was
@@ -61,9 +73,5 @@ export function streamPlaceholder(input: StreamPlaceholderInput): StreamPlacehol
 
   // No frame yet and nothing has reported a failure: the keeper starts a producer for every
   // device it sees, so this is genuinely "on its way" rather than "idle, please press start".
-  if (!input.hasView) {
-    return { view: { kind: "loading" }, blocksInput };
-  }
-
-  return { view: { kind: "none" }, blocksInput };
+  return { view: { kind: "loading" }, blocksInput };
 }

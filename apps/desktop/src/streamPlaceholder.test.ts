@@ -28,6 +28,22 @@ describe("stream placeholder", () => {
     },
   );
 
+  it("never covers a running picture, however stale the recorded error is", () => {
+    // `lastError` is sticky: the 3 s device merge re-applies the previous error whenever the
+    // fresh scan has none, so a phone that failed once and recovered carries it forever.
+    // Judging the error before the picture painted a full-bleed failure panel over live
+    // video, permanently. The picture is the evidence; the record is a memory.
+    const { view } = streamPlaceholder({ ...live, lastError: "adb: device offline" });
+    expect(view.kind).toBe("none");
+
+    // Same for a state field that has not caught up with a stream that is plainly working.
+    expect(streamPlaceholder({ ...live, tileStreamState: "error" }).view.kind).toBe("none");
+
+    // But a codec refusal still wins, because then the "picture" is a canvas that has
+    // stopped being updated -- `live` lags it by design.
+    expect(streamPlaceholder({ ...live, decodeFailed: true }).view.kind).toBe("failed");
+  });
+
   it("offers a retry for a failure that a retry could plausibly clear", () => {
     const { view } = streamPlaceholder({
       ...live,

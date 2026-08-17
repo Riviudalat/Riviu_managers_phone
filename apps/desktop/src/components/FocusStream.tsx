@@ -845,15 +845,29 @@ export function FocusStream({
             held.steps.push({ x: point.x, y: point.y, durationMs: elapsed });
           }}
           onPointerUp={async (e) => {
-            if (e.button !== 0 || !drag.current || !encodedW || !encodedH) {
-              drag.current = null;
+            // **Every exit from here lifts the finger.** `onPointerDown` captures the
+            // pointer, so a drag that leaves the canvas still delivers its `pointerup` here
+            // — and `mapToDevice` returns null for a point outside the painted rect. Both
+            // early returns below used to drop out with an injected DOWN and a stream of
+            // MOVEs already on the control socket and no UP behind them, which is a phone
+            // holding a pointer down forever. Releasing past the edge of the preview is the
+            // natural end of a fast flick, so this was not a corner case.
+            const held = drag.current;
+            drag.current = null;
+            const lift = () => {
+              const last = held?.steps.at(-1) ?? held?.start;
+              if (held?.live && last) void held.live.end(last.x, last.y);
+            };
+            if (e.button !== 0 || !held || !encodedW || !encodedH) {
+              lift();
               return;
             }
             e.preventDefault();
-            const held = drag.current;
             const end = mapToDevice(e.currentTarget, e.clientX, e.clientY, encodedW, encodedH);
-            drag.current = null;
-            if (!end) return;
+            if (!end) {
+              lift();
+              return;
+            }
             // The release point is always the last step, so the gesture ends exactly where
             // the operator let go even if that sample was filtered out above.
             const steps = [...held.steps];

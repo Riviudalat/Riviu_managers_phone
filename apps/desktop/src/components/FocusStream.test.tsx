@@ -8,6 +8,7 @@ import {
   deviceTap,
   deviceTypeText,
   groupInput,
+  viewInjectTouch,
 } from "../api";
 import { FocusStream } from "./FocusStream";
 import { ToastHost } from "./ToastHost";
@@ -32,12 +33,16 @@ vi.mock("../api", () => ({
   saveViewSnapshot: vi.fn(),
   screenshot: vi.fn(),
   setScreenRotation: vi.fn(async () => 0),
+  viewInjectTouch: vi.fn(async () => liveTouchAvailable),
   viewRequestKeyframe: vi.fn(async () => true),
 }));
 
 // Flipped by the "no picture yet" block below. A phone that has never painted has neither a
 // frame nor an encoded size, and the pair has to move together — a size with no frame is a
 // state the store cannot produce.
+/// Whether the phone has a scrcpy producer to take a live touch. Off by default so the
+/// tests below keep covering the agent fallback; the live-path block turns it on.
+let liveTouchAvailable = false;
 let dark = false;
 let decodeRefused = false;
 
@@ -308,6 +313,54 @@ describe("overlay panel rows", () => {
         "ce06",
         "ime set com.sec.android.inputmethod/.SamsungKeypad",
       ),
+    );
+  });
+});
+
+describe("FocusStream never leaves a finger down", () => {
+  beforeEach(() => {
+    vi.mocked(viewInjectTouch).mockClear();
+    // This block is about the live path, so the phone has a producer here.
+    liveTouchAvailable = true;
+    HTMLElement.prototype.setPointerCapture = vi.fn();
+    HTMLElement.prototype.releasePointerCapture = vi.fn();
+  });
+  afterEach(() => {
+    liveTouchAvailable = false;
+  });
+
+  it("lifts the finger when the drag is released outside the picture", async () => {
+    // `onPointerDown` captures the pointer, so a drag that wanders off the canvas still
+    // delivers its pointerup -- and the release point maps to null. Dropping out there left
+    // a DOWN and a run of MOVEs on the control socket with no UP behind them, which is a
+    // phone holding a pointer down forever. Releasing past the edge is how a flick ends.
+    const { container } = render(
+      <FocusStream device={fixture} index={2} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined} />,
+    );
+    const pane = container.querySelector("[data-testid='focus-screen']")!;
+    const canvas = container.querySelector("canvas")!;
+    mockRect(pane, { left: 0, top: 0, width: 288, height: 600 });
+    mockRect(canvas, { left: 0, top: 0, width: 288, height: 600 });
+
+    fireEvent.pointerDown(pane, { button: 0, clientX: 100, clientY: 500, pointerId: 1 });
+    // Spaced past the handler's 8 ms sampling floor, and far enough to clear TAP_SLOP, or
+    // the gesture never becomes a live drag and there is no finger to strand.
+    for (const y of [300, 120]) {
+      await new Promise((resolve) => setTimeout(resolve, 12));
+      fireEvent.pointerMove(pane, { clientX: 100, clientY: y, pointerId: 1 });
+    }
+    await waitFor(() =>
+      expect(
+        vi.mocked(viewInjectTouch).mock.calls.some((call) => call[1] === "down"),
+      ).toBe(true),
+    );
+    // Released well outside the pane: `mapToDevice` returns null for this point.
+    fireEvent.pointerUp(pane, { button: 0, clientX: 100, clientY: -80, pointerId: 1 });
+
+    await waitFor(() =>
+      expect(
+        vi.mocked(viewInjectTouch).mock.calls.some((call) => call[1] === "up"),
+      ).toBe(true),
     );
   });
 });

@@ -192,6 +192,12 @@ pub struct AppState {
     /// Dropping a `UiSessionContext` releases the lease and the activity permit and nothing
     /// else, so "the last holder releases it" is already the semantics rather than a new one.
     overlay_sessions: AsyncMutex<HashMap<String, Arc<UiSessionContext>>>,
+    /// One gate per device, so opening an overlay serialises against itself and nothing else.
+    ///
+    /// Held only while a `begin` is in flight for that phone. The map of gates is locked just
+    /// long enough to clone an `Arc` out, never across device I/O — the mistake this exists to
+    /// undo. Bounded by the number of distinct serials the app has seen, which is the fleet.
+    overlay_gates: AsyncMutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     command_admission: Arc<CommandAdmissionState>,
     background_stop: Arc<AtomicBool>,
     background_stopped: Arc<AtomicBool>,
@@ -730,6 +736,7 @@ impl AppState {
             nurture_engine,
             flow_mutations: FlowMutationCoordinator::default(),
             overlay_sessions: AsyncMutex::new(HashMap::new()),
+            overlay_gates: AsyncMutex::new(HashMap::new()),
             command_admission,
             background_stop: Arc::new(AtomicBool::new(false)),
             background_stopped: Arc::new(AtomicBool::new(false)),
@@ -742,19 +749,42 @@ impl AppState {
 
     /// Open one ManualControl session for the overlay, or reuse the one already held.
     ///
-    /// The map lock is held across `open_manual_session` so two begins cannot
-    /// race into DeviceBusy on the same UDID.
+    /// **Serialised per device, never across the fleet.** The map lock used to be held across
+    /// `open_manual_session`, with a comment reasoning only about one UDID — but
+    /// `overlay_sessions` is one map for every phone, and that open is not quick: on Android
+    /// it can reach `install_agent_apks`, which allows 180 s per APK, or an instrumentation
+    /// restart. Everything else that touches the map waited behind it: every gesture (through
+    /// `overlay_ui_session`), `group_input`, `end_overlay_session`, and — since the lease
+    /// borrow landed — every one of the eleven device rows through [`Self::device_lease`].
+    /// Opening one freshly plugged phone could freeze device work on all twenty.
+    ///
+    /// The property that comment wanted is still here, and it is the only one that was ever
+    /// needed: two begins on the *same* phone cannot race into DeviceBusy, because they
+    /// serialise on that phone's own gate. Two begins on different phones no longer meet.
     pub async fn begin_overlay_session(&self, udid: &str) -> Result<(), CommandError> {
-        let mut sessions = self.overlay_sessions.lock().await;
-        if sessions.contains_key(udid) {
+        let gate = {
+            let mut gates = self.overlay_gates.lock().await;
+            Arc::clone(
+                gates
+                    .entry(udid.to_string())
+                    .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+            )
+        };
+        let _opening = gate.lock().await;
+
+        if self.overlay_sessions.lock().await.contains_key(udid) {
             return Ok(());
         }
+        // No map lock held here, and that is the whole point of the gate above.
         let context = self
             .control
             .open_manual_session(udid, DeviceWorkOwner::ManualControl)
             .await
             .map_err(CommandError::from)?;
-        sessions.insert(udid.to_string(), Arc::new(context));
+        self.overlay_sessions
+            .lock()
+            .await
+            .insert(udid.to_string(), Arc::new(context));
         Ok(())
     }
 
