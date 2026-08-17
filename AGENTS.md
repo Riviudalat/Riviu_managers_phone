@@ -5170,6 +5170,55 @@ moi lan doi preset va moi lan xoay may la mot cua so cham bien mat — upstream 
 agent **von khong cham** — 130–280 ms mot click do tren chinh Galaxy S8+. Con so 1502 ms la
 `adb shell input`, **khong phai** agent, dung nham hai cai.
 
+### 9.83 Dang bai day MOI bundle sang MOI may — va hai backend hieu `source_root` khac nhau (17/08/2026)
+
+Tìm ra bởi một đợt soát đối kháng (115 agent, 36 nghi vấn, 21 sống sót sau ba vòng phản biện
+độc lập). Đây là lỗi **nặng nhất** trong 27 cái còn lại, vì nó là lỗi duy nhất đẩy dữ liệu sai
+**ra ngoài thế giới thật** và không rút lại được — §9.43 đã đo: không có đường xoá bài.
+
+`publish_commands.rs` lấy **một** `source_root` cho cả chiến dịch —
+`bundles[0].source_path.parent()` — rồi dựng nó cho **từng** assignment. Bố cục quản lý là
+`…/<request_id>/<bundle_id>/<ảnh>`, nên cái parent đó là thư mục **chứa mọi bundle**. Chuỗi
+thiệt hại đã truy hết:
+
+1. `riviu_pmd.py::_media_file_manifest` duyệt `source_root.iterdir()` và nhận **mọi** thư mục
+   con làm bundle → manifest và cú đẩy AFC chứa tất cả bundle, cho mọi máy.
+2. Agent nhập **mọi** ảnh trong manifest vào **một** album `Riviu-<importId>`.
+3. `post_one_assignment` bấm `bundle.images.len()` ô tính từ góc trên trái của album đó rồi gõ
+   caption **của assignment này**.
+
+Kết quả nhiều khả năng nhất: **máy A đăng ảnh của bundle B dưới caption của bundle A**. Trong
+khi `validate_publish_mapping` bắt buộc ghép một-một và UI in ra "Mapping tuần tự" — tức cặp
+ghép là hợp đồng của tính năng, và nó bị phá trong im lặng.
+
+**Cái bẫy suýt làm tôi sửa hỏng.** Bản vá đầu của tôi truyền thẳng `bundle.source_path`. Sai:
+sidecar iOS duyệt **thư mục con** rồi mới đọc file, nên đưa thẳng thư mục bundle (chứa file)
+cho ra manifest **rỗng** — không đẩy gì cả. Hai backend hiểu `source_root` khác hẳn nhau:
+
+| | iOS (`_media_file_manifest`) | Android (`publish::stage`) |
+|---|---|---|
+| mong đợi | thư mục **chứa các thư mục bundle** | thư mục **chứa file ảnh** |
+
+Đường Đăng bài **từ chối Android** ngay đầu (`refuse_devices_this_path_cannot_drive`), nên chỉ
+hình dạng iOS chạy ở đây. Bản vá đúng: `stage_one_bundle` chép ra một thư mục tạm
+`<campaign>/.transfer/<ordinal>/<bundle>/` chứa **đúng một** bundle. Tiền tố `.` là cố ý — cả
+hai backend đều bỏ qua mục bắt đầu bằng dấu chấm, nên thư mục tạm không thể bị nhầm là bundle.
+
+Chép chứ không trỏ, vì ba lý do: sửa sidecar là **sự kiện phát hành** (§14, phải đóng băng và
+chứng thực lại); đổi bố cục lúc tạo thì các chiến dịch **đã nằm trong DB** vẫn theo bố cục cũ;
+và Windows không dùng được symlink. Giá phải trả là chép ≤11 ảnh cục bộ, so với việc đẩy đúng
+ngần ấy byte qua USB — không đáng kể. Kèm một cái được: `copy_bundle_to_managed` **kiểm lại
+SHA-256 từng ảnh và caption ngay trước khi byte rời máy tính**, thứ mà đường cũ không làm.
+
+`device_campaign_id` = `<campaign>-<ordinal>`, nên mỗi máy có staging/manifest/album riêng.
+Không phá bước đăng: iOS chọn album bằng **toạ độ cố định**, và `importId` chỉ được *đọc lại*
+từ evidence chứ không bao giờ dựng lại.
+
+**Việc cho người vận hành, phần thiệt hại mà bản vá KHÔNG gỡ được:** máy nào đã chạy một chiến
+dịch nhiều bundle bằng bản lỗi thì đang giữ album `Riviu-*` chứa ảnh của mọi người. Bản vá tạo
+album **mới** (hash manifest đổi), nhưng bước đăng chọn album theo toạ độ cố định nên album cũ
+vẫn có thể nằm đúng chỗ đó. **Phải xoá thủ công các album `Riviu-*` còn sót trên những máy đó.**
+
 ### 9.82 Thay nong producer: giu hinh cu toi khi hinh moi co keyframe (17/08/2026)
 
 §9.81 cắt độ hở khi mở overlay từ 17,8 s xuống 1,65 s. Người vận hành vẫn báo "vẫn có delay",
