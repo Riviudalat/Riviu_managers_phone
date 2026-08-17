@@ -1,8 +1,10 @@
 import { memo } from "react";
-import { deviceModelOsLabel, tileStreamStateView } from "../types";
+import { deviceModelOsLabel } from "../types";
 import type { DeviceInfo } from "../types";
-import { useViewLive } from "../viewStore";
+import { streamPlaceholder } from "../streamPlaceholder";
+import { useViewDecodeFailed, useViewLive, useViewSize } from "../viewStore";
 import { PhoneCanvas } from "./PhoneCanvas";
+import { StreamPlaceholder } from "./StreamPlaceholder";
 
 interface Props {
   device: DeviceInfo;
@@ -31,20 +33,17 @@ function DeviceTileInner({
   onPrepare,
 }: Props) {
   const hasView = useViewLive(device.udid);
-  const streamState = tileStreamStateView(
-    device.tileStreamState,
+  const viewSize = useViewSize(device.udid);
+  // Read at last. This existed the whole time and nothing consulted it, so a stream every
+  // codec had already refused kept breathing the loading mark as if it were on its way.
+  const decodeFailed = useViewDecodeFailed(device.udid);
+  const { view } = streamPlaceholder({
     hasView,
-    Boolean(device.lastError),
-  );
-  /// Whether the operator has to do something, as opposed to just wait.
-  ///
-  /// Everything that is not an outright failure is on its way: `parked` is the *default*
-  /// state a device is listed with, not a decision to leave it stopped, and the keeper
-  /// starts a producer for every device it sees. Showing "No stream" and a Start button
-  /// during that told the operator their phone was idle and needed a nudge, which was never
-  /// true -- and before the leftover sweep was fixed it said so for the better part of
-  /// twenty seconds. A failure is the one case where nothing is coming without them.
-  const failed = streamState.state === "error" || Boolean(device.lastError);
+    hasGeometry: Boolean(viewSize?.width && viewSize.width > 0),
+    decodeFailed,
+    tileStreamState: device.tileStreamState,
+    lastError: device.lastError,
+  });
 
   return (
     <article
@@ -64,31 +63,11 @@ function DeviceTileInner({
           frame arrives — the "fixed frame" the operator asked for. */}
       <div className="dev-phone-screen">
         <PhoneCanvas udid={device.udid} surfaceId="tile" />
-        {!hasView &&
-          (failed ? (
-            <div className="dev-phone-empty">
-              <span>{device.lastError || "Không mở được stream"}</span>
-              <button
-                type="button"
-                className="link"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onPrepare(device.udid);
-                }}
-              >
-                Thử lại
-              </button>
-            </div>
-          ) : (
-            <div
-              className="dev-phone-loading"
-              role="status"
-              aria-label={`Đang mở stream ${device.name}`}
-              title="Đang mở stream…"
-            >
-              <img src="/logo.jpg" alt="" />
-            </div>
-          ))}
+        <StreamPlaceholder
+          view={view}
+          deviceName={device.name}
+          onRetry={() => onPrepare(device.udid)}
+        />
 
         <span className="dev-phone-conn">{device.connection.toUpperCase()}</span>
 

@@ -10,6 +10,8 @@ import {
   groupInput,
 } from "../api";
 import { FocusStream } from "./FocusStream";
+import { ToastHost } from "./ToastHost";
+import { resetToasts } from "../toastStore";
 
 vi.mock("../api", () => ({
   backupDevice: vi.fn(),
@@ -33,12 +35,19 @@ vi.mock("../api", () => ({
   viewRequestKeyframe: vi.fn(async () => true),
 }));
 
+// Flipped by the "no picture yet" block below. A phone that has never painted has neither a
+// frame nor an encoded size, and the pair has to move together — a size with no frame is a
+// state the store cannot produce.
+let dark = false;
+let decodeRefused = false;
+
 vi.mock("../viewStore", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../viewStore")>();
   return {
     ...actual,
-    useViewLive: () => true,
-    useViewSize: () => ({ width: 288, height: 600, generation: 1 }),
+    useViewLive: () => !dark,
+    useViewSize: () => (dark ? undefined : { width: 288, height: 600, generation: 1 }),
+    useViewDecodeFailed: () => decodeRefused,
   };
 });
 
@@ -300,5 +309,76 @@ describe("overlay panel rows", () => {
         "ime set com.sec.android.inputmethod/.SamsungKeypad",
       ),
     );
+  });
+});
+
+describe("FocusStream with no picture yet", () => {
+  beforeEach(() => {
+    vi.mocked(deviceTap).mockClear();
+    HTMLElement.prototype.setPointerCapture = vi.fn();
+    HTMLElement.prototype.releasePointerCapture = vi.fn();
+    // A phone that has never painted: no frame, and therefore no encoded size to map a
+    // gesture through. This is the state the operator's screenshot showed.
+    dark = true;
+  });
+  afterEach(() => {
+    dark = false;
+  });
+
+  function renderDark(device: DeviceInfo = fixture) {
+    resetToasts();
+    // `ToastHost` is mounted alongside on purpose: a toast pushed into the store that never
+    // reaches the screen would satisfy a store-level assertion and still leave the operator
+    // staring at nothing, which is the exact failure being fixed.
+    return render(
+      <>
+        <FocusStream
+          device={device}
+          index={3}
+          onClose={() => undefined}
+          groupUdids={[]}
+          groupMode={false}
+          devices={[device]}
+          onSelectDevice={() => undefined}
+        />
+        <ToastHost />
+      </>,
+    );
+  }
+
+  it("shows the loading mark instead of the old flat string", () => {
+    const { getByRole, queryByText } = renderDark();
+    expect(getByRole("status")).toBeTruthy();
+    expect(queryByText("Đang chờ stream…")).toBeNull();
+  });
+
+  it("says a gesture could not be sent rather than discarding it in silence", async () => {
+    // The whole complaint: while this state was up, every pointer handler early-returned on
+    // the missing frame size, so clicking the picture produced no tap, no toast and no log.
+    const { container, findByText } = renderDark();
+    const pane = container.querySelector("[data-testid='focus-screen']");
+    expect(pane).not.toBeNull();
+    mockRect(pane!, { left: 0, top: 0, width: 288, height: 600 });
+
+    fireEvent.pointerDown(pane!, { button: 0, clientX: 100, clientY: 200, pointerId: 1 });
+    fireEvent.pointerUp(pane!, { button: 0, clientX: 100, clientY: 200, pointerId: 1 });
+
+    expect(await findByText(/chưa gửi được thao tác/i)).toBeTruthy();
+    expect(vi.mocked(deviceTap)).not.toHaveBeenCalled();
+  });
+
+  it("offers a retry for a real failure and none for a codec refusal", () => {
+    const failed = { ...fixture, lastError: "scrcpy-server exited" };
+    const { getByRole, unmount } = renderDark(failed);
+    expect(getByRole("button", { name: "Thử lại" })).toBeTruthy();
+    unmount();
+
+    // Every codec candidate was refused, so retrying the same stream cannot help and the
+    // button must not be offered at all.
+    decodeRefused = true;
+    const { queryByRole, getByText } = renderDark();
+    expect(queryByRole("button", { name: "Thử lại" })).toBeNull();
+    expect(getByText(/không đọc được luồng này/i)).toBeTruthy();
+    decodeRefused = false;
   });
 });

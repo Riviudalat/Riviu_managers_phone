@@ -1449,18 +1449,16 @@ button:disabled {
   letter-spacing: 0.04em;
 }
 
-.screen-empty {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 0.25rem;
-  color: rgb(255 255 255 / 55%);
-  font-size: 0.85rem;
-  text-align: center;
-  padding: 0.75rem;
+/* `.screen-empty` lived here and drew "Đang chờ stream…" over the overlay. Both surfaces
+   share `StreamPlaceholder` now, so it has no users left. */
+
+/* The placeholder sits over a black video pane in the overlay and a dark tile in the grid,
+   so it needs light text in both — but `.dev-phone-empty` was written for the tile only. */
+.focus-phone-screen .dev-phone-empty {
+  color: rgb(255 255 255 / 72%);
+  /* The parent blocks pointer events while it has no geometry (below); the retry button is
+     the one thing inside it that must stay clickable. */
+  pointer-events: auto;
 }
 
 /* List / table view */
@@ -1845,7 +1843,10 @@ button.linkish,
    bitmap (~288×600 from scrcpy max_size=600) as a postage stamp in the
    middle of a 400×832 box, so taps on the image mapped against the black
    letterbox and missed. Tiles keep contain — they do not send gestures. */
-.focus-phone-screen img,
+/* `img` is deliberately NOT in this list. It was, left over from the base64-<img> era that
+   AGENTS.md §9.50 records the canvas replacing, and there has been no <img> under here since
+   -- until the loading mark moved in. Stretching an app icon to fill the phone pane is what
+   that rule would do to it. */
 .focus-phone-screen .phone-canvas,
 .focus-phone-screen .focus-touch {
   position: absolute;

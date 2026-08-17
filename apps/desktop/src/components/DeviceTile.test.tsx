@@ -10,9 +10,13 @@ vi.mock("./PhoneCanvas", () => ({
   PhoneCanvas: () => <div data-testid="phone-canvas" />,
 }));
 
-// No frames ever arrive here, which is precisely the state under test.
+// No frames ever arrive here, which is precisely the state under test. `decodeFailed` is a
+// let so one case can flip it without a second mock factory.
+let decodeFailed = false;
 vi.mock("../viewStore", () => ({
   useViewLive: () => false,
+  useViewSize: () => undefined,
+  useViewDecodeFailed: () => decodeFailed,
 }));
 
 function device(overrides: Partial<DeviceInfo> = {}): DeviceInfo {
@@ -43,7 +47,10 @@ function renderTile(overrides: Partial<DeviceInfo> = {}) {
   );
 }
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  decodeFailed = false;
+});
 
 describe("device tile, before any frame arrives", () => {
   it.each<TileStreamState | undefined>([undefined, "parked", "sampling", "stale"])(
@@ -67,6 +74,18 @@ describe("device tile, before any frame arrives", () => {
     expect(screen.getByRole("button", { name: "Thử lại" })).toBeTruthy();
     // A spinner next to a failure would promise a recovery nobody is attempting.
     expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("stops breathing the loading mark once the codec has refused the stream", () => {
+    // This tile spun the logo forever on an undecodable stream: `viewDecodeFailed` existed
+    // and nothing read it. And there is deliberately NO retry -- every codec candidate was
+    // already tried, so the button could not succeed.
+    decodeFailed = true;
+    renderTile({ tileStreamState: "sampling" });
+
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.getByText(/không đọc được luồng này/i)).toBeTruthy();
   });
 
   it("treats a reported error as a failure even when the state has not caught up", () => {

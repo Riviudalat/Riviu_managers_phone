@@ -41,7 +41,10 @@ import { pickFile } from "../pickFile";
 import { pickDirectory } from "../pickFile";
 import { requestConfirm } from "../confirmStore";
 import { pushToast, toastError } from "../toastStore";
-import { exportViewJpeg, useViewLive, useViewSize } from "../viewStore";
+import { exportViewJpeg, useViewDecodeFailed, useViewLive, useViewSize } from "../viewStore";
+import { streamPlaceholder } from "../streamPlaceholder";
+import { startDevicePreview } from "../startPreview";
+import { StreamPlaceholder } from "./StreamPlaceholder";
 import { mapClientToImage, paintedViewBox } from "../viewHit";
 import { FOCUS_ZOOM, loadZoom, stepZoom, storeZoom, wheelWantsZoom } from "../zoom";
 import { PhoneCanvas } from "./PhoneCanvas";
@@ -147,6 +150,14 @@ export function FocusStream({
   const encodedW = viewSize?.width && viewSize.width > 0 ? viewSize.width : 0;
   const encodedH = viewSize?.height && viewSize.height > 0 ? viewSize.height : 0;
   const aspect = encodedW > 0 && encodedH > 0 ? encodedH / encodedW : 2;
+  const decodeFailed = useViewDecodeFailed(device.udid);
+  const placeholder = streamPlaceholder({
+    hasView,
+    hasGeometry: encodedW > 0 && encodedH > 0,
+    decodeFailed,
+    tileStreamState: device.tileStreamState,
+    lastError: device.lastError,
+  });
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -740,7 +751,21 @@ export function FocusStream({
           style={{ width: frameWidth, height: frameWidth * aspect }}
           title="Ctrl + lăn chuột để phóng to / thu nhỏ"
           onPointerDown={(e) => {
-            if (busy || inFlight.current || e.button !== 0 || !encodedW || !encodedH) return;
+            if (busy || inFlight.current || e.button !== 0) return;
+            // Said out loud rather than dropped. A gesture needs the encoded frame size to
+            // map through, and without it this handler used to return in silence -- so on a
+            // phone that had not painted yet the operator could click the picture as long as
+            // they liked and receive no toast, no log and no reaction. "Nothing happens" is
+            // the worst thing a control surface can do.
+            if (!encodedW || !encodedH) {
+              pushToast(
+                "warn",
+                placeholder.view.kind === "failed"
+                  ? "Chưa điều khiển được: stream đang lỗi."
+                  : "Chưa có hình từ máy, chưa gửi được thao tác.",
+              );
+              return;
+            }
             const start = mapToDevice(e.currentTarget, e.clientX, e.clientY, encodedW, encodedH);
             if (!start) return;
             e.preventDefault();
@@ -836,7 +861,15 @@ export function FocusStream({
             fill
             className={`focus-touch${busy ? " is-busy" : ""}`}
           />
-          {!hasView && <div className="screen-empty">Đang chờ stream…</div>}
+          <StreamPlaceholder
+            view={placeholder.view}
+            deviceName={device.name}
+            onRetry={() => {
+              void startDevicePreview(device).catch((error) =>
+                toastError("Không mở lại được stream", error),
+              );
+            }}
+          />
         </div>
         <aside className="focus-menu" aria-label="Chức năng thiết bị">
           <header className="focus-menu-head">

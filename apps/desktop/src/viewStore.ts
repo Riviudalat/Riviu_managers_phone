@@ -415,6 +415,20 @@ export function useViewLive(udid: string): boolean {
   );
 }
 
+/// Whether every codec candidate refused this device's stream.
+///
+/// `viewDecodeFailed` has existed since the decoder gave up silently, and until now nothing
+/// read it — so an undecodable stream showed the same "still coming" state as one that was
+/// merely slow, forever. Both the add and the recovery `emit`, so this re-renders correctly
+/// in either direction.
+export function useViewDecodeFailed(udid: string): boolean {
+  return useSyncExternalStore(
+    (onStoreChange) => subscribe(udid, onStoreChange),
+    () => decodeFailed.has(udid),
+    () => false,
+  );
+}
+
 export function useViewSize(udid: string): ViewSize | undefined {
   return useSyncExternalStore(
     (onStoreChange) => subscribe(udid, onStoreChange),
