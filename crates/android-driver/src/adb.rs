@@ -701,6 +701,89 @@ pub fn parse_wm_density(stdout: &str) -> Option<u32> {
     override_density.or(physical)
 }
 
+/// The rendered display as it is *right now*, rotation included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayGeometry {
+    /// Pixels across the screen in its current orientation.
+    pub width: u32,
+    /// Pixels down the screen in its current orientation.
+    pub height: u32,
+    /// Density in dpi. Divide by 160 for the density-independent scale factor.
+    pub density: u32,
+    /// `Surface.ROTATION_*` as an index: 0, 1, 2, 3.
+    pub rotation: u8,
+}
+
+/// Parse `dumpsys display` for the size, density and rotation in force.
+///
+/// **This exists because `wm size` cannot answer the question.** Measured 16/08/2026 on
+/// SM-G955F, turned to landscape with Settings in front: `wm size` kept saying
+/// `Override size: 1080x2220` while `dumpsys display` moved to `real 2220 x 1080`.
+/// `wm size` reports the display's base configuration, which has no orientation in it at
+/// all (AGENTS.md §9.59). Anything that needs the geometry a coordinate was picked
+/// against has to read it here.
+///
+/// `mOverrideDisplayInfo` first, `mBaseDisplayInfo` as the fallback, for the same reason
+/// [`parse_wm_size`] prefers the override line: every phone on this fleet reports
+/// `real 1440 x 2960, density 560` as its base and `real 1080 x 2220, density 420` as its
+/// override, and the override is what is rendered. Reading the base puts every derived
+/// coordinate 33% out.
+///
+/// Parsed a line at a time rather than by matching the `DisplayInfo{...}` block, because
+/// that block contains nested braces (`modes [{id=1, ...}]`) — a `[^}]*}` scan stops
+/// inside `modes` and never reaches `rotation` or `density`. All three values sit on the
+/// one line, so the line is the unit.
+pub fn parse_display_geometry(stdout: &str) -> Option<DisplayGeometry> {
+    fn from_line(line: &str) -> Option<DisplayGeometry> {
+        // `real W x H`, not `app W x H`: the same line also carries `app`, `largest app`
+        // and `smallest app`, which exclude the system bars and are smaller.
+        let (width, height) = after(line, "real ").and_then(size_pair)?;
+        let density = after(line, "density ")?
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()?;
+        let rotation = after(line, "rotation ")?
+            .split_whitespace()
+            .next()?
+            .trim_end_matches(',')
+            .parse()
+            .ok()
+            .filter(|value| *value < 4)?;
+        (width > 0 && height > 0 && density > 0).then_some(DisplayGeometry {
+            width,
+            height,
+            density,
+            rotation,
+        })
+    }
+
+    fn after<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+        line.find(key).map(|at| &line[at + key.len()..])
+    }
+
+    fn size_pair(rest: &str) -> Option<(u32, u32)> {
+        let mut parts = rest.split_whitespace();
+        let width = parts.next()?.parse().ok()?;
+        if parts.next()? != "x" {
+            return None;
+        }
+        let height = parts.next()?.trim_end_matches(',').parse().ok()?;
+        Some((width, height))
+    }
+
+    for key in ["mOverrideDisplayInfo=", "mBaseDisplayInfo="] {
+        if let Some(found) = stdout
+            .lines()
+            .filter(|line| line.contains(key))
+            .find_map(from_line)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
 /// Parse the pid out of `pidof <package>`; absent output means not running.
 pub fn parse_pidof(stdout: &str) -> Option<u64> {
     stdout.split_whitespace().next()?.parse().ok()
@@ -1228,6 +1311,92 @@ mod tests {
         let stdout = "package:com.dup.app\npackage:com.dup.app\n";
 
         assert_eq!(parse_package_list(stdout), ["com.dup.app"]);
+    }
+
+    /// One `dumpsys display` from SM-G955F, 17/08/2026, copied verbatim.
+    ///
+    /// Kept whole rather than trimmed to the interesting parts, because the parts that
+    /// break parsers are the ones a summary would drop: the nested `modes [{...}]` braces
+    /// and the `app`/`largest app`/`smallest app` sizes that sit beside `real`.
+    const FLEET_DUMPSYS_DISPLAY: &str = concat!(
+        "  mDefaultViewport=DisplayViewport{valid=true, displayId=0, orientation=0, ",
+        "logicalFrame=Rect(0, 0 - 1080, 2220), deviceWidth=1440, deviceHeight=2960}\n",
+        "  DisplayDeviceInfo{\"Built-in Screen\": uniqueId=\"local:0\", 1440 x 2960, ",
+        "modeId 1, density 560, 522.514 x 525.762 dpi, touch INTERNAL, rotation 0, ",
+        "type BUILT_IN, state ON}\n",
+        "    mBaseDisplayInfo=DisplayInfo{\"Built-in Screen\", app 1440 x 2960, ",
+        "real 1440 x 2960, largest app 1440 x 2960, smallest app 1440 x 2960, mode 1, ",
+        "modes [{id=1, width=1440, height=2960, fps=60.000004}], colorMode -1, ",
+        "rotation 0, density 560 (522.514 x 525.762) dpi, layerStack 0, state ON}\n",
+        "    mOverrideDisplayInfo=DisplayInfo{\"Built-in Screen\", app 1080 x 2094, ",
+        "real 1080 x 2220, largest app 2094 x 2031, smallest app 1080 x 1017, mode 1, ",
+        "modes [{id=1, width=1440, height=2960, fps=60.000004}], colorMode -1, ",
+        "rotation 0, density 420 (391.8855 x 394.32153) dpi, layerStack 0, state ON}\n",
+    );
+
+    #[test]
+    fn the_display_read_is_the_one_that_is_rendered_not_the_panel() {
+        // 1080x2220 at 420, not 1440x2960 at 560. Reading the base line would put every
+        // derived coordinate 33% out on every phone in this fleet -- the same trap
+        // `parse_wm_size` documents for Physical vs Override.
+        let geometry = parse_display_geometry(FLEET_DUMPSYS_DISPLAY).expect("geometry");
+        assert_eq!(
+            geometry,
+            DisplayGeometry {
+                width: 1080,
+                height: 2220,
+                density: 420,
+                rotation: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn a_rotated_display_reports_the_size_it_is_actually_showing() {
+        // The whole reason this parser exists instead of `wm size`: measured 16/08/2026,
+        // a landscape SM-G955F kept reporting `Override size: 1080x2220` to `wm size`
+        // while `dumpsys display` moved to `real 2220 x 1080`.
+        let landscape = FLEET_DUMPSYS_DISPLAY
+            .replace("real 1080 x 2220", "real 2220 x 1080")
+            .replace("rotation 0, density 420", "rotation 1, density 420");
+        let geometry = parse_display_geometry(&landscape).expect("geometry");
+        assert_eq!((geometry.width, geometry.height), (2220, 1080));
+        assert_eq!(geometry.rotation, 1);
+    }
+
+    #[test]
+    fn a_display_with_no_override_falls_back_to_the_panel_it_has() {
+        // Not every phone sets an override. Falling back is right; guessing is not.
+        let base_only = FLEET_DUMPSYS_DISPLAY
+            .lines()
+            .filter(|line| !line.contains("mOverrideDisplayInfo="))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let geometry = parse_display_geometry(&base_only).expect("geometry");
+        assert_eq!(
+            (geometry.width, geometry.height, geometry.density),
+            (1440, 2960, 560)
+        );
+    }
+
+    #[test]
+    fn an_unreadable_display_dump_is_none_rather_than_a_plausible_guess() {
+        // A snapshot built from a half-read dump would be persisted, hashed into a
+        // profile id and enforced at run time. Nothing is better than nearly.
+        assert!(parse_display_geometry("").is_none());
+        assert!(
+            parse_display_geometry("mOverrideDisplayInfo=DisplayInfo{app 1080 x 2094}").is_none()
+        );
+        // Size and density but no rotation: still not enough to know the orientation.
+        assert!(parse_display_geometry(
+            "mOverrideDisplayInfo=DisplayInfo{real 1080 x 2220, density 420 dpi}"
+        )
+        .is_none());
+        // A zero dimension is a dump that did not mean it.
+        assert!(parse_display_geometry(
+            "mOverrideDisplayInfo=DisplayInfo{real 0 x 2220, rotation 0, density 420 dpi}"
+        )
+        .is_none());
     }
 
     #[test]

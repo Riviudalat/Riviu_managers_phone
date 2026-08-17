@@ -32,6 +32,7 @@
 
 pub mod adb;
 pub mod agent;
+mod capability;
 pub mod driver;
 pub mod frames;
 pub mod publish;

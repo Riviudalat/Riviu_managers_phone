@@ -5170,6 +5170,53 @@ moi lan doi preset va moi lan xoay may la mot cua so cham bien mat — upstream 
 agent **von khong cham** — 130–280 ms mot click do tren chinh Galaxy S8+. Con so 1502 ms la
 `adb shell input`, **khong phai** agent, dung nham hai cai.
 
+### 9.85 Flow chay that tren Android: cai `inspect_device_for_target` con thieu (17/08/2026)
+
+`AndroidDriver` **không cài** `DeviceDriver::inspect_device_for_target`, nên mặc định của
+trait trả `unsupported`, và **mọi** lượt Flow trên **mọi** máy Android hỏng ngay ở tiền kiểm.
+Không tầng nào chặn: giao diện vẫn liệt kê cả 20 máy là hợp lệ, `resolve_targets` chỉ lọc
+theo kết nối. Bấm "Chạy Flow" trên dàn Android = 20/20 thất bại chắc chắn.
+
+Bốn quyết định phải nói rõ, vì cả bốn trường đều được **đặt tên trên iOS** và chép nguyên
+sang Android sẽ là nói dối trong một bản ghi định danh được lưu và băm:
+
+| Trường | Trên iOS | Trên Android |
+|---|---|---|
+| `executable_name` | Mach-O trong bundle | **component instrumentation** driver này khởi động (`…server.test/…AndroidJUnitRunner`) — thứ thực sự chạy |
+| `signer_identity_sha256` | băm chuỗi signer trong provisioning profile | **SHA-256 của chính APK đã cài**, đọc bằng `sha256sum` trên máy. adb không có chuỗi tương đương: `dumpsys package` in `hashCode` 32-bit chứ không phải digest |
+| `protected_auth_ready` | route có token đã trả lời | agent trả lời **và đọc được accessibility tree**. Server bind cổng nhưng mất `UiAutomation` vẫn "khoẻ" và hỏng mọi query — đó là đúng thứ cần chứng minh |
+| `transport` | usbmux / RSD | thêm biến thể `AdbTransport`. Thêm variant là **cộng thêm** ở cả hai phía ranh giới lưu trữ: không hàng cũ nào chứa `adb`, không giá trị iOS nào đổi — mà giá trị này là hash material |
+
+**Hình học phải đọc bằng `dumpsys display`, không phải `wm size`.** §9.59 đã đo: máy xoay
+ngang thì `wm size` vẫn trả `Override size: 1080x2220` trong khi `dumpsys display` chuyển
+sang `real 2220 x 1080`. Một dòng `mOverrideDisplayInfo=` chứa cả ba thứ cần —
+`real WxH`, `rotation`, `density` — nên là **một** round trip. Ưu tiên dòng override chứ
+không phải base, cùng cái bẫy `parse_wm_size` đã ghi: cả dàn báo base `1440x2960 density 560`
+và override `1080x2220 density 420`, đọc nhầm là lệch 33%.
+
+Parse **theo dòng**, không theo khối `DisplayInfo{...}`: khối đó có ngoặc lồng
+(`modes [{id=1, …}]`), nên quét `[^}]*}` dừng giữa `modes` và không bao giờ tới
+`rotation`/`density`.
+
+**Chứng minh trên phần cứng, không phải bằng unit test.** Test với dữ liệu cố định chỉ chứng
+minh snapshot *lắp* đúng; chỉ máy thật mới chứng minh các dữ kiện đó *đọc được*. Hai công cụ
+mới, và cả hai chạy trên SM-G955F đang cắm:
+
+- `cargo run -p riviu-android-driver --example flow_qualify -- <serial>` — snapshot đầy đủ
+  trong **1317 ms**, mọi cổng tiền kiểm xanh, `qualified_geometry_profile_id` tính được.
+- `cargo run -p riviu-managers-phone --bin live_flow_android -- <serial>` — một Flow thật
+  (`Start → LaunchApp(TikTok) → End`, `ResourceClass::UiSession`, bằng chứng
+  `ActiveAppEquals`) chạy qua `FlowRuntime` đã ship: **Succeeded**, cả ba node Succeeded.
+
+Một chi tiết đo được đáng nhớ: trong 20 máy, có máy báo `density 480` còn lại báo `420` ở
+cùng `1080x2220`. Nên `profile_id` của chúng **khác nhau**, và phải khác — một toạ độ chọn
+trên máy này là một điểm logic khác trên máy kia.
+
+Điều còn lại chưa sửa, ghi ra vì nó không phải chuyện Android: `PmdDriver::inspect_device_for_target`
+trả cứng `protected_auth_ready: false` và `geometry: None`, nên **iOS thật cũng không qua nổi
+tiền kiểm** của một Flow cần UI session. Chỉ `MockIosDriver` trả snapshot đầy đủ. Đó là một
+lỗi riêng, chưa nằm trong 27 cái của đợt này.
+
 ### 9.84 Go han dang nhap: mat khau plaintext trong cot ten `password_hash` (17/08/2026)
 
 `register_user` ghi mật khẩu **nguyên văn** vào cột tên `password_hash`, và `login_user` so sánh

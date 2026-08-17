@@ -418,6 +418,12 @@ pub struct AndroidDriver {
     /// serial -> a live helper client. Same reuse rule as [`Self::agents`]:
     /// opening a second forward per session leaks a host port.
     helpers: Mutex<HashMap<String, crate::riviu_agent::HelperClient>>,
+    /// serial -> the last thing we proved about its agent.
+    ///
+    /// `DeviceDriver::cached_agent_status` is synchronous and Flow's preflight reads it, so
+    /// what the async paths learn has to be left somewhere a non-async reader can find it.
+    /// The iOS driver keeps the same map for the same reason.
+    agent_statuses: Mutex<HashMap<String, riviu_core::AgentStatus>>,
 }
 
 impl AndroidDriver {
@@ -509,6 +515,7 @@ impl AndroidDriver {
             forwarded: Mutex::new(HashSet::new()),
             riviu_agent_apk,
             helpers: Mutex::new(HashMap::new()),
+            agent_statuses: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1707,6 +1714,170 @@ impl AndroidDriver {
         Ok((f64::from(width), f64::from(height)))
     }
 
+    /// `versionName` and `versionCode` for one installed package.
+    ///
+    /// A package that is not installed is a distinct outcome from one whose dump could not
+    /// be parsed, and both say so: Flow's preflight message is the only thing an operator
+    /// gets when a run refuses, so "TikTok is not installed" must not arrive as "could not
+    /// read the version".
+    async fn package_identity(
+        &self,
+        serial: &str,
+        package: &str,
+    ) -> anyhow::Result<crate::capability::PackageIdentity> {
+        let package = adb::validate_package_name(package)?;
+        let dumpsys = self
+            .adb
+            .shell(serial, &format!("dumpsys package {package}"))
+            .await
+            .with_context(|| format!("read the installed record for {package} on {serial}"))?;
+        let version = riviu_core::tiktok_labels::parse_version_name(&dumpsys);
+        let build = riviu_core::tiktok_labels::parse_version_code(&dumpsys);
+        match (version, build) {
+            (Some(version), Some(build)) => Ok(crate::capability::PackageIdentity {
+                package: package.to_string(),
+                version: version.to_string(),
+                build: build.to_string(),
+            }),
+            _ if !dumpsys.contains(&format!("Package [{package}]")) => {
+                Err(anyhow!("{package} is not installed on {serial}"))
+            }
+            _ => Err(anyhow!(
+                "{package} is installed on {serial} but its version could not be read from \
+                 `dumpsys package`"
+            )),
+        }
+    }
+
+    /// SHA-256 of an installed package's APK, computed on the device.
+    ///
+    /// `pm path` then `sha256sum`, in one shell round trip — measured 225 ms end to end on
+    /// an SM-G955F, which is affordable on a path that runs once per device per Flow run.
+    ///
+    /// The two are chained on the phone rather than here so the path never crosses back
+    /// through the host: `pm path` prints `package:/data/app/…/base.apk`, and a serial with
+    /// two installed splits would otherwise need the host to decide which line to hash.
+    async fn installed_apk_sha256(&self, serial: &str, package: &str) -> anyhow::Result<String> {
+        let package = adb::validate_package_name(package)?;
+        let stdout = self
+            .adb
+            .shell(
+                serial,
+                &format!("sha256sum \"$(pm path {package} | head -n 1 | cut -d: -f2)\""),
+            )
+            .await
+            .with_context(|| format!("hash the installed {package} APK on {serial}"))?;
+        let digest = stdout.split_whitespace().next().unwrap_or_default();
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(anyhow!(
+                "could not hash the installed {package} APK on {serial}: `sha256sum` \
+                 answered {stdout:?}"
+            ));
+        }
+        Ok(digest.to_ascii_lowercase())
+    }
+
+    /// The screen as it is being rendered right now, rotation included.
+    ///
+    /// **`dumpsys display`, not `wm size`.** The latter reports the display's base
+    /// configuration, which has no orientation in it, so a landscape phone answers with its
+    /// portrait dimensions and every coordinate derived from them is wrong (AGENTS.md
+    /// §9.59, and the doc on [`adb::parse_display_geometry`]).
+    async fn display_geometry(&self, serial: &str) -> anyhow::Result<adb::DisplayGeometry> {
+        let stdout = self.adb.shell(serial, "dumpsys display").await?;
+        adb::parse_display_geometry(&stdout).ok_or_else(|| {
+            anyhow!(
+                "could not read the current display geometry from `dumpsys display` on {serial}"
+            )
+        })
+    }
+
+    /// The instrumentation component this driver starts to bring the agent up.
+    fn agent_runner() -> String {
+        format!("{AGENT_TEST_PACKAGE}/{AGENT_RUNNER}")
+    }
+
+    /// `(model, release)` — what a capability snapshot calls product type and OS version.
+    ///
+    /// Read fresh rather than taken from the cached `DeviceInfo`, because that one carries
+    /// a model *hint* from `adb devices -l` which can be the codename (`dream2lte`) rather
+    /// than the marketing model (`SM-G955F`), and this value is hashed into a device
+    /// profile id that has to mean the same thing every time it is computed.
+    async fn device_identity(&self, serial: &str) -> anyhow::Result<(String, String)> {
+        let stdout = self
+            .adb
+            .shell(
+                serial,
+                &format!(
+                    "getprop ro.product.model; echo {sep}; getprop ro.build.version.release",
+                    sep = FIELD_SEPARATOR
+                ),
+            )
+            .await?;
+        let mut sections = stdout.split(FIELD_SEPARATOR);
+        let model = sections.next().unwrap_or_default().trim().to_string();
+        let release = sections.next().unwrap_or_default().trim().to_string();
+        if model.is_empty() || release.is_empty() {
+            return Err(anyhow!(
+                "could not read the model and Android release from {serial}"
+            ));
+        }
+        Ok((model, release))
+    }
+
+    /// Remember what we last proved about a serial's agent, for the synchronous readers.
+    ///
+    /// `DeviceDriver::cached_agent_status` cannot await, and Flow's preflight reads it to
+    /// decide whether the phone has a usable control surface. So every path that learns
+    /// something about the agent records it here, exactly as the iOS driver does with
+    /// `agent_statuses`.
+    fn publish_agent_status(&self, status: riviu_core::AgentStatus) {
+        self.agent_statuses
+            .lock()
+            .insert(status.udid.clone(), status);
+    }
+
+    fn agent_status_for(
+        &self,
+        serial: &str,
+        state: riviu_core::AgentState,
+        identity: Option<&crate::capability::PackageIdentity>,
+        message: Option<String>,
+    ) -> riviu_core::AgentStatus {
+        let ready = state == riviu_core::AgentState::Ready;
+        riviu_core::AgentStatus {
+            udid: serial.to_string(),
+            state,
+            artifact_id: AGENT_PACKAGE.to_string(),
+            artifact_version: identity
+                .map(|value| value.version.clone())
+                .unwrap_or_default(),
+            bundle_id: AGENT_PACKAGE.to_string(),
+            protocol_version: crate::capability::PROTOCOL_VERSION,
+            // What the agent can do is a property of this driver, not of the install: the
+            // uiautomator2 server on any phone this project drives does all four, and the
+            // measurements behind that claim are in `agent.rs`. Reporting them only when
+            // ready keeps a phone that cannot be driven from advertising capabilities.
+            features: if ready {
+                ["stream", "tap", "swipe", "text"]
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            installed_version: identity.map(|value| value.version.clone()),
+            installed_build: identity.map(|value| value.build.clone()),
+            // No token to be ready or not: the uiautomator2 server has no auth. What this
+            // stands for on Android is the same thing `protected_auth_ready` stands for in
+            // the snapshot — the control surface answered and could see.
+            auth_ready: ready,
+            mjpeg_ready: ready,
+            session_ready: ready,
+            message,
+        }
+    }
+
     /// Open a session as the concrete type.
     ///
     /// `start_ui_session` boxes this. Callers that need the Android-specific
@@ -2372,6 +2543,93 @@ impl DeviceDriver for AndroidDriver {
 
     fn supports_verified_app_termination(&self, _udid: &str) -> bool {
         true
+    }
+
+    fn cached_agent_status(&self, udid: &str) -> riviu_core::AgentStatus {
+        self.agent_statuses
+            .lock()
+            .get(udid)
+            .cloned()
+            .unwrap_or_else(|| riviu_core::AgentStatus::unknown(udid))
+    }
+
+    /// Bring the agent up, prove it can see, and record what was found.
+    ///
+    /// The proof is the point. `ensure_agent` already refuses to hand back a server that
+    /// answers `/status` but cannot read the accessibility tree, so reaching the end of it
+    /// is what "ready" means here; anything less is reported as needing repair, with the
+    /// message the phone gave.
+    async fn preflight_agent(&self, udid: &str) -> anyhow::Result<riviu_core::AgentStatus> {
+        let status = match self.ensure_agent(udid).await {
+            Ok(_) => {
+                let identity = self.package_identity(udid, AGENT_PACKAGE).await.ok();
+                self.agent_status_for(udid, riviu_core::AgentState::Ready, identity.as_ref(), None)
+            }
+            Err(error) => self.agent_status_for(
+                udid,
+                riviu_core::AgentState::RepairRequired,
+                None,
+                Some(format!("{error:#}")),
+            ),
+        };
+        self.publish_agent_status(status.clone());
+        Ok(status)
+    }
+
+    /// Repair is the same operation as preflight here, and that is not a shortcut.
+    ///
+    /// `ensure_agent` installs both APK halves when they are missing and restarts the
+    /// instrumentation when the server has gone blind — the two things a repair could do.
+    async fn repair_agent(&self, udid: &str) -> anyhow::Result<riviu_core::AgentStatus> {
+        let status = self.preflight_agent(udid).await?;
+        if status.state == riviu_core::AgentState::Ready {
+            Ok(status)
+        } else {
+            Err(anyhow!(
+                "{}",
+                status
+                    .message
+                    .unwrap_or_else(|| format!("the agent on {udid} could not be repaired"))
+            ))
+        }
+    }
+
+    /// Everything Flow's preflight needs to qualify this phone for this target app.
+    ///
+    /// Implemented 17/08/2026. Before that the trait default returned a typed `unsupported`
+    /// and every Flow run on every Android device failed here, while the UI went on listing
+    /// those devices as valid targets.
+    ///
+    /// Ordered so the cheapest refusal comes first. A phone without the target app installed
+    /// is the common miss, and finding that out costs one `dumpsys`; there is no point
+    /// hashing an APK for a device that was never going to qualify.
+    async fn inspect_device_for_target(
+        &self,
+        udid: &str,
+        target_bundle_id: &str,
+    ) -> anyhow::Result<riviu_core::DeviceCapabilitySnapshot> {
+        let target = self.package_identity(udid, target_bundle_id).await?;
+        let agent = self.package_identity(udid, AGENT_PACKAGE).await?;
+        let agent_apk_sha256 = self.installed_apk_sha256(udid, AGENT_PACKAGE).await?;
+        let display = self.display_geometry(udid).await?;
+        let (product_type, os_version) = self.device_identity(udid).await?;
+        // Last, and live: everything above describes what is installed, this asks whether
+        // the control surface is answering *now*. Recorded through the same path
+        // `preflight_agent` uses so a synchronous reader sees the same verdict.
+        let control_surface_live =
+            self.preflight_agent(udid).await?.state == riviu_core::AgentState::Ready;
+        Ok(crate::capability::build_snapshot(
+            crate::capability::AndroidCapabilityFacts {
+                agent,
+                target,
+                agent_apk_sha256,
+                display,
+                product_type,
+                os_version,
+                control_surface_live,
+                runner: Self::agent_runner(),
+            },
+        ))
     }
 
     /// Yes, and measured: Vietnamese reaches TikTok's comment box intact

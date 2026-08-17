@@ -582,6 +582,23 @@ pub fn parse_version_name(dumpsys: &str) -> Option<&str> {
     })
 }
 
+/// The build number out of `dumpsys package <pkg>`.
+///
+/// The Android counterpart of an iOS `CFBundleVersion`, and read for the same reason: a
+/// `DeviceCapabilitySnapshot` records a target app as name *and* build, because a
+/// hot-fixed build can ship under an unchanged `versionName`.
+///
+/// Unlike `versionName` this does not sit alone on its line — every phone on this fleet
+/// prints `versionCode=380302 minSdk=21 targetSdk=34` — so the value is taken up to the
+/// first space rather than to the end of the line.
+pub fn parse_version_code(dumpsys: &str) -> Option<&str> {
+    dumpsys.lines().find_map(|line| {
+        let at = line.find("versionCode=")? + "versionCode=".len();
+        let value = line[at..].split_whitespace().next()?;
+        (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())).then_some(value)
+    })
+}
+
 /// Every label set that has actually been read off a device.
 ///
 /// Keep this list honest: an entry means somebody dumped the accessibility tree on
@@ -957,6 +974,26 @@ mod tests {
         assert_eq!(parse_version_name("    versionName=\n"), None);
         assert_eq!(parse_version_name("no such field"), None);
         assert_eq!(parse_version_name(""), None);
+    }
+
+    #[test]
+    fn the_version_code_stops_at_the_field_that_follows_it() {
+        // Verbatim from `dumpsys package com.ss.android.ugc.trill` on SM-G955F,
+        // 17/08/2026. Unlike `versionName` this shares its line, so a parser that read to
+        // the end of the line would record the build as "380302 minSdk=21 targetSdk=34".
+        let dumpsys = "  Package [com.ss.android.ugc.trill] (a1b2):\n    \
+                       versionCode=380302 minSdk=21 targetSdk=34\n    versionName=38.3.2\n";
+        assert_eq!(parse_version_code(dumpsys), Some("380302"));
+        assert_eq!(
+            parse_version_code("    versionCode=274 minSdk=26\n"),
+            Some("274")
+        );
+        // Digits only: anything else means the line was not what we thought it was, and a
+        // build number is hashed into a device profile id -- nearly right is wrong.
+        assert_eq!(parse_version_code("    versionCode=unknown\n"), None);
+        assert_eq!(parse_version_code("    versionCode=\n"), None);
+        assert_eq!(parse_version_code("no such field"), None);
+        assert_eq!(parse_version_code(""), None);
     }
 
     #[test]
