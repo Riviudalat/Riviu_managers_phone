@@ -208,15 +208,12 @@ pub async fn flow_coordinate_frame(
     validate_exact(&udid, "device UDID")?;
     validate_exact(&bundle_id, "bundle ID")?;
 
-    // Retain and decode before acquiring the device. The command never starts a
-    // stream or asks WDA for a screenshot.
-    let frame = state.streams.latest(&udid).ok_or_else(|| {
-        device_error(
-            "FrameUnavailable",
-            "No current stream frame is available",
-            &udid,
-        )
-    })?;
+    // Retain and decode before acquiring the device. The command never asks WDA for a
+    // screenshot, and on a device whose frames are already in the hub it starts nothing.
+    let frame = match state.streams.latest(&udid) {
+        Some(frame) => frame,
+        None => borrow_one_frame(&state, &udid).await?,
+    };
     let decoded = decode_and_hash_artifact(frame.as_slice()).map_err(|_| {
         device_error(
             "FrameInvalid",
@@ -367,6 +364,61 @@ fn device_error(code: &'static str, message: &'static str, udid: &str) -> Comman
     let mut error = CommandError::code(code, message);
     error.udid = Some(udid.to_string().into_boxed_str());
     error
+}
+
+/// How long a borrowed producer is given to publish its first frame.
+///
+/// The same 12 s the Android interaction handoff allows for one decoded frame. It is a
+/// failure deadline, not a poll interval: a phone that has not produced anything in twelve
+/// seconds is not slow, it is not producing.
+const BORROWED_FRAME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+
+/// Start a producer just long enough to take one frame, then give it back.
+///
+/// Android devices publish **nothing** into the host's JPEG hub during ordinary use: their
+/// tiles are on the H.264 view path, and `background_sample_candidate` skips Android
+/// outright. So "no current stream frame is available" was not a device that had gone
+/// quiet — it was the permanent, unavoidable state of every phone on this fleet, and it is
+/// what made the Flow inspector's "Chọn toạ độ" and "Chụp mẫu từ thiết bị" buttons
+/// unanswerable no matter how long an operator waited.
+///
+/// Borrowed rather than left running, and stopped rather than parked: the caller has the
+/// bytes by then, and a producer left behind by a picker would sit against the device's
+/// stream budget until something else happened to stop it.
+async fn borrow_one_frame(state: &AppState, udid: &str) -> Result<riviu_core::Frame, CommandError> {
+    let lease = state
+        .control
+        .reserve_background_stream(udid)
+        .map_err(CommandError::from)?;
+    let mut stream = riviu_core::FrameSource::subscribe(&state.streams, udid);
+    let started = state.control.start_background_stream(&lease).await;
+    let frame = match started {
+        Ok(_) => {
+            // The hub is checked again first: a producer can publish between the start
+            // returning and this subscription being read.
+            match state.streams.latest(udid) {
+                Some(frame) => Ok(frame),
+                None => tokio::time::timeout(BORROWED_FRAME_TIMEOUT, stream.next())
+                    .await
+                    .ok()
+                    .flatten()
+                    .ok_or_else(|| {
+                        device_error(
+                            "FrameUnavailable",
+                            "The device produced no frame to pick coordinates on",
+                            udid,
+                        )
+                    }),
+            }
+        }
+        Err(error) => Err(CommandError::from(error)),
+    };
+    // Stopped whether or not a frame arrived. A borrowed producer that outlives its
+    // borrower is exactly the leak the budget exists to prevent.
+    if let Err(error) = state.control.stop_background_stream(&lease).await {
+        log::warn!("could not stop the borrowed coordinate producer on {udid}: {error}");
+    }
+    frame
 }
 
 fn orientation_name(orientation: ScreenOrientation) -> &'static str {

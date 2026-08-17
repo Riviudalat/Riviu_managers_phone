@@ -16,7 +16,14 @@
 //! run needs an exclusive lease, a live agent and a geometry profile — everything a
 //! bridge-only flow would skip. Its side effect is opening an app that is already on the
 //! phone, and its evidence is `ActiveAppEquals`, which the driver reads back from
-//! `mCurrentFocus`. Nothing is typed, tapped or posted.
+//! `mCurrentFocus`. Nothing is typed or posted.
+//!
+//! `--tap` inserts an image-coordinate Tap in the middle, which is the *other* thing that
+//! could not work on Android. The runtime refuses to dispatch a coordinate unless the live
+//! frame matches the device's qualified geometry, and this driver's minicap producer ran at
+//! half scale, so the check could never pass. Adding the flag is how that is proved rather
+//! than asserted — the target is built from the device's own snapshot, so a failure here is
+//! the runtime frame disagreeing, never the plan.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,7 +32,7 @@ use riviu_core::db::Database;
 use riviu_core::{
     release_one_catalog, ActionKind, DeviceControlPlane, DeviceDriver, DeviceRegistry,
     DeviceWorkCoordinator, EventBus, EvidenceSpec, FlowArtifactStore, FlowDocumentV2, FlowEdge,
-    FlowNode, FlowRuntime, FlowRuntimeDeps, FlowTargetSelection,
+    FlowNode, FlowRuntime, FlowRuntimeDeps, FlowTargetSelection, ScreenOrientation,
 };
 use riviu_ios_driver::StreamHub;
 use riviu_script_engine::compile_flow;
@@ -104,6 +111,54 @@ async fn main() -> anyhow::Result<()> {
         FlowEdge::flow(launch_id, end),
     ];
     document.revision = 1;
+
+    if std::env::args().any(|arg| arg == "--tap") {
+        let snapshot = android.inspect_device_for_target(&serial, &target).await?;
+        let geometry = snapshot.geometry.as_ref().expect("qualified geometry");
+        let profile_id = riviu_core::qualified_geometry_profile_id(&snapshot)
+            .map_err(|reason| anyhow::anyhow!("geometry profile: {reason}"))?;
+        println!(
+            "tap target  {}x{} {:?}",
+            geometry.pixel_width, geometry.pixel_height, geometry.orientation
+        );
+        // Middle of the screen: on a TikTok feed that is the video itself, so the tap
+        // pauses or resumes playback and nothing is posted, followed or liked.
+        let mut tap = FlowNode::new(
+            ActionKind::Tap,
+            json!({
+                "point": {
+                    "x": f64::from(geometry.pixel_width) / 2.0,
+                    "y": f64::from(geometry.pixel_height) / 2.0,
+                    "imageWidth": geometry.pixel_width,
+                    "imageHeight": geometry.pixel_height,
+                    "orientation": match geometry.orientation {
+                        ScreenOrientation::Portrait => "portrait",
+                        ScreenOrientation::PortraitUpsideDown => "portraitUpsideDown",
+                        ScreenOrientation::LandscapeLeft => "landscapeLeft",
+                        ScreenOrientation::LandscapeRight => "landscapeRight",
+                    },
+                    "profileId": profile_id,
+                }
+            }),
+        );
+        // The only evidence Tap allows, and it is stated in *frame* pixels -- which is the
+        // second reason the producer's scale matters. A rectangle authored against the
+        // device's geometry is out of bounds on a half-scale frame.
+        tap.postcondition = Some(EvidenceSpec::FrameRegionChanged {
+            x: geometry.pixel_width / 4,
+            y: geometry.pixel_height / 4,
+            width: geometry.pixel_width / 2,
+            height: geometry.pixel_height / 2,
+            minimum_distance: 1,
+        });
+        let tap_id = tap.id;
+        document.nodes.push(tap);
+        document.edges = vec![
+            FlowEdge::flow(start, launch_id),
+            FlowEdge::flow(launch_id, tap_id),
+            FlowEdge::flow(tap_id, end),
+        ];
+    }
 
     let compiled = compile_flow(&document, &release_one_catalog())
         .map_err(|errors| anyhow::anyhow!("flow did not compile: {errors:?}"))?;

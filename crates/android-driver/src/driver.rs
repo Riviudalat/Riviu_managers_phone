@@ -576,6 +576,32 @@ impl AndroidDriver {
         Ok(())
     }
 
+    /// What size the producer's frames come out at.
+    ///
+    /// **Native, not half, and that is a correctness choice rather than a quality one.**
+    ///
+    /// Flow measures in device pixels. A compiled coordinate records the size of the image
+    /// it was picked against, `flow::executor::validate_geometry` refuses to dispatch
+    /// unless the runtime frame matches the device's qualified geometry, and
+    /// `FrameRegionChanged` evidence names a rectangle in frame pixels. This producer ran
+    /// at `Projection::half` from the start, so on a 1080x2220 phone every frame was
+    /// 540x1110 and that check could never pass: image-coordinate taps and the Flow
+    /// inspector's coordinate picker were both unreachable on Android no matter what else
+    /// was fixed.
+    ///
+    /// Nothing pays for this that was not already paying. The Android tile grid does not use
+    /// minicap at all -- it is on the H.264 view path -- and `background_sample_candidate`
+    /// returns false for Android, so the only consumers of these frames are the ones that
+    /// measure them. The AI comment path is unaffected in either direction:
+    /// `openai_client::make_contact_sheet` resizes every frame to 375x667 before a provider
+    /// sees it, so the token bill does not depend on what the phone captured.
+    ///
+    /// If Android tiles ever move back onto minicap, this is the line to revisit: half the
+    /// edge is a quarter of the bytes, and twenty tiles is where that mattered.
+    fn producer_projection(screen: (u32, u32)) -> crate::frames::Projection {
+        crate::frames::Projection::native(screen.0, screen.1)
+    }
+
     /// Spawn minicap for `serial`, publishing into exactly `generation`.
     ///
     /// Never advances a generation and never holds a lock across the adb work. The
@@ -600,10 +626,8 @@ impl AndroidDriver {
         })?;
 
         let screen = crate::frames::device_screen(&self.adb, serial).await?;
-        let options = crate::frames::MinicapOptions::for_device(
-            serial,
-            crate::frames::Projection::half(screen.0, screen.1),
-        );
+        let options =
+            crate::frames::MinicapOptions::for_device(serial, Self::producer_projection(screen));
         // Push before taking a port, so a push failure strands nothing.
         crate::frames::ensure_apk(&self.adb, serial, &apk).await?;
 
@@ -3147,6 +3171,33 @@ mod tests {
     use super::*;
 
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn the_producer_publishes_the_pixels_the_snapshot_claims_the_device_has() {
+        // The two halves of Flow's coordinate model have to agree, and until 17/08/2026
+        // they did not. `inspect_device_for_target` reports the device's real geometry;
+        // this producer published `Projection::half` of it. `validate_geometry` compares
+        // the two and refuses on any difference, so on this fleet every image-coordinate
+        // tap was a guaranteed `GeometryMismatch` and the inspector's coordinate picker
+        // could never return a usable frame.
+        //
+        // Asserted as the relationship rather than as a constant: the point is not that
+        // 1080 appears twice, it is that whatever the snapshot says the pixels are, that
+        // is what comes out of the producer.
+        let display = crate::adb::DisplayGeometry {
+            width: 1080,
+            height: 2220,
+            density: 420,
+            rotation: 0,
+        };
+        let geometry = crate::capability::qualified_geometry(display);
+        let projection = AndroidDriver::producer_projection((display.width, display.height));
+        assert_eq!(projection.virtual_width, geometry.pixel_width);
+        assert_eq!(projection.virtual_height, geometry.pixel_height);
+        // And the half it used to be is exactly what that check rejects.
+        let old = crate::frames::Projection::half(display.width, display.height);
+        assert_ne!(old.virtual_width, geometry.pixel_width);
+    }
 
     #[test]
     fn the_instrumentation_cooldown_outlasts_the_attempt_it_is_bounding() {
