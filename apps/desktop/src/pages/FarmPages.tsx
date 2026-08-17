@@ -821,6 +821,14 @@ export function ScheduleBlock({
             <p className="hint">
               {s.scriptName} · every {s.everyMinutes}m · next {s.nextRunAt ?? "—"}
             </p>
+            {/* The schedule's own account of why nothing ran. Before this, a schedule
+                whose script had been renamed advanced its timestamps on every tick and
+                enqueued nothing, so this card was indistinguishable from a healthy one. */}
+            {s.lastError && (
+              <p className="hint error" role="alert">
+                Lần chạy gần nhất không thực hiện được: {s.lastError}
+              </p>
+            )}
             <button
               type="button"
               className="ghost"

@@ -253,6 +253,8 @@ export interface ScheduleItem {
   enabled: boolean;
   lastRunAt?: string | null;
   nextRunAt?: string | null;
+  /// Why the last due tick enqueued nothing, or absent if it enqueued something.
+  lastError?: string | null;
 }
 
 export interface PublishTask {

@@ -428,7 +428,7 @@ impl Database {
     pub fn list_schedules(&self) -> anyhow::Result<Vec<crate::types::ScheduleItem>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, script_name, udids_json, every_minutes, enabled, last_run_at, next_run_at FROM schedules ORDER BY name",
+            "SELECT id, name, script_name, udids_json, every_minutes, enabled, last_run_at, next_run_at, last_error FROM schedules ORDER BY name",
         )?;
         let rows = stmt.query_map([], |row| {
             let udids_json: String = row.get(3)?;
@@ -441,6 +441,7 @@ impl Database {
                 enabled: row.get::<_, i64>(5)? != 0,
                 last_run_at: row.get(6)?,
                 next_run_at: row.get(7)?,
+                last_error: row.get(8)?,
             })
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
@@ -449,12 +450,13 @@ impl Database {
     pub fn upsert_schedule(&self, s: &crate::types::ScheduleItem) -> anyhow::Result<()> {
         let conn = self.conn()?;
         conn.execute(
-            r#"INSERT INTO schedules (id, name, script_name, udids_json, every_minutes, enabled, last_run_at, next_run_at)
-               VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+            r#"INSERT INTO schedules (id, name, script_name, udids_json, every_minutes, enabled, last_run_at, next_run_at, last_error)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
                ON CONFLICT(id) DO UPDATE SET
                  name=excluded.name, script_name=excluded.script_name, udids_json=excluded.udids_json,
                  every_minutes=excluded.every_minutes, enabled=excluded.enabled,
-                 last_run_at=excluded.last_run_at, next_run_at=excluded.next_run_at"#,
+                 last_run_at=excluded.last_run_at, next_run_at=excluded.next_run_at,
+                 last_error=excluded.last_error"#,
             params![
                 s.id,
                 s.name,
@@ -463,7 +465,8 @@ impl Database {
                 s.every_minutes as i64,
                 if s.enabled { 1 } else { 0 },
                 s.last_run_at,
-                s.next_run_at
+                s.next_run_at,
+                s.last_error
             ],
         )?;
         Ok(())
@@ -2276,6 +2279,74 @@ mod publish_tests {
             .create_publish_campaign(&request, &[bundle("bundle-a", 0), bundle("bundle-b", 1)])
             .expect_err("duplicate UDID must be rejected");
         assert!(error.to_string().contains("duplicate UDID"));
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::*;
+
+    fn fixture() -> (Database, PathBuf) {
+        let path = std::env::temp_dir().join(format!("riviu-schedule-test-{}.db", Uuid::new_v4()));
+        (Database::open(&path).expect("open fixture database"), path)
+    }
+
+    fn schedule(script: &str) -> crate::types::ScheduleItem {
+        crate::types::ScheduleItem {
+            id: "sched-1".into(),
+            name: "hourly".into(),
+            script_name: script.into(),
+            udids: vec!["phone-a".into()],
+            every_minutes: 60,
+            enabled: true,
+            last_run_at: None,
+            next_run_at: None,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn a_schedule_can_record_why_it_did_not_run() {
+        // The runner used to advance `last_run_at` on every tick whether or not anything
+        // was enqueued, and a missing script produced no record anywhere -- both guards
+        // around the lookup and the parse fell through in silence. There was nowhere to
+        // write the reason even if someone had wanted to; migration 8 makes the column,
+        // and this is the round trip that keeps it wired.
+        let (db, path) = fixture();
+        let mut item = schedule("đã-bị-xoá");
+        item.last_error = Some("không còn kịch bản tên `đã-bị-xoá`".into());
+        db.upsert_schedule(&item).expect("save the failed schedule");
+
+        let stored = db.list_schedules().expect("list")[0].clone();
+        assert_eq!(
+            stored.last_error.as_deref(),
+            Some("không còn kịch bản tên `đã-bị-xoá`")
+        );
+        // And `last_run_at` stays empty, because nothing ran.
+        assert_eq!(stored.last_run_at, None);
+
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    #[test]
+    fn a_schedule_that_runs_clears_the_reason_it_used_to_fail_for() {
+        // Otherwise a schedule fixed by restoring its script would keep explaining a
+        // failure that is over -- the same immortal-error shape as `merge_scanned_device`.
+        let (db, path) = fixture();
+        let mut item = schedule("có-thật");
+        item.last_error = Some("không còn kịch bản".into());
+        db.upsert_schedule(&item).expect("save the failed schedule");
+
+        item.last_error = None;
+        item.last_run_at = Some("2026-08-17T12:00:00Z".into());
+        db.upsert_schedule(&item)
+            .expect("save the recovered schedule");
+
+        let stored = db.list_schedules().expect("list")[0].clone();
+        assert_eq!(stored.last_error, None);
+        assert_eq!(stored.last_run_at.as_deref(), Some("2026-08-17T12:00:00Z"));
+
         std::fs::remove_file(path).expect("remove fixture database");
     }
 }

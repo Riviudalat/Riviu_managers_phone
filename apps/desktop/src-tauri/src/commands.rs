@@ -163,23 +163,56 @@ pub async fn prepare_device(
         .registry
         .set_status(&udid, riviu_core::DeviceStatus::Preparing, None);
     prepare_ui_with_control(&state.control, &udid).await?;
-    let mut device = state
-        .control
-        .refresh_device(&udid)
-        .await
-        .map_err(CommandError::from)
-        .or_else(|_| {
-            state
-                .registry
-                .get(&udid)
-                .ok_or_else(|| CommandError::operation("device missing"))
-        })?;
-    device.status = riviu_core::DeviceStatus::Ready;
+    // Two outcomes, and they used to be one. The confirming read is what turns "the
+    // preparation ran" into "and here is the device it left behind"; when it failed, the
+    // old code fell back to the *stale* registry record and then stamped `Ready` on it
+    // anyway. A phone unplugged between the session closing and this read came back as a
+    // Ready device with a healthy agent, described entirely from memory.
+    //
+    // What the preparation itself proves is kept, because it is proven:
+    // `prepare_ui_with_control` installed the agent and opened and closed a UI session, so
+    // `wda_ready` is earned on either path. What is not kept is a `Ready` status nobody
+    // observed, and the silence about why.
+    let refreshed = state.control.refresh_device(&udid).await;
+    let observed = match &refreshed {
+        Ok(device) => device.clone(),
+        Err(_) => state
+            .registry
+            .get(&udid)
+            .ok_or_else(|| CommandError::operation("device missing"))?,
+    };
+    let device = prepared_device(observed, refreshed.err().map(|error| error.to_string()));
+    state.registry.upsert(device.clone());
+    Ok(device)
+}
+
+/// Stamp a prepared device with what was proven, and only that.
+///
+/// `prepare_ui_with_control` installed the agent and opened and closed a UI session, so
+/// `wda_ready` is earned whichever way the confirming read went — that is why it is set on
+/// both paths. `Ready` is not: it describes the device as the refresh found it, and when
+/// the refresh failed nobody found it.
+///
+/// The old code took the stale registry record on failure and stamped `Ready` on it anyway.
+/// A phone unplugged between the session closing and the read came back as a Ready device
+/// with a healthy agent, described entirely from memory, and said nothing about the read
+/// that had just failed.
+fn prepared_device(mut device: DeviceInfo, unconfirmed: Option<String>) -> DeviceInfo {
     device.wda_ready = true;
     device.stream_url = None;
     device.tile_stream_state = riviu_core::TileStreamState::Parked;
-    state.registry.upsert(device.clone());
-    Ok(device)
+    match unconfirmed {
+        None => {
+            device.status = riviu_core::DeviceStatus::Ready;
+            device.last_error = None;
+        }
+        Some(reason) => {
+            device.last_error = Some(format!(
+                "Đã chuẩn bị xong nhưng không đọc lại được trạng thái máy: {reason}"
+            ));
+        }
+    }
+    device
 }
 
 #[tauri::command]
@@ -1592,6 +1625,59 @@ mod tests {
     use riviu_core::{DeviceWorkCoordinator, StreamBudgetManager};
     use riviu_ios_driver::MockIosDriver;
 
+    fn stale(status: riviu_core::DeviceStatus) -> DeviceInfo {
+        DeviceInfo {
+            udid: "ce06".into(),
+            name: "Note 8".into(),
+            model: "SM-N950F".into(),
+            platform: riviu_core::DevicePlatform::Android,
+            os_version: "8.0".into(),
+            connection: riviu_core::ConnectionKind::Usb,
+            status,
+            battery: None,
+            wda_ready: false,
+            wda_expires_at: None,
+            stream_url: None,
+            tile_stream_state: riviu_core::TileStreamState::default(),
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn a_prepare_whose_read_back_failed_does_not_claim_the_device_is_ready() {
+        // The read is what turns "the preparation ran" into "and here is the device it
+        // left behind". When it failed, the old code fell back to the stale registry
+        // record and stamped `Ready` on it anyway -- so a phone unplugged between the
+        // session closing and the read came back Ready with a healthy agent, described
+        // entirely from memory, and said nothing about the failure.
+        let device = prepared_device(
+            stale(riviu_core::DeviceStatus::Connected),
+            Some("device 'ce06' not found".into()),
+        );
+
+        assert_ne!(device.status, riviu_core::DeviceStatus::Ready);
+        assert!(device
+            .last_error
+            .as_deref()
+            .expect("a reason")
+            .contains("device 'ce06' not found"));
+        // Still earned: the session opened and closed, which is what this flag means.
+        assert!(device.wda_ready);
+    }
+
+    #[test]
+    fn a_prepare_that_was_read_back_is_ready_and_carries_no_reason() {
+        let device = prepared_device(stale(riviu_core::DeviceStatus::Connected), None);
+
+        assert_eq!(device.status, riviu_core::DeviceStatus::Ready);
+        assert_eq!(device.last_error, None);
+        assert!(device.wda_ready);
+        assert_eq!(
+            device.tile_stream_state,
+            riviu_core::TileStreamState::Parked,
+            "prepare leaves no producer running"
+        );
+    }
     #[test]
     fn a_group_request_is_judged_before_a_single_phone_is_touched() {
         // The missing-key check used to live inside the per-device loop, in the arm that

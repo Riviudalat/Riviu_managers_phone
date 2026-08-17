@@ -645,6 +645,13 @@ pub struct ScheduleItem {
     pub enabled: bool,
     pub last_run_at: Option<String>,
     pub next_run_at: Option<String>,
+    /// Why the last due tick did not enqueue anything, or `None` if it did.
+    ///
+    /// Exists because the runner used to fail in complete silence: a schedule whose script
+    /// had been renamed or deleted advanced both timestamps on every tick and enqueued
+    /// nothing, so the page showed a healthy job that had never run.
+    #[serde(default)]
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

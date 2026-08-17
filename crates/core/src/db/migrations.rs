@@ -49,6 +49,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "drop-local-users",
         apply: apply_migration_7,
     },
+    Migration {
+        version: 8,
+        name: "schedule-last-error",
+        apply: apply_migration_8,
+    },
 ];
 
 const LEDGER_SQL: &str = r#"
@@ -746,6 +751,20 @@ fn apply_migration_7(transaction: &Transaction<'_>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Give a schedule somewhere to say why it did not run.
+///
+/// A schedule whose script has been renamed or deleted used to advance `last_run_at` and
+/// `next_run_at` on every tick while enqueueing nothing — the two `if let Ok(...)` guards
+/// around the lookup and the parse both fell through in silence. On the schedules page it
+/// read as a job that had run two minutes ago and would run again in an hour, forever.
+///
+/// Nullable and added rather than backfilled: an existing schedule has no failure to
+/// describe until the next tick decides one way or the other.
+fn apply_migration_8(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    transaction.execute_batch("ALTER TABLE schedules ADD COLUMN last_error TEXT;")?;
+    Ok(())
+}
+
 fn apply_v1_schema(connection: &Connection) -> anyhow::Result<()> {
     connection.execute_batch(V1_SCHEMA_SQL)?;
     Ok(())
@@ -1072,6 +1091,21 @@ mod tests {
             .expect("table existence")
     }
 
+    fn column_exists(connection: &Connection, table: &str, column: &str) -> bool {
+        connection
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .and_then(|mut statement| {
+                let mut rows = statement.query([])?;
+                while let Some(row) = rows.next()? {
+                    if row.get::<_, String>(1)? == column {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            })
+            .expect("column existence")
+    }
+
     #[test]
     fn populated_legacy_database_upgrades_once_without_rewriting_rows() {
         let path = temp_db_path("flow-migration");
@@ -1091,7 +1125,7 @@ mod tests {
                 .iter()
                 .map(|(version, _)| *version)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5, 6, 7]
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
         );
         assert!(table_exists(&connection, "flow_documents"));
         assert!(table_exists(&connection, "nurture_comment_attempts"));
@@ -1258,7 +1292,7 @@ mod tests {
                     vec![1, 2, 3, 4, 5]
                 );
                 assert!(table_exists(&connection, "publish_campaigns"));
-            } else {
+            } else if failed_version == 7 {
                 // Failed at 7: everything before it applied, and the drop rolled back --
                 // so the credentials table is still there. That is the assertion that
                 // matters: a half-applied removal must not look like a completed one.
@@ -1270,6 +1304,19 @@ mod tests {
                     vec![1, 2, 3, 4, 5, 6]
                 );
                 assert!(table_exists(&connection, "users"));
+            } else {
+                // Failed at 8: the schedules table is back to the shape it had before the
+                // column was added. A rolled-back `ALTER TABLE` that left the column behind
+                // would make the retry fail with "duplicate column name" forever.
+                assert_eq!(
+                    migration_rows(&connection)
+                        .iter()
+                        .map(|(version, _)| *version)
+                        .collect::<Vec<_>>(),
+                    vec![1, 2, 3, 4, 5, 6, 7]
+                );
+                assert!(!table_exists(&connection, "users"));
+                assert!(!column_exists(&connection, "schedules", "last_error"));
             }
 
             run(&mut connection).expect("retry migrations");
@@ -1278,7 +1325,7 @@ mod tests {
                     .iter()
                     .map(|(version, _)| *version)
                     .collect::<Vec<_>>(),
-                vec![1, 2, 3, 4, 5, 6, 7]
+                vec![1, 2, 3, 4, 5, 6, 7, 8]
             );
             // The local login is gone and migration 7 takes its credentials with it. This
             // used to assert the seeded `guest@local` row existed; the point of the change
@@ -1318,7 +1365,7 @@ mod tests {
                 .iter()
                 .map(|(version, _)| *version)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5, 6, 7]
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
         );
         drop(connection);
         cleanup(&path);
@@ -1363,7 +1410,7 @@ mod tests {
                 .iter()
                 .map(|(version, _)| *version)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5, 6, 7]
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
         );
         drop(connection);
         cleanup(&path);
@@ -1412,7 +1459,7 @@ mod tests {
                                     // ledger from a NEWER build, so this has to move
                                     // whenever a migration is added.
                                     "INSERT INTO schema_migrations(version,name,applied_at)
-                                     VALUES(8,'future','2026-07-30T00:00:02Z')",
+                                     VALUES(9,'future','2026-07-30T00:00:02Z')",
                                     [],
                                 )
                                 .expect("future migration");

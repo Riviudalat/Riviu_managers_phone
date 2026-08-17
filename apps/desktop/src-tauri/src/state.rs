@@ -1425,13 +1425,48 @@ impl AppState {
                     let Ok(_admission) = command_admission.ensure_accepting_work() else {
                         break;
                     };
-                    if let Ok(Some(body)) = db.get_script(&s.script_name) {
-                        if let Ok(script) = riviu_script_engine::parse_script(&body) {
-                            let _ = jobs.enqueue(script, s.udids.clone()).await;
+                    // **Both failures used to fall through in silence, and the timestamps
+                    // moved anyway.** A schedule whose script had been renamed or deleted
+                    // advanced `last_run_at` on every tick while enqueueing nothing, so the
+                    // page showed a job that had run two minutes ago and would run again in
+                    // an hour — for as long as the app stayed open.
+                    //
+                    // `last_run_at` now marks a run that happened, and `last_error` says
+                    // why one did not. `next_run_at` still advances either way: a schedule
+                    // that stopped ticking would look paused, and it is not — it is trying
+                    // once an interval and failing, which is a different thing.
+                    let outcome = match db.get_script(&s.script_name) {
+                        Ok(Some(body)) => match riviu_script_engine::parse_script(&body) {
+                            Ok(script) => match jobs.enqueue(script, s.udids.clone()).await {
+                                Ok(_) => Ok(()),
+                                Err(error) => Err(format!("không xếp được tác vụ: {error}")),
+                            },
+                            Err(error) => Err(format!(
+                                "kịch bản `{}` không đọc được: {error}",
+                                s.script_name
+                            )),
+                        },
+                        Ok(None) => Err(format!(
+                            "không còn kịch bản tên `{}` — có thể đã bị xoá hoặc đổi tên",
+                            s.script_name
+                        )),
+                        Err(error) => Err(format!(
+                            "không đọc được kịch bản `{}`: {error}",
+                            s.script_name
+                        )),
+                    };
+                    match outcome {
+                        Ok(()) => {
+                            s.last_run_at = Some(now.to_rfc3339());
+                            s.last_error = None;
                             let _ = db.log_op("schedule.run", &s.name);
                         }
+                        Err(reason) => {
+                            log::warn!("lịch `{}` không chạy được: {reason}", s.name);
+                            let _ = db.log_op("schedule.failed", &format!("{}: {reason}", s.name));
+                            s.last_error = Some(reason);
+                        }
                     }
-                    s.last_run_at = Some(now.to_rfc3339());
                     s.next_run_at = Some(
                         (now + chrono::Duration::minutes(s.every_minutes as i64)).to_rfc3339(),
                     );
@@ -1544,6 +1579,7 @@ impl AppState {
         let registry = self.registry.clone();
         let app_nurture = app.clone();
         let command_admission = self.command_admission.clone();
+        let nurture_control = self.control.clone();
         tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(30));
             loop {
@@ -1590,13 +1626,43 @@ impl AppState {
                     );
                     continue;
                 }
+                // **The same gate the manual start treats as mandatory.** This path went
+                // straight to `start_many`, so a scheduled run began on phones whose text
+                // agent was not ready and then failed every comment it tried, once an hour,
+                // with nothing anywhere saying why. The manual button had refused those
+                // phones outright; the schedule did not know to ask.
+                let preflight = crate::nurture_commands::preflight_comment_job(
+                    &nurture_control,
+                    &udids,
+                    &settings,
+                )
+                .await;
+                if !preflight.skipped.is_empty() {
+                    log::warn!(
+                        "lịch nuôi TT bỏ qua {} máy: {}",
+                        preflight.skipped.len(),
+                        preflight.skipped.join("; ")
+                    );
+                    let _ = db.log_op("nurture.schedule.skipped", &preflight.skipped.join("; "));
+                }
+                if preflight.ready.is_empty() {
+                    // Recorded rather than retried immediately: the next tick is an hour
+                    // away and the reason is now written down, which is the difference
+                    // between a schedule that is failing and one that looks idle.
+                    let _ = db.log_op("nurture.schedule.blocked", &preflight.refusal());
+                    let _ = db.set_setting(
+                        "nurture.schedule.next_run_at",
+                        &(now + chrono::Duration::minutes(every)).to_rfc3339(),
+                    );
+                    continue;
+                }
                 let duration =
                     Duration::from_secs(settings.schedule_duration_minutes.max(1) as u64 * 60);
                 let started = nurture
                     .start_many(
                         app_nurture.clone(),
                         nurture_engine.clone(),
-                        udids,
+                        preflight.ready,
                         settings,
                         Some(duration),
                     )
