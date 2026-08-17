@@ -5170,6 +5170,50 @@ moi lan doi preset va moi lan xoay may la mot cua so cham bien mat — upstream 
 agent **von khong cham** — 130–280 ms mot click do tren chinh Galaxy S8+. Con so 1502 ms la
 `adb shell input`, **khong phai** agent, dung nham hai cai.
 
+### 9.79 Duong phuc hoi agent KHONG VOI TOI DUOC, va cooldown cho no (17/08/2026)
+
+Đọc `GENFARMER-SOURCE-PATHS.md` → `docs/re/genfarmer` §12.6 chỉ đúng hai bài học: **cooldown
+có cửa sổ cho mọi hành động phục hồi**, và **không đường nào chờ vô hạn**. Soát Riviu:
+
+* **Timeout: đã kín.** Mọi `reqwest::Client` trong crate đều có timeout; không có `.output()`
+  hay `.wait()` trần nào ở phía Android. §12.3 không phải việc phải làm.
+* **Cooldown: thiếu đúng một chỗ.** View producer đã có backoff luỹ thừa 60s→600s + trần
+  đồng thời 4. Nhưng **restart instrumentation thì không có gì cả** — nó bị chặn *trong một
+  lần gọi* (thử một lần rồi báo lỗi) mà không bị chặn **giữa các lần gọi**. Máy nào mất
+  `UiAutomation` vĩnh viễn thì mỗi thao tác của người vận hành lại đi hết vòng phục hồi.
+
+Đã thêm `INSTRUMENTATION_RESTART_COOLDOWN`, **suy ra chứ không chọn**: một vòng tốn hai truy
+vấn mà server sẽ không trả lời (`AgentClient::BLIND_QUERY_COST`, đo 10 116 ms và 10 132 ms —
+timeout root-node của chính server, không setting nào với tới) cộng `AGENT_READY_WAIT`. Cửa
+sổ = hai vòng = 64 s.
+
+**Nhưng cái tìm được khi đi kiểm chứng mới là vấn đề thật, và nó nặng hơn.** Mất
+`UiAutomation` có **hai** biểu hiện, và code cũ chỉ xử lý được một:
+
+1. session mở được, mọi truy vấn treo → `is_alive` bắt được → restart. **Có xử lý.**
+2. session **không mở nổi**: `SessionNotCreatedException: java.lang.IllegalStateException:
+   UiAutomation not connected!`, trả về trong **137 ms**, trong khi `/status` vẫn báo
+   `"ready to accept commands"`.
+
+Ở (2), `let agent = self.open_and_cache_agent(...).await?;` ném lỗi ra ngay — nên **toàn bộ
+đoạn phục hồi bên dưới không bao giờ với tới được**. Muốn chứng minh server hỏng thì phải có
+session, mà cái hỏng chính là không thể có session. Kết quả: mỗi cú chạm trả về một exception
+Java, mãi mãi, và không có gì thử sửa. Nay cả hai nhánh đều dẫn vào cùng một restart — một
+server trả lời `/status` mà không cấp session là một server kẹt, bất kể nó nói gì.
+
+Bằng chứng, và **giới hạn của bằng chứng** (nói rõ vì tôi không tái hiện được theo ý muốn):
+trạng thái (2) **đã quan sát thật** trên `98895a…484f` sau một lần restart thất bại
+(`instrumentation restart finished ms=3205 ok=false`); rằng code cũ không với tới được là sự
+thật **tĩnh** của code, không phải suy đoán; và cách chữa **đã kiểm bằng tay** trên đúng máy
+đó ở đúng trạng thái đó — force-stop hai gói rồi `am instrument` lại thì session mở sạch ngay.
+Cái tôi **không** làm được là ép lại trạng thái (2) để xem Riviu tự chữa: `uiautomator dump`
+cho ra (1) hoặc giết hẳn server, còn force-stop riêng gói `.test` thì kéo theo cả server —
+server HTTP sống trong chính tiến trình runner. (2) là một race.
+
+Ghi thêm: cả hai lần refuse-vì-cooldown và refuse-vì-không-mở-được-session **đều log**. Cùng
+một bài học với `onFallback` ở §9.78 — một đường hỏng mà im lặng thì không ai biết nó đang
+chết.
+
 ### 9.78 Keo truc tiep qua socket control — va cai bay "no chay roi" (17/08/2026)
 
 §9.77 tìm ra chỗ đau: `FocusStream` gom mẫu `pointerMove` rồi chỉ bắn một swipe trong

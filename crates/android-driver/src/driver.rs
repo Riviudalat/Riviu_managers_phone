@@ -59,6 +59,45 @@ const INSTALL_TIMEOUT: Duration = Duration::from_secs(180);
 /// it is gone.
 const CHILD_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How often, and how many times, a freshly started instrumentation is asked whether it has
+/// bound its port yet.
+const AGENT_READY_POLLS: u32 = 40;
+const AGENT_READY_POLL_EVERY: Duration = Duration::from_millis(250);
+/// Longest [`AndroidDriver::instrument_and_wait`] will wait for the port. Derived so the
+/// message the operator reads cannot drift away from the loop that produced it.
+const AGENT_READY_WAIT: Duration =
+    Duration::from_millis(AGENT_READY_POLL_EVERY.as_millis() as u64 * AGENT_READY_POLLS as u64);
+
+/// What one trip through the blind-agent path costs before the caller learns anything.
+///
+/// Two element queries that will not answer — one on the session that turned out blind, one
+/// on its replacement — and [`AGENT_READY_WAIT`] between them waiting for the restarted
+/// server to bind. The queries dominate, and neither is ours to shorten: see
+/// [`AgentClient::BLIND_QUERY_COST`].
+const INSTRUMENTATION_ATTEMPT_COST: Duration =
+    Duration::from_secs(AgentClient::BLIND_QUERY_COST.as_secs() * 2 + AGENT_READY_WAIT.as_secs());
+
+/// Quiet window after an instrumentation restart that did not fix the device.
+///
+/// **Derived, not chosen**: two attempts' worth. A cooldown shorter than one attempt would
+/// let the next restart begin while the last is still polling for a port, which is the storm
+/// this exists to stop rather than the cure for it.
+///
+/// Erring long is nearly free, and that is worth saying because it looks careless. This is
+/// only ever consulted when a device is blind *again* after a restart — a device the restart
+/// fixed never reaches the check, because its liveness query answers and the recovery path
+/// is never entered. So the window can only delay a second restart for a device whose cause
+/// is off-host (another tool holding `UiAutomation`), and that cause does not clear on any
+/// schedule of ours.
+///
+/// The shape matters more than the number: every recovery action needs a window, and Riviu
+/// had one only for view producers (`VIEW_RESTART_BACKOFF`, in the desktop's watchdog).
+/// docs/re/genfarmer README §12.2 records the same pattern applied to every recovery
+/// GenFarmer has — 30 s to recreate an adb client, 45 s between server kills, ten minutes
+/// after five failed reconnects.
+const INSTRUMENTATION_RESTART_COOLDOWN: Duration =
+    Duration::from_secs(INSTRUMENTATION_ATTEMPT_COST.as_secs() * 2);
+
 /// How honest a stream start has to be about frames.
 ///
 /// The split exists because minicap only publishes when the display changes
@@ -305,6 +344,24 @@ pub struct AndroidDriver {
     /// reads exactly like a wrong locator. Force-stopping the instrumentation
     /// restored 118–425 ms immediately. See [`AgentClient::close`].
     agents: Mutex<HashMap<String, AgentClient>>,
+    /// serial -> when this device's instrumentation was last restarted for blindness.
+    ///
+    /// The restart itself is already bounded *within* one call: it happens once, and a
+    /// second blind session is reported rather than retried. What was missing is the bound
+    /// **across** calls. When something else on the phone holds `UiAutomation` and does not
+    /// give it back, every gesture the operator makes walks the whole recovery again —
+    /// open a session, wait out the 5 s liveness proof, restart the instrumentation, poll
+    /// up to 10 s for the port, prove the new session, fail. Tapping three times buys three
+    /// restarts and a minute of nothing.
+    ///
+    /// So a restart that did not fix the device buys a quiet window before the next one is
+    /// allowed. Inside it the caller fails immediately and says why, which is both faster
+    /// and more use than grinding: the fix is on the phone, not in another restart.
+    ///
+    /// This is the "windowed cooldown on recovery actions" half of docs/re/genfarmer
+    /// §12.6 — the half Riviu had for view producers (`VIEW_RESTART_BACKOFF`) and nowhere
+    /// else.
+    instrumentation_restarts: Mutex<HashMap<String, std::time::Instant>>,
     /// serial -> the resolved TikTok package, memoised.
     ///
     /// `pm list packages` is a 1–2 s adb round trip per candidate and this sits on the
@@ -421,6 +478,7 @@ impl AndroidDriver {
             starting: Mutex::new(HashSet::new()),
             interaction: riviu_core::InteractionLifecycleRegistry::default(),
             agents: Mutex::new(HashMap::new()),
+            instrumentation_restarts: Mutex::new(HashMap::new()),
             tiktok_packages: Mutex::new(HashMap::new()),
             screens: Mutex::new(HashMap::new()),
             ports: Mutex::new(HashMap::new()),
@@ -1683,9 +1741,67 @@ impl AndroidDriver {
         // So the new session has to prove itself, and the fall-through is to restart the
         // instrumentation rather than to hand back something that cannot see.
         if AgentClient::is_ready(&base).await {
-            let agent = self.open_and_cache_agent(serial, &base).await?;
-            if agent.is_alive().await {
-                return Ok(agent);
+            // **Both ways of failing here lead to the same restart, and until 17/08/2026 one
+            // of them led nowhere.** Losing `UiAutomation` has two presentations, and this
+            // path only ever handled the first:
+            //
+            //   1. the session opens and every query blocks — caught by `is_alive`;
+            //   2. the session does not open at all, `SessionNotCreatedException:
+            //      java.lang.IllegalStateException: UiAutomation not connected!`, in 137 ms.
+            //
+            // Reproduced on this fleet with an out-of-band `adb shell uiautomator dump`: the
+            // phone lands in (1), the restart runs, and afterwards it sits in (2) — where the
+            // `?` on this line returned the Java exception straight to the operator and the
+            // recovery below was unreachable, because proving the server broken required a
+            // session and the breakage was that no session could be had. Every tap failed,
+            // forever, and nothing ever tried to fix it.
+            //
+            // A server that answers `/status` and will not give a session is wedged whatever
+            // the message says, so the failure is not inspected: it is treated exactly like a
+            // blind session.
+            let opened = self.open_and_cache_agent(serial, &base).await;
+            match opened {
+                Ok(agent) if agent.is_alive().await => return Ok(agent),
+                Ok(agent) => {
+                    let _ = agent.close().await;
+                    self.agents.lock().remove(serial);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        serial,
+                        %error,
+                        "the agent answers /status but will not open a session"
+                    );
+                    self.agents.lock().remove(serial);
+                }
+            }
+            // A restart we already tried and that did not take. Refuse rather than repeat:
+            // the holder of `UiAutomation` is on the phone, and a second restart inside the
+            // window races the same holder for another twenty seconds of the operator's
+            // time. Failing here is not giving up — it is the difference between one clear
+            // message and a minute of silence.
+            if let Some(since) = self.since_instrumentation_restart(serial) {
+                if since < INSTRUMENTATION_RESTART_COOLDOWN {
+                    let quiet_for = INSTRUMENTATION_RESTART_COOLDOWN - since;
+                    // Said out loud, not just returned. The error reaches whoever made this
+                    // call; the log is what tells the next person why a phone spent ten
+                    // minutes refusing every gesture without a single restart in sight.
+                    tracing::warn!(
+                        serial,
+                        since_s = since.as_secs(),
+                        quiet_for_s = quiet_for.as_secs(),
+                        "refusing to restart the instrumentation again inside its cooldown"
+                    );
+                    anyhow::bail!(
+                        "the agent on {serial} is listening but cannot read the accessibility \
+                         tree, and its instrumentation was already restarted {:.0}s ago \
+                         without fixing it. Something else on the phone is holding \
+                         UiAutomation — an `adb shell uiautomator dump` or another automation \
+                         tool. Not restarting again for another {:.0}s.",
+                        since.as_secs_f64(),
+                        quiet_for.as_secs_f64()
+                    );
+                }
             }
             tracing::warn!(
                 serial,
@@ -1693,10 +1809,19 @@ impl AndroidDriver {
                  restarting the instrumentation. Something else may be holding \
                  UiAutomation (an `adb shell uiautomator dump` does this)"
             );
-            let _ = agent.close().await;
-            self.agents.lock().remove(serial);
+            self.note_instrumentation_restart(serial);
+            let started = std::time::Instant::now();
             self.restart_instrumentation(serial).await?;
-            return self.instrument_and_wait(serial, &base).await;
+            let recovered = self.instrument_and_wait(serial, &base).await;
+            // Logged either way, because the cost of this path is the whole reason it now
+            // has a cooldown and nobody should have to induce the fault to find it again.
+            tracing::info!(
+                serial,
+                ms = started.elapsed().as_millis() as u64,
+                ok = recovered.is_ok(),
+                "instrumentation restart finished"
+            );
+            return recovered;
         }
 
         let installed = self
@@ -1711,11 +1836,25 @@ impl AndroidDriver {
         self.instrument_and_wait(serial, &base).await
     }
 
+    /// How long since this device's instrumentation was last restarted for blindness.
+    fn since_instrumentation_restart(&self, serial: &str) -> Option<Duration> {
+        self.instrumentation_restarts
+            .lock()
+            .get(serial)
+            .map(|at| at.elapsed())
+    }
+
+    fn note_instrumentation_restart(&self, serial: &str) {
+        self.instrumentation_restarts
+            .lock()
+            .insert(serial.to_string(), std::time::Instant::now());
+    }
+
     /// Start the runner and wait for a session that can actually read the screen.
     async fn instrument_and_wait(&self, serial: &str, base: &str) -> anyhow::Result<AgentClient> {
         self.spawn_instrumentation(serial)?;
         // The server binds its port a beat after the runner starts.
-        for _ in 0..40 {
+        for _ in 0..AGENT_READY_POLLS {
             if AgentClient::is_ready(base).await {
                 let agent = self.open_and_cache_agent(serial, base).await?;
                 if agent.is_alive().await {
@@ -1732,10 +1871,11 @@ impl AndroidDriver {
                      `adb shell uiautomator dump`, or another automation tool on the phone"
                 ));
             }
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            tokio::time::sleep(AGENT_READY_POLL_EVERY).await;
         }
         Err(anyhow!(
-            "the agent on {serial} did not answer /status within 10 seconds"
+            "the agent on {serial} did not answer /status within {:.0} seconds",
+            AGENT_READY_WAIT.as_secs_f64()
         ))
     }
 
@@ -2666,6 +2806,33 @@ mod tests {
     use super::*;
 
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn the_instrumentation_cooldown_outlasts_the_attempt_it_is_bounding() {
+        // The whole point of the window is that two attempts cannot overlap. A cooldown
+        // shorter than one trip through the blind path would let the second restart begin
+        // while the first is still polling for a port -- which is the storm, not the cure.
+        //
+        assert!(
+            INSTRUMENTATION_RESTART_COOLDOWN >= INSTRUMENTATION_ATTEMPT_COST,
+            "cooldown {INSTRUMENTATION_RESTART_COOLDOWN:?} is shorter than one attempt \
+             ({INSTRUMENTATION_ATTEMPT_COST:?}), so restarts would overlap"
+        );
+        // The attempt cost is dominated by two queries the server will not answer, so a
+        // derivation that forgot one of them would halve the window without looking wrong.
+        assert!(
+            INSTRUMENTATION_ATTEMPT_COST >= AgentClient::BLIND_QUERY_COST * 2,
+            "an attempt pays for the blind session AND its replacement"
+        );
+
+        // And the wait the operator is told about has to be the wait the loop actually
+        // performs, or the error message is fiction.
+        assert_eq!(
+            AGENT_READY_WAIT,
+            AGENT_READY_POLL_EVERY * AGENT_READY_POLLS,
+            "the derived deadline drifted from the poll loop"
+        );
+    }
 
     /// A `FrameSink` that counts which advance was used.
     ///

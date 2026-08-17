@@ -300,6 +300,15 @@ impl AgentClient {
     /// wait out the server's hardcoded root-node timeout and make a healthy agent look
     /// broken. `find` maps a genuine absence to `Ok(None)`, which counts as alive: this
     /// asks whether the tree is readable, not what is in it.
+    /// What one element query costs against an agent that has lost `UiAutomation`.
+    ///
+    /// Not a timeout of ours — it is the server's own hardcoded root-`AccessibilityNodeInfo`
+    /// deadline, and there is no setting that reaches it. Measured twice on this fleet at
+    /// 10 116 ms and 10 132 ms; rounded up so a derivation built on it cannot come out
+    /// short. Callers use it to reason about how long a *failing* agent takes to admit it
+    /// is failing, which is the number that sizes recovery windows.
+    pub const BLIND_QUERY_COST: Duration = Duration::from_secs(11);
+
     pub async fn is_alive(&self) -> bool {
         self.find(&Locator::ClassName("android.widget.FrameLayout".into()))
             .await

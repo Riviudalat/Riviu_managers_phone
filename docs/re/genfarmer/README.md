@@ -442,21 +442,27 @@ thứ tự adb in ra, và trường hợp bẫy nhất — **tập serial giốn
 - **Đổi IME mặc định để lại dấu** trên máy; nếu vì clipboard mà phải làm, hãy
   hoàn nguyên sau khi xong.
 
-## 10. Chưa đọc — đừng nhầm là đã xong
+## 10. Đã đọc bổ sung (17/08/2026) — kết quả ở hồ sơ riêng
 
-Đã đọc kỹ: bản đồ 106 module, toàn bộ tầng điều khiển thiết bị
-(`adb-queue`, `adb-recovery`, `atx-agent`, `uiautomator-session`, `uiautomator`,
-phần stream trong `device.controller`/`resource.controller`), sidecar Python,
-script cài trên máy, và schema qua migration SQL.
+Toàn bộ danh sách "chưa đọc" của bản trước đã được khảo sát xong trong đợt 2.
+Vì khối lượng lớn, kết quả nằm ở hồ sơ riêng ngoài repo (không nhét source của
+GenFarmer vào repo Riviu), cùng với **mã nguồn đã de-bundle** phục vụ tham khảo:
 
-**Chưa đọc:** phần lớn `adb.service.ts` (~5.500 dòng), toàn bộ
-`src/main/controllers/automation/*` (`scriptRunner`, `scriptRunnerWorker`,
-`Action/{Action,Screen,System,Touch,ImageSearch}`, `inspector.controller`), toàn
-bộ `src/api/*` (REST API, `cloudPhone.controller`), `backupRestore.service` +
-`mappings`, `accountChecker.service`, `settings.service`, và toàn bộ renderer.
-Con số dòng trong tài liệu này là vị trí trong bundle, **không phải** số dòng
-source gốc — esbuild chèn vendor code giữa các marker `// src/`, nên đừng suy ra
-kích thước module từ khoảng cách giữa hai marker.
+- Mã nguồn: `C:\Users\cattfan\Documents\All\genfarmer-src\debundled\` —
+  tách `dist/main/index.js` bằng parser **acorn** (chính xác theo AST, đã kiểm
+  chứng lossless): **106 file .ts** theo đúng cây `src/`, tổng **22.576 dòng
+  source thật**; kèm `INDEX.md` (file → dòng bundle gốc), 105 file vendor gap
+  (`_vendor/`), `_preamble.js`, `_tail.js`, `worker.log.worker.js`,
+  `preload.index.js`. Script tái tạo: `genfarmer-src/_debundle2.js`.
+- Báo cáo: `C:\Users\cattfan\Documents\All\genfarmer-explore\`
+  `01-automation-runtime.md`, `02-api-ipc.md`, `03-data-services.md`,
+  `04-renderer.md`, `05-main-performance.md`, `06-renderer-performance.md`.
+
+Đính chính số dòng từ lần đọc thật: `adb.service.ts` chỉ ~238 dòng source thật
+(khoảng marker-to-marker chứa vendor), `automationLogger.service.ts` ~95 dòng —
+số dòng module thật nằm trong `debundled/INDEX.md`. Điểm quan trọng nhất chưa
+có trong tài liệu này: **script runner không sandbox** — Action `Javascript`
+dùng `eval` ngay trong main process (bài học ngược cho Riviu).
 
 ## 11. Thành phần upstream — cái Riviu dùng trực tiếp được
 
@@ -479,3 +485,70 @@ còn thiếu thật sự chỉ là **nguồn frame** (§7).
 Proprietary của GenFarmer — **không dùng, không reverse**: `dist/main/index.js`
 và `*.jsc`, `genauto-agent`, `genfarmer_util` (bundle riêng), `adb-tools.exe`,
 `public-key.pem` và toàn bộ luồng licensing/payment.
+
+## 12. Hiệu suất — bản đồ cơ chế để tham khảo (17/08/2026)
+
+Đợt 2 đã de-bundle toàn bộ main process (106 file, 22.576 dòng source thật) và
+lập danh mục cơ chế hiệu suất. Chi tiết đầy đủ kèm bằng chứng file:dòng ở
+`Documents/All/genfarmer-explore/05-main-performance.md` và
+`06-renderer-performance.md`; dưới đây là phần đáng để Riviu soi.
+
+### 12.1 Điều phối song song — nơi họ đặt các nút hạn chế
+
+- Hàng đợi ADB **2 tầng**: mỗi serial một hàng đợi tuần tự (×1) rồi mới vào hàng
+  đợi toàn cục **×16** — cùng ý tưởng "serialize theo máy + giới hạn toàn cục"
+  mà Riviu đang thiếu cho adb. Với 200 máy đây chính là cổ chai chính của họ.
+- Các TaskQueue theo ngữ cảnh: reconnect ×5, push APK ×5, tạo session ×8,
+  warmup lô 20 máy (timeout 90s/lô), refresh device concurrency ×4.
+- `deviceThreads` giới hạn worker mỗi run (free plan bị chặn xuống 2).
+- Batch ghi DB: Queue gom **50 phần tử / 2000ms** cho device storage.
+
+### 12.2 Throttle/cooldown — bài học quan trọng nhất cho fleet lớn
+
+Họ gắn **cooldown có cửa sổ** vào mọi hành động phục hồi, không chỉ retry:
+
+| Cơ chế | Tham số |
+|---|---|
+| Recreate/restart ADB client | cooldown 30s, dedupe qua promise đang chạy |
+| Kill adb server (recovery) | tối thiểu 45s giữa 2 lần kill |
+| Reconnect máy | 5 lần / cửa sổ 15 phút / cooldown 10 phút, backoff mũ |
+| Restart tracker | 5 lần / 10 phút / cooldown 10 phút |
+| Reload danh sách máy | tối thiểu 5s, dedupe in-flight |
+| Emit log về UI | throttle 120ms/run |
+
+Đây là cách họ chặn "storm tự nuôi" khi 200 máy fail đồng loạt — đúng tinh thần
+phân loại lỗi của Riviu (§8) nhưng thêm lớp giới hạn tần suất ở phía hành động.
+
+### 12.3 Timeout/Watchdog — không có chỗ nào chờ vô hạn
+
+- adb shell retry ≤5 (chỉ lỗi transient) + backoff; getSession 3 lần × timeout 70s;
+  heal lỗi hạ tầng tối đa 12 lần với backoff ≤4s; mỗi node script có nodeTimeout.
+- Watchdog 60s cho AUTOMATION_STARTED (kẹt setup → fail, không treo run);
+  `threadRuntime` cắt thời gian chạy mỗi máy; sau ADB recovery chờ máy online
+  tối đa 120s rồi abort; RPC uiautomator hard-timeout timeout+400ms.
+
+### 12.4 Bộ nhớ / log
+
+- `--expose-gc` + `global.gc()` mỗi 10s (cả main lẫn renderer) — biện pháp thô
+  nhưng cho thấy họ chấp nhận rò nhỏ thay vì OOM trên máy chạy lâu.
+- Log run giữ trong bộ nhớ với cap (500 dòng/run, 300/máy, giữ 5 run) + file
+  rotation 50MB qua worker riêng; app.log cắt giữ đuôi 200MB khi quá 2GB.
+
+### 12.5 Điểm nóng đã xác định (để soi khi GenFarmer chậm — hoặc để tránh khi viết)
+
+1. Hàng đợi ADB global ×16 là cổ chai với fleet lớn.
+2. Warmup tuần tự lô 20 → có thể kéo hàng phút trước khi run bắt đầu.
+3. getUiAutomatorClient 3×70s — một máy kẹt session treo tới ~3,5 phút.
+4. Ghi SQLite **đồng bộ** trên main thread; cập nhật account/deviceStatus theo
+   từng máy không batch.
+5. Renderer: console-interceptor gửi stack qua IPC cho mỗi console.*; pinia
+   persist ghi localStorage đồng bộ mỗi mutation; graph ScriptEditor không ảo
+   hoá node; poll log run 2s.
+6. Worker tìm ảnh Python cố định 4 luồng — nghẽn khi nhiều máy cùng IMAGE.
+
+### 12.6 Áp cho Riviu
+
+Chỗ đáng học trực tiếp: **mô hình cooldown có cửa sổ cho mọi hành động phục hồi**
+(§12.2) và **timeout kín mọi đường** (§12.3). Chỗ đã thấy rõ cái giá: SQLite sync
+trên main thread và console→IPC không tiết chế — Riviu (Rust + tách process) đang
+ở thế tốt hơn, đừng bắt chước hai thứ này.
