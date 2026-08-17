@@ -938,6 +938,25 @@ async fn await_feed(
             }
             return true;
         }
+        // **A modal owns the whole tree, so nothing else on this screen is findable.**
+        // Measured 18/08/2026: a phone held behind "Save login for next time?" dumped a
+        // single `content-desc` of `Dialog`, which is why neither the feed tab nor the Home
+        // tab could be seen and the session could only report that it never saw a feed.
+        //
+        // Declining is safe without knowing which dialog it is — `Not now` changes no
+        // setting and no account, and the dialog comes back next time. Cleared on every
+        // poll rather than once: TikTok stacks these, and each one hides the next.
+        if let Some(element) = locate(run.session, run.labels, TikTokControl::DialogDismiss)
+            .await
+            .ok()
+            .flatten()
+        {
+            report(status, "đóng hộp thoại TikTok chắn feed".into());
+            let _ = run.session.tap(element.centre()).await;
+            sleep_interruptible(FEED_READY_POLL, stop).await;
+            continue;
+        }
+
         // **Try to go there before giving up.** A phone is left wherever the last session
         // or the last person left it, and Profile / Shop / Inbox are each one tap from the
         // feed — but `FeedTab` is a tab *inside* the feed, so on any of them this loop saw
@@ -1599,5 +1618,118 @@ mod tests {
         let stop = AtomicBool::new(true);
         let mut last = Some(Instant::now());
         assert!(!wait_gap(&mut last, Duration::from_millis(50), &stop).await);
+    }
+
+    /// A phone held behind a modal — and behind it, nothing else at all.
+    ///
+    /// The shape is measured rather than invented: the dump taken from
+    /// `ce0517155ab38c390d` on 18/08/2026, while it sat behind TikTok's save-login prompt,
+    /// offered the dialog and neither the feed tab nor the Home tab. That is what makes
+    /// this case worth its own test — every *other* way out of [`await_feed`] looks for a
+    /// control to tap, and behind a modal there is none to find, so the loop could only
+    /// wait out its whole window and then blame a splash screen.
+    #[derive(Default)]
+    struct ModalPhone {
+        dismissed: std::sync::atomic::AtomicBool,
+        taps: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for ModalPhone {
+        async fn tap(&self, _point: TapPoint) -> anyhow::Result<()> {
+            self.taps.fetch_add(1, Ordering::Relaxed);
+            self.dismissed.store(true, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn swipe(&self, _gesture: crate::types::SwipeGesture) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn type_text(&self, _text: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn home(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn find_and_tap(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn assert_visible(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+
+        async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            let dismissed = self.dismissed.load(Ordering::Relaxed);
+            let found = match query {
+                // While the dialog is up it is the only thing on the tree, decline button
+                // included. `Not now` is a `Text` match because that is how it was measured.
+                ElementQuery::Text { value, .. } => !dismissed && value == "Not now",
+                // The feed tab — and the Home tab, which shares this arm — only exist once
+                // the dialog is gone. Both being absent is the whole difficulty.
+                ElementQuery::Description { value, .. } => dismissed && value == "For You",
+                ElementQuery::ClassName(_) => false,
+            };
+            Ok(found.then_some(ElementBox {
+                x: 420.0,
+                y: 1_600.0,
+                width: 240.0,
+                height: 96.0,
+                description: None,
+                enabled: true,
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_modal_that_owns_the_screen_is_declined_instead_of_waited_out() {
+        let phone = ModalPhone::default();
+        let screen = (1_080.0, 2_220.0);
+        let run = HierarchyRun {
+            session: &phone,
+            labels: controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("measured set"),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        };
+        let stop = AtomicBool::new(false);
+        let mut status = NurtureSessionStatus {
+            udid: "modal-phone".into(),
+            running: true,
+            videos_done: 0,
+            swipe_attempts: 0,
+            like_attempts: 0,
+            comment_attempts: 0,
+            follow_attempts: 0,
+            likes: 0,
+            comments: 0,
+            follows: 0,
+            last_message: String::new(),
+            session_usd: 0.0,
+        };
+        let said = std::sync::Mutex::new(Vec::<String>::new());
+        let report = |status: &mut NurtureSessionStatus, message: String| {
+            status.last_message = message.clone();
+            said.lock().expect("messages").push(message);
+        };
+
+        // Without the decline this returns false, thirty seconds later.
+        assert!(await_feed(&run, &stop, &mut status, &report).await);
+        assert_eq!(
+            phone.taps.load(Ordering::Relaxed),
+            1,
+            "declined once — the dialog is gone, so the next poll must not tap again"
+        );
+        let said = said.lock().expect("messages").clone();
+        assert!(
+            said.iter().any(|line| line.contains("hộp thoại")),
+            "the operator is told what was in the way, not left with a guess: {said:?}"
+        );
     }
 }

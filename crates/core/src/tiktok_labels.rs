@@ -50,6 +50,19 @@
 pub enum TikTokControl {
     /// The "For You" / `Đề xuất` feed tab.
     FeedTab,
+    /// The button that declines a modal TikTok puts in the way — `Not now`.
+    ///
+    /// Only ever the *declining* option, which is what makes tapping it safe without
+    /// knowing which dialog is up: declining changes no setting and no account, and the
+    /// dialog simply comes back next time. The affirmative button is deliberately not
+    /// catalogued — there is no dialog this project wants to say yes to on its own.
+    ///
+    /// Worth naming why it matters: a modal owns the whole accessibility tree. Measured
+    /// 18/08/2026 on an SM-G955U1 sitting behind "Save login for next time?", the entire
+    /// dump was one `content-desc` of `Dialog` — so the feed tab, the Home tab and the
+    /// action rail were all equally invisible and the session could only report that it
+    /// never saw a feed.
+    DialogDismiss,
     /// The post's sound strip — `Original sound by <creator>`.
     ///
     /// Not something to tap. It is read for its *value*, because it is the one description
@@ -261,6 +274,7 @@ impl TikTokControl {
             Self::PostDeleteConfirm => 22,
             Self::HomeTab => 23,
             Self::SoundLink => 24,
+            Self::DialogDismiss => 25,
         }
     }
 }
@@ -361,6 +375,8 @@ pub struct TikTokLabels {
     home_tab: Option<LabelMatch>,
     /// The sound strip, matched by its stable prefix and read for its whole value.
     sound_link: Option<LabelMatch>,
+    /// The decline button on a modal. `None` means modals are not cleared on this build.
+    dialog_dismiss: Option<LabelMatch>,
     /// Matched on the node's rendered `text`, not its `content-desc`: measured as a
     /// plain `TextView` reading `Ảnh` beside the caption, with no description at all.
     photo_badge: Option<LabelMatch>,
@@ -434,6 +450,7 @@ impl TikTokLabels {
             TikTokControl::FeedTab => self.feed_tab,
             TikTokControl::HomeTab => self.home_tab,
             TikTokControl::SoundLink => self.sound_link,
+            TikTokControl::DialogDismiss => self.dialog_dismiss,
             TikTokControl::PhotoBadge => self.photo_badge,
             TikTokControl::Like => self.like,
             TikTokControl::Liked => self.liked,
@@ -637,10 +654,15 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // Not recorded at the time; that is the gap `measured_app_version` closes.
         measured_app_version: "",
         feed_tab: Some(LabelMatch::Exact("For You")),
-        // Not read on the 09/08 sweep, which only ever saw the feed. `None` costs this
-        // build the recovery path and nothing else.
-        home_tab: None,
+        // Read off the bottom bar on an SM-G950F on 18/08/2026, on a phone parked on its
+        // Profile tab — the same `Home` the SEA build shows, which is why it is written
+        // down rather than assumed from it.
+        home_tab: Some(LabelMatch::Exact("Home")),
+        // Neither was on the Profile screen that was dumped. `sound_link` costs this build
+        // the zero-engagement fingerprint and `dialog_dismiss` costs it modal clearing;
+        // both degrade to the behaviour this set already had.
         sound_link: None,
+        dialog_dismiss: None,
         // Never measured on this build; the S8+ fleet work never looked at a photo
         // post. Absent means no sideways swipe, which is the safe direction.
         photo_badge: None,
@@ -685,6 +707,7 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         home_tab: Some(LabelMatch::Exact("Trang chủ")),
         // Unmeasured on the vi build: the 10/08 dump was not kept for this strip.
         sound_link: None,
+        dialog_dismiss: None,
         // Read off an SM-N950F on 12/08/2026, on photo cards in the For-You feed and
         // on a post page opened from a link — the same string on both.
         photo_badge: Some(LabelMatch::Text("Ảnh")),
@@ -760,6 +783,9 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // different phones on 18/08/2026. Matched on the prefix and read for the whole
         // value — the creator's name is what makes two cards distinguishable.
         sound_link: Some(LabelMatch::Contains("Original sound by")),
+        // `Not now`, read as `text` with no `content-desc`, off an SM-G955U1 held behind
+        // "Save login for next time?" on 18/08/2026.
+        dialog_dismiss: Some(LabelMatch::Text("Not now")),
         // `Photo` appears in `text` on this card, and the card is a photo post — but the
         // vi build's badge was confirmed on *two* devices and on a post page before being
         // written down, and one screen is not that. Left unmeasured: the cost is that a
@@ -1193,6 +1219,32 @@ mod tests {
                     set.package
                 );
             }
+        }
+    }
+
+    /// A set that can *recognise* the feed must also be able to *reach* it.
+    ///
+    /// Not a tidiness rule — it is what the fleet measured. `feed_tab` is a tab **inside**
+    /// the feed, so a phone parked on Profile, Inbox or Shop shows none of it; the way back
+    /// is the Home tab on the bottom bar. On 18/08/2026 a whole-fleet run had the two
+    /// `com.zhiliaoapp.musically` phones fail with "chờ 30s mà chưa thấy tab feed" for
+    /// exactly this reason, while the sixteen `trill` phones — whose set had `home_tab` —
+    /// recovered and watched. A phone is left wherever the last session left it, so this is
+    /// the ordinary case rather than an edge one.
+    #[test]
+    fn every_set_that_knows_the_feed_also_knows_the_way_back_to_it() {
+        for set in TIKTOK_LABEL_SETS {
+            if set.translated(TikTokControl::FeedTab).is_none() {
+                continue;
+            }
+            assert!(
+                set.translated(TikTokControl::HomeTab).is_some(),
+                "{} / {} can tell it is on the feed but cannot get there: measure the \
+                 bottom bar's Home tab with `cargo run -p riviu-android-driver --example \
+                 label_scout`",
+                set.package,
+                set.language
+            );
         }
     }
 
