@@ -7,7 +7,6 @@ import type {
   AgentStatus,
   AppLibraryItem,
   AppleIdConfig,
-  AuthSession,
   DeviceGroup,
   DeviceInfo,
   GroupInputReport,
@@ -27,7 +26,6 @@ import type {
   FlowTargetSelection,
   LegacyImportResult,
   JobRecord,
-  LocalUser,
   MaterialItem,
   OpLog,
   ProxyConfig,
@@ -460,18 +458,6 @@ export async function setScreenRotation(udid: string, rotation: 0 | 1 | 2 | 3) {
   return invoke<number>("set_screen_rotation", { udid, rotation });
 }
 
-export async function authSession() {
-  return invoke<AuthSession>("auth_session");
-}
-
-export async function authLogin(email: string, password: string) {
-  return invoke<LocalUser>("auth_login", { email, password });
-}
-
-export async function authRegister(email: string, password: string) {
-  return invoke<LocalUser>("auth_register", { email, password });
-}
-
 export async function getDeviceMeta(udid: string) {
   return invoke<DeviceMeta>("get_device_meta", { udid });
 }
@@ -624,10 +610,6 @@ export async function publishPost(campaignId: string) {
 
 export async function listOpLogs(limit = 100) {
   return invoke<OpLog[]>("list_op_logs", { limit });
-}
-
-export async function listUsers() {
-  return invoke<LocalUser[]>("list_users");
 }
 
 export async function analyticsSummary() {

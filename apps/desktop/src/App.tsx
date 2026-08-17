@@ -2,7 +2,6 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import {
   agentBulkRepair,
   agentListStatuses,
-  authSession,
   androidUnavailableReason,
   driverDegradedReason,
   listenRiviuEvents,
@@ -31,7 +30,7 @@ import { DeviceContextMenu, type DeviceMenuAction } from "./components/DeviceCon
 import { AdbConsole } from "./components/AdbConsole";
 import { ALL_DEVICES_TAB, devicesInTab, groupTabs, withDeviceAdded } from "./deviceGroups";
 import { FocusStream } from "./components/FocusStream";
-import { IconPhone, IconRefresh, IconUser } from "./components/Icons";
+import { IconPhone, IconRefresh } from "./components/Icons";
 import { Banner, EmptyState, LoadingState } from "./components/States";
 import { InteractionPopup } from "./components/InteractionPopup";
 import { JobsPanel } from "./components/JobsPanel";
@@ -42,21 +41,17 @@ import { SettingsPanel } from "./components/SettingsPanel";
 import { Sidebar } from "./components/Sidebar";
 import { useViewClient } from "./viewStore";
 import {
-  AccountPage,
   ApiPage,
   AppsPage,
   DataPage,
-  LoginPage,
   MaterialPage,
   PublishPage,
-  RegisterPage,
   ScheduleBlock,
 } from "./pages/FarmPages";
 import type {
   DeviceGroup,
   DeviceInfo,
   JobRecord,
-  LocalUser,
   PageId,
 } from "./types";
 import { deviceModelOsLabel, markDeviceFrameLive } from "./types";
@@ -77,11 +72,8 @@ const PAGE_TITLE: Partial<Record<PageId, string>> = {
   jobs: "Tác vụ",
   publish: "Đăng bài",
   data: "Dữ liệu",
-  account: "Tài khoản",
   api: "API",
   settings: "Cài đặt",
-  login: "Đăng nhập",
-  register: "Đăng ký",
 };
 
 function App() {
@@ -108,9 +100,6 @@ function App() {
   const [driverIssue, setDriverIssue] = useState<string | null>(null);
   const [androidIssue, setAndroidIssue] = useState<string | null>(null);
   const [startupIssue, setStartupIssue] = useState<string | null | undefined>(undefined);
-  const [user, setUser] = useState<LocalUser | null>(null);
-  const [showAuthUi, setShowAuthUi] = useState(false);
-  const [authForced, setAuthForced] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("window");
   const [tileWidth, setTileWidth] = useState(() => loadZoom(TILE_ZOOM));
   const canvasRef = useRef<HTMLDivElement | null>(null);
@@ -351,16 +340,6 @@ function App() {
         setStartupIssue(issue);
         if (issue) return;
 
-        void authSession()
-          .then((s) => {
-            if (cancelled) return;
-            setShowAuthUi(s.showAuthUi);
-            setUser(s.user ?? null);
-            if (s.showAuthUi && !s.bypassed) {
-              setPage("login");
-            }
-          })
-          .catch(() => undefined);
         void reload();
         void listenRiviuEvents((payload) => {
           const p = payload as Record<string, unknown>;
@@ -481,7 +460,6 @@ function App() {
     });
   };
 
-  const authBlocking = (showAuthUi || authForced) && (page === "login" || page === "register");
   const title = PAGE_TITLE[page] ?? page;
 
   if (startupIssue) {
@@ -501,31 +479,6 @@ function App() {
           </button>
         </div>
       </main>
-    );
-  }
-
-  if (authBlocking && page === "login") {
-    return (
-      <LoginPage
-        onDone={(u) => {
-          setUser(u);
-          setAuthForced(false);
-          setPage("control");
-        }}
-        onRegister={() => setPage("register")}
-      />
-    );
-  }
-  if (authBlocking && page === "register") {
-    return (
-      <RegisterPage
-        onDone={(u) => {
-          setUser(u);
-          setAuthForced(false);
-          setPage("control");
-        }}
-        onLogin={() => setPage("login")}
-      />
     );
   }
 
@@ -562,9 +515,6 @@ function App() {
               }}
             >
               <IconRefresh size={16} />
-            </button>
-            <button type="button" className="icon-btn" title={user?.email ?? "guest"}>
-              <IconUser size={18} />
             </button>
           </div>
         </header>
@@ -908,15 +858,6 @@ function App() {
             />
           )}
           {page === "data" && <DataPage />}
-          {page === "account" && (
-            <AccountPage
-              user={user}
-              onShowAuth={() => {
-                setAuthForced(true);
-                setPage("login");
-              }}
-            />
-          )}
           {page === "api" && <ApiPage />}
           {page === "settings" && <SettingsPanel devices={devices} />}
         </div>

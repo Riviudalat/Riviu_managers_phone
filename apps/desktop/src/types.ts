@@ -187,11 +187,8 @@ export type PageId =
   | "jobs"
   | "publish"
   | "data"
-  | "account"
   | "api"
-  | "settings"
-  | "login"
-  | "register";
+  | "settings";
 
 /** @deprecated use PageId */
 export type TabId = PageId;
@@ -371,19 +368,6 @@ export interface OpLog {
   action: string;
   detail: string;
   createdAt: string;
-}
-
-export interface LocalUser {
-  id: string;
-  email: string;
-  role: string;
-  createdAt: string;
-}
-
-export interface AuthSession {
-  showAuthUi: boolean;
-  bypassed: boolean;
-  user?: LocalUser | null;
 }
 
 export interface AnalyticsSummary {

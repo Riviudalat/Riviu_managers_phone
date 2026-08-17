@@ -670,23 +670,6 @@ pub struct OpLog {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LocalUser {
-    pub id: String,
-    pub email: String,
-    pub role: String,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AuthSession {
-    pub show_auth_ui: bool,
-    pub bypassed: bool,
-    pub user: Option<LocalUser>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AnalyticsSummary {
     pub device_total: usize,
     pub device_ready: usize,

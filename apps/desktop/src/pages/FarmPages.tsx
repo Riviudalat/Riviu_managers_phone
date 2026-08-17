@@ -4,8 +4,6 @@ import {
   addMaterial,
   analyticsSummary,
   apiDocs,
-  authLogin,
-  authRegister,
   deleteAppLibrary,
   deleteMaterial,
   deleteSchedule,
@@ -42,7 +40,6 @@ import type {
   DeviceGroup,
   DeviceInfo,
   GroupInstallResult,
-  LocalUser,
   MaterialItem,
   PublishBundle,
   PublishCampaignRecord,
@@ -712,34 +709,6 @@ export function DataPage() {
 
 
 
-export function AccountPage({
-  user,
-  onShowAuth,
-}: {
-  user: LocalUser | null;
-  onShowAuth: () => void;
-}) {
-  return (
-    <div className="panel">
-      <header className="panel-header">
-        <h2>Tài khoản</h2>
-      </header>
-      <section className="settings-card">
-        <h3>Phiên đăng nhập</h3>
-        <p>
-          User: <code>{user?.email ?? "guest@local"}</code> · role{" "}
-          <code>{user?.role ?? "admin"}</code>
-        </p>
-        <p className="hint">
-          Login/Register ẩn mặc định. Set <code>RIVIU_SHOW_AUTH=1</code> rồi restart, hoặc:
-        </p>
-        <button type="button" className="ghost" onClick={onShowAuth}>
-          Hiện màn Login (dev)
-        </button>
-      </section>
-    </div>
-  );
-}
 
 export function ApiPage() {
   const [docs, setDocs] = useState("Loading…");
@@ -869,102 +838,4 @@ export function ScheduleBlock({
   );
 }
 
-export function LoginPage({
-  onDone,
-  onRegister,
-}: {
-  onDone: (u: LocalUser) => void;
-  onRegister: () => void;
-}) {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [err, setErr] = useState<string | null>(null);
-  return (
-    <div className="panel" style={{ maxWidth: 420, margin: "3rem auto" }}>
-      <header className="panel-header">
-        <h2>Login</h2>
-      </header>
-      <label>
-        Email
-        <input value={email} onChange={(e) => setEmail(e.target.value)} />
-      </label>
-      <label>
-        Password
-        <input
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-        />
-      </label>
-      {err && <p className="error">{err}</p>}
-      <div className="row">
-        <button
-          type="button"
-          className="primary"
-          onClick={async () => {
-            try {
-              onDone(await authLogin(email, password));
-            } catch (e) {
-              setErr(String(e));
-            }
-          }}
-        >
-          Đăng nhập
-        </button>
-        <button type="button" className="linkish" onClick={onRegister}>
-          Đăng ký
-        </button>
-      </div>
-    </div>
-  );
-}
 
-export function RegisterPage({
-  onDone,
-  onLogin,
-}: {
-  onDone: (u: LocalUser) => void;
-  onLogin: () => void;
-}) {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [err, setErr] = useState<string | null>(null);
-  return (
-    <div className="panel" style={{ maxWidth: 420, margin: "3rem auto" }}>
-      <header className="panel-header">
-        <h2>Register</h2>
-      </header>
-      <label>
-        Email
-        <input value={email} onChange={(e) => setEmail(e.target.value)} />
-      </label>
-      <label>
-        Password
-        <input
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-        />
-      </label>
-      {err && <p className="error">{err}</p>}
-      <div className="row">
-        <button
-          type="button"
-          className="primary"
-          onClick={async () => {
-            try {
-              onDone(await authRegister(email, password));
-            } catch (e) {
-              setErr(String(e));
-            }
-          }}
-        >
-          Tạo tài khoản
-        </button>
-        <button type="button" className="linkish" onClick={onLogin}>
-          Đã có tài khoản
-        </button>
-      </div>
-    </div>
-  );
-}

@@ -185,15 +185,6 @@ export function IconLog({ size = 18, className }: IconProps) {
   );
 }
 
-export function IconUser({ size = 18, className }: IconProps) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
-      <circle cx="12" cy="8" r="3.25" stroke="currentColor" strokeWidth="1.75" />
-      <path d="M5 19c1-3.2 3.5-5 7-5s6 1.8 7 5" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
-    </svg>
-  );
-}
-
 export function IconApi({ size = 18, className }: IconProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
@@ -384,7 +375,6 @@ export const MENU_ICONS: Record<string, (p: IconProps) => ReactElement> = {
   jobs: IconClock,
   publish: IconRocket,
   data: IconChart,
-  account: IconUser,
   api: IconApi,
   settings: IconSettings,
 };

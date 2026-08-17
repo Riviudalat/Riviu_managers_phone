@@ -15,7 +15,6 @@ vi.mock("./api", () => ({
   // error rather than as the missing mock it is.
   androidUnavailableReason: vi.fn(async () => null),
   driverDegradedReason: vi.fn(async () => null),
-  authSession: vi.fn(async () => ({ showAuthUi: false, bypassed: true, user: null })),
   exampleScript: vi.fn(async () => "{}"),
   getStreamSettings: vi.fn(async () => ({
     fps: 24,
@@ -112,6 +111,31 @@ describe("toolbar Start", () => {
     );
     await waitFor(() => expect(api.prepareDevice).toHaveBeenCalledWith(iphone.udid));
     expect(api.viewEnsure).not.toHaveBeenCalled();
+  });
+});
+
+describe("the removed local login", () => {
+  // Passwords were stored and compared as plaintext, so the login was removed rather than
+  // patched. These are the two things a user could still see afterwards if the removal had
+  // stopped at the backend: a nav entry to an account page with nothing behind it, and an
+  // `auth_session` call on boot deciding whether to gate the app.
+  it("leaves no account entry in the sidebar", async () => {
+    const api = await import("./api");
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Tài khoản" })).toBeNull();
+  });
+
+  it("boots straight to the fleet without asking the backend about a session", async () => {
+    const api = await import("./api");
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
+    // The mock factory has no `authSession`, so an import of it is `undefined` and calling
+    // it throws. Reaching the grid at all is the evidence that nothing calls it.
+    expect("authSession" in api).toBe(false);
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
+    expect(screen.queryByLabelText(/mật khẩu/i)).toBeNull();
   });
 });
 

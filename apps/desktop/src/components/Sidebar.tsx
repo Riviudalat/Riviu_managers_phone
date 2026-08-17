@@ -21,7 +21,6 @@ const MENU: { id: PageId; label: string }[] = [
   { id: "jobs", label: "Tác vụ" },
   { id: "publish", label: "Đăng bài" },
   { id: "data", label: "Dữ liệu" },
-  { id: "account", label: "Tài khoản" },
   { id: "api", label: "API" },
   { id: "settings", label: "Cài đặt" },
 ];

@@ -5170,6 +5170,41 @@ moi lan doi preset va moi lan xoay may la mot cua so cham bien mat — upstream 
 agent **von khong cham** — 130–280 ms mot click do tren chinh Galaxy S8+. Con so 1502 ms la
 `adb shell input`, **khong phai** agent, dung nham hai cai.
 
+### 9.84 Go han dang nhap: mat khau plaintext trong cot ten `password_hash` (17/08/2026)
+
+`register_user` ghi mật khẩu **nguyên văn** vào cột tên `password_hash`, và `login_user` so sánh
+nó như plaintext. Ai đọc được `riviu.db` — thư mục đồng bộ, một bản backup, một support bundle,
+một tài khoản khác trên cùng máy — đọc được mật khẩu của mọi người vận hành.
+
+Người vận hành chọn **xoá hẳn** thay vì băm. Lý do đứng vững: đây là app một máy, cái "đăng
+nhập" này không bảo vệ gì (mọi lệnh Tauri chạy không cần nó), nên nó chỉ tạo ra một kho mật
+khẩu mà không đổi lại được thứ gì. Băm sẽ giữ lại kho đó và thêm việc phải làm đúng.
+
+Bốn thứ bị gỡ, và **thứ tư mới là điểm chính**:
+
+1. Bốn lệnh Tauri (`auth_session`, `auth_login`, `auth_register`, `list_users`) và bốn hàm DB.
+2. Frontend: `LoginPage`/`RegisterPage`/`AccountPage`, `PageId` mất `login`/`register`/`account`,
+   mục "Tài khoản" trên sidebar, và cái nút hình người ở header — nó chỉ là tooltip của email
+   đang đăng nhập, gỡ auth xong thì thành nút bấm không làm gì, đúng thứ §9.58 cấm để lại.
+3. Migration 7 `drop-local-users`: `DROP TABLE IF EXISTS users`. **Gỡ giao diện mà để bảng lại
+   thì phơi nhiễm vẫn nguyên** — hàng cũ vẫn nằm trong file DB của mọi máy đã chạy bản trước.
+4. Một test canh chừng, `no_command_stores_a_login_password`: nó quét *cả bề mặt lệnh* tìm chữ
+   `password` chứ không tìm bốn tên vừa xoá, vì tìm theo tên chỉ bắt được người thêm lại **đúng
+   bốn cái đó**. Lần sau không nhất thiết phải tên là `auth_login`.
+
+Test đó bắt ngay hai chỗ tôi không biết, và **cả hai đều hợp lệ** — nên chúng được **gọi tên
+kèm lý do** trong chính test, chứ không bị bỏ qua im lặng:
+
+- `set_apple_id` nhận mật khẩu app-specific của Apple ID để ký lại WDA. Nó đưa thẳng cho
+  credential store của OS, **không bao giờ chạm `state.db`**, và `get_apple_id` chỉ đọc lại
+  `has_password`. Test khẳng định đúng tính chất đó, không chỉ khẳng định tên.
+- `export_proxy_config` in mật khẩu proxy người dùng tự nhập. Mật khẩu proxy **bắt buộc phải
+  hoàn nguyên được** mới dùng được, nên không băm được; nó nằm đọc được trong bảng `proxies`
+  **do thiết kế**. Vẫn đáng biết: đó là plaintext trong DB, chỉ là loại plaintext có lý do.
+
+Một tên thứ ba xuất hiện trong danh sách đó nghĩa là có bề mặt mật khẩu mới mà chưa ai quyết
+định gì cả.
+
 ### 9.83 Dang bai day MOI bundle sang MOI may — va hai backend hieu `source_root` khac nhau (17/08/2026)
 
 Tìm ra bởi một đợt soát đối kháng (115 agent, 36 nghi vấn, 21 sống sót sau ba vòng phản biện

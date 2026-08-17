@@ -150,9 +150,6 @@ pub fn run() {
             commands::android_unavailable_reason,
             commands::update_check,
             commands::update_install,
-            farm_commands::auth_session,
-            farm_commands::auth_login,
-            farm_commands::auth_register,
             farm_commands::get_device_meta,
             farm_commands::save_device_meta,
             farm_commands::list_groups,
@@ -176,7 +173,6 @@ pub fn run() {
             farm_commands::list_publish_tasks,
             farm_commands::create_publish_task,
             farm_commands::list_op_logs,
-            farm_commands::list_users,
             farm_commands::analytics_summary,
             farm_commands::api_docs,
             flow_commands::flow_action_catalog,
@@ -291,6 +287,85 @@ pub(crate) fn graceful_shutdown(handle: &tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
+    /// Every `#[tauri::command]` in a file, as (name, body).
+    fn commands_in(source: &str) -> Vec<(&str, &str)> {
+        source
+            .split("#[tauri::command]")
+            .skip(1)
+            .filter_map(|chunk| {
+                let signature = chunk.find("fn ")? + 3;
+                let tail = &chunk[signature..];
+                let name = &tail[..tail.find(['(', '<'])?];
+                let end = chunk.find("\n#[").unwrap_or(chunk.len());
+                Some((name, &chunk[..end]))
+            })
+            .collect()
+    }
+
+    /// The local login is gone, and this is what keeps it gone.
+    ///
+    /// It looks for the word rather than for the four removed handler names, because naming
+    /// them would only catch someone re-adding *those*. The old pair stored the password
+    /// verbatim in a column called `password_hash` and compared it as plaintext, and the next
+    /// attempt would not have to be called `auth_login` to repeat that.
+    ///
+    /// Two commands legitimately touch a password and are named here rather than skipped,
+    /// because each one is a decision someone made and can be re-read:
+    ///
+    /// - `set_apple_id` takes the Apple ID app-specific password needed to resign WDA. It
+    ///   hands it to the OS credential store, never to `state.db`, and `get_apple_id` reads
+    ///   back only `has_password` — asserted below.
+    /// - `export_proxy_config` prints a proxy password the operator typed in. A proxy
+    ///   password has to survive round-trip to be usable at all, so it cannot be hashed;
+    ///   it is stored readable in `proxies` by design, not by the oversight this test is
+    ///   about.
+    ///
+    /// A third entry appearing here means a new password surface arrived without that
+    /// decision being made. Before the removal this failed on `farm_commands.rs::auth_login`.
+    #[test]
+    fn no_command_stores_a_login_password() {
+        let surfaces = [
+            ("commands.rs", include_str!("commands.rs")),
+            ("farm_commands.rs", include_str!("farm_commands.rs")),
+            ("agent_commands.rs", include_str!("agent_commands.rs")),
+            ("flow_commands.rs", include_str!("flow_commands.rs")),
+            ("nurture_commands.rs", include_str!("nurture_commands.rs")),
+            ("publish_commands.rs", include_str!("publish_commands.rs")),
+            (
+                "interaction_commands.rs",
+                include_str!("interaction_commands.rs"),
+            ),
+        ];
+        let mut holders = Vec::new();
+        for (file, source) in surfaces {
+            for (name, body) in commands_in(source) {
+                if body.to_ascii_lowercase().contains("password") {
+                    holders.push((file, name, body));
+                }
+            }
+        }
+        let mut named = holders
+            .iter()
+            .map(|(file, name, _)| format!("{file}::{name}"))
+            .collect::<Vec<_>>();
+        named.sort();
+        assert_eq!(
+            named,
+            vec![
+                "commands.rs::set_apple_id".to_string(),
+                "farm_commands.rs::export_proxy_config".to_string(),
+            ],
+        );
+        let (_, _, apple) = holders
+            .iter()
+            .find(|(_, name, _)| *name == "set_apple_id")
+            .expect("set_apple_id");
+        assert!(
+            apple.contains("state.signing") && !apple.contains("state.db"),
+            "set_apple_id must hand the password to the credential store, not the database:\n{apple}"
+        );
+    }
+
     fn command_body<'a>(source: &'a str, name: &str) -> &'a str {
         let sync = format!("pub fn {name}");
         let asynchronous = format!("pub async fn {name}");
@@ -361,9 +436,6 @@ mod tests {
             (
                 include_str!("farm_commands.rs"),
                 &[
-                    "auth_session",
-                    "auth_login",
-                    "auth_register",
                     "save_device_meta",
                     "save_group",
                     "delete_group",
