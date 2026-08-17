@@ -378,16 +378,21 @@ enum ClientEvent {
 /// resync, no log, and any keyframe in the skipped span silently gone while every later
 /// delta was delivered normally. That is precisely "packets keep arriving and nothing
 /// paints".
+/// Pump one device's packets to this client until the channel or the client goes.
+///
+/// Returns the udid it was serving. The caller needs that: a forwarder ends when the hub
+/// forgets its device, and the client has to stop believing it is still subscribed —
+/// otherwise the device can never be picked up again. See the `known` set below.
 async fn forward_device(
     udid: String,
     mut rx: broadcast::Receiver<ViewPacket>,
     tx: mpsc::Sender<ClientEvent>,
-) {
+) -> String {
     loop {
         match rx.recv().await {
             Ok(packet) => {
                 if tx.send(ClientEvent::Packet(packet)).await.is_err() {
-                    return;
+                    return udid;
                 }
             }
             Err(RecvError::Lagged(mut dropped)) => {
@@ -399,7 +404,7 @@ async fn forward_device(
                         Ok(_) => {}
                         Err(TryRecvError::Lagged(more)) => dropped += more,
                         Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Closed) => return,
+                        Err(TryRecvError::Closed) => return udid,
                     }
                 }
                 if tx
@@ -410,10 +415,10 @@ async fn forward_device(
                     .await
                     .is_err()
                 {
-                    return;
+                    return udid;
                 }
             }
-            Err(RecvError::Closed) => return,
+            Err(RecvError::Closed) => return udid,
         }
     }
 }
@@ -457,6 +462,27 @@ async fn serve_client(hub: Arc<ViewHub>, stream: tokio::net::TcpStream) -> anyho
                     Err(RecvError::Lagged(_)) => hub.known_devices(),
                     Err(RecvError::Closed) => Vec::new(),
                 };
+                // **Reap first, and this is the whole fix.** `known` used to only ever
+                // grow. A device that left the fleet had its channel dropped by
+                // `ViewHub::forget`, which ended its forwarder — but its udid stayed in
+                // this set, so when the phone came back and the hub announced its *new*
+                // channel, `insert` answered "already known" and no forwarder was ever
+                // spawned for it. That client then received nothing for that device for
+                // the rest of the connection, with the producer running, a keyframe sent
+                // and no error anywhere.
+                //
+                // Measured on the fleet 17/08/2026: reboot one phone of twenty and the
+                // host's paint evidence sits at 19/20 permanently. Reconnecting the socket
+                // is what fixed it, because a fresh client calls `subscribe_all`.
+                //
+                // Reaping here rather than in a select arm keeps it ordered: a forwarder
+                // whose device was forgotten has already returned by the time that device
+                // can be announced again, since being announced needs a new producer.
+                while let Some(finished) = forwarders.try_join_next() {
+                    if let Ok(gone) = finished {
+                        known.remove(&gone);
+                    }
+                }
                 for udid in fresh {
                     if !known.insert(udid.clone()) {
                         continue;
@@ -1015,6 +1041,53 @@ mod tests {
         assert_eq!(
             live.into_data().to_vec(),
             encode_packet(&h264("b", true, 2))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_device_that_leaves_and_comes_back_still_reaches_an_open_client() {
+        // The failure this exists for, measured on the fleet 17/08/2026: reboot one phone
+        // of twenty and the host's paint evidence sits at 19/20 for as long as the window
+        // stays open. The producer is running, its keyframe was sent, no error is logged
+        // anywhere -- the client simply never subscribed to the phone's *new* channel,
+        // because its `known` set still held the udid from the old one. Reconnecting the
+        // socket was the only cure, since a fresh client calls `subscribe_all`.
+        //
+        // A phone leaving and returning is the most ordinary event this fleet has: a
+        // reboot, a cable knocked loose, a hub that browns out.
+        use futures_util::StreamExt;
+
+        let hub = ViewHub::new();
+        hub.advance("a");
+        assert!(hub.publish(h264("a", true, 1)));
+        let port = Arc::clone(&hub).listen().await.expect("bind loopback");
+        let socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("dial the loopback listener");
+        let (mut client, _) =
+            tokio_tungstenite::client_async(format!("ws://127.0.0.1:{port}/"), socket)
+                .await
+                .expect("websocket handshake");
+        let replayed = client.next().await.expect("a message").expect("no error");
+        assert_eq!(
+            replayed.into_data().to_vec(),
+            encode_packet(&h264("a", true, 1))
+        );
+
+        // The phone leaves the fleet: the 3 s scan reconciles the hub against the registry.
+        hub.forget("a");
+        // ...and comes back, with a new channel and a fresh keyframe.
+        hub.advance("a");
+        assert!(hub.publish(h264("a", true, 9)));
+
+        let live = tokio::time::timeout(Duration::from_secs(5), client.next())
+            .await
+            .expect("the returned device must still reach an already-connected client")
+            .expect("a message")
+            .expect("no error");
+        assert_eq!(
+            live.into_data().to_vec(),
+            encode_packet(&h264("a", true, 9))
         );
     }
 }
