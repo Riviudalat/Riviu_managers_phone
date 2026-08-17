@@ -5170,6 +5170,43 @@ moi lan doi preset va moi lan xoay may la mot cua so cham bien mat — upstream 
 agent **von khong cham** — 130–280 ms mot click do tren chinh Galaxy S8+. Con so 1502 ms la
 `adb shell input`, **khong phai** agent, dung nham hai cai.
 
+### 9.86 27 loi cua dot soat doi khang: nhung gi dang nho lai (17/08/2026)
+
+Toàn bộ 27 lỗi đã sửa. Phần lớn đã nằm trong commit message; đây là những **sự thật xuyên
+suốt** mà việc sau còn phải dùng tới.
+
+**Producer minicap của Android chạy `Projection::native`, không phải `half`.** Đây là lựa
+chọn *đúng đắn*, không phải chất lượng: Flow đo bằng pixel thiết bị — toạ độ đã biên dịch nhớ
+kích thước ảnh nó được chọn trên, `validate_geometry` từ chối gửi nếu khung hình sống không
+khớp hình học đã xác định, và bằng chứng `FrameRegionChanged` nêu hình chữ nhật theo pixel
+khung hình. Ở nửa tỉ lệ không cái nào qua nổi. Đã đo cả hai chiều trên Redmi 23021RAAEG:
+native → 4/4 node Succeeded; đổi lại `half` → `EvidenceInvalid: frame region is outside the
+decoded image`. Lưới tile Android **không** dùng minicap (nó ở đường H.264) và
+`background_sample_candidate` trả false cho Android, nên không ai trả thêm chi phí. Đường AI
+không đổi chiều nào: `openai_client::make_contact_sheet` resize mọi khung về 375x667 trước
+khi tới provider, nên hoá đơn token không phụ thuộc máy chụp cỡ nào. **Nếu tile Android quay
+lại minicap thì phải xem lại dòng này.**
+
+**Một thông điệp chỉ sống đúng bằng trạng thái giải thích nó.** `merge_scanned_device` mang
+`last_error` theo *chỉ khi* `tile_stream_state` vẫn là `Error`. Luật cũ — mang theo bất cứ khi
+nào lần quét mới không có lỗi — làm mọi lỗi bất tử, vì `probe_device` ghi `None` khi thành
+công. Cùng khuôn đó lặp lại ở `ScheduleItem::last_error` (migration 8) và ở kết quả preflight
+của Nuôi TT.
+
+**Một máy hỏng không được kết thúc lượt của máy khác.** Khuôn của `ddd074c` giờ có mặt ở bốn
+chỗ nữa: `startFleetPreview` (từng là `Promise.all`, một máy Android rớt là mọi iPhone phía
+sau không được chạm tới), `preflight_comment_job` (một máy bận huỷ cả lượt start),
+`recover_startup_contexts` (một hàng DB hỏng chặn app khởi động), và vòng lặp pull media.
+
+**Ba thứ đã chứng minh trên phần cứng thật**, không phải suy luận: Flow chạy end-to-end trên
+hai đời máy khác nhau (§9.85), toạ độ ảnh chạy được cả hai chiều, và `export_media` bắt được
+ngay ca thật ở lần chạy đầu — **836/838 file**, 2 file im lặng không tới. Luật cũ sẽ báo
+"Đã lấy 836 file" như một thành công.
+
+Một việc dọn dẹp chưa làm, ghi để khỏi quên: fixture của test Rust (`riviu-flow-runtime-*`,
+`riviu-flow-executor-*`) không tự xoá, nên thư mục temp đang có hơn 21.000 mục. Không phải
+lỗi của đợt này và không ảnh hưởng gì đang chạy.
+
 ### 9.85 Flow chay that tren Android: cai `inspect_device_for_target` con thieu (17/08/2026)
 
 `AndroidDriver` **không cài** `DeviceDriver::inspect_device_for_target`, nên mặc định của
