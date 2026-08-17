@@ -11,15 +11,86 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context};
 use tokio::process::Command;
+use tokio::sync::Semaphore;
 
 /// How long a lifecycle call may take before we stop waiting. Generous: on the
 /// S8+ fleet `screencap` alone is measured at 1.2–2.6 s and `pm install` of a
 /// 17 MB APK is slower still.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How many `adb` invocations this process runs at once.
+///
+/// **Measured on the 20-phone fleet while all twenty were streaming**, because an idle adb
+/// server is not the one that misbehaves. Sixty `adb shell echo` round trips per level:
+///
+/// | at once | p50 | p90 | max | wall for 60 calls |
+/// |---|---|---|---|---|
+/// | 4 | 56 ms | 65 ms | 75 ms | 0.8 s |
+/// | 8 | 61 ms | 71 ms | 82 ms | 0.5 s |
+/// | **12** | **67 ms** | **79 ms** | **89 ms** | **0.3 s** |
+/// | 16 | 68 ms | 75 ms | 97 ms | 0.3 s |
+/// | 24 | 79 ms | 95 ms | 117 ms | 0.2 s |
+/// | 32 | 86 ms | 111 ms | 132 ms | 0.2 s |
+///
+/// Nothing *fails* at any level — this is not a cliff, it is a slope. What the table says is
+/// that past twelve the fleet stops getting faster (0.3 s → 0.2 s) while every individual
+/// call gets slower (p90 79 ms → 111 ms). Twelve is where those two curves cross.
+///
+/// It matters because this process had no cap at all: measured at startup, it reached
+/// **34 concurrent adb invocations**, which is squarely in the region where every call is
+/// paying for the others. The operator feels that as the app being unresponsive exactly when
+/// it is busiest — which is exactly when they are watching it.
+///
+/// **The long-lived scrcpy child is deliberately not counted here.** It is spawned directly
+/// rather than through this module, and it must be: it never exits, so a permit it held would
+/// never come back and the fleet would deadlock at the twelfth phone.
+const ADB_MAX_CONCURRENT: usize = 12;
+
+/// Long enough that an ordinary wait is not worth a line, short enough that a real queue is.
+///
+/// At the cap above, a call waits only when more than twelve are already running; the table
+/// says a running call finishes in well under 100 ms, so a wait past this means something is
+/// genuinely backed up rather than merely busy.
+const ADB_SLOW_WAIT: Duration = Duration::from_millis(500);
+
+/// The cap is **global**, because the thing it rations is global: one adb server per host.
+///
+/// Two `AdbProgram` values are two handles onto the same server, so a per-instance limit
+/// would bound nothing. `detect_driver` alone builds one instance per candidate path while
+/// probing.
+fn adb_slots() -> &'static Semaphore {
+    static SLOTS: OnceLock<Semaphore> = OnceLock::new();
+    SLOTS.get_or_init(|| Semaphore::new(ADB_MAX_CONCURRENT))
+}
+
+/// Wait for a slot, and say so if the wait was long.
+///
+/// Returns the permit; dropping it releases the slot. Held only around the child process, so
+/// a slow *device* does not hold a slot longer than its own command takes.
+async fn enter_adb_slot(what: &str) -> tokio::sync::SemaphorePermit<'static> {
+    let waiting_since = Instant::now();
+    let permit = adb_slots()
+        .acquire()
+        .await
+        .expect("the adb slot semaphore is never closed");
+    let waited = waiting_since.elapsed();
+    if waited >= ADB_SLOW_WAIT {
+        // Printed rather than merely endured. A queue nobody can see is indistinguishable
+        // from a slow device, and those two have opposite fixes.
+        tracing::warn!(
+            waited_ms = waited.as_millis() as u64,
+            limit = ADB_MAX_CONCURRENT,
+            command = what,
+            "waited for an adb slot; the host is running its cap of concurrent adb calls"
+        );
+    }
+    permit
+}
 
 #[derive(Debug, Clone)]
 pub struct AdbProgram {
@@ -206,6 +277,10 @@ impl AdbProgram {
     pub async fn run_bytes(&self, args: &[&str], timeout: Duration) -> anyhow::Result<Vec<u8>> {
         let mut command = self.command();
         command.args(args);
+        // The timeout starts AFTER the slot is acquired, deliberately. Counting queue time
+        // against a command's own deadline would make a busy host look like a broken phone,
+        // and the caller's timeouts are sized on what the device takes to answer.
+        let _slot = enter_adb_slot(args.first().copied().unwrap_or("adb")).await;
         let output = tokio::time::timeout(timeout, command.output())
             .await
             .map_err(|_| anyhow!("adb {} timed out after {:?}", args.join(" "), timeout))?
@@ -241,6 +316,7 @@ impl AdbProgram {
     ) -> anyhow::Result<ShellOutput> {
         let mut command = self.command();
         command.args(["-s", serial, "shell", script]);
+        let _slot = enter_adb_slot("shell").await;
         let output = tokio::time::timeout(timeout, command.output())
             .await
             .map_err(|_| anyhow!("adb shell timed out after {timeout:?}"))?

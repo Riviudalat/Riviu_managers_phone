@@ -37,6 +37,11 @@ type AgentAction = "check" | "repair";
 /// never run at while the operator waits to see it take effect.
 const MIN_STREAM_FPS = 5;
 const MAX_STREAM_FPS = 30;
+/// Display only, and it must match `ViewPreset::Tile::max_fps()` in `scrcpy.rs` — the cap
+/// is enforced there, not here. It is named in the hint because a field labelled "FPS"
+/// that only half the picture obeys is the same disagreement the overlay/encoder mismatch
+/// already cost us once.
+const TILE_FPS_CEILING = 10;
 
 export function SettingsPanel({ devices }: Props) {
   const [email, setEmail] = useState("");
@@ -280,6 +285,12 @@ export function SettingsPanel({ devices }: Props) {
           nên để cao hơn được. Đổi xong sẽ khởi động lại các tile đang chạy, mất khoảng một
           giây hình đen mỗi máy.
         </p>
+        <p className="hint">
+          FPS ở đây là của overlay. Tile trong lưới bị chặn ở {TILE_FPS_CEILING} hình/giây:
+          hai mươi tile giải mã cùng một chỗ với overlay, và đo trên dàn máy này thì 24
+          hình/giây tốn 135% một nhân CPU, còn 5 hình/giây tốn 85%. Chặn tile lại là để
+          máy đang điều khiển được mượt.
+        </p>
         <div className="row">
           <label>
             Chất lượng lưới
@@ -316,7 +327,7 @@ export function SettingsPanel({ devices }: Props) {
             </select>
           </label>
           <label>
-            FPS
+            FPS overlay
             <input
               type="number"
               min={MIN_STREAM_FPS}

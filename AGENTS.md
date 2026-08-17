@@ -5170,6 +5170,53 @@ moi lan doi preset va moi lan xoay may la mot cua so cham bien mat — upstream 
 agent **von khong cham** — 130–280 ms mot click do tren chinh Galaxy S8+. Con so 1502 ms la
 `adb shell input`, **khong phai** agent, dung nham hai cai.
 
+### 9.77 Do "khong muot" thay vi doan: CPU khong phai thu phanh, va cho no that su nam (17/08/2026)
+
+Mục tiêu là "điều khiển mượt, stream không lỗi, hạn chế mất kết nối". Trước khi sửa gì, đo.
+
+**Stream không lỗi — đã đúng, có số.** Nối thêm một client vào view hub và đo *khoảng cách*
+giữa các khung hình (trung bình fps không nói lên độ mượt: 24 khung đều nhau khác hẳn 24 khung
+dồn hai cụm). 20 máy, 24 giây:
+
+| | p50 | p90 | p99 | max |
+|---|---|---|---|---|
+| khoảng cách khung | 101 ms | 104 ms | 120 ms | 178 ms |
+
+Không dồn cụm, không rớt máy nào trong hơn 15 phút, 2.3 Mbit/s tổng. Preset đổi đúng khi mở
+overlay: máy đang focus chuyển sang `max_size=832 max_fps=24 video_bit_rate=6000000`, đọc từ
+`/proc` trên chính máy đó.
+
+Máy focus chỉ cho 11.3 fps khi màn hình **đứng yên** — đó là MediaCodec làm đúng việc, chỉ phát
+khung khi có thay đổi. Cho nó cuộn thật thì lên 16.1 fps và p50 khoảng cách còn **51 ms**.
+Đừng đọc con số fps tĩnh rồi kết luận stream hỏng.
+
+**CPU: đo được, giảm được, nhưng KHÔNG phải nguyên nhân.** 20 tile ăn 135% một nhân. Chẻ theo
+tiến trình: host Rust **12%**, còn lại là renderer (55%) và GPU (23%) của WebView. Hạ nhịp tile
+xuống 10 (`ViewPreset::Tile::max_fps`) còn **107%**. Nhưng máy này có **20 nhân** — 107% một
+nhân là ~5% cả máy, và không luồng nào bão hoà. **Việc giảm CPU là đáng làm, nhưng nó không hề
+là thứ gây giật.** Suýt nữa tôi tối ưu nhầm chỗ vì tưởng CPU cao là đủ để kết luận.
+
+Lưu ý cho lần sau: quan hệ fps↔CPU **dưới tuyến tính** (24→5 chỉ giảm 37%, không phải 80%).
+`i-frame-interval:int=1` giữ nguyên nhịp keyframe bất kể fps, nên fps càng thấp thì *tỉ lệ*
+khung đắt càng cao. Dưới ~10 gần như không còn gì để lấy.
+
+**Chỗ nó thật sự nằm.** Đo từ lúc ra lệnh tới lúc khung hình về client:
+
+| đường đi | p50 |
+|---|---|
+| `adb shell input keyevent` | 536 ms |
+| click thật trong overlay (qua agent) | **250 ms** |
+
+536 ms là phép đo **sai đường** — `adb shell input` dựng một JVM trên máy mỗi lần gọi, app
+không đi đường đó. Khớp với §9.71: đừng nhầm hai con số này.
+
+Nhưng cái đắt nhất không phải độ trễ một cú chạm, mà là **thao tác kéo chỉ được gửi khi nhả
+tay**: `FocusStream` gom mẫu `pointerMove` rồi bắn một `swipe` duy nhất trong `onPointerUp`.
+Nghĩa là người dùng kéo → màn hình đứng im → thả ra mới cuộn. Đó đúng nghĩa đen là "không
+mượt", và không phép đo CPU hay fps nào chỉ ra được nó — phải đọc đường input mới thấy.
+Socket control của scrcpy (mở từ §9.76, `CONTROL_MESSAGE_INJECT_TOUCH` cố ý để không) cho đẩy
+chạm theo thời gian thực; đó mới là chỗ sửa.
+
 ### 9.76 Phan 3 xong: socket control, `RESET_VIDEO`, va mot ket luan tu bac bo (16/08/2026)
 
 §9.71 bo Phan 3 vi "bat control lam mat video ca 20 may". §9.74 tim ra nguyen nhan that

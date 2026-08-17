@@ -159,12 +159,24 @@ describe("stream quality", () => {
       focusQuality: "high",
     });
     render(<SettingsPanel devices={[]} />);
-    await waitFor(() => expect(screen.getByLabelText("FPS")).toBeTruthy());
+    await waitFor(() => expect(screen.getByLabelText("FPS overlay")).toBeTruthy());
 
-    const fps = screen.getByLabelText("FPS");
+    const fps = screen.getByLabelText("FPS overlay");
     await userEvent.clear(fps);
     await userEvent.type(fps, "99");
 
     await waitFor(() => expect((fps as HTMLInputElement).value).toBe("30"));
+  });
+
+  it("says the number is the overlay's, because a tile will not run at it", async () => {
+    // The field is labelled "FPS overlay" and not "FPS" for a reason: tiles are capped
+    // below it in `ViewPreset::Tile::max_fps`, so a bare "FPS" would promise the grid a
+    // rate it never runs at -- the same UI-and-encoder disagreement the test above guards
+    // from the other side. The ceiling itself is checked against Rust by
+    // `the_settings_hint_names_the_same_tile_ceiling_this_file_enforces`.
+    render(<SettingsPanel devices={[]} />);
+    await waitFor(() => expect(screen.getByLabelText("FPS overlay")).toBeTruthy());
+    expect(screen.queryByLabelText("FPS")).toBeNull();
+    expect(screen.getByText(/Tile trong lưới bị chặn ở 10 hình\/giây/)).toBeTruthy();
   });
 });

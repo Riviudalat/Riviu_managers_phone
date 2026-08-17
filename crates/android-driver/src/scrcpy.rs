@@ -167,10 +167,33 @@ impl ViewPreset {
         }
     }
 
-    /// The highest frame rate measured to work on this fleet.
+    /// The highest frame rate this preset will ask a phone for.
+    ///
+    /// **Not the same question for the two presets, and it used to be answered as if it
+    /// were.** The overlay is the one phone the operator is working on; a tile is one of
+    /// twenty they are glancing at. Twenty tiles at the same rate as the overlay is twenty
+    /// times the decode work for the part nobody is looking at, and it is paid in the one
+    /// place it hurts — the WebView that also has to keep the overlay smooth.
+    ///
+    /// Measured on this fleet, twenty phones, whole-app CPU across the Tauri and WebView
+    /// processes:
+    ///
+    /// | grid rate | CPU (one core = 100%) | working set |
+    /// |---|---|---|
+    /// | 24 fps | **135 %** | 1166 MB |
+    /// | 5 fps | **85 %** | 1121 MB |
+    ///
+    /// Note the saving is **sub-linear** — 4.8x fewer frames buys 37 % less CPU, not 80 %.
+    /// That is `video_codec_options=i-frame-interval:int=1` doing what it was asked: one
+    /// keyframe per second regardless of rate, so the *proportion* of expensive frames rises
+    /// as the rate falls. Below about ten there is little left to win, which is why this is
+    /// 10 and not 1.
+    ///
+    /// The operator's frame-rate setting still applies; this is a ceiling on top of it, so
+    /// asking for 24 gives the overlay 24 and a tile 10.
     pub fn max_fps(self) -> u32 {
         match self {
-            Self::Tile => 30,
+            Self::Tile => 10,
             Self::Overlay => 30,
         }
     }
@@ -793,12 +816,22 @@ mod tests {
         // and looks exactly like a phone that stopped sending.
         assert_eq!(command.matches("control=").count(), 1, "{command}");
         assert!(command.contains("max_size=480"), "{command}");
-        // The app's own declared rate, not a hardcoded 30. Before quality and fps were
-        // wired, `get_stream_settings` told the operator 24 while the launch asked for
-        // 30 — the UI and the encoder disagreed and neither said so. They agree now.
+        // A tile is capped below the operator's declared rate, on purpose: twenty of these
+        // decode in the same WebView that has to keep the overlay smooth, and the fleet
+        // measured 135 % of a core at 24 against 85 % at 5. The setting still reaches the
+        // overlay untouched -- see `overlay_preset_is_the_larger_encode_not_a_second_process`.
+        assert!(riviu_core::STREAM_FPS > ViewPreset::Tile.max_fps());
         assert!(
-            command.contains(&format!("max_fps={}", riviu_core::STREAM_FPS)),
+            command.contains(&format!("max_fps={}", ViewPreset::Tile.max_fps())),
             "{command}"
+        );
+        // The cap is a ceiling, not a fixed rate: an operator who asks for less than the
+        // ceiling gets what they asked for, on both presets.
+        assert_eq!(
+            ViewPreset::Tile
+                .tuned(riviu_core::StreamQuality::Medium, MIN_VIEW_FPS)
+                .max_fps,
+            MIN_VIEW_FPS
         );
         assert!(command.contains("video_bit_rate=1200000"), "{command}");
         assert!(
@@ -995,6 +1028,25 @@ mod tests {
                 "{preset:?} {rates:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_settings_hint_names_the_same_tile_ceiling_this_file_enforces() {
+        // The operator reads a number in the settings panel; the encoder obeys the one
+        // here. Nothing but this test connects them, and a mismatch is silent -- the panel
+        // would simply explain a cap that is not the cap.
+        let panel = include_str!("../../../apps/desktop/src/components/SettingsPanel.tsx");
+        let declared = panel
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("const TILE_FPS_CEILING = "))
+            .and_then(|rest| rest.trim_end_matches(';').parse::<u32>().ok())
+            .expect("SettingsPanel.tsx declares TILE_FPS_CEILING");
+        assert_eq!(
+            declared,
+            ViewPreset::Tile.max_fps(),
+            "the settings panel promises {declared} fps for tiles, the launch asks for {}",
+            ViewPreset::Tile.max_fps()
+        );
     }
 
     #[test]

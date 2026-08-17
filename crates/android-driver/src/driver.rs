@@ -1708,7 +1708,7 @@ impl AndroidDriver {
 
     /// Open one session and remember it for this serial.
     async fn open_and_cache_agent(&self, serial: &str, base: &str) -> anyhow::Result<AgentClient> {
-        let agent = AgentClient::connect(base).await?;
+        let agent = AgentClient::connect(serial, base).await?;
         self.agents.lock().insert(serial.to_string(), agent.clone());
         Ok(agent)
     }
