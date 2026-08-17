@@ -82,8 +82,36 @@ async fn main() -> anyhow::Result<()> {
     println!("serial   {serial}\npackage  {package}\nlocale   {locale}\n");
 
     let session = driver.open_session(serial).await?;
-    driver.launch_app(serial, &package).await?;
-    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    // **`--no-launch` exists because launching is not free of consequences.** Bringing
+    // TikTok to the front resets its feed to the top card, so two dumps taken either side
+    // of a swipe both read the *same* card and a swipe that worked looks like one that did
+    // not. Any measurement of what a gesture changed has to skip this.
+    if !args.iter().any(|arg| arg == "--no-launch") {
+        driver.launch_app(serial, &package).await?;
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    }
+
+    // A vertical swipe, in the same direction and shape the nurture loop uses, so that
+    // "does this phone advance at all" can be asked without running a whole session.
+    if args.iter().any(|arg| arg == "--swipe") {
+        let (width, height) = session.window_size().await.unwrap_or((1_080.0, 2_220.0));
+        say(&format!("swiping up on {width}x{height}"));
+        session
+            .swipe(riviu_core::types::SwipeGesture {
+                from: riviu_core::types::TapPoint {
+                    x: width / 2.0,
+                    y: height * 0.78,
+                },
+                to: riviu_core::types::TapPoint {
+                    x: width / 2.0,
+                    y: height * 0.22,
+                },
+                duration_ms: 250,
+            })
+            .await
+            .unwrap_or_else(|error| say(&format!("  (swipe failed: {error})")));
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
 
     if let Some(index) = args.iter().position(|arg| arg == "--tap") {
         if let Some(target) = args.get(index + 1) {
