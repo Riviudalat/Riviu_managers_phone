@@ -32,8 +32,8 @@ pub mod types;
 pub use device_capabilities::*;
 pub use device_control::{
     ContextReleaseProof, DeviceControlError, DeviceControlPlane, DeviceExclusiveContext,
-    DeviceReleaseProof, ForegroundAppProof, InteractionAcquireResult, UiCapacityReservation,
-    UiSessionContext, UiWithStreamContext,
+    DeviceLeaseRef, DeviceReleaseProof, ForegroundAppProof, InteractionAcquireResult,
+    UiCapacityReservation, UiSessionContext, UiWithStreamContext,
 };
 pub use device_work::{
     DeviceBusy, DeviceWorkAcquireError, DeviceWorkCoordinator, DeviceWorkLease, DeviceWorkOwner,

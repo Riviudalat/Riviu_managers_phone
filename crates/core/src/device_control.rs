@@ -554,26 +554,26 @@ impl DeviceControlPlane {
             .map_err(|error| driver_error(lease.udid(), "prepareDevice", error))
     }
 
-    pub async fn install_app(
+    pub async fn install_app<'a>(
         &self,
-        context: &DeviceExclusiveContext,
+        context: impl Into<DeviceLeaseRef<'a>>,
         path: &Path,
     ) -> Result<(), DeviceControlError> {
-        let lease = self.validate_exclusive(context)?;
+        let lease = self.validate_leased(context.into())?;
         self.driver
             .install_app(lease.udid(), path)
             .await
             .map_err(|error| driver_error(lease.udid(), "installApp", error))
     }
 
-    pub async fn stage_publish_media(
+    pub async fn stage_publish_media<'a>(
         &self,
-        context: &DeviceExclusiveContext,
+        context: impl Into<DeviceLeaseRef<'a>>,
         agent_bundle_id: &str,
         campaign_id: &str,
         source_root: &Path,
     ) -> Result<serde_json::Value, DeviceControlError> {
-        let lease = self.validate_exclusive(context)?;
+        let lease = self.validate_leased(context.into())?;
         self.driver
             .stage_publish_media(lease.udid(), agent_bundle_id, campaign_id, source_root)
             .await
@@ -584,26 +584,26 @@ impl DeviceControlPlane {
         self.driver.supports_push_media(udid)
     }
 
-    pub async fn prepare_publish_media(
+    pub async fn prepare_publish_media<'a>(
         &self,
-        context: &DeviceExclusiveContext,
+        context: impl Into<DeviceLeaseRef<'a>>,
         campaign_id: &str,
         manifest_sha256: &str,
     ) -> Result<serde_json::Value, DeviceControlError> {
-        let lease = self.validate_exclusive(context)?;
+        let lease = self.validate_leased(context.into())?;
         self.driver
             .prepare_publish_media(lease.udid(), campaign_id, manifest_sha256)
             .await
             .map_err(|error| driver_error(lease.udid(), "preparePublishMedia", error))
     }
 
-    pub async fn import_publish_media(
+    pub async fn import_publish_media<'a>(
         &self,
-        context: &DeviceExclusiveContext,
+        context: impl Into<DeviceLeaseRef<'a>>,
         campaign_id: &str,
         manifest_sha256: &str,
     ) -> Result<serde_json::Value, DeviceControlError> {
-        let lease = self.validate_exclusive(context)?;
+        let lease = self.validate_leased(context.into())?;
         self.driver
             .import_publish_media(lease.udid(), campaign_id, manifest_sha256)
             .await
@@ -637,36 +637,36 @@ impl DeviceControlPlane {
             .map_err(|error| driver_error(lease.udid(), "cleanupPublishMedia", error))
     }
 
-    pub async fn uninstall_app(
+    pub async fn uninstall_app<'a>(
         &self,
-        context: &DeviceExclusiveContext,
+        context: impl Into<DeviceLeaseRef<'a>>,
         bundle_id: &str,
     ) -> Result<(), DeviceControlError> {
-        let lease = self.validate_exclusive(context)?;
+        let lease = self.validate_leased(context.into())?;
         self.driver
             .uninstall_app(lease.udid(), bundle_id)
             .await
             .map_err(|error| driver_error(lease.udid(), "uninstallApp", error))
     }
 
-    pub async fn screenshot(
+    pub async fn screenshot<'a>(
         &self,
-        context: &DeviceExclusiveContext,
+        context: impl Into<DeviceLeaseRef<'a>>,
         destination: &Path,
     ) -> Result<PathBuf, DeviceControlError> {
-        let lease = self.validate_exclusive(context)?;
+        let lease = self.validate_leased(context.into())?;
         self.driver
             .screenshot(lease.udid(), destination)
             .await
             .map_err(|error| driver_error(lease.udid(), "screenshot", error))
     }
 
-    pub async fn syslog_tail(
+    pub async fn syslog_tail<'a>(
         &self,
-        context: &DeviceExclusiveContext,
+        context: impl Into<DeviceLeaseRef<'a>>,
         lines: usize,
     ) -> Result<String, DeviceControlError> {
-        let lease = self.validate_exclusive(context)?;
+        let lease = self.validate_leased(context.into())?;
         self.driver
             .syslog_tail(lease.udid(), lines)
             .await
@@ -679,12 +679,12 @@ impl DeviceControlPlane {
     /// arbitrary script can reboot the phone, kill the app a session is driving, or
     /// change a setting under it — so it must not be possible to fire one at a device
     /// another piece of work is holding.
-    pub async fn device_shell(
+    pub async fn device_shell<'a>(
         &self,
-        context: &DeviceExclusiveContext,
+        context: impl Into<DeviceLeaseRef<'a>>,
         script: &str,
     ) -> Result<crate::types::ShellOutcome, DeviceControlError> {
-        let lease = self.validate_exclusive(context)?;
+        let lease = self.validate_leased(context.into())?;
         self.driver
             .device_shell(lease.udid(), script)
             .await
@@ -692,12 +692,12 @@ impl DeviceControlPlane {
     }
 
     /// Ask for a rotation and report what the device actually settled at.
-    pub async fn set_screen_rotation(
+    pub async fn set_screen_rotation<'a>(
         &self,
-        context: &DeviceExclusiveContext,
+        context: impl Into<DeviceLeaseRef<'a>>,
         rotation: u8,
     ) -> Result<u8, DeviceControlError> {
-        let lease = self.validate_exclusive(context)?;
+        let lease = self.validate_leased(context.into())?;
         self.driver
             .set_screen_rotation(lease.udid(), rotation)
             .await
@@ -710,44 +710,47 @@ impl DeviceControlPlane {
     /// the keeping-stream variant: an export can run for minutes on a full camera roll, and
     /// parking the operator's live tile for that long — while they watch — is the behaviour
     /// `device_shell` and `set_screen_rotation` were both deliberately moved off.
-    pub async fn pull_media(
+    pub async fn pull_media<'a>(
         &self,
-        context: &DeviceExclusiveContext,
+        context: impl Into<DeviceLeaseRef<'a>>,
         dest_dir: &std::path::Path,
     ) -> Result<Vec<std::path::PathBuf>, DeviceControlError> {
-        let lease = self.validate_exclusive(context)?;
+        let lease = self.validate_leased(context.into())?;
         self.driver
             .pull_media(lease.udid(), dest_dir)
             .await
             .map_err(|error| driver_error(lease.udid(), "pullMedia", error))
     }
 
-    pub async fn reboot(&self, context: &DeviceExclusiveContext) -> Result<(), DeviceControlError> {
-        let lease = self.validate_exclusive(context)?;
+    pub async fn reboot<'a>(
+        &self,
+        context: impl Into<DeviceLeaseRef<'a>>,
+    ) -> Result<(), DeviceControlError> {
+        let lease = self.validate_leased(context.into())?;
         self.driver
             .reboot(lease.udid())
             .await
             .map_err(|error| driver_error(lease.udid(), "reboot", error))
     }
 
-    pub async fn backup_device(
+    pub async fn backup_device<'a>(
         &self,
-        context: &DeviceExclusiveContext,
+        context: impl Into<DeviceLeaseRef<'a>>,
         dest: &std::path::Path,
     ) -> Result<(), DeviceControlError> {
-        let lease = self.validate_exclusive(context)?;
+        let lease = self.validate_leased(context.into())?;
         self.driver
             .backup_device(lease.udid(), dest)
             .await
             .map_err(|error| driver_error(lease.udid(), "backupDevice", error))
     }
 
-    pub async fn restore_device(
+    pub async fn restore_device<'a>(
         &self,
-        context: &DeviceExclusiveContext,
+        context: impl Into<DeviceLeaseRef<'a>>,
         src: &std::path::Path,
     ) -> Result<(), DeviceControlError> {
-        let lease = self.validate_exclusive(context)?;
+        let lease = self.validate_leased(context.into())?;
         self.driver
             .restore_device(lease.udid(), src)
             .await
@@ -1721,6 +1724,22 @@ impl DeviceControlPlane {
         self.validate_lease(context.plane_id, context.lease.as_ref())
     }
 
+    /// The one check every device action actually needs, whichever context is holding the
+    /// lease.
+    ///
+    /// Nothing new is checked here: both arms end in [`Self::validate_lease`], so the
+    /// plane-id, the consumed-context guard, the work token and the owner match all still
+    /// run exactly as before.
+    fn validate_leased<'a>(
+        &self,
+        lease: DeviceLeaseRef<'a>,
+    ) -> Result<&'a DeviceWorkLease, DeviceControlError> {
+        match lease {
+            DeviceLeaseRef::Exclusive(context) => self.validate_exclusive(context),
+            DeviceLeaseRef::Session(context) => self.validate_session(context),
+        }
+    }
+
     fn validate_interaction_capacity(
         &self,
         context: &DeviceExclusiveContext,
@@ -1928,6 +1947,42 @@ pub struct DeviceExclusiveContext {
     lease: Option<DeviceWorkLease>,
     activity: Option<ContextActivityPermit>,
     ui_capacity_token: Option<Uuid>,
+}
+
+/// A borrowed, still-live device lease — whichever kind of context is holding it.
+///
+/// **Why this exists.** Every device action below wants exactly one thing from the context
+/// it is handed: a lease this plane can still validate. Which *kind* of context holds that
+/// lease is the caller's business, not the action's.
+///
+/// Demanding a [`DeviceExclusiveContext`] specifically had a cost nobody intended. The
+/// desktop's control overlay opens a [`UiSessionContext`] and holds it for as long as the
+/// operator has the phone on screen, so ten of its own actions — rotate, install, adb,
+/// import, export, reboot, backup, restore, screenshot, change keyboard — had to ask for a
+/// *second* lease on a phone this process already owned. `try_acquire` refuses that, by
+/// design, so every one of them failed `DeviceBusy` **whenever the overlay was open**, which
+/// is the only time they can be reached. See AGENTS.md 9.82.
+///
+/// This lends the held lease instead. It is not shared ownership and it is not re-entrancy:
+/// exactly one lease per device still exists, and a phone held by nurture, flow, a script or
+/// a repair is still refused — the borrow is only ever offered by the UI that opened it.
+// No `Debug`: `UiSessionContext` holds an `Arc<dyn UiSession>` and does not derive it.
+#[derive(Clone, Copy)]
+pub enum DeviceLeaseRef<'a> {
+    Exclusive(&'a DeviceExclusiveContext),
+    Session(&'a UiSessionContext),
+}
+
+impl<'a> From<&'a DeviceExclusiveContext> for DeviceLeaseRef<'a> {
+    fn from(context: &'a DeviceExclusiveContext) -> Self {
+        Self::Exclusive(context)
+    }
+}
+
+impl<'a> From<&'a UiSessionContext> for DeviceLeaseRef<'a> {
+    fn from(context: &'a UiSessionContext) -> Self {
+        Self::Session(context)
+    }
 }
 
 pub(crate) struct SessionContextUpgradeFailure {
@@ -4467,6 +4522,91 @@ mod tests {
             .close_manual_session(first)
             .expect("release the first session");
         control.shutdown_cleanup().await.expect("control shutdown");
+    }
+
+    #[tokio::test]
+    async fn a_held_session_lease_runs_a_device_action_without_a_second_acquire() {
+        // The overlay opens one manual session and keeps it for as long as the operator has
+        // the phone on screen. Ten of its own rows -- rotate, install, adb, import, export,
+        // reboot, backup, restore, screenshot, change keyboard -- used to demand a *second*
+        // lease and were refused Busy every time, which is to say whenever they were
+        // reachable at all. They ride the held lease now.
+        let driver = Arc::new(TestDriver::default());
+        let control = control_plane(driver, 1);
+        let session = control
+            .open_manual_session("iphone-a", crate::DeviceWorkOwner::ManualControl)
+            .await
+            .expect("manual session");
+
+        control
+            .reboot(&session)
+            .await
+            .expect("reboot on the held lease");
+
+        // And the session is still whole afterwards: borrowing must not consume it, or the
+        // overlay would be dead for every gesture that follows.
+        control
+            .close_manual_session(session)
+            .expect("the session survives a borrowed action");
+        control.shutdown_cleanup().await.expect("control shutdown");
+    }
+
+    #[tokio::test]
+    async fn an_open_overlay_lease_still_excludes_every_background_owner() {
+        // The invariant AGENTS.md 9.58 and 4773 rest on, asserted directly rather than
+        // assumed. Lending is only ever offered to the UI that opened the phone; nurture, a
+        // flow, a script or a repair still finds it busy. If this ever passes for the wrong
+        // reason, "ManualControl holds this phone" has stopped meaning one thing touches it.
+        let driver = Arc::new(TestDriver::default());
+        let control = control_plane(driver, 1);
+        let session = control
+            .open_manual_session("iphone-a", crate::DeviceWorkOwner::ManualControl)
+            .await
+            .expect("manual session");
+
+        for owner in [
+            crate::DeviceWorkOwner::Nurture,
+            crate::DeviceWorkOwner::Script,
+            crate::DeviceWorkOwner::Repair,
+            crate::DeviceWorkOwner::Interaction,
+        ] {
+            match control.try_acquire_exclusive("iphone-a", owner).await {
+                Ok(_) => panic!("{owner:?} must not take a phone the overlay is holding"),
+                Err(DeviceControlError::Busy(busy)) => {
+                    assert_eq!(busy.requested_owner, owner);
+                    assert_eq!(busy.current_owner, crate::DeviceWorkOwner::ManualControl);
+                }
+                Err(other) => panic!("expected Busy for {owner:?}, got {other:?}"),
+            }
+        }
+
+        control
+            .close_manual_session(session)
+            .expect("release the session");
+        control.shutdown_cleanup().await.expect("control shutdown");
+    }
+
+    #[tokio::test]
+    async fn a_session_lease_from_another_control_plane_is_refused() {
+        // The borrow must not become a way around the plane check: a context is only ever
+        // valid on the plane that minted it.
+        let first = control_plane(Arc::new(TestDriver::default()), 1);
+        let second = control_plane(Arc::new(TestDriver::default()), 1);
+        let session = first
+            .open_manual_session("iphone-a", crate::DeviceWorkOwner::ManualControl)
+            .await
+            .expect("manual session");
+
+        match second.reboot(&session).await {
+            Err(DeviceControlError::InvalidContext { .. }) => {}
+            other => panic!("a foreign plane's context must be refused, got {other:?}"),
+        }
+
+        first
+            .close_manual_session(session)
+            .expect("release the session");
+        first.shutdown_cleanup().await.expect("first shutdown");
+        second.shutdown_cleanup().await.expect("second shutdown");
     }
 
     #[tokio::test]
