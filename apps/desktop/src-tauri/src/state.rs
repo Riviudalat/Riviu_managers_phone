@@ -1235,25 +1235,12 @@ impl AppState {
                         let existing = registry.list();
                         let merged = devices
                             .into_iter()
-                            .map(|mut d| {
-                                if let Some(prev) = existing.iter().find(|e| e.udid == d.udid) {
-                                    if d.stream_url.is_none() {
-                                        d.stream_url = prev.stream_url.clone();
-                                    }
-                                    if !d.wda_ready {
-                                        d.wda_ready = prev.wda_ready;
-                                    }
-                                    d.wda_expires_at = prev.wda_expires_at.or(d.wda_expires_at);
-                                    if matches!(prev.status, riviu_core::DeviceStatus::Busy) {
-                                        d.status = prev.status.clone();
-                                    }
-                                    if d.last_error.is_none() {
-                                        d.last_error = prev.last_error.clone();
-                                    }
-                                    d.tile_stream_state = prev.tile_stream_state;
-                                }
-                                d
-                            })
+                            .map(
+                                |device| match existing.iter().find(|e| e.udid == device.udid) {
+                                    Some(previous) => merge_scanned_device(device, previous),
+                                    None => device,
+                                },
+                            )
                             .collect();
                         registry.upsert_many(merged);
                         // This scan is the only place a device DEPARTURE is observed —
@@ -1708,6 +1695,49 @@ fn set_stream_parked(registry: &DeviceRegistry, udid: &str) {
     set_stream_state(registry, udid, riviu_core::TileStreamState::Parked, None);
 }
 
+/// Fold what only the registry knows into the device the three-second scan just read.
+///
+/// `list_devices` builds each `DeviceInfo` from scratch off the wire, so anything recorded
+/// by another path — a stream URL, a WDA flag, the tile's stream state — is absent from it
+/// and has to be carried, or `upsert_many` replacing the roster wholesale would erase it
+/// every three seconds.
+///
+/// **`last_error` is carried only while the state that explains it is still `Error`**, and
+/// that condition is the fix rather than a detail. It used to be carried whenever the fresh
+/// scan had none, which made every error immortal: `probe_device` writes `None` on a
+/// successful probe, so a phone that failed one adb call and answered every one after it
+/// kept the sentence for the life of the process — painting a failure panel over live video.
+///
+/// The old rule also disagreed with itself. A stream failure sets `status = Error`, and
+/// `status` is *not* carried here, so three seconds later the tile read "Ready" with an
+/// error string beneath it. Tying the message to `tile_stream_state` keeps the two together:
+/// a stream failure holds its reason for as long as it holds the state, and
+/// `set_stream_state` clears both the moment it goes Live, Sampling or Parked. A probe
+/// failure is not carried at all — if the probe is still failing this scan wrote its own
+/// error, and if it is not, this scan just disproved the old one.
+fn merge_scanned_device(
+    mut device: riviu_core::DeviceInfo,
+    previous: &riviu_core::DeviceInfo,
+) -> riviu_core::DeviceInfo {
+    if device.stream_url.is_none() {
+        device.stream_url = previous.stream_url.clone();
+    }
+    if !device.wda_ready {
+        device.wda_ready = previous.wda_ready;
+    }
+    device.wda_expires_at = previous.wda_expires_at.or(device.wda_expires_at);
+    if matches!(previous.status, riviu_core::DeviceStatus::Busy) {
+        device.status = previous.status.clone();
+    }
+    device.tile_stream_state = previous.tile_stream_state;
+    if device.last_error.is_none()
+        && previous.tile_stream_state == riviu_core::TileStreamState::Error
+    {
+        device.last_error = previous.last_error.clone();
+    }
+    device
+}
+
 fn set_stream_state(
     registry: &DeviceRegistry,
     udid: &str,
@@ -2158,6 +2188,90 @@ mod tests {
         assert!(
             !background_sample_candidate(&device, &status),
             "Android tiles must not take a minicap budget slot"
+        );
+    }
+
+    fn scanned(udid: &str) -> riviu_core::DeviceInfo {
+        riviu_core::DeviceInfo {
+            udid: udid.to_string(),
+            name: "fixture".to_string(),
+            model: "fixture".to_string(),
+            platform: riviu_core::DevicePlatform::Android,
+            os_version: "9".to_string(),
+            connection: riviu_core::ConnectionKind::Usb,
+            status: riviu_core::DeviceStatus::Connected,
+            battery: None,
+            wda_ready: false,
+            wda_expires_at: None,
+            stream_url: None,
+            tile_stream_state: riviu_core::TileStreamState::default(),
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn a_failure_the_scan_disproved_stops_being_shown() {
+        // One failed adb probe used to mark a phone forever. `probe_device` writes `None`
+        // on every later success, and the merge put the old sentence straight back, so the
+        // tile kept a failure panel over live video until the app was restarted. Three
+        // seconds is the interval; "for the life of the process" was the duration.
+        let mut previous = scanned("fixture");
+        previous.last_error = Some("adb -s fixture shell timed out".to_string());
+        previous.status = riviu_core::DeviceStatus::Error;
+
+        let merged = merge_scanned_device(scanned("fixture"), &previous);
+
+        assert_eq!(merged.last_error, None);
+    }
+
+    #[test]
+    fn a_failure_that_is_still_true_keeps_its_reason() {
+        // Two ways it stays. The scan finding its own fault is the obvious one; a stream
+        // that is sitting in `Error` is the one the old rule got wrong in the other
+        // direction -- it kept the message but dropped `status`, so the tile read "Ready"
+        // with an error underneath it.
+        let mut still_failing = scanned("fixture");
+        still_failing.last_error = Some("adb -s fixture shell timed out".to_string());
+        let merged = merge_scanned_device(still_failing, &scanned("fixture"));
+        assert_eq!(
+            merged.last_error.as_deref(),
+            Some("adb -s fixture shell timed out")
+        );
+
+        let mut stream_failed = scanned("fixture");
+        stream_failed.tile_stream_state = riviu_core::TileStreamState::Error;
+        stream_failed.last_error = Some("no fresh frame".to_string());
+        let merged = merge_scanned_device(scanned("fixture"), &stream_failed);
+        assert_eq!(merged.last_error.as_deref(), Some("no fresh frame"));
+        assert_eq!(
+            merged.tile_stream_state,
+            riviu_core::TileStreamState::Error,
+            "the reason and the state it explains have to travel together"
+        );
+    }
+
+    #[test]
+    fn a_live_stream_clears_the_reason_along_with_the_state() {
+        // `set_stream_state` is the other half: it writes the state and the reason in one
+        // move, so the moment a producer goes live the merge has nothing left to carry.
+        let events = riviu_core::EventBus::new(8);
+        let registry = riviu_core::DeviceRegistry::new(events);
+        let mut failed = scanned("fixture");
+        failed.tile_stream_state = riviu_core::TileStreamState::Error;
+        failed.last_error = Some("no fresh frame".to_string());
+        registry.upsert(failed);
+
+        mark_android_view_live(&registry, "fixture");
+
+        let recovered = registry.get("fixture").expect("device");
+        assert_eq!(
+            recovered.tile_stream_state,
+            riviu_core::TileStreamState::Live
+        );
+        assert_eq!(recovered.last_error, None);
+        assert_eq!(
+            merge_scanned_device(scanned("fixture"), &recovered).last_error,
+            None
         );
     }
 

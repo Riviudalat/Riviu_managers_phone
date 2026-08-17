@@ -42,12 +42,17 @@ export function streamPlaceholder(input: StreamPlaceholderInput): StreamPlacehol
 
   // **A picture beats every reason not to have one, and this test must stay first.**
   //
-  // `lastError` is sticky on the Rust side — the 3 s device merge re-applies the previous
-  // error whenever the fresh scan has none — so a phone that failed once and recovered keeps
-  // the field forever. Checking it before this returned a full-bleed failure panel over live
-  // video, permanently, on both the tile and the overlay. The code this helper replaced was
-  // gated on `!hasView` and did not have that flaw; collapsing two callers into one decision
-  // is exactly where it slipped in.
+  // Checking `lastError` before this returned a full-bleed failure panel over live video, on
+  // both the tile and the overlay. The code this helper replaced was gated on `!hasView` and
+  // did not have that flaw; collapsing two callers into one decision is exactly where it
+  // slipped in.
+  //
+  // The Rust side used to make that permanent — the 3 s device merge re-applied the previous
+  // error whenever the fresh scan had none, so a phone that failed once and recovered kept
+  // the field for the life of the process. That is fixed at the source
+  // (`merge_scanned_device`): a reason now lives exactly as long as the stream state that
+  // explains it. This ordering stays regardless, because it is right on its own terms — an
+  // error that *is* current still must not cover a picture that is arriving.
   if (input.hasView && !input.decodeFailed) {
     return { view: { kind: "none" }, blocksInput };
   }
