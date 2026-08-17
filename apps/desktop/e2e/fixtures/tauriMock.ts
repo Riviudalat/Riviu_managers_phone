@@ -379,13 +379,41 @@ export async function installTauriMock(
         resourceClass: "uiSession",
         allowedEvidence: ["accessibilityVisible"],
       }),
-      definition("rawHttp", "Raw HTTP", "app", { type: "object", properties: {} }, {
+      // The two vision actions were missing from this fixture, and `ifVision` missing is
+      // how the palette bug it guards against stayed invisible: the baseline screenshot
+      // showed a workspace whose only branching action did not exist in the catalog, so
+      // the palette dropping it changed nothing on screen. Categories match
+      // `catalog.rs::category` exactly, including the raw three sitting under `control`.
+      definition("tapVision", "Tap Vision", "input", {
+        type: "object",
+        properties: {
+          templatePngBase64: { type: "string" },
+          threshold: { type: "number", minimum: 0, maximum: 1 },
+        },
+      }, {
+        resourceClass: "uiWithStream",
+        sideEffectClass: "ambiguousUi",
+        evidenceRequirement: "frame",
+        allowedEvidence: ["frameRegionChanged"],
+        reconciliationPolicy: "readFrame",
+        retryPolicy: "beforeDispatchOnly",
+      }),
+      definition("ifVision", "If Vision", "control", {
+        type: "object",
+        properties: {
+          templatePngBase64: { type: "string" },
+          threshold: { type: "number", minimum: 0, maximum: 1 },
+        },
+      }, {
+        resourceClass: "uiWithStream",
+      }),
+      definition("rawHttp", "Raw HTTP", "control", { type: "object", properties: {} }, {
         disabledReason: "Raw HTTP is not available in Flow V2 release 1.",
       }),
-      definition("rawWda", "Raw WDA", "app", { type: "object", properties: {} }, {
+      definition("rawWda", "Raw WDA", "control", { type: "object", properties: {} }, {
         disabledReason: "Raw WDA is not available in Flow V2 release 1.",
       }),
-      definition("shell", "Shell", "app", { type: "object", properties: {} }, {
+      definition("shell", "Shell", "control", { type: "object", properties: {} }, {
         disabledReason: "Shell is not available in Flow V2 release 1.",
       }),
     ];

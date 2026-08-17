@@ -1,22 +1,41 @@
 import type { DragEvent } from "react";
-import type { ActionCategory, ActionDefinition } from "../../types";
+import type { ActionCategory, ActionKind, ActionDefinition } from "../../types";
 import { ACTION_PRESENTATION } from "./FlowActionNode";
 
 export const FLOW_ACTION_MIME = "application/riviu-flow-action";
 
-const CATEGORY_ORDER: Exclude<ActionCategory, "control">[] = [
+const CATEGORY_ORDER: ActionCategory[] = [
   "app",
   "input",
   "timing",
   "evidence",
+  "control",
 ];
 
-const CATEGORY_LABELS: Record<Exclude<ActionCategory, "control">, string> = {
+const CATEGORY_LABELS: Record<ActionCategory, string> = {
   app: "Ứng dụng",
   input: "Thao tác",
   timing: "Thời gian",
   evidence: "Bằng chứng",
+  control: "Điều khiển",
 };
+
+/**
+ * The two nodes the canvas owns, rather than ones an operator drops.
+ *
+ * This list is why the palette now filters by **kind**. It used to exclude the whole
+ * `control` category — `Exclude<ActionCategory, "control">` — which does keep Start and End
+ * out, but takes `ifVision` with them, because the backend files all four under `control`
+ * (`catalog.rs::category`). `ifVision` is the only branching action there is, its two ports
+ * are drawn, its config has a default and the compiler accepts it, so the whole feature was
+ * finished and unreachable: no conditional flow could be built at all.
+ *
+ * `rawHttp`, `rawWda` and `shell` are also `control` and stay out, but for a different and
+ * deliberate reason — they have no entry in `ACTION_PRESENTATION`, which is the list of
+ * actions this UI has decided to offer. Putting them on the canvas is a separate decision,
+ * not a consequence of this one.
+ */
+const STRUCTURAL_KINDS: ActionKind[] = ["start", "end"];
 
 function beginActionDrag(event: DragEvent, action: ActionDefinition) {
   event.dataTransfer.effectAllowed = "copy";
@@ -34,7 +53,10 @@ export function FlowPalette({
     <aside className="flow-palette" data-testid="flow-palette" data-open={String(open)}>
       {CATEGORY_ORDER.map((category) => {
         const actions = catalog.filter(
-          (action) => action.category === category && ACTION_PRESENTATION[action.kind],
+          (action) =>
+            action.category === category &&
+            !STRUCTURAL_KINDS.includes(action.kind) &&
+            ACTION_PRESENTATION[action.kind],
         );
         if (actions.length === 0) return null;
         return (

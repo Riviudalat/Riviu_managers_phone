@@ -143,6 +143,12 @@ const catalog: ActionDefinition[] = [
     },
   ),
   action("rawHttp", "Raw HTTP", "app", null),
+  // Filed under `control` by the backend, exactly as `catalog.rs::category` files it.
+  // That is the whole point of the fixture: the palette must reach it there.
+  action("ifVision", "If Vision", "control", {
+    type: "object",
+    properties: { templatePngBase64: { type: "string" } },
+  }),
 ];
 
 function compiled(document: FlowDocumentV2): CompiledRevision {
@@ -279,6 +285,20 @@ describe("FlowWorkspace startup", () => {
     expect(screen.queryByRole("button", { name: "Raw HTTP" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Lưu bản" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Chạy Flow" })).toBeEnabled();
+  });
+
+  it("offers the one branching action, and still not the two nodes the canvas owns", async () => {
+    // The palette used to drop the entire `control` category to keep Start and End out.
+    // `ifVision` is filed there too, so the only conditional action in the product could
+    // not be placed on a canvas -- while its two ports, its config default and its
+    // compiler support were all finished. Nothing said so; it simply was not in the list.
+    await renderReadyWorkspace();
+
+    expect(screen.getByRole("button", { name: "Nếu thấy ảnh" })).toBeEnabled();
+    // Start and End are created with the document, so offering them would let an operator
+    // drop a second one. Kept out by kind now, not by category.
+    expect(screen.queryByRole("button", { name: "Bắt đầu" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Kết thúc" })).not.toBeInTheDocument();
   });
 
   it("leaves loading state and reports a saved-revision fetch failure", async () => {
