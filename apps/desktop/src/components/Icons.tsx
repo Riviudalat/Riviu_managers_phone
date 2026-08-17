@@ -378,18 +378,12 @@ export function IconChat({ size = 18, className }: IconProps) {
 
 export const MENU_ICONS: Record<string, (p: IconProps) => ReactElement> = {
   control: IconGrid,
-  groups: IconUsers,
-  proxy: IconProxy,
   material: IconImage,
   apps: IconApp,
   scripts: IconScript,
-  nurture: IconHeart,
   jobs: IconClock,
-  sync: IconSync,
   publish: IconRocket,
   data: IconChart,
-  team: IconTeam,
-  logs: IconLog,
   account: IconUser,
   api: IconApi,
   settings: IconSettings,

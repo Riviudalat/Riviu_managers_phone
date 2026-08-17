@@ -51,7 +51,6 @@ import {
   PublishPage,
   RegisterPage,
   ScheduleBlock,
-  SyncPage,
 } from "./pages/FarmPages";
 import type {
   DeviceGroup,
@@ -76,7 +75,6 @@ const PAGE_TITLE: Partial<Record<PageId, string>> = {
   apps: "Trung tâm ứng dụng",
   scripts: "Flow",
   jobs: "Tác vụ",
-  sync: "Đồng bộ cửa sổ",
   publish: "Đăng bài",
   data: "Dữ liệu",
   account: "Tài khoản",
@@ -97,6 +95,13 @@ function App() {
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [groupMode, setGroupMode] = useState(false);
+  /// The phone the operator drives when Sync is on; every other selected phone follows it.
+  ///
+  /// This used to be `selected[0]` — whichever udid happened to land first in the selection
+  /// array — decided on a page of its own that did nothing else. Nothing showed which phone
+  /// it was and nothing let the operator choose, so "máy chính" was a label for an accident.
+  /// It is a property of the grid, set from the tile's own menu, and it lives here.
+  const [controlCenter, setControlCenter] = useState<string | null>(null);
   const [focusUdid, setFocusUdid] = useState<string | null>(null);
   const [jobsScriptSeed, setJobsScriptSeed] = useState<string | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
@@ -225,6 +230,14 @@ function App() {
         run: () => setFocusUdid(device.udid),
       },
       {
+        id: "control-center",
+        label:
+          controlCenter === device.udid
+            ? "Bỏ làm trung tâm điều khiển"
+            : "Đặt làm trung tâm điều khiển",
+        run: () => setControlCenter((current) => (current === device.udid ? null : device.udid)),
+      },
+      {
         id: "screenshot",
         label: "Chụp màn hình",
         run: () => {
@@ -322,7 +335,9 @@ function App() {
         },
       },
     ],
-    [reload],
+    // `controlCenter` is read for the row's own label, so a stale closure would leave the
+    // menu offering "Đặt" on the phone that is already the centre.
+    [reload, controlCenter],
   );
 
 
@@ -396,10 +411,28 @@ function App() {
     };
   }, [reload]);
 
-  const focusDevice = useMemo(
-    () => devices.find((d) => d.udid === focusUdid) ?? null,
-    [devices, focusUdid],
-  );
+  /// The phone the overlay actually drives.
+  ///
+  /// With Sync on and a control centre designated, that is the control centre whichever tile
+  /// was opened — which is what designating one means. Without Sync it is simply the tile the
+  /// operator opened, because a centre with nothing following it would be a surprise rather
+  /// than a feature.
+  const focusDevice = useMemo(() => {
+    const wanted =
+      groupMode && controlCenter && devices.some((d) => d.udid === controlCenter)
+        ? controlCenter
+        : focusUdid;
+    return devices.find((d) => d.udid === wanted) ?? null;
+  }, [devices, focusUdid, groupMode, controlCenter]);
+
+  /// A designated phone that has left the fleet is not a designation, it is a dangling udid
+  /// that would silently redirect the overlay to a device that is not there.
+  useEffect(() => {
+    if (!controlCenter) return;
+    if (devices.length && !devices.some((d) => d.udid === controlCenter)) {
+      setControlCenter(null);
+    }
+  }, [devices, controlCenter]);
 
   // Ask for the overlay's own encode while it is open, and give it back on close.
   //
@@ -729,6 +762,7 @@ function App() {
                       onContextMenu={(udid, x, y) => setTileMenu({ udid, x, y })}
                       selected={selected.includes(device.udid)}
                       focused={focusUdid === device.udid}
+                      controlCenter={controlCenter === device.udid}
                       onSelect={onSelect}
                       onOpen={setFocusUdid}
                       onPrepare={(udid) => {
@@ -864,16 +898,6 @@ function App() {
               onSelectUdids={setSelected}
               onRefresh={reload}
               initialScript={jobsScriptSeed}
-            />
-          )}
-          {page === "sync" && (
-            <SyncPage
-              devices={devices}
-              selected={selected}
-              groupMode={groupMode}
-              onToggleGroup={() => setGroupMode((v) => !v)}
-              onSelect={onSelect}
-              onSelectUdids={setSelected}
             />
           )}
           {page === "publish" && (

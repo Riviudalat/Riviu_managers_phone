@@ -7,22 +7,16 @@ import {
   authLogin,
   authRegister,
   deleteAppLibrary,
-  deleteGroup,
   deleteMaterial,
-  deleteProxy,
   deleteSchedule,
   exampleScript,
-  exportProxyConfig,
   installIpaToGroup,
   installLibraryApp,
   listAppsLibrary,
   listGroups,
   listMaterials,
-  listOpLogs,
-  listProxies,
   listSchedules,
   listScripts,
-  listUsers,
   publishCancel,
   publishCreateCampaign,
   publishList,
@@ -31,8 +25,6 @@ import {
   publishScanFolder,
   publishTransfer,
   pushMaterial,
-  saveGroup,
-  saveProxy,
   saveSchedule,
   saveScript,
 } from "../api";
@@ -41,12 +33,7 @@ import { EmptyState } from "../components/States";
 import {
   IconApp,
   IconImage,
-  IconLog,
-  IconPhone,
-  IconProxy,
   IconRocket,
-  IconUser,
-  IconUsers,
 } from "../components/Icons";
 import { pickDirectory, pickIpa, pickMaterial } from "../pickFile";
 import type {
@@ -57,8 +44,6 @@ import type {
   GroupInstallResult,
   LocalUser,
   MaterialItem,
-  OpLog,
-  ProxyConfig,
   PublishBundle,
   PublishCampaignRecord,
   PublishFolderManifest,
@@ -71,256 +56,7 @@ type SelProps = {
   onSelectUdids: (udids: string[]) => void;
 };
 
-export function GroupsPage({ devices, selected, onSelectUdids }: SelProps) {
-  const [groups, setGroups] = useState<DeviceGroup[]>([]);
-  const [name, setName] = useState("");
-  const [msg, setMsg] = useState<string | null>(null);
-  const targets = targetsOf(selected, devices);
 
-  const reload = () =>
-    listGroups()
-      .then(setGroups)
-      .catch((e) => setMsg(String(e)));
-  useEffect(() => {
-    reload();
-  }, []);
-
-  return (
-    <div className="panel">
-      <header className="panel-header">
-        <h2>Nhóm thiết bị</h2>
-        <button type="button" className="ghost" onClick={reload}>
-          Làm mới
-        </button>
-      </header>
-      <SelectionStrip
-        devices={devices}
-        selected={selected}
-        onSelectAll={() => onSelectUdids(devices.map((d) => d.udid))}
-        onClear={() => onSelectUdids([])}
-        onSelectUdids={onSelectUdids}
-      />
-      <div className="panel-grid">
-        <section>
-          <h3>Tạo nhóm</h3>
-          <label>
-            Tên nhóm
-            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Farm A" />
-          </label>
-          <button
-            type="button"
-            className="primary"
-            disabled={!name.trim() || !targets.length}
-            onClick={async () => {
-              try {
-                await saveGroup({
-                  id: "",
-                  name: name.trim(),
-                  color: "#FF6A00",
-                  udids: targets,
-                  createdAt: "",
-                });
-                setName("");
-                setMsg(null);
-                await reload();
-                flash(`Đã lưu nhóm «${name.trim()}» · ${targets.length} máy`);
-              } catch (e) {
-                setMsg(String(e));
-              }
-            }}
-          >
-            Lưu nhóm ({targets.length})
-          </button>
-          {msg && <p className="error">{msg}</p>}
-        </section>
-        <section>
-          <h3>Danh sách</h3>
-          <div className="job-list">
-            {groups.map((g) => (
-              <article key={g.id} className="job-card">
-                <div>
-                  <strong style={{ color: g.color }}>{g.name}</strong>
-                  <span className="pill">{g.udids.length} devices</span>
-                </div>
-                <p className="hint mono">{g.udids.join(", ") || "—"}</p>
-                <div className="row">
-                  <button type="button" className="primary" onClick={() => onSelectUdids(g.udids)}>
-                    Chọn nhóm
-                  </button>
-                  <button
-                    type="button"
-                    className="ghost"
-                    onClick={async () => {
-                      await deleteGroup(g.id);
-                      await reload();
-                    }}
-                  >
-                    Xóa
-                  </button>
-                </div>
-              </article>
-            ))}
-            {!groups.length && (
-              <EmptyState
-                compact
-                icon={<IconUsers size={15} />}
-                title="Chưa có nhóm nào"
-                hint="Tạo nhóm ở cột bên trái để chạy hàng loạt trên nhiều máy."
-              />
-            )}
-          </div>
-        </section>
-      </div>
-    </div>
-  );
-}
-
-export function ProxyPage() {
-  const [items, setItems] = useState<ProxyConfig[]>([]);
-  const [msg, setMsg] = useState<string | null>(null);
-  const [form, setForm] = useState<ProxyConfig>({
-    id: "",
-    name: "",
-    proxyType: "http",
-    host: "",
-    port: 8080,
-    username: "",
-    password: "",
-    notes: "",
-  });
-
-  const reload = () => listProxies().then(setItems).catch((e) => setMsg(String(e)));
-  useEffect(() => {
-    reload();
-  }, []);
-
-  return (
-    <div className="panel">
-      <header className="panel-header">
-        <h2>Proxy (config — không shop)</h2>
-        <button type="button" className="ghost" onClick={reload}>
-          Làm mới
-        </button>
-      </header>
-      <p className="hint">
-        Lưu cấu hình local + Export copy. App không mua proxy / không ép traffic iPhone — bạn áp dụng
-        thủ công (Wi‑Fi proxy / VPN).
-      </p>
-      <div className="panel-grid">
-        <section>
-          <h3>Thêm / sửa</h3>
-          {(
-            [
-              ["name", "Tên"],
-              ["proxyType", "Loại (http/socks5)"],
-              ["host", "Host"],
-              ["username", "User"],
-              ["password", "Pass"],
-              ["notes", "Ghi chú"],
-            ] as const
-          ).map(([key, label]) => (
-            <label key={key}>
-              {label}
-              <input
-                value={String(form[key] ?? "")}
-                onChange={(e) => setForm({ ...form, [key]: e.target.value })}
-              />
-            </label>
-          ))}
-          <label>
-            Port
-            <input
-              type="number"
-              value={form.port}
-              onChange={(e) => setForm({ ...form, port: Number(e.target.value) || 0 })}
-            />
-          </label>
-          <button
-            type="button"
-            className="primary"
-            disabled={!form.name.trim() || !form.host.trim()}
-            onClick={async () => {
-              try {
-                await saveProxy(form);
-                setForm({
-                  id: "",
-                  name: "",
-                  proxyType: "http",
-                  host: "",
-                  port: 8080,
-                  username: "",
-                  password: "",
-                  notes: "",
-                });
-                await reload();
-                flash("Đã lưu proxy");
-              } catch (e) {
-                setMsg(String(e));
-              }
-            }}
-          >
-            Lưu proxy
-          </button>
-          {msg && <p className="error">{msg}</p>}
-        </section>
-        <section>
-          <h3>Danh sách</h3>
-          <div className="job-list">
-            {items.map((p) => (
-              <article key={p.id} className="job-card">
-                <div>
-                  <strong>{p.name}</strong>
-                  <span className="pill">{p.proxyType}</span>
-                </div>
-                <p className="hint">
-                  {p.host}:{p.port}
-                </p>
-                <div className="row">
-                  <button type="button" className="ghost" onClick={() => setForm(p)}>
-                    Sửa
-                  </button>
-                  <button
-                    type="button"
-                    className="ghost"
-                    onClick={async () => {
-                      try {
-                        const text = await exportProxyConfig(p.id);
-                        await navigator.clipboard.writeText(text);
-                        flash("Đã copy config vào clipboard");
-                      } catch (e) {
-                        flashError(e);
-                      }
-                    }}
-                  >
-                    Export
-                  </button>
-                  <button
-                    type="button"
-                    className="ghost"
-                    onClick={async () => {
-                      await deleteProxy(p.id);
-                      await reload();
-                    }}
-                  >
-                    Xóa
-                  </button>
-                </div>
-              </article>
-            ))}
-            {!items.length && (
-              <EmptyState
-                compact
-                icon={<IconProxy size={15} />}
-                title="Chưa có proxy"
-                hint="Thêm proxy ở khung bên trên để gán cho thiết bị."
-              />
-            )}
-          </div>
-        </section>
-      </div>
-    </div>
-  );
-}
 
 export function MaterialPage({ devices, selected, onSelectUdids }: SelProps) {
   const [items, setItems] = useState<MaterialItem[]>([]);
@@ -626,73 +362,6 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
   );
 }
 
-export function SyncPage({
-  devices,
-  selected,
-  groupMode,
-  onToggleGroup,
-  onSelect,
-  onSelectUdids,
-}: {
-  devices: DeviceInfo[];
-  selected: string[];
-  groupMode: boolean;
-  onToggleGroup: () => void;
-  onSelect: (udid: string, additive: boolean) => void;
-  onSelectUdids: (udids: string[]) => void;
-}) {
-  const master = selected[0];
-  const slaves = selected.slice(1);
-  return (
-    <div className="panel">
-      <header className="panel-header">
-        <h2>Đồng bộ cửa sổ</h2>
-        <button type="button" className={groupMode ? "primary" : "ghost"} onClick={onToggleGroup}>
-          Sync {groupMode ? "ON" : "OFF"}
-        </button>
-      </header>
-      <SelectionStrip
-        devices={devices}
-        selected={selected}
-        onSelectAll={() => onSelectUdids(devices.map((d) => d.udid))}
-        onClear={() => onSelectUdids([])}
-        onSelectUdids={onSelectUdids}
-      />
-      <p className="hint">
-        Click máy để thêm/bớt selection. Máy đầu = Master. Bật Sync rồi điều khiển trong cửa sổ phóng
-        to — input broadcast qua group_input.
-      </p>
-      <div className="job-list" style={{ marginTop: 12 }}>
-        {devices.map((d) => (
-          <article
-            key={d.udid}
-            className="job-card"
-            style={{
-              outline: selected.includes(d.udid) ? "2px solid var(--primary)" : undefined,
-              cursor: "pointer",
-            }}
-            onClick={() => onSelect(d.udid, true)}
-          >
-            <div>
-              <strong>{d.name}</strong>
-              {d.udid === master && <span className="chip primary">Máy chính</span>}
-              {slaves.includes(d.udid) && <span className="chip ok">Máy phụ</span>}
-            </div>
-            <p className="hint mono">{d.udid}</p>
-          </article>
-        ))}
-        {!devices.length && (
-          <EmptyState
-            compact
-            icon={<IconPhone size={15} />}
-            title="Chưa có thiết bị"
-            hint="Về Quản lý cửa sổ và làm mới danh sách."
-          />
-        )}
-      </div>
-    </div>
-  );
-}
 
 export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
   const [sourceRoot, setSourceRoot] = useState("");
@@ -1041,125 +710,7 @@ export function DataPage() {
   );
 }
 
-export function TeamPage() {
-  const [users, setUsers] = useState<LocalUser[]>([]);
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [msg, setMsg] = useState<string | null>(null);
 
-  const reload = () => listUsers().then(setUsers).catch((e) => setMsg(String(e)));
-  useEffect(() => {
-    reload();
-  }, []);
-
-  return (
-    <div className="panel">
-      <header className="panel-header">
-        <h2>Thành viên (local)</h2>
-        <button type="button" className="ghost" onClick={reload}>
-          Làm mới
-        </button>
-      </header>
-      <p className="hint">Tài khoản local trên máy này — không đồng bộ cloud.</p>
-      <div className="panel-grid">
-        <section>
-          <h3>Thêm thành viên</h3>
-          <label>
-            Email
-            <input value={email} onChange={(e) => setEmail(e.target.value)} />
-          </label>
-          <label>
-            Password
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
-          </label>
-          <button
-            type="button"
-            className="primary"
-            disabled={!email.trim() || password.length < 4}
-            onClick={async () => {
-              try {
-                await authRegister(email.trim(), password);
-                setEmail("");
-                setPassword("");
-                setMsg(null);
-                await reload();
-                flash("Đã tạo user");
-              } catch (e) {
-                setMsg(String(e));
-              }
-            }}
-          >
-            Tạo user
-          </button>
-          {msg && <p className="error">{msg}</p>}
-        </section>
-        <section>
-          <h3>Danh sách</h3>
-          <div className="job-list">
-            {users.map((u) => (
-              <article key={u.id} className="job-card">
-                <div>
-                  <strong>{u.email}</strong>
-                  <span className="pill">{u.role}</span>
-                </div>
-                <p className="hint">{u.createdAt}</p>
-              </article>
-            ))}
-            {!users.length && (
-              <EmptyState
-                compact
-                icon={<IconUser size={15} />}
-                title="Chưa có người dùng"
-                hint="Vẫn dùng được app ở chế độ khách."
-              />
-            )}
-          </div>
-        </section>
-      </div>
-    </div>
-  );
-}
-
-export function LogsPage() {
-  const [logs, setLogs] = useState<OpLog[]>([]);
-  const load = () => listOpLogs(200).then(setLogs).catch((e) => flashError(e));
-  useEffect(() => {
-    load();
-  }, []);
-  return (
-    <div className="panel">
-      <header className="panel-header">
-        <h2>Nhật ký thao tác</h2>
-        <button type="button" className="ghost" onClick={load}>
-          Làm mới
-        </button>
-      </header>
-      <div className="job-list">
-        {logs.map((l) => (
-          <article key={l.id} className="job-card">
-            <div>
-              <strong>{l.action}</strong>
-              <span className="hint">{new Date(l.createdAt).toLocaleString()}</span>
-            </div>
-            <p className="hint">{l.detail}</p>
-          </article>
-        ))}
-        {!logs.length && (
-          <EmptyState
-            compact
-            icon={<IconLog size={15} />}
-            title="Chưa có nhật ký"
-            hint="Các thao tác Khởi động, Agent và Đăng bài sẽ được ghi lại ở đây."
-          />
-        )}
-      </div>
-    </div>
-  );
-}
 
 export function AccountPage({
   user,

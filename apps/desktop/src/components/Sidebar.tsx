@@ -18,7 +18,6 @@ const MENU: { id: PageId; label: string }[] = [
   { id: "material", label: "Kho nội dung" },
   { id: "apps", label: "Trung tâm ứng dụng" },
   { id: "scripts", label: "Flow" },
-  { id: "sync", label: "Đồng bộ cửa sổ" },
   { id: "jobs", label: "Tác vụ" },
   { id: "publish", label: "Đăng bài" },
   { id: "data", label: "Dữ liệu" },

@@ -181,21 +181,15 @@ export interface AgentRuntimeView {
 
 export type PageId =
   | "control"
-  | "groups"
-  | "proxy"
   | "material"
   | "apps"
   | "scripts"
   | "jobs"
-  | "sync"
   | "publish"
   | "data"
-  | "team"
-  | "logs"
   | "account"
   | "api"
   | "settings"
-  | "nurture"
   | "login"
   | "register";
 

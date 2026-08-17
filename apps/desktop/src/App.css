@@ -1449,6 +1449,21 @@ button:disabled {
   letter-spacing: 0.04em;
 }
 
+/* Opposite corner from the connection badge so the two never collide, and in the brand
+   colour because this one is a choice the operator made rather than a fact about the cable. */
+.dev-phone-center {
+  position: absolute;
+  top: 0;
+  right: 0;
+  padding: 3px 8px 4px;
+  border-radius: 0 5px 0 4px;
+  background: var(--primary);
+  color: #fff;
+  font-size: clamp(8px, 4.6cqw, 11px);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
 /* `.screen-empty` lived here and drew "Đang chờ stream…" over the overlay. Both surfaces
    share `StreamPlaceholder` now, so it has no users left. */
 

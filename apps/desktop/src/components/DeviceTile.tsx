@@ -14,6 +14,8 @@ interface Props {
   index: number;
   selected: boolean;
   focused?: boolean;
+  /// This phone is the one the overlay drives while Sync is on; the rest follow it.
+  controlCenter?: boolean;
   onSelect: (udid: string, additive: boolean) => void;
   onOpen: (udid: string) => void;
   onPrepare: (udid: string) => void;
@@ -28,6 +30,7 @@ function DeviceTileInner({
   index,
   selected,
   focused,
+  controlCenter,
   onSelect,
   onOpen,
   onPrepare,
@@ -70,6 +73,15 @@ function DeviceTileInner({
         />
 
         <span className="dev-phone-conn">{device.connection.toUpperCase()}</span>
+
+        {/* Named on the tile, because a designation nobody can see is a designation
+            nobody trusts -- which is what the old implicit "first in the selection"
+            master was. */}
+        {controlCenter && (
+          <span className="dev-phone-center" title="Trung tâm điều khiển">
+            Trung tâm
+          </span>
+        )}
 
         <div className="dev-phone-info">
           <span className="dev-phone-index">{index}</span>
