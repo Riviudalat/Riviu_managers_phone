@@ -5170,6 +5170,45 @@ moi lan doi preset va moi lan xoay may la mot cua so cham bien mat — upstream 
 agent **von khong cham** — 130–280 ms mot click do tren chinh Galaxy S8+. Con so 1502 ms la
 `adb shell input`, **khong phai** agent, dung nham hai cai.
 
+### 9.87 Chay that tren 20 may bat duoc hai loi khong test nao bat duoc (17/08/2026)
+
+Mở app thật trên dàn 20 máy, sau khi 27 lỗi đã sửa và mọi gate đều xanh. Hai lỗi lộ ra, và
+**một trong hai là do chính đợt sửa gây ra**.
+
+**1. Máy rời fleet rồi quay lại thì im lặng vĩnh viễn** (`view_hub.rs`). Client WebSocket giữ
+`known: HashSet<String>` các máy nó đã subscribe, và tập đó **chỉ lớn lên**. Máy rời →
+`ViewHub::forget` đóng kênh, forwarder chết — nhưng udid vẫn nằm trong tập. Máy quay lại →
+hub tạo kênh **mới** và thông báo → `insert` trả "đã biết" → bỏ qua → không ai subscribe kênh
+mới. Client điếc với máy đó tới khi kết nối lại.
+
+Mọi thứ nhìn lành lặn: producer chạy, log ghi `idr=true sps=true`, forward có, không lỗi ở
+đâu. Đo trên cùng một máy: reboot → **18/19 giữ nguyên 18 phút**; sau fix → **19/19 ngay khi
+máy về**. Bằng chứng mạnh hơn đến sau: hub USB rớt 19 máy rồi cắm lại, app tự bắt lại
+**20/20 không cần khởi động lại** — trước fix cả 19 sẽ điếc.
+
+Điều đáng nhớ về *cách* nó lộ ra: **E1 làm nó tìm được**. Trước E1, máy quay lại được đánh
+dấu `live` sẵn nên tile khoe đang stream trên canvas trắng. Hình vẫn không có ở cả hai bên;
+fix chỉ đổi một lời nói dối tự tin thành sự im lặng trung thực — và sự im lặng mới là thứ
+đếm được.
+
+**2. Fix A1 của tôi làm chết hẳn đường publish của Android.** `stage_one_bundle` chép bundle
+vào `<scratch>/<ordinal>/<bundle-name>/` rồi truyền `<scratch>/<ordinal>/`. Đúng cho iOS —
+sidecar duyệt thư mục con và lấy tên album từ đó — nhưng `publish::stage` của Android chỉ đọc
+**file** ở gốc, nên thấy một thư mục và không thấy file nào. Mọi transfer hỏng với
+`publish source root ... has no files`. Dàn này toàn Android: publish đã chết từ `b464c49`.
+
+May một điều: khẳng định "không có file" khiến nó **hỏng to tiếng** chứ không im lặng đẩy
+album rỗng.
+
+`collect_source_files` giờ lấy file ở gốc **và một tầng dưới**. Một tầng, không phải duyệt
+sâu: bố cục chỉ có một tầng, và mọi file thu ở đây đều bị đẩy lên máy rồi đưa vào bộ chọn ảnh
+của TikTok. Kiểm trên hai máy, đúng tính chất §9.83 đòi: máy A chỉ nhận bundle A, máy B chỉ
+nhận bundle B, hai manifest hash khác nhau nên hai album khác nhau.
+
+**Bài học chung của cả hai:** gate xanh không thay được việc mở app lên. Cả hai lỗi đều nằm
+ở đường "thiết bị rời rồi quay lại" và "bố cục thư mục giữa hai backend" — chỗ mà unit test
+nhìn thấy đúng thứ nó tự dựng lên.
+
 ### 9.86 27 loi cua dot soat doi khang: nhung gi dang nho lai (17/08/2026)
 
 Toàn bộ 27 lỗi đã sửa. Phần lớn đã nằm trong commit message; đây là những **sự thật xuyên
