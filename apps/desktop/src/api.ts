@@ -628,8 +628,16 @@ export async function nurtureSaveSettings(settings: NurtureSettings) {
   return invoke<NurtureSettings>("nurture_save_settings", { settings });
 }
 
-export async function nurtureTestApi(udid: string) {
-  return invoke<NurtureApiTestResult>("nurture_test_api", { udid });
+/// Draft one comment from what this device is showing, without sending anything.
+///
+/// `frames` carries the pictures the WebView has already decoded. Devices on the H.264
+/// view path — every Android phone — publish nothing into the host's JPEG hub, so without
+/// this the command answered "no frames" about a phone whose live picture was on screen.
+export async function nurtureTestApi(udid: string, frames?: Uint8Array[]) {
+  return invoke<NurtureApiTestResult>("nurture_test_api", {
+    udid,
+    frames: frames?.length ? frames.map((frame) => Array.from(frame)) : null,
+  });
 }
 
 export async function nurtureListCosts(limit = 100) {

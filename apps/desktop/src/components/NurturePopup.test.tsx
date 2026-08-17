@@ -65,6 +65,14 @@ const settings: NurtureSettings = {
   carouselPortionPercent: 100,
 };
 
+// The whole point of the Test API fix: the frames come from the WebView's decoder, not
+// from the host's JPEG hub. `burst` is what the popup is expected to call, and the frames
+// it returns are what must reach `nurtureTestApi`.
+const burst = vi.fn(async () => [new Uint8Array([0xff, 0xd8, 0xff, 0x01])]);
+vi.mock("../viewStore", () => ({
+  exportViewJpegBurst: (...args: unknown[]) => burst(...(args as [])),
+}));
+
 vi.mock("../api", () => ({
   nurtureGetSettings: vi.fn(async () => settings),
   nurtureSaveSettings: saved.saveSettings,
@@ -263,5 +271,23 @@ describe("NurturePopup", () => {
     for (const badge of badges) {
       expect(badge).toHaveAttribute("title", expect.stringContaining("cần dừng và chạy lại"));
     }
+  });
+
+  it("tests the API against the frames the WebView already decoded", async () => {
+    // Test API read only the host's JPEG hub. Android phones stopped publishing there when
+    // the H.264 view path landed, so pressing this while watching a phone's live picture
+    // answered "Chưa có frame stream cho thiết bị …" -- true about the hub and false about
+    // the phone in front of the operator.
+    const api = await import("../api");
+    await open();
+    fireEvent.click(screen.getByRole("tab", { name: "AI" }));
+    fireEvent.click(screen.getByRole("button", { name: /Test API/ }));
+
+    await waitFor(() => expect(api.nurtureTestApi).toHaveBeenCalled());
+    expect(burst).toHaveBeenCalledWith("mock-1");
+    expect(vi.mocked(api.nurtureTestApi).mock.calls[0]).toEqual([
+      "mock-1",
+      [new Uint8Array([0xff, 0xd8, 0xff, 0x01])],
+    ]);
   });
 });

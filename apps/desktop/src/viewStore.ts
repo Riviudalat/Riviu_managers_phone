@@ -394,6 +394,34 @@ export function exportViewJpeg(udid: string): Promise<Uint8Array | null> {
   });
 }
 
+/**
+ * Several JPEGs of one device, spaced far enough apart to differ.
+ *
+ * The grounded-comment pipeline reads up to three frames, because a still and a scrolling
+ * feed are different evidence. Devices on the H.264 view path publish nothing into the
+ * host's JPEG hub, so this is where the host's copy of that evidence has to come from.
+ *
+ * A device this worker is not decoding returns `[]` rather than throwing — the caller then
+ * has nothing to send, and the backend falls back to the hub, which is exactly right for a
+ * device whose frames live there.
+ */
+export async function exportViewJpegBurst(
+  udid: string,
+  count = 3,
+  gapMs = 250,
+): Promise<Uint8Array[]> {
+  const frames: Uint8Array[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const bytes = await exportViewJpeg(udid);
+    // A first frame that is absent means this device is not on the view path at all;
+    // stop rather than spend the gaps discovering it twice more.
+    if (!bytes) break;
+    frames.push(bytes);
+    if (index + 1 < count) await new Promise((resolve) => setTimeout(resolve, gapMs));
+  }
+  return frames;
+}
+
 function subscribe(udid: string, onStoreChange: Listener) {
   let set = listeners.get(udid);
   if (!set) {

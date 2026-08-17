@@ -109,13 +109,50 @@ pub fn nurture_save_settings(
     Ok(settings)
 }
 
+/// Whether a byte string starts with the JPEG SOI marker.
+///
+/// The only check applied to caller-supplied frames, and enough: these bytes go straight
+/// to a vision endpoint as `image/jpeg`, so what matters is that they are one. Same test
+/// `save_view_snapshot` applies to the same source.
+fn looks_like_jpeg(bytes: &[u8]) -> bool {
+    bytes.len() > 3 && bytes[0] == 0xff && bytes[1] == 0xd8
+}
+
+/// The caller-supplied frames that may be used as evidence, at most three.
+///
+/// Separated from the command so the decision can be tested without an `AppState`. Anything
+/// that is not a JPEG is dropped rather than refused: the WebView produces these from a
+/// canvas, and a device whose canvas has not painted yet yields something unusable rather
+/// than something malicious. Dropping it lands the caller in the hub fallback, which is the
+/// same place it would have been without this parameter at all.
+fn usable_supplied_frames(frames: Option<Vec<Vec<u8>>>) -> Vec<Vec<u8>> {
+    frames
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|frame| looks_like_jpeg(frame))
+        .take(3)
+        .collect()
+}
+
 /// Run the same grounded vision pipeline as production comment preparation,
 /// but stop after returning the prepared text. No device UI or comment sender
 /// is opened by this command.
+///
+/// `frames` is how an Android phone gets here at all. The grid and the overlay stopped
+/// showing minicap JPEGs when the H.264 view path landed, so `state.streams` — which this
+/// command was reading — is empty for a phone whose live picture the operator is looking
+/// at right now. Pressing Test API answered "Chưa có frame stream cho thiết bị …", which
+/// was true about the hub and false about the phone.
+///
+/// So the caller may hand in the frames it already has decoded, which is exactly the
+/// picture the button promises to test ("frame hiện tại"). No platform branch is needed on
+/// either side: the WebView produces these only for devices it is decoding, and everything
+/// else falls through to the hub as before.
 #[tauri::command]
 pub async fn nurture_test_api(
     state: State<'_, AppState>,
     udid: String,
+    frames: Option<Vec<Vec<u8>>>,
 ) -> Result<NurtureApiTestResult, String> {
     let _admission = state.ensure_accepting_work()?;
     let udid = udid.trim().to_string();
@@ -130,24 +167,28 @@ pub async fn nurture_test_api(
         return Err("Base URL và model AI không được để trống".into());
     }
 
-    let mut frames = Vec::with_capacity(3);
-    if let Some(frame) = state.streams.latest(&udid) {
-        frames.push(frame.as_ref().clone());
-    }
-    let mut stream = FrameSource::subscribe(&state.streams, &udid);
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
-    while frames.len() < 3 {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            break;
+    let mut frames = usable_supplied_frames(frames);
+    if frames.is_empty() {
+        if let Some(frame) = state.streams.latest(&udid) {
+            frames.push(frame.as_ref().clone());
         }
-        match tokio::time::timeout(remaining, stream.next()).await {
-            Ok(Some(frame)) => frames.push(frame.as_ref().clone()),
-            Ok(None) | Err(_) => break,
+        let mut stream = FrameSource::subscribe(&state.streams, &udid);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
+        while frames.len() < 3 {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, stream.next()).await {
+                Ok(Some(frame)) => frames.push(frame.as_ref().clone()),
+                Ok(None) | Err(_) => break,
+            }
         }
     }
     if frames.is_empty() {
-        return Err(format!("Chưa có frame stream cho thiết bị {udid}"));
+        return Err(format!(
+            "Chưa có hình nào của thiết bị {udid} để test — mở stream của máy này rồi thử lại"
+        ));
     }
 
     let direction = settings
@@ -699,5 +740,46 @@ mod tests {
         assert!(validate_nurture_settings(&settings)
             .expect_err("watch duration must be bounded")
             .contains("thời gian xem"));
+    }
+
+    /// The smallest thing that is a JPEG to every reader that matters.
+    fn jpeg(marker: u8) -> Vec<u8> {
+        vec![0xff, 0xd8, 0xff, marker]
+    }
+
+    #[test]
+    fn frames_the_caller_already_decoded_are_what_gets_tested() {
+        // Test API read only `state.streams`, the host's JPEG hub. Android phones stopped
+        // publishing there when the H.264 view path landed, so pressing the button while
+        // watching a phone's live picture answered "no frames for this device" -- true
+        // about the hub, false about the phone. These are the frames the WebView already
+        // has, which is exactly what the button promises ("frame hiện tại").
+        let supplied = usable_supplied_frames(Some(vec![jpeg(1), jpeg(2)]));
+        assert_eq!(supplied, vec![jpeg(1), jpeg(2)]);
+    }
+
+    #[test]
+    fn a_caller_that_supplies_nothing_usable_falls_through_to_the_hub() {
+        // Absent, empty, and present-but-unusable all have to reach the same place: an
+        // iPhone supplies nothing because its frames live in the hub, and a canvas that
+        // has not painted yet yields bytes that are not an image. Neither is an error --
+        // both leave the caller exactly where it was before this parameter existed.
+        assert!(usable_supplied_frames(None).is_empty());
+        assert!(usable_supplied_frames(Some(Vec::new())).is_empty());
+        assert!(
+            usable_supplied_frames(Some(vec![Vec::new(), b"not-an-image".to_vec()])).is_empty()
+        );
+        // A PNG is a real image and still not one this path may send: the request declares
+        // `image/jpeg`, so a mislabelled body is a provider error nobody could diagnose.
+        let png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        assert!(usable_supplied_frames(Some(vec![png])).is_empty());
+    }
+
+    #[test]
+    fn no_more_than_three_frames_are_ever_sent() {
+        // The grounded pipeline reads three. A caller sending thirty would be billed for
+        // thirty, silently, on a button whose whole purpose is to show what one costs.
+        let many: Vec<Vec<u8>> = (0..30).map(|index| jpeg(index as u8)).collect();
+        assert_eq!(usable_supplied_frames(Some(many)).len(), 3);
     }
 }

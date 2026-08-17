@@ -8,6 +8,7 @@ import {
   nurtureStop,
   nurtureTestApi,
 } from "../api";
+import { exportViewJpegBurst } from "../viewStore";
 import { targetsOf } from "./SelectionStrip";
 import { IconApi, IconClose, IconHeart } from "./Icons";
 import { LoadingState } from "./States";
@@ -364,7 +365,7 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
     if (!settings) return;
     const udid = testUdid || fallbackTestUdid;
     if (!udid) {
-      setMsg("Chọn một máy có frame stream trước khi test API");
+      setMsg("Chọn một máy trước khi test API");
       return;
     }
     setApiTesting(true);
@@ -372,7 +373,7 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
     setMsg(null);
     try {
       if (!(await save(settings))) return;
-      setApiTest(await nurtureTestApi(udid));
+      setApiTest(await nurtureTestApi(udid, await exportViewJpegBurst(udid)));
     } catch (e) {
       setMsg(String(e));
     } finally {
