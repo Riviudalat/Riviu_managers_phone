@@ -10,6 +10,7 @@ import type {
   AuthSession,
   DeviceGroup,
   DeviceInfo,
+  GroupInputReport,
   DeviceMeta,
   GroupInstallResult,
   HardwareKey,
@@ -207,7 +208,9 @@ export async function groupInput(payload: {
   imageH?: number;
   key?: HardwareKey;
 }) {
-  return invoke<void>("group_input", {
+  // Was `invoke<void>`, which threw away the report the command has always returned. A
+  // twenty-phone action that reached zero of them resolved as a success and toasted nothing.
+  return invoke<GroupInputReport>("group_input", {
     udids: payload.udids,
     kind: payload.kind,
     x: payload.x ?? null,

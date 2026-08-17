@@ -76,6 +76,23 @@ export function deviceModelOsLabel(
   return os ? `${device.model} · ${os}` : device.model;
 }
 
+/// One phone a group action did not reach, and why.
+export interface GroupInputSkip {
+  udid: string;
+  /// `DeviceBusy` when something else holds the phone, `ActionFailed` when the action itself
+  /// did not work.
+  code: string;
+  /// Set for `DeviceBusy`: who is holding it. This is the field the operator can act on.
+  currentOwner?: string | null;
+  /// Set for `ActionFailed`.
+  message?: string | null;
+}
+
+export interface GroupInputReport {
+  completedUdids: string[];
+  skipped: GroupInputSkip[];
+}
+
 export interface DeviceInfo {
   udid: string;
   name: string;

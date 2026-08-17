@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactElement } from "react";
-import type { DeviceInfo, HardwareKey } from "../types";
+import type { DeviceInfo, GroupInputReport, HardwareKey } from "../types";
+import { groupInputOutcome } from "../groupInput";
 import {
   backupDevice,
   deviceControlBegin,
@@ -141,6 +142,23 @@ export function FocusStream({
   const targets = groupMode && groupUdids.length > 1 ? groupUdids : [device.udid];
   const targetKey = targets.join("\0");
   const isIos = device.platform === "ios";
+
+  /// Report a group action that did not reach every phone.
+  ///
+  /// `quiet` is for the gesture rows. A drag across twenty phones is many calls, and a toast
+  /// per partial result would bury the screen the operator is trying to watch — so a gesture
+  /// speaks up only when it reached NOBODY, which is the case they genuinely cannot see. The
+  /// explicit rows (a key, a typed phrase) report either way, because the operator pressed
+  /// once and deserves one answer.
+  const reportGroup = (report: GroupInputReport, quiet: boolean) => {
+    const outcome = groupInputOutcome(report);
+    if (outcome.kind === "ok") return;
+    if (outcome.kind === "none") {
+      pushToast("error", outcome.title, outcome.detail);
+      return;
+    }
+    if (!quiet) pushToast("warn", outcome.title, outcome.detail);
+  };
   /// Whether this gesture may go down the scrcpy control socket.
   ///
   /// iOS has no such socket, and group mode has no such thing as *one* socket — the whole
@@ -276,29 +294,35 @@ export function FocusStream({
           if (outcome === "live") return;
         }
         if (targets.length > 1) {
-          await groupInput({
-            udids: targets,
-            kind: "tap",
-            x: end.x,
-            y: end.y,
-            imageW: iw,
-            imageH: ih,
-          });
+          reportGroup(
+            await groupInput({
+              udids: targets,
+              kind: "tap",
+              x: end.x,
+              y: end.y,
+              imageW: iw,
+              imageH: ih,
+            }),
+            true,
+          );
         } else {
           await deviceTap(device.udid, end.x, end.y, iw, ih);
         }
       } else if (targets.length > 1) {
         // Group control has no path command; the endpoints are what every device gets.
-        await groupInput({
-          udids: targets,
-          kind: "swipe",
-          x: start.x,
-          y: start.y,
-          toX: end.x,
-          toY: end.y,
-          imageW: iw,
-          imageH: ih,
-        });
+        reportGroup(
+          await groupInput({
+            udids: targets,
+            kind: "swipe",
+            x: start.x,
+            y: start.y,
+            toX: end.x,
+            toY: end.y,
+            imageW: iw,
+            imageH: ih,
+          }),
+          true,
+        );
       } else if (steps.length >= 2) {
         await deviceSwipePath(device.udid, start, steps, iw, ih);
       } else {
@@ -312,7 +336,7 @@ export function FocusStream({
     try {
       await runExclusive(async () => {
         if (targets.length > 1) {
-          await groupInput({ udids: targets, kind: "key", key });
+          reportGroup(await groupInput({ udids: targets, kind: "key", key }), false);
         } else {
           await deviceKey(device.udid, key);
         }
@@ -331,7 +355,10 @@ export function FocusStream({
     try {
       await runBusy(async () => {
         if (targets.length > 1) {
-          await groupInput({ udids: targets, kind: "type", text: phrase.content });
+          reportGroup(
+            await groupInput({ udids: targets, kind: "type", text: phrase.content }),
+            false,
+          );
         } else {
           await deviceTypeText(device.udid, phrase.content);
         }

@@ -28,6 +28,34 @@ pub struct GroupInputSkip {
     pub udid: String,
     pub code: String,
     pub current_owner: Option<DeviceWorkOwner>,
+    /// Why, when the code alone does not say. `DeviceBusy` explains itself through
+    /// `current_owner`; an action that simply failed does not, and the operator cannot act on
+    /// "one of your twenty phones did not work".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Everything about a group request that can be judged before any phone is touched.
+///
+/// Both checks used to sit in different places and one of them was in the wrong place
+/// entirely: the missing-key case was inside the per-device loop, in the match arm that
+/// needed the key. So a malformed request drove every phone up to that point and *then*
+/// returned an error, leaving the fleet half-actioned and the operator told it had failed.
+///
+/// A precondition belongs before the loop. Pulled out as a function so that is testable
+/// without an `AppState`.
+fn check_group_input(kind: &str, has_key: bool) -> Result<(), CommandError> {
+    if !matches!(kind, "tap" | "swipe" | "type" | "home" | "key") {
+        return Err(CommandError::operation(format!(
+            "unknown group input kind: {kind}"
+        )));
+    }
+    if kind == "key" && !has_key {
+        return Err(CommandError::operation(
+            "group input kind key requires a hardware key",
+        ));
+    }
+    Ok(())
 }
 
 async fn continue_ui_context(
@@ -776,11 +804,7 @@ pub async fn group_input(
     key: Option<HardwareKey>,
 ) -> Result<GroupInputReport, CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    if !matches!(kind.as_str(), "tap" | "swipe" | "type" | "home" | "key") {
-        return Err(CommandError::operation(format!(
-            "unknown group input kind: {kind}"
-        )));
-    }
+    check_group_input(&kind, key.is_some())?;
     let scale = matches!((image_w, image_h), (Some(w), Some(h)) if w > 0.0 && h > 0.0);
     let mut report = GroupInputReport {
         completed_udids: Vec::new(),
@@ -801,7 +825,10 @@ pub async fn group_input(
                         report.skipped.push(GroupInputSkip {
                             udid,
                             code: error.code,
+                            // `current_owner` already names who has the phone, which is the
+                            // whole story for Busy.
                             current_owner: error.current_owner,
+                            message: None,
                         });
                         continue;
                     }
@@ -859,30 +886,37 @@ pub async fn group_input(
             }
             "type" => session.type_text(text.as_deref().unwrap_or("")).await,
             "home" => session.home().await,
-            "key" => match key {
-                Some(key) => session.press_hardware_key(key).await,
-                None => {
-                    if let Some(context) = owned {
-                        state
-                            .control
-                            .close_manual_session(context)
-                            .map_err(CommandError::from)?;
-                    }
-                    return Err(CommandError::operation(
-                        "group input kind key requires a hardware key",
-                    ));
-                }
-            },
+            // Validated before the loop, so this arm cannot be reached without a key.
+            "key" => {
+                session
+                    .press_hardware_key(key.expect("key was validated"))
+                    .await
+            }
             _ => unreachable!("group input kind was validated"),
         };
-        if let Some(context) = owned {
-            let cleanup = state.control.close_manual_session(context);
-            action.map_err(CommandError::operation)?;
-            cleanup.map_err(CommandError::from)?;
-        } else {
-            action.map_err(CommandError::operation)?;
+        // The session is closed whatever the action did. Leaking a GroupSync lease because a
+        // tap failed would take the phone out of the fleet until the app restarts.
+        let cleanup = match owned {
+            Some(context) => state.control.close_manual_session(context).err(),
+            None => None,
+        };
+        match action {
+            Ok(()) => report.completed_udids.push(udid),
+            // **Record and carry on, rather than abort.** This used to be `?`, so the first
+            // phone that failed for any reason other than Busy threw away
+            // `completed_udids` and told the operator the whole batch had failed — when in
+            // a twenty-phone fleet nineteen of them may have worked. One fleet-batch shape
+            // in this codebase, matching `install_ipa_to_group`.
+            Err(error) => report.skipped.push(GroupInputSkip {
+                udid,
+                code: "ActionFailed".to_string(),
+                current_owner: None,
+                message: Some(error.to_string()),
+            }),
         }
-        report.completed_udids.push(udid);
+        if let Some(error) = cleanup {
+            return Err(CommandError::from(error));
+        }
     }
     Ok(report)
 }
@@ -1538,6 +1572,43 @@ mod tests {
 
     use riviu_core::{DeviceWorkCoordinator, StreamBudgetManager};
     use riviu_ios_driver::MockIosDriver;
+
+    #[test]
+    fn a_group_request_is_judged_before_a_single_phone_is_touched() {
+        // The missing-key check used to live inside the per-device loop, in the arm that
+        // needed the key -- so a malformed request drove every phone up to that point and
+        // only then failed, leaving the fleet half-actioned.
+        assert!(check_group_input("key", false).is_err());
+        assert!(check_group_input("key", true).is_ok());
+        assert!(check_group_input("rotate", true).is_err());
+        for kind in ["tap", "swipe", "type", "home"] {
+            assert!(check_group_input(kind, false).is_ok(), "{kind}");
+        }
+    }
+
+    #[test]
+    fn a_skip_carries_something_the_operator_can_act_on() {
+        // Two different silences, two different fields. Busy is explained by who holds the
+        // phone; a failed action is explained by nothing at all unless the message is kept,
+        // and "one of your twenty phones did not work" is not something anyone can act on.
+        let busy = GroupInputSkip {
+            udid: "ce06".into(),
+            code: "DeviceBusy".into(),
+            current_owner: Some(DeviceWorkOwner::Nurture),
+            message: None,
+        };
+        let failed = GroupInputSkip {
+            udid: "ce07".into(),
+            code: "ActionFailed".into(),
+            current_owner: None,
+            message: Some("agent did not answer".into()),
+        };
+        let encoded = serde_json::to_string(&vec![busy, failed]).expect("serialize skips");
+        assert!(encoded.contains("currentOwner"));
+        assert!(encoded.contains("agent did not answer"));
+        // Absent rather than null, so the frontend can tell "no message" from "empty message".
+        assert!(!encoded.contains("\"message\":null"));
+    }
 
     #[tokio::test]
     async fn shared_device_owner_group_sync_reports_interaction_as_skipped() {
