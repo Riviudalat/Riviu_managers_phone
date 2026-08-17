@@ -6,19 +6,19 @@ import {
   setNextRunMode,
 } from "./fixtures/tauriMock";
 
-const FLOW_NODE_TITLE = ".flow-node-title";
+const FLOW_NODE_TITLE = "[data-testid='flow-node-title']";
 
 async function openFlow(page: Page, selectDevices = false): Promise<void> {
   await page.goto("/");
-  await expect(page.locator(".dev-phone")).toHaveCount(2);
+  await expect(page.locator("[data-testid='device-tile']")).toHaveCount(2);
   if (selectDevices) {
     for (const udid of ["MOCK-IPHONE-01", "MOCK-IPHONE-02"]) {
-      await page.locator(".dev-phone", { hasText: udid.replace("MOCK-IPHONE-", "Fixture iPhone ") })
+      await page.locator("[data-testid='device-tile']", { hasText: udid.replace("MOCK-IPHONE-", "Fixture iPhone ") })
         .getByRole("checkbox")
         .check({ force: true });
     }
   }
-  await page.locator(".menu-item").getByText("Flow", { exact: true }).click();
+  await page.locator("[data-testid='nav-item']").getByText("Flow", { exact: true }).click();
   await expect(page.getByRole("region", { name: "Không gian Flow" })).toHaveAttribute(
     "data-loading",
     "false",
@@ -158,7 +158,7 @@ test("authors, saves, runs, and reloads a selected-device flow", async ({ page }
   }));
 
   await page.reload();
-  await page.locator(".menu-item").getByText("Flow", { exact: true }).click();
+  await page.locator("[data-testid='nav-item']").getByText("Flow", { exact: true }).click();
   await expect(page.getByRole("region", { name: "Không gian Flow" })).toHaveAttribute(
     "data-loading",
     "false",
@@ -194,7 +194,7 @@ test("keeps uncertain Tap non-retryable and cancels a running Wait", async ({ pa
     .getByRole("button", { name: "Chạy trên thiết bị" })
     .click();
   await expect(page.getByTestId("flow-monitor")).toContainText("Running");
-  const runId = await page.locator(".flow-run-history select").inputValue();
+  const runId = await page.locator("[data-testid='flow-run-history'] select").inputValue();
   await page.getByRole("button", { name: "Hủy", exact: true }).click();
   await emitRiviuEvent(page, { type: "flowRunUpdated", runId, revision: 2 });
   await expect(page.getByTestId("flow-monitor")).toContainText("Cancelled");
@@ -213,7 +213,7 @@ test("imports supported legacy JSON and preserves the draft on diagnostics", asy
   await dialog.getByRole("button", { name: "Import", exact: true }).click();
   await expect(dialog).toBeHidden();
   await expect(page.getByLabel("Tên Flow")).toHaveValue("Imported legacy flow");
-  const nodeCount = await page.locator(".flow-node").count();
+  const nodeCount = await page.locator("[data-testid='flow-node']").count();
 
   await page.getByRole("button", { name: "Nhập Flow" }).click();
   dialog = page.getByRole("dialog", { name: "Nhập Flow cũ" });
@@ -224,7 +224,7 @@ test("imports supported legacy JSON and preserves the draft on diagnostics", asy
   }));
   await dialog.getByRole("button", { name: "Import", exact: true }).click();
   await expect(dialog.getByText("WaitOutOfRange")).toBeVisible();
-  await expect(page.locator(".flow-node")).toHaveCount(nodeCount);
+  await expect(page.locator("[data-testid='flow-node']")).toHaveCount(nodeCount);
 });
 
 test("legacy scripts and jobs remain reachable", async ({ page }) => {
@@ -232,7 +232,7 @@ test("legacy scripts and jobs remain reachable", async ({ page }) => {
   await page.getByRole("tab", { name: "Legacy" }).click();
   await expect(page.getByRole("heading", { name: "Kịch bản" })).toBeVisible();
   await page.getByRole("button", { name: "Dùng ở Tác vụ" }).first().click();
-  await expect(page.locator(".topbar-title", { hasText: "Tác vụ" })).toBeVisible();
+  await expect(page.locator("[data-testid='page-title']", { hasText: "Tác vụ" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Chạy kịch bản" })).toBeVisible();
 });
 
@@ -268,7 +268,7 @@ for (const viewport of [
     const canvas = await page.getByTestId("flow-canvas").boundingBox();
     expect(canvas).not.toBeNull();
     expect(canvas?.width).toBeGreaterThanOrEqual(420);
-    expect(await page.locator(".flow-node").count()).toBeGreaterThan(0);
+    expect(await page.locator("[data-testid='flow-node']").count()).toBeGreaterThan(0);
     const regionBoxes = (await Promise.all([
       page.getByTestId("flow-toolbar").boundingBox(),
       page.getByTestId("flow-palette").boundingBox(),
@@ -282,7 +282,7 @@ for (const viewport of [
       }
     }
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    expect(await page.locator("button:visible, .flow-node-title:visible").evaluateAll((elements) =>
+    expect(await page.locator("button:visible, [data-testid='flow-node-title']:visible").evaluateAll((elements) =>
       elements.every((element) => element.scrollWidth <= element.clientWidth)
     )).toBe(true);
     await expect(page).toHaveScreenshot(

@@ -536,7 +536,7 @@ export function FlowWorkspace({
           issues={state.validation}
           onSelectNode={(nodeId) => dispatch({ type: "selectNode", nodeId })}
         />
-        <div className="flow-run-history">
+        <div className="flow-run-history" data-testid="flow-run-history">
           <label>
             <span>Lượt chạy</span>
             <select

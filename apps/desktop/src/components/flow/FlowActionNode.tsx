@@ -100,13 +100,15 @@ export function FlowActionNode({ data, selected }: NodeProps<FlowCanvasNode>) {
   const firstIssue = data.issues[0];
 
   return (
-    <div className="flow-node" data-selected={selected || undefined}>
+    <div className="flow-node" data-testid="flow-node" data-selected={selected || undefined}>
       {data.kind !== "start" && (
         <Handle type="target" position={Position.Left} id="flow" />
       )}
       <div className="flow-node-heading">
         <Icon aria-hidden="true" size={16} />
-        <span className="flow-node-title">{presentation.label}</span>
+        <span className="flow-node-title" data-testid="flow-node-title">
+          {presentation.label}
+        </span>
         {data.issues.length > 0 && (
           <span className="flow-node-error" title={firstIssue?.message}>
             {data.issues.length}

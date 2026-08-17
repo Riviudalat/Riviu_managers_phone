@@ -170,12 +170,12 @@ describe("Flow page integration", () => {
     await waitFor(() =>
       expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
     );
-    expect(screen.getByText("Flow", { selector: ".topbar-title" })).toBeVisible();
+    expect(screen.getByText("Flow", { selector: "[data-testid='page-title']" })).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: "Tác vụ" }));
     await user.click(await screen.findByRole("button", { name: "Bỏ thay đổi" }));
     await waitFor(() =>
-      expect(screen.getByText("Tác vụ", { selector: ".topbar-title" })).toBeVisible(),
+      expect(screen.getByText("Tác vụ", { selector: "[data-testid='page-title']" })).toBeVisible(),
     );
   });
 

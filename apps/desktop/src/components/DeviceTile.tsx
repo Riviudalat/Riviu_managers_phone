@@ -49,6 +49,7 @@ function DeviceTileInner({
   return (
     <article
       className={`dev-phone ${selected ? "selected" : ""} ${focused ? "focused" : ""}`}
+      data-testid="device-tile"
       style={{ width, height: width * 2 }}
       onClick={(e) => onSelect(device.udid, e.metaKey || e.ctrlKey || e.shiftKey)}
       onContextMenu={(e) => {

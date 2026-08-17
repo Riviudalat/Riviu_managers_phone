@@ -85,7 +85,7 @@ describe("FocusStream hit mapping", () => {
     const { container } = render(
       <FocusStream device={fixture} index={2} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined} />,
     );
-    const screen = container.querySelector(".focus-phone-screen");
+    const screen = container.querySelector("[data-testid='focus-screen']");
     const canvas = container.querySelector("canvas");
     expect(screen).not.toBeNull();
     expect(canvas).not.toBeNull();
@@ -106,7 +106,7 @@ describe("FocusStream hit mapping", () => {
     const { container } = render(
       <FocusStream device={fixture} index={2} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined} />,
     );
-    const screen = container.querySelector(".focus-phone-screen");
+    const screen = container.querySelector("[data-testid='focus-screen']");
     const canvas = container.querySelector("canvas");
     mockRect(canvas!, { left: 0, top: 0, width: 400, height: 832 });
 
@@ -144,7 +144,7 @@ describe("FocusStream hit mapping", () => {
     const { container } = render(
       <FocusStream device={fixture} index={2} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined} />,
     );
-    const screen = container.querySelector(".focus-phone-screen");
+    const screen = container.querySelector("[data-testid='focus-screen']");
     const canvas = container.querySelector("canvas");
     mockRect(canvas!, { left: 0, top: 0, width: 400, height: 832 });
 
@@ -161,7 +161,7 @@ describe("FocusStream hit mapping", () => {
     const { container } = render(
       <FocusStream device={fixture} index={2} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined} />,
     );
-    const screen = container.querySelector(".focus-phone-screen");
+    const screen = container.querySelector("[data-testid='focus-screen']");
     const canvas = container.querySelector("canvas");
     mockRect(canvas!, { left: 156, top: 166, width: 288, height: 600 });
 

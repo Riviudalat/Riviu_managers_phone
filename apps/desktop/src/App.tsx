@@ -511,7 +511,9 @@ function App() {
 
       <div className="main-col">
         <header className="topbar">
-          <div className="topbar-title">{title}</div>
+          <div className="topbar-title" data-testid="page-title">
+            {title}
+          </div>
           <div className="topbar-drag" />
           <div className="topbar-actions">
             {groupMode && <span className="chip primary">Sync</span>}

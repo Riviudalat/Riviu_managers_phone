@@ -52,6 +52,7 @@ export function Sidebar({
               key={item.id}
               type="button"
               className={`menu-item ${page === item.id ? "active" : ""}`}
+              data-testid="nav-item"
               title={item.label}
               onClick={() => onPage(item.id)}
             >

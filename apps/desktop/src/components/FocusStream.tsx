@@ -733,6 +733,10 @@ export function FocusStream({
         <div
           ref={screenRef}
           className={`focus-phone-screen${busy ? " is-busy" : ""}`}
+          // Tests target this, not the class. A class name is a styling decision and the
+          // restyle is about to change a lot of them; a test that breaks because a colour
+          // moved is a test that stops meaning anything.
+          data-testid="focus-screen"
           style={{ width: frameWidth, height: frameWidth * aspect }}
           title="Ctrl + lăn chuột để phóng to / thu nhỏ"
           onPointerDown={(e) => {
