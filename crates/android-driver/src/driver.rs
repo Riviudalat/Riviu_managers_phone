@@ -2720,7 +2720,7 @@ impl DeviceDriver for AndroidDriver {
         &self,
         udid: &str,
         dest_dir: &Path,
-    ) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    ) -> anyhow::Result<riviu_core::MediaPullReport> {
         crate::publish::pull_media(&self.adb, udid, dest_dir).await
     }
 

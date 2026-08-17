@@ -36,6 +36,28 @@ pub struct AppProcessState {
     pub running: bool,
 }
 
+/// What a media export found on the phone, and what of it actually landed.
+///
+/// Both numbers, because one of them alone is a sentence with no meaning. `pull_media`
+/// used to return only the files that arrived, so a phone with five hundred photos of which
+/// twenty copied reported "20" — the same answer it gives for a phone that only has twenty.
+/// The operator has no way to tell those apart, and the second is the one where nothing is
+/// wrong.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MediaPullReport {
+    /// Files written on this host, verified to exist with a non-zero length.
+    pub fetched: Vec<std::path::PathBuf>,
+    /// How many media files the phone reported having.
+    pub found: usize,
+}
+
+impl MediaPullReport {
+    /// Found but did not arrive. Zero on a healthy export and on an empty gallery alike.
+    pub fn missed(&self) -> usize {
+        self.found.saturating_sub(self.fetched.len())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuardedClipboardOperation {
     Set {
@@ -418,18 +440,15 @@ pub trait DeviceDriver: Send + Sync {
     /// import ids. This one knows nothing about what it is fetching — it is the operator
     /// asking for whatever the camera roll currently holds.
     ///
-    /// Returns the files actually written on this host, so a caller can report a count
-    /// rather than a shrug. An empty gallery is `Ok(vec![])`, not an error: nothing went
-    /// wrong, there was simply nothing there.
+    /// Returns what was found and what arrived, so a caller can report a count rather
+    /// than a shrug -- and can tell a small gallery from a large one that mostly failed.
+    /// An empty gallery is an `Ok` report with both numbers zero, not an error: nothing
+    /// went wrong, there was simply nothing there.
     ///
     /// Defaults to a refusal that names itself rather than to an empty success, the same
     /// rule as every capability above — "no media" and "this backend cannot fetch media"
     /// must not look alike to a caller.
-    async fn pull_media(
-        &self,
-        _udid: &str,
-        _dest_dir: &Path,
-    ) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    async fn pull_media(&self, _udid: &str, _dest_dir: &Path) -> anyhow::Result<MediaPullReport> {
         unsupported("pullMedia")
     }
     async fn uninstall_app(&self, udid: &str, bundle_id: &str) -> anyhow::Result<()>;

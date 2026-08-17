@@ -398,7 +398,7 @@ impl DeviceDriver for MultiplexDriver {
         &self,
         udid: &str,
         dest_dir: &Path,
-    ) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    ) -> anyhow::Result<crate::driver::MediaPullReport> {
         self.route(udid)?.pull_media(udid, dest_dir).await
     }
 
@@ -567,14 +567,17 @@ mod tests {
             &self,
             udid: &str,
             dest_dir: &Path,
-        ) -> anyhow::Result<Vec<std::path::PathBuf>> {
+        ) -> anyhow::Result<crate::driver::MediaPullReport> {
             if !self.text_comments {
                 return Err(crate::driver::UnsupportedCapability {
                     capability: "pullMedia",
                 }
                 .into());
             }
-            Ok(vec![dest_dir.join(format!("{udid}.jpg"))])
+            Ok(crate::driver::MediaPullReport {
+                fetched: vec![dest_dir.join(format!("{udid}.jpg"))],
+                found: 1,
+            })
         }
         async fn install_app(&self, _udid: &str, _path: &Path) -> anyhow::Result<()> {
             Ok(())
@@ -690,7 +693,7 @@ mod tests {
             .await
             .expect("the android backend fetches media");
         assert_eq!(
-            pulled,
+            pulled.fetched,
             vec![PathBuf::from("/tmp/export").join("droid-a.jpg")]
         );
 

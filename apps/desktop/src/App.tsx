@@ -20,7 +20,7 @@ import {
 import { startDevicePreview, startFleetPreview } from "./startPreview";
 import { summarizeBulkRepair } from "./agentStatus";
 import { requestConfirm } from "./confirmStore";
-import { pushToast, toastError } from "./toastStore";
+import { describeError, pushToast, toastError } from "./toastStore";
 import { ConfirmHost } from "./components/ConfirmHost";
 import { ToastHost } from "./components/ToastHost";
 import { DeviceTile } from "./components/DeviceTile";
@@ -508,10 +508,17 @@ function App() {
             <button
               type="button"
               className="icon-btn"
-              title="Refresh"
+              title="Làm mới danh sách máy"
               onClick={async () => {
-                await refreshDevices();
-                await reload();
+                // Same missing failure path as the toolbar's copy. Both are guarded now;
+                // the titles differ so the two are distinguishable to a reader and to a
+                // test, which they were not when both said "Refresh".
+                try {
+                  await refreshDevices();
+                  await reload();
+                } catch (error) {
+                  toastError("Không làm mới được danh sách máy", error);
+                }
               }}
             >
               <IconRefresh size={16} />
@@ -578,9 +585,22 @@ function App() {
                     return;
                   }
                   try {
-                    await startFleetPreview(targets);
+                    const failures = await startFleetPreview(targets);
                     await reload();
-                    pushToast("ok", "Đã khởi động", `Chuẩn bị ${targets.length} máy`);
+                    if (failures.length === 0) {
+                      pushToast("ok", "Đã khởi động", `Chuẩn bị ${targets.length} máy`);
+                    } else if (failures.length === targets.length) {
+                      toastError("Không máy nào khởi động được", failures[0].reason);
+                    } else {
+                      // The count first, the names second. On twenty phones the list is
+                      // what an operator acts on, and "Khởi động thất bại" with one
+                      // message used to be all they got — for a run where most succeeded.
+                      pushToast(
+                        "warn",
+                        `Khởi động ${targets.length - failures.length}/${targets.length} máy`,
+                        `${failures.map((failure) => failure.name).join(", ")} chưa khởi động được: ${describeError(failures[0].reason)}`,
+                      );
+                    }
                   } catch (error) {
                     toastError("Khởi động thất bại", error);
                   }
@@ -623,8 +643,15 @@ function App() {
                 }}
                 onSync={() => setGroupMode((v) => !v)}
                 onRefresh={async () => {
-                  await refreshDevices();
-                  await reload();
+                  // Refresh had no failure path at all: `onClick={() => void onRefresh()}`
+                  // dropped the rejection, so a device scan that failed left the fleet
+                  // unchanged and said nothing. Pressing it again did the same nothing.
+                  try {
+                    await refreshDevices();
+                    await reload();
+                  } catch (error) {
+                    toastError("Không làm mới được danh sách máy", error);
+                  }
                 }}
               />
 
@@ -718,7 +745,13 @@ function App() {
                       onPrepare={(udid) => {
                         const device = devices.find((item) => item.udid === udid);
                         if (!device) return;
-                        void startDevicePreview(device).then(reload);
+                        // `.catch` is the fix. This is the button on a tile that has
+                        // already failed once, so it is pressed at the exact moment the
+                        // operator is least able to tolerate silence -- and a rejection
+                        // here used to go nowhere but the console.
+                        startDevicePreview(device)
+                          .then(reload)
+                          .catch((error) => toastError(`Không mở lại được ${device.name}`, error));
                       }}
                     />
                   ))}
@@ -763,8 +796,12 @@ function App() {
                       type="button"
                       className="primary"
                       onClick={async () => {
-                        await refreshDevices();
-                        await reload();
+                        try {
+                          await refreshDevices();
+                          await reload();
+                        } catch (error) {
+                          toastError("Không làm mới được danh sách máy", error);
+                        }
                       }}
                     >
                       Làm mới

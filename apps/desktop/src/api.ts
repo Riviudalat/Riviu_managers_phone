@@ -438,9 +438,23 @@ export async function importMedia(udid: string, path: string) {
   return invoke<string>("import_media", { udid, path });
 }
 
-/** Copy the phone's photos and videos into `destDir`. Returns how many files landed. */
+/// What an export found on the phone, and what of it reached this machine.
+export interface MediaExportReport {
+  fetched: number;
+  found: number;
+  /// Found on the phone and did not arrive. Zero on a healthy export.
+  missed: number;
+}
+
+/**
+ * Copy the phone's photos and videos into `destDir`.
+ *
+ * Both counts, because `fetched` alone cannot express the failure that matters: a phone
+ * with five hundred photos of which twenty copied returns the same `20` as a phone that
+ * only ever had twenty, and the second is the one where nothing is wrong.
+ */
 export async function exportMedia(udid: string, destDir: string) {
-  return invoke<number>("export_media", { udid, destDir });
+  return invoke<MediaExportReport>("export_media", { udid, destDir });
 }
 
 export async function deviceShell(udid: string, script: string) {

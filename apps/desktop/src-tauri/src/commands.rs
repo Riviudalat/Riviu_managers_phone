@@ -519,12 +519,27 @@ pub async fn import_media(
 /// The other direction, and a genuinely different operation: the import path above knows
 /// about campaigns and manifests, this one knows only that the operator wants whatever is in
 /// the camera roll right now.
+/// What an export found and what of it landed.
+///
+/// The command used to return a bare count of files written, which cannot express the
+/// failure it most needed to: a phone with five hundred photos of which twenty copied
+/// reported `20`, and the toast said "Đã lấy 20 file" — the same words it says about a
+/// phone that only ever had twenty. The per-file failures were logged where nobody was
+/// looking.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaExportReport {
+    pub fetched: u32,
+    pub found: u32,
+    pub missed: u32,
+}
+
 #[tauri::command]
 pub async fn export_media(
     state: State<'_, AppState>,
     udid: String,
     dest_dir: String,
-) -> Result<u32, CommandError> {
+) -> Result<MediaExportReport, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let dest = PathBuf::from(&dest_dir);
     if !dest.is_dir() {
@@ -543,7 +558,11 @@ pub async fn export_media(
         .pull_media(&context, &into)
         .await
         .map_err(CommandError::from)?;
-    Ok(pulled.len() as u32)
+    Ok(MediaExportReport {
+        fetched: pulled.fetched.len() as u32,
+        found: pulled.found as u32,
+        missed: pulled.missed() as u32,
+    })
 }
 
 /// Ask a device to rotate, and report the rotation it actually settled at.

@@ -7,12 +7,18 @@ import {
   deviceSwipePath,
   deviceTap,
   deviceTypeText,
+  exportMedia,
   groupInput,
   viewInjectTouch,
 } from "../api";
 import { FocusStream } from "./FocusStream";
 import { ToastHost } from "./ToastHost";
 import { resetToasts } from "../toastStore";
+
+vi.mock("../pickFile", () => ({
+  pickDirectory: vi.fn(async () => "C:/exports"),
+  pickFile: vi.fn(async () => null),
+}));
 
 vi.mock("../api", () => ({
   backupDevice: vi.fn(),
@@ -24,7 +30,7 @@ vi.mock("../api", () => ({
   deviceSwipe: vi.fn(async () => undefined),
   deviceTap: vi.fn(async () => undefined),
   deviceTypeText: vi.fn(async () => undefined),
-  exportMedia: vi.fn(async () => 0),
+  exportMedia: vi.fn(async () => ({ fetched: 0, found: 0, missed: 0 })),
   importMedia: vi.fn(async () => ""),
   groupInput: vi.fn(async () => ({ completedUdids: [], skipped: [] })),
   installIpa: vi.fn(async () => undefined),
@@ -433,5 +439,50 @@ describe("FocusStream with no picture yet", () => {
     expect(queryByRole("button", { name: "Thử lại" })).toBeNull();
     expect(getByText(/không đọc được luồng này/i)).toBeTruthy();
     decodeRefused = false;
+  });
+});
+
+describe("FocusStream media export", () => {
+  function renderOverlay(device: DeviceInfo = fixture) {
+    resetToasts();
+    return render(
+      <>
+        <FocusStream
+          device={device}
+          index={4}
+          onClose={() => undefined}
+          groupUdids={[]}
+          groupMode={false}
+          devices={[device]}
+          onSelectDevice={() => undefined}
+        />
+        <ToastHost />
+      </>,
+    );
+  }
+
+  it("says how many files stayed behind instead of reporting a partial pull as a success", async () => {
+    // `export_media` returned a bare count of files written, so a phone with 500 photos of
+    // which 20 copied toasted "Đã lấy 20 file" -- the same words it uses for a phone that
+    // only ever had 20. The 480 failures went to a log nobody was reading.
+    vi.mocked(exportMedia).mockResolvedValueOnce({ fetched: 20, found: 500, missed: 480 });
+    const { getByRole, findByText } = renderOverlay();
+
+    fireEvent.click(getByRole("button", { name: "Lấy ảnh/video từ máy" }));
+
+    expect(await findByText("Chỉ lấy được 20/500 file")).toBeTruthy();
+  });
+
+  it("still calls a clean export a success, and an empty gallery an answer", async () => {
+    vi.mocked(exportMedia).mockResolvedValueOnce({ fetched: 12, found: 12, missed: 0 });
+    const clean = renderOverlay();
+    fireEvent.click(clean.getByRole("button", { name: "Lấy ảnh/video từ máy" }));
+    expect(await clean.findByText("Đã lấy 12 file")).toBeTruthy();
+    cleanup();
+
+    vi.mocked(exportMedia).mockResolvedValueOnce({ fetched: 0, found: 0, missed: 0 });
+    const empty = renderOverlay();
+    fireEvent.click(empty.getByRole("button", { name: "Lấy ảnh/video từ máy" }));
+    expect(await empty.findByText("Máy không có ảnh/video nào")).toBeTruthy();
   });
 });

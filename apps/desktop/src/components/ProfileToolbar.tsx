@@ -109,7 +109,7 @@ export function ProfileToolbar({
         Tương tác
       </button>
       <div className="grow" />
-      <button type="button" className="tb-btn refresh" onClick={() => void onRefresh()} title="Refresh">
+      <button type="button" className="tb-btn refresh" onClick={() => void onRefresh()} title="Quét lại thiết bị">
         <IconRefresh size={15} />
       </button>
     </div>

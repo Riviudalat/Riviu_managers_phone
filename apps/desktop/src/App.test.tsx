@@ -246,3 +246,59 @@ describe("Flow page integration", () => {
     });
   });
 });
+
+describe("buttons that used to fail in silence", () => {
+  it("says why Refresh did not refresh", async () => {
+    // The toolbar's Refresh had no failure path at all: `onClick={() => void onRefresh()}`
+    // dropped the rejection, so a scan that failed left the fleet unchanged and reported
+    // nothing. Pressing it again did the same nothing.
+    const api = await import("./api");
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
+    vi.mocked(api.refreshDevices).mockRejectedValueOnce(new Error("adb server is not running"));
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
+
+    await userEvent.click(screen.getByTitle("Quét lại thiết bị"));
+
+    expect(await screen.findByText("Không làm mới được danh sách máy")).toBeInTheDocument();
+    expect(await screen.findByText("adb server is not running")).toBeInTheDocument();
+  });
+
+  it("reports the phones that did not start, and does not call a partial start a success", async () => {
+    // `Promise.all` over the Android half meant the first refusal ended the turn of every
+    // device behind it, and the toast named only that one. This is the mixed-fleet case:
+    // one phone refuses, the other starts, and the operator is told exactly that.
+    const api = await import("./api");
+    const second = { ...androidPhone, udid: "ce0617", name: "Note 8" };
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone, second]);
+    vi.mocked(api.viewEnsure).mockImplementation(async (udid: string) => {
+      if (udid === androidPhone.udid) throw new Error("device offline");
+    });
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Note 8")).toBeInTheDocument());
+
+    await userEvent.click(
+      screen.getByTitle("Prepare / start stream (selected hoặc tất cả)"),
+    );
+
+    expect(await screen.findByText("Khởi động 1/2 máy")).toBeInTheDocument();
+    // The healthy phone was still reached, which is the half that used to be skipped.
+    expect(api.viewEnsure).toHaveBeenCalledWith("ce0617");
+  });
+
+  it("says why a tile's Thử lại did not start the stream", async () => {
+    // This is the button on a tile that has already failed once, so it is pressed at the
+    // moment an operator can least tolerate silence -- and `void startDevicePreview(...)`
+    // dropped the rejection into the console. Pressing it produced nothing, forever.
+    const api = await import("./api");
+    const failed = { ...androidPhone, tileStreamState: "error" as const, lastError: "no frames" };
+    vi.mocked(api.listDevices).mockResolvedValue([failed]);
+    vi.mocked(api.viewEnsure).mockRejectedValueOnce(new Error("scrcpy server refused"));
+    render(<App />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Thử lại" }));
+
+    expect(await screen.findByText("Không mở lại được Redmi")).toBeInTheDocument();
+    expect(await screen.findByText("scrcpy server refused")).toBeInTheDocument();
+  });
+});

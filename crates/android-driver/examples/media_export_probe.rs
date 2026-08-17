@@ -65,22 +65,30 @@ async fn main() -> anyhow::Result<()> {
     let elapsed = started.elapsed();
 
     let bytes: u64 = pulled
+        .fetched
         .iter()
         .filter_map(|path| std::fs::metadata(path).ok())
         .map(|meta| meta.len())
         .sum();
     println!(
-        "{} files, {:.1} MB, in {:.1}s",
-        pulled.len(),
+        "{} of {} files, {:.1} MB, in {:.1}s",
+        pulled.fetched.len(),
+        pulled.found,
         bytes as f64 / (1024.0 * 1024.0),
         elapsed.as_secs_f64()
     );
-    for path in pulled.iter().take(5) {
+    if pulled.missed() > 0 {
+        println!(
+            "  {} file(s) found on the phone did not arrive",
+            pulled.missed()
+        );
+    }
+    for path in pulled.fetched.iter().take(5) {
         let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
         println!("  {} ({size} bytes)", path.display());
     }
-    if pulled.len() > 5 {
-        println!("  … and {} more", pulled.len() - 5);
+    if pulled.fetched.len() > 5 {
+        println!("  … and {} more", pulled.fetched.len() - 5);
     }
     Ok(())
 }

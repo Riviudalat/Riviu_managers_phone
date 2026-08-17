@@ -714,7 +714,7 @@ impl DeviceControlPlane {
         &self,
         context: impl Into<DeviceLeaseRef<'a>>,
         dest_dir: &std::path::Path,
-    ) -> Result<Vec<std::path::PathBuf>, DeviceControlError> {
+    ) -> Result<crate::driver::MediaPullReport, DeviceControlError> {
         let lease = self.validate_leased(context.into())?;
         self.driver
             .pull_media(lease.udid(), dest_dir)

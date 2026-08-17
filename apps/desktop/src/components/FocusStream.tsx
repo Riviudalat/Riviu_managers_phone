@@ -435,13 +435,22 @@ export function FocusStream({
     pushToast("info", "Đang lấy ảnh/video…", `${device.name} — có thể mất vài phút.`);
     try {
       await runBusy(async () => {
-        const count = await exportMedia(device.udid, dir);
-        if (count === 0) {
+        const report = await exportMedia(device.udid, dir);
+        if (report.found === 0) {
           // Not an error: an empty gallery is an answer, and reporting it as a failure
           // would send the operator looking for a bug that is not there.
           pushToast("info", "Máy không có ảnh/video nào", device.name);
+        } else if (report.missed > 0) {
+          // Said out loud, and as a warning. These files were on the phone and are not on
+          // this machine; a plain "Đã lấy N file" reads as success and quietly loses the
+          // rest, which is the whole complaint.
+          pushToast(
+            "warn",
+            `Chỉ lấy được ${report.fetched}/${report.found} file`,
+            `${report.missed} file trên máy không sao chép được — xem log để biết file nào. Đã lưu vào ${dir}`,
+          );
         } else {
-          pushToast("ok", `Đã lấy ${count} file`, dir);
+          pushToast("ok", `Đã lấy ${report.fetched} file`, dir);
         }
       });
     } catch (error) {

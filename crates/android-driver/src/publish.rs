@@ -363,7 +363,7 @@ pub async fn pull_media(
     adb: &AdbProgram,
     serial: &str,
     dest_dir: &Path,
-) -> anyhow::Result<Vec<std::path::PathBuf>> {
+) -> anyhow::Result<riviu_core::MediaPullReport> {
     std::fs::create_dir_all(dest_dir)
         .with_context(|| format!("create the export directory {}", dest_dir.display()))?;
 
@@ -385,7 +385,7 @@ pub async fn pull_media(
     if media.is_empty() {
         // A genuinely empty gallery. Not an error, and the caller must be able to say so
         // rather than implying something went wrong.
-        return Ok(Vec::new());
+        return Ok(riviu_core::MediaPullReport::default());
     }
 
     let mut pulled = Vec::with_capacity(media.len());
@@ -425,7 +425,23 @@ pub async fn pull_media(
         media.len(),
         dest_dir.display()
     );
-    Ok(pulled)
+    // Both numbers travel together from here on. Returning only `pulled` made a phone with
+    // five hundred photos of which twenty copied indistinguishable from a phone that has
+    // twenty photos: the per-file failures above went to the log, and the operator was
+    // handed a number that reads as a success. What was missing was any way for the count
+    // to admit them.
+    if pulled.len() < media.len() {
+        tracing::warn!(
+            serial,
+            found = media.len(),
+            fetched = pulled.len(),
+            "some media did not arrive"
+        );
+    }
+    Ok(riviu_core::MediaPullReport {
+        fetched: pulled,
+        found: media.len(),
+    })
 }
 
 /// A phone's camera roll can be large and USB 2.0 is not fast. Generous, because the failure

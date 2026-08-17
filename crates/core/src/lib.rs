@@ -42,8 +42,8 @@ pub use device_work::{
 pub use driver::{
     ui_error_kind, AppProcessState, DeviceDriver, ElementBox, ElementQuery,
     GuardedClipboardOperation, GuardedClipboardOutput, GuardedClipboardProgress,
-    GuardedClipboardTransition, ProcessAbsenceProof, UiError, UiErrorKind, UiSession,
-    UnsupportedCapability,
+    GuardedClipboardTransition, MediaPullReport, ProcessAbsenceProof, UiError, UiErrorKind,
+    UiSession, UnsupportedCapability,
 };
 pub use events::{AppEvent, EventBus};
 pub use flow::*;
