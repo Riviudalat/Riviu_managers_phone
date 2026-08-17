@@ -265,30 +265,34 @@ impl Database {
         Ok(out)
     }
 
+    /// Replace a group and its membership, **atomically**.
+    ///
+    /// The membership rewrite is a delete-everything-then-rebuild, and it used to run in
+    /// autocommit: the `DELETE` was durable the instant it returned, so anything that went
+    /// wrong in the insert loop left the group **empty and saved that way**. Adding one phone
+    /// to a group could erase it.
+    ///
+    /// The permanent erase needs an error mid-loop and is rare. The everyday version is not:
+    /// any `list_groups` landing in the window between the delete and the last insert reads a
+    /// group with no members, and the tab strip renders it as an empty tab. One transaction
+    /// closes both.
+    ///
+    /// `Immediate` is load-bearing rather than decoration — a deferred transaction that
+    /// upgrades to a write can be refused `SQLITE_BUSY` **without** the busy handler running.
+    /// Same idiom as `create_publish_campaign` and `create_interaction_campaign` below.
     pub fn upsert_group(&self, group: &crate::types::DeviceGroup) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            r#"INSERT INTO groups (id, name, color, created_at) VALUES (?1,?2,?3,?4)
-               ON CONFLICT(id) DO UPDATE SET name=excluded.name, color=excluded.color"#,
-            params![group.id, group.name, group.color, group.created_at],
-        )?;
-        conn.execute(
-            "DELETE FROM group_members WHERE group_id = ?1",
-            params![group.id],
-        )?;
-        for udid in &group.udids {
-            conn.execute(
-                "INSERT OR IGNORE INTO group_members (group_id, udid) VALUES (?1,?2)",
-                params![group.id, udid],
-            )?;
-        }
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        write_group(&transaction, group)?;
+        transaction.commit()?;
         Ok(())
     }
 
     pub fn delete_group(&self, id: &str) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute("DELETE FROM group_members WHERE group_id = ?1", params![id])?;
-        conn.execute("DELETE FROM groups WHERE id = ?1", params![id])?;
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        erase_group(&transaction, id)?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -942,16 +946,37 @@ impl Database {
         }
     }
 
+    /// The settings blob and the two migration markers that say it has been brought forward.
+    ///
+    /// One transaction, because the three belong together: this was three `set_setting`
+    /// calls, each opening **its own connection**, so a failure after the first saved the
+    /// blob without its markers and the next read re-ran the migrations over it. Near
+    /// harmless in practice — `migrate_legacy_defaults` only replaces values still equal to
+    /// the old defaults — but it is three writes that must land together, and one connection
+    /// is cheaper than three.
     pub fn save_nurture_settings(
         &self,
         settings: &crate::types::NurtureSettings,
     ) -> anyhow::Result<()> {
-        self.set_setting("nurture.settings", &serde_json::to_string(settings)?)?;
-        self.set_setting(NURTURE_SETTINGS_MIGRATION_V2, "2026-08-06-human-v2")?;
-        self.set_setting(
-            NURTURE_SETTINGS_MIGRATION_V3,
-            NURTURE_SETTINGS_MIGRATION_V3_VALUE,
-        )
+        let payload = serde_json::to_string(settings)?;
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (key, value) in [
+            ("nurture.settings", payload.as_str()),
+            (NURTURE_SETTINGS_MIGRATION_V2, "2026-08-06-human-v2"),
+            (
+                NURTURE_SETTINGS_MIGRATION_V3,
+                NURTURE_SETTINGS_MIGRATION_V3_VALUE,
+            ),
+        ] {
+            transaction.execute(
+                "INSERT INTO settings (key, value) VALUES (?1,?2)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![key, value],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn get_agent_settings(&self) -> anyhow::Result<crate::types::AgentSettings> {
@@ -1501,6 +1526,40 @@ fn publish_state_from_str(value: &str) -> crate::publish::PublishCampaignState {
     }
 }
 
+/// The group write itself, separated from the transaction that makes it atomic.
+///
+/// Split out so a test can hold the transaction open, drop it without committing, and prove
+/// the old membership is still there — which on the previous autocommit version it was not.
+fn write_group(
+    transaction: &rusqlite::Transaction<'_>,
+    group: &crate::types::DeviceGroup,
+) -> anyhow::Result<()> {
+    transaction.execute(
+        r#"INSERT INTO groups (id, name, color, created_at) VALUES (?1,?2,?3,?4)
+           ON CONFLICT(id) DO UPDATE SET name=excluded.name, color=excluded.color"#,
+        params![group.id, group.name, group.color, group.created_at],
+    )?;
+    transaction.execute(
+        "DELETE FROM group_members WHERE group_id = ?1",
+        params![group.id],
+    )?;
+    for udid in &group.udids {
+        transaction.execute(
+            "INSERT OR IGNORE INTO group_members (group_id, udid) VALUES (?1,?2)",
+            params![group.id, udid],
+        )?;
+    }
+    Ok(())
+}
+
+/// Both deletes, which genuinely both have to happen: `group_members` has no foreign key to
+/// `groups`, so removing the group alone would orphan its rows.
+fn erase_group(transaction: &rusqlite::Transaction<'_>, id: &str) -> anyhow::Result<()> {
+    transaction.execute("DELETE FROM group_members WHERE group_id = ?1", params![id])?;
+    transaction.execute("DELETE FROM groups WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
 fn interaction_campaign_state_label(
     state: crate::interaction::ThreadCampaignState,
 ) -> &'static str {
@@ -1601,6 +1660,96 @@ pub fn step_label(status: &StepStatus) -> &'static str {
         StepStatus::Succeeded => "succeeded",
         StepStatus::Failed => "failed",
         StepStatus::Skipped => "skipped",
+    }
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::*;
+
+    fn fixture() -> (Database, PathBuf) {
+        let path = std::env::temp_dir().join(format!("riviu-group-test-{}.db", Uuid::new_v4()));
+        (Database::open(&path).expect("open fixture database"), path)
+    }
+
+    fn group(id: &str, udids: &[&str]) -> crate::types::DeviceGroup {
+        crate::types::DeviceGroup {
+            id: id.into(),
+            name: format!("nhóm {id}"),
+            color: "#ff6a00".into(),
+            udids: udids.iter().map(|udid| (*udid).to_string()).collect(),
+            created_at: "2026-08-17T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn a_membership_write_that_does_not_commit_leaves_the_group_as_it_was() {
+        // The defect: the membership rewrite is delete-everything-then-rebuild, and it ran
+        // in autocommit -- so the DELETE was durable the moment it returned and anything
+        // going wrong in the insert loop left the group saved as empty. Adding one phone to
+        // a group could erase it.
+        let (db, path) = fixture();
+        db.upsert_group(&group("g1", &["a", "b", "c"]))
+            .expect("seed the group");
+
+        {
+            let mut conn = db.conn().expect("connection");
+            let transaction = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .expect("begin");
+            write_group(&transaction, &group("g1", &["z"])).expect("write inside the txn");
+            // Dropped without committing -- the failure mid-loop, modelled exactly.
+        }
+
+        let groups = db.list_groups().expect("list");
+        let found = groups
+            .iter()
+            .find(|g| g.id == "g1")
+            .expect("group survives");
+        assert_eq!(found.udids.len(), 3, "membership must be untouched");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_delete_that_does_not_commit_leaves_both_the_group_and_its_members() {
+        let (db, path) = fixture();
+        db.upsert_group(&group("g2", &["a", "b"]))
+            .expect("seed the group");
+
+        {
+            let mut conn = db.conn().expect("connection");
+            let transaction = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .expect("begin");
+            erase_group(&transaction, "g2").expect("erase inside the txn");
+        }
+
+        let groups = db.list_groups().expect("list");
+        let found = groups
+            .iter()
+            .find(|g| g.id == "g2")
+            .expect("group survives");
+        assert_eq!(found.udids.len(), 2);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_saved_group_replaces_its_membership_exactly() {
+        // The happy path, so the refactor cannot quietly stop replacing.
+        let (db, path) = fixture();
+        db.upsert_group(&group("g3", &["a", "b", "c"]))
+            .expect("seed");
+        db.upsert_group(&group("g3", &["b", "d"])).expect("replace");
+
+        let groups = db.list_groups().expect("list");
+        let found = groups.iter().find(|g| g.id == "g3").expect("group");
+        let mut udids = found.udids.clone();
+        udids.sort();
+        assert_eq!(udids, vec!["b".to_string(), "d".to_string()]);
+
+        db.delete_group("g3").expect("delete");
+        assert!(db.list_groups().expect("list").iter().all(|g| g.id != "g3"));
+        let _ = std::fs::remove_file(path);
     }
 }
 
