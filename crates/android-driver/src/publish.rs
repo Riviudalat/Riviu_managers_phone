@@ -448,6 +448,51 @@ pub async fn pull_media(
 /// this guards is a genuinely big video, not a hang.
 const PULL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// The images to stage, from the root and from one level under it.
+///
+/// **The managed layout is the reason for the second level.** The desktop stages a campaign
+/// as `<scratch>/<ordinal>/<bundle-name>/<images>`: the bundle keeps its own directory
+/// because the iOS sidecar walks subdirectories and names the phone's album after that
+/// directory. Android needs none of that — `import` builds the album from the campaign scope
+/// — but it is handed the same root, and reading only the top level found nothing there.
+///
+/// Measured 17/08/2026 on two phones: every Android transfer failed with "publish source
+/// root … has no files", which on an all-Android fleet is the entire publish path. Loud
+/// rather than silent, at least — the emptiness assertion in [`stage`] is what made it an
+/// error instead of an empty album.
+///
+/// One level, not a full walk: the layout has exactly one, and deeper recursion would start
+/// sweeping up whatever an operator happens to have nested inside a source folder. Dot
+/// entries stay skipped, which is the convention `publish_commands::stage_one_bundle` relies
+/// on to keep its `.transfer` scratch directory from ever being read as a bundle.
+fn collect_source_files(source_root: &Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    fn hidden(entry: &std::fs::DirEntry) -> bool {
+        entry.file_name().to_string_lossy().starts_with('.')
+    }
+
+    let mut entries: Vec<std::path::PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(source_root).context("read the publish source root")? {
+        let entry = entry?;
+        if hidden(&entry) {
+            continue;
+        }
+        let kind = entry.file_type()?;
+        if kind.is_file() {
+            entries.push(entry.path());
+        } else if kind.is_dir() {
+            for nested in std::fs::read_dir(entry.path())
+                .with_context(|| format!("read the bundle directory {}", entry.path().display()))?
+            {
+                let nested = nested?;
+                if !hidden(&nested) && nested.file_type()?.is_file() {
+                    entries.push(nested.path());
+                }
+            }
+        }
+    }
+    Ok(entries)
+}
+
 pub async fn stage(
     adb: &AdbProgram,
     serial: &str,
@@ -472,13 +517,7 @@ pub async fn stage(
     .await
     .context("prepare the staging directory")?;
 
-    let mut entries: Vec<std::path::PathBuf> = Vec::new();
-    for entry in std::fs::read_dir(source_root).context("read the publish source root")? {
-        let entry = entry?;
-        if entry.file_type()?.is_file() {
-            entries.push(entry.path());
-        }
-    }
+    let mut entries = collect_source_files(source_root)?;
     // Deterministic order, so the manifest hash does not depend on directory order.
     entries.sort();
 
@@ -960,6 +999,60 @@ async fn rows_under(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_managed_bundle_layout_is_what_gets_staged() {
+        // The desktop hands this path `<scratch>/<ordinal>/`, which holds one directory
+        // named after the bundle. Reading only the top level found nothing, so after the
+        // per-assignment staging fix every Android transfer failed with "has no files" --
+        // on an all-Android fleet, the entire publish path. Measured on two phones,
+        // 17/08/2026, and fixed by descending exactly one level.
+        let root = std::env::temp_dir().join(format!("riviu-stage-layout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("bundle-a")).expect("bundle directory");
+        std::fs::write(root.join("bundle-a").join("one.jpg"), b"1").expect("nested image");
+        std::fs::write(root.join("bundle-a").join("two.jpg"), b"2").expect("nested image");
+        // A file sitting directly in the root still counts: that is the shape a caller
+        // handing a plain folder produces, and it worked before this change.
+        std::fs::write(root.join("loose.jpg"), b"3").expect("loose image");
+        // Dot entries stay invisible, which is what keeps `.transfer` from being read as a
+        // bundle if a root ever contains one.
+        std::fs::create_dir_all(root.join(".transfer").join("0")).expect("dot directory");
+        std::fs::write(root.join(".transfer").join("skip.jpg"), b"4").expect("dot image");
+        std::fs::write(root.join(".hidden.jpg"), b"5").expect("dot file");
+
+        let mut found = collect_source_files(&root)
+            .expect("collect")
+            .into_iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        found.sort();
+
+        assert_eq!(found, ["loose.jpg", "one.jpg", "two.jpg"]);
+        std::fs::remove_dir_all(&root).expect("clean up");
+    }
+
+    #[test]
+    fn nothing_two_levels_down_is_swept_up() {
+        // One level, deliberately. A full walk would collect whatever an operator happens
+        // to have nested inside a source folder -- and every file collected here is pushed
+        // to a phone and offered to TikTok's picker.
+        let root = std::env::temp_dir().join(format!("riviu-stage-depth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("bundle-a").join("originals")).expect("deep directory");
+        std::fs::write(root.join("bundle-a").join("keep.jpg"), b"1").expect("kept image");
+        std::fs::write(
+            root.join("bundle-a").join("originals").join("raw.jpg"),
+            b"2",
+        )
+        .expect("deep image");
+
+        let found = collect_source_files(&root).expect("collect");
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].file_name().unwrap(), "keep.jpg");
+        std::fs::remove_dir_all(&root).expect("clean up");
+    }
 
     #[test]
     fn a_namespaced_campaign_id_becomes_a_usable_directory_name() {
