@@ -4164,6 +4164,61 @@ chờ `DIALOG_GRACE = 5s`, rồi hỏng kèm câu nêu đúng tình huống và 
 83 s chờ chết thành 13 s và một câu hành động được. Máy vẫn cần một người bấm một lần —
 **đó không phải lỗi để sửa**, và giả vờ ngược lại thì phải bấm hộ một nút cấp quyền.
 
+### 9.45 Bình luận chạy lần đầu — và tên lỗi chỉ sai hướng suốt 45% số lượt (19/08/2026)
+
+Tính năng bình luận chưa từng chạy thật. Lượt đầu trên sáu máy: 11 lượt, 4 gửi được, và
+**5 chết với `malformed_model_output`** — một cái tên nghe như "mô hình không biết viết JSON".
+
+Nó sai hướng. Bước duy nhất cần làm là bắt lỗi mang theo thứ mô hình **thật sự** trả về, và
+câu trả lời hiện ra ngay dòng đầu:
+
+```
+malformed_model_output: {"caption":"Top 5 món ăn vặt đáng tiền — 1. Lạp xưởng nướng đá.
+Swing chen mukbang version 😜 #mukbang #Shopee
+```
+
+Chuỗi bị cắt giữa chừng, không có dấu đóng ngoặc. Schema đặt `caption` và `visualFacts`
+**trước** `comment`, nên mô hình tiêu hết `max_tokens: 500` để mô tả bài rồi bị cắt trước
+khi viết đúng cái trường đang dùng. 500 là con số hợp lý cho tiếng Anh; tiếng Việt tách
+token tệ hơn, và một caption đầy hashtag với emoji ăn hết ngân sách nhanh hơn nhiều.
+
+`max_tokens` lên 1200, kèm prompt chặn hai trường tham ăn (`caption` ≤ 100 ký tự,
+`visualFacts` ≤ 3 mục dưới 8 từ — nửa này không tốn gì, câu trả lời ngắn hơn thì vừa rẻ vừa
+viết xong được). Cùng sáu máy: **4/11 → 8/13**, và không còn lượt nào không đọc được.
+
+**Bài học chung, và nó áp cho mọi chỗ khác trong mã này:** một cái tên lỗi đặt tại chỗ
+*parse* chỉ mô tả cái parse, không mô tả nguyên nhân. `malformed_model_output` đúng theo
+nghĩa đen và vô dụng theo nghĩa vận hành. Cho lỗi mang theo dữ liệu thật (có cắt độ dài) là
+việc năm phút, và nó đã trả lời câu hỏi mà đọc mã bao lâu cũng không trả lời được.
+
+**Cơ chế thử lại chỉ phục vụ một nửa số cách hỏng.** Nó có sẵn cho bản nháp bị bộ chấm chê,
+nhưng một bản nháp trả về hỏng thì `?` đưa thẳng ra khỏi vòng lặp — bài đó không có gì, dù
+lần hỏi thứ hai gần như chắc chắn sẽ xong.
+
+**Ba chỗ im lặng khi hỏng, cùng một hình dạng đã sửa nhiều lần trong dự án này:**
+
+1. Lý do soạn hỏng đi vào `tracing::warn!` — harness không cài subscriber, app không có
+   surface nào đọc. Hàng ghi nhận chỉ ghi `context_skipped`.
+2. **Không có khoá API** là con đường bỏ qua duy nhất không ghi hàng nào: nó `return` trước
+   cả hàng ghi nhận đầu tiên. Một dàn chưa cấu hình khoá trông y hệt một dàn liên tục quyết
+   định không nói gì.
+3. Một câu đã soạn, đã chấm, rồi không đăng được ghi `skipped` cho **cả bốn** verdict thiết
+   bị khác nhau.
+
+**Và một lỗi trạng thái thật:** `post_comment` bỏ qua `leave` trên mọi `?`, để lại máy đứng
+trong danh sách bình luận với chữ còn trong ô — cú vuốt kế tiếp của vòng feed sẽ cuộn bình
+luận thay vì cuộn feed. Chỗ tệ nhất nằm **sau** khi đã bấm Gửi.
+
+**Khoá API sống ở đúng một nơi** — bảng `settings`, khoá `nurture.settings`, plaintext —
+nên harness bắt đầu từ `Default` không có khoá và không viết nổi một chữ. Nó **chép** CSDL
+của app sang thư mục tạm rồi làm việc trên bản chép: kế thừa được khoá, model, ngôn ngữ,
+định hướng, giới hạn từ, mà không bao giờ ghi đè cấu hình của người vận hành. `comment_prob`
+thì ghi đè vô điều kiện, kể cả bằng 0 — giá trị lưu trong app là số đặt cho *app*.
+
+Ghi thêm: `nurture_comment_attempts` tồn tại từ lâu và **không được hiển thị ở đâu trong
+giao diện**; `nurtureListCommentAttempts` trong `api.ts` không có chỗ nào gọi. Harness in nó
+ra vì nếu không thì không ai đọc được.
+
 ### 9.21 Agent còn sống mà cây đã chết: `/status` không phải bằng chứng (12/08/2026)
 
 `ensure_agent` tin `AgentClient::is_alive()`, mà nó gọi `window_size()`. **Đo được:

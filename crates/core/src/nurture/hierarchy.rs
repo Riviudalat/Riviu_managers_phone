@@ -903,6 +903,21 @@ const FEED_READY_POLL: Duration = Duration::from_millis(1_000);
 /// it, and short enough to leave two thirds of the window for the feed to arrive afterwards.
 const MODAL_BACK_DELAY: Duration = Duration::from_secs(10);
 
+/// How many times Back may be pressed at a screen that no label can reach.
+///
+/// One was enough for a dialog, which is what this rung was built for, and one is not
+/// enough for a *stack*. Measured 19/08/2026 on ce0417145199e0490c: a whole-fleet run
+/// lost one phone, and it was sitting on TikTok's `SearchResultActivity` — left there by
+/// whatever ran last. Search results are two screens deep, so one Back reached the search
+/// page, which has no feed tab and no Home tab either, and the session ended at zero
+/// videos with `chờ 30s mà chưa thấy tab feed`.
+///
+/// Bounded, and each press is re-judged from the top of the loop rather than fired in a
+/// burst: the moment one of them lands on the feed, `on_feed` returns and the rest are
+/// never spent. Three covers the stacks TikTok actually builds; a screen that Back cannot
+/// leave still ends inside [`FEED_READY_WINDOW`] instead of looping on it.
+const MODAL_BACK_LIMIT: u32 = 3;
+
 /// Give the first card's action rail the same grace every later card already gets.
 ///
 /// **The feed's chrome renders before its first card does.** `await_feed` is satisfied by the
@@ -974,7 +989,7 @@ async fn await_feed(
     let deadline = started + FEED_READY_WINDOW;
     let mut said = false;
     let mut nudged = false;
-    let mut backed = false;
+    let mut backs = 0u32;
     loop {
         if stop.load(Ordering::Relaxed) {
             return false;
@@ -1074,11 +1089,11 @@ async fn await_feed(
         // the feed would leave TikTok — but then `on_feed` would have returned. On Profile,
         // Inbox or Shop the Home tab would have been found. What is left is a screen with
         // neither, which is a dialog or a splash.
-        if !backed && started.elapsed() >= MODAL_BACK_DELAY {
-            backed = true;
+        if backs < MODAL_BACK_LIMIT && started.elapsed() >= MODAL_BACK_DELAY {
+            backs += 1;
             report(
                 status,
-                "màn hình bị chặn và không có nút nào đọc được — bấm Back".into(),
+                format!("màn hình bị chặn và không có nút nào đọc được — bấm Back ({backs}/{MODAL_BACK_LIMIT})"),
             );
             let _ = run.session.back().await;
             sleep_interruptible(FEED_READY_POLL, stop).await;
@@ -1947,7 +1962,9 @@ mod tests {
     /// the state every label-driven recovery is blind to, including the measured decline.
     #[derive(Default)]
     struct UnlabelledModalPhone {
-        cleared: std::sync::atomic::AtomicBool,
+        /// How many screens deep the phone is. Zero reads as one, so the default is the
+        /// single dialog this fake was built for; two is a search-results stack.
+        depth: std::sync::atomic::AtomicUsize,
         backs: std::sync::atomic::AtomicUsize,
         taps: std::sync::atomic::AtomicUsize,
     }
@@ -1961,7 +1978,6 @@ mod tests {
 
         async fn back(&self) -> anyhow::Result<()> {
             self.backs.fetch_add(1, Ordering::Relaxed);
-            self.cleared.store(true, Ordering::Relaxed);
             Ok(())
         }
 
@@ -1991,7 +2007,9 @@ mod tests {
 
         async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
             // Behind the dialog: nothing, for any query. Underneath it: the feed.
-            let found = self.cleared.load(Ordering::Relaxed)
+            let out =
+                self.backs.load(Ordering::Relaxed) >= self.depth.load(Ordering::Relaxed).max(1);
+            let found = out
                 && matches!(query, ElementQuery::Description { value, .. } if value == "For You");
             Ok(found.then_some(ElementBox {
                 x: 0.0,
@@ -2048,7 +2066,7 @@ mod tests {
         assert_eq!(
             phone.backs.load(Ordering::Relaxed),
             1,
-            "once — a screen that Back did not fix is not fixed by Back again"
+            "one is enough *here*: the feed was directly underneath. A screen that Back \n             cannot leave is bounded by MODAL_BACK_LIMIT, not by stopping after one"
         );
         assert_eq!(
             phone.taps.load(Ordering::Relaxed),
@@ -2714,6 +2732,55 @@ mod tests {
         assert!(
             said.iter().any(|line| line.contains("7/7")),
             "and the operator is told the post was finished, not abandoned: {said:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_phone_two_screens_deep_is_backed_out_of_both_of_them() {
+        // Measured 19/08/2026 on ce0417145199e0490c: a whole-fleet run lost one phone, and it
+        // was on TikTok's `SearchResultActivity` — left there by whatever ran last, not by a
+        // dialog. Search results are two screens deep, so the single Back this rung used to
+        // allow reached the search page, which has no feed tab and no Home tab either, and
+        // the session ended at zero videos.
+        let phone = UnlabelledModalPhone {
+            depth: std::sync::atomic::AtomicUsize::new(2),
+            ..Default::default()
+        };
+        let screen = (1_080.0, 2_220.0);
+        let run = HierarchyRun {
+            session: &phone,
+            labels: controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("measured set"),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        };
+        let stop = AtomicBool::new(false);
+        let mut status = NurtureSessionStatus {
+            udid: "deep-stack".into(),
+            running: true,
+            videos_done: 0,
+            swipe_attempts: 0,
+            like_attempts: 0,
+            comment_attempts: 0,
+            follow_attempts: 0,
+            likes: 0,
+            comments: 0,
+            follows: 0,
+            last_message: String::new(),
+            session_usd: 0.0,
+        };
+        let report = |status: &mut NurtureSessionStatus, message: String| {
+            status.last_message = message;
+        };
+
+        assert!(
+            await_feed(&run, &stop, &mut status, &report).await,
+            "two screens deep is still a way back to the feed"
+        );
+        assert_eq!(
+            phone.backs.load(Ordering::Relaxed),
+            2,
+            "exactly as many as it took — the loop re-judges after each one, so the moment \
+             the feed appears the rest are never spent"
         );
     }
 }
