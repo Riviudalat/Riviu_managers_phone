@@ -7,6 +7,7 @@ import {
   interactionReadArtifact,
   interactionParseLinks,
   interactionResolveLinks,
+  interactionRetry,
   interactionStartThread,
   listenRiviuEvents,
   listGroups,
@@ -31,7 +32,8 @@ type Props = {
 };
 
 function requestId() {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto)
+    return crypto.randomUUID();
   return `interaction-${Date.now()}`;
 }
 
@@ -54,7 +56,10 @@ function stateLabel(state: string) {
 
 export function InteractionPopup({ devices, selected, onClose }: Props) {
   const inScope = useMemo(
-    () => devices.filter((device) => (selected.length ? selected.includes(device.udid) : true)),
+    () =>
+      devices.filter((device) =>
+        selected.length ? selected.includes(device.udid) : true,
+      ),
     [devices, selected],
   );
   // Android is a first-class actor now: it drives the comment drawer through the
@@ -88,7 +93,9 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
   // 0 means "one team, everybody" — the arrangement this had before teams existed.
   // Kept as a number so the input can be cleared without becoming NaN.
   const [cohortSize, setCohortSize] = useState(0);
-  const [instruction, setInstruction] = useState("tự nhiên, ngắn, nói như người vừa xem xong");
+  const [instruction, setInstruction] = useState(
+    "tự nhiên, ngắn, nói như người vừa xem xong",
+  );
   // "ai" | "manual" — which writes the comments. Kept as a mode rather than inferred from
   // whether the box has text, so switching back to AI does not mean deleting what was pasted.
   const [textSource, setTextSource] = useState<"ai" | "manual">("ai");
@@ -177,7 +184,10 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
     if (seededActors.current) return;
     if (!hierarchyActors.length && !pixelActors.length) return;
     seededActors.current = true;
-    const group = hierarchyActors.length > pixelActors.length ? hierarchyActors : pixelActors;
+    const group =
+      hierarchyActors.length > pixelActors.length
+        ? hierarchyActors
+        : pixelActors;
     // The whole group, not the first six: six was the old hard cap and pre-selecting a
     // fraction of the fleet now would hide from the operator that the rest are usable.
     // Nothing runs until the button is pressed.
@@ -217,7 +227,9 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
       if (event.type !== "interactionUpdated") return;
       void reloadCampaigns();
       if (event.campaignId && detail?.summary.id === event.campaignId) {
-        void interactionGet(event.campaignId).then(setDetail).catch(() => undefined);
+        void interactionGet(event.campaignId)
+          .then(setDetail)
+          .catch(() => undefined);
       }
     }).then((fn) => {
       unlisten = fn;
@@ -253,12 +265,17 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
     }
     return out;
   }, [actors, cohortSize]);
-  const largestCohort = cohorts.reduce((most, team) => Math.max(most, team.length), 0);
+  const largestCohort = cohorts.reduce(
+    (most, team) => Math.max(most, team.length),
+    0,
+  );
 
   const mixedThread =
     mode === "threaded" &&
     actors.some((udid) => pixelActors.some((device) => device.udid === udid)) &&
-    actors.some((udid) => hierarchyActors.some((device) => device.udid === udid));
+    actors.some((udid) =>
+      hierarchyActors.some((device) => device.udid === udid),
+    );
   const mixedThreadReason =
     "Chuỗi lồng nhau không chạy trộn iPhone với Android: hai bên đọc nhãn tác giả theo hai " +
     "cách nên mắt xích có thể đứt giữa chừng. Chọn toàn iPhone, toàn Android, hoặc chuyển " +
@@ -359,15 +376,30 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
           <strong>Tương tác</strong>
           <span className="hint">{actorChoices.length} thiết bị</span>
           <div className="grow" />
-          <button type="button" className="close" title="Đóng" onClick={onClose}>
+          <button
+            type="button"
+            className="close"
+            title="Đóng"
+            onClick={onClose}
+          >
             <IconClose size={14} />
           </button>
         </header>
         <div className="interaction-tabs" role="tablist">
-          <button type="button" role="tab" aria-selected={tab === "setup"} onClick={() => setTab("setup")}>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "setup"}
+            onClick={() => setTab("setup")}
+          >
             Setup
           </button>
-          <button type="button" role="tab" aria-selected={tab === "monitor"} onClick={() => setTab("monitor")}>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "monitor"}
+            onClick={() => setTab("monitor")}
+          >
             Monitor
           </button>
         </div>
@@ -387,19 +419,33 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
               {lines.map((line) => (
                 <div key={line.lineNo} className={line.target ? "ok" : "bad"}>
                   <span>{line.target ? "✓" : "!"}</span>
-                  <span>{line.target?.normalizedUrl ?? `${line.original} · ${line.error}`}</span>
+                  <span>
+                    {line.target?.normalizedUrl ??
+                      `${line.original} · ${line.error}`}
+                  </span>
                 </div>
               ))}
             </div>
             {lines.some((line) => line.error === "unresolvedShortLink") && (
-              <button type="button" className="ghost" disabled={busy} onClick={() => void resolveShortLinks()}>
+              <button
+                type="button"
+                className="ghost"
+                disabled={busy}
+                onClick={() => void resolveShortLinks()}
+              >
                 Resolve link rút gọn
               </button>
             )}
             <div className="interaction-grid">
               <label>
                 Số message
-                <input type="number" min={2} max={64} value={messageCount} onChange={(e) => setMessageCount(Number(e.target.value))} />
+                <input
+                  type="number"
+                  min={2}
+                  max={64}
+                  value={messageCount}
+                  onChange={(e) => setMessageCount(Number(e.target.value))}
+                />
               </label>
               <label>
                 Cỡ cụm
@@ -413,7 +459,13 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
               </label>
               <label>
                 Tối đa từ
-                <input type="number" min={4} max={20} value={maxWords} onChange={(e) => setMaxWords(Number(e.target.value))} />
+                <input
+                  type="number"
+                  min={4}
+                  max={20}
+                  value={maxWords}
+                  onChange={(e) => setMaxWords(Number(e.target.value))}
+                />
               </label>
             </div>
             <p className="hint">
@@ -432,9 +484,16 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
             )}
             <label>
               Kiểu tương tác
-              <select value={mode} onChange={(e) => setMode(e.target.value as ThreadMode)}>
-                <option value="threaded">Qua lại — acc sau trả lời acc trước</option>
-                <option value="standalone">Riêng lẻ — mỗi acc một bình luận gốc</option>
+              <select
+                value={mode}
+                onChange={(e) => setMode(e.target.value as ThreadMode)}
+              >
+                <option value="threaded">
+                  Qua lại — acc sau trả lời acc trước
+                </option>
+                <option value="standalone">
+                  Riêng lẻ — mỗi acc một bình luận gốc
+                </option>
               </select>
             </label>
             {mode === "threaded" && (
@@ -445,8 +504,12 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
                     value={shape}
                     onChange={(e) => setShape(e.target.value as ThreadShape)}
                   >
-                    <option value="chain">Nối tiếp — mỗi acc trả lời acc liền trước</option>
-                    <option value="star">Toả — mọi acc trả lời bình luận gốc</option>
+                    <option value="chain">
+                      Nối tiếp — mỗi acc trả lời acc liền trước
+                    </option>
+                    <option value="star">
+                      Toả — mọi acc trả lời bình luận gốc
+                    </option>
                   </select>
                 </label>
                 <p className="hint">
@@ -470,24 +533,34 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
               Thả tim bài
             </label>
             <p className="hint">
-              Mỗi actor thả tim bài trước khi bình luận, xác nhận bằng nhãn nút tim đổi trạng
-              thái. Máy Android làm được; actor iPhone sẽ bị từ chối vì chưa đo toạ độ nút tim
-              trên trang bài — và một lần thả tim thất bại không làm mất bình luận.
+              Mỗi actor thả tim bài trước khi bình luận, xác nhận bằng nhãn nút
+              tim đổi trạng thái. Máy Android làm được; actor iPhone sẽ bị từ
+              chối vì chưa đo toạ độ nút tim trên trang bài — và một lần thả tim
+              thất bại không làm mất bình luận.
             </p>
             <label>
               Nội dung bình luận
               <select
                 value={textSource}
-                onChange={(e) => setTextSource(e.target.value as "ai" | "manual")}
+                onChange={(e) =>
+                  setTextSource(e.target.value as "ai" | "manual")
+                }
               >
-                <option value="ai">AI viết — đọc nội dung bài rồi tự viết</option>
-                <option value="manual">Thủ công — dán sẵn danh sách bình luận</option>
+                <option value="ai">
+                  AI viết — đọc nội dung bài rồi tự viết
+                </option>
+                <option value="manual">
+                  Thủ công — dán sẵn danh sách bình luận
+                </option>
               </select>
             </label>
             {textSource === "ai" ? (
               <label>
                 Giọng điệu / hướng dẫn
-                <input value={instruction} onChange={(e) => setInstruction(e.target.value)} />
+                <input
+                  value={instruction}
+                  onChange={(e) => setInstruction(e.target.value)}
+                />
               </label>
             ) : (
               <>
@@ -496,16 +569,19 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
                   <textarea
                     rows={6}
                     value={manualText}
-                    placeholder={["đẹp quá", "chỗ này ở đâu vậy ạ", "lưu lại đi ăn thử"].join(
-                      "\n",
-                    )}
+                    placeholder={[
+                      "đẹp quá",
+                      "chỗ này ở đâu vậy ạ",
+                      "lưu lại đi ăn thử",
+                    ].join("\n")}
                     onChange={(e) => setManualText(e.target.value)}
                   />
                 </label>
                 <p className="hint">
-                  {manualComments.length} câu · cần ít nhất {messageCount} câu cho {messageCount}{" "}
-                  message. Chia lần lượt theo từng link nên mười link không mở đầu bằng cùng một
-                  câu, và cùng một chiến dịch chạy lại sẽ gửi đúng chữ đó.
+                  {manualComments.length} câu · cần ít nhất {messageCount} câu
+                  cho {messageCount} message. Chia lần lượt theo từng link nên
+                  mười link không mở đầu bằng cùng một câu, và cùng một chiến
+                  dịch chạy lại sẽ gửi đúng chữ đó.
                 </p>
               </>
             )}
@@ -517,7 +593,9 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
                   <select
                     value=""
                     onChange={(e) => {
-                      const group = groups.find((entry) => entry.id === e.target.value);
+                      const group = groups.find(
+                        (entry) => entry.id === e.target.value,
+                      );
                       if (!group) return;
                       // Intersected with what is actually here: a group remembers udids, and
                       // a phone that has been unplugged since would otherwise be selected and
@@ -538,7 +616,9 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
                   </select>
                 </label>
               )}
-              {actorChoices.length === 0 && <span className="hint">Chưa có thiết bị</span>}
+              {actorChoices.length === 0 && (
+                <span className="hint">Chưa có thiết bị</span>
+              )}
               {/* Grouped by *how each device reads the screen*, not by brand: that is the
                   property the thread rule depends on, and naming it here is what makes the
                   refusal below make sense instead of looking arbitrary. */}
@@ -555,7 +635,13 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
                         <input
                           type="checkbox"
                           checked={actors.includes(device.udid)}
-                          onChange={() => setActors((prev) => (prev.includes(device.udid) ? prev.filter((id) => id !== device.udid) : [...prev, device.udid]))}
+                          onChange={() =>
+                            setActors((prev) =>
+                              prev.includes(device.udid)
+                                ? prev.filter((id) => id !== device.udid)
+                                : [...prev, device.udid],
+                            )
+                          }
                         />
                         <span>{device.name || device.udid.slice(0, 8)}</span>
                       </label>
@@ -578,56 +664,170 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
           <div className="interaction-body">
             <div className="interaction-monitor-head">
               <strong>Campaign gần đây</strong>
-              <button type="button" className="ghost" onClick={() => void reloadCampaigns()}>Làm mới</button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => void reloadCampaigns()}
+              >
+                Làm mới
+              </button>
             </div>
             <div className="interaction-campaign-list">
               {campaigns.map((campaign) => (
-                <button type="button" key={campaign.id} className="interaction-campaign" onClick={() => void openDetail(campaign)}>
+                <button
+                  type="button"
+                  key={campaign.id}
+                  className="interaction-campaign"
+                  onClick={() => void openDetail(campaign)}
+                >
                   <span className={`status-dot ${campaign.state}`} />
                   <span className="grow">
                     <strong>{campaign.requestId.slice(0, 14)}</strong>
-                    <small>{campaign.targetCount} link · {campaign.succeededMessages}/{campaign.messageCount * campaign.targetCount} message · {stateLabel(campaign.state)}</small>
+                    <small>
+                      {campaign.targetCount} link · {campaign.succeededMessages}
+                      /{campaign.messageCount * campaign.targetCount} message ·{" "}
+                      {stateLabel(campaign.state)}
+                    </small>
                     {/* The reason, not just the word "Lỗi". It was stored from the start and
                         read by nobody, so a failed AI run left the operator with no signal
                         at all — see AGENTS.md 9.33. */}
-                    {campaign.errorCode && <small className="interaction-error">{campaign.errorCode}</small>}
+                    {campaign.errorCode && (
+                      <small className="interaction-error">
+                        {campaign.errorCode}
+                      </small>
+                    )}
                   </span>
                 </button>
               ))}
-              {!campaigns.length && <span className="hint">Chưa có campaign</span>}
+              {!campaigns.length && (
+                <span className="hint">Chưa có campaign</span>
+              )}
             </div>
             {detail && (
               <div className="interaction-detail">
                 <div className="interaction-monitor-head">
                   <strong>{stateLabel(detail.summary.state)}</strong>
-                  {detail.summary.state === "running" && <button type="button" className="danger" onClick={() => void interactionCancel(detail.summary.id)}>Dừng</button>}
+                  {detail.summary.state === "running" && (
+                    <button
+                      type="button"
+                      className="danger"
+                      onClick={() => void interactionCancel(detail.summary.id)}
+                    >
+                      Dừng
+                    </button>
+                  )}
+                  {/* The command has existed since the feature shipped and nothing called
+                      it. Offered only on a campaign that has finished badly: `Sending`,
+                      `Succeeded` and `Uncertain` assignments are excluded server-side
+                      because re-sending a comment that may already be public is the one
+                      thing this must never do. */}
+                  {["partial", "failed", "cancelled"].includes(
+                    detail.summary.state,
+                  ) && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={async () => {
+                        setBusy(true);
+                        try {
+                          await interactionRetry(detail.summary.id);
+                          await reloadCampaigns();
+                          setDetail(await interactionGet(detail.summary.id));
+                          setError(null);
+                        } catch (e) {
+                          setError(String(e));
+                        } finally {
+                          setBusy(false);
+                        }
+                      }}
+                    >
+                      Thử lại phần hỏng
+                    </button>
+                  )}
                 </div>
-                {detail.assignments.map((assignment) => {
-                  const shot = artifacts.find(
-                    (item) => item.assignmentId === assignment.id && item.relativePath,
-                  );
-                  return (
-                    <div key={assignment.id} className="interaction-assignment">
-                      <span>#{assignment.ordinal + 1}</span>
-                      <span className="grow">
-                        <strong>{assignment.actorUdid.slice(0, 8)}</strong>
-                        <small>{assignment.preparedText ?? "Chưa chuẩn bị"}</small>
-                        {/* Selected and typed already; simply never shown. A refusal that
+                {/* Grouped by link, which is also grouped by team: `plan_threads` gives
+                    each cohort its own links, so one heading is one conversation on one
+                    post. A flat list of sixty rows from six teams running at once cannot
+                    be read — the ordinals interleave and nothing says which chain a row
+                    belongs to. */}
+                {Object.entries(
+                  detail.assignments.reduce<
+                    Record<string, typeof detail.assignments>
+                  >((byLink, assignment) => {
+                    (byLink[assignment.targetKey] ??= []).push(assignment);
+                    return byLink;
+                  }, {}),
+                ).map(([targetKey, rows]) => (
+                  <div key={targetKey} className="interaction-thread">
+                    <div className="interaction-thread-head">
+                      <strong>{targetKey.replace(/^content:/, "link ")}</strong>
+                      <small>
+                        {rows.filter((row) => row.state === "succeeded").length}
+                        /{rows.length} message
+                      </small>
+                    </div>
+                    {rows.map((assignment) => {
+                      const shot = artifacts.find(
+                        (item) =>
+                          item.assignmentId === assignment.id &&
+                          item.relativePath,
+                      );
+                      return (
+                        <div
+                          key={assignment.id}
+                          className="interaction-assignment"
+                        >
+                          <span>#{assignment.ordinal + 1}</span>
+                          <span className="grow">
+                            <strong>{assignment.actorUdid.slice(0, 8)}</strong>
+                            <small>
+                              {assignment.preparedText ?? "Chưa chuẩn bị"}
+                            </small>
+                            {/* Selected and typed already; simply never shown. A refusal that
                             names its cause is the difference between "Lỗi" and knowing
                             whether the link is dead or the phone was on a LIVE card. */}
-                        {assignment.errorCode && <small className="interaction-error">{assignment.errorCode}</small>}
-                      </span>
-                      {shot && (
-                        <button type="button" className="ghost" onClick={() => void showShot(shot.id)}>
-                          Ảnh
-                        </button>
-                      )}
-                      <span className={`chip ${assignment.state === "succeeded" ? "ok" : assignment.state === "uncertain" ? "warn" : "info"}`}>{stateLabel(assignment.state)}</span>
-                    </div>
-                  );
-                })}
+                            {assignment.errorCode && (
+                              <small className="interaction-error">
+                                {assignment.errorCode}
+                              </small>
+                            )}
+                            {assignment.like && (
+                              <small
+                                className={
+                                  assignment.like.startsWith("đã tim")
+                                    ? "hint"
+                                    : "interaction-error"
+                                }
+                              >
+                                {assignment.like}
+                              </small>
+                            )}
+                          </span>
+                          {shot && (
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={() => void showShot(shot.id)}
+                            >
+                              Ảnh
+                            </button>
+                          )}
+                          <span
+                            className={`chip ${assignment.state === "succeeded" ? "ok" : assignment.state === "uncertain" ? "warn" : "info"}`}
+                          >
+                            {stateLabel(assignment.state)}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
                 {preview && (
-                  <button type="button" className="interaction-shot" onClick={() => setPreview(null)}>
+                  <button
+                    type="button"
+                    className="interaction-shot"
+                    onClick={() => setPreview(null)}
+                  >
                     <img src={preview} alt="Ảnh màn hình khay bình luận" />
                   </button>
                 )}

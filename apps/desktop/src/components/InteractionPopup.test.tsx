@@ -44,6 +44,9 @@ vi.mock("../api", () => ({
   interactionStartThread: startThread,
   listenRiviuEvents: vi.fn(async () => () => undefined),
   listGroups: vi.fn(async () => []),
+  interactionRetry: vi.fn(async () => undefined),
+  interactionListArtifacts: vi.fn(async () => []),
+  interactionReadArtifact: vi.fn(async () => ""),
 }));
 
 afterEach(() => {
@@ -290,5 +293,86 @@ describe("InteractionPopup", () => {
     expect(request.actorUdids).toHaveLength(9);
     expect(request.cohortSize).toBe(3);
     expect(request.messageCount).toBe(3);
+  });
+
+  it("groups the monitor by link, shows a refused like, and offers a retry", async () => {
+    // Three things the Monitor could not do. Sixty rows from six teams running at once
+    // interleave into an unreadable list; a like that was refused went only to the log; and
+    // `interaction_retry` had existed since the feature shipped with nothing calling it.
+    const api = await import("../api");
+    vi.mocked(api.interactionList).mockResolvedValue([
+      {
+        id: "campaign-1",
+        requestId: "request-1",
+        state: "partial",
+        messageCount: 2,
+        targetCount: 2,
+        succeededMessages: 3,
+        failedMessages: 1,
+        updatedAt: "2026-08-18T00:00:00Z",
+      },
+    ] as never);
+    vi.mocked(api.interactionGet).mockResolvedValue({
+      summary: {
+        id: "campaign-1",
+        requestId: "request-1",
+        state: "partial",
+        messageCount: 2,
+        targetCount: 2,
+        succeededMessages: 3,
+        failedMessages: 1,
+        updatedAt: "2026-08-18T00:00:00Z",
+      },
+      assignments: [
+        {
+          id: "a1",
+          targetKey: "content:111",
+          ordinal: 0,
+          actorUdid: "android-0",
+          parentAssignmentId: null,
+          state: "succeeded",
+          preparedText: "gốc của cụm một",
+          errorCode: null,
+          like: "không tim được: nhãn nút tim chưa đo",
+        },
+        {
+          id: "a2",
+          targetKey: "content:111",
+          ordinal: 1,
+          actorUdid: "android-1",
+          parentAssignmentId: "a1",
+          state: "succeeded",
+          preparedText: "rep của cụm một",
+          errorCode: null,
+        },
+        {
+          id: "a3",
+          targetKey: "content:222",
+          ordinal: 0,
+          actorUdid: "android-3",
+          parentAssignmentId: null,
+          state: "failed",
+          preparedText: "gốc của cụm hai",
+          errorCode: "target_open_no_post_page",
+        },
+      ],
+    } as never);
+
+    render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Monitor" }));
+    fireEvent.click(await screen.findByText("request-1"));
+
+    // One heading per link, because a link belongs to exactly one team.
+    expect(await screen.findByText("link 111")).toBeVisible();
+    expect(screen.getByText("link 222")).toBeVisible();
+    expect(screen.getByText("2/2 message")).toBeVisible();
+    expect(screen.getByText("0/1 message")).toBeVisible();
+
+    // The like was refused while the comment posted: a note beside a succeeded row, not a
+    // failure of it.
+    expect(screen.getByText("không tim được: nhãn nút tim chưa đo")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "Thử lại phần hỏng" }));
+    await waitFor(() => expect(api.interactionRetry).toHaveBeenCalledWith("campaign-1"));
   });
 });

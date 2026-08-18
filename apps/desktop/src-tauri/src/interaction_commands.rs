@@ -904,6 +904,23 @@ async fn run_cohort(
         .get_interaction_campaign(&campaign_id)?
         .context("campaign không tồn tại")?;
     let protected = protected_assignment_ids(&detail.assignments);
+    // **What already posted, so a retry knows what to reply to.**
+    //
+    // An identity is only ever produced by sending, and a message that already succeeded
+    // is deliberately never sent again — so on a retry the in-memory map below starts
+    // empty and every reply under a succeeded root was skipped with
+    // `parent_identity_not_confirmed`. That is the one case Retry exists for, and it could
+    // not work. The identity was on disk the whole time, in the assignment's evidence.
+    let posted: HashMap<(String, u8), CommentLocatorIdentity> = detail
+        .assignments
+        .iter()
+        .filter_map(|assignment| {
+            Some((
+                (assignment.target_key.clone(), assignment.ordinal),
+                assignment.posted_identity()?,
+            ))
+        })
+        .collect();
     let assignment_ids: HashMap<(String, u8), String> = detail
         .assignments
         .into_iter()
@@ -1075,7 +1092,13 @@ async fn run_cohort(
 
         // A root comment is sent with full frame evidence. Each subsequent
         // reply first resolves the exact parent text+author on two OCR frames.
-        let mut identities = HashMap::<u8, CommentLocatorIdentity>::new();
+        // Seeded from what this target already posted in an earlier run, then added to as
+        // this one sends. A fresh campaign finds nothing here and behaves exactly as before.
+        let mut identities: HashMap<u8, CommentLocatorIdentity> = posted
+            .iter()
+            .filter(|((key, _), _)| key == &target.target_key)
+            .map(|((_, ordinal), identity)| (*ordinal, identity.clone()))
+            .collect();
         let mut chain_broken_at: Option<u8> = None;
         for (id, prepared) in prepared_messages {
             // A retry runs the same plan but must not re-send anything already
@@ -1205,20 +1228,35 @@ async fn run_cohort(
                 //
                 // Not fatal on purpose. A refusal here is either "this backend cannot" or
                 // "the label did not flip", and neither is a reason to abandon a comment the
-                // operator queued. The campaign's own record shows what happened.
-                if request.like_target {
+                // operator queued.
+                //
+                // **Written into the evidence, not only into the log.** The sentence above
+                // used to end "the campaign's own record shows what happened", and it did
+                // not: the outcome went to `log::warn!` and nowhere else, so an operator
+                // watching the Monitor tab saw a message succeed and had no way to learn the
+                // like had been refused. A failure nobody is shown is the same shape as the
+                // ones this project has spent its time removing.
+                let like_note = if request.like_target {
                     match driver.like_target(session.as_ref()).await {
-                        Ok(reason) => log::info!(
-                            "interaction {}: {} — {reason}",
-                            target.target_key,
-                            prepared.actor_udid
-                        ),
-                        Err(error) => log::warn!(
-                            "interaction {}: không thả tim được ({error:#})",
-                            target.target_key
-                        ),
+                        Ok(reason) => {
+                            log::info!(
+                                "interaction {}: {} — {reason}",
+                                target.target_key,
+                                prepared.actor_udid
+                            );
+                            Some(format!("đã tim: {reason}"))
+                        }
+                        Err(error) => {
+                            log::warn!(
+                                "interaction {}: không thả tim được ({error:#})",
+                                target.target_key
+                            );
+                            Some(format!("không tim được: {error:#}"))
+                        }
                     }
-                }
+                } else {
+                    None
+                };
 
                 // `effect_intent` decides `Uncertain` versus `Failed` on the error path,
                 // and `Uncertain` is permanently unretryable. So it is **not** set before
@@ -1258,6 +1296,7 @@ async fn run_cohort(
                         "postedIdentity": sent.identity,
                         "reader": driver.kind(),
                         "arrival": proof.as_str(),
+                        "like": like_note,
                     }))
                 } else {
                     db.update_interaction_assignment_state(
@@ -1284,6 +1323,7 @@ async fn run_cohort(
                         "postedIdentity": sent.identity,
                         "reader": driver.kind(),
                         "arrival": proof.as_str(),
+                        "like": like_note,
                     }))
                 }
             }
@@ -2151,6 +2191,8 @@ mod tests {
                 state,
                 prepared_text: None,
                 error_code: None,
+                evidence_json: None,
+                like: None,
             }
         }
 
@@ -2291,6 +2333,8 @@ mod tests {
             state,
             prepared_text: Some("nội dung".into()),
             error_code: None,
+            evidence_json: None,
+            like: None,
         }
     }
 

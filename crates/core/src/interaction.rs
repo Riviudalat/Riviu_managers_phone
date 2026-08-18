@@ -830,6 +830,53 @@ pub struct InteractionAssignmentRecord {
     pub state: ThreadMessageState,
     pub prepared_text: Option<String>,
     pub error_code: Option<String>,
+    /// The evidence blob this message was stored with, or `None` if it never sent.
+    ///
+    /// Read back for one reason: it is where a succeeded root's
+    /// [`CommentLocatorIdentity`] lives, under `postedIdentity`. Without it a retry has no
+    /// way to learn what the parent comment was — the identity is only ever produced by
+    /// *sending*, and a root that already succeeded is deliberately not sent again. The
+    /// retry then skipped every reply under it with `parent_identity_not_confirmed`, which
+    /// is precisely the case Retry exists for.
+    ///
+    /// `#[serde(default)]` so a payload from before this reads as absent rather than
+    /// failing to parse.
+    ///
+    /// **Not sent to the desktop.** It carries frame hashes and locator internals the UI has
+    /// no use for; what the UI needs is [`Self::like_note`], which is a field of its own.
+    #[serde(skip)]
+    pub evidence_json: Option<String>,
+    /// What happened to the like, for the operator to read. Derived from the evidence when
+    /// the record is loaded — see [`Self::like_note`].
+    #[serde(default)]
+    pub like: Option<String>,
+}
+
+impl InteractionAssignmentRecord {
+    /// The comment this message posted, if it posted one and said so.
+    ///
+    /// Lives here rather than in the runner because both the runner and any future reader
+    /// of a stored campaign want the same answer, and two parsers of the same blob are two
+    /// chances to disagree about what `postedIdentity` means.
+    /// What happened to the like on this message, if one was asked for.
+    ///
+    /// A like that fails must not cost the comment, so it is not an error code — but it was
+    /// previously not *anything*: the outcome went to the log and the operator watching the
+    /// Monitor tab saw a message succeed with no hint that the like had been refused.
+    pub fn like_note(&self) -> Option<String> {
+        serde_json::from_str::<serde_json::Value>(self.evidence_json.as_deref()?)
+            .ok()?
+            .get("like")?
+            .as_str()
+            .map(str::to_string)
+    }
+
+    pub fn posted_identity(&self) -> Option<CommentLocatorIdentity> {
+        serde_json::from_str::<serde_json::Value>(self.evidence_json.as_deref()?)
+            .ok()?
+            .get("postedIdentity")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+    }
 }
 
 /// A saved frame from a thread campaign, and where it came from.
@@ -1583,6 +1630,88 @@ mod tests {
         assert_eq!(
             req.validate(),
             Err(ThreadValidationError::InvalidCohortSize)
+        );
+    }
+
+    /// The evidence blob a succeeded message is stored with, in the shape the runner writes.
+    fn evidence_with_identity() -> String {
+        serde_json::json!({
+            "send": { "verdict": "sent" },
+            "postedIdentity": {
+                "authorLabel": "hanh.trang.dalat",
+                "text": "quán này nhìn ngon quá",
+                "locatorVersion": "hierarchy-1",
+                "frameSha256": "b".repeat(64),
+            },
+            "reader": "hierarchy",
+            "arrival": "identified",
+        })
+        .to_string()
+    }
+
+    fn stored(evidence: Option<&str>) -> InteractionAssignmentRecord {
+        InteractionAssignmentRecord {
+            id: "assignment-1".into(),
+            target_key: "content:123".into(),
+            ordinal: 0,
+            actor_udid: "ce06".into(),
+            parent_assignment_id: None,
+            state: ThreadMessageState::Succeeded,
+            prepared_text: Some("quán này nhìn ngon quá".into()),
+            error_code: None,
+            evidence_json: evidence.map(str::to_string),
+            like: None,
+        }
+    }
+
+    #[test]
+    fn a_succeeded_root_can_say_what_it_posted_after_a_restart() {
+        // The identity is only ever produced by *sending*, and a message that already
+        // succeeded is deliberately never sent again. So on a retry the runner's in-memory
+        // map starts empty, and every reply under a succeeded root was skipped with
+        // `parent_identity_not_confirmed` — the one case Retry exists for, and it could not
+        // work. The identity was on disk the whole time; nothing read it back.
+        let identity = stored(Some(&evidence_with_identity()))
+            .posted_identity()
+            .expect("a succeeded root knows its own comment");
+
+        assert_eq!(identity.author_label, "hanh.trang.dalat");
+        assert_eq!(identity.text, "quán này nhìn ngon quá");
+        assert_eq!(identity.locator_version, "hierarchy-1");
+    }
+
+    #[test]
+    fn a_message_that_never_posted_offers_no_identity() {
+        // Both shapes of "nothing to reply to", and neither may be guessed at: a failure
+        // with evidence of the failure, and a message that never got that far. Returning
+        // something here would make a reply hunt for a comment that is not on the screen.
+        assert_eq!(stored(None).posted_identity(), None);
+        let failed = serde_json::json!({ "send": { "verdict": "notArmed" } }).to_string();
+        assert_eq!(stored(Some(&failed)).posted_identity(), None);
+        assert_eq!(stored(Some("không phải json")).posted_identity(), None);
+    }
+
+    #[test]
+    fn a_refused_like_is_something_the_operator_can_read() {
+        // It used to go to `log::warn!` and nowhere else, so a message showed as succeeded
+        // and the operator had no way to learn the like had been refused. A like that fails
+        // must not cost the comment — but "must not fail the message" is not the same as
+        // "must not be mentioned".
+        let refused = serde_json::json!({
+            "send": { "verdict": "sent" },
+            "like": "không tim được: capability likeTarget is not supported by this driver",
+        })
+        .to_string();
+        assert_eq!(
+            stored(Some(&refused)).like_note().as_deref(),
+            Some("không tim được: capability likeTarget is not supported by this driver")
+        );
+
+        // And a campaign that never asked for a like says nothing rather than "no".
+        assert_eq!(
+            stored(Some(&evidence_with_identity())).like_note(),
+            None,
+            "a run with likeTarget off must not grow a note about likes"
         );
     }
 }

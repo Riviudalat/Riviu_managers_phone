@@ -1236,8 +1236,11 @@ impl Database {
             return Ok(None);
         };
         let mut statement = conn.prepare(
+            // `evidence_json` is here for the retry path: a succeeded root's posted comment
+            // identity lives in it, and without reading it back a retry cannot tell a reply
+            // what it is replying to.
             "SELECT a.id,t.target_key,a.message_ordinal,a.actor_udid,a.parent_assignment_id,
-                    a.state,a.prepared_json,a.error_code
+                    a.state,a.prepared_json,a.error_code,a.evidence_json
              FROM interaction_assignments a
              JOIN interaction_targets t ON t.id=a.target_id
              WHERE a.campaign_id=?1 ORDER BY t.line_no,a.message_ordinal",
@@ -1263,11 +1266,23 @@ impl Database {
                 state: interaction_message_state(&state),
                 prepared_text,
                 error_code: row.get(7)?,
+                evidence_json: row.get(8)?,
+                // Filled from the blob just below, so every reader of a stored campaign gets
+                // the same answer without parsing it again.
+                like: None,
             })
         })?;
+        let assignments = rows
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|mut assignment| {
+                assignment.like = assignment.like_note();
+                assignment
+            })
+            .collect();
         Ok(Some(crate::interaction::InteractionCampaignDetail {
             summary,
-            assignments: rows.collect::<Result<Vec<_>, _>>()?,
+            assignments,
         }))
     }
 

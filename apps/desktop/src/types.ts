@@ -674,6 +674,14 @@ export interface InteractionAssignmentRecord {
   state: ThreadMessageState;
   preparedText: string | null;
   errorCode: string | null;
+  /**
+   * What happened to the like on this message, when the campaign asked for one.
+   *
+   * Separate from `errorCode` on purpose: a like that fails must not cost the comment, so
+   * a message that posted is `succeeded` and this is a note beside it — not a failure. It
+   * used to go only to the log, which meant a refused like was invisible.
+   */
+  like?: string | null;
 }
 
 export interface InteractionCampaignDetail {
