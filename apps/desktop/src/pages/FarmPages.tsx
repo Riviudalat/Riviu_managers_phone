@@ -399,6 +399,17 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
 
   const selectedBundles =
     manifest?.bundles.filter((bundle) => bundleIds.includes(bundle.id)) ?? [];
+  // **The order that is shown is the order that is sent.**
+  //
+  // `bundleIds` is checkbox history: the handler appends on tick, so unticking bo2 and
+  // reconsidering it leaves [bo1, bo3, bo2] while `selectedBundles` — which the preview
+  // below iterates — is still scanned-folder order. Sending `bundleIds` therefore paired
+  // each phone with a different bundle than the operator had just read, and the pairing is
+  // positional the whole way down (`validate_publish_mapping` zips `bundle_ids[i]` with
+  // `udids[i]`), so nothing downstream could notice. Every phone is a different live
+  // TikTok account: the cost is one account posting another's photographs under another's
+  // caption, with no error, no discrepancy in the evidence, and no delete path to undo it.
+  const orderedBundleIds = selectedBundles.map((bundle) => bundle.id);
   // Refuse before dispatch; do **not** silently drop the Android targets. The
   // bundle -> device mapping is positional (`targets[index]` below), so removing a
   // target re-indexes the rest and would post the wrong caption to the wrong
@@ -552,7 +563,7 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
           try {
             const campaign = await publishCreateCampaign(
               sourceRoot.trim(),
-              bundleIds,
+              orderedBundleIds,
               targets,
               runAt || null,
             );

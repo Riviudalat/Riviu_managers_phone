@@ -948,6 +948,31 @@ async fn await_feed(
             }
             return true;
         }
+
+        // **The window is checked here so every branch below sits inside it.**
+        //
+        // It used to sit at the bottom, past the recovery branches, which was safe only
+        // while each of those could fire once: `nudged` guards the Home tap, `backed`
+        // guards the Back press. The dialog decline deliberately has no such guard —
+        // TikTok stacks prompts and each one hides the next — so a decline label that
+        // stays on screen (a tap that misses, a screen that genuinely carries the word)
+        // put this loop in a tap-sleep-continue cycle that never reached the check at
+        // all. A session promising to give up after thirty seconds instead ran until
+        // something else stopped it.
+        //
+        // Above the branches but below `on_feed`, so a feed arriving on the last poll
+        // still counts. That costs one cheap read and is the answer the operator wanted.
+        if Instant::now() >= deadline {
+            report(
+                status,
+                format!(
+                    "failed — chờ {}s mà chưa thấy tab feed. TikTok có thể còn ở màn khởi \
+                     động, hoặc đang ở trang chọn chủ đề / đăng nhập — dừng thay vì vuốt mù",
+                    FEED_READY_WINDOW.as_secs()
+                ),
+            );
+            return false;
+        }
         // **A modal owns the whole tree, so nothing else on this screen is findable.**
         // Measured 18/08/2026: a phone held behind "Save login for next time?" dumped a
         // single `content-desc` of `Dialog`, which is why neither the feed tab nor the Home
@@ -1023,17 +1048,6 @@ async fn await_feed(
             continue;
         }
 
-        if Instant::now() >= deadline {
-            report(
-                status,
-                format!(
-                    "failed — chờ {}s mà chưa thấy tab feed. TikTok có thể còn ở màn khởi \
-                     động, hoặc đang ở trang chọn chủ đề / đăng nhập — dừng thay vì vuốt mù",
-                    FEED_READY_WINDOW.as_secs()
-                ),
-            );
-            return false;
-        }
         if !said {
             said = true;
             report(status, "TikTok đang khởi động — chờ feed lên".into());
@@ -1888,6 +1902,120 @@ mod tests {
             phone.taps.load(Ordering::Relaxed),
             0,
             "nothing on that screen was safe to tap, so nothing was tapped"
+        );
+    }
+
+    /// A dialog whose decline is always on screen and never does anything.
+    ///
+    /// Not a contrived shape: the decline is matched by label, and a tap can miss, a
+    /// prompt can re-arm, and a screen can simply carry the word "Not now" somewhere the
+    /// loop can find it. What made that fatal rather than merely useless is that the
+    /// decline branch is the one recovery with no once-guard — deliberately, because
+    /// TikTok stacks prompts and each hides the next.
+    #[derive(Default)]
+    struct StuckDialogPhone {
+        taps: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for StuckDialogPhone {
+        async fn tap(&self, _point: TapPoint) -> anyhow::Result<()> {
+            self.taps.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn swipe(&self, _gesture: crate::types::SwipeGesture) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn type_text(&self, _text: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn home(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn find_and_tap(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn assert_visible(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+
+        async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            // The decline is always there. The feed never is.
+            Ok(
+                matches!(query, ElementQuery::Text { .. }).then_some(ElementBox {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 100.0,
+                    height: 40.0,
+                    description: None,
+                    enabled: true,
+                }),
+            )
+        }
+    }
+
+    /// Costs the full `FEED_READY_WINDOW` on purpose: the property is that the window is
+    /// respected, so there is nothing to assert until it has passed. The outer timeout is
+    /// what makes the failure legible — without the deadline in front of the branches this
+    /// loop does not run long, it runs forever, and a hanging test says less than a failing
+    /// one.
+    #[tokio::test]
+    async fn a_decline_that_never_works_still_ends_inside_the_window() {
+        let phone = StuckDialogPhone::default();
+        let screen = (1_080.0, 2_220.0);
+        let run = HierarchyRun {
+            session: &phone,
+            labels: controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("measured set"),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        };
+        let stop = AtomicBool::new(false);
+        let mut status = NurtureSessionStatus {
+            udid: "stuck-dialog".into(),
+            running: true,
+            videos_done: 0,
+            swipe_attempts: 0,
+            like_attempts: 0,
+            comment_attempts: 0,
+            follow_attempts: 0,
+            likes: 0,
+            comments: 0,
+            follows: 0,
+            last_message: String::new(),
+            session_usd: 0.0,
+        };
+        let report = |status: &mut NurtureSessionStatus, message: String| {
+            status.last_message = message;
+        };
+
+        let outcome = tokio::time::timeout(
+            FEED_READY_WINDOW + Duration::from_secs(15),
+            await_feed(&run, &stop, &mut status, &report),
+        )
+        .await;
+
+        assert_eq!(
+            outcome.ok(),
+            Some(false),
+            "await_feed never returned: the decline branch is outrunning its own deadline"
+        );
+        assert!(
+            status.last_message.contains("chưa thấy tab feed"),
+            "the operator is told the window ran out: {:?}",
+            status.last_message
+        );
+        assert!(
+            phone.taps.load(Ordering::Relaxed) > 0,
+            "the decline was never attempted, so this proves nothing"
         );
     }
 }

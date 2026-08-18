@@ -1817,6 +1817,25 @@ fn merge_scanned_device(
     mut device: riviu_core::DeviceInfo,
     previous: &riviu_core::DeviceInfo,
 ) -> riviu_core::DeviceInfo {
+    // **Nothing is carried onto a device the scan could not reach.**
+    //
+    // Everything below this line exists to survive `list_devices` rebuilding each row from
+    // scratch. None of it should survive the scan reporting the phone as unreachable: a
+    // `Disconnected` row is what `unusable_device` produces for an adb state of `offline`
+    // or `recovery`, and it is already complete and already honest — `wda_ready: false`, no
+    // stream, and a sentence saying which cable to check.
+    //
+    // Carrying the old flags over it turned that into the opposite claim. `wda_ready` came
+    // back as `true`, the grid derives readiness from `wdaReady || status == "ready"`, and a
+    // phone in the middle of a forty-second reboot was painted green and counted in "N sẵn
+    // sàng" while its own explanation sat in a field nothing displayed. The old tile
+    // state came back with it, so the frame from before the reboot stayed on screen with no
+    // overlay over it. This became reachable the moment offline devices stopped being
+    // dropped from the roster — the fix that gave them a row is what made the lie visible.
+    if matches!(device.status, riviu_core::DeviceStatus::Disconnected) {
+        return device;
+    }
+
     if device.stream_url.is_none() {
         device.stream_url = previous.stream_url.clone();
     }
@@ -2321,6 +2340,60 @@ mod tests {
             tile_stream_state: riviu_core::TileStreamState::default(),
             last_error: None,
         }
+    }
+
+    #[test]
+    fn a_phone_that_stopped_answering_is_not_still_called_ready() {
+        // The reboot case, which is the common one: a phone that was Ready is restarted
+        // from the tile menu and spends about forty seconds in adb `offline`. The scan
+        // builds an honest row for it. The merge used to hand back the readiness flag from
+        // before the reboot, and the grid shows a green "Running" chip for anything with
+        // `wda_ready` — over a phone that cannot answer a single call.
+        let mut previous = scanned("fixture");
+        previous.wda_ready = true;
+        previous.status = riviu_core::DeviceStatus::Ready;
+        previous.stream_url = Some("http://127.0.0.1:9100/stream".to_string());
+        previous.tile_stream_state = riviu_core::TileStreamState::Live;
+
+        let mut offline = scanned("fixture");
+        offline.status = riviu_core::DeviceStatus::Disconnected;
+        offline.last_error = Some("adb sees this device but it is not answering".to_string());
+
+        let merged = merge_scanned_device(offline, &previous);
+
+        assert!(!merged.wda_ready, "an unreachable phone is not ready");
+        assert_eq!(merged.status, riviu_core::DeviceStatus::Disconnected);
+        assert_eq!(
+            merged.stream_url, None,
+            "a stream URL for a phone that is gone is an address nothing answers"
+        );
+        assert_ne!(
+            merged.tile_stream_state,
+            riviu_core::TileStreamState::Live,
+            "the tile must not keep claiming live video off a phone that stopped answering"
+        );
+        assert!(
+            merged.last_error.is_some(),
+            "the reason the scan wrote is the one thing that must survive"
+        );
+    }
+
+    #[test]
+    fn a_phone_that_is_merely_between_probes_keeps_what_it_earned() {
+        // The other direction, so the guard above cannot be widened by accident: an
+        // ordinary scan carries the flags that no scan can see, which is the whole reason
+        // this function exists.
+        let mut previous = scanned("fixture");
+        previous.wda_ready = true;
+        previous.stream_url = Some("http://127.0.0.1:9100/stream".to_string());
+
+        let merged = merge_scanned_device(scanned("fixture"), &previous);
+
+        assert!(merged.wda_ready);
+        assert_eq!(
+            merged.stream_url.as_deref(),
+            Some("http://127.0.0.1:9100/stream")
+        );
     }
 
     #[test]
