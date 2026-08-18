@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&family=Noto+Sans+Mono:wght@400;500&display=swap");
+@import "./assets/fonts/fonts.css";
 
 /* Swarmote shell tokens · Riviu orange primary (was #3C79F7) */
 :root {
@@ -35,6 +35,65 @@
   --tile: #ffffff;
   --shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
   --radius: 8px;
+  /* ---- Scales -------------------------------------------------------------
+     Added 18/08/2026. Everything above this point is the palette the app already
+     had and is deliberately unchanged; what was missing was every *other* axis.
+     The CSS underneath carried 457 hardcoded pixel values across 73 distinct
+     sizes, and ten font sizes between 0.68rem and 0.9rem that no one chose —
+     they drifted. These are the steps those collapse onto. ------------------ */
+
+  /* 4px base. `--space-0h` is the half-step, for hairline gaps and optical nudges
+     where a full 4px reads as a seam. */
+  --space-0h: 2px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* Root is 14px, so these are the rem values that land on whole pixels there —
+     which matters because this UI is dense and half-pixel text is what made the
+     old sizes look like ten different fonts. */
+  --text-xs: 0.6875rem;
+  --text-sm: 0.75rem;
+  --text-md: 0.8125rem;
+  --text-base: 0.875rem;
+  --text-lg: 1rem;
+  --text-xl: 1.25rem;
+  --text-2xl: 1.5rem;
+
+  --leading-tight: 1.25;
+  --leading-normal: 1.45;
+  --leading-loose: 1.7;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* `--radius` keeps its old value: it is referenced in 3332 lines of App.css and
+     changing it silently restyles the whole app. The scale grows around it. */
+  --radius-sm: 4px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+
+  /* Likewise `--shadow`. One elevation was never enough to tell a resting card
+     from a menu floating over it. */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.05);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.12);
+
+  /* Motion. Named rather than inlined so a future "reduce animation" switch has
+     one place to turn, and because 120ms and 200ms mean different things: the
+     first is a control answering a click, the second is a surface arriving. */
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+
   --aside-w: 240px;
   --aside-w-collapsed: 64px;
   --font-display: "Noto Sans", "PingFang SC", "Helvetica Neue", sans-serif;

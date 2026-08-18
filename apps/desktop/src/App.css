@@ -3020,7 +3020,11 @@ button.danger:hover:not(:disabled) {
   margin: 8px 0 0;
   border: 1px solid var(--line);
   border-radius: 10px;
-  background: var(--surface-2);
+  /* Was `var(--surface-2)`, a token that has never been declared anywhere in this
+     app — so this surface had no background at all and a screenshot with
+     transparency sat straight on the panel. `--bg-muted` is the token that name
+     was reaching for. Found by the token test, not by looking. */
+  background: var(--bg-muted);
   cursor: zoom-out;
   overflow: hidden;
 }
