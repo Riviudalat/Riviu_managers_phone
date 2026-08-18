@@ -2001,6 +2001,8 @@ mod interaction_tests {
             like_target: false,
 
             mode: ThreadMode::Threaded,
+            shape: crate::interaction::ThreadShape::Chain,
+            cohort_size: None,
         }
     }
 

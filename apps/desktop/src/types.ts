@@ -597,6 +597,9 @@ export interface TikTokLinkLine {
 /** Reply chain, or independent top-level comments from each account. */
 export type ThreadMode = "threaded" | "standalone";
 
+/** Chain: message N answers N-1. Star: every message answers message 0. */
+export type ThreadShape = "chain" | "star";
+
 export interface ThreadCampaignRequest {
   requestId: string;
   targets: ResolvedTikTokTarget[];
@@ -605,6 +608,22 @@ export interface ThreadCampaignRequest {
   instruction: string;
   maxWords: number;
   mode: ThreadMode;
+  /**
+   * Chain or star, and only read in `threaded` mode.
+   *
+   * Optional so a caller that never sets it keeps the chain, matching the Rust
+   * `#[serde(default)]`. Star is the shape that lets a run go parallel: every reply
+   * answers message 0, so they no longer have to wait for each other.
+   */
+  shape?: ThreadShape;
+  /**
+   * Split the actors into teams of this size, each team taking its own links.
+   *
+   * Absent means one team holding every actor — the whole selection working the same
+   * link, one phone at a time. The remainder is spread rather than left idle, so twenty
+   * phones at three become 4,4,3,3,3,3.
+   */
+  cohortSize?: number;
   /**
    * Comments written by the operator, used instead of the AI when non-empty.
    *
