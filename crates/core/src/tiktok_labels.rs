@@ -909,25 +909,26 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // carousel is never paged sideways, and the cost of being wrong is a sideways
         // swipe on a video, which opens the author's profile and walks the session off
         // the feed.
-        // **Measured, and deliberately left off.** The label is right: `Photo` in `text`,
-        // present on all three reads of a photo card and absent from ten video cards read
-        // twice each, on ce051715cb22c30403, 18/08/2026. Setting it is not the problem.
+        // **Measured, switched off for a day, and back on now that the traversal works.**
+        // The label was never in doubt: `Photo` in `text`, present on all three reads of a
+        // photo card and absent from ten video cards read twice each, on ce051715cb22c30403,
+        // 18/08/2026.
         //
-        // What it switches on is. Enabling it turned the carousel traversal on for this
-        // build, and measured the same day across nine phones: **both sessions that met a
-        // photo post ended at zero videos, and every session that met none watched
-        // normally.** The trail is the same each time — `gặp bài ảnh — vuốt ngang`, then
-        // `đã xem 2/10 ảnh`, then an unproven vertical swipe, then a card with no action
-        // rail at all. The sideways paging gets two images in and walks the session off the
-        // post, which is exactly what `PhotoBadge`'s own documentation warns a wrong answer
-        // here costs.
+        // What it switches on was. Enabling it the first time turned the carousel traversal
+        // on for this build, and across nine phones **both** sessions that met a photo post
+        // ended at zero videos while every session that met none watched normally. Same
+        // trail each time: `gặp bài ảnh — vuốt ngang`, `đã xem 2/10 ảnh`, an unproven
+        // vertical swipe, then a card with no action rail.
         //
-        // So: `None`, which means photo posts are watched and swiped past like videos. That
-        // is the safe direction the field was designed around, and it is what the fleet was
-        // doing when it measured 20 of 20. Re-enable only together with a fix for the
-        // traversal on 38.3.2, and prove it with a session that meets a photo post and
-        // still finishes.
-        photo_badge: None,
+        // The cause was the gesture, not this label and not the counter. TikTok's image
+        // pager acts on a thrown finger and ignores a dragged one, and `plan_swipe` sends a
+        // drag: bowed into the vertical axis, decelerating to a crawl, then held still
+        // before the lift. The page did not turn, the counter read the same number twice,
+        // and the loop concluded the post had ended. `swipe_slide` now sends
+        // `TouchPointPlanner::plan_flick`, measured at 19 turns out of 19 against the old
+        // gesture's 13 out of 40 — the numbers and the one-component-at-a-time method are
+        // written down there.
+        photo_badge: Some(LabelMatch::Text("Photo")),
         like: Some(LabelMatch::Exact("Like")),
         // Not seen: reading it needs a post to be liked and then unliked
         // (`probe --measure-liked`). The engine confirms a like without it — the
@@ -1166,28 +1167,36 @@ mod tests {
     }
 
     #[test]
-    fn the_carousel_stays_off_on_the_build_where_it_eats_the_session() {
-        // The label was measured and is written down in the comment beside the field. It is
-        // set to `None` anyway, and this pins that: enabling it switched the sideways paging
-        // on for 38.3.2, and across nine phones on 18/08/2026 **both** sessions that met a
-        // photo post ended at zero videos while every session that met none watched
-        // normally. Two images in, the paging walked the session off the post.
+    fn the_carousel_is_on_where_the_traversal_was_proved_and_nowhere_else() {
+        // This label decides whether a build is swiped sideways at all, and the two builds
+        // are in different positions, so it is asserted in both directions rather than as
+        // one rule.
         //
-        // `None` means a photo post is watched and swiped past like a video — the safe
-        // direction, and what the fleet was doing when it measured 20 of 20.
-        for (package, language) in [
-            ("com.ss.android.ugc.trill", "en"),
-            ("com.zhiliaoapp.musically", "en"),
-        ] {
-            assert_eq!(
-                controls_for(package, language, "")
-                    .expect("set")
-                    .label(TikTokControl::PhotoBadge),
-                None,
-                "{package} / {language}: re-enable this only with a fix for the traversal, \
-                 and prove it with a session that meets a photo post and still finishes"
-            );
-        }
+        // `trill/en` was measured on ce051715cb22c30403 on 18/08/2026, switched **off** the
+        // same day because turning it on ended both sessions that met a photo post at zero
+        // videos, and switched back on once the cause was found: the sideways gesture was a
+        // drag, and TikTok's image pager only acts on a fling. See the comment beside the
+        // field, and `TouchPointPlanner::plan_flick` for the measurement that separates the
+        // two gestures.
+        assert_eq!(
+            controls_for("com.ss.android.ugc.trill", "en", "")
+                .expect("set")
+                .label(TikTokControl::PhotoBadge),
+            Some(LabelMatch::Text("Photo")),
+            "the badge lives in `text` and has no content-desc; reading it as a description \
+             finds nothing"
+        );
+        // `musically/en` is a different thing entirely: nobody has ever looked at a photo
+        // post on it. Absent means a photo post is watched and swiped past like a video,
+        // which is the safe direction — the unsafe one is a sideways swipe on a *video*,
+        // which is TikTok's open-the-author's-profile gesture.
+        assert_eq!(
+            controls_for("com.zhiliaoapp.musically", "en", "")
+                .expect("set")
+                .label(TikTokControl::PhotoBadge),
+            None,
+            "measure it on the build before switching it on for the build"
+        );
     }
 
     #[test]

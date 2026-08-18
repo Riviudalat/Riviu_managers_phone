@@ -4074,6 +4074,70 @@ sẽ áp phần trăm **hai lần**, và tôi đã tự làm đúng lỗi đó t
 **Sàn trên feed là 2 ảnh** khi tính năng đang bật, vì không đọc được tổng trước cú vuốt
 đầu. Phần trăm 1% không giúp một phiên khỏi lật một lần.
 
+### 9.43 Bài ảnh, chương bốn: cử chỉ quá giống người thì pager không nhận (18/08/2026)
+
+§9.20 nghiệm thu băng chuyền chạy tốt trên SM-N950F — `8/8 ảnh`, `11/11 ảnh`. Cùng đoạn mã
+đó, trên dàn 20 máy S8 chạy `trill/en 38.3.2`, **giết phiên**: hai phiên gặp bài ảnh đều về
+0 video, mọi phiên không gặp thì xem bình thường. Vết giống hệt nhau mỗi lần:
+
+```
+gặp bài ảnh — vuốt ngang  →  bài ảnh 10 ảnh — xem 10 (100%)  →  bài ảnh: đã xem 2/10 ảnh
+→  vuốt chưa chứng minh được đổi thẻ  →  thẻ không có thanh hành động
+```
+
+`photo_badge` bị tắt để cứu dàn, kèm điều kiện: chỉ bật lại cùng một bản sửa, và phải có
+phiên gặp bài ảnh mà vẫn chạy hết.
+
+**Ba giả thuyết của tôi, cả ba sai, và mỗi cái đều bị chính phép đo bác bỏ.**
+
+1. *"Vuốt ngang đưa phiên rời khỏi bài."* Đo bằng `probe --measure-carousel <link>`:
+   `Comments đổi=false` ở **mọi** lượt vuốt. Thanh hành động không hề mất. Sai.
+2. *"Bộ đọc `parse_carousel_counter` bắt nhầm cặp số."* Bộ đọc đúng — nó đã biết dạng ba
+   node rời từ §9.20, và trên trang bài mở bằng link nó đếm `2/5 → 3 → 4 → 5` không sai
+   nhịp nào. Sai.
+3. *"Chỉ tại `SWIPE_SETTLE_MS` — khoảng giữ 12–45 ms trước khi nhấc tay."* Gần đúng, và vẫn
+   sai: bỏ riêng nó chỉ nâng tỉ lệ lật trang lên 58%.
+
+**Nguyên nhân thật: TikTok lật ảnh khi nhận cú *ném*, và làm ngơ cú *kéo*.** `plan_swipe`
+gửi đúng một cú kéo, vì cả ba tính chất "giống người" của nó đều nói với `VelocityTracker`
+rằng ngón tay đã dừng:
+
+- **độ cong** vuông góc với hướng đi — mà hướng đi ở đây là ngang, nên độ cong là **dọc**,
+  đâm vào đúng trục mà pager dọc của feed đang rình;
+- **giảm tốc**: `ease` là smoothstep, độ dốc ở cuối bằng 0, nên chặng cuối của quãng 600 px
+  chỉ bò ~10 px;
+- **khoảng giữ** 12–45 ms đứng yên ngay trước khi nhấc.
+
+Đo trên feed, mỗi lần đổi **đúng một** thành phần, trên **cùng một thẻ**, năm máy,
+`probe --measure-feed-carousel <n>`:
+
+| cử chỉ | lượt lật được |
+|---|---|
+| `plan_swipe` nguyên bản | 13/40 |
+| chỉ bỏ độ cong | 6/15 |
+| chỉ bỏ khoảng giữ | 7/12 |
+| bỏ cong + giữ, còn giảm tốc | 18/27 |
+| **bỏ cả ba** | **19/19** |
+| thẳng một đoạn (tham chiếu) | 31/32 |
+
+Bảng này là cả bài học: **bỏ một thành phần nào cũng "có vẻ ăn"** — 40%, 58%, 67% — và mỗi
+con số đó đủ để dụ người ta chốt sai. Chỉ khi bỏ cả ba mới hết chập chờn.
+
+`TouchPointPlanner` giờ dựng đường quanh `Curve`: `Drag` giữ nguyên mọi thứ cũ và vẫn là
+cử chỉ của mọi chỗ khác; `Flick` bỏ cong, bỏ giữ, đổi `ease` thành `ease_in` (còn đang tăng
+tốc lúc rời mặt kính). `swipe_slide` gọi `plan_flick`. Thứ **giữ lại** cũng quan trọng
+ngang thứ bỏ đi: đầu mút vẫn rung, đường vẫn cắt thành 12 chặng, nhịp chặng vẫn đổi — nên
+đây không phải quay về đường thẳng cố định mà planner sinh ra để thay thế.
+
+**Cái bẫy đáng nhớ, và nó ngược với trực giác:** một cử chỉ *giống người hơn* không phải
+lúc nào cũng *hoạt động tốt hơn*. Với điều khiển nào quyết định bằng vận tốc lúc nhấc tay —
+pager, fling, swipe-to-dismiss — cử chỉ nhân hoá có thể giống người tới mức app đọc ra
+đúng cái nó mô tả: một ngón tay đã dừng lại.
+
+**Vì sao §9.20 không thấy:** SM-N950F chạy bản khác, và ở đó cú kéo vẫn lật được trang. Một
+cử chỉ "chạy được" trên một máy không phải bằng chứng cho bản dựng khác — cùng khuôn với
+bài học nhãn ở §9.20.
+
 ### 9.21 Agent còn sống mà cây đã chết: `/status` không phải bằng chứng (12/08/2026)
 
 `ensure_agent` tin `AgentClient::is_alive()`, mà nó gọi `window_size()`. **Đo được:

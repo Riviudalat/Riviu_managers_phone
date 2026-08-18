@@ -33,7 +33,7 @@ mod recovery;
 // history rather than its own: two touch planners on one device would produce a tap
 // distribution neither of them intended. `crate::interaction_hierarchy` is the second
 // caller.
-pub(crate) mod touch;
+pub mod touch;
 
 use actions::{CommentResult, LikeResult, SwipeOutcome};
 pub use hierarchy::{run_hierarchy_session, CommentTextSource, HierarchySession, PreparedComment};

@@ -225,6 +225,15 @@ async fn main() -> anyhow::Result<()> {
                         for line in &trail {
                             say(&format!("      [{udid}] {line}"));
                         }
+                    } else {
+                        // The carousel is the thing under test, and a session that met a
+                        // photo post and *finished* says so nowhere else: the trail is only
+                        // dumped when a session ends at zero. That is exactly backwards for
+                        // proving a traversal no longer eats the session, so the photo lines
+                        // come out either way.
+                        for line in trail.iter().filter(|line| line.contains("bài ảnh")) {
+                            say(&format!("      [{udid}] {line}"));
+                        }
                     }
                 }
                 Err(error) => say(&format!(

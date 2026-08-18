@@ -531,11 +531,19 @@ impl<'a> HierarchyRun<'a> {
     ///
     /// Clear of the action rail on the right and well above the caption, so the gesture
     /// reaches the pager and not a control.
+    ///
+    /// **A flick, not a swipe, and that is the whole difference between this working and
+    /// not.** TikTok's image pager acts on a thrown finger and ignores a dragged one, so a
+    /// `plan_swipe` path — bowed into the vertical axis, decelerating to a crawl, then held
+    /// still for 12–45 ms before the lift — leaves the page where it was. The counter then
+    /// reads the same number after the turn as before it, the loop concludes "no further
+    /// image", and a photo post ends the session at two. Measured on the feed on 38.3.2 with
+    /// one component changed at a time; the numbers are in [`TouchPointPlanner::plan_flick`].
     async fn swipe_slide(&mut self, stop: &AtomicBool) -> anyhow::Result<()> {
         // Planned, not two fixed points: the same targets every time produced the same
-        // pixel-perfect straight line every time. `plan_swipe` jitters the ends, bows the
-        // path and varies the velocity — see `super::touch`.
-        let path = self.planner.plan_swipe(
+        // pixel-perfect straight line every time. A flick still jitters its ends and still
+        // varies its leg spacing — it gives up only what the pager objects to.
+        let path = self.planner.plan_flick(
             TapPoint {
                 x: self.screen.0 * 0.78,
                 y: self.screen.1 * 0.40,
@@ -2510,6 +2518,179 @@ mod tests {
             status.videos_done >= 1,
             "falling off the feed must not end the session: {} watched, {said:?}",
             status.videos_done
+        );
+    }
+
+    /// A photo post whose pager turns for a fling and ignores a drag.
+    ///
+    /// **Measured, not invented.** On TikTok 38.3.2, on the feed, a sideways `plan_swipe`
+    /// path advanced the page counter on 3 of 16 turns across three phones, while the same
+    /// path straightened and stripped of its trailing pause turned the page. Android reads
+    /// the release velocity out of the recent motion history, so the pause describes a
+    /// finger that had already stopped; and the bow is perpendicular to travel, which on a
+    /// horizontal gesture means vertical — into the axis the feed's own pager watches.
+    ///
+    /// A phone that answers a drag by doing nothing is the whole failure: the counter reads
+    /// the same number after the turn as before it, the loop concludes "no further image",
+    /// and a photo post ends the session at two.
+    #[derive(Default)]
+    struct PagerPhone {
+        /// Which image is showing. Zero means the counter has not appeared yet, which is
+        /// what the feed does — the digits only materialise once paging starts.
+        at: std::sync::atomic::AtomicU32,
+        /// Gestures this pager refused to act on.
+        drags: std::sync::atomic::AtomicUsize,
+    }
+
+    impl PagerPhone {
+        const TOTAL: u32 = 7;
+
+        fn node(text: &str) -> ElementBox {
+            ElementBox {
+                x: 940.0,
+                y: 195.0,
+                width: 30.0,
+                height: 39.0,
+                description: Some(text.to_string()),
+                enabled: true,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for PagerPhone {
+        async fn tap(&self, _point: TapPoint) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn swipe(&self, _gesture: crate::types::SwipeGesture) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn swipe_path(&self, path: crate::types::SwipePath) -> anyhow::Result<()> {
+            let end = path.end();
+            let (dx, dy) = (end.x - path.start.x, end.y - path.start.y);
+            let span = dx * dx + dy * dy;
+            let straight = span > f64::EPSILON
+                && path.steps.iter().all(|step| {
+                    let along = (((step.point.x - path.start.x) * dx
+                        + (step.point.y - path.start.y) * dy)
+                        / span)
+                        .clamp(0.0, 1.0);
+                    let (lx, ly) = (path.start.x + dx * along, path.start.y + dy * along);
+                    ((step.point.x - lx).powi(2) + (step.point.y - ly).powi(2)).sqrt() < 0.5
+                });
+            if path.settle_ms == 0 && straight {
+                // Measured: the counter arrives with the first turn already reading two.
+                let at = self.at.load(Ordering::Relaxed);
+                self.at
+                    .store((at.max(1) + 1).min(Self::TOTAL), Ordering::Relaxed);
+            } else {
+                self.drags.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(())
+        }
+
+        async fn type_text(&self, _text: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn home(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn find_and_tap(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn assert_visible(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+
+        /// Only the badge, and only on `text` — where it actually lives.
+        async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            match query {
+                ElementQuery::Text { value: "Ảnh", .. } => Ok(Some(Self::node("Ảnh"))),
+                _ => Ok(None),
+            }
+        }
+
+        /// The counter, as three adjacent nodes, exactly as a phone renders it.
+        async fn locate_all_described(
+            &self,
+            query: ElementQuery<'_>,
+        ) -> anyhow::Result<Vec<ElementBox>> {
+            let ElementQuery::ClassName(name) = query else {
+                return Ok(Vec::new());
+            };
+            if name != "android.widget.TextView" {
+                return Ok(Vec::new());
+            }
+            let at = self.at.load(Ordering::Relaxed);
+            if at == 0 {
+                return Ok(Vec::new());
+            }
+            Ok(vec![
+                Self::node(&at.to_string()),
+                Self::node(" / "),
+                Self::node(&Self::TOTAL.to_string()),
+            ])
+        }
+    }
+
+    #[tokio::test]
+    async fn a_photo_post_is_paged_with_a_flick_because_a_drag_turns_nothing() {
+        let phone = PagerPhone::default();
+        let screen = (1_080.0, 2_220.0);
+        let mut run = HierarchyRun {
+            session: &phone,
+            labels: vietnamese(),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        };
+        let stop = AtomicBool::new(false);
+        let mut status = NurtureSessionStatus {
+            udid: "pager-phone".into(),
+            running: true,
+            videos_done: 0,
+            swipe_attempts: 0,
+            like_attempts: 0,
+            comment_attempts: 0,
+            follow_attempts: 0,
+            likes: 0,
+            comments: 0,
+            follows: 0,
+            last_message: String::new(),
+            session_usd: 0.0,
+        };
+        let said = std::sync::Mutex::new(Vec::<String>::new());
+        let report = |status: &mut NurtureSessionStatus, message: String| {
+            status.last_message = message.clone();
+            said.lock().expect("messages").push(message);
+        };
+
+        let seen = run
+            .traverse_carousel(100, 20, &stop, &mut status, &report)
+            .await;
+
+        let said = said.lock().expect("messages").clone();
+        assert_eq!(
+            phone.drags.load(Ordering::Relaxed),
+            0,
+            "every sideways gesture the loop sends has to be one this pager acts on: {said:?}"
+        );
+        assert_eq!(
+            seen,
+            PagerPhone::TOTAL,
+            "a seven-image post asked for in full is seven images: {said:?}"
+        );
+        assert!(
+            said.iter().any(|line| line.contains("7/7")),
+            "and the operator is told the post was finished, not abandoned: {said:?}"
         );
     }
 }
