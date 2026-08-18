@@ -835,7 +835,18 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // `Original sound by Jacketkat` and `Original sound by BapMidnight`, read off two
         // different phones on 18/08/2026. Matched on the prefix and read for the whole
         // value — the creator's name is what makes two cards distinguishable.
-        sound_link: Some(LabelMatch::Contains("Original sound by")),
+
+        // **`Sound: <track> by <author>`** — 9 of 9 cards sampled on ce051715cb22c30403,
+        // 18/08/2026, including a photo post. Matched on the prefix because the rest is
+        // the track and its author, which is exactly the part that has to differ between
+        // two cards for a swipe to be proved.
+        //
+        // This replaces `Original sound by`, which was written down this morning off a
+        // single card and turned out to be the rare form: zero of the nine. It cost the
+        // sound component of the fingerprint on almost every card, which is survivable —
+        // comments and shares still differ — but it is exactly the case the sound was
+        // added for, a low-engagement feed where both of those read the same.
+        sound_link: Some(LabelMatch::Contains("Sound:")),
         // `Not now`, read as `text` with no `content-desc`, off an SM-G955U1 held behind
         // "Save login for next time?" on 18/08/2026.
         dialog_dismiss: Some(LabelMatch::Text("Not now")),
@@ -845,7 +856,16 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // carousel is never paged sideways, and the cost of being wrong is a sideways
         // swipe on a video, which opens the author's profile and walks the session off
         // the feed.
-        photo_badge: None,
+        // In `text`, not `content-desc` — hence `Text` rather than `Contains`.
+        //
+        // Measured on ce051715cb22c30403, 18/08/2026, with the care this one is worth: a
+        // false positive here makes the loop swipe **sideways** on a video, which is
+        // TikTok's open-the-author's-profile gesture and walks the session off the feed.
+        // So: present on all three reads of one photo card, and absent from ten
+        // consecutive video cards read twice each. Stable, which is the property the
+        // transient `N / M` counter does not have and the reason that counter is not the
+        // gate.
+        photo_badge: Some(LabelMatch::Text("Photo")),
         like: Some(LabelMatch::Exact("Like")),
         // Not seen: reading it needs a post to be liked and then unliked
         // (`probe --measure-liked`). The engine confirms a like without it — the
@@ -1073,6 +1093,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_photo_badge_is_read_from_the_attribute_it_lives_in() {
+        // `Photo` is in `text`, not `content-desc`. Reading the wrong attribute finds
+        // nothing at all, and finding nothing here is silent: every photo post is simply
+        // treated as a video, which is safe but is the whole feature not running.
+        let fleet = controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("set");
+        let badge = fleet
+            .label(TikTokControl::PhotoBadge)
+            .expect("sixteen of twenty phones run this build");
+        assert_eq!(badge, LabelMatch::Text("Photo"));
+        assert!(
+            matches!(badge.to_query(), crate::driver::ElementQuery::Text { .. }),
+            "a description query would search an attribute this label is not in"
+        );
+    }
+
+    #[test]
+    fn the_sound_strip_matches_the_form_the_feed_actually_uses() {
+        // Written down as `Original sound by` this morning off one card, and measured as
+        // the rare form the same day: nine of nine sampled cards say `Sound: <track> by
+        // <author>`. The cost of the wrong prefix is quiet — the fingerprint falls back
+        // to comments and shares, which is exactly what fails on the low-engagement feed
+        // this field was added for.
+        for (package, language) in [
+            ("com.ss.android.ugc.trill", "en"),
+            ("com.zhiliaoapp.musically", "en"),
+        ] {
+            assert_eq!(
+                controls_for(package, language, "")
+                    .expect("set")
+                    .label(TikTokControl::SoundLink),
+                Some(LabelMatch::Contains("Sound:")),
+                "{package} / {language}"
+            );
+        }
+    }
     #[test]
     fn every_build_on_the_farm_can_reach_the_send_button() {
         // Read off all twenty phones on 18/08/2026 with `dumpsys package … versionName`.
