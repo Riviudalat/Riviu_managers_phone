@@ -755,11 +755,20 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // proved. Not the same string as the SEA build's `Original sound by`, which is why
         // each set is measured rather than shared.
         sound_link: Some(LabelMatch::Contains("Sound:")),
-        // Left unmeasured deliberately. The dialog this build actually produced — "Get
-        // updates sent to your email?" — has no decline worth tapping: its one labelled
-        // button *accepts*, subscribing a real account to marketing email, and the decline
-        // is an unlabelled X. `await_feed` presses Back instead, which cleared it.
-        dialog_dismiss: None,
+        // `Not now`, read as `text` with no `content-desc`, off ce0717171c2a64d50d held
+        // behind "Turn on precise location" on 19/08/2026 — the same string and the same
+        // attribute the SEA build carries, now measured here rather than assumed from there.
+        //
+        // The earlier note said this build's dialog had "no decline worth tapping", and that
+        // was true of the dialog it happened to produce that day: "Get updates sent to your
+        // email?" labels only its *accept*. It was a statement about one dialog, and it read
+        // as a statement about the build. This one has a labelled decline, so the measured
+        // decline is available again and Back stays as the fallback for the dialogs that
+        // have none — which is exactly the split `await_feed` documents.
+        //
+        // Safe by construction: `Not now` declines. It cannot grant anything, which is the
+        // property that made the email dialog's labelled button unusable.
+        dialog_dismiss: Some(LabelMatch::Text("Not now")),
         // Never measured on this build; the S8+ fleet work never looked at a photo
         // post. Absent means no sideways swipe, which is the safe direction.
         photo_badge: None,
@@ -1603,6 +1612,28 @@ mod tests {
                     set.app_version
                 );
             }
+        }
+    }
+
+    #[test]
+    fn every_english_build_on_the_farm_can_decline_a_dialog_it_understands() {
+        // A dialog holding the phone is the single most common way a session ends at zero
+        // videos, and `await_feed`'s ladder has two rungs for it: tap a *measured decline*
+        // when there is one, press Back when there is not. Back is the weaker rung — it did
+        // not clear "Turn on precise location" on 19/08/2026, and the session failed with
+        // `chờ 30s mà chưa thấy tab feed` while a button reading `Not now` was on screen.
+        //
+        // So the invariant is per build, not per fleet: both English builds run here, and a
+        // decline measured on one of them is not a decline on the other.
+        for package in ["com.ss.android.ugc.trill", "com.zhiliaoapp.musically"] {
+            assert_eq!(
+                controls_for(package, "en", "")
+                    .expect("set")
+                    .label(TikTokControl::DialogDismiss),
+                Some(LabelMatch::Text("Not now")),
+                "{package}: measure the decline with `label_scout <serial> --no-launch` while \
+                 the dialog is up — it is in `text`, not `content-desc`"
+            );
         }
     }
 }
