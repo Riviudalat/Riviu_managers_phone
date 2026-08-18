@@ -805,7 +805,16 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // Not seen: reading it needs a post to be liked and then unliked
         // (`probe --measure-liked`). The engine confirms a like without it — the
         // not-liked label is an exact match, so its disappearance is the proof.
-        liked: None,
+        // Measured on ce051715081fe20f03, 18/08/2026, by liking one card and reading it
+        // back: `Like video. 22 likes` became `Video liked` and the count went to 23.
+        //
+        // Absent, this build could not confirm a like *or* notice one. `Like` is on the
+        // rail in **both** states — it is a separate node from the one that toggles — so
+        // the fallback check, "the not-liked label went away", could never fire here and
+        // every attempt reported `NotConfirmed`. Worse than the miscount: the
+        // `AlreadyLiked` guard runs *before* the tap, so with nothing to recognise, the
+        // loop tapped Like on a post it had already liked — which removes the like.
+        liked: Some(LabelMatch::Exact("Video liked")),
         comments: Some(LabelMatch::Contains("comments")),
         share: Some(LabelMatch::Contains("Share video")),
         bookmark: Some(LabelMatch::Contains("Favorites")),
@@ -927,13 +936,20 @@ mod tests {
         // differ and neither may be a prefix of the other — `Đã thích video`
         // contains no `Thích` as an exact match, which is what makes the
         // exact-match state check sound.
+        // Every set that can *tap* a like must be able to *recognise* one. This used to
+        // `continue` past a set that had only half the pair, which is how the SEA build in
+        // English kept a `like` and no `liked` — and with it, a loop that could neither
+        // confirm a like nor tell it had already left one, on sixteen of eighteen phones.
         for set in TIKTOK_LABEL_SETS {
-            let (Some(like), Some(liked)) = (
-                set.translated(TikTokControl::Like),
-                set.translated(TikTokControl::Liked),
-            ) else {
+            let Some(like) = set.translated(TikTokControl::Like) else {
                 continue;
             };
+            let liked = set.translated(TikTokControl::Liked).unwrap_or_else(|| {
+                panic!(
+                    "{} / {} taps a like it cannot recognise: measure the liked state with                      `cargo run -p riviu-android-driver --example label_scout -- <serial>                      --no-launch --tap Like`",
+                    set.package, set.language
+                )
+            });
             assert_ne!(like.value(), liked.value(), "{}", set.package);
             assert!(like.is_exact() && liked.is_exact(), "{}", set.package);
         }

@@ -48,6 +48,14 @@ struct Args {
     only: Vec<String>,
     minutes: u64,
     videos: u32,
+    /// Percent chance of liking each watched post.
+    ///
+    /// Configurable because the like path is the one that needs a *sample* to say anything:
+    /// at the default rate a two-video run produces one or two attempts across the whole
+    /// fleet, which cannot distinguish "confirmation works" from "we got lucky". Raising it
+    /// is the only way to measure the confirmation, and a like is an action this feature
+    /// exists to perform — unlike a comment, which is why that one stays at zero.
+    like_prob: u32,
 }
 
 fn parse_args() -> Args {
@@ -56,6 +64,7 @@ fn parse_args() -> Args {
         only: Vec::new(),
         minutes: 2,
         videos: 3,
+        like_prob: 30,
     };
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut index = 0;
@@ -65,6 +74,7 @@ fn parse_args() -> Args {
             "--devices" => args.devices = value as usize,
             "--minutes" => args.minutes = value,
             "--videos" => args.videos = value as u32,
+            "--like-prob" => args.like_prob = value.min(100) as u32,
             "--only" => args.only = raw[index + 1].split(',').map(str::to_string).collect(),
             _ => {}
         }
@@ -129,7 +139,7 @@ async fn main() -> anyhow::Result<()> {
     let settings = NurtureSettings {
         num_videos: args.videos,
         num_rounds: 1,
-        like_prob: 30,
+        like_prob: args.like_prob,
         // Not configurable, and deliberately: a comment is text on a real account.
         comment_prob: 0,
         follow_prob: 0,
