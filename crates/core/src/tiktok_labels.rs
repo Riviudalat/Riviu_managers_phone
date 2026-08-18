@@ -406,6 +406,18 @@ pub struct TikTokLabels {
     /// unique: every comment row has one, and picking the wrong one posts the reply
     /// under a stranger's comment. Match it, then choose by geometry
     /// (`crate::interaction_hierarchy`).
+    /// The drawer's Send button **when this build renders it as a string**.
+    ///
+    /// Normally version-keyed and absent here — see the module docs. But `keyed by
+    /// version` describes the *reason*, not a law: 46.3.3 and 46.4.3 leave the control as
+    /// an unresolved `@2131…` reference, which changes on every rebuild, while 38.3.2
+    /// renders `Post comment`. A string is language-keyed by nature, so writing it into
+    /// the version table would have told a Vietnamese 38.3.2 phone to look for English.
+    ///
+    /// [`TikTokControls::label`] takes the resource id when there is one and this
+    /// otherwise, so a build that has both keeps the id — which is the one that cannot be
+    /// wrong about the language.
+    comment_send: Option<LabelMatch>,
     comment_reply: Option<LabelMatch>,
     /// The composer opener in the bottom bar.
     composer_open: Option<LabelMatch>,
@@ -472,8 +484,9 @@ impl TikTokLabels {
             TikTokControl::PostDeleteMenu => self.post_delete_menu,
             TikTokControl::PostDelete => self.post_delete,
             TikTokControl::PostDeleteConfirm => self.post_delete_confirm,
-            // Version-keyed, not language-keyed. See the module docs.
-            TikTokControl::CommentSend => None,
+            // Only for a build that renders it as text; the `@2131…` builds carry it in
+            // the version table and are resolved before this is ever reached.
+            TikTokControl::CommentSend => self.comment_send,
         }
     }
 }
@@ -538,9 +551,14 @@ impl TikTokControls {
     /// device. `None` means refuse — do not substitute another language or version.
     pub fn label(&self, control: TikTokControl) -> Option<LabelMatch> {
         match control {
-            // Version-keyed controls come only from the resource table, so an
-            // unmeasured app version refuses *these* without refusing the rest.
-            TikTokControl::CommentSend => self.resources.and_then(|set| set.resource(control)),
+            // The resource id wins when this build has one: an id is language-proof, and a
+            // string is not. Falling through to the translation is what lets a build that
+            // *resolved* the reference — 38.3.2 renders `Post comment` — be described at all,
+            // rather than refusing every phone in the fleet because no `@2131…` was found.
+            TikTokControl::CommentSend => self
+                .resources
+                .and_then(|set| set.resource(control))
+                .or_else(|| self.translated.translated(control)),
             other => self.translated.translated(other),
         }
     }
@@ -683,6 +701,7 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         live_room: Some(LabelMatch::Contains("Tap to watch LIVE")),
         // Never measured on this build: the S8+ fleet work stopped before the
         // comment drawer was dumped.
+        comment_send: None,
         comment_reply: None,
         composer_open: None,
         // The S8+ fleet work never opened the composer on this build.
@@ -736,6 +755,7 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // `android.widget.Button` nodes with `text="Trả lời"`, `clickable=true` and an
         // **empty** `content-desc`, at x 315..419 — one per comment row, each sitting
         // below its own comment body and to the right of it.
+        comment_send: None,
         comment_reply: Some(LabelMatch::Text("Trả lời")),
         // Read off the bottom bar on 11/08/2026: an `android.widget.Button`,
         // clickable, at x 432..648 y 2135 on a 1080x2400 screen — the middle of five
@@ -823,6 +843,16 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // is exactly the kind of "very likely" this table exists to refuse.
         follow: None,
         live_room: None,
+        // `android.widget.Button` at [927,1310][1048,1384], `clickable=true`, which
+        // appeared once the field held text — measured on ce051715cb22c30403,
+        // 18/08/2026, with `probe --measure-comment`.
+        //
+        // Every phone on this farm runs 38.3.2, and the only measured versions were
+        // 46.3.3 and 46.4.3 from two other handsets. So commenting could not work on any
+        // of the twenty — whatever the operator set `comment_prob` to, and whatever AI
+        // key was configured. The session said so each time, and the reason was this
+        // one absent label rather than anything about the key.
+        comment_send: Some(LabelMatch::Exact("Post comment")),
         comment_reply: None,
         composer_open: None,
         picker_album_menu: None,
@@ -1010,6 +1040,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_build_that_renders_the_send_button_is_described_by_its_language() {
+        // The version table holds `@2131…` references because those change on every
+        // rebuild. 38.3.2 does not leave one — it renders `Post comment` — and a string
+        // is language-keyed by nature, so it belongs with the translations. Writing it
+        // into the version table instead would tell a Vietnamese 38.3.2 phone to look
+        // for English, which is the failure this module exists to stop.
+        let fleet = controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("set");
+        assert_eq!(
+            fleet.label(TikTokControl::CommentSend),
+            Some(LabelMatch::Exact("Post comment")),
+            "every phone on the farm runs this build"
+        );
+
+        // And a build that *does* leave a reference keeps it: the id wins, because an id
+        // cannot be wrong about the language and a string can.
+        let referenced = controls_for("com.ss.android.ugc.trill", "vi", "46.4.3").expect("set");
+        assert_eq!(
+            referenced.label(TikTokControl::CommentSend),
+            Some(LabelMatch::Exact("@2131823293"))
+        );
+    }
     #[test]
     fn the_send_button_is_keyed_by_app_version_not_by_language() {
         // The measurement this whole split exists for: two phones, same package, same
