@@ -229,6 +229,25 @@ async fn main() -> anyhow::Result<()> {
         parent.author_label, parent.text
     );
 
+    // **How long the root gets to become visible to the other accounts.**
+    //
+    // Measured 19/08/2026: on the same post and within the same hour, two runs found the
+    // root within seconds and two later ones did not find it at all — not in the open
+    // list, and not in the folded section either, which the reply path now opens and
+    // searches. A comment is not visible to other accounts the instant it is posted, and
+    // this is the knob that says how much of the difference is time.
+    let propagation = std::env::var("RIVIU_GATE_WAIT_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    if propagation > 0 {
+        println!(
+            "
+  chờ {propagation}s cho gốc lan sang các tài khoản khác"
+        );
+        tokio::time::sleep(Duration::from_secs(propagation)).await;
+    }
+
     // ---- B: arrive independently and reply to that identity ----
     println!("\n== B replies to A's comment ==");
     arrive(&actor_b, url, &handle).await?;
@@ -257,6 +276,14 @@ async fn main() -> anyhow::Result<()> {
                 outcome.verdict,
                 outcome.verdict.reason()
             );
+            if outcome.parent_was_folded {
+                println!(
+                    "  ! CHA NẰM TRONG PHẦN BỊ GẤP — phải mở `View folded comments` mới thấy."
+                );
+                println!(
+                    "    Gửi được, nhưng TikTok đã gấp cha đi khỏi các tài khoản khác: chuỗi này không ai nhìn thấy."
+                );
+            }
             match &outcome.identity {
                 Some(identity) => println!(
                     "  read back: author={:?} text={:?}",
@@ -303,6 +330,14 @@ async fn main() -> anyhow::Result<()> {
                     outcome.verdict,
                     outcome.verdict.reason()
                 );
+                if outcome.parent_was_folded {
+                    println!(
+                        "  ! CHA NẰM TRONG PHẦN BỊ GẤP — phải mở `View folded comments` mới thấy."
+                    );
+                    println!(
+                        "    Gửi được, nhưng TikTok đã gấp cha đi khỏi các tài khoản khác: chuỗi này không ai nhìn thấy."
+                    );
+                }
                 if outcome.verdict.is_sent() {
                     println!(
                         "\n  GATE H5-STAR: two accounts replied to the same comment.\n  \
@@ -310,6 +345,13 @@ async fn main() -> anyhow::Result<()> {
                          under A is a star; a reply nested under B's reply is a chain, and \
                          the log for the two is identical."
                     );
+                    report_nesting(
+                        actor_c.session.as_ref(),
+                        root_text,
+                        reply_text,
+                        Some(second_reply.as_str()),
+                    )
+                    .await;
                 } else {
                     println!("\n  GATE H5-STAR INCOMPLETE: {}", outcome.verdict.reason());
                 }
@@ -330,6 +372,7 @@ async fn main() -> anyhow::Result<()> {
              that two replies attach to the *same* parent. Pass `<serial-C> \"<text>\"` \
              for that.)"
         );
+        report_nesting(actor_b.session.as_ref(), root_text, reply_text, None).await;
         actor_b.serial.clone()
     };
     // The screenshot is the deliverable, not a nicety: a reply attached to the wrong
@@ -345,4 +388,91 @@ async fn main() -> anyhow::Result<()> {
         written.display()
     );
     Ok(())
+}
+
+/// Print the comment rows with their indent, and say what shape they make.
+///
+/// **The screenshot proves it to a person; this proves it to the run.** A reply attached to
+/// the wrong parent produces an identical log, which is why this gate used to end with "look
+/// at the screenshot" — and the first three real runs all produced one with the root off the
+/// top of the list. Indent is the same evidence and does not depend on where the list happens
+/// to be scrolled: TikTok lays a reply out to the right of the comment it answers, so the x of
+/// a row *is* its depth.
+///
+/// **Keyed on the two replies, not on the root**, which is what makes it work. The shape
+/// question is only ever "are these two siblings?" — same x means both answer the same
+/// comment, deeper means the second answers the first. The root is printed when it happens to
+/// be on screen and is not needed for the verdict. The earlier version looked for the root
+/// first and scrolled back to find it, which drags the list down past its top and *closes the
+/// drawer* — after which it was measuring the feed.
+async fn report_nesting(session: &dyn UiSession, root: &str, first: &str, second: Option<&str>) {
+    let row = |needle: String| async move {
+        let rows = session
+            .locate_all_described(riviu_core::ElementQuery::ClassName(
+                "android.widget.TextView",
+            ))
+            .await
+            .unwrap_or_default();
+        rows.into_iter().find(|row| {
+            row.description
+                .as_deref()
+                .map(|text| text.trim() == needle.trim())
+                .unwrap_or(false)
+        })
+    };
+
+    println!("\n  thụt lề (x càng lớn càng sâu):");
+    let mut seen = Vec::new();
+    for (name, text) in [
+        ("gốc  (A)", Some(root)),
+        ("rep 1 (B)", Some(first)),
+        ("rep 2 (C)", second),
+    ] {
+        let Some(text) = text else { continue };
+        match row(text.to_string()).await {
+            Some(found) => {
+                println!(
+                    "    {name}: x={:>6.0} y={:>6.0}  {text:?}",
+                    found.x, found.y
+                );
+                seen.push((name, found.x));
+            }
+            None => println!("    {name}: không trên màn hình  {text:?}"),
+        }
+    }
+
+    let depth = |wanted: &str| {
+        seen.iter()
+            .find(|(name, _)| *name == wanted)
+            .map(|(_, x)| *x)
+    };
+    let (Some(first_x), Some(second_x)) = (depth("rep 1 (B)"), depth("rep 2 (C)")) else {
+        println!(
+            "  chưa kết luận được: cần cả hai rep trên cùng một màn hình, và chúng nằm cạnh \
+             nhau nên đây thường là dấu hiệu một cái không gửi được"
+        );
+        return;
+    };
+    if (second_x - first_x).abs() < 1.0 {
+        let against_root = match depth("gốc  (A)") {
+            Some(root_x) if first_x > root_x => {
+                format!(", và đều thụt vào so với gốc x={root_x:.0}")
+            }
+            Some(root_x) => format!(", NHƯNG gốc ở x={root_x:.0} — không thụt vào, đọc ảnh chụp"),
+            None => String::new(),
+        };
+        println!(
+            "  HÌNH SAO: hai rep cùng x={first_x:.0}{against_root} — cùng trả lời một bình luận"
+        );
+    } else if second_x > first_x {
+        println!(
+            "  CHUỖI: rep 2 (x={second_x:.0}) sâu hơn rep 1 (x={first_x:.0}) — nó trả lời rep 1, \
+             không phải gốc"
+        );
+    } else {
+        println!(
+            "  ! rep 2 (x={second_x:.0}) nông hơn rep 1 (x={first_x:.0}) — không phải hình nào \
+             trong hai; đọc ảnh chụp"
+        );
+    }
 }

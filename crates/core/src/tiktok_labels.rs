@@ -63,6 +63,18 @@ pub enum TikTokControl {
     /// action rail were all equally invisible and the session could only report that it
     /// never saw a feed.
     DialogDismiss,
+    /// The control that reveals comments TikTok has hidden — `View folded comments`.
+    ///
+    /// Not a tidiness feature. TikTok folds comments it considers "similar to others
+    /// flagged by our community", and it does this to these accounts progressively: the
+    /// first few comments on a post are visible and later ones are not. A reply looking
+    /// for its parent then scrolls to the end of a list the parent is not in, and refuses
+    /// with `reply_parent_not_found` — which is correct, and useless, because the parent
+    /// is one tap away.
+    ///
+    /// Tapping it is safe in the way that matters: it reveals, it does not post, follow or
+    /// subscribe anything. What it changes is what the *account* can see, not what it does.
+    FoldedComments,
     /// The post's sound strip — `Original sound by <creator>`.
     ///
     /// Not something to tap. It is read for its *value*, because it is the one description
@@ -275,6 +287,7 @@ impl TikTokControl {
             Self::HomeTab => 23,
             Self::SoundLink => 24,
             Self::DialogDismiss => 25,
+            Self::FoldedComments => 26,
         }
     }
 }
@@ -377,6 +390,9 @@ pub struct TikTokLabels {
     sound_link: Option<LabelMatch>,
     /// The decline button on a modal. `None` means modals are not cleared on this build.
     dialog_dismiss: Option<LabelMatch>,
+    /// The `View folded comments` control, in `text`. `None` means a folded parent stays
+    /// unreachable on this build, which is a refusal rather than a wrong reply.
+    folded_comments: Option<LabelMatch>,
     /// Matched on the node's rendered `text`, not its `content-desc`: measured as a
     /// plain `TextView` reading `Ảnh` beside the caption, with no description at all.
     photo_badge: Option<LabelMatch>,
@@ -463,6 +479,7 @@ impl TikTokLabels {
             TikTokControl::HomeTab => self.home_tab,
             TikTokControl::SoundLink => self.sound_link,
             TikTokControl::DialogDismiss => self.dialog_dismiss,
+            TikTokControl::FoldedComments => self.folded_comments,
             TikTokControl::PhotoBadge => self.photo_badge,
             TikTokControl::Like => self.like,
             TikTokControl::Liked => self.liked,
@@ -589,6 +606,10 @@ pub(crate) fn nothing_measured() -> TikTokControls {
         feed_tab: None,
         home_tab: None,
         dialog_dismiss: None,
+        // Never seen on this build. Absent means a folded parent is refused rather than
+        // replied to blind — measure it with `label_scout <serial> --no-launch` while the
+        // control is on screen; it is in `text`.
+        folded_comments: None,
         sound_link: None,
         photo_badge: None,
         like: None,
@@ -769,6 +790,10 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // Safe by construction: `Not now` declines. It cannot grant anything, which is the
         // property that made the email dialog's labelled button unusable.
         dialog_dismiss: Some(LabelMatch::Text("Not now")),
+        // Never seen on this build. Absent means a folded parent is refused rather than
+        // replied to blind — measure it with `label_scout <serial> --no-launch` while the
+        // control is on screen; it is in `text`.
+        folded_comments: None,
         // Never measured on this build; the S8+ fleet work never looked at a photo
         // post. Absent means no sideways swipe, which is the safe direction.
         photo_badge: None,
@@ -822,6 +847,10 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // Unmeasured on the vi build: the 10/08 dump was not kept for this strip.
         sound_link: None,
         dialog_dismiss: None,
+        // Never seen on this build. Absent means a folded parent is refused rather than
+        // replied to blind — measure it with `label_scout <serial> --no-launch` while the
+        // control is on screen; it is in `text`.
+        folded_comments: None,
         // Read off an SM-N950F on 12/08/2026, on photo cards in the For-You feed and
         // on a post page opened from a link — the same string on both.
         photo_badge: Some(LabelMatch::Text("Ảnh")),
@@ -912,6 +941,15 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // `Not now`, read as `text` with no `content-desc`, off an SM-G955U1 held behind
         // "Save login for next time?" on 18/08/2026.
         dialog_dismiss: Some(LabelMatch::Text("Not now")),
+        // `View folded comments`, read as `text` with no `content-desc`, off
+        // ce0417145199e0490c on 19/08/2026 — the phone was holding the post where three
+        // farm accounts had just commented, and TikTok had folded the newest of them away.
+        //
+        // The fold is **progressive**, which is the part worth writing down: on the same
+        // post, earlier in the same hour, two replies found their parent in the open list
+        // without any of this. It is not a property of the post or of the build, it is what
+        // happens once these accounts have commented on a post a few times.
+        folded_comments: Some(LabelMatch::Text("View folded comments")),
         // `Photo` appears in `text` on this card, and the card is a photo post — but the
         // vi build's badge was confirmed on *two* devices and on a post page before being
         // written down, and one screen is not that. Left unmeasured: the cost is that a

@@ -461,27 +461,70 @@ pub async fn open_target_by_hierarchy(
     let Some(comments) = labels.label(TikTokControl::Comments) else {
         return Err(ArrivalRefusal::NoLabelForPostPage);
     };
-    // The post that is on screen *before* the link is opened. Requiring this to change is
-    // the only thing that distinguishes an arrival from an intent that did nothing, now
-    // that the feed tab is known to stay visible either way.
+    // **The post on screen before the link is opened, and a deliberate move away from it.**
     //
-    // So an unreadable baseline is a **refusal**, not an empty string. It used to be
-    // `unwrap_or_default()`, and see `ArrivalRefusal::NoBaseline` for what that cost: the
-    // whole comparison went vacuous and the guard stopped guarding. One retry first,
-    // because `read_author_label` swallows a query error into the same `None` as a
-    // genuinely absent node and a single agent hiccup should not cost an assignment.
-    let before = match read_author_label(session, labels).await {
-        Some(label) => label,
+    // Arrival is proved by the author label *changing*, which is the only thing separating a
+    // link that resolved from an intent TikTok swallowed. Two ways that reading goes wrong,
+    // both measured on 19/08/2026 and both fixed by the same tap:
+    //
+    // * The phone is **already on the target post** — nothing changes, and the open is
+    //   refused as `target_open_screen_unchanged`, the message for a deleted or blocked post,
+    //   about a post that is on screen and perfectly fine (ce051715ac247a3f01, same link run
+    //   twice). Retrying an assignment does exactly this.
+    // * The phone is **not on a post at all** — no author label anywhere, so there is no
+    //   baseline and the open is refused as `target_open_no_baseline` before it is even tried
+    //   (ce0417145199e0490c, left on a search results page by an earlier run).
+    //
+    // So: read what is there, tap Home, and wait for an author label that is *different* from
+    // whatever was read first. Home is the same gesture `await_feed` uses to get back to the
+    // feed, and it neither posts nor follows anything. A phone that was lost lands on a post
+    // and gets a baseline; a phone already on the target leaves it and gets a different one.
+    //
+    // An unreadable baseline is still a **refusal** rather than an empty string — see
+    // `ArrivalRefusal::NoBaseline` for what `unwrap_or_default()` cost: the comparison went
+    // vacuous and the guard stopped guarding.
+    let initial = read_author_label(session, labels).await;
+    // The retry the tests pin, and it comes first: `read_author_label` folds a query
+    // error into the same `None` as an absent node, so one agent hiccup is otherwise
+    // indistinguishable from an empty screen — and Home cannot help with a transient.
+    let initial = match initial {
+        Some(label) => Some(label),
         None => {
             tokio::time::sleep(ARRIVAL_POLL).await;
             if stop.load(Ordering::Relaxed) {
                 return Err(ArrivalRefusal::Cancelled);
             }
-            read_author_label(session, labels)
-                .await
-                .ok_or(ArrivalRefusal::NoBaseline)?
+            read_author_label(session, labels).await
         }
     };
+    let mut settled = initial.clone();
+    if let Some(home) = labels.label(TikTokControl::HomeTab) {
+        if let Ok(Some(element)) = session.locate(home.to_query()).await {
+            let _ = session.tap(element.centre()).await;
+            let deadline = Instant::now() + BASELINE_SETTLE;
+            loop {
+                tokio::time::sleep(ARRIVAL_POLL).await;
+                if stop.load(Ordering::Relaxed) {
+                    return Err(ArrivalRefusal::Cancelled);
+                }
+                match read_author_label(session, labels).await {
+                    Some(fresh) if Some(&fresh) != initial.as_ref() => {
+                        settled = Some(fresh);
+                        break;
+                    }
+                    fresh => {
+                        if Instant::now() >= deadline {
+                            // Nothing better arrived. Whatever was readable stands, and if
+                            // nothing ever was, the refusal below is the honest answer.
+                            settled = settled.or(fresh);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let before = settled.ok_or(ArrivalRefusal::NoBaseline)?;
 
     // Pinned to the target app, not a bare `VIEW` intent: measured, a bare one resolves
     // to the system app chooser because TikTok and Chrome both claim `www.tiktok.com`, so
@@ -584,6 +627,13 @@ pub struct HierarchySendOutcome {
     /// The posted comment, read back out of the still-open list. `None` when it could
     /// not be found unambiguously, which breaks the chain rather than guessing.
     pub identity: Option<CommentLocatorIdentity>,
+    /// The parent was only reachable after expanding `View folded comments`.
+    ///
+    /// A reply under a folded comment is posted, confirmed, and **seen by nobody** —
+    /// TikTok folded the parent away from everyone but the account that wrote it. The send
+    /// succeeded and the thread is invisible, and those two facts have to travel together
+    /// or the operator reads a success and believes something untrue.
+    pub parent_was_folded: bool,
 }
 
 /// The `locator_version` stamped on identities this module produces.
@@ -618,6 +668,7 @@ where
 
     let outcome = |verdict, armed: String, cleared: String, identity| HierarchySendOutcome {
         verdict,
+        parent_was_folded: false,
         armed_frame_sha256: armed,
         cleared_frame_sha256: cleared,
         identity,
@@ -684,7 +735,37 @@ where
 /// Same budget and same reason as the pixel path's: every reply is sent from a
 /// *different* device that re-opens the link fresh, so TikTok re-ranks the list and the
 /// campaign's own comment is under no obligation to still be near the top.
+/// How long the feed gets to render an author label after the phone is sent Home.
+///
+/// Bounded, and a miss is not a failure: the baseline read before the tap is kept, which is
+/// exactly as good as it was before any of this existed.
+const BASELINE_SETTLE: Duration = Duration::from_secs(4);
+
 const PARENT_SCROLL_ATTEMPTS: u32 = 4;
+
+/// Tap `View folded comments`, if this build has it measured and it is on screen.
+///
+/// **Only ever called at the end of the list**, which is the one place it can be right: the
+/// control sits below the last open comment, and reaching it means the parent was not in the
+/// open list. Tapping it reveals; it posts nothing, follows nobody and subscribes to nothing,
+/// so it is safe in the way that matters for a recovery path.
+///
+/// Returns whether anything was expanded, so the caller can spend one more scroll budget on
+/// the newly-revealed rows and, more importantly, can tell the operator that the thread it is
+/// about to build lives in the folded section.
+async fn expand_folded_comments(session: &dyn UiSession, labels: TikTokControls) -> bool {
+    let Some(label) = labels.label(TikTokControl::FoldedComments) else {
+        return false;
+    };
+    let Ok(Some(control)) = session.locate(label.to_query()).await else {
+        return false;
+    };
+    if session.tap(control.centre()).await.is_err() {
+        return false;
+    }
+    tokio::time::sleep(PARENT_SCROLL_SETTLE).await;
+    true
+}
 const PARENT_SCROLL_DURATION_MS: u64 = 320;
 const PARENT_SCROLL_SETTLE: Duration = Duration::from_millis(900);
 /// How far the list must actually move for a swipe to count as having scrolled.
@@ -701,7 +782,7 @@ pub enum ReplyRefusal {
     /// The drawer never opened.
     NoDrawer,
     /// The parent comment was not on screen after the scroll budget ran out.
-    ParentNotFound { scrolls: u32 },
+    ParentNotFound { scrolls: u32, unfolded: bool },
     /// A swipe closed the drawer instead of scrolling the list.
     DrawerClosedByScroll,
     /// The Reply button was tapped and no composer appeared.
@@ -733,8 +814,15 @@ impl ReplyRefusal {
                 "build/ngôn ngữ này chưa đo nút Trả lời, nên không có gì để bấm".to_string()
             }
             Self::NoDrawer => "drawer bình luận không mở ra ô nhập".to_string(),
-            Self::ParentNotFound { scrolls } => {
-                format!("không tìm thấy bình luận cha sau {scrolls} lần cuộn; không gõ gì cả")
+            Self::ParentNotFound { scrolls, unfolded } => {
+                let folded = if *unfolded {
+                    " (đã mở phần bị gấp và tìm cả trong đó)"
+                } else {
+                    " (không có phần bị gấp nào để mở)"
+                };
+                format!(
+                    "không tìm thấy bình luận cha sau {scrolls} lần cuộn{folded}; không gõ gì cả"
+                )
             }
             Self::DrawerClosedByScroll => "cú swipe đóng drawer thay vì cuộn danh sách".to_string(),
             Self::NoComposer => "đã bấm Trả lời nhưng không thấy ô nhập reply".to_string(),
@@ -787,6 +875,7 @@ where
     if drawer.send_query().is_none() {
         return Ok(Ok(HierarchySendOutcome {
             verdict: CommentVerdict::SendUnmeasured,
+            parent_was_folded: false,
             armed_frame_sha256: String::new(),
             cleared_frame_sha256: String::new(),
             identity: None,
@@ -800,16 +889,18 @@ where
     };
 
     let mut scrolls = 0u32;
+    let mut unfolded = false;
     let target = loop {
         if let Some(found) = find_parent(session, reply_label, parent).await {
             break found;
         }
         if scrolls >= PARENT_SCROLL_ATTEMPTS || stop.load(Ordering::Relaxed) {
-            return Ok(Err(ReplyRefusal::ParentNotFound { scrolls }));
+            return Ok(Err(ReplyRefusal::ParentNotFound { scrolls, unfolded }));
         }
         // Anchors before the swipe, so "the list did not move" is observable rather than
         // assumed. Reply controls are the cheapest anchor: geometry only, no text.
         let before = anchor_positions(session, reply_label).await;
+        let rows_before = visible_rows(session).await;
         scroll_comment_list(session, screen, &field).await?;
         tokio::time::sleep(PARENT_SCROLL_SETTLE).await;
         scrolls += 1;
@@ -826,8 +917,27 @@ where
         }
         let after = anchor_positions(session, reply_label).await;
         if !moved(&before, &after) {
-            // The end of the list. One more look is already done above, so stop.
-            return Ok(Err(ReplyRefusal::ParentNotFound { scrolls }));
+            // The cheap anchor says stopped. It is wrong often enough to matter — evenly
+            // spaced rows alias — so the expensive one gets the final word, and only here,
+            // where the alternative is refusing a reply whose parent is further down.
+            if visible_rows(session).await != rows_before {
+                continue;
+            }
+            // The end of the *open* list, which is not the end of the comments. TikTok
+            // folds these accounts' comments away progressively — measured on the same
+            // post within the same hour, two replies found their parent in the open list
+            // and the next two did not — so the parent is often one tap below the last
+            // row rather than absent. This is the only place that tap can be right: every
+            // scroll has been spent and the control sits under the final comment.
+            //
+            // The revealed rows get their own budget, once. `unfolded` latches, so a list
+            // that keeps refusing to move still ends here.
+            if !unfolded && expand_folded_comments(session, labels).await {
+                unfolded = true;
+                scrolls = 0;
+                continue;
+            }
+            return Ok(Err(ReplyRefusal::ParentNotFound { scrolls, unfolded }));
         }
     };
 
@@ -868,6 +978,7 @@ where
     if !drawer.focus_and_type(&field, text, stop).await? {
         return Ok(Ok(HierarchySendOutcome {
             verdict: CommentVerdict::NoSendControl,
+            parent_was_folded: false,
             armed_frame_sha256: String::new(),
             cleared_frame_sha256: String::new(),
             identity: None,
@@ -876,6 +987,7 @@ where
     let Some(send) = drawer.await_armed(stop).await? else {
         return Ok(Ok(HierarchySendOutcome {
             verdict: CommentVerdict::NotArmed,
+            parent_was_folded: unfolded,
             armed_frame_sha256: String::new(),
             cleared_frame_sha256: String::new(),
             identity: None,
@@ -887,6 +999,7 @@ where
     if !confirmed {
         return Ok(Ok(HierarchySendOutcome {
             verdict: CommentVerdict::NotConfirmed,
+            parent_was_folded: unfolded,
             armed_frame_sha256: armed,
             cleared_frame_sha256: cleared,
             identity: None,
@@ -911,6 +1024,7 @@ where
     let identity = read_back_identity(session, text, &cleared).await;
     Ok(Ok(HierarchySendOutcome {
         verdict: CommentVerdict::Sent,
+        parent_was_folded: unfolded,
         armed_frame_sha256: armed,
         cleared_frame_sha256: cleared,
         identity,
@@ -972,6 +1086,28 @@ async fn anchor_positions(
         .await
         .map(|found| found.into_iter().map(|element| element.y).collect())
         .unwrap_or_default()
+}
+
+/// What the list is showing, as text.
+///
+/// The expensive anchor, and the reason there are two. [`anchor_positions`] is geometry only
+/// and is right nearly always; but it reads the *y of the reply controls*, and comment rows
+/// are close to evenly spaced, so a scroll that happens to advance about a whole number of
+/// rows leaves those controls on the same pixels. The list moved and the anchor cannot tell.
+///
+/// Measured 19/08/2026: a reply refused with `reply_parent_not_found` after **two** scrolls on
+/// a list of eighteen comments, having concluded it had reached the end. The text of the rows
+/// cannot alias that way — different comments say different things.
+async fn visible_rows(session: &dyn UiSession) -> Vec<String> {
+    session
+        .locate_all_described(ElementQuery::ClassName("android.widget.TextView"))
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|element| element.description)
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+        .collect()
 }
 
 /// Whether the list actually shifted. An unchanged set means the end of the list.
@@ -2246,5 +2382,99 @@ mod tests {
             "android-hierarchy-v1",
         )
         .is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_list_that_scrolled_is_not_read_as_the_end_just_because_the_rows_line_up() {
+        // The cheap anchor is the y of the reply controls, and comment rows are close to
+        // evenly spaced — so a scroll that advances about a whole number of rows leaves those
+        // controls on the same pixels and the list looks stopped when it plainly is not.
+        //
+        // Measured 19/08/2026: a reply refused with `reply_parent_not_found` after **two**
+        // scrolls on a list of eighteen comments, having decided it had reached the end. The
+        // text of the rows cannot alias that way, so it gets the final word — and only here,
+        // where the alternative is refusing a reply whose parent is further down.
+        let (_, replies, authors) = measured_rows();
+        let parent = CommentLocatorIdentity {
+            author_label: "Tồi nhưng tử tế".into(),
+            text: "a comment nobody posted".into(),
+            locator_version: HIERARCHY_LOCATOR_VERSION.into(),
+            frame_sha256: "sha".into(),
+        };
+        let session = DrawerSession::default()
+            .with_single("bình luận", node(880.0, 900.0, 120.0, 120.0, "bình luận"))
+            .with_single(EDIT, node(199.0, 1175.0, 700.0, 100.0, ""))
+            .with_single(SEND_ID, send_button(false))
+            // The reply controls never move: this is the aliasing, made exact.
+            .with_many("Trả lời", replies)
+            .with_many("android.widget.Button", authors)
+            // The rows do change, once — which is what the list actually did.
+            .with_many_then(
+                "android.widget.TextView",
+                vec![node(140.0, 300.0, 600.0, 60.0, "hàng trước khi cuộn")],
+                vec![node(140.0, 300.0, 600.0, 60.0, "hàng sau khi cuộn")],
+            );
+
+        let refusal = send_reply_by_hierarchy(
+            &session,
+            vietnamese(),
+            (1080.0, 2400.0),
+            &parent,
+            "reply text",
+            &AtomicBool::new(false),
+            String::new,
+        )
+        .await
+        .expect("no device error")
+        .expect_err("the parent is not there, so this must refuse");
+
+        let ReplyRefusal::ParentNotFound { scrolls, .. } = refusal else {
+            panic!("expected ParentNotFound, got {refusal:?}");
+        };
+        assert!(
+            scrolls > 1,
+            "one scroll then 'the end of the list' is the bug: the rows changed, so the list \
+             moved, and the search had to keep going — got {scrolls}"
+        );
+        assert!(
+            *session.typed.lock() == Vec::<String>::new(),
+            "still nothing typed: a parent that was never found is never replied to"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_phone_is_sent_home_before_the_link_is_opened() {
+        // Arrival is proved by the author label *changing*, and that test is vacuous in two
+        // states a fleet is regularly left in — both measured 19/08/2026, both cured by the
+        // same tap:
+        //
+        // * already on the target post, so nothing changes and the open is refused as
+        //   `target_open_screen_unchanged`, the message for a deleted post, about a post that
+        //   is on screen and fine (ce051715ac247a3f01, same link run twice — which is exactly
+        //   what retrying an assignment does);
+        // * not on a post at all, so there is no author to read and the open is refused as
+        //   `target_open_no_baseline` before it is even attempted (ce0417145199e0490c, left on
+        //   a search results page by an earlier run).
+        let mut present = post_page(Some("Follow Trước"));
+        present.push(("Trang chủ", "Trang chủ"));
+        let session = ArrivalSession::new(TIKTOK, &present).landing_on("Follow Sau");
+
+        let arrival = open_target_by_hierarchy(
+            &session,
+            vietnamese(),
+            TIKTOK,
+            "https://www.tiktok.com/@someone/video/1",
+            "someone",
+            &AtomicBool::new(false),
+        )
+        .await
+        .expect("the open still works");
+
+        assert_eq!(arrival, TargetArrival::Structural);
+        assert!(
+            !session.taps.lock().is_empty(),
+            "Home has to be tapped, or a phone already on the target post can never prove it \
+             arrived at the target post"
+        );
     }
 }
