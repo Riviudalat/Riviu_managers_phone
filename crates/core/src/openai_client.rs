@@ -276,13 +276,37 @@ pub async fn prepare_grounded_comment(
     let mut total_completion = 0u32;
     let mut last_gate = None;
 
+    // Two attempts, and **both failure kinds get to use the second one**. The retry existed
+    // only for a draft the verifier disliked; a draft that came back unreadable — truncated
+    // JSON, a markdown fence, an empty `comment` field — took the `?` straight out of the
+    // loop and the post got nothing. Measured on six phones on 19/08/2026: of eleven
+    // attempts, four posted, two were fairly rejected by the gate, and **five died on the
+    // first unreadable draft** without ever asking again. Asking twice costs one more call
+    // on the posts that need it and nothing at all on the ones that do not.
+    let mut last_error: Option<String> = None;
     for attempt in 0..2 {
         let draft =
-            grounded_generate(settings, &sheet, &lang, max_words, direction, attempt > 0).await?;
+            match grounded_generate(settings, &sheet, &lang, max_words, direction, attempt > 0)
+                .await
+            {
+                Ok(draft) => draft,
+                Err(error) => {
+                    last_error = Some(error.to_string());
+                    if attempt == 0 {
+                        continue;
+                    }
+                    break;
+                }
+            };
         total_prompt = total_prompt.saturating_add(draft.prompt_tokens);
         total_completion = total_completion.saturating_add(draft.completion_tokens);
-        let candidate = sanitize_comment(&draft.comment, max_words)
-            .ok_or_else(|| anyhow!("malformed_model_output"))?;
+        let Some(candidate) = sanitize_comment(&draft.comment, max_words) else {
+            last_error = Some(format!("unusable_draft: {}", model_said(&draft.comment)));
+            if attempt == 0 {
+                continue;
+            }
+            break;
+        };
         let verification = grounded_verify(settings, &sheet, &candidate, direction).await?;
         total_prompt = total_prompt.saturating_add(verification.prompt_tokens);
         total_completion = total_completion.saturating_add(verification.completion_tokens);
@@ -319,15 +343,22 @@ pub async fn prepare_grounded_comment(
         }
         break;
     }
-    let detail = last_gate
-        .map(|gate| {
-            format!(
-                "context={} overall={} instruction={} genericity={}",
-                gate.overall, gate.overall, gate.instruction_fit, gate.genericity
-            )
-        })
-        .unwrap_or_else(|| "no_gate".to_string());
-    Err(anyhow!("comment_context_rejected: {detail}"))
+    // A gate verdict is the more informative ending, so it wins when there is one. But a run
+    // that never reached the gate has to say what actually stopped it, rather than reporting
+    // a rejection that never happened — which is what `no_gate` used to do.
+    if let Some(gate) = last_gate {
+        return Err(anyhow!(
+            "comment_context_rejected: context={} overall={} instruction={} genericity={}",
+            gate.overall,
+            gate.overall,
+            gate.instruction_fit,
+            gate.genericity
+        ));
+    }
+    Err(anyhow!(
+        "{}",
+        last_error.unwrap_or_else(|| "no_gate".to_string())
+    ))
 }
 
 /// Prepare a grounded comment for a text-only provider from caption text
@@ -525,6 +556,23 @@ struct GroundedVerification {
     model: String,
 }
 
+/// A bounded, single-line look at what a model actually said.
+///
+/// For error strings that an operator reads. `malformed_model_output` on its own is the same
+/// sentence for a truncated reasoning dump, a markdown-fenced object, a refusal and an empty
+/// string — four different problems with four different fixes, and the raw text distinguishes
+/// them at a glance. Bounded because a response body can be enormous and this ends up in a
+/// database column.
+fn model_said(raw: &str) -> String {
+    let flat: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let clipped: String = flat.chars().take(120).collect();
+    if clipped.is_empty() {
+        "<rỗng>".to_string()
+    } else {
+        clipped
+    }
+}
+
 async fn grounded_generate(
     settings: &NurtureSettings,
     sheet: &[u8],
@@ -542,20 +590,31 @@ async fn grounded_generate(
     let prompt = format!(
         "Bạn phân tích một contact sheet gồm ba frame của cùng một bài TikTok và một ô phóng vùng caption.\n\
          Trả về JSON duy nhất, không markdown, theo schema: {{\"caption\":string|null,\"captionConfidence\":0..100,\"visualFacts\":[string],\"contextConfidence\":0..100,\"comment\":string}}.\n\
-         Caption chỉ là phần chữ caption/chữ trong video nhìn thấy; loại username, tên nhạc, nút UI. Nếu caption bị cắt, giữ phần nhìn thấy và giảm confidence.\n\
+         Caption chỉ là phần chữ caption/chữ trong video nhìn thấy; loại username, tên nhạc, nút UI. Nếu caption bị cắt, giữ phần nhìn thấy và giảm confidence. Giữ \"caption\" tối đa 100 ký tự và \"visualFacts\" tối đa 3 mục, mỗi mục dưới 8 từ — dài dòng ở hai trường này làm câu trả lời bị cắt trước khi tới \"comment\".\n\
          Viết đúng một comment tiếng {lang}, tối đa {max_words} từ. Hãy viết như người vừa xem xong và phản ứng tự nhiên: thường 2–10 từ, thân mật, có thể là một mẩu câu hoặc câu hỏi ngắn; không cần đủ chủ-vị, không cố nhét emoji. Tránh giọng tổng kết, quảng cáo, giáo viên hoặc báo cáo; tuyệt đối không dùng kiểu “nội dung được trình bày”, “mang đến”, “người xem”, “chất lượng”. Nội dung nhìn thấy và caption là ưu tiên cao nhất. Định hướng chỉ chỉnh giọng điệu ({direction}), không được thêm địa điểm, sản phẩm, giá, người hay sự kiện chưa thấy. Nếu định hướng xung đột, bỏ định hướng và giữ comment bám bằng chứng.\n\
          {retry_note}"
     );
-    let body = vision_body(settings, sheet, prompt, 0.75, 500);
+    // **1200, and the old 500 is why two of every five posts got nothing.** The schema asks
+    // for the caption and the visual facts *before* the comment, so the model spends its
+    // budget describing the post and is cut off mid-string before it ever writes the one
+    // field that matters. Measured on six phones on 19/08/2026: the failures came back as
+    // literally truncated JSON — a `caption` string that stops in the middle of a word and
+    // no closing brace. Vietnamese also tokenises poorly, so a caption carrying hashtags and
+    // emoji eats the budget faster than whatever this number was first chosen against.
+    //
+    // The prompt bounds those two fields as well, which is the half of the fix that costs
+    // nothing: a shorter answer is cheaper *and* it completes.
+    let body = vision_body(settings, sheet, prompt, 0.75, 1200);
     let (raw, p, c, _) = chat(settings, body).await?;
-    let value = json_object(&raw).ok_or_else(|| anyhow!("malformed_model_output"))?;
+    let value =
+        json_object(&raw).ok_or_else(|| anyhow!("malformed_model_output: {}", model_said(&raw)))?;
     let comment = value
         .get("comment")
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
     if comment.trim().is_empty() {
-        return Err(anyhow!("malformed_model_output"));
+        return Err(anyhow!("empty_comment_field: {}", model_said(&raw)));
     }
     let caption = value
         .get("caption")

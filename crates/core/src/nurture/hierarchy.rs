@@ -1367,11 +1367,23 @@ pub(super) async fn run_feed(
                         }
                         Ok(verdict) => {
                             report(status, format!("bỏ qua bình luận: {}", verdict.reason()));
-                            source.record_outcome(&prepared, "skipped").await;
+                            // **The verdict, not just "skipped".** A comment that was
+                            // written, scored and then not posted is a device-level
+                            // failure, and the four ways it happens want four different
+                            // answers: the drawer never opened, the Send control was not
+                            // there, it never armed, or the tap could not be proved. The
+                            // audit row said the same word for all of them, so the only
+                            // place the distinction survived was a status line nobody
+                            // stores.
+                            source
+                                .record_outcome(&prepared, &format!("skipped: {verdict:?}"))
+                                .await;
                         }
                         Err(error) => {
                             report(status, format!("bình luận thất bại: {error}"));
-                            source.record_outcome(&prepared, "failed").await;
+                            source
+                                .record_outcome(&prepared, &format!("failed: {error}"))
+                                .await;
                         }
                     },
                 }
