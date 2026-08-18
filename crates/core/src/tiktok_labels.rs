@@ -571,6 +571,54 @@ pub struct TikTokControls {
     resources: Option<&'static TikTokResourceLabels>,
 }
 
+/// A set with nothing measured, for the tests that check what a refusal does.
+///
+/// Exists because the refusal paths used to be exercised by pointing at a real catalogue
+/// entry that happened to be missing the control — and then the control got measured, and
+/// the test stopped testing anything it was named for. Measuring a label should never
+/// silently delete a refusal's only coverage.
+///
+/// `#[cfg(test)]`: nothing in the product may reach for a set that refuses everything.
+#[cfg(test)]
+pub(crate) fn nothing_measured() -> TikTokControls {
+    static NOTHING: TikTokLabels = TikTokLabels {
+        package: "com.example.unmeasured",
+        language: "zz",
+        measured_on: "nothing — this set exists to be refused",
+        measured_app_version: "",
+        feed_tab: None,
+        home_tab: None,
+        dialog_dismiss: None,
+        sound_link: None,
+        photo_badge: None,
+        like: None,
+        liked: None,
+        comments: None,
+        share: None,
+        bookmark: None,
+        follow: None,
+        live_room: None,
+        comment_send: None,
+        comment_reply: None,
+        composer_open: None,
+        picker_album_menu: None,
+        picker_tab_all: None,
+        picker_tab_photos: None,
+        picker_multi_select: None,
+        picker_next: None,
+        profile_tab: None,
+        composer_next: None,
+        post_button: None,
+        post_delete_menu: None,
+        post_delete: None,
+        post_delete_confirm: None,
+    };
+    TikTokControls {
+        translated: &NOTHING,
+        resources: None,
+    }
+}
+
 impl TikTokControls {
     /// The label for a control, or `None` when it was never measured for this
     /// device. `None` means refuse — do not substitute another language or version.
@@ -727,7 +775,12 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // Never measured on this build: the S8+ fleet work stopped before the
         // comment drawer was dumped.
         comment_send: None,
-        comment_reply: None,
+        // `Reply`, in `text`, one Button per comment row — measured on
+        // ce0717171c2a64d50d, 18/08/2026, three rows at [286,927], [349,1140] and
+        // [286,1763]. Same string as the SEA build in English, measured separately
+        // rather than assumed from it: the two builds disagree about the sound strip and
+        // about the Send button, so agreement here is a fact rather than a rule.
+        comment_reply: Some(LabelMatch::Text("Reply")),
         composer_open: None,
         // The S8+ fleet work never opened the composer on this build.
         picker_album_menu: None,
@@ -906,7 +959,17 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // key was configured. The session said so each time, and the reason was this
         // one absent label rather than anything about the key.
         comment_send: Some(LabelMatch::Exact("Post comment")),
-        comment_reply: None,
+        // `Reply`, in `text` — the same attribute the Vietnamese build puts `Trả lời` in,
+        // and one Button per comment row. Read off ce051715cb22c30403 on 18/08/2026 with
+        // `probe --measure-comment`: author at [155,819][480,861], body at
+        // [155,866][1048,933], and this at [242,944][334,986] — above/below exactly as
+        // `locate_parent_in_elements` requires, well inside `AUTHOR_REACH` and
+        // `REPLY_REACH`.
+        //
+        // Sixteen of the twenty phones on this farm run this build, and without this
+        // every reply refused with `reply_control_unmeasured`. Threading was unreachable
+        // on the whole fleet.
+        comment_reply: Some(LabelMatch::Text("Reply")),
         composer_open: None,
         picker_album_menu: None,
         picker_tab_all: None,
@@ -1153,6 +1216,17 @@ mod tests {
                  measure the drawer with `RIVIU_TIKTOK_PACKAGE={package} probe <serial> \
                  --measure-comment` and look for the control whose `enabled` goes false \
                  -> true when the field holds text"
+            );
+            // **And can answer one.** A build that can comment but not reply cannot be in a
+            // thread at all — every reply refuses with `reply_control_unmeasured`, which is
+            // where all twenty phones stood until this was measured. The pair lives in one
+            // test because a campaign needs both, and half of it is no use.
+            assert!(
+                controls.label(TikTokControl::CommentReply).is_some(),
+                "{phones} phone(s) run {package} {version} and cannot reply to a comment: \
+                 the per-row control lives in `text`, not `content-desc` — open the drawer \
+                 with `probe --measure-comment` and look for one Button per comment row, \
+                 sitting just below each body"
             );
         }
     }

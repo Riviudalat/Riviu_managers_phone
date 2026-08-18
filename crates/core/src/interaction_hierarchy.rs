@@ -1987,9 +1987,13 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn an_unmeasured_reply_control_refuses_before_the_drawer_is_opened() {
-        // The English catalogue set has no measured Reply control. Opening the drawer
-        // first would leave the phone inside it with nothing to aim at.
-        let english = controls_for("com.zhiliaoapp.musically", "en", "").expect("set");
+        // Opening the drawer first would leave the phone inside it with nothing to aim at.
+        //
+        // Against a set with **nothing** measured rather than a real catalogue entry that
+        // happened to lack the control. It used to name `musically/en`, and when that
+        // build's Reply button was measured on 18/08/2026 this test quietly stopped testing
+        // the thing it is named for: it passed, on a set that could reply perfectly well.
+        let english = crate::tiktok_labels::nothing_measured();
         let session = DrawerSession::default();
         let parent = CommentLocatorIdentity {
             author_label: "someone".into(),
