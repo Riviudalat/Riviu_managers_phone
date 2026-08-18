@@ -53,6 +53,39 @@ const INTERACTION_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(12);
 /// lock screen. 40 s is the slowest measured start plus room, on the oldest phone here.
 const FOREGROUND_PROOF_TIMEOUT: Duration = Duration::from_secs(40);
 const FOREGROUND_PROOF_POLL: Duration = Duration::from_millis(250);
+/// How long a system dialog gets to go away after Back has been pressed at it.
+///
+/// Long enough for a dialog that Back *does* dismiss to be gone and the app to be back in
+/// front, short enough that a dialog Back cannot dismiss — measured: Android permission
+/// dialogs — does not eat the whole foreground deadline before anyone is told.
+const DIALOG_GRACE: Duration = Duration::from_secs(5);
+
+/// Is the package in front a **system dialog standing over the target app**, rather than a
+/// different app the phone wandered off to?
+///
+/// The distinction decides whether waiting can possibly help. A launcher in front means the
+/// launch did not take, and a retry or a longer deadline is the answer. One of these means
+/// the launch *did* take and something is standing on top of it — it will still be standing
+/// there when the deadline expires, so the whole window gets spent watching a screen that
+/// was never going to move. Measured exactly once, and it cost a phone: a whole-fleet
+/// nurture run on 18/08/2026 lost ce0717171c2a64d50d to
+/// `com.google.android.packageinstaller/…GrantPermissionsActivity`.
+///
+/// Recovery is **Back**, never a tap, for the same reason `await_feed` presses Back at a
+/// modal: the labelled button on a permission dialog *grants*, and granting a permission on
+/// a real account is not a decision a recovery path gets to make.
+///
+/// Three names because the component moved between Android versions and this fleet spans
+/// them: `com.android.packageinstaller` up to Android 9, `com.google.android.packageinstaller`
+/// on Google builds, `com.android.permissioncontroller` from Android 10.
+fn dialog_over_app(observed: &str) -> bool {
+    matches!(
+        observed,
+        "com.google.android.packageinstaller"
+            | "com.android.packageinstaller"
+            | "com.android.permissioncontroller"
+    )
+}
 /// `pm install` of an 18 MB APK over USB, with room for a slow phone.
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(180);
 /// How long a killed minicap child gets to actually exit before we stop claiming
@@ -3065,18 +3098,56 @@ impl DeviceDriver for AndroidDriver {
         riviu_core::driver::UiSession::launch_app_foreground(&session, &bundle_id).await?;
 
         let deadline = std::time::Instant::now() + FOREGROUND_PROOF_TIMEOUT;
+        // One Back, then a short grace, then the truth. Measured on ce0717171c2a64d50d on
+        // 18/08/2026: a whole-fleet nurture run lost exactly one phone, and it was sitting
+        // under `GrantPermissionsActivity` — the launch had worked, and TikTok's *own*
+        // permission dialog was standing over it, in TikTok's own task.
+        //
+        // Back is tried because Back is what cleared the in-app modal in `await_feed`, and
+        // it is the one gesture that cannot grant anything. It was then measured **not** to
+        // clear this one: Android's permission dialogs are not cancelable. So the rest of
+        // the forty seconds is spent watching a screen that cannot change, and the honest
+        // answer is to stop and say which screen it is. Answering the dialog is not on the
+        // table: both its buttons are labelled, one of them grants a permission on a real
+        // account's phone, and that is the operator's decision and not a recovery path's.
+        let mut backed_at: Option<std::time::Instant> = None;
         loop {
             let observed = match riviu_core::driver::UiSession::active_app_bundle(&session).await {
                 Ok(package) if package == bundle_id => break,
                 Ok(package) => package,
                 Err(error) => format!("<unreadable: {error}>"),
             };
-            if std::time::Instant::now() >= deadline {
+            let over_the_app = dialog_over_app(&observed);
+            if over_the_app && backed_at.is_none() {
+                backed_at = Some(std::time::Instant::now());
+                tracing::info!(
+                    udid,
+                    observed = %observed,
+                    "a system dialog is over the app; pressing Back once and re-launching"
+                );
+                let _ = riviu_core::driver::UiSession::back(&session).await;
+                let _ = riviu_core::driver::UiSession::launch_app_foreground(&session, &bundle_id)
+                    .await;
+            }
+            let now = std::time::Instant::now();
+            let stuck_behind_dialog =
+                over_the_app && backed_at.is_some_and(|at| now.duration_since(at) >= DIALOG_GRACE);
+            if stuck_behind_dialog {
+                self.interaction.clear(udid);
+                anyhow::bail!(
+                    "{bundle_id} is running on {udid} but {observed} is standing over it, and \
+                     Back did not clear it. This is a system permission dialog in the app's own \
+                     task: nothing here can answer it, because one of its buttons grants a \
+                     permission on a real account. Clear it on the phone once and the phone is \
+                     usable again"
+                );
+            }
+            if now >= deadline {
                 self.interaction.clear(udid);
                 anyhow::bail!(
                     "{bundle_id} did not reach the foreground on {udid} within {}s; the phone is \
-                     showing {observed}. A locked screen does this — `monkey` reports success and \
-                     nothing moves",
+                     showing {observed}. A locked screen does this — `monkey` reports success \
+                     and nothing moves",
                     FOREGROUND_PROOF_TIMEOUT.as_secs()
                 );
             }
@@ -3827,5 +3898,33 @@ mod tests {
             .spawn()
             .expect("spawn a silent process");
         assert_eq!(scrcpy_exit_detail(&mut child).await, "");
+    }
+
+    #[test]
+    fn a_permission_dialog_is_told_apart_from_a_phone_that_wandered_off() {
+        // The two need different answers, which is the only reason this is a function
+        // rather than a longer deadline. A dialog is cleared with Back; a launcher means
+        // the launch did not take and Back would only make it worse.
+        for dialog in [
+            "com.google.android.packageinstaller",
+            "com.android.packageinstaller",
+            "com.android.permissioncontroller",
+        ] {
+            assert!(
+                dialog_over_app(dialog),
+                "{dialog} stands over the app — waiting out the deadline cannot clear it"
+            );
+        }
+        for elsewhere in [
+            "com.sec.android.app.launcher",
+            "com.android.systemui",
+            "com.ss.android.ugc.trill",
+            "",
+        ] {
+            assert!(
+                !dialog_over_app(elsewhere),
+                "{elsewhere:?} is not a dialog over the app, and Back there is a guess"
+            );
+        }
     }
 }

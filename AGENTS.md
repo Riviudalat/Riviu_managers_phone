@@ -4138,6 +4138,32 @@ pager, fling, swipe-to-dismiss — cử chỉ nhân hoá có thể giống ngư�
 cử chỉ "chạy được" trên một máy không phải bằng chứng cho bản dựng khác — cùng khuôn với
 bài học nhãn ở §9.20.
 
+### 9.44 Hộp thoại không phải của TikTok, và giới hạn của việc tự khắc phục (18/08/2026)
+
+Lượt nuôi cả dàn mất đúng một máy, và không phải vì mã. `ce0717171c2a64d50d` nằm dưới
+`com.google.android.packageinstaller/GrantPermissionsActivity` — **hộp xin quyền của chính
+TikTok**, sống trong task của TikTok (`TaskRecord A=com.zhiliaoapp.musically sz=2`).
+
+Hệ quả: `launch_app_foreground` báo thành công, `active_app_bundle` đọc ra
+`packageinstaller`, và phiên từ chối sau khi chờ hết 40 s — 40 s nhìn một màn hình không thể
+đổi.
+
+**Back không huỷ được nó.** Đã thử, đã đo: hộp xin quyền của Android không cancelable. Đây
+là chỗ khác với cái bẫy §9.x của `await_feed`, nơi Back chính là thứ gỡ kẹt.
+
+**Và mã không được phép trả lời nó.** Hộp này có hai nút *đều có nhãn*, một trong hai
+**cấp quyền** trên máy của một tài khoản thật. Đó là quyết định của người vận hành, không
+phải của một đường khắc phục sự cố — cùng nguyên tắc đã áp cho hộp "Get updates sent to your
+email?", nơi nút duy nhất có nhãn là nút *đồng ý*.
+
+Nên việc đúng còn lại là **nhận ra và nói thẳng**: `dialog_over_app` phân biệt "hộp thoại
+đè lên app" với "máy đi lạc sang app khác" — hai thứ cần hai câu trả lời khác nhau, vì với
+cái sau thì chờ hoặc thử lại có ích. Bấm Back một lần (cử chỉ duy nhất không cấp được gì),
+chờ `DIALOG_GRACE = 5s`, rồi hỏng kèm câu nêu đúng tình huống và việc cần làm.
+
+83 s chờ chết thành 13 s và một câu hành động được. Máy vẫn cần một người bấm một lần —
+**đó không phải lỗi để sửa**, và giả vờ ngược lại thì phải bấm hộ một nút cấp quyền.
+
 ### 9.21 Agent còn sống mà cây đã chết: `/status` không phải bằng chứng (12/08/2026)
 
 `ensure_agent` tin `AgentClient::is_alive()`, mà nó gọi `window_size()`. **Đo được:
