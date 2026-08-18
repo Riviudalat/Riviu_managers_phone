@@ -101,6 +101,12 @@ function App() {
   const [driverIssue, setDriverIssue] = useState<string | null>(null);
   const [androidIssue, setAndroidIssue] = useState<string | null>(null);
   const [startupIssue, setStartupIssue] = useState<string | null | undefined>(undefined);
+  /// Bumped by the retry button, and read by the boot effect below as a reason to run
+  /// again. A counter rather than `startupIssue` in that effect's dependencies: the
+  /// effect *sets* the issue, so depending on it makes every ordinary startup run the
+  /// whole thing twice — two `startup_error` calls, two subscriptions, one of them
+  /// immediately torn down.
+  const [startupAttempt, setStartupAttempt] = useState(0);
   const [retryingStartup, setRetryingStartup] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("window");
   const [tileWidth, setTileWidth] = useState(() => loadZoom(TILE_ZOOM));
@@ -390,7 +396,16 @@ function App() {
       cancelled = true;
       unlisten?.();
     };
-  }, [reload]);
+    // **`startupAttempt` is a dependency so a successful retry gets a subscription.**
+    //
+    // This effect returns early when startup failed, so nothing is listening. The retry
+    // button cleared the issue and the app rendered — but the effect never ran again, so
+    // `devicesUpdated`, `deviceUpdated`, `jobUpdated` and `streamFrame` were never
+    // subscribed for the rest of the session. The retry handler knew half of this: it
+    // replayed `reload()` by hand, with a comment saying the boot effect had already run.
+    // It could not replay the subscription, and that is the half that matters — without it
+    // the grid moves only on the three-second poll and no tile ever learns a frame arrived.
+  }, [reload, startupAttempt]);
 
   /// The phone the overlay actually drives.
   ///
@@ -442,17 +457,24 @@ function App() {
   // device poll, and restarting the encoder a few times a second is worse than a soft
   // picture. Failure is deliberately swallowed to a log -- the tile encode still plays, so
   // a phone that refuses the larger one should look worse, not stop.
+  //
+  // `focusDevice`, not `focusUdid`: with Sync on and a control centre designated, the
+  // overlay drives the control centre whichever tile was opened — that is what designating
+  // one means — so keying on `focusUdid` asked a phone nobody is watching for the larger
+  // encode and left the phone on screen at the tile preset. Its `.udid` rather than the
+  // object, for the reason above: the memo is a new object on every poll.
+  const overlayUdid = focusDevice?.udid ?? null;
   useEffect(() => {
-    if (!focusUdid) return;
-    void viewSetPreset(focusUdid, "overlay").catch((error) => {
+    if (!overlayUdid) return;
+    void viewSetPreset(overlayUdid, "overlay").catch((error) => {
       console.warn("overlay preset refused", error);
     });
     return () => {
-      void viewSetPreset(focusUdid, "tile").catch(() => {
+      void viewSetPreset(overlayUdid, "tile").catch(() => {
         // The device may be gone -- that is often what closing the overlay means.
       });
     };
-  }, [focusUdid]);
+  }, [overlayUdid]);
 
   const readyCount = useMemo(
     () => devices.filter((d) => d.wdaReady || d.status === "ready").length,
@@ -501,9 +523,10 @@ function App() {
               try {
                 const stillBlocked = await retryStartup();
                 setStartupIssue(stillBlocked);
-                // Came up: the effect that boots the fleet has already run and found an
-                // error, so the rest of the startup work is kicked off here.
-                if (!stillBlocked) await reload();
+                // Came up: run the boot effect again, which loads the fleet *and*
+                // subscribes to events. This used to call `reload()` by hand instead,
+                // which did the first and could not do the second.
+                if (!stillBlocked) setStartupAttempt((attempt) => attempt + 1);
               } catch (error) {
                 setStartupIssue(describeError(error));
               } finally {

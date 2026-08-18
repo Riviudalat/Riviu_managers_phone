@@ -446,7 +446,10 @@ describe("FocusStream with no picture yet", () => {
 });
 
 describe("FocusStream media export", () => {
-  function renderOverlay(device: DeviceInfo = fixture) {
+  function renderOverlay(
+    device: DeviceInfo = fixture,
+    group: { groupUdids?: string[]; groupMode?: boolean } = {},
+  ) {
     resetToasts();
     return render(
       <>
@@ -454,8 +457,8 @@ describe("FocusStream media export", () => {
           device={device}
           index={4}
           onClose={() => undefined}
-          groupUdids={[]}
-          groupMode={false}
+          groupUdids={group.groupUdids ?? []}
+          groupMode={group.groupMode ?? false}
           devices={[device]}
           onSelectDevice={() => undefined}
         />
@@ -487,6 +490,38 @@ describe("FocusStream media export", () => {
     const empty = renderOverlay();
     fireEvent.click(empty.getByRole("button", { name: "Lấy ảnh/video từ máy" }));
     expect(await empty.findByText("Máy không có ảnh/video nào")).toBeTruthy();
+  });
+  it("does not report a quick phrase that reached none of the phones", async () => {
+    // `reportGroup` already pushes an error for a fleet action that reached nobody, and
+    // `sendPhrase` pushed "Đã gõ câu nhanh" straight afterwards regardless — so the
+    // operator got both, one under the other, and the success is the one that reads as
+    // the answer. Nothing else in this component claims an outcome after calling
+    // `reportGroup`, which is why this was the only one wrong.
+    localStorage.setItem(
+      "riviu.quickPhrases",
+      JSON.stringify([{ id: "p1", name: "Chào", content: "Chào bạn nhé" }]),
+    );
+    vi.mocked(groupInput).mockResolvedValueOnce({
+      completedUdids: [],
+      skipped: [
+        { udid: "ce06", code: "DeviceBusy", currentOwner: "nurture" },
+        { udid: "ce07", code: "DeviceUnavailable", message: "device not found" },
+      ],
+    });
+    const { getByRole, findByText, queryByText } = renderOverlay(fixture, {
+      groupUdids: ["ce06", "ce07"],
+      groupMode: true,
+    });
+
+    // The phrase list lives behind its own menu row.
+    fireEvent.click(getByRole("button", { name: "Câu nhanh" }));
+    fireEvent.click(getByRole("button", { name: "Chào" }));
+
+    expect(await findByText(/Không máy nào nhận được thao tác/)).toBeTruthy();
+    expect(
+      queryByText("Đã gõ câu nhanh"),
+      "a phrase that reached nobody must not also be reported as typed",
+    ).toBeNull();
   });
   it("does not report a backup it declined to start", async () => {
     // `runBusy` returns immediately when the device is already busy, which is right —

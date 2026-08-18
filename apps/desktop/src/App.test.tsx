@@ -325,6 +325,28 @@ describe("the startup failure screen", () => {
     );
   });
 
+  it("subscribes to fleet events once the retry has cleared the problem", async () => {
+    // The boot effect returns early when startup failed, so nothing is listening —
+    // correct. It then never ran again: its deps did not include the issue, and the
+    // retry handler replayed `reload()` by hand with a comment saying the effect had
+    // already run. It could not replay the subscription. So a window that came up
+    // through this button spent the rest of the session with no `devicesUpdated`, no
+    // `deviceUpdated`, no `jobUpdated` and no `streamFrame`: the grid only moved on the
+    // three-second poll and no tile ever learned that a frame had arrived.
+    const api = await import("./api");
+    vi.mocked(api.startupError).mockResolvedValueOnce("adb is not on PATH");
+    vi.mocked(api.retryStartup).mockResolvedValueOnce(null);
+    render(<App />);
+    expect(await screen.findByText("adb is not on PATH")).toBeInTheDocument();
+    expect(
+      api.listenRiviuEvents,
+      "nothing should be listening while startup is blocked",
+    ).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole("button", { name: "Thử lại" }));
+
+    await waitFor(() => expect(api.listenRiviuEvents).toHaveBeenCalled());
+  });
   it("shows what is still wrong when the retry finds the same problem", async () => {
     const api = await import("./api");
     vi.mocked(api.startupError).mockResolvedValueOnce("adb is not on PATH");

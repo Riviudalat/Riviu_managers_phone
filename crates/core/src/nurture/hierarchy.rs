@@ -236,6 +236,14 @@ async fn locate(
     session.locate(label.to_query()).await
 }
 
+/// Whether this build can be asked to follow at all.
+///
+/// A named check rather than an inline `is_some()`, because the answer is *no* for most
+/// of this fleet and the consequence of not asking is not a missing follow — it is a
+/// wrong sentence and a spent budget. See the call site.
+fn can_follow(labels: TikTokControls) -> bool {
+    labels.label(TikTokControl::Follow).is_some()
+}
 /// True when the label is measured *and* on screen.
 async fn present(session: &dyn UiSession, labels: TikTokControls, control: TikTokControl) -> bool {
     matches!(locate(session, labels, control).await, Ok(Some(_)))
@@ -1325,7 +1333,20 @@ pub(super) async fn run_feed(
             FeedAction::None => {}
         }
 
-        if roll_follow_in_mood(settings.follow_prob, mood)
+        // **An action with no measured label is not an action this phone can attempt.**
+        //
+        // `follow` finds nothing when `Follow` was never measured for this build, returns
+        // false, and the arm below reports "nút Follow vẫn còn — chưa xác nhận" — blaming a
+        // button that was never looked for, on a screen where nothing was tapped. Sixteen
+        // of the eighteen phones on this fleet run `com.ss.android.ugc.trill`, whose set has
+        // no `follow` label, so that is the majority case rather than an edge one.
+        //
+        // Worse than the wrong sentence: the block above it spends `record_attempt` and
+        // `mark_post_interacted` first, so a roll that could never do anything still used
+        // up the human-pacing budget for that post and blocked the like that might have
+        // followed it.
+        if can_follow(run.labels)
+            && roll_follow_in_mood(settings.follow_prob, mood)
             && policy.can_interact_with_post()
             && policy.can_attempt(PolicyAction::Follow)
             && wait_gap(&mut last_interaction_at, policy.min_action_gap(), stop).await
@@ -1453,6 +1474,29 @@ mod tests {
         items.iter().map(|s| (*s).to_string()).collect()
     }
 
+    #[test]
+    fn a_build_with_no_measured_follow_label_is_never_asked_to_follow() {
+        // Sixteen of the eighteen phones on this fleet run the SEA build, whose set has
+        // no `follow` label. Without this check `follow` found nothing, returned false,
+        // and the loop reported "nút Follow vẫn còn — chưa xác nhận" — blaming a button
+        // it never looked for, on a screen where nothing was tapped. The count of
+        // attempts rose with it, and `record_attempt` plus `mark_post_interacted` had
+        // already run, so a roll that could never do anything spent the pacing budget
+        // for that post and blocked the like that might have used it.
+        assert!(!can_follow(
+            controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("measured set")
+        ));
+        // The SEA build in Vietnamese *does* carry it, which is the point: the gap is per
+        // (package, language), not per package, and the sixteen phones measured on this
+        // fleet on 18/08/2026 are running that build with an English UI.
+        assert!(can_follow(vietnamese()));
+
+        // And the build where it *was* measured still follows, so the guard cannot be
+        // read as "this feature is off".
+        assert!(can_follow(
+            controls_for("com.zhiliaoapp.musically", "en", "").expect("measured set")
+        ));
+    }
     #[test]
     fn the_photo_counter_is_read_out_of_three_adjacent_nodes() {
         // The strings are the measured ones, in tree order, from an SM-N950F on

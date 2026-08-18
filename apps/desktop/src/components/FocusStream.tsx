@@ -150,14 +150,21 @@ export function FocusStream({
   /// speaks up only when it reached NOBODY, which is the case they genuinely cannot see. The
   /// explicit rows (a key, a typed phrase) report either way, because the operator pressed
   /// once and deserves one answer.
-  const reportGroup = (report: GroupInputReport, quiet: boolean) => {
+  /// Report a fleet action, and say whether it reached anybody.
+  ///
+  /// The return value exists because `sendPhrase` pushed "Đã gõ câu nhanh" straight after
+  /// calling this — so an action that reached *none* of the selected phones put an error
+  /// and a success on screen together, one under the other. Nothing else here claims an
+  /// outcome afterwards, which is why it was the only one wrong.
+  const reportGroup = (report: GroupInputReport, quiet: boolean): boolean => {
     const outcome = groupInputOutcome(report);
-    if (outcome.kind === "ok") return;
+    if (outcome.kind === "ok") return true;
     if (outcome.kind === "none") {
       pushToast("error", outcome.title, outcome.detail);
-      return;
+      return false;
     }
     if (!quiet) pushToast("warn", outcome.title, outcome.detail);
+    return true;
   };
   /// Whether this gesture may go down the scrcpy control socket.
   ///
@@ -389,17 +396,19 @@ export function FocusStream({
   /// `adb shell input text` is killed outright by them.
   const sendPhrase = async (phrase: QuickPhrase) => {
     try {
-      await runBusy(async () => {
+      let delivered = false;
+      const ran = await runBusy(async () => {
         if (targets.length > 1) {
-          reportGroup(
+          delivered = reportGroup(
             await groupInput({ udids: targets, kind: "type", text: phrase.content }),
             false,
           );
         } else {
           await deviceTypeText(device.udid, phrase.content);
+          delivered = true;
         }
       });
-      pushToast("ok", "Đã gõ câu nhanh", phrase.name);
+      if (ran && delivered) pushToast("ok", "Đã gõ câu nhanh", phrase.name);
     } catch (error) {
       toastError("Gõ câu nhanh thất bại", error);
     }
