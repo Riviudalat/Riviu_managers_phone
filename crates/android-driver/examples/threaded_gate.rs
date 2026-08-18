@@ -47,7 +47,7 @@ use riviu_core::interaction::CommentLocatorIdentity;
 use riviu_core::interaction_hierarchy::{
     open_target_by_hierarchy, send_reply_by_hierarchy, send_root_by_hierarchy, TargetArrival,
 };
-use riviu_core::tiktok_labels::{self, TikTokControls};
+use riviu_core::tiktok_labels::{self, TikTokControl, TikTokControls};
 
 static TIKTOK: LazyLock<String> = LazyLock::new(|| {
     std::env::var("RIVIU_TIKTOK_PACKAGE")
@@ -347,6 +347,7 @@ async fn main() -> anyhow::Result<()> {
                     );
                     report_nesting(
                         actor_c.session.as_ref(),
+                        actor_c.labels,
                         root_text,
                         reply_text,
                         Some(second_reply.as_str()),
@@ -372,7 +373,14 @@ async fn main() -> anyhow::Result<()> {
              that two replies attach to the *same* parent. Pass `<serial-C> \"<text>\"` \
              for that.)"
         );
-        report_nesting(actor_b.session.as_ref(), root_text, reply_text, None).await;
+        report_nesting(
+            actor_b.session.as_ref(),
+            actor_b.labels,
+            root_text,
+            reply_text,
+            None,
+        )
+        .await;
         actor_b.serial.clone()
     };
     // The screenshot is the deliverable, not a nicety: a reply attached to the wrong
@@ -405,7 +413,33 @@ async fn main() -> anyhow::Result<()> {
 /// be on screen and is not needed for the verdict. The earlier version looked for the root
 /// first and scrolled back to find it, which drags the list down past its top and *closes the
 /// drawer* — after which it was measuring the feed.
-async fn report_nesting(session: &dyn UiSession, root: &str, first: &str, second: Option<&str>) {
+async fn report_nesting(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    root: &str,
+    first: &str,
+    second: Option<&str>,
+) {
+    // **Re-open the drawer first.** The reply path closes it on the way out — which is
+    // right, and which left this measuring a closed post page: the first run after the
+    // star finally completed reported all three lines "not on screen" while the
+    // screenshot showed the feed card with the comment count on it.
+    if session
+        .locate(riviu_core::ElementQuery::ClassName(
+            "android.widget.EditText",
+        ))
+        .await
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        if let Some(opener) = labels.label(TikTokControl::Comments) {
+            if let Ok(Some(control)) = session.locate(opener.to_query()).await {
+                let _ = session.tap(control.centre()).await;
+                tokio::time::sleep(Duration::from_millis(2_500)).await;
+            }
+        }
+    }
     let row = |needle: String| async move {
         let rows = session
             .locate_all_described(riviu_core::ElementQuery::ClassName(
