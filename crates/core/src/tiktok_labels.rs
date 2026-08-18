@@ -909,16 +909,25 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // carousel is never paged sideways, and the cost of being wrong is a sideways
         // swipe on a video, which opens the author's profile and walks the session off
         // the feed.
-        // In `text`, not `content-desc` — hence `Text` rather than `Contains`.
+        // **Measured, and deliberately left off.** The label is right: `Photo` in `text`,
+        // present on all three reads of a photo card and absent from ten video cards read
+        // twice each, on ce051715cb22c30403, 18/08/2026. Setting it is not the problem.
         //
-        // Measured on ce051715cb22c30403, 18/08/2026, with the care this one is worth: a
-        // false positive here makes the loop swipe **sideways** on a video, which is
-        // TikTok's open-the-author's-profile gesture and walks the session off the feed.
-        // So: present on all three reads of one photo card, and absent from ten
-        // consecutive video cards read twice each. Stable, which is the property the
-        // transient `N / M` counter does not have and the reason that counter is not the
-        // gate.
-        photo_badge: Some(LabelMatch::Text("Photo")),
+        // What it switches on is. Enabling it turned the carousel traversal on for this
+        // build, and measured the same day across nine phones: **both sessions that met a
+        // photo post ended at zero videos, and every session that met none watched
+        // normally.** The trail is the same each time — `gặp bài ảnh — vuốt ngang`, then
+        // `đã xem 2/10 ảnh`, then an unproven vertical swipe, then a card with no action
+        // rail at all. The sideways paging gets two images in and walks the session off the
+        // post, which is exactly what `PhotoBadge`'s own documentation warns a wrong answer
+        // here costs.
+        //
+        // So: `None`, which means photo posts are watched and swiped past like videos. That
+        // is the safe direction the field was designed around, and it is what the fleet was
+        // doing when it measured 20 of 20. Re-enable only together with a fix for the
+        // traversal on 38.3.2, and prove it with a session that meets a photo post and
+        // still finishes.
+        photo_badge: None,
         like: Some(LabelMatch::Exact("Like")),
         // Not seen: reading it needs a post to be liked and then unliked
         // (`probe --measure-liked`). The engine confirms a like without it — the
@@ -1157,19 +1166,28 @@ mod tests {
     }
 
     #[test]
-    fn the_photo_badge_is_read_from_the_attribute_it_lives_in() {
-        // `Photo` is in `text`, not `content-desc`. Reading the wrong attribute finds
-        // nothing at all, and finding nothing here is silent: every photo post is simply
-        // treated as a video, which is safe but is the whole feature not running.
-        let fleet = controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("set");
-        let badge = fleet
-            .label(TikTokControl::PhotoBadge)
-            .expect("sixteen of twenty phones run this build");
-        assert_eq!(badge, LabelMatch::Text("Photo"));
-        assert!(
-            matches!(badge.to_query(), crate::driver::ElementQuery::Text { .. }),
-            "a description query would search an attribute this label is not in"
-        );
+    fn the_carousel_stays_off_on_the_build_where_it_eats_the_session() {
+        // The label was measured and is written down in the comment beside the field. It is
+        // set to `None` anyway, and this pins that: enabling it switched the sideways paging
+        // on for 38.3.2, and across nine phones on 18/08/2026 **both** sessions that met a
+        // photo post ended at zero videos while every session that met none watched
+        // normally. Two images in, the paging walked the session off the post.
+        //
+        // `None` means a photo post is watched and swiped past like a video — the safe
+        // direction, and what the fleet was doing when it measured 20 of 20.
+        for (package, language) in [
+            ("com.ss.android.ugc.trill", "en"),
+            ("com.zhiliaoapp.musically", "en"),
+        ] {
+            assert_eq!(
+                controls_for(package, language, "")
+                    .expect("set")
+                    .label(TikTokControl::PhotoBadge),
+                None,
+                "{package} / {language}: re-enable this only with a fix for the traversal, \
+                 and prove it with a session that meets a photo post and still finishes"
+            );
+        }
     }
 
     #[test]
