@@ -31,12 +31,25 @@ function canvasClassName(fill: boolean | undefined, className: string | undefine
 export function PhoneCanvas({ udid, surfaceId, className, fill }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  // The current appearance, readable from the identity effect without becoming one of its
+  // dependencies. Keeping `className` out of those deps is what stopped the canvas being
+  // rebuilt on every `busy` flip; reading it here is what stops the rebuilt canvas — the
+  // one a change of `udid` legitimately creates — from coming up with no class at all.
+  const appearanceRef = useRef({ fill, className });
+  appearanceRef.current = { fill, className };
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
     const canvas = document.createElement("canvas");
     canvas.dataset.udid = udid;
+    // Styled before it is in the document, so there is never a frame of unstyled canvas
+    // and never a canvas that stays unstyled: the effect below only re-runs when the
+    // appearance itself changes, and switching phones changes neither.
+    canvas.className = canvasClassName(
+      appearanceRef.current.fill,
+      appearanceRef.current.className,
+    );
     host.appendChild(canvas);
     canvasRef.current = canvas;
     const forget = () => {

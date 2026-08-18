@@ -2661,6 +2661,45 @@ impl DeviceDriver for AndroidDriver {
         }
     }
 
+    /// Install and verify the agent without opening a session or starting a stream.
+    ///
+    /// This is the method every product-level agent path actually calls — Settings' Check
+    /// and Repair, the toolbar's bulk repair, `job_queue::run_on_device`, and the nurture
+    /// comment preflight all reach it through `DeviceControlPlane`, and that indirection is
+    /// deliberate: a test pins that preflight must not open a session or start a stream,
+    /// because checking on a phone should not disturb the phone. Only the iOS drivers
+    /// implemented it, so on an Android fleet every one of those paths answered
+    /// `capability repairAgentInstallOnly is not supported by this device` — and the nurture
+    /// refusal told the operator to run the Agent Repair that had just failed for the same
+    /// reason. `AndroidDriver::preflight_agent` was implemented and working the whole time;
+    /// nothing in the product called it.
+    ///
+    /// `ensure_agent` is the whole repair on this platform — it installs both APK halves
+    /// when they are missing and restarts the instrumentation when the server has gone
+    /// blind — and it starts no UI session and no producer, which is what the install-only
+    /// contract asks for.
+    async fn repair_agent_install_only(
+        &self,
+        udid: &str,
+    ) -> anyhow::Result<riviu_core::AgentInstallProof> {
+        self.ensure_agent(udid).await?;
+        let agent = self.package_identity(udid, AGENT_PACKAGE).await?;
+        let agent_apk_sha256 = self.installed_apk_sha256(udid, AGENT_PACKAGE).await?;
+        let proof = crate::capability::install_only_proof(
+            agent.clone(),
+            agent_apk_sha256,
+            Self::agent_runner(),
+        );
+        // Refuse to hand back a proof that does not satisfy the contract it names, rather
+        // than let a caller store it and find out later: the digest has to be a digest, and
+        // the lifecycle flags have to say that nothing was started.
+        proof.validate_install_only()?;
+        // Keep the synchronous readers in step, the same way `preflight_agent` does.
+        let status = self.agent_status_for(udid, riviu_core::AgentState::Ready, Some(&agent), None);
+        self.publish_agent_status(status);
+        Ok(proof)
+    }
+
     /// Everything Flow's preflight needs to qualify this phone for this target app.
     ///
     /// Implemented 17/08/2026. Before that the trait default returned a typed `unsupported`

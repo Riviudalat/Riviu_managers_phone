@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DeviceInfo } from "../types";
 import {
+  backupDevice,
   deviceShell,
   deviceSwipe,
   deviceSwipePath,
@@ -487,6 +488,44 @@ describe("FocusStream media export", () => {
     fireEvent.click(empty.getByRole("button", { name: "Lấy ảnh/video từ máy" }));
     expect(await empty.findByText("Máy không có ảnh/video nào")).toBeTruthy();
   });
+  it("does not report a backup it declined to start", async () => {
+    // `runBusy` returns immediately when the device is already busy, which is right —
+    // two of these on one phone is the contention this project spent a week removing.
+    // The success toast sat *after* that await, and Backup, Restore and Reboot are the
+    // three menu rows with no `disabled: busy`, so they are clickable during exactly
+    // the window in which nothing happens. A second click picked a second folder, did
+    // no work, and reported "Backup xong" against a folder that stays empty — the
+    // operator now believes a backup exists.
+    let release: (() => void) | undefined;
+    vi.mocked(backupDevice).mockImplementation(
+      () => new Promise<void>((resolve) => { release = resolve; }),
+    );
+    // Backup and Restore are iOS-only rows, so this needs an iPhone.
+    const { getByRole, findByText, queryByText } = renderOverlay({
+      ...fixture,
+      udid: "MOCK-IPHONE-01",
+      name: "iPhone 8",
+      model: "iPhone10,1",
+      platform: "ios",
+      osVersion: "16.7.15",
+    });
+
+    fireEvent.click(getByRole("button", { name: "Backup" }));
+    await findByText("Đang backup…");
+
+    // Click it again while the first is still running.
+    fireEvent.click(getByRole("button", { name: "Backup" }));
+    expect(await findByText("Máy đang bận")).toBeTruthy();
+    expect(
+      queryByText("Backup xong"),
+      "a backup that never ran must not be reported as finished",
+    ).toBeNull();
+
+    release?.();
+    expect(await findByText("Backup xong")).toBeTruthy();
+  
+  });
+
 });
 
 describe("FocusStream control lease lifecycle", () => {

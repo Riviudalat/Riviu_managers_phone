@@ -14,8 +14,8 @@
 //! decisions below be tested rather than argued about.
 
 use riviu_core::{
-    ActiveTransport, DeviceCapabilitySnapshot, InstalledAgentIdentity, InstalledTargetIdentity,
-    QualifiedGeometry, ScreenOrientation,
+    ActiveTransport, AgentInstallProof, DeviceCapabilitySnapshot, InstalledAgentIdentity,
+    InstalledTargetIdentity, QualifiedGeometry, ScreenOrientation,
 };
 
 use crate::adb::DisplayGeometry;
@@ -150,8 +150,105 @@ pub(crate) fn build_snapshot(facts: AndroidCapabilityFacts) -> DeviceCapabilityS
     }
 }
 
+/// The proof that the agent is installed and answering, with nothing else started.
+///
+/// **Why this exists at all.** `DeviceControlPlane::preflight_agent` and `repair_agent`
+/// both go through `DeviceDriver::repair_agent_install_only`, and that is deliberate rather
+/// than a slip: an existing test pins it — preflight must not open a session, must not
+/// start a stream, and must not call the driver's own `preflight_agent`, because checking
+/// on a phone should not disturb the phone. Only the iOS drivers implemented it. On Android
+/// every caller therefore reached the trait's `unsupported(...)` default, and each of these
+/// failed for that one reason: Settings' Check and Repair on all twenty rows, the toolbar's
+/// bulk repair, every legacy script job (`job_queue` calls it as the first line of
+/// `run_on_device`), and the nurture comment preflight — whose refusal told the operator to
+/// run the Agent Repair that had just failed for the same reason.
+///
+/// Android satisfies the install-only contract naturally. `ensure_agent` installs the two
+/// APK halves and starts the instrumentation; the instrumentation is the agent's own
+/// process, not a UI session and not a producer, so nothing here creates either.
+///
+/// Split out as a function because it is the part that can be tested without a phone: the
+/// contract is a shape, and `validate_install_only` refuses a proof that claims a session
+/// or a stream, or that carries a digest that is not a digest.
+pub(crate) fn install_only_proof(
+    agent: PackageIdentity,
+    agent_apk_sha256: String,
+    runner: String,
+) -> AgentInstallProof {
+    AgentInstallProof {
+        installed: InstalledAgentIdentity {
+            bundle_id: agent.package,
+            version: agent.version,
+            build: agent.build,
+            executable_name: runner,
+            signer_identity_sha256: agent_apk_sha256.clone(),
+        },
+        // The same digest twice, for the same reason `build_snapshot` carries it twice: on
+        // Android the artifact that was selected *is* the file on the phone, because
+        // `install_agent_apks` is what put it there.
+        artifact_sha256: agent_apk_sha256,
+        // `ensure_agent` returning Ok means the server answered and could read the
+        // accessibility tree — the liveness this flag names.
+        protected_auth_ready: true,
+        session_created: false,
+        stream_started: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_install_only_proof_satisfies_the_contract_it_names() {
+        // The whole reason this shape exists: a caller is promised that checking on a phone
+        // installed nothing it did not have to, and started nothing at all. Android could
+        // not make that promise before — `repair_agent_install_only` fell to the trait's
+        // `unsupported(...)`, so Settings' Check and Repair, the bulk repair, every legacy
+        // script job and the nurture comment preflight all failed on every phone in a
+        // twenty-device fleet, for one missing method.
+        let proof = install_only_proof(
+            PackageIdentity {
+                package: "io.appium.uiautomator2.server".to_string(),
+                version: "7.1.1".to_string(),
+                build: "71".to_string(),
+            },
+            "a".repeat(64),
+            "io.appium.uiautomator2.server.test/androidx.test.runner.AndroidJUnitRunner"
+                .to_string(),
+        );
+
+        proof
+            .validate_install_only()
+            .expect("the proof this driver hands back must pass the check its callers run");
+        assert!(!proof.session_created, "install-only opens no session");
+        assert!(!proof.stream_started, "install-only starts no producer");
+        assert!(proof.protected_auth_ready);
+        // One file, named twice: `install_agent_apks` put the artifact there, so the
+        // installed digest and the qualified digest are the same by construction.
+        assert_eq!(
+            proof.artifact_sha256,
+            proof.installed.signer_identity_sha256
+        );
+        assert_eq!(proof.installed.bundle_id, "io.appium.uiautomator2.server");
+    }
+
+    #[test]
+    fn a_proof_with_a_digest_that_is_not_one_is_refused() {
+        // `validate_install_only` is called on the driver's own result before it is
+        // returned, so this is the guard that stops a malformed proof reaching storage and
+        // being found out later.
+        let proof = install_only_proof(
+            PackageIdentity {
+                package: "io.appium.uiautomator2.server".to_string(),
+                version: "7.1.1".to_string(),
+                build: "71".to_string(),
+            },
+            "not-a-digest".to_string(),
+            "runner".to_string(),
+        );
+
+        assert!(proof.validate_install_only().is_err());
+    }
+
     use riviu_core::flow::qualified_geometry_profile_id;
 
     use super::*;

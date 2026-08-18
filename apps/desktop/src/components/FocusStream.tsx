@@ -235,12 +235,33 @@ export function FocusStream({
     }
   };
 
-  const runBusy = async (work: () => Promise<void>) => {
-    if (inFlight.current) return;
+  /// Run one thing at a time on this phone, and say so when that means not running.
+  ///
+  /// Refusing while another operation holds the device is right — two of these on one
+  /// phone is the contention this project spent a week removing. Refusing *silently* was
+  /// not: `backup`, `restore` and `reboot` put their success toast after the `await`, and
+  /// those three menu rows are the only ones with no `disabled: busy`, so they are
+  /// clickable during exactly the window in which this does nothing. Clicking Backup a
+  /// second time while the first is still running picked a second folder, skipped the
+  /// work, and reported "Backup xong" against a folder that stays empty. `inFlight` is
+  /// also set by `runExclusive`, which never sets `busy` at all, so any tap or swipe on
+  /// the phone screen opens the same window.
+  ///
+  /// Returns whether the work ran, so a caller cannot claim an outcome it did not get.
+  const runBusy = async (work: () => Promise<void>): Promise<boolean> => {
+    if (inFlight.current) {
+      pushToast(
+        "warn",
+        "Máy đang bận",
+        `${device.name} đang chạy một thao tác khác — chờ xong rồi thử lại.`,
+      );
+      return false;
+    }
     inFlight.current = true;
     setBusy(true);
     try {
       await work();
+      return true;
     } finally {
       inFlight.current = false;
       setBusy(false);
@@ -522,10 +543,10 @@ export function FocusStream({
     });
     if (!proceed) return;
     try {
-      await runBusy(async () => {
+      const ran = await runBusy(async () => {
         await rebootDevice(device.udid);
       });
-      pushToast("info", "Đang khởi động lại", device.name);
+      if (ran) pushToast("info", "Đang khởi động lại", device.name);
     } catch (e) {
       toastError("Khởi động lại thất bại", e);
     }
@@ -536,10 +557,10 @@ export function FocusStream({
     if (!dir) return;
     pushToast("info", "Đang backup…", `${device.name} — có thể mất vài phút.`);
     try {
-      await runBusy(async () => {
+      const ran = await runBusy(async () => {
         await backupDevice(device.udid, dir);
       });
-      pushToast("ok", "Backup xong", dir);
+      if (ran) pushToast("ok", "Backup xong", dir);
     } catch (e) {
       toastError("Backup thất bại", e);
     }
@@ -557,10 +578,10 @@ export function FocusStream({
     if (!proceed) return;
     pushToast("info", "Đang phục hồi…", device.name);
     try {
-      await runBusy(async () => {
+      const ran = await runBusy(async () => {
         await restoreDevice(device.udid, dir);
       });
-      pushToast("ok", "Đã phục hồi", "Thiết bị sẽ khởi động lại.");
+      if (ran) pushToast("ok", "Đã phục hồi", "Thiết bị sẽ khởi động lại.");
     } catch (e) {
       toastError("Phục hồi thất bại", e);
     }

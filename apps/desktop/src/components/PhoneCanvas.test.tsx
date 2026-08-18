@@ -63,4 +63,26 @@ describe("PhoneCanvas", () => {
     );
     expect(container.querySelector("canvas")?.className).toBe("phone-canvas tile-touch");
   });
+
+  it("styles the canvas it builds for a different phone", () => {
+    // The other side of the fix above. `className` is rightly not a dependency of
+    // the effect that creates the canvas, but `udid` is — so switching phones in the
+    // overlay ("Đổi máy") builds a fresh canvas while the styling effect, which depends
+    // only on `className` and `fill`, stays asleep. The new canvas came up with no
+    // class at all: none of `.phone-canvas`, `.is-fill` or `.focus-touch` applied,
+    // so the video drew at its intrinsic bitmap size centred in the pane instead of
+    // filling it, and every tap on the area around it measured against a box that was
+    // no longer where the picture was.
+    const { container, rerender } = render(
+      <PhoneCanvas udid="ce06" surfaceId="overlay" fill className="focus-touch" />,
+    );
+    const before = container.querySelector("canvas");
+    expect(before?.className).toBe("phone-canvas is-fill focus-touch");
+
+    rerender(<PhoneCanvas udid="ce11" surfaceId="overlay" fill className="focus-touch" />);
+
+    const after = container.querySelector("canvas");
+    expect(after, "a different phone gets a different canvas").not.toBe(before);
+    expect(after?.className).toBe("phone-canvas is-fill focus-touch");
+  });
 });

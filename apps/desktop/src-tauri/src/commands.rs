@@ -840,6 +840,27 @@ pub async fn device_control_end(
     state.end_overlay_session(&udid).await
 }
 
+/// The skip entry a phone gets when its session could not be opened.
+///
+/// A function rather than two arms inline, because the two arms were the defect:
+/// `DeviceBusy` was recorded and the loop carried on, and **every other code aborted the
+/// whole batch** — discarding `completed_udids` and telling the operator the fleet action
+/// had failed when nineteen of twenty phones had already taken the input. A phone that is
+/// unplugged, whose agent has died, or that answers with anything unexpected is exactly as
+/// skippable as a busy one, and on a fleet this size it is the likelier of the two.
+///
+/// `message` is `None` only for Busy, which explains itself through `current_owner`.
+/// Anything else carries its reason: "one of your twenty phones did not work" is not
+/// something an operator can act on.
+fn open_failure_skip(udid: String, error: CommandError) -> GroupInputSkip {
+    let busy = error.code == "DeviceBusy";
+    GroupInputSkip {
+        udid,
+        code: error.code,
+        current_owner: error.current_owner,
+        message: (!busy).then(|| error.message.to_string()),
+    }
+}
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn group_input(
@@ -872,34 +893,32 @@ pub async fn group_input(
             {
                 Ok(context) => Some(context),
                 Err(error) => {
-                    let error = CommandError::from(error);
-                    if error.code == "DeviceBusy" {
-                        report.skipped.push(GroupInputSkip {
-                            udid,
-                            code: error.code,
-                            // `current_owner` already names who has the phone, which is the
-                            // whole story for Busy.
-                            current_owner: error.current_owner,
-                            message: None,
-                        });
-                        continue;
-                    }
-                    return Err(error);
+                    report
+                        .skipped
+                        .push(open_failure_skip(udid, CommandError::from(error)));
+                    continue;
                 }
             }
         } else {
             None
         };
+        // The same rule as the open above: a lookup that fails is this phone's problem,
+        // not the batch's. `?` here threw away every phone already actioned.
         let session = match overlay_session {
             Some(session) => session,
-            None => state
-                .control
-                .session(
-                    owned
-                        .as_ref()
-                        .expect("group input opened a session when no overlay is held"),
-                )
-                .map_err(CommandError::from)?,
+            None => match state.control.session(
+                owned
+                    .as_ref()
+                    .expect("group input opened a session when no overlay is held"),
+            ) {
+                Ok(session) => session,
+                Err(error) => {
+                    report
+                        .skipped
+                        .push(open_failure_skip(udid, CommandError::from(error)));
+                    continue;
+                }
+            },
         };
         let action = match kind.as_str() {
             "tap" => {
@@ -952,6 +971,8 @@ pub async fn group_input(
             Some(context) => state.control.close_manual_session(context).err(),
             None => None,
         };
+        // Both arms below consume `udid`, and the cleanup report after them needs it.
+        let udid_for_cleanup = udid.clone();
         match action {
             Ok(()) => report.completed_udids.push(udid),
             // **Record and carry on, rather than abort.** This used to be `?`, so the first
@@ -966,8 +987,19 @@ pub async fn group_input(
                 message: Some(error.to_string()),
             }),
         }
+        // A cleanup that failed does not undo an input that landed, and it is not a
+        // reason to abandon the phones after this one. The udid stays in
+        // `completed_udids` because the tap really did happen; the failure is reported
+        // beside it so the operator learns the session did not close cleanly. Appearing
+        // in both lists is the accurate description of that, not a contradiction.
         if let Some(error) = cleanup {
-            return Err(CommandError::from(error));
+            let error = CommandError::from(error);
+            report.skipped.push(GroupInputSkip {
+                udid: udid_for_cleanup,
+                code: "CleanupFailed".to_string(),
+                current_owner: None,
+                message: Some(error.message.to_string()),
+            });
         }
     }
     Ok(report)
@@ -1689,6 +1721,37 @@ mod tests {
         for kind in ["tap", "swipe", "type", "home"] {
             assert!(check_group_input(kind, false).is_ok(), "{kind}");
         }
+    }
+
+    #[test]
+    fn a_phone_that_cannot_be_opened_is_skipped_whatever_the_reason() {
+        // `DeviceBusy` was the only code that produced a skip. Everything else returned,
+        // which discarded `completed_udids` and reported the whole fleet action as failed —
+        // on twenty phones, nineteen of which had already taken the input. The phones that
+        // hit this are the ordinary ones: a cable that dropped, an agent that died, a
+        // serial adb stopped answering for.
+        let unplugged = open_failure_skip(
+            "ce07".into(),
+            CommandError::code("DeviceUnavailable", "device 'ce07' not found"),
+        );
+        assert_eq!(unplugged.code, "DeviceUnavailable");
+        assert_eq!(
+            unplugged.message.as_deref(),
+            Some("device 'ce07' not found"),
+            "a code alone is not something an operator can act on"
+        );
+
+        // Busy keeps its own shape: the holder is the whole story, and repeating it as a
+        // message would put the same sentence on screen twice.
+        let busy = open_failure_skip(
+            "ce06".into(),
+            CommandError {
+                current_owner: Some(DeviceWorkOwner::Nurture),
+                ..CommandError::code("DeviceBusy", "device 'ce06' is held by Nurture")
+            },
+        );
+        assert_eq!(busy.message, None);
+        assert_eq!(busy.current_owner, Some(DeviceWorkOwner::Nurture));
     }
 
     #[test]
