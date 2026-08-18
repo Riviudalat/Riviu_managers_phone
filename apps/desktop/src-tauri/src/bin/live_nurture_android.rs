@@ -8,11 +8,19 @@
 //! **Do not run this while the desktop app is open.** Two processes competing for the same
 //! phones is the contention this project spent a week removing.
 //!
-//! Comments are off (`comment_prob = 0`) and cannot be switched on here: writing a comment
-//! needs an AI key and puts text on a real account, which is not a thing a measurement
-//! harness should do. That promise is kept by *persisting* the settings rather than by
-//! passing them — see the note at the call, and the follow that happened before it did.
-//! What it does exercise is everything underneath — an exclusive lease, a
+//! Comments are **off unless `--comment-prob` says otherwise**, and switching them on posts
+//! real text under the logged-in account. That is the operator's call and this harness now
+//! takes it as an instruction rather than refusing it outright — the earlier version could
+//! not be asked at all, which meant the feature could only ever be exercised by hand.
+//!
+//! The AI key is **never typed on the command line**. Settings are inherited from the
+//! desktop app's own database — key, model, base url, language, tone directions and word
+//! cap — by copying that file into the scratch directory and working on the copy, so a run
+//! here can never rewrite what the operator configured in the app. The copy carries the key
+//! in plaintext for the life of the run and is deleted at the end; a crash leaves it in
+//! `%TEMP%`, which is the same exposure the app's own database already has.
+//!
+//! What it exercises is everything underneath — an exclusive lease, a
 //! stream-budget slot, a UI session, TikTok in the foreground, watch and swipe and like —
 //! per device, concurrently. That is the part that decides whether the feature works for a
 //! whole fleet or only for the first couple of phones.
@@ -64,6 +72,19 @@ struct Args {
     /// verified without performing one — and then it is worth doing on one phone rather than
     /// on twenty.
     follow_prob: u32,
+    /// Percent chance of writing and posting a comment on each watched post.
+    ///
+    /// **This posts real text under the logged-in account.** Zero by default, and the only
+    /// way to raise it is to say so here — there is no stored value that can switch it on
+    /// behind the operator's back, because the inherited settings have this one field
+    /// overwritten unconditionally.
+    ///
+    /// The text is not canned: it is generated per post from what is on the screen, in the
+    /// language and tone the desktop app has stored, and a second model call scores it for
+    /// relevance and genericity before it is typed. What can still go wrong is on the
+    /// account, not in the code — so start at a low number on one phone and read what it
+    /// wrote before raising it.
+    comment_prob: u32,
 }
 
 fn parse_args() -> Args {
@@ -74,6 +95,7 @@ fn parse_args() -> Args {
         videos: 3,
         like_prob: 30,
         follow_prob: 0,
+        comment_prob: 0,
     };
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut index = 0;
@@ -85,6 +107,7 @@ fn parse_args() -> Args {
             "--videos" => args.videos = value as u32,
             "--like-prob" => args.like_prob = value.min(100) as u32,
             "--follow-prob" => args.follow_prob = value.min(100) as u32,
+            "--comment-prob" => args.comment_prob = value.min(100) as u32,
             "--only" => args.only = raw[index + 1].split(',').map(str::to_string).collect(),
             _ => {}
         }
@@ -132,6 +155,31 @@ async fn main() -> anyhow::Result<()> {
 
     let scratch = std::env::temp_dir().join(format!("riviu-live-nurture-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&scratch)?;
+    // **The desktop app's own database, copied.** The AI key, the model, the base url, the
+    // comment language, the tone directions and the word cap all live there and nowhere
+    // else, so a harness that starts from `Default` cannot write a comment at all — it has
+    // no key. Copying rather than opening the real file means a run here can never rewrite
+    // what the operator set in the app, and cannot be blamed for a settings change either.
+    //
+    // Missing file is not an error: everything except commenting works from defaults, and
+    // saying so beats refusing to start.
+    let app_db = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("riviu-managers-phone")
+        .join("riviu.db");
+    let inherited = if app_db.is_file() {
+        match std::fs::copy(&app_db, scratch.join("riviu.db")) {
+            Ok(_) => true,
+            Err(error) => {
+                say(&format!(
+                    "không chép được cấu hình từ app ({error}) — chạy bằng mặc định"
+                ));
+                false
+            }
+        }
+    } else {
+        false
+    };
     let database = Arc::new(Database::open(scratch.join("riviu.db"))?);
     let control = Arc::new(DeviceControlPlane::new(
         android.clone(),
@@ -146,19 +194,55 @@ async fn main() -> anyhow::Result<()> {
     )
     .with_frame_text_source(Arc::new(DesktopFrameTextSource));
 
+    // Start from what the app has stored rather than from `Default`, or the key, the model
+    // and the tone directions are all empty and a comment cannot be written at all. Only the
+    // fields this harness is *asked* about are overwritten.
+    //
+    // `comment_prob` is overwritten **unconditionally**, including with zero. The stored
+    // value must never be able to switch commenting on for a run that did not ask for it —
+    // and the app's stored value is a number the operator set for the app, not for this.
+    let stored = database.get_nurture_settings().unwrap_or_default();
+    let has_key = !stored.api_key.trim().is_empty();
+    println!(
+        "cấu hình: {} — model {}, ngôn ngữ {}, tối đa {} từ, định hướng {:?}, khoá API {}",
+        if inherited {
+            "kế thừa từ app"
+        } else {
+            "mặc định (không thấy CSDL của app)"
+        },
+        stored.model,
+        stored.comment_lang,
+        stored.max_comment_words,
+        stored.ai_directions,
+        if has_key { "có" } else { "TRỐNG" }
+    );
+    if args.comment_prob > 0 && !has_key {
+        anyhow::bail!(
+            "--comment-prob {} nhưng không có khoá API trong cấu hình của app. Điền khoá \
+             trong menu Nuôi TikTok rồi chạy lại — ở đây cố tình không nhận khoá qua dòng \
+             lệnh, vì một khoá gõ trên dòng lệnh sẽ nằm lại trong lịch sử shell",
+            args.comment_prob
+        );
+    }
+    if args.comment_prob > 0 {
+        println!(
+            "** BÌNH LUẬN ĐANG BẬT ({}%) — sẽ đăng chữ thật lên tài khoản thật **",
+            args.comment_prob
+        );
+    }
+
     let settings = NurtureSettings {
         num_videos: args.videos,
         num_rounds: 1,
         like_prob: args.like_prob,
-        // Not configurable, and deliberately: a comment is text on a real account.
-        comment_prob: 0,
+        comment_prob: args.comment_prob,
         follow_prob: args.follow_prob,
         frenzy_prob: 0,
         watch_min: 2.0,
         watch_max: 4.0,
         stagger_delay_min: 1,
         stagger_delay_max: 3,
-        ..Default::default()
+        ..stored
     };
 
     // **Write them down before running, or they are not the settings that run.**
@@ -170,8 +254,9 @@ async fn main() -> anyhow::Result<()> {
     //
     // Measured, not reasoned: on 18/08/2026 ce0717171c2a64d50d followed an author during a
     // run whose settings said `follow_prob: 0`. A follow is a real relationship on a real
-    // account, and the same channel governs `comment_prob`, which this harness promises in
-    // its own header never to switch on. Persisting first makes both promises true.
+    // account, and the same channel governs `comment_prob` — so a run asked for zero
+    // comments could otherwise post them from a stored value it never saw. Persisting the
+    // merged settings first is what makes `--comment-prob` mean what it says.
     database.save_nurture_settings(&settings)?;
 
     println!(
@@ -280,6 +365,79 @@ async fn main() -> anyhow::Result<()> {
         targets.len(),
         started.elapsed().as_secs_f64()
     );
+
+    // Every comment the run *considered*, not just the ones that posted. A skip is the more
+    // interesting row: it says the evidence was unusable or the verifier rejected the draft,
+    // and both are working as intended rather than failures to chase.
+    match database.list_nurture_comment_attempts(200) {
+        Ok(attempts) if !attempts.is_empty() => {
+            println!("\nbình luận — {} lượt:", attempts.len());
+            let mut spent = 0.0;
+            for attempt in &attempts {
+                spent += attempt.usd;
+                let scores = match (attempt.relevance, attempt.evidence_support) {
+                    (Some(relevance), Some(evidence)) => {
+                        format!("  [hợp đề {relevance}, bằng chứng {evidence}]")
+                    }
+                    _ => String::new(),
+                };
+                println!(
+                    "  {:<22} {:<22} {}{}",
+                    attempt.udid,
+                    attempt.outcome,
+                    if attempt.preview.is_empty() {
+                        format!("(caption: {})", attempt.caption_preview)
+                    } else {
+                        format!("{:?}", attempt.preview)
+                    },
+                    scores
+                );
+            }
+            println!("  chi phí: {spent:.4} USD");
+        }
+        Ok(_) if args.comment_prob > 0 => {
+            println!("\nbình luận: bật {}% nhưng không lượt nào được thử — xác suất chưa nổ, hoặc phiên kết thúc trước đó", args.comment_prob);
+        }
+        Ok(_) => {}
+        Err(error) => println!("\nkhông đọc được các lượt bình luận: {error}"),
+    }
+
     let _ = std::fs::remove_dir_all(&scratch);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// The promise in this file's own header, pinned the only way a promise about *source*
+    /// can be — by reading the source, the same way the scheduler's gate is pinned.
+    ///
+    /// `run_session` re-reads the stored settings row once per post, and since this harness
+    /// started inheriting the desktop app's database that row carries the operator's own
+    /// `commentProb`, set for the app and not for this. If the merged settings ever take
+    /// that field instead of overwriting it, a run asked for zero comments starts posting
+    /// them on real accounts without anyone asking — which is exactly what happened with
+    /// `follow_prob` on 18/08/2026, from the same channel.
+    #[test]
+    fn the_inherited_settings_can_never_switch_commenting_on() {
+        // Only the program, never this module: the negative assertion below quotes the
+        // string it is forbidding, so a whole-file scan finds its own footnote and passes
+        // for the wrong reason.
+        let whole = include_str!("live_nurture_android.rs");
+        let source = whole
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the program above the tests");
+        assert!(
+            source.contains("comment_prob: args.comment_prob,"),
+            "the rate has to come from the flag, unconditionally"
+        );
+        assert!(
+            !source.contains("comment_prob: stored"),
+            "the app's stored rate must not reach a run that did not ask for it"
+        );
+        assert!(
+            source.contains("..stored"),
+            "everything else is inherited on purpose — the key lives there and nowhere else"
+        );
+    }
 }

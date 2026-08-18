@@ -1145,6 +1145,17 @@ impl NurtureEngine {
         stop: &AtomicBool,
     ) -> Option<super::hierarchy::PreparedComment> {
         if settings.api_key.trim().is_empty() {
+            // **The one skip that used to leave no trace at all.** Every other reason a post
+            // goes uncommented writes a row, so the operator can read `nurture_comment_attempts`
+            // and see what happened; this one returned before the first of them. On screen it
+            // produced the identical line to "the frame had nothing worth saying", so a farm
+            // configured with no key looked like a farm that kept deciding to stay quiet.
+            self.record_context_skip_attempt(
+                udid,
+                settings,
+                context_source(settings),
+                "no_api_key",
+            );
             return None;
         }
         let frames = match self.collect_grounding_frames(udid, stop).await {
@@ -1184,12 +1195,23 @@ impl NurtureEngine {
         let comment = match prepared {
             Ok(comment) => comment,
             Err(error) => {
+                // **The reason has to survive the failure.** `context_skipped` on its own
+                // says a comment did not happen and refuses to say why, and the only copy of
+                // the why went to `tracing::warn!` — which no operator-facing surface reads,
+                // and which the command-line harness does not even install a subscriber for.
+                // A rejected API key, a model id that does not exist, a verifier that keeps
+                // scoring the draft as generic, and a network that is down all produced the
+                // same row, so the first real run of this feature could only say "it skipped".
+                //
+                // Bounded, because a transport error can carry a whole response body and this
+                // is a column an operator reads, not a log.
                 tracing::warn!("[nurture {udid}] không soạn được bình luận: {error}");
+                let reason: String = error.to_string().chars().take(160).collect();
                 self.record_context_skip_attempt(
                     udid,
                     settings,
                     context_source(settings),
-                    "context_skipped",
+                    &format!("context_skipped: {reason}"),
                 );
                 return None;
             }

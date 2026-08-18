@@ -292,23 +292,38 @@ pub async fn post_comment(
 ) -> anyhow::Result<CommentVerdict> {
     let mut drawer = CommentDrawer::new(session, labels, plan_tap);
     if drawer.send_query().is_none() {
+        // Nothing was opened, so there is nothing to close.
         return Ok(CommentVerdict::SendUnmeasured);
     }
+    let outcome = post_into_drawer(&mut drawer, text, stop).await;
+    // **Closed on the way out whatever happened, including on an error.** Every step below
+    // can fail with `?`, and each of those failures used to skip `leave` — which leaves the
+    // phone standing inside an open comment list, with the typed text still in the field.
+    // The feed loop's next gesture is then spent scrolling comments instead of the feed,
+    // which is the same way an interaction that wandered off the feed used to cost a whole
+    // session. The last of those sites is the worst: it is reached *after* Send was tapped,
+    // so the comment may well be posted and the drawer stays open on top of it.
+    drawer.leave(stop).await;
+    outcome
+}
+
+/// The steps that need an open drawer. Split out so [`post_comment`] can close it on every
+/// exit without repeating the call at each early return, and without a `?` bypassing it.
+async fn post_into_drawer<P: TapPlanner>(
+    drawer: &mut CommentDrawer<'_, P>,
+    text: &str,
+    stop: &AtomicBool,
+) -> anyhow::Result<CommentVerdict> {
     let Some(field) = drawer.open(stop).await? else {
-        drawer.leave(stop).await;
         return Ok(CommentVerdict::NoDrawer);
     };
     if !drawer.focus_and_type(&field, text, stop).await? {
-        drawer.leave(stop).await;
         return Ok(CommentVerdict::NoSendControl);
     }
     let Some(send) = drawer.await_armed(stop).await? else {
-        drawer.leave(stop).await;
         return Ok(CommentVerdict::NotArmed);
     };
-    let sent = drawer.tap_send_and_confirm_disarm(&send, stop).await?;
-    drawer.leave(stop).await;
-    Ok(if sent {
+    Ok(if drawer.tap_send_and_confirm_disarm(&send, stop).await? {
         CommentVerdict::Sent
     } else {
         CommentVerdict::NotConfirmed
@@ -376,6 +391,10 @@ mod tests {
         taps: Mutex<Vec<TapPoint>>,
         typed: Mutex<Vec<String>>,
         backs: Mutex<usize>,
+        /// Make the typing step fail, so the error path can be exercised. A transport
+        /// error here is the realistic one: the agent is reached, the drawer is open, and
+        /// the request dies mid-gesture.
+        typing_fails: bool,
     }
 
     impl FakeSession {
@@ -407,6 +426,9 @@ mod tests {
             Ok(())
         }
         async fn type_text(&self, text: &str) -> anyhow::Result<()> {
+            if self.typing_fails {
+                anyhow::bail!("agent went away mid-gesture");
+            }
             self.typed.lock().push(text.to_string());
             Ok(())
         }
@@ -573,5 +595,36 @@ mod tests {
             assert!(!verdict.reason().trim().is_empty(), "{verdict:?}");
             assert_eq!(verdict.is_sent(), verdict == CommentVerdict::Sent);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_drawer_is_closed_even_when_the_gesture_that_failed_was_mid_comment() {
+        // Every step between opening and sending can fail with `?`, and each of those
+        // failures used to return straight out of `post_comment` without closing anything.
+        // The phone is then standing inside an open comment list, and the feed loop's next
+        // swipe scrolls comments instead of the feed — the same way a wandering interaction
+        // used to cost a whole session.
+        let session = FakeSession {
+            typing_fails: true,
+            ..FakeSession::with(vec![
+                ("bình luận", Some(element(true))),
+                ("android.widget.EditText", Some(element(true))),
+                ("@2131823284", Some(element(false))), // present, so typing is attempted
+            ])
+        };
+        let mut planner = centre_planner();
+        let stop = AtomicBool::new(false);
+
+        let outcome = post_comment(&session, vietnamese(), &mut planner, "chào", &stop).await;
+
+        assert!(
+            outcome.is_err(),
+            "the failure itself must still be reported, not swallowed by the cleanup"
+        );
+        assert!(
+            *session.backs.lock() > 0,
+            "the drawer has to be closed on the way out, or the next feed swipe happens \
+             inside the comment list"
+        );
     }
 }
