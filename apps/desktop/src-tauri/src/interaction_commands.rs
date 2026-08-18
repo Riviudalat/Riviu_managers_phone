@@ -796,13 +796,29 @@ async fn execute_thread_campaign(
             .insert(message.target_key.clone());
     }
 
+    // **Bounded by the stream budget, because exhausting it is a refusal and not a queue.**
+    //
+    // Each assignment holds one foreground stream slot while it runs, so N cohorts want N
+    // slots at once. Past the budget, `preview_foreground_victim` answers
+    // `CapacityExhausted` and the assignment *fails* — it does not wait its turn. Starting
+    // eight teams against a budget of four would not run slower, it would fail half the
+    // campaign for a reason that has nothing to do with the phones.
+    //
+    // Held for a whole cohort rather than per assignment: coarser than it has to be, and
+    // the coarseness is what makes it safe to reason about — a team that has a permit can
+    // always open its next phone.
+    let gate = Arc::new(tokio::sync::Semaphore::new(
+        control.stream_capacity().max(1),
+    ));
     // `None` for a single cohort rather than a set holding every key: it is the same work
     // either way, and it keeps the ordinary one-team run on the path that has no filter to
     // get wrong.
     let single = by_cohort.len() <= 1;
     let mut running = Vec::with_capacity(by_cohort.len().max(1));
     for (_, targets) in by_cohort {
-        running.push(tokio::spawn(run_cohort(
+        let gate = gate.clone();
+        running.push(tokio::spawn(gated_cohort(
+            gate,
             (!single).then_some(targets),
             db.clone(),
             control.clone(),
@@ -863,6 +879,46 @@ async fn execute_thread_campaign(
         Some(error) => Err(error),
         None => Ok(()),
     }
+}
+
+/// [`run_cohort`], but holding a slice of the stream budget for as long as it runs.
+///
+/// A separate function rather than a block inside the spawn, so the permit's lifetime is
+/// the task's lifetime by construction: acquiring it inside the future and dropping it at
+/// the end is exactly what "this team is using a phone" means, and there is no path out of
+/// here that forgets to release it.
+#[allow(clippy::too_many_arguments)]
+async fn gated_cohort(
+    gate: Arc<tokio::sync::Semaphore>,
+    mine: Option<std::collections::HashSet<String>>,
+    db: Arc<riviu_core::db::Database>,
+    control: Arc<DeviceControlPlane>,
+    engine: riviu_core::NurtureEngine,
+    events: riviu_core::EventBus,
+    campaign_id: String,
+    request: ThreadCampaignRequest,
+    plan: ThreadPlan,
+    only_assignments: Option<std::collections::HashSet<String>>,
+    artifacts: riviu_core::FlowArtifactStore,
+    frame_source: Arc<dyn riviu_core::GenerationFrameSource>,
+) -> anyhow::Result<(usize, usize)> {
+    // The semaphore is never closed, so this only fails if it is — treat that as "go", since
+    // refusing a whole team over a bookkeeping error would lose more than it protects.
+    let _permit = gate.acquire().await;
+    run_cohort(
+        mine,
+        db,
+        control,
+        engine,
+        events,
+        campaign_id,
+        request,
+        plan,
+        only_assignments,
+        artifacts,
+        frame_source,
+    )
+    .await
 }
 
 /// Run one cohort's share of a campaign: its links, its phones, its own identity map.

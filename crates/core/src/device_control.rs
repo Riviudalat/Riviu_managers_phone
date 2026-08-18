@@ -418,6 +418,17 @@ impl DeviceControlPlane {
             .map_err(|_| DeviceControlError::CleanupWorkerClosed)?
     }
 
+    /// How many devices may hold a foreground stream at once.
+    ///
+    /// Exposed for callers that fan out across devices and need to bound themselves:
+    /// exhausting this is not a queue, it is a **refusal** — `preview_foreground_victim`
+    /// returns `CapacityExhausted` when the budget is full and there is no background
+    /// producer to evict. A caller that starts more concurrent work than this does not
+    /// run slower, it fails the excess.
+    pub fn stream_capacity(&self) -> usize {
+        self.streams.configured_limit()
+    }
+
     pub async fn reserve_ui_capacity(
         &self,
         context: DeviceExclusiveContext,
