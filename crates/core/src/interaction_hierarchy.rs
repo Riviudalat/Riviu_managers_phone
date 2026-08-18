@@ -732,16 +732,29 @@ where
 
 /// How many times the comment list is scrolled looking for the parent.
 ///
-/// Same budget and same reason as the pixel path's: every reply is sent from a
-/// *different* device that re-opens the link fresh, so TikTok re-ranks the list and the
-/// campaign's own comment is under no obligation to still be near the top.
+/// Same reason as the pixel path's: every reply is sent from a *different* device that
+/// re-opens the link fresh, so TikTok re-ranks the list and the campaign's own comment is
+/// under no obligation to still be near the top.
+///
+/// **Ten, and the old four was measured short rather than argued short.** On 19/08/2026, on
+/// a post carrying about twenty-five comments, the third actor of a star spent all four
+/// scrolls, found no folded section to open, and refused — while the second actor, looking a
+/// minute earlier, had found the same parent and replied. Nothing was wrong except that the
+/// list was longer than the budget. One scroll covers roughly two or three rows, so four
+/// reaches about ten comments deep: fine for the post this number was chosen on, and short
+/// for any post a campaign has been working.
+///
+/// The cost is paid only by replies that fail, and only in full by the ones that were going
+/// to fail anyway — a parent found on the second scroll still costs two. Bounded because a
+/// list that will not yield the parent has to end in a refusal rather than in scrolling
+/// forever, and because a swipe that closes the drawer is caught on every turn.
+const PARENT_SCROLL_ATTEMPTS: u32 = 10;
+
 /// How long the feed gets to render an author label after the phone is sent Home.
 ///
 /// Bounded, and a miss is not a failure: the baseline read before the tap is kept, which is
 /// exactly as good as it was before any of this existed.
 const BASELINE_SETTLE: Duration = Duration::from_secs(4);
-
-const PARENT_SCROLL_ATTEMPTS: u32 = 4;
 
 /// Tap `View folded comments`, if this build has it measured and it is on screen.
 ///
