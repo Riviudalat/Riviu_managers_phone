@@ -464,6 +464,22 @@ impl UiSession for AndroidUiSession {
             .map(|_| ())
     }
 
+    /// `am force-stop` and then launch, which on this platform is a real restart.
+    ///
+    /// The default would only re-raise a process that is already in front, and that is
+    /// exactly the case this exists for: a TikTok whose feed has run dry shows the same
+    /// card no matter how many times it is launched, and comes back with a new one after
+    /// being stopped. Measured on ce051715081fe20f03, 18/08/2026.
+    async fn restart_app(&self, bundle_id: &str) -> anyhow::Result<()> {
+        let package = crate::adb::validate_package_name(bundle_id)?;
+        // A force-stop on a package that is not running is not an error, so this needs no
+        // check first.
+        self.adb
+            .shell(&self.serial, &format!("am force-stop {package}"))
+            .await?;
+        self.launch_app_foreground(bundle_id).await
+    }
+
     async fn active_app_bundle(&self) -> anyhow::Result<String> {
         // `dumpsys window windows` no longer carries `mCurrentFocus`: measured
         // empty on Android 15 (Redmi Note 12, HyperOS `OS2.0.207.0`) while it is

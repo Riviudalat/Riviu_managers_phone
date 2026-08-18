@@ -62,6 +62,15 @@ const OFF_FEED_LIMIT: u32 = 6;
 /// How many consecutive swipes may fail to change the post before stopping.
 const STUCK_SWIPE_LIMIT: u32 = 4;
 
+/// Unproven swipes before TikTok is restarted — **below** the give-up limit, deliberately.
+///
+/// The feed loop runs exactly `num_videos` passes, so it makes at most that many swipe
+/// attempts: a session asked for two videos can never reach a counter of four. Measured
+/// 18/08/2026 on the fleet, where every stuck phone ended on `2/4` and the recovery
+/// behind that four could not have fired even if it had existed. Two is the smallest
+/// number that is still evidence rather than one disappointment.
+const STUCK_RESTART_AFTER: u32 = 2;
+
 /// Minimum settle time after a swipe before the first hierarchy read.
 ///
 /// The tree is queryable immediately but reports the outgoing card for a beat, so
@@ -834,6 +843,7 @@ pub async fn run_hierarchy_session(
     await_first_rail(&run, stop).await;
     let outcome = run_feed(
         run,
+        bundle_id,
         settings,
         started,
         max_duration,
@@ -1078,6 +1088,8 @@ async fn await_feed(
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_feed(
     mut run: HierarchyRun<'_>,
+    // TikTok's package on *this* phone, for the one recovery that has to restart it.
+    bundle_id: &str,
     settings: &NurtureSettings,
     started: Instant,
     max_duration: Option<Duration>,
@@ -1143,6 +1155,7 @@ pub(super) async fn run_feed(
 
     let mut off_feed_streak = 0u32;
     let mut stuck_swipes = 0u32;
+    let mut restarted = false;
     let mut last_interaction_at: Option<Instant> = None;
     let mut outcome = Outcome::Done;
     // Latched so an operator who switches comments on mid-run is told once why nothing
@@ -1193,14 +1206,28 @@ pub(super) async fn run_feed(
                 outcome = Outcome::Partial;
                 break;
             }
+            // **Use the ladder that already knows how to find the feed.**
+            //
+            // This swiped, blindly, and a swipe is the one gesture that cannot help: being
+            // off the feed means being on some *other* screen, and swiping a profile or a
+            // search page moves that page. Measured 18/08/2026 on ce0717171c2a64d50d, which
+            // left the feed after its first like and then reported "chưa thấy tab feed"
+            // six times in a row while swiping a screen that was never going to become the
+            // feed — a session that had already started successfully, ending at zero.
+            //
+            // `await_feed` is the same ladder the session opens with: tap the feed tab,
+            // decline a modal, tap Home, and press Back when the screen carries no label at
+            // all. Reusing it means there is one way back rather than two, and the second
+            // one working was never more than luck.
             report(
                 status,
-                format!("chưa thấy tab feed ({off_feed_streak}/{OFF_FEED_LIMIT}) — vuốt tiếp"),
+                format!("rời khỏi feed ({off_feed_streak}/{OFF_FEED_LIMIT}) — tìm đường về"),
             );
-            let before = PostFingerprint::default();
-            let _ = run
-                .swipe_next(human.swipe_duration_ms(false), &before, stop)
-                .await;
+            if !await_feed(&run, stop, status, report).await {
+                report(status, "không quay lại được feed — dừng".into());
+                outcome = Outcome::Partial;
+                break;
+            }
             continue;
         }
         off_feed_streak = 0;
@@ -1407,6 +1434,28 @@ pub(super) async fn run_feed(
             }
         }
 
+        // **An interaction can leave the feed, and a swipe spent elsewhere is a post lost.**
+        //
+        // Measured 18/08/2026 on ce0717171c2a64d50d: every post went watch → like → the
+        // like landed somewhere that opened another screen → swipe, on that screen → the
+        // card could not have changed, so the swipe read as unproven and the post counted
+        // for nothing. The walk back happened on the *next* pass, by which time the same
+        // thing was about to happen again, and the session ended at zero videos having
+        // recovered its way through every one of them.
+        //
+        // Checking here costs one cheap read per post and turns that into a post that
+        // counts. The fingerprint is retaken because the walk back is a navigation: the
+        // card in front of us afterwards is not necessarily the one `before` describes,
+        // and judging a swipe against a stale card is how a working swipe reads as stuck.
+        if !run.on_feed().await {
+            if !await_feed(&run, stop, status, report).await {
+                report(status, "không quay lại được feed — dừng".into());
+                outcome = Outcome::Partial;
+                break;
+            }
+            before = fingerprint(run.session, run.labels).await;
+        }
+
         status.swipe_attempts += 1;
         let advanced = run
             .swipe_next(
@@ -1429,6 +1478,32 @@ pub(super) async fn run_feed(
                 status,
                 format!("vuốt chưa chứng minh được đổi thẻ ({stuck_swipes}/{STUCK_SWIPE_LIMIT})"),
             );
+            if stuck_swipes >= STUCK_RESTART_AFTER && !restarted {
+                // **Restart TikTok once before believing the feed is over.**
+                //
+                // A feed that will not advance is not a broken swipe. Measured 18/08/2026
+                // on ce051715081fe20f03, whose card would not change for the nurture loop,
+                // for the agent, or for a plain `adb shell input swipe` — and which moved
+                // on the very first swipe after the app was force-stopped and reopened.
+                // Launching it again is not enough: `launch_app_foreground` only raises a
+                // process that is already in front, which is why repeated launches kept
+                // showing the same card and made this look like a dead phone.
+                //
+                // Once, and only after four honest attempts: restarting costs the watch
+                // history of the current session and a few seconds of startup, and a feed
+                // that is still stuck afterwards is telling us something a second restart
+                // will not change.
+                restarted = true;
+                report(status, "feed không đổi thẻ — khởi động lại TikTok".into());
+                let _ = run.session.restart_app(bundle_id).await;
+                if await_feed(&run, stop, status, report).await {
+                    // No need to re-fingerprint: the loop reads the card it is about to
+                    // leave at the top of each pass, and after a restart that is a
+                    // different card anyway.
+                    stuck_swipes = 0;
+                    continue;
+                }
+            }
             if stuck_swipes >= STUCK_SWIPE_LIMIT {
                 report(
                     status,
@@ -2060,6 +2135,379 @@ mod tests {
         assert!(
             phone.taps.load(Ordering::Relaxed) > 0,
             "the decline was never attempted, so this proves nothing"
+        );
+    }
+
+    /// A phone whose feed will not move until the app is restarted.
+    ///
+    /// Measured shape, from ce051715081fe20f03 on 18/08/2026: the same card for the nurture
+    /// loop, for the agent, and for a plain `adb shell input swipe` — and a different card
+    /// on the first swipe after a force-stop and relaunch. Every rail label is present the
+    /// whole time, so nothing here looks broken; only the *values* refuse to change, which
+    /// is exactly what a fingerprint is for.
+    #[derive(Default)]
+    struct StuckFeedPhone {
+        generation: std::sync::atomic::AtomicUsize,
+        restarts: std::sync::atomic::AtomicUsize,
+        raises: std::sync::atomic::AtomicUsize,
+    }
+
+    impl StuckFeedPhone {
+        fn card(&self, prefix: &str) -> Option<ElementBox> {
+            let generation = self.generation.load(Ordering::Relaxed);
+            Some(ElementBox {
+                x: 900.0,
+                y: 1_000.0,
+                width: 80.0,
+                height: 80.0,
+                description: Some(format!("{prefix} {generation}")),
+                enabled: true,
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for StuckFeedPhone {
+        async fn tap(&self, _point: TapPoint) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        // The swipe lands and changes nothing — until the app has been restarted, after
+        // which the feed behaves. That order is the measured shape: the gesture was never
+        // the problem, the app's state was.
+        async fn swipe(&self, _gesture: crate::types::SwipeGesture) -> anyhow::Result<()> {
+            if self.restarts.load(Ordering::Relaxed) > 0 {
+                self.generation.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(())
+        }
+
+        async fn type_text(&self, _text: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn home(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn find_and_tap(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn assert_visible(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+
+        async fn launch_app_foreground(&self, _bundle_id: &str) -> anyhow::Result<()> {
+            // Raising a process that is already in front is what the old code could do, and
+            // it is counted here to prove it is not what unsticks this.
+            self.raises.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn restart_app(&self, _bundle_id: &str) -> anyhow::Result<()> {
+            self.restarts.fetch_add(1, Ordering::Relaxed);
+            self.generation.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            let ElementQuery::Description { value, .. } = query else {
+                return Ok(None);
+            };
+            Ok(match value {
+                "For You" => Some(ElementBox {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 100.0,
+                    height: 40.0,
+                    description: None,
+                    enabled: true,
+                }),
+                "comments" => self.card("comments"),
+                "Share video" => self.card("Share video"),
+                "Original sound by" => self.card("Original sound by"),
+                _ => None,
+            })
+        }
+    }
+
+    /// Runs for real seconds: four honest swipe attempts have to happen before the restart
+    /// is earned, and each one waits for the card to settle. That delay is the design —
+    /// restarting costs the session its place in the feed, so it is not something to reach
+    /// for on the first disappointment.
+    #[tokio::test]
+    async fn a_feed_that_will_not_advance_gets_the_app_restarted_once() {
+        let phone = StuckFeedPhone::default();
+        let screen = (1_080.0, 2_220.0);
+        let run = HierarchyRun {
+            session: &phone,
+            labels: controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("measured set"),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        };
+        let settings = NurtureSettings {
+            num_videos: 4,
+            num_rounds: 1,
+            like_prob: 0,
+            comment_prob: 0,
+            follow_prob: 0,
+            frenzy_prob: 0,
+            watch_min: 0.1,
+            watch_max: 0.1,
+            ..Default::default()
+        };
+        let stop = AtomicBool::new(false);
+        let mut status = NurtureSessionStatus {
+            udid: "stuck-feed".into(),
+            running: true,
+            videos_done: 0,
+            swipe_attempts: 0,
+            like_attempts: 0,
+            comment_attempts: 0,
+            follow_attempts: 0,
+            likes: 0,
+            comments: 0,
+            follows: 0,
+            last_message: String::new(),
+            session_usd: 0.0,
+        };
+        let said = std::sync::Mutex::new(Vec::<String>::new());
+        let report = |status: &mut NurtureSessionStatus, message: String| {
+            status.last_message = message.clone();
+            said.lock().expect("messages").push(message);
+        };
+
+        run_feed(
+            run,
+            "com.ss.android.ugc.trill",
+            &settings,
+            Instant::now(),
+            Some(Duration::from_secs(120)),
+            &stop,
+            &mut status,
+            &report,
+            None,
+            None,
+        )
+        .await;
+
+        let said = said.lock().expect("messages").clone();
+        assert_eq!(
+            phone.restarts.load(Ordering::Relaxed),
+            1,
+            "once — a feed still stuck after a restart is saying something a second will not \
+             change: {said:?}"
+        );
+        assert!(
+            said.iter()
+                .any(|line| line.contains("khởi động lại TikTok")),
+            "the operator is told why the app went away and came back: {said:?}"
+        );
+        assert!(
+            status.videos_done > 0,
+            "the restart is only worth doing if the feed moves afterwards: {said:?}"
+        );
+    }
+
+    /// A phone that keeps falling off the feed, and comes back only via the Home tab.
+    ///
+    /// Measured on ce0717171c2a64d50d, 18/08/2026: it started cleanly, watched, liked, and
+    /// then left the feed — after which the loop swiped six times at whatever screen it had
+    /// landed on and ended the session at zero videos. Swiping is the one gesture that
+    /// cannot help there: being off the feed means being on some *other* page, and swiping
+    /// scrolls that page.
+    #[derive(Default)]
+    struct WandersOffPhone {
+        generation: std::sync::atomic::AtomicUsize,
+        on_feed: std::sync::atomic::AtomicBool,
+        home_taps: std::sync::atomic::AtomicUsize,
+        started: std::sync::atomic::AtomicBool,
+    }
+
+    impl WandersOffPhone {
+        /// The bottom bar sits here, and nothing else does — which is how `tap` can tell a
+        /// Home press from any other tap without being handed a label.
+        const HOME_Y: f64 = 2_100.0;
+
+        fn here(&self) -> bool {
+            // First read arms it: `Default` gives `false` and the phone starts on the feed.
+            if !self.started.swap(true, Ordering::Relaxed) {
+                self.on_feed.store(true, Ordering::Relaxed);
+            }
+            self.on_feed.load(Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for WandersOffPhone {
+        /// A tap on the rail wanders off; a tap on the bottom bar comes back.
+        ///
+        /// This is the measured order and it matters: the *like* is what left the feed on
+        /// ce0717171c2a64d50d, not the swipe. Modelling it the other way round makes the
+        /// loop refuse the swipe for a good reason — a rail that vanishes mid-gesture means
+        /// the card went somewhere, which is not an advance — and tests the wrong thing.
+        async fn tap(&self, point: TapPoint) -> anyhow::Result<()> {
+            if point.y >= Self::HOME_Y {
+                self.home_taps.fetch_add(1, Ordering::Relaxed);
+                self.on_feed.store(true, Ordering::Relaxed);
+            } else if self.here() {
+                self.on_feed.store(false, Ordering::Relaxed);
+            }
+            Ok(())
+        }
+
+        async fn swipe(&self, _gesture: crate::types::SwipeGesture) -> anyhow::Result<()> {
+            if self.here() {
+                self.generation.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(())
+        }
+
+        async fn type_text(&self, _text: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn home(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn find_and_tap(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn assert_visible(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+
+        async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            let ElementQuery::Description { value, .. } = query else {
+                return Ok(None);
+            };
+            let generation = self.generation.load(Ordering::Relaxed);
+            let card = |prefix: &str| {
+                Some(ElementBox {
+                    x: 900.0,
+                    y: 1_000.0,
+                    width: 80.0,
+                    height: 80.0,
+                    description: Some(format!("{prefix} {generation}")),
+                    enabled: true,
+                })
+            };
+            // The bottom bar is on screen wherever we are; the rail is only on the feed.
+            if value == "Home" {
+                return Ok(Some(ElementBox {
+                    x: 100.0,
+                    y: Self::HOME_Y,
+                    width: 60.0,
+                    height: 60.0,
+                    description: None,
+                    enabled: true,
+                }));
+            }
+            if !self.here() {
+                return Ok(None);
+            }
+            Ok(match value {
+                "For You" => Some(ElementBox {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 100.0,
+                    height: 40.0,
+                    description: None,
+                    enabled: true,
+                }),
+                "Like" => card("Like"),
+                "comments" => card("comments"),
+                "Share video" => card("Share video"),
+                "Original sound by" => card("Original sound by"),
+                _ => None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_that_falls_off_the_feed_walks_back_instead_of_swiping() {
+        let phone = WandersOffPhone::default();
+        let screen = (1_080.0, 2_220.0);
+        let run = HierarchyRun {
+            session: &phone,
+            labels: controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("measured set"),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        };
+        let settings = NurtureSettings {
+            num_videos: 4,
+            num_rounds: 1,
+            like_prob: 100,
+            comment_prob: 0,
+            follow_prob: 0,
+            frenzy_prob: 0,
+            watch_min: 0.1,
+            watch_max: 0.1,
+            ..Default::default()
+        };
+        let stop = AtomicBool::new(false);
+        let mut status = NurtureSessionStatus {
+            udid: "wanders-off".into(),
+            running: true,
+            videos_done: 0,
+            swipe_attempts: 0,
+            like_attempts: 0,
+            comment_attempts: 0,
+            follow_attempts: 0,
+            likes: 0,
+            comments: 0,
+            follows: 0,
+            last_message: String::new(),
+            session_usd: 0.0,
+        };
+        let said = std::sync::Mutex::new(Vec::<String>::new());
+        let report = |status: &mut NurtureSessionStatus, message: String| {
+            status.last_message = message.clone();
+            said.lock().expect("messages").push(message);
+        };
+
+        run_feed(
+            run,
+            "com.ss.android.ugc.trill",
+            &settings,
+            Instant::now(),
+            Some(Duration::from_secs(180)),
+            &stop,
+            &mut status,
+            &report,
+            None,
+            None,
+        )
+        .await;
+
+        let said = said.lock().expect("messages").clone();
+        assert!(
+            phone.home_taps.load(Ordering::Relaxed) > 0,
+            "the way back was never taken: {said:?}"
+        );
+        assert!(
+            said.iter().any(|line| line.contains("bấm Home để về feed")),
+            "the operator is told the session left the feed and went back: {said:?}"
+        );
+        assert!(
+            !said.iter().any(|line| line.contains("vuốt chưa chứng minh")),
+            "a swipe was spent off the feed, which is the post this fix exists to save:              {said:?}"
+        );
+        assert!(
+            status.videos_done >= 1,
+            "falling off the feed must not end the session: {} watched, {said:?}",
+            status.videos_done
         );
     }
 }

@@ -631,6 +631,19 @@ pub trait UiSession: Send + Sync {
     async fn launch_app_foreground(&self, _bundle_id: &str) -> anyhow::Result<()> {
         anyhow::bail!("launch_app_foreground not supported")
     }
+    /// Stop the app and start it again, so it comes back in a fresh state.
+    ///
+    /// Distinct from [`Self::launch_app_foreground`], which only raises what is already
+    /// running — measured 18/08/2026 on ce051715081fe20f03, whose TikTok would not leave
+    /// one card: launching it repeatedly showed the same card every time, and a
+    /// force-stop followed by a launch moved the feed on the first swipe afterwards.
+    ///
+    /// The default is that plain raise, because it is the most a backend without process
+    /// control can offer and it is never *worse* than doing nothing. A backend that can
+    /// stop a process should override this and say so.
+    async fn restart_app(&self, bundle_id: &str) -> anyhow::Result<()> {
+        self.launch_app_foreground(bundle_id).await
+    }
     /// Bundle id of the frontmost app (`GET /wda/activeAppInfo`). Default: unsupported.
     async fn active_app_bundle(&self) -> anyhow::Result<String> {
         anyhow::bail!("active_app_bundle not supported")
