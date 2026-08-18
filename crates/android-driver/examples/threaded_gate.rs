@@ -1,23 +1,30 @@
-//! Gate H5: prove a reply attaches to the **right parent**, across two real phones.
+//! Gate H5: prove a reply attaches to the **right parent**, across real phones.
 //!
 //! This is the only test that can prove it. Everything else about the reply path can pass
 //! while the reply lands under a stranger's comment: the geometry rules have unit tests,
 //! but "the nearest reply control below this body" is a claim about a real screen, and a
 //! wrong answer is invisible in a log — it looks exactly like a success.
 //!
-//! Two devices, because that is what a thread is: each message in a chain is sent from a
+//! Two devices at minimum, because that is what a thread is: each message is sent from a
 //! *different* actor, so device B has to find device A's comment on a screen it opened
 //! itself, with TikTok having re-ranked the list in between.
+//!
+//! **Three for the star.** With two actors a star and a chain are the same picture, so a
+//! two-phone run cannot tell them apart — and the star is the shape a fleet run uses,
+//! because every reply depending only on the root is what lets them stop waiting for each
+//! other. The third actor replies to **A**, with B's reply already sitting under A, which
+//! is the arrangement that gets this wrong: the nearest reply control below A's body now
+//! has another comment between it and the bottom of the row.
 //!
 //! ```text
 //! RIVIU_ADB_PATH=… RIVIU_TIKTOK_PACKAGE=com.ss.android.ugc.trill \
 //!   cargo run -p riviu-android-driver --example threaded_gate -- \
-//!     <serial-A> <serial-B> <url> "<root text>" "<reply text>"
+//!     <serial-A> <serial-B> <url> "<root>" "<reply>" [<serial-C> "<second reply>"]
 //! ```
 //!
-//! **It posts two public comments** — a root from A and a reply from B — under whichever
-//! accounts those phones are logged into. Both texts come from the command line rather
-//! than being invented here.
+//! **It posts public comments** — a root from A, a reply from B, and a second reply from C
+//! when a third actor is given — under whichever accounts those phones are logged into.
+//! Every text comes from the command line rather than being invented here.
 //!
 //! What it checks, in order, and every one is a shipped function:
 //!
@@ -163,14 +170,25 @@ async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 5 {
         println!(
-            "usage: threaded_gate <serial-A> <serial-B> <url> \"<root text>\" \"<reply text>\"\n\
+            "usage: threaded_gate <serial-A> <serial-B> <url> \"<root>\" \"<reply>\" \
+             [<serial-C> \"<second reply>\"]\n\
              \n\
-             POSTS TWO PUBLIC COMMENTS: a root from A and a reply from B."
+             POSTS PUBLIC COMMENTS: a root from A, a reply from B, and — with the optional\n\
+             third actor — a second reply from C **to A**, which is the star."
         );
         return Ok(());
     }
     let (serial_a, serial_b, url, root_text, reply_text) =
         (&args[0], &args[1], &args[2], &args[3], &args[4]);
+    // The star needs three. With two actors a star and a chain are the same picture, so a
+    // two-phone run can never tell them apart. C replies to **A**, not to B, and does it
+    // once B's reply is already sitting under A — which is the case that actually gets this
+    // wrong, because "the nearest reply control below this body" now has another comment
+    // between it and the bottom of the row.
+    let third = args
+        .get(5)
+        .zip(args.get(6))
+        .map(|(serial, text)| (serial.clone(), text.clone()));
     let handle = url
         .split('@')
         .nth(1)
@@ -263,14 +281,68 @@ async fn main() -> anyhow::Result<()> {
         ),
     }
 
+    // ---- C: the star. Arrives independently and replies to A, not to B ----
+    let shot_from = if let Some((serial_c, second_reply)) = third {
+        println!("\n== C replies to A's comment, with B's reply already under it ==");
+        let actor_c = open_actor(&driver, &serial_c).await?;
+        arrive(&actor_c, url, &handle).await?;
+        let reply = send_reply_by_hierarchy(
+            actor_c.session.as_ref(),
+            actor_c.labels,
+            actor_c.screen,
+            &parent,
+            &second_reply,
+            &stop,
+            String::new,
+        )
+        .await?;
+        match reply {
+            Ok(outcome) => {
+                println!(
+                    "  verdict = {:?} ({})",
+                    outcome.verdict,
+                    outcome.verdict.reason()
+                );
+                if outcome.verdict.is_sent() {
+                    println!(
+                        "\n  GATE H5-STAR: two accounts replied to the same comment.\n  \
+                         THE SCREENSHOT IS THE PROOF — two replies at the *same level* \
+                         under A is a star; a reply nested under B's reply is a chain, and \
+                         the log for the two is identical."
+                    );
+                } else {
+                    println!("\n  GATE H5-STAR INCOMPLETE: {}", outcome.verdict.reason());
+                }
+            }
+            // Worth printing rather than passing over: the refusal that matters here is
+            // `ParentNotFound`, which is the star's own risk — by the fifteenth reply A's
+            // comment may have been re-ranked past the scroll budget.
+            Err(refusal) => println!(
+                "  reply refused ({}): {}\n  nothing was typed.",
+                refusal.code(),
+                refusal.message()
+            ),
+        }
+        actor_c.serial.clone()
+    } else {
+        println!(
+            "\n  (no third actor — this run proves a reply attaches to its parent, but not \
+             that two replies attach to the *same* parent. Pass `<serial-C> \"<text>\"` \
+             for that.)"
+        );
+        actor_b.serial.clone()
+    };
     // The screenshot is the deliverable, not a nicety: a reply attached to the wrong
     // parent produces an identical log.
     let path = std::env::temp_dir().join("riviu-gate-h5-reply.png");
-    let written = driver.screenshot(&actor_b.serial, &path).await?;
+    let written = driver.screenshot(&shot_from, &path).await?;
     let bytes = tokio::fs::metadata(&written)
         .await
         .map(|meta| meta.len())
         .unwrap_or(0);
-    println!("\n  B's screen: {} ({bytes} bytes)", written.display());
+    println!(
+        "\n  screen of {shot_from}: {} ({bytes} bytes)",
+        written.display()
+    );
     Ok(())
 }
