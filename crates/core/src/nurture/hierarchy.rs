@@ -656,6 +656,17 @@ impl<'a> HierarchyRun<'a> {
                 // badge has already established this is a photo post, so the honest response
                 // is to keep turning for a bounded stretch rather than to stop or to swipe
                 // forever.
+                //
+                // **And there is nothing better to reach for, which is measured rather than
+                // assumed.** The obvious idea is to fingerprint the tree instead — if the
+                // page turned, something changed. It did not: on 38.3.2, across turns that
+                // provably advanced the counter, the `ImageView` rectangles and the
+                // `TextView` list were **identical** before and after (`probe
+                // --measure-feed-carousel`, 18/08/2026). The counter is the only thing in the
+                // hierarchy that can see a page turn, so on a post that never renders one,
+                // four turns is the most this can honestly claim. On a whole-fleet run that
+                // was 6 of 10 photo posts one time and 2 of 13 another — it is feed content,
+                // not a phone or a build.
                 None => {
                     unproven += 1;
                     if unproven > CAROUSEL_UNPROVEN_LIMIT {
