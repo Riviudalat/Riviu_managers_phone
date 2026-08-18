@@ -43,6 +43,7 @@ vi.mock("../api", () => ({
   interactionResolveLinks: vi.fn(async () => []),
   interactionStartThread: startThread,
   listenRiviuEvents: vi.fn(async () => () => undefined),
+  listGroups: vi.fn(async () => []),
 }));
 
 afterEach(() => {
@@ -223,7 +224,71 @@ describe("InteractionPopup", () => {
     await waitFor(() => expect(screen.getByText(/creator\/video\/123/)).toBeVisible());
     fireEvent.click(screen.getByLabelText("Phone B"));
     fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
-    await waitFor(() => expect(screen.getByText("Chọn từ 2 đến 6 thiết bị làm actor")).toBeVisible());
+    await waitFor(() => expect(screen.getByText("Chọn từ 2 đến 64 thiết bị làm actor")).toBeVisible());
     expect(startThread).not.toHaveBeenCalled();
+  });
+
+  it("sends the star shape, which is the one the operator asked for", async () => {
+    // "Một máy bình luận gốc rồi các máy còn lại vào rep" — a star. The popup only ever
+    // offered a chain, and a chain is a different thing: each account answers the one
+    // before it, which is also why a chain cannot run in parallel.
+    render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
+    fireEvent.change(screen.getByPlaceholderText("https://www.tiktok.com/@creator/video/123"), {
+      target: { value: "https://www.tiktok.com/@creator/video/123" },
+    });
+    await waitFor(() => expect(screen.getByText(/creator\/video\/123/)).toBeVisible());
+
+    fireEvent.change(screen.getByLabelText("Hình chuỗi"), { target: { value: "star" } });
+    fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
+
+    await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
+    const request = (startThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>)[0][0];
+    expect(request.shape).toBe("star");
+  });
+
+  it("shows how the phones split into teams before anything runs", async () => {
+    // The split is a decision the operator should see rather than discover from the
+    // Monitor tab. Three phones in teams of two is one team of three, not a two and a
+    // one: `partition_actors` spreads the remainder, and this line has to say the same
+    // thing the backend will do.
+    render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
+    fireEvent.change(screen.getByLabelText("Cỡ cụm"), { target: { value: "2" } });
+
+    const teams = await screen.findByTestId("cohort-preview");
+    expect(teams.textContent).toContain("cụm 1");
+    // Two iPhones are pre-selected, so teams of two is exactly one team.
+    expect(teams.querySelectorAll("li")).toHaveLength(1);
+  });
+
+  it("no longer refuses a fleet larger than six", async () => {
+    // The cap was 2..=6 on both sides, which is what made a twenty-phone run impossible
+    // before anything else could go wrong.
+    const fleet = Array.from({ length: 9 }, (_, index) => ({
+      udid: `android-${index}`,
+      name: `Android ${index}`,
+      model: "SM-G955F",
+      platform: "android",
+      osVersion: "9",
+      connection: "usb",
+      status: "ready",
+      wdaReady: true,
+    })) as never[];
+    render(<InteractionPopup devices={fleet} selected={[]} onClose={() => undefined} />);
+    fireEvent.change(screen.getByPlaceholderText("https://www.tiktok.com/@creator/video/123"), {
+      target: { value: "https://www.tiktok.com/@creator/video/123" },
+    });
+    await waitFor(() => expect(screen.getByText(/creator\/video\/123/)).toBeVisible());
+
+    // Nine phones in teams of three: three messages a link covers the biggest team, which
+    // is the rule that replaced "message count must cover the whole fleet".
+    fireEvent.change(screen.getByLabelText("Cỡ cụm"), { target: { value: "3" } });
+    fireEvent.change(screen.getByLabelText("Số message"), { target: { value: "3" } });
+    fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
+
+    await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
+    const request = (startThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>)[0][0];
+    expect(request.actorUdids).toHaveLength(9);
+    expect(request.cohortSize).toBe(3);
+    expect(request.messageCount).toBe(3);
   });
 });

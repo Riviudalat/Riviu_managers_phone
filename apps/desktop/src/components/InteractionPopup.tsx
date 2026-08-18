@@ -9,11 +9,14 @@ import {
   interactionResolveLinks,
   interactionStartThread,
   listenRiviuEvents,
+  listGroups,
 } from "../api";
 import type { InteractionArtifactRecord } from "../api";
 import type {
+  DeviceGroup,
   DeviceInfo,
   ThreadMode,
+  ThreadShape,
   InteractionCampaignDetail,
   InteractionCampaignSummary,
   ThreadCampaignRequest,
@@ -71,9 +74,20 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
   const [rawLinks, setRawLinks] = useState("");
   const [lines, setLines] = useState<TikTokLinkLine[]>([]);
   const [actors, setActors] = useState<string[]>([]);
+  /// Saved device groups, offered as a way to fill the actor list in one go.
+  ///
+  /// Deliberately not `SelectionStrip`, which every other page uses: that component says
+  /// "chưa chọn → sẽ dùng tất cả", and here an empty actor list is refused rather than
+  /// meaning everything. Borrowing it would have put a sentence on screen that is false
+  /// in this panel.
+  const [groups, setGroups] = useState<DeviceGroup[]>([]);
   const [messageCount, setMessageCount] = useState(2);
   const [maxWords, setMaxWords] = useState(12);
   const [mode, setMode] = useState<ThreadMode>("threaded");
+  const [shape, setShape] = useState<ThreadShape>("chain");
+  // 0 means "one team, everybody" — the arrangement this had before teams existed.
+  // Kept as a number so the input can be cleared without becoming NaN.
+  const [cohortSize, setCohortSize] = useState(0);
   const [instruction, setInstruction] = useState("tự nhiên, ngắn, nói như người vừa xem xong");
   // "ai" | "manual" — which writes the comments. Kept as a mode rather than inferred from
   // whether the box has text, so switching back to AI does not mean deleting what was pasted.
@@ -116,10 +130,23 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
       instruction,
       maxWords,
       mode,
+      shape,
+      cohortSize: cohortSize >= 2 ? cohortSize : undefined,
       manualComments,
       likeTarget,
     }),
-    [actors, instruction, likeTarget, manualComments, maxWords, messageCount, mode, validTargets],
+    [
+      actors,
+      cohortSize,
+      instruction,
+      likeTarget,
+      manualComments,
+      maxWords,
+      messageCount,
+      mode,
+      shape,
+      validTargets,
+    ],
   );
 
   const reloadCampaigns = useCallback(async () => {
@@ -151,8 +178,24 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
     if (!hierarchyActors.length && !pixelActors.length) return;
     seededActors.current = true;
     const group = hierarchyActors.length > pixelActors.length ? hierarchyActors : pixelActors;
-    setActors(group.slice(0, 6).map((device) => device.udid));
+    // The whole group, not the first six: six was the old hard cap and pre-selecting a
+    // fraction of the fleet now would hide from the operator that the rest are usable.
+    // Nothing runs until the button is pressed.
+    setActors(group.map((device) => device.udid));
   }, [hierarchyActors, pixelActors]);
+
+  useEffect(() => {
+    let alive = true;
+    listGroups()
+      .then((next) => {
+        if (alive) setGroups(next);
+      })
+      // Groups are a shortcut, not a requirement: the checkboxes still work without them.
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   /// A phone that has left the fleet drops out of the selection, and nothing else moves.
   ///
@@ -188,6 +231,30 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
   // that row by OCR and match the label, and the two do not have to agree — a badge, a
   // truncation, a rendered-versus-attribute difference. Standalone has no parent to find,
   // so mixing is fine there.
+  /// The teams, as the operator will see them and as the backend will build them.
+  ///
+  /// Mirrors `partition_actors`: the remainder is spread, so twenty phones in teams of
+  /// three are 4,4,3,3,3,3 rather than six threes and two phones left out. Duplicated
+  /// here only to *show* the split before anything runs — the plan that executes still
+  /// comes from the backend, and the preview below is rendered from that plan rather
+  /// than from this.
+  const cohorts = useMemo(() => {
+    if (cohortSize < 2 || actors.length === 0) return [actors];
+    const count = Math.max(1, Math.floor(actors.length / cohortSize));
+    const base = Math.floor(actors.length / count);
+    let remainder = actors.length % count;
+    const out: string[][] = [];
+    let at = 0;
+    for (let team = 0; team < count; team += 1) {
+      const take = base + (remainder > 0 ? 1 : 0);
+      if (remainder > 0) remainder -= 1;
+      out.push(actors.slice(at, at + take));
+      at += take;
+    }
+    return out;
+  }, [actors, cohortSize]);
+  const largestCohort = cohorts.reduce((most, team) => Math.max(most, team.length), 0);
+
   const mixedThread =
     mode === "threaded" &&
     actors.some((udid) => pixelActors.some((device) => device.udid === udid)) &&
@@ -225,8 +292,8 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
       setError("Cần ít nhất một link video/photo hợp lệ");
       return;
     }
-    if (actors.length < 2 || actors.length > 6) {
-      setError("Chọn từ 2 đến 6 thiết bị làm actor");
+    if (actors.length < 2 || actors.length > 64) {
+      setError("Chọn từ 2 đến 64 thiết bị làm actor");
       return;
     }
     if (mixedThread) {
@@ -236,8 +303,15 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
       setError(mixedThreadReason);
       return;
     }
-    if (messageCount < actors.length) {
-      setError("Số message phải lớn hơn hoặc bằng số actor");
+    // Per team, not per fleet: twenty phones in teams of three need three messages a
+    // link, not twenty. Measured against the biggest team, because spreading the
+    // remainder makes them uneven by one.
+    if (messageCount < largestCohort) {
+      setError(
+        cohortSize >= 2
+          ? `Số message phải ≥ số máy của cụm lớn nhất (${largestCohort})`
+          : "Số message phải lớn hơn hoặc bằng số actor",
+      );
       return;
     }
     setBusy(true);
@@ -325,13 +399,37 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
             <div className="interaction-grid">
               <label>
                 Số message
-                <input type="number" min={2} max={6} value={messageCount} onChange={(e) => setMessageCount(Number(e.target.value))} />
+                <input type="number" min={2} max={64} value={messageCount} onChange={(e) => setMessageCount(Number(e.target.value))} />
+              </label>
+              <label>
+                Cỡ cụm
+                <input
+                  type="number"
+                  min={0}
+                  max={64}
+                  value={cohortSize}
+                  onChange={(e) => setCohortSize(Number(e.target.value))}
+                />
               </label>
               <label>
                 Tối đa từ
                 <input type="number" min={4} max={20} value={maxWords} onChange={(e) => setMaxWords(Number(e.target.value))} />
               </label>
             </div>
+            <p className="hint">
+              {cohortSize >= 2
+                ? `${actors.length} máy chia thành ${cohorts.length} cụm; mỗi cụm nhận link riêng và các cụm chạy cùng lúc.`
+                : "Cỡ cụm 0 = một cụm duy nhất: cả nhóm cùng làm một link, lần lượt từng máy."}
+            </p>
+            {cohortSize >= 2 && (
+              <ul className="hint" data-testid="cohort-preview">
+                {cohorts.map((team, index) => (
+                  <li key={team.join("|") || index}>
+                    {`cụm ${index + 1} (${team.length} máy) → link ${index + 1}, ${cohorts.length + index + 1}, …`}
+                  </li>
+                ))}
+              </ul>
+            )}
             <label>
               Kiểu tương tác
               <select value={mode} onChange={(e) => setMode(e.target.value as ThreadMode)}>
@@ -339,6 +437,25 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
                 <option value="standalone">Riêng lẻ — mỗi acc một bình luận gốc</option>
               </select>
             </label>
+            {mode === "threaded" && (
+              <>
+                <label>
+                  Hình chuỗi
+                  <select
+                    value={shape}
+                    onChange={(e) => setShape(e.target.value as ThreadShape)}
+                  >
+                    <option value="chain">Nối tiếp — mỗi acc trả lời acc liền trước</option>
+                    <option value="star">Toả — mọi acc trả lời bình luận gốc</option>
+                  </select>
+                </label>
+                <p className="hint">
+                  {shape === "star"
+                    ? "Một acc bình luận gốc, các acc còn lại rep thẳng vào đó. Vì mọi rep chỉ phụ thuộc bình luận gốc, chúng không phải chờ nhau — và một rep hỏng chỉ mất chính nó."
+                    : "Mỗi message trả lời message liền trước, nên chúng phải chạy nối đuôi: message N chỉ bắt đầu sau khi N-1 đã đăng và đọc lại được. Một mắt xích đứt là dừng cả link."}
+                </p>
+              </>
+            )}
             <p className="hint">
               {mode === "threaded"
                 ? "Tạo hội thoại lồng nhau. Actor Android tìm lại bình luận cha trong hierarchy; actor iPhone cần OCR đọc được tiếng Việt, hiện chỉ có trên macOS. Không trộn hai loại trong một chuỗi."
@@ -394,6 +511,33 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
             )}
             <fieldset className="interaction-actors">
               <legend>Actor tham gia</legend>
+              {groups.length > 0 && (
+                <label>
+                  Lấy từ nhóm
+                  <select
+                    value=""
+                    onChange={(e) => {
+                      const group = groups.find((entry) => entry.id === e.target.value);
+                      if (!group) return;
+                      // Intersected with what is actually here: a group remembers udids, and
+                      // a phone that has been unplugged since would otherwise be selected and
+                      // then refused at dispatch with nothing on screen explaining why.
+                      setActors(
+                        group.udids.filter((udid) =>
+                          actorChoices.some((device) => device.udid === udid),
+                        ),
+                      );
+                    }}
+                  >
+                    <option value="">Chọn nhóm…</option>
+                    {groups.map((group) => (
+                      <option key={group.id} value={group.id}>
+                        {group.name} ({group.udids.length})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
               {actorChoices.length === 0 && <span className="hint">Chưa có thiết bị</span>}
               {/* Grouped by *how each device reads the screen*, not by brand: that is the
                   property the thread rule depends on, and naming it here is what makes the
