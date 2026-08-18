@@ -56,6 +56,14 @@ struct Args {
     /// is the only way to measure the confirmation, and a like is an action this feature
     /// exists to perform — unlike a comment, which is why that one stays at zero.
     like_prob: u32,
+    /// Percent chance of following the author of a watched post.
+    ///
+    /// Off by default and separate from `--like-prob` because the two are not the same kind
+    /// of action: a like can be taken back and leaves nothing behind, a follow is a lasting
+    /// relationship on a real account. Configurable at all only because the path cannot be
+    /// verified without performing one — and then it is worth doing on one phone rather than
+    /// on twenty.
+    follow_prob: u32,
 }
 
 fn parse_args() -> Args {
@@ -65,6 +73,7 @@ fn parse_args() -> Args {
         minutes: 2,
         videos: 3,
         like_prob: 30,
+        follow_prob: 0,
     };
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut index = 0;
@@ -75,6 +84,7 @@ fn parse_args() -> Args {
             "--minutes" => args.minutes = value,
             "--videos" => args.videos = value as u32,
             "--like-prob" => args.like_prob = value.min(100) as u32,
+            "--follow-prob" => args.follow_prob = value.min(100) as u32,
             "--only" => args.only = raw[index + 1].split(',').map(str::to_string).collect(),
             _ => {}
         }
@@ -142,7 +152,7 @@ async fn main() -> anyhow::Result<()> {
         like_prob: args.like_prob,
         // Not configurable, and deliberately: a comment is text on a real account.
         comment_prob: 0,
-        follow_prob: 0,
+        follow_prob: args.follow_prob,
         frenzy_prob: 0,
         watch_min: 2.0,
         watch_max: 4.0,

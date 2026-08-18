@@ -1550,27 +1550,29 @@ mod tests {
     }
 
     #[test]
-    fn a_build_with_no_measured_follow_label_is_never_asked_to_follow() {
-        // Sixteen of the eighteen phones on this fleet run the SEA build, whose set has
-        // no `follow` label. Without this check `follow` found nothing, returned false,
-        // and the loop reported "nút Follow vẫn còn — chưa xác nhận" — blaming a button
-        // it never looked for, on a screen where nothing was tapped. The count of
-        // attempts rose with it, and `record_attempt` plus `mark_post_interacted` had
-        // already run, so a roll that could never do anything spent the pacing budget
-        // for that post and blocked the like that might have used it.
-        assert!(!can_follow(
-            controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("measured set")
-        ));
-        // The SEA build in Vietnamese *does* carry it, which is the point: the gap is per
-        // (package, language), not per package, and the sixteen phones measured on this
-        // fleet on 18/08/2026 are running that build with an English UI.
-        assert!(can_follow(vietnamese()));
-
-        // And the build where it *was* measured still follows, so the guard cannot be
-        // read as "this feature is off".
-        assert!(can_follow(
-            controls_for("com.zhiliaoapp.musically", "en", "").expect("measured set")
-        ));
+    fn every_measured_build_can_be_asked_to_follow() {
+        // The guard this exercises exists because `follow` finds nothing when the label
+        // was never measured, returns false, and the loop then reported "nút Follow vẫn
+        // còn — chưa xác nhận" about a screen where nothing was tapped — after spending
+        // `record_attempt` and `mark_post_interacted`, so a roll that could do nothing
+        // blocked the like that might have used the budget.
+        //
+        // Sixteen of twenty phones were in that state this morning. The label was there
+        // the whole time: `Follow <author>` appears only on cards whose author is not
+        // followed yet, so the first dump anyone took happened not to show it. It is
+        // measured now, and this asserts the state that follows from that — while the
+        // guard stays, because the next build added here may arrive half-measured too.
+        for set in crate::tiktok_labels::TIKTOK_LABEL_SETS {
+            let controls =
+                controls_for(set.package, set.language, "").expect("a declared set resolves");
+            assert!(
+                can_follow(controls),
+                "{} / {} cannot follow: read `Follow <author>` off a card whose author is \
+                 not followed yet — it is absent from the others",
+                set.package,
+                set.language
+            );
+        }
     }
     #[test]
     fn the_photo_counter_is_read_out_of_three_adjacent_nodes() {

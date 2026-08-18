@@ -516,6 +516,31 @@ impl TikTokResourceLabels {
 
 /// Every resource-id set that has been read off a device, by app version.
 pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
+    // The four `com.zhiliaoapp.musically` phones on this farm. Both versions here leave the
+    // Send button as an unresolved reference, the way 46.3.3 and 46.4.3 do — unlike
+    // `trill` 38.3.2, which renders it and is therefore described by language instead.
+    //
+    // Identified by the contract rather than by position: of the four `@2131…` controls in
+    // this drawer, `@2131823247` (`id/cx0`, [911,1305][1048,1389]) is the only one whose
+    // `enabled` is **false with the field empty and true once it holds text**. The other
+    // three stay enabled throughout, and the probe's own guess — the first thing to appear
+    // alongside the text — picked an emoji tile.
+    TikTokResourceLabels {
+        package: "com.zhiliaoapp.musically",
+        app_version: "46.2.1",
+        measured_on: "SM-G950F ce0517152c898c6f0d, Android 9, 18/08/2026 (probe --measure-comment)",
+        comment_send: Some(LabelMatch::Exact("@2131823247")),
+    },
+    TikTokResourceLabels {
+        package: "com.zhiliaoapp.musically",
+        app_version: "46.2.42",
+        measured_on: "SM-G950F ce0517155ab38c390d, Android 9, 18/08/2026 (probe --measure-comment)",
+        // The same id as 46.2.1, measured separately rather than assumed — and worth an
+        // entry of its own even so. The id moving between 46.3.3 and 46.4.3 is what this
+        // table exists for; the id *not* moving between two other versions is not evidence
+        // that it never does, and a lookup keyed by version cannot guess.
+        comment_send: Some(LabelMatch::Exact("@2131823247")),
+    },
     TikTokResourceLabels {
         package: "com.ss.android.ugc.trill",
         app_version: "46.3.3",
@@ -841,7 +866,15 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // Absent from the measured screen, whose author was already followed. The vi
         // build keeps the English `Follow ` and this build very likely does too — which
         // is exactly the kind of "very likely" this table exists to refuse.
-        follow: None,
+        // `Follow <author>`, read off six consecutive cards on ce051715cb22c30403,
+        // 18/08/2026 — `Follow Cindy…`, `Follow University of Melbourne`, `Follow TM Su`.
+        // Only on cards whose author is not followed yet, which is why it took scrolling
+        // rather than one dump and why sixteen phones went without it: absent from the
+        // first card anyone looked at is not absent from the build.
+        //
+        // The trailing space is load-bearing — it is what keeps this off the `Following`
+        // tab, which is a different control on the same screen.
+        follow: Some(LabelMatch::Contains("Follow ")),
         live_room: None,
         // `android.widget.Button` at [927,1310][1048,1384], `clickable=true`, which
         // appeared once the field held text — measured on ce051715cb22c30403,
@@ -1040,6 +1073,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_build_on_the_farm_can_reach_the_send_button() {
+        // Read off all twenty phones on 18/08/2026 with `dumpsys package … versionName`.
+        // Before this, the only measured versions were 46.3.3 and 46.4.3 — two handsets
+        // that are not on this farm at all — so commenting was impossible on every one of
+        // the twenty, and the refusal blamed the AI key.
+        //
+        // A list of literal builds rather than a rule, because that is what it is: there
+        // is no deriving one version's Send control from another's, which is the whole
+        // reason for the table. When the farm updates, this test fails and the answer is
+        // to measure the new build, not to relax the assertion.
+        for (package, language, version, phones) in [
+            ("com.ss.android.ugc.trill", "en", "38.3.2", 16),
+            ("com.zhiliaoapp.musically", "en", "46.2.1", 3),
+            ("com.zhiliaoapp.musically", "en", "46.2.42", 1),
+        ] {
+            let controls = controls_for(package, language, version)
+                .unwrap_or_else(|| panic!("{package} {version} has no measured label set"));
+            assert!(
+                controls.label(TikTokControl::CommentSend).is_some(),
+                "{phones} phone(s) run {package} {version} and cannot post a comment: \
+                 measure the drawer with `RIVIU_TIKTOK_PACKAGE={package} probe <serial> \
+                 --measure-comment` and look for the control whose `enabled` goes false \
+                 -> true when the field holds text"
+            );
+        }
+    }
     #[test]
     fn a_build_that_renders_the_send_button_is_described_by_its_language() {
         // The version table holds `@2131…` references because those change on every
