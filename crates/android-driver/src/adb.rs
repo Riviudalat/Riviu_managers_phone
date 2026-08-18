@@ -543,16 +543,17 @@ impl AdbDeviceState {
     pub fn operator_reason(&self) -> Option<String> {
         match self {
             Self::Device => None,
-            Self::Unauthorized => Some(
-                "USB debugging not allowed yet — accept the prompt on the device".to_string(),
-            ),
+            Self::Unauthorized => {
+                Some("USB debugging not allowed yet — accept the prompt on the device".to_string())
+            }
             Self::Offline => Some(
-                "adb sees this device but it is not answering — check the cable or the USB hub,                  or wait if it is rebooting"
+                "adb sees this device but it is not answering — check the cable or the USB hub, \
+                 or wait if it is rebooting"
                     .to_string(),
             ),
-            Self::Other(state) => {
-                Some(format!("adb reports this device as `{state}`, which cannot be driven"))
-            }
+            Self::Other(state) => Some(format!(
+                "adb reports this device as `{state}`, which cannot be driven"
+            )),
         }
     }
 }
@@ -1033,6 +1034,38 @@ pub fn parse_current_focus_package(stdout: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// A sentence an operator reads must not carry the source code's indentation.
+    ///
+    /// Rust joins a literal split across lines *including* the leading spaces of the next
+    /// line, unless a trailing backslash swallows them. The offline reason had eighteen of
+    /// them in its middle, so the grid offered "check the cable or the USB hub,
+    /// or wait" with a hole in it — which reads as a rendering fault in the app rather than
+    /// as advice, right at the moment somebody is trying to work out why a phone vanished.
+    /// Found by scanning for the shape rather than by reading, which is the only way: it is
+    /// invisible in the source, where it looks like ordinary wrapping.
+    #[test]
+    fn every_reason_is_one_clean_sentence() {
+        for state in [
+            AdbDeviceState::Device,
+            AdbDeviceState::Unauthorized,
+            AdbDeviceState::Offline,
+            AdbDeviceState::Other("sideload".into()),
+        ] {
+            let Some(reason) = state.operator_reason() else {
+                continue;
+            };
+            assert!(
+                !reason.contains("  "),
+                "{state:?} reason has a gap in the middle of it: {reason:?}"
+            );
+            assert!(
+                !reason.contains('\n'),
+                "{state:?} reason spans lines: {reason:?}"
+            );
+            assert_eq!(reason.trim(), reason, "{state:?} reason has loose edges");
+        }
+    }
+
     use super::*;
 
     #[test]

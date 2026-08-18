@@ -2177,7 +2177,9 @@ impl AndroidDriver {
     async fn install_agent_apks(&self, serial: &str) -> anyhow::Result<()> {
         let Some((server, test)) = self.agent_apks.as_ref() else {
             return Err(anyhow!(
-                "the agent is not installed on {serial} and this build has no agent APK                  to install. Set RIVIU_AGENT_SERVER_APK and RIVIU_AGENT_TEST_APK, or use                  an installer that bundles them"
+                "the agent is not installed on {serial} and this build has no agent APK \
+                 to install. Set RIVIU_AGENT_SERVER_APK and RIVIU_AGENT_TEST_APK, or use \
+                 an installer that bundles them"
             ));
         };
         // Server first: the test APK declares an instrumentation targeting the server's

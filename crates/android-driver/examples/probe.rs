@@ -1158,11 +1158,16 @@ async fn gate_standalone(
             started.elapsed().as_millis()
         ),
         Ok(TargetArrival::Structural) => println!(
-            "  arrival: Structural in {} ms — the post changed but the nickname does not              reveal the handle",
+            "  arrival: Structural in {} ms — the post changed but the nickname does not \
+             reveal the handle",
             started.elapsed().as_millis()
         ),
         Err(refusal) => {
-            println!("  arrival REFUSED: {} — {}", refusal.code(), refusal.message());
+            println!(
+                "  arrival REFUSED: {} — {}",
+                refusal.code(),
+                refusal.message()
+            );
             println!("  nothing was typed. Gate H4 did not run.");
             return Ok(());
         }
@@ -1183,7 +1188,8 @@ async fn gate_standalone(
             identity.author_label, identity.text, identity.locator_version
         ),
         None => println!(
-            "  ! the posted comment could not be read back unambiguously — a Threaded              chain would stop here rather than reply to a row nobody confirmed"
+            "  ! the posted comment could not be read back unambiguously — a Threaded \
+             chain would stop here rather than reply to a row nobody confirmed"
         ),
     }
     if outcome.verdict.is_sent() && outcome.identity.is_some() {
@@ -1714,7 +1720,10 @@ async fn measure_target_open(
         println!("  => NO RAIL: nothing is up. Refusal: NoPostPage.");
     } else if after.is_empty() || after == before_author {
         println!(
-            "  => UNCHANGED: same post as before the link. This is the signature of an              unavailable post (deleted / private / region-blocked) — TikTok takes the              intent, fails server-side, and leaves the feed alone. Refusal:              ScreenNeverChanged. THE LINK IS THE PROBLEM, NOT THE PHONE."
+            "  => UNCHANGED: same post as before the link. This is the signature of an \
+             unavailable post (deleted / private / region-blocked) — TikTok takes the \
+             intent, fails server-side, and leaves the feed alone. Refusal: \
+             ScreenNeverChanged. THE LINK IS THE PROBLEM, NOT THE PHONE."
         );
     } else {
         println!("  => ARRIVED: a different post is up.");

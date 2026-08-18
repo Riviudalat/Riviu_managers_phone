@@ -88,6 +88,28 @@ describe("device tile, before any frame arrives", () => {
     expect(screen.getByText(/không đọc được luồng này/i)).toBeTruthy();
   });
 
+  it("keeps a phone whose cable dropped on the grid, with the reason it gave", () => {
+    // The other half of D4. `adb devices` reporting a phone as `offline` used to be
+    // discarded in the driver, so the tile simply vanished — no row, no reason, and
+    // indistinguishable from a phone somebody had unplugged on purpose. The Rust side
+    // now hands that phone a row and a sentence (`unusable_device`, driver.rs), and this
+    // is the half that proves the sentence reaches the operator.
+    //
+    // The awkward part is the combination: the device is `disconnected` and no stream
+    // ever started, so there is no `tileStreamState` to key off — only `lastError`. A
+    // tile that keyed on the stream state alone would draw a spinner over a phone that
+    // is not coming back.
+    renderTile({
+      status: "disconnected",
+      wdaReady: false,
+      lastError:
+        "adb sees this device but it is not answering — check the cable or the USB hub, or wait if it is rebooting",
+    });
+
+    expect(screen.getByText(/not answering — check the cable or the USB hub, or wait/)).toBeTruthy();
+    expect(screen.queryByRole("status"), "no spinner over a phone that is not coming back").toBeNull();
+  });
+
   it("treats a reported error as a failure even when the state has not caught up", () => {
     // The two travel separately -- `lastError` is set by whatever failed, `tileStreamState`
     // by the next device poll. Between them the tile would otherwise spin over a phone that

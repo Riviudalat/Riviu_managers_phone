@@ -1063,7 +1063,8 @@ mod tests {
         let encoded_width = ViewPreset::Overlay.max_size() * 1080 / 2400;
         assert!(
             encoded_width >= FOCUS_DEFAULT_WIDTH * 9 / 10,
-            "overlay encodes {encoded_width}px wide, under its {FOCUS_DEFAULT_WIDTH}px              default -- the default view must not be an upscale"
+            "overlay encodes {encoded_width}px wide, under its {FOCUS_DEFAULT_WIDTH}px \
+             default -- the default view must not be an upscale"
         );
         // Bounded and named rather than left to be rediscovered. Measured on hardware at
         // 832: 376x832, which reads sharply enough to make out individual notification
