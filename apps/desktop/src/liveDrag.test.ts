@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createLiveDrag, liveTap, type SendTouch } from "./liveDrag";
+import { createLiveDrag, createLiveDragGroup, liveTap, type SendTouch } from "./liveDrag";
 
 /// A sink that records what it was asked to send and lets the test decide when each call
 /// finishes, so the ordering guarantees can be tested against a slow phone rather than an
@@ -163,5 +163,83 @@ describe("live drag", () => {
     drag.move(5, 5);
     expect(await drag.end(5, 5)).toBe("fallback");
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("live drag across a group", () => {
+  it("puts the gesture on every phone in the selection", async () => {
+    const a = recorder();
+    const b = recorder();
+    const group = createLiveDragGroup([
+      { udid: "phone-a", send: a.send },
+      { udid: "phone-b", send: b.send },
+    ]);
+
+    group.begin(10, 10);
+    group.move(10, 40);
+    const settled = group.end(10, 80);
+    // Alternating rounds, because `recorder` was written for one phone: draining A can
+    // queue B's next call and the other way round, so one pass each leaves gates behind.
+    for (let round = 0; round < 8; round += 1) {
+      await a.releaseAll();
+      await b.releaseAll();
+    }
+    const split = await settled;
+
+    expect(split.live.sort()).toEqual(["phone-a", "phone-b"]);
+    expect(split.fallback).toEqual([]);
+    // The shape reaches both, not just the endpoints: this is the whole difference from
+    // `group_input`, which has no path command and sends the two ends.
+    expect(a.calls[0]).toBe("down 10,10");
+    expect(b.calls[0]).toBe("down 10,10");
+    expect(a.calls.at(-1)).toBe("up 10,80");
+    expect(b.calls.at(-1)).toBe("up 10,80");
+  });
+
+  it("names the phones that fell back instead of hiding them behind the ones that worked", async () => {
+    // The split is the point. Replaying the gesture on a phone that already ran it live
+    // scrolls twice; skipping one that fell back does nothing at all. A single verdict for
+    // the whole group has to be wrong in one of those two directions.
+    const good = recorder();
+    const dead = recorder((action) => (action === "down" ? false : true));
+    const group = createLiveDragGroup([
+      { udid: "works", send: good.send },
+      { udid: "no-producer", send: dead.send },
+    ]);
+
+    group.begin(5, 5);
+    group.move(5, 50);
+    const settled = group.end(5, 90);
+    for (let round = 0; round < 8; round += 1) {
+      await good.releaseAll();
+      await dead.releaseAll();
+    }
+    const split = await settled;
+
+    expect(split.live).toEqual(["works"]);
+    expect(split.fallback).toEqual(["no-producer"]);
+  });
+
+  it("lets a fast phone stay smooth while a slow one drops points", async () => {
+    // One instance per phone, not one fanning out inside `send`. Shared, every point would
+    // wait for the slowest socket and the group would run at the speed of its worst device.
+    const fast = recorder();
+    const slow = recorder();
+    const group = createLiveDragGroup([
+      { udid: "fast", send: fast.send },
+      { udid: "slow", send: slow.send },
+    ]);
+
+    group.begin(0, 0);
+    await fast.releaseAll();
+    // Only the fast phone has acknowledged its DOWN; the slow one is still holding it.
+    for (let y = 10; y <= 60; y += 10) {
+      group.move(0, y);
+      await fast.releaseAll();
+    }
+
+    const fastMoves = fast.calls.filter((call) => call.startsWith("move")).length;
+    const slowMoves = slow.calls.filter((call) => call.startsWith("move")).length;
+    expect(fastMoves).toBeGreaterThan(slowMoves);
   });
 });

@@ -23,7 +23,7 @@ import {
   viewInjectTouch,
   viewRequestKeyframe,
 } from "../api";
-import { createLiveDrag, liveTap, type LiveDrag } from "../liveDrag";
+import { createLiveDragGroup, liveTap, type LiveDragGroup } from "../liveDrag";
 import {
   parseCurrentInputMethod,
   parseInputMethods,
@@ -136,7 +136,7 @@ export function FocusStream({
     /// Non-null once the gesture has travelled far enough to be a drag rather than a tap.
     /// Until then nothing is injected, so a tap keeps the uiautomator2 path it has always
     /// had and the control socket only ever sees gestures that benefit from being live.
-    live: LiveDrag | null;
+    live: LiveDragGroup | null;
   } | null>(null);
   const inFlight = useRef(false);
   const targets = groupMode && groupUdids.length > 1 ? groupUdids : [device.udid];
@@ -168,10 +168,13 @@ export function FocusStream({
   };
   /// Whether this gesture may go down the scrcpy control socket.
   ///
-  /// iOS has no such socket, and group mode has no such thing as *one* socket — the whole
-  /// point there is that every selected phone gets the same gesture, which only the group
-  /// command can do. Both keep the path they already had.
-  const canDragLive = !isIos && targets.length === 1;
+  /// iOS has no such socket. Group mode used to be excluded too, on the reasoning that it
+  /// "has no such thing as *one* socket" — but every phone has a socket of its own, and one
+  /// live drag each off the same pointer stream is precisely what one-controls-many is. The
+  /// exclusion meant the normal working mode on this farm, a multi-selection, never used the
+  /// live path at all: the drag was decided at release from two samples and replayed as a
+  /// straight line at constant speed. That is what "not smooth" was.
+  const canDragLive = !isIos;
   const encodedW = viewSize?.width && viewSize.width > 0 ? viewSize.width : 0;
   const encodedH = viewSize?.height && viewSize.height > 0 ? viewSize.height : 0;
   const aspect = encodedW > 0 && encodedH > 0 ? encodedH / encodedW : 2;
@@ -316,30 +319,44 @@ export function FocusStream({
     start: { x: number; y: number },
     end: { x: number; y: number },
     steps: { x: number; y: number; durationMs: number }[],
+    /// Which phones still need this gesture, defaulting to the whole selection.
+    ///
+    /// The live path passes the subset that could **not** take it live, so a phone that
+    /// already ran the drag sample by sample does not run it again as a swipe. One verdict
+    /// for the whole group has to be wrong in one direction or the other: replay on a phone
+    /// that went live and it scrolls twice; skip one that fell back and it does nothing.
+    only: string[] = targets,
   ) => {
     const iw = encodedW;
     const ih = encodedH;
-    if (!iw || !ih) return;
+    if (!iw || !ih || only.length === 0) return;
     const dist = Math.hypot(end.x - start.x, end.y - start.y);
     await runExclusive(async () => {
+      let remaining = only;
       if (dist < TAP_SLOP) {
         // Down the control socket first, and not for the milliseconds: it is the one input
         // path that does not depend on uiautomator2, so it still works on a phone whose
         // agent has lost UiAutomation -- the state that otherwise costs tens of seconds per
         // tap, or refuses every one of them (AGENTS.md 9.79).
         if (canDragLive) {
-          const outcome = await liveTap(
-            (action, x, y) => viewInjectTouch(device.udid, action, x, y, iw, ih),
-            end.x,
-            end.y,
-            (reason) => console.warn(`live tap fell back on ${device.udid}: ${reason}`),
+          const outcomes = await Promise.all(
+            remaining.map(async (udid) => ({
+              udid,
+              outcome: await liveTap(
+                (action, x, y) => viewInjectTouch(udid, action, x, y, iw, ih),
+                end.x,
+                end.y,
+                (reason) => console.warn(`live tap fell back on ${udid}: ${reason}`),
+              ),
+            })),
           );
-          if (outcome === "live") return;
+          remaining = outcomes.filter((row) => row.outcome !== "live").map((row) => row.udid);
+          if (remaining.length === 0) return;
         }
-        if (targets.length > 1) {
+        if (remaining.length > 1) {
           reportGroup(
             await groupInput({
-              udids: targets,
+              udids: remaining,
               kind: "tap",
               x: end.x,
               y: end.y,
@@ -349,13 +366,19 @@ export function FocusStream({
             true,
           );
         } else {
-          await deviceTap(device.udid, end.x, end.y, iw, ih);
+          await deviceTap(remaining[0], end.x, end.y, iw, ih);
         }
-      } else if (targets.length > 1) {
+      } else if (remaining.length > 1) {
         // Group control has no path command; the endpoints are what every device gets.
+        //
+        // Which is why this is now the *fallback* rather than the road every group gesture
+        // took. Two endpoints replayed at constant speed is a drag, and a drag is measurably
+        // weaker than the flick the operator drew: 13 of 40 against 19 of 19 on a TikTok
+        // carousel, measured 19/08/2026. The phones that could take it live already have the
+        // real shape; these are the ones that could not.
         reportGroup(
           await groupInput({
-            udids: targets,
+            udids: remaining,
             kind: "swipe",
             x: start.x,
             y: start.y,
@@ -367,10 +390,10 @@ export function FocusStream({
           true,
         );
       } else if (steps.length >= 2) {
-        await deviceSwipePath(device.udid, start, steps, iw, ih);
+        await deviceSwipePath(remaining[0], start, steps, iw, ih);
       } else {
         // Too few samples to be a path -- a fast flick the pointer only reported twice.
-        await deviceSwipe(device.udid, start.x, start.y, end.x, end.y, iw, ih, 160);
+        await deviceSwipe(remaining[0], start.x, start.y, end.x, end.y, iw, ih, 160);
       }
     });
   };
@@ -876,13 +899,16 @@ export function FocusStream({
               canDragLive &&
               Math.hypot(point.x - held.start.x, point.y - held.start.y) >= TAP_SLOP
             ) {
-              held.live = createLiveDrag(
-                (action, x, y) =>
-                  viewInjectTouch(device.udid, action, x, y, encodedW, encodedH),
+              held.live = createLiveDragGroup(
+                targets.map((udid) => ({
+                  udid,
+                  send: (action, x, y) =>
+                    viewInjectTouch(udid, action, x, y, encodedW, encodedH),
+                })),
                 // Not a toast: the gesture still reaches the phone the old way, so there is
                 // nothing for the operator to do about it. It goes to the console so that a
                 // silently dead live path is findable.
-                (reason) => console.warn(`live drag fell back on ${device.udid}: ${reason}`),
+                (reason) => console.warn(`live drag fell back: ${reason}`),
               );
               held.live.begin(held.start.x, held.start.y);
             }
@@ -935,7 +961,14 @@ export function FocusStream({
             try {
               // A live drag has already happened on the phone, sample by sample. Replaying
               // it as a swipe would scroll everything a second time.
-              if (held.live && (await held.live.end(end.x, end.y)) === "live") return;
+              if (held.live) {
+                // The split, not a single verdict: the phones that ran it live already have
+                // the gesture, and replaying it on them would scroll everything twice.
+                const split = await held.live.end(end.x, end.y);
+                if (split.fallback.length === 0) return;
+                await runGesture(held.start, end, steps, split.fallback);
+                return;
+              }
               await runGesture(held.start, end, steps);
             } catch (error) {
               toastError("Điều khiển thất bại", error);

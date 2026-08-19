@@ -189,3 +189,68 @@ export function createLiveDrag(send: SendTouch, onFallback?: OnFallback): LiveDr
     },
   };
 }
+
+/// One phone in a group gesture: which device, and how to reach its control socket.
+export interface LiveDragMember {
+  udid: string;
+  send: SendTouch;
+}
+
+/// Which phones took the gesture live, and which still need it sent the old way.
+///
+/// A split rather than one verdict, because the two halves need opposite treatment and
+/// getting it wrong is silent either way: replay the gesture on a phone that already ran it
+/// live and it scrolls twice, skip a phone that fell back and it does nothing at all.
+export interface LiveDragSplit {
+  live: string[];
+  fallback: string[];
+}
+
+export interface LiveDragGroup {
+  begin(x: number, y: number): void;
+  move(x: number, y: number): void;
+  end(x: number, y: number): Promise<LiveDragSplit>;
+}
+
+/// Drive one live drag per phone off a single pointer stream.
+///
+/// **One instance each, deliberately, rather than one instance fanning out inside `send`.**
+/// `createLiveDrag` keeps a single `pending` point and drops whatever the newest one
+/// overtook, so a phone that answers slowly simply receives fewer points. Share one instance
+/// across twenty phones and that self-throttling inverts: every point waits for the slowest
+/// socket, and the whole group runs at the speed of its worst device. Separate instances let
+/// the fast nineteen stay smooth.
+///
+/// This is the difference the operator actually feels on a farm. Group control used to fall
+/// back to `group_input`, which — as its own call site says — "has no path command; the
+/// endpoints are what every device gets": the drag was decided at release from two points
+/// and replayed as a straight line at constant speed. Besides looking nothing like the
+/// finger that drew it, that shape is measurably weaker: on 19/08/2026 a straight constant
+/// speed drag turned a TikTok photo carousel on 13 of 40 attempts where a shaped flick
+/// managed 19 of 19.
+export function createLiveDragGroup(
+  members: LiveDragMember[],
+  onFallback?: OnFallback,
+): LiveDragGroup {
+  const drags = members.map((member) => ({
+    udid: member.udid,
+    drag: createLiveDrag(member.send, (reason) => onFallback?.(`${member.udid}: ${reason}`)),
+  }));
+  return {
+    begin(x, y) {
+      for (const { drag } of drags) drag.begin(x, y);
+    },
+    move(x, y) {
+      for (const { drag } of drags) drag.move(x, y);
+    },
+    async end(x, y) {
+      const outcomes = await Promise.all(
+        drags.map(async ({ udid, drag }) => ({ udid, outcome: await drag.end(x, y) })),
+      );
+      return {
+        live: outcomes.filter((row) => row.outcome === "live").map((row) => row.udid),
+        fallback: outcomes.filter((row) => row.outcome !== "live").map((row) => row.udid),
+      };
+    },
+  };
+}
