@@ -215,9 +215,16 @@ function App() {
   /**
    * Tile menu rows, and every one of them is a command this app already has.
    *
-   * The reference product also offers an adb command box, rotate, wallpaper, APK
-   * install and device deletion. They are absent on purpose: a row that calls a
-   * command we never wrote is a button that fails, which is worse than its absence.
+   * That is the rule and it stands: a row calling a command we never wrote is a button that
+   * fails. What does not stand is the list of exceptions this comment used to carry — adb,
+   * rotate and APK install were written down as things we deliberately did not offer, then
+   * built, and the note was never corrected. All three are rows below.
+   *
+   * What is genuinely not here, measured 19/08/2026 against the reference product's own
+   * menu: a gesture recorder, and a clipboard read. The first is real work; the second is a
+   * missing Tauri command over a `UiSession` method that already exists. Everything else it
+   * offers, this app has — just laid out differently: the app list lives in the focus view,
+   * agent repair in Settings, tasks in the Flow panel.
    */
   const tileActions = useCallback(
     (device: DeviceInfo): DeviceMenuAction[] => [

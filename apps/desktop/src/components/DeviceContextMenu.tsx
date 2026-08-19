@@ -26,10 +26,12 @@ interface Props {
  * caption over it, and a row of always-visible buttons would cover the screen the
  * operator is watching.
  *
- * Only actions with a backend appear here. The reference offers several more — an adb
- * command box, rotate, wallpaper, APK install, device deletion — and inventing UI for
- * commands this app does not have would produce buttons that fail, which is worse than
- * their absence.
+ * Only actions with a backend appear here, and that rule is the whole design — a row that
+ * calls a command this app never wrote is a button that fails, which is worse than its
+ * absence. The rule has not changed; what changed is the list. An adb command box, rotate
+ * and APK install were once named here as deliberate omissions, and all three were built
+ * afterwards without this note being corrected, so it spent a while describing the opposite
+ * of the truth. If a row is missing now, check `api.ts` before assuming it cannot exist.
  */
 export function DeviceContextMenu({
   device,
