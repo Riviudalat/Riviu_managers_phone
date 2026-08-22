@@ -3,7 +3,6 @@ import {
   deviceModelOsLabel,
   deviceOsLabel,
   deviceTileSubtitle,
-  markDeviceFrameLive,
   tileStreamStateView,
   type DeviceInfo,
 } from "../types";
@@ -88,28 +87,5 @@ describe("deviceTileSubtitle", () => {
       osVersion: "16.7.15",
     };
     expect(deviceTileSubtitle(named)).toBe("iPhone10,1 · iOS 16.7.15");
-  });
-});
-
-describe("markDeviceFrameLive", () => {
-  it("marks only the device that emitted a fresh frame as live", () => {
-    const fixture = (udid: string): DeviceInfo => ({
-      udid,
-      name: udid,
-      model: "fixture",
-      platform: "ios",
-      osVersion: "fixture",
-      connection: "mock",
-      status: "ready",
-      wdaReady: true,
-      tileStreamState: "sampling",
-    });
-    const devices = [fixture("a"), fixture("b")];
-
-    const next = markDeviceFrameLive(devices, "b");
-
-    expect(next[0]).toBe(devices[0]);
-    expect(next[0].tileStreamState).toBe("sampling");
-    expect(next[1].tileStreamState).toBe("live");
   });
 });

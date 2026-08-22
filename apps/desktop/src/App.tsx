@@ -116,7 +116,7 @@ import type {
   JobRecord,
   PageId,
 } from "./types";
-import { deviceModelOsLabel, markDeviceFrameLive } from "./types";
+import { deviceModelOsLabel } from "./types";
 import { pickDirectory, pickFile } from "./pickFile";
 import { loadZoom, stepZoom, storeZoom, TILE_ZOOM, wheelWantsZoom } from "./zoom";
 import {
@@ -1134,9 +1134,6 @@ function App() {
               next[idx] = job;
               return next;
             });
-          }
-          if (p.type === "streamFrame" && typeof p.udid === "string") {
-            setDevices((prev) => markDeviceFrameLive(prev, p.udid as string));
           }
         }).then((fn) => {
           if (cancelled) {

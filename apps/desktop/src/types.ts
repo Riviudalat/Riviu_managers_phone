@@ -27,16 +27,6 @@ export function tileStreamStateView(
   return { state: resolved, label: TILE_STREAM_LABELS[resolved] };
 }
 
-export function markDeviceFrameLive(devices: DeviceInfo[], udid: string): DeviceInfo[] {
-  let changed = false;
-  const next = devices.map((device) => {
-    if (device.udid !== udid || device.tileStreamState === "live") return device;
-    changed = true;
-    return { ...device, tileStreamState: "live" as const };
-  });
-  return changed ? next : devices;
-}
-
 export type DevicePlatform = "ios" | "android";
 
 export type HardwareKey =

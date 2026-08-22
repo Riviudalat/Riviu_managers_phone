@@ -30,24 +30,17 @@ import type {
   LegacyImportResult,
   JobRecord,
   MaterialItem,
-  OpLog,
-  ProxyConfig,
-  PublishTask,
   PublishCampaignDetail,
   PublishCampaignRecord,
   PublishFolderManifest,
   ScheduleItem,
   StreamSettings,
-  NurtureCommentAttempt,
-  NurtureCommentCost,
-  NurtureCostSummary,
   NurtureApiTestResult,
   NurtureSessionStatus,
   NurtureSettings,
   InteractionCampaignDetail,
   InteractionCampaignSummary,
   ThreadCampaignRequest,
-  ThreadPreview,
   TikTokLinkLine,
   InstalledApp,
   ShellOutcome,
@@ -86,20 +79,12 @@ export async function installIpa(udid: string, path: string) {
   return invoke<void>("install_ipa", { udid, path });
 }
 
-export async function uninstallApp(udid: string, bundleId: string) {
-  return invoke<void>("uninstall_app", { udid, bundleId });
-}
-
 export async function installIpaToGroup(groupId: string, path: string) {
   return invoke<GroupInstallResult[]>("install_ipa_to_group", { groupId, path });
 }
 
 export async function screenshot(udid: string) {
   return invoke<string>("screenshot", { udid });
-}
-
-export async function syslog(udid: string, lines = 80) {
-  return invoke<string>("syslog", { udid, lines });
 }
 
 export async function rebootDevice(udid: string) {
@@ -191,10 +176,6 @@ export async function deviceSwipe(
 
 export async function deviceTypeText(udid: string, text: string) {
   return invoke<void>("device_type_text", { udid, text });
-}
-
-export async function deviceHome(udid: string) {
-  return invoke<void>("device_home", { udid });
 }
 
 export async function deviceKey(udid: string, key: HardwareKey) {
@@ -477,10 +458,6 @@ export async function relayPulseChannel(
   return invoke<void>("relay_pulse_channel", { port, channel, holdMs, energize });
 }
 
-export async function latestFrame(udid: string) {
-  return invoke<string | null>("latest_frame", { udid });
-}
-
 export async function viewEndpoint() {
   return invoke<string | null>("view_endpoint");
 }
@@ -583,14 +560,6 @@ export async function setAppleId(email: string, password: string) {
 
 export async function clearAppleId() {
   return invoke<void>("clear_apple_id");
-}
-
-export async function resignWda(udid: string) {
-  return invoke<string>("resign_wda", { udid });
-}
-
-export async function bulkResignWda(udids: string[]) {
-  return invoke<string[]>("bulk_resign_wda", { udids });
 }
 
 export async function agentGetSettings() {
@@ -741,26 +710,6 @@ export async function saveGroup(group: DeviceGroup) {
   return invoke<DeviceGroup>("save_group", { group });
 }
 
-export async function deleteGroup(id: string) {
-  return invoke<void>("delete_group", { id });
-}
-
-export async function listProxies() {
-  return invoke<ProxyConfig[]>("list_proxies");
-}
-
-export async function saveProxy(proxy: ProxyConfig) {
-  return invoke<ProxyConfig>("save_proxy", { proxy });
-}
-
-export async function deleteProxy(id: string) {
-  return invoke<void>("delete_proxy", { id });
-}
-
-export async function exportProxyConfig(id: string) {
-  return invoke<string>("export_proxy_config", { id });
-}
-
 export async function listMaterials() {
   return invoke<MaterialItem[]>("list_materials");
 }
@@ -815,24 +764,6 @@ export async function deleteSchedule(id: string) {
   return invoke<void>("delete_schedule", { id });
 }
 
-export async function listPublishTasks() {
-  return invoke<PublishTask[]>("list_publish_tasks");
-}
-
-export async function createPublishTask(
-  name: string,
-  scriptName: string,
-  materialIds: string[],
-  udids: string[],
-) {
-  return invoke<PublishTask>("create_publish_task", {
-    name,
-    scriptName,
-    materialIds,
-    udids,
-  });
-}
-
 export async function publishScanFolder(sourceRoot: string) {
   return invoke<PublishFolderManifest>("publish_scan_folder", { sourceRoot });
 }
@@ -855,10 +786,6 @@ export async function publishList(limit = 50) {
   return invoke<PublishCampaignRecord[]>("publish_list", { limit });
 }
 
-export async function publishGet(campaignId: string) {
-  return invoke<PublishCampaignDetail | null>("publish_get", { campaignId });
-}
-
 export async function publishCancel(campaignId: string) {
   return invoke<void>("publish_cancel", { campaignId });
 }
@@ -873,10 +800,6 @@ export async function publishTransfer(campaignId: string) {
 
 export async function publishPost(campaignId: string) {
   return invoke<PublishCampaignDetail>("publish_post", { campaignId });
-}
-
-export async function listOpLogs(limit = 100) {
-  return invoke<OpLog[]>("list_op_logs", { limit });
 }
 
 export async function analyticsSummary() {
@@ -907,18 +830,6 @@ export async function nurtureTestApi(udid: string, frames?: Uint8Array[]) {
   });
 }
 
-export async function nurtureListCosts(limit = 100) {
-  return invoke<NurtureCommentCost[]>("nurture_list_costs", { limit });
-}
-
-export async function nurtureListCommentAttempts(limit = 100) {
-  return invoke<NurtureCommentAttempt[]>("nurture_list_comment_attempts", { limit });
-}
-
-export async function nurtureCostSummary() {
-  return invoke<NurtureCostSummary>("nurture_cost_summary");
-}
-
 export async function nurtureSessionStatus() {
   return invoke<NurtureSessionStatus[]>("nurture_session_status");
 }
@@ -940,10 +851,6 @@ export async function interactionParseLinks(rawText: string) {
 
 export async function interactionResolveLinks(rawText: string) {
   return invoke<TikTokLinkLine[]>("interaction_resolve_links", { rawText });
-}
-
-export async function interactionPreviewThread(request: ThreadCampaignRequest) {
-  return invoke<ThreadPreview>("interaction_preview_thread", { request });
 }
 
 export async function interactionStartThread(request: ThreadCampaignRequest) {
@@ -994,10 +901,6 @@ export async function interactionListArtifacts(campaignId: string) {
 
 export async function interactionReadArtifact(artifactId: string) {
   return invoke<InteractionArtifactPayload>("interaction_read_artifact", { artifactId });
-}
-
-export async function interactionOpenOnDevice(udid: string, url: string) {
-  return invoke<void>("interaction_open_on_device", { udid, url });
 }
 
 export function listenRiviuEvents(handler: (payload: unknown) => void): Promise<UnlistenFn> {

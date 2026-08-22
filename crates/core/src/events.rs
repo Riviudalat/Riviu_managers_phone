@@ -8,41 +8,13 @@ use crate::types::{DeviceInfo, JobRecord};
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum AppEvent {
-    DevicesUpdated {
-        devices: Vec<DeviceInfo>,
-    },
-    DeviceUpdated {
-        device: DeviceInfo,
-    },
-    JobUpdated {
-        job: JobRecord,
-    },
-    FlowUpdated {
-        flow_id: FlowId,
-        revision: u64,
-    },
-    FlowRunUpdated {
-        run_id: Uuid,
-        revision: u64,
-    },
-    InteractionUpdated {
-        campaign_id: String,
-        revision: u64,
-    },
-    StreamFrame {
-        udid: String,
-        /// Base64 JPEG frame for UI when not using HTTP MJPEG URL.
-        jpeg_base64: String,
-        fps: u32,
-    },
-    Log {
-        level: String,
-        message: String,
-    },
-    WdaExpiryWarning {
-        udid: String,
-        days_remaining: i64,
-    },
+    DevicesUpdated { devices: Vec<DeviceInfo> },
+    DeviceUpdated { device: DeviceInfo },
+    JobUpdated { job: JobRecord },
+    FlowUpdated { flow_id: FlowId, revision: u64 },
+    FlowRunUpdated { run_id: Uuid, revision: u64 },
+    InteractionUpdated { campaign_id: String, revision: u64 },
+    WdaExpiryWarning { udid: String, days_remaining: i64 },
 }
 
 #[derive(Clone)]
