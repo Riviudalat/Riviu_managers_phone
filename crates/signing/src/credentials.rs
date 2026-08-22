@@ -56,6 +56,12 @@ pub struct CredentialStore {
 }
 
 impl CredentialStore {
+    /// How long a *candidate* keychain backend gets to answer before it is passed over.
+    ///
+    /// This runs while choosing a backend, not while using one, so the cost of waiting is
+    /// paid on a path the operator is sitting in front of. A keyring service that has not
+    /// answered in two seconds is wedged — on Windows that is a stalled Credential Manager —
+    /// and the right move is the next candidate, not a longer wait.
     const CANDIDATE_KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
     pub fn new(backend: Arc<dyn CredentialBackend>) -> Self {

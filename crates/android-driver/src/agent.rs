@@ -29,6 +29,12 @@ use serde_json::{json, Value};
 /// W3C returns the element id under this key; older servers use `ELEMENT`.
 const W3C_ELEMENT_KEY: &str = "element-6066-11e4-a52e-4f735466cecf";
 
+/// How long one UiAutomator2 request may take before the driver gives up on it.
+///
+/// Thirty rather than `adb.rs`'s sixty because this is one HTTP call to a server already
+/// running on the phone, not a command that may have to start one. A request still pending
+/// after this is not slow, it is a server that stopped answering, and waiting longer only
+/// delays the restart that fixes it.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How an element is addressed on screen.

@@ -22,6 +22,11 @@ use crate::{
     InteractionSessionKind, SideEffectClass,
 };
 
+/// How long shutdown waits for running flows to stop themselves before it stops waiting.
+///
+/// Long enough for a node inside `EVIDENCE_TIMEOUT` plus its release to finish on its own,
+/// which is the outcome worth waiting for: a flow that ends itself releases the device lease,
+/// and one that is abandoned does not. Bounded because the app must still close.
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]

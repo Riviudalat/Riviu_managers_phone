@@ -782,6 +782,11 @@ async fn expand_folded_comments(session: &dyn UiSession, labels: TikTokControls)
     true
 }
 const PARENT_SCROLL_DURATION_MS: u64 = 320;
+/// Time given to the comment list to stop moving before it is read again.
+///
+/// TikTok's list keeps gliding after the finger leaves, and a hierarchy dump taken mid-glide
+/// reports rows at coordinates they have already left. Paired with `SCROLL_PROGRESS_PX`
+/// below: this decides *when* the list is read, that decides whether it moved.
 const PARENT_SCROLL_SETTLE: Duration = Duration::from_millis(900);
 /// How far the list must actually move for a swipe to count as having scrolled.
 ///

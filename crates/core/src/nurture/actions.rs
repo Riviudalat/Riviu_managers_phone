@@ -56,7 +56,17 @@ fn context_source(settings: &NurtureSettings) -> &'static str {
 const SWIPE_FROM_Y: f64 = 0.62;
 const SWIPE_TO_Y: f64 = 0.20;
 
+/// Time for the comment drawer to finish opening and load its first screenful.
+///
+/// The drawer animates up and *then* fetches, so the window is not the animation — it is the
+/// network round trip behind it on a fleet of budget phones. Reading earlier finds an empty
+/// list and concludes the post has no comments.
 const COMMENT_DRAWER_SETTLE: Duration = Duration::from_millis(3_500);
+
+/// Time for the keyboard to come up and the input field to take focus after the tap.
+///
+/// Shorter than the drawer because nothing is fetched — it is one IME animation. Typing into
+/// a field that has not focused yet sends the text nowhere, silently.
 const COMMENT_INPUT_SETTLE: Duration = Duration::from_millis(1_200);
 
 /// What a swipe could be *proven* to have done.

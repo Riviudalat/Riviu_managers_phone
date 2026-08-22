@@ -84,7 +84,19 @@ fn helper_token(serial: &str) -> String {
         .clone()
 }
 
+/// One helper request, over `adb forward` to loopback on the phone.
+///
+/// Everything on this path is small and local — clipboard text, an app label, a wallpaper
+/// path — so ten seconds is already far past working. It exists to bound the case the port
+/// is held by something that accepted the connection and then said nothing, which
+/// `adb forward` makes reachable.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Installing the helper APK, which is a different order of work entirely.
+///
+/// `pm install` on the older phones in this fleet verifies and optimises the package, and
+/// that is minutes, not seconds. Bounded anyway: an install that has not finished by now has
+/// hung, and the caller needs to hear that rather than block the fleet.
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
 /// Hard cap on what the host will read back from one helper request.
 ///

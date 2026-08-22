@@ -22,7 +22,17 @@ use crate::{
     ProcessAbsenceProof, TapPoint, UiCapacityReservation,
 };
 
+/// How long a node waits for the phone to *prove* what it did.
+///
+/// Evidence here is a frame that changed, a process that went away, a context that was
+/// released — all things that either happen within a second or are not going to. The node
+/// fails rather than reports success it cannot show, which is the rule this timeout serves.
 const EVIDENCE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The step a long wait is chopped into, so cancellation is felt promptly.
+///
+/// A flow's wait can be minutes; sleeping it in one call would make Stop take that long to
+/// be noticed. Quarter-second slices keep the shutdown path responsive without spinning.
 const WAIT_SLICE: Duration = Duration::from_millis(250);
 
 #[derive(Clone)]
