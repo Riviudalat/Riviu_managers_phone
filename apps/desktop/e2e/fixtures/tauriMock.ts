@@ -762,6 +762,58 @@ export async function installTauriMock(
     commandHandlers.set("update_install", () => null);
     commandHandlers.set("list_installed_apps", () => []);
     commandHandlers.set("list_groups", () => []);
+    // Everything the Settings page asks for on mount. Absent, each of these rejected and the
+    // page rendered `Unknown mock command: …` in red — and because five of them race, *which*
+    // name landed in the banner varied, so the page's screenshot baseline was pinning a
+    // different error message from run to run. That is the "pre-existing Settings drift" this
+    // repo has been carrying: not a rendering change, an unfinished fixture.
+    commandHandlers.set("agent_get_settings", () => ({
+      settings: { autoRepair: true },
+      tokenConfigured: true,
+      activeArtifactId: "riviu-agent-ios-candidate",
+      activeArtifactVersion: "0.5.8-media-text",
+    }));
+    const fixtureAgentStatus = (udid: string) => ({
+      udid,
+      state: "ready",
+      artifactId: "riviu-agent-ios-candidate",
+      artifactVersion: "0.5.8-media-text",
+      bundleId: "com.riviu.managersphone.agent.xctrunner",
+      protocolVersion: 1,
+      features: ["stream", "gesture", "text"],
+      installedVersion: "10.6.2",
+      installedBuild: "274",
+      authReady: true,
+      mjpegReady: true,
+      sessionReady: true,
+      message: null,
+    });
+    commandHandlers.set("agent_list_statuses", (args) => {
+      const udids = Array.isArray(args.udids) ? (args.udids as string[]) : [];
+      return udids.map(fixtureAgentStatus);
+    });
+    commandHandlers.set("agent_save_settings", () => ({
+      settings: { autoRepair: true },
+      tokenConfigured: true,
+      activeArtifactId: "riviu-agent-ios-candidate",
+      activeArtifactVersion: "0.5.8-media-text",
+    }));
+    commandHandlers.set("agent_preflight", (args) => fixtureAgentStatus(String(args.udid ?? "")));
+    commandHandlers.set("agent_repair", (args) => fixtureAgentStatus(String(args.udid ?? "")));
+    commandHandlers.set("local_api_get_config", () => ({
+      enabled: false,
+      port: 17999,
+      token: "",
+    }));
+    commandHandlers.set("local_api_set_config", (args) => args.config ?? null);
+    commandHandlers.set("get_apple_id", () => ({ email: "", hasPassword: false }));
+    commandHandlers.set("driver_mode", () => "mock");
+    commandHandlers.set("arp_scan", () => []);
+    // The grid reads the operator's own records (alias, number) on every reload. Without a
+    // handler the mock *rejects*, which the call site catches — so the page still renders and
+    // the omission would only show up as a fleet with no labels, which is also what an empty
+    // answer looks like. Mocked so the two stay distinguishable.
+    commandHandlers.set("list_device_metas", () => []);
     commandHandlers.set("device_shell", () => ({ exitCode: 0, stdout: "", stderr: "" }));
     commandHandlers.set("set_screen_rotation", () => 0);
 

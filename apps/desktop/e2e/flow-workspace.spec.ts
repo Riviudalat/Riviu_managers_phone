@@ -12,11 +12,19 @@ async function openFlow(page: Page, selectDevices = false): Promise<void> {
   await page.goto("/");
   await expect(page.locator("[data-testid='device-tile']")).toHaveCount(2);
   if (selectDevices) {
+    // Ctrl-click, because the tile's corner checkbox was removed on request: selection is the
+    // tile's own click now, additive on ctrl/meta/shift (`onSelect` in App.tsx). Held down for
+    // the first tile too — additive on an empty selection still just adds it, and asking for
+    // "additive" explicitly says what this loop means rather than relying on plain-click
+    // replace-then-extend ordering.
     for (const udid of ["MOCK-IPHONE-01", "MOCK-IPHONE-02"]) {
-      await page.locator("[data-testid='device-tile']", { hasText: udid.replace("MOCK-IPHONE-", "Fixture iPhone ") })
-        .getByRole("checkbox")
-        .check({ force: true });
+      await page
+        .locator("[data-testid='device-tile']", {
+          hasText: udid.replace("MOCK-IPHONE-", "Fixture iPhone "),
+        })
+        .click({ modifiers: ["ControlOrMeta"] });
     }
+    await expect(page.locator("[data-testid='device-tile'].selected")).toHaveCount(2);
   }
   await page.locator("[data-testid='nav-item']").getByText("Flow", { exact: true }).click();
   await expect(page.getByRole("region", { name: "Không gian Flow" })).toHaveAttribute(
