@@ -7717,3 +7717,25 @@ Gate từng-crate tại máy **không** bắt nổi cả ba, và đó là lý do
 **Nguyên tắc chung để lại: một thay đổi chỉ chạy trên CI thì chỉ CI nghiệm thu được nó, và một
 thay đổi mà client thật phải chấp nhận thì chỉ client thật nghiệm thu được nó.** Cả hai loại đều
 không có trong `cargo test`.
+
+#### Nghiệm thu trên fleet thật (22/08/2026, sau khi cắm lại máy)
+
+Hai mục §9.97 để nợ vì lúc sửa **không máy nào cắm USB**, nay đã đóng trên 19 máy thật:
+
+- **S5 (WebSocket đòi token)** — `19/19 android devices reporting painted frames`, lưới hiện đủ
+  19 tile với màn hình thật của từng máy, và **0 lần `handshake refused`** kể từ khi fleet quay
+  lại. "Painted frames" do *frontend* báo về (`view_report_paint`), nên nó chứng minh cả chuỗi:
+  bắt tay có token được chấp nhận → frame tới WebView → giải mã được.
+- **S10 (CSP)** — cả bốn directive từng chưa chạm tới nay đều có bằng chứng:
+  `connect-src ws://127.0.0.1:*` (fleet đang stream), `worker-src blob:` (giải mã H.264 chạy
+  trong Web Worker — không có nó thì không có "painted frame" nào), `img-src data:` (icon app
+  thật: TikTok, Facebook, GenFarmer, ATX… đều là `data:image/png;base64`), và
+  `style-src`/`font-src`/`script-src` (app render đủ).
+
+Tiện thể nghiệm thu luôn **S13**: lần bấm "làm mới" App List đi qua `read_capped`, tức trần
+8 MiB không cắt nhầm payload icon thật.
+
+**Ghi lại một chi tiết vận hành**: một máy vừa cắm lại có `com.riviu.agent` **đã cài** nhưng App
+List vẫn báo "Máy chưa có Riviu helper nên chưa đọc được tên và icon app". Cài đặt ≠ với tới
+được: service chưa chạy / chưa forward. Bấm làm mới là nó attach rồi trả đủ nhãn + icon. Câu chú
+thích đó nên nói "chưa với tới được helper" thay vì "chưa có helper".
