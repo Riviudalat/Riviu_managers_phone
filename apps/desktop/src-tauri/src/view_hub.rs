@@ -454,22 +454,27 @@ async fn forward_device(
     }
 }
 
-/// Does this handshake carry the hub's token, and is it from our own WebView?
+/// Does this handshake carry the hub's token?
 ///
 /// Split out and pure so the decision is testable without a socket — the property that matters
 /// is "no token, no frames", and that must not depend on getting a TCP fixture right.
 ///
-/// Both halves are load-bearing:
-/// * the token is compared in **constant time**, because a byte-at-a-time comparison against a
-///   secret an attacker can retry at loopback speed is a secret an attacker can read;
-/// * any request carrying an `Origin` is refused outright. Our client is a Tauri WebView
-///   calling `new WebSocket(...)` from `tauri://` or a dev-server page, and browsers attach
-///   `Origin` to cross-site WebSocket handshakes. Since WebSocket bypasses CORS entirely, this
-///   is the only thing standing between a random web page and twenty-one live screens.
-fn handshake_is_authorised(path_and_query: &str, origin: Option<&str>, token: &str) -> bool {
-    if origin.is_some() {
-        return false;
-    }
+/// The token is compared in **constant time**: a byte-at-a-time comparison against a secret an
+/// attacker can retry at loopback speed is a secret an attacker can read.
+///
+/// **`Origin` is deliberately not a gate, and that was learned the hard way.** The first
+/// version of this refused any handshake carrying an `Origin`, on the theory that our own
+/// WebView sends none and a browser page does. The running app disproved it in seconds: in dev
+/// the page is served by vite from `http://localhost:5173` (`tauri.conf.json` devUrl), so our
+/// own client sends `Origin` too — the log filled with `view websocket handshake refused` in a
+/// reconnect loop and the fleet view went blank. An allowlist instead would have to track
+/// `tauri://localhost`, `https://tauri.localhost` and the dev origin across platforms: more
+/// surface, no more safety.
+///
+/// The token alone answers the attacker `Origin` was aimed at. A web page can open a
+/// cross-origin WebSocket — they bypass CORS — but it cannot **read** the token, which reaches
+/// only our own WebView, over IPC, and is 244 bits of CSPRNG.
+fn handshake_is_authorised(path_and_query: &str, token: &str) -> bool {
     let Some(query) = path_and_query.split_once('?').map(|(_, q)| q) else {
         return false;
     };
@@ -503,16 +508,12 @@ fn gate_handshake(
     response: HandshakeResponse,
     token: &str,
 ) -> Result<HandshakeResponse, HandshakeRejection> {
-    let origin = request
-        .headers()
-        .get("origin")
-        .and_then(|value| value.to_str().ok());
     let target = request
         .uri()
         .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or("");
-    if handshake_is_authorised(target, origin, token) {
+    if handshake_is_authorised(target, token) {
         return Ok(response);
     }
     log::warn!("view websocket handshake refused: no valid token");
@@ -1209,46 +1210,20 @@ mod tests {
     fn the_handshake_gate_answers_the_only_question_that_matters() {
         // Pure, so the decision is provable without a socket: no token, no frames.
         let token = "0123456789abcdef";
-        assert!(handshake_is_authorised("/?k=0123456789abcdef", None, token));
+        assert!(handshake_is_authorised("/?k=0123456789abcdef", token));
         assert!(handshake_is_authorised(
             "/?other=1&k=0123456789abcdef",
-            None,
             token
         ));
 
         // No token at all — the shape every caller had before this existed.
-        assert!(!handshake_is_authorised("/", None, token));
-        assert!(!handshake_is_authorised("/?k=", None, token));
-        assert!(!handshake_is_authorised(
-            "/?j=0123456789abcdef",
-            None,
-            token
-        ));
+        assert!(!handshake_is_authorised("/", token));
+        assert!(!handshake_is_authorised("/?k=", token));
+        assert!(!handshake_is_authorised("/?j=0123456789abcdef", token));
         // Wrong token, including the prefix that a byte-at-a-time compare would leak.
-        assert!(!handshake_is_authorised(
-            "/?k=0123456789abcdee",
-            None,
-            token
-        ));
-        assert!(!handshake_is_authorised("/?k=0123456789abcde", None, token));
-        assert!(!handshake_is_authorised(
-            "/?k=0123456789abcdefff",
-            None,
-            token
-        ));
-
-        // A browser page, even one that somehow learned the token: WebSocket bypasses CORS,
-        // so `Origin` is the only signal that the caller is not our own WebView.
-        assert!(!handshake_is_authorised(
-            "/?k=0123456789abcdef",
-            Some("https://evil.example"),
-            token
-        ));
-        assert!(!handshake_is_authorised(
-            "/?k=0123456789abcdef",
-            Some("http://localhost:5173"),
-            token
-        ));
+        assert!(!handshake_is_authorised("/?k=0123456789abcdee", token));
+        assert!(!handshake_is_authorised("/?k=0123456789abcde", token));
+        assert!(!handshake_is_authorised("/?k=0123456789abcdefff", token));
     }
 
     #[test]
