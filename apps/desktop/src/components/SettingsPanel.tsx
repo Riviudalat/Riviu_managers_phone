@@ -41,8 +41,9 @@ interface Props {
 
 type AgentAction = "check" | "repair";
 
-/// Kept in step with `MIN_VIEW_FPS` and `MAX_SETTABLE_VIEW_FPS` on the Rust side. Rust
-/// clamps regardless — these only stop the field from displaying a number the encoder will
+/// Pinned to `MIN_VIEW_FPS` and `MAX_SETTABLE_VIEW_FPS` on the Rust side by
+/// `the_fps_field_offers_exactly_the_range_this_file_clamps_to` in `commands.rs`, which
+/// reads these two lines. Change one and that test names the other. Rust clamps regardless — these only stop the field from displaying a number the encoder will
 /// never run at while the operator waits to see it take effect.
 const MIN_STREAM_FPS = 5;
 const MAX_STREAM_FPS = 30;

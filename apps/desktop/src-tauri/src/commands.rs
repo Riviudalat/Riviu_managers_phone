@@ -2400,6 +2400,35 @@ mod tests {
     use riviu_core::{DeviceWorkCoordinator, StreamBudgetManager};
     use riviu_ios_driver::MockIosDriver;
 
+    #[test]
+    fn the_fps_field_offers_exactly_the_range_this_file_clamps_to() {
+        // The panel comment says these are "kept in step with MIN_VIEW_FPS and
+        // MAX_SETTABLE_VIEW_FPS on the Rust side", and until now nothing kept them. Drift
+        // here is not an error the operator can see: they type 45, the field accepts it,
+        // the encoder silently runs 30, and the settings row goes on displaying 45 as
+        // though it took. The panel already has one pinned constant (TILE_FPS_CEILING in
+        // scrcpy.rs); this is the same pin for the other two numbers in the same block.
+        let panel = include_str!("../../src/components/SettingsPanel.tsx");
+        let declared = |name: &str| -> u32 {
+            let needle = format!("const {name} = ");
+            panel
+                .lines()
+                .find_map(|line| line.trim().strip_prefix(&needle).map(str::to_owned))
+                .and_then(|rest| rest.trim().trim_end_matches(';').parse().ok())
+                .unwrap_or_else(|| panic!("SettingsPanel.tsx declares {name}"))
+        };
+        assert_eq!(
+            declared("MIN_STREAM_FPS"),
+            riviu_android_driver::MIN_VIEW_FPS,
+            "the field's floor is not the encoder's floor"
+        );
+        assert_eq!(
+            declared("MAX_STREAM_FPS"),
+            MAX_SETTABLE_VIEW_FPS,
+            "the field would accept a rate the save clamps away without saying so"
+        );
+    }
+
     fn stale(status: riviu_core::DeviceStatus) -> DeviceInfo {
         DeviceInfo {
             udid: "ce06".into(),

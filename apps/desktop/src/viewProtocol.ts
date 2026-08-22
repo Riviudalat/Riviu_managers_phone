@@ -1,4 +1,8 @@
-/** Binary envelope the Rust ViewHub writes. Must stay byte-identical. */
+/**
+ * Binary envelope the Rust ViewHub writes. Must stay byte-identical — and now is:
+ * `the_worker_slices_the_envelope_this_file_writes` in `view_hub.rs` reads the five
+ * constants below out of this file and compares them to the ones the encoder uses.
+ */
 
 export const VIEW_MAGIC = 0x5256_5531;
 export const VIEW_KIND_H264 = 1;

@@ -31,6 +31,14 @@ pub const VIEW_KIND_H264: u8 = 1;
 pub const VIEW_KIND_JPEG: u8 = 2;
 pub const VIEW_FLAG_KEY: u8 = 1;
 
+/// Fixed part of the envelope, before the udid and the payload.
+///
+/// 4 magic + 1 kind + 1 flags + 8 generation + 2 width + 2 height + 2 udid_len +
+/// 4 payload_len. It was an unnamed `24` in `encode_packet` and a named constant in the
+/// worker, which is the exact shape a drift takes: one side grows a field, the other keeps
+/// slicing at the old offset and reads a udid out of the middle of a frame.
+pub const VIEW_HEADER_BYTES: usize = 24;
+
 /// Live view, not a DVR — and now a **per-device** rate, which is the whole point.
 ///
 /// This used to be one ring for the entire fleet, and that made its capacity in *time* a
@@ -807,7 +815,7 @@ pub fn encode_packet(packet: &ViewPacket) -> Vec<u8> {
     };
     let flags = if packet.key { VIEW_FLAG_KEY } else { 0 };
     let udid = packet.udid.as_bytes();
-    let mut out = Vec::with_capacity(24 + udid.len() + packet.bytes.len());
+    let mut out = Vec::with_capacity(VIEW_HEADER_BYTES + udid.len() + packet.bytes.len());
     out.extend_from_slice(&VIEW_MAGIC.to_be_bytes());
     out.push(kind);
     out.push(flags);
@@ -824,6 +832,60 @@ pub fn encode_packet(packet: &ViewPacket) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pull `export const NAME = <number>;` out of a TypeScript source.
+    ///
+    /// Accepts decimal and `0x` hex, both with `_` separators, because the envelope's magic
+    /// is written `0x5256_5531` on both sides and a pin that could not read it would quietly
+    /// pass by finding nothing.
+    fn ts_const(source: &str, name: &str) -> u64 {
+        let needle = format!("export const {name} = ");
+        let rest = source
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(&needle).map(str::to_owned))
+            .unwrap_or_else(|| panic!("viewProtocol.ts declares {name}"));
+        let literal = rest.trim().trim_end_matches(';').replace('_', "");
+        match literal.strip_prefix("0x") {
+            Some(hex) => u64::from_str_radix(hex, 16),
+            None => literal.parse(),
+        }
+        .unwrap_or_else(|_| panic!("{name} = {literal} is not a number"))
+    }
+
+    #[test]
+    fn the_worker_slices_the_envelope_this_file_writes() {
+        // `viewProtocol.ts` opens with "Must stay byte-identical" and nothing enforced it.
+        // A mismatch is not a crash: the worker reads a wrong magic and returns null, so
+        // every tile simply goes black while the hub reports frames sent. That is the
+        // hardest failure on this path to trace back to its cause, and it costs one test.
+        let ts = include_str!("../../src/viewProtocol.ts");
+        assert_eq!(ts_const(ts, "VIEW_MAGIC"), u64::from(VIEW_MAGIC), "magic");
+        assert_eq!(ts_const(ts, "VIEW_KIND_H264"), u64::from(VIEW_KIND_H264));
+        assert_eq!(ts_const(ts, "VIEW_KIND_JPEG"), u64::from(VIEW_KIND_JPEG));
+        assert_eq!(ts_const(ts, "VIEW_FLAG_KEY"), u64::from(VIEW_FLAG_KEY));
+        assert_eq!(
+            ts_const(ts, "VIEW_HEADER_BYTES"),
+            VIEW_HEADER_BYTES as u64,
+            "the worker would slice the udid out of the middle of a frame"
+        );
+    }
+
+    #[test]
+    fn the_named_header_size_is_the_one_the_encoder_actually_writes() {
+        // Naming the 24 is only worth something if the name stays true when a field is
+        // added, so measure the header off a real packet with an empty udid and no payload
+        // rather than trusting the arithmetic in the doc comment.
+        let bare = encode_packet(&ViewPacket {
+            udid: String::new(),
+            generation: 0,
+            kind: ViewKind::Jpeg,
+            width: 0,
+            height: 0,
+            key: false,
+            bytes: Vec::new(),
+        });
+        assert_eq!(bare.len(), VIEW_HEADER_BYTES);
+    }
 
     #[test]
     fn encode_packet_round_trips_the_header_the_worker_will_read() {
