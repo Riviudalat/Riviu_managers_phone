@@ -981,12 +981,32 @@ impl AndroidDriver {
     }
 
     /// Stop mock location, returning the phone to its real GPS (feature B).
+    ///
+    /// Revokes the appop as well as removing the test provider. Without that, one use of "set
+    /// location" left `com.riviu.agent` as the phone's selected mock-location app **forever** —
+    /// a permission that normally requires a human to pick the app in Developer Options, handed
+    /// out permanently. Combined with an unauthenticated helper that is a standing GPS-spoofing
+    /// capability for any other app on the device, long after the operator finished with it.
+    ///
+    /// Revoke is best-effort and runs even when the helper is unreachable: the appop is granted
+    /// by adb, not by the helper, so a helper that has died must not strand the grant.
     pub async fn stop_mock_location(&self, serial: &str) -> anyhow::Result<()> {
-        let helper = self
-            .try_attach_helper(serial)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Riviu helper không sẵn sàng trên máy này"))?;
-        helper.stop_mock_location().await
+        let stopped = match self.try_attach_helper(serial).await {
+            Ok(Some(helper)) => helper.stop_mock_location().await,
+            Ok(None) => Err(anyhow::anyhow!("Riviu helper không sẵn sàng trên máy này")),
+            Err(error) => Err(error),
+        };
+        let _ = self
+            .adb
+            .shell(
+                serial,
+                &format!(
+                    "appops set {} android:mock_location deny",
+                    crate::riviu_agent::PACKAGE
+                ),
+            )
+            .await;
+        stopped
     }
 
     // --- Root tier (feature C, xiaowei "ROOT 模式 / 一键新机"). These need a rooted phone
