@@ -1583,3 +1583,188 @@ mod nurture_tuning_tests {
         assert_eq!(running.schedule_every_minutes, 240);
     }
 }
+
+/// The frontend's copy of these types has to describe the same wire.
+///
+/// `apps/desktop/src/types.ts` is 1,300 lines written by hand against `types.rs`, and nothing
+/// checked the two. Renaming a serde field is therefore not a compile error and not a test
+/// failure — the frontend simply reads `undefined` at runtime, on whichever screen happens to
+/// use that field, and the value renders as blank rather than as an error.
+///
+/// This does not replace the hand-written file with generated code; it holds it to the shape
+/// of the Rust side, which is the part that was missing. Twenty-four types carry the same name
+/// on both sides and all twenty-four agree today, so this starts green and stays useful.
+#[cfg(test)]
+mod wire_shape_tests {
+    use std::collections::BTreeSet;
+
+    /// `recover_delay_min` -> `recoverDelayMin`.
+    fn camel(snake: &str) -> String {
+        let mut out = String::with_capacity(snake.len());
+        let mut upper = false;
+        for ch in snake.chars() {
+            if ch == '_' {
+                upper = true;
+            } else if upper {
+                out.extend(ch.to_uppercase());
+                upper = false;
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    /// Field names each `#[derive(Serialize)]` struct puts on the wire.
+    ///
+    /// A line scanner rather than a parser, and deliberately conservative: a struct it cannot
+    /// read is one it does not report, which the count assertion below then catches.
+    fn rust_structs(source: &str) -> Vec<(String, BTreeSet<String>)> {
+        let lines: Vec<&str> = source.lines().collect();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i].trim_start();
+            if !line.starts_with("pub struct ") || !line.ends_with('{') {
+                i += 1;
+                continue;
+            }
+            let name = line
+                .trim_start_matches("pub struct ")
+                .split([' ', '<', '{'])
+                .next()
+                .unwrap_or("")
+                .to_string();
+
+            // Attributes sit directly above the declaration.
+            let mut attrs = String::new();
+            let mut j = i;
+            while j > 0 {
+                let prev = lines[j - 1].trim();
+                if prev.starts_with("#[") {
+                    attrs.push_str(prev);
+                    j -= 1;
+                } else if prev.starts_with("///") || prev.starts_with("//") {
+                    j -= 1;
+                } else {
+                    break;
+                }
+            }
+            if !attrs.contains("Serialize") && !attrs.contains("Deserialize") {
+                i += 1;
+                continue;
+            }
+            let camel_all = attrs.contains("rename_all = \"camelCase\"");
+
+            let mut fields = BTreeSet::new();
+            let mut k = i + 1;
+            let mut pending = String::new();
+            while k < lines.len() && lines[k].trim() != "}" {
+                let f = lines[k].trim();
+                if f.starts_with("#[") {
+                    pending.push_str(f);
+                } else if let Some(rest) = f.strip_prefix("pub ") {
+                    if let Some((field, _)) = rest.split_once(':') {
+                        let field = field.trim();
+                        let skipped =
+                            pending.contains("skip") && !pending.contains("skip_serializing_if");
+                        if !skipped && !field.is_empty() {
+                            let renamed = pending
+                                .split_once("rename = \"")
+                                .and_then(|(_, r)| r.split_once('"'))
+                                .map(|(v, _)| v.to_string());
+                            fields.insert(match renamed {
+                                Some(v) => v,
+                                None if camel_all => camel(field),
+                                None => field.to_string(),
+                            });
+                        }
+                    }
+                    pending.clear();
+                } else if !f.is_empty() && !f.starts_with("//") {
+                    pending.clear();
+                }
+                k += 1;
+            }
+            out.push((name, fields));
+            i = k;
+        }
+        out
+    }
+
+    /// Field names each `export interface` declares.
+    fn ts_interfaces(source: &str) -> Vec<(String, BTreeSet<String>)> {
+        let lines: Vec<&str> = source.lines().collect();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i].trim_start();
+            if !line.starts_with("export interface ") || !line.ends_with('{') {
+                i += 1;
+                continue;
+            }
+            let name = line
+                .trim_start_matches("export interface ")
+                .split([' ', '<', '{'])
+                .next()
+                .unwrap_or("")
+                .to_string();
+            let mut fields = BTreeSet::new();
+            let mut k = i + 1;
+            while k < lines.len() && lines[k] != "}" {
+                let f = lines[k].trim();
+                let is_comment = f.starts_with("//") || f.starts_with("/*") || f.starts_with('*');
+                if !is_comment {
+                    if let Some((field, _)) = f.split_once(':') {
+                        let field = field.trim().trim_end_matches('?');
+                        if !field.is_empty()
+                            && field.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        {
+                            fields.insert(field.to_string());
+                        }
+                    }
+                }
+                k += 1;
+            }
+            out.push((name, fields));
+            i = k;
+        }
+        out
+    }
+
+    #[test]
+    fn the_frontend_types_describe_the_same_fields_the_backend_sends() {
+        let rust = rust_structs(include_str!("types.rs"));
+        let ts = ts_interfaces(include_str!("../../../apps/desktop/src/types.ts"));
+
+        let mut shared = 0;
+        let mut drift = Vec::new();
+        for (name, rust_fields) in &rust {
+            let Some((_, ts_fields)) = ts.iter().find(|(n, _)| n == name) else {
+                continue;
+            };
+            shared += 1;
+            let only_rust: Vec<_> = rust_fields.difference(ts_fields).cloned().collect();
+            let only_ts: Vec<_> = ts_fields.difference(rust_fields).cloned().collect();
+            if !only_rust.is_empty() || !only_ts.is_empty() {
+                drift.push(format!(
+                    "{name}: only in Rust {only_rust:?}, only in TypeScript {only_ts:?}"
+                ));
+            }
+        }
+
+        // A scanner that reads nothing passes every assertion below it.
+        assert!(
+            shared >= 24,
+            "only {shared} types matched by name; the scanner has stopped reading one of the \
+             two files (Rust structs seen: {}, TS interfaces seen: {})",
+            rust.len(),
+            ts.len()
+        );
+        assert!(
+            drift.is_empty(),
+            "the two halves of the wire disagree:\n  {}",
+            drift.join("\n  ")
+        );
+    }
+}
