@@ -160,6 +160,22 @@ final class HttpServer {
         if ("POST".equals(method) && "/v1/media/delete".equals(path)) {
             return MediaStoreImport.deleteById(context, json.optString("id", ""));
         }
+        if ("POST".equals(method) && "/v1/wallpaper/set".equals(path)) {
+            return WallpaperSet.setFromFile(context, json.optString("path", ""));
+        }
+        if ("POST".equals(method) && "/v1/location/set".equals(path)) {
+            return MockLocation.set(context, json.optDouble("lat", 0), json.optDouble("lng", 0));
+        }
+        if ("POST".equals(method) && "/v1/location/stop".equals(path)) {
+            return MockLocation.stop(context);
+        }
+        if ("POST".equals(method) && "/v1/apps/describe".equals(path)) {
+            return AppList.describe(
+                    context,
+                    json.optJSONArray("packages"),
+                    json.optBoolean("icons", true),
+                    json.optInt("iconPx", 0));
+        }
         return Protocol.error("not_found", method + " " + path);
     }
 

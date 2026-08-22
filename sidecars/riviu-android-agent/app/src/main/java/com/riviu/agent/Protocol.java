@@ -9,7 +9,7 @@ import org.json.JSONObject;
  * Changing a field name here without changing that file is a protocol break.
  */
 final class Protocol {
-    static final String AGENT_VERSION = "0.1.0";
+    static final String AGENT_VERSION = "0.3.0";
     static final int PROTOCOL_VERSION = 1;
     static final int PORT = 17980;
     static final int MAX_BODY_BYTES = 64 * 1024;
@@ -20,6 +20,11 @@ final class Protocol {
         JSONArray features = new JSONArray();
         features.put("clipboard");
         features.put("pushMedia");
+        features.put("wallpaper");
+        features.put("mockLocation");
+        // Names and icons for installed apps, which adb cannot answer at all. Advertised so
+        // the desktop can tell "helper too old" from "phone cannot".
+        features.put("appLabels");
         return new JSONObject()
                 .put("ok", true)
                 .put("agentVersion", AGENT_VERSION)

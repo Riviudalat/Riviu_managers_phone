@@ -51,6 +51,12 @@
       "bytes": 197183,
       "sha256": "8300fc764611b4c8ffba4d779f9fa4b3f3d902b92181f38725500c6eea725fa2",
       "role": "agentTestApk"
+    },
+    {
+      "path": "noarch/riviu-agent.apk",
+      "bytes": 25047,
+      "sha256": "a0b8ac276aea40c2e1aefa5864f17e0cc7d16db822eea06c15a869a8da9a1c31",
+      "role": "riviuAgentApk"
     }
   ],
   "appiumUiautomator2ServerSource": "appium/appium-uiautomator2-server v10.6.2 (Apache-2.0)"

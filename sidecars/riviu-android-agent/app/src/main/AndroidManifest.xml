@@ -4,6 +4,16 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.SET_WALLPAPER" />
+    <!-- Android 11+ hides other packages from an app that has not declared what it is looking
+         for, so without this `getApplicationInfo` throws NameNotFound for every app but this
+         one and the app list comes back nameless. This APK is side-loaded onto a farm phone by
+         adb, never distributed through a store, so the store policy that makes this permission
+         awkward does not apply — and the alternative (`<queries>` per package) cannot be
+         written down in advance for a list the operator chooses at runtime. -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
