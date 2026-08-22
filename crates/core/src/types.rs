@@ -771,6 +771,14 @@ pub struct NurtureSettings {
     pub base_url: String,
     pub model: String,
     pub api_key: String,
+    /// Whether a key is stored, for a form that must not receive the key itself.
+    ///
+    /// `#[serde(skip_serializing_if)]`-free on purpose: the frontend reads it on every load.
+    /// Derived at the command boundary, never persisted — `save_nurture_settings` writes the
+    /// key to the OS credential store and the settings blob keeps neither it nor this flag
+    /// meaningfully.
+    #[serde(default)]
+    pub has_api_key: bool,
     pub input_price_per_1m: f64,
     pub output_price_per_1m: f64,
     pub bundle_id: String,
@@ -893,6 +901,7 @@ impl Default for NurtureSettings {
             base_url: "https://openrouter.ai/api/v1".into(),
             model: "openai/gpt-5.6-luna".into(),
             api_key: String::new(),
+            has_api_key: false,
             // OpenRouter's OpenAI route listed $0.10 / $0.60 on 14/08/2026
             // (50% off the $0.20 / $1.20 list). Display only; the panel can
             // edit these if the promo ends.

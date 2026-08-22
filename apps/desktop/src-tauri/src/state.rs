@@ -180,6 +180,8 @@ pub struct AppState {
     pub interaction_artifacts: FlowArtifactStore,
     pub db: Arc<Database>,
     pub signing: SigningService,
+    /// The OS credential store, for secrets that must not sit in the SQLite file.
+    pub secrets: CredentialStore,
     pub agent_token_configured: bool,
     pub active_agent_artifact_id: String,
     pub active_agent_artifact_version: String,
@@ -534,6 +536,31 @@ impl BackgroundStreamSampler {
     }
 }
 
+/// Bridges `riviu-core`'s [`SecretStore`] onto the OS credential store.
+///
+/// The seam exists because `crates/core` must not depend on `riviu-signing` — core stays
+/// unaware of keyrings the same way it stays unaware of the driver crates. This is the one
+/// place the two meet, and it is four lines.
+struct KeyringSecrets {
+    credentials: CredentialStore,
+}
+
+impl KeyringSecrets {
+    fn new(credentials: CredentialStore) -> Self {
+        Self { credentials }
+    }
+}
+
+impl riviu_core::db::SecretStore for KeyringSecrets {
+    fn get_secret(&self, name: &str) -> anyhow::Result<Option<String>> {
+        self.credentials.app_secret(name)
+    }
+
+    fn set_secret(&self, name: &str, value: &str) -> anyhow::Result<()> {
+        self.credentials.set_app_secret(name, value)
+    }
+}
+
 impl AppState {
     pub async fn bootstrap(resource_dir: Option<PathBuf>) -> anyhow::Result<Self> {
         let mock_requested = std::env::var("RIVIU_MOCK_DEVICES")
@@ -547,9 +574,15 @@ impl AppState {
         let artifacts_dir = data.join("artifacts");
         std::fs::create_dir_all(&artifacts_dir)?;
 
-        let db = Arc::new(Database::open(data.join("riviu.db"))?);
         let sidecar_root = resolve_sidecar_root(resource_dir.as_deref());
         let credentials = CredentialStore::system()?;
+        // The database gets somewhere to put secrets that is not the SQLite file. Opened after
+        // the credential store precisely so it can be handed one: the AI API key used to sit in
+        // the settings blob in cleartext, readable by any process running as the operator.
+        let db = Arc::new(
+            Database::open(data.join("riviu.db"))?
+                .with_secrets(Arc::new(KeyringSecrets::new(credentials.clone()))),
+        );
         let legacy_token = std::env::var("RIVIU_RTMMO_TOKEN").ok();
         let ResolvedAgentRuntime {
             driver_config,
@@ -678,7 +711,8 @@ impl AppState {
             Arc::new(desktop_stream_budget(initial_devices.len())),
             bundle.interaction_capabilities.clone(),
         ));
-        let signing = SigningService::with_credentials(sidecar_root.join("signer"), credentials);
+        let signing =
+            SigningService::with_credentials(sidecar_root.join("signer"), credentials.clone());
 
         let events = EventBus::new(512);
         let registry = DeviceRegistry::new(events.clone());
@@ -757,6 +791,7 @@ impl AppState {
             interaction_artifacts,
             db,
             signing,
+            secrets: credentials,
             agent_token_configured,
             active_agent_artifact_id,
             active_agent_artifact_version,
@@ -974,7 +1009,7 @@ impl AppState {
         // the lifecycle stays a single spawn rather than a bind/unbind dance we could not
         // verify without the running app.
         {
-            let config = crate::local_api::load_config(&self.db);
+            let config = crate::local_api::load_config(&self.db, &self.secrets);
             if config.enabled && !config.token.is_empty() {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {

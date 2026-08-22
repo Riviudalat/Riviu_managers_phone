@@ -434,7 +434,17 @@ export interface AnalyticsSummary {
 export interface NurtureSettings {
   baseUrl: string;
   model: string;
+  /**
+   * Never the real key on the way *out* of the backend.
+   *
+   * The key lives in the OS credential store, not in the settings row, and it is not handed to
+   * this page: a load returns the sentinel `__riviu_keep_stored_key__` when one is configured,
+   * and sending that same value back means "leave it alone". Anything else — including an
+   * empty string — is taken literally, so the key can still be replaced or cleared.
+   */
   apiKey: string;
+  /** Whether a key is stored. The only thing the form can honestly show about it. */
+  hasApiKey?: boolean;
   inputPricePer1m: number;
   outputPricePer1m: number;
   bundleId: string;

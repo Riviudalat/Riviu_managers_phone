@@ -14,8 +14,29 @@ mod migrations;
 pub use flow_runs::{AttemptTransitionPatch, FlowStateConflict};
 pub(crate) use flow_runs::{FlowAttemptExecutionContext, FlowRecoveryRunContext};
 
+/// Somewhere to keep a secret that is **not** the SQLite file.
+///
+/// The database is the app's SQLite file under `%APPDATA%`, opened with a plain
+/// `Connection::open` — no SQLCipher, no key, and nothing hardening its ACL. Anything written
+/// there is readable by any process running as the operator. That is fine for campaign rows and
+/// device aliases; it is not fine for an API key that can spend money.
+///
+/// A trait rather than a direct dependency on `riviu-signing`: `crates/core` deliberately does
+/// not know about the OS credential store, the same way it deliberately does not know about the
+/// driver crates. The desktop supplies the keyring-backed implementation; tests supply an
+/// in-memory one; a `Database` with no store at all keeps the old behaviour, which is what the
+/// 38 test constructors rely on.
+pub trait SecretStore: Send + Sync {
+    fn get_secret(&self, name: &str) -> anyhow::Result<Option<String>>;
+    fn set_secret(&self, name: &str, value: &str) -> anyhow::Result<()>;
+}
+
+/// Name under which the AI API key lives in the secret store.
+pub const SECRET_AI_API_KEY: &str = "nurture-ai-api-key";
+
 pub struct Database {
     path: PathBuf,
+    secrets: Option<std::sync::Arc<dyn SecretStore>>,
 }
 
 const NURTURE_SETTINGS_MIGRATION_V2: &str = "nurture.settings.migration.v2";
@@ -28,7 +49,10 @@ impl Database {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let db = Self { path };
+        let db = Self {
+            path,
+            secrets: None,
+        };
         db.migrate()?;
         Ok(db)
     }
@@ -36,6 +60,12 @@ impl Database {
     pub fn default_path() -> anyhow::Result<PathBuf> {
         let base = dirs::data_dir().context("no data dir")?;
         Ok(base.join("riviu-managers-phone").join("riviu.db"))
+    }
+
+    /// Attach the place secrets live. Without one, secrets stay in the SQLite blob as before.
+    pub fn with_secrets(mut self, store: std::sync::Arc<dyn SecretStore>) -> Self {
+        self.secrets = Some(store);
+        self
     }
 
     fn conn(&self) -> anyhow::Result<Connection> {
@@ -912,10 +942,45 @@ impl Database {
                     // were accepted by the old profile schema.
                     self.save_nurture_settings(&settings)?;
                 }
+                self.resolve_api_key(&mut settings)?;
                 Ok(settings)
             }
             None => Ok(crate::types::NurtureSettings::default()),
         }
+    }
+
+    /// Put the API key back on the settings the engine is about to use.
+    ///
+    /// The key does not live in the settings blob any more — see [`SecretStore`] — so every read
+    /// has to re-attach it. This is called from [`Self::get_nurture_settings`] rather than from
+    /// the command layer **because the engine re-reads its settings mid-session**
+    /// (`nurture::run_session` refreshes from the database on every post), and a key attached
+    /// only at the command layer would come back empty on the first live refresh: commenting
+    /// would stop part-way through a run, with an "API key đang trống" that the operator could
+    /// not act on because the key *is* configured.
+    ///
+    /// Also migrates: a blob still carrying a key from before this existed is moved into the
+    /// store and blanked, once.
+    fn resolve_api_key(&self, settings: &mut crate::types::NurtureSettings) -> anyhow::Result<()> {
+        let Some(store) = self.secrets.as_ref() else {
+            return Ok(());
+        };
+        if !settings.api_key.is_empty() {
+            // Legacy row: the key is still in SQLite. Blank the blob first, *then* write the
+            // real key — because `save_nurture_settings` writes the secret too, so storing it
+            // before the save would immediately be overwritten by the blank we are saving.
+            // Found by the migration test rather than by reading: the store ended up holding
+            // an empty string and the key was gone from both places.
+            let moved = std::mem::take(&mut settings.api_key);
+            self.save_nurture_settings(settings)?;
+            store.set_secret(SECRET_AI_API_KEY, &moved)?;
+            settings.api_key = moved;
+            return Ok(());
+        }
+        if let Some(key) = store.get_secret(SECRET_AI_API_KEY)? {
+            settings.api_key = key;
+        }
+        Ok(())
     }
 
     /// The settings blob and the two migration markers that say it has been brought forward.
@@ -930,7 +995,19 @@ impl Database {
         &self,
         settings: &crate::types::NurtureSettings,
     ) -> anyhow::Result<()> {
-        let payload = serde_json::to_string(settings)?;
+        // The API key goes to the secret store, and the blob keeps an empty string in its
+        // place. Faithful rather than clever: an empty key here really does clear the stored
+        // one, so "leave it unchanged" is a decision for the caller that owns the form, not a
+        // silent rule buried in the database layer.
+        let payload = match self.secrets.as_ref() {
+            Some(store) => {
+                store.set_secret(SECRET_AI_API_KEY, &settings.api_key)?;
+                let mut without = settings.clone();
+                without.api_key.clear();
+                serde_json::to_string(&without)?
+            }
+            None => serde_json::to_string(settings)?,
+        };
         let mut conn = self.conn()?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for (key, value) in [
@@ -2505,5 +2582,174 @@ mod schedule_tests {
         assert_eq!(stored.last_run_at.as_deref(), Some("2026-08-17T12:00:00Z"));
 
         std::fs::remove_file(path).expect("remove fixture database");
+    }
+}
+
+#[cfg(test)]
+mod secret_store_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// In-memory stand-in for the OS credential store.
+    #[derive(Default)]
+    struct MemoryStore {
+        entries: Mutex<std::collections::HashMap<String, String>>,
+    }
+
+    impl SecretStore for MemoryStore {
+        fn get_secret(&self, name: &str) -> anyhow::Result<Option<String>> {
+            Ok(self.entries.lock().unwrap().get(name).cloned())
+        }
+        fn set_secret(&self, name: &str, value: &str) -> anyhow::Result<()> {
+            self.entries
+                .lock()
+                .unwrap()
+                .insert(name.to_string(), value.to_string());
+            Ok(())
+        }
+    }
+
+    fn fixture() -> (Database, Arc<MemoryStore>, PathBuf) {
+        let path = std::env::temp_dir().join(format!("riviu-secret-test-{}.db", Uuid::new_v4()));
+        let store = Arc::new(MemoryStore::default());
+        let db = Database::open(&path)
+            .expect("open fixture database")
+            .with_secrets(store.clone());
+        (db, store, path)
+    }
+
+    /// What the whole seam is for: the key must not be in the SQLite file.
+    #[test]
+    fn the_api_key_goes_to_the_store_and_not_into_the_settings_blob() {
+        let (db, store, path) = fixture();
+        let settings = crate::types::NurtureSettings {
+            api_key: "sk-secret-value".into(),
+            ..Default::default()
+        };
+        db.save_nurture_settings(&settings).expect("save");
+
+        let blob = db
+            .get_setting("nurture.settings")
+            .expect("read blob")
+            .expect("blob exists");
+        assert!(
+            !blob.contains("sk-secret-value"),
+            "the key is still in the SQLite blob: {blob}"
+        );
+        assert_eq!(
+            store.get_secret(SECRET_AI_API_KEY).unwrap().as_deref(),
+            Some("sk-secret-value")
+        );
+
+        // And it comes back on read, because the engine needs the real value.
+        let loaded = db.get_nurture_settings().expect("load");
+        assert_eq!(loaded.api_key, "sk-secret-value");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The engine re-reads settings mid-session; every read must carry the key.
+    ///
+    /// This is the failure a command-layer-only fix would have shipped: the first read looks
+    /// right, and the *second* one — the live refresh `nurture::run_session` does on every post
+    /// — comes back empty, so commenting stops part way through a run.
+    #[test]
+    fn every_read_carries_the_key_not_just_the_first() {
+        let (db, _store, path) = fixture();
+        let settings = crate::types::NurtureSettings {
+            api_key: "sk-live-refresh".into(),
+            ..Default::default()
+        };
+        db.save_nurture_settings(&settings).expect("save");
+
+        for read in 1..=3 {
+            let loaded = db.get_nurture_settings().expect("load");
+            assert_eq!(
+                loaded.api_key, "sk-live-refresh",
+                "read #{read} lost the key"
+            );
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A database written before the store existed still has the key in its blob.
+    #[test]
+    fn a_legacy_blob_is_migrated_into_the_store_and_blanked() {
+        let path = std::env::temp_dir().join(format!("riviu-secret-legacy-{}.db", Uuid::new_v4()));
+        // Written by a build with no secret store: the key lands in the blob.
+        {
+            let plain = Database::open(&path).expect("open plain");
+            let settings = crate::types::NurtureSettings {
+                api_key: "sk-legacy".into(),
+                ..Default::default()
+            };
+            plain.save_nurture_settings(&settings).expect("save plain");
+            let blob = plain.get_setting("nurture.settings").unwrap().unwrap();
+            assert!(
+                blob.contains("sk-legacy"),
+                "fixture must start in the old shape"
+            );
+        }
+
+        let store = Arc::new(MemoryStore::default());
+        let db = Database::open(&path)
+            .expect("reopen")
+            .with_secrets(store.clone());
+
+        // First read migrates and still answers with the key.
+        let loaded = db.get_nurture_settings().expect("load");
+        assert_eq!(loaded.api_key, "sk-legacy");
+        assert_eq!(
+            store.get_secret(SECRET_AI_API_KEY).unwrap().as_deref(),
+            Some("sk-legacy")
+        );
+        let blob = db.get_setting("nurture.settings").unwrap().unwrap();
+        assert!(
+            !blob.contains("sk-legacy"),
+            "the legacy key was left in the blob: {blob}"
+        );
+
+        // Second read is a plain store read, and still correct.
+        assert_eq!(db.get_nurture_settings().unwrap().api_key, "sk-legacy");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Clearing means clearing. The database layer is faithful; "leave it unchanged" is a
+    /// decision for whoever owns the form, not a rule hidden down here.
+    #[test]
+    fn an_empty_key_clears_the_stored_one() {
+        let (db, store, path) = fixture();
+        let mut settings = crate::types::NurtureSettings {
+            api_key: "sk-first".into(),
+            ..Default::default()
+        };
+        db.save_nurture_settings(&settings).expect("save");
+        settings.api_key = String::new();
+        db.save_nurture_settings(&settings).expect("clear");
+
+        assert_eq!(
+            store.get_secret(SECRET_AI_API_KEY).unwrap().as_deref(),
+            Some("")
+        );
+        assert_eq!(db.get_nurture_settings().unwrap().api_key, "");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// No store attached: unchanged behaviour, which is what the other test fixtures rely on.
+    #[test]
+    fn without_a_store_the_key_stays_in_the_blob_as_before() {
+        let path = std::env::temp_dir().join(format!("riviu-secret-none-{}.db", Uuid::new_v4()));
+        let db = Database::open(&path).expect("open");
+        let settings = crate::types::NurtureSettings {
+            api_key: "sk-plain".into(),
+            ..Default::default()
+        };
+        db.save_nurture_settings(&settings).expect("save");
+        assert!(db
+            .get_setting("nurture.settings")
+            .unwrap()
+            .unwrap()
+            .contains("sk-plain"));
+        assert_eq!(db.get_nurture_settings().unwrap().api_key, "sk-plain");
+        let _ = std::fs::remove_file(path);
     }
 }

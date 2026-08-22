@@ -29,6 +29,7 @@ use riviu_core::DeviceWorkOwner;
 
 use crate::command_error::CommandError;
 use crate::state::AppState;
+use riviu_signing::CredentialStore;
 
 /// DB key the config is persisted under (KV settings table).
 const CONFIG_KEY: &str = "local_api.config.v1";
@@ -72,18 +73,48 @@ impl Default for LocalApiConfig {
     }
 }
 
+/// Name the bearer token lives under in the OS credential store.
+pub const SECRET_LOCAL_API_TOKEN: &str = "local-api-token";
+
 /// Read the stored config, falling back to the (disabled) default on any read/parse failure —
 /// the API staying off is the safe direction to fail.
-pub fn load_config(db: &Database) -> LocalApiConfig {
-    match db.get_setting(CONFIG_KEY) {
+///
+/// The **token comes from the credential store**, not from the SQLite row: it is a bearer
+/// credential for a server that can drive the whole fleet, and the database is a plain
+/// unencrypted file. A token still sitting in an old row is migrated on read and removed from
+/// the row, so a database written before this change stops carrying it.
+pub fn load_config(db: &Database, secrets: &CredentialStore) -> LocalApiConfig {
+    let mut config: LocalApiConfig = match db.get_setting(CONFIG_KEY) {
         Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or_default(),
         _ => LocalApiConfig::default(),
+    };
+    if !config.token.is_empty() {
+        // Legacy row. Move it, then rewrite the row without it.
+        let moved = std::mem::take(&mut config.token);
+        let _ = db.set_setting(
+            CONFIG_KEY,
+            &serde_json::to_string(&config).unwrap_or_default(),
+        );
+        let _ = secrets.set_app_secret(SECRET_LOCAL_API_TOKEN, &moved);
+        config.token = moved;
+        return config;
     }
+    if let Ok(Some(token)) = secrets.app_secret(SECRET_LOCAL_API_TOKEN) {
+        config.token = token;
+    }
+    config
 }
 
-/// Persist the config as JSON.
-pub fn save_config(db: &Database, config: &LocalApiConfig) -> anyhow::Result<()> {
-    db.set_setting(CONFIG_KEY, &serde_json::to_string(config)?)
+/// Persist the config: everything but the token as JSON, the token in the credential store.
+pub fn save_config(
+    db: &Database,
+    secrets: &CredentialStore,
+    config: &LocalApiConfig,
+) -> anyhow::Result<()> {
+    secrets.set_app_secret(SECRET_LOCAL_API_TOKEN, &config.token)?;
+    let mut without = config.clone();
+    without.token.clear();
+    db.set_setting(CONFIG_KEY, &serde_json::to_string(&without)?)
 }
 
 /// A fresh random bearer token: two v4 UUIDs, hyphens stripped (~256 bits of entropy).
@@ -100,7 +131,7 @@ pub fn generate_token() -> String {
 pub async fn local_api_get_config(
     state: State<'_, AppState>,
 ) -> Result<LocalApiConfig, CommandError> {
-    Ok(load_config(&state.db))
+    Ok(load_config(&state.db, &state.secrets))
 }
 
 /// Persist the Local-API config. A change takes effect on the next app launch — the server is
@@ -120,7 +151,8 @@ pub async fn local_api_set_config(
     if next.enabled && next.token.trim().is_empty() {
         next.token = generate_token();
     }
-    save_config(&state.db, &next).map_err(|error| CommandError::operation(error.to_string()))?;
+    save_config(&state.db, &state.secrets, &next)
+        .map_err(|error| CommandError::operation(error.to_string()))?;
     Ok(next)
 }
 

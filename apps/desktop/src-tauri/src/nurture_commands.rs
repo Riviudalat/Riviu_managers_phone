@@ -79,9 +79,23 @@ fn validate_nurture_settings(settings: &NurtureSettings) -> Result<(), String> {
     Ok(())
 }
 
+/// What the operator typed to mean "leave the stored key alone".
+///
+/// The form has to show *something* in the API-key box, and it must not be the key: this value
+/// crosses IPC into the WebView, and the panel is screenshotted constantly. So the command
+/// hands back this sentinel instead, and treats it on the way back in as "unchanged". Any other
+/// value — including empty — is taken literally, so clearing the key is still possible.
+const API_KEY_UNCHANGED: &str = "__riviu_keep_stored_key__";
+
 #[tauri::command]
 pub fn nurture_get_settings(state: State<'_, AppState>) -> Result<NurtureSettings, String> {
-    state.db.get_nurture_settings().map_err(err)
+    let mut settings = state.db.get_nurture_settings().map_err(err)?;
+    // The key never leaves the backend. `has_api_key` is what the form needs to know.
+    settings.has_api_key = !settings.api_key.trim().is_empty();
+    if settings.has_api_key {
+        settings.api_key = API_KEY_UNCHANGED.to_string();
+    }
+    Ok(settings)
 }
 
 #[tauri::command]
@@ -89,9 +103,15 @@ pub fn nurture_save_settings(
     state: State<'_, AppState>,
     settings: NurtureSettings,
 ) -> Result<NurtureSettings, String> {
+    let mut settings = settings;
+    let prev_for_key = state.db.get_nurture_settings().unwrap_or_default();
+    if settings.api_key == API_KEY_UNCHANGED {
+        settings.api_key = prev_for_key.api_key.clone();
+    }
+    let settings = settings;
     validate_nurture_settings(&settings)?;
     let _admission = state.ensure_accepting_work()?;
-    let prev = state.db.get_nurture_settings().unwrap_or_default();
+    let prev = prev_for_key;
     state.db.save_nurture_settings(&settings).map_err(err)?;
     // When schedule is (re)enabled, schedule the next tick from now.
     if settings.schedule_enabled
@@ -106,7 +126,14 @@ pub fn nurture_save_settings(
         let _ = state.db.set_setting("nurture.schedule.next_run_at", "");
     }
     let _ = state.db.log_op("nurture.settings", &settings.model);
-    Ok(settings)
+    // Answer with the same shape `nurture_get_settings` returns, so a save does not hand the
+    // key back to the page that just stopped receiving it.
+    let mut echoed = settings;
+    echoed.has_api_key = !echoed.api_key.trim().is_empty();
+    if echoed.has_api_key {
+        echoed.api_key = API_KEY_UNCHANGED.to_string();
+    }
+    Ok(echoed)
 }
 
 /// Whether a byte string starts with the JPEG SOI marker.
@@ -916,5 +943,25 @@ mod tests {
         // thirty, silently, on a button whose whole purpose is to show what one costs.
         let many: Vec<Vec<u8>> = (0..30).map(|index| jpeg(index as u8)).collect();
         assert_eq!(usable_supplied_frames(Some(many)).len(), 3);
+    }
+
+    /// The sentinel is a contract between this file and the settings form, so it is pinned.
+    ///
+    /// If it ever equalled a plausible key, "leave it alone" would silently swallow a real one
+    /// the operator had just typed; if the frontend's copy drifted from this one, every save
+    /// would overwrite the stored key with the literal sentinel string.
+    #[test]
+    fn the_unchanged_sentinel_cannot_be_mistaken_for_a_key() {
+        assert_eq!(API_KEY_UNCHANGED, "__riviu_keep_stored_key__");
+        // Not something an API key could plausibly be: no provider issues keys with this shape.
+        assert!(API_KEY_UNCHANGED.starts_with("__"));
+        assert!(!API_KEY_UNCHANGED.starts_with("sk-"));
+        // And the frontend must agree, byte for byte — a drifted copy would write the sentinel
+        // into the credential store as if it were the key.
+        let types_ts = include_str!("../../src/types.ts");
+        assert!(
+            types_ts.contains(API_KEY_UNCHANGED),
+            "apps/desktop/src/types.ts no longer documents the sentinel {API_KEY_UNCHANGED}"
+        );
     }
 }

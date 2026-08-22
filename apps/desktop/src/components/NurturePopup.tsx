@@ -602,7 +602,7 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                       API key
                       <Info
                         of="API key"
-                        what="Khoá của endpoint ở trên. Để trống thì không bật được bình luận — phiên sẽ từ chối trước khi chạy chứ không âm thầm bỏ bình luận."
+                        what="Khoá của endpoint ở trên. Khoá được cất trong kho mật khẩu của hệ điều hành, không nằm trong file dữ liệu — nên panel này không hiện lại khoá đã lưu, chỉ báo là đã có. Gõ khoá mới để thay, xoá trắng ô rồi lưu để bỏ hẳn."
                       />
                     </span>
                     <input
@@ -610,6 +610,7 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                       value={settings.apiKey}
                       onChange={(e) => patch("apiKey", e.target.value)}
                       autoComplete="off"
+                      placeholder={settings.hasApiKey ? "Đã lưu — gõ để thay" : "Chưa có khoá"}
                     />
                   </label>
                   <div className="nurture-row">
