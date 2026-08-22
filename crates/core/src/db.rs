@@ -219,7 +219,7 @@ impl Database {
                 created_at: row.get(3)?,
             })
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// The columns of one `device_meta` row, in the order both readers below bind them.
@@ -314,15 +314,13 @@ impl Database {
             .query_map([], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<rusqlite::Result<_>>()?;
         let mut out = Vec::new();
         for (id, name, color, created_at) in groups {
             let mut mstmt = conn.prepare("SELECT udid FROM group_members WHERE group_id = ?1")?;
             let udids: Vec<String> = mstmt
                 .query_map(params![id], |row| row.get(0))?
-                .filter_map(|r| r.ok())
-                .collect();
+                .collect::<rusqlite::Result<_>>()?;
             out.push(crate::types::DeviceGroup {
                 id,
                 name,
@@ -376,13 +374,13 @@ impl Database {
                 name: row.get(1)?,
                 proxy_type: row.get(2)?,
                 host: row.get(3)?,
-                port: row.get::<_, i64>(4)? as u16,
+                port: narrow(row.get::<_, i64>(4)?, "port")?,
                 username: row.get(5)?,
                 password: row.get(6)?,
                 notes: row.get(7)?,
             })
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn upsert_proxy(&self, p: &crate::types::ProxyConfig) -> anyhow::Result<()> {
@@ -429,7 +427,7 @@ impl Database {
                 created_at: row.get(5)?,
             })
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn add_material(&self, item: &crate::types::MaterialItem) -> anyhow::Result<()> {
@@ -469,7 +467,7 @@ impl Database {
                 created_at: row.get(5)?,
             })
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn add_app_library(&self, item: &crate::types::AppLibraryItem) -> anyhow::Result<()> {
@@ -506,14 +504,14 @@ impl Database {
                 name: row.get(1)?,
                 script_name: row.get(2)?,
                 udids: serde_json::from_str(&udids_json).unwrap_or_default(),
-                every_minutes: row.get::<_, i64>(4)? as u32,
+                every_minutes: narrow(row.get::<_, i64>(4)?, "every_minutes")?,
                 enabled: row.get::<_, i64>(5)? != 0,
                 last_run_at: row.get(6)?,
                 next_run_at: row.get(7)?,
                 last_error: row.get(8)?,
             })
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn upsert_schedule(&self, s: &crate::types::ScheduleItem) -> anyhow::Result<()> {
@@ -565,7 +563,7 @@ impl Database {
                 created_at: row.get(6)?,
             })
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn add_publish_task(&self, t: &crate::types::PublishTask) -> anyhow::Result<()> {
@@ -790,7 +788,7 @@ impl Database {
                     id: row.get(0)?,
                     campaign_id: id.to_string(),
                     bundle_id: row.get(1)?,
-                    ordinal: row.get::<_, i64>(2)? as u32,
+                    ordinal: narrow(row.get::<_, i64>(2)?, "ordinal")?,
                     udid: row.get(3)?,
                     state: publish_state_from_str(&row.get::<_, String>(4)?),
                     effect_intent: row.get(5)?,
@@ -823,6 +821,9 @@ impl Database {
                 |(ordinal, (bundle_id, udid))| crate::publish::PublishAssignmentPlan {
                     bundle_id: bundle_id.clone(),
                     udid: udid.clone(),
+                    // Not a `narrow`: this is `enumerate()` over a list the caller just
+                    // built, not a value read back out of a column. There is no stored
+                    // number here that could disagree with the type.
                     ordinal: ordinal as u32,
                 },
             )
@@ -1161,19 +1162,28 @@ impl Database {
                 source: row.get(3)?,
                 model: row.get(4)?,
                 base_url_host: row.get(5)?,
-                prompt_tokens: row.get::<_, i64>(6)? as u32,
-                completion_tokens: row.get::<_, i64>(7)? as u32,
+                prompt_tokens: narrow(row.get::<_, i64>(6)?, "prompt_tokens")?,
+                completion_tokens: narrow(row.get::<_, i64>(7)?, "completion_tokens")?,
                 usd: row.get(8)?,
                 preview: row.get(9)?,
                 caption_preview: row.get(10)?,
                 frame_sha256: row.get(11)?,
-                context_confidence: row.get::<_, Option<i64>>(12)?.map(|v| v as u8),
-                relevance: row.get::<_, Option<i64>>(13)?.map(|v| v as u8),
-                evidence_support: row.get::<_, Option<i64>>(14)?.map(|v| v as u8),
+                context_confidence: row
+                    .get::<_, Option<i64>>(12)?
+                    .map(|v| narrow(v, "context_confidence"))
+                    .transpose()?,
+                relevance: row
+                    .get::<_, Option<i64>>(13)?
+                    .map(|v| narrow(v, "relevance"))
+                    .transpose()?,
+                evidence_support: row
+                    .get::<_, Option<i64>>(14)?
+                    .map(|v| narrow(v, "evidence_support"))
+                    .transpose()?,
                 created_at: row.get(15)?,
             })
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn list_nurture_comment_costs(
@@ -1191,14 +1201,14 @@ impl Database {
                 udid: row.get(1)?,
                 model: row.get(2)?,
                 base_url_host: row.get(3)?,
-                prompt_tokens: row.get::<_, i64>(4)? as u32,
-                completion_tokens: row.get::<_, i64>(5)? as u32,
+                prompt_tokens: narrow(row.get::<_, i64>(4)?, "prompt_tokens")?,
+                completion_tokens: narrow(row.get::<_, i64>(5)?, "completion_tokens")?,
                 usd: row.get(6)?,
                 preview: row.get(7)?,
                 created_at: row.get(8)?,
             })
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn nurture_cost_summary(&self) -> anyhow::Result<crate::types::NurtureCostSummary> {
@@ -1217,8 +1227,8 @@ impl Database {
         Ok(crate::types::NurtureCostSummary {
             today_usd: today_row.0,
             total_usd: total.0,
-            today_comments: today_row.1 as u32,
-            total_comments: total.1 as u32,
+            today_comments: narrow(today_row.1, "today_comments")?,
+            total_comments: narrow(total.1, "total_comments")?,
         })
     }
 
@@ -1376,7 +1386,7 @@ impl Database {
             Ok(crate::interaction::InteractionAssignmentRecord {
                 id: row.get(0)?,
                 target_key: row.get(1)?,
-                ordinal: row.get::<_, i64>(2)? as u8,
+                ordinal: narrow(row.get::<_, i64>(2)?, "ordinal")?,
                 actor_udid: row.get(3)?,
                 parent_assignment_id: row.get(4)?,
                 state: interaction_message_state(&state),
@@ -1571,6 +1581,54 @@ impl Database {
     }
 }
 
+/// A value in the database does not fit the type the row is read into.
+#[derive(Debug)]
+struct ColumnOutOfRange {
+    column: &'static str,
+    value: i64,
+    target: &'static str,
+}
+
+impl std::fmt::Display for ColumnOutOfRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "column `{}` holds {}, which does not fit {}",
+            self.column, self.value, self.target
+        )
+    }
+}
+
+impl std::error::Error for ColumnOutOfRange {}
+
+/// Read an `i64` column into a narrower integer, refusing rather than wrapping.
+///
+/// Every call site here used to be `as u8`, `as u16` or `as u32`. That is not a conversion,
+/// it is a truncation with no signal: a proxy port stored as 70000 came back as 4464 and the
+/// app then dialled 4464; a thread of 256 messages came back with `message_count` 0 and read
+/// as empty; an AI score above 255 wrapped into a plausible small number and was charted.
+///
+/// None of those can be caught downstream, because the wrapped value is a perfectly ordinary
+/// value of the target type. The only place the truth still exists is right here, so this is
+/// where it has to be checked — and a row that cannot be read honestly is an error, not a
+/// number someone invented.
+fn narrow<T>(value: i64, column: &'static str) -> rusqlite::Result<T>
+where
+    T: TryFrom<i64>,
+{
+    T::try_from(value).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Integer,
+            Box::new(ColumnOutOfRange {
+                column,
+                value,
+                target: std::any::type_name::<T>(),
+            }),
+        )
+    })
+}
+
 fn publish_state_from_str(value: &str) -> crate::publish::PublishCampaignState {
     match value {
         "queued" => crate::publish::PublishCampaignState::Queued,
@@ -1678,16 +1736,16 @@ fn interaction_summary_from_row(
             "cancelled" => crate::interaction::ThreadCampaignState::Cancelled,
             _ => crate::interaction::ThreadCampaignState::Queued,
         },
-        message_count: row.get::<_, i64>(3)? as u8,
+        message_count: narrow(row.get::<_, i64>(3)?, "message_count")?,
         updated_at: row.get(4)?,
         // Index 5 is `c.error_code`, which sits between the plain columns and the three
         // counting subqueries in both SELECTs — so adding it shifted every index after it.
         // A test caught that; the shift was silent otherwise, because the counts and the
         // reason are all readable as the wrong type only sometimes.
         error_code: row.get(5)?,
-        target_count: row.get::<_, i64>(6)? as u32,
-        succeeded_messages: row.get::<_, i64>(7)? as u32,
-        failed_messages: row.get::<_, i64>(8)? as u32,
+        target_count: narrow(row.get::<_, i64>(6)?, "target_count")?,
+        succeeded_messages: narrow(row.get::<_, i64>(7)?, "succeeded_messages")?,
+        failed_messages: narrow(row.get::<_, i64>(8)?, "failed_messages")?,
     })
 }
 
@@ -1724,6 +1782,66 @@ pub fn step_label(status: &StepStatus) -> &'static str {
         StepStatus::Succeeded => "succeeded",
         StepStatus::Failed => "failed",
         StepStatus::Skipped => "skipped",
+    }
+}
+
+#[cfg(test)]
+mod narrowing_tests {
+    use super::*;
+
+    /// A stored value that does not fit is an error, not a different number.
+    ///
+    /// Every one of these columns used to be read with `as u16` / `as u8` / `as u32`. The
+    /// failure that produces is the worst kind available: the wrapped result is a perfectly
+    /// ordinary value of the target type, so nothing downstream can tell it apart from a real
+    /// one, and the only place the truth still exists is the row itself.
+    #[test]
+    fn a_value_too_large_for_its_column_type_is_refused_not_wrapped() {
+        // 70000 as u16 is 4464 — a real port number, and the wrong one. The app would have
+        // dialled it and reported a connection failure against a port nobody configured.
+        assert_eq!(70000_i64 as u16, 4464, "the wrap this replaces");
+        assert!(narrow::<u16>(70000, "port").is_err());
+        assert_eq!(narrow::<u16>(8080, "port").ok(), Some(8080_u16));
+
+        // 256 as u8 is 0 — a thread of 256 messages read back as an empty thread.
+        assert_eq!(256_i64 as u8, 0, "the wrap this replaces");
+        assert!(narrow::<u8>(256, "message_count").is_err());
+        assert_eq!(narrow::<u8>(255, "message_count").ok(), Some(255_u8));
+
+        // And negatives, which `as` turns into very large numbers rather than refusing.
+        assert!(narrow::<u32>(-1, "target_count").is_err());
+        assert!(narrow::<u16>(-1, "port").is_err());
+    }
+
+    #[test]
+    fn the_refusal_says_which_column_and_what_it_held() {
+        // A row that cannot be read is only actionable if the message names the column: the
+        // operator sees it as "could not load proxies", and the cause is one row's port.
+        let message = narrow::<u16>(70000, "port").unwrap_err().to_string();
+        assert!(message.contains("port"), "{message}");
+        assert!(message.contains("70000"), "{message}");
+    }
+
+    #[test]
+    fn a_proxy_row_with_an_impossible_port_fails_the_read_instead_of_inventing_one() {
+        let path = std::env::temp_dir().join(format!("riviu-narrow-test-{}.db", Uuid::new_v4()));
+        let db = Database::open(&path).expect("open fixture database");
+        db.conn()
+            .expect("connection")
+            .execute(
+                "INSERT INTO proxies (id,name,proxy_type,host,port,username,password,notes)
+                 VALUES ('p1','bad','http','127.0.0.1',70000,'','','')",
+                [],
+            )
+            .expect("insert a row no UI would produce but a migration or a hand edit could");
+
+        let read = db.list_proxies();
+        assert!(
+            read.is_err(),
+            "70000 came back as {:?}",
+            read.map(|v| v.len())
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }
 
