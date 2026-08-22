@@ -504,132 +504,259 @@ mod tests {
         );
     }
 
-    fn command_body<'a>(source: &'a str, name: &str) -> &'a str {
-        let sync = format!("pub fn {name}");
-        let asynchronous = format!("pub async fn {name}");
-        let start = source
-            .find(&asynchronous)
-            .or_else(|| source.find(&sync))
-            .unwrap_or_else(|| panic!("missing mutating command {name}"));
-        let tail = &source[start..];
-        let end = tail.find("\n#[tauri::command]").unwrap_or(tail.len());
-        &tail[..end]
-    }
+    /// Every command source file. Adding one and forgetting it here is the failure mode the
+    /// list below is written to make loud, so it is asserted against the directory listing.
+    const COMMAND_SOURCES: &[(&str, &str)] = &[
+        ("agent_commands.rs", include_str!("agent_commands.rs")),
+        ("commands.rs", include_str!("commands.rs")),
+        ("farm_commands.rs", include_str!("farm_commands.rs")),
+        ("flow_commands.rs", include_str!("flow_commands.rs")),
+        (
+            "interaction_commands.rs",
+            include_str!("interaction_commands.rs"),
+        ),
+        ("lib.rs", include_str!("lib.rs")),
+        ("local_api.rs", include_str!("local_api.rs")),
+        ("nurture_commands.rs", include_str!("nurture_commands.rs")),
+        ("peripherals.rs", include_str!("peripherals.rs")),
+        ("publish_commands.rs", include_str!("publish_commands.rs")),
+    ];
 
-    #[test]
-    fn every_mutating_command_holds_application_admission() {
-        let inventories = [
-            (
-                include_str!("commands.rs"),
-                &[
-                    "refresh_devices",
-                    "prepare_device",
-                    "install_ipa",
-                    "install_ipa_to_group",
-                    "install_unsigned_ipa",
-                    "uninstall_app",
-                    "list_installed_apps",
-                    "device_shell",
-                    "import_media",
-                    "export_media",
-                    "set_screen_rotation",
-                    "screenshot",
-                    "syslog",
-                    "reboot_device",
-                    "backup_device",
-                    "restore_device",
-                    "device_tap",
-                    "device_swipe",
-                    "device_swipe_path",
-                    "device_type_text",
-                    "device_home",
-                    "device_key",
-                    "device_control_begin",
-                    "device_control_end",
-                    "group_input",
-                    "set_stream_settings",
-                    "view_ensure",
-                    "view_request_keyframe",
-                    "view_inject_touch",
-                    "view_set_preset",
-                    "save_view_snapshot",
-                    "run_script",
-                    "cancel_job",
-                    "save_script",
-                    "set_apple_id",
-                    "clear_apple_id",
-                    "resign_wda",
-                    "bulk_resign_wda",
-                ][..],
-            ),
-            (
-                include_str!("agent_commands.rs"),
-                &[
-                    "agent_save_settings",
-                    "agent_preflight",
-                    "agent_repair",
-                    "agent_bulk_repair",
-                ][..],
-            ),
-            (
-                include_str!("farm_commands.rs"),
-                &[
-                    "save_device_meta",
-                    "save_group",
-                    "delete_group",
-                    "save_proxy",
-                    "delete_proxy",
-                    "add_material",
-                    "delete_material",
-                    "push_material",
-                    "add_app_library",
-                    "delete_app_library",
-                    "install_library_app",
-                    "save_schedule",
-                    "delete_schedule",
-                    "create_publish_task",
-                ][..],
-            ),
-            (
-                include_str!("nurture_commands.rs"),
-                &[
-                    "nurture_save_settings",
-                    "nurture_test_api",
-                    "nurture_start",
-                    "nurture_stop",
-                ][..],
-            ),
-            (
-                include_str!("flow_commands.rs"),
-                &[
-                    "flow_save_revision",
-                    "flow_archive",
-                    "flow_run",
-                    "flow_cancel_run",
-                    "flow_retry_attempt",
-                    "flow_coordinate_frame",
-                ][..],
-            ),
-            (
-                include_str!("publish_commands.rs"),
-                &[
-                    "publish_create_campaign",
-                    "publish_cancel",
-                    "publish_prepare",
-                    "publish_transfer",
-                    "publish_post",
-                ][..],
-            ),
-        ];
+    /// Commands that may skip `ensure_accepting_work()`, each with the reason it may.
+    ///
+    /// This is the **whole** exemption list: anything not named here must hold admission, so a
+    /// new command is guarded by default and skipping it is a decision someone has to write
+    /// down. That is the inversion — see the test below for why the previous shape could not
+    /// work.
+    const ADMISSION_EXEMPT: &[(&str, &str)] = &[
+        // Reads. They answer from the DB, from memory, or from a frame already captured, and
+        // touch no device — so refusing them during shutdown drain would blank the UI for no
+        // safety gained.
+        ("agent_get_settings", "read: agent settings held in memory"),
+        (
+            "agent_list_statuses",
+            "read: cached_agent_status, probes nothing",
+        ),
+        ("list_devices", "read: cached roster"),
+        ("get_stream_settings", "read: KV config"),
+        ("latest_frame", "read: last frame already in memory"),
+        ("view_endpoint", "read: the loopback URL"),
+        ("view_report_paint", "read-back: frontend paint counters"),
+        ("list_jobs", "read: DB"),
+        ("list_scripts", "read: DB"),
+        ("example_script", "read: a static fixture"),
+        (
+            "get_apple_id",
+            "read: email + has_password, never the password",
+        ),
+        ("driver_mode", "read: which backend is live"),
+        ("driver_degraded_reason", "read: health probe"),
+        ("android_unavailable_reason", "read: health probe"),
+        ("update_check", "read: asks GitHub, touches no device"),
+        ("get_device_meta", "read: DB"),
+        ("list_device_metas", "read: DB"),
+        ("list_groups", "read: DB"),
+        ("list_proxies", "read: DB"),
+        (
+            "export_proxy_config",
+            "read: renders proxies the operator already stored",
+        ),
+        ("list_materials", "read: DB"),
+        ("list_apps_library", "read: DB"),
+        ("list_schedules", "read: DB"),
+        ("list_publish_tasks", "read: DB"),
+        ("list_op_logs", "read: DB"),
+        ("analytics_summary", "read: DB aggregate"),
+        ("api_docs", "read: static text"),
+        ("flow_action_catalog", "read: static catalog"),
+        ("flow_list", "read: DB"),
+        ("flow_get", "read: DB"),
+        ("flow_validate", "pure: compiles a document, no I/O"),
+        (
+            "flow_import_legacy",
+            "pure: parses JSON into a typed document",
+        ),
+        ("flow_export", "read: DB"),
+        ("flow_list_runs", "read: DB"),
+        ("flow_get_run", "read: DB"),
+        ("flow_read_artifact", "read: DB-keyed bytes, hash-verified"),
+        ("interaction_parse_links", "pure: string parsing"),
+        (
+            "interaction_resolve_links",
+            "read: follows TikTok redirects, touches no device",
+        ),
+        (
+            "interaction_preview_thread",
+            "pure: plans a campaign without running it",
+        ),
+        ("interaction_list", "read: DB"),
+        ("interaction_get", "read: DB"),
+        ("interaction_list_artifacts", "read: DB"),
+        (
+            "interaction_read_artifact",
+            "read: DB-keyed bytes, hash-verified",
+        ),
+        ("local_api_get_config", "read: KV config"),
+        ("nurture_get_settings", "read: DB"),
+        ("nurture_list_costs", "read: DB"),
+        ("nurture_list_comment_attempts", "read: DB"),
+        ("nurture_cost_summary", "read: DB aggregate"),
+        ("nurture_session_status", "read: in-memory session state"),
+        ("publish_list", "read: DB"),
+        ("publish_get", "read: DB"),
+        // Not reads, and not oversights — each guards differently, on purpose.
+        (
+            "update_install",
+            "guards with state.busy_reason(): admission would let it install mid-run",
+        ),
+        (
+            "retry_startup",
+            "re-runs bootstrap; there may be no admission gate yet to hold",
+        ),
+        ("startup_error", "read: why bootstrap failed"),
+    ];
 
-        for (source, commands) in inventories {
-            for command in commands {
-                assert!(
-                    command_body(source, command).contains("ensure_accepting_work()"),
-                    "mutating command {command} bypasses application admission"
-                );
+    /// Every `#[tauri::command]`, with its body, across every command file.
+    fn all_commands() -> Vec<(&'static str, &'static str, &'static str)> {
+        let mut found = Vec::new();
+        for (file, source) in COMMAND_SOURCES {
+            // Cut the trailing test *module* first: `lib.rs`'s own tests contain the literal
+            // "#[tauri::command]" (this scanner splits on it), so counting those would make
+            // the test read itself.
+            //
+            // Matched as `#[cfg(test)]` immediately followed by `mod `, not as a bare
+            // `#[cfg(test)]`: several files carry item-level `#[cfg(test)]` on test-only
+            // imports at the *top*, and cutting there truncated the entire file. Not
+            // hypothetical — it hid all six commands in `agent_commands.rs`, and the
+            // cross-check below is what caught it.
+            let source = match source.find("#[cfg(test)]\nmod ") {
+                Some(at) => &source[..at],
+                None => source,
+            };
+            for chunk in source.split("#[tauri::command]").skip(1) {
+                let Some(at) = chunk.find("fn ") else {
+                    continue;
+                };
+                let tail = &chunk[at + 3..];
+                let Some(stop) = tail.find(['(', '<']) else {
+                    continue;
+                };
+                found.push((*file, &tail[..stop], chunk));
             }
         }
+        found
+    }
+
+    /// Admission is required by **default**, and skipping it has to be written down.
+    ///
+    /// This replaces an allowlist of 84 command names that each had to hold
+    /// `ensure_accepting_work()`. The problem with that shape is not that it was incomplete —
+    /// it is that it **could not** be complete: a new mutating command that forgot admission
+    /// *and* was not added to the list passed, so the gate could not catch the one mistake it
+    /// exists to catch. Three whole files (`interaction_commands.rs`, `peripherals.rs`,
+    /// `local_api.rs` — 16 commands) had never been in its inventory at all.
+    ///
+    /// Inverted, the default is safe: a command is checked unless someone names it and says
+    /// why. Measured when this landed: 158 commands, 52 exempt, and no device-mutating command
+    /// was missing admission — so this closes a drift path rather than a live hole.
+    #[test]
+    fn every_command_holds_admission_unless_explicitly_exempted() {
+        let exempt: std::collections::HashMap<&str, &str> =
+            ADMISSION_EXEMPT.iter().copied().collect();
+        let mut offenders = Vec::new();
+        for (file, name, body) in all_commands() {
+            if body.contains("ensure_accepting_work()") || exempt.contains_key(name) {
+                continue;
+            }
+            offenders.push(format!("{file}::{name}"));
+        }
+        assert!(
+            offenders.is_empty(),
+            "these commands neither hold ensure_accepting_work() nor appear in ADMISSION_EXEMPT \
+             with a reason: {}",
+            offenders.join(", ")
+        );
+    }
+
+    /// The scan sees every command that is actually registered — proved, not assumed.
+    ///
+    /// `all_commands()` stops at each file's `#[cfg(test)]`, because `lib.rs`'s own test module
+    /// contains the literal `"#[tauri::command]"` and splitting on it would make this test read
+    /// itself. That cut is also a blind spot: a command written *below* the test module would
+    /// be invisible to the gate, and a gate with an invisible region is the thing this whole
+    /// inversion is trying to stop being. Found the honest way — an early probe of the gate was
+    /// appended to the end of a file, the gate stayed green, and the probe rather than the gate
+    /// turned out to be wrong.
+    ///
+    /// So: cross-check the scan against `generate_handler!`, which is the list Tauri actually
+    /// exposes. A command hidden below a test module, or defined and never registered, makes
+    /// the two disagree.
+    #[test]
+    fn the_admission_scan_sees_every_registered_command() {
+        let source = include_str!("lib.rs");
+        let at = source
+            .find("generate_handler!")
+            .expect("lib.rs registers its commands with generate_handler!");
+        let tail = &source[at..];
+        let open = tail.find('[').expect("generate_handler![ ... ]");
+        let close = tail.find(']').expect("generate_handler![ ... ]");
+        let registered: std::collections::HashSet<&str> = tail[open + 1..close]
+            .split(',')
+            .map(|entry| entry.trim())
+            .filter(|entry| !entry.is_empty() && !entry.starts_with("//"))
+            .map(|entry| entry.rsplit("::").next().unwrap_or(entry))
+            .collect();
+
+        let scanned: std::collections::HashSet<&str> = all_commands()
+            .into_iter()
+            .map(|(_, name, _)| name)
+            .collect();
+
+        let missed: Vec<&str> = registered.difference(&scanned).copied().collect();
+        assert!(
+            missed.is_empty(),
+            "registered but invisible to the admission scan (below a #[cfg(test)] module?): {}",
+            missed.join(", ")
+        );
+    }
+
+    /// An exemption that no longer names a real command is a stale claim, so it fails too.
+    ///
+    /// Without this the list only ever grows: a command gets renamed or deleted, its excuse
+    /// stays behind, and the next reader believes a decision was made about something that is
+    /// not there.
+    #[test]
+    fn no_admission_exemption_outlives_its_command() {
+        let commands: std::collections::HashSet<&str> = all_commands()
+            .into_iter()
+            .map(|(_, name, _)| name)
+            .collect();
+        let stale: Vec<&str> = ADMISSION_EXEMPT
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| !commands.contains(name))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "ADMISSION_EXEMPT names commands that no longer exist: {}",
+            stale.join(", ")
+        );
+
+        // And an exemption that has since grown a real admission call is also stale — it now
+        // claims an exception it does not take.
+        let redundant: Vec<&str> = all_commands()
+            .into_iter()
+            .filter(|(_, name, body)| {
+                body.contains("ensure_accepting_work()")
+                    && ADMISSION_EXEMPT.iter().any(|(exempt, _)| exempt == name)
+            })
+            .map(|(_, name, _)| name)
+            .collect();
+        assert!(
+            redundant.is_empty(),
+            "these hold admission and no longer need an exemption: {}",
+            redundant.join(", ")
+        );
     }
 
     #[test]
