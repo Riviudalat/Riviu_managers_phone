@@ -7614,3 +7614,106 @@ thu thủ công không thay được suite.**
 
 Gate: frontend 479 test / 56 file, e2e **18/18**, `tsc -b` + `vite build` + oxlint sạch. Rust
 không chạm.
+
+### 9.97 Mô hình đe doạ cho hai cổng nghe, và chín lỗ đã bịt (22/08/2026)
+
+Mục này tồn tại vì một khoảng trống tài liệu: agent iOS có nguyên một mục mô tả token
+`X-Riviu-Token`, cap header 8192 byte/5 giây, MJPEG bind loopback (§~403-426) — còn **hai cổng
+nghe trên chính máy tính thì không có mục nào**. Đó chính là nơi hai lỗ nặng nhất sống sót.
+
+**Khung đe doạ, viết ra để lần sau xếp mức không phải đoán.** Đây là công cụ nội bộ chạy trên
+**một** máy của một người, không phải service mở ra internet. Kẻ tấn công thật gồm: (A) một tiến
+trình khác **cùng user** trên máy tính; (B) một **trang web** trong trình duyệt trên cùng máy —
+quan trọng vì **WebSocket không chịu CORS**, và `fetch` cross-origin vẫn *gây ra* side effect dù
+không đọc được phản hồi; (C) một **app khác trên điện thoại** — loopback trên Android **không**
+phải ranh giới quyền, `INTERNET` là quyền cấp tự động; (D) **nội dung không tin cậy** từ TikTok
+đi ngược vào (caption, nhãn app, tên file).
+
+#### Hai cổng nghe, và vì sao chỉ một cái được bảo vệ
+
+Chúng nằm **cách nhau sáu dòng** trong `state.rs::spawn_background_tasks`:
+
+| | Local API | View WebSocket |
+|---|---|---|
+| Bật | **tắt mặc định**, cần operator bật | **vô điều kiện** |
+| Xác thực | token CSPRNG 244 bit, so sánh constant-time, kiểm **trước** khi route | **không có gì** |
+| Chở gì | vài cử chỉ trong whitelist | **màn hình trực tiếp của cả 21 máy** |
+| Chú thích | có, giải thích rõ lý do từng lựa chọn | không |
+
+Cái được viết cẩn thận là cái ít nguy hiểm hơn. **Bài học: một cổng nghe được thêm vào như "hạ
+tầng nội bộ" thì không ai rà nó như rà một API.** Nay `view_hub` dùng lại đúng khuôn của Local
+API — token 2×UUIDv4, `bytes_eq_ct`, kiểm **trong lúc bắt tay** nên client sai bị từ chối trước
+khi kết nối được nâng cấp và không nhận nổi một byte.
+
+**`Origin` KHÔNG được dùng làm cửa, và đây là chỗ phải đo chứ không được suy.** Bản đầu từ chối
+mọi handshake có `Origin`, lập luận rằng WebView của mình không gửi. App đang chạy bác bỏ trong
+vài giây: dev serve trang từ `http://localhost:5173` nên client của chính mình **cũng** gửi
+`Origin` → log đầy `handshake refused` mỗi ~4 giây, khung nhìn trắng. Token một mình đã đủ đúng
+kẻ tấn công đó: trang web mở được socket khác origin nhưng **không đọc được** token.
+
+#### Helper APK: loopback không phải ranh giới quyền
+
+`com.riviu.agent` bind `127.0.0.1:17980` — đúng — nhưng grep cả module không có một chỗ nào
+`token`/`authoriz`/`secret`/`signature`/`getCallingUid`/`checkPermission`. README nói "Loopback
+only" như thể đó là biện pháp kiểm soát; **đó là giả định chịu lực và nó sai**. Mọi app trên máy
+gọi được cả 9 endpoint, trong đó `/v1/media/delete` chỉ kiểm "1..32 chữ số" (xoá được **ảnh bất
+kỳ**, không hoàn lại) và `/v1/wallpaper/set` mở **đường dẫn tuỳ ý**. Phần APK nằm ở Đợt B, chưa
+cài lên fleet.
+
+#### Chín lỗ đã bịt ở đợt này (host)
+
+Ghi ngắn, chi tiết trong commit:
+
+1. **Khoá ký bản cập nhật có trong mọi build PR/branch** — job `build:` không có bộ lọc ref, mà
+   build thi hành code tuỳ ý của repo. Nay build không-phải-tag đúc khoá dùng-một-lần.
+2. **WebSocket phát hình đòi token** (trên).
+3. **Mật khẩu Apple ID rời khỏi argv** — và nó **chưa bao giờ được đọc**: `_ = args.password`.
+   Một bí mật đi ra command line để không làm gì cả.
+4. **`set_device_identity` validate ba trường** trước khi vào `su -c "…"`, nơi `$( )` và backtick
+   vẫn chạy trong nháy đôi.
+5. **Quyền giả GPS được thu hồi khi tắt** — trước đó `appops … allow` xuất hiện đúng một lần
+   trong cả cây và không có chỗ nào `deny`.
+6. **Cửa admission đảo chiều** — xem dưới.
+7. **`udid` không steer được đường dẫn artifact** — `Path::join` với thành phần tuyệt đối **thay
+   thế** cả đường dẫn.
+8. **Local API có read timeout + trần kết nối** — slowloris trước đó **không cần token**, vì auth
+   nằm sau vòng đọc.
+9. **Trần 8 MiB cho phản hồi từ helper**, + **CSP** thay cho `csp: null`, + **"Quay lại USB"** và
+   confirm cho adb không dây.
+
+#### Cửa kiểm tra chỉ bảo vệ được thứ nó nhìn thấy
+
+`every_mutating_command_holds_application_admission` liệt kê **84 tên** rồi assert từng cái giữ
+`ensure_accepting_work()`. Nó **không thể** đủ: một lệnh mutating mới vừa quên admission vừa quên
+thêm tên thì CI xanh — nó không bắt được đúng cái sai mà nó sinh ra để bắt. Ba file (16 lệnh)
+chưa từng có trong inventory.
+
+Đảo lại: liệt kê **mọi** `#[tauri::command]`, bắt buộc giữ admission **hoặc** có tên trong
+`ADMISSION_EXEMPT` kèm lý do. Đo lúc landing: 158 lệnh, 52 miễn, **không lệnh chạm-thiết-bị nào
+đang thiếu**. Kèm hai test phụ: miễn trừ không được sống lâu hơn lệnh của nó, và **phép quét phải
+nhìn thấy mọi lệnh đã đăng ký** (đối chiếu `generate_handler!`).
+
+Cái cross-check thứ hai lập tức tìm ra một vùng mù thật: phép cắt module test cắt ở `#[cfg(test)]`
+**đầu tiên**, mà `agent_commands.rs` có `#[cfg(test)]` ngay **dòng 1** trên các import chỉ dùng
+cho test — nên **cả 6 lệnh agent vô hình**. **Nguyên tắc: một cửa kiểm tra dựa trên quét source
+phải tự chứng minh nó nhìn thấy đủ**, nếu không "xanh" chỉ có nghĩa là "không tìm thấy gì".
+
+Và đã chứng minh cửa **đỏ** thật bằng một lệnh mutating giả. Lần thử đầu để lệnh giả ở **cuối**
+file, test vẫn xanh — hoá ra sai là ở **phép thử**, không phải ở cửa. Chính chỗ đó đẻ ra
+cross-check trên. **Một phép thử tiêu cực cũng cần được kiểm rằng nó thật sự chạm tới thứ nó
+đang thử.**
+
+#### Ba thứ chỉ CI hoặc app-đang-chạy bắt được
+
+Gate từng-crate tại máy **không** bắt nổi cả ba, và đó là lý do đẩy sớm thay vì dồn commit:
+
+- **Khoá dùng-một-lần**: file khoá `tauri signer generate` ghi ra **không có newline cuối** (348
+  byte, 0 newline), nên khối `NAME<<DELIM` dán dấu đóng vào cùng dòng với khoá →
+  `Matching delimiter not found`. Giá trị một dòng thì dùng `NAME=value`.
+- **Smoke test signer**: hai script CI gọi signer bằng đúng hai cờ vừa bỏ. **Chỉ leg Windows**
+  chạy nhánh đó.
+- **Cửa `Origin`**: chỉ app thật mới lộ ra (trên).
+
+**Nguyên tắc chung để lại: một thay đổi chỉ chạy trên CI thì chỉ CI nghiệm thu được nó, và một
+thay đổi mà client thật phải chấp nhận thì chỉ client thật nghiệm thu được nó.** Cả hai loại đều
+không có trong `cargo test`.
