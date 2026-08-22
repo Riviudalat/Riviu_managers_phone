@@ -499,6 +499,61 @@ pub fn validate_package_name(bundle_id: &str) -> anyhow::Result<&str> {
     Ok(bundle_id)
 }
 
+/// The three device-identity values, checked before they reach a **root** shell.
+///
+/// `set_device_identity` pastes these into `su -c "…"`, and inside those double quotes `$(…)`
+/// and backticks still substitute — so a value like `x"; sh -c 'curl …|sh'; #` is not a bad
+/// serial, it is root code execution on the phone. The shipped UI generates all three locally,
+/// but they arrive as three free `Option<String>` on a registered Tauri command, so the gap is
+/// at the trust boundary rather than behind it.
+///
+/// Rejecting beats escaping, the same call this file already makes for package names and device
+/// paths: all three have narrow, fully specified grammars, so anything outside is a mistake or
+/// an attack and neither should be quoted and run.
+mod identity {
+    use anyhow::anyhow;
+
+    /// 16 lowercase hex digits — the shape `settings get secure android_id` returns.
+    pub fn validate_android_id(value: &str) -> anyhow::Result<&str> {
+        if value.len() == 16 && value.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            Ok(value)
+        } else {
+            Err(anyhow!("not a valid android_id (16 hex digits): {value:?}"))
+        }
+    }
+
+    /// Alphanumerics, and the two separators Samsung/Xiaomi serials actually use.
+    pub fn validate_serial_no(value: &str) -> anyhow::Result<&str> {
+        let ok = (1..=64).contains(&value.len())
+            && value
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_');
+        if ok {
+            Ok(value)
+        } else {
+            Err(anyhow!("not a valid serial number: {value:?}"))
+        }
+    }
+
+    /// `xx:xx:xx:xx:xx:xx`. `ip link set … address` takes nothing else.
+    pub fn validate_mac(value: &str) -> anyhow::Result<&str> {
+        let mut octets = 0usize;
+        for octet in value.split(':') {
+            octets += 1;
+            if octet.len() != 2 || !octet.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                return Err(anyhow!("not a valid MAC address: {value:?}"));
+            }
+        }
+        if octets == 6 {
+            Ok(value)
+        } else {
+            Err(anyhow!("not a valid MAC address: {value:?}"))
+        }
+    }
+}
+
+pub use identity::{validate_android_id, validate_mac, validate_serial_no};
+
 fn exe_name() -> &'static str {
     if cfg!(windows) {
         "adb.exe"
@@ -1623,6 +1678,64 @@ drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
             assert!(
                 validate_package_name(bad).is_err(),
                 "should have been refused: {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn identity_values_that_a_root_shell_could_act_on_are_refused() {
+        // These three are pasted into `su -c "…"`, so the bar is higher than for the package
+        // name: inside double quotes `$(…)` and a backtick still substitute even though `;`
+        // and `|` are already covered by the grammars. A pass here is root on the phone.
+        let measured_android_id = "a1b2c3d4e5f60789";
+        let measured_serial = "10969614";
+        let measured_mac = "02:00:00:44:55:66";
+        assert!(validate_android_id(measured_android_id).is_ok());
+        assert!(validate_serial_no(measured_serial).is_ok());
+        assert!(validate_mac(measured_mac).is_ok());
+
+        for bad in [
+            "a1b2c3d4e5f6078",   // 15 digits
+            "a1b2c3d4e5f607890", // 17
+            "a1b2c3d4e5f6078g",  // not hex
+            "$(id)0123456789",
+            "a1b2c3d4e5f6\"; id; #",
+            "",
+        ] {
+            assert!(
+                validate_android_id(bad).is_err(),
+                "android_id should have been refused: {bad:?}"
+            );
+        }
+
+        for bad in [
+            "x\"; sh -c 'id'; #",
+            "x$(id)",
+            "x`id`",
+            "x;reboot",
+            "x y",
+            "x\nreboot",
+            "",
+        ] {
+            assert!(
+                validate_serial_no(bad).is_err(),
+                "serial should have been refused: {bad:?}"
+            );
+        }
+
+        for bad in [
+            "02:00:00:44:55",       // five octets
+            "02:00:00:44:55:66:77", // seven
+            "02:00:00:44:55:6g",
+            "02:00:00:44:55:6",
+            "02-00-00-44-55-66",
+            "x\"; ip link set wlan0 address 00:11:22:33:44:55; #",
+            "$(id):00:00:44:55:66",
+            "",
+        ] {
+            assert!(
+                validate_mac(bad).is_err(),
+                "mac should have been refused: {bad:?}"
             );
         }
     }

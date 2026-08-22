@@ -1027,6 +1027,26 @@ impl AndroidDriver {
         serialno: Option<&str>,
         mac: Option<&str>,
     ) -> anyhow::Result<String> {
+        // Validated **before** anything touches the phone, and validated together: all three
+        // are pasted into `su -c "…"` below, where `$(…)` and a backtick still substitute
+        // inside the double quotes, so an unchecked value here is root code execution on the
+        // device. Checking up front rather than per-field is deliberate — a partially applied
+        // identity is worse than a refused one, and the doc comment two functions up
+        // ("callers here pass fixed commands, not operator free-text") was true of
+        // `factory_reset` and never true of this function.
+        let android_id = android_id
+            .map(adb::validate_android_id)
+            .transpose()
+            .map_err(|error| anyhow::anyhow!("android_id không hợp lệ: {error}"))?;
+        let serialno = serialno
+            .map(adb::validate_serial_no)
+            .transpose()
+            .map_err(|error| anyhow::anyhow!("serialno không hợp lệ: {error}"))?;
+        let mac = mac
+            .map(adb::validate_mac)
+            .transpose()
+            .map_err(|error| anyhow::anyhow!("địa chỉ MAC không hợp lệ: {error}"))?;
+
         let rooted = self.is_rooted(serial).await;
         let mut done: Vec<String> = Vec::new();
         let mut failed: Vec<String> = Vec::new();
