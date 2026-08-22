@@ -463,7 +463,15 @@ mod tests {
     #[test]
     fn no_command_stores_a_login_password() {
         let surfaces = [
-            ("commands.rs", include_str!("commands.rs")),
+            ("commands/mod.rs", include_str!("commands/mod.rs")),
+            (
+                "commands/android_ops.rs",
+                include_str!("commands/android_ops.rs"),
+            ),
+            ("commands/device.rs", include_str!("commands/device.rs")),
+            ("commands/jobs.rs", include_str!("commands/jobs.rs")),
+            ("commands/system.rs", include_str!("commands/system.rs")),
+            ("commands/view.rs", include_str!("commands/view.rs")),
             ("farm_commands.rs", include_str!("farm_commands.rs")),
             ("agent_commands.rs", include_str!("agent_commands.rs")),
             ("flow_commands.rs", include_str!("flow_commands.rs")),
@@ -490,7 +498,7 @@ mod tests {
         assert_eq!(
             named,
             vec![
-                "commands.rs::set_apple_id".to_string(),
+                "commands/system.rs::set_apple_id".to_string(),
                 "farm_commands.rs::export_proxy_config".to_string(),
             ],
         );
@@ -508,7 +516,15 @@ mod tests {
     /// list below is written to make loud, so it is asserted against the directory listing.
     const COMMAND_SOURCES: &[(&str, &str)] = &[
         ("agent_commands.rs", include_str!("agent_commands.rs")),
-        ("commands.rs", include_str!("commands.rs")),
+        ("commands/mod.rs", include_str!("commands/mod.rs")),
+        (
+            "commands/android_ops.rs",
+            include_str!("commands/android_ops.rs"),
+        ),
+        ("commands/device.rs", include_str!("commands/device.rs")),
+        ("commands/jobs.rs", include_str!("commands/jobs.rs")),
+        ("commands/system.rs", include_str!("commands/system.rs")),
+        ("commands/view.rs", include_str!("commands/view.rs")),
         ("farm_commands.rs", include_str!("farm_commands.rs")),
         ("flow_commands.rs", include_str!("flow_commands.rs")),
         (
@@ -946,7 +962,7 @@ mod tests {
         //
         // Re-ordering any pair still compiles and still works on a farm with no phones
         // plugged in, which is exactly why this is pinned rather than left to review.
-        let source = include_str!("commands.rs");
+        let source = include_str!("commands/system.rs");
         let start = source
             .find("pub async fn update_install(")
             .expect("update_install present");
