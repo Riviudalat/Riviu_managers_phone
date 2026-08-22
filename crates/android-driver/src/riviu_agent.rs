@@ -39,7 +39,7 @@ pub const DEVICE_PORT: u16 = 17980;
 /// Protocol the APK and this client both speak. A newer APK with a different
 /// number is refused rather than half-read.
 pub const PROTOCOL_VERSION: u32 = 1;
-pub const AGENT_VERSION: &str = "0.1.0";
+pub const AGENT_VERSION: &str = "0.4.0";
 
 /// What this build needs the installed helper to advertise on `/status`.
 ///
@@ -47,7 +47,7 @@ pub const AGENT_VERSION: &str = "0.1.0";
 /// "can it answer the call I am about to make", and a phone can legitimately carry a newer
 /// APK than this build knows about. A helper missing any of these is reinstalled once — see
 /// [`HelperClient::upgrade_if_stale`].
-const REQUIRED_FEATURES: &[&str] = &["clipboard", "pushMedia", "appLabels"];
+const REQUIRED_FEATURES: &[&str] = &["clipboard", "pushMedia", "appLabels", "auth"];
 
 /// Serials this process has already tried to upgrade, so a stale APK on disk cannot turn
 /// every helper call into another install attempt.
@@ -55,6 +55,33 @@ fn upgrade_attempts() -> &'static parking_lot::Mutex<std::collections::HashSet<S
     static ATTEMPTED: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
         std::sync::OnceLock::new();
     ATTEMPTED.get_or_init(Default::default)
+}
+
+/// Header the helper's shared token travels in. Mirrors `HttpServer.TOKEN_HEADER`.
+pub const TOKEN_HEADER: &str = "X-Riviu-Token";
+
+/// The token this process uses for one phone, minted on first use.
+///
+/// Per **serial**, not one for the fleet: a token is only as contained as the thing that holds
+/// it, and a helper on one phone has no business being able to answer for another. Per
+/// **process**, not persisted: it lives as long as the desktop does, so there is nothing on
+/// either disk to steal, and a restart simply re-provisions.
+fn helper_token(serial: &str) -> String {
+    static TOKENS: std::sync::OnceLock<
+        parking_lot::Mutex<std::collections::HashMap<String, String>>,
+    > = std::sync::OnceLock::new();
+    let tokens = TOKENS.get_or_init(Default::default);
+    let mut tokens = tokens.lock();
+    tokens
+        .entry(serial.to_string())
+        .or_insert_with(|| {
+            format!(
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            )
+        })
+        .clone()
 }
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -182,6 +209,7 @@ impl HelperClient {
         let response = self
             .http
             .get(format!("{}/status", self.base))
+            .header(TOKEN_HEADER, helper_token(&self.serial))
             .send()
             .await
             .with_context(|| format!("GET {}/status", self.base))?;
@@ -249,14 +277,6 @@ impl HelperClient {
             .await?;
         require_ok(&value, "media import")?;
         parse_media_import(&value)
-    }
-
-    pub async fn delete_media(&self, id: &str) -> anyhow::Result<()> {
-        let value = self
-            .post_json("/v1/media/delete", json!({ "id": id }))
-            .await?;
-        require_ok(&value, "media delete")?;
-        Ok(())
     }
 
     /// Set the device wallpaper from a file already on the device (feature A3). The caller
@@ -330,6 +350,7 @@ impl HelperClient {
         let response = self
             .http
             .post(format!("{}{path}", self.base))
+            .header(TOKEN_HEADER, helper_token(&self.serial))
             .json(&body)
             .send()
             .await
@@ -642,11 +663,23 @@ async fn enable_ime(adb: &AdbProgram, serial: &str) -> anyhow::Result<()> {
         .with_context(|| format!("ime enable {IME_ID} on {serial}"))
 }
 
+/// Start the helper service, handing it the token it must then demand on every request.
+///
+/// The token goes as an Intent extra rather than a file or a property: it reaches exactly one
+/// process, leaves nothing behind on the device, and a helper started by anyone *else* — which
+/// an exported service always allows — comes up with no token and therefore serves nothing.
 async fn start_service(adb: &AdbProgram, serial: &str) -> anyhow::Result<()> {
-    adb.shell(serial, &format!("am start-foreground-service -n {SERVICE}"))
-        .await
-        .map(|_| ())
-        .with_context(|| format!("start {SERVICE} on {serial}"))
+    let token = helper_token(serial);
+    // Token is hex from `Uuid::simple`, so it needs no quoting; asserted rather than assumed,
+    // because this string is pasted into a device shell command.
+    debug_assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+    adb.shell(
+        serial,
+        &format!("am start-foreground-service -n {SERVICE} --es token {token}"),
+    )
+    .await
+    .map(|_| ())
+    .with_context(|| format!("start {SERVICE} on {serial}"))
 }
 
 async fn current_ime(adb: &AdbProgram, serial: &str) -> anyhow::Result<String> {

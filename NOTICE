@@ -118,9 +118,9 @@ scrcpy client is not shipped.
 ------------------------------------------------------------------------
 
     sidecars/riviu-android-agent/           Java source (minSdk 26)
-    sidecars/android/noarch/riviu-agent.apk agent 0.3.0, protocol 1
-      bytes  25047
-      sha256 a0b8ac276aea40c2e1aefa5864f17e0cc7d16db822eea06c15a869a8da9a1c31
+    sidecars/android/noarch/riviu-agent.apk agent 0.4.0, protocol 1
+      bytes  25050
+      sha256 7d84c1b045d33e80e8b29ac53eec67f78a97d64e7458e13020f288649e14e81c
 
 This is Riviu-authored. It is a helper, not an iPhone-Agent equivalent: loopback
 HTTP for clipboard (brief IME), MediaStore insert/delete, wallpaper, mock

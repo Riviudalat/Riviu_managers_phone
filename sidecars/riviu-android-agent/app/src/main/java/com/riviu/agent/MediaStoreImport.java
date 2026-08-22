@@ -80,32 +80,6 @@ final class MediaStoreImport {
                 .put("pendingModel", pendingModel);
     }
 
-    static JSONObject deleteById(Context context, String id) throws Exception {
-        String safe = safeId(id);
-        Uri uri = Uri.withAppendedPath(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, safe);
-        context.getContentResolver().delete(uri, null, null);
-        return Protocol.ok().put("id", safe);
-    }
-
-    static boolean rowExists(Context context, String id) {
-        String safe;
-        try {
-            safe = safeId(id);
-        } catch (IllegalArgumentException ignored) {
-            return false;
-        }
-        Uri uri = Uri.withAppendedPath(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, safe);
-        Cursor cursor = context.getContentResolver().query(uri, new String[]{"_id"}, null, null, null);
-        if (cursor == null) {
-            return false;
-        }
-        try {
-            return cursor.moveToFirst();
-        } finally {
-            cursor.close();
-        }
-    }
-
     static String safeFileName(String raw) {
         if (raw == null || raw.isEmpty() || raw.length() > 128) {
             throw new IllegalArgumentException("file name must be 1..=128 characters");
@@ -117,18 +91,6 @@ final class MediaStoreImport {
             char ch = raw.charAt(i);
             if (!(Character.isLetterOrDigit(ch) || ch == '.' || ch == '_' || ch == '-')) {
                 throw new IllegalArgumentException("file name carries a character the shell would act on");
-            }
-        }
-        return raw;
-    }
-
-    static String safeId(String raw) {
-        if (raw == null || raw.isEmpty() || raw.length() > 32) {
-            throw new IllegalArgumentException("MediaStore id must be 1..=32 digits");
-        }
-        for (int i = 0; i < raw.length(); i++) {
-            if (!Character.isDigit(raw.charAt(i))) {
-                throw new IllegalArgumentException("MediaStore id must be digits");
             }
         }
         return raw;

@@ -54,8 +54,8 @@
     },
     {
       "path": "noarch/riviu-agent.apk",
-      "bytes": 25047,
-      "sha256": "a0b8ac276aea40c2e1aefa5864f17e0cc7d16db822eea06c15a869a8da9a1c31",
+      "bytes": 25050,
+      "sha256": "7d84c1b045d33e80e8b29ac53eec67f78a97d64e7458e13020f288649e14e81c",
       "role": "riviuAgentApk"
     }
   ],
