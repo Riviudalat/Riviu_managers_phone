@@ -104,6 +104,23 @@ pub struct ViewHub {
     /// connected, and every phone discovered afterwards would be a canvas that never paints.
     roster: broadcast::Sender<String>,
     port: AtomicU16,
+    /// Secret a client must present to receive a single frame.
+    ///
+    /// This socket carries the live screen of **every phone in the fleet**, and until this
+    /// existed it handed that to anyone who completed a WebSocket handshake on the port —
+    /// no token, no `Origin` check, and started unconditionally rather than off-by-default.
+    /// Six lines away in `state.rs` the Local API is off by default, token-gated and
+    /// constant-time compared, with a comment explaining why; the socket that streams
+    /// twenty-one screens had none of it.
+    ///
+    /// Two attackers, both real on a single-operator box:
+    /// * any other local process can scan loopback, and a successful handshake followed
+    ///   immediately by binary frames is an unambiguous fingerprint;
+    /// * a web page, because **WebSocket is not subject to CORS** — a browser will happily
+    ///   open `ws://127.0.0.1:<port>` from any origin.
+    ///
+    /// Minted per process, so it dies with the app and never reaches disk.
+    token: String,
 }
 
 impl ViewHub {
@@ -115,12 +132,26 @@ impl ViewHub {
             devices: Mutex::new(HashMap::new()),
             roster,
             port: AtomicU16::new(0),
+            // Two v4 UUIDs, the same construction and the same CSPRNG (`getrandom`) the Local
+            // API's token uses. 244 bits over 64 hex chars.
+            token: format!(
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            ),
         })
     }
 
+    /// The URL the frontend should open, token included.
+    ///
+    /// The token rides in the query string rather than a header because the browser
+    /// `WebSocket` constructor cannot set headers — and the frontend passes this straight to
+    /// `new WebSocket(url)` (`viewStore.ts`), so nothing on that side has to change. It never
+    /// leaves the machine: the URL is handed to our own WebView over IPC and the socket is
+    /// loopback-bound.
     pub fn endpoint(&self) -> Option<String> {
         let port = self.port.load(Ordering::Acquire);
-        (port != 0).then(|| format!("ws://127.0.0.1:{port}"))
+        (port != 0).then(|| format!("ws://127.0.0.1:{port}/?k={}", self.token))
     }
 
     /// Bind 127.0.0.1:0 and accept WebSocket clients. Call once from the
@@ -423,9 +454,93 @@ async fn forward_device(
     }
 }
 
+/// Does this handshake carry the hub's token, and is it from our own WebView?
+///
+/// Split out and pure so the decision is testable without a socket — the property that matters
+/// is "no token, no frames", and that must not depend on getting a TCP fixture right.
+///
+/// Both halves are load-bearing:
+/// * the token is compared in **constant time**, because a byte-at-a-time comparison against a
+///   secret an attacker can retry at loopback speed is a secret an attacker can read;
+/// * any request carrying an `Origin` is refused outright. Our client is a Tauri WebView
+///   calling `new WebSocket(...)` from `tauri://` or a dev-server page, and browsers attach
+///   `Origin` to cross-site WebSocket handshakes. Since WebSocket bypasses CORS entirely, this
+///   is the only thing standing between a random web page and twenty-one live screens.
+fn handshake_is_authorised(path_and_query: &str, origin: Option<&str>, token: &str) -> bool {
+    if origin.is_some() {
+        return false;
+    }
+    let Some(query) = path_and_query.split_once('?').map(|(_, q)| q) else {
+        return false;
+    };
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .any(|(key, value)| key == "k" && bytes_eq_ct(value.as_bytes(), token.as_bytes()))
+}
+
+/// Constant-time byte comparison. Same helper as `local_api.rs`, same reason.
+fn bytes_eq_ct(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+type HandshakeRequest = tokio_tungstenite::tungstenite::handshake::server::Request;
+type HandshakeResponse = tokio_tungstenite::tungstenite::handshake::server::Response;
+type HandshakeRejection = tokio_tungstenite::tungstenite::handshake::server::ErrorResponse;
+
+/// Accept or reject one handshake.
+///
+#[allow(clippy::result_large_err)]
+fn gate_handshake(
+    request: &HandshakeRequest,
+    response: HandshakeResponse,
+    token: &str,
+) -> Result<HandshakeResponse, HandshakeRejection> {
+    let origin = request
+        .headers()
+        .get("origin")
+        .and_then(|value| value.to_str().ok());
+    let target = request
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("");
+    if handshake_is_authorised(target, origin, token) {
+        return Ok(response);
+    }
+    log::warn!("view websocket handshake refused: no valid token");
+    Err(tokio_tungstenite::tungstenite::http::Response::builder()
+        .status(tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED)
+        .body(None)
+        .expect("a 401 with an empty body is always constructible"))
+}
+
+/// `result_large_err`: the handshake callback's `Err` is tungstenite's
+/// `http::Response<Option<String>>` (136 bytes) and its shape is fixed by the `accept_hdr_async`
+/// signature — clippy's suggestion to box it does not typecheck against that callback. The cost
+/// is one 136-byte value, once per connection, and only on the rejection path.
+#[allow(clippy::result_large_err)]
 async fn serve_client(hub: Arc<ViewHub>, stream: tokio::net::TcpStream) -> anyhow::Result<()> {
     let _ = stream.set_nodelay(true);
-    let mut ws = tokio_tungstenite::accept_async(stream).await?;
+    // Checked **during** the handshake, so an unauthorised client is refused before the
+    // connection is upgraded — it never reaches `replay_latest` and so never receives a byte
+    // of anyone's screen. Doing it after `accept_async` would mean the socket is already a
+    // live WebSocket when we decide, which is a race worth not having.
+    let token = hub.token.clone();
+    let mut ws = tokio_tungstenite::accept_hdr_async(
+        stream,
+        |request: &HandshakeRequest, response: HandshakeResponse| {
+            gate_handshake(request, response, &token)
+        },
+    )
+    .await?;
     // Roster BEFORE the device snapshot, and the snapshot before the replay. Two ordering
     // windows now, and both lose a device permanently and silently if got wrong: a phone
     // created between the snapshot and the roster subscribe would never be forwarded to this
@@ -1019,7 +1134,7 @@ mod tests {
             .await
             .expect("dial the loopback listener");
         let (mut client, _) =
-            tokio_tungstenite::client_async(format!("ws://127.0.0.1:{port}/"), socket)
+            tokio_tungstenite::client_async(hub.endpoint().expect("the hub is listening"), socket)
                 .await
                 .expect("websocket handshake");
 
@@ -1065,7 +1180,7 @@ mod tests {
             .await
             .expect("dial the loopback listener");
         let (mut client, _) =
-            tokio_tungstenite::client_async(format!("ws://127.0.0.1:{port}/"), socket)
+            tokio_tungstenite::client_async(hub.endpoint().expect("the hub is listening"), socket)
                 .await
                 .expect("websocket handshake");
         let replayed = client.next().await.expect("a message").expect("no error");
@@ -1088,6 +1203,98 @@ mod tests {
         assert_eq!(
             live.into_data().to_vec(),
             encode_packet(&h264("a", true, 9))
+        );
+    }
+    #[test]
+    fn the_handshake_gate_answers_the_only_question_that_matters() {
+        // Pure, so the decision is provable without a socket: no token, no frames.
+        let token = "0123456789abcdef";
+        assert!(handshake_is_authorised("/?k=0123456789abcdef", None, token));
+        assert!(handshake_is_authorised(
+            "/?other=1&k=0123456789abcdef",
+            None,
+            token
+        ));
+
+        // No token at all — the shape every caller had before this existed.
+        assert!(!handshake_is_authorised("/", None, token));
+        assert!(!handshake_is_authorised("/?k=", None, token));
+        assert!(!handshake_is_authorised(
+            "/?j=0123456789abcdef",
+            None,
+            token
+        ));
+        // Wrong token, including the prefix that a byte-at-a-time compare would leak.
+        assert!(!handshake_is_authorised(
+            "/?k=0123456789abcdee",
+            None,
+            token
+        ));
+        assert!(!handshake_is_authorised("/?k=0123456789abcde", None, token));
+        assert!(!handshake_is_authorised(
+            "/?k=0123456789abcdefff",
+            None,
+            token
+        ));
+
+        // A browser page, even one that somehow learned the token: WebSocket bypasses CORS,
+        // so `Origin` is the only signal that the caller is not our own WebView.
+        assert!(!handshake_is_authorised(
+            "/?k=0123456789abcdef",
+            Some("https://evil.example"),
+            token
+        ));
+        assert!(!handshake_is_authorised(
+            "/?k=0123456789abcdef",
+            Some("http://localhost:5173"),
+            token
+        ));
+    }
+
+    #[test]
+    fn every_hub_mints_its_own_token_and_publishes_it_in_the_endpoint() {
+        let a = ViewHub::new();
+        let b = ViewHub::new();
+        assert_ne!(a.token, b.token, "a fixed token would be no token at all");
+        assert_eq!(a.token.len(), 64, "two v4 UUIDs, hex, no dashes");
+        assert!(a.token.chars().all(|c| c.is_ascii_hexdigit()));
+        // Not listening yet, so there is nothing to hand out.
+        assert!(a.endpoint().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_client_without_the_token_is_refused_and_receives_no_frame() {
+        // The property in one test: an unauthorised client must not get a single byte of
+        // anyone's screen. Before this, connecting to the port was the whole authorisation.
+        use futures_util::StreamExt;
+
+        let hub = ViewHub::new();
+        hub.advance("a");
+        assert!(hub.publish(h264("a", true, 1)));
+        let port = Arc::clone(&hub).listen().await.expect("bind loopback");
+
+        let socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("dial the loopback listener");
+        let refused =
+            tokio_tungstenite::client_async(format!("ws://127.0.0.1:{port}/"), socket).await;
+        assert!(
+            refused.is_err(),
+            "a tokenless handshake must be rejected, not upgraded"
+        );
+
+        // And the hub is still serving: the refusal is per-connection, not a wedged listener.
+        let socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("dial again");
+        let (mut client, _) =
+            tokio_tungstenite::client_async(hub.endpoint().expect("listening"), socket)
+                .await
+                .expect("the real endpoint still works");
+        let replayed = client.next().await.expect("a message").expect("no error");
+        assert_eq!(
+            replayed.into_data().to_vec(),
+            encode_packet(&h264("a", true, 1))
         );
     }
 }
