@@ -7739,3 +7739,76 @@ Tiện thể nghiệm thu luôn **S13**: lần bấm "làm mới" App List đi q
 List vẫn báo "Máy chưa có Riviu helper nên chưa đọc được tên và icon app". Cài đặt ≠ với tới
 được: service chưa chạy / chưa forward. Bấm làm mới là nó attach rồi trả đủ nhãn + icon. Câu chú
 thích đó nên nói "chưa với tới được helper" thay vì "chưa có helper".
+
+
+### 9.98 Bốn lỗi mà chỉ việc dọn mới lôi ra, và ba mục tôi từ chối làm (23/08/2026)
+
+Đợt D+E: hợp đồng, code chết, và cấu trúc. Mục này ghi lại **thứ đáng nhớ**, không phải danh
+sách file đã di chuyển — cái đó nằm trong git.
+
+**Bốn lỗi đang chảy, cả bốn chỉ lộ ra vì đang dọn chỗ khác.**
+
+1. **Ba subscriber đọc tên field mà dây không bao giờ gửi.** `#[serde(rename_all)]` trên một
+   *enum* chỉ đổi tên variant; field của struct-variant giữ nguyên spelling Rust trừ khi có
+   `rename_all_fields`. Mọi payload khác của app tới frontend dạng camelCase, nên `AppEvent` là
+   chỗ duy nhất gửi `run_id`/`flow_id`/`campaign_id`, và cả ba subscriber viết theo camelCase.
+   Không lỗi biên dịch, không test đỏ, **không bao giờ khớp**. `FlowRunMonitor` trông chỉ hơi
+   chậm vì poll 750 ms gánh hết.
+
+   **Và có một test cho đường đó — chính nó che lỗi.** Test bơm `{ runId: … }`, đúng cái hình
+   dạng sai mà production đang đọc. Hai cái sai khớp nhau thì cùng xanh. Bài học: một test viết
+   payload *cùng cách* code đọc nó không kiểm tra gì cả; chỉ test **đi qua ranh giới** — serialize
+   kiểu Rust thật rồi so — mới bắt được.
+
+2. **`i64 as u8/u16/u32` ở 18 chỗ đọc cột.** Không phải phép chuyển, là cắt bit im lặng: port
+   70000 đọc ra **4464** (một số hiệu cổng hoàn toàn hợp lệ, và sai), `message_count` 256 đọc ra
+   **0**. Không tầng nào phía sau phân biệt được với giá trị thật.
+
+3. **…và ngay khi sửa (2), lộ ra 11 chỗ `filter_map(|r| r.ok())` nuốt hàng đọc lỗi.** Trước đó vô
+   hại vì `as` không bao giờ lỗi. Sau khi sửa, hàng port 70000 không trả 4464 nữa — nó **biến mất
+   khỏi danh sách**, im lặng. Đổi một lỗi tồi lấy một lỗi tồi hơn. Test end-to-end bắt được: nó
+   kỳ vọng `list_proxies` lỗi và nhận `Ok(0)`. Hai test đơn vị cho `narrow` thì đã xanh cả ba.
+
+4. **Năm trong tám `role="dialog"` thiếu `aria-modal`.** Trình đọc màn hình coi đó là thêm một
+   vùng trên trang, nên nó đọc tiếp hai mươi tile phía sau. Bốn cái nằm trong vỏ phủ kín → sửa;
+   cái thứ năm là popover neo trong toolbar → **cố ý không sửa**, khai `aria-modal` mới là nói dối
+   ngược lại.
+
+**`PARENT_SCROLL_ATTEMPTS`: vì sao một engine không được nằm hai crate.** `a413442` đo được 4 là
+thiếu và nâng lên 10 — nhưng hằng số tồn tại hai bản, nên bản sửa **đo được** chỉ áp cho một nửa,
+ba ngày. Đường pixel vẫn hỏng đúng theo cách đã được chứng minh là hỏng. Nay engine về một chỗ
+(`riviu-core/interaction_campaign.rs`), và một test bắt buộc hằng số chỉ được định nghĩa một lần
+trong cả workspace.
+
+**Cửa mới, và mỗi cửa đều đã thử làm lệch để chắc nó cắn.** Không cửa nào ở đây được tin nếu chưa
+thấy nó đỏ: hình dạng lỗi lệnh (163 lệnh, một kiểu), tag `AppEvent` hai chiều, tên field
+`AppEvent` trên dây, `LIVE_TUNABLE_FIELDS` ↔ `absorb_live_changes`, bảy cặp hằng số Rust↔TS,
+`aria-modal`, cờ "đang bận", hằng số hình học/thời gian phải có lý do, và **24 kiểu Rust↔TS phải
+cùng field**. Kèm một luật cho chính các cửa: mỗi cái phải khẳng định **quét thấy tối thiểu bao
+nhiêu** thứ — một bộ quét trả rỗng thì xanh vĩnh viễn mà không kiểm gì, và đó là cách một
+source-scanning test mục đi.
+
+**Ba mục trong plan tôi không làm, kèm số đo.**
+
+- **E7 (định tuyến 21 lệnh Android qua `MultiplexDriver`).** Đo lại: **29 thao tác, 31 chỗ gọi,
+  0 cái nào có trên trait `DeviceDriver`**, và driver iOS cài đặt **0/7** những cái nghe có vẻ
+  đa nền tảng nhất. Làm theo plan nghĩa là viết 29 method iOS trả "không hỗ trợ", trong khi phần
+  lớn danh sách (`root_shell`, `is_rooted`, `factory_reset`, `appops`, adb-qua-Wi-Fi) là khái niệm
+  chỉ Android có. Đã làm nửa đáng làm: 22 bản chép của cùng một guard thành `require_android()?`,
+  và câu lỗi nay mang theo *nguyên nhân* mà `android_unavailable_reason` giữ suốt thời gian đó.
+- **E6 `useAsyncAction`.** Đo trước: 39 chỗ bật cờ bận, **38 nhả trong `finally`**, cái thứ 39
+  không ném được. Không có bug để sửa. Thay 39 chỗ đang chạy đúng trong lớp UI test thưa là đổi
+  rủi ro thật lấy sự đồng đều. Thay bằng một cửa giữ kỷ luật đó khỏi mòn.
+- **E4 tab "setup" của `InteractionPopup`.** Đo: nó chạm **50 symbol**. Tách ra là đổi một file
+  dài lấy một danh sách tham số dài. Tab "monitor" và ba tab của `NurturePopup` thì tách được vì
+  chúng chạm 15 và 4-10.
+
+**Một mục bị chặn, không phải bị bỏ.** `run_session` (1.369 dòng, 58% của `nurture/mod.rs`) tách
+được, nhưng luật nghiệm thu của Đợt E đòi chạy lại một phiên nuôi **trên máy thật** trước khi đi
+tiếp — mà phiên đó đăng bình luận thật từ tài khoản thật. Đó là việc cần anh gật, không phải việc
+tự quyết.
+
+**Kỹ thuật "cắt theo khoảng dòng" trượt hai lần, cả hai đều đỏ ngay lúc build:** một lần vơ luôn
+`WorkerCommand`/`QuarantineStore` khi tách context ra khỏi `device_control`, một lần gắn
+`DEVICE_META_COLUMNS` vào `db/jobs.rs` trong khi cả hai người đọc nó ở `db/fleet.rs`. Cắt theo
+**span của khai báo** (kèm doc comment) thì đúng; cắt theo số dòng thì không.
