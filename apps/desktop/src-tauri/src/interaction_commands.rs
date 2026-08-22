@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use riviu_core::interaction_hierarchy::PARENT_SCROLL_ATTEMPTS;
 use riviu_core::AppEvent;
 use riviu_core::{
     discover_comment_identity, locate_parent_comment, parse_tiktok_links, plan_threads,
@@ -2105,15 +2106,9 @@ async fn choose_target_driver<'a>(
     }))
 }
 
-/// How far to hunt for the parent before giving up, and the gesture used.
-///
-/// The drawer only ever showed its first screenful: `open_comment_for_ocr`
-/// opens it, reads one frame, and returns. Every reply is sent from a *different
-/// device* that re-opens the link fresh, so TikTok re-ranks the list each time
-/// and the campaign's own comment is under no obligation to still be near the
-/// top. When it is not, the parent is simply unfindable and the rest of the
-/// thread dies — with no attempt to look further down.
-const PARENT_SCROLL_ATTEMPTS: u32 = 4;
+/// The gesture used to hunt for the parent. How *far* to hunt is
+/// `PARENT_SCROLL_ATTEMPTS`, shared with the hierarchy path — the budget was measured
+/// against TikTok's comment list, which is the same list whichever path is scrolling it.
 const PARENT_SCROLL_FROM_Y: f64 = 0.62;
 const PARENT_SCROLL_TO_Y: f64 = 0.38;
 const PARENT_SCROLL_SETTLE: Duration = Duration::from_millis(900);

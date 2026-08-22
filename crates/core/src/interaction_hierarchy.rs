@@ -732,9 +732,11 @@ where
 
 /// How many times the comment list is scrolled looking for the parent.
 ///
-/// Same reason as the pixel path's: every reply is sent from a *different* device that
-/// re-opens the link fresh, so TikTok re-ranks the list and the campaign's own comment is
-/// under no obligation to still be near the top.
+/// Shared with the pixel path, which imports it: every reply is sent from a *different*
+/// device that re-opens the link fresh, so TikTok re-ranks the list and the campaign's own
+/// comment is under no obligation to still be near the top. The budget is a property of the
+/// comment list, not of whichever path is scrolling it, so the two must not drift again —
+/// they did once, and only the hierarchy half got the measured fix below.
 ///
 /// **Ten, and the old four was measured short rather than argued short.** On 19/08/2026, on
 /// a post carrying about twenty-five comments, the third actor of a star spent all four
@@ -748,7 +750,7 @@ where
 /// to fail anyway — a parent found on the second scroll still costs two. Bounded because a
 /// list that will not yield the parent has to end in a refusal rather than in scrolling
 /// forever, and because a swipe that closes the drawer is caught on every turn.
-const PARENT_SCROLL_ATTEMPTS: u32 = 10;
+pub const PARENT_SCROLL_ATTEMPTS: u32 = 10;
 
 /// How long the feed gets to render an author label after the phone is sent Home.
 ///
