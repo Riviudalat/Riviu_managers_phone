@@ -12,11 +12,16 @@
 //! [`crate::commands::with_manual_session`] path the Tauri commands use, so the API can reach
 //! a device by no route a command could not (same lease, same admission, same cleanup).
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager, State};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
+use tokio::time::timeout;
 
 use riviu_core::db::Database;
 use riviu_core::types::{HardwareKey, SwipeGesture, TapPoint};
@@ -32,6 +37,21 @@ const DEFAULT_PORT: u16 = 22222;
 /// Hard cap on one request (head + body). Generous for a JSON gesture, small enough that a
 /// stray client cannot make the server buffer without bound.
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
+/// How long a client gets to finish sending its request.
+///
+/// The size cap alone does not bound a connection: a client that sends **one byte every few
+/// seconds** never trips it and holds the task forever, and because auth happens *after* both
+/// read loops, this costs an attacker **no token**. Ten seconds is far more than a loopback
+/// client needs (the whole point of this API is that it is on the same machine) and far less
+/// than the "forever" it was.
+const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// How many connections may be in flight at once.
+///
+/// Paired with the timeout: the timeout bounds one slow client, this bounds how many of them
+/// there can be. 64 is generous for a scripting API driving 20 phones from the same box, and
+/// small enough that the accept loop cannot be turned into unbounded task growth. Excess
+/// connections wait for a slot rather than being refused, so an honest burst still completes.
+const MAX_CONCURRENT_CONNECTIONS: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -337,6 +357,7 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 pub async fn serve(app: AppHandle, port: u16, token: String) -> anyhow::Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
     log::info!("local API listening on 127.0.0.1:{port}");
+    let slots = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
     loop {
         let (stream, _peer) = match listener.accept().await {
             Ok(pair) => pair,
@@ -345,11 +366,24 @@ pub async fn serve(app: AppHandle, port: u16, token: String) -> anyhow::Result<(
                 continue;
             }
         };
+        // Taken before the spawn, so a flood waits in the accept loop instead of turning into
+        // an unbounded pile of tasks. The semaphore lives as long as the server, so `acquire`
+        // can only fail if it were closed — which it never is.
+        let Ok(slot) = Arc::clone(&slots).acquire_owned().await else {
+            log::warn!("local API connection semaphore closed; refusing new connections");
+            return Ok(());
+        };
         let app = app.clone();
         let token = token.clone();
         tokio::spawn(async move {
-            if let Err(error) = handle_conn(stream, &app, &token).await {
-                log::debug!("local API connection ended: {error}");
+            let _slot = slot;
+            match timeout(REQUEST_READ_TIMEOUT, handle_conn(stream, &app, &token)).await {
+                Ok(Err(error)) => log::debug!("local API connection ended: {error}"),
+                // A client that never finished its request. Dropped without a reply: there is
+                // nothing to reply *to* yet, and answering a half-request would just keep the
+                // socket alive a little longer.
+                Err(_) => log::debug!("local API connection timed out before a full request"),
+                Ok(Ok(())) => {}
             }
         });
     }
