@@ -1,6 +1,6 @@
 import type { DragEvent } from "react";
 import type { ActionCategory, ActionKind, ActionDefinition } from "../../types";
-import { ACTION_PRESENTATION } from "./FlowActionNode";
+import { ACTION_PRESENTATION } from "./actionPresentation";
 
 export const FLOW_ACTION_MIME = "application/riviu-flow-action";
 

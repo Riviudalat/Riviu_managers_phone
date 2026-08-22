@@ -1,26 +1,10 @@
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
-import {
-  Camera,
-  CirclePlay,
-  CircleStop,
-  Crosshair,
-  GitBranch,
-  House,
-  Keyboard,
-  MousePointerClick,
-  MoveUp,
-  PowerOff,
-  Rocket,
-  ScanSearch,
-  Timer,
-  type LucideIcon,
-} from "lucide-react";
 import type {
   ActionKind,
   FlowValidationIssue,
   JsonObject,
-  JsonValue,
 } from "../../types";
+import { ACTION_PRESENTATION, summarizeAction } from "./actionPresentation";
 
 export interface FlowActionNodeData extends Record<string, unknown> {
   kind: ActionKind;
@@ -29,69 +13,6 @@ export interface FlowActionNodeData extends Record<string, unknown> {
 }
 
 export type FlowCanvasNode = Node<FlowActionNodeData, "flowAction">;
-
-export const ACTION_PRESENTATION: Partial<
-  Record<ActionKind, { label: string; icon: LucideIcon }>
-> = {
-  start: { label: "Bắt đầu", icon: CirclePlay },
-  end: { label: "Kết thúc", icon: CircleStop },
-  launchApp: { label: "Mở ứng dụng", icon: Rocket },
-  terminateApp: { label: "Tắt ứng dụng", icon: PowerOff },
-  wait: { label: "Chờ", icon: Timer },
-  tap: { label: "Chạm", icon: MousePointerClick },
-  swipe: { label: "Vuốt", icon: MoveUp },
-  typeText: { label: "Gõ chữ", icon: Keyboard },
-  screenshot: { label: "Chụp màn hình", icon: Camera },
-  home: { label: "Về màn hình chính", icon: House },
-  assertVisible: { label: "Kiểm tra hiển thị", icon: ScanSearch },
-  tapVision: { label: "Chạm theo ảnh", icon: Crosshair },
-  ifVision: { label: "Nếu thấy ảnh", icon: GitBranch },
-};
-
-function objectNumber(value: JsonValue | undefined, key: string): number | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  const field = value[key];
-  return typeof field === "number" && Number.isFinite(field) ? field : null;
-}
-
-export function summarizeAction(kind: ActionKind, config: JsonObject): string {
-  const text = (key: string) => {
-    const value = config[key];
-    return typeof value === "string" ? value : "";
-  };
-  switch (kind) {
-    case "launchApp":
-    case "terminateApp":
-      return text("bundleId");
-    case "wait":
-      return typeof config.durationMs === "number" ? `${config.durationMs} ms` : "";
-    case "tap": {
-      const coordinates = [objectNumber(config.point, "x"), objectNumber(config.point, "y")]
-        .filter((value): value is number => value !== null)
-        .join(", ");
-      return text("accessibilityId") || coordinates;
-    }
-    case "swipe":
-      return `Swipe${
-        typeof config.durationMs === "number" ? ` ${config.durationMs} ms` : ""
-      }`;
-    case "typeText":
-      return `${text("text").length} characters`;
-    case "screenshot":
-      return text("label");
-    case "assertVisible":
-      return text("accessibilityId");
-    case "tapVision":
-    case "ifVision": {
-      const hasTemplate = text("templatePngBase64").length > 0;
-      const threshold =
-        typeof config.threshold === "number" ? config.threshold.toFixed(2) : "?";
-      return hasTemplate ? `vision ≥ ${threshold}` : "no template";
-    }
-    default:
-      return "";
-  }
-}
 
 export function FlowActionNode({ data, selected }: NodeProps<FlowCanvasNode>) {
   const presentation = ACTION_PRESENTATION[data.kind];

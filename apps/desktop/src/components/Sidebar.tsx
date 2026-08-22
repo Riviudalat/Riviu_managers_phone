@@ -1,5 +1,5 @@
 import type { PageId } from "../types";
-import { MENU_ICONS } from "./Icons";
+import { MENU_ICONS } from "./menuIcons";
 
 interface Props {
   page: PageId;

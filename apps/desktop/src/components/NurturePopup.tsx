@@ -23,7 +23,7 @@ import {
   isRateEnabled,
   type BudgetKey,
 } from "../nurtureBudget";
-import { targetsOf } from "./SelectionStrip";
+import { targetsOf } from "../selectionTargets";
 import { IconApi, IconClose, IconHeart } from "./Icons";
 import { LoadingState } from "./States";
 import type {

@@ -21,3 +21,6 @@ async-trait = "0.1"
 # For the per-gesture variation in `agent.rs`: contact time and micro-drift. Same
 # version core already pins, so no second copy is built.
 rand = "0.8"
+
+[lints]
+workspace = true

@@ -4,7 +4,7 @@ import type { DeviceInfo, FlowTargetSelection } from "../../types";
 
 type RunMode = FlowTargetSelection["mode"];
 
-export function targetSelection(
+function targetSelection(
   mode: RunMode,
   oneUdid: string,
   selectedUdids: string[],

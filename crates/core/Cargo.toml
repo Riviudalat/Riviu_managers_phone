@@ -34,3 +34,6 @@ riviu-script-engine = { workspace = true }
 # actually waiting. A feature on a crate already in the graph, so `Cargo.lock` is
 # untouched — verified with `cargo metadata --locked`.
 tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

@@ -2,7 +2,7 @@ import { useState } from "react";
 
 import { describeError } from "../../describeError";
 import type { FlowCoordinateFrame, VisionRegion } from "../../types";
-import { projectContainedImageClick } from "./FlowCoordinatePicker";
+import { projectContainedImageClick } from "./projectImageClick";
 
 /** Crop a sub-rectangle of a base64 JPEG frame into a base64 PNG (no data-URL prefix). */
 function cropToPngBase64(

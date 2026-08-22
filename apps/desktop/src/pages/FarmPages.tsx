@@ -26,7 +26,9 @@ import {
   saveSchedule,
   saveScript,
 } from "../api";
-import { SelectionStrip, flash, flashError, targetsOf } from "../components/SelectionStrip";
+import { SelectionStrip } from "../components/SelectionStrip";
+import { flash, flashError } from "../farmToast";
+import { targetsOf } from "../selectionTargets";
 import { EmptyState } from "../components/States";
 import {
   IconApp,

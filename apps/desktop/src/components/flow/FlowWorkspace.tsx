@@ -184,6 +184,9 @@ export function FlowWorkspace({
       flowId: state.document.id,
       documentEpoch: state.documentEpoch,
     };
+    // Deliberate: the dependency array below records why this effect is keyed on the
+    // epoch and not on the document. exhaustive-deps is switched off for this file in
+    // .oxlintrc.json -- oxlint 1.x does not honour an inline disable for this rule.
     const snapshot = structuredClone(state.document);
     dispatch({ type: "validationStarted", identity });
     const timer = window.setTimeout(() => {

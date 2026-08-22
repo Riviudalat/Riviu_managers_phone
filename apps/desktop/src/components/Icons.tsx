@@ -1,7 +1,6 @@
 /** Minimal inline SVG icons — no emoji. */
-import type { ReactElement } from "react";
 
-type IconProps = { size?: number; className?: string };
+export type IconProps = { size?: number; className?: string };
 
 export function IconPhone({ size = 18, className }: IconProps) {
   return (
@@ -367,14 +366,3 @@ export function IconChat({ size = 18, className }: IconProps) {
   );
 }
 
-export const MENU_ICONS: Record<string, (p: IconProps) => ReactElement> = {
-  control: IconGrid,
-  material: IconImage,
-  apps: IconApp,
-  scripts: IconScript,
-  jobs: IconClock,
-  publish: IconRocket,
-  data: IconChart,
-  api: IconApi,
-  settings: IconSettings,
-};

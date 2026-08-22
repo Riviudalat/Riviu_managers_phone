@@ -56,7 +56,7 @@ import {
   useRecordedSteps,
   useSavedMacros,
 } from "../macroStore";
-import { targetsOf } from "./SelectionStrip";
+import { targetsOf } from "../selectionTargets";
 import { pushToast, toastError } from "../toastStore";
 import { IconClose } from "./Icons";
 import { describeError } from "../describeError";

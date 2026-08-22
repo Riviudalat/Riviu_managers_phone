@@ -14,7 +14,7 @@ import type {
 } from "../../types";
 import { flowCoordinateFrame } from "../../api";
 import { acceptFiniteValueAsNumber } from "../../flow/validation";
-import { ACTION_PRESENTATION } from "./FlowActionNode";
+import { ACTION_PRESENTATION } from "./actionPresentation";
 import { FlowCoordinatePicker } from "./FlowCoordinatePicker";
 import { FlowVisionCapture } from "./FlowVisionCapture";
 import { describeError } from "../../describeError";
