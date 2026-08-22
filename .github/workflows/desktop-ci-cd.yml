@@ -146,6 +146,24 @@ jobs:
         working-directory: apps/desktop
         run: npm run test:e2e
 
+      # 567 crates in Cargo.lock and, until this step, nothing checking any of them. `npm audit`
+      # already covered the frontend and reports clean; the Rust half had no equivalent at all.
+      # Pinned by version so a new cargo-deny release cannot turn a green build red on its own.
+      - name: Install cargo-deny
+        shell: bash
+        run: cargo install cargo-deny --version 0.20.2 --locked
+
+      - name: Check Rust dependencies for advisories and licences
+        shell: bash
+        run: cargo deny check
+
+      - name: Check npm dependencies for advisories
+        working-directory: apps/desktop
+        shell: bash
+        # `--audit-level=high` rather than the default: a moderate advisory in a dev-only
+        # transitive dependency should be visible in the log, not a merge blocker.
+        run: npm audit --audit-level=high
+
       - name: Upload e2e failure artifacts
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

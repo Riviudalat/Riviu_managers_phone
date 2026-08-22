@@ -6,6 +6,10 @@ authors = ["Riviu"]
 edition = "2021"
 rust-version = "1.77.2"
 default-run = "riviu-managers-phone"
+# Never published: this is a private product, not a library. Marking it here also lets
+# `cargo deny` treat it as private, so the workspace's own path dependencies are not
+# reported as wildcard versions and the missing `license` field is not an error.
+publish = false
 
 [lib]
 name = "app_lib"

@@ -647,6 +647,35 @@ mod tests {
         found
     }
 
+    /// The pinned toolchain and the one CI installs must be the same version.
+    ///
+    /// `rust-toolchain.toml` exists so a developer's `cargo clippy` runs the lints CI runs. If
+    /// the two drift, it does the opposite of its job — it pins the machine to a version CI is
+    /// *not* using, and the lint difference it was added to remove comes back silently. That
+    /// difference is not hypothetical: clippy 1.97 flagged an `unnecessary_cast` at `fa8ecca`
+    /// that the release toolchain did not.
+    #[test]
+    fn the_pinned_toolchain_matches_the_one_ci_installs() {
+        let pinned = include_str!("../../../../rust-toolchain.toml");
+        let workflow = include_str!("../../../../.github/workflows/desktop-ci-cd.yml");
+
+        let channel = pinned
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("channel = "))
+            .map(|value| value.trim_matches('"'))
+            .expect("rust-toolchain.toml declares a channel");
+        let ci = workflow
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("RUST_TOOLCHAIN: "))
+            .map(|value| value.trim_matches('"'))
+            .expect("the workflow declares RUST_TOOLCHAIN");
+
+        assert_eq!(
+            channel, ci,
+            "rust-toolchain.toml pins {channel} but CI installs {ci}"
+        );
+    }
+
     /// Admission is required by **default**, and skipping it has to be written down.
     ///
     /// This replaces an allowlist of 84 command names that each had to hold
