@@ -1225,6 +1225,25 @@ pub async fn enable_wifi_adb(
         .map_err(|e| CommandError::operation(e.to_string()))
 }
 
+/// Put adbd back on USB, closing the `0.0.0.0:5555` port `enable_wifi_adb` opened (A4).
+///
+/// The counterpart that was missing: `wifi_adb_disconnect` only drops this host's client, so
+/// before this the only way to close the port was to reboot the phone.
+#[tauri::command]
+pub async fn disable_wifi_adb(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .disable_wifi_adb(&udid)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
 /// `adb connect host:port` — manual wireless connect (A4).
 #[tauri::command]
 pub async fn wifi_adb_connect(

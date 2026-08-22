@@ -263,6 +263,14 @@ export async function enableWifiAdb(udid: string) {
   return invoke<string>("enable_wifi_adb", { udid });
 }
 
+/// Put adbd back on USB, closing the `0.0.0.0:5555` port (A4).
+///
+/// Not the same as `wifiAdbDisconnect`, which only drops this host's client and leaves the
+/// phone listening to the whole LAN.
+export async function disableWifiAdb(udid: string) {
+  return invoke<void>("disable_wifi_adb", { udid });
+}
+
 /// Manually `adb connect host:port` (A4).
 export async function wifiAdbConnect(host: string) {
   return invoke<void>("wifi_adb_connect", { host });

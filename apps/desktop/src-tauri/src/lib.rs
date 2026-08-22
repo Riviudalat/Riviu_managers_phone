@@ -234,6 +234,7 @@ pub fn run() {
             commands::distribute_text,
             commands::distribute_files,
             commands::enable_wifi_adb,
+            commands::disable_wifi_adb,
             commands::wifi_adb_connect,
             commands::wifi_adb_disconnect,
             commands::arp_scan,

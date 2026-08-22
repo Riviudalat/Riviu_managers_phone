@@ -19,6 +19,7 @@ import {
   deviceSwipe,
   driverDegradedReason,
   getDeviceMeta,
+  disableWifiAdb,
   enableWifiAdb,
   exportMedia,
   importMedia,
@@ -972,16 +973,52 @@ function App() {
               id: "wifi-adb",
               label: "Chuyển sang WIFI (adb không dây)",
               androidOnly: true,
+              danger: true,
               keywords: "wifi mode adb khong day",
               run: () => {
-                void enableWifiAdb(device.udid)
-                  .then((host) => {
-                    pushToast("ok", "Đã bật adb không dây", host);
+                // Confirmed, and the confirm says what actually happens: `adb tcpip 5555`
+                // leaves adbd listening on 0.0.0.0, so the phone becomes drivable by anything
+                // on the LAN that gets a host key trusted — and on Android 9 that is the only
+                // gate there is. `factory_reset` has always been confirmed for a smaller blast
+                // radius than this; this row used to fire on a single click and toast success.
+                void requestConfirm({
+                  title: "Bật adb không dây cho máy này?",
+                  message:
+                    "Máy sẽ mở cổng 5555 cho CẢ MẠNG LAN, không riêng máy tính này. Ai trong " +
+                    "cùng mạng được máy chấp nhận khoá đều điều khiển được nó. Cổng vẫn mở cho " +
+                    "tới khi bấm “Quay lại USB” hoặc khởi động lại máy.",
+                  confirmLabel: "Bật",
+                  danger: true,
+                }).then((ok) => {
+                  if (!ok) return;
+                  void enableWifiAdb(device.udid)
+                    .then((host) => {
+                      pushToast("ok", "Đã bật adb không dây", host);
+                      void refreshDevices()
+                        .then(reload)
+                        .catch(() => {});
+                    })
+                    .catch((error) => toastError("Bật WIFI adb thất bại", error));
+                });
+              },
+            },
+            {
+              id: "wifi-adb-off",
+              label: "Quay lại USB (đóng cổng adb không dây)",
+              androidOnly: true,
+              keywords: "usb tat wifi adb dong cong",
+              run: () => {
+                // The way back. `wifiAdbDisconnect` only drops this host's client; the phone
+                // keeps listening. This is the only thing that closes the port short of a
+                // reboot, which is why it sits next to the row that opens it.
+                void disableWifiAdb(device.udid)
+                  .then(() => {
+                    pushToast("ok", "Đã đóng cổng adb không dây", "Máy quay lại chỉ nhận USB");
                     void refreshDevices()
                       .then(reload)
                       .catch(() => {});
                   })
-                  .catch((error) => toastError("Bật WIFI adb thất bại", error));
+                  .catch((error) => toastError("Quay lại USB thất bại", error));
               },
             },
           ],

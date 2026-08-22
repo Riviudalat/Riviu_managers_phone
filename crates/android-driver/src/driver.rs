@@ -931,11 +931,41 @@ impl AndroidDriver {
 
     /// `adb disconnect <host:port>`, dropping a wireless endpoint (the USB side, if any, is
     /// unaffected).
+    ///
+    /// Note what this does **not** do: adbd on the phone keeps listening on `0.0.0.0:5555`.
+    /// This only drops *this host's* client connection. To close the port, see
+    /// [`Self::disable_wifi_adb`].
     pub async fn wifi_disconnect(&self, host: &str) -> anyhow::Result<()> {
         self.adb
             .run(&["disconnect", host], std::time::Duration::from_secs(10))
             .await
             .map_err(|e| anyhow::anyhow!("adb disconnect failed: {e}"))?;
+        Ok(())
+    }
+
+    /// Put adbd back on USB, closing the TCP/IP port it was listening on.
+    ///
+    /// The way back that did not exist. `enable_wifi_adb` restarts adbd on `0.0.0.0:5555`, and
+    /// on Android 9 that port is gated only by the RSA host-key prompt — on farm phones where
+    /// "always allow" was tapped once (which is the point of a farm), anyone on the LAN who
+    /// gets a key trusted has full `adb shell`, which on the rooted subset is root. Until now
+    /// nothing in this codebase ran `adb usb`, so the only way to close the port again was to
+    /// reboot the phone, and nothing in the UI said so.
+    ///
+    /// Takes the **USB** serial deliberately: `adb usb` has to be addressed to the device, and
+    /// asking over the wireless transport would be sawing off the branch — the command that
+    /// closes the port would travel through the port it closes.
+    pub async fn disable_wifi_adb(&self, serial: &str) -> anyhow::Result<()> {
+        let out = self
+            .adb
+            .run(&["-s", serial, "usb"], std::time::Duration::from_secs(10))
+            .await
+            .map_err(|e| anyhow::anyhow!("adb usb failed: {e}"))?;
+        // adb prints "restarting in USB mode" on success. Some builds print nothing at all and
+        // still switch, so an empty answer is accepted; only an explicit error is refused.
+        if out.to_lowercase().contains("error") {
+            anyhow::bail!("adb usb {serial}: {}", out.trim());
+        }
         Ok(())
     }
 
