@@ -18,11 +18,9 @@ const MENU: { id: PageId; label: string }[] = [
   { id: "material", label: "Kho nội dung" },
   { id: "apps", label: "Trung tâm ứng dụng" },
   { id: "scripts", label: "Flow" },
-  { id: "sync", label: "Đồng bộ cửa sổ" },
   { id: "jobs", label: "Tác vụ" },
   { id: "publish", label: "Đăng bài" },
   { id: "data", label: "Dữ liệu" },
-  { id: "account", label: "Tài khoản" },
   { id: "api", label: "API" },
   { id: "settings", label: "Cài đặt" },
 ];
@@ -52,6 +50,7 @@ export function Sidebar({
               key={item.id}
               type="button"
               className={`menu-item ${page === item.id ? "active" : ""}`}
+              data-testid="nav-item"
               title={item.label}
               onClick={() => onPage(item.id)}
             >

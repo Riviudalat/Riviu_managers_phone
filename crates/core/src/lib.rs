@@ -10,6 +10,7 @@ pub mod events;
 pub mod flow;
 pub mod frame_source;
 pub mod frame_text;
+pub mod group_sync;
 pub mod human_behavior;
 pub mod interaction;
 pub mod interaction_hierarchy;
@@ -32,8 +33,8 @@ pub mod types;
 pub use device_capabilities::*;
 pub use device_control::{
     ContextReleaseProof, DeviceControlError, DeviceControlPlane, DeviceExclusiveContext,
-    DeviceReleaseProof, ForegroundAppProof, InteractionAcquireResult, UiCapacityReservation,
-    UiSessionContext, UiWithStreamContext,
+    DeviceLeaseRef, DeviceReleaseProof, ForegroundAppProof, InteractionAcquireResult,
+    UiCapacityReservation, UiSessionContext, UiWithStreamContext,
 };
 pub use device_work::{
     DeviceBusy, DeviceWorkAcquireError, DeviceWorkCoordinator, DeviceWorkLease, DeviceWorkOwner,
@@ -42,8 +43,8 @@ pub use device_work::{
 pub use driver::{
     ui_error_kind, AppProcessState, DeviceDriver, ElementBox, ElementQuery,
     GuardedClipboardOperation, GuardedClipboardOutput, GuardedClipboardProgress,
-    GuardedClipboardTransition, ProcessAbsenceProof, UiError, UiErrorKind, UiSession,
-    UnsupportedCapability,
+    GuardedClipboardTransition, MediaPullReport, ProcessAbsenceProof, UiError, UiErrorKind,
+    UiSession, UnsupportedCapability,
 };
 pub use events::{AppEvent, EventBus};
 pub use flow::*;
@@ -52,6 +53,7 @@ pub use frame_source::{
     GenerationFrameEvent, GenerationFrameSource, GenerationFrameStream, NullFrameSource,
 };
 pub use frame_text::{FrameTextSource, NullFrameTextSource};
+pub use group_sync::{apply_offset, DelayPolicy, DevicePlan, GroupSyncPolicy, OffsetPolicy};
 pub use interaction::*;
 pub use interaction_hierarchy::{
     discover_identity_in_elements, locate_parent_in_elements, ElementReplyTarget,

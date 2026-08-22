@@ -10,8 +10,11 @@ android {
         applicationId "com.riviu.agent"
         minSdk 26
         targetSdk 34
-        versionCode 1
-        versionName "0.1.0"
+        // Kept in step with `Protocol.AGENT_VERSION`, which is what `/status` advertises and
+        // what the desktop compares against. Two version strings that disagree is how a
+        // stale helper looks fresh.
+        versionCode 4
+        versionName "0.4.0"
     }
 
     buildTypes {

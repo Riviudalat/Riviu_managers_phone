@@ -66,6 +66,28 @@ impl CredentialStore {
         Ok(Self::new(Arc::new(SystemCredentialBackend)))
     }
 
+    /// Read one application secret by name.
+    ///
+    /// Namespaced under `app-secret:` so a caller cannot reach — or collide with — the four
+    /// purpose-built accounts above (the agent tokens and the Apple ID pair), each of which has
+    /// its own reasoning and its own test.
+    pub fn app_secret(&self, name: &str) -> anyhow::Result<Option<String>> {
+        self.backend.get(&Self::app_secret_account(name))
+    }
+
+    /// Write one application secret by name. An empty value clears it.
+    pub fn set_app_secret(&self, name: &str, value: &str) -> anyhow::Result<()> {
+        let account = Self::app_secret_account(name);
+        if value.is_empty() {
+            return self.backend.delete(&account);
+        }
+        self.backend.set(&account, value)
+    }
+
+    fn app_secret_account(name: &str) -> String {
+        format!("app-secret:{name}")
+    }
+
     pub fn agent_token_or_create(&self, legacy_env: Option<&str>) -> anyhow::Result<String> {
         let explicit = legacy_env.map(str::trim).filter(|value| !value.is_empty());
         if let Some(token) = explicit {
@@ -288,6 +310,30 @@ mod tests {
 
         assert_eq!(token.len(), 64);
         assert_eq!(backend.get(CANDIDATE_AGENT_TOKEN_ACCOUNT).unwrap(), None);
+    }
+
+    #[test]
+    fn app_secrets_cannot_collide_with_the_purpose_built_accounts() {
+        let (backend, store) = fixture();
+        store
+            .set_app_secret("nurture-ai-api-key", "sk-x")
+            .expect("set");
+        assert_eq!(
+            store.app_secret("nurture-ai-api-key").unwrap().as_deref(),
+            Some("sk-x")
+        );
+        // Not stored under a bare name, so nothing can reach the agent/Apple accounts by
+        // choosing a clever `name`.
+        assert!(backend.get("nurture-ai-api-key").unwrap().is_none());
+        assert!(backend
+            .get("app-secret:nurture-ai-api-key")
+            .unwrap()
+            .is_some());
+        // Empty clears rather than storing an empty string.
+        store
+            .set_app_secret("nurture-ai-api-key", "")
+            .expect("clear");
+        assert!(store.app_secret("nurture-ai-api-key").unwrap().is_none());
     }
 
     #[test]

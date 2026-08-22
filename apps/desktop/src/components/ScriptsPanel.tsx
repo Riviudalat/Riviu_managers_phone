@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { exampleScript, listScripts, saveScript } from "../api";
+import { describeError } from "../toastStore";
 
 interface Props {
   onUseInJobs: (json: string) => void;
@@ -44,9 +45,17 @@ export function ScriptsPanel({ onUseInJobs }: Props) {
             <button
               type="button"
               onClick={async () => {
-                await saveScript(name, body);
-                setMessage("Saved");
-                await reload();
+                // The backend parses the script before storing it, so this rejects on
+                // exactly the input an operator most needs told about -- a script with a
+                // syntax error. It used to reject into nothing: no "Saved", no reason, and
+                // the panel still showing the text that was never stored.
+                try {
+                  await saveScript(name, body);
+                  setMessage("Đã lưu");
+                  await reload();
+                } catch (error) {
+                  setMessage(`Không lưu được: ${describeError(error)}`);
+                }
               }}
             >
               Save

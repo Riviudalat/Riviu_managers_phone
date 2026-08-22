@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
 use riviu_core::{
-    AnalyticsSummary, AppLibraryItem, AuthSession, DeviceGroup, DeviceMeta, DeviceWorkOwner,
-    LocalUser, MaterialItem, OpLog, ProxyConfig, PublishTask, ScheduleItem,
+    AnalyticsSummary, AppLibraryItem, DeviceGroup, DeviceMeta, DeviceWorkOwner, MaterialItem,
+    OpLog, ProxyConfig, PublishTask, ScheduleItem,
 };
 use riviu_script_engine::parse_script;
 use tauri::State;
@@ -20,53 +20,18 @@ fn log(state: &AppState, action: &str, detail: &str) {
 }
 
 #[tauri::command]
-pub fn auth_session(state: State<'_, AppState>) -> Result<AuthSession, String> {
-    let _admission = state.ensure_accepting_work()?;
-    let show = std::env::var("RIVIU_SHOW_AUTH")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let user = state.db.guest_user().map_err(err)?;
-    Ok(AuthSession {
-        show_auth_ui: show,
-        bypassed: !show,
-        user: Some(user),
-    })
-}
-
-#[tauri::command]
-pub fn auth_login(
-    state: State<'_, AppState>,
-    email: String,
-    password: String,
-) -> Result<LocalUser, String> {
-    let _admission = state.ensure_accepting_work()?;
-    let user = state
-        .db
-        .login_user(&email, &password)
-        .map_err(err)?
-        .ok_or_else(|| "Sai email hoặc mật khẩu".to_string())?;
-    log(&state, "auth.login", &email);
-    Ok(user)
-}
-
-#[tauri::command]
-pub fn auth_register(
-    state: State<'_, AppState>,
-    email: String,
-    password: String,
-) -> Result<LocalUser, String> {
-    let _admission = state.ensure_accepting_work()?;
-    let user = state
-        .db
-        .register_user(&email, &password, "operator")
-        .map_err(err)?;
-    log(&state, "auth.register", &email);
-    Ok(user)
-}
-
-#[tauri::command]
 pub fn get_device_meta(state: State<'_, AppState>, udid: String) -> Result<DeviceMeta, String> {
     state.db.get_device_meta(&udid).map_err(err)
+}
+
+/// Every phone this app has a record for, in one call.
+///
+/// The grid reads it per refresh to label and order twenty tiles (alias, number). Per-device
+/// reads would be twenty IPC round trips to draw one frame, and `get_device_meta` stays for
+/// the one-phone editors that already use it.
+#[tauri::command]
+pub fn list_device_metas(state: State<'_, AppState>) -> Result<Vec<DeviceMeta>, String> {
+    state.db.list_device_metas().map_err(err)
 }
 
 #[tauri::command]
@@ -433,11 +398,6 @@ pub fn list_op_logs(
 }
 
 #[tauri::command]
-pub fn list_users(state: State<'_, AppState>) -> Result<Vec<LocalUser>, String> {
-    state.db.list_users().map_err(err)
-}
-
-#[tauri::command]
 pub fn analytics_summary(state: State<'_, AppState>) -> Result<AnalyticsSummary, String> {
     let devices = state.registry.list();
     let ready = devices
@@ -468,11 +428,9 @@ pub fn api_docs() -> String {
 - publish_scan_folder / publish_create_campaign / publish_list / publish_get
 - publish_prepare / publish_transfer / publish_post / publish_cancel
 - list_publish_tasks / create_publish_task (legacy script compatibility)
-- list_op_logs / analytics_summary / list_users
+- list_op_logs / analytics_summary
 
 ## Auth (hidden by default)
-- auth_session / auth_login / auth_register
-- Set RIVIU_SHOW_AUTH=1 to show login UI
 
 ## Sidecar
 - python riviu_pmd.py list|install|uninstall|media-stage|stream|start-wda|...

@@ -1,6 +1,7 @@
 import { Upload, X } from "lucide-react";
 import { useState } from "react";
 import { flowImportLegacy } from "../../api";
+import { describeError } from "../../describeError";
 import type { FlowDocumentV2, LegacyImportResult } from "../../types";
 
 export interface FlowImportDialogProps {
@@ -30,7 +31,9 @@ export function FlowImportDialog({
         onImport(imported.document);
       }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      // `flow_import_legacy` rejects with a `CommandError` object (`flow_commands.rs:111`), so
+      // `String(reason)` printed `[object Object]` over the reason the JSON was refused.
+      setError(describeError(reason));
     } finally {
       setBusy(false);
     }

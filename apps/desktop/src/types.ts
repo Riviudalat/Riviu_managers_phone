@@ -76,6 +76,55 @@ export function deviceModelOsLabel(
   return os ? `${device.model} · ${os}` : device.model;
 }
 
+/**
+ * The line under a tile's bold name. When a phone reports no friendly name its `name` is
+ * its model — an Android serial like "23021RAAEG" — so the full "model · OS" caption would
+ * print that serial a *second* time right beneath the name and the tile reads as a cluttered
+ * duplicate. In that case show only the OS ("Android 15"); otherwise the model still adds
+ * information (an iPhone named "iPhone 8 (Global)" over model "iPhone10,1"), so keep it.
+ */
+export function deviceTileSubtitle(
+  device: Pick<DeviceInfo, "name" | "model" | "platform" | "osVersion">,
+): string {
+  return device.name === device.model
+    ? deviceOsLabel(device)
+    : deviceModelOsLabel(device);
+}
+
+/// One phone a group action did not reach, and why.
+export interface GroupInputSkip {
+  udid: string;
+  /// `DeviceBusy` when something else holds the phone, `ActionFailed` when the action itself
+  /// did not work.
+  code: string;
+  /// Set for `DeviceBusy`: who is holding it. This is the field the operator can act on.
+  currentOwner?: string | null;
+  /// Set for `ActionFailed`.
+  message?: string | null;
+}
+
+export interface GroupInputReport {
+  completedUdids: string[];
+  skipped: GroupInputSkip[];
+}
+
+/// Group-sync timing/offset policy (A1). Mirrors `riviu_core::group_sync`. All fields
+/// optional — an absent policy (or `{}`) is the old lockstep behaviour.
+export type DelayPolicy =
+  | { mode: "none" }
+  | { mode: "random"; minMs: number; maxMs: number }
+  | { mode: "staggered"; stepMs: number };
+
+export interface OffsetPolicy {
+  /// Max absolute pixel jitter applied independently to x and y. 0 disables offset.
+  maxPx: number;
+}
+
+export interface GroupSyncPolicy {
+  delay?: DelayPolicy;
+  offset?: OffsetPolicy;
+}
+
 export interface DeviceInfo {
   udid: string;
   name: string;
@@ -92,12 +141,10 @@ export interface DeviceInfo {
   lastError?: string | null;
 }
 
-export type TileSize = "thumbnail" | "medium" | "large" | "extraLarge";
 export type StreamQuality = "low" | "medium" | "high" | "extra";
 
 export interface StreamSettings {
   fps: number;
-  tileSize: TileSize;
   gridQuality: StreamQuality;
   focusQuality: StreamQuality;
 }
@@ -166,23 +213,14 @@ export interface AgentRuntimeView {
 
 export type PageId =
   | "control"
-  | "groups"
-  | "proxy"
   | "material"
   | "apps"
   | "scripts"
   | "jobs"
-  | "sync"
   | "publish"
   | "data"
-  | "team"
-  | "logs"
-  | "account"
   | "api"
-  | "settings"
-  | "nurture"
-  | "login"
-  | "register";
+  | "settings";
 
 /** @deprecated use PageId */
 export type TabId = PageId;
@@ -193,6 +231,19 @@ export interface DeviceMeta {
   tags: string[];
   groupId?: string | null;
   proxyId?: string | null;
+  /** TikTok @handle this phone is logged into, without the leading `@`. Empty if unknown. */
+  handle?: string;
+  /**
+   * What the operator calls this phone (xiaowei "Change Name"). Empty means "use the name
+   * the phone reports" — this is a label in this app's records, never written to the device.
+   */
+  alias?: string;
+  /**
+   * The number written on the phone and on the shelf (xiaowei "Change Number"). `null` means
+   * unnumbered, and the tile then shows its position in the grid instead — which is the very
+   * thing a number replaces, since a position moves when the fleet list changes.
+   */
+  number?: number | null;
 }
 
 export interface DeviceGroup {
@@ -247,6 +298,8 @@ export interface ScheduleItem {
   enabled: boolean;
   lastRunAt?: string | null;
   nextRunAt?: string | null;
+  /// Why the last due tick enqueued nothing, or absent if it enqueued something.
+  lastError?: string | null;
 }
 
 export interface PublishTask {
@@ -364,19 +417,6 @@ export interface OpLog {
   createdAt: string;
 }
 
-export interface LocalUser {
-  id: string;
-  email: string;
-  role: string;
-  createdAt: string;
-}
-
-export interface AuthSession {
-  showAuthUi: boolean;
-  bypassed: boolean;
-  user?: LocalUser | null;
-}
-
 export interface AnalyticsSummary {
   deviceTotal: number;
   deviceReady: number;
@@ -394,7 +434,17 @@ export interface AnalyticsSummary {
 export interface NurtureSettings {
   baseUrl: string;
   model: string;
+  /**
+   * Never the real key on the way *out* of the backend.
+   *
+   * The key lives in the OS credential store, not in the settings row, and it is not handed to
+   * this page: a load returns the sentinel `__riviu_keep_stored_key__` when one is configured,
+   * and sending that same value back means "leave it alone". Anything else — including an
+   * empty string — is taken literally, so the key can still be replaced or cleared.
+   */
   apiKey: string;
+  /** Whether a key is stored. The only thing the form can honestly show about it. */
+  hasApiKey?: boolean;
   inputPricePer1m: number;
   outputPricePer1m: number;
   bundleId: string;
@@ -602,6 +652,9 @@ export interface TikTokLinkLine {
 /** Reply chain, or independent top-level comments from each account. */
 export type ThreadMode = "threaded" | "standalone";
 
+/** Chain: message N answers N-1. Star: every message answers message 0. */
+export type ThreadShape = "chain" | "star";
+
 export interface ThreadCampaignRequest {
   requestId: string;
   targets: ResolvedTikTokTarget[];
@@ -611,6 +664,22 @@ export interface ThreadCampaignRequest {
   maxWords: number;
   mode: ThreadMode;
   /**
+   * Chain or star, and only read in `threaded` mode.
+   *
+   * Optional so a caller that never sets it keeps the chain, matching the Rust
+   * `#[serde(default)]`. Star is the shape that lets a run go parallel: every reply
+   * answers message 0, so they no longer have to wait for each other.
+   */
+  shape?: ThreadShape;
+  /**
+   * Split the actors into teams of this size, each team taking its own links.
+   *
+   * Absent means one team holding every actor — the whole selection working the same
+   * link, one phone at a time. The remainder is spread rather than left idle, so twenty
+   * phones at three become 4,4,3,3,3,3.
+   */
+  cohortSize?: number;
+  /**
    * Comments written by the operator, used instead of the AI when non-empty.
    *
    * Optional so a caller that never sets it keeps the AI behaviour, matching the Rust
@@ -619,6 +688,13 @@ export interface ThreadCampaignRequest {
   manualComments?: string[];
   /** Also like each target, once per actor that comments on it. */
   likeTarget?: boolean;
+  /**
+   * @-handles (without the leading `@`) tagged at the front of each thread's opening
+   * comment, as plain text. A handle that belongs to a fleet phone is also added to
+   * `actorUdids` by the caller so that phone joins the post and replies; a handle matching
+   * no phone is tagged in text only. Optional/empty prepends nothing (Rust `#[serde(default)]`).
+   */
+  mentions?: string[];
 }
 
 export type ThreadMessageState =
@@ -660,6 +736,14 @@ export interface InteractionAssignmentRecord {
   state: ThreadMessageState;
   preparedText: string | null;
   errorCode: string | null;
+  /**
+   * What happened to the like on this message, when the campaign asked for one.
+   *
+   * Separate from `errorCode` on purpose: a like that fails must not cost the comment, so
+   * a message that posted is `succeeded` and this is a note beside it — not a failure. It
+   * used to go only to the log, which meant a refused like was invisible.
+   */
+  like?: string | null;
 }
 
 export interface InteractionCampaignDetail {
@@ -1187,6 +1271,15 @@ export interface InstalledApp {
   bundleId: string;
   kind: InstalledAppKind;
   label: string | null;
+  /**
+   * The app's icon as a base64 PNG (48 px edge), from the on-device helper.
+   *
+   * Absent for a phone with no helper, for the system partition (which the driver does not
+   * pay to describe — see `name_apps_with_helper`), and for the handful of packages that
+   * genuinely have no icon. Never a placeholder: the UI draws its own neutral square, so
+   * "no icon" cannot be mistaken for "this is what the app looks like".
+   */
+  iconPngBase64?: string | null;
 }
 
 /**
@@ -1200,4 +1293,41 @@ export interface ShellOutcome {
   exitCode: number;
   stdout: string;
   stderr: string;
+}
+
+/**
+ * What one row of a phone's directory listing is.
+ *
+ * `other` is a real answer — a socket, a fifo, a block device — and not a parse failure.
+ * A browser that dropped rows it did not recognise would show a folder as emptier than it
+ * is, which is the worst kind of wrong for a file manager.
+ */
+export type DeviceFileKind = "file" | "directory" | "symlink" | "other";
+
+/**
+ * One entry in a phone's own directory listing (xiaowei "Preview Mobile Files").
+ *
+ * `modified` is the phone's own `YYYY-MM-DD HH:MM` text, not a parsed date: `ls` prints in
+ * the *device's* timezone with no offset, so turning it into a Date here would invent a
+ * precision the source does not have. `null` means the phone printed `?` — it could not
+ * stat the row, which happens on dangling symlinks.
+ *
+ * `size` is meaningful for files. For a directory it is the inode size (3452 on this
+ * fleet's sdcard), which says nothing about what is inside, so the UI does not show it.
+ */
+export interface DeviceFileEntry {
+  name: string;
+  kind: DeviceFileKind;
+  size: number;
+  modified: string | null;
+  linkTarget: string | null;
+}
+
+/** What the phone had on its clipboard (xiaowei "Export Clipboard"). */
+export interface ClipboardRead {
+  /** The phone's own MIME description, e.g. `text/plain`. */
+  contentType: string;
+  /** Decoded as text. Empty for non-text content, where `bytes` still says how much. */
+  text: string;
+  bytes: number;
 }

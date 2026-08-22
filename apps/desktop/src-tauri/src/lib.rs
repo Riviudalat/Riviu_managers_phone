@@ -10,23 +10,107 @@ mod flow_commands;
 mod interaction_commands;
 pub mod interaction_ocr;
 mod interaction_target;
+mod local_api;
 mod nurture_commands;
+mod peripherals;
 mod publish_commands;
 mod publish_driver;
 mod state;
 mod view_hub;
+mod view_watchdog;
 
 use state::AppState;
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 
-#[derive(Clone, Default)]
+/// How much log one file holds before it is rotated, and how many are kept.
+///
+/// Named constants rather than literals at the call site so the test below can assert the
+/// property that matters — that neither of them is the plugin's default — instead of
+/// re-stating the numbers.
+const LOG_FILE_BYTES: u128 = 8 * 1024 * 1024;
+const LOG_FILES_KEPT: usize = 5;
+
+/// The plugin's own defaults, restated so a change to them is visible from here.
+///
+/// From `tauri-plugin-log` 2.9: `DEFAULT_MAX_FILE_SIZE = 40_000` with
+/// `DEFAULT_ROTATION_STRATEGY = KeepOne`.
+const PLUGIN_DEFAULT_MAX_FILE_SIZE: u128 = 40_000;
+
+/// The rules the two constants above have to satisfy, checked at compile time.
+///
+/// A `#[test]` was the first shape of this and clippy was right to refuse it: these are
+/// constants, so the question is answerable while the crate is being built, and a compile
+/// error is a stronger guarantee than a test somebody has to run. Anyone who drops the size
+/// back toward the plugin's 40 KB — the value that made the log useless — will not get a
+/// binary out of it.
+const _: () = {
+    assert!(
+        LOG_FILE_BYTES > PLUGIN_DEFAULT_MAX_FILE_SIZE,
+        "40 KB of Warn output is minutes on a twenty-device farm; that default is the bug"
+    );
+    // A working day of Warn output with room for a burst...
+    assert!(LOG_FILE_BYTES >= 4 * 1024 * 1024);
+    // ...and a worst case that is still trivial on a machine driving twenty phones.
+    assert!(LOG_FILE_BYTES * LOG_FILES_KEPT as u128 <= 64 * 1024 * 1024);
+    // More than one file: the rotation has to leave something behind, which is the half
+    // `KeepOne` got wrong -- it deletes rather than archives.
+    assert!(LOG_FILES_KEPT > 1);
+};
+
+/// Why the app could not start, if it could not — and the lock that lets it try again.
+///
+/// The message used to be a plain `Option<String>` fixed at setup, which is what made the
+/// startup screen's only button useless: it called `window.location.reload()`, the WebView
+/// came back, asked `startup_error` again and was handed the same stored sentence.
+/// `AppState::bootstrap` had run once and would never run again, so the operator could fix
+/// whatever was wrong — plug in adb, start the sidecar — and had no way to tell the app.
+/// The only real remedy was quitting and reopening.
+#[derive(Default)]
 struct StartupState {
-    error: Option<String>,
+    error: parking_lot::Mutex<Option<String>>,
+    /// Serialises retries, so two impatient clicks cannot bootstrap twice.
+    attempt: tokio::sync::Mutex<()>,
 }
 
 #[tauri::command]
 fn startup_error(state: tauri::State<'_, StartupState>) -> Option<String> {
-    state.error.clone()
+    state.error.lock().clone()
+}
+
+/// Try the bootstrap again, and answer with whatever is wrong *now*.
+///
+/// `None` means the app is up: either this attempt succeeded, or another one already did.
+/// A second success is impossible rather than merely unlikely — `Manager::manage` refuses a
+/// type that is already managed, and a bootstrap that ran twice would leave two of every
+/// background task running against one database.
+#[tauri::command]
+async fn retry_startup(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, StartupState>,
+) -> Result<Option<String>, String> {
+    let _attempt = state.attempt.lock().await;
+    if app.try_state::<AppState>().is_some() {
+        *state.error.lock() = None;
+        return Ok(None);
+    }
+    let resource_dir = app.path().resource_dir().ok();
+    match AppState::bootstrap(resource_dir).await {
+        Ok(fresh) => {
+            fresh.spawn_background_tasks(app.clone());
+            if !app.manage(fresh) {
+                // Lost a race this lock exists to prevent. Whoever won is the live state.
+                log::warn!("a concurrent startup retry had already installed the app state");
+            }
+            *state.error.lock() = None;
+            Ok(None)
+        }
+        Err(error) => {
+            let message = format!("{error:#}");
+            log::error!("desktop startup retry is still blocked: {message}");
+            *state.error.lock() = Some(message.clone());
+            Ok(Some(message))
+        }
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -53,13 +137,35 @@ pub fn run() {
             };
             window.show()?;
             window.set_focus()?;
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
+            // Registered in release too, at Warn. It used to be debug-only, which meant
+            // an operator hitting a driver failure had no record of it anywhere -- and
+            // the driver's warnings are exactly the ones worth keeping: a scrcpy server
+            // that ignored SIGTERM, a reclaimed leaked forward, a producer restart.
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(if cfg!(debug_assertions) {
+                        log::LevelFilter::Info
+                    } else {
+                        log::LevelFilter::Warn
+                    })
+                    // **The defaults threw the log away, which is worse than not writing
+                    // one.** `tauri-plugin-log` ships `max_file_size = 40_000` bytes with
+                    // `RotationStrategy::KeepOne`, and `KeepOne` *deletes* the file when it
+                    // rotates rather than archiving it. Forty kilobytes is a few hundred
+                    // lines; on a twenty-device farm that is minutes. Opening the log after
+                    // an incident showed the seconds *after* the incident and nothing else,
+                    // and the whole reason release logging was turned on was to have a
+                    // record of driver failures — a scrcpy server that ignored SIGTERM, a
+                    // reclaimed leaked forward, a producer restart.
+                    //
+                    // Five files of 8 MB is 40 MB at worst on a machine that runs a device
+                    // farm, and it covers a full working day of Warn-level output with room
+                    // for a burst. `KeepSome` archives with a date in the name, so the file
+                    // an operator is asked for still exists an hour later.
+                    .max_file_size(LOG_FILE_BYTES)
+                    .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(LOG_FILES_KEPT))
+                    .build(),
+            )?;
 
             let handle = app.handle().clone();
             let resource_dir = app.path().resource_dir().ok();
@@ -74,7 +180,8 @@ pub fn run() {
                         let message = format!("{error:#}");
                         log::error!("desktop startup is blocked: {message}");
                         StartupState {
-                            error: Some(message),
+                            error: parking_lot::Mutex::new(Some(message)),
+                            ..Default::default()
                         }
                     }
                 };
@@ -85,6 +192,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             startup_error,
+            retry_startup,
             agent_commands::agent_get_settings,
             agent_commands::agent_save_settings,
             agent_commands::agent_list_statuses,
@@ -100,6 +208,8 @@ pub fn run() {
             commands::uninstall_app,
             commands::list_installed_apps,
             commands::device_shell,
+            commands::import_media,
+            commands::export_media,
             commands::set_screen_rotation,
             commands::screenshot,
             commands::syslog,
@@ -108,17 +218,57 @@ pub fn run() {
             commands::restore_device,
             commands::device_tap,
             commands::device_swipe,
+            commands::device_swipe_path,
             commands::device_type_text,
             commands::device_home,
             commands::device_key,
+            commands::set_screen_locked,
+            local_api::local_api_get_config,
+            local_api::local_api_set_config,
+            peripherals::list_serial_ports,
+            peripherals::relay_set_channel,
+            peripherals::relay_pulse_channel,
             commands::device_control_begin,
             commands::device_control_end,
             commands::group_input,
+            commands::distribute_text,
+            commands::distribute_files,
+            commands::enable_wifi_adb,
+            commands::disable_wifi_adb,
+            commands::wifi_adb_connect,
+            commands::wifi_adb_disconnect,
+            commands::arp_scan,
+            commands::set_wallpaper,
+            commands::set_wallpaper_bytes,
+            commands::set_mock_location,
+            commands::stop_mock_location,
+            commands::is_rooted,
+            commands::set_device_identity,
+            commands::factory_reset,
+            commands::root_shell,
+            // The per-phone function menu (xiaowei 功能), one command per row.
+            commands::device_list_dir,
+            commands::device_pull_path,
+            commands::device_push_file,
+            commands::device_delete_path,
+            commands::set_wifi_radio,
+            commands::reset_display_metrics,
+            commands::power_off_device,
+            commands::open_system_settings,
+            commands::wake_screen,
+            commands::screenshot_to_device,
+            commands::set_input_method,
+            commands::launch_device_app,
+            commands::device_get_clipboard,
+            commands::device_set_clipboard,
             commands::get_stream_settings,
             commands::set_stream_settings,
             commands::latest_frame,
             commands::view_endpoint,
+            commands::view_report_paint,
             commands::view_ensure,
+            commands::view_request_keyframe,
+            commands::view_inject_touch,
             commands::view_set_preset,
             commands::save_view_snapshot,
             commands::list_jobs,
@@ -137,10 +287,8 @@ pub fn run() {
             commands::android_unavailable_reason,
             commands::update_check,
             commands::update_install,
-            farm_commands::auth_session,
-            farm_commands::auth_login,
-            farm_commands::auth_register,
             farm_commands::get_device_meta,
+            farm_commands::list_device_metas,
             farm_commands::save_device_meta,
             farm_commands::list_groups,
             farm_commands::save_group,
@@ -163,7 +311,6 @@ pub fn run() {
             farm_commands::list_publish_tasks,
             farm_commands::create_publish_task,
             farm_commands::list_op_logs,
-            farm_commands::list_users,
             farm_commands::analytics_summary,
             farm_commands::api_docs,
             flow_commands::flow_action_catalog,
@@ -278,130 +425,367 @@ pub(crate) fn graceful_shutdown(handle: &tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    fn command_body<'a>(source: &'a str, name: &str) -> &'a str {
-        let sync = format!("pub fn {name}");
-        let asynchronous = format!("pub async fn {name}");
-        let start = source
-            .find(&asynchronous)
-            .or_else(|| source.find(&sync))
-            .unwrap_or_else(|| panic!("missing mutating command {name}"));
-        let tail = &source[start..];
-        let end = tail.find("\n#[tauri::command]").unwrap_or(tail.len());
-        &tail[..end]
+    /// Every `#[tauri::command]` in a file, as (name, body).
+    fn commands_in(source: &str) -> Vec<(&str, &str)> {
+        source
+            .split("#[tauri::command]")
+            .skip(1)
+            .filter_map(|chunk| {
+                let signature = chunk.find("fn ")? + 3;
+                let tail = &chunk[signature..];
+                let name = &tail[..tail.find(['(', '<'])?];
+                let end = chunk.find("\n#[").unwrap_or(chunk.len());
+                Some((name, &chunk[..end]))
+            })
+            .collect()
     }
 
+    /// The local login is gone, and this is what keeps it gone.
+    ///
+    /// It looks for the word rather than for the four removed handler names, because naming
+    /// them would only catch someone re-adding *those*. The old pair stored the password
+    /// verbatim in a column called `password_hash` and compared it as plaintext, and the next
+    /// attempt would not have to be called `auth_login` to repeat that.
+    ///
+    /// Two commands legitimately touch a password and are named here rather than skipped,
+    /// because each one is a decision someone made and can be re-read:
+    ///
+    /// - `set_apple_id` takes the Apple ID app-specific password needed to resign WDA. It
+    ///   hands it to the OS credential store, never to `state.db`, and `get_apple_id` reads
+    ///   back only `has_password` — asserted below.
+    /// - `export_proxy_config` prints a proxy password the operator typed in. A proxy
+    ///   password has to survive round-trip to be usable at all, so it cannot be hashed;
+    ///   it is stored readable in `proxies` by design, not by the oversight this test is
+    ///   about.
+    ///
+    /// A third entry appearing here means a new password surface arrived without that
+    /// decision being made. Before the removal this failed on `farm_commands.rs::auth_login`.
     #[test]
-    fn every_mutating_command_holds_application_admission() {
-        let inventories = [
+    fn no_command_stores_a_login_password() {
+        let surfaces = [
+            ("commands.rs", include_str!("commands.rs")),
+            ("farm_commands.rs", include_str!("farm_commands.rs")),
+            ("agent_commands.rs", include_str!("agent_commands.rs")),
+            ("flow_commands.rs", include_str!("flow_commands.rs")),
+            ("nurture_commands.rs", include_str!("nurture_commands.rs")),
+            ("publish_commands.rs", include_str!("publish_commands.rs")),
             (
-                include_str!("commands.rs"),
-                &[
-                    "refresh_devices",
-                    "prepare_device",
-                    "install_ipa",
-                    "install_ipa_to_group",
-                    "install_unsigned_ipa",
-                    "uninstall_app",
-                    "list_installed_apps",
-                    "device_shell",
-                    "set_screen_rotation",
-                    "screenshot",
-                    "syslog",
-                    "reboot_device",
-                    "backup_device",
-                    "restore_device",
-                    "device_tap",
-                    "device_swipe",
-                    "device_type_text",
-                    "device_home",
-                    "device_key",
-                    "device_control_begin",
-                    "device_control_end",
-                    "group_input",
-                    "set_stream_settings",
-                    "view_ensure",
-                    "view_set_preset",
-                    "save_view_snapshot",
-                    "run_script",
-                    "cancel_job",
-                    "save_script",
-                    "set_apple_id",
-                    "clear_apple_id",
-                    "resign_wda",
-                    "bulk_resign_wda",
-                ][..],
-            ),
-            (
-                include_str!("agent_commands.rs"),
-                &[
-                    "agent_save_settings",
-                    "agent_preflight",
-                    "agent_repair",
-                    "agent_bulk_repair",
-                ][..],
-            ),
-            (
-                include_str!("farm_commands.rs"),
-                &[
-                    "auth_session",
-                    "auth_login",
-                    "auth_register",
-                    "save_device_meta",
-                    "save_group",
-                    "delete_group",
-                    "save_proxy",
-                    "delete_proxy",
-                    "add_material",
-                    "delete_material",
-                    "push_material",
-                    "add_app_library",
-                    "delete_app_library",
-                    "install_library_app",
-                    "save_schedule",
-                    "delete_schedule",
-                    "create_publish_task",
-                ][..],
-            ),
-            (
-                include_str!("nurture_commands.rs"),
-                &[
-                    "nurture_save_settings",
-                    "nurture_test_api",
-                    "nurture_start",
-                    "nurture_stop",
-                ][..],
-            ),
-            (
-                include_str!("flow_commands.rs"),
-                &[
-                    "flow_save_revision",
-                    "flow_archive",
-                    "flow_run",
-                    "flow_cancel_run",
-                    "flow_retry_attempt",
-                    "flow_coordinate_frame",
-                ][..],
-            ),
-            (
-                include_str!("publish_commands.rs"),
-                &[
-                    "publish_create_campaign",
-                    "publish_cancel",
-                    "publish_prepare",
-                    "publish_transfer",
-                    "publish_post",
-                ][..],
+                "interaction_commands.rs",
+                include_str!("interaction_commands.rs"),
             ),
         ];
-
-        for (source, commands) in inventories {
-            for command in commands {
-                assert!(
-                    command_body(source, command).contains("ensure_accepting_work()"),
-                    "mutating command {command} bypasses application admission"
-                );
+        let mut holders = Vec::new();
+        for (file, source) in surfaces {
+            for (name, body) in commands_in(source) {
+                if body.to_ascii_lowercase().contains("password") {
+                    holders.push((file, name, body));
+                }
             }
         }
+        let mut named = holders
+            .iter()
+            .map(|(file, name, _)| format!("{file}::{name}"))
+            .collect::<Vec<_>>();
+        named.sort();
+        assert_eq!(
+            named,
+            vec![
+                "commands.rs::set_apple_id".to_string(),
+                "farm_commands.rs::export_proxy_config".to_string(),
+            ],
+        );
+        let (_, _, apple) = holders
+            .iter()
+            .find(|(_, name, _)| *name == "set_apple_id")
+            .expect("set_apple_id");
+        assert!(
+            apple.contains("state.signing") && !apple.contains("state.db"),
+            "set_apple_id must hand the password to the credential store, not the database:\n{apple}"
+        );
+    }
+
+    /// Every command source file. Adding one and forgetting it here is the failure mode the
+    /// list below is written to make loud, so it is asserted against the directory listing.
+    const COMMAND_SOURCES: &[(&str, &str)] = &[
+        ("agent_commands.rs", include_str!("agent_commands.rs")),
+        ("commands.rs", include_str!("commands.rs")),
+        ("farm_commands.rs", include_str!("farm_commands.rs")),
+        ("flow_commands.rs", include_str!("flow_commands.rs")),
+        (
+            "interaction_commands.rs",
+            include_str!("interaction_commands.rs"),
+        ),
+        ("lib.rs", include_str!("lib.rs")),
+        ("local_api.rs", include_str!("local_api.rs")),
+        ("nurture_commands.rs", include_str!("nurture_commands.rs")),
+        ("peripherals.rs", include_str!("peripherals.rs")),
+        ("publish_commands.rs", include_str!("publish_commands.rs")),
+    ];
+
+    /// Commands that may skip `ensure_accepting_work()`, each with the reason it may.
+    ///
+    /// This is the **whole** exemption list: anything not named here must hold admission, so a
+    /// new command is guarded by default and skipping it is a decision someone has to write
+    /// down. That is the inversion — see the test below for why the previous shape could not
+    /// work.
+    const ADMISSION_EXEMPT: &[(&str, &str)] = &[
+        // Reads. They answer from the DB, from memory, or from a frame already captured, and
+        // touch no device — so refusing them during shutdown drain would blank the UI for no
+        // safety gained.
+        ("agent_get_settings", "read: agent settings held in memory"),
+        (
+            "agent_list_statuses",
+            "read: cached_agent_status, probes nothing",
+        ),
+        ("list_devices", "read: cached roster"),
+        ("get_stream_settings", "read: KV config"),
+        ("latest_frame", "read: last frame already in memory"),
+        ("view_endpoint", "read: the loopback URL"),
+        ("view_report_paint", "read-back: frontend paint counters"),
+        ("list_jobs", "read: DB"),
+        ("list_scripts", "read: DB"),
+        ("example_script", "read: a static fixture"),
+        (
+            "get_apple_id",
+            "read: email + has_password, never the password",
+        ),
+        ("driver_mode", "read: which backend is live"),
+        ("driver_degraded_reason", "read: health probe"),
+        ("android_unavailable_reason", "read: health probe"),
+        ("update_check", "read: asks GitHub, touches no device"),
+        ("get_device_meta", "read: DB"),
+        ("list_device_metas", "read: DB"),
+        ("list_groups", "read: DB"),
+        ("list_proxies", "read: DB"),
+        (
+            "export_proxy_config",
+            "read: renders proxies the operator already stored",
+        ),
+        ("list_materials", "read: DB"),
+        ("list_apps_library", "read: DB"),
+        ("list_schedules", "read: DB"),
+        ("list_publish_tasks", "read: DB"),
+        ("list_op_logs", "read: DB"),
+        ("analytics_summary", "read: DB aggregate"),
+        ("api_docs", "read: static text"),
+        ("flow_action_catalog", "read: static catalog"),
+        ("flow_list", "read: DB"),
+        ("flow_get", "read: DB"),
+        ("flow_validate", "pure: compiles a document, no I/O"),
+        (
+            "flow_import_legacy",
+            "pure: parses JSON into a typed document",
+        ),
+        ("flow_export", "read: DB"),
+        ("flow_list_runs", "read: DB"),
+        ("flow_get_run", "read: DB"),
+        ("flow_read_artifact", "read: DB-keyed bytes, hash-verified"),
+        ("interaction_parse_links", "pure: string parsing"),
+        (
+            "interaction_resolve_links",
+            "read: follows TikTok redirects, touches no device",
+        ),
+        (
+            "interaction_preview_thread",
+            "pure: plans a campaign without running it",
+        ),
+        ("interaction_list", "read: DB"),
+        ("interaction_get", "read: DB"),
+        ("interaction_list_artifacts", "read: DB"),
+        (
+            "interaction_read_artifact",
+            "read: DB-keyed bytes, hash-verified",
+        ),
+        ("local_api_get_config", "read: KV config"),
+        ("nurture_get_settings", "read: DB"),
+        ("nurture_list_costs", "read: DB"),
+        ("nurture_list_comment_attempts", "read: DB"),
+        ("nurture_cost_summary", "read: DB aggregate"),
+        ("nurture_session_status", "read: in-memory session state"),
+        ("publish_list", "read: DB"),
+        ("publish_get", "read: DB"),
+        // Not reads, and not oversights — each guards differently, on purpose.
+        (
+            "update_install",
+            "guards with state.busy_reason(): admission would let it install mid-run",
+        ),
+        (
+            "retry_startup",
+            "re-runs bootstrap; there may be no admission gate yet to hold",
+        ),
+        ("startup_error", "read: why bootstrap failed"),
+    ];
+
+    /// Every `#[tauri::command]`, with its body, across every command file.
+    fn all_commands() -> Vec<(&'static str, &'static str, &'static str)> {
+        let mut found = Vec::new();
+        for (file, source) in COMMAND_SOURCES {
+            // Cut the trailing test *module* first: `lib.rs`'s own tests contain the literal
+            // "#[tauri::command]" (this scanner splits on it), so counting those would make
+            // the test read itself.
+            //
+            // Matched as `#[cfg(test)]` immediately followed by `mod `, not as a bare
+            // `#[cfg(test)]`: several files carry item-level `#[cfg(test)]` on test-only
+            // imports at the *top*, and cutting there truncated the entire file. Not
+            // hypothetical — it hid all six commands in `agent_commands.rs`, and the
+            // cross-check below is what caught it.
+            let source = match source.find("#[cfg(test)]\nmod ") {
+                Some(at) => &source[..at],
+                None => source,
+            };
+            for chunk in source.split("#[tauri::command]").skip(1) {
+                let Some(at) = chunk.find("fn ") else {
+                    continue;
+                };
+                let tail = &chunk[at + 3..];
+                let Some(stop) = tail.find(['(', '<']) else {
+                    continue;
+                };
+                found.push((*file, &tail[..stop], chunk));
+            }
+        }
+        found
+    }
+
+    /// The pinned toolchain and the one CI installs must be the same version.
+    ///
+    /// `rust-toolchain.toml` exists so a developer's `cargo clippy` runs the lints CI runs. If
+    /// the two drift, it does the opposite of its job — it pins the machine to a version CI is
+    /// *not* using, and the lint difference it was added to remove comes back silently. That
+    /// difference is not hypothetical: clippy 1.97 flagged an `unnecessary_cast` at `fa8ecca`
+    /// that the release toolchain did not.
+    #[test]
+    fn the_pinned_toolchain_matches_the_one_ci_installs() {
+        let pinned = include_str!("../../../../rust-toolchain.toml");
+        let workflow = include_str!("../../../../.github/workflows/desktop-ci-cd.yml");
+
+        let channel = pinned
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("channel = "))
+            .map(|value| value.trim_matches('"'))
+            .expect("rust-toolchain.toml declares a channel");
+        let ci = workflow
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("RUST_TOOLCHAIN: "))
+            .map(|value| value.trim_matches('"'))
+            .expect("the workflow declares RUST_TOOLCHAIN");
+
+        assert_eq!(
+            channel, ci,
+            "rust-toolchain.toml pins {channel} but CI installs {ci}"
+        );
+    }
+
+    /// Admission is required by **default**, and skipping it has to be written down.
+    ///
+    /// This replaces an allowlist of 84 command names that each had to hold
+    /// `ensure_accepting_work()`. The problem with that shape is not that it was incomplete —
+    /// it is that it **could not** be complete: a new mutating command that forgot admission
+    /// *and* was not added to the list passed, so the gate could not catch the one mistake it
+    /// exists to catch. Three whole files (`interaction_commands.rs`, `peripherals.rs`,
+    /// `local_api.rs` — 16 commands) had never been in its inventory at all.
+    ///
+    /// Inverted, the default is safe: a command is checked unless someone names it and says
+    /// why. Measured when this landed: 158 commands, 52 exempt, and no device-mutating command
+    /// was missing admission — so this closes a drift path rather than a live hole.
+    #[test]
+    fn every_command_holds_admission_unless_explicitly_exempted() {
+        let exempt: std::collections::HashMap<&str, &str> =
+            ADMISSION_EXEMPT.iter().copied().collect();
+        let mut offenders = Vec::new();
+        for (file, name, body) in all_commands() {
+            if body.contains("ensure_accepting_work()") || exempt.contains_key(name) {
+                continue;
+            }
+            offenders.push(format!("{file}::{name}"));
+        }
+        assert!(
+            offenders.is_empty(),
+            "these commands neither hold ensure_accepting_work() nor appear in ADMISSION_EXEMPT \
+             with a reason: {}",
+            offenders.join(", ")
+        );
+    }
+
+    /// The scan sees every command that is actually registered — proved, not assumed.
+    ///
+    /// `all_commands()` stops at each file's `#[cfg(test)]`, because `lib.rs`'s own test module
+    /// contains the literal `"#[tauri::command]"` and splitting on it would make this test read
+    /// itself. That cut is also a blind spot: a command written *below* the test module would
+    /// be invisible to the gate, and a gate with an invisible region is the thing this whole
+    /// inversion is trying to stop being. Found the honest way — an early probe of the gate was
+    /// appended to the end of a file, the gate stayed green, and the probe rather than the gate
+    /// turned out to be wrong.
+    ///
+    /// So: cross-check the scan against `generate_handler!`, which is the list Tauri actually
+    /// exposes. A command hidden below a test module, or defined and never registered, makes
+    /// the two disagree.
+    #[test]
+    fn the_admission_scan_sees_every_registered_command() {
+        let source = include_str!("lib.rs");
+        let at = source
+            .find("generate_handler!")
+            .expect("lib.rs registers its commands with generate_handler!");
+        let tail = &source[at..];
+        let open = tail.find('[').expect("generate_handler![ ... ]");
+        let close = tail.find(']').expect("generate_handler![ ... ]");
+        let registered: std::collections::HashSet<&str> = tail[open + 1..close]
+            .split(',')
+            .map(|entry| entry.trim())
+            .filter(|entry| !entry.is_empty() && !entry.starts_with("//"))
+            .map(|entry| entry.rsplit("::").next().unwrap_or(entry))
+            .collect();
+
+        let scanned: std::collections::HashSet<&str> = all_commands()
+            .into_iter()
+            .map(|(_, name, _)| name)
+            .collect();
+
+        let missed: Vec<&str> = registered.difference(&scanned).copied().collect();
+        assert!(
+            missed.is_empty(),
+            "registered but invisible to the admission scan (below a #[cfg(test)] module?): {}",
+            missed.join(", ")
+        );
+    }
+
+    /// An exemption that no longer names a real command is a stale claim, so it fails too.
+    ///
+    /// Without this the list only ever grows: a command gets renamed or deleted, its excuse
+    /// stays behind, and the next reader believes a decision was made about something that is
+    /// not there.
+    #[test]
+    fn no_admission_exemption_outlives_its_command() {
+        let commands: std::collections::HashSet<&str> = all_commands()
+            .into_iter()
+            .map(|(_, name, _)| name)
+            .collect();
+        let stale: Vec<&str> = ADMISSION_EXEMPT
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| !commands.contains(name))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "ADMISSION_EXEMPT names commands that no longer exist: {}",
+            stale.join(", ")
+        );
+
+        // And an exemption that has since grown a real admission call is also stale — it now
+        // claims an exception it does not take.
+        let redundant: Vec<&str> = all_commands()
+            .into_iter()
+            .filter(|(_, name, body)| {
+                body.contains("ensure_accepting_work()")
+                    && ADMISSION_EXEMPT.iter().any(|(exempt, _)| exempt == name)
+            })
+            .map(|(_, name, _)| name)
+            .collect();
+        assert!(
+            redundant.is_empty(),
+            "these hold admission and no longer need an exemption: {}",
+            redundant.join(", ")
+        );
     }
 
     #[test]

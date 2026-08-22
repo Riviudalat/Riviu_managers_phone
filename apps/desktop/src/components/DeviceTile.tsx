@@ -1,17 +1,32 @@
 import { memo } from "react";
-import { deviceModelOsLabel, tileStreamStateView } from "../types";
+import { deviceTileSubtitle } from "../types";
 import type { DeviceInfo } from "../types";
-import { useViewLive } from "../viewStore";
+import { streamPlaceholder } from "../streamPlaceholder";
+import { useViewDecodeFailed, useViewLive, useViewSize } from "../viewStore";
 import { PhoneCanvas } from "./PhoneCanvas";
+import { StreamPlaceholder } from "./StreamPlaceholder";
 
 interface Props {
   device: DeviceInfo;
   /** Tile width in px, driven by the wheel zoom. */
   width: number;
-  /** 1-based position in the visible grid, shown like GenFarmer's big number. */
+  /**
+   * The big number on the tile.
+   *
+   * The operator's own number for this phone when they set one, and its 1-based position in
+   * the visible grid otherwise — decided by `deviceNaming.tileNumber`, not here, because the
+   * fallback is a rule and not a default value.
+   */
   index: number;
+  /**
+   * What to call this phone: the operator's alias, or the name the phone reports. Resolved
+   * by `deviceNaming.tileName`. The udid is still the tooltip and the identity.
+   */
+  name?: string;
   selected: boolean;
   focused?: boolean;
+  /// This phone is the one the overlay drives while Sync is on; the rest follow it.
+  controlCenter?: boolean;
   onSelect: (udid: string, additive: boolean) => void;
   onOpen: (udid: string) => void;
   onPrepare: (udid: string) => void;
@@ -24,24 +39,32 @@ function DeviceTileInner({
   onContextMenu,
   width,
   index,
+  name,
   selected,
   focused,
+  controlCenter,
   onSelect,
   onOpen,
   onPrepare,
 }: Props) {
   const hasView = useViewLive(device.udid);
-  const streamState = tileStreamStateView(
-    device.tileStreamState,
+  const viewSize = useViewSize(device.udid);
+  // Read at last. This existed the whole time and nothing consulted it, so a stream every
+  // codec had already refused kept breathing the loading mark as if it were on its way.
+  const decodeFailed = useViewDecodeFailed(device.udid);
+  const { view } = streamPlaceholder({
     hasView,
-    Boolean(device.lastError),
-  );
-  const emptyLabel =
-    streamState.state === "sampling" ? "Đang mở stream…" : device.lastError || "No stream";
+    hasGeometry: Boolean(viewSize?.width && viewSize.width > 0),
+    decodeFailed,
+    tileStreamState: device.tileStreamState,
+    lastError: device.lastError,
+  });
 
   return (
     <article
       className={`dev-phone ${selected ? "selected" : ""} ${focused ? "focused" : ""}`}
+      data-testid="device-tile"
+      data-udid={device.udid}
       style={{ width, height: width * 2 }}
       onClick={(e) => onSelect(device.udid, e.metaKey || e.ctrlKey || e.shiftKey)}
       onContextMenu={(e) => {
@@ -56,48 +79,43 @@ function DeviceTileInner({
           frame arrives — the "fixed frame" the operator asked for. */}
       <div className="dev-phone-screen">
         <PhoneCanvas udid={device.udid} surfaceId="tile" />
-        {!hasView && (
-          <div className="dev-phone-empty">
-            <span>{emptyLabel}</span>
-            <button
-              type="button"
-              className="link"
-              onClick={(e) => {
-                e.stopPropagation();
-                onPrepare(device.udid);
-              }}
-            >
-              Start
-            </button>
-          </div>
-        )}
+        <StreamPlaceholder
+          view={view}
+          deviceName={name ?? device.name}
+          onRetry={() => onPrepare(device.udid)}
+        />
 
         <span className="dev-phone-conn">{device.connection.toUpperCase()}</span>
 
+        {/* Named on the tile, because a designation nobody can see is a designation
+            nobody trusts -- which is what the old implicit "first in the selection"
+            master was. */}
+        {controlCenter && (
+          <span
+            className="dev-phone-center"
+            title="Máy chính: khi bật Sync, mở máy nào cũng ra màn hình này và mọi máy đã chọn làm theo thao tác trên đó"
+          >
+            Máy chính
+          </span>
+        )}
+
         <div className="dev-phone-info">
           <span className="dev-phone-index">{index}</span>
-          <span className="dev-phone-name" title={device.name}>
-            {device.name}
+          {/* The alias when there is one, and the phone's own name in the tooltip beside
+              the udid — renaming a tile must not hide which phone it is. */}
+          <span className="dev-phone-name" title={`${device.name} · ${device.udid}`}>
+            {name ?? device.name}
           </span>
-          <span className="dev-phone-model">{deviceModelOsLabel(device)}</span>
+          <span className="dev-phone-model">{deviceTileSubtitle(device)}</span>
         </div>
       </div>
 
-      {/* Outside `.dev-phone-screen` on purpose. That element has `overflow: hidden`,
-          so a checkbox pinned to the outer corner from inside it would be clipped —
-          this sits on `.dev-phone`, which does not clip.
-
-          There is no expand button any more: double-click on the tile opens the
-          overlay, which `onDoubleClick` above has always done. */}
-      <input
-        className="dev-phone-pick"
-        type="checkbox"
-        title="Chọn máy"
-        checked={selected}
-        onClick={(e) => e.stopPropagation()}
-        onDoubleClick={(e) => e.stopPropagation()}
-        onChange={() => onSelect(device.udid, true)}
-      />
+      {/* No corner checkbox and no expand button. Both were removed rather than restyled,
+          because the tile already carries every gesture they duplicated: a click selects
+          (Ctrl/Shift/Cmd extends), a drag across the grid box-selects, Ctrl+A takes the tab,
+          and a double-click opens the overlay. A 15 px control over a live video frame that
+          does what clicking the frame does is one more thing to aim at and one more thing to
+          hit by accident. Selection is still visible — the tile's own border. */}
     </article>
   );
 }

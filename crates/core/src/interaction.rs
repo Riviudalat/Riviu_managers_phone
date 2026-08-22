@@ -11,8 +11,19 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-const MAX_MESSAGE_COUNT: u8 = 6;
+/// Ceiling on messages per link and on actors in one run.
+///
+/// Was six for both, which is what made a twenty-phone run impossible — the request
+/// was refused before anything else could go wrong. Sixty-four is a guard rail rather
+/// than a target: the real limit is how many phones are plugged in, and a number this
+/// far above the fleet exists only so a typo cannot ask for eight thousand.
+const MAX_MESSAGE_COUNT: u8 = 64;
 const MIN_MESSAGE_COUNT: u8 = 2;
+const MAX_ACTOR_COUNT: usize = 64;
+/// Two, because one account replying to itself is not a conversation.
+const MIN_ACTOR_COUNT: usize = 2;
+/// A cohort has to be able to hold a conversation on its own, so it needs two.
+const MIN_COHORT_SIZE: u8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -167,6 +178,29 @@ pub enum ThreadMode {
     Standalone,
 }
 
+/// Whether the replies answer each other in a line, or all answer the first one.
+///
+/// A second axis, deliberately not folded into [`ThreadMode`]: that one says *whether*
+/// the messages form a chain at all, this one says what shape the chain has. Collapsing
+/// them would make `Standalone` and `Star` look like alternatives when they are not —
+/// `Standalone` has no parents, `Star` has one parent shared by everybody.
+///
+/// **`Star` is what makes a fleet run parallel.** In `Chain`, message N cannot start
+/// until N-1 has been posted *and read back*, so twenty accounts are twenty sequential
+/// waits by construction. In `Star` every reply depends only on ordinal 0, so once the
+/// root is up the rest are independent of each other — and a reply that fails must not
+/// take its siblings with it (see `chain_broken_at` in the runner).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ThreadShape {
+    /// Message N answers message N-1. The behaviour every campaign had before this
+    /// existed, and what `#[serde(default)]` gives a row persisted back then.
+    #[default]
+    Chain,
+    /// Every message after the first answers message 0.
+    Star,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadCampaignRequest {
@@ -180,6 +214,21 @@ pub struct ThreadCampaignRequest {
     /// deserialise into the behaviour they were created with.
     #[serde(default)]
     pub mode: ThreadMode,
+    /// Chain or star. Only read in [`ThreadMode::Threaded`]; `Standalone` has no parents
+    /// to arrange. Defaults to `Chain`, which is what every stored campaign was.
+    #[serde(default)]
+    pub shape: ThreadShape,
+    /// Split the actors into cohorts of this size, each cohort taking its own links.
+    ///
+    /// `None` means one cohort holding every actor — the behaviour this had before, where
+    /// the whole fleet works the same link one phone at a time. Setting it is what lets
+    /// twenty phones be six conversations happening at once instead of one long queue.
+    ///
+    /// The size is a *target*, not a promise: the remainder is spread across cohorts
+    /// rather than left idle, so twenty actors at size three become 4,4,3,3,3,3 and every
+    /// phone has work. See [`partition_actors`].
+    #[serde(default)]
+    pub cohort_size: Option<u8>,
     /// Comments written by the operator, used **instead of** the AI when non-empty.
     ///
     /// A pool rather than a fixed list per message: it is dealt out across
@@ -196,6 +245,16 @@ pub struct ThreadCampaignRequest {
     /// Off by default, and off is also what a stored campaign from before this reads as.
     #[serde(default)]
     pub like_target: bool,
+    /// @-handles to tag at the front of every comment, without the leading `@`.
+    ///
+    /// Inserted as **plain text** (`@name`), which TikTok does not turn into a linked
+    /// mention or a notification — matching what a person typing the same characters gets.
+    /// A handle that belongs to a fleet phone is *also* added to `actor_udids` by the caller,
+    /// so tagging an owned account brings that phone into the same post to reply; a handle
+    /// that matches no phone is tagged in text only. Empty (the default, and what a campaign
+    /// stored before this reads as) prepends nothing.
+    #[serde(default)]
+    pub mentions: Vec<String>,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -204,10 +263,12 @@ pub enum ThreadValidationError {
     EmptyRequestId,
     #[error("at least one target is required")]
     NoTargets,
-    #[error("two to six messages are required")]
+    #[error("message count must be between two and sixty-four")]
     InvalidMessageCount,
-    #[error("two to six distinct actors are required")]
+    #[error("actor count must be between two and sixty-four, and every actor distinct")]
     InvalidActorCount,
+    #[error("a cohort needs at least two actors")]
+    InvalidCohortSize,
     #[error("message count must cover every selected actor")]
     TooFewMessagesForActors,
     #[error("duplicate actor")]
@@ -233,8 +294,11 @@ impl ThreadCampaignRequest {
         if !(MIN_MESSAGE_COUNT..=MAX_MESSAGE_COUNT).contains(&self.message_count) {
             return Err(ThreadValidationError::InvalidMessageCount);
         }
-        if !(2..=6).contains(&self.actor_udids.len()) {
+        if !(MIN_ACTOR_COUNT..=MAX_ACTOR_COUNT).contains(&self.actor_udids.len()) {
             return Err(ThreadValidationError::InvalidActorCount);
+        }
+        if self.cohort_size.is_some_and(|size| size < MIN_COHORT_SIZE) {
+            return Err(ThreadValidationError::InvalidCohortSize);
         }
         let mut actors = HashSet::new();
         if self
@@ -252,7 +316,16 @@ impl ThreadCampaignRequest {
         {
             return Err(ThreadValidationError::DuplicateTarget);
         }
-        if (self.message_count as usize) < self.actor_udids.len() {
+        // **Per cohort, not per fleet.** The rule is that every actor gets a turn, and a
+        // cohort is where turns are taken: twenty phones in cohorts of three need three
+        // messages a link, not twenty. Measured against the *largest* cohort, because the
+        // remainder makes them uneven by one and the biggest is the one that must fit.
+        let largest_cohort = partition_actors(&self.actor_udids, self.cohort_size)
+            .iter()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(0);
+        if (self.message_count as usize) < largest_cohort {
             return Err(ThreadValidationError::TooFewMessagesForActors);
         }
         if !(4..=20).contains(&self.max_words) {
@@ -302,6 +375,28 @@ impl ThreadCampaignRequest {
         self.manual_comments.get(index).map(String::as_str)
     }
 
+    /// The `@name ` text prepended to the **opening** comment of a thread, or empty.
+    ///
+    /// Each entry is trimmed, its leading `@` dropped and re-added, and blanks are skipped,
+    /// so `["@ann", " bob ", ""]` yields `"@ann @bob "` (one trailing space before the
+    /// comment body). Only the root (ordinal 0) carries it: the opener tags the accounts and
+    /// the replies are those accounts answering, so re-tagging on every reply would read as
+    /// spam. Plain text — TikTok does not linkify or notify it — see [`Self::mentions`].
+    pub fn mention_prefix(&self) -> String {
+        let tags: Vec<String> = self
+            .mentions
+            .iter()
+            .map(|raw| raw.trim().trim_start_matches('@').trim())
+            .filter(|handle| !handle.is_empty())
+            .map(|handle| format!("@{handle}"))
+            .collect();
+        if tags.is_empty() {
+            String::new()
+        } else {
+            format!("{} ", tags.join(" "))
+        }
+    }
+
     /// Whether the run has to open each target once up front just to photograph it.
     ///
     /// Only the AI needs that: it writes from frames of the post. A manual pool covers
@@ -330,6 +425,13 @@ pub struct ThreadMessagePlan {
     pub ordinal: u8,
     pub actor_udid: String,
     pub parent_ordinal: Option<u8>,
+    /// Which cohort owns this message, and therefore which task will run it.
+    ///
+    /// On the plan item rather than in a separate map because the runner's only question
+    /// is "what does cohort N have to do", and a flat list it has to re-group is a list it
+    /// can re-group wrongly. Zero for every message when no cohort size was asked for.
+    #[serde(default)]
+    pub cohort: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -339,26 +441,89 @@ pub struct ThreadPlan {
     pub assignments: Vec<ThreadMessagePlan>,
 }
 
+/// Split the actors into cohorts, spreading the remainder rather than stranding it.
+///
+/// `None` returns one cohort holding everybody, which is the arrangement this feature had
+/// before cohorts existed: the whole selection works the same link, one phone at a time.
+///
+/// **The remainder is spread, not dropped and not left as a runt.** Twenty actors at size
+/// three is six cohorts of 4,4,3,3,3,3 — not six of three with two phones idle, and not
+/// five of three plus a cohort of five. A phone that was selected is a phone the operator
+/// expects to work, and a cohort far larger than the others finishes long after the rest
+/// and turns a parallel run back into a queue.
+///
+/// Pure, and separate from planning, because the partition is the thing worth asserting on
+/// its own: every actor appears exactly once, no cohort is empty, and the sizes differ by
+/// at most one.
+pub fn partition_actors(actors: &[String], cohort_size: Option<u8>) -> Vec<Vec<String>> {
+    let Some(size) = cohort_size.map(usize::from).filter(|size| *size > 0) else {
+        return vec![actors.to_vec()];
+    };
+    // A cohort larger than the selection is one cohort, not an error: asking for teams of
+    // five out of three phones plainly means "all of them together".
+    let cohorts = (actors.len() / size).max(1);
+    let base = actors.len() / cohorts;
+    let mut remainder = actors.len() % cohorts;
+    let mut out = Vec::with_capacity(cohorts);
+    let mut rest = actors;
+    for _ in 0..cohorts {
+        let mut take = base;
+        if remainder > 0 {
+            take += 1;
+            remainder -= 1;
+        }
+        let (head, tail) = rest.split_at(take.min(rest.len()));
+        out.push(head.to_vec());
+        rest = tail;
+    }
+    out
+}
+
+/// Expand a request into the work list, cohort by cohort.
+///
+/// The links are dealt round-robin across cohorts, so cohort 0 takes link 0, link C,
+/// link 2C… That matters more than it looks: dealing them in blocks instead would give the
+/// first cohort every early link, and a run cancelled part way would have covered a few
+/// links thoroughly and the rest not at all.
+///
+/// Inside a cohort nothing changed. The actor still rotates by
+/// `(target_index + ordinal) % cohort_len` — with `target_index` counted *within the
+/// cohort*, so the rotation keeps doing what it was for: giving link two a different root
+/// actor than link one.
 pub fn plan_threads(request: &ThreadCampaignRequest) -> Result<ThreadPlan, ThreadValidationError> {
     request.validate()?;
+    let cohorts = partition_actors(&request.actor_udids, request.cohort_size);
     let mut assignments =
         Vec::with_capacity(request.targets.len() * request.message_count as usize);
-    for (target_index, target) in request.targets.iter().enumerate() {
-        for ordinal in 0..request.message_count {
-            let actor_index = (target_index + ordinal as usize) % request.actor_udids.len();
-            assignments.push(ThreadMessagePlan {
-                target_key: target.target_key.clone(),
-                ordinal,
-                actor_udid: request.actor_udids[actor_index].clone(),
-                // Standalone leaves every message parentless, which is the
-                // whole of the difference: no parent means no locator, no OCR,
-                // and no chain to break.
-                parent_ordinal: match request.mode {
-                    ThreadMode::Standalone => None,
-                    ThreadMode::Threaded if ordinal == 0 => None,
-                    ThreadMode::Threaded => Some(ordinal - 1),
-                },
-            });
+    for (cohort_index, cohort) in cohorts.iter().enumerate() {
+        if cohort.is_empty() {
+            continue;
+        }
+        let mine = request
+            .targets
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| index % cohorts.len() == cohort_index);
+        for (local_index, (_, target)) in mine.enumerate() {
+            for ordinal in 0..request.message_count {
+                let actor_index = (local_index + ordinal as usize) % cohort.len();
+                assignments.push(ThreadMessagePlan {
+                    target_key: target.target_key.clone(),
+                    ordinal,
+                    actor_udid: cohort[actor_index].clone(),
+                    // Standalone leaves every message parentless, which is the
+                    // whole of the difference: no parent means no locator, no OCR,
+                    // and no chain to break. Star gives them all the same parent,
+                    // which is what makes them independent of each other.
+                    parent_ordinal: match (request.mode, request.shape, ordinal) {
+                        (ThreadMode::Standalone, _, _) => None,
+                        (ThreadMode::Threaded, _, 0) => None,
+                        (ThreadMode::Threaded, ThreadShape::Chain, ordinal) => Some(ordinal - 1),
+                        (ThreadMode::Threaded, ThreadShape::Star, _) => Some(0),
+                    },
+                    cohort: cohort_index as u16,
+                });
+            }
         }
     }
     Ok(ThreadPlan {
@@ -697,6 +862,53 @@ pub struct InteractionAssignmentRecord {
     pub state: ThreadMessageState,
     pub prepared_text: Option<String>,
     pub error_code: Option<String>,
+    /// The evidence blob this message was stored with, or `None` if it never sent.
+    ///
+    /// Read back for one reason: it is where a succeeded root's
+    /// [`CommentLocatorIdentity`] lives, under `postedIdentity`. Without it a retry has no
+    /// way to learn what the parent comment was — the identity is only ever produced by
+    /// *sending*, and a root that already succeeded is deliberately not sent again. The
+    /// retry then skipped every reply under it with `parent_identity_not_confirmed`, which
+    /// is precisely the case Retry exists for.
+    ///
+    /// `#[serde(default)]` so a payload from before this reads as absent rather than
+    /// failing to parse.
+    ///
+    /// **Not sent to the desktop.** It carries frame hashes and locator internals the UI has
+    /// no use for; what the UI needs is [`Self::like_note`], which is a field of its own.
+    #[serde(skip)]
+    pub evidence_json: Option<String>,
+    /// What happened to the like, for the operator to read. Derived from the evidence when
+    /// the record is loaded — see [`Self::like_note`].
+    #[serde(default)]
+    pub like: Option<String>,
+}
+
+impl InteractionAssignmentRecord {
+    /// The comment this message posted, if it posted one and said so.
+    ///
+    /// Lives here rather than in the runner because both the runner and any future reader
+    /// of a stored campaign want the same answer, and two parsers of the same blob are two
+    /// chances to disagree about what `postedIdentity` means.
+    /// What happened to the like on this message, if one was asked for.
+    ///
+    /// A like that fails must not cost the comment, so it is not an error code — but it was
+    /// previously not *anything*: the outcome went to the log and the operator watching the
+    /// Monitor tab saw a message succeed with no hint that the like had been refused.
+    pub fn like_note(&self) -> Option<String> {
+        serde_json::from_str::<serde_json::Value>(self.evidence_json.as_deref()?)
+            .ok()?
+            .get("like")?
+            .as_str()
+            .map(str::to_string)
+    }
+
+    pub fn posted_identity(&self) -> Option<CommentLocatorIdentity> {
+        serde_json::from_str::<serde_json::Value>(self.evidence_json.as_deref()?)
+            .ok()?
+            .get("postedIdentity")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+    }
 }
 
 /// A saved frame from a thread campaign, and where it came from.
@@ -743,8 +955,11 @@ mod tests {
                 instruction: "tự nhiên".into(),
                 max_words: 12,
                 mode: ThreadMode::Threaded,
+                shape: ThreadShape::Chain,
+                cohort_size: None,
                 manual_comments: pool.into_iter().map(str::to_string).collect(),
                 like_target: false,
+                mentions: Vec::new(),
             }
         }
 
@@ -754,6 +969,22 @@ mod tests {
             assert!(!ai.is_manual());
             assert_eq!(ai.manual_comment_for(0, 0), None);
             assert!(ai.validate().is_ok());
+        }
+
+        #[test]
+        fn mention_prefix_normalizes_handles_and_is_empty_without_any() {
+            let mut req = request(vec![]);
+            // No mentions -> nothing prepended, so an ordinary comment is unchanged.
+            assert_eq!(req.mention_prefix(), "");
+            // Leading `@` optional, blanks skipped, one trailing space before the body.
+            req.mentions = vec![
+                "@ann".into(),
+                " bob ".into(),
+                String::new(),
+                "   ".into(),
+                "@cara".into(),
+            ];
+            assert_eq!(req.mention_prefix(), "@ann @bob @cara ");
         }
 
         #[test]
@@ -876,6 +1107,9 @@ mod tests {
             manual_comments: Vec::new(),
             like_target: false,
             mode: ThreadMode::Threaded,
+            shape: ThreadShape::Chain,
+            cohort_size: None,
+            mentions: Vec::new(),
         }
     }
 
@@ -1291,5 +1525,243 @@ mod tests {
         // The reader is recorded, not assumed: it used to be hard-coded
         // "vision-v1" even when a Windows run had read the frame.
         assert_eq!(identity.locator_version, "test-ocr");
+    }
+
+    #[test]
+    fn a_star_hangs_every_reply_off_the_root_rather_than_off_its_neighbour() {
+        // The shape the operator asked for: one account comments, the rest answer *that*
+        // comment. It is also the only shape that can run in parallel — in a chain, message
+        // N cannot start until N-1 has been posted and read back, so twenty accounts are
+        // twenty sequential waits by construction.
+        let mut req = request(vec![target("1")], vec!["a", "b", "c", "d"], 4);
+        req.shape = ThreadShape::Star;
+        let plan = plan_threads(&req).expect("star plan");
+
+        assert_eq!(
+            plan.assignments[0].parent_ordinal, None,
+            "ordinal 0 is the root"
+        );
+        for message in plan.assignments.iter().skip(1) {
+            assert_eq!(
+                message.parent_ordinal,
+                Some(0),
+                "ordinal {} answered its neighbour instead of the root",
+                message.ordinal
+            );
+        }
+    }
+
+    #[test]
+    fn a_chain_is_untouched_by_the_new_axis() {
+        // `Chain` is what every stored campaign deserialises to, so this is the regression
+        // that says the shape field did not quietly rewrite them.
+        let plan =
+            plan_threads(&request(vec![target("1")], vec!["a", "b", "c"], 3)).expect("chain plan");
+        let parents: Vec<_> = plan
+            .assignments
+            .iter()
+            .map(|message| message.parent_ordinal)
+            .collect();
+        assert_eq!(parents, vec![None, Some(0), Some(1)]);
+    }
+
+    #[test]
+    fn cohorts_spread_the_remainder_instead_of_stranding_it() {
+        // Twenty phones in teams of three. Six cohorts, and the two left over join
+        // existing teams rather than idling or forming a runt of two that finishes last.
+        let actors: Vec<String> = (0..20).map(|n| format!("dev-{n:02}")).collect();
+        let cohorts = partition_actors(&actors, Some(3));
+
+        assert_eq!(cohorts.len(), 6);
+        let mut sizes: Vec<usize> = cohorts.iter().map(Vec::len).collect();
+        sizes.sort_unstable();
+        assert_eq!(sizes, vec![3, 3, 3, 3, 4, 4]);
+
+        // Every phone once, and no phone twice: a device in two cohorts would be two tasks
+        // reaching for the same exclusive lease, which is the deadlock this partition
+        // exists to make impossible.
+        let mut seen: Vec<&String> = cohorts.iter().flatten().collect();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            actors.len(),
+            "a phone was dropped or duplicated"
+        );
+    }
+
+    #[test]
+    fn a_cohort_larger_than_the_selection_is_simply_one_cohort() {
+        // Asking for teams of five out of three phones plainly means "all of them
+        // together", and refusing it would be pedantry rather than safety.
+        let actors: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
+        assert_eq!(partition_actors(&actors, Some(5)), vec![actors.clone()]);
+        assert_eq!(partition_actors(&actors, None), vec![actors]);
+    }
+
+    #[test]
+    fn links_are_dealt_round_robin_so_a_cancelled_run_covered_a_bit_of_everything() {
+        // Blocks would give cohort 0 every early link, and a run stopped part way would
+        // have finished the first few links and never touched the rest.
+        let targets = (1..=6).map(|n| target(&n.to_string())).collect();
+        let mut req = request(targets, vec!["a", "b", "c", "d"], 2);
+        req.cohort_size = Some(2);
+        let plan = plan_threads(&req).expect("cohort plan");
+
+        let mut by_cohort: std::collections::BTreeMap<u16, Vec<&str>> = Default::default();
+        for message in &plan.assignments {
+            let keys = by_cohort.entry(message.cohort).or_default();
+            if !keys.contains(&message.target_key.as_str()) {
+                keys.push(&message.target_key);
+            }
+        }
+        assert_eq!(by_cohort[&0], vec!["content:1", "content:3", "content:5"]);
+        assert_eq!(by_cohort[&1], vec!["content:2", "content:4", "content:6"]);
+
+        // And a cohort only ever drives its own phones — the property that lets the two
+        // run at the same time without contending for a lease.
+        for message in &plan.assignments {
+            let mine = if message.cohort == 0 {
+                ["a", "b"]
+            } else {
+                ["c", "d"]
+            };
+            assert!(
+                mine.contains(&message.actor_udid.as_str()),
+                "cohort {} reached for {}",
+                message.cohort,
+                message.actor_udid
+            );
+        }
+    }
+
+    #[test]
+    fn twenty_actors_are_allowed_and_one_still_is_not() {
+        // The cap was six, which is what made a twenty-phone run impossible before
+        // anything else could go wrong.
+        let actors: Vec<String> = (0..20).map(|n| format!("dev-{n:02}")).collect();
+        let borrowed: Vec<&str> = actors.iter().map(String::as_str).collect();
+        let mut req = request(vec![target("1")], borrowed, 20);
+        assert!(req.validate().is_ok());
+
+        req.actor_udids.truncate(1);
+        assert_eq!(
+            req.validate(),
+            Err(ThreadValidationError::InvalidActorCount),
+            "one account replying to itself is not a conversation"
+        );
+    }
+
+    #[test]
+    fn the_message_count_has_to_cover_the_largest_cohort_not_the_whole_fleet() {
+        // Twenty phones in teams of three need three messages a link, not twenty. Measured
+        // against the largest cohort because the remainder makes them uneven by one.
+        let actors: Vec<String> = (0..20).map(|n| format!("dev-{n:02}")).collect();
+        let borrowed: Vec<&str> = actors.iter().map(String::as_str).collect();
+        let mut req = request(vec![target("1")], borrowed, 4);
+        req.cohort_size = Some(3);
+        assert!(
+            req.validate().is_ok(),
+            "four covers the biggest team of four"
+        );
+
+        req.message_count = 3;
+        assert_eq!(
+            req.validate(),
+            Err(ThreadValidationError::TooFewMessagesForActors),
+            "the two cohorts of four would leave a phone with no turn"
+        );
+    }
+
+    #[test]
+    fn a_cohort_of_one_is_refused() {
+        let mut req = request(vec![target("1")], vec!["a", "b", "c", "d"], 4);
+        req.cohort_size = Some(1);
+        assert_eq!(
+            req.validate(),
+            Err(ThreadValidationError::InvalidCohortSize)
+        );
+    }
+
+    /// The evidence blob a succeeded message is stored with, in the shape the runner writes.
+    fn evidence_with_identity() -> String {
+        serde_json::json!({
+            "send": { "verdict": "sent" },
+            "postedIdentity": {
+                "authorLabel": "hanh.trang.dalat",
+                "text": "quán này nhìn ngon quá",
+                "locatorVersion": "hierarchy-1",
+                "frameSha256": "b".repeat(64),
+            },
+            "reader": "hierarchy",
+            "arrival": "identified",
+        })
+        .to_string()
+    }
+
+    fn stored(evidence: Option<&str>) -> InteractionAssignmentRecord {
+        InteractionAssignmentRecord {
+            id: "assignment-1".into(),
+            target_key: "content:123".into(),
+            ordinal: 0,
+            actor_udid: "ce06".into(),
+            parent_assignment_id: None,
+            state: ThreadMessageState::Succeeded,
+            prepared_text: Some("quán này nhìn ngon quá".into()),
+            error_code: None,
+            evidence_json: evidence.map(str::to_string),
+            like: None,
+        }
+    }
+
+    #[test]
+    fn a_succeeded_root_can_say_what_it_posted_after_a_restart() {
+        // The identity is only ever produced by *sending*, and a message that already
+        // succeeded is deliberately never sent again. So on a retry the runner's in-memory
+        // map starts empty, and every reply under a succeeded root was skipped with
+        // `parent_identity_not_confirmed` — the one case Retry exists for, and it could not
+        // work. The identity was on disk the whole time; nothing read it back.
+        let identity = stored(Some(&evidence_with_identity()))
+            .posted_identity()
+            .expect("a succeeded root knows its own comment");
+
+        assert_eq!(identity.author_label, "hanh.trang.dalat");
+        assert_eq!(identity.text, "quán này nhìn ngon quá");
+        assert_eq!(identity.locator_version, "hierarchy-1");
+    }
+
+    #[test]
+    fn a_message_that_never_posted_offers_no_identity() {
+        // Both shapes of "nothing to reply to", and neither may be guessed at: a failure
+        // with evidence of the failure, and a message that never got that far. Returning
+        // something here would make a reply hunt for a comment that is not on the screen.
+        assert_eq!(stored(None).posted_identity(), None);
+        let failed = serde_json::json!({ "send": { "verdict": "notArmed" } }).to_string();
+        assert_eq!(stored(Some(&failed)).posted_identity(), None);
+        assert_eq!(stored(Some("không phải json")).posted_identity(), None);
+    }
+
+    #[test]
+    fn a_refused_like_is_something_the_operator_can_read() {
+        // It used to go to `log::warn!` and nowhere else, so a message showed as succeeded
+        // and the operator had no way to learn the like had been refused. A like that fails
+        // must not cost the comment — but "must not fail the message" is not the same as
+        // "must not be mentioned".
+        let refused = serde_json::json!({
+            "send": { "verdict": "sent" },
+            "like": "không tim được: capability likeTarget is not supported by this driver",
+        })
+        .to_string();
+        assert_eq!(
+            stored(Some(&refused)).like_note().as_deref(),
+            Some("không tim được: capability likeTarget is not supported by this driver")
+        );
+
+        // And a campaign that never asked for a like says nothing rather than "no".
+        assert_eq!(
+            stored(Some(&evidence_with_identity())).like_note(),
+            None,
+            "a run with likeTarget off must not grow a note about likes"
+        );
     }
 }

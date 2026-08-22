@@ -17,6 +17,10 @@ const REDMI = [
   { bundleId: "com.android.settings", kind: "system" as const, label: null },
 ];
 
+/** A 1x1 PNG, which is all a src assertion needs. */
+const PIXEL =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
+
 // The refusal path and every emptiness distinction live in installedAppsView.test.ts,
 // which needs no promises. What is left here is the wiring: does the fetch happen, does
 // the toggle reach the view, does pointing at another phone refetch.
@@ -28,7 +32,9 @@ describe("InstalledApps", () => {
     await waitFor(() => expect(screen.getByText("com.riviu.agent")).toBeTruthy());
     // System is present in the data and counted, but not listed until asked for.
     expect(screen.queryByText("com.android.settings")).toBeNull();
-    expect(screen.getByText(/Hiện app hệ thống \(1\)/)).toBeTruthy();
+    // "Hệ thống (1)" and not "Hiện app hệ thống (1)": the App List is a 220 px column in the
+    // overlay panel now, and the longer label wrapped onto two lines beside its checkbox.
+    expect(screen.getByText(/Hệ thống \(1\)/)).toBeTruthy();
 
     await userEvent.click(screen.getByRole("checkbox"));
 
@@ -62,5 +68,36 @@ describe("InstalledApps", () => {
     rerender(<InstalledApps udid="ce061716" deviceName="Note 8" />);
 
     await waitFor(() => expect(listMock).toHaveBeenCalledWith("ce061716"));
+  });
+
+  it("draws the phone's own icon and name when the helper read them", async () => {
+    listMock.mockResolvedValue([
+      {
+        bundleId: "com.zing.zalo",
+        kind: "user" as const,
+        label: "Zalo",
+        iconPngBase64: PIXEL,
+      },
+    ]);
+    render(<InstalledApps udid="10969614" deviceName="Redmi" />);
+
+    await waitFor(() => expect(screen.getByText("Zalo")).toBeTruthy());
+    const icon = document.querySelector("img.installed-apps-icon") as HTMLImageElement | null;
+    expect(icon?.getAttribute("src")).toBe(`data:image/png;base64,${PIXEL}`);
+    // Nothing about names being unavailable: they were available.
+    expect(screen.queryByText(/Riviu helper/)).toBeNull();
+  });
+
+  /**
+   * A row with no icon must occupy the same space rather than collapsing, or a list where
+   * only some apps have icons reads as two different layouts.
+   */
+  it("leaves a neutral square where the phone gave no icon", async () => {
+    listMock.mockResolvedValue(REDMI);
+    render(<InstalledApps udid="10969614" deviceName="Redmi" />);
+
+    await waitFor(() => expect(screen.getByText("com.riviu.agent")).toBeTruthy());
+    expect(document.querySelector("img.installed-apps-icon")).toBeNull();
+    expect(document.querySelectorAll("span.installed-apps-icon.is-blank").length).toBe(2);
   });
 });

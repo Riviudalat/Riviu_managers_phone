@@ -1,17 +1,19 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use riviu_core::{
-    AutomationScript, DeviceControlPlane, DeviceExclusiveContext, DeviceInfo, DeviceWorkOwner,
-    HardwareKey, InteractionSessionKind, JobRecord, StreamSettings, SwipeGesture, TapPoint,
-    UiSession, UiWithStreamContext,
+    apply_offset, AutomationScript, DeviceControlPlane, DeviceExclusiveContext, DeviceInfo,
+    DeviceWorkOwner, GroupSyncPolicy, HardwareKey, InteractionSessionKind, JobRecord,
+    StreamSettings, SwipeGesture, TapPoint, UiSession, UiWithStreamContext,
 };
 use riviu_script_engine::{example_script_json, parse_script};
 use serde::Serialize;
 use tauri::State;
 
+use crate::view_watchdog::PaintReport;
+
 use crate::command_error::CommandError;
-use crate::state::AppState;
+use crate::state::{AppState, LeaseStream};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,6 +28,34 @@ pub struct GroupInputSkip {
     pub udid: String,
     pub code: String,
     pub current_owner: Option<DeviceWorkOwner>,
+    /// Why, when the code alone does not say. `DeviceBusy` explains itself through
+    /// `current_owner`; an action that simply failed does not, and the operator cannot act on
+    /// "one of your twenty phones did not work".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Everything about a group request that can be judged before any phone is touched.
+///
+/// Both checks used to sit in different places and one of them was in the wrong place
+/// entirely: the missing-key case was inside the per-device loop, in the match arm that
+/// needed the key. So a malformed request drove every phone up to that point and *then*
+/// returned an error, leaving the fleet half-actioned and the operator told it had failed.
+///
+/// A precondition belongs before the loop. Pulled out as a function so that is testable
+/// without an `AppState`.
+fn check_group_input(kind: &str, has_key: bool) -> Result<(), CommandError> {
+    if !matches!(kind, "tap" | "swipe" | "type" | "home" | "key") {
+        return Err(CommandError::operation(format!(
+            "unknown group input kind: {kind}"
+        )));
+    }
+    if kind == "key" && !has_key {
+        return Err(CommandError::operation(
+            "group input kind key requires a hardware key",
+        ));
+    }
+    Ok(())
 }
 
 async fn continue_ui_context(
@@ -57,7 +87,23 @@ async fn continue_ui_context(
         .map_err(CommandError::from)
 }
 
-async fn with_manual_session<F, Fut>(
+/// A udid reduced to something that cannot steer a path.
+///
+/// Every artifact this app writes is named after a device, and a udid is not a safe filename:
+/// a Wi-Fi serial carries a `:`, which Windows refuses outright. Worse, `Path::join` with an
+/// **absolute** component *replaces* the path rather than extending it, so an unsanitised udid
+/// was not merely a bad filename — `C:/Users/x/.../Startup/z` or `\\host\share\z` would be
+/// written there instead, and `create_dir_all` would build the tree to meet it.
+///
+/// Same reduction `set_wallpaper_bytes` already applies, promoted to a shared helper so the
+/// next artifact path gets it for free instead of re-deriving the reasoning.
+pub(crate) fn safe_udid_stem(udid: &str) -> String {
+    udid.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
+pub(crate) async fn with_manual_session<F, Fut>(
     state: &AppState,
     udid: &str,
     owner: DeviceWorkOwner,
@@ -133,23 +179,56 @@ pub async fn prepare_device(
         .registry
         .set_status(&udid, riviu_core::DeviceStatus::Preparing, None);
     prepare_ui_with_control(&state.control, &udid).await?;
-    let mut device = state
-        .control
-        .refresh_device(&udid)
-        .await
-        .map_err(CommandError::from)
-        .or_else(|_| {
-            state
-                .registry
-                .get(&udid)
-                .ok_or_else(|| CommandError::operation("device missing"))
-        })?;
-    device.status = riviu_core::DeviceStatus::Ready;
+    // Two outcomes, and they used to be one. The confirming read is what turns "the
+    // preparation ran" into "and here is the device it left behind"; when it failed, the
+    // old code fell back to the *stale* registry record and then stamped `Ready` on it
+    // anyway. A phone unplugged between the session closing and this read came back as a
+    // Ready device with a healthy agent, described entirely from memory.
+    //
+    // What the preparation itself proves is kept, because it is proven:
+    // `prepare_ui_with_control` installed the agent and opened and closed a UI session, so
+    // `wda_ready` is earned on either path. What is not kept is a `Ready` status nobody
+    // observed, and the silence about why.
+    let refreshed = state.control.refresh_device(&udid).await;
+    let observed = match &refreshed {
+        Ok(device) => device.clone(),
+        Err(_) => state
+            .registry
+            .get(&udid)
+            .ok_or_else(|| CommandError::operation("device missing"))?,
+    };
+    let device = prepared_device(observed, refreshed.err().map(|error| error.to_string()));
+    state.registry.upsert(device.clone());
+    Ok(device)
+}
+
+/// Stamp a prepared device with what was proven, and only that.
+///
+/// `prepare_ui_with_control` installed the agent and opened and closed a UI session, so
+/// `wda_ready` is earned whichever way the confirming read went — that is why it is set on
+/// both paths. `Ready` is not: it describes the device as the refresh found it, and when
+/// the refresh failed nobody found it.
+///
+/// The old code took the stale registry record on failure and stamped `Ready` on it anyway.
+/// A phone unplugged between the session closing and the read came back as a Ready device
+/// with a healthy agent, described entirely from memory, and said nothing about the read
+/// that had just failed.
+fn prepared_device(mut device: DeviceInfo, unconfirmed: Option<String>) -> DeviceInfo {
     device.wda_ready = true;
     device.stream_url = None;
     device.tile_stream_state = riviu_core::TileStreamState::Parked;
-    state.registry.upsert(device.clone());
-    Ok(device)
+    match unconfirmed {
+        None => {
+            device.status = riviu_core::DeviceStatus::Ready;
+            device.last_error = None;
+        }
+        Some(reason) => {
+            device.last_error = Some(format!(
+                "Đã chuẩn bị xong nhưng không đọc lại được trạng thái máy: {reason}"
+            ));
+        }
+    }
+    device
 }
 
 #[tauri::command]
@@ -160,10 +239,8 @@ pub async fn install_ipa(
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let context = state
-        .control
-        .try_acquire_exclusive(&udid, DeviceWorkOwner::Repair)
-        .await
-        .map_err(CommandError::from)?;
+        .device_lease(&udid, DeviceWorkOwner::Repair, LeaseStream::Park)
+        .await?;
     state
         .control
         .install_app(&context, &PathBuf::from(path))
@@ -309,10 +386,8 @@ pub async fn uninstall_app(
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let context = state
-        .control
-        .try_acquire_exclusive(&udid, DeviceWorkOwner::Repair)
-        .await
-        .map_err(CommandError::from)?;
+        .device_lease(&udid, DeviceWorkOwner::Repair, LeaseStream::Park)
+        .await?;
     state
         .control
         .uninstall_app(&context, &bundle_id)
@@ -353,7 +428,8 @@ pub async fn list_installed_apps(
 pub async fn screenshot(state: State<'_, AppState>, udid: String) -> Result<String, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let dest = state.artifacts_dir.join("screenshots").join(format!(
-        "{udid}-{}.jpg",
+        "{}-{}.jpg",
+        safe_udid_stem(&udid),
         chrono::Utc::now().timestamp_millis()
     ));
     if let Some(bytes) = state.streams.latest(&udid) {
@@ -364,10 +440,8 @@ pub async fn screenshot(state: State<'_, AppState>, udid: String) -> Result<Stri
         return Ok(dest.display().to_string());
     }
     let context = state
-        .control
-        .try_acquire_exclusive_keeping_stream(&udid, DeviceWorkOwner::ManualControl)
-        .await
-        .map_err(CommandError::from)?;
+        .device_lease(&udid, DeviceWorkOwner::ManualControl, LeaseStream::Keep)
+        .await?;
     let path = state
         .control
         .screenshot(&context, &dest)
@@ -399,15 +473,187 @@ pub async fn device_shell(
     // acquire parks the live preview, so running a command would black the tile the
     // operator is watching for its effect.
     let context = state
-        .control
-        .try_acquire_exclusive_keeping_stream(&udid, DeviceWorkOwner::ManualControl)
-        .await
-        .map_err(CommandError::from)?;
+        .device_lease(&udid, DeviceWorkOwner::ManualControl, LeaseStream::Keep)
+        .await?;
     state
         .control
         .device_shell(&context, &script)
         .await
         .map_err(CommandError::from)
+}
+
+/// Put a picture or a video into the phone's gallery, where the operator can see it.
+///
+/// Stage, prepare, then import — all three, which is the difference between this and
+/// `push_material`. That one stops after staging, and staging lands the file in a hidden
+/// dot-directory that MediaStore does not index: a row labelled "Import" that puts a file
+/// somewhere the operator cannot find it would be the same lying button the Rotate row was
+/// written to avoid. The import step is what moves it into a visible directory and tells
+/// MediaStore about it.
+///
+/// One file per call, staged as a single-file campaign because that is the shape the
+/// measured pipeline takes. `_keeping_stream`, because the operator is watching the tile to
+/// see the picture appear.
+#[tauri::command]
+pub async fn import_media(
+    state: State<'_, AppState>,
+    udid: String,
+    path: String,
+) -> Result<String, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    import_one_media(&state, &udid, &path).await
+}
+
+/// Push one local media file into a device's gallery via stage → prepare → import. Shared by
+/// `import_media` (one device) and `distribute_files` (a different file per device), so the
+/// two agree byte-for-byte on the staging/manifest pipeline.
+async fn import_one_media(
+    state: &AppState,
+    udid: &str,
+    path: &str,
+) -> Result<String, CommandError> {
+    let source = PathBuf::from(path);
+    if !source.is_file() {
+        return Err(CommandError::invalid_argument(format!(
+            "không thấy file {path}"
+        )));
+    }
+    let name = source
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "media".to_string());
+
+    // A staging tree of exactly one file. The campaign id is per-call rather than per-file
+    // so two imports of the same picture do not collide in the device's staging directory.
+    let campaign_id = uuid::Uuid::new_v4().to_string();
+    let staged = state
+        .artifacts_dir
+        .join("import-staging")
+        .join(udid)
+        .join(&campaign_id);
+    std::fs::create_dir_all(&staged).map_err(CommandError::operation)?;
+    std::fs::copy(&source, staged.join(&name)).map_err(CommandError::operation)?;
+
+    let context = state
+        .device_lease(udid, DeviceWorkOwner::ManualControl, LeaseStream::Keep)
+        .await?;
+
+    let staged_evidence = state
+        .control
+        .stage_publish_media(
+            &context,
+            &state.active_agent_bundle_id,
+            &campaign_id,
+            &staged,
+        )
+        .await
+        .map_err(CommandError::from)?;
+    // The manifest hash the phone computed, which prepare and import both key on. Reading it
+    // back from the staging evidence rather than recomputing it here is the point: the two
+    // sides have to agree about what landed.
+    let manifest = staged_evidence
+        .get("manifestSha256")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            CommandError::operation("staging did not report a manifest hash to import against")
+        })?
+        .to_string();
+    state
+        .control
+        .prepare_publish_media(&context, &campaign_id, &manifest)
+        .await
+        .map_err(CommandError::from)?;
+    let imported = state
+        .control
+        .import_publish_media(&context, &campaign_id, &manifest)
+        .await
+        .map_err(CommandError::from)?;
+
+    // Best effort: the file is on the phone either way, and failing the whole import because
+    // a temporary directory survived would report a success as a failure.
+    let _ = std::fs::remove_dir_all(&staged);
+    Ok(format!("Đã đưa {name} vào thư viện máy ({imported})"))
+}
+
+/// One phone's share of a file-distribution run (feature A2, xiaowei "文件分发").
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct DistributeFileItem {
+    pub udid: String,
+    pub path: String,
+}
+
+/// Push a *different* file into each selected phone's gallery (xiaowei "File Distribution").
+/// Same per-device batch shape as `group_input`/`distribute_text`: a phone that fails is
+/// recorded and the run carries on, never aborting the batch.
+#[tauri::command]
+pub async fn distribute_files(
+    state: State<'_, AppState>,
+    assignments: Vec<DistributeFileItem>,
+) -> Result<GroupInputReport, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let mut report = GroupInputReport {
+        completed_udids: Vec::new(),
+        skipped: Vec::new(),
+    };
+    for item in assignments {
+        let DistributeFileItem { udid, path } = item;
+        match import_one_media(&state, &udid, &path).await {
+            Ok(_) => report.completed_udids.push(udid),
+            Err(error) => report.skipped.push(open_failure_skip(udid, error)),
+        }
+    }
+    Ok(report)
+}
+
+/// Copy the phone's photos and videos onto this machine.
+///
+/// The other direction, and a genuinely different operation: the import path above knows
+/// about campaigns and manifests, this one knows only that the operator wants whatever is in
+/// the camera roll right now.
+/// What an export found and what of it landed.
+///
+/// The command used to return a bare count of files written, which cannot express the
+/// failure it most needed to: a phone with five hundred photos of which twenty copied
+/// reported `20`, and the toast said "Đã lấy 20 file" — the same words it says about a
+/// phone that only ever had twenty. The per-file failures were logged where nobody was
+/// looking.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaExportReport {
+    pub fetched: u32,
+    pub found: u32,
+    pub missed: u32,
+}
+
+#[tauri::command]
+pub async fn export_media(
+    state: State<'_, AppState>,
+    udid: String,
+    dest_dir: String,
+) -> Result<MediaExportReport, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let dest = PathBuf::from(&dest_dir);
+    if !dest.is_dir() {
+        return Err(CommandError::invalid_argument(format!(
+            "không thấy thư mục {dest_dir}"
+        )));
+    }
+    // Per device, so exporting two phones into one folder does not interleave their camera
+    // rolls into an unsortable pile.
+    let into = dest.join(format!("riviu-{}", safe_udid_stem(&udid)));
+    let context = state
+        .device_lease(&udid, DeviceWorkOwner::ManualControl, LeaseStream::Keep)
+        .await?;
+    let pulled = state
+        .control
+        .pull_media(&context, &into)
+        .await
+        .map_err(CommandError::from)?;
+    Ok(MediaExportReport {
+        fetched: pulled.fetched.len() as u32,
+        found: pulled.found as u32,
+        missed: pulled.missed() as u32,
+    })
 }
 
 /// Ask a device to rotate, and report the rotation it actually settled at.
@@ -425,10 +671,8 @@ pub async fn set_screen_rotation(
     let _admission = state.ensure_accepting_work()?;
     // Keeps the stream for the same reason: the whole point is to watch the tile turn.
     let context = state
-        .control
-        .try_acquire_exclusive_keeping_stream(&udid, DeviceWorkOwner::ManualControl)
-        .await
-        .map_err(CommandError::from)?;
+        .device_lease(&udid, DeviceWorkOwner::ManualControl, LeaseStream::Keep)
+        .await?;
     state
         .control
         .set_screen_rotation(&context, rotation)
@@ -444,10 +688,8 @@ pub async fn syslog(
 ) -> Result<String, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let context = state
-        .control
-        .try_acquire_exclusive(&udid, DeviceWorkOwner::ManualControl)
-        .await
-        .map_err(CommandError::from)?;
+        .device_lease(&udid, DeviceWorkOwner::ManualControl, LeaseStream::Park)
+        .await?;
     state
         .control
         .syslog_tail(&context, lines.unwrap_or(100))
@@ -459,10 +701,8 @@ pub async fn syslog(
 pub async fn reboot_device(state: State<'_, AppState>, udid: String) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let context = state
-        .control
-        .try_acquire_exclusive(&udid, DeviceWorkOwner::Repair)
-        .await
-        .map_err(CommandError::from)?;
+        .device_lease(&udid, DeviceWorkOwner::Repair, LeaseStream::Park)
+        .await?;
     state
         .control
         .reboot(&context)
@@ -478,10 +718,8 @@ pub async fn backup_device(
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let context = state
-        .control
-        .try_acquire_exclusive(&udid, DeviceWorkOwner::Repair)
-        .await
-        .map_err(CommandError::from)?;
+        .device_lease(&udid, DeviceWorkOwner::Repair, LeaseStream::Park)
+        .await?;
     state
         .control
         .backup_device(&context, std::path::Path::new(&dest))
@@ -497,10 +735,8 @@ pub async fn restore_device(
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let context = state
-        .control
-        .try_acquire_exclusive(&udid, DeviceWorkOwner::Repair)
-        .await
-        .map_err(CommandError::from)?;
+        .device_lease(&udid, DeviceWorkOwner::Repair, LeaseStream::Park)
+        .await?;
     state
         .control
         .restore_device(&context, std::path::Path::new(&src))
@@ -526,6 +762,47 @@ pub async fn device_tap(
             match (image_w, image_h) {
                 (Some(w), Some(h)) if w > 0.0 && h > 0.0 => session.tap_image(x, y, w, h).await,
                 _ => session.tap(TapPoint { x, y }).await,
+            }
+        },
+    )
+    .await
+}
+
+/// A drag as the path the finger actually took, not as its two endpoints.
+///
+/// `device_swipe` sends one `pointerMove`, which the framework receives as a perfectly
+/// straight line at a perfectly constant velocity between the same two points every time.
+/// The overlay was deciding the whole gesture at release from exactly two samples, so that
+/// is all it could ever produce -- which is what "not sticking to the finger" was.
+///
+/// The agent's `/actions` takes an arbitrary number of moves with individual durations in
+/// ONE round trip, so the curve costs no more than the straight line did.
+#[tauri::command]
+pub async fn device_swipe_path(
+    state: State<'_, AppState>,
+    udid: String,
+    path: riviu_core::types::SwipePath,
+    image_w: Option<f64>,
+    image_h: Option<f64>,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    // A path with no steps is not a drag; refuse it here rather than letting it reach the
+    // device as a touch that never moves and never lifts.
+    if path.steps.is_empty() {
+        return Err(CommandError::operation(anyhow::anyhow!(
+            "a swipe path needs at least one step"
+        )));
+    }
+    with_manual_session(
+        &state,
+        &udid,
+        DeviceWorkOwner::ManualControl,
+        |session| async move {
+            match (image_w, image_h) {
+                (Some(w), Some(h)) if w > 0.0 && h > 0.0 => {
+                    session.swipe_path_image(path, w, h).await
+                }
+                _ => session.swipe_path(path).await,
             }
         },
     )
@@ -603,6 +880,24 @@ pub async fn device_key(
     .await
 }
 
+/// Lock (screen off) or unlock a phone — xiaowei "锁屏/解锁", batched by the UI over a group
+/// (D, iOS `useIphoneLockScreen`; cross-platform via `UiSession::set_locked`).
+#[tauri::command]
+pub async fn set_screen_locked(
+    state: State<'_, AppState>,
+    udid: String,
+    locked: bool,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    with_manual_session(
+        &state,
+        &udid,
+        DeviceWorkOwner::ManualControl,
+        move |session| async move { session.set_locked(locked).await },
+    )
+    .await
+}
+
 #[tauri::command]
 pub async fn device_control_begin(
     state: State<'_, AppState>,
@@ -621,6 +916,27 @@ pub async fn device_control_end(
     state.end_overlay_session(&udid).await
 }
 
+/// The skip entry a phone gets when its session could not be opened.
+///
+/// A function rather than two arms inline, because the two arms were the defect:
+/// `DeviceBusy` was recorded and the loop carried on, and **every other code aborted the
+/// whole batch** — discarding `completed_udids` and telling the operator the fleet action
+/// had failed when nineteen of twenty phones had already taken the input. A phone that is
+/// unplugged, whose agent has died, or that answers with anything unexpected is exactly as
+/// skippable as a busy one, and on a fleet this size it is the likelier of the two.
+///
+/// `message` is `None` only for Busy, which explains itself through `current_owner`.
+/// Anything else carries its reason: "one of your twenty phones did not work" is not
+/// something an operator can act on.
+fn open_failure_skip(udid: String, error: CommandError) -> GroupInputSkip {
+    let busy = error.code == "DeviceBusy";
+    GroupInputSkip {
+        udid,
+        code: error.code,
+        current_owner: error.current_owner,
+        message: (!busy).then(|| error.message.to_string()),
+    }
+}
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn group_input(
@@ -635,19 +951,31 @@ pub async fn group_input(
     image_w: Option<f64>,
     image_h: Option<f64>,
     key: Option<HardwareKey>,
+    sync: Option<GroupSyncPolicy>,
 ) -> Result<GroupInputReport, CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    if !matches!(kind.as_str(), "tap" | "swipe" | "type" | "home" | "key") {
-        return Err(CommandError::operation(format!(
-            "unknown group input kind: {kind}"
-        )));
-    }
+    check_group_input(&kind, key.is_some())?;
     let scale = matches!((image_w, image_h), (Some(w), Some(h)) if w > 0.0 && h > 0.0);
+    // Group-sync timing/offset (A1). Absent policy = the old lockstep behaviour, so callers
+    // that never send `sync` are unchanged. One seed per operation keeps successive group
+    // actions different while any single one stays reproducible (the policy is pure/tested).
+    let sync = sync.unwrap_or_default();
+    let group_count = udids.len();
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
     let mut report = GroupInputReport {
         completed_udids: Vec::new(),
         skipped: Vec::new(),
     };
-    for udid in udids {
+    for (ordinal, udid) in udids.into_iter().enumerate() {
+        // Compute this device's delay/offset before touching anything. Sleep *before*
+        // opening the session so a staggered wait does not hold a GroupSync lease idle.
+        let plan = sync.plan(ordinal, group_count, seed);
+        if plan.delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(plan.delay_ms)).await;
+        }
         let overlay_session = state.overlay_ui_session(&udid).await;
         let owned = if overlay_session.is_none() {
             match state
@@ -657,36 +985,47 @@ pub async fn group_input(
             {
                 Ok(context) => Some(context),
                 Err(error) => {
-                    let error = CommandError::from(error);
-                    if error.code == "DeviceBusy" {
-                        report.skipped.push(GroupInputSkip {
-                            udid,
-                            code: error.code,
-                            current_owner: error.current_owner,
-                        });
-                        continue;
-                    }
-                    return Err(error);
+                    report
+                        .skipped
+                        .push(open_failure_skip(udid, CommandError::from(error)));
+                    continue;
                 }
             }
         } else {
             None
         };
+        // The same rule as the open above: a lookup that fails is this phone's problem,
+        // not the batch's. `?` here threw away every phone already actioned.
         let session = match overlay_session {
             Some(session) => session,
-            None => state
-                .control
-                .session(
-                    owned
-                        .as_ref()
-                        .expect("group input opened a session when no overlay is held"),
-                )
-                .map_err(CommandError::from)?,
+            None => match state.control.session(
+                owned
+                    .as_ref()
+                    .expect("group input opened a session when no overlay is held"),
+            ) {
+                Ok(session) => session,
+                Err(error) => {
+                    report
+                        .skipped
+                        .push(open_failure_skip(udid, CommandError::from(error)));
+                    continue;
+                }
+            },
         };
+        // In image mode the coordinates are pixels bounded by the frame, so jitter must be
+        // clamped on-screen; in logical mode there is no upper bound (only floored at 0).
+        let bound_w = scale.then(|| image_w.unwrap());
+        let bound_h = scale.then(|| image_h.unwrap());
         let action = match kind.as_str() {
             "tap" => {
-                let x = x.unwrap_or(0.0);
-                let y = y.unwrap_or(0.0);
+                let (x, y) = apply_offset(
+                    x.unwrap_or(0.0),
+                    y.unwrap_or(0.0),
+                    plan.dx,
+                    plan.dy,
+                    bound_w,
+                    bound_h,
+                );
                 if scale {
                     session
                         .tap_image(x, y, image_w.unwrap(), image_h.unwrap())
@@ -696,14 +1035,26 @@ pub async fn group_input(
                 }
             }
             "swipe" => {
-                let from = TapPoint {
-                    x: x.unwrap_or(0.0),
-                    y: y.unwrap_or(0.0),
-                };
-                let to = TapPoint {
-                    x: to_x.unwrap_or(0.0),
-                    y: to_y.unwrap_or(0.0),
-                };
+                // Shift both endpoints by the same offset: the gesture's shape and length are
+                // preserved, only its position on the screen jitters.
+                let (fx, fy) = apply_offset(
+                    x.unwrap_or(0.0),
+                    y.unwrap_or(0.0),
+                    plan.dx,
+                    plan.dy,
+                    bound_w,
+                    bound_h,
+                );
+                let (tx, ty) = apply_offset(
+                    to_x.unwrap_or(0.0),
+                    to_y.unwrap_or(0.0),
+                    plan.dx,
+                    plan.dy,
+                    bound_w,
+                    bound_h,
+                );
+                let from = TapPoint { x: fx, y: fy };
+                let to = TapPoint { x: tx, y: ty };
                 if scale {
                     session
                         .swipe_image(from, to, image_w.unwrap(), image_h.unwrap(), 300)
@@ -720,32 +1071,680 @@ pub async fn group_input(
             }
             "type" => session.type_text(text.as_deref().unwrap_or("")).await,
             "home" => session.home().await,
-            "key" => match key {
-                Some(key) => session.press_hardware_key(key).await,
-                None => {
-                    if let Some(context) = owned {
-                        state
-                            .control
-                            .close_manual_session(context)
-                            .map_err(CommandError::from)?;
-                    }
-                    return Err(CommandError::operation(
-                        "group input kind key requires a hardware key",
-                    ));
-                }
-            },
+            // Validated before the loop, so this arm cannot be reached without a key.
+            "key" => {
+                session
+                    .press_hardware_key(key.expect("key was validated"))
+                    .await
+            }
             _ => unreachable!("group input kind was validated"),
         };
-        if let Some(context) = owned {
-            let cleanup = state.control.close_manual_session(context);
-            action.map_err(CommandError::operation)?;
-            cleanup.map_err(CommandError::from)?;
-        } else {
-            action.map_err(CommandError::operation)?;
+        // The session is closed whatever the action did. Leaking a GroupSync lease because a
+        // tap failed would take the phone out of the fleet until the app restarts.
+        let cleanup = match owned {
+            Some(context) => state.control.close_manual_session(context).err(),
+            None => None,
+        };
+        // Both arms below consume `udid`, and the cleanup report after them needs it.
+        let udid_for_cleanup = udid.clone();
+        match action {
+            Ok(()) => report.completed_udids.push(udid),
+            // **Record and carry on, rather than abort.** This used to be `?`, so the first
+            // phone that failed for any reason other than Busy threw away
+            // `completed_udids` and told the operator the whole batch had failed — when in
+            // a twenty-phone fleet nineteen of them may have worked. One fleet-batch shape
+            // in this codebase, matching `install_ipa_to_group`.
+            Err(error) => report.skipped.push(GroupInputSkip {
+                udid,
+                code: "ActionFailed".to_string(),
+                current_owner: None,
+                message: Some(error.to_string()),
+            }),
         }
-        report.completed_udids.push(udid);
+        // A cleanup that failed does not undo an input that landed, and it is not a
+        // reason to abandon the phones after this one. The udid stays in
+        // `completed_udids` because the tap really did happen; the failure is reported
+        // beside it so the operator learns the session did not close cleanly. Appearing
+        // in both lists is the accurate description of that, not a contradiction.
+        if let Some(error) = cleanup {
+            let error = CommandError::from(error);
+            report.skipped.push(GroupInputSkip {
+                udid: udid_for_cleanup,
+                code: "CleanupFailed".to_string(),
+                current_owner: None,
+                message: Some(error.message.to_string()),
+            });
+        }
     }
     Ok(report)
+}
+
+/// One phone's share of a text-distribution run (feature A2, xiaowei `inputBatch`).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct DistributeTextItem {
+    pub udid: String,
+    pub text: String,
+}
+
+/// Type a *different* string onto each selected phone (xiaowei "文字分发 / Text Distribution").
+///
+/// The frontend has already split the block and paired each piece to a phone in the operator's
+/// chosen order, so here we only apply. Cross-platform: it goes through `UiSession::type_text`,
+/// which on Android reaches `ACTION_SET_TEXT` (the one route that carries Vietnamese
+/// diacritics) and on iOS reaches WDA — the same path `group_input`'s `type` uses. Same
+/// per-device batch shape as `group_input`: a phone that fails is recorded and the run
+/// carries on, never aborting the batch.
+#[tauri::command]
+pub async fn distribute_text(
+    state: State<'_, AppState>,
+    assignments: Vec<DistributeTextItem>,
+) -> Result<GroupInputReport, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let mut report = GroupInputReport {
+        completed_udids: Vec::new(),
+        skipped: Vec::new(),
+    };
+    for item in assignments {
+        let DistributeTextItem { udid, text } = item;
+        let overlay_session = state.overlay_ui_session(&udid).await;
+        let owned = if overlay_session.is_none() {
+            match state
+                .control
+                .open_manual_session(&udid, DeviceWorkOwner::GroupSync)
+                .await
+            {
+                Ok(context) => Some(context),
+                Err(error) => {
+                    report
+                        .skipped
+                        .push(open_failure_skip(udid, CommandError::from(error)));
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        let session = match overlay_session {
+            Some(session) => session,
+            None => match state.control.session(
+                owned
+                    .as_ref()
+                    .expect("distribute_text opened a session when no overlay is held"),
+            ) {
+                Ok(session) => session,
+                Err(error) => {
+                    report
+                        .skipped
+                        .push(open_failure_skip(udid, CommandError::from(error)));
+                    continue;
+                }
+            },
+        };
+        let action = session.type_text(&text).await;
+        let cleanup = match owned {
+            Some(context) => state.control.close_manual_session(context).err(),
+            None => None,
+        };
+        let udid_for_cleanup = udid.clone();
+        match action {
+            Ok(()) => report.completed_udids.push(udid),
+            Err(error) => report.skipped.push(GroupInputSkip {
+                udid,
+                code: "ActionFailed".to_string(),
+                current_owner: None,
+                message: Some(error.to_string()),
+            }),
+        }
+        if let Some(error) = cleanup {
+            let error = CommandError::from(error);
+            report.skipped.push(GroupInputSkip {
+                udid: udid_for_cleanup,
+                code: "CleanupFailed".to_string(),
+                current_owner: None,
+                message: Some(error.message.to_string()),
+            });
+        }
+    }
+    Ok(report)
+}
+
+/// Put a USB Android phone into wireless adb and connect to it (A4). Returns `host:port`.
+#[tauri::command]
+pub async fn enable_wifi_adb(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<String, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    // On Android the udid is the adb serial.
+    android
+        .enable_wifi_adb(&udid)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Put adbd back on USB, closing the `0.0.0.0:5555` port `enable_wifi_adb` opened (A4).
+///
+/// The counterpart that was missing: `wifi_adb_disconnect` only drops this host's client, so
+/// before this the only way to close the port was to reboot the phone.
+#[tauri::command]
+pub async fn disable_wifi_adb(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .disable_wifi_adb(&udid)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// `adb connect host:port` — manual wireless connect (A4).
+#[tauri::command]
+pub async fn wifi_adb_connect(
+    state: State<'_, AppState>,
+    host: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .wifi_connect(&host)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// `adb disconnect host:port` (A4).
+#[tauri::command]
+pub async fn wifi_adb_disconnect(
+    state: State<'_, AppState>,
+    host: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .wifi_disconnect(&host)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Set an Android phone's wallpaper from a local image file (A3, "number as wallpaper").
+#[tauri::command]
+pub async fn set_wallpaper(
+    state: State<'_, AppState>,
+    udid: String,
+    path: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .set_wallpaper(&udid, &path)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Inject a mock GPS location on an Android phone (B, "虚拟定位").
+#[tauri::command]
+pub async fn set_mock_location(
+    state: State<'_, AppState>,
+    udid: String,
+    lat: f64,
+    lng: f64,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .set_mock_location(&udid, lat, lng)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Stop mock location, returning the phone to real GPS (B).
+#[tauri::command]
+pub async fn stop_mock_location(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .stop_mock_location(&udid)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Set an Android wallpaper from PNG bytes the webview rendered (A3, "number as wallpaper").
+/// The bytes are written to the app's own artifacts dir (always writable, unlike a
+/// frontend temp path bound by the fs ACL) and handed to the driver to push + apply.
+#[tauri::command]
+pub async fn set_wallpaper_bytes(
+    state: State<'_, AppState>,
+    udid: String,
+    png: Vec<u8>,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    let dir = state.artifacts_dir.join("wallpaper");
+    std::fs::create_dir_all(&dir).map_err(CommandError::operation)?;
+    let path = dir.join(format!("{}.png", safe_udid_stem(&udid)));
+    std::fs::write(&path, &png).map_err(CommandError::operation)?;
+    android
+        .set_wallpaper(&udid, path.to_string_lossy().as_ref())
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Whether an Android phone is rooted (Magisk `su`), for gating the root-tier UI (feature C).
+#[tauri::command]
+pub async fn is_rooted(state: State<'_, AppState>, udid: String) -> Result<bool, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Ok(false);
+    };
+    Ok(android.is_rooted(&udid).await)
+}
+
+/// Overwrite the app-visible device fingerprint (feature C, xiaowei 一键新机). android_id
+/// applies without root; serialno/mac need root. Returns a summary of what changed.
+#[tauri::command]
+pub async fn set_device_identity(
+    state: State<'_, AppState>,
+    udid: String,
+    android_id: Option<String>,
+    serialno: Option<String>,
+    mac: Option<String>,
+) -> Result<String, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .set_device_identity(
+            &udid,
+            android_id.as_deref(),
+            serialno.as_deref(),
+            mac.as_deref(),
+        )
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Factory-reset a rooted Android phone (feature C). Irreversible; UI confirms first.
+#[tauri::command]
+pub async fn factory_reset(state: State<'_, AppState>, udid: String) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .factory_reset(&udid)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Run one root shell command on an Android phone (feature C, advanced). Errors if not rooted.
+#[tauri::command]
+pub async fn root_shell(
+    state: State<'_, AppState>,
+    udid: String,
+    command: String,
+) -> Result<String, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .root_shell(&udid, &command)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+// --- The per-phone function menu (xiaowei 功能). One command per row, and each one is the
+// whole row: the frontend never assembles a shell string, because a menu item that pastes
+// `rm -rf` into a device shell from TypeScript is a menu item with no validator in front of
+// it. Every Android call below lives in `AndroidDriver` where the path and package
+// validators are. ---
+
+/// Read one directory on the phone, for the file browser (xiaowei "Preview Mobile Files").
+///
+/// Lease-free, deliberately, and following `list_installed_apps`: it reads nothing but a
+/// directory listing, and taking an exclusive lease to open a folder would let a browser
+/// click evict a running nurture session.
+#[tauri::command]
+pub async fn device_list_dir(
+    state: State<'_, AppState>,
+    udid: String,
+    path: String,
+) -> Result<Vec<riviu_core::DeviceFileEntry>, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .list_device_dir(&udid, &path)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Copy one file or folder from the phone to this machine (xiaowei "Export File").
+/// Returns the local path it landed at.
+#[tauri::command]
+pub async fn device_pull_path(
+    state: State<'_, AppState>,
+    udid: String,
+    remote: String,
+    dest_dir: String,
+) -> Result<String, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    let dest = PathBuf::from(&dest_dir);
+    if !dest.is_dir() {
+        return Err(CommandError::invalid_argument(format!(
+            "không thấy thư mục {dest_dir}"
+        )));
+    }
+    android
+        .pull_device_path(&udid, &remote, &dest)
+        .await
+        .map(|path| path.display().to_string())
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Put one local file onto the phone (xiaowei "Import File"). Returns the device path.
+#[tauri::command]
+pub async fn device_push_file(
+    state: State<'_, AppState>,
+    udid: String,
+    local: String,
+    remote_dir: String,
+) -> Result<String, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .push_device_file(&udid, Path::new(&local), &remote_dir)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Delete a file or folder on the phone. The driver refuses storage roots; the UI confirms.
+#[tauri::command]
+pub async fn device_delete_path(
+    state: State<'_, AppState>,
+    udid: String,
+    path: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .delete_device_path(&udid, &path)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Turn the phone's Wi-Fi radio on or off, returning the state it settled at (xiaowei ADB
+/// submenu). Note this is the *phone's* Wi-Fi, not this app's wireless-adb link — a phone
+/// reached over Wi-Fi disconnects itself by obeying, which the UI warns about first.
+#[tauri::command]
+pub async fn set_wifi_radio(
+    state: State<'_, AppState>,
+    udid: String,
+    on: bool,
+) -> Result<bool, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .set_wifi_radio(&udid, on)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Put the display back to its factory density and/or resolution (xiaowei "Reset DPI" /
+/// "Reset resolution"). Returns what the phone reads as afterwards.
+#[tauri::command]
+pub async fn reset_display_metrics(
+    state: State<'_, AppState>,
+    udid: String,
+    density: bool,
+    size: bool,
+) -> Result<String, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .reset_display_metrics(&udid, density, size)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Power the phone off (xiaowei "Shutdown"). Irreversible from here — only a human at the
+/// phone can turn it back on — so the UI confirms with that said plainly.
+#[tauri::command]
+pub async fn power_off_device(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .power_off(&udid)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Open the phone's own Settings app (xiaowei "Phone Settings").
+#[tauri::command]
+pub async fn open_system_settings(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .open_system_settings(&udid)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Wake the screen (xiaowei "Turn On Screen"). KEYCODE_WAKEUP, so calling it on an awake
+/// phone does nothing — unlike the power key, which would put it to sleep.
+#[tauri::command]
+pub async fn wake_screen(state: State<'_, AppState>, udid: String) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .wake_screen(&udid)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Screenshot into the phone's own gallery (xiaowei "Screenshot to phone"). Returns the
+/// device path; the companion `screenshot` command is the one that copies to this machine.
+#[tauri::command]
+pub async fn screenshot_to_device(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<String, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .screenshot_to_device(&udid)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Switch the phone's keyboard (xiaowei "Switch Input Method"). The picker only ever offers
+/// ids the phone itself printed, and the driver refuses the Riviu helper's own IME.
+#[tauri::command]
+pub async fn set_input_method(
+    state: State<'_, AppState>,
+    udid: String,
+    ime_id: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .set_input_method(&udid, &ime_id)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Bring one app to the front of one phone (xiaowei's App List, where a click launches).
+///
+/// Goes through the control plane rather than the Android driver directly, because unlike
+/// everything else in this block it is *not* Android-only: foregrounding an app is a thing
+/// both platforms do, and the lease keeps the live tile up while it happens.
+#[tauri::command]
+pub async fn launch_device_app(
+    state: State<'_, AppState>,
+    udid: String,
+    bundle_id: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let context = state
+        .device_lease(&udid, DeviceWorkOwner::ManualControl, LeaseStream::Keep)
+        .await?;
+    state
+        .control
+        .launch_app(&context, &bundle_id)
+        .await
+        .map_err(CommandError::from)
+}
+
+/// What the phone had on its clipboard.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardRead {
+    /// The phone's own MIME description, e.g. `text/plain`. Reported rather than assumed:
+    /// a clipboard holding an image is a real answer and the UI has to be able to say so
+    /// instead of showing empty text.
+    pub content_type: String,
+    /// Decoded as UTF-8 when it is text. Non-text content leaves this empty and `bytes`
+    /// carries the size.
+    pub text: String,
+    pub bytes: usize,
+}
+
+/// Read the phone's clipboard onto this machine (xiaowei "Export Clipboard").
+///
+/// The one row of the reference product's menu that this app had a *session method* for and
+/// no command over it, which is why it went missing for so long: `UiSession::get_clipboard`
+/// has existed since the interaction work and nothing could call it.
+///
+/// The ceiling is [`MAX_INTERACTION_CLIPBOARD_BYTES`] and not a number chosen here. Measured
+/// 21/08/2026 on 23021RAAEG: asking for 256 KiB — which looked like a generous, harmless
+/// choice — is refused outright with `clipboard read limit exceeds 65536 bytes`, because the
+/// capability contract pins the value on both platforms rather than treating it as a maximum.
+/// So the constant is the contract's, and a clipboard bigger than that is the phone's answer
+/// to report, not something to raise a limit for.
+#[tauri::command]
+pub async fn device_get_clipboard(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<ClipboardRead, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let read = std::sync::Arc::new(parking_lot::Mutex::new(None));
+    let sink = read.clone();
+    with_manual_session(
+        &state,
+        &udid,
+        DeviceWorkOwner::ManualControl,
+        move |session| async move {
+            let (content_type, bytes) = session
+                .get_clipboard(riviu_core::MAX_INTERACTION_CLIPBOARD_BYTES)
+                .await?;
+            *sink.lock() = Some((content_type, bytes));
+            Ok(())
+        },
+    )
+    .await?;
+    let (content_type, bytes) = read
+        .lock()
+        .take()
+        .ok_or_else(|| CommandError::operation("máy không trả về nội dung clipboard"))?;
+    Ok(ClipboardRead {
+        // Lossy on purpose: a clipboard holding half a UTF-8 sequence is still worth
+        // showing, and refusing the whole read over one bad byte would lose the rest.
+        text: String::from_utf8_lossy(&bytes).to_string(),
+        bytes: bytes.len(),
+        content_type,
+    })
+}
+
+/// Write text onto the phone's clipboard, so the operator can paste it there by hand.
+#[tauri::command]
+pub async fn device_set_clipboard(
+    state: State<'_, AppState>,
+    udid: String,
+    text: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    with_manual_session(
+        &state,
+        &udid,
+        DeviceWorkOwner::ManualControl,
+        move |session| async move { session.set_clipboard("text/plain", text.as_bytes()).await },
+    )
+    .await
+}
+
+/// One host discovered on the LAN via the ARP table (feature A9).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArpEntry {
+    pub ip: String,
+    pub mac: String,
+}
+
+/// Scan the host's ARP table for LAN devices, so the operator can pick one and `adb connect`
+/// to it wirelessly (A9, xiaowei ARP list). Reads the OS `arp -a`; does not touch any phone.
+#[tauri::command]
+pub async fn arp_scan(state: State<'_, AppState>) -> Result<Vec<ArpEntry>, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let output = tokio::process::Command::new("arp")
+        .arg("-a")
+        .output()
+        .await
+        .map_err(|e| CommandError::operation(format!("arp -a lỗi: {e}")))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(riviu_android_driver::adb::parse_arp_table(&stdout)
+        .into_iter()
+        .map(|(ip, mac)| ArpEntry { ip, mac })
+        .collect())
 }
 
 #[tauri::command]
@@ -760,6 +1759,11 @@ pub fn get_stream_settings(state: State<'_, AppState>) -> StreamSettings {
 /// had no reader anywhere in the tree. Both are now clamped rather than discarded and
 /// pushed into the Android view path.
 ///
+/// And the whole row now **survives a restart**. It did not: the value lived only in an
+/// `Arc<RwLock<_>>` built from `Default` at bootstrap, so an operator's choice lasted until
+/// they closed the app — a save that quietly forgets is not much better than the no-op this
+/// already replaced once.
+///
 /// Running tiles are restarted so the change is visible: a settings row that only
 /// applies to phones started later is the same silent no-op this replaces. The restart
 /// is the path the watchdog already takes several times an hour, so it costs a second
@@ -771,13 +1775,17 @@ pub async fn set_stream_settings(
 ) -> Result<StreamSettings, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let mut s = settings;
-    s.fps = s
-        .fps
-        .clamp(riviu_android_driver::MIN_VIEW_FPS, MAX_SETTABLE_VIEW_FPS);
+    s.fps = clamp_stream_fps(s.fps);
+    // Persist before applying. A save that takes effect for this session and vanishes on
+    // restart is worse than one that reports it could not be written.
+    state
+        .db
+        .save_stream_settings(&s)
+        .map_err(CommandError::operation)?;
     *state.stream_settings.write() = s.clone();
 
     if let Some(android) = &state.android {
-        android.set_view_tuning(s.grid_quality.clone(), s.fps);
+        android.set_view_tuning(s.grid_quality.clone(), s.focus_quality.clone(), s.fps);
         for device in state.registry.list() {
             if device.platform != riviu_core::DevicePlatform::Android {
                 continue;
@@ -791,6 +1799,31 @@ pub async fn set_stream_settings(
             // Retune restarts the same producer rather than spawning a second one.
             // A failure here is logged and skipped: one phone that will not retune must
             // not stop the setting from reaching the rest of the fleet.
+            //
+            // Under the same ceiling as every other producer restart. The loop is already
+            // sequential, so on an idle fleet it never waits; the permit is what stops it
+            // stacking on top of recoveries the keeper started, which is how a settings
+            // change used to become a twenty-first concurrent scrcpy spawn.
+            let frames = state
+                .view_paint
+                .sample(&device.udid)
+                .map(|report| report.frames)
+                .unwrap_or(0);
+            let permit = match state
+                .view_recovery
+                .admit_operator(&device.udid, frames)
+                .await
+            {
+                Ok(permit) => permit,
+                Err(error) => {
+                    log::warn!(
+                        "could not retune {} after a settings change: {}",
+                        device.udid,
+                        error.message
+                    );
+                    continue;
+                }
+            };
             if let Err(error) = android
                 .set_view_preset(&device.udid, riviu_android_driver::ViewPreset::Tile)
                 .await
@@ -800,6 +1833,8 @@ pub async fn set_stream_settings(
                     device.udid
                 );
             }
+            drop(permit);
+            state.view_paint.clear(&device.udid);
         }
     }
     Ok(s)
@@ -817,6 +1852,36 @@ pub fn view_endpoint(state: State<'_, AppState>) -> Result<Option<String>, Strin
     Ok(state.view_hub.endpoint())
 }
 
+/// What the frontend painted, for every device it is tracking, as of its last tick.
+///
+/// The frontend is the only thing that can see whether a frame came out of the decoder, and
+/// AGENTS.md 9.66 is why it cannot simply log it: vite forwards the page's console but not a
+/// Web Worker's, so counters that stay inside the worker are invisible by construction. This
+/// carries them to the one place that can act on them.
+///
+/// Deliberately **not** on the mutating-command inventory and deliberately without
+/// `ensure_accepting_work`: it writes a ledger, touches no device, and must keep working
+/// while the app is draining so the last reports before a quit are not lost.
+///
+/// One call per tick for the whole fleet rather than one per device per beat — at twenty
+/// phones and a 1 s beat the per-device shape would be twenty IPC round trips a second to
+/// say "still fine".
+#[tauri::command]
+pub fn view_report_paint(state: State<'_, AppState>, reports: Vec<PaintReport>) {
+    let now = std::time::Instant::now();
+    for report in &reports {
+        // The hub's generation is the authority on which producer is current. A report from
+        // before a restart is not evidence about the producer that replaced it.
+        let current = state.view_hub.current_generation(&report.udid);
+        state.view_paint.record(report, current, now);
+        if report.generation == current {
+            state
+                .view_recovery
+                .note_painted(&report.udid, report.frames);
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn view_ensure(state: State<'_, AppState>, udid: String) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
@@ -831,13 +1896,102 @@ pub async fn view_ensure(state: State<'_, AppState>, udid: String) -> Result<(),
     if platform != riviu_core::DevicePlatform::Android {
         return Ok(());
     }
-    android.stop_view_stream(&udid).await;
-    android
-        .start_view_stream(&udid, riviu_android_driver::ViewPreset::Tile)
-        .await
-        .map_err(CommandError::operation)?;
-    crate::state::mark_android_view_live(&state.registry, &udid);
+    // Do not tear down a producer somebody else is already replacing. This stops before it
+    // claims, so losing that race used to leave the device with NO producer at all until the
+    // keeper's next tick -- a stream the operator was watching went away because a recovery
+    // for it started somewhere else. A start already in flight satisfies "ensure".
+    if android.view_start_in_flight(&udid) {
+        return Ok(());
+    }
+    // "Ensure" means two different operations depending on what is there, and only one of
+    // them is rationed. With no producer running this is a first start: nothing is torn down,
+    // so it takes no permit -- which is what keeps `startFleetPreview`'s twenty-way fan-out
+    // (startPreview.ts) as fast as the bench says it can be. With one running, ensuring it
+    // means replacing a picture that may be working, and that is precisely what the ceiling
+    // is for.
+    if !android.view_is_active(&udid).await {
+        crate::view_watchdog::start_android_view(android, &state.registry, &udid)
+            .await
+            .map_err(CommandError::operation)?;
+        return Ok(());
+    }
+    let frames = state
+        .view_paint
+        .sample(&udid)
+        .map(|report| report.frames)
+        .unwrap_or(0);
+    let permit = state.view_recovery.admit_operator(&udid, frames).await?;
+    // Stop-then-start, the preset the operator last asked for, and the ledger cleared -- all
+    // of it in one place now, so the keeper and this command cannot drift apart.
+    crate::view_watchdog::restart_android_view(
+        android,
+        &state.registry,
+        &state.view_paint,
+        &udid,
+        permit,
+    )
+    .await
+    .map_err(CommandError::operation)?;
     Ok(())
+}
+
+/// Ask the phone for a fresh keyframe. The cheap half of "the picture is stuck".
+///
+/// Takes **no recovery permit**, deliberately: it tears nothing down, so the ceiling that
+/// bounds how much of the fleet can go dark at once has nothing to bound here. It is also
+/// the operator-facing half of what the watchdog now tries first — one byte and a fresh IDR,
+/// against ~11.5 s of black tile for a restart.
+#[tauri::command]
+pub async fn view_request_keyframe(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<bool, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Ok(false);
+    };
+    android
+        .request_keyframe(&udid)
+        .await
+        .map_err(CommandError::operation)
+}
+
+/// One touch event, live, on the scrcpy control socket.
+///
+/// **Not a replacement for `device_tap`.** Taps, keys and text stay on uiautomator2, which
+/// handles Vietnamese diacritics and does not care what size the video is. This exists for
+/// the continuous middle of a drag, which until now reached the phone only after the operator
+/// let go — `FocusStream` buffered the samples and posted a single swipe on release, so the
+/// picture stood still under a moving finger. See AGENTS.md 9.77.
+///
+/// Deliberately outside `with_manual_session`. That helper claims device ownership and opens
+/// a uiautomator2 session, neither of which this path needs — and a pointer at 60 Hz would be
+/// claiming and releasing ownership sixty times a second. The control socket already belongs
+/// to the producer that is drawing the picture being touched.
+///
+/// `Ok(false)` means the phone is not streaming, so the caller should fall back to the agent
+/// rather than report a failure. A refusal to admit work still throws, because a drag during
+/// shutdown should stop like everything else.
+#[tauri::command]
+pub async fn view_inject_touch(
+    state: State<'_, AppState>,
+    udid: String,
+    action: String,
+    x: f64,
+    y: f64,
+    image_w: f64,
+    image_h: f64,
+) -> Result<bool, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Ok(false);
+    };
+    let action =
+        riviu_android_driver::TouchAction::parse(&action).map_err(CommandError::operation)?;
+    android
+        .inject_touch(&udid, action, x, y, image_w, image_h)
+        .await
+        .map_err(CommandError::operation)
 }
 
 #[tauri::command]
@@ -862,11 +2016,33 @@ pub async fn view_set_preset(
         "overlay" => riviu_android_driver::ViewPreset::Overlay,
         _ => riviu_android_driver::ViewPreset::Tile,
     };
-    android
+    // A retune restarts the same producer, so it costs the adb server exactly what a
+    // recovery costs and it belongs under the same ceiling. It uses the operator lane
+    // because it *is* an operator action — opening or closing an overlay — and that lane has
+    // no per-device backoff: refusing a person's second click because their first was 40 s
+    // ago would read as the app being broken.
+    //
+    // A refusal here is not the end of it. The keeper reconciles toward
+    // `desired_view_preset` on its own tick, which is what makes this safe to refuse at all;
+    // `set_view_preset` records the desire before it does any work.
+    let frames = state
+        .view_paint
+        .sample(&udid)
+        .map(|report| report.frames)
+        .unwrap_or(0);
+    let permit = state.view_recovery.admit_operator(&udid, frames).await?;
+    let outcome = android
         .set_view_preset(&udid, preset)
         .await
         .map_err(CommandError::operation)
-        .map(|_| ())
+        .map(|_| ());
+    // Held across the retune for the same reason the recovery path holds it: a producer
+    // that has spawned and not yet published is still using the resource being rationed.
+    drop(permit);
+    // The producer was replaced, so evidence about the old one is not evidence about this
+    // one -- the same rule `restart_android_view` applies.
+    state.view_paint.clear(&udid);
+    outcome
 }
 
 #[tauri::command]
@@ -880,7 +2056,8 @@ pub fn save_view_snapshot(
         return Err(CommandError::operation("view snapshot is not a JPEG"));
     }
     let dest = state.artifacts_dir.join("screenshots").join(format!(
-        "{udid}-{}.jpg",
+        "{}-{}.jpg",
+        safe_udid_stem(&udid),
         chrono::Utc::now().timestamp_millis()
     ));
     if let Some(parent) = dest.parent() {
@@ -1202,6 +2379,15 @@ pub struct UpdateStatus {
 /// stored value from an older build cannot refuse the whole save.
 const MAX_SETTABLE_VIEW_FPS: u32 = 30;
 
+/// The one place the settable frame rate is bounded.
+///
+/// Two callers now that the value is persisted — the save, and the load at startup — and
+/// they must not drift: `get_stream_settings` reporting one number while the encoder runs
+/// another is precisely the silent disagreement AGENTS.md 9.59 records as already fixed once.
+pub(crate) fn clamp_stream_fps(fps: u32) -> u32 {
+    fps.clamp(riviu_android_driver::MIN_VIEW_FPS, MAX_SETTABLE_VIEW_FPS)
+}
+
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
@@ -1213,6 +2399,127 @@ mod tests {
 
     use riviu_core::{DeviceWorkCoordinator, StreamBudgetManager};
     use riviu_ios_driver::MockIosDriver;
+
+    fn stale(status: riviu_core::DeviceStatus) -> DeviceInfo {
+        DeviceInfo {
+            udid: "ce06".into(),
+            name: "Note 8".into(),
+            model: "SM-N950F".into(),
+            platform: riviu_core::DevicePlatform::Android,
+            os_version: "8.0".into(),
+            connection: riviu_core::ConnectionKind::Usb,
+            status,
+            battery: None,
+            wda_ready: false,
+            wda_expires_at: None,
+            stream_url: None,
+            tile_stream_state: riviu_core::TileStreamState::default(),
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn a_prepare_whose_read_back_failed_does_not_claim_the_device_is_ready() {
+        // The read is what turns "the preparation ran" into "and here is the device it
+        // left behind". When it failed, the old code fell back to the stale registry
+        // record and stamped `Ready` on it anyway -- so a phone unplugged between the
+        // session closing and the read came back Ready with a healthy agent, described
+        // entirely from memory, and said nothing about the failure.
+        let device = prepared_device(
+            stale(riviu_core::DeviceStatus::Connected),
+            Some("device 'ce06' not found".into()),
+        );
+
+        assert_ne!(device.status, riviu_core::DeviceStatus::Ready);
+        assert!(device
+            .last_error
+            .as_deref()
+            .expect("a reason")
+            .contains("device 'ce06' not found"));
+        // Still earned: the session opened and closed, which is what this flag means.
+        assert!(device.wda_ready);
+    }
+
+    #[test]
+    fn a_prepare_that_was_read_back_is_ready_and_carries_no_reason() {
+        let device = prepared_device(stale(riviu_core::DeviceStatus::Connected), None);
+
+        assert_eq!(device.status, riviu_core::DeviceStatus::Ready);
+        assert_eq!(device.last_error, None);
+        assert!(device.wda_ready);
+        assert_eq!(
+            device.tile_stream_state,
+            riviu_core::TileStreamState::Parked,
+            "prepare leaves no producer running"
+        );
+    }
+    #[test]
+    fn a_group_request_is_judged_before_a_single_phone_is_touched() {
+        // The missing-key check used to live inside the per-device loop, in the arm that
+        // needed the key -- so a malformed request drove every phone up to that point and
+        // only then failed, leaving the fleet half-actioned.
+        assert!(check_group_input("key", false).is_err());
+        assert!(check_group_input("key", true).is_ok());
+        assert!(check_group_input("rotate", true).is_err());
+        for kind in ["tap", "swipe", "type", "home"] {
+            assert!(check_group_input(kind, false).is_ok(), "{kind}");
+        }
+    }
+
+    #[test]
+    fn a_phone_that_cannot_be_opened_is_skipped_whatever_the_reason() {
+        // `DeviceBusy` was the only code that produced a skip. Everything else returned,
+        // which discarded `completed_udids` and reported the whole fleet action as failed —
+        // on twenty phones, nineteen of which had already taken the input. The phones that
+        // hit this are the ordinary ones: a cable that dropped, an agent that died, a
+        // serial adb stopped answering for.
+        let unplugged = open_failure_skip(
+            "ce07".into(),
+            CommandError::code("DeviceUnavailable", "device 'ce07' not found"),
+        );
+        assert_eq!(unplugged.code, "DeviceUnavailable");
+        assert_eq!(
+            unplugged.message.as_deref(),
+            Some("device 'ce07' not found"),
+            "a code alone is not something an operator can act on"
+        );
+
+        // Busy keeps its own shape: the holder is the whole story, and repeating it as a
+        // message would put the same sentence on screen twice.
+        let busy = open_failure_skip(
+            "ce06".into(),
+            CommandError {
+                current_owner: Some(DeviceWorkOwner::Nurture),
+                ..CommandError::code("DeviceBusy", "device 'ce06' is held by Nurture")
+            },
+        );
+        assert_eq!(busy.message, None);
+        assert_eq!(busy.current_owner, Some(DeviceWorkOwner::Nurture));
+    }
+
+    #[test]
+    fn a_skip_carries_something_the_operator_can_act_on() {
+        // Two different silences, two different fields. Busy is explained by who holds the
+        // phone; a failed action is explained by nothing at all unless the message is kept,
+        // and "one of your twenty phones did not work" is not something anyone can act on.
+        let busy = GroupInputSkip {
+            udid: "ce06".into(),
+            code: "DeviceBusy".into(),
+            current_owner: Some(DeviceWorkOwner::Nurture),
+            message: None,
+        };
+        let failed = GroupInputSkip {
+            udid: "ce07".into(),
+            code: "ActionFailed".into(),
+            current_owner: None,
+            message: Some("agent did not answer".into()),
+        };
+        let encoded = serde_json::to_string(&vec![busy, failed]).expect("serialize skips");
+        assert!(encoded.contains("currentOwner"));
+        assert!(encoded.contains("agent did not answer"));
+        // Absent rather than null, so the frontend can tell "no message" from "empty message".
+        assert!(!encoded.contains("\"message\":null"));
+    }
 
     #[tokio::test]
     async fn shared_device_owner_group_sync_reports_interaction_as_skipped() {
@@ -1258,5 +2565,34 @@ mod tests {
         assert_eq!(driver.ordinary_session_calls(), 0);
         assert_eq!(driver.fresh_text_session_calls(), 0);
         assert_eq!(driver.stream_restart_calls(), 0);
+    }
+
+    /// A udid cannot decide *where* an artifact is written, only what it is called.
+    ///
+    /// `Path::join` with an absolute component **replaces** the path, so before this a udid of
+    /// `C:/…/Startup/z` did not produce a badly-named screenshot in the artifacts folder — it
+    /// produced a file in the Startup folder, with `create_dir_all` building the tree to reach
+    /// it. A UNC udid is the same primitive pointed at SMB, which also leaks an NTLM handshake.
+    #[test]
+    fn a_udid_can_never_steer_an_artifact_path_off_the_artifacts_dir() {
+        let artifacts = Path::new("C:/riviu/artifacts");
+        for hostile in [
+            "C:/Users/x/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/z",
+            r"\\attacker\share\z",
+            "../../../../Windows/System32/z",
+            "/etc/cron.d/z",
+        ] {
+            let joined = artifacts.join(format!("{}.png", safe_udid_stem(hostile)));
+            assert_eq!(
+                joined.parent(),
+                Some(artifacts),
+                "escaped the artifacts dir: {hostile:?} -> {joined:?}"
+            );
+        }
+
+        // And the ordinary cases still round-trip to something readable: a USB serial is
+        // untouched, and a Wi-Fi serial keeps its digits with the illegal ':' neutralised.
+        assert_eq!(safe_udid_stem("10969614"), "10969614");
+        assert_eq!(safe_udid_stem("192.168.1.44:5555"), "192_168_1_44_5555");
     }
 }

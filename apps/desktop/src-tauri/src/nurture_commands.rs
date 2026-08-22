@@ -79,9 +79,23 @@ fn validate_nurture_settings(settings: &NurtureSettings) -> Result<(), String> {
     Ok(())
 }
 
+/// What the operator typed to mean "leave the stored key alone".
+///
+/// The form has to show *something* in the API-key box, and it must not be the key: this value
+/// crosses IPC into the WebView, and the panel is screenshotted constantly. So the command
+/// hands back this sentinel instead, and treats it on the way back in as "unchanged". Any other
+/// value — including empty — is taken literally, so clearing the key is still possible.
+const API_KEY_UNCHANGED: &str = "__riviu_keep_stored_key__";
+
 #[tauri::command]
 pub fn nurture_get_settings(state: State<'_, AppState>) -> Result<NurtureSettings, String> {
-    state.db.get_nurture_settings().map_err(err)
+    let mut settings = state.db.get_nurture_settings().map_err(err)?;
+    // The key never leaves the backend. `has_api_key` is what the form needs to know.
+    settings.has_api_key = !settings.api_key.trim().is_empty();
+    if settings.has_api_key {
+        settings.api_key = API_KEY_UNCHANGED.to_string();
+    }
+    Ok(settings)
 }
 
 #[tauri::command]
@@ -89,9 +103,15 @@ pub fn nurture_save_settings(
     state: State<'_, AppState>,
     settings: NurtureSettings,
 ) -> Result<NurtureSettings, String> {
+    let mut settings = settings;
+    let prev_for_key = state.db.get_nurture_settings().unwrap_or_default();
+    if settings.api_key == API_KEY_UNCHANGED {
+        settings.api_key = prev_for_key.api_key.clone();
+    }
+    let settings = settings;
     validate_nurture_settings(&settings)?;
     let _admission = state.ensure_accepting_work()?;
-    let prev = state.db.get_nurture_settings().unwrap_or_default();
+    let prev = prev_for_key;
     state.db.save_nurture_settings(&settings).map_err(err)?;
     // When schedule is (re)enabled, schedule the next tick from now.
     if settings.schedule_enabled
@@ -106,16 +126,60 @@ pub fn nurture_save_settings(
         let _ = state.db.set_setting("nurture.schedule.next_run_at", "");
     }
     let _ = state.db.log_op("nurture.settings", &settings.model);
-    Ok(settings)
+    // Answer with the same shape `nurture_get_settings` returns, so a save does not hand the
+    // key back to the page that just stopped receiving it.
+    let mut echoed = settings;
+    echoed.has_api_key = !echoed.api_key.trim().is_empty();
+    if echoed.has_api_key {
+        echoed.api_key = API_KEY_UNCHANGED.to_string();
+    }
+    Ok(echoed)
+}
+
+/// Whether a byte string starts with the JPEG SOI marker.
+///
+/// The only check applied to caller-supplied frames, and enough: these bytes go straight
+/// to a vision endpoint as `image/jpeg`, so what matters is that they are one. Same test
+/// `save_view_snapshot` applies to the same source.
+fn looks_like_jpeg(bytes: &[u8]) -> bool {
+    bytes.len() > 3 && bytes[0] == 0xff && bytes[1] == 0xd8
+}
+
+/// The caller-supplied frames that may be used as evidence, at most three.
+///
+/// Separated from the command so the decision can be tested without an `AppState`. Anything
+/// that is not a JPEG is dropped rather than refused: the WebView produces these from a
+/// canvas, and a device whose canvas has not painted yet yields something unusable rather
+/// than something malicious. Dropping it lands the caller in the hub fallback, which is the
+/// same place it would have been without this parameter at all.
+fn usable_supplied_frames(frames: Option<Vec<Vec<u8>>>) -> Vec<Vec<u8>> {
+    frames
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|frame| looks_like_jpeg(frame))
+        .take(3)
+        .collect()
 }
 
 /// Run the same grounded vision pipeline as production comment preparation,
 /// but stop after returning the prepared text. No device UI or comment sender
 /// is opened by this command.
+///
+/// `frames` is how an Android phone gets here at all. The grid and the overlay stopped
+/// showing minicap JPEGs when the H.264 view path landed, so `state.streams` — which this
+/// command was reading — is empty for a phone whose live picture the operator is looking
+/// at right now. Pressing Test API answered "Chưa có frame stream cho thiết bị …", which
+/// was true about the hub and false about the phone.
+///
+/// So the caller may hand in the frames it already has decoded, which is exactly the
+/// picture the button promises to test ("frame hiện tại"). No platform branch is needed on
+/// either side: the WebView produces these only for devices it is decoding, and everything
+/// else falls through to the hub as before.
 #[tauri::command]
 pub async fn nurture_test_api(
     state: State<'_, AppState>,
     udid: String,
+    frames: Option<Vec<Vec<u8>>>,
 ) -> Result<NurtureApiTestResult, String> {
     let _admission = state.ensure_accepting_work()?;
     let udid = udid.trim().to_string();
@@ -130,24 +194,28 @@ pub async fn nurture_test_api(
         return Err("Base URL và model AI không được để trống".into());
     }
 
-    let mut frames = Vec::with_capacity(3);
-    if let Some(frame) = state.streams.latest(&udid) {
-        frames.push(frame.as_ref().clone());
-    }
-    let mut stream = FrameSource::subscribe(&state.streams, &udid);
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
-    while frames.len() < 3 {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            break;
+    let mut frames = usable_supplied_frames(frames);
+    if frames.is_empty() {
+        if let Some(frame) = state.streams.latest(&udid) {
+            frames.push(frame.as_ref().clone());
         }
-        match tokio::time::timeout(remaining, stream.next()).await {
-            Ok(Some(frame)) => frames.push(frame.as_ref().clone()),
-            Ok(None) | Err(_) => break,
+        let mut stream = FrameSource::subscribe(&state.streams, &udid);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
+        while frames.len() < 3 {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, stream.next()).await {
+                Ok(Some(frame)) => frames.push(frame.as_ref().clone()),
+                Ok(None) | Err(_) => break,
+            }
         }
     }
     if frames.is_empty() {
-        return Err(format!("Chưa có frame stream cho thiết bị {udid}"));
+        return Err(format!(
+            "Chưa có hình nào của thiết bị {udid} để test — mở stream của máy này rồi thử lại"
+        ));
     }
 
     let direction = settings
@@ -280,7 +348,21 @@ pub async fn nurture_start(
         .get_nurture_settings()
         .map_err(CommandError::operation)?;
     validate_nurture_settings(&settings).map_err(CommandError::operation)?;
-    preflight_comment_job(&state.control, &udids, &settings).await?;
+    let preflight = preflight_comment_job(&state.control, &udids, &settings).await;
+    if preflight.ready.is_empty() {
+        return Err(CommandError::operation(preflight.refusal()));
+    }
+    if !preflight.skipped.is_empty() {
+        // Named in the log rather than swallowed. The command's answer is the list of
+        // phones that started, so the caller can already see the shortfall; this is what
+        // says which ones and why.
+        log::warn!(
+            "nuôi TT bỏ qua {} máy: {}",
+            preflight.skipped.len(),
+            preflight.skipped.join("; ")
+        );
+    }
+    let udids = preflight.ready;
     // Manual starts get a varied 2–3 hour horizon so they do not all end on
     // the same fixed video count. Scheduled starts keep their explicit value.
     let run_duration = duration_minutes
@@ -302,41 +384,72 @@ pub async fn nurture_start(
     Ok(started)
 }
 
-async fn preflight_comment_job(
+/// Which phones can take a text comment, and why the others cannot.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct CommentPreflight {
+    pub(crate) ready: Vec<String>,
+    /// `udid: reason`, one line each.
+    pub(crate) skipped: Vec<String>,
+}
+
+impl CommentPreflight {
+    pub(crate) fn refusal(&self) -> String {
+        format!(
+            "Riviu Agent chưa sẵn sàng cho bình luận chữ: {}. Chạy Agent Repair rồi thử lại.",
+            self.skipped.join("; ")
+        )
+    }
+}
+
+/// Check every phone, and let each one's answer be its own.
+///
+/// **One busy phone used to end the whole start.** Acquiring the lease was a `?`, so a
+/// device already held by a job, a flow or the control overlay aborted the preflight before
+/// the phones after it were even looked at — and the error the operator got was about a
+/// lease, not about an agent. Twenty phones, one of them busy, nothing starts.
+///
+/// Same shape as the fix for `group_input`: record the failure, keep going, and let the
+/// caller decide what a partial result means. A phone that cannot take a comment is a
+/// reason to leave *that* phone out, not to cancel the other nineteen.
+pub(crate) async fn preflight_comment_job(
     control: &DeviceControlPlane,
     udids: &[String],
     settings: &NurtureSettings,
-) -> Result<(), CommandError> {
+) -> CommentPreflight {
     if settings.comment_prob == 0 {
-        return Ok(());
+        // Comments are off, so no phone needs an agent for them. Every device is eligible
+        // and nothing is probed -- taking a lease per phone to answer a question nobody
+        // asked would be its own way of blocking a start.
+        return CommentPreflight {
+            ready: udids.to_vec(),
+            skipped: Vec::new(),
+        };
     }
 
-    let mut failures = Vec::new();
+    let mut preflight = CommentPreflight::default();
     for udid in udids {
-        let context = control
+        let context = match control
             .try_acquire_exclusive(udid, DeviceWorkOwner::Nurture)
             .await
-            .map_err(CommandError::from)?;
+        {
+            Ok(context) => context,
+            Err(error) => {
+                preflight.skipped.push(format!("{udid}: {error}"));
+                continue;
+            }
+        };
         match control.preflight_agent(&context).await {
-            Ok(status) if status.auth_ready => {}
-            Ok(status) => failures.push(format!(
+            Ok(status) if status.auth_ready => preflight.ready.push(udid.clone()),
+            Ok(status) => preflight.skipped.push(format!(
                 "{udid}: {}",
                 status
                     .message
                     .unwrap_or_else(|| format!("trạng thái {:?}", status.state))
             )),
-            Err(error) => failures.push(format!("{udid}: {error}")),
+            Err(error) => preflight.skipped.push(format!("{udid}: {error}")),
         }
     }
-
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(CommandError::operation(format!(
-            "Riviu Agent chưa sẵn sàng cho bình luận chữ: {}. Chạy Agent Repair rồi thử lại.",
-            failures.join("; ")
-        )))
-    }
+    preflight
 }
 
 #[tauri::command]
@@ -650,17 +763,18 @@ mod tests {
             ..Default::default()
         };
 
-        let error = preflight_comment_job(
+        let preflight = preflight_comment_job(
             &control,
             &["needs-repair-a".to_string(), "needs-repair-b".to_string()],
             &settings,
         )
-        .await
-        .expect_err("an unready text agent must reject the whole command");
+        .await;
 
-        assert!(error.message.contains("needs-repair-a"));
-        assert!(error.message.contains("needs-repair-b"));
-        assert!(error.message.contains("Agent Repair"));
+        assert!(preflight.ready.is_empty());
+        let refusal = preflight.refusal();
+        assert!(refusal.contains("needs-repair-a"));
+        assert!(refusal.contains("needs-repair-b"));
+        assert!(refusal.contains("Agent Repair"));
         assert!(runtime.list_status().is_empty());
         assert_eq!(
             driver.agent_preflight_calls(),
@@ -669,6 +783,95 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn one_busy_phone_no_longer_cancels_the_start_for_every_other_phone() {
+        // Taking the lease was a `?`, so a device already held by a job, a flow or the
+        // control overlay aborted the preflight before the phones after it were even
+        // looked at -- and the error named a lease, not an agent. Twenty phones, one busy,
+        // nothing starts.
+        let driver = MockIosDriver::new();
+        let work = Arc::new(DeviceWorkCoordinator::new());
+        let control = DeviceControlPlane::new(
+            Arc::new(driver.clone()),
+            work.clone(),
+            Arc::new(StreamBudgetManager::default()),
+        );
+        // Held by something else, exactly as a running job would hold it.
+        let _busy = work
+            .try_acquire("MOCK-IPHONE-02", DeviceWorkOwner::Script)
+            .expect("hold the busy device");
+        let settings = NurtureSettings {
+            comment_prob: 1,
+            ..Default::default()
+        };
+
+        let preflight = preflight_comment_job(
+            &control,
+            &["MOCK-IPHONE-02".to_string(), "MOCK-IPHONE-01".to_string()],
+            &settings,
+        )
+        .await;
+
+        // The busy phone is skipped with its reason; the healthy one behind it -- which the
+        // old code never reached -- is ready to start.
+        assert_eq!(preflight.ready, vec!["MOCK-IPHONE-01".to_string()]);
+        assert_eq!(preflight.skipped.len(), 1);
+        assert!(preflight.skipped[0].starts_with("MOCK-IPHONE-02:"));
+    }
+
+    #[tokio::test]
+    async fn with_comments_switched_off_no_phone_is_probed_or_excluded() {
+        // Nothing needs a text agent, so nothing is asked for a lease. Probing anyway would
+        // be its own way of letting one busy phone hold up a start.
+        let driver = MockIosDriver::new();
+        let control = DeviceControlPlane::new(
+            Arc::new(driver.clone()),
+            Arc::new(DeviceWorkCoordinator::new()),
+            Arc::new(StreamBudgetManager::default()),
+        );
+        let settings = NurtureSettings {
+            comment_prob: 0,
+            ..Default::default()
+        };
+
+        let preflight =
+            preflight_comment_job(&control, &["MOCK-IPHONE-01".to_string()], &settings).await;
+
+        assert_eq!(preflight.ready, vec!["MOCK-IPHONE-01".to_string()]);
+        assert!(preflight.skipped.is_empty());
+    }
+
+    /// The scheduled path must ask the same question the button asks.
+    ///
+    /// The tick in `state.rs` went straight to `start_many`, so a scheduled run began on
+    /// phones whose text agent was not ready and then failed every comment it attempted,
+    /// once an hour, with nothing written down. The manual start had refused those phones;
+    /// the schedule did not know to ask. Both now call `preflight_comment_job`, and this
+    /// pins the source-level fact that they do -- there is no seam a unit test can drive
+    /// the spawned scheduler through.
+    #[test]
+    fn the_scheduled_start_goes_through_the_same_comment_gate_as_the_button() {
+        let scheduler = include_str!("state.rs");
+        let tick = scheduler
+            .split("// TikTok nurture schedule ticks")
+            .nth(1)
+            .expect("the nurture schedule tick");
+        // `.start_many(` with the dot, not the bare name: the comment above the gate
+        // explains what the code used to do and mentions `start_many` by name, so matching
+        // the bare word finds the prose rather than the call.
+        let start = tick.find(".start_many(").expect("the scheduled start");
+        let gate = tick
+            .find("preflight_comment_job")
+            .expect("the scheduled start skipped the comment gate");
+        assert!(
+            gate < start,
+            "the gate has to run before the start, not after it"
+        );
+        assert!(
+            tick.contains("preflight.ready"),
+            "the scheduled start must run only the phones the gate admitted"
+        );
+    }
     #[test]
     fn default_nurture_settings_pass_validation() {
         assert!(validate_nurture_settings(&NurtureSettings::default()).is_ok());
@@ -699,5 +902,66 @@ mod tests {
         assert!(validate_nurture_settings(&settings)
             .expect_err("watch duration must be bounded")
             .contains("thời gian xem"));
+    }
+
+    /// The smallest thing that is a JPEG to every reader that matters.
+    fn jpeg(marker: u8) -> Vec<u8> {
+        vec![0xff, 0xd8, 0xff, marker]
+    }
+
+    #[test]
+    fn frames_the_caller_already_decoded_are_what_gets_tested() {
+        // Test API read only `state.streams`, the host's JPEG hub. Android phones stopped
+        // publishing there when the H.264 view path landed, so pressing the button while
+        // watching a phone's live picture answered "no frames for this device" -- true
+        // about the hub, false about the phone. These are the frames the WebView already
+        // has, which is exactly what the button promises ("frame hiện tại").
+        let supplied = usable_supplied_frames(Some(vec![jpeg(1), jpeg(2)]));
+        assert_eq!(supplied, vec![jpeg(1), jpeg(2)]);
+    }
+
+    #[test]
+    fn a_caller_that_supplies_nothing_usable_falls_through_to_the_hub() {
+        // Absent, empty, and present-but-unusable all have to reach the same place: an
+        // iPhone supplies nothing because its frames live in the hub, and a canvas that
+        // has not painted yet yields bytes that are not an image. Neither is an error --
+        // both leave the caller exactly where it was before this parameter existed.
+        assert!(usable_supplied_frames(None).is_empty());
+        assert!(usable_supplied_frames(Some(Vec::new())).is_empty());
+        assert!(
+            usable_supplied_frames(Some(vec![Vec::new(), b"not-an-image".to_vec()])).is_empty()
+        );
+        // A PNG is a real image and still not one this path may send: the request declares
+        // `image/jpeg`, so a mislabelled body is a provider error nobody could diagnose.
+        let png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        assert!(usable_supplied_frames(Some(vec![png])).is_empty());
+    }
+
+    #[test]
+    fn no_more_than_three_frames_are_ever_sent() {
+        // The grounded pipeline reads three. A caller sending thirty would be billed for
+        // thirty, silently, on a button whose whole purpose is to show what one costs.
+        let many: Vec<Vec<u8>> = (0..30).map(|index| jpeg(index as u8)).collect();
+        assert_eq!(usable_supplied_frames(Some(many)).len(), 3);
+    }
+
+    /// The sentinel is a contract between this file and the settings form, so it is pinned.
+    ///
+    /// If it ever equalled a plausible key, "leave it alone" would silently swallow a real one
+    /// the operator had just typed; if the frontend's copy drifted from this one, every save
+    /// would overwrite the stored key with the literal sentinel string.
+    #[test]
+    fn the_unchanged_sentinel_cannot_be_mistaken_for_a_key() {
+        assert_eq!(API_KEY_UNCHANGED, "__riviu_keep_stored_key__");
+        // Not something an API key could plausibly be: no provider issues keys with this shape.
+        assert!(API_KEY_UNCHANGED.starts_with("__"));
+        assert!(!API_KEY_UNCHANGED.starts_with("sk-"));
+        // And the frontend must agree, byte for byte — a drifted copy would write the sentinel
+        // into the credential store as if it were the key.
+        let types_ts = include_str!("../../src/types.ts");
+        assert!(
+            types_ts.contains(API_KEY_UNCHANGED),
+            "apps/desktop/src/types.ts no longer documents the sentinel {API_KEY_UNCHANGED}"
+        );
     }
 }

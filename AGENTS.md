@@ -4074,6 +4074,151 @@ sẽ áp phần trăm **hai lần**, và tôi đã tự làm đúng lỗi đó t
 **Sàn trên feed là 2 ảnh** khi tính năng đang bật, vì không đọc được tổng trước cú vuốt
 đầu. Phần trăm 1% không giúp một phiên khỏi lật một lần.
 
+### 9.43 Bài ảnh, chương bốn: cử chỉ quá giống người thì pager không nhận (18/08/2026)
+
+§9.20 nghiệm thu băng chuyền chạy tốt trên SM-N950F — `8/8 ảnh`, `11/11 ảnh`. Cùng đoạn mã
+đó, trên dàn 20 máy S8 chạy `trill/en 38.3.2`, **giết phiên**: hai phiên gặp bài ảnh đều về
+0 video, mọi phiên không gặp thì xem bình thường. Vết giống hệt nhau mỗi lần:
+
+```
+gặp bài ảnh — vuốt ngang  →  bài ảnh 10 ảnh — xem 10 (100%)  →  bài ảnh: đã xem 2/10 ảnh
+→  vuốt chưa chứng minh được đổi thẻ  →  thẻ không có thanh hành động
+```
+
+`photo_badge` bị tắt để cứu dàn, kèm điều kiện: chỉ bật lại cùng một bản sửa, và phải có
+phiên gặp bài ảnh mà vẫn chạy hết.
+
+**Ba giả thuyết của tôi, cả ba sai, và mỗi cái đều bị chính phép đo bác bỏ.**
+
+1. *"Vuốt ngang đưa phiên rời khỏi bài."* Đo bằng `probe --measure-carousel <link>`:
+   `Comments đổi=false` ở **mọi** lượt vuốt. Thanh hành động không hề mất. Sai.
+2. *"Bộ đọc `parse_carousel_counter` bắt nhầm cặp số."* Bộ đọc đúng — nó đã biết dạng ba
+   node rời từ §9.20, và trên trang bài mở bằng link nó đếm `2/5 → 3 → 4 → 5` không sai
+   nhịp nào. Sai.
+3. *"Chỉ tại `SWIPE_SETTLE_MS` — khoảng giữ 12–45 ms trước khi nhấc tay."* Gần đúng, và vẫn
+   sai: bỏ riêng nó chỉ nâng tỉ lệ lật trang lên 58%.
+
+**Nguyên nhân thật: TikTok lật ảnh khi nhận cú *ném*, và làm ngơ cú *kéo*.** `plan_swipe`
+gửi đúng một cú kéo, vì cả ba tính chất "giống người" của nó đều nói với `VelocityTracker`
+rằng ngón tay đã dừng:
+
+- **độ cong** vuông góc với hướng đi — mà hướng đi ở đây là ngang, nên độ cong là **dọc**,
+  đâm vào đúng trục mà pager dọc của feed đang rình;
+- **giảm tốc**: `ease` là smoothstep, độ dốc ở cuối bằng 0, nên chặng cuối của quãng 600 px
+  chỉ bò ~10 px;
+- **khoảng giữ** 12–45 ms đứng yên ngay trước khi nhấc.
+
+Đo trên feed, mỗi lần đổi **đúng một** thành phần, trên **cùng một thẻ**, năm máy,
+`probe --measure-feed-carousel <n>`:
+
+| cử chỉ | lượt lật được |
+|---|---|
+| `plan_swipe` nguyên bản | 13/40 |
+| chỉ bỏ độ cong | 6/15 |
+| chỉ bỏ khoảng giữ | 7/12 |
+| bỏ cong + giữ, còn giảm tốc | 18/27 |
+| **bỏ cả ba** | **19/19** |
+| thẳng một đoạn (tham chiếu) | 31/32 |
+
+Bảng này là cả bài học: **bỏ một thành phần nào cũng "có vẻ ăn"** — 40%, 58%, 67% — và mỗi
+con số đó đủ để dụ người ta chốt sai. Chỉ khi bỏ cả ba mới hết chập chờn.
+
+`TouchPointPlanner` giờ dựng đường quanh `Curve`: `Drag` giữ nguyên mọi thứ cũ và vẫn là
+cử chỉ của mọi chỗ khác; `Flick` bỏ cong, bỏ giữ, đổi `ease` thành `ease_in` (còn đang tăng
+tốc lúc rời mặt kính). `swipe_slide` gọi `plan_flick`. Thứ **giữ lại** cũng quan trọng
+ngang thứ bỏ đi: đầu mút vẫn rung, đường vẫn cắt thành 12 chặng, nhịp chặng vẫn đổi — nên
+đây không phải quay về đường thẳng cố định mà planner sinh ra để thay thế.
+
+**Cái bẫy đáng nhớ, và nó ngược với trực giác:** một cử chỉ *giống người hơn* không phải
+lúc nào cũng *hoạt động tốt hơn*. Với điều khiển nào quyết định bằng vận tốc lúc nhấc tay —
+pager, fling, swipe-to-dismiss — cử chỉ nhân hoá có thể giống người tới mức app đọc ra
+đúng cái nó mô tả: một ngón tay đã dừng lại.
+
+**Vì sao §9.20 không thấy:** SM-N950F chạy bản khác, và ở đó cú kéo vẫn lật được trang. Một
+cử chỉ "chạy được" trên một máy không phải bằng chứng cho bản dựng khác — cùng khuôn với
+bài học nhãn ở §9.20.
+
+### 9.44 Hộp thoại không phải của TikTok, và giới hạn của việc tự khắc phục (18/08/2026)
+
+Lượt nuôi cả dàn mất đúng một máy, và không phải vì mã. `ce0717171c2a64d50d` nằm dưới
+`com.google.android.packageinstaller/GrantPermissionsActivity` — **hộp xin quyền của chính
+TikTok**, sống trong task của TikTok (`TaskRecord A=com.zhiliaoapp.musically sz=2`).
+
+Hệ quả: `launch_app_foreground` báo thành công, `active_app_bundle` đọc ra
+`packageinstaller`, và phiên từ chối sau khi chờ hết 40 s — 40 s nhìn một màn hình không thể
+đổi.
+
+**Back không huỷ được nó.** Đã thử, đã đo: hộp xin quyền của Android không cancelable. Đây
+là chỗ khác với cái bẫy §9.x của `await_feed`, nơi Back chính là thứ gỡ kẹt.
+
+**Và mã không được phép trả lời nó.** Hộp này có hai nút *đều có nhãn*, một trong hai
+**cấp quyền** trên máy của một tài khoản thật. Đó là quyết định của người vận hành, không
+phải của một đường khắc phục sự cố — cùng nguyên tắc đã áp cho hộp "Get updates sent to your
+email?", nơi nút duy nhất có nhãn là nút *đồng ý*.
+
+Nên việc đúng còn lại là **nhận ra và nói thẳng**: `dialog_over_app` phân biệt "hộp thoại
+đè lên app" với "máy đi lạc sang app khác" — hai thứ cần hai câu trả lời khác nhau, vì với
+cái sau thì chờ hoặc thử lại có ích. Bấm Back một lần (cử chỉ duy nhất không cấp được gì),
+chờ `DIALOG_GRACE = 5s`, rồi hỏng kèm câu nêu đúng tình huống và việc cần làm.
+
+83 s chờ chết thành 13 s và một câu hành động được. Máy vẫn cần một người bấm một lần —
+**đó không phải lỗi để sửa**, và giả vờ ngược lại thì phải bấm hộ một nút cấp quyền.
+
+### 9.45 Bình luận chạy lần đầu — và tên lỗi chỉ sai hướng suốt 45% số lượt (19/08/2026)
+
+Tính năng bình luận chưa từng chạy thật. Lượt đầu trên sáu máy: 11 lượt, 4 gửi được, và
+**5 chết với `malformed_model_output`** — một cái tên nghe như "mô hình không biết viết JSON".
+
+Nó sai hướng. Bước duy nhất cần làm là bắt lỗi mang theo thứ mô hình **thật sự** trả về, và
+câu trả lời hiện ra ngay dòng đầu:
+
+```
+malformed_model_output: {"caption":"Top 5 món ăn vặt đáng tiền — 1. Lạp xưởng nướng đá.
+Swing chen mukbang version 😜 #mukbang #Shopee
+```
+
+Chuỗi bị cắt giữa chừng, không có dấu đóng ngoặc. Schema đặt `caption` và `visualFacts`
+**trước** `comment`, nên mô hình tiêu hết `max_tokens: 500` để mô tả bài rồi bị cắt trước
+khi viết đúng cái trường đang dùng. 500 là con số hợp lý cho tiếng Anh; tiếng Việt tách
+token tệ hơn, và một caption đầy hashtag với emoji ăn hết ngân sách nhanh hơn nhiều.
+
+`max_tokens` lên 1200, kèm prompt chặn hai trường tham ăn (`caption` ≤ 100 ký tự,
+`visualFacts` ≤ 3 mục dưới 8 từ — nửa này không tốn gì, câu trả lời ngắn hơn thì vừa rẻ vừa
+viết xong được). Cùng sáu máy: **4/11 → 8/13**, và không còn lượt nào không đọc được.
+
+**Bài học chung, và nó áp cho mọi chỗ khác trong mã này:** một cái tên lỗi đặt tại chỗ
+*parse* chỉ mô tả cái parse, không mô tả nguyên nhân. `malformed_model_output` đúng theo
+nghĩa đen và vô dụng theo nghĩa vận hành. Cho lỗi mang theo dữ liệu thật (có cắt độ dài) là
+việc năm phút, và nó đã trả lời câu hỏi mà đọc mã bao lâu cũng không trả lời được.
+
+**Cơ chế thử lại chỉ phục vụ một nửa số cách hỏng.** Nó có sẵn cho bản nháp bị bộ chấm chê,
+nhưng một bản nháp trả về hỏng thì `?` đưa thẳng ra khỏi vòng lặp — bài đó không có gì, dù
+lần hỏi thứ hai gần như chắc chắn sẽ xong.
+
+**Ba chỗ im lặng khi hỏng, cùng một hình dạng đã sửa nhiều lần trong dự án này:**
+
+1. Lý do soạn hỏng đi vào `tracing::warn!` — harness không cài subscriber, app không có
+   surface nào đọc. Hàng ghi nhận chỉ ghi `context_skipped`.
+2. **Không có khoá API** là con đường bỏ qua duy nhất không ghi hàng nào: nó `return` trước
+   cả hàng ghi nhận đầu tiên. Một dàn chưa cấu hình khoá trông y hệt một dàn liên tục quyết
+   định không nói gì.
+3. Một câu đã soạn, đã chấm, rồi không đăng được ghi `skipped` cho **cả bốn** verdict thiết
+   bị khác nhau.
+
+**Và một lỗi trạng thái thật:** `post_comment` bỏ qua `leave` trên mọi `?`, để lại máy đứng
+trong danh sách bình luận với chữ còn trong ô — cú vuốt kế tiếp của vòng feed sẽ cuộn bình
+luận thay vì cuộn feed. Chỗ tệ nhất nằm **sau** khi đã bấm Gửi.
+
+**Khoá API sống ở đúng một nơi** — bảng `settings`, khoá `nurture.settings`, plaintext —
+nên harness bắt đầu từ `Default` không có khoá và không viết nổi một chữ. Nó **chép** CSDL
+của app sang thư mục tạm rồi làm việc trên bản chép: kế thừa được khoá, model, ngôn ngữ,
+định hướng, giới hạn từ, mà không bao giờ ghi đè cấu hình của người vận hành. `comment_prob`
+thì ghi đè vô điều kiện, kể cả bằng 0 — giá trị lưu trong app là số đặt cho *app*.
+
+Ghi thêm: `nurture_comment_attempts` tồn tại từ lâu và **không được hiển thị ở đâu trong
+giao diện**; `nurtureListCommentAttempts` trong `api.ts` không có chỗ nào gọi. Harness in nó
+ra vì nếu không thì không ai đọc được.
+
 ### 9.21 Agent còn sống mà cây đã chết: `/status` không phải bằng chứng (12/08/2026)
 
 `ensure_agent` tin `AgentClient::is_alive()`, mà nó gọi `window_size()`. **Đo được:
@@ -4813,7 +4958,9 @@ Redmi API 35 chạy được cả 3.3.4 lẫn 4.1 **khi** `max_size≥320`; cả
 
 **Preset.** Tile `max_size=480 bitrate=1_200_000 max_fps=30`. Overlay **không** đổi preset: CSS fill phóng bitmap tile, không `stop` + `app_process` lại. Mở overlay từng restart encoder → canvas trống / tap trượt / cảm giác lag. Vì overlay xem đúng encode tile, 15 fps / 400 kbps làm cửa sổ lớn trông chậm dù encoder sống — đó là lag sau khi hết lỗi `exited before it accepted a connection`. `video_codec_options=i-frame-interval:int=1` — form `key[:type]=value` của 3.3.4. Dấu hai chấm thứ ba (`int:2`) làm `CodecOption.parseOption` ném `'=' expected` rồi process thoát trước khi bind socket; tile hiện `scrcpy-server exited before it accepted a connection`. Overlay session (§9.48) không park, không `open_ui_context`.
 
-**ViewHub không được xếp hàng video.** `broadcast` cap 256 từng giữ ~8 s frame; WebSocket `send().await` từng packet rồi mới vẽ quá khứ. Cap 8, `Lagged` phát lại key mới nhất, `coalesce` một packet/UDID, TCP `nodelay`. Worker decode tuần tự, giữ packet mới nhất, timestamp +1 ms (`optimizeForLatency`) — không +66 ms/frame. Không đưa scrcpy vào `StreamHub`.
+**ViewHub không được xếp hàng video.** `broadcast` cap 256 từng giữ ~8 s frame; WebSocket `send().await` từng packet rồi mới vẽ quá khứ. `Lagged` phát lại key mới nhất, `coalesce` gộp khi một máy tụt quá 3 frame, TCP `nodelay`. Worker decode tuần tự, giữ packet mới nhất, timestamp +1 ms (`optimizeForLatency`) — không +66 ms/frame. Không đưa scrcpy vào `StreamHub`.
+
+**Một kênh mỗi máy, một socket cho cả fleet** (§9.68, §9.73). Cap là `DEVICE_BROADCAST_CAP = 128` **mỗi máy** = 5,3 s ở 24 fps **bất kể fleet bao nhiêu máy** — không còn con số nào phải chỉnh lại khi cắm thêm máy. Socket vẫn dùng chung vì giao thức một chiều và worker tự tách theo udid; thứ tách theo máy là bộ đệm phía sau nó. Client subscribe từng máy, một forwarder mỗi máy đổ vào một `mpsc` chung, nên `Lagged` **quy được về đúng máy gây ra** và chỉ máy đó bị resync. Máy mới được báo qua kênh `roster`; **subscribe trước rồi mới replay cache của máy đó** — ngược lại là mất frame im lặng. `forget` chỉ gọi khi máy **rời fleet** (vòng quét `list_devices`), không gọi khi restart producer.
 
 **Handshake 3.3.4.** `tunnel_forward` = máy **listen**, host connect. Spawn `app_process` trước, rồi `adb forward`, rồi TCP (thử ngay, nghỉ 50 ms khi `NotListening`). `start_view_stream` chỉ `Ok` sau sample **sync** đầu (IDR hoặc cờ key, config đã merge); hello không đủ — Note 8 từng `Live` mà canvas trống vì encoder dừng sau SPS, hoặc Exynos gửi AU đầu **không** `BUFFER_FLAG_KEY_FRAME`. ADB trên Windows **từ chối** abstract socket nếu server chưa bind — TCP mở trước listen EOF ngay và không bao giờ thành video socket. Dummy được ghi trong cùng `accept()`; chưa thấy dummy thì TCP đó **chưa** consume accept, được phép thử lại. Đã thấy dummy thì đây là socket video duy nhất: server đóng `LocalServerSocket` ngay. Hello = dummy + tên 64 byte + **12 byte** `codec/width/height` (`writeVideoHeader(Size)`). Packet: config **bit 63**, key **bit 62**, **không** có session packet — parser 4.1 sẽ đọc config thành size và nuốt payload. Hai máy Android start song song.
 
@@ -4825,7 +4972,7 @@ Redmi API 35 chạy được cả 3.3.4 lẫn 4.1 **khi** `max_size≥320`; cả
 
 **WebSocket xem nối lại.** `viewStore` reconnect khi socket đứt hoặc `viewEndpoint` chưa bind, backoff 200 ms → ~2 s, cùng URL. `started` không chặn reconnect. Test mode vẫn một lần.
 
-**Watchdog producer im.** `ViewHub::publish` ghi `last_packet_at` theo UDID; `advance` xoá. Keeper 2 s: `view_is_running` và im > 5 s (không tính lúc `view_starting`) → `stop_view_stream` rồi start lại; registry `Sampling` rồi `Live`/`Error`. `view_is_running` **không** đổi thành “đã vẽ canvas” — frontend không phải nguồn sự thật phía Rust.
+**Watchdog producer — MỘT quyết định, xem §9.72.** `ViewHub::publish` ghi `last_packet_at` theo UDID; `advance` xoá. Keeper 2 s gọi `view_verdict` trên **cả hai** loại bằng chứng: byte về (im > **45 s** → `Silent`) và frame đã vẽ do frontend báo qua `view_report_paint` (packet vẫn tới mà không vẽ > 12 s → `PaintStalled`). Báo cáo cũ hơn 6 s **không tính là bằng chứng** — tụt về luật byte, không bao giờ coi là hỏng. Mọi lần restart producer, tự động hay do người bấm, đi qua `restart_android_view` và **phải cầm permit** của `ViewRecoveryGate`; start lần đầu thì không, vì nó không tháo cái gì đang chạy. Frontend **không còn** restart gì cả (`AUTO_RESTART_ON_STALL` đã xoá, không phải bật lên).
 
 **Note 8 SPS.** Đo được cạnh GenFarmer 2.4: hello `152×320`, config 21 byte `67 42 00 0d` = `avc1.42000D` (Baseline level 1.3), rồi IDR 2025 byte cờ key. Encoder **không** chết; WebView2 `isConfigSupported` có thể từ chối level 1.3. Worker thử thêm `avc1.42E01E` / `42001E` / `4D401E` trên cùng Annex-B và vẫn `configure` khi `isConfigSupported` là false. Nút Start gọi `stop` rồi `start` — `view_is_running` không được biến Start thành no-op khi canvas trống.
 
@@ -5011,6 +5158,1375 @@ JPEG preview không đè UDID đang có H.264. Nurture vẫn `tap()` cũ. Không
 `pkill` GenFarmer `Server 2.4`. WebSocket xem nối lại khi đứt; keeper
 restart scrcpy im > 5 s.
 
+### 9.63 Overlay cuoi cung co encode rieng, va con so 900 trong ke hoach cua toi la sai (15/08/2026)
+
+`viewSetPreset` da ton tai va **khong co caller nao**, nen commit truoc nang overlay len
+1600 la vo hieu -- khong may nao tung duoc yeu cau preset do. Gio no duoc goi khi mo overlay
+va tra ve `tile` khi dong.
+
+Ba manh phai xong cung luc, thieu mot manh la khong thay gi:
+
+1. Goi `viewSetPreset(udid, "overlay")` khi mo, `"tile"` khi dong. Khoa theo **udid** chu
+   khong theo `focusDevice`: memo tao object moi moi lan poll thiet bi, va restart encoder
+   vai lan mot giay con te hon hinh mem.
+2. Watchdog trong `state.rs` restart bang `ViewPreset::Tile` **cung nhac**, nen overlay dang
+   mo se tu tut ve encode tile sau vai giay. Driver gio giu `desired_presets` rieng khoi
+   `views` -- luc watchdog restart thi khong con producer nao de doc preset ra.
+3. Cap phai ap **sau** he so quality. High = base*3/2, Extra = base*2.
+
+**Con so 900 trong ke hoach cua toi la sai, va test bat duoc.** Toi suy ra 900 tu dung hai
+may dang cam (19.5:9 va 18.5:9). Ngan sach la tren **dien tich** frame, nen canh dai an
+toan phu thuoc ti le, va cang vuong thi cang nho:
+
+| canh dai | 16:9 | 18:9 | 19.5:9 |
+|---|---|---|---|
+| 832 | 1560 | 1352 | 1248 |
+| 848 | 1590 | 1431 | 1272 |
+| 864 | **1674 vuot** | 1458 | 1350 |
+| 900 | **1824 vuot** | **1653 vuot** | 1482 |
+
+18:9 la ti le cuc pho thong. Nen cap la **832** (boi cua 16, dem 1560/1620), suy ra tu ti le
+vuong nhat duoc ho tro chu khong tu may co san. Do duoc: 4:3 van vuot ngay ca o 832 -- day
+la nong dien thoai nen chua gap, nhung tablet thi phai suy cap tu resolution scrcpy bao ve
+thay vi tu mot hang so.
+
+**Mot dieu khong the co ca hai, noi thang:** overlay hien toi 760px o zoom toi da, ma 760px
+tren ti le nay can canh dai ~1689 -- gap hon 4 lan ngan sach level 3.0. Nen van con upscale
+2.02x o zoom toi da (truoc la 2.81x), va **mac dinh 400px thi khong con upscale**. Bo hoan
+toan phai them candidate level 4.0 vao dau ladder codec, khong phai nang hang so nay len.
+Test cu doi encode phu duoc zoom toi da; no da duoc viet lai de phat bieu dung dieu do.
+
+**Nghiem thu tren may that**, doc tu log (thu ma truoc 9.61 khong the doc duoc):
+
+```
+gen=1 tile    216x480
+gen=2 overlay 376x832   <- mo overlay
+gen=3 tile    216x480   <- dong overlay
+```
+
+Overlay chay ~2 phut khong bi watchdog ha ve tile. Hinh doc duoc tung dong thong bao, ke ca
+chu Trung. Vi mot producer nuoi ca hai surface, tile phia sau **cung net len theo** khi
+overlay mo -- khong phai loi, nhung dang biet truoc khi ai do di tim vi sao tile thay doi.
+
+### 9.69 App bao nguoi van hanh cai hai APK ma no khong he ship (16/08/2026)
+
+Cam mot box **20 may Galaxy S8**. Video chay **20/20**, dieu khien chay **0/20**, va loi noi
+dung nguyen nhan: `openControlSession failed ... the agent is not installed on <serial>.
+Install both appium-uiautomator2-server APKs`.
+
+`sidecars/android/noarch/` luc do chi co `minicap.apk` va `scrcpy-server`. **Do dung la ly do
+video chay con dieu khien thi khong** — `scrcpy-server` duoc dong goi va day sang may, hai APK
+kia khong co gi day ca. Bao ai do cai mot file khong nam trong hop thi khong phai thong bao
+loi, do la **mot tinh nang con thieu deo mat na thong bao loi**.
+
+Da dong goi `appium-uiautomator2-server v10.6.2` (Apache-2.0), lay tu release upstream tren
+GitHub, **khong** lay tu thu muc cai cua san pham khac. Pin SHA-256 trong
+`android-tools-manifest.json` y het minicap va scrcpy. `minSdkVersion 26` — phu Android 9 cua
+fleet nay va Android 15 cua may truoc do.
+
+`pm install -r -g -t`: cai de len ban cu, cap quyen runtime khong hien dialog, va **cho phep
+APK test-only** — nua `androidTest` build voi `android:testOnly` ma `pm install` mac dinh tu
+choi. Server cai truoc vi APK test khai mot instrumentation tro toi package cua server.
+
+**Ca hai nua hoac khong nua nao, ep tu kieu du lieu.** Cap APK la mot `zip` cua hai lan phan
+giai nen trang thai nua voi khong bieu dien duoc. Nua instrumentation cai sach se roi that bai
+o `am instrument` voi **dung cai refusal cu**, va nguoi di sua se soi nham cai nua dang co.
+
+**Do dau-cuoi:** mo overlay mot may → tu cai ca hai APK trong ~3 giay → `pm list packages` thay
+du hai → agent tra `/status` qua dung forward cua app voi `version 10.6.2, versionCode 274` →
+logcat may ghi `MotionEvent { ACTION_DOWN, x=336.0, y=594.0, toolType=TOOL_TYPE_FINGER,
+source=0x1002 }` **success** ca DOWN lan UP.
+
+### 9.70 Overlay quyet dinh ca cu keo tu DUNG HAI DIEM (16/08/2026)
+
+Nguoi van hanh bao keo khong bam tay. No khong the bam: `runGesture` quyet dinh toan bo cu chi
+**luc nha tay** tu `pointerdown` va `pointerup`, va **khong he co handler `pointermove` nao
+trong ca cay** (grep toan `apps/desktop/src` ra dung mot cho, o `NurturePopup`). Moi thu ngon
+tay lam o giua bi vut truoc khi roi trinh duyet, nen moi cu keo toi may la **mot duong thang o
+toc do deu**.
+
+Do **khong bao gio** la gioi han cua transport. `SwipePath` da ton tai trong `crates/core` tu
+khi viet cho nurture, `UiSession::swipe_path` co ban Android gui no, va `/actions` cua agent
+nhan **so `pointerMove` tuy y voi thoi luong rieng tung buoc trong MOT round trip**. Thu thieu
+la mot Tauri command: khong gi ngoai `crates/core` voi toi duoc.
+
+Them `swipe_path_image` vao `UiSession` (overlay do trong khung da encode, `SwipePath` mang
+pixel thiet bi — cung phep scale ma `swipe_image` da lam, giu trong session vi do la noi biet
+kich thuoc man hinh). Mac dinh cua trait gop ve diem-dau→diem-cuoi nen iOS va moi backend khac
+van chay, chi mat duong cong.
+
+Lay mau **co chu dich la mat mat o giua va chinh xac o hai dau**: bo mau gan hon 8 ms hoac 2 px,
+va qua 64 buoc thi **gop ve phia truoc** chu khong bo — giu nguyen tong thoi luong va ca hai
+dau mut, chi lam tho phan giua ma mat khong thay. Diem nha tay **luon** duoc them vao du bo loc
+da tu choi no.
+
+Hai mau tro xuong van di bang duong hai-diem cu. Mot cu flick trinh duyet chi lay mau mot lan
+khong phai duong cong, va gui no thanh path mot buoc se doi ca thoi luong cu chi cho mot move.
+
+**Do duoc: mot cu keo gio sinh 84 `ACTION_MOVE` tren may. Truoc do la 1.**
+
+Nhom van dung hai dau mut: khong co command path cho nhom, va viec fan mot chuoi 64 buoc ra
+hai muoi may la mot quyet dinh khac voi cai gia khac.
+
+### 9.71 Bat `control=true` lam mat video ca 20 may — va no chan IM LANG (16/08/2026)
+
+Ke hoach la bat control chi de gui `RESET_VIDEO` (type 17), cach upstream tu ket luan la dung
+de xin keyframe ma khong phai restart tien trinh (~44 giay tren fleet nay).
+
+Ket qua do duoc: **6 phut, 0 producer, khong mot warning nao.** Tren may thi **co server scrcpy
+dang chay** nhung **khong co `adb forward` nao** cho serial do. No chan im lang chu khong loi.
+
+Da **stash** (`part3-control-socket-WIP`) va tra `control=false`; fleet chay lai 20/20 ngay.
+
+> **DA TIM RA NGUYEN NHAN 16/08/2026, va Phan 3 gio DA CHAY. Xem §9.74 va §9.76.**
+> Khong phai `power_on` khong hop le: no la key hop le, va key **khong** hop le thi server chi
+> `Ln.w` chu khong chet. Thu that su giet 20 may la **do dai argv cua `app_process`**: qua
+> **254 byte** thi tien trinh chet bang `stack corruption detected (-fstack-protector)`, va
+> chet **sau** khi da tra loi bat tay — nen host doc duoc hello hoan hao roi khong nhan duoc
+> frame nao. Bat control ton them 24 byte tren mot ngan sach con 14.
+
+Nghi van hang dau luc do, **da bi bac bo**: `power_on=false` co the khong phai ten option hop le
+cua 3.3.4, lam server thoat theo kieu ta chua bat. `clipboard_autosync` thi **da** xac nhan la co
+(dich nguoc `Options.parse`), `power_on` thi **chua**.
+
+Nhung dieu **da** xac lap ve giao thuc, hai nguon doc lap dong y (dich nguoc `classes.dex` cua
+chinh file ta ship, va upstream tag `v3.3.4`; SHA-256 khop dung `SHA256SUMS.txt` chinh thuc):
+
+* Server accept **mot lan moi kenh bat**, thu tu **video → audio → control**, roi moi dong
+  listener. `sendDeviceMeta` chi chay **sau khi** `open()` tra ve. Nen host phai mo socket thu
+  hai **giua** luc doc dummy va luc doc device name. Do tren 3 may: socket #1 nhan dummy ngay,
+  roi **3,00 s / 0 byte**; mo socket #2 toi **cung host port** la nha ca hai header. **Mot
+  `adb forward` phuc vu ca hai socket.**
+* Dummy byte chi ghi vao socket **dau tien**. Socket control **khong** co dummy.
+* **Mot loi tren socket control giet CA server, ke ca video** — `Controller.start()` o `finally`
+  → `fatalError` → `Looper.quitSafely()`, ke ca vi **mot type byte la**. Nen reader phai khoan
+  dung va moi message phai di bang **mot** `write_all`: stream nay **khong co framing**.
+* `RESET_VIDEO` = type **17**, mot byte. `INJECT_TOUCH_EVENT` = type `0x02`, **32 byte**, toan
+  big-endian, pressure Q0.16 voi `0xFFFF` = dung 1.0.
+
+**Socket control gio DA bat** (§9.76) — nhung chi de gui `RESET_VIDEO`, khong gui input.
+**Quyet dinh: input o lai uiautomator2, KHONG chuyen sang control socket.** Nguoi van hanh chon
+"bam theo cac du an lon", va do chinh la dieu he sinh thai lam — nhanh **soi guong** (scrcpy,
+QtScrcpy, ws-scrcpy) dung control socket vi the gioi cua ho la pixel; nhanh **farm** (STF,
+Airtest+Poco, Appium, uiautomator2) cai agent vi the gioi cua ho la element. **Ta o nhanh farm.**
+Ba ly do cu the: scrcpy rang toa do vao kich thuoc khung video va **bo im lang** khi lech (nen
+moi lan doi preset va moi lan xoay may la mot cua so cham bien mat — upstream #4925 **con mo**);
+`INJECT_TEXT` di tung ky tu qua `KeyCharacterMap` nen **khong go duoc tieng Viet co dau**; va
+agent **von khong cham** — 130–280 ms mot click do tren chinh Galaxy S8+. Con so 1502 ms la
+`adb shell input`, **khong phai** agent, dung nham hai cai.
+
+### 9.88 Menu chức năng từng máy: đo được gì trên máy thật, và bốn cái bẫy (21/08/2026)
+
+Người dùng đối chiếu menu từng-máy của xiaowei với của Riviu và kết luận đúng: **10 dòng so với
+35**. Không phải "bố cục khác" — tám lệnh của nó ở đây **chưa từng được viết**. Đợt này viết
+tám lệnh đó, dựng lại menu (có ô tìm, có submenu), thêm trình quản lý tệp trên máy, và thêm
+đổi-tên / đổi-số máy (migration 10). Gate: core 536 test, android 170, frontend 415, clippy +
+fmt sạch trên `riviu-core` / `riviu-android-driver` / `riviu-managers-phone`.
+
+**Số đo trên 23021RAAEG (Android 15), tất cả 21/08/2026.**
+
+1. **`ls -la /sdcard` in ra *symlink*, không phải nội dung** — một dòng
+   `/sdcard -> /storage/self/primary`. Phải có dấu `/` cuối: `ls -la /sdcard/`. Không có nó,
+   bộ nhớ chính của máy hiện ra như **một file lạ**.
+2. **Ba hình dạng dòng mà parser phải chịu được**, tất cả đều là dòng máy này thật sự in:
+   cột **đệm khác nhau theo từng lần liệt kê** (nên không đọc theo offset cố định); tên **có
+   dấu cách và có cả ` - `** (`Giao Trinh - Bai Giang - HDH`, nên chỉ tìm mũi tên `->` ở dòng
+   mode bắt đầu bằng `l`); và dòng máy **không stat được** in `?` cho mọi cột, **gộp cả ngày và
+   giờ thành một `?`** — thiếu đúng một trường so với mọi dòng khác. Bắt theo *số trường* là
+   mất dòng đó, nên phải tìm cặp ngày-rồi-giờ trước, chỉ khi không có mới rơi về trường thứ 7.
+3. **`svc wifi` không in gì cả** — bật được và bị từ chối trông y như nhau. Trạng thái thật đọc
+   ở `settings get global wifi_on`: `disable` + chờ 1 s ra `0`, `enable` + chờ 2 s ra `1`.
+4. **`am start` exit 0 khi nó KHÔNG mở activity**: mở Cài đặt lúc Cài đặt đang ở trên in
+   `Warning: Activity not started, intent has been delivered to currently running top-most
+   instance` và vẫn exit 0. Cho nên điều kiện đúng là tìm `Error:` trong output, không phải
+   exit code.
+5. **Trần clipboard là hợp đồng, không phải giới hạn trên.** Xin 256 KiB — trông vô hại — bị
+   từ chối thẳng: `clipboard read limit exceeds 65536 bytes`. `MAX_INTERACTION_CLIPBOARD_BYTES`
+   ghim đúng một giá trị ở cả hai nền tảng; lệnh mới phải dùng hằng đó, không tự chọn số.
+6. **Chụp vào máy đi một lệnh shell duy nhất**, tên do *máy* đóng dấu:
+   `p=/sdcard/Pictures/riviu-$(date +%Y%m%d-%H%M%S).png; mkdir -p … && screencap -p "$p" &&
+   ls -la "$p"`. Hai lý do, lý do thứ hai mới là chính: đồng hồ của máy là đồng hồ người vận
+   hành sẽ so khi lướt thư viện; và một lệnh thì **không thể liệt kê ra file khác** với file vừa
+   chụp — chuyện có thật nếu đặt tên ở host rồi `ls` ở lần gọi sau, trên máy vừa nhảy giây.
+   `ls` một file in ra **cả đường dẫn** làm tên, nên một dòng đó vừa là bằng chứng vừa là câu
+   trả lời. Ảnh 0 byte = màn hình đang có nội dung không cho chụp, phải báo, không được coi là
+   xong.
+
+**Menu: ô tìm + submenu mở tại chỗ.** 35 dòng thì cuộn tìm "Reset DPI" chậm hơn gõ "dpi", nên
+có ô tìm (`deviceMenu.ts`, thuần, có test) — và nó **gấp dấu tiếng Việt** vì mọi nhãn là tiếng
+Việt còn bàn phím thì không: `đ` là codepoint riêng nên NFD không tách được, phải xử lý tay.
+Submenu **mở tại chỗ (thụt lề), không bay ngang** — bay ngang thì mỗi cấp lại phải kẹp vào biên
+viewport, và một menu mở ra ngoài màn hình tệ hơn một menu thụt lề. Submenu **hỏi máy thì hỏi
+lúc mở** (`loadChildren`): danh sách app là một lệnh adb mỗi máy, không ai muốn mở menu là bắn
+20 lệnh. Nền tảng lọc ở `gateDeviceMenu` chứ không ở renderer, và phần dễ quên là **bỏ luôn
+submenu rỗng** — không thì iPhone hiện một mũi `ADB ▸` mở ra không có gì.
+
+**Trình quản lý tệp: ba thứ nó từ chối làm giả.** Thư mục đọc không được thì **nói ra** (exit 1
++ câu của máy trên stderr) chứ không vẽ thành thư mục rỗng — hai sự thật khác nhau. Xoá thì
+**đọc lại** (`rm -rf` im lặng về cái nó không xoá được). Và **điều hướng là xoá lựa chọn**: cùng
+một cái tên tồn tại ở hai mươi thư mục, giữ lựa chọn qua một lần chuyển thư mục chính là cách
+một lệnh xoá rơi vào file khác. Đường dẫn được validate ở Rust (`validate_device_path`): chỉ
+chặn `'`, ký tự điều khiển và đường dẫn tương đối, vì mọi đường dẫn đều được bọc nháy đơn —
+`$ & ; | < >` vô hại trong nháy đơn và **tên file thật có chúng**. Gốc lưu trữ (`/`, `/sdcard`,
+`/data`…) thì `is_undeletable_root` chặn hẳn.
+
+**Đổi tên / đổi số (migration 10).** `alias` rỗng = dùng tên máy báo về; `number` NULL = dùng vị
+trí trong lưới. `""` và `null` **không được lẫn**: rỗng là "bỏ tên riêng", `null` từ dialog là
+"thôi không đổi" — không phân biệt được thì mỗi lần bấm Escape là mất tên. Máy có số xếp lên đầu
+lưới theo thứ tự số; hai máy cùng số thì giữ nguyên thứ tự đến (không có gì trong UI ngăn gõ
+trùng số, và lưới không được xáo). Tên **không ghi xuống máy**: đổi tên máy Android cần root và
+là đổi fingerprint, còn việc người vận hành muốn là phân biệt hai mươi con SM-G955F giống nhau.
+Lưu thì **đọc lại bản ghi trước khi ghi**, nếu không đổi tên sẽ xoá số (và xoá cả `handle`
+TikTok nằm cùng dòng).
+
+**Driver: chuột phải phải nằm trong MỘT process.** Menu đóng khi có `pointerdown` ngoài nó, mà
+mỗi lần gọi `driver.ps1` lại mở đầu bằng một cú click activate lên title bar — nên `click` rồi
+`shot` **luôn** chụp được một menu đã đóng, trông y hệt menu chưa bao giờ mở. Đã thêm
+`rightclick`, `menushot` (chuột phải + click dòng) và `menusearch` (chuột phải + gõ vào ô tìm +
+click kết quả đầu). `menusearch` là cách **tin được** để tới một dòng nằm trong submenu: toạ độ
+dòng phụ thuộc submenu nào đang mở và menu đang cuộn tới đâu, còn kết quả tìm luôn là dòng đầu.
+Hai cái bẫy khi viết nó: `PrintWindow` **được gọi mà chưa hề được khai báo** trong khối
+`DllImport` (nên `shot` lúc bị cửa sổ khác che chết bằng "does not contain a method named
+'PrintWindow'" thay vì rơi về đường dự phòng), và `@(@(490,715))` trong PS 5.1 **bị làm phẳng
+thành hai số** nên hai cú click đầu bay lên title bar — phải có dấu phẩy đơn nguyên.
+
+**Còn thiếu so với xiaowei, nói thẳng:** ghi macro theo từng máy (Action Record — replay thì
+Công cụ nhóm đã có), auto swipe, "switch accessible casting", và toàn bộ tầng này trên iOS
+(mọi lệnh mới đều Android-only, iPhone bị `gateDeviceMenu` lọc ra).
+
+### 9.89 Lúc phóng to cũng phải có đủ chức năng, và nhãn + icon app thật (21/08/2026)
+
+Hai câu hỏi của người dùng ngay sau §9.88, và cả hai đều đúng chỗ.
+
+**1. "Phóng to ra thì vẫn kèm các chức năng đó chứ?"** Không — panel overlay có menu riêng 16
+dòng, tách rời menu chuột-phải. Hai khung nhìn của **cùng một máy** mà một cái làm được nhiều
+hơn cái kia là lỗi sản phẩm, không phải khác bố cục. Nay cả hai vẽ bằng **một** component
+(`DeviceFunctionList`) trên **một** danh mục (`tileActions` ở `App.tsx`). Overlay bỏ đúng những
+dòng nó tự làm tốt hơn tại chỗ — app list, bàn phím, adb console là panel nội tuyến; chụp màn
+hình, cài APK, hai chiều ảnh/video là dòng có icon phía trên; Home/Back/Recents là navbar phía
+dưới — qua `withoutMenuIds`, và giữ phần còn lại dưới nhãn "Chức năng khác". Dòng "Quay màn
+hình" riêng của overlay **bỏ** vì danh mục có submenu phải/trái/dọc, hai dòng cùng tên tệ hơn
+một dòng làm nhiều hơn.
+
+**Cái bẫy layout, cùng họ §9.57 nhưng một tầng cao hơn.** Thêm ~14 dòng vào
+`.focus-menu-list` làm **panel app và bàn phím rơi khỏi màn hình**. `flex: 1` +
+`overflow-y: auto` không giới hạn được gì nếu chiều cao **cha** là `auto`: `.focus-stage` là
+flex row `align-items: stretch`, nên nó cao bằng đứa cao nhất — và menu dài làm chính nó thành
+đứa cao nhất. Sửa: `.focus-menu { max-height: calc(100vh - 24px) }` (24px là padding của
+`.focus-overlay`), để cột có chiều cao **xác định** rồi tự cuộn bên trong. Khung ảnh điện thoại
+vẫn giữ đúng kích thước zoom, đúng như ghi chú trên `.focus-phone-screen` yêu cầu.
+
+**2. "Phải lấy được mấy cái icon app nữa."** §9.55 đã kết luận đúng rằng adb không trả nhãn
+được, và đã ghi rõ đường *sẽ* chạy: helper trên máy gọi `PackageManager`. Nay làm xong.
+
+- Helper **0.3.0** thêm `POST /v1/apps/describe` (`AppList.java`): nhận danh sách package,
+  trả `label` + `system` + `icon` (PNG base64). Icon vẽ **qua Canvas**, không cast
+  `BitmapDrawable` — mọi app Android 8+ dùng adaptive icon là drawable nhiều lớp, cast sẽ ném
+  cho phần lớn app của một máy hiện đại. Manifest thêm `QUERY_ALL_PACKAGES`: Android 11+ ẩn
+  package khác, thiếu nó thì `getApplicationInfo` ném `NameNotFound` cho **mọi** app trừ chính
+  nó và danh sách trả về trắng tên.
+- **adb vẫn là nguồn sự thật cho *có những app nào*** (đọc cả hai phân vùng, kể cả app không có
+  launcher activity); helper chỉ trả lời câu adb không trả lời được. Ghép theo tên package.
+- **Số đo trên 23021RAAEG (539 package, Android 15):** nhãn cho **cả 539** mất **4 559 ms**,
+  47 KB. Nhãn + icon 48 px cho **162 app người dùng** mất **3 599 ms**, 535 KB (≈2,2 KB/icon).
+  Tức ~8 ms mỗi app, là chi phí `PackageManager` trên máy — không phải đường truyền. Vì thế:
+  chỉ mô tả **phân vùng người dùng** (377 app hệ thống giữ tên gói, UI vẫn để sau một toggle),
+  và **cache theo serial**, key là fingerprint của *tập* package đã sắp xếp — cài/xoá app là
+  đúng lúc phải đọc lại, và không có gì khác là.
+- **Helper cũ trên fleet là cái bẫy im lặng thật sự.** `pm path` chỉ nói *có cài hay không*,
+  nên 20 máy mang bản trước `appLabels` sẽ để tính năng mới chết lặng trong khi `/status` vẫn
+  trả lời vui vẻ. Nên `/status` khai báo **features**, và `upgrade_if_stale` cài lại **một lần
+  mỗi máy mỗi lần chạy** khi thiếu feature — best-effort, thất bại thì log và vẫn trả helper cũ
+  cho việc mà người gọi đang cần.
+- Nhãn cũng làm câu chú thích cũ thành **sai**: "Android không trả tên qua adb" đọc bên cạnh
+  "Zalo", "TikTok" thành ra panel không biết nó đang hiện gì. `installedAppsFootnote` nay có ba
+  trường hợp và im lặng khi mọi dòng đều có tên.
+- **Build APK không cần Gradle.** Máy này có SDK 34 + build-tools 34.0.0 + JDK 21 nhưng
+  **không có Gradle**, nên `build.ps1` thêm nhánh thứ hai: aapt2 compile/link → javac
+  (`-source 8 -target 8`, classpath là `android.jar`, **không** `--release 8` — nó ghim thư
+  viện của JDK và chặn mọi import `android.*`) → d8 → `jar uf` chèn `classes.dex` → zipalign
+  → apksigner (align **trước** khi ký: chữ ký v2 phủ cả file). Một cái bẫy: aapt2 đòi
+  `package` trên thẻ `<manifest>` còn AGP 8 lại **từ chối** manifest có cả `package` lẫn
+  `namespace`, nên script tự chèn vào một **bản copy**.
+- Nghiệm thu máy thật: `agentVersion 0.3.0`, features có `appLabels`; overlay và menu
+  chuột-phải đều hiện icon + tên thật (kakaopay, GoPay, Bitget, TeraBox, Shopee, WeChat,
+  Grok, Proton VPN…). APK ghim lại: **25 047 byte**, sha256
+  `a0b8ac276aea40c2e1aefa5864f17e0cc7d16db822eea06c15a869a8da9a1c31`, `verify-android-tools`
+  báo ok.
+
+### 9.90 "Ba dòng này không chạy" — cả ba đều chạy, và đó mới là vấn đề (21/08/2026)
+
+Người dùng báo **Cài APK / Đưa ảnh-video vào máy / Lấy ảnh-video từ máy** "chưa hoạt động".
+Đo trên máy thật: **cả ba đều chạy**. Bấm → hộp thoại native mở thật (kiểm bằng
+`driver.ps1 occlusion`: cửa sổ `Chọn ảnh hoặc video` / `Chọn APK` đứng trên app). Cái sai là
+những gì người vận hành **nhìn thấy**, và có ba lỗ riêng biệt:
+
+**1. Hộp thoại lỗi thì mất hút.** Mọi chỗ gọi đều viết
+`const p = await pickFile(...); if (!p) return; try { …việc trên máy… } catch { toast }` —
+tức là **lời gọi picker nằm NGOÀI try**. Dialog không mở được (plugin từ chối, thiếu quyền,
+OS lỗi) → promise bị reject mà không ai await → **không toast, không log, không gì**. Đúng
+hình dạng "bấm mà chẳng có gì xảy ra". Sửa ở gốc: `pickFile`/`pickFiles`/`pickDirectory`
+**không bao giờ throw nữa** — chúng toast lý do rồi trả `null`/`[]`, cùng một câu trả lời với
+"người dùng bấm Cancel" mà mọi call site đã xử lý. Huỷ thì vẫn im lặng. 5 test ghim.
+
+**2. Dòng bị xám mà không nói vì sao.** `disabled={busy}` im lặng, và một dòng không bấm được
+mà không giải thích thì đọc y hệt một dòng không làm gì. Nay panel có băng
+"Đang chạy một thao tác trên máy này…" ngay trên danh sách — một dòng, luôn đúng, giải thích
+mọi dòng xám. (`runBusy` vốn có toast "Máy đang bận", nhưng nút **disabled thì không bấm
+được**, nên toast đó không bao giờ tới.)
+
+**3. Và cái lớn nhất: "Lấy ảnh/video từ máy" lấy TOÀN BỘ thư viện.** Đo trên 23021RAAEG:
+`/sdcard/DCIM` có **761 tệp, 3,3 GB**. Nó chạy vài phút, không có tiến độ, không có nút dừng.
+Người vận hành bấm → xám → im → kết luận "không chạy". Toast trước khi chạy nay nói rõ *toàn
+bộ* và *vài GB*, và chỉ sang "Tệp trên máy…" cho người chỉ muốn vài tệp. **Tiến độ theo tệp
+vẫn chưa có** — muốn có phải đẩy event từ Rust, ghi lại đây để đừng ai phải phát hiện lại.
+
+**App List: đúng hình dạng xiaowei, và không còn read-only.** Panel overlay trước đây ẩn danh
+sách app sau một dòng bật/tắt, và tìm ra app rồi vẫn **không mở được nó**. Nay App List là một
+phần thường trực của cột (header + nút làm mới + lọc + toggle app hệ thống), mỗi dòng là icon
+thật + tên thật, **bấm là mở app** (`launchDeviceApp`). Nghiệm thu: bấm TeraBox → app mở trên
+máy thật. Layout: `.installed-apps.is-launchable { flex: 1 1 45% }` và
+`.focus-menu-list { flex: 1 1 55% }` — hai list chia nhau chiều cao cột; `flex: 1` cho một cái
+và pixel `max-height` cho cái kia là đúng cách bản cũ tự co về 0 (§9.57).
+
+**Một chi tiết của gate, không phải của sản phẩm:** `designTokens.test.ts` chặn màu literal
+theo *substring*, nên `#fff7ed` — một màu amber hoàn toàn mới — bị bắt vì chứa `#fff`. Dùng
+`--warn-soft`/`--warn-line`/`--warn` có sẵn.
+
+### 9.91 Hover mở submenu, một vùng cuộn, và `[object Object]` (21/08/2026)
+
+Ba yêu cầu của người dùng, và cái thứ ba làm lộ một lỗi thật.
+
+**1. Submenu mở khi hover, không cần bấm.** Trước đó submenu mở *tại chỗ* khi bấm, với lý do
+"flyout phải kẹp viewport ở mọi cấp". Kẹp thì vẫn phải làm — nhưng mở tại chỗ sai hai lần: nó
+**đẩy mọi dòng bên dưới** đúng lúc người ta đang đọc, và biến việc mở submenu thành một cú bấm
+trong khi sản phẩm gốc không cần cú nào. Nay: `onPointerEnter` mở một flyout cạnh dòng, chọn
+bên phải nếu còn chỗ (`window.innerWidth - rect.right >= 236`), không thì lật sang trái, và kẹp
+`top` để không tràn đáy. **Portal ra `document.body`** — panel overlay nằm trong một ancestor có
+`transform`, và `position: fixed` bên trong một cái như thế được định vị theo *nó* chứ không
+theo viewport (đúng cái bẫy tooltip đã ghi trong memory). Có **grace 180 ms** khi rời chuột: giữa
+dòng và flyout có vài pixel trống, đóng ngay lập tức là biến submenu thành thứ không tới được —
+lỗi kinh điển của menu hover. Bấm vẫn mở (bàn phím, cảm ứng).
+
+**2. Một vùng cuộn cho cả cột.** Bố cục cũ là hai hộp cuộn xếp nhau (danh sách chức năng
+`flex: 1` + App List `flex: 1 1 45%`), nên **con lăn làm việc khác nhau tuỳ con trỏ ở nửa nào**
+và người vận hành phải tìm đường nối. Nay `.focus-menu-scroll` bọc toàn bộ thân panel (chức
+năng + panel đang mở + App List), mọi con bên trong để chiều cao tự nhiên (`overflow: visible`),
+và một con lăn ở bất cứ đâu cuộn cùng một danh sách.
+
+**3. Trình quản lý tệp: thêm ô đường dẫn gõ tay — và `[object Object]`.** Lối tắt và breadcrumb
+chỉ tới được thứ đã ở trên màn hình; muốn xem `/data/local/tmp` thì không có đường nào. Nay có
+ô "Đường dẫn" (Enter để đi), thêm lối tắt `Android/data` và `Gốc /`. Đo trên 23021RAAEG:
+`/sdcard/Android/data` **đọc được**, `/data` và `/data/data` trả `Permission denied` — đó là
+policy của Android, không phải lỗi tool.
+
+Và đây là lỗi thật, chỉ chạy máy thật mới thấy: một thư mục bị từ chối hiện ra
+**`[object Object]`**. Lệnh Tauri reject bằng một *object* (`{code, message}`), nên
+`String(error)` cho ra đúng chuỗi vô dụng đó — trong khi `describeError` (đã có sẵn trong
+`toastStore`) biết đọc nó. Rất có thể đây chính là lý do của câu "nó phải truy cập được thư mục
+của máy chứ": người dùng gặp `[object Object]` và kết luận là không vào được. Đã sửa ở
+`DeviceFilesPopup`, `InstalledApps`, `DeviceFunctionList`, `AdbConsole`. **`String(error)` vẫn
+còn ~15 chỗ trong `SettingsPanel.tsx`** với cùng lỗi này — chưa sửa, ghi lại để đừng ai phải
+phát hiện lại. Test của popup nay dùng `describeError` **thật** (chỉ mock `pushToast`/
+`toastError`), vì mock nó đi là mở đường cho `[object Object]` quay lại mà không ai thấy.
+
+**Một test flaky đã ghim:** `FlowWorkspace` chờ nút "Chạy Flow" enable với timeout mặc định 1 s
+— nó pass khi chạy riêng và fail rải rác trong full suite (54 file render song song). Đã cho
+timeout tường minh 5 s: một gate flaky dạy người ta chạy lại thay vì đọc.
+
+**Và ngay sau đó, cùng một họ lỗi một tầng nữa: dải trắng dưới ảnh điện thoại.** Cho `.focus-menu`
+`max-height: calc(100vh - 24px)` chữa được chuyện panel đẩy navbar ra ngoài (§9.89), nhưng lại
+cho phép nó **cao hơn ảnh máy** — và `.focus-stage` là flex row `align-items: stretch`, nên
+stage giãn theo đứa cao nhất và chừa một dải trắng dưới khung ảnh. Chiều cao xác định nay lấy
+từ chính component: `style={{ height: frameWidth * aspect }}`, **đúng biểu thức mà khung ảnh
+dùng**, nên ảnh máy luôn là mốc và panel cuộn bên trong đúng chiều cao đó. `max-height` giữ lại
+làm trần cho lúc zoom rất lớn — khi đó ảnh mới là đứa cao hơn, và không có dải trắng theo chiều
+nào. Ba lần sửa cùng một chỗ, cùng một nguyên nhân: **một cột flex chỉ tự cuộn được khi chiều
+cao của nó là xác định**, và "xác định" phải đến từ thứ định nghĩa layout — ở đây là khung ảnh.
+
+### 9.92 Một danh sách, và cái `max-height` cắt mất App List (21/08/2026)
+
+**Bỏ nhãn "CHỨC NĂNG KHÁC", ô tìm lên đầu, một danh sách duy nhất.** Panel overlay từng có hai
+nhóm: dòng của riêng nó, rồi nhãn "Chức năng khác" và danh mục dùng chung có ô tìm riêng. Cái
+nhãn đó chỉ dạy người vận hành **một chức năng nằm ở nửa nào** — và ô tìm chỉ lọc được nửa dưới.
+Nay `menuRows` của panel được khai báo thẳng là `DeviceMenuNode[]` và nối với danh mục
+(`panelNodes = [...menuRows, ...overlayFunctions]`), tất cả do **một** `DeviceFunctionList` vẽ:
+một ô tìm `position: sticky` ở đầu (lọc *mọi* dòng), một cổng nền tảng, không nhãn phân nhóm.
+
+`panelNodes` **không memo hoá**, và đó là cố ý: `menuRows` được dựng lại mỗi lần render theo
+thiết kế (nhãn của nó đọc `busy`, `showDevices`, `showPhrases`), nên memo theo bất cứ thứ gì
+nhỏ hơn chính mảng đó sẽ trả về **dòng cũ**, còn memo theo chính mảng thì không bao giờ hit.
+
+**`role="menuitem"` chỉ đúng khi có `role="menu"` bao ngoài.** Gộp danh sách làm mọi dòng của
+panel thành `menuitem` — nhưng panel là một `<aside>`, và một `menuitem` không nằm trong `menu`
+là ARIA sai, đọc còn tệ hơn cái `button` mà nó thực sự là. Nay có prop `menuSemantics`: menu
+chuột-phải bật (container của nó có `role="menu"`), panel tắt; dòng trong flyout **luôn** là
+`menuitem` vì flyout tự nó là một menu. Đây cũng là lý do 5 test của overlay đỏ cùng lúc — chúng
+tìm `role="button"`, thứ mà `role="menuitem"` ghi đè.
+
+**App List bị cắt ở 340 px và không lăn được — nguyên nhân nằm trong CSS gốc.** Quy tắc
+`.installed-apps` (viết cho bố cục panel-bật-tắt cũ) có `max-height: 340px` **và**
+`overflow: hidden`; bản `.is-launchable` của tôi không reset hai thứ đó, nên trong vùng cuộn
+duy nhất của panel các dòng app bị **cắt cụt** mà không có cách nào tới phần còn lại. Sửa:
+`max-height: none; overflow: visible;` và `gap: 0` (0.4rem giữa header/ô lọc/chú thích của quy
+tắc gốc chính là "khoảng trắng quá nhiều" trong một cột 220 px).
+
+**Chú thích của App List từng đổ lỗi cho máy.** Trên một máy fleet nó ghi "241 app máy không trả
+tên" — nhưng 241 cái đó là **phân vùng hệ thống mà driver cố ý không hỏi tên** (4,5 s cho 539
+gói so với 3,6 s cho 162 gói người dùng thật sự mở). Nay khi mọi dòng không tên đều là system,
+câu đó nói đúng chuyện: "chưa đọc tên (để không mất thêm ~4,5 s mỗi máy)".
+
+**Và ngưỡng test là ngưỡng *tải*, không phải hành vi.** `waitFor` mặc định 1 s và `testTimeout`
+mặc định 5 s — trên máy này (app + 20 máy đang stream + suite 54 file song song) ba file khác
+nhau đỏ trong ba lần chạy liên tiếp, mỗi cái đều xanh khi chạy riêng. Nâng `asyncUtilTimeout`
+lên 5 s (`src/test/setup.ts`) rồi phát hiện ngay bẫy thứ hai: nó **bằng đúng** `testTimeout`,
+nên một `waitFor` chậm ăn hết ngân sách của cả test và lỗi hiện ra là "test timed out" chứ
+không phải là tải. Nâng `testTimeout` lên 20 s (`vite.config.ts`). Sau đó 444/444 xanh ba lần
+liên tiếp. Nâng ngưỡng không tốn gì khi assertion sẽ đúng (`waitFor` poll và trả về ngay), chỉ
+làm chậm một lỗi thật — còn một gate flaky thì dạy người ta chạy lại thay vì đọc.
+
+### 9.93 Một nhãn bị hỏi "là sao?", và màu xanh trong một sản phẩm màu cam (21/08/2026)
+
+**"Đặt làm trung tâm điều khiển là sao?"** — chính câu hỏi đó là câu trả lời: một nhãn đặt tên
+cho một **khái niệm do sản phẩm tự nghĩ ra** thì không giải thích được gì. Việc nó làm là chọn
+xem overlay điều khiển máy nào khi **Sync đang bật**: mở tile nào cũng ra màn hình của máy đó,
+và mọi máy đã chọn làm theo thao tác trên đó (`focusDevice` ở `App.tsx`). Nếu Sync tắt thì nó
+**không có tác dụng gì**.
+
+Nay nhãn nói đúng việc: "Đặt làm máy chính khi bật Sync". Và vì một dòng menu không có chỗ cho
+lời giải thích, toast nói phần còn lại **đúng lúc có thể hành động**: bấm khi Sync đang tắt thì
+nó nói ra rằng đang tắt và bật ở đâu. Nhãn trên tile đổi từ "Trung tâm" sang "Máy chính", với
+`title` mang cả câu. Bài học chung: **đặt tên theo việc nó làm, không theo khái niệm mình vừa
+phát minh** — nếu nhãn cần một trang tài liệu thì nó là nhãn sai.
+
+**Màu xanh trong một sản phẩm màu cam đọc thành hai thương hiệu.** Người dùng yêu cầu đúng chữ:
+"UI hiện tại lại có màu xanh ở nhiều chỗ, chuyển qua màu cam". Nguồn lớn nhất là **token**:
+`--link: #2b6cb0` — được đặt với lý do "cam đọc như một cái nút trong chữ chạy" — nay trỏ vào
+`--primary-deep`, nên bảy chỗ dùng `var(--link)` (hover của mọi dòng menu, dòng đang chọn, link
+trong văn bản) đổi theo cùng lúc. `--bg-content` từ `#f8faff` sang `--primary-50`.
+
+Còn lại là literal, và chúng là những chỗ **nhấn** chứ không phải chữ/viền trung tính: viền
+khung overlay `#7aa7d9`, header panel `#dce6f5`/`#c5d4e8`, hover `#f3f6fb`/`#eaf1fb`, dòng đang
+chọn `#eff6ff`, viền tile đã chọn + khung kéo-chọn + `accent-color` của checkbox `#5671ff`, chip
+USB/WIFI trên tile `#2f6fed`, banner info `#d6e4f5`/`#f2f7fd`/`#2f5d8a` — tất cả sang token cam.
+**Cố ý KHÔNG đổi:** dãy xám-slate (`#94a3b8`, `#64748b`, `#334155`…) và hai màu xanh lá của
+trạng thái ok. Chúng đọc là trung tính/ngữ nghĩa, không phải "xanh", và nhuộm cam cả chữ phụ
+thì mất đúng cái tương phản mà một màu nhấn cần có. Cách tìm cho lần sau: liệt kê mọi literal
+rồi lọc `b - r >= 25` — nó tách "xanh thật" khỏi "xám hơi lạnh" mà mắt không làm nổi.
+
+`designTokens.test.ts` vẫn xanh: thay literal bằng token chỉ **giảm** số màu một-lần.
+
+**Kéo khung chọn máy thì bôi đen luôn chữ trong tile** (21/08/2026, người dùng báo kèm ảnh:
+số tile, model và "Android 9" xanh lè). Đó là text-selection mặc định của trình duyệt chạy dưới
+cú kéo. Sửa hai đầu: `event.preventDefault()` ở `onCanvasMouseDown` (chặn cho cả cú kéo) và
+`user-select: none` trên `.dev-phone` (chặn cả cú kéo bắt đầu *bên trong* một tile). Không mất
+gì: caption chỉ có hai dữ kiện và cả hai copy được từ menu của tile ("Sao chép ID máy").
+
+**Và trong lúc nghiệm thu cú kéo đó, phát hiện một lỗi nặng hơn nhiều: mỗi máy vào danh sách
+chọn HAI lần.** Dấu hiệu là hai con số cho cùng một thứ — kéo khung qua ba tile thì toolbar ghi
+`(3)` còn sidebar ghi `Đã chọn 6`; lần trước là 9 và 18. Đúng tỉ lệ 2:1, và đó là chỉ dẫn.
+Nguyên nhân: `querySelectorAll("[data-udid]")` — một tile mang thuộc tính đó trên **ba** phần tử
+(`<article>` của `DeviceTile`, host div của `PhoneCanvas`, và `<canvas>` khi đã có stream), nên
+một tile trả về hai-ba udid giống nhau. Sidebar đọc `selected.length` (có trùng), toolbar đọc
+`devices.filter(...)` (không trùng) — nên hai số vênh nhau, và **con số vênh chỉ là nửa nhìn
+thấy được**: `selected` là `udids` truyền vào `group_input`, nên mọi thao tác nhóm sẽ được gửi
+tới cùng một máy **hai lần** — một cú tap thành hai, một phím thành hai, một chuỗi chữ gõ hai
+lần. Sửa: selector thành `.dev-phone[data-udid]` (đúng gốc), **và** `tilesInBox` tự loại trùng +
+bỏ udid rỗng (không thể bị hỏng lại khi có phần tử mới mang thuộc tính đó). 3 test ghim.
+
+Bài học đáng ghi: **hai chỗ hiển thị cùng một con số là một máy dò lỗi miễn phí.** Nếu chúng
+vênh nhau theo một tỉ lệ tròn, đừng đi "sửa cái đếm" — tỉ lệ đó đang chỉ vào nguyên nhân.
+
+**"Quét chọn từ dưới lên thì không quét được" — và nguyên nhân cũng là của Ctrl+lăn chuột.**
+`.window-canvas` chỉ cao bằng đúng các tile của nó, nên **vùng trống dưới lưới thuộc về phần tử
+cha** — mà cả hai cử chỉ của lưới đều gắn vào canvas. Bắt đầu kéo khung ở dưới đó thì rơi vào
+`event.target !== event.currentTarget` và **không bao giờ khởi động**, còn Ctrl+lăn ở dưới đó thì
+cuộn trang thay vì zoom. Đo được: kéo từ (400,800) chọn **0 máy**, cùng cú kéo bắt đầu trong
+vùng tile chọn **9 máy**. Sửa: `.window-canvas { flex: 1 1 auto; min-height: 0 }` để nó chiếm
+hết phần còn lại của `.content`. Hướng kéo chưa bao giờ là vấn đề — `normalizeBox` xử lý cả bốn
+chiều — vấn đề là **điểm bắt đầu**; "từ dưới lên" chỉ là cách gặp nó.
+
+Kèm một tác dụng phụ phải sửa ngay: `align-content` mặc định là `stretch`, nên khoảnh khắc
+canvas cao hơn các tile thì các **hàng đã wrap giãn ra** để lấp chỗ và một khe hở mở ra giữa
+hàng một và hàng hai. `align-items: flex-start` có sẵn không cứu được vì nó là trục khác. Thêm
+`align-content: flex-start`.
+
+**Bỏ thanh trượt "Cỡ", giữ Ctrl+lăn chuột** (theo yêu cầu). Thanh trượt từng được thêm *vì*
+cử chỉ cần giữ Ctrl nên không có gì trên màn hình nói rằng cỡ đổi được — nay câu đó chuyển vào
+`title` của chính lưới ("Ctrl + lăn chuột để phóng to / thu nhỏ · kéo chuột để quét chọn máy"),
+đúng cách overlay đã làm với khung ảnh của nó. Cử chỉ không đổi: cùng `TILE_ZOOM`, cùng clamp,
+cùng khoá localStorage. `FilterToolbar` mất hai prop và có một test **ghim rằng không còn
+`input[type=range]`**, để không ai đặt lại theo phản xạ. `driver.ps1` thêm `ctrlscroll` — SendKeys
+không giữ được modifier *xuyên qua* một mouse event, nên phải `keybd_event` nhấn/nhả Ctrl quanh
+nốt lăn.
+
+**Bỏ ô tick ở góc tile** (21/08/2026, theo yêu cầu). Nó không mất chức năng nào: bấm tile là
+chọn (Ctrl/Shift/Cmd để cộng thêm), kéo khung là chọn nhiều (A7), Ctrl+A lấy cả tab, nháy đúp
+mở overlay — ô tick 15 px nằm trên một khung video đang chạy chỉ làm **đúng việc mà bấm vào
+khung đã làm**, tức thêm một thứ để nhắm và một thứ để bấm nhầm. Trạng thái chọn vẫn thấy được:
+viền cam của chính tile. Cùng lý do với cái nút mở-rộng đã bỏ trước đó.
+
+### 9.87 Chay that tren 20 may bat duoc hai loi khong test nao bat duoc (17/08/2026)
+
+Mở app thật trên dàn 20 máy, sau khi 27 lỗi đã sửa và mọi gate đều xanh. Hai lỗi lộ ra, và
+**một trong hai là do chính đợt sửa gây ra**.
+
+**1. Máy rời fleet rồi quay lại thì im lặng vĩnh viễn** (`view_hub.rs`). Client WebSocket giữ
+`known: HashSet<String>` các máy nó đã subscribe, và tập đó **chỉ lớn lên**. Máy rời →
+`ViewHub::forget` đóng kênh, forwarder chết — nhưng udid vẫn nằm trong tập. Máy quay lại →
+hub tạo kênh **mới** và thông báo → `insert` trả "đã biết" → bỏ qua → không ai subscribe kênh
+mới. Client điếc với máy đó tới khi kết nối lại.
+
+Mọi thứ nhìn lành lặn: producer chạy, log ghi `idr=true sps=true`, forward có, không lỗi ở
+đâu. Đo trên cùng một máy: reboot → **18/19 giữ nguyên 18 phút**; sau fix → **19/19 ngay khi
+máy về**. Bằng chứng mạnh hơn đến sau: hub USB rớt 19 máy rồi cắm lại, app tự bắt lại
+**20/20 không cần khởi động lại** — trước fix cả 19 sẽ điếc.
+
+Điều đáng nhớ về *cách* nó lộ ra: **E1 làm nó tìm được**. Trước E1, máy quay lại được đánh
+dấu `live` sẵn nên tile khoe đang stream trên canvas trắng. Hình vẫn không có ở cả hai bên;
+fix chỉ đổi một lời nói dối tự tin thành sự im lặng trung thực — và sự im lặng mới là thứ
+đếm được.
+
+**2. Fix A1 của tôi làm chết hẳn đường publish của Android.** `stage_one_bundle` chép bundle
+vào `<scratch>/<ordinal>/<bundle-name>/` rồi truyền `<scratch>/<ordinal>/`. Đúng cho iOS —
+sidecar duyệt thư mục con và lấy tên album từ đó — nhưng `publish::stage` của Android chỉ đọc
+**file** ở gốc, nên thấy một thư mục và không thấy file nào. Mọi transfer hỏng với
+`publish source root ... has no files`. Dàn này toàn Android: publish đã chết từ `b464c49`.
+
+May một điều: khẳng định "không có file" khiến nó **hỏng to tiếng** chứ không im lặng đẩy
+album rỗng.
+
+`collect_source_files` giờ lấy file ở gốc **và một tầng dưới**. Một tầng, không phải duyệt
+sâu: bố cục chỉ có một tầng, và mọi file thu ở đây đều bị đẩy lên máy rồi đưa vào bộ chọn ảnh
+của TikTok. Kiểm trên hai máy, đúng tính chất §9.83 đòi: máy A chỉ nhận bundle A, máy B chỉ
+nhận bundle B, hai manifest hash khác nhau nên hai album khác nhau.
+
+**Bài học chung của cả hai:** gate xanh không thay được việc mở app lên. Cả hai lỗi đều nằm
+ở đường "thiết bị rời rồi quay lại" và "bố cục thư mục giữa hai backend" — chỗ mà unit test
+nhìn thấy đúng thứ nó tự dựng lên.
+
+### 9.86 27 loi cua dot soat doi khang: nhung gi dang nho lai (17/08/2026)
+
+Toàn bộ 27 lỗi đã sửa. Phần lớn đã nằm trong commit message; đây là những **sự thật xuyên
+suốt** mà việc sau còn phải dùng tới.
+
+**Producer minicap của Android chạy `Projection::native`, không phải `half`.** Đây là lựa
+chọn *đúng đắn*, không phải chất lượng: Flow đo bằng pixel thiết bị — toạ độ đã biên dịch nhớ
+kích thước ảnh nó được chọn trên, `validate_geometry` từ chối gửi nếu khung hình sống không
+khớp hình học đã xác định, và bằng chứng `FrameRegionChanged` nêu hình chữ nhật theo pixel
+khung hình. Ở nửa tỉ lệ không cái nào qua nổi. Đã đo cả hai chiều trên Redmi 23021RAAEG:
+native → 4/4 node Succeeded; đổi lại `half` → `EvidenceInvalid: frame region is outside the
+decoded image`. Lưới tile Android **không** dùng minicap (nó ở đường H.264) và
+`background_sample_candidate` trả false cho Android, nên không ai trả thêm chi phí. Đường AI
+không đổi chiều nào: `openai_client::make_contact_sheet` resize mọi khung về 375x667 trước
+khi tới provider, nên hoá đơn token không phụ thuộc máy chụp cỡ nào. **Nếu tile Android quay
+lại minicap thì phải xem lại dòng này.**
+
+**Một thông điệp chỉ sống đúng bằng trạng thái giải thích nó.** `merge_scanned_device` mang
+`last_error` theo *chỉ khi* `tile_stream_state` vẫn là `Error`. Luật cũ — mang theo bất cứ khi
+nào lần quét mới không có lỗi — làm mọi lỗi bất tử, vì `probe_device` ghi `None` khi thành
+công. Cùng khuôn đó lặp lại ở `ScheduleItem::last_error` (migration 8) và ở kết quả preflight
+của Nuôi TT.
+
+**Một máy hỏng không được kết thúc lượt của máy khác.** Khuôn của `ddd074c` giờ có mặt ở bốn
+chỗ nữa: `startFleetPreview` (từng là `Promise.all`, một máy Android rớt là mọi iPhone phía
+sau không được chạm tới), `preflight_comment_job` (một máy bận huỷ cả lượt start),
+`recover_startup_contexts` (một hàng DB hỏng chặn app khởi động), và vòng lặp pull media.
+
+**Ba thứ đã chứng minh trên phần cứng thật**, không phải suy luận: Flow chạy end-to-end trên
+hai đời máy khác nhau (§9.85), toạ độ ảnh chạy được cả hai chiều, và `export_media` bắt được
+ngay ca thật ở lần chạy đầu — **836/838 file**, 2 file im lặng không tới. Luật cũ sẽ báo
+"Đã lấy 836 file" như một thành công.
+
+Một việc dọn dẹp chưa làm, ghi để khỏi quên: fixture của test Rust (`riviu-flow-runtime-*`,
+`riviu-flow-executor-*`) không tự xoá, nên thư mục temp đang có hơn 21.000 mục. Không phải
+lỗi của đợt này và không ảnh hưởng gì đang chạy.
+
+### 9.85 Flow chay that tren Android: cai `inspect_device_for_target` con thieu (17/08/2026)
+
+`AndroidDriver` **không cài** `DeviceDriver::inspect_device_for_target`, nên mặc định của
+trait trả `unsupported`, và **mọi** lượt Flow trên **mọi** máy Android hỏng ngay ở tiền kiểm.
+Không tầng nào chặn: giao diện vẫn liệt kê cả 20 máy là hợp lệ, `resolve_targets` chỉ lọc
+theo kết nối. Bấm "Chạy Flow" trên dàn Android = 20/20 thất bại chắc chắn.
+
+Bốn quyết định phải nói rõ, vì cả bốn trường đều được **đặt tên trên iOS** và chép nguyên
+sang Android sẽ là nói dối trong một bản ghi định danh được lưu và băm:
+
+| Trường | Trên iOS | Trên Android |
+|---|---|---|
+| `executable_name` | Mach-O trong bundle | **component instrumentation** driver này khởi động (`…server.test/…AndroidJUnitRunner`) — thứ thực sự chạy |
+| `signer_identity_sha256` | băm chuỗi signer trong provisioning profile | **SHA-256 của chính APK đã cài**, đọc bằng `sha256sum` trên máy. adb không có chuỗi tương đương: `dumpsys package` in `hashCode` 32-bit chứ không phải digest |
+| `protected_auth_ready` | route có token đã trả lời | agent trả lời **và đọc được accessibility tree**. Server bind cổng nhưng mất `UiAutomation` vẫn "khoẻ" và hỏng mọi query — đó là đúng thứ cần chứng minh |
+| `transport` | usbmux / RSD | thêm biến thể `AdbTransport`. Thêm variant là **cộng thêm** ở cả hai phía ranh giới lưu trữ: không hàng cũ nào chứa `adb`, không giá trị iOS nào đổi — mà giá trị này là hash material |
+
+**Hình học phải đọc bằng `dumpsys display`, không phải `wm size`.** §9.59 đã đo: máy xoay
+ngang thì `wm size` vẫn trả `Override size: 1080x2220` trong khi `dumpsys display` chuyển
+sang `real 2220 x 1080`. Một dòng `mOverrideDisplayInfo=` chứa cả ba thứ cần —
+`real WxH`, `rotation`, `density` — nên là **một** round trip. Ưu tiên dòng override chứ
+không phải base, cùng cái bẫy `parse_wm_size` đã ghi: cả dàn báo base `1440x2960 density 560`
+và override `1080x2220 density 420`, đọc nhầm là lệch 33%.
+
+Parse **theo dòng**, không theo khối `DisplayInfo{...}`: khối đó có ngoặc lồng
+(`modes [{id=1, …}]`), nên quét `[^}]*}` dừng giữa `modes` và không bao giờ tới
+`rotation`/`density`.
+
+**Chứng minh trên phần cứng, không phải bằng unit test.** Test với dữ liệu cố định chỉ chứng
+minh snapshot *lắp* đúng; chỉ máy thật mới chứng minh các dữ kiện đó *đọc được*. Hai công cụ
+mới, và cả hai chạy trên SM-G955F đang cắm:
+
+- `cargo run -p riviu-android-driver --example flow_qualify -- <serial>` — snapshot đầy đủ
+  trong **1317 ms**, mọi cổng tiền kiểm xanh, `qualified_geometry_profile_id` tính được.
+- `cargo run -p riviu-managers-phone --bin live_flow_android -- <serial>` — một Flow thật
+  (`Start → LaunchApp(TikTok) → End`, `ResourceClass::UiSession`, bằng chứng
+  `ActiveAppEquals`) chạy qua `FlowRuntime` đã ship: **Succeeded**, cả ba node Succeeded.
+
+Một chi tiết đo được đáng nhớ: trong 20 máy, có máy báo `density 480` còn lại báo `420` ở
+cùng `1080x2220`. Nên `profile_id` của chúng **khác nhau**, và phải khác — một toạ độ chọn
+trên máy này là một điểm logic khác trên máy kia.
+
+Điều còn lại chưa sửa, ghi ra vì nó không phải chuyện Android: `PmdDriver::inspect_device_for_target`
+trả cứng `protected_auth_ready: false` và `geometry: None`, nên **iOS thật cũng không qua nổi
+tiền kiểm** của một Flow cần UI session. Chỉ `MockIosDriver` trả snapshot đầy đủ. Đó là một
+lỗi riêng, chưa nằm trong 27 cái của đợt này.
+
+### 9.84 Go han dang nhap: mat khau plaintext trong cot ten `password_hash` (17/08/2026)
+
+`register_user` ghi mật khẩu **nguyên văn** vào cột tên `password_hash`, và `login_user` so sánh
+nó như plaintext. Ai đọc được `riviu.db` — thư mục đồng bộ, một bản backup, một support bundle,
+một tài khoản khác trên cùng máy — đọc được mật khẩu của mọi người vận hành.
+
+Người vận hành chọn **xoá hẳn** thay vì băm. Lý do đứng vững: đây là app một máy, cái "đăng
+nhập" này không bảo vệ gì (mọi lệnh Tauri chạy không cần nó), nên nó chỉ tạo ra một kho mật
+khẩu mà không đổi lại được thứ gì. Băm sẽ giữ lại kho đó và thêm việc phải làm đúng.
+
+Bốn thứ bị gỡ, và **thứ tư mới là điểm chính**:
+
+1. Bốn lệnh Tauri (`auth_session`, `auth_login`, `auth_register`, `list_users`) và bốn hàm DB.
+2. Frontend: `LoginPage`/`RegisterPage`/`AccountPage`, `PageId` mất `login`/`register`/`account`,
+   mục "Tài khoản" trên sidebar, và cái nút hình người ở header — nó chỉ là tooltip của email
+   đang đăng nhập, gỡ auth xong thì thành nút bấm không làm gì, đúng thứ §9.58 cấm để lại.
+3. Migration 7 `drop-local-users`: `DROP TABLE IF EXISTS users`. **Gỡ giao diện mà để bảng lại
+   thì phơi nhiễm vẫn nguyên** — hàng cũ vẫn nằm trong file DB của mọi máy đã chạy bản trước.
+4. Một test canh chừng, `no_command_stores_a_login_password`: nó quét *cả bề mặt lệnh* tìm chữ
+   `password` chứ không tìm bốn tên vừa xoá, vì tìm theo tên chỉ bắt được người thêm lại **đúng
+   bốn cái đó**. Lần sau không nhất thiết phải tên là `auth_login`.
+
+Test đó bắt ngay hai chỗ tôi không biết, và **cả hai đều hợp lệ** — nên chúng được **gọi tên
+kèm lý do** trong chính test, chứ không bị bỏ qua im lặng:
+
+- `set_apple_id` nhận mật khẩu app-specific của Apple ID để ký lại WDA. Nó đưa thẳng cho
+  credential store của OS, **không bao giờ chạm `state.db`**, và `get_apple_id` chỉ đọc lại
+  `has_password`. Test khẳng định đúng tính chất đó, không chỉ khẳng định tên.
+- `export_proxy_config` in mật khẩu proxy người dùng tự nhập. Mật khẩu proxy **bắt buộc phải
+  hoàn nguyên được** mới dùng được, nên không băm được; nó nằm đọc được trong bảng `proxies`
+  **do thiết kế**. Vẫn đáng biết: đó là plaintext trong DB, chỉ là loại plaintext có lý do.
+
+Một tên thứ ba xuất hiện trong danh sách đó nghĩa là có bề mặt mật khẩu mới mà chưa ai quyết
+định gì cả.
+
+### 9.83 Dang bai day MOI bundle sang MOI may — va hai backend hieu `source_root` khac nhau (17/08/2026)
+
+Tìm ra bởi một đợt soát đối kháng (115 agent, 36 nghi vấn, 21 sống sót sau ba vòng phản biện
+độc lập). Đây là lỗi **nặng nhất** trong 27 cái còn lại, vì nó là lỗi duy nhất đẩy dữ liệu sai
+**ra ngoài thế giới thật** và không rút lại được — §9.43 đã đo: không có đường xoá bài.
+
+`publish_commands.rs` lấy **một** `source_root` cho cả chiến dịch —
+`bundles[0].source_path.parent()` — rồi dựng nó cho **từng** assignment. Bố cục quản lý là
+`…/<request_id>/<bundle_id>/<ảnh>`, nên cái parent đó là thư mục **chứa mọi bundle**. Chuỗi
+thiệt hại đã truy hết:
+
+1. `riviu_pmd.py::_media_file_manifest` duyệt `source_root.iterdir()` và nhận **mọi** thư mục
+   con làm bundle → manifest và cú đẩy AFC chứa tất cả bundle, cho mọi máy.
+2. Agent nhập **mọi** ảnh trong manifest vào **một** album `Riviu-<importId>`.
+3. `post_one_assignment` bấm `bundle.images.len()` ô tính từ góc trên trái của album đó rồi gõ
+   caption **của assignment này**.
+
+Kết quả nhiều khả năng nhất: **máy A đăng ảnh của bundle B dưới caption của bundle A**. Trong
+khi `validate_publish_mapping` bắt buộc ghép một-một và UI in ra "Mapping tuần tự" — tức cặp
+ghép là hợp đồng của tính năng, và nó bị phá trong im lặng.
+
+**Cái bẫy suýt làm tôi sửa hỏng.** Bản vá đầu của tôi truyền thẳng `bundle.source_path`. Sai:
+sidecar iOS duyệt **thư mục con** rồi mới đọc file, nên đưa thẳng thư mục bundle (chứa file)
+cho ra manifest **rỗng** — không đẩy gì cả. Hai backend hiểu `source_root` khác hẳn nhau:
+
+| | iOS (`_media_file_manifest`) | Android (`publish::stage`) |
+|---|---|---|
+| mong đợi | thư mục **chứa các thư mục bundle** | thư mục **chứa file ảnh** |
+
+Đường Đăng bài **từ chối Android** ngay đầu (`refuse_devices_this_path_cannot_drive`), nên chỉ
+hình dạng iOS chạy ở đây. Bản vá đúng: `stage_one_bundle` chép ra một thư mục tạm
+`<campaign>/.transfer/<ordinal>/<bundle>/` chứa **đúng một** bundle. Tiền tố `.` là cố ý — cả
+hai backend đều bỏ qua mục bắt đầu bằng dấu chấm, nên thư mục tạm không thể bị nhầm là bundle.
+
+Chép chứ không trỏ, vì ba lý do: sửa sidecar là **sự kiện phát hành** (§14, phải đóng băng và
+chứng thực lại); đổi bố cục lúc tạo thì các chiến dịch **đã nằm trong DB** vẫn theo bố cục cũ;
+và Windows không dùng được symlink. Giá phải trả là chép ≤11 ảnh cục bộ, so với việc đẩy đúng
+ngần ấy byte qua USB — không đáng kể. Kèm một cái được: `copy_bundle_to_managed` **kiểm lại
+SHA-256 từng ảnh và caption ngay trước khi byte rời máy tính**, thứ mà đường cũ không làm.
+
+`device_campaign_id` = `<campaign>-<ordinal>`, nên mỗi máy có staging/manifest/album riêng.
+Không phá bước đăng: iOS chọn album bằng **toạ độ cố định**, và `importId` chỉ được *đọc lại*
+từ evidence chứ không bao giờ dựng lại.
+
+**Việc cho người vận hành, phần thiệt hại mà bản vá KHÔNG gỡ được:** máy nào đã chạy một chiến
+dịch nhiều bundle bằng bản lỗi thì đang giữ album `Riviu-*` chứa ảnh của mọi người. Bản vá tạo
+album **mới** (hash manifest đổi), nhưng bước đăng chọn album theo toạ độ cố định nên album cũ
+vẫn có thể nằm đúng chỗ đó. **Phải xoá thủ công các album `Riviu-*` còn sót trên những máy đó.**
+
+### 9.82 Thay nong producer: giu hinh cu toi khi hinh moi co keyframe (17/08/2026)
+
+§9.81 cắt độ hở khi mở overlay từ 17,8 s xuống 1,65 s. Người vận hành vẫn báo "vẫn có delay",
+và đo lại thì đúng: **1.742 ms không có khung hình nào**. Ảnh không đen — canvas giữ khung
+cuối — nên nó *đóng băng* gần hai giây mỗi lần mở một máy.
+
+Chia nhỏ 1.683 ms của lần spawn đó: quét tiến trình thừa **691 ms**, khởi động server trên máy
++ keyframe đầu **687 ms**, còn lại ~305 ms. Cắt sạch bước quét cũng vẫn còn ~1 giây. **Nên
+hướng đi không phải làm spawn nhanh hơn mà là đừng mất hình.**
+
+**Giả định phải đo trước, vì §9.50 cảnh báo đúng chỗ này.** §9.50 ghi hai encoder trên một máy
+gây hại (tile Riviu hello mà không IDR khi GenFarmer 2.4 còn sống). Nhưng đó là server **2.4
+của app khác**. Đo hai server **3.3.4 của chính mình** trên Galaxy S8+ (Exynos, encoder khó
+tính nhất dàn): server thứ hai nối vào lúc server thứ nhất vẫn đang stream, trả config packet
+rồi **IDR thật sau 284 ms**. Cảnh báo cũ không áp cho trường hợp này.
+
+Một cái bẫy khi tự đo, đáng ghi vì tôi sập vào chính ghi chú của mình: probe đầu nhận được
+dummy rồi **treo** ở tên thiết bị. Không phải máy hỏng — với `control=true`, server chờ socket
+điều khiển được mở **giữa** dummy và tên thiết bị (§9.76). Probe thiếu socket thứ hai.
+
+**Thay đổi.** `spawn_view` nhận `ViewStart`: `Fresh` (chưa có gì chạy, thế hệ đã tăng) hoặc
+`Replace` (đang có producer sống). Trên `Replace`:
+
+* **bỏ `stop_our_scrcpy_leftovers`** — nó khớp mọi server 3.3.4 của ta trên máy đó, mà một
+  trong số đó chính là producer đang vẽ màn hình người dùng;
+* điểm đổi thế hệ dời xuống **sau** khi đã cầm chắc keyframe: `take_and_stop_view` rồi
+  `sink.advance` chỉ chạy khi stream mới đã chứng minh được mình.
+
+Hệ quả phụ đáng giá: **thất bại giờ rẻ hơn hẳn**. Thứ tự cũ đã phá producer cũ *trước*, nên
+spawn hỏng là máy tối thui; nay hỏng thì người dùng giữ nguyên stream đang có.
+
+Đo lại, cùng phép đo:
+
+| | trước | sau |
+|---|---|---|
+| mở overlay (tile→overlay) | 1.742 ms | **182 ms** |
+| đóng overlay (overlay→tile) | 17.792 ms | **112 ms** |
+
+Soak 4 vòng mở/đóng: số tiến trình server trên máy đứng yên ở 2 (không rò), 0 máy rớt, 0
+producer hỏng, 20/20 vẫn vẽ. `swap_ms` 940–1193 ms — đó là toàn bộ thời gian dựng stream mới,
+và giờ nó là thời gian người dùng đang nhìn **ảnh sống** chứ không phải ảnh đứng.
+
+### 9.81 95% thoi gian mo mot view nam trong MOT dong shell (17/08/2026)
+
+Người vận hành báo: chọn một máy để điều khiển thì phải chờ. Đo bằng cách nối thêm một client
+vào view hub và bấm mở overlay: **17.8 giây không có khung hình nào**. Ảnh không đen — canvas
+giữ khung cuối — nên nó *đóng băng* 18 giây, thứ mà log không thể phân biệt với "đang chạy".
+
+Không đoán chỗ chậm. Đã tính giờ từng bước của `spawn_view` và in vào chính dòng
+`scrcpy view started`:
+
+| bước | trước | sau |
+|---|---|---|
+| wake display | 216 ms | 290 ms |
+| kiểm JAR | 139 ms | 260 ms |
+| **quét tiến trình thừa** | **21.082 ms** | **367 ms** |
+| prune forward | 73 ms | 207 ms |
+| spawn + forward | 382 ms | 487 ms |
+| bắt tay + keyframe đầu | 361 ms | 584 ms |
+| **tổng** | **22.253 ms** | **2.195 ms** |
+
+`LEFTOVER_LIST_SCRIPT` lặp `/proc/[0-9]*/cmdline` và fork **hai `grep` mỗi PID**. Galaxy S8
+có 648 tiến trình → ~1300 lần spawn qua một `sh`. Một `grep -al` quét hết trong một lượt rồi
+chỉ grep lại vài file khớp: **5,5 s → 230 ms** lúc rảnh, 21 s → 0,37 s khi cả fleet cùng khởi
+động. Khoảng trống mở overlay: **17.792 ms → 1.652 ms**.
+
+Kèm theo, một lỗi tiềm ẩn lộ ra khi đo: **script tự khớp với chính nó** — dòng lệnh của shell
+tạm chứa đúng chuỗi nó đang tìm, cả `scrcpy.Server` lẫn `3.3.4`. Bản cũ cũng thế, và hậu quả
+là `stop_our_scrcpy_leftovers` **không bao giờ** đi vào nhánh "không có gì để dọn": luôn tìm
+thấy ít nhất một PID, luôn ngủ 300 ms, luôn liệt kê lần hai. Nay loại bằng `/proc/` — dòng
+lệnh scrcpy thật không bao giờ chứa nó, dòng lệnh của script thì luôn.
+
+### 9.80 Cham cung di socket control — de agent thoi la diem chet duy nhat (17/08/2026)
+
+Nối tiếp §9.79. Sau khi làm cho lỗi agent **hỏng nhanh và tự chữa được**, việc còn lại là để
+thao tác thường dùng nhất **không phụ thuộc vào nó nữa**. Chạm nay đi socket control trước,
+rơi về agent khi máy chưa có producer.
+
+**Đây là chịu lỗi, không phải tốc độ.** 55 ms của agent chưa bao giờ là vấn đề. Vấn đề là
+agent là điểm chết duy nhất cho mọi thao tác, với chế độ hỏng tính bằng chục giây (§9.79).
+Socket control không biết `UiAutomation` là gì nên không dính. Chữ và phím vẫn ở agent —
+`INJECT_TEXT` không gõ được dấu tiếng Việt, không socket nào đổi được điều đó.
+
+`TAP_HOLD_MS = 60`: DOWN và UP trong cùng một mili-giây không phải thứ ngón tay làm được, và
+một số view bỏ qua nó. 60 ms là một cú click người thật, xa ngưỡng long-press 500 ms.
+
+Kiểm chứng trên máy thật: hai cú chạm trong overlay đi sâu hai cấp trong Cài đặt và **bật
+được một toggle** — toggle chỉ phản ứng với cặp DOWN/UP thật, nên nó là bằng chứng mạnh hơn
+một cú điều hướng. (Đã trả lại trạng thái toggle sau khi thử.)
+
+**Một khoảng hở đã biết, không sửa:** mở overlay làm đổi preset, tức dựng lại producer, nên
+trong ~1–3 s đầu **không có producer** và cú chạm đầu tiên luôn rơi về agent. Quan sát đúng
+như vậy trong lượt kiểm chứng: cú 1 lúc 11:01:15 rơi về agent (vẫn tới máy), producer overlay
+lên lúc 11:01:16, cú 2 đi live. Dự phòng làm đúng việc nên đây không phải lỗi — nhưng nó có
+nghĩa là **tương tác đầu tiên sau khi mở overlay vẫn đi đường mong manh**. Sửa được bằng cách
+giữ producer tile sống tới khi producer overlay sẵn sàng; chưa làm vì đó là thay đổi lớn hơn
+nhiều so với thứ nó mua.
+
+### 9.79 Duong phuc hoi agent KHONG VOI TOI DUOC, va cooldown cho no (17/08/2026)
+
+Đọc `GENFARMER-SOURCE-PATHS.md` → `docs/re/genfarmer` §12.6 chỉ đúng hai bài học: **cooldown
+có cửa sổ cho mọi hành động phục hồi**, và **không đường nào chờ vô hạn**. Soát Riviu:
+
+* **Timeout: đã kín.** Mọi `reqwest::Client` trong crate đều có timeout; không có `.output()`
+  hay `.wait()` trần nào ở phía Android. §12.3 không phải việc phải làm.
+* **Cooldown: thiếu đúng một chỗ.** View producer đã có backoff luỹ thừa 60s→600s + trần
+  đồng thời 4. Nhưng **restart instrumentation thì không có gì cả** — nó bị chặn *trong một
+  lần gọi* (thử một lần rồi báo lỗi) mà không bị chặn **giữa các lần gọi**. Máy nào mất
+  `UiAutomation` vĩnh viễn thì mỗi thao tác của người vận hành lại đi hết vòng phục hồi.
+
+Đã thêm `INSTRUMENTATION_RESTART_COOLDOWN`, **suy ra chứ không chọn**: một vòng tốn hai truy
+vấn mà server sẽ không trả lời (`AgentClient::BLIND_QUERY_COST`, đo 10 116 ms và 10 132 ms —
+timeout root-node của chính server, không setting nào với tới) cộng `AGENT_READY_WAIT`. Cửa
+sổ = hai vòng = 64 s.
+
+**Nhưng cái tìm được khi đi kiểm chứng mới là vấn đề thật, và nó nặng hơn.** Mất
+`UiAutomation` có **hai** biểu hiện, và code cũ chỉ xử lý được một:
+
+1. session mở được, mọi truy vấn treo → `is_alive` bắt được → restart. **Có xử lý.**
+2. session **không mở nổi**: `SessionNotCreatedException: java.lang.IllegalStateException:
+   UiAutomation not connected!`, trả về trong **137 ms**, trong khi `/status` vẫn báo
+   `"ready to accept commands"`.
+
+Ở (2), `let agent = self.open_and_cache_agent(...).await?;` ném lỗi ra ngay — nên **toàn bộ
+đoạn phục hồi bên dưới không bao giờ với tới được**. Muốn chứng minh server hỏng thì phải có
+session, mà cái hỏng chính là không thể có session. Kết quả: mỗi cú chạm trả về một exception
+Java, mãi mãi, và không có gì thử sửa. Nay cả hai nhánh đều dẫn vào cùng một restart — một
+server trả lời `/status` mà không cấp session là một server kẹt, bất kể nó nói gì.
+
+Bằng chứng, và **giới hạn của bằng chứng** (nói rõ vì tôi không tái hiện được theo ý muốn):
+trạng thái (2) **đã quan sát thật** trên `98895a…484f` sau một lần restart thất bại
+(`instrumentation restart finished ms=3205 ok=false`); rằng code cũ không với tới được là sự
+thật **tĩnh** của code, không phải suy đoán; và cách chữa **đã kiểm bằng tay** trên đúng máy
+đó ở đúng trạng thái đó — force-stop hai gói rồi `am instrument` lại thì session mở sạch ngay.
+Cái tôi **không** làm được là ép lại trạng thái (2) để xem Riviu tự chữa: `uiautomator dump`
+cho ra (1) hoặc giết hẳn server, còn force-stop riêng gói `.test` thì kéo theo cả server —
+server HTTP sống trong chính tiến trình runner. (2) là một race.
+
+Ghi thêm: cả hai lần refuse-vì-cooldown và refuse-vì-không-mở-được-session **đều log**. Cùng
+một bài học với `onFallback` ở §9.78 — một đường hỏng mà im lặng thì không ai biết nó đang
+chết.
+
+### 9.78 Keo truc tiep qua socket control — va cai bay "no chay roi" (17/08/2026)
+
+§9.77 tìm ra chỗ đau: `FocusStream` gom mẫu `pointerMove` rồi chỉ bắn một swipe trong
+`onPointerUp`. Nay phần giữa của thao tác kéo đi thẳng xuống socket control của scrcpy
+(`INJECT_TOUCH_EVENT`, 32 byte). **Chỉ phần giữa**: chạm đơn, phím và chữ vẫn ở uiautomator2
+— `INJECT_TEXT` không gõ được dấu tiếng Việt, và một cú chạm rời không đủ chậm để đáng đánh
+đổi rủi ro toạ độ.
+
+**Bẫy toạ độ (upstream #4925) và cách bịt.** Server gọi `Device.getPhysicalPoint`, so kích
+thước khai báo trong thông điệp với kích thước nó **đang mã hoá**, lệch thì **bỏ im lặng**.
+Nên kích thước ghi lên dây không bao giờ là của người gọi: `ViewProducer.frame_size` (một
+`AtomicU32`, w<<16|h, tác vụ đọc cập nhật mỗi khung **trước** khi publish) là nguồn chuẩn, và
+toạ độ của người gọi được scale vào đó. Người gọi chậm một thế hệ thì bị scale lại, chứ không
+mất cú chạm.
+
+**Ngưỡng kéo dùng chung một hằng số.** `TAP_SLOP = 10` quyết định cả "khi nào bắt đầu bơm
+live" lẫn "khi nào `runGesture` gọi đây là tap". Tách đôi là một kéo ngắn vừa được bơm live
+vừa bị phát lại thành tap.
+
+**Cái bẫy tốn nhiều thời gian nhất không phải kỹ thuật.** Lần thử đầu qua UI: máy không nhúc
+nhích. Nhưng `liveDrag` **nuốt lỗi im lặng** theo đúng thiết kế (rơi về đường cũ, thao tác vẫn
+tới máy) — nên không có gì để đọc, và "hỏng" trông y hệt "chạy". Hai bài học:
+
+1. Đã thêm `onFallback` báo một lần mỗi lần kéo. Đường dự phòng **im lặng là đường dự phòng
+   không ai biết là đang chết**. Chính nó nói ra câu trả lời: `down refused: no producer`.
+2. Nguyên nhân thật: đúng lúc đó producer đang được dựng lại (log cùng giây: *19/20 …
+   1 of 4 recovery slots in use*). Tức là **không có lỗi nào cả** — dự phòng làm đúng việc.
+   Thử lại khi fleet ổn định thì chạy ngay.
+
+**Cách kiểm chứng, vì hai lần đầu tôi tự lừa mình.** Ảnh chụp cửa sổ không kết luận được
+(stream có thể trễ), và chụp máy khi đang mở TikTok cũng không (video tự đổi khung — tôi suýt
+đọc đó là thành công). Cách đúng: `examples/touch_probe.rs` tách riêng nửa Rust, và chụp
+`adb exec-out screencap` trên một màn hình **tĩnh mà cuộn được** (Cài đặt) **trong lúc chuột
+vẫn đang giữ**. Kết quả: danh sách đã cuộn lên hiện "Biometrics and security" / "Accounts and
+backup" trước khi nhả tay. Ở chiều ngược lại danh sách đã ở đáy nên chỉ có **thanh cuộn hiện
+ra** — Android chỉ vẽ nó khi có ngón tay đang cuộn, nên đó cũng là bằng chứng.
+
+### 9.77 Do "khong muot" thay vi doan: CPU khong phai thu phanh, va cho no that su nam (17/08/2026)
+
+Mục tiêu là "điều khiển mượt, stream không lỗi, hạn chế mất kết nối". Trước khi sửa gì, đo.
+
+**Stream không lỗi — đã đúng, có số.** Nối thêm một client vào view hub và đo *khoảng cách*
+giữa các khung hình (trung bình fps không nói lên độ mượt: 24 khung đều nhau khác hẳn 24 khung
+dồn hai cụm). 20 máy, 24 giây:
+
+| | p50 | p90 | p99 | max |
+|---|---|---|---|---|
+| khoảng cách khung | 101 ms | 104 ms | 120 ms | 178 ms |
+
+Không dồn cụm, không rớt máy nào trong hơn 15 phút, 2.3 Mbit/s tổng. Preset đổi đúng khi mở
+overlay: máy đang focus chuyển sang `max_size=832 max_fps=24 video_bit_rate=6000000`, đọc từ
+`/proc` trên chính máy đó.
+
+Máy focus chỉ cho 11.3 fps khi màn hình **đứng yên** — đó là MediaCodec làm đúng việc, chỉ phát
+khung khi có thay đổi. Cho nó cuộn thật thì lên 16.1 fps và p50 khoảng cách còn **51 ms**.
+Đừng đọc con số fps tĩnh rồi kết luận stream hỏng.
+
+**CPU: đo được, giảm được, nhưng KHÔNG phải nguyên nhân.** 20 tile ăn 135% một nhân. Chẻ theo
+tiến trình: host Rust **12%**, còn lại là renderer (55%) và GPU (23%) của WebView. Hạ nhịp tile
+xuống 10 (`ViewPreset::Tile::max_fps`) còn **107%**. Nhưng máy này có **20 nhân** — 107% một
+nhân là ~5% cả máy, và không luồng nào bão hoà. **Việc giảm CPU là đáng làm, nhưng nó không hề
+là thứ gây giật.** Suýt nữa tôi tối ưu nhầm chỗ vì tưởng CPU cao là đủ để kết luận.
+
+Lưu ý cho lần sau: quan hệ fps↔CPU **dưới tuyến tính** (24→5 chỉ giảm 37%, không phải 80%).
+`i-frame-interval:int=1` giữ nguyên nhịp keyframe bất kể fps, nên fps càng thấp thì *tỉ lệ*
+khung đắt càng cao. Dưới ~10 gần như không còn gì để lấy.
+
+**Chỗ nó thật sự nằm.** Đo từ lúc ra lệnh tới lúc khung hình về client:
+
+| đường đi | p50 |
+|---|---|
+| `adb shell input keyevent` | 536 ms |
+| click thật trong overlay (qua agent) | **250 ms** |
+
+536 ms là phép đo **sai đường** — `adb shell input` dựng một JVM trên máy mỗi lần gọi, app
+không đi đường đó. Khớp với §9.71: đừng nhầm hai con số này.
+
+Nhưng cái đắt nhất không phải độ trễ một cú chạm, mà là **thao tác kéo chỉ được gửi khi nhả
+tay**: `FocusStream` gom mẫu `pointerMove` rồi bắn một `swipe` duy nhất trong `onPointerUp`.
+Nghĩa là người dùng kéo → màn hình đứng im → thả ra mới cuộn. Đó đúng nghĩa đen là "không
+mượt", và không phép đo CPU hay fps nào chỉ ra được nó — phải đọc đường input mới thấy.
+Socket control của scrcpy (mở từ §9.76, `CONTROL_MESSAGE_INJECT_TOUCH` cố ý để không) cho đẩy
+chạm theo thời gian thực; đó mới là chỗ sửa.
+
+### 9.76 Phan 3 xong: socket control, `RESET_VIDEO`, va mot ket luan tu bac bo (16/08/2026)
+
+§9.71 bo Phan 3 vi "bat control lam mat video ca 20 may". §9.74 tim ra nguyen nhan that
+(argv > 254 byte) va **van ket luan sai** rang Phan 3 khong vua — vi no cong ca
+`clipboard_autosync=false`. **Chua ai do `control=true` MOT MINH.** Do roi thi:
+
+| cau hinh | argv | ket qua |
+|---|---|---|
+| `control=false` (cu) | 240 | chay |
+| **`control=true` mot minh** | **239** | **chay** — re hon 1 byte |
+| `control=true` + `clipboard_autosync=false` | 264 | vuot tran, abort |
+
+Nen thu khong vua **chi la viec tat clipboard sync**, khong phai socket control. Ta de
+clipboard sync **bat** va **drain** socket. Do 75 giay tren SM-G955F, socket control mo va
+**co y khong doc**, clipboard doi 12 lan: **2.197.388 byte video**, 12/12 `RESET_VIDEO` deu
+duoc dap ung, server song. `DeviceMessageSender` dung bounded queue voi `offer` nen no **drop**
+chu khong block — drain la bao hiem, khong phai dieu kien song con.
+
+**Hai thu phai dung, khong phai style:**
+
+* **Socket #2 mo GIUA luc doc dummy va luc doc device name.** Server accept mot socket moi
+  kenh roi moi dong listener; `sendDeviceMeta` chay sau `open()`. Doc name truoc khi mo socket
+  #2 la treo vinh vien. Do: socket #1 nhan dummy ngay, roi **3,00 s / 0 byte**, mo socket #2 la
+  nha ca 64 byte name lan 12 byte header.
+* **Lo hong retry, va no du de tai hien §9.71.** Vong retry 40 lan key tren `NotListening`.
+  Voi `control=true`, neu doc dummy that bai *cham* (khong phai kieu refuse tuc thi cua adb
+  Windows) thi server **da an TCP nay lam kenh video**, va lan retry se bi an lam kenh
+  **control** — server dong listener, ghi name vao socket khong ai doc, retry treo het
+  `META_DEADLINE` roi chet. Sua bang `REFUSAL_WINDOW = 300 ms`: hong *nhanh* moi la
+  `NotListening`, hong *cham* la `Protocol`.
+
+**`RESET_VIDEO` gio la cach chua RE, thu truoc khi restart.** Watchdog gap `PaintStalled` thi
+xin keyframe (1 byte) va cho `VIEW_KEYFRAME_GRACE = 15 s`; het han ma van khong ve thi moi
+restart (~11,5 s man den). Xin keyframe **khong** tieu permit cua tran — no khong ha may nao
+xuong. Co ca dong menu "Lam moi hinh" cho nguoi van hanh.
+
+**Do dau-cuoi tren may that:** bam "Lam moi hinh" trong overlay → logcat cua chinh dien thoai
+ghi `I scrcpy : Video capture reset`. Fleet sau do: 21 producer, 0 stall, 0 lagged, 0 decoder
+error, 0 restart, 20/20 bao frame, khong mot `Controller error` nao.
+
+**Bai hoc, dat hon phan code:** toi da ghi mot ket luan ("khong vua") vao AGENTS.md khi no dua
+tren mot gia dinh chua do, va no da suyt thanh su that vinh vien. Gia dinh do — "tat
+clipboard_autosync la bat buoc" — chua bao gio duoc kiem, chi duoc **chep lai** tu ke hoach.
+
+### 9.75 Import/Export anh-video hai chieu, va cai bay `.thumbnails` (16/08/2026)
+
+**Import** (dua file vao thu vien may) khong phai code moi: `stage` → `prepare` → `import` da
+do xong tu §9.10. Cai *thieu* la khong co gi goi ca ba. `push_material` dung lai o `stage`,
+ma stage lai do vao thu muc **co dau cham dau** — MediaStore khong quet, nen file nam tren may
+o cho nguoi van hanh khong tim thay. Mot dong menu ten "Import" ma lam the la dung cai nut noi
+doi ma §9.59 da bo cho Rotate. `import_media` chay du ba buoc, doc `manifestSha256` **tu chinh
+bang chung cua stage** chu khong tu tinh lai — hai phia phai dong y ve cai da len may.
+
+Do that tren SM-G955F: `staged {hiddenFromMediaStore:true}` → `prepared {state:"ready"}` →
+`imported {state:"imported", mediaIds:["606"], scanBroadcast:true}` → `cleanup {state:"cleaned"}`.
+
+**Export** (lay anh/video ve may tinh) la nang luc moi: `pull_media` xuyen trait →
+`driver_multiplex` (**forward viet tay**, khong co no thi moi may deu tra ve refusal mac dinh
+va ban Android thanh code chet ma van xanh) → control plane (`_keeping_stream`, vi export mot
+camera roll day mat vai phut va park tile cua nguoi dang xem la sai) → command → api.
+
+**Bay, va chi thay khi test tren du lieu that:** loc theo *ten file* co dau cham dau la khong
+du — phai loc theo **moi thanh phan cua duong dan**. Do tren mot may: `find` ra **136 dong**,
+trong do **46 dong** nam trong thu muc an (`/sdcard/DCIM/.thumbnails/…`) va deu la `.jpg` that.
+Loc kieu cu se keo ca dong thumbnail ve may nguoi ta. Sau khi sua: **45 file, 139,3 MB, 12,3 s**.
+
+**`adb pull` exit 0 ma khong ghi gi la co that** (§9.12: Git Bash mangle duong dan). Nen: doc
+lai `metadata().len()` cua tung file, va neu **tim thay media ma khong file nao ve** thi bao
+loi — khong duoc tra ve 0 giong nhu "may khong co anh nao". Hai truong hop do cung mot con so
+va nguoc nghia nhau.
+
+Probe: `cargo run -p riviu-android-driver --example media_export_probe -- <serial>`
+(`--import <file>`, `--cleanup <importId>`). Phai la Rust chu khong phai bash — chinh vi §9.12.
+
+### 9.74 `app_process` chet o 255 byte argv — nguyen nhan that su cua §9.71 (16/08/2026)
+
+Do tren **SM-G955F va SM-G950F (Android 9)**, app da dung, giet leftover truoc moi lan do.
+Nguong **giong het nhau tren ca hai may va rat sac**:
+
+| argv | ket qua |
+|---|---|
+| 254 byte | chay, co video |
+| **255 byte** | `stack corruption detected (-fstack-protector)` → `Aborted`, **0 byte video** |
+
+**Cho hiem cua no:** tien trinh chet **sau khi** da tra loi bat tay — dummy byte, 64 byte ten
+may, 12 byte video header deu ve dung. Nen host doc duoc mot hello **hoan hao** roi khong bao
+gio nhan frame. Nhin tu phia app no giong het "may ngung gui", khong giong loi.
+
+**La argv, khong phai ca dong lenh.** Them **60 byte** vao dong shell bang mot phep gan **bien
+moi truong** thi chay tot (13950 byte video). Them **12 byte** vao argv thi chet. Nen
+`CLASSPATH=` (45 byte) **khong tinh vao ngan sach**, va rut ngan duong dan JAR khong mua duoc
+gi ca.
+
+**Khong phai ten option.** `zz=1` va `zz=1 yy=2` (khong phai option cua scrcpy, chi bi
+`WARN: Unknown server option`) chay binh thuong; `send_frame_meta=true` — mot option **hop le
+va dung dung gia tri mac dinh cua no** — thi chet. Bien so duy nhat la **so byte**.
+
+Do la ly do bay dau: `power_on=false` (14 byte) chet, `log_level=verbose` (17) chet,
+`clipboard_autosync=false` (24) chet — nen ba lan do trong nhu "option nao cung chet", va
+nghi van cua §9.71 doc no thanh "`power_on` khong hop le". Ca ba deu chi la **du dai**.
+
+**Ngan sach hien tai: argv 240 byte, con 14 byte** o moi preset va moi muc quality
+(`max_size` cap o 832 va `video_bit_rate` deu 7 chu so, nen do dai khong doi theo quality).
+
+**Phan 3 VUA, va da bat — xem §9.76.** Ket luan dau tien o day ("khong vua, +24 tren 14") dua
+tren mot gia dinh **chua do**: rang `clipboard_autosync=false` la bat buoc. No khong bat buoc.
+`control=true` mot minh **re hon `control=false` dung 1 byte**, tuc argv 239/254 — thua 15.
+Cai khong vua chi la viec *tat* clipboard sync; nen ta de no bat va **drain** socket thay vi
+tat no.
+
+Da ghim bang test: `MAX_SERVER_ARGV = 254` va `server_argv()` trong `scrcpy.rs`, cong ba test —
+mot quet **moi preset × moi quality × fps bien** de khong tuning nao vuot nguong, mot ghim rang
+`CLASSPATH` khong tinh, va mot ghim dung cai thieu hut cua Phan 3 (test do **that bai neu Phan 3
+tro nen kha thi**, tuc la luc do phai do lai tren may that truoc khi tin).
+
+### 9.73 Mot kenh moi may — va cai bay chi mot test socket that moi thay (16/08/2026)
+
+§9.68 ket luan cach sua dung ve cau truc la mot kenh broadcast **moi may** chu khong phai mot
+`BROADCAST_CAP` du rong. Da lam.
+
+Cap gio la `DEVICE_BROADCAST_CAP = 128` **moi may**: **5,3 s o 24 fps bat ke fleet bao nhieu
+may**. Con so **giam** tu 2048 chu khong giu nguyen, va do la co y — **danh doi bi lat nguoc**.
+Truoc: thoi gian co lai theo so may, bo nho co dinh. Gio: thoi gian **hang so**, bo nho tang
+tuyen tinh theo so may. O ~2,6 KB moi packet, 128 slot la ~325 KB moi may, ~6,5 MB cho 20 may;
+de nguyen 2048 se la ~104 MB — va tokio cap phat **toan bo slot ngay luc tao kenh**, nen cai
+gia do roi vao luc phat hien may chu khong phai luc tai cao.
+
+Duoc them, khong phai phu: **`Lagged` gio quy duoc ve dung may gay ra**. Truoc kia mot may
+cham lam cho `batch.clear()` va `resync` **moi may** cho moi client. Gio moi may mot forwarder,
+chi may do mat batch va chi may do duoc resync.
+
+Bon map bien thanh mot `DeviceView`: `publish` chay 480 lan/giay o 20 may × 24 fps va truoc do
+lay **bon lock lien tiep** voi cua so rach giua chung.
+
+**Cai bay, va no chi lo ra khi viet test socket that:** khi mot may moi duoc bao qua `roster`,
+client phai **subscribe truoc, replay cache cua may do sau**. Lam nguoc lai — hoac khong replay
+— thi packet nao duoc publish giua luc bao va luc subscribe se **mat vinh vien va im lang** cho
+client do. Do dung la thu xay ra: producer goi `advance` (bao) roi publish keyframe dau ngay
+sau. Test loopback dau tien cua file nay bat duoc; khong test nao truoc do tung chay
+`serve_client`, `replay_latest` hay duong resync — **toan bo phan mang nhieu comment ve mat
+frame im lang nhat lai la phan khong co test nao**.
+
+Va: `publish_jpeg` chay **moi frame preview**, nen bao roster vo dieu kien se lam moi client
+thay `Lagged` tren roster va re-snapshot ca fleet vai lan mot giay. Chi bao **luc tao**.
+
+`advance` **khong** duoc dong kenh: duong restart cua watchdog la stop-roi-start, dong kenh moi
+lan bump generation se giet canvas cua may do o moi lan hoi phuc. Chi `forget` — goi tu vong
+quet `list_devices`, noi duy nhat nhin thay may **roi fleet** — moi dong.
+
+**Do tren 20 may:** 20 producer trong 8 giay, **0 stall, 0 lagged, 0 decoder error, 0 restart**,
+va `20/20 android devices reporting painted frames`.
+
+### 9.72 Tran dong thoi cho recovery: da do, va phep do BAC BO ly do ban dau (16/08/2026)
+
+§9.67 ket luan detector frontend chi duoc restart lai **khi da co tran dong thoi toan fleet**,
+va khong noi tran do la bao nhieu. Chon mot con so tu hu khong chinh la cach `BROADCAST_CAP`
+(8, roi 128) da duoc chon tren ban thu hai may. Nen da do:
+`crates/android-driver/examples/view_concurrency_bench.rs`, 20 may Galaxy S8/S8+, app da dung.
+
+| dong thoi | p50 toi keyframe dau | p90 | max | wall cho 20 may |
+|---|---|---|---|---|
+| 1 | 11,4 s | 12,9 s | 14,7 s | 230,0 s |
+| 2 | 11,5 s | 13,0 s | 14,8 s | 115,5 s |
+| 4 | 11,4 s | 13,3 s | 14,7 s | 59,3 s |
+| 8 | 11,5 s | 13,1 s | 14,6 s | 34,0 s |
+| 20 | 11,5 s | 13,3 s | 14,9 s | 14,9 s |
+
+**Do tre moi lan start PHANG tu 1 den 20**, va wall giam tuyen tinh hoan hao. Mot adb server
+nhan 20 lan spawn scrcpy dong thoi ma **khong lam cham lan nao**. Hai he qua, ca hai nguoc voi
+dieu vẫn được tin:
+
+1. **Cau chuyen "291 restart vi cac lan start tranh nhau adb" la sai.** Tranh chap adb khong ton
+   tai o quy mo nay. Vong lap that la **tu kich hoat**: mot lan restart lam may khong ve gi
+   trong ~12 s, ma 12 s **dung bang** `VIEW_PAINT_STALL`, nen chinh lan restart do lam luat da
+   ra lenh cho no ban lai. Thu giet vong lap la (a) bang chung duoc **gan generation** va bi vut
+   khi producer bi thay, va (b) backoff moi may vuot han mot lan restart — khong phai cai tran.
+2. **~44 giay la con so cua duong RESTART trong app dang tai, khong phai cua mot lan start
+   sach.** Start sach toi keyframe dau la **~11,5 s**. Trich 44 s cho mot lan start moi la noi
+   qua gia cua viec hoi phuc len bon lan; §9.64 §3 van dung cho canh no do.
+
+Tran **van giu**, nhung ly do phai ghi cho dung: no khong bao ve thong luong adb (thu do khong
+he bi de doa), no chan **so may co the toi cung luc vi mot cach chua ta chua chac**. Mac dinh
+**4** — mot phan nam fleet, va cung la cho so hoc tu roi vao: 20 may voi backoff 60 s chiu duoc
+20/60 s lan thu, moi lan ~11,5 s, tuc ~3,8 chay song song o trang thai on dinh. Nen no chi can
+thiep khi ca fleet hong cung luc, con binh thuong thi khong ton gi.
+
+`RIVIU_VIEW_RECOVERY_CONCURRENCY` ghi de duoc, kep trong 1..=8, sai thi **fail closed** ve mac
+dinh. Tran o `view_watchdog.rs`; `restart_android_view` nhan permit **theo gia tri** nen khong
+goi duoc neu chua duoc cap — tran khong phai mot cai co ai do co the quen kiem.
+
+### 9.65 Keyframe khong phai bang chung co SPS — va vi sao chan doan im lang suot 3 vong (15/08/2026)
+
+Mot box **20 may Galaxy S8** cam vao la loi man den tu in ra nguyen nhan cua no. Chu ky
+giong het nhau tren moi may:
+
+```
+fed=206 out=50 keys=4 closes=4 refused(nodec=0 queue=0 notsync=0)
+rebuilds=2 genchg=1 codec=avc1.420015 cands=avc1.42E01E,avc1.42001E,avc1.4D401E
+```
+
+`codecFromAnnexB` tra ve hang so `"avc1.42E01E"` khi blob **khong co SPS**. Do la lua chon
+hop ly cho viec dung decoder **dau tien**, va la cai bay cho bat ky cho nao so sanh voi mot
+codec **dang dung**: scrcpy gui config NAL **tach rieng**, nen IDR rat hay toi ma khong kem
+SPS. `annexBIsSyncSample` van coi do la sync sample — **dung** — nen "co phai keyframe khong"
+**khong** dong nghia "goi nay noi duoc codec la gi khong".
+
+Stream that la `avc1.420015` — **level 2.1**, khong he gan tran level 3.0 ma toi lo suot ba
+commit. Moi keyframe khong-SPS sinh ra danh sach candidate hu cau, danh sach do khong the
+chua codec dang dung, nhanh mismatch pha decoder va dung lai bang mot chuoi codec **sai voi
+stream**. Output chet o ~50 frame moi may.
+
+Sua: them `annexBHasSps`, va chi suy lai codec tu goi **that su mang SPS**.
+
+**Do duoc sau khi sua, cung 20 may, hon mot phut:** 20 producer, **0 stall, 0 decoder error,
+0 lagged**. Truoc do la 20 stall trong dung khoang ay.
+
+### 9.66 Vite khong chuyen tiep console cua Web Worker — ba vong chan doan bi mu vi dieu nay
+
+Day la ly do 9.65 mat lau den the, va no dang mot muc rieng vi no se lam nguoi tiep theo mat
+y het thoi gian.
+
+**Vite chuyen tiep console cua TRANG ra terminal, khong chuyen cua Web Worker.** Moi chan doan
+`console.warn`/`console.error`/`console.info` viet trong `viewDecode.worker.ts` deu di vao
+devtools va khong di dau khac. Hau qua thuc te:
+
+| doc duoc trong log | toi ket luan | su that |
+|---|---|---|
+| `decoder rejected` = 0 | decoder khong bao loi | dong log do chua bao gio ra duoc log |
+| `viewdiag` = 0 | bo dem khong chay | `console.info` con bi loc them mot lan nua |
+| `decode unsupported` = 0 | ladder chua can | dung, nhung khong phai vi ly do toi nghi |
+
+Va `import.meta.env.DEV` trong worker o build nay **la false**, nen mot co gate theo no cung
+im not.
+
+Cach lam dung, da ap dung: **so lieu di kem message `postMessage` va do main thread in ra.**
+`paintBeat` da ton tai nen bo dem di ghep vao do, con loi decoder thi thanh message rieng.
+In ra ngay trong dong bao stall — dung cho no tra loi cau hoi.
+
+**Truoc khi chan doan bat cu gi trong worker: kiem xem dong log do co that su ra duoc terminal
+khong.** Mot bo dem bang 0 vi khong ai in no thi khong phai bang chung khoe manh, no khong
+phai bang chung gi ca.
+
+### 9.67 Detector stall tu restart la vong phan hoi duong — cang nhieu may cang chet (15/08/2026)
+
+Do duoc o hai quy mo, va no te di theo so may:
+
+| may | chu ky mo/dong overlay | producer khoi dong |
+|---|---|---|
+| 2 | 3 | **33** |
+| 20 | 0 (chi chay len) | **291** |
+
+Moi restart ton adb va CPU, lam them may truot cua so ve, sinh them restart. O quy mo fleet,
+cach "hoi phuc" do **pha chinh thu no dinh cuu**.
+
+Va backoff nhan doi **khong cuu duoc**, vi toi cho no reset khi "co frame duoc ve" — ma sau
+moi restart stream ve duoc mot hai frame roi tat, nen moi lan deu ghi `attempt 1`. Sua bang
+`SUSTAINED_PAINT_FRAMES = 48` (~2 s o 24 fps) van chua du: `AUTO_RESTART_ON_STALL` gio **tat**.
+
+Phan **bao hieu** giu lai — no la tin hieu duy nhat tach duoc "decoder khong xuat frame" khoi
+"man hinh khong doi", va chinh no dan toi 9.65. Keeper phia Rust van restart khi may **im
+that**, do la vi ngu khac va an toan.
+
+Bat lai `AUTO_RESTART_ON_STALL` **chi khi** da co tran dong thoi cho recovery tren toan fleet.
+
+### 9.68 `BROADCAST_CAP` phai doc nhu mot toc do, khong phai mot kich thuoc (15/08/2026)
+
+Mot kenh broadcast cho **ca fleet**, nen dung luong tinh bang **thoi gian** co lai tuyen tinh
+theo so may. O 24 fps:
+
+| may | cap 128 | cap 2048 |
+|---|---|---|
+| 2 | 2667 ms | 42667 ms |
+| 20 | **267 ms** | 4267 ms |
+| 50 | 107 ms | 1707 ms |
+| 100 | **53 ms** | 853 ms |
+
+Ca hai gia tri truoc do (8, roi 128) deu chon tren ban thu **hai may**, va khong comment nao
+noi dieu gi xay ra khi ban thu dong len. Gio la 2048.
+
+Hai thu khien ring lon la an toan, va **khong** cai nao dung khi 8 duoc chon: `coalesce_for_live`
+chan viec phat lai lich su bat ke kich thuoc, va mot lan `Lagged` khong con la tham hoa vi
+`serve_client` drain toi hien tai roi resync tu keyframe moi nhat.
+
+Sua dung ve cau truc la **mot kenh moi may** — **da lam, xem §9.73.**
+
+### 9.64 Man den bao gom mot cai treo cua chinh dien thoai, va mot diem mu 8 phut (15/08/2026)
+
+Nguoi van hanh bao overlay den + `agent /actions 400 Bad Request: Unable to perform W3C
+actions`. Do duoc, va hai thu **khong lien quan nhau** nhu ve ngoai goi y.
+
+**1. Man hinh chinh cai dien thoai treo, khong phai stream.** `screencap -p` (duong hoan
+toan doc lap voi scrcpy) tra ve anh **den tuyen 1080x2400, 15.580 byte**, hai lan, ke ca sau
+`KEYCODE_WAKEUP`. Trong khi do PowerManager khai `Display State=ON`, `mScreenOn=true`,
+`mAwake=true`, `mScreenOnFully=true` -- nen predicate "display awake" cua watchdog **tin vao
+tin hieu sai**. Dau hieu that nam o cho khac: `mKeyguardDrawComplete=false`
+`mWindowManagerDrawComplete=false`, focus dinh cung o `NotificationShade`, va swipe/keyevent
+tiem vao khong doi duoc focus. SystemUI treo.
+
+Chua: `am crash com.android.systemui` (pid 3731 -> 17347). Sau do screencap tu **15.580 len
+2.565.870 byte** va may ve lai binh thuong. **Khong phai loi cua app:** `ignored SIGTERM`
+dem duoc **0**, nen `kill -9` moi them o 9.60 chua tung chay tren may nay.
+
+Keo theo ca loi W3C: `InvalidElementStateException` tai `W3CActions.java:82` la cho
+uiautomator2 nem khi **injection tra ve false**, khong phai khi JSON sai hinh -- va
+`/appium/settings` + `/element` ngay truoc do deu thanh cong, nen session hop le. May thi
+`deviceLocked=1`, `isKeyguardShowing=true`. Dang chu y: `adb shell input tap` **exit 0** cung
+luc do, vi shell dung duong injection khac (`INJECT_EVENTS`, uid shell) chu khong qua
+`UiAutomation`. Nen exit code cua `input` **khong** chung minh duoc input da den dich.
+
+**2. Watchdog mu 8 phut, do duoc.** Stream dung tu `17:24`, watchdog chi ban luc `17:32`.
+Ly do: `state.rs` do `view_hub.last_packet_age`, dong dau trong `publish` -- tuc **byte tu
+may ve**, khong phai frame da ve. Decode chet thi packet van chay, nen no im. Va
+`decodeUnsupported` ma worker gui thi **khong co ai nghe** -- grep ra dung mot cho gui,
+khong cho nao nhan.
+
+Chua: heartbeat frame that trong worker (`paintBeat`, throttle 1s). `painted` cu **khong
+dung duoc** vi `notifyPainted` return som khi size/generation khong doi, nen mot stream
+decode on dinh gui no dung mot lan roi thoi. Frontend bat stall trong **6 giay** thay vi 8
+phut, ha tile khoi Live, va goi `view_ensure`.
+
+**3. Hoi quy toi tu gay ra roi tu bat duoc, ghi lai vi no day.** Cooldown phang 20s **khong
+du**: mot lan restart producer mat **~44 giay** do duoc (17:51:54 -> 17:52:45), dai hon
+cooldown, nen moi stall lai re-arm giua luc restart chua xong va may bi teardown khoang moi
+phut mot lan, mai mai. Log that:
+
+```
+12:51:10 painted nothing -> gen=3 luc 17:51:54 -> 12:52:02 painted nothing
+      -> gen=4 luc 17:52:45 -> 12:52:52 painted nothing ...
+```
+
+Do te hon cai canvas cu no dinh thay the. Chua bang backoff nhan doi voi base **30s**, chon
+de **lan retry thu hai** (60s) da vuot `OBSERVED_RESTART_MS = 44000`; lan restart dau van
+tuc thi cho su co thoang qua. Va bo dem chi reset khi **co frame duoc ve**, khong phai khi
+restart "thanh cong" -- restart thanh cong ma van khong ve gi la dung cai da xay ra.
+
+**4. `stop_view_stream` khong duoc quen preset, cung la loi toi vua gay.** Duong restart cua
+watchdog la stop-roi-start (`state.rs:837` roi `852`), ma toi cho `stop_view_stream` xoa
+`desired_presets`, nen moi restart doc lai default: quan sat truc tiep `gen=5 tile 216x480`
+trong khi overlay **van dang mo**. Desire thuoc ve viec operator mo overlay, khong thuoc
+vong doi producer -- no bi ghi de, khong bao gio bi xoa. `view_ensure` cung phai doc
+`desired_view_preset` chu khong cung `Tile`, khong thi chinh duong hoi phuc lai ha cap
+overlay.
+
+**Con lai chua giai thich duoc tu code, can do them:** sau khi may da khoe
+(`mKeyguardDrawComplete=true`, screencap 2 MB, dung mot scrcpy server chay), Redmi **van
+khong ve frame nao** trong khi packet ve deu (watchdog byte im). Do la decode that bai chu
+khong phai may -- nhung `decodeUnsupported` khong ban, nen decoder khong bao loi, no chi
+khong xuat frame. Nghi van hang dau: `shouldDecodeH264Sample` bo het frame khi
+`decodeQueueSize` khong bao gio thoat. Do cai nay can dem frame vao/ra decoder, chua co.
+
+### 9.60 `adb forward` song lau hon app, va vi sao no lam man hinh den (14/08/2026)
+
+Nguoi van hanh bao "stream den". Do duoc, khong doan:
+
+| do duoc | y nghia |
+|---|---|
+| `adb forward --list` co 5 forward tro toi socket scrcpy da chet, tren 2 may | rac tich luy |
+| moi forward mot `scid` khac nhau | `prune_forwards` khop **dung ten** nen khong bao gio thay |
+| Redmi con 2 `app_process` giu encoder | server phia may song sot |
+| `ps -A -o CMD \| grep genymobile` tra ve **0** ca hai may | `ps` cat argv -- phai doc `/proc/*/cmdline` |
+
+**`adb forward` nam trong adb server, khong nam trong app.** Nen crash, force-quit, hay
+bat ky kieu dung tien trinh nao khong chay `stop_view_producer` deu de lai forward ma
+khong con ai xoa. Moi duong loi trong `spawn_view` **da** goi `remove_forward`, nen ro ri
+khong nam trong mot lan chay -- no nam **giua cac lan chay**.
+
+Hau qua khong phai mot cong bi lang phi: mot ket noi TCP moi roi vao forward chet se khong
+bao gio nhan byte dummy cua scrcpy, desktop bao "published nothing for 5s" roi thu lai mai,
+moi vong lai ro them mot cai.
+
+Sua: `prune_scrcpy_forwards(adb, serial, FORWARD_PREFIX, keep)` -- khop theo **tien to**
+(`localabstract:scrcpy_`), tru nhung host port ma producer dang song dang giu (`keep` lay
+tu `self.views`). `keep` la thu khien no an toan khi may khac dang stream.
+
+Danh doi da biet, noi thang: scrcpy cua ben thu ba tren cung may cung dat ten socket
+`scrcpy_*` va khong co cach nao phan biet trong listing. Prune se cat phien cua no. Repo da
+ghi cung loai hiem hoa nay cho `adb kill-server`; khac biet la cai nay chi trong pham vi
+mot serial ma ta sap dieu khien.
+
+Nua thu hai: `stop_our_scrcpy_leftovers` gui `kill` (SIGTERM) roi **khong kiem lai**. Server
+dang tac trong MediaCodec khong buoc phai nghe. No giu encoder, nen server moi that
+`MediaCodec.configure` va tile den. Gio co mot vong xac nhan roi `kill -9`, dung mot lan --
+neu SIGKILL khong an thi ta khong the giet duoc va thu lai cung vo nghia.
+
+**Nghiem thu tren may that:** forward chet cua ca hai may bi thu hoi, `tcp:6790` cua agent
+**van song**, moi may dung mot forward khop `host_port` da log. Chay 3 phut lien: khong
+restart, khong warning, ca hai tile ve that (danh sach thong bao cua Redmi doi noi dung
+giua hai lan chup -- bang chung no khong dong bang).
+
+### 9.61 `tracing` khong co sink: mot gio chan doan bi mu (14/08/2026)
+
+`tauri-dev.log` **khong co mot dong nao** cua driver trong khi hai may restart producer
+theo vong lap. Ly do: moi chan doan trong workspace la macro `tracing::`, va khong he co
+subscriber nao duoc cai. `tauri-plugin-log` co dang ky nhung no thu `log`, khong thu
+`tracing`.
+
+Sua nho nhat va du: bat feature `log` cua `tracing` -- khi khong co subscriber, `tracing`
+phat ra ban ghi `log`, dung cai ma plugin dang thu. Mot dong trong `Cargo.toml`, mot dong
+trong `Cargo.lock`, khong can mang.
+
+Cung luc do bo `cfg!(debug_assertions)` quanh viec dang ky plugin: truoc day ban release
+**khong ghi gi ca**, nen nguoi van hanh gap loi driver thi khong co dau vet o dau. Release
+gio ghi tu Warn -- va warning cua driver dung la loai dang giu: server phot lo SIGTERM,
+forward ro ri duoc thu hoi, producer restart.
+
+Ngay sau khi bat, dong dau tien doc duoc da tra loi cau hoi ma truoc do phai doan:
+
+```
+[riviu_android_driver::driver][INFO] scrcpy view started serial="ce06..." host_port=58449
+  generation=1 preset="tile" codec=1748121140 device=SM-N950F width=232 height=480
+  key=true bytes=11517 idr=true sps=true
+```
+
+Bai hoc de lai: **truoc khi chan doan bat cu gi o duong video, kiem `tauri-dev.log` co dong
+`riviu_android_driver` nao khong.** Neu khong co thi khong phai "im lang binh thuong", la
+log dang bi bo di.
+
+### 9.62 `dblclick` trong `driver.ps1`: hai click roi rac khong phai mot double-click (14/08/2026)
+
+Tile mo overlay bang double-click va chi **chon** bang click don, nen khong co lenh nao
+trong harness mo duoc overlay -- `click` hai lan la hai tien trinh, khoang cach giua chung
+rong hon nhieu so voi khoang double-click.
+
+Lan dau viet voi `$gap = GetDoubleClickTime() / 4` (125ms) van **that**: tile chon roi bo
+chon (`Da chon 0`) va `onDoubleClick` khong bao gio chay. `Start-Sleep` o day co do hat
+~15ms nen khoang danh nghia khong phai khoang ma cua so nhan duoc. Gui ca hai click lien
+tiep khong sleep thi dat -- overlay mo va ve video that.
+
 ### 9.59 Bon hanh dong thiet bi, va ba thu do duoc lat nguoc thiet ke (14/08/2026)
 
 Nguoi van hanh xin bon thu con thieu so voi GenFarmer, tru Wallpaper: **AdbCommand,
@@ -5038,6 +6554,21 @@ mot nut "Rotate" bao thanh cong se **noi doi o dung ca pho bien nhat**. Nen ham 
 con Note 8 in `mRotation=0`. Va bay that nam o cho `ROTATION_90` la **ten hang so
 `Surface.ROTATION_90`, gia tri 1** - parse chu so ra khoi ten se doc 270 thanh mot rotation
 bat kha va bo mat. Test ghim ca hai dang.
+
+**`wm size` KHONG chay theo rotation — do 16/08/2026 tren SM-G955F.** Xoay ngang that (mo
+Settings truoc, vi launcher khoa doc nen no nuot yeu cau):
+
+| | doc | ngang |
+|---|---|---|
+| `wm size` Override | 1080x2220 | **1080x2220** — khong doi |
+| `dumpsys display` real (override) | 1080 x 2220 | **2220 x 1080** — dao |
+| `dumpsys window displays` app | 1080 x 2094 | **2094 x 1080** |
+
+Nen doc lai `wm size` sau khi xoay **tra ve dung con so cu va khong sua duoc gi**. No la
+kich thuoc *cau hinh* cua display, khong co khai niem huong trong do — cung ly do `frames.rs`
+dua tuple do cho minicap la `real=WxH` con rotation la **tham so rieng**. Nguon lam moi phai
+la `/window/current/size` cua agent. `wm size` van dung lam **hat giong** luc mo session, khi
+agent co the chua san sang.
 
 #### AdbCommand: phan bien tim ra hai loi trong dung code toi vua viet
 
@@ -5852,3 +7383,359 @@ Suy đoán ban đầu của tôi — `model: "deepseek-v4-flash"` không phải 
 **Ghi thêm, không liên quan tới H6-d:** `apiKey` của AI nằm **plaintext** trong bảng `settings`
 (`nurture.settings` là một chuỗi JSON). Không phải lỗi do đợt này gây ra, và không nằm trong
 phạm vi đã thống nhất — ghi lại để đừng ai phải phát hiện lại.
+
+### 9.94 Bốn thanh kéo chia nhau một trăm phần trăm (21/08/2026)
+
+> Hai quyết định trong mục này bị **§9.95 (cùng ngày) sửa lại**: thang đo của thanh kéo
+> (không còn `Math.max(percent, ceiling)`) và con số 103% của cấu hình trên fleet.
+
+Yêu cầu, nguyên văn: *"Thêm 1 cái thanh kéo, ở 4 dòng 4 cái kéo, tất cả chung 100% 1 nếu 1 thanh
+chỉ có 90% thì 3 thanh kia chia đều 3% 1 thanh sẽ kéo được 4%"*. Đó là một luật số học rất gọn —
+**một tỉ lệ được phép lên tới đúng phần mà ba tỉ lệ kia để trống** — nên nó đi vào một module
+thuần (`apps/desktop/src/nurtureBudget.ts`, 11 test), không nằm rải trong `onChange` của bốn dòng.
+
+**Phải nói ra một điều trước khi nói nó chạy được: trong engine bốn con số này KHÔNG chia nhau
+cái gì.** `likeProb`/`commentProb`/`followProb`/`frenzyProb` là bốn con xúc xắc **độc lập** tung
+trên mỗi bài — "bao nhiêu phần bài được tim", "bao nhiêu phần bài được follow tác giả" — nên
+100 + 28 + 3 + 0 = 131 trước nay là một cấu hình hợp lệ và có nghĩa. Ngân sách chung là một
+**cách cấu hình chặt hơn**, không phải một thay đổi trong engine (Rust không bị chạm một dòng).
+Hệ quả bắt buộc phải chấp nhận: **cấu hình đang lưu mà cộng lại vượt 100 thì phải kéo xuống mới
+lưu lại được.** Đo trên máy người dùng lúc nghiệm thu: cấu hình đang lưu là 100/0/3/0 = **103%**,
+nên việc đầu tiên panel làm là nói ra con số đó.
+
+Bốn quyết định, mỗi cái đều là một lỗi nếu làm ngược:
+
+- **Kẹp, không chia lại.** Kéo Thích lên quá phần trống thì Thích dừng ở trần, **không** trừ của
+  Bình luận. Một ngân sách tự cân lại sau lưng người dùng sẽ phá đúng những con số họ vừa tinh
+  chỉnh — và cảm giác của nó là "máy bị ma nhập" chứ không phải "máy giúp mình".
+- **Trần của một tỉ lệ có tính chính nó.** `budgetCeiling` trừ ba cái *kia*, không trừ cả bốn.
+  Nếu không, mọi thanh kéo mở ra là đã nằm ngoài khoảng của chính nó.
+- **`max` của thanh kéo là `Math.max(percent, ceiling)`.** `<input type="range">` vẽ một giá trị
+  vượt `max` **tại** `max`, nên với cấu hình 103 thì con trượt sẽ nằm ở 3 trong khi ô số ghi 100 —
+  một cái điều khiển nói dối về giá trị của chính nó. Cho `max` nới ra tới vị trí hiện tại chỉ mở
+  thêm đúng một chiều: **kéo xuống**, mà đó là chiều cấu hình quá hạn đang cần.
+- **Làm tròn xuống số nguyên.** Engine nhận số nguyên; một thanh kéo báo 3.5 là báo một con số
+  backend sẽ tự làm tròn sau lưng người dùng.
+
+Và một đường thoát, cho đúng một tình huống người dùng **không** tự thoát được bằng thanh kéo:
+cấu hình đã vượt hạn thì mọi trần đều bằng 0, mọi thanh kéo đứng im, panel thành ngõ cụt.
+`fitToBudget` trừ dần **từ tỉ lệ lớn nhất** (103 của 100/0/3/0 thành 97/0/3/0) để giữ hình dạng
+những con số nhỏ đã tinh chỉnh, và nó nằm sau một câu hỏi (`đưa về 100%`) chứ **không** tự chạy
+lúc load — sửa lặng lẽ cấu hình của người khác tệ hơn hỏi một câu.
+
+Chỗ lưu: **một phép kiểm tra thay hai.** Trước đây có `Thích + Bình luận > 100` và
+`Follow/vuốt nhanh phải 0..100` — cả hai cùng **đúng** trên một cấu hình cộng lại 131, đó là lý
+do 131 lưu được. Nay là `isOverBudget(s)` trên cả bốn, và thông báo nói ra đang là bao nhiêu.
+
+**Đo trên 20 máy thật** (`target/run-skill/93..96`): mở panel ra thấy `Đang dùng 103% / 100%` màu
+đỏ kèm hộp cảnh báo; bấm `đưa về 100%` → Thích 100 thành **97**, Bình luận 0 và Follow 3 giữ
+nguyên, đầu mục đổi thành `Còn 0% / 100%`; kéo Thích xuống **48** thì đầu mục thành `Còn 49%` và
+thanh của Follow tự dài ra (3 trên trần 52, không còn 3 trên trần 3); kéo Bình luận **sang tận
+cùng bên phải** thì nó dừng ở **49** — không phải 100 — còn Thích vẫn 48, Follow vẫn 3, Vuốt nhanh
+vẫn 0. Đóng panel **không** bấm Lưu, nên cấu hình 103 của người dùng còn nguyên: chọn con số nào
+là việc của họ.
+
+Hai cái bẫy trong lúc sửa, đáng ghi vì cả hai đều **im lặng**:
+
+- **Một `assert` cho hai lần `replace` thì lần thứ hai hụt cũng vẫn "thành công".** Script python
+  đầu tiên thay import *và* thân `FeatureRow`, chỉ kiểm `s != before` ở cuối — import khớp nên
+  assert xanh, thân hàm không khớp và không ai biết, cho tới khi `tsc` hỏi `ceiling` ở đâu. Mỗi
+  lần thay một assert riêng.
+- **`NurturePopup.tsx` là CRLF trong working tree** (`core.autocrlf=true`), nên một lần sửa bằng
+  python với `newline=""` đã chèn 10 dòng LF trơ vào giữa file. Anchor tiếp theo hết khớp và thông
+  báo lỗi không hé một chữ nào về xuống dòng. Đọc bằng `newline=None`, ghi lại bằng
+  `newline="\r\n"`. (Ngược lại, `AGENTS.md` là **thuần LF** — xem §4525.)
+
+CSS: `.nu-feature-ranged` là **cột thứ tư** của riêng bốn dòng đó, vì dòng "Vuốt ngang" của Bài
+ảnh dùng lại `.nu-feature` với ba con và phải giữ ba. `.nu-budget` mang `order: 1` để ngồi ở đầu
+phải của đường kẻ nhóm thay vì chen vào cạnh tiêu đề. Không có literal màu mới:
+`accent-color: var(--primary)`, cảnh báo dùng dãy `--danger-*`.
+
+### 9.95 Thanh kéo đổi thang đo, và một công tắc tắt vẫn bị thu tiền (21/08/2026)
+
+Hai câu của người dùng, và câu thứ hai **sửa lại một con số trong §9.94**.
+
+**"Khi kéo thanh thứ 2 thì thanh 1 cũng bị kéo theo, % thì tính đúng rồi."** Đúng, và chẩn đoán
+nằm ngay trong nửa sau của câu: **con số không sai, cái điều khiển mới sai.** `max` của mỗi range
+là trần của dòng đó, nên trần đổi là **thang đo đổi**: Follow ở 3 trên thang 0..3 thì con trượt
+nằm sát phải; kéo Thích xuống nhả ra 49 điểm thì thang thành 0..52 và con trượt **tự trôi sang
+trái** trong khi 3 vẫn là 3. Một cái điều khiển tự di chuyển đang nói dối về việc người dùng vừa
+sửa dòng nào.
+
+Sửa: **cả bốn thanh chạy 0..100, luôn luôn.** Trần không còn là `max` nữa; nó được **vẽ** trên
+đường ray (cam đậm = đang dùng, cam nhạt = còn kéo được, xám = ba dòng kia đã lấy) và được
+**giữ** bằng `clampToBudget` trong `onChange` như trước. Kéo quá trần thì con trượt dựng lại ở
+trần trong khi con chuột đi tiếp — cảm giác đúng của một bức tường, và §9.94's lý do cho
+`Math.max(percent, ceiling)` biến mất cùng lúc: thang cố định thì một giá trị 100 không bao giờ
+nằm ngoài khoảng của chính nó. Thang cố định còn cho một thứ mà thang riêng không thể có:
+**48% ở dòng nào cũng cùng một khoảng cách** — điều kiện cần để bốn thanh đọc thành bốn phần
+của một thứ.
+
+Hai chi tiết hình học phải đo, không đoán: (1) đường ray phải tự vẽ bằng `linear-gradient` trên
+`::-webkit-slider-runnable-track`, vì hễ style track thì `accent-color` thôi tô phần đã chạy;
+(2) mốc **fill** phải thụt vào nửa con trượt (`thumb/2 + (100% - thumb) * fill`) vì thumb chỉ chạy
+trong khoảng đó — không thụt thì ranh giới màu lệch khỏi tâm thumb tới 7px ở hai đầu. Mốc **trần**
+thì **không** thụt: thụt vào, trần 100 rơi ở `100% - thumb/2` và để lại 7px xám ở cuối đường ray
+— 7px nói "ba dòng kia đang chiếm" trong khi chúng chiếm 0. Giữa dải, hai công thức lệch nhau
+dưới một pixel; nên hai đầu đúng thắng.
+
+**"Chức năng được chủ động tắt thì sao?"** — đây là một lỗ thật, và câu trả lời không phải là
+lựa chọn thiết kế: **engine đã trả lời rồi.** `NurtureSettings::into_effective`
+(`crates/core/src/types.rs`) gán `like_prob = 0` khi `like_enabled` false, và vòng lặp **chỉ bao
+giờ thấy bản đã gán đó**. Nên một tỉ lệ đang tắt sinh ra đúng 0 hành động, và một ngân sách thu
+tiền của nó là thu tiền cho những bài **chắc chắn không xảy ra**. Nay `budgetUsed` chỉ cộng các
+dòng đang bật; tắt một dòng là **trả phần trăm của nó lại** cho ba dòng kia ngay lập tức.
+
+**Và đây là chỗ nó sửa §9.94:** cấu hình trên fleet không phải "103% vượt hạn". Nó là
+100/0/3/0 **với Follow đang tắt**, nên nó tiêu đúng **100** và **lưu được y nguyên** — cái 3 kia
+thuộc về một tính năng người dùng đã tắt. Con số 103 trong §9.94 là con số của một luật mù công
+tắc, và chính câu hỏi của người dùng đã tìm ra nó. Bài học: **một quy tắc mới phải được thử với
+mọi công tắc mà hệ thống đã có**, không chỉ với các con số nó nhắm vào.
+
+Ba quyết định kèm theo, mỗi cái là một lỗi nếu làm ngược:
+
+- **Dòng đang tắt KHÔNG bị kẹp theo trần** (chỉ 0..100). Nó không tiêu gì thì không có gì để kẹp
+  nó vào; và kẹp nó sẽ phá đúng lời hứa của cái công tắc — *tắt để giữ số, chỉnh sau*. Đo được
+  trường hợp tệ nhất: ba dòng kia tiêu hết 100 thì dòng đang tắt sẽ bị đóng băng ở 0, tức là số
+  người dùng đang bảo vệ bị lấy mất.
+- **Bật lại mà không vừa thì panel nói ra, KHÔNG tự cắt dòng vừa bật.** Người dùng chỉ yêu cầu
+  "bật cái này"; cắt số của chính dòng đó là panel sửa một con số đã tinh chỉnh sau lưng họ.
+  Cảnh báo + nút `đưa về 100%` đã có sẵn cho đúng tình huống này (câu chữ đổi thành "các tỉ lệ
+  đang bật", vì nay nó có hai đường vào chứ không chỉ cấu hình cũ).
+- **`fitToBudget` không cắt dòng đang tắt** — cắt nó thì mất một con số mà **không** giải phóng
+  nổi một phần trăm nào.
+
+Kèm một lỗ cùng họ, tìm ra khi đi tìm mọi chỗ đọc `commentProb` mà không đọc công tắc: phép kiểm
+tra lúc lưu `commentProb > 0 && !apiKey` **từ chối lưu** vì thiếu API key cho một tính năng đang
+tắt — tức là chặn cả một lần lưu vì một tính năng chắc chắn không chạy. Nay có
+`isRateEnabled(s, "commentProb")` phía trước.
+
+**`designTokens.test.ts` đỏ, và nó đỏ đúng.** Nó đòi mọi `var(--x)` trong App.css phải được khai
+báo trong index.css; thanh kéo có bốn custom property **cục bộ** của riêng nó (`--nu-thumb`,
+`--nu-track`, hai mốc `calc`) cộng hai cái **đến từ inline style** (`--fill`, `--ceil`) mà không
+stylesheet nào thấy được. Không hạ ngưỡng: đổi lại phát biểu cho đúng thứ cần bảo vệ — **không
+`var()` nào được resolve thành rỗng**. Hợp lệ nếu (a) khai báo trong index.css, (b) khai báo cục
+bộ trong App.css, hoặc (c) có **fallback** trong chính `var()`. Lỗi gốc mà test này sinh ra để
+bắt (`var(--surface-2)` dùng một lần, khai báo không đâu, không fallback) vẫn bị bắt.
+
+**Đo trên fleet 20 máy** (`target/run-skill/100..104`): mở ra thấy `Còn 0% / 100%` và **không có
+cảnh báo** (Thích 100 một mình tiêu hết, Follow 3 đang tắt không tính); kéo Thích xuống **49** →
+`Còn 51%`, và con trượt của Follow **không nhích một pixel** (trước bản sửa nó nhảy từ sát phải
+sang gần trái); bật Follow lên → `Còn 48%`, dòng Follow chuyển cam, **vẫn không con trượt nào di
+chuyển**; đường ray của Thích hết vệt xám 7px ở cuối. Đóng panel không Lưu (vùng panel còn đúng
+một màu nền) nên cấu hình trên máy còn nguyên.
+
+Gate: frontend 473 test / 55 file xanh, `tsc -b` + `vite build` + oxlint sạch. Rust không chạm.
+
+### 9.96 `[object Object]` ở 47 chỗ, và ba lỗi mà chỉ e2e nhìn thấy (21/08/2026)
+
+**Một hàm, 47 lời gọi, sáu bản tự viết lại.** Mọi lệnh Tauri trong app này reject bằng một
+**object** `{ code, message }`, nên `String(error)` cho ra đúng chữ `[object Object]` — và nó
+**im lặng**: không có gì throw, chỉ là chỗ đáng ra ghi "Permission denied" thì ghi một câu vô
+nghĩa. §9.91 sửa 4 file thiết bị và ghi lại rằng còn ~15 chỗ trong `SettingsPanel.tsx`. Đo lại
+hôm nay: **47 chỗ** trên 11 file (Settings 14, FarmPages 9, InteractionPopup 7, NurturePopup 5,
+liveDrag 4, App 4, Flow 2 bản tự viết, JobsPanel/GroupTools/validation 1 mỗi).
+
+> **Sửa ngày 22/08 — đợt quét này CHƯA XONG, mà mục dưới đây đã tuyên bố là xong.** Nó grep
+> `String(error)`, `String(e)`, `String(err)` — tức là **grep theo tên biến**, nên bỏ sót ba
+> chỗ đặt tên `reason`, và cả ba là `[object Object]` **thật**:
+> `FlowJsonDialog.tsx:60` bắt `flowValidate` (`flow_commands.rs:69` trả
+> `Result<_, **Vec**<CommandError>>` — `String` một *mảng* object), `FlowJsonDialog.tsx:72` bắt
+> `flowExport`, `FlowImportDialog.tsx:33` bắt `flowImportLegacy`. Cả ba file không có test.
+> **Nguyên tắc để lại: quét một lớp lỗi thì phải quét theo *hình dạng lời gọi*, không theo tên
+> biến người ta đã đặt** — ở đây là `String(` ôm một binding của `catch`, và vì oxlint 1.77
+> **không có** `no-restricted-syntax` (đã kiểm schema), thứ chặn được nó là một convention
+> test đọc source, đúng khuôn `designTokens.test.ts`.
+
+Đáng ghi là **phân loại** chứ không phải số lượng, vì không phải chỗ nào cũng là lỗi:
+
+- **Lệnh trả `Result<_, CommandError>`** (**93** lệnh) reject bằng object → `String` sai. Đây là
+  lỗi. Nặng nhất: `interaction_start_thread` — mọi lần nó từ chối (kể cả
+  `require_parent_locator`, thứ chặn cả chuỗi trả lời, xem §9.85) đều hiện `[object Object]`.
+- **Lệnh trả `Result<_, String>`** (**57** lệnh) reject bằng chuỗi → `String` **đúng**.
+  `update_check`, `nurture_test_api` thuộc nhóm này; đổi sang `describeError` không sửa gì, chỉ
+  để một hàm. Còn **15** lệnh nữa không thuộc hai nhóm (infallible, hoặc
+  `Result<_, Vec<CommandError>>`) — tổng **165**.
+- **`FlowInspector.tsx` / `FlowWorkspace.tsx`** đã tự đọc `.code`/`.message` trước rồi mới
+  `String` — **không phải lỗi**, chỉ là hai bản tự viết lại của cùng một hàm. Gộp lại vì hai bản
+  song song là chỗ để lệch nhau sau này, không phải vì chúng báo sai.
+
+> **Sửa ngày 22/08 — hai con số trên đây từng ghi sai là 96/43.** Regex đếm
+> (`Result<[^>]*, String>`) không đi qua được generic lồng như `Result<Vec<DeviceInfo>, String>`,
+> nên nó **đếm thiếu 14 lệnh** đúng vào nhóm cần sửa. Bài học nhỏ mà đắt: **một regex đếm
+> bằng `[^>]*` thì không đếm được kiểu Rust** — phải tách theo `#[tauri::command]` rồi đọc cả
+> chữ ký, như `commands_in()` ở `lib.rs:428` vẫn làm.
+
+`describeError` chuyển ra module riêng `src/describeError.ts`, `toastStore` **re-export** (19 file
+đang import từ đó). Lý do tách: `liveDrag.ts` và `flow/validation.ts` là module thuần — chúng cần
+một dòng chữ, không cần import một store React để có nó. 6 test mới ghim đúng cái bug: hình
+`{code, message}`, payload lạ (phải ra JSON, **không** bao giờ ra `[object Object]`), payload
+cyclic (`JSON.stringify` throw → phải không throw, vì throw trong handler lỗi sẽ thay lỗi của
+người dùng bằng lỗi khác), và `message: ""` (chuỗi rỗng là một message về mặt kỹ thuật và vô dụng
+về mặt con người).
+
+**Rồi e2e tìm ra ba thứ mà 479 unit test không thấy** — nó đang ở 15/18:
+
+1. **Hai spec Flow đỏ vì cái checkbox đã bị xoá theo yêu cầu** (§9.93). Helper `openFlow` vẫn
+   `getByRole("checkbox").check()` trên tile, nên nó **timeout 30 s** chờ một phần tử không còn
+   tồn tại. Đây là lỗi *của test*, do một thay đổi sản phẩm cố ý — và nó nằm đó im lặng vì thay
+   đổi xoá checkbox chưa bao giờ được commit lên CI. Sửa: Ctrl-click chính tile (đường chọn thật,
+   `onSelect` trong `App.tsx`), kèm một assert `.selected` có 2 để lần sau nó **nói ra** là
+   "không chọn được máy" chứ không phải "không tìm thấy checkbox".
+2. **Snapshot trang Cài đặt "trôi"** — và nó không trôi, nó đang ghim một **thông báo lỗi**.
+   `tauriMock` thiếu handler cho 5 lệnh trang Settings gọi lúc mount (`agent_get_settings`,
+   `agent_list_statuses`, `local_api_get_config`, `get_apple_id`, `driver_mode`), mà registry của
+   mock cố ý throw `Unknown mock command` cho lệnh chưa khai. Năm lệnh **đua nhau**, nên *cái tên
+   nào* rơi vào băng đỏ thay đổi giữa các lần chạy → baseline pin một dòng chữ khác nhau mỗi lần.
+   Đó chính là "pre-existing Settings drift" repo mang theo mấy phiên nay: **không phải đổi giao
+   diện, mà là một fixture chưa làm xong.** Khai đủ 5 lệnh (+ 4 lệnh nút bấm) rồi refresh
+   baseline: trang nay hiện nội dung thật (artifact, protocol, hai máy `Sẵn sàng` với build).
+3. Sau hai cái trên: **18/18 xanh**, lần đầu.
+
+> **Sửa ngày 22/08 — bài học đầu tiên của mục này từng ghi là "một gate không chạy không phải
+> là một gate", với lý do `npm run test:e2e` không nằm trong CI. SAI.** Nó nằm ở
+> `.github/workflows/desktop-ci-cd.yml:143` (`playwright install --with-deps chromium`) và
+> `:147`, **trong bản đã commit**, từ `cb4a8e3` (08/08).
+>
+> Nguyên nhân thật thì đo được và khác hẳn: lúc viết mục này, `git status` = **119 file chưa
+> commit** (79 sửa + 40 mới, gồm cả module production mới như `local_api.rs`, `peripherals.rs`,
+> `GroupToolsPopup.tsx` 1.436 dòng) và **90 commit chưa push**, commit gần nhất 19/08. Gate rất
+> tốt, **có** e2e, và mọi action đều ghim theo SHA — ba ngày công việc chỉ là **chưa bao giờ tới
+> được nó**.
+>
+> Bài học đúng, và nó nặng hơn cái sai: **một gate chỉ bảo vệ thứ đã đi qua nó.** Trước khi kết
+> luận "gate thiếu", chạy `git status` — vì "CI không có cửa này" và "việc chưa tới CI" nhìn
+> từ trong máy dev thì **giống hệt nhau**, mà cách sửa thì ngược nhau hoàn toàn.
+
+Bài học thứ hai vẫn đúng: **một snapshot chụp được cả thông báo lỗi thì nó ghim lỗi làm chuẩn**
+— nhìn `-actual.png` trước khi `--update-snapshots`, đừng bao giờ chấp nhận mù. Và: hai trong
+ba lỗi trên do chính những thay đổi đã được nghiệm thu bằng mắt trên máy thật, tức là **nghiệm
+thu thủ công không thay được suite.**
+
+Gate: frontend 479 test / 56 file, e2e **18/18**, `tsc -b` + `vite build` + oxlint sạch. Rust
+không chạm.
+
+### 9.97 Mô hình đe doạ cho hai cổng nghe, và chín lỗ đã bịt (22/08/2026)
+
+Mục này tồn tại vì một khoảng trống tài liệu: agent iOS có nguyên một mục mô tả token
+`X-Riviu-Token`, cap header 8192 byte/5 giây, MJPEG bind loopback (§~403-426) — còn **hai cổng
+nghe trên chính máy tính thì không có mục nào**. Đó chính là nơi hai lỗ nặng nhất sống sót.
+
+**Khung đe doạ, viết ra để lần sau xếp mức không phải đoán.** Đây là công cụ nội bộ chạy trên
+**một** máy của một người, không phải service mở ra internet. Kẻ tấn công thật gồm: (A) một tiến
+trình khác **cùng user** trên máy tính; (B) một **trang web** trong trình duyệt trên cùng máy —
+quan trọng vì **WebSocket không chịu CORS**, và `fetch` cross-origin vẫn *gây ra* side effect dù
+không đọc được phản hồi; (C) một **app khác trên điện thoại** — loopback trên Android **không**
+phải ranh giới quyền, `INTERNET` là quyền cấp tự động; (D) **nội dung không tin cậy** từ TikTok
+đi ngược vào (caption, nhãn app, tên file).
+
+#### Hai cổng nghe, và vì sao chỉ một cái được bảo vệ
+
+Chúng nằm **cách nhau sáu dòng** trong `state.rs::spawn_background_tasks`:
+
+| | Local API | View WebSocket |
+|---|---|---|
+| Bật | **tắt mặc định**, cần operator bật | **vô điều kiện** |
+| Xác thực | token CSPRNG 244 bit, so sánh constant-time, kiểm **trước** khi route | **không có gì** |
+| Chở gì | vài cử chỉ trong whitelist | **màn hình trực tiếp của cả 21 máy** |
+| Chú thích | có, giải thích rõ lý do từng lựa chọn | không |
+
+Cái được viết cẩn thận là cái ít nguy hiểm hơn. **Bài học: một cổng nghe được thêm vào như "hạ
+tầng nội bộ" thì không ai rà nó như rà một API.** Nay `view_hub` dùng lại đúng khuôn của Local
+API — token 2×UUIDv4, `bytes_eq_ct`, kiểm **trong lúc bắt tay** nên client sai bị từ chối trước
+khi kết nối được nâng cấp và không nhận nổi một byte.
+
+**`Origin` KHÔNG được dùng làm cửa, và đây là chỗ phải đo chứ không được suy.** Bản đầu từ chối
+mọi handshake có `Origin`, lập luận rằng WebView của mình không gửi. App đang chạy bác bỏ trong
+vài giây: dev serve trang từ `http://localhost:5173` nên client của chính mình **cũng** gửi
+`Origin` → log đầy `handshake refused` mỗi ~4 giây, khung nhìn trắng. Token một mình đã đủ đúng
+kẻ tấn công đó: trang web mở được socket khác origin nhưng **không đọc được** token.
+
+#### Helper APK: loopback không phải ranh giới quyền
+
+`com.riviu.agent` bind `127.0.0.1:17980` — đúng — nhưng grep cả module không có một chỗ nào
+`token`/`authoriz`/`secret`/`signature`/`getCallingUid`/`checkPermission`. README nói "Loopback
+only" như thể đó là biện pháp kiểm soát; **đó là giả định chịu lực và nó sai**. Mọi app trên máy
+gọi được cả 9 endpoint, trong đó `/v1/media/delete` chỉ kiểm "1..32 chữ số" (xoá được **ảnh bất
+kỳ**, không hoàn lại) và `/v1/wallpaper/set` mở **đường dẫn tuỳ ý**. Phần APK nằm ở Đợt B, chưa
+cài lên fleet.
+
+#### Chín lỗ đã bịt ở đợt này (host)
+
+Ghi ngắn, chi tiết trong commit:
+
+1. **Khoá ký bản cập nhật có trong mọi build PR/branch** — job `build:` không có bộ lọc ref, mà
+   build thi hành code tuỳ ý của repo. Nay build không-phải-tag đúc khoá dùng-một-lần.
+2. **WebSocket phát hình đòi token** (trên).
+3. **Mật khẩu Apple ID rời khỏi argv** — và nó **chưa bao giờ được đọc**: `_ = args.password`.
+   Một bí mật đi ra command line để không làm gì cả.
+4. **`set_device_identity` validate ba trường** trước khi vào `su -c "…"`, nơi `$( )` và backtick
+   vẫn chạy trong nháy đôi.
+5. **Quyền giả GPS được thu hồi khi tắt** — trước đó `appops … allow` xuất hiện đúng một lần
+   trong cả cây và không có chỗ nào `deny`.
+6. **Cửa admission đảo chiều** — xem dưới.
+7. **`udid` không steer được đường dẫn artifact** — `Path::join` với thành phần tuyệt đối **thay
+   thế** cả đường dẫn.
+8. **Local API có read timeout + trần kết nối** — slowloris trước đó **không cần token**, vì auth
+   nằm sau vòng đọc.
+9. **Trần 8 MiB cho phản hồi từ helper**, + **CSP** thay cho `csp: null`, + **"Quay lại USB"** và
+   confirm cho adb không dây.
+
+#### Cửa kiểm tra chỉ bảo vệ được thứ nó nhìn thấy
+
+`every_mutating_command_holds_application_admission` liệt kê **84 tên** rồi assert từng cái giữ
+`ensure_accepting_work()`. Nó **không thể** đủ: một lệnh mutating mới vừa quên admission vừa quên
+thêm tên thì CI xanh — nó không bắt được đúng cái sai mà nó sinh ra để bắt. Ba file (16 lệnh)
+chưa từng có trong inventory.
+
+Đảo lại: liệt kê **mọi** `#[tauri::command]`, bắt buộc giữ admission **hoặc** có tên trong
+`ADMISSION_EXEMPT` kèm lý do. Đo lúc landing: 158 lệnh, 52 miễn, **không lệnh chạm-thiết-bị nào
+đang thiếu**. Kèm hai test phụ: miễn trừ không được sống lâu hơn lệnh của nó, và **phép quét phải
+nhìn thấy mọi lệnh đã đăng ký** (đối chiếu `generate_handler!`).
+
+Cái cross-check thứ hai lập tức tìm ra một vùng mù thật: phép cắt module test cắt ở `#[cfg(test)]`
+**đầu tiên**, mà `agent_commands.rs` có `#[cfg(test)]` ngay **dòng 1** trên các import chỉ dùng
+cho test — nên **cả 6 lệnh agent vô hình**. **Nguyên tắc: một cửa kiểm tra dựa trên quét source
+phải tự chứng minh nó nhìn thấy đủ**, nếu không "xanh" chỉ có nghĩa là "không tìm thấy gì".
+
+Và đã chứng minh cửa **đỏ** thật bằng một lệnh mutating giả. Lần thử đầu để lệnh giả ở **cuối**
+file, test vẫn xanh — hoá ra sai là ở **phép thử**, không phải ở cửa. Chính chỗ đó đẻ ra
+cross-check trên. **Một phép thử tiêu cực cũng cần được kiểm rằng nó thật sự chạm tới thứ nó
+đang thử.**
+
+#### Ba thứ chỉ CI hoặc app-đang-chạy bắt được
+
+Gate từng-crate tại máy **không** bắt nổi cả ba, và đó là lý do đẩy sớm thay vì dồn commit:
+
+- **Khoá dùng-một-lần**: file khoá `tauri signer generate` ghi ra **không có newline cuối** (348
+  byte, 0 newline), nên khối `NAME<<DELIM` dán dấu đóng vào cùng dòng với khoá →
+  `Matching delimiter not found`. Giá trị một dòng thì dùng `NAME=value`.
+- **Smoke test signer**: hai script CI gọi signer bằng đúng hai cờ vừa bỏ. **Chỉ leg Windows**
+  chạy nhánh đó.
+- **Cửa `Origin`**: chỉ app thật mới lộ ra (trên).
+
+**Nguyên tắc chung để lại: một thay đổi chỉ chạy trên CI thì chỉ CI nghiệm thu được nó, và một
+thay đổi mà client thật phải chấp nhận thì chỉ client thật nghiệm thu được nó.** Cả hai loại đều
+không có trong `cargo test`.
+
+#### Nghiệm thu trên fleet thật (22/08/2026, sau khi cắm lại máy)
+
+Hai mục §9.97 để nợ vì lúc sửa **không máy nào cắm USB**, nay đã đóng trên 19 máy thật:
+
+- **S5 (WebSocket đòi token)** — `19/19 android devices reporting painted frames`, lưới hiện đủ
+  19 tile với màn hình thật của từng máy, và **0 lần `handshake refused`** kể từ khi fleet quay
+  lại. "Painted frames" do *frontend* báo về (`view_report_paint`), nên nó chứng minh cả chuỗi:
+  bắt tay có token được chấp nhận → frame tới WebView → giải mã được.
+- **S10 (CSP)** — cả bốn directive từng chưa chạm tới nay đều có bằng chứng:
+  `connect-src ws://127.0.0.1:*` (fleet đang stream), `worker-src blob:` (giải mã H.264 chạy
+  trong Web Worker — không có nó thì không có "painted frame" nào), `img-src data:` (icon app
+  thật: TikTok, Facebook, GenFarmer, ATX… đều là `data:image/png;base64`), và
+  `style-src`/`font-src`/`script-src` (app render đủ).
+
+Tiện thể nghiệm thu luôn **S13**: lần bấm "làm mới" App List đi qua `read_capped`, tức trần
+8 MiB không cắt nhầm payload icon thật.
+
+**Ghi lại một chi tiết vận hành**: một máy vừa cắm lại có `com.riviu.agent` **đã cài** nhưng App
+List vẫn báo "Máy chưa có Riviu helper nên chưa đọc được tên và icon app". Cài đặt ≠ với tới
+được: service chưa chạy / chưa forward. Bấm làm mới là nó attach rồi trả đủ nhãn + icon. Câu chú
+thích đó nên nói "chưa với tới được helper" thay vì "chưa có helper".

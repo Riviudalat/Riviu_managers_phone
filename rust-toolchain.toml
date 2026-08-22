@@ -1,0 +1,10 @@
+# Pin the toolchain the release is built with, so a local `cargo clippy` runs the same lints CI
+# runs. Not a CI gap — the workflow already installs this exact version via `RUST_TOOLCHAIN` —
+# but a developer machine on a newer stable surfaces lints CI never sees, and that has already
+# happened once: clippy 1.97 flagged an `unnecessary_cast` at `fa8ecca` that 1.95 did not.
+#
+# Keep in step with `RUST_TOOLCHAIN` in .github/workflows/desktop-ci-cd.yml. The test in
+# apps/desktop/src-tauri/src/lib.rs asserts they agree, so they cannot drift silently.
+[toolchain]
+channel = "1.95.0"
+components = ["clippy", "rustfmt"]

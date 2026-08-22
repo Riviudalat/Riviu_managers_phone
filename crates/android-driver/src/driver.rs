@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,6 +12,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use riviu_core::driver::{AppProcessState, DeviceDriver, ProcessAbsenceProof, UiSession};
 use riviu_core::{ConnectionKind, DeviceInfo, DeviceStatus};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::adb::{self, AdbDeviceState, AdbProgram};
 use crate::agent::AgentClient;
@@ -51,9 +53,83 @@ const INTERACTION_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(12);
 /// lock screen. 40 s is the slowest measured start plus room, on the oldest phone here.
 const FOREGROUND_PROOF_TIMEOUT: Duration = Duration::from_secs(40);
 const FOREGROUND_PROOF_POLL: Duration = Duration::from_millis(250);
+/// How long a system dialog gets to go away after Back has been pressed at it.
+///
+/// Long enough for a dialog that Back *does* dismiss to be gone and the app to be back in
+/// front, short enough that a dialog Back cannot dismiss — measured: Android permission
+/// dialogs — does not eat the whole foreground deadline before anyone is told.
+const DIALOG_GRACE: Duration = Duration::from_secs(5);
+
+/// Is the package in front a **system dialog standing over the target app**, rather than a
+/// different app the phone wandered off to?
+///
+/// The distinction decides whether waiting can possibly help. A launcher in front means the
+/// launch did not take, and a retry or a longer deadline is the answer. One of these means
+/// the launch *did* take and something is standing on top of it — it will still be standing
+/// there when the deadline expires, so the whole window gets spent watching a screen that
+/// was never going to move. Measured exactly once, and it cost a phone: a whole-fleet
+/// nurture run on 18/08/2026 lost ce0717171c2a64d50d to
+/// `com.google.android.packageinstaller/…GrantPermissionsActivity`.
+///
+/// Recovery is **Back**, never a tap, for the same reason `await_feed` presses Back at a
+/// modal: the labelled button on a permission dialog *grants*, and granting a permission on
+/// a real account is not a decision a recovery path gets to make.
+///
+/// Three names because the component moved between Android versions and this fleet spans
+/// them: `com.android.packageinstaller` up to Android 9, `com.google.android.packageinstaller`
+/// on Google builds, `com.android.permissioncontroller` from Android 10.
+fn dialog_over_app(observed: &str) -> bool {
+    matches!(
+        observed,
+        "com.google.android.packageinstaller"
+            | "com.android.packageinstaller"
+            | "com.android.permissioncontroller"
+    )
+}
+/// `pm install` of an 18 MB APK over USB, with room for a slow phone.
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(180);
 /// How long a killed minicap child gets to actually exit before we stop claiming
 /// it is gone.
 const CHILD_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How often, and how many times, a freshly started instrumentation is asked whether it has
+/// bound its port yet.
+const AGENT_READY_POLLS: u32 = 40;
+const AGENT_READY_POLL_EVERY: Duration = Duration::from_millis(250);
+/// Longest [`AndroidDriver::instrument_and_wait`] will wait for the port. Derived so the
+/// message the operator reads cannot drift away from the loop that produced it.
+const AGENT_READY_WAIT: Duration =
+    Duration::from_millis(AGENT_READY_POLL_EVERY.as_millis() as u64 * AGENT_READY_POLLS as u64);
+
+/// What one trip through the blind-agent path costs before the caller learns anything.
+///
+/// Two element queries that will not answer — one on the session that turned out blind, one
+/// on its replacement — and [`AGENT_READY_WAIT`] between them waiting for the restarted
+/// server to bind. The queries dominate, and neither is ours to shorten: see
+/// [`AgentClient::BLIND_QUERY_COST`].
+const INSTRUMENTATION_ATTEMPT_COST: Duration =
+    Duration::from_secs(AgentClient::BLIND_QUERY_COST.as_secs() * 2 + AGENT_READY_WAIT.as_secs());
+
+/// Quiet window after an instrumentation restart that did not fix the device.
+///
+/// **Derived, not chosen**: two attempts' worth. A cooldown shorter than one attempt would
+/// let the next restart begin while the last is still polling for a port, which is the storm
+/// this exists to stop rather than the cure for it.
+///
+/// Erring long is nearly free, and that is worth saying because it looks careless. This is
+/// only ever consulted when a device is blind *again* after a restart — a device the restart
+/// fixed never reaches the check, because its liveness query answers and the recovery path
+/// is never entered. So the window can only delay a second restart for a device whose cause
+/// is off-host (another tool holding `UiAutomation`), and that cause does not clear on any
+/// schedule of ours.
+///
+/// The shape matters more than the number: every recovery action needs a window, and Riviu
+/// had one only for view producers (`VIEW_RESTART_BACKOFF`, in the desktop's watchdog).
+/// docs/re/genfarmer README §12.2 records the same pattern applied to every recovery
+/// GenFarmer has — 30 s to recreate an adb client, 45 s between server kills, ten minutes
+/// after five failed reconnects.
+const INSTRUMENTATION_RESTART_COOLDOWN: Duration =
+    Duration::from_secs(INSTRUMENTATION_ATTEMPT_COST.as_secs() * 2);
 
 /// How honest a stream start has to be about frames.
 ///
@@ -125,6 +201,20 @@ pub struct AndroidDriverConfig {
     /// The helper APK shipped inside the installer. Lowest priority, same
     /// reason as [`Self::bundled_minicap_apk`].
     pub bundled_riviu_agent_apk: Option<PathBuf>,
+    /// Explicit path to `appium-uiautomator2-server.apk`. Falls back to
+    /// `RIVIU_AGENT_SERVER_APK`, then [`Self::bundled_agent_server_apk`].
+    pub agent_server_apk: Option<PathBuf>,
+    /// The server APK shipped inside the installer. Lowest priority, same reason as
+    /// [`Self::bundled_minicap_apk`].
+    pub bundled_agent_server_apk: Option<PathBuf>,
+    /// Explicit path to the `androidTest` half. Falls back to `RIVIU_AGENT_TEST_APK`,
+    /// then [`Self::bundled_agent_test_apk`].
+    ///
+    /// Both halves or neither: the runner lives in the test APK and `am instrument` names
+    /// it, so a device with only the server installed refuses exactly as if it had nothing.
+    pub agent_test_apk: Option<PathBuf>,
+    /// The test APK shipped inside the installer. Lowest priority.
+    pub bundled_agent_test_apk: Option<PathBuf>,
 }
 
 /// One running minicap feed, owned so a second `ensure_stream` reuses it and a
@@ -149,12 +239,150 @@ struct StreamProducer {
 
 /// One running scrcpy view. Separate from [`StreamProducer`]: a phone can keep
 /// this H.264 encode while nurture owns a minicap JPEG producer.
+/// The operator's quality choices, one per preset, plus the frame rate they share.
+#[derive(Debug, Clone)]
+struct ViewTuningChoice {
+    /// What a grid tile encodes at.
+    grid: riviu_core::StreamQuality,
+    /// What the overlay encodes at. Higher by default: it is one phone at a time, which is
+    /// exactly what makes the larger encode affordable.
+    focus: riviu_core::StreamQuality,
+    /// Shared, because it is a property of what the fleet can deliver rather than of how big
+    /// the picture is.
+    fps: u32,
+}
+
+/// Width and height in one atomic, so a touch can never be built from one frame's width and
+/// the next frame's height.
+///
+/// Samples carry these as `u32` and the control message declares them as `u16`. Saturating
+/// rather than truncating: a `as u16` on a hypothetical 70000-pixel frame would wrap to a
+/// small number that looks perfectly plausible on the wire, and the touch would land in the
+/// wrong place instead of being refused. Nothing on this fleet comes near it — `MAX_LONG_EDGE`
+/// is 832 — which is exactly why a silent wrap would never be found.
+fn pack_frame_size(width: u32, height: u32) -> u32 {
+    let clamp = |value: u32| u16::try_from(value).unwrap_or(u16::MAX);
+    (u32::from(clamp(width)) << 16) | u32::from(clamp(height))
+}
+
+fn unpack_frame_size(packed: u32) -> (u16, u16) {
+    ((packed >> 16) as u16, (packed & 0xffff) as u16)
+}
+
+/// Whether this spawn is taking over from a producer that is still painting.
+///
+/// **The picture must not go away while the operator is looking at it.** Opening the overlay
+/// switches preset, which means a new encode, and the old shape of this — stop, advance the
+/// generation, then spawn — left the canvas frozen on its last tile frame for the whole
+/// spawn. Measured on this fleet: **1.7 s** of a stuck picture every time a phone is opened,
+/// which is what "vẫn có delay" was.
+///
+/// `Replace` keeps the live producer running through the spawn and only swaps once the new
+/// stream has a keyframe in hand, so nothing on screen ever stops moving. Two scrcpy servers
+/// briefly share the device, which AGENTS.md 9.50 warned about — but that warning was about
+/// GenFarmer's 2.4 server, and this was measured rather than assumed: on a Galaxy S8+
+/// (Exynos, the fleet's fussiest encoder) a second 3.3.4 server connected alongside a live
+/// one returned its config packet and a real IDR **284 ms** after connect.
+///
+/// A failed `Replace` is also strictly safer than the old order: the operator keeps the
+/// stream they had instead of being left with a dead device.
+enum ViewStart {
+    /// Nothing is streaming this serial. The generation has already been advanced.
+    Fresh { generation: u64 },
+    /// A producer is live. Hold it until the replacement is proven, then stop it.
+    Replace,
+}
+
 struct ViewProducer {
     generation: u64,
     preset: crate::scrcpy::ViewPreset,
     host_port: u16,
     child: tokio::process::Child,
     reader: tokio::task::JoinHandle<()>,
+    /// Width in the high 16 bits, height in the low 16, as of the last sample read.
+    ///
+    /// This exists so that a touch can declare the size the server is *currently* encoding
+    /// rather than the size some caller last saw. `Device.getPhysicalPoint` on the device
+    /// compares the two and silently ignores the event when they differ, so a value that
+    /// lags a preset change or a rotation is not a slightly-off tap — it is no tap at all.
+    ///
+    /// Packed into one atomic rather than kept behind the `views` mutex because the reader
+    /// task writes it on every frame and `inject_touch` reads it on every pointer sample;
+    /// neither should ever wait on the other, and the pair must move together or a touch
+    /// could be built from one frame's width and the next frame's height.
+    frame_size: Arc<AtomicU32>,
+    /// The write half of the scrcpy control socket.
+    ///
+    /// Behind its own async mutex, and that is a correctness requirement rather than a
+    /// style: `ControlMessageReader` on the device has **no framing**, so two interleaved
+    /// writes desynchronise it permanently — and a desynchronised control stream is not a
+    /// dropped message, it is `ControlProtocolException` -> `Looper.quitSafely()`, which
+    /// kills the video too. One message, one `write_all`, one lock.
+    ///
+    /// Separate from `views` so the lock is never held across the send: `views` is taken by
+    /// every keeper tick and holding it through a socket write would make a slow phone stall
+    /// the reconciliation of every other one.
+    control: Arc<tokio::sync::Mutex<tokio::net::tcp::OwnedWriteHalf>>,
+    /// Reads the device→host half and throws it away.
+    ///
+    /// With `clipboard_autosync` left at its default the phone sends a message every time
+    /// its clipboard changes. Measured: holding that socket unread for 75 s while the
+    /// clipboard changed twelve times did not disturb the server — `DeviceMessageSender`
+    /// offers onto a bounded queue and drops rather than blocking. So this is insurance, not
+    /// a load-bearing part: it keeps the socket honest over hours rather than minutes, and it
+    /// costs one idle task per phone.
+    ///
+    /// Tolerant by construction — it never parses, so it cannot object to a message type it
+    /// does not know, and objecting is the one thing that would be fatal.
+    control_drain: tokio::task::JoinHandle<()>,
+}
+
+/// What one phone's apps are called and what they look like, plus the package set it was read
+/// for. See [`AndroidDriver::app_descriptions`] for the measurements that make it worth
+/// keeping.
+struct AppDescriptionCache {
+    fingerprint: u64,
+    rows: Vec<crate::riviu_agent::HelperApp>,
+}
+
+/// A hash of *which* packages a description covers.
+///
+/// Sorted first, so the same set in a different order is the same fingerprint: adb's listing
+/// order is not stable across calls and an order-sensitive key would miss the cache every
+/// time. Installing or removing an app changes the set and therefore the key, which is the
+/// only event that should invalidate the names.
+fn package_set_fingerprint(packages: &[String]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut sorted: Vec<&str> = packages.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    sorted.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Copy labels and icons onto the rows adb produced, joining on the package name.
+///
+/// An empty label is dropped rather than written: a row labelled with an empty string reads
+/// as an app called nothing, where `None` reads as "the package name is all we have".
+fn apply_app_descriptions(
+    apps: &mut [riviu_core::InstalledApp],
+    described: &[crate::riviu_agent::HelperApp],
+) {
+    let by_package: HashMap<&str, &crate::riviu_agent::HelperApp> = described
+        .iter()
+        .map(|row| (row.package.as_str(), row))
+        .collect();
+    for app in apps.iter_mut() {
+        let Some(row) = by_package.get(app.bundle_id.as_str()) else {
+            continue;
+        };
+        if !row.label.trim().is_empty() {
+            app.label = Some(row.label.clone());
+        }
+        if let Some(icon) = &row.icon_png_base64 {
+            app.icon_png_base64 = Some(icon.clone());
+        }
+    }
 }
 
 pub struct AndroidDriver {
@@ -178,6 +406,13 @@ pub struct AndroidDriver {
     /// serial -> the scrcpy view we started for it. Held only across map
     /// access, same rule as [`Self::streams`].
     views: tokio::sync::Mutex<HashMap<String, ViewProducer>>,
+    /// Preset each serial was last *asked* for, which is not the same as the one running.
+    ///
+    /// Separate from `views` on purpose: the watchdog restarts a dead producer, and at that
+    /// moment there is no producer left to read the preset off. It used to hard-code
+    /// `Tile`, so an overlay the operator had open silently dropped back to the tile encode
+    /// a few seconds later and the picture went soft again with nothing to point at.
+    desired_presets: parking_lot::Mutex<HashMap<String, crate::scrcpy::ViewPreset>>,
     /// Serials with a view start in flight.
     view_starting: Mutex<HashSet<String>>,
     /// The operator's quality and frame-rate choice for the tile grid.
@@ -188,7 +423,11 @@ pub struct AndroidDriver {
     /// each would make three places able to disagree about it. Set from the app when
     /// stream settings are saved; read when a producer is spawned, so a change reaches
     /// a tile on its next restart and never mid-stream.
-    view_tuning: Mutex<(riviu_core::StreamQuality, u32)>,
+    /// Per preset, because the two are displayed at very different sizes and the operator
+    /// gets a control for each. One shared pair meant the overlay silently encoded at the
+    /// grid's quality and `focus_quality` had no reader at all — a settings row that stored
+    /// a value and changed nothing.
+    view_tuning: Mutex<ViewTuningChoice>,
     /// Serials with a producer start in flight.
     ///
     /// The atomic claim that replaces holding [`Self::streams`] across the slow
@@ -210,12 +449,37 @@ pub struct AndroidDriver {
     /// reads exactly like a wrong locator. Force-stopping the instrumentation
     /// restored 118–425 ms immediately. See [`AgentClient::close`].
     agents: Mutex<HashMap<String, AgentClient>>,
+    /// serial -> when this device's instrumentation was last restarted for blindness.
+    ///
+    /// The restart itself is already bounded *within* one call: it happens once, and a
+    /// second blind session is reported rather than retried. What was missing is the bound
+    /// **across** calls. When something else on the phone holds `UiAutomation` and does not
+    /// give it back, every gesture the operator makes walks the whole recovery again —
+    /// open a session, wait out the 5 s liveness proof, restart the instrumentation, poll
+    /// up to 10 s for the port, prove the new session, fail. Tapping three times buys three
+    /// restarts and a minute of nothing.
+    ///
+    /// So a restart that did not fix the device buys a quiet window before the next one is
+    /// allowed. Inside it the caller fails immediately and says why, which is both faster
+    /// and more use than grinding: the fix is on the phone, not in another restart.
+    ///
+    /// This is the "windowed cooldown on recovery actions" half of docs/re/genfarmer
+    /// §12.6 — the half Riviu had for view producers (`VIEW_RESTART_BACKOFF`) and nowhere
+    /// else.
+    instrumentation_restarts: Mutex<HashMap<String, std::time::Instant>>,
     /// serial -> the resolved TikTok package, memoised.
     ///
     /// `pm list packages` is a 1–2 s adb round trip per candidate and this sits on the
     /// path to every session. Invalidated by `refresh_device`, because a build can be
     /// installed or removed while the app is running.
     tiktok_packages: Mutex<HashMap<String, String>>,
+    /// serial -> the phone's current screen size, shared with every session for it.
+    ///
+    /// One handle per serial rather than a copy per session, for the same reason `agents`
+    /// is keyed this way: invalidating has to reach the sessions already handed out.
+    /// `session.rs` used to hold this as a plain tuple captured at open, so a rotation made
+    /// every later coordinate wrong and nothing said so.
+    screens: Mutex<HashMap<String, crate::session::ScreenCache>>,
     /// serial -> forwarded host port.
     ports: Mutex<HashMap<String, u16>>,
     /// Serials for which *we* established the `adb forward`.
@@ -230,9 +494,28 @@ pub struct AndroidDriver {
     /// checkout has no pinned binary until someone builds
     /// `sidecars/riviu-android-agent`.
     riviu_agent_apk: Option<PathBuf>,
+    /// Both halves of the uiautomator2 instrumentation, resolved once at construction.
+    agent_apks: Option<(PathBuf, PathBuf)>,
     /// serial -> a live helper client. Same reuse rule as [`Self::agents`]:
     /// opening a second forward per session leaks a host port.
     helpers: Mutex<HashMap<String, crate::riviu_agent::HelperClient>>,
+    /// serial -> app names and icons the helper already described, keyed on the exact set of
+    /// packages they were read for.
+    ///
+    /// **Measured on 23021RAAEG, 21/08/2026, and the numbers are why this cache exists:**
+    /// labels for all 539 packages cost 4 559 ms and 47 KB; labels plus 48 px icons for the
+    /// 162 user-partition packages cost 3 599 ms and 535 KB. That is per `PackageManager`
+    /// call on the device, roughly 8 ms an app, and it is not something a faster wire makes
+    /// better. A menu that spends four seconds every time it opens is a menu nobody opens
+    /// twice, so the answer is kept until the package set itself changes — installing or
+    /// removing an app is exactly when it must be re-read, and nothing else is.
+    app_descriptions: Mutex<HashMap<String, AppDescriptionCache>>,
+    /// serial -> the last thing we proved about its agent.
+    ///
+    /// `DeviceDriver::cached_agent_status` is synchronous and Flow's preflight reads it, so
+    /// what the async paths learn has to be left somewhere a non-async reader can find it.
+    /// The iOS driver keeps the same map for the same reason.
+    agent_statuses: Mutex<HashMap<String, riviu_core::AgentStatus>>,
 }
 
 impl AndroidDriver {
@@ -281,28 +564,51 @@ impl AndroidDriver {
             std::env::var("RIVIU_ANDROID_AGENT_APK").ok(),
             config.bundled_riviu_agent_apk.clone(),
         );
+        // Both halves or neither. Half an instrumentation installs cleanly and then fails
+        // at `am instrument` with the same "not installed" refusal, which sends whoever
+        // debugs it looking at the wrong half.
+        let agent_apks = crate::riviu_agent::resolve_apk_path(
+            config.agent_server_apk.clone(),
+            std::env::var("RIVIU_AGENT_SERVER_APK").ok(),
+            config.bundled_agent_server_apk.clone(),
+        )
+        .zip(crate::riviu_agent::resolve_apk_path(
+            config.agent_test_apk.clone(),
+            std::env::var("RIVIU_AGENT_TEST_APK").ok(),
+            config.bundled_agent_test_apk.clone(),
+        ));
         Self {
             adb,
             minicap_apk,
             scrcpy_server,
+            agent_apks,
             frame_sink: Mutex::new(None),
             view_sink: Mutex::new(None),
             streams: tokio::sync::Mutex::new(HashMap::new()),
             views: tokio::sync::Mutex::new(HashMap::new()),
+            desired_presets: parking_lot::Mutex::new(HashMap::new()),
             view_starting: Mutex::new(HashSet::new()),
             // Medium reproduces the bitrate and size that shipped. The frame rate does
             // change: the launch used to ask for a hardcoded 30 while
             // `get_stream_settings` told the operator 24, so the UI and the encoder
             // disagreed silently. The default is now the declared rate, and the two agree.
-            view_tuning: Mutex::new((riviu_core::StreamQuality::Medium, riviu_core::STREAM_FPS)),
+            view_tuning: Mutex::new(ViewTuningChoice {
+                grid: riviu_core::StreamQuality::Medium,
+                focus: riviu_core::StreamQuality::High,
+                fps: riviu_core::STREAM_FPS,
+            }),
             starting: Mutex::new(HashSet::new()),
             interaction: riviu_core::InteractionLifecycleRegistry::default(),
             agents: Mutex::new(HashMap::new()),
+            instrumentation_restarts: Mutex::new(HashMap::new()),
             tiktok_packages: Mutex::new(HashMap::new()),
+            screens: Mutex::new(HashMap::new()),
             ports: Mutex::new(HashMap::new()),
             forwarded: Mutex::new(HashSet::new()),
             riviu_agent_apk,
             helpers: Mutex::new(HashMap::new()),
+            app_descriptions: Mutex::new(HashMap::new()),
+            agent_statuses: Mutex::new(HashMap::new()),
         }
     }
 
@@ -363,6 +669,32 @@ impl AndroidDriver {
         Ok(())
     }
 
+    /// What size the producer's frames come out at.
+    ///
+    /// **Native, not half, and that is a correctness choice rather than a quality one.**
+    ///
+    /// Flow measures in device pixels. A compiled coordinate records the size of the image
+    /// it was picked against, `flow::executor::validate_geometry` refuses to dispatch
+    /// unless the runtime frame matches the device's qualified geometry, and
+    /// `FrameRegionChanged` evidence names a rectangle in frame pixels. This producer ran
+    /// at `Projection::half` from the start, so on a 1080x2220 phone every frame was
+    /// 540x1110 and that check could never pass: image-coordinate taps and the Flow
+    /// inspector's coordinate picker were both unreachable on Android no matter what else
+    /// was fixed.
+    ///
+    /// Nothing pays for this that was not already paying. The Android tile grid does not use
+    /// minicap at all -- it is on the H.264 view path -- and `background_sample_candidate`
+    /// returns false for Android, so the only consumers of these frames are the ones that
+    /// measure them. The AI comment path is unaffected in either direction:
+    /// `openai_client::make_contact_sheet` resizes every frame to 375x667 before a provider
+    /// sees it, so the token bill does not depend on what the phone captured.
+    ///
+    /// If Android tiles ever move back onto minicap, this is the line to revisit: half the
+    /// edge is a quarter of the bytes, and twenty tiles is where that mattered.
+    fn producer_projection(screen: (u32, u32)) -> crate::frames::Projection {
+        crate::frames::Projection::native(screen.0, screen.1)
+    }
+
     /// Spawn minicap for `serial`, publishing into exactly `generation`.
     ///
     /// Never advances a generation and never holds a lock across the adb work. The
@@ -387,10 +719,8 @@ impl AndroidDriver {
         })?;
 
         let screen = crate::frames::device_screen(&self.adb, serial).await?;
-        let options = crate::frames::MinicapOptions::for_device(
-            serial,
-            crate::frames::Projection::half(screen.0, screen.1),
-        );
+        let options =
+            crate::frames::MinicapOptions::for_device(serial, Self::producer_projection(screen));
         // Push before taking a port, so a push failure strands nothing.
         crate::frames::ensure_apk(&self.adb, serial, &apk).await?;
 
@@ -553,6 +883,748 @@ impl AndroidDriver {
             },
         );
         Ok(first_frame_observed)
+    }
+
+    /// Put a USB-attached phone into TCP/IP adb mode, discover its Wi-Fi address, and
+    /// `adb connect` to it — so it can be driven over the LAN without the cable (feature A4,
+    /// xiaowei WIFI mode). Returns the `host:port` now connected. The USB serial keeps
+    /// working; the wireless endpoint shows up as an additional device on the next refresh.
+    pub async fn enable_wifi_adb(&self, serial: &str) -> anyhow::Result<String> {
+        // 5555 is adb's conventional wireless port and what `adb tcpip` restarts adbd on.
+        self.adb
+            .run(
+                &["-s", serial, "tcpip", "5555"],
+                std::time::Duration::from_secs(10),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("adb tcpip failed: {e}"))?;
+        // adbd restarts; give it a beat before asking the phone for its address.
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        let out = self
+            .adb
+            .shell(serial, adb::WLAN_IP_SHELL)
+            .await
+            .map_err(|e| anyhow::anyhow!("read wlan0 address failed: {e}"))?;
+        let ip = adb::parse_wlan_ipv4(&out)
+            .ok_or_else(|| anyhow::anyhow!("no Wi-Fi (wlan0) address — is the phone on Wi-Fi?"))?;
+        let host = format!("{ip}:5555");
+        self.wifi_connect(&host).await?;
+        Ok(host)
+    }
+
+    /// `adb connect <host:port>` to a phone already in TCP/IP mode (manual entry, or after
+    /// [`Self::enable_wifi_adb`]). adb prints "connected"/"already connected" on success and a
+    /// human reason on failure, which is surfaced verbatim.
+    pub async fn wifi_connect(&self, host: &str) -> anyhow::Result<()> {
+        let out = self
+            .adb
+            .run(&["connect", host], std::time::Duration::from_secs(10))
+            .await
+            .map_err(|e| anyhow::anyhow!("adb connect failed: {e}"))?;
+        let low = out.to_lowercase();
+        if low.contains("connected") {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("adb connect {host}: {}", out.trim()))
+        }
+    }
+
+    /// `adb disconnect <host:port>`, dropping a wireless endpoint (the USB side, if any, is
+    /// unaffected).
+    ///
+    /// Note what this does **not** do: adbd on the phone keeps listening on `0.0.0.0:5555`.
+    /// This only drops *this host's* client connection. To close the port, see
+    /// [`Self::disable_wifi_adb`].
+    pub async fn wifi_disconnect(&self, host: &str) -> anyhow::Result<()> {
+        self.adb
+            .run(&["disconnect", host], std::time::Duration::from_secs(10))
+            .await
+            .map_err(|e| anyhow::anyhow!("adb disconnect failed: {e}"))?;
+        Ok(())
+    }
+
+    /// Put adbd back on USB, closing the TCP/IP port it was listening on.
+    ///
+    /// The way back that did not exist. `enable_wifi_adb` restarts adbd on `0.0.0.0:5555`, and
+    /// on Android 9 that port is gated only by the RSA host-key prompt — on farm phones where
+    /// "always allow" was tapped once (which is the point of a farm), anyone on the LAN who
+    /// gets a key trusted has full `adb shell`, which on the rooted subset is root. Until now
+    /// nothing in this codebase ran `adb usb`, so the only way to close the port again was to
+    /// reboot the phone, and nothing in the UI said so.
+    ///
+    /// Takes the **USB** serial deliberately: `adb usb` has to be addressed to the device, and
+    /// asking over the wireless transport would be sawing off the branch — the command that
+    /// closes the port would travel through the port it closes.
+    pub async fn disable_wifi_adb(&self, serial: &str) -> anyhow::Result<()> {
+        let out = self
+            .adb
+            .run(&["-s", serial, "usb"], std::time::Duration::from_secs(10))
+            .await
+            .map_err(|e| anyhow::anyhow!("adb usb failed: {e}"))?;
+        // adb prints "restarting in USB mode" on success. Some builds print nothing at all and
+        // still switch, so an empty answer is accepted; only an explicit error is refused.
+        if out.to_lowercase().contains("error") {
+            anyhow::bail!("adb usb {serial}: {}", out.trim());
+        }
+        Ok(())
+    }
+
+    /// Set the phone's wallpaper from a local image file (feature A3, "number as wallpaper").
+    /// Pushes the file to the device then asks the helper to apply it. Requires the Riviu
+    /// helper APK (bundled); errors clearly if it is not attachable.
+    pub async fn set_wallpaper(&self, serial: &str, local_path: &str) -> anyhow::Result<()> {
+        let helper = self
+            .try_attach_helper(serial)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Riviu helper không sẵn sàng trên máy này"))?;
+        let device_path = "/data/local/tmp/riviu-wallpaper.png";
+        self.adb
+            .run(
+                &["-s", serial, "push", local_path, device_path],
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("push wallpaper failed: {e}"))?;
+        helper.set_wallpaper(device_path).await
+    }
+
+    /// Inject a mock GPS location (feature B). Grants the helper the mock-location appop
+    /// (best-effort — on some builds it must be set once in Developer Options) then asks the
+    /// helper to feed the coordinates into the GPS/network providers.
+    pub async fn set_mock_location(&self, serial: &str, lat: f64, lng: f64) -> anyhow::Result<()> {
+        let helper = self
+            .try_attach_helper(serial)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Riviu helper không sẵn sàng trên máy này"))?;
+        // Best-effort: needs WRITE_SECURE_SETTINGS-level appop, which `adb shell` has.
+        let _ = self
+            .adb
+            .shell(
+                serial,
+                &format!(
+                    "appops set {} android:mock_location allow",
+                    crate::riviu_agent::PACKAGE
+                ),
+            )
+            .await;
+        helper.set_mock_location(lat, lng).await
+    }
+
+    /// Stop mock location, returning the phone to its real GPS (feature B).
+    ///
+    /// Revokes the appop as well as removing the test provider. Without that, one use of "set
+    /// location" left `com.riviu.agent` as the phone's selected mock-location app **forever** —
+    /// a permission that normally requires a human to pick the app in Developer Options, handed
+    /// out permanently. Combined with an unauthenticated helper that is a standing GPS-spoofing
+    /// capability for any other app on the device, long after the operator finished with it.
+    ///
+    /// Revoke is best-effort and runs even when the helper is unreachable: the appop is granted
+    /// by adb, not by the helper, so a helper that has died must not strand the grant.
+    pub async fn stop_mock_location(&self, serial: &str) -> anyhow::Result<()> {
+        let stopped = match self.try_attach_helper(serial).await {
+            Ok(Some(helper)) => helper.stop_mock_location().await,
+            Ok(None) => Err(anyhow::anyhow!("Riviu helper không sẵn sàng trên máy này")),
+            Err(error) => Err(error),
+        };
+        let _ = self
+            .adb
+            .shell(
+                serial,
+                &format!(
+                    "appops set {} android:mock_location deny",
+                    crate::riviu_agent::PACKAGE
+                ),
+            )
+            .await;
+        stopped
+    }
+
+    // --- Root tier (feature C, xiaowei "ROOT 模式 / 一键新机"). These need a rooted phone
+    // (Magisk `su`); on a non-rooted phone `is_rooted` returns false and the mutating calls
+    // report that rather than half-applying. Only android_id can be set without root (adb
+    // carries WRITE_SECURE_SETTINGS). ---
+
+    /// True when `su` grants uid 0 — i.e. the phone is rooted (Magisk) and has authorised adb.
+    pub async fn is_rooted(&self, serial: &str) -> bool {
+        match self.adb.shell(serial, "su -c id").await {
+            Ok(out) => out.contains("uid=0"),
+            Err(_) => false,
+        }
+    }
+
+    /// Run a command as root (`su -c`). Errors if the phone is not rooted, rather than
+    /// silently running it unprivileged.
+    pub async fn root_shell(&self, serial: &str, command: &str) -> anyhow::Result<String> {
+        if !self.is_rooted(serial).await {
+            anyhow::bail!("máy chưa root (không có su)");
+        }
+        // Double quotes so the caller's command keeps its own single quotes; callers here
+        // pass fixed commands, not operator free-text.
+        self.adb
+            .shell(serial, &format!("su -c \"{command}\""))
+            .await
+    }
+
+    /// One-click new identity (xiaowei 一键新机): overwrite the app-visible device fingerprint.
+    /// `android_id` applies without root (adb WRITE_SECURE_SETTINGS); `serialno` and `mac`
+    /// need root (`resetprop`, `ip link`). Each field is best-effort and reported; a field the
+    /// device or its root state rejects does not fail the others. Note this changes what apps
+    /// *read* (Build/Settings/MAC), not the baseband IMEI.
+    pub async fn set_device_identity(
+        &self,
+        serial: &str,
+        android_id: Option<&str>,
+        serialno: Option<&str>,
+        mac: Option<&str>,
+    ) -> anyhow::Result<String> {
+        // Validated **before** anything touches the phone, and validated together: all three
+        // are pasted into `su -c "…"` below, where `$(…)` and a backtick still substitute
+        // inside the double quotes, so an unchecked value here is root code execution on the
+        // device. Checking up front rather than per-field is deliberate — a partially applied
+        // identity is worse than a refused one, and the doc comment two functions up
+        // ("callers here pass fixed commands, not operator free-text") was true of
+        // `factory_reset` and never true of this function.
+        let android_id = android_id
+            .map(adb::validate_android_id)
+            .transpose()
+            .map_err(|error| anyhow::anyhow!("android_id không hợp lệ: {error}"))?;
+        let serialno = serialno
+            .map(adb::validate_serial_no)
+            .transpose()
+            .map_err(|error| anyhow::anyhow!("serialno không hợp lệ: {error}"))?;
+        let mac = mac
+            .map(adb::validate_mac)
+            .transpose()
+            .map_err(|error| anyhow::anyhow!("địa chỉ MAC không hợp lệ: {error}"))?;
+
+        let rooted = self.is_rooted(serial).await;
+        let mut done: Vec<String> = Vec::new();
+        let mut failed: Vec<String> = Vec::new();
+
+        if let Some(id) = android_id {
+            // Try plain first (adb has WRITE_SECURE_SETTINGS); fall back to root.
+            let plain = self
+                .adb
+                .shell(serial, &format!("settings put secure android_id {id}"))
+                .await;
+            let ok = plain.is_ok()
+                || (rooted
+                    && self
+                        .adb
+                        .shell(
+                            serial,
+                            &format!("su -c \"settings put secure android_id {id}\""),
+                        )
+                        .await
+                        .is_ok());
+            if ok {
+                done.push("android_id".into());
+            } else {
+                failed.push("android_id".into());
+            }
+        }
+
+        if let Some(sn) = serialno {
+            if rooted {
+                let a = self
+                    .adb
+                    .shell(serial, &format!("su -c \"resetprop ro.serialno {sn}\""))
+                    .await;
+                let b = self
+                    .adb
+                    .shell(
+                        serial,
+                        &format!("su -c \"resetprop ro.boot.serialno {sn}\""),
+                    )
+                    .await;
+                if a.is_ok() || b.is_ok() {
+                    done.push("serialno".into());
+                } else {
+                    failed.push("serialno".into());
+                }
+            } else {
+                failed.push("serialno(cần root)".into());
+            }
+        }
+
+        if let Some(m) = mac {
+            if rooted {
+                let cmd = format!(
+                    "su -c \"ip link set wlan0 down; ip link set wlan0 address {m}; ip link set wlan0 up\""
+                );
+                if self.adb.shell(serial, &cmd).await.is_ok() {
+                    done.push("wifi_mac".into());
+                } else {
+                    failed.push("wifi_mac".into());
+                }
+            } else {
+                failed.push("wifi_mac(cần root)".into());
+            }
+        }
+
+        let mut summary = format!(
+            "Đã đổi: {}",
+            if done.is_empty() {
+                "—".into()
+            } else {
+                done.join(", ")
+            }
+        );
+        if !failed.is_empty() {
+            summary.push_str(&format!(" · Không đổi được: {}", failed.join(", ")));
+        }
+        Ok(summary)
+    }
+
+    // --- The per-phone function menu (xiaowei 功能, one row each). Everything here is one
+    // or two adb calls and none of it needs the helper APK or root, which is the reason this
+    // block exists as its own tier: the operator gets the whole menu on a stock phone. ---
+
+    /// List one directory on the phone (xiaowei "Preview Mobile Files").
+    ///
+    /// The trailing slash is not cosmetic. Measured on 23021RAAEG: `ls -la /sdcard` prints
+    /// *the symlink* — one line, `/sdcard -> /storage/self/primary` — while `ls -la /sdcard/`
+    /// prints the contents. Browsing without it shows the phone's main storage as a single
+    /// mysterious file.
+    ///
+    /// A non-zero exit is surfaced as an error with the phone's own sentence, because for a
+    /// browser that is the honest outcome: `ls: /sdcard/nope: No such file or directory` on
+    /// stderr with an empty stdout is a refusal, and rendering it as an empty folder would
+    /// claim the directory exists and is empty.
+    pub async fn list_device_dir(
+        &self,
+        serial: &str,
+        path: &str,
+    ) -> anyhow::Result<Vec<riviu_core::DeviceFileEntry>> {
+        let path = adb::validate_device_path(path)?;
+        let listed = if path.ends_with('/') {
+            path.to_string()
+        } else {
+            format!("{path}/")
+        };
+        let out = self
+            .adb
+            .shell_output(
+                serial,
+                &format!("ls -la {}", adb::quote_device_path(&listed)),
+                Duration::from_secs(30),
+            )
+            .await?;
+        let entries = adb::parse_ls_listing(&out.stdout);
+        if entries.is_empty() && out.exit_code != 0 {
+            let reason = if out.stderr.trim().is_empty() {
+                out.stdout.trim().to_string()
+            } else {
+                out.stderr.trim().to_string()
+            };
+            anyhow::bail!("không đọc được {path}: {reason}");
+        }
+        Ok(entries)
+    }
+
+    /// Copy one file or folder off the phone onto this machine (xiaowei "Export File").
+    ///
+    /// Returns where it landed. `adb pull` is given the destination *directory*, so the
+    /// phone's own name for the file is kept — renaming it here would make an export of
+    /// twenty phones into twenty files whose origin is only in the log.
+    pub async fn pull_device_path(
+        &self,
+        serial: &str,
+        remote: &str,
+        dest_dir: &Path,
+    ) -> anyhow::Result<PathBuf> {
+        let remote = adb::validate_device_path(remote)?;
+        std::fs::create_dir_all(dest_dir)
+            .with_context(|| format!("tạo thư mục {}", dest_dir.display()))?;
+        let name = remote
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .filter(|part| !part.is_empty())
+            .unwrap_or("pulled");
+        // Not `shell`: `adb pull` is a client subcommand, so the path never reaches a device
+        // shell and needs no quoting — it is one argv element.
+        self.adb
+            .device(
+                serial,
+                &["pull", remote, &dest_dir.to_string_lossy()],
+                Duration::from_secs(300),
+            )
+            .await
+            .map_err(|e| anyhow!("adb pull thất bại: {e}"))?;
+        let landed = dest_dir.join(name);
+        if !landed.exists() {
+            anyhow::bail!(
+                "adb pull báo xong nhưng không thấy {} — đường dẫn trên máy có thể là thư mục rỗng",
+                landed.display()
+            );
+        }
+        Ok(landed)
+    }
+
+    /// Put a local file onto the phone (xiaowei "Import File").
+    ///
+    /// Deliberately *not* the media-import path: that one stages a campaign and tells
+    /// MediaStore about the result so a picture shows up in the gallery. This is the file
+    /// manager's own push — whatever the file is, wherever the operator pointed — and it
+    /// promises nothing more than "the bytes are at this path now", which it verifies.
+    pub async fn push_device_file(
+        &self,
+        serial: &str,
+        local: &Path,
+        remote_dir: &str,
+    ) -> anyhow::Result<String> {
+        let remote_dir = adb::validate_device_path(remote_dir)?;
+        if !local.is_file() {
+            anyhow::bail!("không thấy file {}", local.display());
+        }
+        let name = local
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .ok_or_else(|| anyhow!("đường dẫn nguồn không có tên file"))?;
+        let target = format!("{}/{name}", remote_dir.trim_end_matches('/'));
+        adb::validate_device_path(&target)?;
+        self.adb
+            .device(
+                serial,
+                &["push", &local.to_string_lossy(), &target],
+                Duration::from_secs(300),
+            )
+            .await
+            .map_err(|e| anyhow!("adb push thất bại: {e}"))?;
+        // Proof, not optimism: `adb push` has been seen to report success while the target
+        // directory was read-only, and a file manager that then lists nothing new looks
+        // broken rather than refused.
+        let check = self
+            .adb
+            .shell_output(
+                serial,
+                &format!("ls -la {}", adb::quote_device_path(&target)),
+                Duration::from_secs(20),
+            )
+            .await?;
+        if adb::parse_ls_listing(&check.stdout).is_empty() {
+            anyhow::bail!("đẩy xong nhưng máy không thấy {target}");
+        }
+        Ok(target)
+    }
+
+    /// Delete a file or folder on the phone.
+    ///
+    /// Two guards, and they answer different fears. [`adb::is_undeletable_root`] refuses a
+    /// delete aimed at a storage root — the one gesture no confirm dialog can undo — and the
+    /// path validator refuses anything a single quote could break out of. Everything else is
+    /// the operator's call, and the UI asks first.
+    pub async fn delete_device_path(&self, serial: &str, path: &str) -> anyhow::Result<()> {
+        let path = adb::validate_device_path(path)?;
+        if adb::is_undeletable_root(path) {
+            anyhow::bail!("{path} là gốc lưu trữ — không xoá cả gốc, chỉ xoá thứ bên trong");
+        }
+        let out = self
+            .adb
+            .shell_output(
+                serial,
+                &format!("rm -rf {}", adb::quote_device_path(path)),
+                Duration::from_secs(60),
+            )
+            .await?;
+        if out.exit_code != 0 {
+            let reason = if out.stderr.trim().is_empty() {
+                out.stdout.trim().to_string()
+            } else {
+                out.stderr.trim().to_string()
+            };
+            anyhow::bail!("xoá {path} thất bại: {reason}");
+        }
+        // `rm -rf` is silent about a path it could not remove for a reason it swallows, so
+        // absence is read back rather than assumed.
+        let check = self
+            .adb
+            .shell_output(
+                serial,
+                &format!("ls -la {}", adb::quote_device_path(path)),
+                Duration::from_secs(20),
+            )
+            .await?;
+        if !adb::parse_ls_listing(&check.stdout).is_empty() {
+            anyhow::bail!("{path} vẫn còn trên máy sau khi xoá");
+        }
+        Ok(())
+    }
+
+    /// Turn the phone's own Wi-Fi radio on or off (xiaowei ADB submenu "Turn on/off WIFI"),
+    /// and report the state it actually settled at.
+    ///
+    /// `svc wifi` prints nothing at all — success and refusal look identical — so the answer
+    /// comes from reading `settings get global wifi_on` back. Measured end to end on
+    /// 23021RAAEG (Android 15) 21/08/2026: `disable` then a 1 s wait reads `0`, `enable` then
+    /// a 2 s wait reads `1`, and both `svc` calls exit 0 with empty output either way.
+    ///
+    /// **A phone reached over wireless adb disconnects itself by obeying this.** The serial
+    /// says which — `10969614` is USB, `192.168.1.42:5555` is not — and the UI warns before
+    /// asking; the driver still obeys, because an operator switching a phone to cable next is
+    /// a legitimate thing to want.
+    pub async fn set_wifi_radio(&self, serial: &str, on: bool) -> anyhow::Result<bool> {
+        let verb = if on { "enable" } else { "disable" };
+        self.adb
+            .shell(serial, &format!("svc wifi {verb}"))
+            .await
+            .map_err(|e| anyhow!("svc wifi {verb} thất bại: {e}"))?;
+        // The radio takes a moment to report its new state; asking immediately reads the old
+        // one and makes a working toggle look like it did nothing. Two seconds because that
+        // is what the slower direction (on) needed when measured, not because it looks safe.
+        tokio::time::sleep(Duration::from_millis(2000)).await;
+        let read = self
+            .adb
+            .shell(serial, "settings get global wifi_on")
+            .await
+            .unwrap_or_default();
+        Ok(read.trim() == "1")
+    }
+
+    /// Put the display back to the resolution and density the phone shipped with (xiaowei
+    /// ADB submenu "Reset DPI" / "Reset resolution"), and say what it reads as afterwards.
+    ///
+    /// Returns the phone's own two lines so the operator sees the result rather than a
+    /// claim. Measured on 23021RAAEG: `Physical size: 1080x2400` and `Physical density: 440`.
+    /// `wm` prints only the *override* when one is set, so a reset that worked is a listing
+    /// with the physical values and no override line.
+    pub async fn reset_display_metrics(
+        &self,
+        serial: &str,
+        density: bool,
+        size: bool,
+    ) -> anyhow::Result<String> {
+        if !density && !size {
+            anyhow::bail!("không có gì để đặt lại");
+        }
+        if size {
+            self.adb
+                .shell(serial, "wm size reset")
+                .await
+                .map_err(|e| anyhow!("wm size reset thất bại: {e}"))?;
+        }
+        if density {
+            self.adb
+                .shell(serial, "wm density reset")
+                .await
+                .map_err(|e| anyhow!("wm density reset thất bại: {e}"))?;
+        }
+        let read = self
+            .adb
+            .shell(serial, "wm size; wm density")
+            .await
+            .unwrap_or_default();
+        Ok(read.trim().to_string())
+    }
+
+    /// Power the phone off (xiaowei "Shutdown").
+    ///
+    /// `adb reboot -p` and not `adb shell reboot -p`: the client subcommand is the one that
+    /// survives the connection dying underneath it, which is guaranteed here — the device
+    /// this is aimed at stops answering as a direct result. A transport error *after* the
+    /// request went out is therefore not treated as a failure; the fleet list noticing the
+    /// phone is gone is the real confirmation, and it arrives on the next refresh.
+    pub async fn power_off(&self, serial: &str) -> anyhow::Result<()> {
+        match self
+            .adb
+            .device(serial, &["reboot", "-p"], Duration::from_secs(20))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                let text = error.to_string().to_lowercase();
+                if text.contains("closed")
+                    || text.contains("device offline")
+                    || text.contains("device not found")
+                    || text.contains("no devices")
+                {
+                    tracing::info!(
+                        serial,
+                        "tắt máy: adb mất kết nối ngay sau lệnh, coi là đã tắt"
+                    );
+                    Ok(())
+                } else {
+                    Err(anyhow!("tắt máy thất bại: {error}"))
+                }
+            }
+        }
+    }
+
+    /// Open the phone's own Settings app (xiaowei hidden-function "Phone Settings").
+    ///
+    /// An action intent rather than a package launch: the Settings *package* differs by ROM
+    /// (`com.android.settings` on AOSP, MIUI ships its own on this fleet's Redmi), while
+    /// `android.settings.SETTINGS` is resolved by the phone itself and cannot be wrong.
+    pub async fn open_system_settings(&self, serial: &str) -> anyhow::Result<()> {
+        let out = self
+            .adb
+            .shell_output(
+                serial,
+                "am start -a android.settings.SETTINGS",
+                Duration::from_secs(20),
+            )
+            .await?;
+        // `am start` exits 0 while printing `Error: Activity not started`, so the exit code
+        // alone would let a refusal pass as a success.
+        let text = format!("{}{}", out.stdout, out.stderr);
+        if text.contains("Error:") {
+            anyhow::bail!("mở Cài đặt thất bại: {}", text.trim());
+        }
+        Ok(())
+    }
+
+    /// Wake the screen (xiaowei hidden-function "Turn On Screen").
+    ///
+    /// KEYCODE_WAKEUP, which is idempotent — unlike KEYCODE_POWER, which *toggles* and so
+    /// puts an already-awake phone to sleep. The same constant the capture path uses.
+    pub async fn wake_screen(&self, serial: &str) -> anyhow::Result<()> {
+        self.adb
+            .shell(serial, adb::WAKE_KEYEVENT)
+            .await
+            .map(|_| ())
+            .map_err(|e| anyhow!("bật màn hình thất bại: {e}"))
+    }
+
+    /// Take a screenshot and leave it *on the phone* (xiaowei "Screenshot to phone").
+    ///
+    /// The other screenshot command copies the picture to this machine; this one is the row
+    /// beside it in xiaowei's menu, and the difference is the point — a phone whose gallery
+    /// has pictures in it looks like a phone somebody uses.
+    ///
+    /// Verified by reading the size back: `screencap` on a phone that refuses to capture
+    /// (secure window in front, measured on TikTok's own screens) exits 0 and leaves a
+    /// zero-byte file, which is exactly the silent failure this project's rules forbid.
+    /// The name is stamped **by the phone**, in one shell call that also lists the result.
+    /// Two reasons, and the second is the load-bearing one: the phone's clock is the one an
+    /// operator scrolling its gallery will compare against, and a single call cannot end up
+    /// listing a *different* file than the one it captured — which a host-side name plus a
+    /// separate `ls` can, on a phone whose second ticked over between them.
+    pub async fn screenshot_to_device(&self, serial: &str) -> anyhow::Result<String> {
+        // Fixed script, no operator input in it, so `$(…)` here is ours and not an injection
+        // surface. `Pictures/` exists on every phone here; a fresh flash may not have it.
+        const SCRIPT: &str = "p=/sdcard/Pictures/riviu-$(date +%Y%m%d-%H%M%S).png; \
+             mkdir -p /sdcard/Pictures && screencap -p \"$p\" && ls -la \"$p\"";
+        let out = self
+            .adb
+            .shell_output(serial, SCRIPT, Duration::from_secs(60))
+            .await?;
+        if out.exit_code != 0 {
+            let reason = if out.stderr.trim().is_empty() {
+                out.stdout.trim().to_string()
+            } else {
+                out.stderr.trim().to_string()
+            };
+            anyhow::bail!("chụp vào máy thất bại: {reason}");
+        }
+        // Listing a file by path prints that whole path as the name — measured on
+        // 23021RAAEG — so this row carries both the proof and the answer.
+        let captured = adb::parse_ls_listing(&out.stdout)
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("chụp xong nhưng máy không liệt kê được ảnh vừa tạo"))?;
+        if captured.size == 0 {
+            anyhow::bail!(
+                "chụp xong nhưng ảnh rỗng — màn hình đang mở nội dung không cho chụp (secure window)"
+            );
+        }
+        Ok(captured.name)
+    }
+
+    /// Put the phone's own names and icons onto a listing adb produced.
+    ///
+    /// adb stays the source of truth for *which* apps exist — it reads both partitions and
+    /// includes apps with no launcher activity, which a `queryIntentActivities` sweep would
+    /// miss. The helper answers the one question adb cannot: what an app is called, and what
+    /// it looks like (AGENTS.md §9.55).
+    ///
+    /// **The user partition only, and that is a measurement rather than a preference.** On
+    /// 23021RAAEG (21/08/2026) describing all 539 packages took 4 559 ms; the 162
+    /// user-partition packages with icons took 3 599 ms. The system partition is 377 rows the
+    /// UI keeps behind a toggle and a farm operator does not launch, so paying four seconds
+    /// to name them on every listing buys nothing. They keep their package names, which is
+    /// what every row showed before this existed.
+    ///
+    /// Best effort throughout: a phone with no helper keeps its package names and says so
+    /// once in the log rather than failing the listing.
+    async fn name_apps_with_helper(&self, serial: &str, apps: &mut [riviu_core::InstalledApp]) {
+        let wanted: Vec<String> = apps
+            .iter()
+            .filter(|app| app.kind == riviu_core::InstalledAppKind::User)
+            .map(|app| app.bundle_id.clone())
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+        let fingerprint = package_set_fingerprint(&wanted);
+        if let Some(cached) = self.app_descriptions.lock().get(serial) {
+            if cached.fingerprint == fingerprint {
+                apply_app_descriptions(apps, &cached.rows);
+                return;
+            }
+        }
+
+        let helper = match self.try_attach_helper(serial).await {
+            Ok(Some(helper)) => helper,
+            Ok(None) => {
+                tracing::info!(
+                    serial,
+                    "không có Riviu helper — danh sách app chỉ có tên gói, không có nhãn/icon"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(serial, %error, "không gắn được helper để đọc nhãn app");
+                return;
+            }
+        };
+        let described = match helper.describe_apps(&wanted, true).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(serial, %error, "helper không trả nhãn app");
+                return;
+            }
+        };
+        apply_app_descriptions(apps, &described);
+        self.app_descriptions.lock().insert(
+            serial.to_string(),
+            AppDescriptionCache {
+                fingerprint,
+                rows: described,
+            },
+        );
+    }
+
+    /// Switch the phone's keyboard (xiaowei "Switch Input Method").
+    ///
+    /// The id is validated the same way the picker in the UI validates it, and for the same
+    /// reason twice over: it is interpolated into a device shell, and the helper's own IME
+    /// must never be left installed as the phone's keyboard (AGENTS.md §9.5x).
+    pub async fn set_input_method(&self, serial: &str, ime_id: &str) -> anyhow::Result<()> {
+        let ime_id = crate::riviu_agent::validate_ime_id(ime_id)?;
+        if ime_id == crate::riviu_agent::IME_ID {
+            anyhow::bail!("không đặt bàn phím của Riviu làm bàn phím chính của máy");
+        }
+        self.adb
+            .shell(serial, &format!("ime set {ime_id}"))
+            .await
+            .map(|_| ())
+            .map_err(|e| anyhow!("đổi bàn phím thất bại: {e}"))
+    }
+
+    /// Factory-reset the phone (xiaowei 恢复出厂). Needs root; sends the system MASTER_CLEAR
+    /// broadcast. Irreversible — the UI gates this behind an explicit confirm.
+    pub async fn factory_reset(&self, serial: &str) -> anyhow::Result<()> {
+        if !self.is_rooted(serial).await {
+            anyhow::bail!("máy chưa root (không có su) — không thể khôi phục gốc từ xa");
+        }
+        self.adb
+            .shell(
+                serial,
+                "su -c \"am broadcast -a android.intent.action.MASTER_CLEAR\"",
+            )
+            .await?;
+        Ok(())
     }
 
     /// What the phone says about its own display, for a caller that needs to explain
@@ -812,9 +1884,12 @@ impl AndroidDriver {
         }
     }
 
-    /// Start or retune the scrcpy view. Same process, new options: a live
-    /// producer at a different preset is stopped first. Does not touch minicap
-    /// or `StreamBudgetManager`.
+    /// Start or retune the scrcpy view. Same process, new options.
+    ///
+    /// A producer that is already painting is **kept until the replacement has a keyframe**
+    /// (see [`ViewStart`]) rather than stopped up front. That is what the operator feels when
+    /// they open a phone: the picture keeps moving through the switch instead of freezing for
+    /// the length of a spawn. Does not touch minicap or `StreamBudgetManager`.
     pub async fn start_view_stream(
         &self,
         serial: &str,
@@ -822,20 +1897,49 @@ impl AndroidDriver {
     ) -> anyhow::Result<u64> {
         let sink = self.view_sink()?;
         let claim = self.claim_view_start(serial)?;
+        self.desired_presets
+            .lock()
+            .insert(serial.to_string(), preset);
         if self.view_is_running(serial, preset).await {
             return Ok(sink.generation(serial));
         }
-        self.take_and_stop_view(serial).await;
-        let generation = sink.advance(serial);
-        self.spawn_view(serial, generation, preset).await?;
+        // "Is something alive on this serial" rather than "is it at the preset we want":
+        // anything still running is a picture worth keeping until the new one is proven.
+        let replacing = self.views.lock().await.contains_key(serial);
+        let start = if replacing {
+            ViewStart::Replace
+        } else {
+            ViewStart::Fresh {
+                generation: sink.advance(serial),
+            }
+        };
+        self.spawn_view(serial, start, preset).await?;
         drop(claim);
-        Ok(generation)
+        Ok(sink.generation(serial))
     }
 
     /// Stop the view for one serial. `true` when nothing is left running,
     /// including when there was nothing to stop.
     pub async fn stop_view_stream(&self, serial: &str) -> bool {
+        // Deliberately does NOT forget the desired preset. Measured: it used to, and the
+        // watchdog's restart path is stop-then-start (state.rs), so every restart read back
+        // the default and an open overlay silently dropped to the tile encode -- observed
+        // live as `gen=5 tile 216x480` while the overlay was still on screen.
+        //
+        // The desire belongs to the operator having an overlay open, not to a producer's
+        // lifetime. It is overwritten, never cleared: closing the overlay asks for `tile`,
+        // which is the same insert.
         self.take_and_stop_view(serial).await
+    }
+
+    /// What this serial should be restarted at. `Tile` for anything never asked for, which
+    /// is the pre-existing behaviour for every device the operator has not opened.
+    pub fn desired_view_preset(&self, serial: &str) -> crate::scrcpy::ViewPreset {
+        self.desired_presets
+            .lock()
+            .get(serial)
+            .copied()
+            .unwrap_or(crate::scrcpy::ViewPreset::Tile)
     }
 
     /// Set the quality and frame rate new views will start with.
@@ -843,8 +1947,13 @@ impl AndroidDriver {
     /// Does **not** touch running producers. Restarting sixteen encoders because a
     /// slider moved is a fleet-wide stall the operator did not ask for, so the caller
     /// decides which views to restart and when — see `set_view_preset`.
-    pub fn set_view_tuning(&self, quality: riviu_core::StreamQuality, fps: u32) {
-        *self.view_tuning.lock() = (quality, fps);
+    pub fn set_view_tuning(
+        &self,
+        grid: riviu_core::StreamQuality,
+        focus: riviu_core::StreamQuality,
+        fps: u32,
+    ) {
+        *self.view_tuning.lock() = ViewTuningChoice { grid, focus, fps };
     }
 
     /// Retune by restarting the same producer. Not a second `app_process`.
@@ -873,6 +1982,16 @@ impl AndroidDriver {
 
     async fn stop_view_producer(&self, serial: &str, mut producer: ViewProducer) -> bool {
         producer.reader.abort();
+        // The control socket goes first, and shut down rather than merely dropped.
+        // `DesktopConnection.shutdown` on the device closes all three sockets; giving its
+        // reader a clean EOF is what stops a teardown that races a `write_all` from leaving
+        // a half-written message behind — and a half-written message on this stream is not a
+        // lost byte, it is `ControlProtocolException` on a server we are about to kill
+        // anyway, but which would log a fatal error and confuse the next reader of the log.
+        producer.control_drain.abort();
+        if let Ok(mut socket) = producer.control.try_lock() {
+            let _ = socket.shutdown().await;
+        }
         let _ = producer.child.start_kill();
         let confirmed = matches!(
             tokio::time::timeout(CHILD_EXIT_TIMEOUT, producer.child.wait()).await,
@@ -917,15 +2036,49 @@ impl AndroidDriver {
         for pid in &unique {
             let _ = self.adb.shell(serial, &format!("kill {pid}")).await;
         }
-        if !unique.is_empty() {
-            tokio::time::sleep(Duration::from_millis(300)).await;
+        if unique.is_empty() {
+            return;
         }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Confirm, then escalate. `kill` is SIGTERM, and a server blocked inside
+        // MediaCodec does not have to honour it -- measured on the Redmi, two
+        // `app_process` were still holding the encoder after this function had already
+        // run and reported nothing, because it never looked again. A survivor is not
+        // harmless: it keeps the hardware encoder, so the fresh server we are about to
+        // start fails `MediaCodec.configure` and the tile stays black.
+        //
+        // One escalation, not a loop: if SIGKILL does not take, the process is unkillable
+        // by us and retrying cannot change that, so say so and let the spawn attempt
+        // produce the real error.
+        let survivors = self
+            .adb
+            .shell(serial, crate::scrcpy::LEFTOVER_LIST_SCRIPT)
+            .await
+            .unwrap_or_default();
+        let survivors: Vec<u32> = survivors
+            .split_whitespace()
+            .filter_map(|token| token.parse::<u32>().ok())
+            .filter(|pid| *pid > 0 && unique.contains(pid))
+            .collect();
+        if survivors.is_empty() {
+            return;
+        }
+        tracing::warn!(
+            serial,
+            ?survivors,
+            "scrcpy server ignored SIGTERM; sending SIGKILL"
+        );
+        for pid in &survivors {
+            let _ = self.adb.shell(serial, &format!("kill -9 {pid}")).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
     }
 
     async fn spawn_view(
         &self,
         serial: &str,
-        generation: u64,
+        start: ViewStart,
         preset: crate::scrcpy::ViewPreset,
     ) -> anyhow::Result<()> {
         let sink = self.view_sink()?;
@@ -941,13 +2094,61 @@ impl AndroidDriver {
         // an encode.
         let tuning = {
             let guard = self.view_tuning.lock();
-            preset.tuned(guard.0.clone(), guard.1)
+            // The overlay is one phone filling a window; a tile is one of twenty. They are
+            // different pictures at different sizes, so they get the operator's two separate
+            // quality choices rather than sharing one.
+            let quality = match preset {
+                crate::scrcpy::ViewPreset::Tile => guard.grid.clone(),
+                crate::scrcpy::ViewPreset::Overlay => guard.focus.clone(),
+            };
+            preset.tuned(quality, guard.fps)
         };
 
+        // Timed step by step, because "a start takes about eleven seconds" is not something
+        // anyone can act on. Measured on this fleet a preset switch left the operator with
+        // **17.8 s of no frames at all** after double-clicking a phone, and the only way to
+        // know which of these five adb round trips to attack is to charge each of them.
+        let spawn_started = std::time::Instant::now();
         self.wake_display_for_capture(serial).await;
+        let woke = spawn_started.elapsed();
 
         crate::scrcpy::ensure_server(&self.adb, serial, &server).await?;
-        self.stop_our_scrcpy_leftovers(serial).await;
+        let served = spawn_started.elapsed();
+        // NOT on the replace path, and this is load-bearing rather than an optimisation: the
+        // sweep matches every 3.3.4 server of ours on the device, and on that path one of
+        // them is the producer still painting the operator's screen. Sweeping here would kill
+        // the picture we are going through all this to preserve.
+        if matches!(start, ViewStart::Fresh { .. }) {
+            self.stop_our_scrcpy_leftovers(serial).await;
+        }
+        let swept = spawn_started.elapsed();
+
+        // Drop forwards left over from a run that never cleaned up. Every failure path
+        // below removes its own forward, so this is not for the current process -- it is
+        // for the previous one. `adb forward` lives in the adb server, so a crash, a
+        // force-quit, or a kill that skips `stop_view_producer` leaves the forward behind
+        // with nothing to remove it, and `prune_forwards` cannot find it because it
+        // matches the socket name exactly while scrcpy randomises the `scid`. Measured
+        // after several development restarts: five stranded forwards across two phones,
+        // each to a dead socket, plus two orphaned `app_process` on one of them.
+        //
+        // `keep` is every port a live producer holds, which is what makes this safe to
+        // run on a device that is already streaming into another window.
+        let live_ports: Vec<u16> = self
+            .views
+            .lock()
+            .await
+            .values()
+            .map(|producer| producer.host_port)
+            .collect();
+        crate::frames::prune_scrcpy_forwards(
+            &self.adb,
+            serial,
+            crate::scrcpy::FORWARD_PREFIX,
+            &live_ports,
+        )
+        .await;
+        let pruned = spawn_started.elapsed();
 
         let scid = (rand::random::<u32>() & 0x7fff_ffff).max(1);
         // Device listens (`tunnel_forward`). Spawn first. This Windows adb
@@ -963,13 +2164,25 @@ impl AndroidDriver {
                 &crate::scrcpy::launch_command(scid, tuning),
             ])
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            // Piped, not null. `Ln.i` goes to FD 1, so discarding stdout threw away the
+            // server's account of itself -- which encoder it chose, the `Device: [...]` line,
+            // and `Video capture reset`. A handshake that hangs instead of exiting then left
+            // no host-side evidence whatsoever; the one measured instance ran six minutes
+            // with nothing logged (AGENTS.md 9.71).
+            //
+            // Safe against the obvious hazard: the pipe is only ever read by
+            // `scrcpy_exit_detail`, which runs on failure paths and then the child is killed.
+            // A healthy server logs a handful of lines at startup and then nothing, so the
+            // pipe cannot fill in normal operation -- and if it ever did, the writer blocking
+            // is the server, not this process.
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         #[cfg(windows)]
         child.creation_flags(0x0800_0000);
         let mut child = child.spawn().context("spawn scrcpy-server")?;
 
+        let spawned = spawn_started.elapsed();
         let host_port = match crate::scrcpy::forward(&self.adb, serial, scid).await {
             Ok(port) => port,
             Err(error) => {
@@ -977,7 +2190,9 @@ impl AndroidDriver {
                 return Err(error);
             }
         };
+        let forwarded = spawn_started.elapsed();
         let mut stream = None;
+        let mut control = None;
         let mut last_error = None;
         for attempt in 0..40 {
             if child.try_wait().ok().flatten().is_some() {
@@ -990,8 +2205,9 @@ impl AndroidDriver {
                 );
             }
             match crate::scrcpy::ScrcpyStream::try_accept(host_port).await {
-                Ok(accepted) => {
+                Ok((accepted, accepted_control)) => {
                     stream = Some(accepted);
+                    control = Some(accepted_control);
                     break;
                 }
                 Err(crate::scrcpy::AcceptError::NotListening(error)) => {
@@ -1004,8 +2220,12 @@ impl AndroidDriver {
                     crate::frames::remove_forward(&self.adb, serial, host_port)
                         .await
                         .ok();
+                    // The server's own words BEFORE the kill, on this path too. A protocol
+                    // failure is exactly the case where it usually has something to say and
+                    // is usually still alive to say it.
+                    let said = scrcpy_exit_detail(&mut child).await;
                     let _ = child.kill().await;
-                    return Err(error);
+                    return Err(error.context(format!("scrcpy handshake failed{said}")));
                 }
             }
         }
@@ -1013,9 +2233,15 @@ impl AndroidDriver {
             crate::frames::remove_forward(&self.adb, serial, host_port)
                 .await
                 .ok();
+            let said = scrcpy_exit_detail(&mut child).await;
             let _ = child.kill().await;
-            return Err(last_error.unwrap_or_else(|| anyhow!("scrcpy never accepted a connection")));
+            let error = last_error.unwrap_or_else(|| anyhow!("scrcpy never accepted a connection"));
+            return Err(error.context(format!(
+                "scrcpy never accepted a connection after 40 attempts{said}"
+            )));
         };
+        // Set in the same arm as `stream`, so this cannot be reached without it.
+        let control = control.expect("try_accept returns both sockets or neither");
         let first =
             match tokio::time::timeout(Duration::from_secs(8), stream.next_sync_sample()).await {
                 Ok(Ok(sample)) => sample,
@@ -1023,17 +2249,35 @@ impl AndroidDriver {
                     crate::frames::remove_forward(&self.adb, serial, host_port)
                         .await
                         .ok();
+                    let said = scrcpy_exit_detail(&mut child).await;
                     let _ = child.kill().await;
-                    return Err(error);
+                    return Err(error.context(format!("scrcpy stream failed{said}")));
                 }
                 Err(_) => {
                     crate::frames::remove_forward(&self.adb, serial, host_port)
                         .await
                         .ok();
+                    let said = scrcpy_exit_detail(&mut child).await;
                     let _ = child.kill().await;
-                    anyhow::bail!("scrcpy produced no keyframe after the hello");
+                    anyhow::bail!("scrcpy produced no keyframe after the hello{said}");
                 }
             };
+
+        // The swap point, and it is deliberately *here* rather than before the spawn.
+        //
+        // Everything above can fail, and until this line the producer the operator is
+        // watching is untouched: a failed replacement costs them nothing, where the old
+        // order left the device dark. From here on the new stream is proven -- it has a
+        // keyframe in hand -- so the handover is a hand-off rather than a gamble.
+        let generation = match start {
+            ViewStart::Fresh { generation } => generation,
+            ViewStart::Replace => {
+                self.take_and_stop_view(serial).await;
+                sink.advance(serial)
+            }
+        };
+        let swapped = spawn_started.elapsed();
+
         tracing::info!(
             serial,
             host_port,
@@ -1047,11 +2291,28 @@ impl AndroidDriver {
             bytes = first.bytes.len(),
             idr = crate::scrcpy::annexb_has_idr(&first.bytes),
             sps = crate::scrcpy::annexb_has_sps(&first.bytes),
+            // Cumulative, so each is "by the time this step finished". Differences are the
+            // per-step cost; the total is what the operator waits when a preset switch takes
+            // their picture away.
+            wake_ms = woke.as_millis() as u64,
+            jar_ms = served.as_millis() as u64,
+            sweep_ms = swept.as_millis() as u64,
+            prune_ms = pruned.as_millis() as u64,
+            spawn_ms = spawned.as_millis() as u64,
+            forward_ms = forwarded.as_millis() as u64,
+            // How long the old producer kept painting before it was handed over. On a
+            // replace this is the whole spawn, and it is time the operator spent looking at
+            // a *live* picture rather than a frozen one.
+            swap_ms = swapped.as_millis() as u64,
+            replaced = matches!(start, ViewStart::Replace),
+            total_ms = spawn_started.elapsed().as_millis() as u64,
             "scrcpy view started"
         );
 
         let udid = serial.to_string();
         let publisher = Arc::clone(&sink);
+        let frame_size = Arc::new(AtomicU32::new(pack_frame_size(first.width, first.height)));
+        let reader_frame_size = Arc::clone(&frame_size);
         let first_packet = crate::view::ViewPacket {
             udid: udid.clone(),
             generation,
@@ -1072,6 +2333,12 @@ impl AndroidDriver {
             loop {
                 match stream.next_sample().await {
                     Ok(sample) => {
+                        // Before publishing, not after: a touch that races the publish should
+                        // see the newer size, because the *server* has already moved to it.
+                        reader_frame_size.store(
+                            pack_frame_size(sample.width, sample.height),
+                            Ordering::Release,
+                        );
                         let packet = crate::view::ViewPacket {
                             udid: udid.clone(),
                             generation,
@@ -1094,6 +2361,26 @@ impl AndroidDriver {
             }
         });
 
+        // Split so the write half can live behind its own lock while a task reads the other
+        // end. `into_split` rather than `split` because the two halves outlive this function
+        // in different places.
+        let (mut control_read, control_write) = control.into_split();
+        let control_write = Arc::new(tokio::sync::Mutex::new(control_write));
+        let drain_serial = serial.to_string();
+        let control_drain = tokio::spawn(async move {
+            let mut scratch = [0u8; 1024];
+            // Read and discard, never parse. The only thing that arrives is a clipboard
+            // notification we did not ask for; the one thing that would be fatal is
+            // objecting to a message type we do not know, and a reader that never
+            // interprets cannot object.
+            while let Ok(read) = control_read.read(&mut scratch).await {
+                if read == 0 {
+                    break;
+                }
+            }
+            tracing::debug!(serial = %drain_serial, "scrcpy control socket closed");
+        });
+
         self.views.lock().await.insert(
             serial.to_string(),
             ViewProducer {
@@ -1102,9 +2389,107 @@ impl AndroidDriver {
                 host_port,
                 child,
                 reader,
+                frame_size,
+                control: control_write,
+                control_drain,
             },
         );
         Ok(())
+    }
+
+    /// Put one touch event on the phone, in the coordinate space of the picture on screen.
+    ///
+    /// `image_w`/`image_h` are the dimensions the *caller* was looking at when the operator
+    /// moved their finger. They are not passed on: the message declares this host's latest
+    /// observed frame size and the coordinates are rescaled into it. The device compares the
+    /// declared size against what it is encoding and drops the event outright when they
+    /// differ, so a caller one generation behind would otherwise lose the touch entirely
+    /// rather than land it a few pixels off.
+    ///
+    /// `Ok(false)` means no producer — the overlay is not streaming this phone, so there is
+    /// nothing to touch and nothing has gone wrong.
+    pub async fn inject_touch(
+        &self,
+        serial: &str,
+        action: crate::scrcpy::TouchAction,
+        x: f64,
+        y: f64,
+        image_w: f64,
+        image_h: f64,
+    ) -> anyhow::Result<bool> {
+        if !(image_w > 0.0 && image_h > 0.0) {
+            anyhow::bail!("touch needs the size of the picture it came from");
+        }
+        let (control, packed) = {
+            let views = self.views.lock().await;
+            match views.get(serial) {
+                Some(producer) => (
+                    Arc::clone(&producer.control),
+                    producer.frame_size.load(Ordering::Acquire),
+                ),
+                None => return Ok(false),
+            }
+        };
+        let (frame_w, frame_h) = unpack_frame_size(packed);
+        if frame_w == 0 || frame_h == 0 {
+            anyhow::bail!("no frame seen from {serial} yet");
+        }
+        // Clamped, because a pointer can leave the element between two samples and a
+        // coordinate outside the picture is a coordinate outside the phone.
+        let scaled_x = (x / image_w * f64::from(frame_w)).round();
+        let scaled_y = (y / image_h * f64::from(frame_h)).round();
+        let clamped_x = scaled_x.clamp(0.0, f64::from(frame_w - 1)) as i32;
+        let clamped_y = scaled_y.clamp(0.0, f64::from(frame_h - 1)) as i32;
+        let message = crate::scrcpy::inject_touch(action, clamped_x, clamped_y, frame_w, frame_h);
+        let mut socket = control.lock().await;
+        // ONE `write_all`, under the lock, for the same reason as RESET_VIDEO: the reader on
+        // the device has no framing, so an interleaved write desynchronises it permanently
+        // and takes the video down with it.
+        socket
+            .write_all(&message)
+            .await
+            .with_context(|| format!("send touch to {serial}"))?;
+        socket
+            .flush()
+            .await
+            .with_context(|| format!("flush touch to {serial}"))?;
+        Ok(true)
+    }
+
+    /// Ask the phone for a fresh keyframe, without restarting anything.
+    ///
+    /// This is what the control socket is for. The alternative cure for a decoder that has
+    /// stopped producing frames is a full producer restart, measured at ~11.5 s of black
+    /// tile on this fleet; a keyframe request is one byte and the server answers by logging
+    /// `Video capture reset` and emitting a fresh IDR. Measured over a 75 s soak: twelve
+    /// requests, twelve resets, video flowing throughout.
+    ///
+    /// `Ok(false)` means there is no producer to ask — not a failure, just nothing to do.
+    ///
+    /// The `views` lock is released before the write. Holding it across a socket send would
+    /// let one unresponsive phone stall the keeper's reconciliation of the whole fleet.
+    pub async fn request_keyframe(&self, serial: &str) -> anyhow::Result<bool> {
+        let control = {
+            let views = self.views.lock().await;
+            match views.get(serial) {
+                Some(producer) => Arc::clone(&producer.control),
+                None => return Ok(false),
+            }
+        };
+        let message = crate::scrcpy::reset_video();
+        let mut socket = control.lock().await;
+        // ONE `write_all`, under the lock. The device's reader has no framing, so a partial
+        // or interleaved write desynchronises it permanently — and that is not a lost
+        // message, it is the whole server going down, video included.
+        socket
+            .write_all(&message)
+            .await
+            .with_context(|| format!("send RESET_VIDEO to {serial}"))?;
+        socket
+            .flush()
+            .await
+            .with_context(|| format!("flush RESET_VIDEO to {serial}"))?;
+        Ok(true)
     }
 
     fn host_port(&self, serial: &str) -> u16 {
@@ -1188,14 +2573,203 @@ impl AndroidDriver {
         Ok((f64::from(width), f64::from(height)))
     }
 
+    /// `versionName` and `versionCode` for one installed package.
+    ///
+    /// A package that is not installed is a distinct outcome from one whose dump could not
+    /// be parsed, and both say so: Flow's preflight message is the only thing an operator
+    /// gets when a run refuses, so "TikTok is not installed" must not arrive as "could not
+    /// read the version".
+    async fn package_identity(
+        &self,
+        serial: &str,
+        package: &str,
+    ) -> anyhow::Result<crate::capability::PackageIdentity> {
+        let package = adb::validate_package_name(package)?;
+        let dumpsys = self
+            .adb
+            .shell(serial, &format!("dumpsys package {package}"))
+            .await
+            .with_context(|| format!("read the installed record for {package} on {serial}"))?;
+        let version = riviu_core::tiktok_labels::parse_version_name(&dumpsys);
+        let build = riviu_core::tiktok_labels::parse_version_code(&dumpsys);
+        match (version, build) {
+            (Some(version), Some(build)) => Ok(crate::capability::PackageIdentity {
+                package: package.to_string(),
+                version: version.to_string(),
+                build: build.to_string(),
+            }),
+            _ if !dumpsys.contains(&format!("Package [{package}]")) => {
+                Err(anyhow!("{package} is not installed on {serial}"))
+            }
+            _ => Err(anyhow!(
+                "{package} is installed on {serial} but its version could not be read from \
+                 `dumpsys package`"
+            )),
+        }
+    }
+
+    /// SHA-256 of an installed package's APK, computed on the device.
+    ///
+    /// `pm path` then `sha256sum`, in one shell round trip — measured 225 ms end to end on
+    /// an SM-G955F, which is affordable on a path that runs once per device per Flow run.
+    ///
+    /// The two are chained on the phone rather than here so the path never crosses back
+    /// through the host: `pm path` prints `package:/data/app/…/base.apk`, and a serial with
+    /// two installed splits would otherwise need the host to decide which line to hash.
+    async fn installed_apk_sha256(&self, serial: &str, package: &str) -> anyhow::Result<String> {
+        let package = adb::validate_package_name(package)?;
+        let stdout = self
+            .adb
+            .shell(
+                serial,
+                &format!("sha256sum \"$(pm path {package} | head -n 1 | cut -d: -f2)\""),
+            )
+            .await
+            .with_context(|| format!("hash the installed {package} APK on {serial}"))?;
+        let digest = stdout.split_whitespace().next().unwrap_or_default();
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(anyhow!(
+                "could not hash the installed {package} APK on {serial}: `sha256sum` \
+                 answered {stdout:?}"
+            ));
+        }
+        Ok(digest.to_ascii_lowercase())
+    }
+
+    /// The screen as it is being rendered right now, rotation included.
+    ///
+    /// **`dumpsys display`, not `wm size`.** The latter reports the display's base
+    /// configuration, which has no orientation in it, so a landscape phone answers with its
+    /// portrait dimensions and every coordinate derived from them is wrong (AGENTS.md
+    /// §9.59, and the doc on [`adb::parse_display_geometry`]).
+    async fn display_geometry(&self, serial: &str) -> anyhow::Result<adb::DisplayGeometry> {
+        let stdout = self.adb.shell(serial, "dumpsys display").await?;
+        adb::parse_display_geometry(&stdout).ok_or_else(|| {
+            anyhow!(
+                "could not read the current display geometry from `dumpsys display` on {serial}"
+            )
+        })
+    }
+
+    /// The instrumentation component this driver starts to bring the agent up.
+    fn agent_runner() -> String {
+        format!("{AGENT_TEST_PACKAGE}/{AGENT_RUNNER}")
+    }
+
+    /// `(model, release)` — what a capability snapshot calls product type and OS version.
+    ///
+    /// Read fresh rather than taken from the cached `DeviceInfo`, because that one carries
+    /// a model *hint* from `adb devices -l` which can be the codename (`dream2lte`) rather
+    /// than the marketing model (`SM-G955F`), and this value is hashed into a device
+    /// profile id that has to mean the same thing every time it is computed.
+    async fn device_identity(&self, serial: &str) -> anyhow::Result<(String, String)> {
+        let stdout = self
+            .adb
+            .shell(
+                serial,
+                &format!(
+                    "getprop ro.product.model; echo {sep}; getprop ro.build.version.release",
+                    sep = FIELD_SEPARATOR
+                ),
+            )
+            .await?;
+        let mut sections = stdout.split(FIELD_SEPARATOR);
+        let model = sections.next().unwrap_or_default().trim().to_string();
+        let release = sections.next().unwrap_or_default().trim().to_string();
+        if model.is_empty() || release.is_empty() {
+            return Err(anyhow!(
+                "could not read the model and Android release from {serial}"
+            ));
+        }
+        Ok((model, release))
+    }
+
+    /// Remember what we last proved about a serial's agent, for the synchronous readers.
+    ///
+    /// `DeviceDriver::cached_agent_status` cannot await, and Flow's preflight reads it to
+    /// decide whether the phone has a usable control surface. So every path that learns
+    /// something about the agent records it here, exactly as the iOS driver does with
+    /// `agent_statuses`.
+    fn publish_agent_status(&self, status: riviu_core::AgentStatus) {
+        self.agent_statuses
+            .lock()
+            .insert(status.udid.clone(), status);
+    }
+
+    fn agent_status_for(
+        &self,
+        serial: &str,
+        state: riviu_core::AgentState,
+        identity: Option<&crate::capability::PackageIdentity>,
+        message: Option<String>,
+    ) -> riviu_core::AgentStatus {
+        let ready = state == riviu_core::AgentState::Ready;
+        riviu_core::AgentStatus {
+            udid: serial.to_string(),
+            state,
+            artifact_id: AGENT_PACKAGE.to_string(),
+            artifact_version: identity
+                .map(|value| value.version.clone())
+                .unwrap_or_default(),
+            bundle_id: AGENT_PACKAGE.to_string(),
+            protocol_version: crate::capability::PROTOCOL_VERSION,
+            // What the agent can do is a property of this driver, not of the install: the
+            // uiautomator2 server on any phone this project drives does all four, and the
+            // measurements behind that claim are in `agent.rs`. Reporting them only when
+            // ready keeps a phone that cannot be driven from advertising capabilities.
+            features: if ready {
+                ["stream", "tap", "swipe", "text"]
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            installed_version: identity.map(|value| value.version.clone()),
+            installed_build: identity.map(|value| value.build.clone()),
+            // No token to be ready or not: the uiautomator2 server has no auth. What this
+            // stands for on Android is the same thing `protected_auth_ready` stands for in
+            // the snapshot — the control surface answered and could see.
+            auth_ready: ready,
+            mjpeg_ready: ready,
+            session_ready: ready,
+            message,
+        }
+    }
+
     /// Open a session as the concrete type.
     ///
     /// `start_ui_session` boxes this. Callers that need the Android-specific
     /// surface — locator queries, element bounds — take this instead of
     /// downcasting a trait object.
+    /// Drop what we believe about a serial's screen size.
+    ///
+    /// Cheap enough to call speculatively — the next gesture pays one agent read, and only
+    /// if it actually needs a size.
+    pub(crate) fn invalidate_screen(&self, serial: &str) {
+        if let Some(cache) = self.screens.lock().get(serial) {
+            cache.invalidate();
+        }
+    }
+
     pub async fn open_session(&self, udid: &str) -> anyhow::Result<AndroidUiSession> {
         let agent = self.ensure_agent(udid).await?;
-        let screen = self.screen_size(udid).await?;
+        let screen = {
+            let cache = self
+                .screens
+                .lock()
+                .entry(udid.to_string())
+                .or_default()
+                .clone();
+            // Seed from `wm size` only when there is nothing cached. It is the right *seed*
+            // -- available before the agent is primed -- and the wrong *refresh*, because it
+            // does not follow rotation (see `ScreenCache`). Re-opening a session for a phone
+            // we already know now costs no adb round trip at all.
+            if cache.peek().is_none() {
+                cache.store(self.screen_size(udid).await?);
+            }
+            cache
+        };
         let helper = match self.try_attach_helper(udid).await {
             Ok(helper) => helper,
             Err(error) => {
@@ -1208,7 +2782,10 @@ impl AndroidDriver {
             }
         };
         Ok(
-            AndroidUiSession::new(agent, self.adb.clone(), udid.to_string(), screen)
+            // `new` still takes a tuple so the public constructor is unchanged; the shared
+            // handle replaces the private cache it seeds.
+            AndroidUiSession::new(agent, self.adb.clone(), udid.to_string(), (0.0, 0.0))
+                .with_screen_cache(screen)
                 .with_helper(helper),
         )
     }
@@ -1277,9 +2854,67 @@ impl AndroidDriver {
         // So the new session has to prove itself, and the fall-through is to restart the
         // instrumentation rather than to hand back something that cannot see.
         if AgentClient::is_ready(&base).await {
-            let agent = self.open_and_cache_agent(serial, &base).await?;
-            if agent.is_alive().await {
-                return Ok(agent);
+            // **Both ways of failing here lead to the same restart, and until 17/08/2026 one
+            // of them led nowhere.** Losing `UiAutomation` has two presentations, and this
+            // path only ever handled the first:
+            //
+            //   1. the session opens and every query blocks — caught by `is_alive`;
+            //   2. the session does not open at all, `SessionNotCreatedException:
+            //      java.lang.IllegalStateException: UiAutomation not connected!`, in 137 ms.
+            //
+            // Reproduced on this fleet with an out-of-band `adb shell uiautomator dump`: the
+            // phone lands in (1), the restart runs, and afterwards it sits in (2) — where the
+            // `?` on this line returned the Java exception straight to the operator and the
+            // recovery below was unreachable, because proving the server broken required a
+            // session and the breakage was that no session could be had. Every tap failed,
+            // forever, and nothing ever tried to fix it.
+            //
+            // A server that answers `/status` and will not give a session is wedged whatever
+            // the message says, so the failure is not inspected: it is treated exactly like a
+            // blind session.
+            let opened = self.open_and_cache_agent(serial, &base).await;
+            match opened {
+                Ok(agent) if agent.is_alive().await => return Ok(agent),
+                Ok(agent) => {
+                    let _ = agent.close().await;
+                    self.agents.lock().remove(serial);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        serial,
+                        %error,
+                        "the agent answers /status but will not open a session"
+                    );
+                    self.agents.lock().remove(serial);
+                }
+            }
+            // A restart we already tried and that did not take. Refuse rather than repeat:
+            // the holder of `UiAutomation` is on the phone, and a second restart inside the
+            // window races the same holder for another twenty seconds of the operator's
+            // time. Failing here is not giving up — it is the difference between one clear
+            // message and a minute of silence.
+            if let Some(since) = self.since_instrumentation_restart(serial) {
+                if since < INSTRUMENTATION_RESTART_COOLDOWN {
+                    let quiet_for = INSTRUMENTATION_RESTART_COOLDOWN - since;
+                    // Said out loud, not just returned. The error reaches whoever made this
+                    // call; the log is what tells the next person why a phone spent ten
+                    // minutes refusing every gesture without a single restart in sight.
+                    tracing::warn!(
+                        serial,
+                        since_s = since.as_secs(),
+                        quiet_for_s = quiet_for.as_secs(),
+                        "refusing to restart the instrumentation again inside its cooldown"
+                    );
+                    anyhow::bail!(
+                        "the agent on {serial} is listening but cannot read the accessibility \
+                         tree, and its instrumentation was already restarted {:.0}s ago \
+                         without fixing it. Something else on the phone is holding \
+                         UiAutomation — an `adb shell uiautomator dump` or another automation \
+                         tool. Not restarting again for another {:.0}s.",
+                        since.as_secs_f64(),
+                        quiet_for.as_secs_f64()
+                    );
+                }
             }
             tracing::warn!(
                 serial,
@@ -1287,10 +2922,19 @@ impl AndroidDriver {
                  restarting the instrumentation. Something else may be holding \
                  UiAutomation (an `adb shell uiautomator dump` does this)"
             );
-            let _ = agent.close().await;
-            self.agents.lock().remove(serial);
+            self.note_instrumentation_restart(serial);
+            let started = std::time::Instant::now();
             self.restart_instrumentation(serial).await?;
-            return self.instrument_and_wait(serial, &base).await;
+            let recovered = self.instrument_and_wait(serial, &base).await;
+            // Logged either way, because the cost of this path is the whole reason it now
+            // has a cooldown and nobody should have to induce the fault to find it again.
+            tracing::info!(
+                serial,
+                ms = started.elapsed().as_millis() as u64,
+                ok = recovered.is_ok(),
+                "instrumentation restart finished"
+            );
+            return recovered;
         }
 
         let installed = self
@@ -1299,21 +2943,31 @@ impl AndroidDriver {
             .await
             .unwrap_or_default();
         if !installed.contains(AGENT_PACKAGE) {
-            return Err(anyhow!(
-                "the agent is not installed on {serial}. Install both \
-                 appium-uiautomator2-server APKs (server and \
-                 debug-androidTest) and try again"
-            ));
+            self.install_agent_apks(serial).await?;
         }
 
         self.instrument_and_wait(serial, &base).await
+    }
+
+    /// How long since this device's instrumentation was last restarted for blindness.
+    fn since_instrumentation_restart(&self, serial: &str) -> Option<Duration> {
+        self.instrumentation_restarts
+            .lock()
+            .get(serial)
+            .map(|at| at.elapsed())
+    }
+
+    fn note_instrumentation_restart(&self, serial: &str) {
+        self.instrumentation_restarts
+            .lock()
+            .insert(serial.to_string(), std::time::Instant::now());
     }
 
     /// Start the runner and wait for a session that can actually read the screen.
     async fn instrument_and_wait(&self, serial: &str, base: &str) -> anyhow::Result<AgentClient> {
         self.spawn_instrumentation(serial)?;
         // The server binds its port a beat after the runner starts.
-        for _ in 0..40 {
+        for _ in 0..AGENT_READY_POLLS {
             if AgentClient::is_ready(base).await {
                 let agent = self.open_and_cache_agent(serial, base).await?;
                 if agent.is_alive().await {
@@ -1330,10 +2984,11 @@ impl AndroidDriver {
                      `adb shell uiautomator dump`, or another automation tool on the phone"
                 ));
             }
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            tokio::time::sleep(AGENT_READY_POLL_EVERY).await;
         }
         Err(anyhow!(
-            "the agent on {serial} did not answer /status within 10 seconds"
+            "the agent on {serial} did not answer /status within {:.0} seconds",
+            AGENT_READY_WAIT.as_secs_f64()
         ))
     }
 
@@ -1343,6 +2998,52 @@ impl AndroidDriver {
     /// 12/08/2026 — `open_session` then re-instrumented and answered in 4040 ms. The
     /// server holds `UiAutomation` for its lifetime, so nothing short of ending the
     /// process gets it back.
+    /// Push and install both halves of the uiautomator2 instrumentation.
+    ///
+    /// Until 16/08/2026 this was a message telling the operator to install two APKs the
+    /// app did not ship. Measured on a freshly plugged 20-device Galaxy S8 box: video
+    /// worked on 20/20 because `scrcpy-server` is bundled and pushed, and control worked
+    /// on **0/20** because nothing pushed these. Telling someone to install a file that is
+    /// not in the box is not an error message, it is a missing feature.
+    ///
+    /// `-r -g -t`: reinstall over a stale copy, grant the runtime permissions the server
+    /// needs without a dialog, and allow a test-only APK -- the `androidTest` half is
+    /// built with `android:testOnly`, which `pm install` refuses by default.
+    async fn install_agent_apks(&self, serial: &str) -> anyhow::Result<()> {
+        let Some((server, test)) = self.agent_apks.as_ref() else {
+            return Err(anyhow!(
+                "the agent is not installed on {serial} and this build has no agent APK \
+                 to install. Set RIVIU_AGENT_SERVER_APK and RIVIU_AGENT_TEST_APK, or use \
+                 an installer that bundles them"
+            ));
+        };
+        // Server first: the test APK declares an instrumentation targeting the server's
+        // package, and installing it against a missing target fails on some builds.
+        for (apk, package) in [(server, AGENT_PACKAGE), (test, AGENT_TEST_PACKAGE)] {
+            let path = apk.to_string_lossy().to_string();
+            tracing::info!(serial, package, apk = %path, "installing the uiautomator2 agent");
+            self.adb
+                .run(
+                    &["-s", serial, "install", "-r", "-g", "-t", &path],
+                    INSTALL_TIMEOUT,
+                )
+                .await
+                .with_context(|| format!("install {package} on {serial} from {path}"))?;
+        }
+        // Prove it rather than trust the exit code: `pm install` has been observed to
+        // report success for a package that is not then listed.
+        let installed = self
+            .adb
+            .shell(serial, &format!("pm list packages {AGENT_PACKAGE}"))
+            .await
+            .unwrap_or_default();
+        anyhow::ensure!(
+            installed.contains(AGENT_PACKAGE),
+            "installed the agent on {serial} but `pm list packages` still does not show              {AGENT_PACKAGE}"
+        );
+        Ok(())
+    }
+
     async fn restart_instrumentation(&self, serial: &str) -> anyhow::Result<()> {
         for package in [AGENT_PACKAGE, AGENT_TEST_PACKAGE] {
             if let Err(error) = self
@@ -1360,7 +3061,7 @@ impl AndroidDriver {
 
     /// Open one session and remember it for this serial.
     async fn open_and_cache_agent(&self, serial: &str, base: &str) -> anyhow::Result<AgentClient> {
-        let agent = AgentClient::connect(base).await?;
+        let agent = AgentClient::connect(serial, base).await?;
         self.agents.lock().insert(serial.to_string(), agent.clone());
         Ok(agent)
     }
@@ -1410,27 +3111,43 @@ impl AndroidDriver {
     }
 }
 
-/// Last stderr from a dead `adb shell` scrcpy. 3.3.4 prints the real
-/// reason there (`'=' expected` on a bad codec option) and then exits;
-/// without this the tile only says "exited before it accepted".
+/// Whatever the scrcpy server has said for itself, on **any** failure path.
+///
+/// 3.3.4 prints the real reason for a refusal on stderr (`'=' expected` on a bad codec
+/// option) and then exits; without this the tile only said "exited before it accepted".
+///
+/// It now reads stdout too, and is called from every failure arm rather than only from the
+/// already-exited one. Both changes are the same lesson: `Ln.i` goes to FD 1, so the
+/// server's account of what it chose — the encoder it picked, `Device: [...]`, and
+/// `Video capture reset` — was being written into `Stdio::null()`. A handshake that hangs
+/// rather than exits produced no host-side evidence at all, and the one measured instance of
+/// that ran **six minutes with zero warnings** (AGENTS.md 9.71).
+///
+/// Non-blocking by construction: a short timeout on each pipe, because the server may still
+/// be alive and holding them open. Nothing here may wait on a process that is not going to
+/// exit.
 async fn scrcpy_exit_detail(child: &mut tokio::process::Child) -> String {
     use tokio::io::AsyncReadExt;
-    let Some(mut stderr) = child.stderr.take() else {
-        return String::new();
-    };
-    let mut buf = Vec::new();
-    let _ = tokio::time::timeout(Duration::from_millis(200), stderr.read_to_end(&mut buf)).await;
-    let text: String = String::from_utf8_lossy(&buf)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .take(6)
-        .collect::<Vec<_>>()
-        .join(" ");
-    if text.is_empty() {
+    async fn drain(pipe: Option<impl tokio::io::AsyncRead + Unpin>, tag: &str) -> Vec<String> {
+        let Some(mut pipe) = pipe else {
+            return Vec::new();
+        };
+        let mut buf = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_millis(200), pipe.read_to_end(&mut buf)).await;
+        String::from_utf8_lossy(&buf)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .take(6)
+            .map(|line| format!("{tag} {line}"))
+            .collect()
+    }
+    let mut said = drain(child.stderr.take(), "[err]").await;
+    said.extend(drain(child.stdout.take(), "[out]").await);
+    if said.is_empty() {
         String::new()
     } else {
-        format!(": {}", text.chars().take(280).collect::<String>())
+        format!(": {}", said.join(" ").chars().take(400).collect::<String>())
     }
 }
 
@@ -1510,6 +3227,45 @@ fn parse_inventory(stdout: &str) -> Inventory {
     }
 }
 
+/// Where an Android screenshot goes, given where the caller asked for it.
+///
+/// Only the extension moves. The directory and stem are the caller's -- they carry the
+/// serial and the timestamp that keep two phones' captures apart -- and a path that already
+/// says `.png` is left exactly as it is.
+fn screenshot_destination(dest: &Path) -> PathBuf {
+    dest.with_extension("png")
+}
+
+/// A row for a phone adb can see but cannot drive.
+///
+/// Every field it can honestly fill is filled and the rest are left empty rather than
+/// guessed: there is no OS version or battery to read from a device that will not answer.
+/// The status is what the grid sorts and colours by, and the reason is the sentence the
+/// operator acts on.
+fn unusable_device(serial: &str, model: Option<String>, state: AdbDeviceState) -> DeviceInfo {
+    DeviceInfo {
+        udid: serial.to_string(),
+        name: model.clone().unwrap_or_else(|| serial.to_string()),
+        model: model.unwrap_or_default(),
+        platform: riviu_core::DevicePlatform::Android,
+        os_version: String::new(),
+        connection: ConnectionKind::Usb,
+        // `Pairing` for the one state a human can clear from the device itself;
+        // `Disconnected` for the rest, which are about the cable, the hub or the mode the
+        // phone booted into.
+        status: match state {
+            AdbDeviceState::Unauthorized => DeviceStatus::Pairing,
+            _ => DeviceStatus::Disconnected,
+        },
+        battery: None,
+        wda_ready: false,
+        wda_expires_at: None,
+        stream_url: None,
+        tile_stream_state: Default::default(),
+        last_error: state.operator_reason(),
+    }
+}
+
 #[async_trait]
 impl DeviceDriver for AndroidDriver {
     async fn list_devices(&self) -> anyhow::Result<Vec<DeviceInfo>> {
@@ -1539,38 +3295,27 @@ impl DeviceDriver for AndroidDriver {
         // Fan out: the fleet is 16 phones and every one of them costs a round
         // trip we would otherwise pay in series.
         let mut inflight = Vec::new();
-        let mut unauthorized = Vec::new();
+        let mut unreachable_devices = Vec::new();
         for line in lines {
             match line.state {
                 AdbDeviceState::Device => {
                     let adb = self.adb.clone();
                     inflight.push(tokio::spawn(probe_device(adb, line.serial, line.model)));
                 }
-                // Report it, do not hide it. A phone whose USB-debugging prompt
-                // has not been accepted is a normal fleet state with an obvious
-                // fix, and dropping it from the list makes it look unplugged.
-                AdbDeviceState::Unauthorized => unauthorized.push(DeviceInfo {
-                    udid: line.serial.clone(),
-                    name: line.model.clone().unwrap_or_else(|| line.serial.clone()),
-                    model: line.model.unwrap_or_default(),
-                    platform: riviu_core::DevicePlatform::Android,
-                    os_version: String::new(),
-                    connection: ConnectionKind::Usb,
-                    status: DeviceStatus::Pairing,
-                    battery: None,
-                    wda_ready: false,
-                    wda_expires_at: None,
-                    stream_url: None,
-                    tile_stream_state: Default::default(),
-                    last_error: Some(
-                        "USB debugging not allowed yet — accept the prompt on the device".into(),
-                    ),
-                }),
-                AdbDeviceState::Offline | AdbDeviceState::Other => {}
+                // **Report it, do not hide it**, and that now covers every state rather
+                // than one of them. A phone whose USB-debugging prompt has not been
+                // accepted is a normal fleet state with an obvious fix; so is one that has
+                // gone `offline` because its cable or hub dropped, or because it is
+                // mid-reboot. Dropping those from the list makes them look unplugged, which
+                // is the one thing they are not — adb can see them, and it can say why.
+                //
+                // `offline` in particular was silently discarded, so a phone that lost its
+                // connection simply vanished from the grid with no row and no reason.
+                state => unreachable_devices.push(unusable_device(&line.serial, line.model, state)),
             }
         }
 
-        let mut devices = Vec::with_capacity(inflight.len() + unauthorized.len());
+        let mut devices = Vec::with_capacity(inflight.len() + unreachable_devices.len());
         for handle in inflight {
             let Ok(mut device) = handle.await else {
                 continue;
@@ -1581,14 +3326,17 @@ impl DeviceDriver for AndroidDriver {
             }
             devices.push(device);
         }
-        devices.extend(unauthorized);
+        devices.extend(unreachable_devices);
         Ok(devices)
     }
 
     async fn refresh_device(&self, udid: &str) -> anyhow::Result<DeviceInfo> {
         // A refresh is the operator saying "look again", which is also the moment a
-        // TikTok build may have been installed or removed.
+        // TikTok build may have been installed or removed -- or the display resolution
+        // changed under us, which is the one stale-screen case an aspect-ratio check cannot
+        // see, because `wm size 1080x2220` keeps the shape and moves the numbers.
         self.tiktok_packages.lock().remove(udid);
+        self.invalidate_screen(udid);
         let mut device = probe_device(self.adb.clone(), udid.to_string(), None).await;
         device.wda_ready = self.agent_ready(udid).await;
         if device.wda_ready {
@@ -1618,6 +3366,18 @@ impl DeviceDriver for AndroidDriver {
             .map(|_| ())
     }
 
+    /// `screencap -p`, written under the extension it actually is.
+    ///
+    /// The caller names the file before it knows which backend will answer, and it names it
+    /// `.jpg` because that is what the iOS path and the stream hub produce. `screencap -p`
+    /// produces a PNG — the assertion two lines down has always said so — and the old code
+    /// wrote those bytes straight into the `.jpg` the caller asked for, then handed back
+    /// that path for the toast to display. Every Android screenshot this app has ever taken
+    /// is a PNG with a lie for a file extension.
+    ///
+    /// Corrected here rather than at the call site because this is where the format is
+    /// known, and the return value already exists for exactly this: callers use the path
+    /// that comes back, not the one they passed in.
     async fn screenshot(&self, udid: &str, dest: &Path) -> anyhow::Result<PathBuf> {
         let png = self
             .adb
@@ -1632,10 +3392,11 @@ impl DeviceDriver for AndroidDriver {
             "screencap returned {} bytes that are not a PNG",
             png.len()
         );
-        tokio::fs::write(dest, &png)
+        let dest = screenshot_destination(dest);
+        tokio::fs::write(&dest, &png)
             .await
             .with_context(|| format!("write {}", dest.display()))?;
-        Ok(dest.to_path_buf())
+        Ok(dest)
     }
 
     async fn syslog_tail(&self, udid: &str, lines: usize) -> anyhow::Result<String> {
@@ -1684,6 +3445,132 @@ impl DeviceDriver for AndroidDriver {
 
     fn supports_verified_app_termination(&self, _udid: &str) -> bool {
         true
+    }
+
+    fn cached_agent_status(&self, udid: &str) -> riviu_core::AgentStatus {
+        self.agent_statuses
+            .lock()
+            .get(udid)
+            .cloned()
+            .unwrap_or_else(|| riviu_core::AgentStatus::unknown(udid))
+    }
+
+    /// Bring the agent up, prove it can see, and record what was found.
+    ///
+    /// The proof is the point. `ensure_agent` already refuses to hand back a server that
+    /// answers `/status` but cannot read the accessibility tree, so reaching the end of it
+    /// is what "ready" means here; anything less is reported as needing repair, with the
+    /// message the phone gave.
+    async fn preflight_agent(&self, udid: &str) -> anyhow::Result<riviu_core::AgentStatus> {
+        let status = match self.ensure_agent(udid).await {
+            Ok(_) => {
+                let identity = self.package_identity(udid, AGENT_PACKAGE).await.ok();
+                self.agent_status_for(udid, riviu_core::AgentState::Ready, identity.as_ref(), None)
+            }
+            Err(error) => self.agent_status_for(
+                udid,
+                riviu_core::AgentState::RepairRequired,
+                None,
+                Some(format!("{error:#}")),
+            ),
+        };
+        self.publish_agent_status(status.clone());
+        Ok(status)
+    }
+
+    /// Repair is the same operation as preflight here, and that is not a shortcut.
+    ///
+    /// `ensure_agent` installs both APK halves when they are missing and restarts the
+    /// instrumentation when the server has gone blind — the two things a repair could do.
+    async fn repair_agent(&self, udid: &str) -> anyhow::Result<riviu_core::AgentStatus> {
+        let status = self.preflight_agent(udid).await?;
+        if status.state == riviu_core::AgentState::Ready {
+            Ok(status)
+        } else {
+            Err(anyhow!(
+                "{}",
+                status
+                    .message
+                    .unwrap_or_else(|| format!("the agent on {udid} could not be repaired"))
+            ))
+        }
+    }
+
+    /// Install and verify the agent without opening a session or starting a stream.
+    ///
+    /// This is the method every product-level agent path actually calls — Settings' Check
+    /// and Repair, the toolbar's bulk repair, `job_queue::run_on_device`, and the nurture
+    /// comment preflight all reach it through `DeviceControlPlane`, and that indirection is
+    /// deliberate: a test pins that preflight must not open a session or start a stream,
+    /// because checking on a phone should not disturb the phone. Only the iOS drivers
+    /// implemented it, so on an Android fleet every one of those paths answered
+    /// `capability repairAgentInstallOnly is not supported by this device` — and the nurture
+    /// refusal told the operator to run the Agent Repair that had just failed for the same
+    /// reason. `AndroidDriver::preflight_agent` was implemented and working the whole time;
+    /// nothing in the product called it.
+    ///
+    /// `ensure_agent` is the whole repair on this platform — it installs both APK halves
+    /// when they are missing and restarts the instrumentation when the server has gone
+    /// blind — and it starts no UI session and no producer, which is what the install-only
+    /// contract asks for.
+    async fn repair_agent_install_only(
+        &self,
+        udid: &str,
+    ) -> anyhow::Result<riviu_core::AgentInstallProof> {
+        self.ensure_agent(udid).await?;
+        let agent = self.package_identity(udid, AGENT_PACKAGE).await?;
+        let agent_apk_sha256 = self.installed_apk_sha256(udid, AGENT_PACKAGE).await?;
+        let proof = crate::capability::install_only_proof(
+            agent.clone(),
+            agent_apk_sha256,
+            Self::agent_runner(),
+        );
+        // Refuse to hand back a proof that does not satisfy the contract it names, rather
+        // than let a caller store it and find out later: the digest has to be a digest, and
+        // the lifecycle flags have to say that nothing was started.
+        proof.validate_install_only()?;
+        // Keep the synchronous readers in step, the same way `preflight_agent` does.
+        let status = self.agent_status_for(udid, riviu_core::AgentState::Ready, Some(&agent), None);
+        self.publish_agent_status(status);
+        Ok(proof)
+    }
+
+    /// Everything Flow's preflight needs to qualify this phone for this target app.
+    ///
+    /// Implemented 17/08/2026. Before that the trait default returned a typed `unsupported`
+    /// and every Flow run on every Android device failed here, while the UI went on listing
+    /// those devices as valid targets.
+    ///
+    /// Ordered so the cheapest refusal comes first. A phone without the target app installed
+    /// is the common miss, and finding that out costs one `dumpsys`; there is no point
+    /// hashing an APK for a device that was never going to qualify.
+    async fn inspect_device_for_target(
+        &self,
+        udid: &str,
+        target_bundle_id: &str,
+    ) -> anyhow::Result<riviu_core::DeviceCapabilitySnapshot> {
+        let target = self.package_identity(udid, target_bundle_id).await?;
+        let agent = self.package_identity(udid, AGENT_PACKAGE).await?;
+        let agent_apk_sha256 = self.installed_apk_sha256(udid, AGENT_PACKAGE).await?;
+        let display = self.display_geometry(udid).await?;
+        let (product_type, os_version) = self.device_identity(udid).await?;
+        // Last, and live: everything above describes what is installed, this asks whether
+        // the control surface is answering *now*. Recorded through the same path
+        // `preflight_agent` uses so a synchronous reader sees the same verdict.
+        let control_surface_live =
+            self.preflight_agent(udid).await?.state == riviu_core::AgentState::Ready;
+        Ok(crate::capability::build_snapshot(
+            crate::capability::AndroidCapabilityFacts {
+                agent,
+                target,
+                agent_apk_sha256,
+                display,
+                product_type,
+                os_version,
+                control_surface_live,
+                runner: Self::agent_runner(),
+            },
+        ))
     }
 
     /// Yes, and measured: Vietnamese reaches TikTok's comment box intact
@@ -1744,6 +3631,14 @@ impl DeviceDriver for AndroidDriver {
         import_id: &str,
     ) -> anyhow::Result<serde_json::Value> {
         crate::publish::cleanup(&self.adb, udid, import_id).await
+    }
+
+    async fn pull_media(
+        &self,
+        udid: &str,
+        dest_dir: &Path,
+    ) -> anyhow::Result<riviu_core::MediaPullReport> {
+        crate::publish::pull_media(&self.adb, udid, dest_dir).await
     }
 
     /// Which regional TikTok build this phone actually has.
@@ -1818,6 +3713,11 @@ impl DeviceDriver for AndroidDriver {
     /// ignored; the read-back is the only thing that decides the answer.
     async fn set_screen_rotation(&self, udid: &str, rotation: u8) -> anyhow::Result<u8> {
         anyhow::ensure!(rotation < 4, "rotation must be 0, 1, 2 or 3");
+        // Invalidate BEFORE asking, not after. Once the shells below have run there is no
+        // way to tell from a failed read-back whether the screen moved, so the cached size
+        // has to be dropped either way — and dropping it costs one lazy agent read on the
+        // next gesture, while keeping a stale one costs every coordinate after this.
+        self.invalidate_screen(udid);
         // Auto-rotate has to come off first, or the sensor overrides the request on a
         // phone that is lying flat.
         let _ = self
@@ -1864,12 +3764,14 @@ impl DeviceDriver for AndroidDriver {
                 apps.push(riviu_core::InstalledApp {
                     bundle_id,
                     kind,
-                    // Not obtainable over adb at any price worth paying. See the doc on
-                    // `InstalledApp`.
+                    // Filled in below when the helper is there; not obtainable over adb at
+                    // any price worth paying. See the doc on `InstalledApp`.
                     label: None,
+                    icon_png_base64: None,
                 });
             }
         }
+        self.name_apps_with_helper(udid, &mut apps).await;
         Ok(apps)
     }
 
@@ -2000,18 +3902,56 @@ impl DeviceDriver for AndroidDriver {
         riviu_core::driver::UiSession::launch_app_foreground(&session, &bundle_id).await?;
 
         let deadline = std::time::Instant::now() + FOREGROUND_PROOF_TIMEOUT;
+        // One Back, then a short grace, then the truth. Measured on ce0717171c2a64d50d on
+        // 18/08/2026: a whole-fleet nurture run lost exactly one phone, and it was sitting
+        // under `GrantPermissionsActivity` — the launch had worked, and TikTok's *own*
+        // permission dialog was standing over it, in TikTok's own task.
+        //
+        // Back is tried because Back is what cleared the in-app modal in `await_feed`, and
+        // it is the one gesture that cannot grant anything. It was then measured **not** to
+        // clear this one: Android's permission dialogs are not cancelable. So the rest of
+        // the forty seconds is spent watching a screen that cannot change, and the honest
+        // answer is to stop and say which screen it is. Answering the dialog is not on the
+        // table: both its buttons are labelled, one of them grants a permission on a real
+        // account's phone, and that is the operator's decision and not a recovery path's.
+        let mut backed_at: Option<std::time::Instant> = None;
         loop {
             let observed = match riviu_core::driver::UiSession::active_app_bundle(&session).await {
                 Ok(package) if package == bundle_id => break,
                 Ok(package) => package,
                 Err(error) => format!("<unreadable: {error}>"),
             };
-            if std::time::Instant::now() >= deadline {
+            let over_the_app = dialog_over_app(&observed);
+            if over_the_app && backed_at.is_none() {
+                backed_at = Some(std::time::Instant::now());
+                tracing::info!(
+                    udid,
+                    observed = %observed,
+                    "a system dialog is over the app; pressing Back once and re-launching"
+                );
+                let _ = riviu_core::driver::UiSession::back(&session).await;
+                let _ = riviu_core::driver::UiSession::launch_app_foreground(&session, &bundle_id)
+                    .await;
+            }
+            let now = std::time::Instant::now();
+            let stuck_behind_dialog =
+                over_the_app && backed_at.is_some_and(|at| now.duration_since(at) >= DIALOG_GRACE);
+            if stuck_behind_dialog {
+                self.interaction.clear(udid);
+                anyhow::bail!(
+                    "{bundle_id} is running on {udid} but {observed} is standing over it, and \
+                     Back did not clear it. This is a system permission dialog in the app's own \
+                     task: nothing here can answer it, because one of its buttons grants a \
+                     permission on a real account. Clear it on the phone once and the phone is \
+                     usable again"
+                );
+            }
+            if now >= deadline {
                 self.interaction.clear(udid);
                 anyhow::bail!(
                     "{bundle_id} did not reach the foreground on {udid} within {}s; the phone is \
-                     showing {observed}. A locked screen does this — `monkey` reports success and \
-                     nothing moves",
+                     showing {observed}. A locked screen does this — `monkey` reports success \
+                     and nothing moves",
                     FOREGROUND_PROOF_TIMEOUT.as_secs()
                 );
             }
@@ -2188,6 +4128,125 @@ mod tests {
     use super::*;
 
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn a_phone_adb_can_see_but_not_drive_gets_a_row_and_a_reason() {
+        // `offline` was discarded outright, so a phone whose cable or hub dropped simply
+        // vanished from the grid: no row, no reason, indistinguishable from unplugged. The
+        // comment beside the `unauthorized` arm had already made the argument -- "report
+        // it, do not hide it" -- and it applies to every state that is not `device`.
+        let offline = unusable_device("ce06", Some("SM-N950F".into()), AdbDeviceState::Offline);
+        assert_eq!(offline.udid, "ce06");
+        assert_eq!(offline.name, "SM-N950F");
+        assert_eq!(offline.status, DeviceStatus::Disconnected);
+        assert!(offline
+            .last_error
+            .as_deref()
+            .expect("a reason")
+            .contains("not answering"));
+
+        // Unauthorised keeps `Pairing`: it is the one state a human clears from the device
+        // itself, and the grid treats it differently for that reason.
+        let unauthorised = unusable_device("ce07", None, AdbDeviceState::Unauthorized);
+        assert_eq!(unauthorised.status, DeviceStatus::Pairing);
+        assert_eq!(
+            unauthorised.name, "ce07",
+            "no model, so the serial has to do"
+        );
+        assert!(unauthorised
+            .last_error
+            .as_deref()
+            .expect("a reason")
+            .contains("accept the prompt"));
+
+        // And an unrecognised state says which one it was, because `recovery`,
+        // `sideload` and `no permissions` have different fixes.
+        let recovery = unusable_device("ce08", None, AdbDeviceState::Other("recovery".into()));
+        assert_eq!(recovery.status, DeviceStatus::Disconnected);
+        assert!(recovery
+            .last_error
+            .as_deref()
+            .expect("a reason")
+            .contains("`recovery`"));
+    }
+
+    #[test]
+    fn an_android_screenshot_is_saved_under_the_extension_it_actually_is() {
+        // `screencap -p` returns a PNG; the caller names the file `.jpg` because that is
+        // what the iOS path and the stream hub produce. The old code wrote PNG bytes into
+        // that `.jpg` and handed the path back for the toast, so every Android screenshot
+        // this app has ever taken is a PNG with a lie for a file extension -- and the
+        // operator is told exactly that path.
+        let asked = Path::new("C:/riviu/screenshots/ce06-1755400000000.jpg");
+        let actual = screenshot_destination(asked);
+
+        assert_eq!(
+            actual.extension().and_then(|value| value.to_str()),
+            Some("png")
+        );
+        // The stem is what keeps two phones' captures apart; only the extension moves.
+        assert_eq!(actual.file_stem(), asked.file_stem());
+        assert_eq!(actual.parent(), asked.parent());
+        // Already correct stays correct.
+        assert_eq!(
+            screenshot_destination(Path::new("/tmp/shot.png")),
+            PathBuf::from("/tmp/shot.png")
+        );
+    }
+
+    #[test]
+    fn the_producer_publishes_the_pixels_the_snapshot_claims_the_device_has() {
+        // The two halves of Flow's coordinate model have to agree, and until 17/08/2026
+        // they did not. `inspect_device_for_target` reports the device's real geometry;
+        // this producer published `Projection::half` of it. `validate_geometry` compares
+        // the two and refuses on any difference, so on this fleet every image-coordinate
+        // tap was a guaranteed `GeometryMismatch` and the inspector's coordinate picker
+        // could never return a usable frame.
+        //
+        // Asserted as the relationship rather than as a constant: the point is not that
+        // 1080 appears twice, it is that whatever the snapshot says the pixels are, that
+        // is what comes out of the producer.
+        let display = crate::adb::DisplayGeometry {
+            width: 1080,
+            height: 2220,
+            density: 420,
+            rotation: 0,
+        };
+        let geometry = crate::capability::qualified_geometry(display);
+        let projection = AndroidDriver::producer_projection((display.width, display.height));
+        assert_eq!(projection.virtual_width, geometry.pixel_width);
+        assert_eq!(projection.virtual_height, geometry.pixel_height);
+        // And the half it used to be is exactly what that check rejects.
+        let old = crate::frames::Projection::half(display.width, display.height);
+        assert_ne!(old.virtual_width, geometry.pixel_width);
+    }
+
+    #[test]
+    fn the_instrumentation_cooldown_outlasts_the_attempt_it_is_bounding() {
+        // The whole point of the window is that two attempts cannot overlap. A cooldown
+        // shorter than one trip through the blind path would let the second restart begin
+        // while the first is still polling for a port -- which is the storm, not the cure.
+        //
+        assert!(
+            INSTRUMENTATION_RESTART_COOLDOWN >= INSTRUMENTATION_ATTEMPT_COST,
+            "cooldown {INSTRUMENTATION_RESTART_COOLDOWN:?} is shorter than one attempt \
+             ({INSTRUMENTATION_ATTEMPT_COST:?}), so restarts would overlap"
+        );
+        // The attempt cost is dominated by two queries the server will not answer, so a
+        // derivation that forgot one of them would halve the window without looking wrong.
+        assert!(
+            INSTRUMENTATION_ATTEMPT_COST >= AgentClient::BLIND_QUERY_COST * 2,
+            "an attempt pays for the blind session AND its replacement"
+        );
+
+        // And the wait the operator is told about has to be the wait the loop actually
+        // performs, or the error message is fiction.
+        assert_eq!(
+            AGENT_READY_WAIT,
+            AGENT_READY_POLL_EVERY * AGENT_READY_POLLS,
+            "the derived deadline drifted from the poll loop"
+        );
+    }
 
     /// A `FrameSink` that counts which advance was used.
     ///
@@ -2445,6 +4504,88 @@ mod tests {
         assert!(error.to_string().contains("stop_owned_stream"), "{error}");
     }
 
+    #[tokio::test]
+    async fn stopping_a_producer_does_not_forget_which_preset_the_operator_asked_for() {
+        // Regression, observed live: the watchdog's restart path is stop-then-start
+        // (apps/desktop/src-tauri/src/state.rs), and `stop_view_stream` used to clear the
+        // desired preset. So every restart read the default back and an open overlay
+        // dropped to the tile encode -- logged as `gen=5 tile 216x480` with the overlay
+        // still on screen. Asserted here rather than in the desktop crate because this is
+        // the invariant the desktop relies on.
+        let driver = AndroidDriver::new(&AndroidDriverConfig::default()).expect("driver");
+        assert_eq!(
+            driver.desired_view_preset("serial-a"),
+            crate::scrcpy::ViewPreset::Tile,
+            "a device never asked for anything must restart as a tile"
+        );
+
+        driver
+            .desired_presets
+            .lock()
+            .insert("serial-a".to_string(), crate::scrcpy::ViewPreset::Overlay);
+
+        // No producer is running, so this is the cheap half of stop-then-start; what
+        // matters is that it leaves the recorded desire alone.
+        driver.stop_view_stream("serial-a").await;
+        assert_eq!(
+            driver.desired_view_preset("serial-a"),
+            crate::scrcpy::ViewPreset::Overlay,
+            "stopping the producer must not change what the operator asked for"
+        );
+
+        // Closing the overlay overwrites rather than clears -- that is the only path back.
+        driver
+            .desired_presets
+            .lock()
+            .insert("serial-a".to_string(), crate::scrcpy::ViewPreset::Tile);
+        assert_eq!(
+            driver.desired_view_preset("serial-a"),
+            crate::scrcpy::ViewPreset::Tile
+        );
+    }
+
+    #[test]
+    fn half_an_agent_is_no_agent() {
+        // Both halves or neither. The runner lives in the `androidTest` APK and
+        // `am instrument` names it, so a device with only the server installed refuses
+        // exactly as if it had nothing -- and whoever debugs that goes looking at the
+        // half that IS installed. `zip` makes the pair unrepresentable when one is
+        // missing, so the refusal happens at construction with a message that says so.
+        let only_server = AndroidDriverConfig {
+            agent_server_apk: Some(PathBuf::from("server.apk")),
+            ..Default::default()
+        };
+        assert!(
+            AndroidDriver::new(&only_server)
+                .expect("driver")
+                .agent_apks
+                .is_none(),
+            "a server APK without its androidTest half must not look installable"
+        );
+
+        let only_test = AndroidDriverConfig {
+            agent_test_apk: Some(PathBuf::from("test.apk")),
+            ..Default::default()
+        };
+        assert!(
+            AndroidDriver::new(&only_test)
+                .expect("driver")
+                .agent_apks
+                .is_none(),
+            "the androidTest half alone is not an agent either"
+        );
+
+        let both = AndroidDriverConfig {
+            agent_server_apk: Some(PathBuf::from("server.apk")),
+            agent_test_apk: Some(PathBuf::from("test.apk")),
+            ..Default::default()
+        };
+        assert_eq!(
+            AndroidDriver::new(&both).expect("driver").agent_apks,
+            Some((PathBuf::from("server.apk"), PathBuf::from("test.apk")))
+        );
+    }
+
     #[test]
     fn each_device_gets_its_own_forwarded_port() {
         let driver = AndroidDriver::new(&AndroidDriverConfig::default()).expect("driver");
@@ -2509,5 +4650,85 @@ mod tests {
                 battery: None,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn a_failing_server_is_quoted_from_both_of_its_pipes() {
+        // scrcpy writes `Ln.i` to stdout and `Ln.w`/`Ln.e` to stderr, and this used to read
+        // stderr only -- with stdout going to `Stdio::null()`, so the server's account of
+        // what it chose was discarded at the source. A handshake that hangs rather than
+        // exits then leaves no host-side evidence at all, which is how turning on the
+        // control socket produced six minutes of silence (AGENTS.md 9.71).
+        let mut command = tokio::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        if cfg!(windows) {
+            command.args(["/c", "echo picked-encoder & echo refused 1>&2"]);
+        } else {
+            command.args(["-c", "echo picked-encoder; echo refused 1>&2"]);
+        }
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn a process that writes to both pipes");
+
+        let detail = scrcpy_exit_detail(&mut child).await;
+
+        assert!(detail.contains("refused"), "stderr is quoted: {detail}");
+        assert!(
+            detail.contains("picked-encoder"),
+            "stdout is quoted too -- that is the half that used to be thrown away: {detail}"
+        );
+        assert!(
+            detail.contains("[out]") && detail.contains("[err]"),
+            "{detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_that_says_nothing_adds_nothing_to_the_error() {
+        // The detail is appended to a message that already reads as a sentence, so an empty
+        // one must be genuinely empty rather than a dangling colon.
+        let mut command = tokio::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        if cfg!(windows) {
+            command.args(["/c", "exit 1"]);
+        } else {
+            command.args(["-c", "exit 1"]);
+        }
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn a silent process");
+        assert_eq!(scrcpy_exit_detail(&mut child).await, "");
+    }
+
+    #[test]
+    fn a_permission_dialog_is_told_apart_from_a_phone_that_wandered_off() {
+        // The two need different answers, which is the only reason this is a function
+        // rather than a longer deadline. A dialog is cleared with Back; a launcher means
+        // the launch did not take and Back would only make it worse.
+        for dialog in [
+            "com.google.android.packageinstaller",
+            "com.android.packageinstaller",
+            "com.android.permissioncontroller",
+        ] {
+            assert!(
+                dialog_over_app(dialog),
+                "{dialog} stands over the app — waiting out the deadline cannot clear it"
+            );
+        }
+        for elsewhere in [
+            "com.sec.android.app.launcher",
+            "com.android.systemui",
+            "com.ss.android.ugc.trill",
+            "",
+        ] {
+            assert!(
+                !dialog_over_app(elsewhere),
+                "{elsewhere:?} is not a dialog over the app, and Back there is a guess"
+            );
+        }
     }
 }

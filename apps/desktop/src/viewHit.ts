@@ -59,7 +59,7 @@ export function mapClientToImage(
   if (content.width <= 0 || content.height <= 0) return null;
   const x = clientX - box.left - content.x;
   const y = clientY - box.top - content.y;
-  if (x < 0 || y < 0 || x > content.width || y > content.height) {
+  if (x < 0 || y < 0 || x >= content.width || y >= content.height) {
     return null;
   }
   return {

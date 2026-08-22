@@ -114,22 +114,28 @@ This is the **view** encoder only (H.264 tiles and overlay). It is not a
 scrcpy client is not shipped.
 
 
-2c. Riviu Android helper (`com.riviu.agent`) — project source, no pinned APK yet
--------------------------------------------------------------------------------
+2c. Riviu Android helper (`com.riviu.agent`) — project source, pinned APK
+------------------------------------------------------------------------
 
-    sidecars/riviu-android-agent/     Java source (minSdk 26)
-    sidecars/android/noarch/riviu-agent.apk   **not present**
+    sidecars/riviu-android-agent/           Java source (minSdk 26)
+    sidecars/android/noarch/riviu-agent.apk agent 0.4.0, protocol 1
+      bytes  25050
+      sha256 7d84c1b045d33e80e8b29ac53eec67f78a97d64e7458e13020f288649e14e81c
 
 This is Riviu-authored. It is a helper, not an iPhone-Agent equivalent: loopback
-HTTP for clipboard (brief IME) and MediaStore insert/delete. It does not replace
-uiautomator2, scrcpy, or minicap, and it must not stay the default keyboard.
+HTTP for clipboard (brief IME), MediaStore insert/delete, wallpaper, mock
+location, and app names/icons (`PackageManager`, which adb cannot answer). It
+does not replace uiautomator2, scrcpy, or minicap, and it must not stay the
+default keyboard.
 
-There is no APK in the installer until a machine with JDK 17 + Android SDK 34
-runs `sidecars/riviu-android-agent/build.ps1` and the output is pinned here
-**and** in `sidecars/android/android-tools-manifest.json` with
-`role: riviuAgentApk` (bytes + SHA-256). Inventing those numbers without a
-built file is the digest lie that gate exists to catch. Runtime override:
-`RIVIU_ANDROID_AGENT_APK`, lowest priority is a future bundled copy.
+Built by `sidecars/riviu-android-agent/build.ps1` on a machine with JDK 17+ and
+Android SDK 34 — Gradle when present, otherwise the same SDK build-tools
+pipeline (aapt2 → javac → d8 → zipalign → apksigner, debug keystore). The
+numbers above must be re-pinned here **and** in
+`sidecars/android/android-tools-manifest.json` (`role: riviuAgentApk`) after
+every rebuild; inventing them without a built file is the digest lie that gate
+exists to catch. Runtime override: `RIVIU_ANDROID_AGENT_APK`, then the bundled
+copy.
 
 
 3. WebDriverAgent (Facebook / Meta, appium) — BSD-3-Clause

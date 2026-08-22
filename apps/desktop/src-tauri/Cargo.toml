@@ -6,6 +6,10 @@ authors = ["Riviu"]
 edition = "2021"
 rust-version = "1.77.2"
 default-run = "riviu-managers-phone"
+# Never published: this is a private product, not a library. Marking it here also lets
+# `cargo deny` treat it as private, so the workspace's own path dependencies are not
+# reported as wildcard versions and the missing `license` field is not an error.
+publish = false
 
 [lib]
 name = "app_lib"
@@ -40,6 +44,10 @@ reqwest = { workspace = true }
 tauri-plugin-updater = "2"
 tokio-tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# USB relay control for the peripherals tier (xiaowei "外设" — power-cycle a wedged phone by
+# toggling its relay channel). Cross-platform, pure-Rust FFI (no C toolchain); the enumerate
+# path is what the desktop uses to list COM ports for the operator.
+serialport = "4"
 
 # Windows ships an OCR engine in the OS (Windows.Media.Ocr, Windows 10+). These
 # are Microsoft's own WinRT projections, pure bindings with no runtime of their

@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use riviu_android_driver::{AndroidDriver, AndroidDriverConfig, Locator};
 use riviu_core::driver::{DeviceDriver, UiSession};
+use riviu_core::nurture::touch::TouchPointPlanner;
 use riviu_core::tiktok_labels::{self, LabelMatch, TikTokControl, TikTokControls};
 
 /// A catalogued label becomes the driver's own locator, keeping exact vs substring
@@ -415,7 +416,8 @@ async fn main() -> anyhow::Result<()> {
     } else {
         println!(
             "\n(skipping the feed-carousel measurement; pass --measure-feed-carousel <n> — \
-             swipes the feed n times, reads only)"
+             swipes the feed n times, and on every photo card compares three sideways \
+             gestures: plan_swipe, plan_flick, and a plain straight swipe. Posts nothing.)"
         );
     }
 
@@ -1158,11 +1160,16 @@ async fn gate_standalone(
             started.elapsed().as_millis()
         ),
         Ok(TargetArrival::Structural) => println!(
-            "  arrival: Structural in {} ms — the post changed but the nickname does not              reveal the handle",
+            "  arrival: Structural in {} ms — the post changed but the nickname does not \
+             reveal the handle",
             started.elapsed().as_millis()
         ),
         Err(refusal) => {
-            println!("  arrival REFUSED: {} — {}", refusal.code(), refusal.message());
+            println!(
+                "  arrival REFUSED: {} — {}",
+                refusal.code(),
+                refusal.message()
+            );
             println!("  nothing was typed. Gate H4 did not run.");
             return Ok(());
         }
@@ -1183,7 +1190,8 @@ async fn gate_standalone(
             identity.author_label, identity.text, identity.locator_version
         ),
         None => println!(
-            "  ! the posted comment could not be read back unambiguously — a Threaded              chain would stop here rather than reply to a row nobody confirmed"
+            "  ! the posted comment could not be read back unambiguously — a Threaded \
+             chain would stop here rather than reply to a row nobody confirmed"
         ),
     }
     if outcome.verdict.is_sent() && outcome.identity.is_some() {
@@ -1209,6 +1217,12 @@ async fn measure_feed_carousel(
 ) -> anyhow::Result<()> {
     let (w, h) = ui.window_size().await?;
     let mut with_counter = 0u32;
+    // Turns offered to each gesture, and turns that actually paged. Counted only where
+    // the answer is knowable: the previous reading has to be known, and the post has to
+    // have images left. This is the regression check for the whole finding — a future
+    // change to the planner that quietly turns a flick back into a drag shows up here.
+    let mut offered = [0u32; 3];
+    let mut paged = [0u32; 3];
     let mut with_photo_word = 0u32;
     for card in 1..=cards {
         let counter = ui
@@ -1251,56 +1265,114 @@ async fn measure_feed_carousel(
                 node.x, node.y, node.width, node.height, node.description
             );
             // And the question the implementation actually turns on: does a sideways swipe
-            // change anything the loop can read, *here on the feed*? The digits are absent,
-            // so if nothing else moves either then a feed carousel cannot be paged by
-            // hierarchy at all and the honest answer is to say so rather than to swipe
-            // blindly — a sideways gesture on a video card opens the author's profile.
+            // change anything the loop can read, *here on the feed*? Two gestures, on the
+            // same card, in this order — because the **shape** of the swipe is the one
+            // variable no earlier measurement ever changed. Every mode above swipes a
+            // dead-straight line; the shipped loop swipes `plan_swipe`'s path, which is
+            // bowed, eased, and held still for a moment before the lift.
+            //
+            // The bow is perpendicular to travel, and travel here is horizontal — so the
+            // bow is **vertical**, up to ~4.5% of the path, plus endpoint jitter. A
+            // link-opened post page has nothing competing for that axis; the feed has its
+            // own vertical pager. If the planned gesture turns nothing and the straight one
+            // turns pages on the same card, that is the bug — and it is also why the card
+            // afterwards has no action rail: the feed is left stranded between two posts.
+            //
+            // `parse` is what `carousel_position` would return, read the way it reads it. A
+            // gesture that moves pixels but leaves that `None` is as broken as one that
+            // moves nothing, so both are printed rather than one standing in for the other.
+            // Four gestures on the same card. The first is what the engine actually sends;
+            // the last is what every measurement before this one sent. The two in between
+            // take the engine's own path and remove **one component each**, so the answer
+            // names a component rather than a vibe.
+            //
+            // Order is deliberate and costs nothing: a gesture that fails to turn the page
+            // consumes no image, so the suspects go first and the known-good straight swipe
+            // goes last, where running out of post no longer confounds anything.
+            // Three gestures on the same card: what the engine used to send, what it sends
+            // now, and the plain straight swipe every earlier measurement used as its only
+            // gesture. Both planned variants call the **shipped** functions rather than
+            // lookalikes — the point is to measure `plan_flick`, not something shaped like it.
+            //
+            // A gesture that fails to turn the page consumes no image, so the control goes
+            // first and the reference last, where running out of post confounds nothing.
+            let mut planner = TouchPointPlanner::new((w, h));
             let mut before = CarouselLook::read(ui, labels).await?;
-            for turn in 1..=3u32 {
-                ui.swipe(riviu_core::types::SwipeGesture {
-                    from: riviu_core::types::TapPoint {
+            let mut turn = 0u32;
+            // Seeded from the screen, not from zero: the counter is already up here, so
+            // the very first turn is judgeable too.
+            let mut previous = shipped_counter(ui).await;
+            for (variant, (style, repeats)) in [
+                ("plan_swipe — cử chỉ cũ", 3u32),
+                ("plan_flick — cử chỉ mới", 4),
+                ("thẳng một đoạn", 3),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                for _ in 0..repeats {
+                    turn += 1;
+                    let from = riviu_core::types::TapPoint {
                         x: w * 0.78,
                         y: h * 0.40,
-                    },
-                    to: riviu_core::types::TapPoint {
+                    };
+                    let to = riviu_core::types::TapPoint {
                         x: w * 0.22,
                         y: h * 0.40,
-                    },
-                    duration_ms: 320,
-                })
-                .await?;
-                tokio::time::sleep(Duration::from_millis(900)).await;
-                let slash = ui
-                    .locate(riviu_core::driver::ElementQuery::Text {
-                        value: " / ",
-                        exact: true,
-                    })
-                    .await
-                    .ok()
-                    .flatten();
-                let now = CarouselLook::read(ui, labels).await?;
-                println!(
-                    "      ngang {turn}: đếm={}  ImageView đổi={}  TextView đổi={}  \
-                     Comments đổi={}",
-                    match &slash {
-                        Some(node) => format!("x={:.0} y={:.0}", node.x, node.y),
-                        None => "MẤT".to_string(),
-                    },
-                    now.images != before.images,
-                    now.texts != before.texts,
-                    now.comments != before.comments
-                );
-                for text in &now.texts {
-                    if !before.texts.contains(text) {
-                        println!("        + {text:?}");
+                    };
+                    let settle_ms;
+                    match variant {
+                        0 => {
+                            let path = planner.plan_swipe(from, to, 320);
+                            settle_ms = path.settle_ms;
+                            ui.swipe_path(path).await?;
+                        }
+                        1 => {
+                            let path = planner.plan_flick(from, to, 320);
+                            settle_ms = path.settle_ms;
+                            ui.swipe_path(path).await?;
+                        }
+                        _ => {
+                            settle_ms = 0;
+                            ui.swipe(riviu_core::types::SwipeGesture {
+                                from,
+                                to,
+                                duration_ms: 320,
+                            })
+                            .await?;
+                        }
                     }
-                }
-                for text in &before.texts {
-                    if !now.texts.contains(text) {
-                        println!("        - {text:?}");
+                    tokio::time::sleep(Duration::from_millis(900)).await;
+                    let parsed = shipped_counter(ui).await;
+                    // A turn only counts when the answer is knowable. If the previous
+                    // reading was lost, or the post had no image left to turn to, the turn
+                    // says nothing about the gesture and is not held against it.
+                    if let (Some((was, total)), Some((now, _))) = (previous, parsed) {
+                        if was < total {
+                            offered[variant] += 1;
+                            if now > was {
+                                paged[variant] += 1;
+                            }
+                        }
                     }
+                    previous = parsed;
+                    let now = CarouselLook::read(ui, labels).await?;
+                    println!(
+                        "      ngang {turn:>2} [{style}]: parse={}  giữ={settle_ms}ms  \
+                         Comments đổi={}",
+                        match parsed {
+                            Some((current, total)) => format!("{current}/{total}"),
+                            None => "None".to_string(),
+                        },
+                        now.comments != before.comments
+                    );
+                    if now.comments.is_none() {
+                        println!(
+                            "        ! RAIL MẤT — đã rời khỏi bài, đúng triệu chứng phiên nuôi chết"
+                        );
+                    }
+                    before = now;
                 }
-                before = now;
             }
         }
         ui.swipe(riviu_core::types::SwipeGesture {
@@ -1328,7 +1400,54 @@ async fn measure_feed_carousel(
             "Không gặp bài ảnh nào trong lần chạy này — chưa kết luận được"
         }
     );
+    if offered.iter().any(|count| *count > 0) {
+        println!("\n  Lượt lật được / lượt được trao, theo cử chỉ:");
+        for (variant, style) in [
+            "plan_swipe (cũ)",
+            "plan_flick (đang dùng)",
+            "thẳng một đoạn",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            println!("    {style:<24} {}/{}", paged[variant], offered[variant]);
+        }
+        // The claim this mode exists to keep honest. `plan_flick` was measured at 19 of 19
+        // against `plan_swipe`'s 13 of 40; a run where it drops back toward the old number
+        // means the planner has quietly started sending a drag again.
+        println!(
+            "    -> plan_flick phải bám sát cột 'thẳng', không bám 'cũ'. Xem \
+             TouchPointPlanner::plan_flick."
+        );
+    }
     Ok(())
+}
+
+/// `(current, total)` exactly as `carousel_position` would read it on this screen.
+///
+/// A copy of the shipped three-node parse rather than a call to it, because that function
+/// is private to the nurture module — and the copy is faithful in the one way that matters
+/// here: it reads `locate_all_described` **unfiltered**, empty descriptions and all, which
+/// is what the engine does and is not what `CarouselLook` does. If an empty node ever lands
+/// between the digits and the slash, the engine sees `None` where the eye sees `2 / 10`.
+async fn shipped_counter(ui: &dyn UiSession) -> Option<(u32, u32)> {
+    let texts: Vec<String> = ui
+        .locate_all_described(riviu_core::driver::ElementQuery::ClassName(
+            "android.widget.TextView",
+        ))
+        .await
+        .ok()?
+        .into_iter()
+        .filter_map(|element| element.description)
+        .collect();
+    texts.windows(3).find_map(|window| {
+        if window[1].trim() != "/" {
+            return None;
+        }
+        let current = window[0].trim().parse::<u32>().ok()?;
+        let total = window[2].trim().parse::<u32>().ok()?;
+        (current >= 1 && total >= current).then_some((current, total))
+    })
 }
 
 /// What one look at a photo post sees, in the only terms the hierarchy loop has.
@@ -1714,7 +1833,10 @@ async fn measure_target_open(
         println!("  => NO RAIL: nothing is up. Refusal: NoPostPage.");
     } else if after.is_empty() || after == before_author {
         println!(
-            "  => UNCHANGED: same post as before the link. This is the signature of an              unavailable post (deleted / private / region-blocked) — TikTok takes the              intent, fails server-side, and leaves the feed alone. Refusal:              ScreenNeverChanged. THE LINK IS THE PROBLEM, NOT THE PHONE."
+            "  => UNCHANGED: same post as before the link. This is the signature of an \
+             unavailable post (deleted / private / region-blocked) — TikTok takes the \
+             intent, fails server-side, and leaves the feed alone. Refusal: \
+             ScreenNeverChanged. THE LINK IS THE PROBLEM, NOT THE PHONE."
         );
     } else {
         println!("  => ARRIVED: a different post is up.");

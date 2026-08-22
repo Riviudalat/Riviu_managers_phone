@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { installedAppsView } from "./installedAppsView";
+import { installedAppsFootnote, installedAppsView } from "./installedAppsView";
 import type { InstalledApp } from "./types";
 
 const REDMI: InstalledApp[] = [
@@ -75,5 +75,59 @@ describe("installedAppsView", () => {
     expect(view.notice?.kind).toBe("loading");
     expect(view.rows).toEqual([]);
     expect(view.userCount).toBe(0);
+  });
+});
+
+/**
+ * The footnote used to be one unconditional sentence saying Android gives no names, which was
+ * true while the only route was adb. The helper reads them off `PackageManager` now, so the
+ * wrong sentence is worse than none: telling an operator looking at "Zalo" that names are
+ * unavailable reads as the panel not knowing what it is showing.
+ */
+describe("installedAppsFootnote", () => {
+  it("says nothing when every row is named", () => {
+    expect(
+      installedAppsFootnote([
+        { bundleId: "com.zing.zalo", kind: "user", label: "Zalo" },
+        { bundleId: "com.ss.android.ugc.trill", kind: "user", label: "TikTok" },
+      ]),
+    ).toBeNull();
+  });
+
+  it("names the missing helper when nothing is named", () => {
+    const text = installedAppsFootnote([
+      { bundleId: "com.zing.zalo", kind: "user", label: null },
+    ]);
+    expect(text).toContain("Riviu helper");
+  });
+
+  /**
+   * The driver deliberately does not pay to name the system partition (4,5 s for 539 packages
+   * against 3,6 s for the 162 a farm operator launches). Saying "the phone did not give a
+   * name" for those would blame the phone for a choice this app made — measured on a fleet
+   * Galaxy where the panel read "241 app máy không trả tên" and every one of them was system.
+   */
+  it("says system names were not asked for, rather than blaming the phone", () => {
+    const text = installedAppsFootnote([
+      { bundleId: "a", kind: "user", label: "Zalo" },
+      { bundleId: "b", kind: "system", label: null },
+      { bundleId: "c", kind: "system", label: "   " },
+    ]);
+    expect(text).toBe(
+      "2 app hệ thống chưa đọc tên (để không mất thêm ~4,5 s mỗi máy) — hiện bằng tên gói.",
+    );
+  });
+
+  it("still counts plainly when an unnamed row is a user app", () => {
+    const text = installedAppsFootnote([
+      { bundleId: "a", kind: "user", label: "Zalo" },
+      { bundleId: "b", kind: "user", label: null },
+      { bundleId: "c", kind: "system", label: null },
+    ]);
+    expect(text).toBe("2 app máy không trả tên, hiện bằng tên gói.");
+  });
+
+  it("says nothing about an empty list", () => {
+    expect(installedAppsFootnote([])).toBeNull();
   });
 });

@@ -1,23 +1,30 @@
-//! Gate H5: prove a reply attaches to the **right parent**, across two real phones.
+//! Gate H5: prove a reply attaches to the **right parent**, across real phones.
 //!
 //! This is the only test that can prove it. Everything else about the reply path can pass
 //! while the reply lands under a stranger's comment: the geometry rules have unit tests,
 //! but "the nearest reply control below this body" is a claim about a real screen, and a
 //! wrong answer is invisible in a log — it looks exactly like a success.
 //!
-//! Two devices, because that is what a thread is: each message in a chain is sent from a
+//! Two devices at minimum, because that is what a thread is: each message is sent from a
 //! *different* actor, so device B has to find device A's comment on a screen it opened
 //! itself, with TikTok having re-ranked the list in between.
+//!
+//! **Three for the star.** With two actors a star and a chain are the same picture, so a
+//! two-phone run cannot tell them apart — and the star is the shape a fleet run uses,
+//! because every reply depending only on the root is what lets them stop waiting for each
+//! other. The third actor replies to **A**, with B's reply already sitting under A, which
+//! is the arrangement that gets this wrong: the nearest reply control below A's body now
+//! has another comment between it and the bottom of the row.
 //!
 //! ```text
 //! RIVIU_ADB_PATH=… RIVIU_TIKTOK_PACKAGE=com.ss.android.ugc.trill \
 //!   cargo run -p riviu-android-driver --example threaded_gate -- \
-//!     <serial-A> <serial-B> <url> "<root text>" "<reply text>"
+//!     <serial-A> <serial-B> <url> "<root>" "<reply>" [<serial-C> "<second reply>"]
 //! ```
 //!
-//! **It posts two public comments** — a root from A and a reply from B — under whichever
-//! accounts those phones are logged into. Both texts come from the command line rather
-//! than being invented here.
+//! **It posts public comments** — a root from A, a reply from B, and a second reply from C
+//! when a third actor is given — under whichever accounts those phones are logged into.
+//! Every text comes from the command line rather than being invented here.
 //!
 //! What it checks, in order, and every one is a shipped function:
 //!
@@ -40,7 +47,7 @@ use riviu_core::interaction::CommentLocatorIdentity;
 use riviu_core::interaction_hierarchy::{
     open_target_by_hierarchy, send_reply_by_hierarchy, send_root_by_hierarchy, TargetArrival,
 };
-use riviu_core::tiktok_labels::{self, TikTokControls};
+use riviu_core::tiktok_labels::{self, TikTokControl, TikTokControls};
 
 static TIKTOK: LazyLock<String> = LazyLock::new(|| {
     std::env::var("RIVIU_TIKTOK_PACKAGE")
@@ -163,14 +170,25 @@ async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 5 {
         println!(
-            "usage: threaded_gate <serial-A> <serial-B> <url> \"<root text>\" \"<reply text>\"\n\
+            "usage: threaded_gate <serial-A> <serial-B> <url> \"<root>\" \"<reply>\" \
+             [<serial-C> \"<second reply>\"]\n\
              \n\
-             POSTS TWO PUBLIC COMMENTS: a root from A and a reply from B."
+             POSTS PUBLIC COMMENTS: a root from A, a reply from B, and — with the optional\n\
+             third actor — a second reply from C **to A**, which is the star."
         );
         return Ok(());
     }
     let (serial_a, serial_b, url, root_text, reply_text) =
         (&args[0], &args[1], &args[2], &args[3], &args[4]);
+    // The star needs three. With two actors a star and a chain are the same picture, so a
+    // two-phone run can never tell them apart. C replies to **A**, not to B, and does it
+    // once B's reply is already sitting under A — which is the case that actually gets this
+    // wrong, because "the nearest reply control below this body" now has another comment
+    // between it and the bottom of the row.
+    let third = args
+        .get(5)
+        .zip(args.get(6))
+        .map(|(serial, text)| (serial.clone(), text.clone()));
     let handle = url
         .split('@')
         .nth(1)
@@ -211,6 +229,25 @@ async fn main() -> anyhow::Result<()> {
         parent.author_label, parent.text
     );
 
+    // **How long the root gets to become visible to the other accounts.**
+    //
+    // Measured 19/08/2026: on the same post and within the same hour, two runs found the
+    // root within seconds and two later ones did not find it at all — not in the open
+    // list, and not in the folded section either, which the reply path now opens and
+    // searches. A comment is not visible to other accounts the instant it is posted, and
+    // this is the knob that says how much of the difference is time.
+    let propagation = std::env::var("RIVIU_GATE_WAIT_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    if propagation > 0 {
+        println!(
+            "
+  chờ {propagation}s cho gốc lan sang các tài khoản khác"
+        );
+        tokio::time::sleep(Duration::from_secs(propagation)).await;
+    }
+
     // ---- B: arrive independently and reply to that identity ----
     println!("\n== B replies to A's comment ==");
     arrive(&actor_b, url, &handle).await?;
@@ -239,6 +276,14 @@ async fn main() -> anyhow::Result<()> {
                 outcome.verdict,
                 outcome.verdict.reason()
             );
+            if outcome.parent_was_folded {
+                println!(
+                    "  ! CHA NẰM TRONG PHẦN BỊ GẤP — phải mở `View folded comments` mới thấy."
+                );
+                println!(
+                    "    Gửi được, nhưng TikTok đã gấp cha đi khỏi các tài khoản khác: chuỗi này không ai nhìn thấy."
+                );
+            }
             match &outcome.identity {
                 Some(identity) => println!(
                     "  read back: author={:?} text={:?}",
@@ -263,14 +308,205 @@ async fn main() -> anyhow::Result<()> {
         ),
     }
 
+    // ---- C: the star. Arrives independently and replies to A, not to B ----
+    let shot_from = if let Some((serial_c, second_reply)) = third {
+        println!("\n== C replies to A's comment, with B's reply already under it ==");
+        let actor_c = open_actor(&driver, &serial_c).await?;
+        arrive(&actor_c, url, &handle).await?;
+        let reply = send_reply_by_hierarchy(
+            actor_c.session.as_ref(),
+            actor_c.labels,
+            actor_c.screen,
+            &parent,
+            &second_reply,
+            &stop,
+            String::new,
+        )
+        .await?;
+        match reply {
+            Ok(outcome) => {
+                println!(
+                    "  verdict = {:?} ({})",
+                    outcome.verdict,
+                    outcome.verdict.reason()
+                );
+                if outcome.parent_was_folded {
+                    println!(
+                        "  ! CHA NẰM TRONG PHẦN BỊ GẤP — phải mở `View folded comments` mới thấy."
+                    );
+                    println!(
+                        "    Gửi được, nhưng TikTok đã gấp cha đi khỏi các tài khoản khác: chuỗi này không ai nhìn thấy."
+                    );
+                }
+                if outcome.verdict.is_sent() {
+                    println!(
+                        "\n  GATE H5-STAR: two accounts replied to the same comment.\n  \
+                         THE SCREENSHOT IS THE PROOF — two replies at the *same level* \
+                         under A is a star; a reply nested under B's reply is a chain, and \
+                         the log for the two is identical."
+                    );
+                    report_nesting(
+                        actor_c.session.as_ref(),
+                        actor_c.labels,
+                        root_text,
+                        reply_text,
+                        Some(second_reply.as_str()),
+                    )
+                    .await;
+                } else {
+                    println!("\n  GATE H5-STAR INCOMPLETE: {}", outcome.verdict.reason());
+                }
+            }
+            // Worth printing rather than passing over: the refusal that matters here is
+            // `ParentNotFound`, which is the star's own risk — by the fifteenth reply A's
+            // comment may have been re-ranked past the scroll budget.
+            Err(refusal) => println!(
+                "  reply refused ({}): {}\n  nothing was typed.",
+                refusal.code(),
+                refusal.message()
+            ),
+        }
+        actor_c.serial.clone()
+    } else {
+        println!(
+            "\n  (no third actor — this run proves a reply attaches to its parent, but not \
+             that two replies attach to the *same* parent. Pass `<serial-C> \"<text>\"` \
+             for that.)"
+        );
+        report_nesting(
+            actor_b.session.as_ref(),
+            actor_b.labels,
+            root_text,
+            reply_text,
+            None,
+        )
+        .await;
+        actor_b.serial.clone()
+    };
     // The screenshot is the deliverable, not a nicety: a reply attached to the wrong
     // parent produces an identical log.
     let path = std::env::temp_dir().join("riviu-gate-h5-reply.png");
-    let written = driver.screenshot(&actor_b.serial, &path).await?;
+    let written = driver.screenshot(&shot_from, &path).await?;
     let bytes = tokio::fs::metadata(&written)
         .await
         .map(|meta| meta.len())
         .unwrap_or(0);
-    println!("\n  B's screen: {} ({bytes} bytes)", written.display());
+    println!(
+        "\n  screen of {shot_from}: {} ({bytes} bytes)",
+        written.display()
+    );
     Ok(())
+}
+
+/// Print the comment rows with their indent, and say what shape they make.
+///
+/// **The screenshot proves it to a person; this proves it to the run.** A reply attached to
+/// the wrong parent produces an identical log, which is why this gate used to end with "look
+/// at the screenshot" — and the first three real runs all produced one with the root off the
+/// top of the list. Indent is the same evidence and does not depend on where the list happens
+/// to be scrolled: TikTok lays a reply out to the right of the comment it answers, so the x of
+/// a row *is* its depth.
+///
+/// **Keyed on the two replies, not on the root**, which is what makes it work. The shape
+/// question is only ever "are these two siblings?" — same x means both answer the same
+/// comment, deeper means the second answers the first. The root is printed when it happens to
+/// be on screen and is not needed for the verdict. The earlier version looked for the root
+/// first and scrolled back to find it, which drags the list down past its top and *closes the
+/// drawer* — after which it was measuring the feed.
+async fn report_nesting(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    root: &str,
+    first: &str,
+    second: Option<&str>,
+) {
+    // **Re-open the drawer first.** The reply path closes it on the way out — which is
+    // right, and which left this measuring a closed post page: the first run after the
+    // star finally completed reported all three lines "not on screen" while the
+    // screenshot showed the feed card with the comment count on it.
+    if session
+        .locate(riviu_core::ElementQuery::ClassName(
+            "android.widget.EditText",
+        ))
+        .await
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        if let Some(opener) = labels.label(TikTokControl::Comments) {
+            if let Ok(Some(control)) = session.locate(opener.to_query()).await {
+                let _ = session.tap(control.centre()).await;
+                tokio::time::sleep(Duration::from_millis(2_500)).await;
+            }
+        }
+    }
+    let row = |needle: String| async move {
+        let rows = session
+            .locate_all_described(riviu_core::ElementQuery::ClassName(
+                "android.widget.TextView",
+            ))
+            .await
+            .unwrap_or_default();
+        rows.into_iter().find(|row| {
+            row.description
+                .as_deref()
+                .map(|text| text.trim() == needle.trim())
+                .unwrap_or(false)
+        })
+    };
+
+    println!("\n  thụt lề (x càng lớn càng sâu):");
+    let mut seen = Vec::new();
+    for (name, text) in [
+        ("gốc  (A)", Some(root)),
+        ("rep 1 (B)", Some(first)),
+        ("rep 2 (C)", second),
+    ] {
+        let Some(text) = text else { continue };
+        match row(text.to_string()).await {
+            Some(found) => {
+                println!(
+                    "    {name}: x={:>6.0} y={:>6.0}  {text:?}",
+                    found.x, found.y
+                );
+                seen.push((name, found.x));
+            }
+            None => println!("    {name}: không trên màn hình  {text:?}"),
+        }
+    }
+
+    let depth = |wanted: &str| {
+        seen.iter()
+            .find(|(name, _)| *name == wanted)
+            .map(|(_, x)| *x)
+    };
+    let (Some(first_x), Some(second_x)) = (depth("rep 1 (B)"), depth("rep 2 (C)")) else {
+        println!(
+            "  chưa kết luận được: cần cả hai rep trên cùng một màn hình, và chúng nằm cạnh \
+             nhau nên đây thường là dấu hiệu một cái không gửi được"
+        );
+        return;
+    };
+    if (second_x - first_x).abs() < 1.0 {
+        let against_root = match depth("gốc  (A)") {
+            Some(root_x) if first_x > root_x => {
+                format!(", và đều thụt vào so với gốc x={root_x:.0}")
+            }
+            Some(root_x) => format!(", NHƯNG gốc ở x={root_x:.0} — không thụt vào, đọc ảnh chụp"),
+            None => String::new(),
+        };
+        println!(
+            "  HÌNH SAO: hai rep cùng x={first_x:.0}{against_root} — cùng trả lời một bình luận"
+        );
+    } else if second_x > first_x {
+        println!(
+            "  CHUỖI: rep 2 (x={second_x:.0}) sâu hơn rep 1 (x={first_x:.0}) — nó trả lời rep 1, \
+             không phải gốc"
+        );
+    } else {
+        println!(
+            "  ! rep 2 (x={second_x:.0}) nông hơn rep 1 (x={first_x:.0}) — không phải hình nào \
+             trong hai; đọc ảnh chụp"
+        );
+    }
 }

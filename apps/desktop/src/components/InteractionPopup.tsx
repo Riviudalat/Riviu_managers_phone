@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  getDeviceMeta,
   interactionCancel,
   interactionGet,
   interactionList,
@@ -7,19 +8,27 @@ import {
   interactionReadArtifact,
   interactionParseLinks,
   interactionResolveLinks,
+  interactionRetry,
   interactionStartThread,
   listenRiviuEvents,
+  listGroups,
+  saveDeviceMeta,
 } from "../api";
+import { parseMentions, resolveMentionActors, unionActors } from "../interactionMentions";
 import type { InteractionArtifactRecord } from "../api";
 import type {
+  DeviceGroup,
   DeviceInfo,
   ThreadMode,
+  ThreadShape,
   InteractionCampaignDetail,
   InteractionCampaignSummary,
   ThreadCampaignRequest,
   TikTokLinkLine,
 } from "../types";
 import { IconChat, IconClose } from "./Icons";
+import { InfoDot as Info } from "./InfoDot";
+import { describeError } from "../describeError";
 
 type Props = {
   devices: DeviceInfo[];
@@ -28,7 +37,8 @@ type Props = {
 };
 
 function requestId() {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto)
+    return crypto.randomUUID();
   return `interaction-${Date.now()}`;
 }
 
@@ -51,7 +61,10 @@ function stateLabel(state: string) {
 
 export function InteractionPopup({ devices, selected, onClose }: Props) {
   const inScope = useMemo(
-    () => devices.filter((device) => (selected.length ? selected.includes(device.udid) : true)),
+    () =>
+      devices.filter((device) =>
+        selected.length ? selected.includes(device.udid) : true,
+      ),
     [devices, selected],
   );
   // Android is a first-class actor now: it drives the comment drawer through the
@@ -59,6 +72,14 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
   // here any more. What replaces the filter is a *grouping*, because the two readers
   // cannot be mixed inside one nested thread — see `mixedThread` below.
   const actorChoices = inScope;
+  // The same 1-based number the grid stamps on each tile (position in the full device
+  // list), so "máy số 7" in the picker is the same phone as tile 7 on the wall — that is
+  // how an operator tells one anonymous "23021RAAEG" from the next.
+  const deviceNumber = useMemo(() => {
+    const map = new Map<string, number>();
+    devices.forEach((device, index) => map.set(device.udid, index + 1));
+    return map;
+  }, [devices]);
   const pixelActors = useMemo(
     () => inScope.filter((device) => device.platform === "ios"),
     [inScope],
@@ -71,15 +92,33 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
   const [rawLinks, setRawLinks] = useState("");
   const [lines, setLines] = useState<TikTokLinkLine[]>([]);
   const [actors, setActors] = useState<string[]>([]);
+  /// Saved device groups, offered as a way to fill the actor list in one go.
+  ///
+  /// Deliberately not `SelectionStrip`, which every other page uses: that component says
+  /// "chưa chọn → sẽ dùng tất cả", and here an empty actor list is refused rather than
+  /// meaning everything. Borrowing it would have put a sentence on screen that is false
+  /// in this panel.
+  const [groups, setGroups] = useState<DeviceGroup[]>([]);
   const [messageCount, setMessageCount] = useState(2);
   const [maxWords, setMaxWords] = useState(12);
   const [mode, setMode] = useState<ThreadMode>("threaded");
-  const [instruction, setInstruction] = useState("tự nhiên, ngắn, nói như người vừa xem xong");
+  const [shape, setShape] = useState<ThreadShape>("chain");
+  // 0 means "one team, everybody" — the arrangement this had before teams existed.
+  // Kept as a number so the input can be cleared without becoming NaN.
+  const [cohortSize, setCohortSize] = useState(0);
+  const [instruction, setInstruction] = useState(
+    "tự nhiên, ngắn, nói như người vừa xem xong",
+  );
   // "ai" | "manual" — which writes the comments. Kept as a mode rather than inferred from
   // whether the box has text, so switching back to AI does not mean deleting what was pasted.
   const [textSource, setTextSource] = useState<"ai" | "manual">("ai");
   const [manualText, setManualText] = useState("");
   const [likeTarget, setLikeTarget] = useState(false);
+  // Free-form tag string ("@ann @bob") and each in-scope phone's stored @handle. A tag that
+  // matches a phone's handle pulls that phone into the actor set so the tagged account joins
+  // the post and replies; a tag matching no phone is prepended as plain text only.
+  const [mentionText, setMentionText] = useState("");
+  const [handles, setHandles] = useState<Record<string, string>>({});
   const [campaigns, setCampaigns] = useState<InteractionCampaignSummary[]>([]);
   const [detail, setDetail] = useState<InteractionCampaignDetail | null>(null);
   const [artifacts, setArtifacts] = useState<InteractionArtifactRecord[]>([]);
@@ -107,38 +146,147 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
         : [],
     [manualText, textSource],
   );
+  // @handles for the in-scope phones. The fleet poll rebuilds `inScope` every few seconds,
+  // so keying the load on the udid list (a string) keeps it from refetching — and clobbering
+  // an unsaved edit — on every poll. A locally-edited handle in `prev` wins over a reload.
+  const inScopeKey = useMemo(() => inScope.map((device) => device.udid).join(","), [inScope]);
+  useEffect(() => {
+    let alive = true;
+    const udids = inScopeKey ? inScopeKey.split(",") : [];
+    void Promise.all(
+      udids.map((udid) =>
+        getDeviceMeta(udid)
+          .then((meta) => [udid, meta.handle ?? ""] as const)
+          .catch(() => [udid, ""] as const),
+      ),
+    ).then((pairs) => {
+      if (alive) setHandles((prev) => ({ ...Object.fromEntries(pairs), ...prev }));
+    });
+    return () => {
+      alive = false;
+    };
+  }, [inScopeKey]);
+
+  const persistHandle = useCallback(async (udid: string, value: string) => {
+    const handle = value.trim().replace(/^@+/, "");
+    setHandles((prev) => ({ ...prev, [udid]: handle }));
+    try {
+      // Round-trip the full meta so notes/tags/group/proxy are preserved, not wiped.
+      const meta = await getDeviceMeta(udid);
+      await saveDeviceMeta({ ...meta, handle });
+    } catch {
+      // Non-fatal: the tag still resolves from local state for this session.
+    }
+  }, []);
+
+  const mentions = useMemo(() => parseMentions(mentionText), [mentionText]);
+  /// The phones a tag names, by matching each tag to a phone's @handle. These join the actor
+  /// set so the tagged account comments on the post itself.
+  const mentionActors = useMemo(() => {
+    const udids = inScopeKey ? inScopeKey.split(",") : [];
+    return resolveMentionActors(
+      mentions,
+      udids.map((udid) => ({ udid, handle: handles[udid] ?? "" })),
+    );
+  }, [mentions, inScopeKey, handles]);
+  const effectiveActors = useMemo(
+    () => unionActors(actors, mentionActors),
+    [actors, mentionActors],
+  );
+
   const request: ThreadCampaignRequest = useMemo(
     () => ({
       requestId: requestId(),
       targets: validTargets,
-      actorUdids: actors,
+      actorUdids: effectiveActors,
       messageCount,
       instruction,
       maxWords,
       mode,
+      shape,
+      cohortSize: cohortSize >= 2 ? cohortSize : undefined,
       manualComments,
       likeTarget,
+      mentions,
     }),
-    [actors, instruction, likeTarget, manualComments, maxWords, messageCount, mode, validTargets],
+    [
+      effectiveActors,
+      mentions,
+      cohortSize,
+      instruction,
+      likeTarget,
+      manualComments,
+      maxWords,
+      messageCount,
+      mode,
+      shape,
+      validTargets,
+    ],
   );
 
   const reloadCampaigns = useCallback(async () => {
     try {
       setCampaigns(await interactionList());
     } catch (e) {
-      setError(String(e));
+      setError(describeError(e));
     }
   }, []);
 
   useEffect(() => {
     void reloadCampaigns();
-    // Pre-select from ONE group, never across both: a default selection that is already
-    // invalid for Threaded would make the operator undo the app's own choice before they
-    // could start. The larger group wins so the default covers as much of the fleet as
-    // one thread can.
-    const group = hierarchyActors.length > pixelActors.length ? hierarchyActors : pixelActors;
-    setActors(group.slice(0, 6).map((device) => device.udid));
-  }, [hierarchyActors, pixelActors, reloadCampaigns]);
+  }, [reloadCampaigns]);
+
+  /// Seed the default **once**, and never again.
+  ///
+  /// This used to share an effect with the campaign reload and depend on the actor lists,
+  /// which are memos over `devices` — a fresh array every three seconds from the fleet
+  /// poll. So `setActors` ran every three seconds and threw away whatever the operator had
+  /// just chosen. Selecting actors for a threaded campaign was a race against the next
+  /// tick, and nobody wins that.
+  ///
+  /// Pre-selects from ONE group, never across both: a default that is already invalid for
+  /// Threaded would make the operator undo the app's own choice before they could start.
+  /// The larger group wins so the default covers as much of the fleet as one thread can.
+  const seededActors = useRef(false);
+  useEffect(() => {
+    if (seededActors.current) return;
+    if (!hierarchyActors.length && !pixelActors.length) return;
+    seededActors.current = true;
+    const group =
+      hierarchyActors.length > pixelActors.length
+        ? hierarchyActors
+        : pixelActors;
+    // The whole group, not the first six: six was the old hard cap and pre-selecting a
+    // fraction of the fleet now would hide from the operator that the rest are usable.
+    // Nothing runs until the button is pressed.
+    setActors(group.map((device) => device.udid));
+  }, [hierarchyActors, pixelActors]);
+
+  useEffect(() => {
+    let alive = true;
+    listGroups()
+      .then((next) => {
+        if (alive) setGroups(next);
+      })
+      // Groups are a shortcut, not a requirement: the checkboxes still work without them.
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  /// A phone that has left the fleet drops out of the selection, and nothing else moves.
+  ///
+  /// Returning `prev` unchanged when nothing departed is what keeps this from being the old
+  /// bug in a new shape: a new array on every poll would re-render the list forever.
+  useEffect(() => {
+    setActors((previous) => {
+      const present = previous.filter((udid) =>
+        inScope.some((device) => device.udid === udid),
+      );
+      return present.length === previous.length ? previous : present;
+    });
+  }, [inScope]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -147,7 +295,9 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
       if (event.type !== "interactionUpdated") return;
       void reloadCampaigns();
       if (event.campaignId && detail?.summary.id === event.campaignId) {
-        void interactionGet(event.campaignId).then(setDetail).catch(() => undefined);
+        void interactionGet(event.campaignId)
+          .then(setDetail)
+          .catch(() => undefined);
       }
     }).then((fn) => {
       unlisten = fn;
@@ -161,10 +311,39 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
   // that row by OCR and match the label, and the two do not have to agree — a badge, a
   // truncation, a rendered-versus-attribute difference. Standalone has no parent to find,
   // so mixing is fine there.
+  /// The teams, as the operator will see them and as the backend will build them.
+  ///
+  /// Mirrors `partition_actors`: the remainder is spread, so twenty phones in teams of
+  /// three are 4,4,3,3,3,3 rather than six threes and two phones left out. Duplicated
+  /// here only to *show* the split before anything runs — the plan that executes still
+  /// comes from the backend, and the preview below is rendered from that plan rather
+  /// than from this.
+  const cohorts = useMemo(() => {
+    if (cohortSize < 2 || effectiveActors.length === 0) return [effectiveActors];
+    const count = Math.max(1, Math.floor(effectiveActors.length / cohortSize));
+    const base = Math.floor(effectiveActors.length / count);
+    let remainder = effectiveActors.length % count;
+    const out: string[][] = [];
+    let at = 0;
+    for (let team = 0; team < count; team += 1) {
+      const take = base + (remainder > 0 ? 1 : 0);
+      if (remainder > 0) remainder -= 1;
+      out.push(effectiveActors.slice(at, at + take));
+      at += take;
+    }
+    return out;
+  }, [effectiveActors, cohortSize]);
+  const largestCohort = cohorts.reduce(
+    (most, team) => Math.max(most, team.length),
+    0,
+  );
+
   const mixedThread =
     mode === "threaded" &&
-    actors.some((udid) => pixelActors.some((device) => device.udid === udid)) &&
-    actors.some((udid) => hierarchyActors.some((device) => device.udid === udid));
+    effectiveActors.some((udid) => pixelActors.some((device) => device.udid === udid)) &&
+    effectiveActors.some((udid) =>
+      hierarchyActors.some((device) => device.udid === udid),
+    );
   const mixedThreadReason =
     "Chuỗi lồng nhau không chạy trộn iPhone với Android: hai bên đọc nhãn tác giả theo hai " +
     "cách nên mắt xích có thể đứt giữa chừng. Chọn toàn iPhone, toàn Android, hoặc chuyển " +
@@ -176,7 +355,7 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
       setLines(await interactionParseLinks(value));
       setError(null);
     } catch (e) {
-      setError(String(e));
+      setError(describeError(e));
     }
   };
 
@@ -187,7 +366,7 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
       setLines(await interactionResolveLinks(rawLinks));
       setError(null);
     } catch (e) {
-      setError(String(e));
+      setError(describeError(e));
     } finally {
       setBusy(false);
     }
@@ -198,8 +377,8 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
       setError("Cần ít nhất một link video/photo hợp lệ");
       return;
     }
-    if (actors.length < 2 || actors.length > 6) {
-      setError("Chọn từ 2 đến 6 thiết bị làm actor");
+    if (effectiveActors.length < 2 || effectiveActors.length > 64) {
+      setError("Chọn từ 2 đến 64 thiết bị làm actor (kể cả acc được tag)");
       return;
     }
     if (mixedThread) {
@@ -209,8 +388,15 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
       setError(mixedThreadReason);
       return;
     }
-    if (messageCount < actors.length) {
-      setError("Số message phải lớn hơn hoặc bằng số actor");
+    // Per team, not per fleet: twenty phones in teams of three need three messages a
+    // link, not twenty. Measured against the biggest team, because spreading the
+    // remainder makes them uneven by one.
+    if (messageCount < largestCohort) {
+      setError(
+        cohortSize >= 2
+          ? `Số message phải ≥ số máy của cụm lớn nhất (${largestCohort})`
+          : "Số message phải lớn hơn hoặc bằng số actor",
+      );
       return;
     }
     setBusy(true);
@@ -220,7 +406,7 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
       await reloadCampaigns();
       setError(null);
     } catch (e) {
-      setError(String(e));
+      setError(describeError(e));
     } finally {
       setBusy(false);
     }
@@ -235,7 +421,7 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
       // just asserted; a campaign that has none still opens.
       setArtifacts(await interactionListArtifacts(campaign.id).catch(() => []));
     } catch (e) {
-      setError(String(e));
+      setError(describeError(e));
     } finally {
       setBusy(false);
     }
@@ -246,7 +432,7 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
       const payload = await interactionReadArtifact(artifactId);
       setPreview(`data:${payload.mimeType};base64,${payload.base64}`);
     } catch (e) {
-      setError(String(e));
+      setError(describeError(e));
     }
   };
 
@@ -258,23 +444,39 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
           <strong>Tương tác</strong>
           <span className="hint">{actorChoices.length} thiết bị</span>
           <div className="grow" />
-          <button type="button" className="close" title="Đóng" onClick={onClose}>
+          <button
+            type="button"
+            className="close"
+            title="Đóng"
+            onClick={onClose}
+          >
             <IconClose size={14} />
           </button>
         </header>
         <div className="interaction-tabs" role="tablist">
-          <button type="button" role="tab" aria-selected={tab === "setup"} onClick={() => setTab("setup")}>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "setup"}
+            onClick={() => setTab("setup")}
+          >
             Setup
           </button>
-          <button type="button" role="tab" aria-selected={tab === "monitor"} onClick={() => setTab("monitor")}>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "monitor"}
+            onClick={() => setTab("monitor")}
+          >
             Monitor
           </button>
         </div>
         {error && <div className="banner error">{error}</div>}
         {tab === "setup" ? (
-          <div className="interaction-body">
-            <label>
-              Link TikTok (mỗi dòng một link)
+          <div className="interaction-body nu-pane">
+            <div className="nu-group-head">Bài viết</div>
+            <label className="nu-field">
+              <span className="nu-label">Link TikTok — mỗi dòng một link</span>
               <textarea
                 value={rawLinks}
                 onChange={(event) => void parse(event.target.value)}
@@ -286,88 +488,229 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
               {lines.map((line) => (
                 <div key={line.lineNo} className={line.target ? "ok" : "bad"}>
                   <span>{line.target ? "✓" : "!"}</span>
-                  <span>{line.target?.normalizedUrl ?? `${line.original} · ${line.error}`}</span>
+                  <span>
+                    {line.target?.normalizedUrl ??
+                      `${line.original} · ${line.error}`}
+                  </span>
                 </div>
               ))}
             </div>
             {lines.some((line) => line.error === "unresolvedShortLink") && (
-              <button type="button" className="ghost" disabled={busy} onClick={() => void resolveShortLinks()}>
+              <button
+                type="button"
+                className="ghost"
+                disabled={busy}
+                onClick={() => void resolveShortLinks()}
+              >
                 Resolve link rút gọn
               </button>
             )}
-            <div className="interaction-grid">
-              <label>
-                Số message
-                <input type="number" min={2} max={6} value={messageCount} onChange={(e) => setMessageCount(Number(e.target.value))} />
+            <div className="nu-group-head">Cấu trúc chuỗi</div>
+            <div className="nu-grid nu-grid-3">
+              <label className="nu-field">
+                <span className="nu-label">Số message</span>
+                <input
+                  type="number"
+                  min={2}
+                  max={64}
+                  value={messageCount}
+                  onChange={(e) => setMessageCount(Number(e.target.value))}
+                />
               </label>
-              <label>
-                Tối đa từ
-                <input type="number" min={4} max={20} value={maxWords} onChange={(e) => setMaxWords(Number(e.target.value))} />
+              <label className="nu-field">
+                <span className="nu-label">Cỡ cụm</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={64}
+                  value={cohortSize}
+                  onChange={(e) => setCohortSize(Number(e.target.value))}
+                />
+              </label>
+              <label className="nu-field">
+                <span className="nu-label">Tối đa từ</span>
+                <input
+                  type="number"
+                  min={4}
+                  max={20}
+                  value={maxWords}
+                  onChange={(e) => setMaxWords(Number(e.target.value))}
+                />
               </label>
             </div>
-            <label>
-              Kiểu tương tác
-              <select value={mode} onChange={(e) => setMode(e.target.value as ThreadMode)}>
-                <option value="threaded">Qua lại — acc sau trả lời acc trước</option>
-                <option value="standalone">Riêng lẻ — mỗi acc một bình luận gốc</option>
+            <p className="hint">
+              {cohortSize >= 2
+                ? `${effectiveActors.length} máy chia thành ${cohorts.length} cụm; mỗi cụm nhận link riêng và các cụm chạy cùng lúc.`
+                : "Cỡ cụm 0 = một cụm duy nhất: cả nhóm cùng làm một link, lần lượt từng máy."}
+            </p>
+            {cohortSize >= 2 && (
+              <ul className="hint" data-testid="cohort-preview">
+                {cohorts.map((team, index) => (
+                  <li key={team.join("|") || index}>
+                    {`cụm ${index + 1} (${team.length} máy) → link ${index + 1}, ${cohorts.length + index + 1}, …`}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <label className="nu-field">
+              <span className="nu-label">
+                Kiểu tương tác
+                <Info
+                  of="Kiểu tương tác"
+                  what="Qua lại = các acc trả lời nhau thành hội thoại lồng nhau (Android đọc hierarchy; iPhone cần OCR/macOS; không trộn hai loại trong một chuỗi). Riêng lẻ = mỗi acc một bình luận gốc, chạy mọi máy, trộn iPhone + Android được."
+                />
+              </span>
+              <select
+                value={mode}
+                onChange={(e) => setMode(e.target.value as ThreadMode)}
+              >
+                <option value="threaded">
+                  Qua lại — acc sau trả lời acc trước
+                </option>
+                <option value="standalone">
+                  Riêng lẻ — mỗi acc một bình luận gốc
+                </option>
               </select>
             </label>
-            <p className="hint">
-              {mode === "threaded"
-                ? "Tạo hội thoại lồng nhau. Actor Android tìm lại bình luận cha trong hierarchy; actor iPhone cần OCR đọc được tiếng Việt, hiện chỉ có trên macOS. Không trộn hai loại trong một chuỗi."
-                : "Mỗi acc để một bình luận riêng, không lồng nhau. Không cần OCR, chạy được trên mọi máy, và trộn iPhone với Android cũng được."}
-            </p>
-            <label className="check">
+            {mode === "threaded" && (
+              <label className="nu-field">
+                <span className="nu-label">
+                  Hình chuỗi
+                  <Info
+                    of="Hình chuỗi"
+                    what="Nối tiếp = acc N trả lời acc N-1, chạy nối đuôi nên một mắt xích đứt là dừng cả link. Toả = mọi acc trả lời bình luận gốc, chạy song song nên một rep hỏng chỉ mất chính nó."
+                  />
+                </span>
+                <select
+                  value={shape}
+                  onChange={(e) => setShape(e.target.value as ThreadShape)}
+                >
+                  <option value="chain">
+                    Nối tiếp — mỗi acc trả lời acc liền trước
+                  </option>
+                  <option value="star">
+                    Toả — mọi acc trả lời bình luận gốc
+                  </option>
+                </select>
+              </label>
+            )}
+            <label className="nu-switch">
               <input
                 type="checkbox"
                 checked={likeTarget}
                 onChange={(e) => setLikeTarget(e.target.checked)}
+                aria-label="Thả tim bài"
               />
-              Thả tim bài
+              <span className="nu-switch-track" aria-hidden="true" />
+              <span className="nu-switch-label">
+                Thả tim bài
+                <Info
+                  of="Thả tim bài"
+                  what="Mỗi actor thả tim bài trước khi bình luận, xác nhận bằng nhãn nút tim đổi trạng thái. Android làm được; iPhone bị từ chối vì chưa đo toạ độ nút tim. Thả tim hỏng không làm mất bình luận."
+                />
+              </span>
             </label>
-            <p className="hint">
-              Mỗi actor thả tim bài trước khi bình luận, xác nhận bằng nhãn nút tim đổi trạng
-              thái. Máy Android làm được; actor iPhone sẽ bị từ chối vì chưa đo toạ độ nút tim
-              trên trang bài — và một lần thả tim thất bại không làm mất bình luận.
-            </p>
-            <label>
-              Nội dung bình luận
+            <div className="nu-group-head">Nội dung</div>
+            <label className="nu-field">
+              <span className="nu-label">Nội dung bình luận</span>
               <select
                 value={textSource}
-                onChange={(e) => setTextSource(e.target.value as "ai" | "manual")}
+                onChange={(e) =>
+                  setTextSource(e.target.value as "ai" | "manual")
+                }
               >
-                <option value="ai">AI viết — đọc nội dung bài rồi tự viết</option>
-                <option value="manual">Thủ công — dán sẵn danh sách bình luận</option>
+                <option value="ai">
+                  AI viết — đọc nội dung bài rồi tự viết
+                </option>
+                <option value="manual">
+                  Thủ công — dán sẵn danh sách bình luận
+                </option>
               </select>
             </label>
             {textSource === "ai" ? (
-              <label>
-                Giọng điệu / hướng dẫn
-                <input value={instruction} onChange={(e) => setInstruction(e.target.value)} />
+              <label className="nu-field">
+                <span className="nu-label">Giọng điệu / hướng dẫn</span>
+                <input
+                  value={instruction}
+                  onChange={(e) => setInstruction(e.target.value)}
+                />
               </label>
             ) : (
               <>
-                <label>
-                  Danh sách bình luận — mỗi dòng một câu
+                <label className="nu-field">
+                  <span className="nu-label">
+                    Danh sách bình luận — mỗi dòng một câu
+                    <Info
+                      of="Danh sách bình luận"
+                      what="Chia lần lượt theo từng link nên nhiều link không mở đầu bằng cùng một câu; chạy lại cùng chiến dịch sẽ gửi đúng chữ đó. Cần ít nhất số câu bằng số message."
+                    />
+                  </span>
                   <textarea
                     rows={6}
                     value={manualText}
-                    placeholder={["đẹp quá", "chỗ này ở đâu vậy ạ", "lưu lại đi ăn thử"].join(
-                      "\n",
-                    )}
+                    placeholder={[
+                      "đẹp quá",
+                      "chỗ này ở đâu vậy ạ",
+                      "lưu lại đi ăn thử",
+                    ].join("\n")}
                     onChange={(e) => setManualText(e.target.value)}
                   />
                 </label>
                 <p className="hint">
-                  {manualComments.length} câu · cần ít nhất {messageCount} câu cho {messageCount}{" "}
-                  message. Chia lần lượt theo từng link nên mười link không mở đầu bằng cùng một
-                  câu, và cùng một chiến dịch chạy lại sẽ gửi đúng chữ đó.
+                  {manualComments.length} câu · cần ≥ {messageCount}
                 </p>
               </>
             )}
-            <fieldset className="interaction-actors">
-              <legend>Actor tham gia</legend>
-              {actorChoices.length === 0 && <span className="hint">Chưa có thiết bị</span>}
+            <div className="nu-group-head">Actor &amp; tag</div>
+            <div className="interaction-actors">
+              <label className="nu-field interaction-mention">
+                <span className="nu-label">Tag / nhắc (@) — cách nhau bằng dấu cách hoặc phẩy</span>
+                <input
+                  type="text"
+                  placeholder="@ann @bob"
+                  value={mentionText}
+                  onChange={(event) => setMentionText(event.target.value)}
+                />
+              </label>
+              {mentions.length > 0 && (
+                <p className="hint">
+                  {mentionActors.length > 0
+                    ? `Chèn ${mentions.map((m) => `@${m}`).join(" ")} vào comment mở đầu; ${mentionActors.length} acc trong fleet được tag sẽ tự vào post trả lời.`
+                    : `Chèn ${mentions.map((m) => `@${m}`).join(" ")} (chỉ là chữ) — chưa có máy nào trong fleet khớp @handle để tự vào.`}
+                </p>
+              )}
+              {groups.length > 0 && (
+                <label className="nu-field">
+                  <span className="nu-label">Lấy từ nhóm</span>
+                  <select
+                    value=""
+                    onChange={(e) => {
+                      const group = groups.find(
+                        (entry) => entry.id === e.target.value,
+                      );
+                      if (!group) return;
+                      // Intersected with what is actually here: a group remembers udids, and
+                      // a phone that has been unplugged since would otherwise be selected and
+                      // then refused at dispatch with nothing on screen explaining why.
+                      setActors(
+                        group.udids.filter((udid) =>
+                          actorChoices.some((device) => device.udid === udid),
+                        ),
+                      );
+                    }}
+                  >
+                    <option value="">Chọn nhóm…</option>
+                    {groups.map((group) => (
+                      <option key={group.id} value={group.id}>
+                        {group.name} ({group.udids.length})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              {actorChoices.length === 0 && (
+                <span className="hint">Chưa có thiết bị</span>
+              )}
               {/* Grouped by *how each device reads the screen*, not by brand: that is the
                   property the thread rule depends on, and naming it here is what makes the
                   refusal below make sense instead of looking arbitrary. */}
@@ -379,23 +722,62 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
                 .map((section) => (
                   <div key={section.label} className="interaction-actor-group">
                     <span className="hint">{section.label}</span>
-                    {section.group.map((device) => (
-                      <label key={device.udid}>
-                        <input
-                          type="checkbox"
-                          checked={actors.includes(device.udid)}
-                          onChange={() => setActors((prev) => (prev.includes(device.udid) ? prev.filter((id) => id !== device.udid) : [...prev, device.udid]))}
-                        />
-                        <span>{device.name || device.udid.slice(0, 8)}</span>
-                      </label>
-                    ))}
+                    {section.group.map((device) => {
+                      const picked = actors.includes(device.udid);
+                      return (
+                        <div
+                          key={device.udid}
+                          className={`interaction-actor-tile${picked ? " selected" : ""}`}
+                        >
+                          {/* No visible checkbox: the whole tile is the target and the orange
+                              fill is the "chosen" signal. The checkbox is still here, only
+                              moved off-screen — it keeps the label clickable and lets the tests
+                              (and a screen reader) read the picked state by the device name. */}
+                          <label className="tile-pick" title={device.model || device.udid}>
+                            <input
+                              type="checkbox"
+                              className="tile-check"
+                              aria-label={device.name || device.model || device.udid.slice(0, 8)}
+                              checked={picked}
+                              onChange={() =>
+                                setActors((prev) =>
+                                  prev.includes(device.udid)
+                                    ? prev.filter((id) => id !== device.udid)
+                                    : [...prev, device.udid],
+                                )
+                              }
+                            />
+                            <span className="tile-num" aria-hidden="true">
+                              {deviceNumber.get(device.udid) ?? "?"}
+                            </span>
+                            <span className="tile-name">
+                              {device.name || device.model || device.udid.slice(0, 8)}
+                            </span>
+                          </label>
+                          {/* The @handle this phone is logged into. Kept next to the phone so
+                              an operator sets it once, here, and tagging it later pulls this
+                              phone into the post. Blurring saves it to the device meta. */}
+                          <input
+                            type="text"
+                            className="interaction-handle"
+                            placeholder="@handle"
+                            title="Nick TikTok máy này đang đăng nhập — để tag thì máy này tự vào comment"
+                            value={handles[device.udid] ?? ""}
+                            onChange={(event) =>
+                              setHandles((prev) => ({ ...prev, [device.udid]: event.target.value }))
+                            }
+                            onBlur={(event) => void persistHandle(device.udid, event.target.value)}
+                          />
+                        </div>
+                      );
+                    })}
                   </div>
                 ))}
               {mixedThread && <p className="error">{mixedThreadReason}</p>}
-            </fieldset>
+            </div>
             <button
               type="button"
-              className="primary"
+              className="primary interaction-run"
               disabled={busy || mixedThread}
               title={mixedThread ? mixedThreadReason : undefined}
               onClick={() => void run()}
@@ -407,56 +789,170 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
           <div className="interaction-body">
             <div className="interaction-monitor-head">
               <strong>Campaign gần đây</strong>
-              <button type="button" className="ghost" onClick={() => void reloadCampaigns()}>Làm mới</button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => void reloadCampaigns()}
+              >
+                Làm mới
+              </button>
             </div>
             <div className="interaction-campaign-list">
               {campaigns.map((campaign) => (
-                <button type="button" key={campaign.id} className="interaction-campaign" onClick={() => void openDetail(campaign)}>
+                <button
+                  type="button"
+                  key={campaign.id}
+                  className="interaction-campaign"
+                  onClick={() => void openDetail(campaign)}
+                >
                   <span className={`status-dot ${campaign.state}`} />
                   <span className="grow">
                     <strong>{campaign.requestId.slice(0, 14)}</strong>
-                    <small>{campaign.targetCount} link · {campaign.succeededMessages}/{campaign.messageCount * campaign.targetCount} message · {stateLabel(campaign.state)}</small>
+                    <small>
+                      {campaign.targetCount} link · {campaign.succeededMessages}
+                      /{campaign.messageCount * campaign.targetCount} message ·{" "}
+                      {stateLabel(campaign.state)}
+                    </small>
                     {/* The reason, not just the word "Lỗi". It was stored from the start and
                         read by nobody, so a failed AI run left the operator with no signal
                         at all — see AGENTS.md 9.33. */}
-                    {campaign.errorCode && <small className="interaction-error">{campaign.errorCode}</small>}
+                    {campaign.errorCode && (
+                      <small className="interaction-error">
+                        {campaign.errorCode}
+                      </small>
+                    )}
                   </span>
                 </button>
               ))}
-              {!campaigns.length && <span className="hint">Chưa có campaign</span>}
+              {!campaigns.length && (
+                <span className="hint">Chưa có campaign</span>
+              )}
             </div>
             {detail && (
               <div className="interaction-detail">
                 <div className="interaction-monitor-head">
                   <strong>{stateLabel(detail.summary.state)}</strong>
-                  {detail.summary.state === "running" && <button type="button" className="danger" onClick={() => void interactionCancel(detail.summary.id)}>Dừng</button>}
+                  {detail.summary.state === "running" && (
+                    <button
+                      type="button"
+                      className="danger"
+                      onClick={() => void interactionCancel(detail.summary.id)}
+                    >
+                      Dừng
+                    </button>
+                  )}
+                  {/* The command has existed since the feature shipped and nothing called
+                      it. Offered only on a campaign that has finished badly: `Sending`,
+                      `Succeeded` and `Uncertain` assignments are excluded server-side
+                      because re-sending a comment that may already be public is the one
+                      thing this must never do. */}
+                  {["partial", "failed", "cancelled"].includes(
+                    detail.summary.state,
+                  ) && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={async () => {
+                        setBusy(true);
+                        try {
+                          await interactionRetry(detail.summary.id);
+                          await reloadCampaigns();
+                          setDetail(await interactionGet(detail.summary.id));
+                          setError(null);
+                        } catch (e) {
+                          setError(describeError(e));
+                        } finally {
+                          setBusy(false);
+                        }
+                      }}
+                    >
+                      Thử lại phần hỏng
+                    </button>
+                  )}
                 </div>
-                {detail.assignments.map((assignment) => {
-                  const shot = artifacts.find(
-                    (item) => item.assignmentId === assignment.id && item.relativePath,
-                  );
-                  return (
-                    <div key={assignment.id} className="interaction-assignment">
-                      <span>#{assignment.ordinal + 1}</span>
-                      <span className="grow">
-                        <strong>{assignment.actorUdid.slice(0, 8)}</strong>
-                        <small>{assignment.preparedText ?? "Chưa chuẩn bị"}</small>
-                        {/* Selected and typed already; simply never shown. A refusal that
+                {/* Grouped by link, which is also grouped by team: `plan_threads` gives
+                    each cohort its own links, so one heading is one conversation on one
+                    post. A flat list of sixty rows from six teams running at once cannot
+                    be read — the ordinals interleave and nothing says which chain a row
+                    belongs to. */}
+                {Object.entries(
+                  detail.assignments.reduce<
+                    Record<string, typeof detail.assignments>
+                  >((byLink, assignment) => {
+                    (byLink[assignment.targetKey] ??= []).push(assignment);
+                    return byLink;
+                  }, {}),
+                ).map(([targetKey, rows]) => (
+                  <div key={targetKey} className="interaction-thread">
+                    <div className="interaction-thread-head">
+                      <strong>{targetKey.replace(/^content:/, "link ")}</strong>
+                      <small>
+                        {rows.filter((row) => row.state === "succeeded").length}
+                        /{rows.length} message
+                      </small>
+                    </div>
+                    {rows.map((assignment) => {
+                      const shot = artifacts.find(
+                        (item) =>
+                          item.assignmentId === assignment.id &&
+                          item.relativePath,
+                      );
+                      return (
+                        <div
+                          key={assignment.id}
+                          className="interaction-assignment"
+                        >
+                          <span>#{assignment.ordinal + 1}</span>
+                          <span className="grow">
+                            <strong>{assignment.actorUdid.slice(0, 8)}</strong>
+                            <small>
+                              {assignment.preparedText ?? "Chưa chuẩn bị"}
+                            </small>
+                            {/* Selected and typed already; simply never shown. A refusal that
                             names its cause is the difference between "Lỗi" and knowing
                             whether the link is dead or the phone was on a LIVE card. */}
-                        {assignment.errorCode && <small className="interaction-error">{assignment.errorCode}</small>}
-                      </span>
-                      {shot && (
-                        <button type="button" className="ghost" onClick={() => void showShot(shot.id)}>
-                          Ảnh
-                        </button>
-                      )}
-                      <span className={`chip ${assignment.state === "succeeded" ? "ok" : assignment.state === "uncertain" ? "warn" : "info"}`}>{stateLabel(assignment.state)}</span>
-                    </div>
-                  );
-                })}
+                            {assignment.errorCode && (
+                              <small className="interaction-error">
+                                {assignment.errorCode}
+                              </small>
+                            )}
+                            {assignment.like && (
+                              <small
+                                className={
+                                  assignment.like.startsWith("đã tim")
+                                    ? "hint"
+                                    : "interaction-error"
+                                }
+                              >
+                                {assignment.like}
+                              </small>
+                            )}
+                          </span>
+                          {shot && (
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={() => void showShot(shot.id)}
+                            >
+                              Ảnh
+                            </button>
+                          )}
+                          <span
+                            className={`chip ${assignment.state === "succeeded" ? "ok" : assignment.state === "uncertain" ? "warn" : "info"}`}
+                          >
+                            {stateLabel(assignment.state)}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
                 {preview && (
-                  <button type="button" className="interaction-shot" onClick={() => setPreview(null)}>
+                  <button
+                    type="button"
+                    className="interaction-shot"
+                    onClick={() => setPreview(null)}
+                  >
                     <img src={preview} alt="Ảnh màn hình khay bình luận" />
                   </button>
                 )}

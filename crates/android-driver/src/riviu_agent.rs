@@ -1,12 +1,19 @@
 //! HTTP client for the Riviu helper APK (`com.riviu.agent`).
 //!
 //! This is **not** the uiautomator2 session in [`crate::agent`]. That server
-//! drives taps, the tree, and `ACTION_SET_TEXT`. This one exists for the two
-//! things uiautomator2 cannot honestly do:
+//! drives taps, the tree, and `ACTION_SET_TEXT`. This one exists for the things
+//! neither that server nor adb can honestly do:
 //!
 //! * clipboard read on Android 10+ (the Appium route returns empty; advertising
 //!   that as success is the lie AGENTS.md §9 forbids);
-//! * MediaStore insert from an app UID, so `is_pending` starts clearable.
+//! * MediaStore insert from an app UID, so `is_pending` starts clearable;
+//! * wallpaper and mock location, both of which need an app context;
+//! * **app names and icons** — `PackageManager.getApplicationLabel` and
+//!   `getApplicationIcon`. adb returns the label as a resource id needing the
+//!   device locale, and no farm phone here has `aapt` (AGENTS.md §9.55/§9.89).
+//!
+//! The list grows, so [`REQUIRED_FEATURES`] and `/status` carry it: a phone with
+//! an older APK is reinstalled once rather than left silently short of a feature.
 //!
 //! The helper IME is enabled for one request and then the previous IME is
 //! restored. Leaving it as the default keyboard is GenFarmer's mark, not ours.
@@ -32,10 +39,66 @@ pub const DEVICE_PORT: u16 = 17980;
 /// Protocol the APK and this client both speak. A newer APK with a different
 /// number is refused rather than half-read.
 pub const PROTOCOL_VERSION: u32 = 1;
-pub const AGENT_VERSION: &str = "0.1.0";
+pub const AGENT_VERSION: &str = "0.4.0";
+
+/// What this build needs the installed helper to advertise on `/status`.
+///
+/// Features and not a version number, deliberately: the question is never "is it 0.3.0", it is
+/// "can it answer the call I am about to make", and a phone can legitimately carry a newer
+/// APK than this build knows about. A helper missing any of these is reinstalled once — see
+/// [`HelperClient::upgrade_if_stale`].
+const REQUIRED_FEATURES: &[&str] = &["clipboard", "pushMedia", "appLabels", "auth"];
+
+/// Serials this process has already tried to upgrade, so a stale APK on disk cannot turn
+/// every helper call into another install attempt.
+fn upgrade_attempts() -> &'static parking_lot::Mutex<std::collections::HashSet<String>> {
+    static ATTEMPTED: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    ATTEMPTED.get_or_init(Default::default)
+}
+
+/// Header the helper's shared token travels in. Mirrors `HttpServer.TOKEN_HEADER`.
+pub const TOKEN_HEADER: &str = "X-Riviu-Token";
+
+/// The token this process uses for one phone, minted on first use.
+///
+/// Per **serial**, not one for the fleet: a token is only as contained as the thing that holds
+/// it, and a helper on one phone has no business being able to answer for another. Per
+/// **process**, not persisted: it lives as long as the desktop does, so there is nothing on
+/// either disk to steal, and a restart simply re-provisions.
+fn helper_token(serial: &str) -> String {
+    static TOKENS: std::sync::OnceLock<
+        parking_lot::Mutex<std::collections::HashMap<String, String>>,
+    > = std::sync::OnceLock::new();
+    let tokens = TOKENS.get_or_init(Default::default);
+    let mut tokens = tokens.lock();
+    tokens
+        .entry(serial.to_string())
+        .or_insert_with(|| {
+            format!(
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            )
+        })
+        .clone()
+}
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
+/// Hard cap on what the host will read back from one helper request.
+///
+/// A timeout alone does not bound a response: a helper — or anything that got to the port
+/// first, since `adb forward` reaches whatever is listening — can stream as fast as USB allows
+/// for the full ten seconds and the host buffers all of it. Twenty phones doing that at once is
+/// an out-of-memory on the desktop from one call.
+///
+/// 8 MiB is chosen against the biggest legitimate response, not against a round number: the
+/// helper's own icon budget is 3 MB of base64 PNG (`AppList.java`), and that budget is
+/// *voluntary* — it only binds an honest server, which is exactly why the host needs its own.
+/// `wda.rs` caps the iOS side the same way at 64 KiB; Android needs more only because app icons
+/// travel on this channel.
+const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 /// One helper connection, cheap to clone (shared HTTP client + serial).
 #[derive(Clone)]
@@ -62,8 +125,67 @@ impl HelperClient {
         start_service(&adb, serial).await?;
         let host_port = forward_helper(&adb, serial).await?;
         let client = Self::at(adb, serial, host_port)?;
-        client.require_status().await?;
+        let status = client.require_status().await?;
+        if let Some(apk) = apk {
+            client.upgrade_if_stale(&status, apk).await;
+        }
         Ok(client)
+    }
+
+    /// Replace a helper that predates a feature this build needs, once per phone per run.
+    ///
+    /// Twenty phones already carry the APK from before `appLabels` existed, and `pm path`
+    /// says only *whether* something is installed — so without this the new feature would be
+    /// silently dead on the whole fleet while `/status` answered happily. That is precisely
+    /// the failure this project's rules call out: a fallback nobody knows is a fallback.
+    ///
+    /// Best effort by design. An upgrade that cannot happen (MIUI refusing an install, no
+    /// bundled APK) must not cost the caller the clipboard call it actually asked for, so
+    /// this logs and returns rather than failing `ensure`. Attempted at most once per serial
+    /// per process, because if the APK on disk is also old the version never advances and a
+    /// retry every call would reinstall forever.
+    async fn upgrade_if_stale(&self, status: &HelperStatus, apk: &Path) {
+        let missing: Vec<&str> = REQUIRED_FEATURES
+            .iter()
+            .copied()
+            .filter(|feature| !status.features.iter().any(|have| have == feature))
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        {
+            let mut attempted = upgrade_attempts().lock();
+            if !attempted.insert(self.serial.clone()) {
+                return;
+            }
+        }
+        tracing::warn!(
+            serial = %self.serial,
+            installed = %status.agent_version,
+            missing = %missing.join(", "),
+            "Riviu helper thiếu tính năng — cài lại APK helper một lần"
+        );
+        if let Err(error) = install_apk(&self.adb, &self.serial, apk).await {
+            tracing::warn!(serial = %self.serial, %error, "cài lại helper thất bại, dùng bản cũ");
+            return;
+        }
+        // The reinstall kills the service; the host-side forward survives it because it is
+        // keyed on the device port, not on the process.
+        if let Err(error) = start_service(&self.adb, &self.serial).await {
+            tracing::warn!(serial = %self.serial, %error, "helper mới chưa khởi động lại được");
+            return;
+        }
+        match self.require_status().await {
+            Ok(fresh) => tracing::info!(
+                serial = %self.serial,
+                version = %fresh.agent_version,
+                features = %fresh.features.join(", "),
+                "helper đã cài lại"
+            ),
+            Err(error) => {
+                tracing::warn!(serial = %self.serial, %error, "helper mới không trả /status")
+            }
+        }
     }
 
     fn at(adb: AdbProgram, serial: &str, host_port: u16) -> anyhow::Result<Self> {
@@ -87,14 +209,12 @@ impl HelperClient {
         let response = self
             .http
             .get(format!("{}/status", self.base))
+            .header(TOKEN_HEADER, helper_token(&self.serial))
             .send()
             .await
             .with_context(|| format!("GET {}/status", self.base))?;
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .with_context(|| format!("đọc /status từ helper trên {}", self.serial))?;
+        let body = read_capped(response, "/status").await?;
         if !status.is_success() {
             anyhow::bail!(
                 "Riviu helper trên {} trả HTTP {status} cho /status: {body}",
@@ -159,27 +279,84 @@ impl HelperClient {
         parse_media_import(&value)
     }
 
-    pub async fn delete_media(&self, id: &str) -> anyhow::Result<()> {
+    /// Set the device wallpaper from a file already on the device (feature A3). The caller
+    /// pushes the PNG to `device_path` first (e.g. `/data/local/tmp/...`).
+    pub async fn set_wallpaper(&self, device_path: &str) -> anyhow::Result<()> {
         let value = self
-            .post_json("/v1/media/delete", json!({ "id": id }))
+            .post_json("/v1/wallpaper/set", json!({ "path": device_path }))
             .await?;
-        require_ok(&value, "media delete")?;
+        require_ok(&value, "set wallpaper")?;
         Ok(())
+    }
+
+    /// Inject a mock GPS location (feature B). Requires the helper to be the selected
+    /// mock-location app — the caller grants that with `appops set <pkg> android:mock_location
+    /// allow` before the first call.
+    pub async fn set_mock_location(&self, lat: f64, lng: f64) -> anyhow::Result<()> {
+        let value = self
+            .post_json("/v1/location/set", json!({ "lat": lat, "lng": lng }))
+            .await?;
+        require_ok(&value, "set mock location")?;
+        Ok(())
+    }
+
+    /// Remove the mock-location test providers, so the device returns to its real GPS.
+    pub async fn stop_mock_location(&self) -> anyhow::Result<()> {
+        let value = self.post_json("/v1/location/stop", json!({})).await?;
+        require_ok(&value, "stop mock location")?;
+        Ok(())
+    }
+
+    /// Ask the phone what a list of packages is *called* and what they look like.
+    ///
+    /// The one question adb cannot answer: a label is a resource id needing the device's own
+    /// locale, and no farm phone here has `aapt` (AGENTS.md §9.55). On the device it is one
+    /// `PackageManager` call per app, so the whole fleet's app names cost one HTTP request per
+    /// phone.
+    ///
+    /// `packages` is the list adb already gave the caller, so the helper never decides which
+    /// apps exist — only what they are named and what icon they carry. An empty list asks the
+    /// helper for everything the launcher would show, which is a different (narrower)
+    /// question and is only useful to a caller that has no list of its own.
+    pub async fn describe_apps(
+        &self,
+        packages: &[String],
+        with_icons: bool,
+    ) -> anyhow::Result<Vec<HelperApp>> {
+        let value = self
+            .post_json(
+                "/v1/apps/describe",
+                json!({ "packages": packages, "icons": with_icons }),
+            )
+            .await
+            .map_err(|error| {
+                // A helper from before this endpoint answers `not_found`, and the useful
+                // sentence names the fix rather than the HTTP status.
+                if format!("{error:#}").contains("not_found") {
+                    anyhow!(
+                        "Riviu helper trên {} quá cũ (chưa có /v1/apps/describe) — cài lại APK \
+                         helper để lấy tên và icon app",
+                        self.serial
+                    )
+                } else {
+                    error
+                }
+            })?;
+        require_ok(&value, "describe apps")?;
+        parse_described_apps(&value)
     }
 
     async fn post_json(&self, path: &str, body: Value) -> anyhow::Result<Value> {
         let response = self
             .http
             .post(format!("{}{path}", self.base))
+            .header(TOKEN_HEADER, helper_token(&self.serial))
             .json(&body)
             .send()
             .await
             .with_context(|| format!("POST {}{path}", self.base))?;
         let status = response.status();
-        let text = response
-            .text()
-            .await
-            .with_context(|| format!("đọc {path}"))?;
+        let text = read_capped(response, path).await?;
         let value: Value = serde_json::from_str(&text)
             .with_context(|| format!("helper {path} không phải JSON: {text}"))?;
         if !status.is_success() && value.get("ok") != Some(&Value::Bool(true)) {
@@ -217,6 +394,53 @@ pub struct HelperStatus {
     pub features: Vec<String>,
 }
 
+/// One app as the phone itself describes it: the name a person sees, and its icon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelperApp {
+    pub package: String,
+    pub label: String,
+    pub system: bool,
+    /// Base64 PNG, at the size the helper rendered. `None` when the icon could not be drawn
+    /// (measured: a handful of system packages have none) or when the caller asked for no
+    /// icons — never a placeholder, so the UI can tell "no icon" from "a grey square".
+    pub icon_png_base64: Option<String>,
+}
+
+/// Read the `/v1/apps/describe` reply.
+///
+/// A row with no `package` is dropped rather than defaulted: the package name is the key the
+/// desktop joins this onto its own listing by, and a row that cannot be joined is not a row.
+pub fn parse_described_apps(value: &Value) -> anyhow::Result<Vec<HelperApp>> {
+    let apps = value
+        .get("apps")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("helper apps/describe had no apps array: {value}"))?;
+    let mut out = Vec::with_capacity(apps.len());
+    for row in apps {
+        let Some(package) = row.get("package").and_then(Value::as_str) else {
+            continue;
+        };
+        if package.is_empty() {
+            continue;
+        }
+        out.push(HelperApp {
+            package: package.to_string(),
+            label: row
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or(package)
+                .to_string(),
+            system: row.get("system").and_then(Value::as_bool).unwrap_or(false),
+            icon_png_base64: row
+                .get("icon")
+                .and_then(Value::as_str)
+                .filter(|icon| !icon.is_empty())
+                .map(str::to_string),
+        });
+    }
+    Ok(out)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaImport {
     pub id: String,
@@ -238,6 +462,27 @@ pub fn resolve_apk_path(
                 .map(PathBuf::from)
         })
         .or(bundled)
+}
+
+/// Read a helper response into a `String`, refusing anything over [`MAX_RESPONSE_BYTES`].
+///
+/// Streamed rather than `response.text()` so the cap is enforced *while* reading: `text()`
+/// buffers the whole body first, which is the allocation being defended against, so checking
+/// its length afterwards would be checking after the damage. Same shape as `wda.rs`.
+async fn read_capped(response: reqwest::Response, what: &str) -> anyhow::Result<String> {
+    let mut response = response;
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .with_context(|| format!("đọc {what} từ helper"))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+            anyhow::bail!("helper trả lời {what} quá {MAX_RESPONSE_BYTES} byte — đã cắt kết nối");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).with_context(|| format!("{what} từ helper không phải UTF-8"))
 }
 
 pub fn parse_status(body: &str) -> anyhow::Result<HelperStatus> {
@@ -418,11 +663,23 @@ async fn enable_ime(adb: &AdbProgram, serial: &str) -> anyhow::Result<()> {
         .with_context(|| format!("ime enable {IME_ID} on {serial}"))
 }
 
+/// Start the helper service, handing it the token it must then demand on every request.
+///
+/// The token goes as an Intent extra rather than a file or a property: it reaches exactly one
+/// process, leaves nothing behind on the device, and a helper started by anyone *else* — which
+/// an exported service always allows — comes up with no token and therefore serves nothing.
 async fn start_service(adb: &AdbProgram, serial: &str) -> anyhow::Result<()> {
-    adb.shell(serial, &format!("am start-foreground-service -n {SERVICE}"))
-        .await
-        .map(|_| ())
-        .with_context(|| format!("start {SERVICE} on {serial}"))
+    let token = helper_token(serial);
+    // Token is hex from `Uuid::simple`, so it needs no quoting; asserted rather than assumed,
+    // because this string is pasted into a device shell command.
+    debug_assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+    adb.shell(
+        serial,
+        &format!("am start-foreground-service -n {SERVICE} --es token {token}"),
+    )
+    .await
+    .map(|_| ())
+    .with_context(|| format!("start {SERVICE} on {serial}"))
 }
 
 async fn current_ime(adb: &AdbProgram, serial: &str) -> anyhow::Result<String> {
@@ -512,6 +769,53 @@ mod tests {
         assert_eq!(status.protocol_version, 1);
         assert_eq!(status.agent_version, "0.1.0");
         assert_eq!(status.features, ["clipboard", "pushMedia"]);
+    }
+
+    /// The real reply, trimmed from `POST /v1/apps/describe` on 23021RAAEG (Android 15,
+    /// helper 0.3.0, 21/08/2026) — labels the phone resolved off `PackageManager`, which is
+    /// the whole reason this endpoint exists.
+    #[test]
+    fn described_apps_carry_the_names_the_phone_resolved() {
+        let value: Value = serde_json::from_str(
+            r#"{"ok":true,"apps":[
+                {"package":"com.kakaopay.app","label":"kakaopay","system":false},
+                {"package":"com.gojek.gopay","label":"GoPay","system":false,"icon":"iVBORw0KGgo="},
+                {"package":"com.android.settings","label":"Cài đặt","system":true}
+            ],"iconPx":48,"iconsTruncated":0}"#,
+        )
+        .expect("wire");
+        let apps = parse_described_apps(&value).expect("parse");
+        assert_eq!(apps.len(), 3);
+        assert_eq!(apps[0].label, "kakaopay");
+        assert_eq!(apps[0].icon_png_base64, None);
+        assert_eq!(apps[1].icon_png_base64.as_deref(), Some("iVBORw0KGgo="));
+        assert!(
+            apps[2].system,
+            "the system partition is flagged, not hidden"
+        );
+    }
+
+    #[test]
+    fn a_row_with_no_package_is_dropped_because_nothing_can_be_joined_onto_it() {
+        // The package name is the key the desktop joins this onto its own adb listing by, so
+        // a row without one is not a row — and defaulting it to "" would attach a stranger's
+        // name to whichever app sorted first.
+        let value: Value = serde_json::from_str(
+            r#"{"ok":true,"apps":[{"label":"ghost"},{"package":"","label":"also ghost"},
+                {"package":"com.real.app"}]}"#,
+        )
+        .expect("wire");
+        let apps = parse_described_apps(&value).expect("parse");
+        assert_eq!(apps.len(), 1);
+        // No label of its own: falls back to the package name rather than to empty text.
+        assert_eq!(apps[0].label, "com.real.app");
+    }
+
+    #[test]
+    fn a_reply_without_an_apps_array_is_an_error_not_an_empty_fleet() {
+        let value: Value = serde_json::from_str(r#"{"ok":true}"#).expect("wire");
+        let error = parse_described_apps(&value).expect_err("no apps array");
+        assert!(error.to_string().contains("apps"), "{error}");
     }
 
     #[test]

@@ -24,6 +24,12 @@ const KEYCODE_POWER: i64 = 26;
 const KEYCODE_NOTIFICATION: i64 = 83;
 /// `KEYCODE_APP_SWITCH` — Recents.
 const KEYCODE_APP_SWITCH: i64 = 187;
+/// `KEYCODE_SLEEP` — screen off / lock, deterministically (POWER only toggles).
+const KEYCODE_SLEEP: i64 = 223;
+/// `KEYCODE_WAKEUP` — screen on, deterministically.
+const KEYCODE_WAKEUP: i64 = 224;
+/// `KEYCODE_MENU` — dismisses a swipe-only keyguard on many builds.
+const KEYCODE_MENU: i64 = 82;
 
 pub(crate) fn hardware_keycode(key: HardwareKey) -> i64 {
     match key {
@@ -37,13 +43,77 @@ pub(crate) fn hardware_keycode(key: HardwareKey) -> i64 {
     }
 }
 
+/// One serial's current screen size, shared by every session handed out for it.
+///
+/// A plain `(f64, f64)` field was wrong in a way that only shows up on a rotated phone: it
+/// was captured once from `wm size` when the session opened and never refreshed, so every
+/// coordinate scaled after a rotation went to the wrong place — and silently, because a tap
+/// that lands somewhere unintended looks exactly like a tap the app ignored.
+///
+/// **`wm size` cannot be the refresh source**, which is the load-bearing part of this design.
+/// Measured 16/08/2026 on SM-G955F, screen turned to landscape with Settings in front:
+///
+/// ```text
+/// wm size            Override size: 1080x2220   ->  Override size: 1080x2220   (unchanged)
+/// dumpsys display    real 1080 x 2220           ->  real 2220 x 1080           (swapped)
+/// ```
+///
+/// `wm size` reports the display's base/override configuration, which has no orientation in
+/// it at all — the same reason `frames.rs` feeds that tuple to minicap as `real=WxH` while
+/// passing rotation as a separate argument. Re-running it after a rotation returns the
+/// identical numbers and fixes nothing. The refresh therefore goes through the agent's
+/// `/window/current/size`, which is the current window and rides the already-open forward.
+///
+/// Shared rather than copied so that invalidating reaches sessions already handed out — the
+/// same reason `AgentClient` memoises its session id per serial.
+#[derive(Clone, Default)]
+pub(crate) struct ScreenCache(std::sync::Arc<parking_lot::Mutex<Option<(f64, f64)>>>);
+
+impl ScreenCache {
+    pub(crate) fn seeded(size: (f64, f64)) -> Self {
+        Self(std::sync::Arc::new(parking_lot::Mutex::new(Some(size))))
+    }
+
+    pub(crate) fn peek(&self) -> Option<(f64, f64)> {
+        *self.0.lock()
+    }
+
+    pub(crate) fn store(&self, size: (f64, f64)) {
+        *self.0.lock() = Some(size);
+    }
+
+    pub(crate) fn invalidate(&self) {
+        *self.0.lock() = None;
+    }
+
+    /// Whether the frame being pointed at proves the cached size is stale.
+    ///
+    /// The overlay hands in the size of the frame the operator actually clicked on, so a
+    /// landscape frame against a portrait cache is not a suspicion — it is a contradiction,
+    /// and it needs no clock and no timeout to detect. That is what catches the rotations
+    /// nobody asked us for: auto-rotate, a physical turn, an app that comes up landscape.
+    ///
+    /// A square or degenerate frame answers `false`, so this can never add a round trip to
+    /// the ordinary path.
+    pub(crate) fn contradicted_by(&self, image_w: f64, image_h: f64) -> bool {
+        let Some((width, height)) = self.peek() else {
+            return false;
+        };
+        if image_w <= 0.0 || image_h <= 0.0 || width <= 0.0 || height <= 0.0 {
+            return false;
+        }
+        let frame_landscape = image_w > image_h;
+        let cache_landscape = width > height;
+        image_w != image_h && width != height && frame_landscape != cache_landscape
+    }
+}
+
 pub struct AndroidUiSession {
     agent: AgentClient,
     adb: AdbProgram,
     serial: String,
-    /// Rendered screen size in device pixels — the *override* size, which is
-    /// what everything on screen is measured in.
-    screen: (f64, f64),
+    /// The live screen size, refreshed rather than captured once. See [`ScreenCache`].
+    screen: ScreenCache,
     /// Present only when `com.riviu.agent` answered `/status`. Missing means
     /// clipboard stays the trait default (`unsupported`) — never the empty
     /// uiautomator2 body.
@@ -56,9 +126,16 @@ impl AndroidUiSession {
             agent,
             adb,
             serial,
-            screen,
+            screen: ScreenCache::seeded(screen),
             helper: None,
         }
+    }
+
+    /// Share the driver's per-serial cache instead of this session's private one, so an
+    /// invalidation reaches a session that was handed out before the rotation.
+    pub(crate) fn with_screen_cache(mut self, screen: ScreenCache) -> Self {
+        self.screen = screen;
+        self
     }
 
     pub(crate) fn with_helper(mut self, helper: Option<HelperClient>) -> Self {
@@ -122,8 +199,47 @@ impl AndroidUiSession {
         self.agent.rect(&element).await.map(Some)
     }
 
-    fn image_to_screen(&self, x: f64, y: f64, image_w: f64, image_h: f64) -> (f64, f64) {
-        scale_to_screen(x, y, image_w, image_h, self.screen)
+    /// The screen size to scale this frame against, refreshing it if it is missing or if the
+    /// frame contradicts it.
+    ///
+    /// Resolved **once per gesture**, never per point: `/actions` takes a whole path in one
+    /// round trip, and doing this inside the per-point closure would turn a fifty-point drag
+    /// into fifty screen reads.
+    ///
+    /// A failed read falls back to the last known size rather than propagating. A stale
+    /// scale still puts a finger on the phone; an `Err` loses the gesture outright, and for
+    /// the nurture engine it aborts the whole session.
+    async fn resolve_screen(&self, image_w: f64, image_h: f64) -> (f64, f64) {
+        let cached = self.screen.peek();
+        if let Some(size) = cached {
+            if !self.screen.contradicted_by(image_w, image_h) {
+                return size;
+            }
+        }
+        match self.agent.window_size().await {
+            Ok(size) => {
+                self.screen.store(size);
+                size
+            }
+            Err(error) => match cached {
+                Some(size) => {
+                    tracing::warn!(
+                        serial = %self.serial,
+                        %error,
+                        "could not re-read the screen size; scaling against the last known one"
+                    );
+                    size
+                }
+                None => {
+                    tracing::warn!(
+                        serial = %self.serial,
+                        %error,
+                        "no screen size available; passing image coordinates through unscaled"
+                    );
+                    (image_w, image_h)
+                }
+            },
+        }
     }
 }
 
@@ -190,8 +306,42 @@ impl UiSession for AndroidUiSession {
         self.agent.swipe_path(&path).await
     }
 
+    /// Scale every point of the path, then send the whole curve in one round trip.
+    ///
+    /// One request, not one per step: the agent's `/actions` takes an arbitrary number of
+    /// `pointerMove`s with individual durations, so a fifty-point drag costs the same trip
+    /// as a two-point one. That is the whole reason the overlay can afford to send what the
+    /// finger actually did instead of a straight line between the endpoints.
+    async fn swipe_path_image(
+        &self,
+        path: riviu_core::types::SwipePath,
+        image_w: f64,
+        image_h: f64,
+    ) -> anyhow::Result<()> {
+        // Once for the whole path, before the closure. See `resolve_screen`.
+        let screen = self.resolve_screen(image_w, image_h).await;
+        let scale = |point: &riviu_core::types::TapPoint| {
+            let (x, y) = scale_to_screen(point.x, point.y, image_w, image_h, screen);
+            riviu_core::types::TapPoint { x, y }
+        };
+        let scaled = riviu_core::types::SwipePath {
+            start: scale(&path.start),
+            steps: path
+                .steps
+                .iter()
+                .map(|step| riviu_core::types::SwipeStep {
+                    point: scale(&step.point),
+                    duration_ms: step.duration_ms,
+                })
+                .collect(),
+            settle_ms: path.settle_ms,
+        };
+        self.agent.swipe_path(&scaled).await
+    }
+
     async fn tap_image(&self, x: f64, y: f64, image_w: f64, image_h: f64) -> anyhow::Result<()> {
-        let (x, y) = self.image_to_screen(x, y, image_w, image_h);
+        let screen = self.resolve_screen(image_w, image_h).await;
+        let (x, y) = scale_to_screen(x, y, image_w, image_h, screen);
         // Overlay / Open-on-Device: a 16 ms contact, no nurture drift.
         // `tap()` keeps the 45–130 ms human contact for the farm loop.
         self.agent.tap_direct(x, y).await
@@ -205,8 +355,10 @@ impl UiSession for AndroidUiSession {
         image_h: f64,
         duration_ms: u64,
     ) -> anyhow::Result<()> {
-        let from = self.image_to_screen(from.x, from.y, image_w, image_h);
-        let to = self.image_to_screen(to.x, to.y, image_w, image_h);
+        // One resolve for both endpoints -- they are the same gesture on the same screen.
+        let screen = self.resolve_screen(image_w, image_h).await;
+        let from = scale_to_screen(from.x, from.y, image_w, image_h, screen);
+        let to = scale_to_screen(to.x, to.y, image_w, image_h, screen);
         self.agent.swipe(from, to, duration_ms).await
     }
 
@@ -264,6 +416,20 @@ impl UiSession for AndroidUiSession {
         self.agent.press_key(hardware_keycode(key)).await
     }
 
+    /// Sleep locks; wake then nudges past a swipe-only keyguard.
+    ///
+    /// A secure PIN is deliberately left alone — this is a screen on/off for the fleet, not
+    /// a lock-screen bypass, so a PIN-protected phone wakes to its own lock screen.
+    async fn set_locked(&self, locked: bool) -> anyhow::Result<()> {
+        if locked {
+            self.agent.press_key(KEYCODE_SLEEP).await
+        } else {
+            self.agent.press_key(KEYCODE_WAKEUP).await?;
+            let _ = self.agent.press_key(KEYCODE_MENU).await;
+            Ok(())
+        }
+    }
+
     /// Find by `content-desc`, then touch it like a finger would.
     ///
     /// Resolves bounds first and taps inside them instead of issuing an
@@ -292,8 +458,19 @@ impl UiSession for AndroidUiSession {
         self.agent.window_size().await.is_ok()
     }
 
+    /// The cached size, read from the device only when there is nothing cached.
+    ///
+    /// Deliberately not a device call every time. Several callers treat this as free — the
+    /// nurture planner reads it before each action, and `interaction_commands` reads it
+    /// mid-run — and the G1 probe's "window_size 0 ms" is this cached read, not a round
+    /// trip. `healthy()` exists to be the live probe.
     async fn window_size(&self) -> anyhow::Result<(f64, f64)> {
-        Ok(self.screen)
+        if let Some(size) = self.screen.peek() {
+            return Ok(size);
+        }
+        let size = self.agent.window_size().await?;
+        self.screen.store(size);
+        Ok(size)
     }
 
     async fn launch_app_foreground(&self, bundle_id: &str) -> anyhow::Result<()> {
@@ -305,6 +482,22 @@ impl UiSession for AndroidUiSession {
             )
             .await
             .map(|_| ())
+    }
+
+    /// `am force-stop` and then launch, which on this platform is a real restart.
+    ///
+    /// The default would only re-raise a process that is already in front, and that is
+    /// exactly the case this exists for: a TikTok whose feed has run dry shows the same
+    /// card no matter how many times it is launched, and comes back with a new one after
+    /// being stopped. Measured on ce051715081fe20f03, 18/08/2026.
+    async fn restart_app(&self, bundle_id: &str) -> anyhow::Result<()> {
+        let package = crate::adb::validate_package_name(bundle_id)?;
+        // A force-stop on a package that is not running is not an error, so this needs no
+        // check first.
+        self.adb
+            .shell(&self.serial, &format!("am force-stop {package}"))
+            .await?;
+        self.launch_app_foreground(bundle_id).await
     }
 
     async fn active_app_bundle(&self) -> anyhow::Result<String> {
@@ -650,5 +843,76 @@ mod tests {
         let screen = (1080.0, 2220.0);
         assert_eq!(scale_to_screen(10.0, 20.0, 0.0, 0.0, screen), (10.0, 20.0));
         assert_eq!(scale_to_screen(10.0, 20.0, -1.0, 5.0, screen), (10.0, 20.0));
+    }
+
+    #[test]
+    fn a_rotated_phone_scaled_against_the_stale_screen_lands_off_the_display() {
+        // The bug, in numbers. The phone is turned to landscape, so the frame the operator
+        // clicks is 2220x1080 -- but the session captured 1080x2220 from `wm size` when it
+        // opened and `wm size` does not follow rotation (measured; see `ScreenCache`).
+        //
+        // A tap in the middle of that frame, scaled against the stale portrait size, does
+        // not merely land somewhere else. It lands off the screen entirely, which is why the
+        // failure is silent: nothing happens, and nothing can report that nothing happened.
+        let stale = (1080.0, 2220.0);
+        let (x, y) = scale_to_screen(1110.0, 540.0, 2220.0, 1080.0, stale);
+        assert!(
+            x > 2220.0 || y > 1080.0,
+            "a centre tap scaled against the stale size should be off the rotated display, \
+             got ({x}, {y})"
+        );
+
+        // Against the refreshed size it is the centre, exactly.
+        let live = (2220.0, 1080.0);
+        assert_eq!(
+            scale_to_screen(1110.0, 540.0, 2220.0, 1080.0, live),
+            (1110.0, 540.0)
+        );
+    }
+
+    #[test]
+    fn a_landscape_frame_contradicts_a_portrait_cache() {
+        let cache = ScreenCache::seeded((1080.0, 2220.0));
+        assert!(
+            cache.contradicted_by(2220.0, 1080.0),
+            "landscape frame, portrait cache"
+        );
+        // The half-scale portrait frame pinned by the scaling test above is NOT a
+        // contradiction -- it is the ordinary case and must not cost a round trip.
+        assert!(!cache.contradicted_by(540.0, 1110.0));
+        assert!(!cache.contradicted_by(1080.0, 2220.0));
+    }
+
+    #[test]
+    fn a_square_or_degenerate_frame_never_forces_a_refresh() {
+        // Otherwise this would add an agent read to gestures that carry no orientation
+        // information at all, on every device, forever.
+        let cache = ScreenCache::seeded((1080.0, 2220.0));
+        assert!(!cache.contradicted_by(600.0, 600.0));
+        assert!(!cache.contradicted_by(0.0, 0.0));
+        assert!(!cache.contradicted_by(-1.0, 5.0));
+        // And an empty cache cannot be contradicted -- there is nothing to disagree with.
+        let empty = ScreenCache::default();
+        assert!(!empty.contradicted_by(2220.0, 1080.0));
+    }
+
+    #[test]
+    fn invalidating_one_handle_invalidates_the_session_already_handed_out() {
+        // The property the whole fix rests on. A session opened before the rotate button was
+        // pressed must see the invalidation, or the fix only helps sessions opened later --
+        // which is to say, not the one the operator is using.
+        let held_by_a_session = ScreenCache::seeded((1080.0, 2220.0));
+        let held_by_the_driver = held_by_a_session.clone();
+        assert_eq!(held_by_a_session.peek(), Some((1080.0, 2220.0)));
+
+        held_by_the_driver.invalidate();
+        assert_eq!(
+            held_by_a_session.peek(),
+            None,
+            "the session is still scaling against a size the driver has thrown away"
+        );
+
+        held_by_the_driver.store((2220.0, 1080.0));
+        assert_eq!(held_by_a_session.peek(), Some((2220.0, 1080.0)));
     }
 }

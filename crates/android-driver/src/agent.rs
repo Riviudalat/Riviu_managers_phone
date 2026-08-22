@@ -170,10 +170,23 @@ impl Rect {
 /// Matched as a substring because the message carries a varying millisecond count.
 const STALE_TREE_MARKER: &str = "waiting for the root AccessibilityNodeInfo";
 
+/// Past this, an operator gesture is something they can feel.
+///
+/// A tap is one `/actions` round trip and measures 130–280 ms on this fleet, and the slowest
+/// legitimate element query recorded is ~10 s. Half a second is comfortably above the first
+/// and far below the second, so it catches "control got sluggish" without printing a line for
+/// every hierarchy read.
+const SLOW_AGENT_CALL: Duration = Duration::from_millis(500);
+
 #[derive(Clone)]
 pub struct AgentClient {
     http: reqwest::Client,
     base: String,
+    /// Carried only so a slow or failing call can name the phone it was talking to.
+    ///
+    /// `base=http://127.0.0.1:6795` is technically the same fact and practically useless:
+    /// nobody holds the port-to-serial map in their head while reading a log.
+    serial: String,
     /// Shared and swappable, so recycling a degraded session fixes **every** clone —
     /// including the `AndroidUiSession` already handed to a running loop.
     session_id: Arc<Mutex<String>>,
@@ -181,7 +194,10 @@ pub struct AgentClient {
 
 impl AgentClient {
     /// Open a session against an agent already listening on `base`.
-    pub async fn connect(base: impl Into<String>) -> anyhow::Result<Self> {
+    pub async fn connect(
+        serial: impl Into<String>,
+        base: impl Into<String>,
+    ) -> anyhow::Result<Self> {
         let base = base.into().trim_end_matches('/').to_string();
         // 30 s, from measurements rather than from caution. The slowest *legitimate*
         // element query recorded against this server is 10,2–10,5 s (the S8+ fleet under a
@@ -216,6 +232,7 @@ impl AgentClient {
         let client = Self {
             http,
             base,
+            serial: serial.into(),
             session_id: Arc::new(Mutex::new(session_id)),
         };
         client.prime_session().await?;
@@ -283,6 +300,15 @@ impl AgentClient {
     /// wait out the server's hardcoded root-node timeout and make a healthy agent look
     /// broken. `find` maps a genuine absence to `Ok(None)`, which counts as alive: this
     /// asks whether the tree is readable, not what is in it.
+    /// What one element query costs against an agent that has lost `UiAutomation`.
+    ///
+    /// Not a timeout of ours — it is the server's own hardcoded root-`AccessibilityNodeInfo`
+    /// deadline, and there is no setting that reaches it. Measured twice on this fleet at
+    /// 10 116 ms and 10 132 ms; rounded up so a derivation built on it cannot come out
+    /// short. Callers use it to reason about how long a *failing* agent takes to admit it
+    /// is failing, which is the number that sizes recovery windows.
+    pub const BLIND_QUERY_COST: Duration = Duration::from_secs(11);
+
     pub async fn is_alive(&self) -> bool {
         self.find(&Locator::ClassName("android.widget.FrameLayout".into()))
             .await
@@ -385,10 +411,25 @@ impl AgentClient {
         if let Some(body) = body {
             request = request.json(&body);
         }
+        // Every operator gesture ends here, so this is where "control feels sluggish" either
+        // is or is not true — and until now nothing measured it. A tap is one `/actions`
+        // round trip over the adb forward; measured on this fleet it should be 130–280 ms,
+        // so anything past half a second is the thing the operator is complaining about and
+        // it should be in the log with the device and the route on it.
+        let started = std::time::Instant::now();
         let response = request
             .send()
             .await
             .with_context(|| format!("gọi agent {suffix}"))?;
+        let elapsed = started.elapsed();
+        if elapsed >= SLOW_AGENT_CALL {
+            tracing::warn!(
+                serial = %self.serial,
+                route = suffix,
+                ms = elapsed.as_millis() as u64,
+                "agent call was slow"
+            );
+        }
         let status = response.status();
         // Read as bytes and decode UTF-8 ourselves. The server answers without a
         // charset for some routes, and letting a client guess is exactly how

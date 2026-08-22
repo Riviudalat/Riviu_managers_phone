@@ -939,12 +939,17 @@ def verify_packaged_resources(
                 "sign-install-wda",
                 "--udid",
                 "FIXTURE_ONLY",
-                "--apple-id",
-                "fixture@example.test",
-                "--password",
-                "FIXTURE_ONLY",
             ],
             cwd=REPOSITORY_ROOT,
+            # Credentials by environment, never argv — the signer stopped accepting
+            # `--apple-id`/`--password` because a Windows command line is readable by every
+            # process running as the same user. Passed here anyway so this smoke test keeps
+            # exercising the same path the desktop uses.
+            env={
+                **os.environ,
+                "RIVIU_APPLE_ID": "fixture@example.test",
+                "RIVIU_APPLE_PASSWORD": "FIXTURE_ONLY",
+            },
             capture_output=True,
             text=True,
             encoding="utf-8",

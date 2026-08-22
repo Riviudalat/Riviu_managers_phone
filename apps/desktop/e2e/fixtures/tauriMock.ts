@@ -379,13 +379,41 @@ export async function installTauriMock(
         resourceClass: "uiSession",
         allowedEvidence: ["accessibilityVisible"],
       }),
-      definition("rawHttp", "Raw HTTP", "app", { type: "object", properties: {} }, {
+      // The two vision actions were missing from this fixture, and `ifVision` missing is
+      // how the palette bug it guards against stayed invisible: the baseline screenshot
+      // showed a workspace whose only branching action did not exist in the catalog, so
+      // the palette dropping it changed nothing on screen. Categories match
+      // `catalog.rs::category` exactly, including the raw three sitting under `control`.
+      definition("tapVision", "Tap Vision", "input", {
+        type: "object",
+        properties: {
+          templatePngBase64: { type: "string" },
+          threshold: { type: "number", minimum: 0, maximum: 1 },
+        },
+      }, {
+        resourceClass: "uiWithStream",
+        sideEffectClass: "ambiguousUi",
+        evidenceRequirement: "frame",
+        allowedEvidence: ["frameRegionChanged"],
+        reconciliationPolicy: "readFrame",
+        retryPolicy: "beforeDispatchOnly",
+      }),
+      definition("ifVision", "If Vision", "control", {
+        type: "object",
+        properties: {
+          templatePngBase64: { type: "string" },
+          threshold: { type: "number", minimum: 0, maximum: 1 },
+        },
+      }, {
+        resourceClass: "uiWithStream",
+      }),
+      definition("rawHttp", "Raw HTTP", "control", { type: "object", properties: {} }, {
         disabledReason: "Raw HTTP is not available in Flow V2 release 1.",
       }),
-      definition("rawWda", "Raw WDA", "app", { type: "object", properties: {} }, {
+      definition("rawWda", "Raw WDA", "control", { type: "object", properties: {} }, {
         disabledReason: "Raw WDA is not available in Flow V2 release 1.",
       }),
-      definition("shell", "Shell", "app", { type: "object", properties: {} }, {
+      definition("shell", "Shell", "control", { type: "object", properties: {} }, {
         disabledReason: "Shell is not available in Flow V2 release 1.",
       }),
     ];
@@ -564,11 +592,11 @@ export async function installTauriMock(
     commandHandlers.set("list_jobs", () => []);
     commandHandlers.set("get_stream_settings", () => ({
       fps: 24,
-      tileSize: "medium",
       gridQuality: "medium",
       focusQuality: "high",
     }));
-    commandHandlers.set("auth_session", () => ({ showAuthUi: false, bypassed: true, user: null }));
+    // The Settings panel can now write these, and `invoke` throws for anything unregistered.
+    commandHandlers.set("set_stream_settings", (args) => clone(args?.settings ?? null));
     commandHandlers.set("flow_action_catalog", () => clone(catalog));
     commandHandlers.set("flow_list", () => {
       const seen = new Set<string>();
@@ -714,6 +742,14 @@ export async function installTauriMock(
     commandHandlers.set("view_endpoint", () => null);
     commandHandlers.set("view_ensure", () => null);
     commandHandlers.set("view_set_preset", () => null);
+    commandHandlers.set("view_request_keyframe", () => true);
+    // The view store posts this on its own 2 s tick as soon as any device has a beat, so it
+    // is reached without a spec doing anything.
+    commandHandlers.set("view_report_paint", () => null);
+    // Overlay rows: only reached on a click, but `invoke` throws for anything unregistered
+    // and the registry here is the contract rather than a convenience.
+    commandHandlers.set("import_media", () => "ok");
+    commandHandlers.set("export_media", () => 0);
     commandHandlers.set("save_view_snapshot", () => "");
     // Registered because `invoke` throws `Unknown mock command` for anything absent,
     // and the Settings tab calls neither on mount but offers both as buttons.
@@ -726,6 +762,58 @@ export async function installTauriMock(
     commandHandlers.set("update_install", () => null);
     commandHandlers.set("list_installed_apps", () => []);
     commandHandlers.set("list_groups", () => []);
+    // Everything the Settings page asks for on mount. Absent, each of these rejected and the
+    // page rendered `Unknown mock command: …` in red — and because five of them race, *which*
+    // name landed in the banner varied, so the page's screenshot baseline was pinning a
+    // different error message from run to run. That is the "pre-existing Settings drift" this
+    // repo has been carrying: not a rendering change, an unfinished fixture.
+    commandHandlers.set("agent_get_settings", () => ({
+      settings: { autoRepair: true },
+      tokenConfigured: true,
+      activeArtifactId: "riviu-agent-ios-candidate",
+      activeArtifactVersion: "0.5.8-media-text",
+    }));
+    const fixtureAgentStatus = (udid: string) => ({
+      udid,
+      state: "ready",
+      artifactId: "riviu-agent-ios-candidate",
+      artifactVersion: "0.5.8-media-text",
+      bundleId: "com.riviu.managersphone.agent.xctrunner",
+      protocolVersion: 1,
+      features: ["stream", "gesture", "text"],
+      installedVersion: "10.6.2",
+      installedBuild: "274",
+      authReady: true,
+      mjpegReady: true,
+      sessionReady: true,
+      message: null,
+    });
+    commandHandlers.set("agent_list_statuses", (args) => {
+      const udids = Array.isArray(args.udids) ? (args.udids as string[]) : [];
+      return udids.map(fixtureAgentStatus);
+    });
+    commandHandlers.set("agent_save_settings", () => ({
+      settings: { autoRepair: true },
+      tokenConfigured: true,
+      activeArtifactId: "riviu-agent-ios-candidate",
+      activeArtifactVersion: "0.5.8-media-text",
+    }));
+    commandHandlers.set("agent_preflight", (args) => fixtureAgentStatus(String(args.udid ?? "")));
+    commandHandlers.set("agent_repair", (args) => fixtureAgentStatus(String(args.udid ?? "")));
+    commandHandlers.set("local_api_get_config", () => ({
+      enabled: false,
+      port: 17999,
+      token: "",
+    }));
+    commandHandlers.set("local_api_set_config", (args) => args.config ?? null);
+    commandHandlers.set("get_apple_id", () => ({ email: "", hasPassword: false }));
+    commandHandlers.set("driver_mode", () => "mock");
+    commandHandlers.set("arp_scan", () => []);
+    // The grid reads the operator's own records (alias, number) on every reload. Without a
+    // handler the mock *rejects*, which the call site catches — so the page still renders and
+    // the omission would only show up as a fleet with no labels, which is also what an empty
+    // answer looks like. Mocked so the two stay distinguishable.
+    commandHandlers.set("list_device_metas", () => []);
     commandHandlers.set("device_shell", () => ({ exitCode: 0, stdout: "", stderr: "" }));
     commandHandlers.set("set_screen_rotation", () => 0);
 

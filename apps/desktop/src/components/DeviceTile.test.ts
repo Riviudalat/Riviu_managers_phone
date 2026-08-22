@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   deviceModelOsLabel,
   deviceOsLabel,
+  deviceTileSubtitle,
   markDeviceFrameLive,
   tileStreamStateView,
   type DeviceInfo,
@@ -62,6 +63,31 @@ describe("deviceOsLabel", () => {
       osVersion: "",
     };
     expect(deviceModelOsLabel(noVersion)).toBe("Redmi Note 12 · Android");
+  });
+});
+
+describe("deviceTileSubtitle", () => {
+  it("drops the model when it only repeats the name a phone reported no name for", () => {
+    // A Redmi with no friendly name: name === model === "23021RAAEG". The tile already
+    // prints that serial in bold above, so the subtitle must not print it again — just
+    // the OS.
+    const anon: Pick<DeviceInfo, "name" | "model" | "platform" | "osVersion"> = {
+      name: "23021RAAEG",
+      model: "23021RAAEG",
+      platform: "android",
+      osVersion: "15",
+    };
+    expect(deviceTileSubtitle(anon)).toBe("Android 15");
+  });
+
+  it("keeps the model when it adds information the name does not", () => {
+    const named: Pick<DeviceInfo, "name" | "model" | "platform" | "osVersion"> = {
+      name: "iPhone 8 (Global)",
+      model: "iPhone10,1",
+      platform: "ios",
+      osVersion: "16.7.15",
+    };
+    expect(deviceTileSubtitle(named)).toBe("iPhone10,1 · iOS 16.7.15");
   });
 });
 

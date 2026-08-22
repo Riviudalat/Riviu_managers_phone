@@ -19,7 +19,11 @@ public final class AgentService extends Service {
     private static final String CHANNEL = "riviu-helper";
     private static final int NOTICE_ID = 17980;
 
+    /** Intent extra the desktop passes the shared token in. */
+    public static final String EXTRA_TOKEN = "token";
+
     private HttpServer server;
+    private String activeToken;
 
     @Override
     public void onCreate() {
@@ -39,17 +43,46 @@ public final class AgentService extends Service {
         } else {
             startForeground(NOTICE_ID, notification);
         }
-        server = new HttpServer(this, Protocol.PORT);
+        // The server is deliberately NOT started here. It needs the shared token, and the
+        // token arrives on the Intent, which `onCreate` does not see — so binding the port
+        // before `onStartCommand` would mean binding it unauthenticated.
+    }
+
+    /**
+     * Bind the port once a token has been supplied, and rebind if the token changed.
+     *
+     * <p>No token, no server. That is the safe direction and it is the point: a helper that any
+     * app could start with a bare {@code am start-foreground-service} used to come up serving
+     * every endpoint to the whole phone. Now such a start produces a foreground service that
+     * listens to nothing.
+     *
+     * <p>{@code START_STICKY} can hand back a null Intent after the process is killed, which
+     * leaves the token behind. That case fails closed too; the desktop re-issues the start on
+     * its next {@code ensure}.
+     */
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        String token = intent == null ? null : intent.getStringExtra(EXTRA_TOKEN);
+        if (token == null || token.isEmpty()) {
+            Log.w(TAG, "start without a token; the HTTP server stays down");
+            return START_STICKY;
+        }
+        if (server != null && token.equals(activeToken)) {
+            return START_STICKY;
+        }
+        if (server != null) {
+            server.stop();
+            server = null;
+        }
+        HttpServer fresh = new HttpServer(this, Protocol.PORT, token);
         try {
-            server.start();
+            fresh.start();
+            server = fresh;
+            activeToken = token;
         } catch (Exception error) {
             Log.e(TAG, "HTTP bind failed", error);
             stopSelf();
         }
-    }
-
-    @Override
-    public int onStartCommand(Intent intent, int flags, int startId) {
         return START_STICKY;
     }
 

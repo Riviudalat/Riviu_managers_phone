@@ -14,8 +14,29 @@ mod migrations;
 pub use flow_runs::{AttemptTransitionPatch, FlowStateConflict};
 pub(crate) use flow_runs::{FlowAttemptExecutionContext, FlowRecoveryRunContext};
 
+/// Somewhere to keep a secret that is **not** the SQLite file.
+///
+/// The database is the app's SQLite file under `%APPDATA%`, opened with a plain
+/// `Connection::open` — no SQLCipher, no key, and nothing hardening its ACL. Anything written
+/// there is readable by any process running as the operator. That is fine for campaign rows and
+/// device aliases; it is not fine for an API key that can spend money.
+///
+/// A trait rather than a direct dependency on `riviu-signing`: `crates/core` deliberately does
+/// not know about the OS credential store, the same way it deliberately does not know about the
+/// driver crates. The desktop supplies the keyring-backed implementation; tests supply an
+/// in-memory one; a `Database` with no store at all keeps the old behaviour, which is what the
+/// 38 test constructors rely on.
+pub trait SecretStore: Send + Sync {
+    fn get_secret(&self, name: &str) -> anyhow::Result<Option<String>>;
+    fn set_secret(&self, name: &str, value: &str) -> anyhow::Result<()>;
+}
+
+/// Name under which the AI API key lives in the secret store.
+pub const SECRET_AI_API_KEY: &str = "nurture-ai-api-key";
+
 pub struct Database {
     path: PathBuf,
+    secrets: Option<std::sync::Arc<dyn SecretStore>>,
 }
 
 const NURTURE_SETTINGS_MIGRATION_V2: &str = "nurture.settings.migration.v2";
@@ -28,7 +49,10 @@ impl Database {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let db = Self { path };
+        let db = Self {
+            path,
+            secrets: None,
+        };
         db.migrate()?;
         Ok(db)
     }
@@ -36,6 +60,12 @@ impl Database {
     pub fn default_path() -> anyhow::Result<PathBuf> {
         let base = dirs::data_dir().context("no data dir")?;
         Ok(base.join("riviu-managers-phone").join("riviu.db"))
+    }
+
+    /// Attach the place secrets live. Without one, secrets stay in the SQLite blob as before.
+    pub fn with_secrets(mut self, store: std::sync::Arc<dyn SecretStore>) -> Self {
+        self.secrets = Some(store);
+        self
     }
 
     fn conn(&self) -> anyhow::Result<Connection> {
@@ -192,21 +222,36 @@ impl Database {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
+    /// The columns of one `device_meta` row, in the order both readers below bind them.
+    /// One constant so a column added to the table cannot be added to one reader only —
+    /// which is how `handle` came to be selected by the single-row read and not by anything
+    /// else for a while.
+    const DEVICE_META_COLUMNS: &'static str =
+        "udid, notes, tags_json, group_id, proxy_id, handle, alias, number";
+
+    fn device_meta_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::types::DeviceMeta> {
+        let tags_json: String = row.get(2)?;
+        Ok(crate::types::DeviceMeta {
+            udid: row.get(0)?,
+            notes: row.get(1)?,
+            tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+            group_id: row.get(3)?,
+            proxy_id: row.get(4)?,
+            handle: row.get(5)?,
+            alias: row.get(6)?,
+            number: row.get(7)?,
+        })
+    }
+
     pub fn get_device_meta(&self, udid: &str) -> anyhow::Result<crate::types::DeviceMeta> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT udid, notes, tags_json, group_id, proxy_id FROM device_meta WHERE udid = ?1",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM device_meta WHERE udid = ?1",
+            Self::DEVICE_META_COLUMNS
+        ))?;
         let mut rows = stmt.query(params![udid])?;
         if let Some(row) = rows.next()? {
-            let tags_json: String = row.get(2)?;
-            Ok(crate::types::DeviceMeta {
-                udid: row.get(0)?,
-                notes: row.get(1)?,
-                tags: serde_json::from_str(&tags_json).unwrap_or_default(),
-                group_id: row.get(3)?,
-                proxy_id: row.get(4)?,
-            })
+            Ok(Self::device_meta_from_row(row)?)
         } else {
             Ok(crate::types::DeviceMeta {
                 udid: udid.to_string(),
@@ -214,24 +259,48 @@ impl Database {
                 tags: vec![],
                 group_id: None,
                 proxy_id: None,
+                handle: String::new(),
+                alias: String::new(),
+                number: None,
             })
         }
+    }
+
+    /// Every phone this app has a record for, in one read.
+    ///
+    /// The grid needs the alias and the number of *twenty* phones to draw one frame, and
+    /// asking per device is twenty IPC round trips for a table that fits in a page. Rows
+    /// exist only for phones somebody has edited, so a fleet with no records answers empty
+    /// and every tile falls back to what the phone reports.
+    pub fn list_device_metas(&self) -> anyhow::Result<Vec<crate::types::DeviceMeta>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM device_meta",
+            Self::DEVICE_META_COLUMNS
+        ))?;
+        let rows = stmt.query_map([], Self::device_meta_from_row)?;
+        Ok(rows.filter_map(|row| row.ok()).collect())
     }
 
     pub fn upsert_device_meta(&self, meta: &crate::types::DeviceMeta) -> anyhow::Result<()> {
         let conn = self.conn()?;
         conn.execute(
-            r#"INSERT INTO device_meta (udid, notes, tags_json, group_id, proxy_id)
-               VALUES (?1,?2,?3,?4,?5)
+            r#"INSERT INTO device_meta (udid, notes, tags_json, group_id, proxy_id, handle, alias, number)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
                ON CONFLICT(udid) DO UPDATE SET
                  notes=excluded.notes, tags_json=excluded.tags_json,
-                 group_id=excluded.group_id, proxy_id=excluded.proxy_id"#,
+                 group_id=excluded.group_id, proxy_id=excluded.proxy_id,
+                 handle=excluded.handle, alias=excluded.alias,
+                 number=excluded.number"#,
             params![
                 meta.udid,
                 meta.notes,
                 serde_json::to_string(&meta.tags)?,
                 meta.group_id,
-                meta.proxy_id
+                meta.proxy_id,
+                meta.handle,
+                meta.alias,
+                meta.number
             ],
         )?;
         Ok(())
@@ -265,30 +334,34 @@ impl Database {
         Ok(out)
     }
 
+    /// Replace a group and its membership, **atomically**.
+    ///
+    /// The membership rewrite is a delete-everything-then-rebuild, and it used to run in
+    /// autocommit: the `DELETE` was durable the instant it returned, so anything that went
+    /// wrong in the insert loop left the group **empty and saved that way**. Adding one phone
+    /// to a group could erase it.
+    ///
+    /// The permanent erase needs an error mid-loop and is rare. The everyday version is not:
+    /// any `list_groups` landing in the window between the delete and the last insert reads a
+    /// group with no members, and the tab strip renders it as an empty tab. One transaction
+    /// closes both.
+    ///
+    /// `Immediate` is load-bearing rather than decoration — a deferred transaction that
+    /// upgrades to a write can be refused `SQLITE_BUSY` **without** the busy handler running.
+    /// Same idiom as `create_publish_campaign` and `create_interaction_campaign` below.
     pub fn upsert_group(&self, group: &crate::types::DeviceGroup) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            r#"INSERT INTO groups (id, name, color, created_at) VALUES (?1,?2,?3,?4)
-               ON CONFLICT(id) DO UPDATE SET name=excluded.name, color=excluded.color"#,
-            params![group.id, group.name, group.color, group.created_at],
-        )?;
-        conn.execute(
-            "DELETE FROM group_members WHERE group_id = ?1",
-            params![group.id],
-        )?;
-        for udid in &group.udids {
-            conn.execute(
-                "INSERT OR IGNORE INTO group_members (group_id, udid) VALUES (?1,?2)",
-                params![group.id, udid],
-            )?;
-        }
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        write_group(&transaction, group)?;
+        transaction.commit()?;
         Ok(())
     }
 
     pub fn delete_group(&self, id: &str) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute("DELETE FROM group_members WHERE group_id = ?1", params![id])?;
-        conn.execute("DELETE FROM groups WHERE id = ?1", params![id])?;
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        erase_group(&transaction, id)?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -424,7 +497,7 @@ impl Database {
     pub fn list_schedules(&self) -> anyhow::Result<Vec<crate::types::ScheduleItem>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, script_name, udids_json, every_minutes, enabled, last_run_at, next_run_at FROM schedules ORDER BY name",
+            "SELECT id, name, script_name, udids_json, every_minutes, enabled, last_run_at, next_run_at, last_error FROM schedules ORDER BY name",
         )?;
         let rows = stmt.query_map([], |row| {
             let udids_json: String = row.get(3)?;
@@ -437,6 +510,7 @@ impl Database {
                 enabled: row.get::<_, i64>(5)? != 0,
                 last_run_at: row.get(6)?,
                 next_run_at: row.get(7)?,
+                last_error: row.get(8)?,
             })
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
@@ -445,12 +519,13 @@ impl Database {
     pub fn upsert_schedule(&self, s: &crate::types::ScheduleItem) -> anyhow::Result<()> {
         let conn = self.conn()?;
         conn.execute(
-            r#"INSERT INTO schedules (id, name, script_name, udids_json, every_minutes, enabled, last_run_at, next_run_at)
-               VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+            r#"INSERT INTO schedules (id, name, script_name, udids_json, every_minutes, enabled, last_run_at, next_run_at, last_error)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
                ON CONFLICT(id) DO UPDATE SET
                  name=excluded.name, script_name=excluded.script_name, udids_json=excluded.udids_json,
                  every_minutes=excluded.every_minutes, enabled=excluded.enabled,
-                 last_run_at=excluded.last_run_at, next_run_at=excluded.next_run_at"#,
+                 last_run_at=excluded.last_run_at, next_run_at=excluded.next_run_at,
+                 last_error=excluded.last_error"#,
             params![
                 s.id,
                 s.name,
@@ -459,7 +534,8 @@ impl Database {
                 s.every_minutes as i64,
                 if s.enabled { 1 } else { 0 },
                 s.last_run_at,
-                s.next_run_at
+                s.next_run_at,
+                s.last_error
             ],
         )?;
         Ok(())
@@ -814,76 +890,6 @@ impl Database {
         )
     }
 
-    pub fn list_users(&self) -> anyhow::Result<Vec<crate::types::LocalUser>> {
-        let conn = self.conn()?;
-        let mut stmt =
-            conn.prepare("SELECT id, email, role, created_at FROM users ORDER BY email")?;
-        let rows = stmt.query_map([], |row| {
-            Ok(crate::types::LocalUser {
-                id: row.get(0)?,
-                email: row.get(1)?,
-                role: row.get(2)?,
-                created_at: row.get(3)?,
-            })
-        })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
-    }
-
-    pub fn register_user(
-        &self,
-        email: &str,
-        password: &str,
-        role: &str,
-    ) -> anyhow::Result<crate::types::LocalUser> {
-        let conn = self.conn()?;
-        let user = crate::types::LocalUser {
-            id: Uuid::new_v4().to_string(),
-            email: email.to_string(),
-            role: role.to_string(),
-            created_at: Utc::now().to_rfc3339(),
-        };
-        conn.execute(
-            "INSERT INTO users (id, email, password_hash, role, created_at) VALUES (?1,?2,?3,?4,?5)",
-            params![user.id, user.email, password, user.role, user.created_at],
-        )?;
-        Ok(user)
-    }
-
-    pub fn login_user(
-        &self,
-        email: &str,
-        password: &str,
-    ) -> anyhow::Result<Option<crate::types::LocalUser>> {
-        let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, email, role, created_at, password_hash FROM users WHERE email = ?1",
-        )?;
-        let mut rows = stmt.query(params![email])?;
-        if let Some(row) = rows.next()? {
-            let hash: String = row.get(4)?;
-            if hash != password {
-                return Ok(None);
-            }
-            Ok(Some(crate::types::LocalUser {
-                id: row.get(0)?,
-                email: row.get(1)?,
-                role: row.get(2)?,
-                created_at: row.get(3)?,
-            }))
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub fn guest_user(&self) -> anyhow::Result<crate::types::LocalUser> {
-        let users = self.list_users()?;
-        if let Some(u) = users.into_iter().find(|u| u.email == "guest@local") {
-            Ok(u)
-        } else {
-            self.register_user("guest@local", "guest", "admin")
-        }
-    }
-
     pub fn analytics_summary(
         &self,
         device_total: usize,
@@ -936,22 +942,90 @@ impl Database {
                     // were accepted by the old profile schema.
                     self.save_nurture_settings(&settings)?;
                 }
+                self.resolve_api_key(&mut settings)?;
                 Ok(settings)
             }
             None => Ok(crate::types::NurtureSettings::default()),
         }
     }
 
+    /// Put the API key back on the settings the engine is about to use.
+    ///
+    /// The key does not live in the settings blob any more — see [`SecretStore`] — so every read
+    /// has to re-attach it. This is called from [`Self::get_nurture_settings`] rather than from
+    /// the command layer **because the engine re-reads its settings mid-session**
+    /// (`nurture::run_session` refreshes from the database on every post), and a key attached
+    /// only at the command layer would come back empty on the first live refresh: commenting
+    /// would stop part-way through a run, with an "API key đang trống" that the operator could
+    /// not act on because the key *is* configured.
+    ///
+    /// Also migrates: a blob still carrying a key from before this existed is moved into the
+    /// store and blanked, once.
+    fn resolve_api_key(&self, settings: &mut crate::types::NurtureSettings) -> anyhow::Result<()> {
+        let Some(store) = self.secrets.as_ref() else {
+            return Ok(());
+        };
+        if !settings.api_key.is_empty() {
+            // Legacy row: the key is still in SQLite. Blank the blob first, *then* write the
+            // real key — because `save_nurture_settings` writes the secret too, so storing it
+            // before the save would immediately be overwritten by the blank we are saving.
+            // Found by the migration test rather than by reading: the store ended up holding
+            // an empty string and the key was gone from both places.
+            let moved = std::mem::take(&mut settings.api_key);
+            self.save_nurture_settings(settings)?;
+            store.set_secret(SECRET_AI_API_KEY, &moved)?;
+            settings.api_key = moved;
+            return Ok(());
+        }
+        if let Some(key) = store.get_secret(SECRET_AI_API_KEY)? {
+            settings.api_key = key;
+        }
+        Ok(())
+    }
+
+    /// The settings blob and the two migration markers that say it has been brought forward.
+    ///
+    /// One transaction, because the three belong together: this was three `set_setting`
+    /// calls, each opening **its own connection**, so a failure after the first saved the
+    /// blob without its markers and the next read re-ran the migrations over it. Near
+    /// harmless in practice — `migrate_legacy_defaults` only replaces values still equal to
+    /// the old defaults — but it is three writes that must land together, and one connection
+    /// is cheaper than three.
     pub fn save_nurture_settings(
         &self,
         settings: &crate::types::NurtureSettings,
     ) -> anyhow::Result<()> {
-        self.set_setting("nurture.settings", &serde_json::to_string(settings)?)?;
-        self.set_setting(NURTURE_SETTINGS_MIGRATION_V2, "2026-08-06-human-v2")?;
-        self.set_setting(
-            NURTURE_SETTINGS_MIGRATION_V3,
-            NURTURE_SETTINGS_MIGRATION_V3_VALUE,
-        )
+        // The API key goes to the secret store, and the blob keeps an empty string in its
+        // place. Faithful rather than clever: an empty key here really does clear the stored
+        // one, so "leave it unchanged" is a decision for the caller that owns the form, not a
+        // silent rule buried in the database layer.
+        let payload = match self.secrets.as_ref() {
+            Some(store) => {
+                store.set_secret(SECRET_AI_API_KEY, &settings.api_key)?;
+                let mut without = settings.clone();
+                without.api_key.clear();
+                serde_json::to_string(&without)?
+            }
+            None => serde_json::to_string(settings)?,
+        };
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (key, value) in [
+            ("nurture.settings", payload.as_str()),
+            (NURTURE_SETTINGS_MIGRATION_V2, "2026-08-06-human-v2"),
+            (
+                NURTURE_SETTINGS_MIGRATION_V3,
+                NURTURE_SETTINGS_MIGRATION_V3_VALUE,
+            ),
+        ] {
+            transaction.execute(
+                "INSERT INTO settings (key, value) VALUES (?1,?2)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![key, value],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn get_agent_settings(&self) -> anyhow::Result<crate::types::AgentSettings> {
@@ -967,6 +1041,31 @@ impl Database {
         settings: &crate::types::AgentSettings,
     ) -> anyhow::Result<()> {
         self.set_setting("agent.settings.v1", &serde_json::to_string(settings)?)
+    }
+
+    /// The operator's stream quality and frame rate, or the defaults.
+    ///
+    /// No migration: the `settings` key/value table has existed since the first one, and
+    /// both other persisted settings blobs already live in it. A new schema object here
+    /// would buy nothing and drag the migration ledger tests with it — the "migration" is a
+    /// new key string.
+    ///
+    /// Strict about malformed JSON, like its neighbours: a stored value that cannot be read
+    /// is a fact worth surfacing, not something to quietly replace with defaults. The
+    /// startup caller decides whether that is fatal; here it is reported.
+    pub fn get_stream_settings(&self) -> anyhow::Result<crate::types::StreamSettings> {
+        match self.get_setting("stream.settings.v1")? {
+            Some(raw) => serde_json::from_str(&raw)
+                .context("invalid JSON in stored setting stream.settings.v1"),
+            None => Ok(crate::types::StreamSettings::default()),
+        }
+    }
+
+    pub fn save_stream_settings(
+        &self,
+        settings: &crate::types::StreamSettings,
+    ) -> anyhow::Result<()> {
+        self.set_setting("stream.settings.v1", &serde_json::to_string(settings)?)
     }
 
     pub fn add_nurture_comment_cost(
@@ -1253,8 +1352,11 @@ impl Database {
             return Ok(None);
         };
         let mut statement = conn.prepare(
+            // `evidence_json` is here for the retry path: a succeeded root's posted comment
+            // identity lives in it, and without reading it back a retry cannot tell a reply
+            // what it is replying to.
             "SELECT a.id,t.target_key,a.message_ordinal,a.actor_udid,a.parent_assignment_id,
-                    a.state,a.prepared_json,a.error_code
+                    a.state,a.prepared_json,a.error_code,a.evidence_json
              FROM interaction_assignments a
              JOIN interaction_targets t ON t.id=a.target_id
              WHERE a.campaign_id=?1 ORDER BY t.line_no,a.message_ordinal",
@@ -1280,11 +1382,23 @@ impl Database {
                 state: interaction_message_state(&state),
                 prepared_text,
                 error_code: row.get(7)?,
+                evidence_json: row.get(8)?,
+                // Filled from the blob just below, so every reader of a stored campaign gets
+                // the same answer without parsing it again.
+                like: None,
             })
         })?;
+        let assignments = rows
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|mut assignment| {
+                assignment.like = assignment.like_note();
+                assignment
+            })
+            .collect();
         Ok(Some(crate::interaction::InteractionCampaignDetail {
             summary,
-            assignments: rows.collect::<Result<Vec<_>, _>>()?,
+            assignments,
         }))
     }
 
@@ -1476,6 +1590,40 @@ fn publish_state_from_str(value: &str) -> crate::publish::PublishCampaignState {
     }
 }
 
+/// The group write itself, separated from the transaction that makes it atomic.
+///
+/// Split out so a test can hold the transaction open, drop it without committing, and prove
+/// the old membership is still there — which on the previous autocommit version it was not.
+fn write_group(
+    transaction: &rusqlite::Transaction<'_>,
+    group: &crate::types::DeviceGroup,
+) -> anyhow::Result<()> {
+    transaction.execute(
+        r#"INSERT INTO groups (id, name, color, created_at) VALUES (?1,?2,?3,?4)
+           ON CONFLICT(id) DO UPDATE SET name=excluded.name, color=excluded.color"#,
+        params![group.id, group.name, group.color, group.created_at],
+    )?;
+    transaction.execute(
+        "DELETE FROM group_members WHERE group_id = ?1",
+        params![group.id],
+    )?;
+    for udid in &group.udids {
+        transaction.execute(
+            "INSERT OR IGNORE INTO group_members (group_id, udid) VALUES (?1,?2)",
+            params![group.id, udid],
+        )?;
+    }
+    Ok(())
+}
+
+/// Both deletes, which genuinely both have to happen: `group_members` has no foreign key to
+/// `groups`, so removing the group alone would orphan its rows.
+fn erase_group(transaction: &rusqlite::Transaction<'_>, id: &str) -> anyhow::Result<()> {
+    transaction.execute("DELETE FROM group_members WHERE group_id = ?1", params![id])?;
+    transaction.execute("DELETE FROM groups WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
 fn interaction_campaign_state_label(
     state: crate::interaction::ThreadCampaignState,
 ) -> &'static str {
@@ -1580,6 +1728,196 @@ pub fn step_label(status: &StepStatus) -> &'static str {
 }
 
 #[cfg(test)]
+mod group_tests {
+    use super::*;
+
+    fn fixture() -> (Database, PathBuf) {
+        let path = std::env::temp_dir().join(format!("riviu-group-test-{}.db", Uuid::new_v4()));
+        (Database::open(&path).expect("open fixture database"), path)
+    }
+
+    fn group(id: &str, udids: &[&str]) -> crate::types::DeviceGroup {
+        crate::types::DeviceGroup {
+            id: id.into(),
+            name: format!("nhóm {id}"),
+            color: "#ff6a00".into(),
+            udids: udids.iter().map(|udid| (*udid).to_string()).collect(),
+            created_at: "2026-08-17T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn a_membership_write_that_does_not_commit_leaves_the_group_as_it_was() {
+        // The defect: the membership rewrite is delete-everything-then-rebuild, and it ran
+        // in autocommit -- so the DELETE was durable the moment it returned and anything
+        // going wrong in the insert loop left the group saved as empty. Adding one phone to
+        // a group could erase it.
+        let (db, path) = fixture();
+        db.upsert_group(&group("g1", &["a", "b", "c"]))
+            .expect("seed the group");
+
+        {
+            let mut conn = db.conn().expect("connection");
+            let transaction = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .expect("begin");
+            write_group(&transaction, &group("g1", &["z"])).expect("write inside the txn");
+            // Dropped without committing -- the failure mid-loop, modelled exactly.
+        }
+
+        let groups = db.list_groups().expect("list");
+        let found = groups
+            .iter()
+            .find(|g| g.id == "g1")
+            .expect("group survives");
+        assert_eq!(found.udids.len(), 3, "membership must be untouched");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_delete_that_does_not_commit_leaves_both_the_group_and_its_members() {
+        let (db, path) = fixture();
+        db.upsert_group(&group("g2", &["a", "b"]))
+            .expect("seed the group");
+
+        {
+            let mut conn = db.conn().expect("connection");
+            let transaction = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .expect("begin");
+            erase_group(&transaction, "g2").expect("erase inside the txn");
+        }
+
+        let groups = db.list_groups().expect("list");
+        let found = groups
+            .iter()
+            .find(|g| g.id == "g2")
+            .expect("group survives");
+        assert_eq!(found.udids.len(), 2);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_saved_group_replaces_its_membership_exactly() {
+        // The happy path, so the refactor cannot quietly stop replacing.
+        let (db, path) = fixture();
+        db.upsert_group(&group("g3", &["a", "b", "c"]))
+            .expect("seed");
+        db.upsert_group(&group("g3", &["b", "d"])).expect("replace");
+
+        let groups = db.list_groups().expect("list");
+        let found = groups.iter().find(|g| g.id == "g3").expect("group");
+        let mut udids = found.udids.clone();
+        udids.sort();
+        assert_eq!(udids, vec!["b".to_string(), "d".to_string()]);
+
+        db.delete_group("g3").expect("delete");
+        assert!(db.list_groups().expect("list").iter().all(|g| g.id != "g3"));
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod device_meta_tests {
+    use super::*;
+
+    fn fixture() -> (Database, PathBuf) {
+        let path = std::env::temp_dir().join(format!("riviu-device-meta-{}.db", Uuid::new_v4()));
+        (Database::open(&path).expect("open fixture database"), path)
+    }
+
+    fn meta(udid: &str) -> crate::types::DeviceMeta {
+        crate::types::DeviceMeta {
+            udid: udid.into(),
+            notes: String::new(),
+            tags: vec![],
+            group_id: None,
+            proxy_id: None,
+            handle: String::new(),
+            alias: String::new(),
+            number: None,
+        }
+    }
+
+    #[test]
+    fn an_alias_and_a_number_survive_a_write_and_a_reopen() {
+        let (db, path) = fixture();
+        db.upsert_device_meta(&crate::types::DeviceMeta {
+            alias: "Máy kệ trên, cột 3".into(),
+            number: Some(21),
+            handle: "riviu.demo".into(),
+            ..meta("10969614")
+        })
+        .expect("write");
+
+        let read = db.get_device_meta("10969614").expect("read");
+        assert_eq!(read.alias, "Máy kệ trên, cột 3");
+        assert_eq!(read.number, Some(21));
+        // The neighbouring column, because the update statement lists every column by hand
+        // and the way that breaks is by overwriting the one nobody looked at.
+        assert_eq!(read.handle, "riviu.demo");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_unnumbered_phone_reads_back_as_unnumbered_rather_than_zero() {
+        // `None` and `Some(0)` are different facts: the grid falls back to a tile's position
+        // for the first and would print "0" for the second.
+        let (db, path) = fixture();
+        db.upsert_device_meta(&meta("ce0417145199e0490c"))
+            .expect("write");
+        assert_eq!(
+            db.get_device_meta("ce0417145199e0490c")
+                .expect("read")
+                .number,
+            None
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_phone_with_no_record_answers_with_an_empty_one_instead_of_failing() {
+        let (db, path) = fixture();
+        let read = db.get_device_meta("never-seen").expect("read");
+        assert_eq!(read.udid, "never-seen");
+        assert_eq!(read.alias, "");
+        assert_eq!(read.number, None);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn listing_returns_only_the_phones_that_have_a_record() {
+        // What the grid reads once per refresh. Rows exist only for edited phones, so a fleet
+        // nobody has renamed answers empty and every tile keeps the name the phone reports.
+        let (db, path) = fixture();
+        assert!(db.list_device_metas().expect("empty list").is_empty());
+        db.upsert_device_meta(&crate::types::DeviceMeta {
+            number: Some(2),
+            ..meta("b")
+        })
+        .expect("write b");
+        db.upsert_device_meta(&crate::types::DeviceMeta {
+            number: Some(1),
+            ..meta("a")
+        })
+        .expect("write a");
+
+        let listed = db.list_device_metas().expect("list");
+        assert_eq!(listed.len(), 2);
+        let mut numbered: Vec<(String, Option<u32>)> = listed
+            .into_iter()
+            .map(|row| (row.udid, row.number))
+            .collect();
+        numbered.sort();
+        assert_eq!(
+            numbered,
+            vec![("a".to_string(), Some(1)), ("b".to_string(), Some(2))]
+        );
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
 mod agent_settings_tests {
     use super::*;
     use crate::types::AgentSettings;
@@ -1618,6 +1956,87 @@ mod agent_settings_tests {
             .expect_err("malformed settings must fail");
 
         assert!(error.to_string().contains("agent.settings.v1"));
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+}
+
+#[cfg(test)]
+mod stream_settings_tests {
+    use super::*;
+    use crate::types::{StreamQuality, StreamSettings};
+
+    fn fixture() -> (Database, PathBuf) {
+        let path =
+            std::env::temp_dir().join(format!("riviu-stream-settings-test-{}.db", Uuid::new_v4()));
+        (Database::open(&path).expect("open fixture database"), path)
+    }
+
+    #[test]
+    fn an_untouched_install_reads_the_defaults_rather_than_failing() {
+        let (db, path) = fixture();
+        assert_eq!(
+            db.get_stream_settings()
+                .expect("absent key is not an error"),
+            StreamSettings::default()
+        );
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    #[test]
+    fn stream_settings_survive_a_restart() {
+        // The whole point of the change: quality and frame rate used to live only in an
+        // `Arc<RwLock<_>>` built from `Default` at bootstrap, so every setting the operator
+        // chose was gone the next time the app opened.
+        let (db, path) = fixture();
+        let chosen = StreamSettings {
+            fps: 18,
+            grid_quality: StreamQuality::Extra,
+            focus_quality: StreamQuality::Low,
+        };
+
+        db.save_stream_settings(&chosen).expect("save");
+
+        assert_eq!(db.get_stream_settings().expect("load"), chosen);
+        let raw = db
+            .get_setting("stream.settings.v1")
+            .expect("read raw setting")
+            .expect("stored setting");
+        assert_eq!(
+            raw,
+            r#"{"fps":18,"gridQuality":"extra","focusQuality":"low"}"#
+        );
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    #[test]
+    fn a_blob_missing_a_field_still_loads() {
+        // `#[serde(default)]` earns its place here rather than in review: the load runs at
+        // startup, so without it the first field ever added to this struct would turn every
+        // existing install's stored row into a failure to boot.
+        let (db, path) = fixture();
+        db.set_setting("stream.settings.v1", r#"{"fps":12}"#)
+            .expect("store a blob from an older build");
+
+        let loaded = db
+            .get_stream_settings()
+            .expect("a partial blob still loads");
+
+        assert_eq!(loaded.fps, 12);
+        assert_eq!(loaded.grid_quality, StreamSettings::default().grid_quality);
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    #[test]
+    fn invalid_stream_settings_json_is_not_silently_defaulted() {
+        let (db, path) = fixture();
+        db.set_setting("stream.settings.v1", "{not-json")
+            .expect("store malformed fixture");
+
+        let error = db
+            .get_stream_settings()
+            .expect_err("malformed settings must fail");
+
+        assert!(error.to_string().contains("stream.settings.v1"));
         std::fs::remove_file(path).expect("remove fixture database");
     }
 }
@@ -1813,6 +2232,9 @@ mod interaction_tests {
             like_target: false,
 
             mode: ThreadMode::Threaded,
+            shape: crate::interaction::ThreadShape::Chain,
+            cohort_size: None,
+            mentions: Vec::new(),
         }
     }
 
@@ -2092,5 +2514,242 @@ mod publish_tests {
             .expect_err("duplicate UDID must be rejected");
         assert!(error.to_string().contains("duplicate UDID"));
         std::fs::remove_file(path).expect("remove fixture database");
+    }
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::*;
+
+    fn fixture() -> (Database, PathBuf) {
+        let path = std::env::temp_dir().join(format!("riviu-schedule-test-{}.db", Uuid::new_v4()));
+        (Database::open(&path).expect("open fixture database"), path)
+    }
+
+    fn schedule(script: &str) -> crate::types::ScheduleItem {
+        crate::types::ScheduleItem {
+            id: "sched-1".into(),
+            name: "hourly".into(),
+            script_name: script.into(),
+            udids: vec!["phone-a".into()],
+            every_minutes: 60,
+            enabled: true,
+            last_run_at: None,
+            next_run_at: None,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn a_schedule_can_record_why_it_did_not_run() {
+        // The runner used to advance `last_run_at` on every tick whether or not anything
+        // was enqueued, and a missing script produced no record anywhere -- both guards
+        // around the lookup and the parse fell through in silence. There was nowhere to
+        // write the reason even if someone had wanted to; migration 8 makes the column,
+        // and this is the round trip that keeps it wired.
+        let (db, path) = fixture();
+        let mut item = schedule("đã-bị-xoá");
+        item.last_error = Some("không còn kịch bản tên `đã-bị-xoá`".into());
+        db.upsert_schedule(&item).expect("save the failed schedule");
+
+        let stored = db.list_schedules().expect("list")[0].clone();
+        assert_eq!(
+            stored.last_error.as_deref(),
+            Some("không còn kịch bản tên `đã-bị-xoá`")
+        );
+        // And `last_run_at` stays empty, because nothing ran.
+        assert_eq!(stored.last_run_at, None);
+
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    #[test]
+    fn a_schedule_that_runs_clears_the_reason_it_used_to_fail_for() {
+        // Otherwise a schedule fixed by restoring its script would keep explaining a
+        // failure that is over -- the same immortal-error shape as `merge_scanned_device`.
+        let (db, path) = fixture();
+        let mut item = schedule("có-thật");
+        item.last_error = Some("không còn kịch bản".into());
+        db.upsert_schedule(&item).expect("save the failed schedule");
+
+        item.last_error = None;
+        item.last_run_at = Some("2026-08-17T12:00:00Z".into());
+        db.upsert_schedule(&item)
+            .expect("save the recovered schedule");
+
+        let stored = db.list_schedules().expect("list")[0].clone();
+        assert_eq!(stored.last_error, None);
+        assert_eq!(stored.last_run_at.as_deref(), Some("2026-08-17T12:00:00Z"));
+
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+}
+
+#[cfg(test)]
+mod secret_store_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// In-memory stand-in for the OS credential store.
+    #[derive(Default)]
+    struct MemoryStore {
+        entries: Mutex<std::collections::HashMap<String, String>>,
+    }
+
+    impl SecretStore for MemoryStore {
+        fn get_secret(&self, name: &str) -> anyhow::Result<Option<String>> {
+            Ok(self.entries.lock().unwrap().get(name).cloned())
+        }
+        fn set_secret(&self, name: &str, value: &str) -> anyhow::Result<()> {
+            self.entries
+                .lock()
+                .unwrap()
+                .insert(name.to_string(), value.to_string());
+            Ok(())
+        }
+    }
+
+    fn fixture() -> (Database, Arc<MemoryStore>, PathBuf) {
+        let path = std::env::temp_dir().join(format!("riviu-secret-test-{}.db", Uuid::new_v4()));
+        let store = Arc::new(MemoryStore::default());
+        let db = Database::open(&path)
+            .expect("open fixture database")
+            .with_secrets(store.clone());
+        (db, store, path)
+    }
+
+    /// What the whole seam is for: the key must not be in the SQLite file.
+    #[test]
+    fn the_api_key_goes_to_the_store_and_not_into_the_settings_blob() {
+        let (db, store, path) = fixture();
+        let settings = crate::types::NurtureSettings {
+            api_key: "sk-secret-value".into(),
+            ..Default::default()
+        };
+        db.save_nurture_settings(&settings).expect("save");
+
+        let blob = db
+            .get_setting("nurture.settings")
+            .expect("read blob")
+            .expect("blob exists");
+        assert!(
+            !blob.contains("sk-secret-value"),
+            "the key is still in the SQLite blob: {blob}"
+        );
+        assert_eq!(
+            store.get_secret(SECRET_AI_API_KEY).unwrap().as_deref(),
+            Some("sk-secret-value")
+        );
+
+        // And it comes back on read, because the engine needs the real value.
+        let loaded = db.get_nurture_settings().expect("load");
+        assert_eq!(loaded.api_key, "sk-secret-value");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The engine re-reads settings mid-session; every read must carry the key.
+    ///
+    /// This is the failure a command-layer-only fix would have shipped: the first read looks
+    /// right, and the *second* one — the live refresh `nurture::run_session` does on every post
+    /// — comes back empty, so commenting stops part way through a run.
+    #[test]
+    fn every_read_carries_the_key_not_just_the_first() {
+        let (db, _store, path) = fixture();
+        let settings = crate::types::NurtureSettings {
+            api_key: "sk-live-refresh".into(),
+            ..Default::default()
+        };
+        db.save_nurture_settings(&settings).expect("save");
+
+        for read in 1..=3 {
+            let loaded = db.get_nurture_settings().expect("load");
+            assert_eq!(
+                loaded.api_key, "sk-live-refresh",
+                "read #{read} lost the key"
+            );
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A database written before the store existed still has the key in its blob.
+    #[test]
+    fn a_legacy_blob_is_migrated_into_the_store_and_blanked() {
+        let path = std::env::temp_dir().join(format!("riviu-secret-legacy-{}.db", Uuid::new_v4()));
+        // Written by a build with no secret store: the key lands in the blob.
+        {
+            let plain = Database::open(&path).expect("open plain");
+            let settings = crate::types::NurtureSettings {
+                api_key: "sk-legacy".into(),
+                ..Default::default()
+            };
+            plain.save_nurture_settings(&settings).expect("save plain");
+            let blob = plain.get_setting("nurture.settings").unwrap().unwrap();
+            assert!(
+                blob.contains("sk-legacy"),
+                "fixture must start in the old shape"
+            );
+        }
+
+        let store = Arc::new(MemoryStore::default());
+        let db = Database::open(&path)
+            .expect("reopen")
+            .with_secrets(store.clone());
+
+        // First read migrates and still answers with the key.
+        let loaded = db.get_nurture_settings().expect("load");
+        assert_eq!(loaded.api_key, "sk-legacy");
+        assert_eq!(
+            store.get_secret(SECRET_AI_API_KEY).unwrap().as_deref(),
+            Some("sk-legacy")
+        );
+        let blob = db.get_setting("nurture.settings").unwrap().unwrap();
+        assert!(
+            !blob.contains("sk-legacy"),
+            "the legacy key was left in the blob: {blob}"
+        );
+
+        // Second read is a plain store read, and still correct.
+        assert_eq!(db.get_nurture_settings().unwrap().api_key, "sk-legacy");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Clearing means clearing. The database layer is faithful; "leave it unchanged" is a
+    /// decision for whoever owns the form, not a rule hidden down here.
+    #[test]
+    fn an_empty_key_clears_the_stored_one() {
+        let (db, store, path) = fixture();
+        let mut settings = crate::types::NurtureSettings {
+            api_key: "sk-first".into(),
+            ..Default::default()
+        };
+        db.save_nurture_settings(&settings).expect("save");
+        settings.api_key = String::new();
+        db.save_nurture_settings(&settings).expect("clear");
+
+        assert_eq!(
+            store.get_secret(SECRET_AI_API_KEY).unwrap().as_deref(),
+            Some("")
+        );
+        assert_eq!(db.get_nurture_settings().unwrap().api_key, "");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// No store attached: unchanged behaviour, which is what the other test fixtures rely on.
+    #[test]
+    fn without_a_store_the_key_stays_in_the_blob_as_before() {
+        let path = std::env::temp_dir().join(format!("riviu-secret-none-{}.db", Uuid::new_v4()));
+        let db = Database::open(&path).expect("open");
+        let settings = crate::types::NurtureSettings {
+            api_key: "sk-plain".into(),
+            ..Default::default()
+        };
+        db.save_nurture_settings(&settings).expect("save");
+        assert!(db
+            .get_setting("nurture.settings")
+            .unwrap()
+            .unwrap()
+            .contains("sk-plain"));
+        assert_eq!(db.get_nurture_settings().unwrap().api_key, "sk-plain");
+        let _ = std::fs::remove_file(path);
     }
 }

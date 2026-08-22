@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&family=Noto+Sans+Mono:wght@400;500&display=swap");
+@import "./assets/fonts/fonts.css";
 
 /* Swarmote shell tokens · Riviu orange primary (was #3C79F7) */
 :root {
@@ -14,7 +14,9 @@
   --orange-ring: var(--primary-ring);
 
   --bg: #ffffff;
-  --bg-content: #f8faff;
+  /* The page behind the panels. A hair of the brand rather than the hair of blue it used to
+     be (`#f8faff`); see `--link` for the decision. */
+  --bg-content: var(--primary-50);
   --bg-elevated: #ffffff;
   --bg-panel: #ffffff;
   --bg-aside: #ffffff;
@@ -35,6 +37,101 @@
   --tile: #ffffff;
   --shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
   --radius: 8px;
+  /* ---- Scales -------------------------------------------------------------
+     Added 18/08/2026. Everything above this point is the palette the app already
+     had and is deliberately unchanged; what was missing was every *other* axis.
+     The CSS underneath carried 457 hardcoded pixel values across 73 distinct
+     sizes, and ten font sizes between 0.68rem and 0.9rem that no one chose —
+     they drifted. These are the steps those collapse onto. ------------------ */
+
+  /* 4px base. `--space-0h` is the half-step, for hairline gaps and optical nudges
+     where a full 4px reads as a seam. */
+  /* ---- Semantic colours ---------------------------------------------------
+     Added 18/08/2026 with the values they already had, letter for letter, so this
+     names what was there rather than restyling it. The stylesheet carried 79
+     distinct hardcoded colours; these are the roles that appeared more than once
+     and can be told apart by what they are for. ------------------------------- */
+  /* Text and icons drawn on a filled control — primary, danger, the stage. */
+  --text-inverse: #ffffff;
+  /* A hair off white: zebra rows and inset wells. */
+  --bg-subtle: #fafafa;
+  /* Behind a phone's video. Black on purpose, so letterboxing is invisible. */
+  --bg-stage: #000000;
+  /* Chrome floating over the stage — overlay bars, menus. */
+  --bg-stage-elevated: #151515;
+  /* Danger fill. */
+  --danger-soft: #fef0f0;
+  /* Danger border. */
+  --danger-line: #fde2e2;
+  /* Danger text on a danger fill, where --danger itself is too light to read. */
+  --danger-strong: #c45656;
+  /* The heaviest danger text, for a destructive confirmation. */
+  --danger-deep: #b91c1c;
+  /* Warning fill. */
+  --warn-soft: #fdf6ec;
+  /* Warning border. */
+  --warn-line: #faecd8;
+  /* Success fill. */
+  --ok-soft: #f0f9eb;
+  /* An interactive text colour: a link in body copy, and the hover colour of a menu row.
+     It was a blue (`#2b6cb0`) on the reasoning that the orange primary reads as a button in
+     running text. Changed to the deep orange on 21/08/2026 because the operator asked for it
+     in as many words — "UI hiện tại lại có màu xanh ở nhiều chỗ, chuyển qua màu cam" — and a
+     blue accent inside an orange product does read as two brands. Deep rather than
+     `--primary`, so it still passes as *text* on white. */
+  --link: var(--primary-deep);
+
+  --space-0h: 2px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* Root is 14px, so these are the rem values that land on whole pixels there —
+     which matters because this UI is dense and half-pixel text is what made the
+     old sizes look like ten different fonts. */
+  --text-2xs: 0.625rem;
+  --text-xs: 0.6875rem;
+  --text-sm: 0.75rem;
+  --text-md: 0.8125rem;
+  --text-base: 0.875rem;
+  --text-lg: 1rem;
+  --text-xl: 1.25rem;
+  --text-2xl: 1.5rem;
+
+  --leading-tight: 1.25;
+  --leading-normal: 1.45;
+  --leading-loose: 1.7;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* `--radius` keeps its old value: it is referenced in 3332 lines of App.css and
+     changing it silently restyles the whole app. The scale grows around it. */
+  --radius-sm: 4px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+
+  /* Likewise `--shadow`. One elevation was never enough to tell a resting card
+     from a menu floating over it. */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.05);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.12);
+
+  /* Motion. Named rather than inlined so a future "reduce animation" switch has
+     one place to turn, and because 120ms and 200ms mean different things: the
+     first is a control answering a click, the second is a surface arriving. */
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+
   --aside-w: 240px;
   --aside-w-collapsed: 64px;
   --font-display: "Noto Sans", "PingFang SC", "Helvetica Neue", sans-serif;
@@ -43,7 +140,7 @@
   color: var(--text);
   background: var(--bg);
   font-family: var(--font-body);
-  font-size: 14px;
+  font-size: var(--text-lg);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -72,12 +169,38 @@ button {
   cursor: pointer;
 }
 
+/* **Keyboard focus, which this app did not have.**
+
+   Before this rule there was exactly one `outline` in 3300 lines of App.css, on one
+   control. Everywhere else, tabbing through the interface moved an invisible cursor:
+   the operator could not see which of twenty device tiles, which toolbar button or
+   which field was about to receive the Enter key. On a tool somebody drives all day
+   that is not a nicety.
+
+   `:where()` so the whole selector costs zero specificity — component styles keep
+   winning on colour and shape, and only the ring is added. `:focus-visible` rather
+   than `:focus` so a mouse click does not leave a ring behind it, which is the reason
+   people delete focus styling in the first place.
+
+   Deliberately an `outline` and not a `box-shadow`: outlines follow `border-radius`
+   on their own and never participate in layout, so this cannot shift a row by a pixel
+   the way an inset shadow or a border swap does. */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--primary-ring);
+  outline-offset: 2px;
+}
+
+/* A dark surface swallows the ring's own colour, so lift it there. */
+:where(.focus-shell, .focus-stage, .tile-zoom) :where(a, button, input, [tabindex]):focus-visible {
+  outline-color: var(--primary);
+}
+
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #c0c4cc;
+  background: var(--line-strong);
   border-radius: 6px;
 }
 ::-webkit-scrollbar-track {
@@ -119,13 +242,13 @@ button {
 .agent-runtime-meta dt {
   margin-bottom: 0.2rem;
   color: var(--text-3);
-  font-size: 0.72rem;
+  font-size: var(--text-sm);
 }
 
 .agent-runtime-meta dd {
   margin: 0;
   color: var(--text-1);
-  font-size: 0.82rem;
+  font-size: var(--text-md);
   overflow-wrap: anywhere;
 }
 
@@ -164,14 +287,14 @@ button {
 .agent-status-head {
   background: var(--bg-muted);
   color: var(--text-3);
-  font-size: 0.72rem;
+  font-size: var(--text-sm);
   font-weight: 600;
   border-bottom: 1px solid var(--line);
 }
 
 .agent-status-row {
   color: var(--text-2);
-  font-size: 0.78rem;
+  font-size: var(--text-sm);
 }
 
 .agent-status-row + .agent-status-row {
@@ -206,7 +329,7 @@ button {
   width: 80px;
   min-height: 30px;
   padding: 0.3rem 0.45rem;
-  font-size: 0.76rem;
+  font-size: var(--text-sm);
 }
 
 @media (max-width: 760px) {

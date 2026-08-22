@@ -762,7 +762,183 @@ fn protected_assignment_ids(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Run a campaign's cohorts at the same time, then decide what the campaign was.
+///
+/// **The cohorts are why this is safe to run in parallel.** `partition_actors` gives each
+/// cohort its own phones, and `plan_threads` gives each cohort its own links, so two tasks
+/// never reach for the same exclusive lease and never share an identity map. Nothing here
+/// coordinates them because there is nothing to coordinate — the isolation is in the plan.
+///
+/// A campaign with no cohort size is one cohort, which is the sequential behaviour this had
+/// before: same code path, one task.
+///
+/// The final state is written **once, here**, after every cohort has finished. Leaving it
+/// inside the runner would have each cohort racing to declare the campaign over while its
+/// siblings were still posting.
 async fn execute_thread_campaign(
+    db: Arc<riviu_core::db::Database>,
+    control: Arc<DeviceControlPlane>,
+    engine: riviu_core::NurtureEngine,
+    events: riviu_core::EventBus,
+    campaign_id: String,
+    request: ThreadCampaignRequest,
+    plan: ThreadPlan,
+    only_assignments: Option<std::collections::HashSet<String>>,
+    artifacts: riviu_core::FlowArtifactStore,
+    frame_source: Arc<dyn riviu_core::GenerationFrameSource>,
+) -> anyhow::Result<()> {
+    let mut by_cohort: std::collections::BTreeMap<u16, std::collections::HashSet<String>> =
+        Default::default();
+    for message in &plan.assignments {
+        by_cohort
+            .entry(message.cohort)
+            .or_default()
+            .insert(message.target_key.clone());
+    }
+
+    // **Bounded by the stream budget, because exhausting it is a refusal and not a queue.**
+    //
+    // Each assignment holds one foreground stream slot while it runs, so N cohorts want N
+    // slots at once. Past the budget, `preview_foreground_victim` answers
+    // `CapacityExhausted` and the assignment *fails* — it does not wait its turn. Starting
+    // eight teams against a budget of four would not run slower, it would fail half the
+    // campaign for a reason that has nothing to do with the phones.
+    //
+    // Held for a whole cohort rather than per assignment: coarser than it has to be, and
+    // the coarseness is what makes it safe to reason about — a team that has a permit can
+    // always open its next phone.
+    let gate = Arc::new(tokio::sync::Semaphore::new(
+        control.stream_capacity().max(1),
+    ));
+    // `None` for a single cohort rather than a set holding every key: it is the same work
+    // either way, and it keeps the ordinary one-team run on the path that has no filter to
+    // get wrong.
+    let single = by_cohort.len() <= 1;
+    let mut running = Vec::with_capacity(by_cohort.len().max(1));
+    for (_, targets) in by_cohort {
+        let gate = gate.clone();
+        running.push(tokio::spawn(gated_cohort(
+            gate,
+            (!single).then_some(targets),
+            db.clone(),
+            control.clone(),
+            engine.clone(),
+            events.clone(),
+            campaign_id.clone(),
+            request.clone(),
+            plan.clone(),
+            only_assignments.clone(),
+            artifacts.clone(),
+            frame_source.clone(),
+        )));
+    }
+
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+    let mut first_error: Option<anyhow::Error> = None;
+    for handle in running {
+        match handle.await {
+            Ok(Ok((ok, bad))) => {
+                succeeded += ok;
+                failed += bad;
+            }
+            // A cohort that died still leaves its siblings' work standing, and the campaign
+            // is still worth finalising from what did land. The first reason is kept for
+            // the caller; the rest would only bury it.
+            Ok(Err(error)) => {
+                log::warn!("interaction cohort failed: {error:#}");
+                first_error.get_or_insert(error);
+            }
+            Err(join) => {
+                log::warn!("interaction cohort panicked: {join}");
+                first_error.get_or_insert_with(|| anyhow::anyhow!("cohort panicked: {join}"));
+            }
+        }
+    }
+
+    let cancelled = matches!(
+        db.get_interaction_campaign(&campaign_id)?
+            .map(|detail| detail.summary.state),
+        Some(ThreadCampaignState::Cancelled)
+    );
+    if !cancelled {
+        let final_state = if failed == 0 && first_error.is_none() {
+            ThreadCampaignState::Succeeded
+        } else if succeeded == 0 {
+            ThreadCampaignState::Failed
+        } else {
+            ThreadCampaignState::Partial
+        };
+        db.update_interaction_campaign_state(&campaign_id, final_state, None)?;
+    }
+    events.emit(AppEvent::InteractionUpdated {
+        campaign_id,
+        revision: revision(),
+    });
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// [`run_cohort`], but holding a slice of the stream budget for as long as it runs.
+///
+/// A separate function rather than a block inside the spawn, so the permit's lifetime is
+/// the task's lifetime by construction: acquiring it inside the future and dropping it at
+/// the end is exactly what "this team is using a phone" means, and there is no path out of
+/// here that forgets to release it.
+#[allow(clippy::too_many_arguments)]
+async fn gated_cohort(
+    gate: Arc<tokio::sync::Semaphore>,
+    mine: Option<std::collections::HashSet<String>>,
+    db: Arc<riviu_core::db::Database>,
+    control: Arc<DeviceControlPlane>,
+    engine: riviu_core::NurtureEngine,
+    events: riviu_core::EventBus,
+    campaign_id: String,
+    request: ThreadCampaignRequest,
+    plan: ThreadPlan,
+    only_assignments: Option<std::collections::HashSet<String>>,
+    artifacts: riviu_core::FlowArtifactStore,
+    frame_source: Arc<dyn riviu_core::GenerationFrameSource>,
+) -> anyhow::Result<(usize, usize)> {
+    // The semaphore is never closed, so this only fails if it is — treat that as "go", since
+    // refusing a whole team over a bookkeeping error would lose more than it protects.
+    let _permit = gate.acquire().await;
+    run_cohort(
+        mine,
+        db,
+        control,
+        engine,
+        events,
+        campaign_id,
+        request,
+        plan,
+        only_assignments,
+        artifacts,
+        frame_source,
+    )
+    .await
+}
+
+/// Run one cohort's share of a campaign: its links, its phones, its own identity map.
+///
+/// Renamed from `execute_thread_campaign` when cohorts arrived, and the body is unchanged
+/// — which is the point. A cohort is the whole campaign restricted to the links it owns,
+/// so the sequencing inside it, the parent-identity map, the cancellation checks and the
+/// evidence all keep working exactly as they were proven to.
+///
+/// `mine` is the set of target keys this cohort owns; `None` means all of them, which is
+/// the single-cohort arrangement this had before. The **full** request is still passed in
+/// rather than a trimmed one, because `manual_comment_for` deals the operator's pool by
+/// global target index — trimming would make link 1 and link 2 open with the same
+/// sentence, which is precisely what that dealing exists to avoid.
+///
+/// Returns `(succeeded, failed)` and deliberately does **not** write the campaign's final
+/// state: with several cohorts running, that decision belongs to whoever joins them.
+#[allow(clippy::too_many_arguments)]
+async fn run_cohort(
+    mine: Option<std::collections::HashSet<String>>,
     db: Arc<riviu_core::db::Database>,
     control: Arc<DeviceControlPlane>,
     engine: riviu_core::NurtureEngine,
@@ -775,7 +951,7 @@ async fn execute_thread_campaign(
     // Separate from `engine.frames`, which is an `Arc<dyn FrameSource>` and therefore has
     // no way to ask for a *generation*. Evidence needs that: see `evidence_frame_after`.
     frame_source: Arc<dyn riviu_core::GenerationFrameSource>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(usize, usize)> {
     let settings = db.get_nurture_settings().context("đọc cấu hình AI")?;
     if settings.api_key.trim().is_empty() {
         anyhow::bail!("AI API key chưa được cấu hình cho Interaction");
@@ -784,6 +960,23 @@ async fn execute_thread_campaign(
         .get_interaction_campaign(&campaign_id)?
         .context("campaign không tồn tại")?;
     let protected = protected_assignment_ids(&detail.assignments);
+    // **What already posted, so a retry knows what to reply to.**
+    //
+    // An identity is only ever produced by sending, and a message that already succeeded
+    // is deliberately never sent again — so on a retry the in-memory map below starts
+    // empty and every reply under a succeeded root was skipped with
+    // `parent_identity_not_confirmed`. That is the one case Retry exists for, and it could
+    // not work. The identity was on disk the whole time, in the assignment's evidence.
+    let posted: HashMap<(String, u8), CommentLocatorIdentity> = detail
+        .assignments
+        .iter()
+        .filter_map(|assignment| {
+            Some((
+                (assignment.target_key.clone(), assignment.ordinal),
+                assignment.posted_identity()?,
+            ))
+        })
+        .collect();
     let assignment_ids: HashMap<(String, u8), String> = detail
         .assignments
         .into_iter()
@@ -805,8 +998,16 @@ async fn execute_thread_campaign(
     let mut failed = 0usize;
 
     for (target_index, target) in request.targets.iter().enumerate() {
+        // Another cohort's link. Skipped here rather than by trimming the request so that
+        // `target_index` keeps meaning what it meant.
+        if mine
+            .as_ref()
+            .is_some_and(|mine| !mine.contains(&target.target_key))
+        {
+            continue;
+        }
         if campaign_is_cancelled(&db, &campaign_id)? {
-            return Ok(());
+            return Ok((succeeded, failed));
         }
 
         // Open the target and collect the same-post evidence before preparing
@@ -939,6 +1140,15 @@ async fn execute_thread_campaign(
                     grounded.text
                 }
             };
+            // Tag the mentioned accounts at the front of the opening comment only. `@name` is
+            // plain text (TikTok does not linkify it); the fleet accounts among the mentions
+            // were already added to `actor_udids` by the caller, so they join this post and
+            // reply — the replies do not re-tag.
+            let text = if assignment.ordinal == 0 {
+                format!("{}{}", request.mention_prefix(), text)
+            } else {
+                text
+            };
             let prepared = PreparedThreadMessage::new(assignment, text);
             previous = Some(prepared.text.clone());
             db.prepare_interaction_assignment(id, &prepared)?;
@@ -947,7 +1157,13 @@ async fn execute_thread_campaign(
 
         // A root comment is sent with full frame evidence. Each subsequent
         // reply first resolves the exact parent text+author on two OCR frames.
-        let mut identities = HashMap::<u8, CommentLocatorIdentity>::new();
+        // Seeded from what this target already posted in an earlier run, then added to as
+        // this one sends. A fresh campaign finds nothing here and behaves exactly as before.
+        let mut identities: HashMap<u8, CommentLocatorIdentity> = posted
+            .iter()
+            .filter(|((key, _), _)| key == &target.target_key)
+            .map(|((_, ordinal), identity)| (*ordinal, identity.clone()))
+            .collect();
         let mut chain_broken_at: Option<u8> = None;
         for (id, prepared) in prepared_messages {
             // A retry runs the same plan but must not re-send anything already
@@ -967,7 +1183,7 @@ async fn execute_thread_campaign(
             // would manufacture `Uncertain`, which blocks retry. One in-flight
             // message finishing is the correct cost of stopping.
             if campaign_is_cancelled(&db, &campaign_id)? {
-                return Ok(());
+                return Ok((succeeded, failed));
             }
             let parent_identity = prepared
                 .parent_ordinal
@@ -976,11 +1192,17 @@ async fn execute_thread_campaign(
                 .parent_ordinal
                 .filter(|_| parent_identity.is_none())
             {
-                // The chain is linear and an identity is only ever learned by
-                // sending, so once it breaks nothing later in this target can
-                // recover — every remaining message lands here. Naming the
-                // ordinal that broke it is the difference between "5 messages
-                // skipped" and knowing which one to look at.
+                // An identity is only ever learned by sending, so a message whose parent
+                // never posted has nothing to reply to. Naming the ordinal that broke it
+                // is the difference between "5 messages skipped" and knowing which one to
+                // look at.
+                //
+                // **How far that spreads is the shape's business, not this block's.** In a
+                // chain every later message names the one before it, so one gap does end
+                // the target — each of them arrives here in turn. In a star they all name
+                // ordinal 0, so a reply that fails costs only itself and its siblings carry
+                // on. Nothing here needs to know which it is: the lookup is by the parent
+                // this message actually has.
                 if chain_broken_at.is_none() {
                     chain_broken_at = Some(parent_ordinal);
                 }
@@ -1071,20 +1293,35 @@ async fn execute_thread_campaign(
                 //
                 // Not fatal on purpose. A refusal here is either "this backend cannot" or
                 // "the label did not flip", and neither is a reason to abandon a comment the
-                // operator queued. The campaign's own record shows what happened.
-                if request.like_target {
+                // operator queued.
+                //
+                // **Written into the evidence, not only into the log.** The sentence above
+                // used to end "the campaign's own record shows what happened", and it did
+                // not: the outcome went to `log::warn!` and nowhere else, so an operator
+                // watching the Monitor tab saw a message succeed and had no way to learn the
+                // like had been refused. A failure nobody is shown is the same shape as the
+                // ones this project has spent its time removing.
+                let like_note = if request.like_target {
                     match driver.like_target(session.as_ref()).await {
-                        Ok(reason) => log::info!(
-                            "interaction {}: {} — {reason}",
-                            target.target_key,
-                            prepared.actor_udid
-                        ),
-                        Err(error) => log::warn!(
-                            "interaction {}: không thả tim được ({error:#})",
-                            target.target_key
-                        ),
+                        Ok(reason) => {
+                            log::info!(
+                                "interaction {}: {} — {reason}",
+                                target.target_key,
+                                prepared.actor_udid
+                            );
+                            Some(format!("đã tim: {reason}"))
+                        }
+                        Err(error) => {
+                            log::warn!(
+                                "interaction {}: không thả tim được ({error:#})",
+                                target.target_key
+                            );
+                            Some(format!("không tim được: {error:#}"))
+                        }
                     }
-                }
+                } else {
+                    None
+                };
 
                 // `effect_intent` decides `Uncertain` versus `Failed` on the error path,
                 // and `Uncertain` is permanently unretryable. So it is **not** set before
@@ -1124,6 +1361,7 @@ async fn execute_thread_campaign(
                         "postedIdentity": sent.identity,
                         "reader": driver.kind(),
                         "arrival": proof.as_str(),
+                        "like": like_note,
                     }))
                 } else {
                     db.update_interaction_assignment_state(
@@ -1150,6 +1388,7 @@ async fn execute_thread_campaign(
                         "postedIdentity": sent.identity,
                         "reader": driver.kind(),
                         "arrival": proof.as_str(),
+                        "like": like_note,
                     }))
                 }
             }
@@ -1258,26 +1497,7 @@ async fn execute_thread_campaign(
         }
     }
 
-    let cancelled = matches!(
-        db.get_interaction_campaign(&campaign_id)?
-            .map(|detail| detail.summary.state),
-        Some(ThreadCampaignState::Cancelled)
-    );
-    if !cancelled {
-        let final_state = if failed == 0 {
-            ThreadCampaignState::Succeeded
-        } else if succeeded == 0 {
-            ThreadCampaignState::Failed
-        } else {
-            ThreadCampaignState::Partial
-        };
-        db.update_interaction_campaign_state(&campaign_id, final_state, None)?;
-    }
-    events.emit(AppEvent::InteractionUpdated {
-        campaign_id,
-        revision: revision(),
-    });
-    Ok(())
+    Ok((succeeded, failed))
 }
 
 /// Longest the device gets to land on the target before the open is called a
@@ -2036,6 +2256,8 @@ mod tests {
                 state,
                 prepared_text: None,
                 error_code: None,
+                evidence_json: None,
+                like: None,
             }
         }
 
@@ -2176,6 +2398,8 @@ mod tests {
             state,
             prepared_text: Some("nội dung".into()),
             error_code: None,
+            evidence_json: None,
+            like: None,
         }
     }
 

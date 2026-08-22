@@ -1,7 +1,6 @@
 import { renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  describeError,
   dismissToast,
   pushToast,
   resetToasts,
@@ -49,20 +48,17 @@ describe("toastStore", () => {
     expect(visibleToasts()).toHaveLength(0);
   });
 
-  it("normalises Error, Tauri CommandError and string throwables to one line", () => {
-    expect(describeError(new Error("boom"))).toBe("boom");
-    expect(describeError("plain")).toBe("plain");
-    expect(describeError({ code: "DeviceBusy", message: "máy đang bận" })).toBe(
-      "DeviceBusy: máy đang bận",
-    );
-    expect(describeError({ error: "không kết nối được" })).toBe("không kết nối được");
-    expect(describeError(null)).toBe("Lỗi không rõ nguyên nhân");
-
+  it("puts a normalised error in the toast's detail line", () => {
+    // `describeError` itself is proved in describeError.test.ts; what matters here is that a
+    // toast passes the throwable through it rather than interpolating it raw.
     toastError("Backup thất bại", new Error("hết dung lượng"));
     expect(visibleToasts()[0]).toMatchObject({
       kind: "error",
       title: "Backup thất bại",
       detail: "hết dung lượng",
     });
+
+    toastError("Không mở được thư mục", { code: "Io", message: "Permission denied" });
+    expect(visibleToasts()[0].detail).toBe("Io: Permission denied");
   });
 });
