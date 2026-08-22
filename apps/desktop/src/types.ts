@@ -76,6 +76,21 @@ export function deviceModelOsLabel(
   return os ? `${device.model} · ${os}` : device.model;
 }
 
+/**
+ * The line under a tile's bold name. When a phone reports no friendly name its `name` is
+ * its model — an Android serial like "23021RAAEG" — so the full "model · OS" caption would
+ * print that serial a *second* time right beneath the name and the tile reads as a cluttered
+ * duplicate. In that case show only the OS ("Android 15"); otherwise the model still adds
+ * information (an iPhone named "iPhone 8 (Global)" over model "iPhone10,1"), so keep it.
+ */
+export function deviceTileSubtitle(
+  device: Pick<DeviceInfo, "name" | "model" | "platform" | "osVersion">,
+): string {
+  return device.name === device.model
+    ? deviceOsLabel(device)
+    : deviceModelOsLabel(device);
+}
+
 /// One phone a group action did not reach, and why.
 export interface GroupInputSkip {
   udid: string;
@@ -91,6 +106,23 @@ export interface GroupInputSkip {
 export interface GroupInputReport {
   completedUdids: string[];
   skipped: GroupInputSkip[];
+}
+
+/// Group-sync timing/offset policy (A1). Mirrors `riviu_core::group_sync`. All fields
+/// optional — an absent policy (or `{}`) is the old lockstep behaviour.
+export type DelayPolicy =
+  | { mode: "none" }
+  | { mode: "random"; minMs: number; maxMs: number }
+  | { mode: "staggered"; stepMs: number };
+
+export interface OffsetPolicy {
+  /// Max absolute pixel jitter applied independently to x and y. 0 disables offset.
+  maxPx: number;
+}
+
+export interface GroupSyncPolicy {
+  delay?: DelayPolicy;
+  offset?: OffsetPolicy;
 }
 
 export interface DeviceInfo {
@@ -199,6 +231,19 @@ export interface DeviceMeta {
   tags: string[];
   groupId?: string | null;
   proxyId?: string | null;
+  /** TikTok @handle this phone is logged into, without the leading `@`. Empty if unknown. */
+  handle?: string;
+  /**
+   * What the operator calls this phone (xiaowei "Change Name"). Empty means "use the name
+   * the phone reports" — this is a label in this app's records, never written to the device.
+   */
+  alias?: string;
+  /**
+   * The number written on the phone and on the shelf (xiaowei "Change Number"). `null` means
+   * unnumbered, and the tile then shows its position in the grid instead — which is the very
+   * thing a number replaces, since a position moves when the fleet list changes.
+   */
+  number?: number | null;
 }
 
 export interface DeviceGroup {
@@ -633,6 +678,13 @@ export interface ThreadCampaignRequest {
   manualComments?: string[];
   /** Also like each target, once per actor that comments on it. */
   likeTarget?: boolean;
+  /**
+   * @-handles (without the leading `@`) tagged at the front of each thread's opening
+   * comment, as plain text. A handle that belongs to a fleet phone is also added to
+   * `actorUdids` by the caller so that phone joins the post and replies; a handle matching
+   * no phone is tagged in text only. Optional/empty prepends nothing (Rust `#[serde(default)]`).
+   */
+  mentions?: string[];
 }
 
 export type ThreadMessageState =
@@ -1209,6 +1261,15 @@ export interface InstalledApp {
   bundleId: string;
   kind: InstalledAppKind;
   label: string | null;
+  /**
+   * The app's icon as a base64 PNG (48 px edge), from the on-device helper.
+   *
+   * Absent for a phone with no helper, for the system partition (which the driver does not
+   * pay to describe — see `name_apps_with_helper`), and for the handful of packages that
+   * genuinely have no icon. Never a placeholder: the UI draws its own neutral square, so
+   * "no icon" cannot be mistaken for "this is what the app looks like".
+   */
+  iconPngBase64?: string | null;
 }
 
 /**
@@ -1222,4 +1283,41 @@ export interface ShellOutcome {
   exitCode: number;
   stdout: string;
   stderr: string;
+}
+
+/**
+ * What one row of a phone's directory listing is.
+ *
+ * `other` is a real answer — a socket, a fifo, a block device — and not a parse failure.
+ * A browser that dropped rows it did not recognise would show a folder as emptier than it
+ * is, which is the worst kind of wrong for a file manager.
+ */
+export type DeviceFileKind = "file" | "directory" | "symlink" | "other";
+
+/**
+ * One entry in a phone's own directory listing (xiaowei "Preview Mobile Files").
+ *
+ * `modified` is the phone's own `YYYY-MM-DD HH:MM` text, not a parsed date: `ls` prints in
+ * the *device's* timezone with no offset, so turning it into a Date here would invent a
+ * precision the source does not have. `null` means the phone printed `?` — it could not
+ * stat the row, which happens on dangling symlinks.
+ *
+ * `size` is meaningful for files. For a directory it is the inode size (3452 on this
+ * fleet's sdcard), which says nothing about what is inside, so the UI does not show it.
+ */
+export interface DeviceFileEntry {
+  name: string;
+  kind: DeviceFileKind;
+  size: number;
+  modified: string | null;
+  linkTarget: string | null;
+}
+
+/** What the phone had on its clipboard (xiaowei "Export Clipboard"). */
+export interface ClipboardRead {
+  /** The phone's own MIME description, e.g. `text/plain`. */
+  contentType: string;
+  /** Decoded as text. Empty for non-text content, where `bytes` still says how much. */
+  text: string;
+  bytes: number;
 }

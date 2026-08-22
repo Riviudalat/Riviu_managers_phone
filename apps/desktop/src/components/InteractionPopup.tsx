@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  getDeviceMeta,
   interactionCancel,
   interactionGet,
   interactionList,
@@ -11,7 +12,9 @@ import {
   interactionStartThread,
   listenRiviuEvents,
   listGroups,
+  saveDeviceMeta,
 } from "../api";
+import { parseMentions, resolveMentionActors, unionActors } from "../interactionMentions";
 import type { InteractionArtifactRecord } from "../api";
 import type {
   DeviceGroup,
@@ -24,6 +27,8 @@ import type {
   TikTokLinkLine,
 } from "../types";
 import { IconChat, IconClose } from "./Icons";
+import { InfoDot as Info } from "./InfoDot";
+import { describeError } from "../describeError";
 
 type Props = {
   devices: DeviceInfo[];
@@ -67,6 +72,14 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
   // here any more. What replaces the filter is a *grouping*, because the two readers
   // cannot be mixed inside one nested thread — see `mixedThread` below.
   const actorChoices = inScope;
+  // The same 1-based number the grid stamps on each tile (position in the full device
+  // list), so "máy số 7" in the picker is the same phone as tile 7 on the wall — that is
+  // how an operator tells one anonymous "23021RAAEG" from the next.
+  const deviceNumber = useMemo(() => {
+    const map = new Map<string, number>();
+    devices.forEach((device, index) => map.set(device.udid, index + 1));
+    return map;
+  }, [devices]);
   const pixelActors = useMemo(
     () => inScope.filter((device) => device.platform === "ios"),
     [inScope],
@@ -101,6 +114,11 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
   const [textSource, setTextSource] = useState<"ai" | "manual">("ai");
   const [manualText, setManualText] = useState("");
   const [likeTarget, setLikeTarget] = useState(false);
+  // Free-form tag string ("@ann @bob") and each in-scope phone's stored @handle. A tag that
+  // matches a phone's handle pulls that phone into the actor set so the tagged account joins
+  // the post and replies; a tag matching no phone is prepended as plain text only.
+  const [mentionText, setMentionText] = useState("");
+  const [handles, setHandles] = useState<Record<string, string>>({});
   const [campaigns, setCampaigns] = useState<InteractionCampaignSummary[]>([]);
   const [detail, setDetail] = useState<InteractionCampaignDetail | null>(null);
   const [artifacts, setArtifacts] = useState<InteractionArtifactRecord[]>([]);
@@ -128,11 +146,59 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
         : [],
     [manualText, textSource],
   );
+  // @handles for the in-scope phones. The fleet poll rebuilds `inScope` every few seconds,
+  // so keying the load on the udid list (a string) keeps it from refetching — and clobbering
+  // an unsaved edit — on every poll. A locally-edited handle in `prev` wins over a reload.
+  const inScopeKey = useMemo(() => inScope.map((device) => device.udid).join(","), [inScope]);
+  useEffect(() => {
+    let alive = true;
+    const udids = inScopeKey ? inScopeKey.split(",") : [];
+    void Promise.all(
+      udids.map((udid) =>
+        getDeviceMeta(udid)
+          .then((meta) => [udid, meta.handle ?? ""] as const)
+          .catch(() => [udid, ""] as const),
+      ),
+    ).then((pairs) => {
+      if (alive) setHandles((prev) => ({ ...Object.fromEntries(pairs), ...prev }));
+    });
+    return () => {
+      alive = false;
+    };
+  }, [inScopeKey]);
+
+  const persistHandle = useCallback(async (udid: string, value: string) => {
+    const handle = value.trim().replace(/^@+/, "");
+    setHandles((prev) => ({ ...prev, [udid]: handle }));
+    try {
+      // Round-trip the full meta so notes/tags/group/proxy are preserved, not wiped.
+      const meta = await getDeviceMeta(udid);
+      await saveDeviceMeta({ ...meta, handle });
+    } catch {
+      // Non-fatal: the tag still resolves from local state for this session.
+    }
+  }, []);
+
+  const mentions = useMemo(() => parseMentions(mentionText), [mentionText]);
+  /// The phones a tag names, by matching each tag to a phone's @handle. These join the actor
+  /// set so the tagged account comments on the post itself.
+  const mentionActors = useMemo(() => {
+    const udids = inScopeKey ? inScopeKey.split(",") : [];
+    return resolveMentionActors(
+      mentions,
+      udids.map((udid) => ({ udid, handle: handles[udid] ?? "" })),
+    );
+  }, [mentions, inScopeKey, handles]);
+  const effectiveActors = useMemo(
+    () => unionActors(actors, mentionActors),
+    [actors, mentionActors],
+  );
+
   const request: ThreadCampaignRequest = useMemo(
     () => ({
       requestId: requestId(),
       targets: validTargets,
-      actorUdids: actors,
+      actorUdids: effectiveActors,
       messageCount,
       instruction,
       maxWords,
@@ -141,9 +207,11 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
       cohortSize: cohortSize >= 2 ? cohortSize : undefined,
       manualComments,
       likeTarget,
+      mentions,
     }),
     [
-      actors,
+      effectiveActors,
+      mentions,
       cohortSize,
       instruction,
       likeTarget,
@@ -160,7 +228,7 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
     try {
       setCampaigns(await interactionList());
     } catch (e) {
-      setError(String(e));
+      setError(describeError(e));
     }
   }, []);
 
@@ -251,20 +319,20 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
   /// comes from the backend, and the preview below is rendered from that plan rather
   /// than from this.
   const cohorts = useMemo(() => {
-    if (cohortSize < 2 || actors.length === 0) return [actors];
-    const count = Math.max(1, Math.floor(actors.length / cohortSize));
-    const base = Math.floor(actors.length / count);
-    let remainder = actors.length % count;
+    if (cohortSize < 2 || effectiveActors.length === 0) return [effectiveActors];
+    const count = Math.max(1, Math.floor(effectiveActors.length / cohortSize));
+    const base = Math.floor(effectiveActors.length / count);
+    let remainder = effectiveActors.length % count;
     const out: string[][] = [];
     let at = 0;
     for (let team = 0; team < count; team += 1) {
       const take = base + (remainder > 0 ? 1 : 0);
       if (remainder > 0) remainder -= 1;
-      out.push(actors.slice(at, at + take));
+      out.push(effectiveActors.slice(at, at + take));
       at += take;
     }
     return out;
-  }, [actors, cohortSize]);
+  }, [effectiveActors, cohortSize]);
   const largestCohort = cohorts.reduce(
     (most, team) => Math.max(most, team.length),
     0,
@@ -272,8 +340,8 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
 
   const mixedThread =
     mode === "threaded" &&
-    actors.some((udid) => pixelActors.some((device) => device.udid === udid)) &&
-    actors.some((udid) =>
+    effectiveActors.some((udid) => pixelActors.some((device) => device.udid === udid)) &&
+    effectiveActors.some((udid) =>
       hierarchyActors.some((device) => device.udid === udid),
     );
   const mixedThreadReason =
@@ -287,7 +355,7 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
       setLines(await interactionParseLinks(value));
       setError(null);
     } catch (e) {
-      setError(String(e));
+      setError(describeError(e));
     }
   };
 
@@ -298,7 +366,7 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
       setLines(await interactionResolveLinks(rawLinks));
       setError(null);
     } catch (e) {
-      setError(String(e));
+      setError(describeError(e));
     } finally {
       setBusy(false);
     }
@@ -309,8 +377,8 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
       setError("Cần ít nhất một link video/photo hợp lệ");
       return;
     }
-    if (actors.length < 2 || actors.length > 64) {
-      setError("Chọn từ 2 đến 64 thiết bị làm actor");
+    if (effectiveActors.length < 2 || effectiveActors.length > 64) {
+      setError("Chọn từ 2 đến 64 thiết bị làm actor (kể cả acc được tag)");
       return;
     }
     if (mixedThread) {
@@ -338,7 +406,7 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
       await reloadCampaigns();
       setError(null);
     } catch (e) {
-      setError(String(e));
+      setError(describeError(e));
     } finally {
       setBusy(false);
     }
@@ -353,7 +421,7 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
       // just asserted; a campaign that has none still opens.
       setArtifacts(await interactionListArtifacts(campaign.id).catch(() => []));
     } catch (e) {
-      setError(String(e));
+      setError(describeError(e));
     } finally {
       setBusy(false);
     }
@@ -364,7 +432,7 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
       const payload = await interactionReadArtifact(artifactId);
       setPreview(`data:${payload.mimeType};base64,${payload.base64}`);
     } catch (e) {
-      setError(String(e));
+      setError(describeError(e));
     }
   };
 
@@ -405,9 +473,10 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
         </div>
         {error && <div className="banner error">{error}</div>}
         {tab === "setup" ? (
-          <div className="interaction-body">
-            <label>
-              Link TikTok (mỗi dòng một link)
+          <div className="interaction-body nu-pane">
+            <div className="nu-group-head">Bài viết</div>
+            <label className="nu-field">
+              <span className="nu-label">Link TikTok — mỗi dòng một link</span>
               <textarea
                 value={rawLinks}
                 onChange={(event) => void parse(event.target.value)}
@@ -436,9 +505,10 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
                 Resolve link rút gọn
               </button>
             )}
-            <div className="interaction-grid">
-              <label>
-                Số message
+            <div className="nu-group-head">Cấu trúc chuỗi</div>
+            <div className="nu-grid nu-grid-3">
+              <label className="nu-field">
+                <span className="nu-label">Số message</span>
                 <input
                   type="number"
                   min={2}
@@ -447,8 +517,8 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
                   onChange={(e) => setMessageCount(Number(e.target.value))}
                 />
               </label>
-              <label>
-                Cỡ cụm
+              <label className="nu-field">
+                <span className="nu-label">Cỡ cụm</span>
                 <input
                   type="number"
                   min={0}
@@ -457,8 +527,8 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
                   onChange={(e) => setCohortSize(Number(e.target.value))}
                 />
               </label>
-              <label>
-                Tối đa từ
+              <label className="nu-field">
+                <span className="nu-label">Tối đa từ</span>
                 <input
                   type="number"
                   min={4}
@@ -470,7 +540,7 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
             </div>
             <p className="hint">
               {cohortSize >= 2
-                ? `${actors.length} máy chia thành ${cohorts.length} cụm; mỗi cụm nhận link riêng và các cụm chạy cùng lúc.`
+                ? `${effectiveActors.length} máy chia thành ${cohorts.length} cụm; mỗi cụm nhận link riêng và các cụm chạy cùng lúc.`
                 : "Cỡ cụm 0 = một cụm duy nhất: cả nhóm cùng làm một link, lần lượt từng máy."}
             </p>
             {cohortSize >= 2 && (
@@ -482,8 +552,14 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
                 ))}
               </ul>
             )}
-            <label>
-              Kiểu tương tác
+            <label className="nu-field">
+              <span className="nu-label">
+                Kiểu tương tác
+                <Info
+                  of="Kiểu tương tác"
+                  what="Qua lại = các acc trả lời nhau thành hội thoại lồng nhau (Android đọc hierarchy; iPhone cần OCR/macOS; không trộn hai loại trong một chuỗi). Riêng lẻ = mỗi acc một bình luận gốc, chạy mọi máy, trộn iPhone + Android được."
+                />
+              </span>
               <select
                 value={mode}
                 onChange={(e) => setMode(e.target.value as ThreadMode)}
@@ -497,49 +573,46 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
               </select>
             </label>
             {mode === "threaded" && (
-              <>
-                <label>
+              <label className="nu-field">
+                <span className="nu-label">
                   Hình chuỗi
-                  <select
-                    value={shape}
-                    onChange={(e) => setShape(e.target.value as ThreadShape)}
-                  >
-                    <option value="chain">
-                      Nối tiếp — mỗi acc trả lời acc liền trước
-                    </option>
-                    <option value="star">
-                      Toả — mọi acc trả lời bình luận gốc
-                    </option>
-                  </select>
-                </label>
-                <p className="hint">
-                  {shape === "star"
-                    ? "Một acc bình luận gốc, các acc còn lại rep thẳng vào đó. Vì mọi rep chỉ phụ thuộc bình luận gốc, chúng không phải chờ nhau — và một rep hỏng chỉ mất chính nó."
-                    : "Mỗi message trả lời message liền trước, nên chúng phải chạy nối đuôi: message N chỉ bắt đầu sau khi N-1 đã đăng và đọc lại được. Một mắt xích đứt là dừng cả link."}
-                </p>
-              </>
+                  <Info
+                    of="Hình chuỗi"
+                    what="Nối tiếp = acc N trả lời acc N-1, chạy nối đuôi nên một mắt xích đứt là dừng cả link. Toả = mọi acc trả lời bình luận gốc, chạy song song nên một rep hỏng chỉ mất chính nó."
+                  />
+                </span>
+                <select
+                  value={shape}
+                  onChange={(e) => setShape(e.target.value as ThreadShape)}
+                >
+                  <option value="chain">
+                    Nối tiếp — mỗi acc trả lời acc liền trước
+                  </option>
+                  <option value="star">
+                    Toả — mọi acc trả lời bình luận gốc
+                  </option>
+                </select>
+              </label>
             )}
-            <p className="hint">
-              {mode === "threaded"
-                ? "Tạo hội thoại lồng nhau. Actor Android tìm lại bình luận cha trong hierarchy; actor iPhone cần OCR đọc được tiếng Việt, hiện chỉ có trên macOS. Không trộn hai loại trong một chuỗi."
-                : "Mỗi acc để một bình luận riêng, không lồng nhau. Không cần OCR, chạy được trên mọi máy, và trộn iPhone với Android cũng được."}
-            </p>
-            <label className="check">
+            <label className="nu-switch">
               <input
                 type="checkbox"
                 checked={likeTarget}
                 onChange={(e) => setLikeTarget(e.target.checked)}
+                aria-label="Thả tim bài"
               />
-              Thả tim bài
+              <span className="nu-switch-track" aria-hidden="true" />
+              <span className="nu-switch-label">
+                Thả tim bài
+                <Info
+                  of="Thả tim bài"
+                  what="Mỗi actor thả tim bài trước khi bình luận, xác nhận bằng nhãn nút tim đổi trạng thái. Android làm được; iPhone bị từ chối vì chưa đo toạ độ nút tim. Thả tim hỏng không làm mất bình luận."
+                />
+              </span>
             </label>
-            <p className="hint">
-              Mỗi actor thả tim bài trước khi bình luận, xác nhận bằng nhãn nút
-              tim đổi trạng thái. Máy Android làm được; actor iPhone sẽ bị từ
-              chối vì chưa đo toạ độ nút tim trên trang bài — và một lần thả tim
-              thất bại không làm mất bình luận.
-            </p>
-            <label>
-              Nội dung bình luận
+            <div className="nu-group-head">Nội dung</div>
+            <label className="nu-field">
+              <span className="nu-label">Nội dung bình luận</span>
               <select
                 value={textSource}
                 onChange={(e) =>
@@ -555,8 +628,8 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
               </select>
             </label>
             {textSource === "ai" ? (
-              <label>
-                Giọng điệu / hướng dẫn
+              <label className="nu-field">
+                <span className="nu-label">Giọng điệu / hướng dẫn</span>
                 <input
                   value={instruction}
                   onChange={(e) => setInstruction(e.target.value)}
@@ -564,8 +637,14 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
               </label>
             ) : (
               <>
-                <label>
-                  Danh sách bình luận — mỗi dòng một câu
+                <label className="nu-field">
+                  <span className="nu-label">
+                    Danh sách bình luận — mỗi dòng một câu
+                    <Info
+                      of="Danh sách bình luận"
+                      what="Chia lần lượt theo từng link nên nhiều link không mở đầu bằng cùng một câu; chạy lại cùng chiến dịch sẽ gửi đúng chữ đó. Cần ít nhất số câu bằng số message."
+                    />
+                  </span>
                   <textarea
                     rows={6}
                     value={manualText}
@@ -578,18 +657,31 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
                   />
                 </label>
                 <p className="hint">
-                  {manualComments.length} câu · cần ít nhất {messageCount} câu
-                  cho {messageCount} message. Chia lần lượt theo từng link nên
-                  mười link không mở đầu bằng cùng một câu, và cùng một chiến
-                  dịch chạy lại sẽ gửi đúng chữ đó.
+                  {manualComments.length} câu · cần ≥ {messageCount}
                 </p>
               </>
             )}
-            <fieldset className="interaction-actors">
-              <legend>Actor tham gia</legend>
+            <div className="nu-group-head">Actor &amp; tag</div>
+            <div className="interaction-actors">
+              <label className="nu-field interaction-mention">
+                <span className="nu-label">Tag / nhắc (@) — cách nhau bằng dấu cách hoặc phẩy</span>
+                <input
+                  type="text"
+                  placeholder="@ann @bob"
+                  value={mentionText}
+                  onChange={(event) => setMentionText(event.target.value)}
+                />
+              </label>
+              {mentions.length > 0 && (
+                <p className="hint">
+                  {mentionActors.length > 0
+                    ? `Chèn ${mentions.map((m) => `@${m}`).join(" ")} vào comment mở đầu; ${mentionActors.length} acc trong fleet được tag sẽ tự vào post trả lời.`
+                    : `Chèn ${mentions.map((m) => `@${m}`).join(" ")} (chỉ là chữ) — chưa có máy nào trong fleet khớp @handle để tự vào.`}
+                </p>
+              )}
               {groups.length > 0 && (
-                <label>
-                  Lấy từ nhóm
+                <label className="nu-field">
+                  <span className="nu-label">Lấy từ nhóm</span>
                   <select
                     value=""
                     onChange={(e) => {
@@ -630,29 +722,62 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
                 .map((section) => (
                   <div key={section.label} className="interaction-actor-group">
                     <span className="hint">{section.label}</span>
-                    {section.group.map((device) => (
-                      <label key={device.udid}>
-                        <input
-                          type="checkbox"
-                          checked={actors.includes(device.udid)}
-                          onChange={() =>
-                            setActors((prev) =>
-                              prev.includes(device.udid)
-                                ? prev.filter((id) => id !== device.udid)
-                                : [...prev, device.udid],
-                            )
-                          }
-                        />
-                        <span>{device.name || device.udid.slice(0, 8)}</span>
-                      </label>
-                    ))}
+                    {section.group.map((device) => {
+                      const picked = actors.includes(device.udid);
+                      return (
+                        <div
+                          key={device.udid}
+                          className={`interaction-actor-tile${picked ? " selected" : ""}`}
+                        >
+                          {/* No visible checkbox: the whole tile is the target and the orange
+                              fill is the "chosen" signal. The checkbox is still here, only
+                              moved off-screen — it keeps the label clickable and lets the tests
+                              (and a screen reader) read the picked state by the device name. */}
+                          <label className="tile-pick" title={device.model || device.udid}>
+                            <input
+                              type="checkbox"
+                              className="tile-check"
+                              aria-label={device.name || device.model || device.udid.slice(0, 8)}
+                              checked={picked}
+                              onChange={() =>
+                                setActors((prev) =>
+                                  prev.includes(device.udid)
+                                    ? prev.filter((id) => id !== device.udid)
+                                    : [...prev, device.udid],
+                                )
+                              }
+                            />
+                            <span className="tile-num" aria-hidden="true">
+                              {deviceNumber.get(device.udid) ?? "?"}
+                            </span>
+                            <span className="tile-name">
+                              {device.name || device.model || device.udid.slice(0, 8)}
+                            </span>
+                          </label>
+                          {/* The @handle this phone is logged into. Kept next to the phone so
+                              an operator sets it once, here, and tagging it later pulls this
+                              phone into the post. Blurring saves it to the device meta. */}
+                          <input
+                            type="text"
+                            className="interaction-handle"
+                            placeholder="@handle"
+                            title="Nick TikTok máy này đang đăng nhập — để tag thì máy này tự vào comment"
+                            value={handles[device.udid] ?? ""}
+                            onChange={(event) =>
+                              setHandles((prev) => ({ ...prev, [device.udid]: event.target.value }))
+                            }
+                            onBlur={(event) => void persistHandle(device.udid, event.target.value)}
+                          />
+                        </div>
+                      );
+                    })}
                   </div>
                 ))}
               {mixedThread && <p className="error">{mixedThreadReason}</p>}
-            </fieldset>
+            </div>
             <button
               type="button"
-              className="primary"
+              className="primary interaction-run"
               disabled={busy || mixedThread}
               title={mixedThread ? mixedThreadReason : undefined}
               onClick={() => void run()}
@@ -735,7 +860,7 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
                           setDetail(await interactionGet(detail.summary.id));
                           setError(null);
                         } catch (e) {
-                          setError(String(e));
+                          setError(describeError(e));
                         } finally {
                           setBusy(false);
                         }

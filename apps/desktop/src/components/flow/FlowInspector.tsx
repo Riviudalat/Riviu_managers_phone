@@ -17,6 +17,7 @@ import { acceptFiniteValueAsNumber } from "../../flow/validation";
 import { ACTION_PRESENTATION } from "./FlowActionNode";
 import { FlowCoordinatePicker } from "./FlowCoordinatePicker";
 import { FlowVisionCapture } from "./FlowVisionCapture";
+import { describeError } from "../../describeError";
 
 interface JsonSchema {
   type: "object" | "string" | "number" | "integer" | "boolean";
@@ -31,17 +32,6 @@ interface JsonSchema {
 }
 
 type CoordinateFieldName = "point" | "from" | "to";
-
-function displayCommandError(error: unknown): string {
-  if (typeof error === "object" && error !== null) {
-    const value = error as Record<string, unknown>;
-    if (typeof value.code === "string" && typeof value.message === "string") {
-      return `${value.code}: ${value.message}`;
-    }
-    if (typeof value.message === "string") return value.message;
-  }
-  return error instanceof Error ? error.message : String(error);
-}
 
 export interface FlowInspectorProps {
   node: FlowNode | null;
@@ -687,7 +677,7 @@ export function FlowInspector({
         : await flowCoordinateFrame(coordinateDeviceUdid ?? "", launchBundleId ?? "");
       setPicker({ field, frame });
     } catch (error) {
-      setPickerError(displayCommandError(error));
+      setPickerError(describeError(error));
     } finally {
       setPickerLoading(false);
     }
@@ -702,7 +692,7 @@ export function FlowInspector({
         : await flowCoordinateFrame(coordinateDeviceUdid ?? "", launchBundleId ?? "");
       setVisionFrame(frame);
     } catch (error) {
-      setPickerError(displayCommandError(error));
+      setPickerError(describeError(error));
     } finally {
       setPickerLoading(false);
     }
@@ -720,7 +710,7 @@ export function FlowInspector({
       delete next.region;
       commitConfig(next);
     } catch (error) {
-      setPickerError(displayCommandError(error));
+      setPickerError(describeError(error));
     }
   };
 

@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState, type ReactElement } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import type { DeviceInfo, GroupInputReport, HardwareKey } from "../types";
 import { groupInputOutcome } from "../groupInput";
+import { getGroupSync } from "../groupSync";
+import { recordKey, recordSwipe, recordTap } from "../macroStore";
 import {
   backupDevice,
   deviceControlBegin,
@@ -19,7 +21,6 @@ import {
   restoreDevice,
   saveViewSnapshot,
   screenshot,
-  setScreenRotation,
   viewInjectTouch,
   viewRequestKeyframe,
 } from "../api";
@@ -71,6 +72,8 @@ import {
   IconVolumeDown,
   IconVolumeUp,
 } from "./Icons";
+import { withoutMenuIds, type DeviceMenuNode } from "../deviceMenu";
+import { DeviceFunctionList } from "./DeviceFunctionList";
 
 interface Props {
   device: DeviceInfo;
@@ -87,6 +90,15 @@ interface Props {
    */
   devices: DeviceInfo[];
   onSelectDevice: (udid: string) => void;
+  /**
+   * The shared per-phone function catalog (`App.tsx`), so zooming into a phone does not lose
+   * a function the tile's right-click menu offers.
+   *
+   * Optional, and empty by default: the overlay's own rows below are the ones its tests
+   * exercise and the ones it can offer without a parent, so a caller that passes nothing gets
+   * exactly the overlay it always had.
+   */
+  functions?: DeviceMenuNode[];
 }
 
 function mapToDevice(
@@ -109,11 +121,11 @@ export function FocusStream({
   groupMode,
   devices,
   onSelectDevice,
+  functions = [],
 }: Props) {
   const hasView = useViewLive(device.udid);
   const viewSize = useViewSize(device.udid);
   const [busy, setBusy] = useState(false);
-  const [showApps, setShowApps] = useState(false);
   const [showAdb, setShowAdb] = useState(false);
   const [showDevices, setShowDevices] = useState(false);
   const [showPhrases, setShowPhrases] = useState(false);
@@ -139,6 +151,16 @@ export function FocusStream({
     live: LiveDragGroup | null;
   } | null>(null);
   const inFlight = useRef(false);
+  /// Devices whose overlay control session (`deviceControlBegin`) has finished opening.
+  ///
+  /// A gesture fired before this — the reflex scroll during a slow open on a phone whose
+  /// agent is struggling — collides with the ManualControl lease the still-opening session
+  /// already holds but has not yet registered, and `with_manual_session` cannot find the
+  /// session to reuse, so it tries to acquire the lease again and is refused ("busy with
+  /// ManualControl; ManualControl cannot acquire it"). Gestures gate on this instead. A ref,
+  /// not state: the gesture handlers read it imperatively and must see the current value, and
+  /// readiness changing should not force a re-render.
+  const controlReady = useRef<Set<string>>(new Set());
   const targets = groupMode && groupUdids.length > 1 ? groupUdids : [device.udid];
   const targetKey = targets.join("\0");
   const isIos = device.platform === "ios";
@@ -214,13 +236,20 @@ export function FocusStream({
   useEffect(() => {
     const udids = targetKey.split("\0").filter(Boolean);
     let cancelled = false;
+    // Control is reopening for a new target set; nothing is ready until each begin lands.
+    controlReady.current = new Set();
     // One promise per device, kept so the cleanup queues behind the right one rather than
     // behind all of them: a slow phone must not delay releasing a fast one.
     const opening = new Map(udids.map((udid) => [udid, deviceControlBegin(udid)] as const));
-    for (const begin of opening.values()) {
-      void begin.catch((error) => {
-        if (!cancelled) toastError("Không mở được điều khiển", error);
-      });
+    for (const [udid, begin] of opening) {
+      void begin
+        .then(() => {
+          // Registered now, so `with_manual_session` will reuse it — gestures may fire.
+          if (!cancelled) controlReady.current.add(udid);
+        })
+        .catch((error) => {
+          if (!cancelled) toastError("Không mở được điều khiển", error);
+        });
     }
     return () => {
       cancelled = true;
@@ -291,6 +320,10 @@ export function FocusStream({
       }
       if (!encodedW || !encodedH || inFlight.current) return;
       event.preventDefault();
+      // Control is still opening — silently drop this tick rather than race the lease its
+      // own begin holds. Wheel ticks are plentiful; the operator loses nothing and gets no
+      // error toast, and the scroll works the moment control is up.
+      if (!controlReady.current.has(device.udid)) return;
       const x = encodedW / 2;
       const startY = encodedH * 0.55;
       const endY = startY - Math.sign(event.deltaY) * encodedH * 0.18;
@@ -331,6 +364,10 @@ export function FocusStream({
     const ih = encodedH;
     if (!iw || !ih || only.length === 0) return;
     const dist = Math.hypot(end.x - start.x, end.y - start.y);
+    // Macro recording (A8): capture the logical gesture once, in reference-image space, the
+    // same coordinates group_input replays. No-ops unless recording is armed in Group Tools.
+    if (dist < TAP_SLOP) recordTap(end.x, end.y, iw, ih);
+    else recordSwipe(start.x, start.y, end.x, end.y, iw, ih);
     await runExclusive(async () => {
       let remaining = only;
       if (dist < TAP_SLOP) {
@@ -362,6 +399,7 @@ export function FocusStream({
               y: end.y,
               imageW: iw,
               imageH: ih,
+              sync: getGroupSync(),
             }),
             true,
           );
@@ -386,6 +424,7 @@ export function FocusStream({
             toY: end.y,
             imageW: iw,
             imageH: ih,
+            sync: getGroupSync(),
           }),
           true,
         );
@@ -399,10 +438,21 @@ export function FocusStream({
   };
 
   const pressKey = async (key: HardwareKey) => {
+    recordKey(key); // A8: no-op unless a macro recording is armed.
+    // Single-device gestures go through the manual-session lease; wait for control to open
+    // rather than race it. The group path (`group_input`) skips and reports per device, so
+    // it needs no gate.
+    if (targets.length <= 1 && !controlReady.current.has(device.udid)) {
+      pushToast("warn", "Đang mở điều khiển", "Đợi một giây rồi thử lại.");
+      return;
+    }
     try {
       await runExclusive(async () => {
         if (targets.length > 1) {
-          reportGroup(await groupInput({ udids: targets, kind: "key", key }), false);
+          reportGroup(
+            await groupInput({ udids: targets, kind: "key", key, sync: getGroupSync() }),
+            false,
+          );
         } else {
           await deviceKey(device.udid, key);
         }
@@ -418,12 +468,21 @@ export function FocusStream({
   /// agent's `ACTION_SET_TEXT` — the only route here that carries Vietnamese diacritics.
   /// `adb shell input text` is killed outright by them.
   const sendPhrase = async (phrase: QuickPhrase) => {
+    if (targets.length <= 1 && !controlReady.current.has(device.udid)) {
+      pushToast("warn", "Đang mở điều khiển", "Đợi một giây rồi thử lại.");
+      return;
+    }
     try {
       let delivered = false;
       const ran = await runBusy(async () => {
         if (targets.length > 1) {
           delivered = reportGroup(
-            await groupInput({ udids: targets, kind: "type", text: phrase.content }),
+            await groupInput({
+              udids: targets,
+              kind: "type",
+              text: phrase.content,
+              sync: getGroupSync(),
+            }),
             false,
           );
         } else {
@@ -499,8 +558,15 @@ export function FocusStream({
     const dir = await pickDirectory("Chọn thư mục lưu ảnh/video lấy từ máy");
     if (!dir) return;
     // A full camera roll over USB 2.0 takes minutes, so say so before it starts rather than
-    // leaving the operator watching a disabled button.
-    pushToast("info", "Đang lấy ảnh/video…", `${device.name} — có thể mất vài phút.`);
+    // leaving the operator watching a disabled button — and say *how much*, because the
+    // number is the part nobody expects. Measured on 23021RAAEG: `/sdcard/DCIM` held **761
+    // files, 3.3 GB**, and the row pulls all of it with no way to stop. An operator who
+    // wanted three photos should use "Tệp trên máy…" and pick them.
+    pushToast(
+      "info",
+      "Đang lấy TOÀN BỘ ảnh/video…",
+      `${device.name} — cả thư viện, có thể vài GB và vài phút. Muốn lấy vài tệp thì dùng "Tệp trên máy…".`,
+    );
     try {
       await runBusy(async () => {
         const report = await exportMedia(device.udid, dir);
@@ -619,17 +685,11 @@ export function FocusStream({
     }
   };
 
-  type MenuRow = {
-    id: string;
-    label: string;
-    Icon: (props: { size?: number }) => ReactElement;
-    androidOnly?: boolean;
-    danger?: boolean;
-    disabled?: boolean;
-    run: () => void;
-  };
-
-  const menuRows: MenuRow[] = [
+  /// The overlay's own rows. Typed as `DeviceMenuNode` rather than a local shape, because
+  /// they are concatenated with the shared catalog below and drawn by the same component: one
+  /// list means one search box, one platform gate, and no heading telling the operator which
+  /// half of the panel a function lives in.
+  const menuRows: DeviceMenuNode[] = [
     {
       // First, because switching phone is navigation rather than an action on this one —
       // and because it is the row that stops the operator closing and reopening the overlay
@@ -688,28 +748,6 @@ export function FocusStream({
       androidOnly: true,
       disabled: busy,
       run: () => void pressKey("power"),
-    },
-    {
-      // GenFarmer has this row here, in this panel, immediately after Power button —
-      // which is why it also lives here and not only in the tile's right-click menu.
-      id: "rotate",
-      label: "Quay màn hình",
-      Icon: IconRefresh,
-      androidOnly: true,
-      disabled: busy,
-      run: () => {
-        void setScreenRotation(device.udid, 1)
-          .then((observed) =>
-            observed === 1
-              ? pushToast("ok", "Đã quay ngang")
-              : pushToast(
-                  "warn",
-                  "Máy không quay",
-                  "App đang mở khoá hướng dọc nên hệ thống bỏ qua yêu cầu.",
-                ),
-          )
-          .catch((error) => toastError("Quay màn hình thất bại", error));
-      },
     },
     {
       id: "installApk",
@@ -796,15 +834,6 @@ export function FocusStream({
       Icon: IconRefresh,
       run: () => void reboot(),
     },
-    {
-      // No `androidOnly`. Whether a phone can be enumerated is the backend's answer,
-      // arriving as a refusal with a reason; a hardcoded platform gate here would be a
-      // guess that goes stale the moment the iOS route lands.
-      id: "apps",
-      label: showApps ? "Ẩn ứng dụng" : "Ứng dụng",
-      Icon: IconGrid,
-      run: () => setShowApps((open) => !open),
-    },
     ...(isIos
       ? [
           {
@@ -823,6 +852,43 @@ export function FocusStream({
         ]
       : []),
   ];
+
+  /// The shared catalog minus what this panel already offers.
+  ///
+  /// Every id here is a row the overlay does better in place: the app list, the keyboard
+  /// picker and the adb console open as inline panels beside the phone; screenshot, install
+  /// APK and the two media transfers are icon rows above; Home/Back/Recents are the navbar
+  /// below; volume and notification are icon rows too. `open` is dropped because the overlay
+  /// *is* the thing that row opens.
+  const overlayFunctions = useMemo(
+    () =>
+      withoutMenuIds(functions, [
+        "open",
+        "apps",
+        "keyboard",
+        "adb-console",
+        "screenshot",
+        "transfer",
+        "reboot",
+        "key-home",
+        "key-back",
+        "key-recents",
+        "key-volumeUp",
+        "key-volumeDown",
+        "key-notification",
+      ]),
+    [functions],
+  );
+
+  /// Everything the panel offers, in one list: its own rows first (the ones it does better
+  /// in place — inline panels, the picture refresh, switching phone), then the shared catalog
+  /// minus whatever those already cover.
+  ///
+  /// Not memoised, deliberately: `menuRows` is rebuilt on every render by design — its labels
+  /// read `busy`, `showDevices`, `showPhrases` — so a memo keyed on anything less than the
+  /// array itself would hand back stale rows, and one keyed on the array would never hit.
+  /// Concatenating forty objects costs nothing next to the render it happens inside.
+  const panelNodes = [...menuRows, ...overlayFunctions];
 
   const navKeys: { key: HardwareKey; title: string; Icon: (props: { size?: number }) => ReactElement }[] =
     isIos
@@ -909,6 +975,9 @@ export function FocusStream({
                 // nothing for the operator to do about it. It goes to the console so that a
                 // silently dead live path is findable.
                 (reason) => console.warn(`live drag fell back: ${reason}`),
+                // Same anti-detection jitter the batch path applies, so a live group-drag is
+                // not twenty pixel-identical paths. 0 (the default policy) is a no-op.
+                getGroupSync().offset?.maxPx ?? 0,
               );
               held.live.begin(held.start.x, held.start.y);
             }
@@ -999,7 +1068,18 @@ export function FocusStream({
             }}
           />
         </div>
-        <aside className="focus-menu" aria-label="Chức năng thiết bị">
+        {/* Exactly as tall as the phone picture beside it, and that is the whole fix for a
+            visible bug: `.focus-stage` is a flex row that stretches to its **tallest** child,
+            so a panel taller than the picture grew the stage and left a band of white under
+            the phone. Pinning the height here (the same `frameWidth * aspect` the pane uses)
+            makes the picture the reference and the panel scroll inside it. The CSS
+            `max-height` stays as the cap for a very large zoom, where the picture is the
+            taller one again and there is no gap either way. */}
+        <aside
+          className="focus-menu"
+          aria-label="Chức năng thiết bị"
+          style={{ height: frameWidth * aspect }}
+        >
           <header className="focus-menu-head">
             <strong title={device.udid}>
               {index} {device.name}
@@ -1037,23 +1117,24 @@ export function FocusStream({
               <IconClose size={14} />
             </button>
           </header>
+          {/* Why every row is greyed out. `disabled={busy}` alone is silent, and a row that
+              cannot be clicked and does not say why reads exactly like a row that does
+              nothing — which is how three working rows came to be reported as broken. */}
+          {busy && <p className="focus-menu-busy">Đang chạy một thao tác trên máy này…</p>}
+          {/* ONE scroll region for the whole column: the function rows, whatever panel is
+              open, and the App List all live in here, so a wheel anywhere in the panel moves
+              the same list. Two scroll boxes stacked (which is what a `flex: 1` list plus a
+              `flex: 1 1 45%` App List gave) means the wheel does different things depending on
+              which half the pointer is over, and the operator has to find the seam. */}
+          <div className="focus-menu-scroll">
+          {/* ONE list, and no "other functions" heading: the panel's own rows and the shared
+              per-phone catalog are the same kind of thing, so splitting them under a heading
+              only made the operator learn which half a function lived in. The search box is
+              the first row of the list and is `position: sticky`, so it stays at the top of
+              the panel while everything under it scrolls — and it filters *everything*, which
+              a box above only half the rows could not do. */}
           <div className="focus-menu-list">
-            {menuRows.map(({ id, label, Icon, androidOnly, danger, disabled, run }) => {
-              const blocked = Boolean(androidOnly && isIos);
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  className={danger ? "danger" : ""}
-                  disabled={blocked || disabled}
-                  title={blocked ? `${label} — chỉ có trên Android` : label}
-                  onClick={run}
-                >
-                  <Icon size={16} />
-                  <span>{label}</span>
-                </button>
-              );
-            })}
+            <DeviceFunctionList nodes={panelNodes} platform={device.platform} />
           </div>
           {/* Every one of these sits BEFORE the navbar and carries its own height. The menu
               list is `flex: 1`, so a sibling added after the navbar collapses to nothing and
@@ -1160,7 +1241,12 @@ export function FocusStream({
               )}
             </div>
           )}
-          {showApps && <InstalledApps udid={device.udid} deviceName={device.name} />}
+          {/* Always here, never behind a toggle — the reference product's App List sits
+              under its Functions list and so does this one. `launchable` makes a row a
+              button: finding an app and being unable to open it was the other half of the
+              complaint. */}
+          <InstalledApps udid={device.udid} deviceName={device.name} launchable />
+          </div>
           {showAdb && <AdbConsole device={device} onClose={() => setShowAdb(false)} />}
           <nav className="focus-navbar" aria-label="Phím điều hướng">
             {navKeys.map(({ key, title, Icon }) => (

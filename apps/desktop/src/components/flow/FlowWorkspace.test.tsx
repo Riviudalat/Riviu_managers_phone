@@ -267,6 +267,8 @@ async function renderReadyWorkspace(onDirtyChange = vi.fn()) {
   );
   await screen.findByDisplayValue("Saved flow");
   await waitFor(() => expect(api.flowValidate).toHaveBeenCalled());
+  // The load-tolerant `waitFor` default lives in `src/test/setup.ts`; see the comment there
+  // for why 1 s was a load threshold rather than a behaviour one.
   await waitFor(() => expect(screen.getByRole("button", { name: "Chạy Flow" })).toBeEnabled());
   return onDirtyChange;
 }

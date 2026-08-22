@@ -1,4 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
+
+import { InfoDot as Info } from "./InfoDot";
 import {
   listenRiviuEvents,
   nurtureGetSettings,
@@ -9,6 +12,17 @@ import {
   nurtureTestApi,
 } from "../api";
 import { exportViewJpegBurst } from "../viewStore";
+import {
+  BUDGET_TOTAL,
+  budgetCeiling,
+  budgetFree,
+  budgetUsed,
+  clampToBudget,
+  fitToBudget,
+  isOverBudget,
+  isRateEnabled,
+  type BudgetKey,
+} from "../nurtureBudget";
 import { targetsOf } from "./SelectionStrip";
 import { IconApi, IconClose, IconHeart } from "./Icons";
 import { LoadingState } from "./States";
@@ -18,6 +32,7 @@ import type {
   NurtureSessionStatus,
   NurtureSettings,
 } from "../types";
+import { describeError } from "../describeError";
 
 type Props = {
   devices: DeviceInfo[];
@@ -66,6 +81,7 @@ function FeatureRow({
   label,
   what,
   percent,
+  ceiling,
   enabled,
   onPercent,
   onEnabled,
@@ -73,12 +89,17 @@ function FeatureRow({
   label: string;
   what: string;
   percent: number;
+  /**
+   * The highest this rate may reach: whatever the other three leave of the shared 100%.
+   * Computed by `nurtureBudget`, never here.
+   */
+  ceiling: number;
   enabled: boolean;
   onPercent: (value: number) => void;
   onEnabled: (value: boolean) => void;
 }) {
   return (
-    <div className={`nu-feature${enabled ? "" : " is-off"}`}>
+    <div className={`nu-feature nu-feature-ranged${enabled ? "" : " is-off"}`}>
       <label className="nu-switch nu-switch-bare">
         <input
           type="checkbox"
@@ -92,11 +113,47 @@ function FeatureRow({
         {label}
         <Info of={label} what={what} />
       </span>
+      {/* Every slider runs 0..100, always — the ceiling is enforced by `onPercent` clamping
+          and *shown* as the pale part of the track, it is NOT the slider's `max`.
+          Measured why: with `max` set to the ceiling, dragging row 2 up rescaled row 1,
+          so row 1's thumb slid across the track while its number never changed (Follow at
+          3 sat hard right on a max of 3, then jumped left when Thích freed 49 points). A
+          thumb that moves on its own is a control lying about which row the operator is
+          editing. A fixed scale also means 48% is the same distance along on all four rows,
+          which is the only way four sliders read as shares of one thing.
+
+          `--fill` / `--ceil` are fractions, turned into track positions in App.css. They are
+          inset by half a thumb there, so the colour boundaries line up with the thumb centre
+          instead of drifting up to 7px away from it at the ends. */}
+      <input
+        className="nu-feature-slider"
+        type="range"
+        min={0}
+        max={BUDGET_TOTAL}
+        step={1}
+        value={percent}
+        data-ceiling={ceiling}
+        style={
+          {
+            "--fill": Math.min(percent, BUDGET_TOTAL) / BUDGET_TOTAL,
+            "--ceil": Math.max(Math.min(percent, BUDGET_TOTAL), ceiling) / BUDGET_TOTAL,
+          } as CSSProperties
+        }
+        title={
+          enabled
+            ? `Kéo được tới ${ceiling}% — ba tỉ lệ kia đang dùng ${BUDGET_TOTAL - ceiling}%`
+            : `Đang tắt nên không tiêu ngân sách. Bật lại thì nó chiếm ${percent}%, mà hiện chỉ còn ${ceiling}% trống`
+        }
+        onChange={(e) => onPercent(Number(e.target.value) || 0)}
+        aria-label={`${label} thanh kéo phần trăm`}
+      />
       <label className="nu-feature-pct">
         <input
           type="number"
           min={0}
-          max={100}
+          // A switched-off row spends nothing, so the budget does not bound it — only 0..100
+          // does. Same rule as `clampToBudget`, which is what actually holds either way.
+          max={enabled ? ceiling : BUDGET_TOTAL}
           value={percent}
           onChange={(e) => onPercent(Number(e.target.value) || 0)}
           aria-label={`${label} phần trăm`}
@@ -107,40 +164,28 @@ function FeatureRow({
   );
 }
 
-/**
- * The `!` after a control's name: what that control actually does, on hover.
- *
- * The panel used to carry the same information as paragraphs of hint text under each
- * field, which is why it was asked to be removed — it made a dense settings form read as
- * documentation. The information itself was not the problem, the permanent shelf space
- * was. So it moves into one glyph per control that costs nothing until pointed at.
- *
- * A `span` rather than a `button`: several of these sit inside a `<label>`, where a button
- * would swallow the click that is meant to focus the field.
- *
- * `aria-hidden`, and that is deliberate rather than lazy. A `<label>`'s accessible name is
- * its whole text content, so a glyph that is visible to the accessibility tree renames
- * every field it sits next to — the first version of this turned "Base URL" into
- * "Base URL !" and broke two existing tests by doing so. A field's name has to stay the
- * field's name. The cost is that a screen reader does not get the explanation; it did not
- * have it before this either, so nothing was taken away. Giving it one properly means an
- * `aria-describedby` per control, which is a change worth making on its own.
- *
- * `data-info` is how a test finds a particular one, since every glyph reads the same.
- */
-function Info({ of, what }: { of: string; what: string }) {
-  return (
-    <span className="nu-info" aria-hidden="true" data-info={of} title={what}>
-      !
-    </span>
-  );
-}
-
 /** Marks a field a running session will not pick up, with the reason. */
 function RestartBadge({ reason }: { reason: string }) {
+  const [tip, setTip] = useState<{ left: number; top: number } | null>(null);
+  const what = `${reason}. Đang chạy mà đổi thì phải bấm Dừng rồi Bắt đầu lại mới áp dụng.`;
   return (
-    <span className="nurture-restart-badge" title={`${reason}. Đổi xong cần dừng và chạy lại.`}>
+    <span
+      className="nurture-restart-badge"
+      data-tip={what}
+      onMouseEnter={(event) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        setTip({ left: Math.round(rect.left + rect.width / 2), top: Math.round(rect.top) });
+      }}
+      onMouseLeave={() => setTip(null)}
+    >
       cần chạy lại
+      {tip &&
+        createPortal(
+          <span className="nu-tip" role="tooltip" style={{ left: tip.left, top: tip.top }}>
+            {what}
+          </span>,
+          document.body,
+        )}
     </span>
   );
 }
@@ -245,7 +290,7 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
       setStatuses(st);
       setMsg(null);
     } catch (e) {
-      setMsg(String(e));
+      setMsg(describeError(e));
     }
   }, []);
 
@@ -274,33 +319,29 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
     setSettings((prev) => (prev ? { ...prev, [key]: value } : prev));
   };
 
-  const actionHint = useMemo(() => {
-    if (!settings) return "";
-    // Mirrors `NurtureSettings::into_effective`: a switch that is off makes its
-    // probability zero. Reading the raw numbers here made the line contradict the
-    // switches directly above it — with Thích off at 100% it said "Thích 100% · Bỏ qua
-    // 0%", i.e. that every post would be liked, while the engine was correctly liking
-    // none. The percentage is kept on purpose when a feature is switched off, so this
-    // line is the one place that has to fold it.
-    const effective = (enabled: boolean | undefined, percent: number) =>
-      (enabled ?? true) ? percent : 0;
-    const like = effective(settings.likeEnabled, settings.likeProb);
-    const comment = effective(settings.commentEnabled, settings.commentProb);
-    const follow = effective(settings.followEnabled, settings.followProb);
-    const frenzy = effective(settings.frenzyEnabled, settings.frenzyProb);
-    const none = Math.max(0, 100 - like - comment);
-    return `Thích ${like}% · Bình luận ${comment}% · Bỏ qua ${none}% · Follow độc lập ${follow}% · Vuốt nhanh ${frenzy}%`;
-  }, [settings]);
+  /// One of the four rates that share the 100% budget.
+  ///
+  /// Clamped against the *current* settings inside the updater rather than against a
+  /// captured copy: a slider fires many times a second while dragging, and a ceiling
+  /// computed from a stale render lets the sum drift past the budget between two frames.
+  const patchRate = (key: BudgetKey, value: number) => {
+    setSettings((prev) => (prev ? { ...prev, [key]: clampToBudget(prev, key, value) } : prev));
+  };
+
+  /// A saved config can spend more than the budget, because nothing added the four rates
+  /// up before today. The panel says so and offers the fix rather than editing it silently.
+  const overBudget = settings ? isOverBudget(settings) : false;
 
   const save = async (next?: NurtureSettings): Promise<boolean> => {
     const s = next ?? settings;
     if (!s) return false;
-    if (s.likeProb + s.commentProb > 100) {
-      setMsg(`Thích + Bình luận > 100%`);
-      return false;
-    }
-    if (s.followProb > 100 || s.frenzyProb > 100) {
-      setMsg(`Follow và vuốt nhanh phải từ 0 đến 100%`);
+    // The four rates share one budget, so the check is over all four. It replaces a pair
+    // of narrower ones ("Thích + Bình luận > 100" and "Follow/vuốt nhanh phải 0..100")
+    // that could both pass while the four together spent 131.
+    if (isOverBudget(s)) {
+      setMsg(
+        `Bốn tỉ lệ tương tác dùng chung ${BUDGET_TOTAL}%, đang là ${budgetUsed(s)}% — kéo xuống cho vừa`,
+      );
       return false;
     }
     if (s.maxCommentWords < 4 || s.maxCommentWords > 30) {
@@ -319,7 +360,11 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
       setMsg(`Lịch phải cách nhau 15–1440 phút và kéo dài 15–360 phút`);
       return false;
     }
-    if (s.commentProb > 0 && !s.apiKey.trim()) {
+    // The switch, not just the number: a percentage kept for later while the switch is off
+    // cannot produce a comment — `NurtureSettings::into_effective` zeroes it before the loop
+    // ever sees it — so demanding an API key for it was refusing a save over a feature that
+    // provably will not run.
+    if (isRateEnabled(s, "commentProb") && s.commentProb > 0 && !s.apiKey.trim()) {
       setMsg(`Đã bật bình luận: điền API key trong Cấu hình AI`);
       return false;
     }
@@ -343,7 +388,7 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
       await nurtureStart(targets);
       await reload();
     } catch (e) {
-      setMsg(String(e));
+      setMsg(describeError(e));
     } finally {
       setBusy(false);
     }
@@ -355,7 +400,7 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
       await nurtureStop(targets.length ? targets : []);
       await reload();
     } catch (e) {
-      setMsg(String(e));
+      setMsg(describeError(e));
     } finally {
       setBusy(false);
     }
@@ -375,7 +420,7 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
       if (!(await save(settings))) return;
       setApiTest(await nurtureTestApi(udid, await exportViewJpegBurst(udid)));
     } catch (e) {
-      setMsg(String(e));
+      setMsg(describeError(e));
     } finally {
       setApiTesting(false);
     }
@@ -441,7 +486,7 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                     try {
                       if (await save()) setMsg(null);
                     } catch (e) {
-                      setMsg(String(e));
+                      setMsg(describeError(e));
                     } finally {
                       setBusy(false);
                     }
@@ -698,40 +743,74 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                   </div>
 
                   <div className="nu-group">
-                    <div className="nu-group-head">Tương tác</div>
+                    <div className="nu-group-head">
+                      Tương tác
+                      {/* The budget, stated where it is spent: four rates sharing a hundred
+                          need the remainder on screen or every drag is a guess. */}
+                      <span className={`nu-budget${overBudget ? " is-over" : ""}`}>
+                        {overBudget
+                          ? `Đang dùng ${budgetUsed(settings)}% / ${BUDGET_TOTAL}%`
+                          : `Còn ${budgetFree(settings)}% / ${BUDGET_TOTAL}%`}
+                      </span>
+                    </div>
+                    {overBudget && (
+                      /* Two ways to get here: a config saved before the budget existed, and a
+                         switch turned back on over a number that no longer fits. Both leave
+                         every ceiling at or below where its rate already is, so no slider can
+                         be dragged up. Said out loud with a one-press fix rather than rewritten
+                         on load or on the switch click: these are the operator's tuned numbers,
+                         and something silently editing them is worse than a sentence asking. */
+                      <p className="nu-budget-warn" role="alert">
+                        Các tỉ lệ đang bật dùng chung {BUDGET_TOTAL}%, mà cộng lại đang là{" "}
+                        {budgetUsed(settings)}%. Kéo xuống cho vừa, hoặc{" "}
+                        <button
+                          type="button"
+                          className="link"
+                          onClick={() =>
+                            setSettings((prev) => (prev ? { ...prev, ...fitToBudget(prev) } : prev))
+                          }
+                        >
+                          đưa về {BUDGET_TOTAL}%
+                        </button>{" "}
+                        (trừ dần từ tỉ lệ lớn nhất).
+                      </p>
+                    )}
                     <FeatureRow
                       label="Thích"
                       what="Tỉ lệ post được thả tim. Chỉ tính thành công khi nhãn nút tim đổi trạng thái, không phải khi tap xong — nên số 'đã tim' luôn nhỏ hơn hoặc bằng số lần thử."
                       percent={settings.likeProb}
+                      ceiling={budgetCeiling(settings, "likeProb")}
                       enabled={settings.likeEnabled ?? true}
-                      onPercent={(v) => patch("likeProb", v)}
+                      onPercent={(v) => patchRate("likeProb", v)}
                       onEnabled={(v) => patch("likeEnabled", v)}
                     />
                     <FeatureRow
                       label="Bình luận"
                       what="Tỉ lệ post được bình luận. AI đọc nội dung post rồi tự viết; chỉ tính là đã gửi khi nút Gửi tắt lại. Cần API key ở tab AI."
                       percent={settings.commentProb}
+                      ceiling={budgetCeiling(settings, "commentProb")}
                       enabled={settings.commentEnabled ?? true}
-                      onPercent={(v) => patch("commentProb", v)}
+                      onPercent={(v) => patchRate("commentProb", v)}
                       onEnabled={(v) => patch("commentEnabled", v)}
                     />
                     <FeatureRow
                       label="Follow"
                       what="Tỉ lệ post được follow tác giả, tính riêng chứ không kèm thích hay bình luận. Xác nhận bằng việc nút Follow mất khỏi thẻ."
                       percent={settings.followProb}
+                      ceiling={budgetCeiling(settings, "followProb")}
                       enabled={settings.followEnabled ?? true}
-                      onPercent={(v) => patch("followProb", v)}
+                      onPercent={(v) => patchRate("followProb", v)}
                       onEnabled={(v) => patch("followEnabled", v)}
                     />
                     <FeatureRow
                       label="Vuốt nhanh"
                       what="Tỉ lệ post bị vuốt qua nhanh, không xem hết — giống lúc người ta lướt cho qua mấy bài không quan tâm."
                       percent={settings.frenzyProb}
+                      ceiling={budgetCeiling(settings, "frenzyProb")}
                       enabled={settings.frenzyEnabled ?? true}
-                      onPercent={(v) => patch("frenzyProb", v)}
+                      onPercent={(v) => patchRate("frenzyProb", v)}
                       onEnabled={(v) => patch("frenzyEnabled", v)}
                     />
-                    <p className="nu-summary">{actionHint}</p>
                   </div>
 
                   <div className="nu-group">

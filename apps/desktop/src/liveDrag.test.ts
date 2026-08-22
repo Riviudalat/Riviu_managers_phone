@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { createLiveDrag, createLiveDragGroup, liveTap, type SendTouch } from "./liveDrag";
+import {
+  createLiveDrag,
+  createLiveDragGroup,
+  deviceDragOffset,
+  liveTap,
+  type SendTouch,
+} from "./liveDrag";
 
 /// A sink that records what it was asked to send and lets the test decide when each call
 /// finishes, so the ordering guarantees can be tested against a slow phone rather than an
@@ -241,5 +247,70 @@ describe("live drag across a group", () => {
     const fastMoves = fast.calls.filter((call) => call.startsWith("move")).length;
     const slowMoves = slow.calls.filter((call) => call.startsWith("move")).length;
     expect(fastMoves).toBeGreaterThan(slowMoves);
+  });
+});
+
+describe("deviceDragOffset", () => {
+  it("leaves the first device on the true pointer", () => {
+    expect(deviceDragOffset(0, 8)).toEqual({ dx: 0, dy: 0 });
+  });
+
+  it("is a no-op when the policy sets no jitter", () => {
+    expect(deviceDragOffset(3, 0)).toEqual({ dx: 0, dy: 0 });
+    expect(deviceDragOffset(3, -5)).toEqual({ dx: 0, dy: 0 });
+  });
+
+  it("keeps every offset inside the ±maxPx box", () => {
+    const maxPx = 6;
+    for (let index = 1; index < 50; index += 1) {
+      const { dx, dy } = deviceDragOffset(index, maxPx);
+      expect(Math.abs(dx)).toBeLessThanOrEqual(maxPx);
+      expect(Math.abs(dy)).toBeLessThanOrEqual(maxPx);
+    }
+  });
+
+  it("is stable for a given index so a drag does not warp mid-gesture", () => {
+    expect(deviceDragOffset(7, 5)).toEqual(deviceDragOffset(7, 5));
+  });
+
+  it("does not hand every device the same offset", () => {
+    const seen = new Set(
+      Array.from({ length: 12 }, (_, i) => JSON.stringify(deviceDragOffset(i + 1, 6))),
+    );
+    // The whole point is that twenty phones are not pixel-identical; a couple of collisions
+    // are fine, but they must not all land on one point.
+    expect(seen.size).toBeGreaterThan(4);
+  });
+});
+
+describe("live drag group offset", () => {
+  it("tracks the pointer on the first phone and jitters the rest by a fixed per-device amount", async () => {
+    const a = recorder();
+    const b = recorder();
+    const maxPx = 6;
+    const off = deviceDragOffset(1, maxPx);
+    const group = createLiveDragGroup(
+      [
+        { udid: "lead", send: a.send },
+        { udid: "follower", send: b.send },
+      ],
+      undefined,
+      maxPx,
+    );
+
+    group.begin(100, 100);
+    const settled = group.end(100, 160);
+    for (let round = 0; round < 8; round += 1) {
+      await a.releaseAll();
+      await b.releaseAll();
+    }
+    await settled;
+
+    // The lead phone (index 0) gets the exact pointer.
+    expect(a.calls[0]).toBe("down 100,100");
+    expect(a.calls.at(-1)).toBe("up 100,160");
+    // The follower gets the same offset on both endpoints — the gesture is shifted, not warped.
+    expect(b.calls[0]).toBe(`down ${100 + off.dx},${100 + off.dy}`);
+    expect(b.calls.at(-1)).toBe(`up ${100 + off.dx},${160 + off.dy}`);
   });
 });

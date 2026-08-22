@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   addQuickPhrase,
+  DEFAULT_QUICK_GROUP,
+  exportQuickPhrases,
+  groupsOf,
+  importQuickPhrases,
   MAX_QUICK_PHRASES,
   MAX_QUICK_PHRASE_LENGTH,
   parseQuickPhrases,
+  phrasesInGroup,
   removeQuickPhrase,
   type QuickPhrase,
 } from "./quickPhrases";
@@ -20,7 +25,12 @@ describe("quick phrases", () => {
     // looks broken.
     const { phrases, error } = addQuickPhrase([], "  ", "xin chào các bạn", "1");
     expect(error).toBeNull();
-    expect(phrases[0]).toEqual({ id: "1", name: "xin chào các bạn", content: "xin chào các bạn" });
+    expect(phrases[0]).toEqual({
+      id: "1",
+      name: "xin chào các bạn",
+      content: "xin chào các bạn",
+      group: DEFAULT_QUICK_GROUP,
+    });
   });
 
   it("refuses an empty phrase with a reason rather than saving a blank row", () => {
@@ -59,7 +69,7 @@ describe("quick phrases", () => {
     expect(parseQuickPhrases('{"not":"an array"}')).toEqual([]);
     expect(parseQuickPhrases('[{"id":1}]')).toEqual([]);
     expect(parseQuickPhrases('[{"id":"a","name":"n","content":"c"},null,7]')).toEqual([
-      { id: "a", name: "n", content: "c" },
+      { id: "a", name: "n", content: "c", group: DEFAULT_QUICK_GROUP },
     ]);
   });
 
@@ -68,5 +78,63 @@ describe("quick phrases", () => {
       Array.from({ length: MAX_QUICK_PHRASES + 10 }, (_, index) => phrase(String(index))),
     );
     expect(parseQuickPhrases(stored)).toHaveLength(MAX_QUICK_PHRASES);
+  });
+});
+
+describe("quick phrase groups & import/export", () => {
+  const withGroup = (id: string, group: string): QuickPhrase => ({
+    id,
+    name: id,
+    content: `content ${id}`,
+    group,
+  });
+
+  it("adds a phrase into a normalized group; blank group folds to default", () => {
+    const a = addQuickPhrase([], "n", "c", "1", "  Marketing ");
+    expect(a.phrases[0].group).toBe("Marketing");
+    const b = addQuickPhrase([], "n", "c", "2", "   ");
+    expect(b.phrases[0].group).toBe(DEFAULT_QUICK_GROUP);
+  });
+
+  it("lists groups with the default first, then first-seen order", () => {
+    const book = [withGroup("a", "Sale"), withGroup("b", DEFAULT_QUICK_GROUP), withGroup("c", "Sale")];
+    expect(groupsOf(book)).toEqual([DEFAULT_QUICK_GROUP, "Sale"]);
+  });
+
+  it("filters phrases by group", () => {
+    const book = [withGroup("a", "Sale"), withGroup("b", "Care")];
+    expect(phrasesInGroup(book, "Sale").map((p) => p.id)).toEqual(["a"]);
+  });
+
+  it("round-trips through export/import, preserving group/name/content and newlines", () => {
+    const src = addQuickPhrase([], "Chào", "Xin chào\nBạn khỏe không", "1", "Sale").phrases;
+    const text = exportQuickPhrases(src);
+    let counter = 0;
+    const back = importQuickPhrases([], text, () => `imp-${(counter += 1)}`);
+    expect(back.added).toBe(1);
+    expect(back.skipped).toBe(0);
+    expect(back.phrases[0]).toMatchObject({
+      name: "Chào",
+      content: "Xin chào\nBạn khỏe không",
+      group: "Sale",
+    });
+  });
+
+  it("imports tolerant line shapes (3 / 2 / 1 columns)", () => {
+    const raw = ["Sale\tTên\tNội dung", "Care\tChỉ nội dung", "Không nhóm"].join("\n");
+    let n = 0;
+    const out = importQuickPhrases([], raw, () => `x${(n += 1)}`);
+    expect(out.added).toBe(3);
+    expect(out.phrases[0]).toMatchObject({ group: "Sale", name: "Tên", content: "Nội dung" });
+    expect(out.phrases[1]).toMatchObject({ group: "Care", content: "Chỉ nội dung" });
+    expect(out.phrases[2]).toMatchObject({ group: DEFAULT_QUICK_GROUP, content: "Không nhóm" });
+  });
+
+  it("skips blank lines and merges onto the existing book", () => {
+    const existing = addQuickPhrase([], "n", "cũ", "0", "Care").phrases;
+    let n = 0;
+    const out = importQuickPhrases(existing, "\n\nCare\tmới\n\n", () => `y${(n += 1)}`);
+    expect(out.added).toBe(1);
+    expect(out.phrases).toHaveLength(2);
   });
 });

@@ -14,7 +14,9 @@
   --orange-ring: var(--primary-ring);
 
   --bg: #ffffff;
-  --bg-content: #f8faff;
+  /* The page behind the panels. A hair of the brand rather than the hair of blue it used to
+     be (`#f8faff`); see `--link` for the decision. */
+  --bg-content: var(--primary-50);
   --bg-elevated: #ffffff;
   --bg-panel: #ffffff;
   --bg-aside: #ffffff;
@@ -71,8 +73,13 @@
   --warn-line: #faecd8;
   /* Success fill. */
   --ok-soft: #f0f9eb;
-  /* A link inside body text, where the orange primary reads as a button. */
-  --link: #2b6cb0;
+  /* An interactive text colour: a link in body copy, and the hover colour of a menu row.
+     It was a blue (`#2b6cb0`) on the reasoning that the orange primary reads as a button in
+     running text. Changed to the deep orange on 21/08/2026 because the operator asked for it
+     in as many words — "UI hiện tại lại có màu xanh ở nhiều chỗ, chuyển qua màu cam" — and a
+     blue accent inside an orange product does read as two brands. Deep rather than
+     `--primary`, so it still passes as *text* on white. */
+  --link: var(--primary-deep);
 
   --space-0h: 2px;
   --space-1: 4px;

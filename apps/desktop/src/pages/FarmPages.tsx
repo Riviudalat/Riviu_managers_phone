@@ -46,6 +46,7 @@ import type {
   PublishFolderManifest,
   ScheduleItem,
 } from "../types";
+import { describeError } from "../describeError";
 
 type SelProps = {
   devices: DeviceInfo[];
@@ -392,7 +393,7 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
   const [msg, setMsg] = useState<string | null>(null);
   const targets = targetsOf(selected, devices);
 
-  const reload = () => publishList().then(setCampaigns).catch((e) => setMsg(String(e)));
+  const reload = () => publishList().then(setCampaigns).catch((e) => setMsg(describeError(e)));
   useEffect(() => {
     reload();
   }, []);
@@ -434,7 +435,7 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
     } catch (e) {
       setManifest(null);
       setBundleIds([]);
-      setMsg(String(e));
+      setMsg(describeError(e));
     } finally {
       setBusy(false);
     }
@@ -575,7 +576,7 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
                 : `Đã chuẩn bị ${bundleIds.length} bundle. Bấm Post để đăng native trên TikTok.`,
             );
           } catch (e) {
-            setMsg(String(e));
+            setMsg(describeError(e));
           } finally {
             setBusy(false);
           }
@@ -608,7 +609,7 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
                       await reload();
                       setMsg("Đã import ảnh vào Photos. Bấm Post để mở composer TikTok.");
                     } catch (e) {
-                      setMsg(String(e));
+                      setMsg(describeError(e));
                     } finally {
                       setBusy(false);
                     }
@@ -629,7 +630,7 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
                       await reload();
                       setMsg("Đã đăng và xác nhận frame TikTok; ảnh tạm đã được dọn.");
                     } catch (e) {
-                      setMsg(String(e));
+                      setMsg(describeError(e));
                     } finally {
                       setBusy(false);
                     }
@@ -649,7 +650,7 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
                       await publishPrepare(campaign.id);
                       await reload();
                     } catch (e) {
-                      setMsg(String(e));
+                      setMsg(describeError(e));
                     } finally {
                       setBusy(false);
                     }
@@ -669,7 +670,7 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
                       await publishCancel(campaign.id);
                       await reload();
                     } catch (e) {
-                      setMsg(String(e));
+                      setMsg(describeError(e));
                     } finally {
                       setBusy(false);
                     }
@@ -703,7 +704,7 @@ export function DataPage() {
         setData(d);
         setErr(null);
       })
-      .catch((e) => setErr(String(e)));
+      .catch((e) => setErr(describeError(e)));
   useEffect(() => {
     load();
   }, []);
@@ -748,7 +749,7 @@ export function ApiPage() {
   useEffect(() => {
     apiDocs()
       .then(setDocs)
-      .catch((e) => setDocs(String(e)));
+      .catch((e) => setDocs(describeError(e)));
   }, []);
   return (
     <div className="panel">

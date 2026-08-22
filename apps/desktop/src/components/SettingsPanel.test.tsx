@@ -27,6 +27,9 @@ vi.mock("../api", () => ({
     focusQuality: "high",
   })),
   setStreamSettings: vi.fn(async (settings: unknown) => settings),
+  // Reached on mount too — the loopback API config load.
+  localApiGetConfig: vi.fn(async () => ({ enabled: false, port: 22222, token: "" })),
+  localApiSetConfig: vi.fn(async (config: unknown) => config),
   updateCheck: vi.fn(),
   updateInstall: vi.fn(async () => undefined),
 }));

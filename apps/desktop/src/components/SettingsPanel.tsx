@@ -5,22 +5,31 @@ import {
   agentPreflight,
   agentRepair,
   agentSaveSettings,
+  arpScan,
   clearAppleId,
   driverMode,
   getAppleId,
   getStreamSettings,
+  localApiGetConfig,
+  localApiSetConfig,
   setAppleId,
   setStreamSettings,
   updateCheck,
   updateInstall,
+  wifiAdbConnect,
+  type ArpEntry,
+  type LocalApiConfig,
 } from "../api";
 import { agentStatusView } from "../agentStatus";
+import { describeError } from "../toastStore";
 import { updateView } from "../updateView";
+import { setGroupSync, useGroupSync } from "../groupSync";
 import { EmptyState } from "./States";
 import { IconPhone } from "./Icons";
 import type {
   AgentRuntimeView,
   AgentStatus,
+  DelayPolicy,
   DeviceInfo,
   StreamSettings,
   UpdateStatus,
@@ -61,6 +70,40 @@ export function SettingsPanel({ devices }: Props) {
   const [streamSettings, setStreamSettingsState] = useState<StreamSettings | null>(null);
   const [savingStream, setSavingStream] = useState(false);
   const [streamMessage, setStreamMessage] = useState<string | null>(null);
+  const groupSync = useGroupSync();
+  // Normalised locals so the union narrows cleanly in JSX (the store always stores concrete
+  // values; the type keeps the fields optional for forward-compat).
+  const gsDelay: DelayPolicy = groupSync.delay ?? { mode: "none" };
+  const gsMaxPx = groupSync.offset?.maxPx ?? 0;
+  const [wifiHost, setWifiHost] = useState("");
+  const [arp, setArp] = useState<ArpEntry[]>([]);
+  const [arpBusy, setArpBusy] = useState(false);
+  const [wifiMessage, setWifiMessage] = useState<string | null>(null);
+  const [localApi, setLocalApi] = useState<LocalApiConfig | null>(null);
+  const [savingApi, setSavingApi] = useState(false);
+  const [apiMessage, setApiMessage] = useState<string | null>(null);
+
+  const connectWifi = async (host: string) => {
+    const target = host.includes(":") ? host : `${host}:5555`;
+    try {
+      await wifiAdbConnect(target);
+      setWifiMessage(`Đã kết nối ${target}. Bấm "Làm mới" ở Quản lý cửa sổ để thấy máy.`);
+    } catch (error) {
+      setWifiMessage(describeError(error));
+    }
+  };
+
+  const scanArp = async () => {
+    setArpBusy(true);
+    setWifiMessage(null);
+    try {
+      setArp(await arpScan());
+    } catch (error) {
+      setWifiMessage(describeError(error));
+    } finally {
+      setArpBusy(false);
+    }
+  };
 
   /// Send the whole row, not the one field that changed: the command takes a complete
   /// `StreamSettings` and a partial one would reset the fields it omitted to their defaults.
@@ -73,7 +116,7 @@ export function SettingsPanel({ devices }: Props) {
       // effect rather than what was typed.
       setStreamSettingsState(await setStreamSettings({ ...streamSettings, ...change }));
     } catch (error) {
-      setStreamMessage(String(error));
+      setStreamMessage(describeError(error));
     } finally {
       setSavingStream(false);
     }
@@ -91,7 +134,7 @@ export function SettingsPanel({ devices }: Props) {
   useEffect(() => {
     agentGetSettings()
       .then(setRuntime)
-      .catch((error) => setAgentMessage(String(error)));
+      .catch((error) => setAgentMessage(describeError(error)));
     getAppleId()
       .then((config) => {
         setEmail(config.email);
@@ -101,7 +144,10 @@ export function SettingsPanel({ devices }: Props) {
     driverMode().then(setMode).catch(() => setMode("unknown"));
     getStreamSettings()
       .then(setStreamSettingsState)
-      .catch((error) => setStreamMessage(String(error)));
+      .catch((error) => setStreamMessage(describeError(error)));
+    localApiGetConfig()
+      .then(setLocalApi)
+      .catch((error) => setApiMessage(describeError(error)));
   }, []);
 
   useEffect(() => {
@@ -113,7 +159,7 @@ export function SettingsPanel({ devices }: Props) {
       .then((items) => {
         setStatuses(Object.fromEntries(items.map((status) => [status.udid, status])));
       })
-      .catch((error) => setAgentMessage(String(error)));
+      .catch((error) => setAgentMessage(describeError(error)));
   }, [connectedUdids]);
 
   const runAgentAction = async (udid: string, action: AgentAction) => {
@@ -124,7 +170,7 @@ export function SettingsPanel({ devices }: Props) {
         action === "check" ? await agentPreflight(udid) : await agentRepair(udid);
       setStatuses((current) => ({ ...current, [udid]: status }));
     } catch (error) {
-      setAgentMessage(String(error));
+      setAgentMessage(describeError(error));
     } finally {
       setBusy((current) => {
         const next = { ...current };
@@ -191,7 +237,7 @@ export function SettingsPanel({ devices }: Props) {
               try {
                 setRuntime(await agentSaveSettings(settings));
               } catch (error) {
-                setAgentMessage(String(error));
+                setAgentMessage(describeError(error));
               } finally {
                 setSavingSettings(false);
               }
@@ -350,6 +396,227 @@ export function SettingsPanel({ devices }: Props) {
       </section>
 
       <section className="settings-section">
+        <h3>Đồng bộ nhóm (Delay &amp; Offset)</h3>
+        <p className="hint">
+          Khi một thao tác (chạm/vuốt/gõ/phím) phát ra cả nhóm máy, thêm độ trễ và lệch toạ độ
+          ngẫu nhiên cho từng máy để cả nhóm không bấm y hệt cùng lúc, cùng chỗ. Tắt cả hai =
+          phát đồng loạt như cũ. Chỉ áp cho điều khiển nhóm (≥2 máy), không áp khi điều khiển
+          một máy.
+        </p>
+        <div className="row">
+          <label>
+            Độ trễ mỗi máy
+            <select
+              value={gsDelay.mode}
+              onChange={(event) => {
+                const mode = event.target.value;
+                if (mode === "random") {
+                  setGroupSync({
+                    ...groupSync,
+                    delay: { mode: "random", minMs: 200, maxMs: 800 },
+                  });
+                } else if (mode === "staggered") {
+                  setGroupSync({ ...groupSync, delay: { mode: "staggered", stepMs: 150 } });
+                } else {
+                  setGroupSync({ ...groupSync, delay: { mode: "none" } });
+                }
+              }}
+            >
+              <option value="none">Tắt</option>
+              <option value="random">Ngẫu nhiên</option>
+              <option value="staggered">So le theo thứ tự</option>
+            </select>
+          </label>
+          {gsDelay.mode === "random" && (
+            <>
+              <label>
+                Tối thiểu (ms)
+                <input
+                  type="number"
+                  min={0}
+                  value={gsDelay.minMs}
+                  onChange={(event) => {
+                    const v = Math.max(0, Math.round(Number(event.target.value) || 0));
+                    setGroupSync({
+                      ...groupSync,
+                      delay: { mode: "random", minMs: v, maxMs: gsDelay.maxMs },
+                    });
+                  }}
+                />
+              </label>
+              <label>
+                Tối đa (ms)
+                <input
+                  type="number"
+                  min={0}
+                  value={gsDelay.maxMs}
+                  onChange={(event) => {
+                    const v = Math.max(0, Math.round(Number(event.target.value) || 0));
+                    setGroupSync({
+                      ...groupSync,
+                      delay: { mode: "random", minMs: gsDelay.minMs, maxMs: v },
+                    });
+                  }}
+                />
+              </label>
+            </>
+          )}
+          {gsDelay.mode === "staggered" && (
+            <label>
+              Bước (ms mỗi máy)
+              <input
+                type="number"
+                min={0}
+                value={gsDelay.stepMs}
+                onChange={(event) => {
+                  const v = Math.max(0, Math.round(Number(event.target.value) || 0));
+                  setGroupSync({ ...groupSync, delay: { mode: "staggered", stepMs: v } });
+                }}
+              />
+            </label>
+          )}
+          <label>
+            Lệch toạ độ (± px)
+            <input
+              type="number"
+              min={0}
+              value={gsMaxPx}
+              onChange={(event) => {
+                const v = Math.max(0, Math.round(Number(event.target.value) || 0));
+                setGroupSync({ ...groupSync, offset: { maxPx: v } });
+              }}
+            />
+          </label>
+        </div>
+      </section>
+
+      <section className="settings-section">
+        <h3>Kết nối không dây (WIFI adb)</h3>
+        <p className="hint">
+          Kết nối điện thoại Android qua Wi-Fi thay vì cáp. Bật từ máy đang cắm USB bằng
+          menu chuột phải → "Chuyển sang WIFI", hoặc nhập trực tiếp host bên dưới. Máy phải
+          cùng mạng LAN với PC.
+        </p>
+        <div className="row">
+          <label style={{ flex: 1 }}>
+            Host (ip hoặc ip:cổng)
+            <input
+              type="text"
+              placeholder="192.168.1.42 hoặc 192.168.1.42:5555"
+              value={wifiHost}
+              onChange={(event) => setWifiHost(event.target.value)}
+            />
+          </label>
+          <button
+            type="button"
+            className="ghost"
+            disabled={!wifiHost.trim()}
+            onClick={() => void connectWifi(wifiHost.trim())}
+          >
+            Kết nối
+          </button>
+          <button type="button" className="ghost" disabled={arpBusy} onClick={() => void scanArp()}>
+            {arpBusy ? "Đang quét…" : "Quét mạng (ARP)"}
+          </button>
+        </div>
+        {arp.length > 0 && (
+          <div className="group-tools-preview" style={{ marginTop: "0.4rem" }}>
+            {arp.map((entry) => (
+              <div className="row-item" key={entry.ip}>
+                <span className="who mono">{entry.ip}</span>
+                <span className="what mono">{entry.mac}</span>
+                <span className="grow" />
+                <button type="button" className="ghost" onClick={() => void connectWifi(entry.ip)}>
+                  Kết nối
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        {wifiMessage && <p className="hint">{wifiMessage}</p>}
+      </section>
+
+      <section className="settings-section">
+        <h3>API tự động hoá cục bộ (openapi)</h3>
+        <p className="hint">
+          Máy chủ HTTP chỉ chạy trên loopback (127.0.0.1) để script bên ngoài điều khiển fleet
+          — bật/tắt màn, chạm, vuốt, gõ, phím. Mặc định TẮT, luôn cần token Bearer. Đổi cấu
+          hình có hiệu lực sau khi khởi động lại ứng dụng.
+        </p>
+        {localApi && (
+          <>
+            <label className="agent-toggle" style={{ marginBottom: "0.5rem" }}>
+              <input
+                type="checkbox"
+                checked={localApi.enabled}
+                onChange={(event) => setLocalApi({ ...localApi, enabled: event.target.checked })}
+              />
+              Bật API cục bộ
+            </label>
+            <div className="row">
+              <label>
+                Cổng
+                <input
+                  type="number"
+                  min={1}
+                  max={65535}
+                  value={localApi.port}
+                  onChange={(event) =>
+                    setLocalApi({ ...localApi, port: Number(event.target.value) || 0 })
+                  }
+                  style={{ width: "8rem" }}
+                />
+              </label>
+              <label style={{ flex: 1 }}>
+                Token (Bearer)
+                <input type="text" readOnly value={localApi.token || "(tạo khi lưu)"} className="mono" />
+              </label>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => setLocalApi({ ...localApi, token: "" })}
+                title="Xoá token hiện tại; lưu sẽ tạo token mới"
+              >
+                Tạo token mới
+              </button>
+            </div>
+            <div className="row" style={{ marginTop: "0.5rem" }}>
+              <button
+                type="button"
+                className="primary"
+                disabled={savingApi}
+                onClick={async () => {
+                  setSavingApi(true);
+                  setApiMessage(null);
+                  try {
+                    const saved = await localApiSetConfig(localApi);
+                    setLocalApi(saved);
+                    setApiMessage(
+                      saved.enabled
+                        ? `Đã lưu. API sẽ chạy ở 127.0.0.1:${saved.port} sau khi khởi động lại ứng dụng.`
+                        : "Đã lưu (API đang tắt).",
+                    );
+                  } catch (error) {
+                    setApiMessage(describeError(error));
+                  } finally {
+                    setSavingApi(false);
+                  }
+                }}
+              >
+                {savingApi ? "Đang lưu…" : "Lưu"}
+              </button>
+            </div>
+            {localApi.token && (
+              <pre className="group-tools-log" style={{ marginTop: "0.5rem" }}>
+                {`# ví dụ: liệt kê máy\ncurl -H "Authorization: Bearer ${localApi.token}" http://127.0.0.1:${localApi.port}/v1/devices\n\n# chạm toạ độ trên một máy\ncurl -X POST -H "Authorization: Bearer ${localApi.token}" \\\n  -d '{"udid":"<udid>","x":540,"y":1200}' http://127.0.0.1:${localApi.port}/v1/tap`}
+              </pre>
+            )}
+          </>
+        )}
+        {apiMessage && <p className="hint">{apiMessage}</p>}
+      </section>
+
+      <section className="settings-section">
         <h3>Bản cập nhật</h3>
         <p>
           <span className={`chip ${updateStatusView.tone}`}>{updateStatusView.headline}</span>
@@ -367,7 +634,7 @@ export function SettingsPanel({ devices }: Props) {
                 setUpdate(await updateCheck());
               } catch (error) {
                 setUpdate(null);
-                setUpdateError(String(error));
+                setUpdateError(describeError(error));
               } finally {
                 setCheckingUpdate(false);
               }
@@ -388,7 +655,7 @@ export function SettingsPanel({ devices }: Props) {
                 // to be reopened. On Windows the process is gone before this line.
                 setUpdateError("Đã cài xong — mở lại app để dùng bản mới.");
               } catch (error) {
-                setUpdateError(String(error));
+                setUpdateError(describeError(error));
               } finally {
                 setInstallingUpdate(false);
               }
@@ -436,7 +703,7 @@ export function SettingsPanel({ devices }: Props) {
                 setPassword("");
                 setLegacyMessage("Saved to OS credential store");
               } catch (error) {
-                setLegacyMessage(String(error));
+                setLegacyMessage(describeError(error));
               }
             }}
           >
@@ -453,7 +720,7 @@ export function SettingsPanel({ devices }: Props) {
                 setHasPassword(false);
                 setLegacyMessage("Cleared");
               } catch (error) {
-                setLegacyMessage(String(error));
+                setLegacyMessage(describeError(error));
               }
             }}
           >

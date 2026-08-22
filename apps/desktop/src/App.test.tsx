@@ -23,6 +23,14 @@ vi.mock("./api", () => ({
   })),
   listenRiviuEvents: vi.fn(async () => () => undefined),
   listDevices: vi.fn(async () => []),
+  // The grid reads the operator's own records (alias, number) on every reload. Mocked for
+  // the reason the comment above gives, and this one bit: an unmocked export is `undefined`,
+  // so the call threw *synchronously* inside `reload`'s try block — past the `.catch` that
+  // was meant to make this failure cost only the labels — and the whole boot reported an
+  // error instead. Three banner tests failed with nothing in them changed.
+  listDeviceMetas: vi.fn(async () => []),
+  getDeviceMeta: vi.fn(async (udid: string) => ({ udid, notes: "", tags: [] })),
+  saveDeviceMeta: vi.fn(async () => undefined),
   listGroups: vi.fn(async () => []),
   listJobs: vi.fn(async () => []),
   listSchedules: vi.fn(async () => []),

@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { describeError } from "../../describeError";
 import type { FlowCoordinateFrame, VisionRegion } from "../../types";
 import { projectContainedImageClick } from "./FlowCoordinatePicker";
 
@@ -81,9 +82,7 @@ export function FlowVisionCapture({
           y1: y1 / frame.imageHeight,
         });
       })
-      .catch((cropError: unknown) =>
-        setError(cropError instanceof Error ? cropError.message : String(cropError)),
-      );
+      .catch((cropError: unknown) => setError(describeError(cropError)));
   };
 
   return (

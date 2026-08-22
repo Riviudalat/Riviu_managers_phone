@@ -22,12 +22,33 @@ export interface InstalledAppsView {
   notice: { kind: "loading" | "refused" | "empty" | "filtered"; text: string } | null;
 }
 
-const NAMES_ARE_PACKAGES =
-  "Android không trả tên hiển thị qua adb, nên đây là tên gói.";
-
-/** The one line explaining why rows read as package names rather than app names. */
-export function installedAppsFootnote(): string {
-  return NAMES_ARE_PACKAGES;
+/**
+ * The line explaining why rows read as package names — when they do.
+ *
+ * It used to be unconditional, because a name was genuinely unobtainable: adb returns the
+ * label as a resource id and no farm phone has `aapt`. The helper's `PackageManager` route
+ * changed that for the apps it can describe, so the sentence now has three cases and the
+ * wrong one is worse than none — telling an operator looking at "Zalo" and "TikTok" that
+ * Android does not give names reads as the panel not knowing what it is showing.
+ *
+ * `null` means every row is named and there is nothing to explain.
+ */
+export function installedAppsFootnote(apps: InstalledApp[]): string | null {
+  if (apps.length === 0) return null;
+  const unnamed = apps.filter((app) => (app.label ?? "").trim().length === 0);
+  if (unnamed.length === 0) return null;
+  if (unnamed.length === apps.length) {
+    return "Máy chưa có Riviu helper nên chưa đọc được tên và icon app — đây là tên gói.";
+  }
+  // Which rows are unnamed matters more than how many. The driver deliberately does not ask
+  // the phone to name the *system* partition — measured 4,5 s for 539 packages against 3,6 s
+  // for the 162 a farm operator actually launches — so "the phone did not give a name" would
+  // blame the phone for a choice this app made. Said plainly instead, and only when the
+  // unnamed rows really are all system ones.
+  if (unnamed.every((app) => app.kind === "system")) {
+    return `${unnamed.length} app hệ thống chưa đọc tên (để không mất thêm ~4,5 s mỗi máy) — hiện bằng tên gói.`;
+  }
+  return `${unnamed.length} app máy không trả tên, hiện bằng tên gói.`;
 }
 
 /**

@@ -26,14 +26,29 @@ describe("the token layer", () => {
     const declared = new Set(
       [...code(indexCssRaw).matchAll(/^\s*(--[a-z0-9-]+):/gm)].map((m) => m[1]),
     );
-    const used = new Set(
-      [
-        ...code(indexCssRaw).matchAll(/var\((--[a-z0-9-]+)/g),
-        ...code(appCssRaw).matchAll(/var\((--[a-z0-9-]+)/g),
-      ].map((m) => m[1]),
+    // Two other ways a `var()` can legitimately resolve, and the property this test protects
+    // is "nothing resolves to nothing" rather than "everything comes from index.css":
+    //  - declared locally by the component that uses it. `.nu-feature-slider` computes its
+    //    track positions this way; those are geometry of one control, not a shared step, and
+    //    promoting them to the token layer would be inventing a global out of a local.
+    //  - fed from an inline style, which a stylesheet cannot see at all. Those must carry a
+    //    fallback in the `var()` so the rule still renders with no style attribute — which is
+    //    what the second half of the filter below insists on.
+    const local = new Set(
+      [...code(appCssRaw).matchAll(/^\s*(--[a-z0-9-]+):/gm)].map((m) => m[1]),
     );
-    const missing = [...used].filter((name) => !declared.has(name));
-    expect(missing, `used but never declared: ${missing.join(", ")}`).toEqual([]);
+    const uses = [
+      ...code(indexCssRaw).matchAll(/var\((--[a-z0-9-]+)(\s*,)?/g),
+      ...code(appCssRaw).matchAll(/var\((--[a-z0-9-]+)(\s*,)?/g),
+    ];
+    const missing = [
+      ...new Set(
+        uses
+          .filter(([, name, fallback]) => !declared.has(name) && !local.has(name) && !fallback)
+          .map(([, name]) => name),
+      ),
+    ];
+    expect(missing, `resolves to nothing: ${missing.join(", ")}`).toEqual([]);
   });
 
   it("keeps the two tokens the old stylesheet was built on at their old values", () => {

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { describeError } from "../toastStore";
 import { deviceShell } from "../api";
 import type { DeviceInfo } from "../types";
 
@@ -42,7 +43,9 @@ export function AdbConsole({ device, onClose }: Props) {
       });
     } catch (error) {
       // Reached only for a real failure: adb gone, device unplugged, lease refused.
-      setOutput({ text: String(error), failed: true });
+      // `describeError`: the refusal arrives as `{code, message}` and `String` of that is
+      // "[object Object]" — exactly the sentence an operator cannot act on.
+      setOutput({ text: describeError(error), failed: true });
     } finally {
       setRunning(false);
     }

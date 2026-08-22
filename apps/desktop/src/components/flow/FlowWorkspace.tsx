@@ -53,6 +53,7 @@ import { FlowPalette } from "./FlowPalette";
 import { FlowRunDialog } from "./FlowRunDialog";
 import { FlowRunMonitor } from "./FlowRunMonitor";
 import { FlowToolbar } from "./FlowToolbar";
+import { describeError } from "../../describeError";
 
 export interface FlowWorkspaceProps {
   devices: DeviceInfo[];
@@ -61,14 +62,6 @@ export interface FlowWorkspaceProps {
 }
 
 type OpenDialog = "import" | "json" | "run" | null;
-
-function errorText(error: unknown): string {
-  if (typeof error === "object" && error !== null && "message" in error) {
-    const message = (error as { message?: unknown }).message;
-    if (typeof message === "string") return message;
-  }
-  return error instanceof Error ? error.message : String(error);
-}
 
 function savedSummary(document: FlowDocumentV2, createdAt: string): FlowSummary {
   return {
@@ -178,7 +171,7 @@ export function FlowWorkspace({
           if (!disposed && record !== null) replaceFromRecord(record);
         }
       } catch (error) {
-        if (!disposed) setOperationError(errorText(error));
+        if (!disposed) setOperationError(describeError(error));
       } finally {
         if (!disposed) setLoading(false);
       }
@@ -263,7 +256,7 @@ export function FlowWorkspace({
 
   const selectFlow = useCallback(async (id: string) => {
     if (!(await confirmDiscard())) return;
-    await openSavedFlow(id).catch((error) => setOperationError(errorText(error)));
+    await openSavedFlow(id).catch((error) => setOperationError(describeError(error)));
   }, [confirmDiscard, openSavedFlow]);
 
   const replaceWithNew = useCallback((document: FlowDocumentV2, source: "new" | "duplicate") => {
@@ -312,14 +305,14 @@ export function FlowWorkspace({
       const event = flowDocumentEvent(payload);
       if (event) {
         void invalidate(event.flowId, event.revision).catch((error) => {
-          if (!disposed) setOperationError(errorText(error));
+          if (!disposed) setOperationError(describeError(error));
         });
       }
     }).then((unlisten) => {
       if (disposed) unlisten();
       else stop = unlisten;
     }, (error) => {
-      if (!disposed) setOperationError(errorText(error));
+      if (!disposed) setOperationError(describeError(error));
     });
 
     return () => {
@@ -345,7 +338,7 @@ export function FlowWorkspace({
       },
       (error) => {
         dispatch({ type: "saveFailed", identity });
-        setOperationError(errorText(error));
+        setOperationError(describeError(error));
       },
     );
   }, [state]);
@@ -368,7 +361,7 @@ export function FlowWorkspace({
         if (next.length > 0) await openSavedFlow(next[0].id);
         else replaceWithNew(newFlowDocument(), "new");
       } catch (error) {
-        setOperationError(errorText(error));
+        setOperationError(describeError(error));
       }
     })();
   }, [openSavedFlow, refreshFlows, replaceWithNew, saved, state.document.id, state.document.name]);
@@ -385,14 +378,14 @@ export function FlowWorkspace({
         const detail = await flowGetRun(run.id);
         if (detail) setActiveRun(detail);
       } catch (error) {
-        setOperationError(errorText(error));
+        setOperationError(describeError(error));
       }
     })();
   }, [compiled, saved, state.dirty, state.document.id, state.document.revision]);
 
   const selectRun = useCallback((runId: string) => {
     void flowGetRun(runId).then((detail) => setActiveRun(detail), (error) => {
-      setOperationError(errorText(error));
+      setOperationError(describeError(error));
     });
   }, []);
 
@@ -403,7 +396,7 @@ export function FlowWorkspace({
         const detail = await flowGetRun(runId);
         if (detail) setActiveRun(detail);
       } catch (error) {
-        setOperationError(errorText(error));
+        setOperationError(describeError(error));
       }
     })();
   }, []);
@@ -416,7 +409,7 @@ export function FlowWorkspace({
         const detail = await flowGetRun(activeRun.run.id);
         if (detail) setActiveRun(detail);
       } catch (error) {
-        setOperationError(errorText(error));
+        setOperationError(describeError(error));
       }
     })();
   }, [activeRun]);
@@ -424,7 +417,7 @@ export function FlowWorkspace({
   const openArtifact = useCallback((artifactId: string) => {
     setOperationError(null);
     void flowReadArtifact(artifactId).then(setArtifact, (error) => {
-      setOperationError(errorText(error));
+      setOperationError(describeError(error));
     });
   }, []);
 
@@ -462,7 +455,7 @@ export function FlowWorkspace({
           if (!saved) return;
           void flowExport(state.document.id, state.document.revision).then(
             (body) => downloadJson(state.document.name, body),
-            (error) => setOperationError(errorText(error)),
+            (error) => setOperationError(describeError(error)),
           );
         }}
         onJson={() => setDialog("json")}

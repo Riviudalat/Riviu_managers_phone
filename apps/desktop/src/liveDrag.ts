@@ -1,4 +1,5 @@
 import type { TouchAction } from "./api";
+import { describeError } from "./describeError";
 
 /// A drag the phone follows while it happens, instead of after it ends.
 ///
@@ -79,7 +80,7 @@ export async function liveTap(
       return "fallback";
     }
   } catch (error) {
-    onFallback?.(`tap down threw: ${String(error)}`);
+    onFallback?.(`tap down threw: ${describeError(error)}`);
     return "fallback";
   }
   await new Promise((resolve) => setTimeout(resolve, TAP_HOLD_MS));
@@ -89,7 +90,7 @@ export async function liveTap(
     // The finger is down and this is the only thing that lifts it. Nothing left to try, and
     // reporting a fallback would be worse than useless: the caller would tap again on top of
     // a pointer that never came up.
-    onFallback?.(`tap up threw, the pointer may be stuck: ${String(error)}`);
+    onFallback?.(`tap up threw, the pointer may be stuck: ${describeError(error)}`);
   }
   return "live";
 }
@@ -122,7 +123,7 @@ export function createLiveDrag(send: SendTouch, onFallback?: OnFallback): LiveDr
         if (!(await send(action, x, y))) giveUp(`${action} refused: no producer`);
         else if (action === "down") landed = true;
       } catch (error) {
-        giveUp(`${action} threw: ${String(error)}`);
+        giveUp(`${action} threw: ${describeError(error)}`);
       }
     });
   };
@@ -142,7 +143,7 @@ export function createLiveDrag(send: SendTouch, onFallback?: OnFallback): LiveDr
         try {
           if (!(await send("move", next.x, next.y))) giveUp("move refused: no producer");
         } catch (error) {
-          giveUp(`move threw: ${String(error)}`);
+          giveUp(`move threw: ${describeError(error)}`);
         }
       }
       flushing = false;
@@ -228,24 +229,46 @@ export interface LiveDragGroup {
 /// finger that drew it, that shape is measurably weaker: on 19/08/2026 a straight constant
 /// speed drag turned a TikTok photo carousel on 13 of 40 attempts where a shaped flick
 /// managed 19 of 19.
+/// A stable per-device coordinate offset within a ±`maxPx` box (A1 anti-detection jitter on
+/// the live-drag path, the counterpart to what `group_input` applies on the batch path).
+///
+/// Deterministic per `(index, maxPx)` so a device's whole gesture shares one offset — begin,
+/// move and end must agree or the path warps mid-drag. `index 0` gets `(0, 0)` so the phone
+/// the operator is nominally tracking follows the true pointer and the rest scatter around
+/// it. `maxPx <= 0` disables it, which is the default policy and keeps the old behaviour.
+export function deviceDragOffset(index: number, maxPx: number): { dx: number; dy: number } {
+  if (maxPx <= 0 || index <= 0) return { dx: 0, dy: 0 };
+  const span = 2 * maxPx + 1;
+  // Knuth multiplicative hash of the index → two independent offsets in [-maxPx, maxPx].
+  const hash = (index * 2654435761) >>> 0;
+  const dx = (hash % span) - maxPx;
+  const dy = (Math.floor(hash / span) % span) - maxPx;
+  return { dx, dy };
+}
+
 export function createLiveDragGroup(
   members: LiveDragMember[],
   onFallback?: OnFallback,
+  offsetMaxPx = 0,
 ): LiveDragGroup {
-  const drags = members.map((member) => ({
+  const drags = members.map((member, index) => ({
     udid: member.udid,
+    offset: deviceDragOffset(index, offsetMaxPx),
     drag: createLiveDrag(member.send, (reason) => onFallback?.(`${member.udid}: ${reason}`)),
   }));
   return {
     begin(x, y) {
-      for (const { drag } of drags) drag.begin(x, y);
+      for (const { drag, offset } of drags) drag.begin(x + offset.dx, y + offset.dy);
     },
     move(x, y) {
-      for (const { drag } of drags) drag.move(x, y);
+      for (const { drag, offset } of drags) drag.move(x + offset.dx, y + offset.dy);
     },
     async end(x, y) {
       const outcomes = await Promise.all(
-        drags.map(async ({ udid, drag }) => ({ udid, outcome: await drag.end(x, y) })),
+        drags.map(async ({ udid, drag, offset }) => ({
+          udid,
+          outcome: await drag.end(x + offset.dx, y + offset.dy),
+        })),
       );
       return {
         live: outcomes.filter((row) => row.outcome === "live").map((row) => row.udid),

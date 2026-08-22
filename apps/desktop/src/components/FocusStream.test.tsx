@@ -194,6 +194,34 @@ describe("FocusStream hit mapping", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(deviceTap).not.toHaveBeenCalled();
   });
+
+  it("drops a wheel tick until control has opened, then scrolls", async () => {
+    // The DeviceBusy race: a reflex wheel tick fired while `deviceControlBegin` is still in
+    // flight used to acquire ManualControl a second time and collide with the lease the
+    // opening session already held ("busy with ManualControl; ManualControl cannot acquire
+    // it"). The gate makes an early tick a no-op and lets the scroll work once control is up.
+    // A deferred begin holds the opening window open deterministically.
+    let openControl = () => {};
+    vi.mocked(deviceControlBegin).mockImplementationOnce(
+      () => new Promise<void>((resolve) => (openControl = () => resolve())),
+    );
+    const { container } = render(
+      <FocusStream device={fixture} index={2} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined} />,
+    );
+    const screen = container.querySelector("[data-testid='focus-screen']")!;
+
+    // Still opening: the tick is dropped, not raced.
+    fireEvent.wheel(screen, { deltaY: 120 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(deviceSwipe).not.toHaveBeenCalled();
+
+    // Control opens; let the begin's continuation register readiness, then the tick scrolls.
+    openControl();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    fireEvent.wheel(screen, { deltaY: 120 });
+    await waitFor(() => expect(deviceSwipe).toHaveBeenCalled());
+    expect((deviceSwipe as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][0]).toBe("ce06");
+  });
 });
 
 describe("overlay panel rows", () => {
@@ -226,6 +254,59 @@ describe("overlay panel rows", () => {
     fireEvent.click(await findByTitle("ce07"));
 
     expect(onSelectDevice).toHaveBeenCalledWith("ce07");
+  });
+
+  /**
+   * The question this answers is the operator's own: "when I zoom in, do I still get those
+   * functions?" The overlay and the tile menu are two views of one phone, so the panel takes
+   * the same catalog — and drops only the rows it already offers a better way, which is why
+   * the exclusion is asserted here rather than trusted.
+   */
+  it("offers the shared per-phone functions, minus the ones it already has its own way", async () => {
+    const run = vi.fn();
+    const { getByText, queryByText } = render(
+      <FocusStream
+        device={fixture}
+        index={1}
+        onClose={() => undefined}
+        groupUdids={[]}
+        groupMode={false}
+        devices={[fixture]}
+        onSelectDevice={() => undefined}
+        functions={[
+          { id: "power-off", label: "Tắt máy", danger: true, run },
+          // Dropped: the panel has its own "Chụp màn hình" row above.
+          { id: "screenshot", label: "Chụp màn hình về máy tính", run: vi.fn() },
+          // Dropped whole, because its only row is one the panel owns.
+          { id: "adb", label: "ADB", children: [{ id: "adb-console", label: "Lệnh adb…" }] },
+        ]}
+      />,
+    );
+
+    // One list, no heading: the panel's own rows and the catalog are the same kind of thing,
+    // and a heading only taught the operator which half a function lived in.
+    expect(queryByText("Chức năng khác")).toBeNull();
+    expect(getByText("Đổi máy")).toBeTruthy();
+    expect(queryByText("Chụp màn hình về máy tính")).toBeNull();
+    expect(queryByText("ADB")).toBeNull();
+
+    fireEvent.click(getByText("Tắt máy"));
+    expect(run).toHaveBeenCalled();
+  });
+
+  it("still draws its own rows when the parent passed no catalog", () => {
+    const { queryByText } = render(
+      <FocusStream
+        device={fixture}
+        index={1}
+        onClose={() => undefined}
+        groupUdids={[]}
+        groupMode={false}
+        devices={[fixture]}
+        onSelectDevice={() => undefined}
+      />,
+    );
+    expect(queryByText("Chức năng khác")).toBeNull();
   });
 
   it("shows the battery it was given, and a dash when there is none", () => {
@@ -282,11 +363,15 @@ describe("overlay panel rows", () => {
     fireEvent.click(getByText("xin chào các bạn"));
 
     await waitFor(() =>
-      expect(vi.mocked(groupInput)).toHaveBeenCalledWith({
-        udids: ["ce06", "ce07"],
-        kind: "type",
-        text: "xin chào các bạn",
-      }),
+      // objectContaining so the group-sync policy field (added with feature A1) does not make
+      // this brittle — what matters here is the udids/kind/text of the phrase send.
+      expect(vi.mocked(groupInput)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          udids: ["ce06", "ce07"],
+          kind: "type",
+          text: "xin chào các bạn",
+        }),
+      ),
     );
   });
 

@@ -44,6 +44,16 @@ vi.mock("../api", () => ({
   interactionStartThread: startThread,
   listenRiviuEvents: vi.fn(async () => () => undefined),
   listGroups: vi.fn(async () => []),
+  // Reached on mount, once per in-scope device, to load each phone's @handle.
+  getDeviceMeta: vi.fn(async (udid: string) => ({
+    udid,
+    notes: "",
+    tags: [],
+    groupId: null,
+    proxyId: null,
+    handle: "",
+  })),
+  saveDeviceMeta: vi.fn(async () => undefined),
   interactionRetry: vi.fn(async () => undefined),
   interactionListArtifacts: vi.fn(async () => []),
   interactionReadArtifact: vi.fn(async () => ""),
@@ -227,7 +237,9 @@ describe("InteractionPopup", () => {
     await waitFor(() => expect(screen.getByText(/creator\/video\/123/)).toBeVisible());
     fireEvent.click(screen.getByLabelText("Phone B"));
     fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
-    await waitFor(() => expect(screen.getByText("Chọn từ 2 đến 64 thiết bị làm actor")).toBeVisible());
+    await waitFor(() =>
+      expect(screen.getByText(/Chọn từ 2 đến 64 thiết bị làm actor/)).toBeVisible(),
+    );
     expect(startThread).not.toHaveBeenCalled();
   });
 
@@ -241,7 +253,7 @@ describe("InteractionPopup", () => {
     });
     await waitFor(() => expect(screen.getByText(/creator\/video\/123/)).toBeVisible());
 
-    fireEvent.change(screen.getByLabelText("Hình chuỗi"), { target: { value: "star" } });
+    fireEvent.change(screen.getByLabelText(/^Hình chuỗi/), { target: { value: "star" } });
     fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
 
     await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));

@@ -106,6 +106,22 @@ function open() {
   return waitFor(() => expect(screen.getByRole("tab", { name: "Hành vi" })).toBeVisible());
 }
 
+/** Opens the panel with the four interaction rates set to these values, rest unchanged. */
+async function openWithRates(like: number, comment: number, follow: number, frenzy: number) {
+  const api = await import("../api");
+  vi.mocked(api.nurtureGetSettings).mockResolvedValueOnce({
+    ...settings,
+    likeProb: like,
+    commentProb: comment,
+    followProb: follow,
+    frenzyProb: frenzy,
+  });
+  await open();
+}
+
+const slider = (name: string) => screen.getByLabelText(`${name} thanh kéo phần trăm`);
+const box = (name: string) => screen.getByLabelText(`${name} phần trăm`);
+
 describe("NurturePopup", () => {
   it("groups the settings into tabs and shows one group at a time", async () => {
     await open();
@@ -144,23 +160,6 @@ describe("NurturePopup", () => {
     // …and the 35 is still there, still editable.
     expect(screen.getByLabelText("Thích phần trăm")).toHaveValue(35);
     expect(screen.getByLabelText("Thích phần trăm")).toBeEnabled();
-  });
-
-  it("folds the switches into the summary line", async () => {
-    // The line under the four features has to agree with them. Reading the raw
-    // percentages made it say "Thích 35% · Bỏ qua 65%" with Thích switched off — the
-    // number is deliberately kept when a feature is off, so this is the one place that
-    // has to apply the switch. Mirrors `NurtureSettings::into_effective`.
-    await open();
-    expect(screen.getByText(/^Thích 35% · Bình luận 0% · Bỏ qua 65%/)).toBeVisible();
-
-    fireEvent.click(screen.getByLabelText("Bật Thích"));
-    expect(screen.getByText(/^Thích 0% · Bình luận 0% · Bỏ qua 100%/)).toBeVisible();
-    // …and the tuned 35 is still in its box, ready to come back.
-    expect(screen.getByLabelText("Thích phần trăm")).toHaveValue(35);
-
-    fireEvent.click(screen.getByLabelText("Bật Follow"));
-    expect(screen.getByText(/Follow độc lập 0%/)).toBeVisible();
   });
 
   it("renders the carousel as one switched row with its portion", async () => {
@@ -216,7 +215,7 @@ describe("NurturePopup", () => {
     ]) {
       expect(info(name)).toHaveTextContent("!");
       // A `!` with a generic tooltip would be worse than none.
-      expect(info(name).getAttribute("title")!.length).toBeGreaterThan(30);
+      expect(info(name).getAttribute("data-tip")!.length).toBeGreaterThan(30);
     }
     // Decorative, and this is the assertion that keeps it so. A label's accessible name is
     // its text content, so a glyph visible to the accessibility tree renames every field it
@@ -241,7 +240,7 @@ describe("NurturePopup", () => {
     }
     // The manual-run horizon is the one thing this field does *not* control, and that was
     // measured the hard way — so the tooltip has to say so.
-    expect(info("Thời lượng (phút)").getAttribute("title")).toContain("bấm tay");
+    expect(info("Thời lượng (phút)").getAttribute("data-tip")).toContain("bấm tay");
   });
 
   it("shows the pacing override as one switch, off by default", async () => {
@@ -253,7 +252,7 @@ describe("NurturePopup", () => {
     expect(pacing).not.toBeChecked();
     // The tooltip has to name what it would take back, in numbers — an operator who turns
     // this on is choosing a much slower run than the percentages above suggest.
-    const why = document.querySelector('[data-info="Giới hạn nhịp người"]')!.getAttribute("title")!;
+    const why = document.querySelector('[data-info="Giới hạn nhịp người"]')!.getAttribute("data-tip")!;
     for (const fragment of ["8–16", "2 trong 5", "12–35"]) {
       expect(why).toContain(fragment);
     }
@@ -269,7 +268,7 @@ describe("NurturePopup", () => {
     const badges = screen.getAllByText("cần chạy lại");
     expect(badges).toHaveLength(3);
     for (const badge of badges) {
-      expect(badge).toHaveAttribute("title", expect.stringContaining("cần dừng và chạy lại"));
+      expect(badge).toHaveAttribute("data-tip", expect.stringContaining("Bắt đầu lại"));
     }
   });
 
@@ -289,5 +288,185 @@ describe("NurturePopup", () => {
       "mock-1",
       [new Uint8Array([0xff, 0xd8, 0xff, 0x01])],
     ]);
+  });
+});
+
+/**
+ * The four interaction rates share one 100% budget, dragged rather than typed.
+ *
+ * The arithmetic itself is proved in `nurtureBudget.test.ts` against the pure module. What
+ * needs a render is the wiring: that each row got a slider, that a slider's `max` is that
+ * row's ceiling and not a flat 100, that dragging clamps instead of stealing from a
+ * neighbour, and that a config already over the budget can still be brought back.
+ */
+describe("the shared 100% budget", () => {
+  it("tells every rate what the other three leave free, without rescaling it", async () => {
+    // 35 + 0 + 3 + 6 = 44 spent, so Thích may reach 100 - 9 = 91 and no further.
+    await open();
+    expect(slider("Thích")).toHaveAttribute("data-ceiling", "91");
+    expect(slider("Bình luận")).toHaveAttribute("data-ceiling", "56");
+    expect(slider("Follow")).toHaveAttribute("data-ceiling", "59");
+    expect(slider("Vuốt nhanh")).toHaveAttribute("data-ceiling", "62");
+    expect(screen.getByText("Còn 56% / 100%")).toBeVisible();
+
+    // The ceiling is drawn on the track and enforced on change; it is NOT the slider's `max`.
+    // With `max` set to the ceiling, dragging one row rescaled the others and their thumbs
+    // slid across the track while their numbers never moved — see "one row's thumb" below.
+    for (const name of ["Thích", "Bình luận", "Follow", "Vuốt nhanh"]) {
+      expect(slider(name)).toHaveAttribute("max", "100");
+    }
+  });
+
+  it("lets the other three share what one leaves, to the last point", async () => {
+    // The operator's own example: one at 90 leaves 10, three at 3 leaves one able to reach 4.
+    await openWithRates(90, 3, 3, 0);
+    expect(slider("Vuốt nhanh")).toHaveAttribute("data-ceiling", "4");
+
+    fireEvent.change(slider("Vuốt nhanh"), { target: { value: "4" } });
+    expect(box("Vuốt nhanh")).toHaveValue(4);
+    expect(screen.getByText("Còn 0% / 100%")).toBeVisible();
+    // One point further is refused, which is the clamp and not the input's own range.
+    fireEvent.change(slider("Vuốt nhanh"), { target: { value: "5" } });
+    expect(box("Vuốt nhanh")).toHaveValue(4);
+  });
+
+  it("moves one row's thumb only when that row's own number moves", async () => {
+    // The bug the operator reported: "kéo thanh thứ 2 thì thanh 1 cũng bị kéo theo". Follow
+    // sat at 3 on a scale of 0..3, so its thumb was hard right; freeing 49 points rescaled it
+    // to 0..52 and the thumb slid left on its own. The number was right the whole time, which
+    // is what made it a lie rather than an error — the control moved without being edited.
+    await openWithRates(97, 0, 3, 0);
+    const followThumb = () => slider("Follow").style.getPropertyValue("--fill");
+    const before = followThumb();
+    expect(before).toBe("0.03");
+
+    fireEvent.change(slider("Thích"), { target: { value: "48" } });
+    expect(box("Thích")).toHaveValue(48);
+    // Follow's ceiling grew — that is real and it is drawn — but its own position did not.
+    expect(slider("Follow")).toHaveAttribute("data-ceiling", "52");
+    expect(followThumb()).toBe(before);
+    expect(box("Follow")).toHaveValue(3);
+  });
+
+  it("clamps a drag past the free amount instead of taking it off a neighbour", async () => {
+    await open();
+    fireEvent.change(slider("Thích"), { target: { value: "95" } });
+    // Stopped at its ceiling…
+    expect(box("Thích")).toHaveValue(91);
+    // …and the three the operator did not touch are exactly as they were. A budget that
+    // rebalances neighbours behind the operator's back destroys numbers they tuned.
+    expect(box("Bình luận")).toHaveValue(0);
+    expect(box("Follow")).toHaveValue(3);
+    expect(box("Vuốt nhanh")).toHaveValue(6);
+  });
+
+  it("keeps the slider and the number box showing the same value", async () => {
+    // Two controls over one number: either may move it, and neither may lie about it.
+    await open();
+    fireEvent.change(slider("Follow"), { target: { value: "20" } });
+    expect(box("Follow")).toHaveValue(20);
+    fireEvent.change(box("Follow"), { target: { value: "12" } });
+    expect(slider("Follow")).toHaveValue("12");
+  });
+
+  it("offers a way back for a config saved before the budget existed", async () => {
+    // The measured shape of the operator's own settings: 100 + 28 + 3 + 0 = 131. Every
+    // ceiling is 0 in that state, so without the button below no slider moves and the panel
+    // is a dead end.
+    await openWithRates(100, 28, 3, 0);
+    expect(screen.getByRole("alert")).toHaveTextContent("cộng lại đang là 131%");
+    expect(screen.getByText("Đang dùng 131% / 100%")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "đưa về 100%" }));
+    // Taken off the largest, so the two small tuned rates survive.
+    expect(box("Thích")).toHaveValue(69);
+    expect(box("Bình luận")).toHaveValue(28);
+    expect(box("Follow")).toHaveValue(3);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByText("Còn 0% / 100%")).toBeVisible();
+  });
+
+  it("refuses to save an over-budget config, and says by how much", async () => {
+    const api = await import("../api");
+    await openWithRates(100, 28, 3, 0);
+    fireEvent.click(screen.getByRole("button", { name: "Lưu" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/dùng chung 100%, đang là 131%/)).toBeVisible(),
+    );
+    expect(api.nurtureSaveSettings).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A feature the operator switched off.
+ *
+ * The engine folds the switch into the probability — `into_effective` zeroes `like_prob` when
+ * `like_enabled` is false — so a switched-off rate produces nothing and must therefore cost
+ * nothing. Charging it would reserve budget for posts that provably never happen.
+ */
+describe("a rate the operator switched off", () => {
+  it("gives its percent back to the other three the moment it is switched off", async () => {
+    await open();
+    // 35 + 0 + 3 + 6 = 44.
+    expect(screen.getByText("Còn 56% / 100%")).toBeVisible();
+
+    fireEvent.click(screen.getByLabelText("Bật Vuốt nhanh"));
+    expect(screen.getByText("Còn 62% / 100%")).toBeVisible();
+    // Its 6 is kept, not zeroed — that is the whole point of a switch beside a number.
+    expect(box("Vuốt nhanh")).toHaveValue(6);
+    // And the freed 6 is now reachable by a rate that is on.
+    expect(slider("Thích")).toHaveAttribute("data-ceiling", "97");
+  });
+
+  it("stays draggable while off, past what is left free", async () => {
+    // 100 spent by Thích alone, so switching Follow off leaves nothing for it. Held to the
+    // budget it would be frozen at 0, and an operator who switched a feature off to come back
+    // to it later would find the number they were protecting taken away.
+    await openWithRates(100, 0, 3, 0);
+    fireEvent.click(screen.getByLabelText("Bật Follow"));
+    expect(screen.getByText("Còn 0% / 100%")).toBeVisible();
+    expect(slider("Follow")).toHaveAttribute("data-ceiling", "0");
+
+    fireEvent.change(slider("Follow"), { target: { value: "40" } });
+    expect(box("Follow")).toHaveValue(40);
+    // It is parked, not spent: the readout does not move and nothing is over budget.
+    expect(screen.getByText("Còn 0% / 100%")).toBeVisible();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("says so when switching it back on no longer fits, instead of trimming it", async () => {
+    await openWithRates(97, 0, 3, 0);
+    const followSwitch = screen.getByLabelText("Bật Follow");
+    fireEvent.click(followSwitch);
+    fireEvent.change(slider("Follow"), { target: { value: "40" } });
+    fireEvent.click(followSwitch);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("cộng lại đang là 137%");
+    // The number the operator just parked is still 40. Trimming the row they had only asked
+    // to *enable* would be the panel editing a tuned number behind them.
+    expect(box("Follow")).toHaveValue(40);
+    expect(box("Thích")).toHaveValue(97);
+  });
+
+  it("does not demand an API key for comments it will never post", async () => {
+    // `settings.apiKey` is "" in this fixture. With the switch off the run cannot comment, so
+    // refusing the save over a missing key was refusing it over a feature that will not run.
+    const api = await import("../api");
+    await openWithRates(30, 20, 0, 0);
+    fireEvent.click(screen.getByRole("button", { name: "Lưu" }));
+    await waitFor(() =>
+      expect(screen.getByText(/điền API key trong Cấu hình AI/)).toBeVisible(),
+    );
+    expect(api.nurtureSaveSettings).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByLabelText("Bật Bình luận"));
+    fireEvent.click(screen.getByRole("button", { name: "Lưu" }));
+    await waitFor(() => expect(api.nurtureSaveSettings).toHaveBeenCalled());
+    // The 20 is still on the wire; only the switch says not to use it.
+    expect(vi.mocked(api.nurtureSaveSettings).mock.calls[0][0]).toMatchObject({
+      commentProb: 20,
+      commentEnabled: false,
+    });
   });
 });
