@@ -3,7 +3,10 @@
 .DS_Store
 apps/desktop/dist
 apps/desktop/src-tauri/target
-apps/desktop/node_modules
+# Any level, not just apps/desktop: running `npx vitest` from the repo root writes a cache to
+# `./node_modules/.vite/`, which then shows up as untracked at the root and is easy to commit by
+# accident during a `git add -A`.
+node_modules/
 *.db
 .idea
 .vscode
@@ -16,5 +19,11 @@ __pycache__/
 .env.*
 sidecars/wda/DerivedData/
 sidecars/wda/build_payload/
+# Helper APK build output. Both paths are intermediates — the shipped artifact is the copy
+# pinned at sidecars/android/noarch/riviu-agent.apk, and committing an unpinned build next to
+# it is how two APKs with the same name come to disagree.
+sidecars/riviu-android-agent/build-tools-out/
+sidecars/riviu-android-agent/app/build/
+sidecars/riviu-android-agent/local.properties
 **/xcuserdata/
 **/*.xcuserstate
