@@ -43,14 +43,12 @@ import { ScriptsPanel } from "./components/ScriptsPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Sidebar } from "./components/Sidebar";
 import { forgetDepartedViews, useViewClient } from "./viewStore";
-import {
-  ApiPage,
-  AppsPage,
-  DataPage,
-  MaterialPage,
-  PublishPage,
-  ScheduleBlock,
-} from "./pages/FarmPages";
+import { ApiPage } from "./pages/ApiPage";
+import { AppsPage } from "./pages/AppsPage";
+import { DataPage } from "./pages/DataPage";
+import { MaterialPage } from "./pages/MaterialPage";
+import { PublishPage } from "./pages/PublishPage";
+import { ScheduleBlock } from "./pages/ScheduleBlock";
 import type { DeviceInfo, PageId } from "./types";
 import { deviceModelOsLabel } from "./types";
 import { loadZoom, stepZoom, storeZoom, TILE_ZOOM, wheelWantsZoom } from "./zoom";

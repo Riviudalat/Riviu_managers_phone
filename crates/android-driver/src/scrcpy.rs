@@ -1209,12 +1209,13 @@ mod tests {
         // The operator reads a number in the settings panel; the encoder obeys the one
         // here. Nothing but this test connects them, and a mismatch is silent -- the panel
         // would simply explain a cap that is not the cap.
-        let panel = include_str!("../../../apps/desktop/src/components/SettingsPanel.tsx");
+        let panel =
+            include_str!("../../../apps/desktop/src/components/settings/StreamQualitySection.tsx");
         let declared = panel
             .lines()
             .find_map(|line| line.trim().strip_prefix("const TILE_FPS_CEILING = "))
             .and_then(|rest| rest.trim_end_matches(';').parse::<u32>().ok())
-            .expect("SettingsPanel.tsx declares TILE_FPS_CEILING");
+            .expect("StreamQualitySection.tsx declares TILE_FPS_CEILING");
         assert_eq!(
             declared,
             ViewPreset::Tile.max_fps(),

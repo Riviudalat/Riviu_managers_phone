@@ -2411,14 +2411,14 @@ mod tests {
         // the encoder silently runs 30, and the settings row goes on displaying 45 as
         // though it took. The panel already has one pinned constant (TILE_FPS_CEILING in
         // scrcpy.rs); this is the same pin for the other two numbers in the same block.
-        let panel = include_str!("../../src/components/SettingsPanel.tsx");
+        let panel = include_str!("../../src/components/settings/StreamQualitySection.tsx");
         let declared = |name: &str| -> u32 {
             let needle = format!("const {name} = ");
             panel
                 .lines()
                 .find_map(|line| line.trim().strip_prefix(&needle).map(str::to_owned))
                 .and_then(|rest| rest.trim().trim_end_matches(';').parse().ok())
-                .unwrap_or_else(|| panic!("SettingsPanel.tsx declares {name}"))
+                .unwrap_or_else(|| panic!("StreamQualitySection.tsx declares {name}"))
         };
         assert_eq!(
             declared("MIN_STREAM_FPS"),

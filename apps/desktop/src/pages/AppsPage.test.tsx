@@ -2,7 +2,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { AppsPage } from "./FarmPages";
+import { AppsPage } from "./AppsPage";
 import { resetToasts } from "../toastStore";
 import type { AppLibraryItem, DeviceInfo } from "../types";
 
