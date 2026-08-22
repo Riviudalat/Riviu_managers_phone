@@ -1,3 +1,4 @@
+use crate::command_error::CommandError;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,16 +18,16 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
-fn err(error: impl std::fmt::Display) -> String {
-    error.to_string()
+fn err(error: impl std::fmt::Display) -> CommandError {
+    CommandError::operation(error)
 }
 
 #[tauri::command]
 pub fn publish_scan_folder(
     state: State<'_, AppState>,
     source_root: String,
-) -> Result<PublishFolderManifest, String> {
-    let _admission = state.ensure_accepting_work().map_err(String::from)?;
+) -> Result<PublishFolderManifest, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     scan_publish_folder(PathBuf::from(source_root), PublishScanOptions::default()).map_err(err)
 }
 
@@ -37,14 +38,14 @@ pub fn publish_create_campaign(
     bundle_ids: Vec<String>,
     udids: Vec<String>,
     run_at: Option<String>,
-) -> Result<PublishCampaignRecord, String> {
-    let _admission = state.ensure_accepting_work().map_err(String::from)?;
+) -> Result<PublishCampaignRecord, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     if let Some(raw) = run_at.as_deref() {
-        parse_run_at(raw).map_err(err)?;
+        parse_run_at(raw)?;
     }
     for udid in &udids {
         if state.registry.get(udid).is_none() {
-            return Err(format!("device is not connected: {udid}"));
+            return Err(err(format!("device is not connected: {udid}")));
         }
     }
 
@@ -107,7 +108,7 @@ pub fn publish_create_campaign(
 pub fn publish_list(
     state: State<'_, AppState>,
     limit: Option<usize>,
-) -> Result<Vec<PublishCampaignRecord>, String> {
+) -> Result<Vec<PublishCampaignRecord>, CommandError> {
     state
         .db
         .list_publish_campaigns(limit.unwrap_or(50).clamp(1, 200))
@@ -118,13 +119,13 @@ pub fn publish_list(
 pub fn publish_get(
     state: State<'_, AppState>,
     campaign_id: String,
-) -> Result<Option<PublishCampaignDetail>, String> {
+) -> Result<Option<PublishCampaignDetail>, CommandError> {
     state.db.get_publish_campaign(&campaign_id).map_err(err)
 }
 
 #[tauri::command]
-pub fn publish_cancel(state: State<'_, AppState>, campaign_id: String) -> Result<(), String> {
-    let _admission = state.ensure_accepting_work().map_err(String::from)?;
+pub fn publish_cancel(state: State<'_, AppState>, campaign_id: String) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     state.db.cancel_publish_campaign(&campaign_id).map_err(err)
 }
 
@@ -134,8 +135,8 @@ pub fn publish_cancel(state: State<'_, AppState>, campaign_id: String) -> Result
 pub fn publish_prepare(
     state: State<'_, AppState>,
     campaign_id: String,
-) -> Result<PublishCampaignDetail, String> {
-    let _admission = state.ensure_accepting_work().map_err(String::from)?;
+) -> Result<PublishCampaignDetail, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     let detail = state
         .db
         .get_publish_campaign(&campaign_id)
@@ -147,10 +148,10 @@ pub fn publish_prepare(
             | riviu_core::PublishCampaignState::Succeeded
             | riviu_core::PublishCampaignState::Uncertain
     ) {
-        return Err(format!(
+        return Err(err(format!(
             "campaign is already terminal: {:?}",
             detail.campaign.state
-        ));
+        )));
     }
     state
         .db
@@ -160,15 +161,15 @@ pub fn publish_prepare(
         .db
         .get_publish_campaign(&campaign_id)
         .map_err(err)?
-        .ok_or_else(|| "campaign disappeared after prepare".to_string())
+        .ok_or_else(|| err("campaign disappeared after prepare"))
 }
 
 #[tauri::command]
 pub async fn publish_transfer(
     state: State<'_, AppState>,
     campaign_id: String,
-) -> Result<PublishCampaignDetail, String> {
-    let _admission = state.ensure_accepting_work().map_err(String::from)?;
+) -> Result<PublishCampaignDetail, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     transfer_publish_campaign_inner(
         state.control.clone(),
         state.db.clone(),
@@ -385,8 +386,8 @@ fn refuse_devices_this_path_cannot_drive<'a>(
 pub async fn publish_post(
     state: State<'_, AppState>,
     campaign_id: String,
-) -> Result<PublishCampaignDetail, String> {
-    let _admission = state.ensure_accepting_work().map_err(String::from)?;
+) -> Result<PublishCampaignDetail, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     post_publish_campaign_inner(
         state.control.clone(),
         state.db.clone(),
@@ -1009,7 +1010,7 @@ fn import_id_from_evidence(raw: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn parse_run_at(raw: &str) -> Result<NaiveDateTime, String> {
+fn parse_run_at(raw: &str) -> Result<NaiveDateTime, CommandError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("runAt cannot be empty".into());

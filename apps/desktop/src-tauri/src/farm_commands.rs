@@ -1,3 +1,4 @@
+use crate::command_error::CommandError;
 use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
@@ -11,8 +12,8 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
-fn err(e: impl std::fmt::Display) -> String {
-    e.to_string()
+fn err(e: impl std::fmt::Display) -> CommandError {
+    CommandError::operation(e)
 }
 
 fn log(state: &AppState, action: &str, detail: &str) {
@@ -20,7 +21,10 @@ fn log(state: &AppState, action: &str, detail: &str) {
 }
 
 #[tauri::command]
-pub fn get_device_meta(state: State<'_, AppState>, udid: String) -> Result<DeviceMeta, String> {
+pub fn get_device_meta(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<DeviceMeta, CommandError> {
     state.db.get_device_meta(&udid).map_err(err)
 }
 
@@ -30,12 +34,12 @@ pub fn get_device_meta(state: State<'_, AppState>, udid: String) -> Result<Devic
 /// reads would be twenty IPC round trips to draw one frame, and `get_device_meta` stays for
 /// the one-phone editors that already use it.
 #[tauri::command]
-pub fn list_device_metas(state: State<'_, AppState>) -> Result<Vec<DeviceMeta>, String> {
+pub fn list_device_metas(state: State<'_, AppState>) -> Result<Vec<DeviceMeta>, CommandError> {
     state.db.list_device_metas().map_err(err)
 }
 
 #[tauri::command]
-pub fn save_device_meta(state: State<'_, AppState>, meta: DeviceMeta) -> Result<(), String> {
+pub fn save_device_meta(state: State<'_, AppState>, meta: DeviceMeta) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     state.db.upsert_device_meta(&meta).map_err(err)?;
     log(&state, "device.meta", &meta.udid);
@@ -43,12 +47,15 @@ pub fn save_device_meta(state: State<'_, AppState>, meta: DeviceMeta) -> Result<
 }
 
 #[tauri::command]
-pub fn list_groups(state: State<'_, AppState>) -> Result<Vec<DeviceGroup>, String> {
+pub fn list_groups(state: State<'_, AppState>) -> Result<Vec<DeviceGroup>, CommandError> {
     state.db.list_groups().map_err(err)
 }
 
 #[tauri::command]
-pub fn save_group(state: State<'_, AppState>, group: DeviceGroup) -> Result<DeviceGroup, String> {
+pub fn save_group(
+    state: State<'_, AppState>,
+    group: DeviceGroup,
+) -> Result<DeviceGroup, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let mut g = group;
     if g.id.is_empty() {
@@ -64,7 +71,7 @@ pub fn save_group(state: State<'_, AppState>, group: DeviceGroup) -> Result<Devi
 }
 
 #[tauri::command]
-pub fn delete_group(state: State<'_, AppState>, id: String) -> Result<(), String> {
+pub fn delete_group(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     state.db.delete_group(&id).map_err(err)?;
     log(&state, "group.delete", &id);
@@ -72,12 +79,15 @@ pub fn delete_group(state: State<'_, AppState>, id: String) -> Result<(), String
 }
 
 #[tauri::command]
-pub fn list_proxies(state: State<'_, AppState>) -> Result<Vec<ProxyConfig>, String> {
+pub fn list_proxies(state: State<'_, AppState>) -> Result<Vec<ProxyConfig>, CommandError> {
     state.db.list_proxies().map_err(err)
 }
 
 #[tauri::command]
-pub fn save_proxy(state: State<'_, AppState>, proxy: ProxyConfig) -> Result<ProxyConfig, String> {
+pub fn save_proxy(
+    state: State<'_, AppState>,
+    proxy: ProxyConfig,
+) -> Result<ProxyConfig, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let mut p = proxy;
     if p.id.is_empty() {
@@ -89,7 +99,7 @@ pub fn save_proxy(state: State<'_, AppState>, proxy: ProxyConfig) -> Result<Prox
 }
 
 #[tauri::command]
-pub fn delete_proxy(state: State<'_, AppState>, id: String) -> Result<(), String> {
+pub fn delete_proxy(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     state.db.delete_proxy(&id).map_err(err)?;
     log(&state, "proxy.delete", &id);
@@ -97,7 +107,7 @@ pub fn delete_proxy(state: State<'_, AppState>, id: String) -> Result<(), String
 }
 
 #[tauri::command]
-pub fn export_proxy_config(state: State<'_, AppState>, id: String) -> Result<String, String> {
+pub fn export_proxy_config(state: State<'_, AppState>, id: String) -> Result<String, CommandError> {
     let proxies = state.db.list_proxies().map_err(err)?;
     let p = proxies
         .into_iter()
@@ -111,7 +121,7 @@ pub fn export_proxy_config(state: State<'_, AppState>, id: String) -> Result<Str
 }
 
 #[tauri::command]
-pub fn list_materials(state: State<'_, AppState>) -> Result<Vec<MaterialItem>, String> {
+pub fn list_materials(state: State<'_, AppState>) -> Result<Vec<MaterialItem>, CommandError> {
     state.db.list_materials().map_err(err)
 }
 
@@ -120,11 +130,11 @@ pub fn add_material(
     state: State<'_, AppState>,
     source_path: String,
     name: Option<String>,
-) -> Result<MaterialItem, String> {
+) -> Result<MaterialItem, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let src = PathBuf::from(&source_path);
     if !src.is_file() {
-        return Err(format!("file not found: {source_path}"));
+        return Err(err(format!("file not found: {source_path}")));
     }
     let file_name = name.unwrap_or_else(|| {
         src.file_name()
@@ -163,7 +173,7 @@ pub fn add_material(
 }
 
 #[tauri::command]
-pub fn delete_material(state: State<'_, AppState>, id: String) -> Result<(), String> {
+pub fn delete_material(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     if let Some(item) = state
         .db
@@ -184,7 +194,7 @@ pub async fn push_material(
     state: State<'_, AppState>,
     udid: String,
     material_id: String,
-) -> Result<String, String> {
+) -> Result<String, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let item = state
         .db
@@ -231,7 +241,7 @@ pub async fn push_material(
 }
 
 #[tauri::command]
-pub fn list_apps_library(state: State<'_, AppState>) -> Result<Vec<AppLibraryItem>, String> {
+pub fn list_apps_library(state: State<'_, AppState>) -> Result<Vec<AppLibraryItem>, CommandError> {
     state.db.list_apps_library().map_err(err)
 }
 
@@ -242,11 +252,11 @@ pub fn add_app_library(
     name: Option<String>,
     bundle_id: Option<String>,
     version: Option<String>,
-) -> Result<AppLibraryItem, String> {
+) -> Result<AppLibraryItem, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let src = PathBuf::from(&source_path);
     if !src.is_file() {
-        return Err(format!("IPA not found: {source_path}"));
+        return Err(err(format!("IPA not found: {source_path}")));
     }
     let file_name = name.unwrap_or_else(|| {
         src.file_name()
@@ -272,7 +282,7 @@ pub fn add_app_library(
 }
 
 #[tauri::command]
-pub fn delete_app_library(state: State<'_, AppState>, id: String) -> Result<(), String> {
+pub fn delete_app_library(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     if let Some(item) = state
         .db
@@ -293,7 +303,7 @@ pub async fn install_library_app(
     state: State<'_, AppState>,
     udid: String,
     app_id: String,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let item = state
         .db
@@ -317,7 +327,7 @@ pub async fn install_library_app(
 }
 
 #[tauri::command]
-pub fn list_schedules(state: State<'_, AppState>) -> Result<Vec<ScheduleItem>, String> {
+pub fn list_schedules(state: State<'_, AppState>) -> Result<Vec<ScheduleItem>, CommandError> {
     state.db.list_schedules().map_err(err)
 }
 
@@ -325,7 +335,7 @@ pub fn list_schedules(state: State<'_, AppState>) -> Result<Vec<ScheduleItem>, S
 pub fn save_schedule(
     state: State<'_, AppState>,
     schedule: ScheduleItem,
-) -> Result<ScheduleItem, String> {
+) -> Result<ScheduleItem, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let mut s = schedule;
     if s.id.is_empty() {
@@ -341,7 +351,7 @@ pub fn save_schedule(
 }
 
 #[tauri::command]
-pub fn delete_schedule(state: State<'_, AppState>, id: String) -> Result<(), String> {
+pub fn delete_schedule(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     state.db.delete_schedule(&id).map_err(err)?;
     log(&state, "schedule.delete", &id);
@@ -349,7 +359,7 @@ pub fn delete_schedule(state: State<'_, AppState>, id: String) -> Result<(), Str
 }
 
 #[tauri::command]
-pub fn list_publish_tasks(state: State<'_, AppState>) -> Result<Vec<PublishTask>, String> {
+pub fn list_publish_tasks(state: State<'_, AppState>) -> Result<Vec<PublishTask>, CommandError> {
     state.db.list_publish_tasks().map_err(err)
 }
 
@@ -360,7 +370,7 @@ pub async fn create_publish_task(
     script_name: String,
     material_ids: Vec<String>,
     udids: Vec<String>,
-) -> Result<PublishTask, String> {
+) -> Result<PublishTask, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let task = PublishTask {
         id: Uuid::new_v4().to_string(),
@@ -393,12 +403,12 @@ pub async fn create_publish_task(
 pub fn list_op_logs(
     state: State<'_, AppState>,
     limit: Option<usize>,
-) -> Result<Vec<OpLog>, String> {
+) -> Result<Vec<OpLog>, CommandError> {
     state.db.list_op_logs(limit.unwrap_or(100)).map_err(err)
 }
 
 #[tauri::command]
-pub fn analytics_summary(state: State<'_, AppState>) -> Result<AnalyticsSummary, String> {
+pub fn analytics_summary(state: State<'_, AppState>) -> Result<AnalyticsSummary, CommandError> {
     let devices = state.registry.list();
     let ready = devices
         .iter()

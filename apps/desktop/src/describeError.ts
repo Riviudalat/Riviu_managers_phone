@@ -1,4 +1,15 @@
 /**
+ * Codes that say nothing the message does not already say.
+ *
+ * `CommandError::operation` stamps `OperationFailed` on anything without a more specific
+ * cause, which is most errors — it is the absence of a code, spelled as one. Printing it
+ * would put "OperationFailed: " in front of every sentence the operator reads. Named codes
+ * like `DeviceBusy` do earn their place, because they are the difference between "try again"
+ * and "something is wrong".
+ */
+const GENERIC_CODES = new Set(["OperationFailed"]);
+
+/**
  * One line of text for anything that can be thrown or rejected.
  *
  * Written because `String(error)` is wrong for the single most common failure in this app: a
@@ -18,8 +29,8 @@ export function describeError(cause: unknown): string {
     const record = cause as Record<string, unknown>;
     const message = record.message ?? record.error ?? record.detail;
     if (typeof message === "string" && message.length > 0) {
-      const code = typeof record.code === "string" ? `${record.code}: ` : "";
-      return `${code}${message}`;
+      const named = typeof record.code === "string" && !GENERIC_CODES.has(record.code);
+      return named ? `${record.code as string}: ${message}` : message;
     }
     // No field worth naming. JSON at least carries what came back, where `String` would
     // throw away the whole payload and print `[object Object]`.

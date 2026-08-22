@@ -55,3 +55,20 @@ describe("describeError", () => {
     expect(describeError({ code: "Io", message: "" })).toBe('{"code":"Io","message":""}');
   });
 });
+
+describe("codes the operator should not have to read", () => {
+  it("drops OperationFailed, which is the absence of a code spelled as one", () => {
+    // Every command that used to return a plain String now returns
+    // `CommandError::operation(...)`, so without this the whole app would grow a
+    // "OperationFailed: " prefix on messages that read fine on their own.
+    expect(
+      describeError({ code: "OperationFailed", message: "không mở được thư mục" }),
+    ).toBe("không mở được thư mục");
+  });
+
+  it("keeps a code that tells the operator something the message does not", () => {
+    expect(describeError({ code: "DeviceBusy", message: "máy đang bận" })).toBe(
+      "DeviceBusy: máy đang bận",
+    );
+  });
+});

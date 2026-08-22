@@ -153,7 +153,7 @@ async fn prepare_ui_with_control(
 }
 
 #[tauri::command]
-pub async fn list_devices(state: State<'_, AppState>) -> Result<Vec<DeviceInfo>, String> {
+pub async fn list_devices(state: State<'_, AppState>) -> Result<Vec<DeviceInfo>, CommandError> {
     Ok(state.registry.list())
 }
 
@@ -1841,14 +1841,17 @@ pub async fn set_stream_settings(
 }
 
 #[tauri::command]
-pub fn latest_frame(state: State<'_, AppState>, udid: String) -> Result<Option<String>, String> {
+pub fn latest_frame(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<Option<String>, CommandError> {
     Ok(state.streams.latest(&udid).map(|bytes| {
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes.as_slice())
     }))
 }
 
 #[tauri::command]
-pub fn view_endpoint(state: State<'_, AppState>) -> Result<Option<String>, String> {
+pub fn view_endpoint(state: State<'_, AppState>) -> Result<Option<String>, CommandError> {
     Ok(state.view_hub.endpoint())
 }
 
@@ -2068,7 +2071,7 @@ pub fn save_view_snapshot(
 }
 
 #[tauri::command]
-pub fn list_jobs(state: State<'_, AppState>) -> Result<Vec<JobRecord>, String> {
+pub fn list_jobs(state: State<'_, AppState>) -> Result<Vec<JobRecord>, CommandError> {
     state.jobs.list_jobs(100).map_err(err)
 }
 
@@ -2077,14 +2080,14 @@ pub async fn run_script(
     state: State<'_, AppState>,
     script_json: String,
     udids: Vec<String>,
-) -> Result<JobRecord, String> {
+) -> Result<JobRecord, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let script: AutomationScript = parse_script(&script_json).map_err(err)?;
     state.jobs.enqueue(script, udids).await.map_err(err)
 }
 
 #[tauri::command]
-pub fn cancel_job(state: State<'_, AppState>, job_id: String) -> Result<(), String> {
+pub fn cancel_job(state: State<'_, AppState>, job_id: String) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let id = uuid::Uuid::parse_str(&job_id).map_err(err)?;
     state.jobs.cancel(id);
@@ -2092,7 +2095,7 @@ pub fn cancel_job(state: State<'_, AppState>, job_id: String) -> Result<(), Stri
 }
 
 #[tauri::command]
-pub fn list_scripts(state: State<'_, AppState>) -> Result<Vec<(String, String)>, String> {
+pub fn list_scripts(state: State<'_, AppState>) -> Result<Vec<(String, String)>, CommandError> {
     state.db.list_scripts().map_err(err)
 }
 
@@ -2101,7 +2104,7 @@ pub fn save_script(
     state: State<'_, AppState>,
     name: String,
     body_json: String,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     parse_script(&body_json).map_err(err)?;
     state.db.save_script(&name, &body_json).map_err(err)
@@ -2113,7 +2116,7 @@ pub fn example_script() -> String {
 }
 
 #[tauri::command]
-pub fn get_apple_id(state: State<'_, AppState>) -> Result<riviu_core::AppleIdConfig, String> {
+pub fn get_apple_id(state: State<'_, AppState>) -> Result<riviu_core::AppleIdConfig, CommandError> {
     state.signing.apple_id_config().map_err(err)
 }
 
@@ -2122,13 +2125,13 @@ pub fn set_apple_id(
     state: State<'_, AppState>,
     email: String,
     password: String,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     state.signing.save_apple_id(&email, &password).map_err(err)
 }
 
 #[tauri::command]
-pub fn clear_apple_id(state: State<'_, AppState>) -> Result<(), String> {
+pub fn clear_apple_id(state: State<'_, AppState>) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     state.signing.clear_apple_id().map_err(err)
 }
@@ -2262,7 +2265,7 @@ pub fn android_unavailable_reason(state: State<'_, AppState>) -> Option<String> 
 pub async fn update_check(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-) -> Result<UpdateStatus, String> {
+) -> Result<UpdateStatus, CommandError> {
     use tauri_plugin_updater::UpdaterExt;
 
     // Asked before the network call, so a busy fleet is reported even if GitHub is
@@ -2313,11 +2316,11 @@ pub async fn update_check(
 pub async fn update_install(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     use tauri_plugin_updater::UpdaterExt;
 
     if let Some(reason) = state.busy_reason() {
-        return Err(reason);
+        return Err(reason.into());
     }
 
     let update = app
@@ -2350,10 +2353,10 @@ pub async fn update_install(
     // operator reopens the app, which the fleet is already released for.
     match worker.join() {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) => Err(format!(
+        Ok(Err(error)) => Err(err(format!(
             "cài bản mới thất bại sau khi đã dừng phiên — mở lại app: {error}"
-        )),
-        Err(_) => Err("luồng cài đặt dừng bất thường — mở lại app".to_string()),
+        ))),
+        Err(_) => Err(err("luồng cài đặt dừng bất thường — mở lại app")),
     }
 }
 
@@ -2388,8 +2391,8 @@ pub(crate) fn clamp_stream_fps(fps: u32) -> u32 {
     fps.clamp(riviu_android_driver::MIN_VIEW_FPS, MAX_SETTABLE_VIEW_FPS)
 }
 
-fn err(e: impl std::fmt::Display) -> String {
-    e.to_string()
+fn err(e: impl std::fmt::Display) -> CommandError {
+    CommandError::operation(e)
 }
 
 #[cfg(test)]

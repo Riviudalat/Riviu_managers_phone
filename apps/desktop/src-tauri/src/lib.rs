@@ -19,6 +19,7 @@ mod state;
 mod view_hub;
 mod view_watchdog;
 
+use crate::command_error::CommandError;
 use state::AppState;
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 
@@ -87,7 +88,7 @@ fn startup_error(state: tauri::State<'_, StartupState>) -> Option<String> {
 async fn retry_startup(
     app: tauri::AppHandle,
     state: tauri::State<'_, StartupState>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, CommandError> {
     let _attempt = state.attempt.lock().await;
     if app.try_state::<AppState>().is_some() {
         *state.error.lock() = None;
@@ -645,6 +646,110 @@ mod tests {
             }
         }
         found
+    }
+
+    /// Commands that answer without a `Result`, and why each one cannot fail.
+    ///
+    /// Small and meant to stay small: an infallible command is one whose answer is already in
+    /// memory. Anything that touches a device, the database or the filesystem belongs in the
+    /// other list.
+    const INFALLIBLE_COMMANDS: &[(&str, &str)] = &[
+        ("agent_get_settings", "returns settings held in memory"),
+        ("agent_list_statuses", "returns the cached status map"),
+        (
+            "android_unavailable_reason",
+            "returns a stored Option<String>",
+        ),
+        ("api_docs", "returns a &'static str"),
+        ("driver_degraded_reason", "returns a stored Option<String>"),
+        ("driver_mode", "returns an enum the state already holds"),
+        ("example_script", "returns a &'static str"),
+        ("flow_action_catalog", "returns the compiled-in catalog"),
+        (
+            "get_stream_settings",
+            "returns the in-memory copy of the KV row",
+        ),
+        ("interaction_parse_links", "pure text parsing, cannot fail"),
+        ("startup_error", "returns a stored Option<String>"),
+        ("view_report_paint", "records a paint and returns nothing"),
+    ];
+
+    /// Every fallible command answers the frontend in one shape.
+    ///
+    /// It did not. 57 of 163 returned `Result<_, String>`, and two whole modules --
+    /// `farm_commands.rs` (25/26) and `publish_commands.rs` (8/8) -- were entirely String, so
+    /// the boundary ran along module history rather than along anything a caller could reason
+    /// about. A `String` error reaches the webview as a bare string: no `code`, so the
+    /// frontend cannot tell "the app is shutting down" from "the phone is unplugged" except by
+    /// matching on prose. Six commands even took a `CommandError` the admission gate had
+    /// already built and flattened it with `.map_err(String::from)`, throwing away the
+    /// `ApplicationShuttingDown` code on the way out.
+    ///
+    /// This is the test that turns adding a 164th command in the old shape into a build
+    /// failure rather than a slow return to two conventions.
+    #[test]
+    fn every_command_answers_in_one_error_shape() {
+        let mut wrong = Vec::new();
+        let mut infallible_seen = Vec::new();
+
+        for (file, name, chunk) in all_commands() {
+            // The return type: from `->` to the `{` that opens the body, balanced on `<>` so
+            // a nested generic cannot end the scan early. That imprecision is what made the
+            // first count of this surface wrong by 14.
+            let signature = &chunk[..chunk.find('{').unwrap_or(chunk.len())];
+            let Some(arrow) = signature.find("->") else {
+                infallible_seen.push(name);
+                continue;
+            };
+            let mut depth = 0i32;
+            let ret: String = signature[arrow + 2..]
+                .chars()
+                .take_while(|c| {
+                    match c {
+                        '<' => depth += 1,
+                        '>' => depth -= 1,
+                        _ => {}
+                    }
+                    true
+                })
+                .collect();
+            let ret = ret.trim();
+
+            if !ret.starts_with("Result") {
+                infallible_seen.push(name);
+            } else if ret.contains("CommandError") {
+                // `Vec<CommandError>` is deliberate on the validation path: the frontend
+                // renders every issue at once rather than the first one.
+            } else {
+                wrong.push(format!("{file}::{name} -> {ret}"));
+            }
+        }
+
+        assert!(
+            wrong.is_empty(),
+            "these commands do not answer with CommandError:
+  {}",
+            wrong.join(
+                "
+  "
+            )
+        );
+
+        // And the infallible list is a list, not a loophole: a command that quietly stops
+        // returning a Result has to say so here.
+        let declared: Vec<&str> = INFALLIBLE_COMMANDS.iter().map(|(n, _)| *n).collect();
+        for name in &infallible_seen {
+            assert!(
+                declared.contains(name),
+                "`{name}` returns no Result and is not in INFALLIBLE_COMMANDS with a reason"
+            );
+        }
+        for (name, _) in INFALLIBLE_COMMANDS {
+            assert!(
+                infallible_seen.contains(name),
+                "`{name}` is listed as infallible but now returns a Result"
+            );
+        }
     }
 
     /// The pinned toolchain and the one CI installs must be the same version.

@@ -15,8 +15,8 @@ use tauri::{AppHandle, Emitter, State};
 use crate::command_error::CommandError;
 use crate::state::AppState;
 
-fn err(e: impl std::fmt::Display) -> String {
-    e.to_string()
+fn err(e: impl std::fmt::Display) -> CommandError {
+    CommandError::operation(e)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -88,7 +88,7 @@ fn validate_nurture_settings(settings: &NurtureSettings) -> Result<(), String> {
 const API_KEY_UNCHANGED: &str = "__riviu_keep_stored_key__";
 
 #[tauri::command]
-pub fn nurture_get_settings(state: State<'_, AppState>) -> Result<NurtureSettings, String> {
+pub fn nurture_get_settings(state: State<'_, AppState>) -> Result<NurtureSettings, CommandError> {
     let mut settings = state.db.get_nurture_settings().map_err(err)?;
     // The key never leaves the backend. `has_api_key` is what the form needs to know.
     settings.has_api_key = !settings.api_key.trim().is_empty();
@@ -102,7 +102,7 @@ pub fn nurture_get_settings(state: State<'_, AppState>) -> Result<NurtureSetting
 pub fn nurture_save_settings(
     state: State<'_, AppState>,
     settings: NurtureSettings,
-) -> Result<NurtureSettings, String> {
+) -> Result<NurtureSettings, CommandError> {
     let mut settings = settings;
     let prev_for_key = state.db.get_nurture_settings().unwrap_or_default();
     if settings.api_key == API_KEY_UNCHANGED {
@@ -180,7 +180,7 @@ pub async fn nurture_test_api(
     state: State<'_, AppState>,
     udid: String,
     frames: Option<Vec<Vec<u8>>>,
-) -> Result<NurtureApiTestResult, String> {
+) -> Result<NurtureApiTestResult, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let udid = udid.trim().to_string();
     if udid.is_empty() {
@@ -213,9 +213,9 @@ pub async fn nurture_test_api(
         }
     }
     if frames.is_empty() {
-        return Err(format!(
+        return Err(err(format!(
             "Chưa có hình nào của thiết bị {udid} để test — mở stream của máy này rồi thử lại"
-        ));
+        )));
     }
 
     let direction = settings
@@ -300,7 +300,7 @@ pub(crate) async fn prepare_comment_for_frames(
 pub fn nurture_list_costs(
     state: State<'_, AppState>,
     limit: Option<usize>,
-) -> Result<Vec<riviu_core::NurtureCommentCost>, String> {
+) -> Result<Vec<riviu_core::NurtureCommentCost>, CommandError> {
     state
         .db
         .list_nurture_comment_costs(limit.unwrap_or(100))
@@ -311,7 +311,7 @@ pub fn nurture_list_costs(
 pub fn nurture_list_comment_attempts(
     state: State<'_, AppState>,
     limit: Option<usize>,
-) -> Result<Vec<riviu_core::NurtureCommentAttempt>, String> {
+) -> Result<Vec<riviu_core::NurtureCommentAttempt>, CommandError> {
     state
         .db
         .list_nurture_comment_attempts(limit.unwrap_or(100))
@@ -321,14 +321,14 @@ pub fn nurture_list_comment_attempts(
 #[tauri::command]
 pub fn nurture_cost_summary(
     state: State<'_, AppState>,
-) -> Result<riviu_core::NurtureCostSummary, String> {
+) -> Result<riviu_core::NurtureCostSummary, CommandError> {
     state.db.nurture_cost_summary().map_err(err)
 }
 
 #[tauri::command]
 pub fn nurture_session_status(
     state: State<'_, AppState>,
-) -> Result<Vec<NurtureSessionStatus>, String> {
+) -> Result<Vec<NurtureSessionStatus>, CommandError> {
     Ok(state.nurture.list_status())
 }
 
@@ -453,7 +453,7 @@ pub(crate) async fn preflight_comment_job(
 }
 
 #[tauri::command]
-pub fn nurture_stop(state: State<'_, AppState>, udids: Vec<String>) -> Result<(), String> {
+pub fn nurture_stop(state: State<'_, AppState>, udids: Vec<String>) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
     if udids.is_empty() {
         state.nurture.stop_all();
