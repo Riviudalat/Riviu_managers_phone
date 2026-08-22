@@ -585,7 +585,12 @@ export function FlowWorkspace({
       )}
       {artifact && (
         <div className="flow-dialog-layer">
-          <section className="flow-dialog flow-artifact-dialog" role="dialog" aria-label="Tệp kết quả">
+          <section
+            className="flow-dialog flow-artifact-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Tệp kết quả"
+          >
             <header>
               <strong>{artifact.label}</strong>
               <button type="button" onClick={() => setArtifact(null)}>Đóng</button>

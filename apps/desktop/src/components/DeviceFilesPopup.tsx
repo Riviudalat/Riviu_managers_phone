@@ -190,6 +190,7 @@ export function DeviceFilesPopup({ device, onClose }: Props) {
       <div
         className="modal device-files"
         role="dialog"
+        aria-modal="true"
         aria-label={`Tệp trên ${device.name}`}
         onClick={(event) => event.stopPropagation()}
       >

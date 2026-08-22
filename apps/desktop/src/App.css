@@ -329,7 +329,7 @@
 .flow-toolbar {
   grid-row: 1;
   position: relative;
-  z-index: 8;
+  z-index: var(--z-toolbar);
   display: flex;
   align-items: center;
   gap: 4px;
@@ -809,7 +809,7 @@
 
 .flow-monitor th {
   position: sticky;
-  z-index: 1;
+  z-index: var(--z-raised);
   top: 0;
   background: var(--bg-muted);
   color: var(--text-3);
@@ -825,7 +825,7 @@
 
 .flow-dialog-layer {
   position: absolute;
-  z-index: 50;
+  z-index: var(--z-dialog-layer);
   display: grid;
   place-items: center;
   inset: 0;
@@ -869,7 +869,7 @@
 
 .flow-coordinate-popover {
   position: absolute;
-  z-index: 30;
+  z-index: var(--z-float-interaction);
   width: min(420px, calc(100% - 24px));
   inset: 48px 12px auto;
   padding: 10px;
@@ -957,7 +957,7 @@
 
 .flow-compile-preview {
   position: fixed;
-  z-index: 40;
+  z-index: var(--z-panel);
   display: flex;
   width: 360px;
   max-height: 360px;
@@ -1000,7 +1000,7 @@
 
   .flow-palette[data-open="true"] {
     position: absolute;
-    z-index: 20;
+    z-index: var(--z-palette);
     width: 240px;
     inset: 0 auto 0 0;
     box-shadow: var(--shadow);
@@ -1029,7 +1029,7 @@
 
   .flow-inspector-shell[data-open="true"] {
     position: absolute;
-    z-index: 40;
+    z-index: var(--z-panel);
     width: min(320px, 90vw);
     inset: 0 0 0 auto;
     border-left: 1px solid var(--line);
@@ -1274,7 +1274,7 @@ button:disabled {
    selected tile's border, at low alpha — brand orange since 21/08/2026, see `--link`. */
 .select-band {
   position: fixed;
-  z-index: 30;
+  z-index: var(--z-float-interaction);
   border: 1px solid var(--primary);
   background: var(--primary-ring);
   pointer-events: none;
@@ -1849,7 +1849,7 @@ button.linkish,
 .focus-overlay {
   position: fixed;
   inset: 0;
-  z-index: 40;
+  z-index: var(--z-panel);
   display: flex;
   align-items: flex-start;
   justify-content: center;
@@ -2254,7 +2254,7 @@ button.danger:hover:not(:disabled) {
 .nurture-float-layer {
   position: fixed;
   inset: 0;
-  z-index: 45;
+  z-index: var(--z-float-nurture);
   pointer-events: none;
 }
 .nurture-float {
@@ -2891,7 +2891,7 @@ button.danger:hover:not(:disabled) {
    the pointer enters, unlike the native `title` it replaces. */
 .nu-tip {
   position: fixed;
-  z-index: 60;
+  z-index: var(--z-menu);
   transform: translate(-50%, calc(-100% - 8px));
   max-width: 260px;
   width: max-content;
@@ -2978,7 +2978,7 @@ button.danger:hover:not(:disabled) {
   position: fixed;
   right: 1.1rem;
   bottom: 1.1rem;
-  z-index: 30;
+  z-index: var(--z-float-interaction);
   pointer-events: none;
 }
 .interaction-float {
@@ -3112,7 +3112,7 @@ button.danger:hover:not(:disabled) {
   position: fixed;
   right: 1rem;
   bottom: 1rem;
-  z-index: 120;
+  z-index: var(--z-toast);
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
@@ -3215,7 +3215,7 @@ button.danger:hover:not(:disabled) {
 .confirm-layer {
   position: fixed;
   inset: 0;
-  z-index: 130;
+  z-index: var(--z-confirm);
   display: grid;
   place-items: center;
   padding: 1.5rem;
@@ -3590,7 +3590,7 @@ button.danger:hover:not(:disabled) {
    event, and an absolutely-positioned menu would be offset by whatever scrolled. */
 .device-menu {
   position: fixed;
-  z-index: 60;
+  z-index: var(--z-menu);
   min-width: 196px;
   padding: 4px;
   border: 1px solid #dfe6ef;
@@ -3660,7 +3660,7 @@ button.danger:hover:not(:disabled) {
 .device-menu-search {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: var(--z-raised);
   margin: 0.3rem 0.2rem;
   padding: 0.32rem 0.5rem;
   border: 1px solid #dfe6ef;
@@ -3687,7 +3687,7 @@ button.danger:hover:not(:disabled) {
    (60) and the focus overlay (40). */
 .device-flyout {
   position: fixed;
-  z-index: 80;
+  z-index: var(--z-flyout);
   width: 236px;
   max-height: 60vh;
   overflow-y: auto;
@@ -3782,7 +3782,7 @@ button.danger:hover:not(:disabled) {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 70;
+  z-index: var(--z-modal-backdrop);
   display: flex;
   align-items: center;
   justify-content: center;

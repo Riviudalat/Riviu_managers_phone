@@ -120,6 +120,31 @@
   --radius-lg: 12px;
   --radius-pill: 999px;
 
+  /* Stacking order, as one list instead of eighteen numbers spread over 4,000 lines.
+   *
+   * Every value here is the number that was already in `App.css`, so this changes nothing
+   * on screen — the point is that the order is now readable in one place, and a new layer
+   * has somewhere to be placed on purpose rather than by picking a number that looked big
+   * enough. Twelve distinct values were in use and no two of them were near each other by
+   * design.
+   *
+   * The one disagreement worth naming rather than hiding: the two floating popup layers sit
+   * at different heights, so with both open the nurture panel always covers the interaction
+   * panel. Nothing chose that, and correcting it changes which popup is on top — a decision
+   * about the product, not a tidy-up, so the numbers stay as they are and say so here. */
+  --z-raised: 1;
+  --z-toolbar: 8;
+  --z-palette: 20;
+  --z-float-interaction: 30;
+  --z-panel: 40;
+  --z-float-nurture: 45;
+  --z-dialog-layer: 50;
+  --z-menu: 60;
+  --z-modal-backdrop: 70;
+  --z-flyout: 80;
+  --z-toast: 120;
+  --z-confirm: 130;
+
   /* Likewise `--shadow`. One elevation was never enough to tell a resting card
      from a menu floating over it. */
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.05);

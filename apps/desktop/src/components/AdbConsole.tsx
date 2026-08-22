@@ -56,6 +56,7 @@ export function AdbConsole({ device, onClose }: Props) {
       <div
         className="modal adb-console"
         role="dialog"
+        aria-modal="true"
         aria-label={`Lệnh adb trên ${device.name}`}
         onClick={(event) => event.stopPropagation()}
       >
