@@ -1682,6 +1682,50 @@ drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
         }
     }
 
+    /// The shapes the frontend's generator actually produces must all pass.
+    ///
+    /// `RootTool` invents an identity per phone in `randomIdentity.ts`, and every one of the
+    /// three values lands here before it reaches `su -c`. The two halves are written in
+    /// different languages and cannot call each other, so each states the same grammar and
+    /// names the other: the TypeScript half is `randomIdentity.test.ts`, which asserts the
+    /// generator emits exactly the shapes below.
+    ///
+    /// A drift is not a security hole — the validator refusing is the safe direction — it is
+    /// a batch identity change that fails on every phone after the operator pressed the
+    /// button, with a per-field error and no clue that the *generator* is what moved.
+    #[test]
+    fn the_generated_identities_match_the_shapes_the_frontend_sends() {
+        // 16 lowercase hex, from 8 random bytes.
+        for generated in ["0123456789abcdef", "ffffffffffffffff", "0000000000000000"] {
+            assert!(
+                validate_android_id(generated).is_ok(),
+                "the generator emits {generated} and this refuses it"
+            );
+        }
+
+        // 12 uppercase alphanumerics from an alphabet with no ambiguous I/O/0/1, because a
+        // human reads these off a label. Narrower than what this validator allows, on purpose.
+        for generated in ["ABCDEFGHJKLM", "NPQRSTUVWXYZ", "23456789ABCD"] {
+            assert!(
+                validate_serial_no(generated).is_ok(),
+                "the generator emits {generated} and this refuses it"
+            );
+        }
+
+        // Six colon-separated lowercase hex octets, first octet locally administered and
+        // unicast — bit 1 set, bit 0 clear — so `02`, `06`, `0a`, `0e` and so on.
+        for generated in [
+            "02:1a:2b:3c:4d:5e",
+            "0a:ff:00:11:22:33",
+            "fe:00:00:00:00:01",
+        ] {
+            assert!(
+                validate_mac(generated).is_ok(),
+                "the generator emits {generated} and this refuses it"
+            );
+        }
+    }
+
     #[test]
     fn identity_values_that_a_root_shell_could_act_on_are_refused() {
         // These three are pasted into `su -c "…"`, so the bar is higher than for the package
