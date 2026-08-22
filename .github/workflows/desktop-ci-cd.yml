@@ -270,6 +270,33 @@ jobs:
             --work target/pyinstaller-work \
             --tauri-config target/tauri-sidecar.conf.json
 
+      # The updater signing key is the one secret that must never reach a build anyone with
+      # push access can start. `build:` has no ref filter, so it runs on every PR and every
+      # branch push — and a build executes arbitrary repository code (`build.rs`, npm lifecycle
+      # hooks, `scripts/build_desktop_sidecar.py`). A branch that edits any of those could read
+      # the key straight out of the environment, and with it sign an update that **every
+      # installed build accepts**, because the matching pubkey is baked into `tauri.conf.json`.
+      #
+      # Tag builds are the only ones whose signature has to verify against that pubkey. Every
+      # other build gets a keypair minted for that run and thrown away with the runner: the
+      # bundler still runs its full signing path (so the build still fails on a bundler
+      # regression, which is the reason the keys are mandatory at all), the `.sig` it writes is
+      # simply one no installed app would ever accept — and non-tag artifacts are never
+      # published, so nothing downstream can mistake it for a release.
+      - name: Mint a throwaway updater key (builds that are not a release tag)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx tauri signer generate --ci -f -p "" -w "${RUNNER_TEMP}/updater-throwaway.key"
+          {
+            echo "THROWAWAY_SIGNING_KEY<<__RIVIU_THROWAWAY_KEY__"
+            cat "${RUNNER_TEMP}/updater-throwaway.key"
+            echo "__RIVIU_THROWAWAY_KEY__"
+          } >> "$GITHUB_ENV"
+          rm -f "${RUNNER_TEMP}/updater-throwaway.key" "${RUNNER_TEMP}/updater-throwaway.key.pub"
+
       - name: Build Tauri installers
         working-directory: apps/desktop
         env:
@@ -281,8 +308,12 @@ jobs:
           # unsigned artifact nobody can verify — which is the correct direction: an
           # installed build only accepts an update whose signature matches the pubkey baked
           # into it, so an unsigned release would simply never be taken.
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          #
+          # The real key appears **only** on a release tag; see the step above. Keeping it in
+          # this step's `env:` rather than the job's is deliberate — it is the narrowest scope
+          # that still lets the bundler sign.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.TAURI_SIGNING_PRIVATE_KEY || env.THROWAWAY_SIGNING_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         shell: bash
         run: |
           set -euo pipefail
