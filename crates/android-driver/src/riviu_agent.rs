@@ -59,6 +59,19 @@ fn upgrade_attempts() -> &'static parking_lot::Mutex<std::collections::HashSet<S
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
+/// Hard cap on what the host will read back from one helper request.
+///
+/// A timeout alone does not bound a response: a helper — or anything that got to the port
+/// first, since `adb forward` reaches whatever is listening — can stream as fast as USB allows
+/// for the full ten seconds and the host buffers all of it. Twenty phones doing that at once is
+/// an out-of-memory on the desktop from one call.
+///
+/// 8 MiB is chosen against the biggest legitimate response, not against a round number: the
+/// helper's own icon budget is 3 MB of base64 PNG (`AppList.java`), and that budget is
+/// *voluntary* — it only binds an honest server, which is exactly why the host needs its own.
+/// `wda.rs` caps the iOS side the same way at 64 KiB; Android needs more only because app icons
+/// travel on this channel.
+const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 /// One helper connection, cheap to clone (shared HTTP client + serial).
 #[derive(Clone)]
@@ -173,10 +186,7 @@ impl HelperClient {
             .await
             .with_context(|| format!("GET {}/status", self.base))?;
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .with_context(|| format!("đọc /status từ helper trên {}", self.serial))?;
+        let body = read_capped(response, "/status").await?;
         if !status.is_success() {
             anyhow::bail!(
                 "Riviu helper trên {} trả HTTP {status} cho /status: {body}",
@@ -325,10 +335,7 @@ impl HelperClient {
             .await
             .with_context(|| format!("POST {}{path}", self.base))?;
         let status = response.status();
-        let text = response
-            .text()
-            .await
-            .with_context(|| format!("đọc {path}"))?;
+        let text = read_capped(response, path).await?;
         let value: Value = serde_json::from_str(&text)
             .with_context(|| format!("helper {path} không phải JSON: {text}"))?;
         if !status.is_success() && value.get("ok") != Some(&Value::Bool(true)) {
@@ -434,6 +441,27 @@ pub fn resolve_apk_path(
                 .map(PathBuf::from)
         })
         .or(bundled)
+}
+
+/// Read a helper response into a `String`, refusing anything over [`MAX_RESPONSE_BYTES`].
+///
+/// Streamed rather than `response.text()` so the cap is enforced *while* reading: `text()`
+/// buffers the whole body first, which is the allocation being defended against, so checking
+/// its length afterwards would be checking after the damage. Same shape as `wda.rs`.
+async fn read_capped(response: reqwest::Response, what: &str) -> anyhow::Result<String> {
+    let mut response = response;
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .with_context(|| format!("đọc {what} từ helper"))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+            anyhow::bail!("helper trả lời {what} quá {MAX_RESPONSE_BYTES} byte — đã cắt kết nối");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).with_context(|| format!("{what} từ helper không phải UTF-8"))
 }
 
 pub fn parse_status(body: &str) -> anyhow::Result<HelperStatus> {
