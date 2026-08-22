@@ -192,6 +192,44 @@ impl NurtureEngine {
     }
 }
 
+/// What a finished session should be called, from what it actually did.
+///
+/// **A ceiling is not a target, and calling a healthy run "partial" is a real bug this rule
+/// already had.** `total_videos` is an upper bound; a session that runs on the clock stops
+/// with the bound untouched, and judging against the bound told the operator that a perfectly
+/// good 47-video run had gone wrong. So the ceiling only counts when the loop actually ran out
+/// of videos (`hit_video_cap`), never when it ran out of time.
+///
+/// A verdict already decided — `Stopped` because the operator pressed stop, `Failed` because
+/// something threw — is left alone: this only refines `Done`.
+///
+/// Pure, and apart from the 1,369-line session loop for that reason. It is the one piece of
+/// that loop with no device, no timers and no borrows in it, so it is the one piece that can
+/// be argued about in a test rather than on twenty phones.
+pub fn session_verdict(
+    outcome: Outcome,
+    videos_done: u32,
+    // True when the loop ended because it ran out of videos rather than out of time.
+    hit_video_cap: bool,
+    video_ceiling: u32,
+    had_error: bool,
+) -> Outcome {
+    if outcome != Outcome::Done {
+        return outcome;
+    }
+    if videos_done == 0 {
+        return Outcome::Failed;
+    }
+    // Stopped early without running out of time — something cut it short.
+    if hit_video_cap && videos_done < video_ceiling / 2 {
+        return Outcome::Partial;
+    }
+    if videos_done < 3 && had_error {
+        return Outcome::Partial;
+    }
+    Outcome::Done
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,5 +659,79 @@ mod tests {
             .expect("close recovery fixture");
         drop(engine);
         let _ = std::fs::remove_file(db_path);
+    }
+}
+
+#[cfg(test)]
+mod verdict_tests {
+    use super::*;
+
+    /// The bug this rule already had, stated as a test.
+    ///
+    /// A session bounded by the clock stops with its video ceiling untouched. Judging it
+    /// against the ceiling reported a healthy 47-video run as `partial`, and "partial" is
+    /// what the operator reads as "something went wrong on that phone".
+    #[test]
+    fn a_run_that_ended_on_the_clock_is_done_however_far_from_the_ceiling_it_stopped() {
+        let verdict = session_verdict(Outcome::Done, 47, false, 400, false);
+        assert_eq!(
+            verdict,
+            Outcome::Done,
+            "47 of a 400 ceiling, stopped by time"
+        );
+    }
+
+    #[test]
+    fn a_run_that_ran_out_of_videos_early_is_partial() {
+        // Same numbers, but the loop ended because it exhausted the count rather than the
+        // clock — so something did cut it short.
+        assert_eq!(
+            session_verdict(Outcome::Done, 47, true, 400, false),
+            Outcome::Partial
+        );
+    }
+
+    #[test]
+    fn reaching_most_of_the_ceiling_is_done_even_when_the_ceiling_ran_out() {
+        assert_eq!(
+            session_verdict(Outcome::Done, 300, true, 400, false),
+            Outcome::Done
+        );
+    }
+
+    #[test]
+    fn a_session_that_watched_nothing_failed_whatever_else_is_true() {
+        assert_eq!(
+            session_verdict(Outcome::Done, 0, false, 400, false),
+            Outcome::Failed
+        );
+        assert_eq!(
+            session_verdict(Outcome::Done, 0, true, 1, true),
+            Outcome::Failed
+        );
+    }
+
+    #[test]
+    fn a_couple_of_videos_and_an_error_is_partial_but_a_couple_without_one_is_not() {
+        // Two videos is a plausible short run on a slow phone; two videos *and* something
+        // thrown is the shape of a run that limped.
+        assert_eq!(
+            session_verdict(Outcome::Done, 2, false, 400, true),
+            Outcome::Partial
+        );
+        assert_eq!(
+            session_verdict(Outcome::Done, 2, false, 400, false),
+            Outcome::Done
+        );
+    }
+
+    #[test]
+    fn a_verdict_already_reached_is_never_overwritten() {
+        // `Stopped` means the operator pressed stop and `Failed` means something threw.
+        // Neither is a judgement this rule is entitled to revisit — least of all turning a
+        // deliberate stop into "failed" because it happened early.
+        for decided in [Outcome::Stopped, Outcome::Failed, Outcome::Partial] {
+            assert_eq!(session_verdict(decided, 0, true, 400, true), decided);
+        }
     }
 }

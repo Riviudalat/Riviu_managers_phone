@@ -39,8 +39,8 @@ use actions::{CommentResult, LikeResult, SwipeOutcome};
 pub use hierarchy::{run_hierarchy_session, CommentTextSource, HierarchySession, PreparedComment};
 pub use live::LiveSettings;
 use live::{apply_live_settings, video_target};
-use recovery::Budget;
 pub use recovery::Outcome;
+use recovery::{session_verdict, Budget};
 
 use crate::db::Database;
 use crate::device_control::{DeviceControlPlane, UiWithStreamContext};
@@ -1771,20 +1771,13 @@ impl NurtureEngine {
             .await
             .is_some();
 
-        // `total_videos` is a ceiling, not a target: a timed run stops on the
-        // clock with the ceiling untouched, and calling that "partial" told the
-        // operator a healthy 47-video run had gone wrong. Judge on whether the
-        // session actually worked instead.
-        if outcome == Outcome::Done {
-            if status.videos_done == 0 {
-                outcome = Outcome::Failed;
-            } else if hit_video_cap && status.videos_done < total_videos / 2 {
-                // Stopped early without running out of time — something cut it short.
-                outcome = Outcome::Partial;
-            } else if status.videos_done < 3 && last_error.is_some() {
-                outcome = Outcome::Partial;
-            }
-        }
+        outcome = session_verdict(
+            outcome,
+            status.videos_done,
+            hit_video_cap,
+            total_videos,
+            last_error.is_some(),
+        );
 
         if let Err(error) = self.control.close_ui_context(ui_context).await {
             outcome = if status.videos_done == 0 {
