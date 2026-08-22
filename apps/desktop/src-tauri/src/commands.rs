@@ -1,10 +1,10 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use riviu_core::{
-    AutomationScript, DeviceControlPlane, DeviceExclusiveContext, DeviceInfo, DeviceWorkOwner,
-    HardwareKey, InteractionSessionKind, JobRecord, StreamSettings, SwipeGesture, TapPoint,
-    UiSession, UiWithStreamContext,
+    apply_offset, AutomationScript, DeviceControlPlane, DeviceExclusiveContext, DeviceInfo,
+    DeviceWorkOwner, GroupSyncPolicy, HardwareKey, InteractionSessionKind, JobRecord,
+    StreamSettings, SwipeGesture, TapPoint, UiSession, UiWithStreamContext,
 };
 use riviu_script_engine::{example_script_json, parse_script};
 use serde::Serialize;
@@ -87,7 +87,7 @@ async fn continue_ui_context(
         .map_err(CommandError::from)
 }
 
-async fn with_manual_session<F, Fut>(
+pub(crate) async fn with_manual_session<F, Fut>(
     state: &AppState,
     udid: &str,
     owner: DeviceWorkOwner,
@@ -484,7 +484,18 @@ pub async fn import_media(
     path: String,
 ) -> Result<String, CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let source = PathBuf::from(&path);
+    import_one_media(&state, &udid, &path).await
+}
+
+/// Push one local media file into a device's gallery via stage → prepare → import. Shared by
+/// `import_media` (one device) and `distribute_files` (a different file per device), so the
+/// two agree byte-for-byte on the staging/manifest pipeline.
+async fn import_one_media(
+    state: &AppState,
+    udid: &str,
+    path: &str,
+) -> Result<String, CommandError> {
+    let source = PathBuf::from(path);
     if !source.is_file() {
         return Err(CommandError::invalid_argument(format!(
             "không thấy file {path}"
@@ -501,13 +512,13 @@ pub async fn import_media(
     let staged = state
         .artifacts_dir
         .join("import-staging")
-        .join(&udid)
+        .join(udid)
         .join(&campaign_id);
     std::fs::create_dir_all(&staged).map_err(CommandError::operation)?;
     std::fs::copy(&source, staged.join(&name)).map_err(CommandError::operation)?;
 
     let context = state
-        .device_lease(&udid, DeviceWorkOwner::ManualControl, LeaseStream::Keep)
+        .device_lease(udid, DeviceWorkOwner::ManualControl, LeaseStream::Keep)
         .await?;
 
     let staged_evidence = state
@@ -545,6 +556,36 @@ pub async fn import_media(
     // a temporary directory survived would report a success as a failure.
     let _ = std::fs::remove_dir_all(&staged);
     Ok(format!("Đã đưa {name} vào thư viện máy ({imported})"))
+}
+
+/// One phone's share of a file-distribution run (feature A2, xiaowei "文件分发").
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct DistributeFileItem {
+    pub udid: String,
+    pub path: String,
+}
+
+/// Push a *different* file into each selected phone's gallery (xiaowei "File Distribution").
+/// Same per-device batch shape as `group_input`/`distribute_text`: a phone that fails is
+/// recorded and the run carries on, never aborting the batch.
+#[tauri::command]
+pub async fn distribute_files(
+    state: State<'_, AppState>,
+    assignments: Vec<DistributeFileItem>,
+) -> Result<GroupInputReport, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let mut report = GroupInputReport {
+        completed_udids: Vec::new(),
+        skipped: Vec::new(),
+    };
+    for item in assignments {
+        let DistributeFileItem { udid, path } = item;
+        match import_one_media(&state, &udid, &path).await {
+            Ok(_) => report.completed_udids.push(udid),
+            Err(error) => report.skipped.push(open_failure_skip(udid, error)),
+        }
+    }
+    Ok(report)
 }
 
 /// Copy the phone's photos and videos onto this machine.
@@ -822,6 +863,24 @@ pub async fn device_key(
     .await
 }
 
+/// Lock (screen off) or unlock a phone — xiaowei "锁屏/解锁", batched by the UI over a group
+/// (D, iOS `useIphoneLockScreen`; cross-platform via `UiSession::set_locked`).
+#[tauri::command]
+pub async fn set_screen_locked(
+    state: State<'_, AppState>,
+    udid: String,
+    locked: bool,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    with_manual_session(
+        &state,
+        &udid,
+        DeviceWorkOwner::ManualControl,
+        move |session| async move { session.set_locked(locked).await },
+    )
+    .await
+}
+
 #[tauri::command]
 pub async fn device_control_begin(
     state: State<'_, AppState>,
@@ -875,15 +934,31 @@ pub async fn group_input(
     image_w: Option<f64>,
     image_h: Option<f64>,
     key: Option<HardwareKey>,
+    sync: Option<GroupSyncPolicy>,
 ) -> Result<GroupInputReport, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     check_group_input(&kind, key.is_some())?;
     let scale = matches!((image_w, image_h), (Some(w), Some(h)) if w > 0.0 && h > 0.0);
+    // Group-sync timing/offset (A1). Absent policy = the old lockstep behaviour, so callers
+    // that never send `sync` are unchanged. One seed per operation keeps successive group
+    // actions different while any single one stays reproducible (the policy is pure/tested).
+    let sync = sync.unwrap_or_default();
+    let group_count = udids.len();
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
     let mut report = GroupInputReport {
         completed_udids: Vec::new(),
         skipped: Vec::new(),
     };
-    for udid in udids {
+    for (ordinal, udid) in udids.into_iter().enumerate() {
+        // Compute this device's delay/offset before touching anything. Sleep *before*
+        // opening the session so a staggered wait does not hold a GroupSync lease idle.
+        let plan = sync.plan(ordinal, group_count, seed);
+        if plan.delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(plan.delay_ms)).await;
+        }
         let overlay_session = state.overlay_ui_session(&udid).await;
         let owned = if overlay_session.is_none() {
             match state
@@ -920,10 +995,20 @@ pub async fn group_input(
                 }
             },
         };
+        // In image mode the coordinates are pixels bounded by the frame, so jitter must be
+        // clamped on-screen; in logical mode there is no upper bound (only floored at 0).
+        let bound_w = scale.then(|| image_w.unwrap());
+        let bound_h = scale.then(|| image_h.unwrap());
         let action = match kind.as_str() {
             "tap" => {
-                let x = x.unwrap_or(0.0);
-                let y = y.unwrap_or(0.0);
+                let (x, y) = apply_offset(
+                    x.unwrap_or(0.0),
+                    y.unwrap_or(0.0),
+                    plan.dx,
+                    plan.dy,
+                    bound_w,
+                    bound_h,
+                );
                 if scale {
                     session
                         .tap_image(x, y, image_w.unwrap(), image_h.unwrap())
@@ -933,14 +1018,26 @@ pub async fn group_input(
                 }
             }
             "swipe" => {
-                let from = TapPoint {
-                    x: x.unwrap_or(0.0),
-                    y: y.unwrap_or(0.0),
-                };
-                let to = TapPoint {
-                    x: to_x.unwrap_or(0.0),
-                    y: to_y.unwrap_or(0.0),
-                };
+                // Shift both endpoints by the same offset: the gesture's shape and length are
+                // preserved, only its position on the screen jitters.
+                let (fx, fy) = apply_offset(
+                    x.unwrap_or(0.0),
+                    y.unwrap_or(0.0),
+                    plan.dx,
+                    plan.dy,
+                    bound_w,
+                    bound_h,
+                );
+                let (tx, ty) = apply_offset(
+                    to_x.unwrap_or(0.0),
+                    to_y.unwrap_or(0.0),
+                    plan.dx,
+                    plan.dy,
+                    bound_w,
+                    bound_h,
+                );
+                let from = TapPoint { x: fx, y: fy };
+                let to = TapPoint { x: tx, y: ty };
                 if scale {
                     session
                         .swipe_image(from, to, image_w.unwrap(), image_h.unwrap(), 300)
@@ -1003,6 +1100,620 @@ pub async fn group_input(
         }
     }
     Ok(report)
+}
+
+/// One phone's share of a text-distribution run (feature A2, xiaowei `inputBatch`).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct DistributeTextItem {
+    pub udid: String,
+    pub text: String,
+}
+
+/// Type a *different* string onto each selected phone (xiaowei "文字分发 / Text Distribution").
+///
+/// The frontend has already split the block and paired each piece to a phone in the operator's
+/// chosen order, so here we only apply. Cross-platform: it goes through `UiSession::type_text`,
+/// which on Android reaches `ACTION_SET_TEXT` (the one route that carries Vietnamese
+/// diacritics) and on iOS reaches WDA — the same path `group_input`'s `type` uses. Same
+/// per-device batch shape as `group_input`: a phone that fails is recorded and the run
+/// carries on, never aborting the batch.
+#[tauri::command]
+pub async fn distribute_text(
+    state: State<'_, AppState>,
+    assignments: Vec<DistributeTextItem>,
+) -> Result<GroupInputReport, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let mut report = GroupInputReport {
+        completed_udids: Vec::new(),
+        skipped: Vec::new(),
+    };
+    for item in assignments {
+        let DistributeTextItem { udid, text } = item;
+        let overlay_session = state.overlay_ui_session(&udid).await;
+        let owned = if overlay_session.is_none() {
+            match state
+                .control
+                .open_manual_session(&udid, DeviceWorkOwner::GroupSync)
+                .await
+            {
+                Ok(context) => Some(context),
+                Err(error) => {
+                    report
+                        .skipped
+                        .push(open_failure_skip(udid, CommandError::from(error)));
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        let session = match overlay_session {
+            Some(session) => session,
+            None => match state.control.session(
+                owned
+                    .as_ref()
+                    .expect("distribute_text opened a session when no overlay is held"),
+            ) {
+                Ok(session) => session,
+                Err(error) => {
+                    report
+                        .skipped
+                        .push(open_failure_skip(udid, CommandError::from(error)));
+                    continue;
+                }
+            },
+        };
+        let action = session.type_text(&text).await;
+        let cleanup = match owned {
+            Some(context) => state.control.close_manual_session(context).err(),
+            None => None,
+        };
+        let udid_for_cleanup = udid.clone();
+        match action {
+            Ok(()) => report.completed_udids.push(udid),
+            Err(error) => report.skipped.push(GroupInputSkip {
+                udid,
+                code: "ActionFailed".to_string(),
+                current_owner: None,
+                message: Some(error.to_string()),
+            }),
+        }
+        if let Some(error) = cleanup {
+            let error = CommandError::from(error);
+            report.skipped.push(GroupInputSkip {
+                udid: udid_for_cleanup,
+                code: "CleanupFailed".to_string(),
+                current_owner: None,
+                message: Some(error.message.to_string()),
+            });
+        }
+    }
+    Ok(report)
+}
+
+/// Put a USB Android phone into wireless adb and connect to it (A4). Returns `host:port`.
+#[tauri::command]
+pub async fn enable_wifi_adb(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<String, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    // On Android the udid is the adb serial.
+    android
+        .enable_wifi_adb(&udid)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// `adb connect host:port` — manual wireless connect (A4).
+#[tauri::command]
+pub async fn wifi_adb_connect(
+    state: State<'_, AppState>,
+    host: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .wifi_connect(&host)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// `adb disconnect host:port` (A4).
+#[tauri::command]
+pub async fn wifi_adb_disconnect(
+    state: State<'_, AppState>,
+    host: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .wifi_disconnect(&host)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Set an Android phone's wallpaper from a local image file (A3, "number as wallpaper").
+#[tauri::command]
+pub async fn set_wallpaper(
+    state: State<'_, AppState>,
+    udid: String,
+    path: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .set_wallpaper(&udid, &path)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Inject a mock GPS location on an Android phone (B, "虚拟定位").
+#[tauri::command]
+pub async fn set_mock_location(
+    state: State<'_, AppState>,
+    udid: String,
+    lat: f64,
+    lng: f64,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .set_mock_location(&udid, lat, lng)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Stop mock location, returning the phone to real GPS (B).
+#[tauri::command]
+pub async fn stop_mock_location(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .stop_mock_location(&udid)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Set an Android wallpaper from PNG bytes the webview rendered (A3, "number as wallpaper").
+/// The bytes are written to the app's own artifacts dir (always writable, unlike a
+/// frontend temp path bound by the fs ACL) and handed to the driver to push + apply.
+#[tauri::command]
+pub async fn set_wallpaper_bytes(
+    state: State<'_, AppState>,
+    udid: String,
+    png: Vec<u8>,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    let dir = state.artifacts_dir.join("wallpaper");
+    std::fs::create_dir_all(&dir).map_err(CommandError::operation)?;
+    // A wifi serial has a ':' in it, illegal in a Windows filename — keep only safe chars.
+    let safe: String = udid
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let path = dir.join(format!("{safe}.png"));
+    std::fs::write(&path, &png).map_err(CommandError::operation)?;
+    android
+        .set_wallpaper(&udid, path.to_string_lossy().as_ref())
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Whether an Android phone is rooted (Magisk `su`), for gating the root-tier UI (feature C).
+#[tauri::command]
+pub async fn is_rooted(state: State<'_, AppState>, udid: String) -> Result<bool, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Ok(false);
+    };
+    Ok(android.is_rooted(&udid).await)
+}
+
+/// Overwrite the app-visible device fingerprint (feature C, xiaowei 一键新机). android_id
+/// applies without root; serialno/mac need root. Returns a summary of what changed.
+#[tauri::command]
+pub async fn set_device_identity(
+    state: State<'_, AppState>,
+    udid: String,
+    android_id: Option<String>,
+    serialno: Option<String>,
+    mac: Option<String>,
+) -> Result<String, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .set_device_identity(
+            &udid,
+            android_id.as_deref(),
+            serialno.as_deref(),
+            mac.as_deref(),
+        )
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Factory-reset a rooted Android phone (feature C). Irreversible; UI confirms first.
+#[tauri::command]
+pub async fn factory_reset(state: State<'_, AppState>, udid: String) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .factory_reset(&udid)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Run one root shell command on an Android phone (feature C, advanced). Errors if not rooted.
+#[tauri::command]
+pub async fn root_shell(
+    state: State<'_, AppState>,
+    udid: String,
+    command: String,
+) -> Result<String, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .root_shell(&udid, &command)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+// --- The per-phone function menu (xiaowei 功能). One command per row, and each one is the
+// whole row: the frontend never assembles a shell string, because a menu item that pastes
+// `rm -rf` into a device shell from TypeScript is a menu item with no validator in front of
+// it. Every Android call below lives in `AndroidDriver` where the path and package
+// validators are. ---
+
+/// Read one directory on the phone, for the file browser (xiaowei "Preview Mobile Files").
+///
+/// Lease-free, deliberately, and following `list_installed_apps`: it reads nothing but a
+/// directory listing, and taking an exclusive lease to open a folder would let a browser
+/// click evict a running nurture session.
+#[tauri::command]
+pub async fn device_list_dir(
+    state: State<'_, AppState>,
+    udid: String,
+    path: String,
+) -> Result<Vec<riviu_core::DeviceFileEntry>, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .list_device_dir(&udid, &path)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Copy one file or folder from the phone to this machine (xiaowei "Export File").
+/// Returns the local path it landed at.
+#[tauri::command]
+pub async fn device_pull_path(
+    state: State<'_, AppState>,
+    udid: String,
+    remote: String,
+    dest_dir: String,
+) -> Result<String, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    let dest = PathBuf::from(&dest_dir);
+    if !dest.is_dir() {
+        return Err(CommandError::invalid_argument(format!(
+            "không thấy thư mục {dest_dir}"
+        )));
+    }
+    android
+        .pull_device_path(&udid, &remote, &dest)
+        .await
+        .map(|path| path.display().to_string())
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Put one local file onto the phone (xiaowei "Import File"). Returns the device path.
+#[tauri::command]
+pub async fn device_push_file(
+    state: State<'_, AppState>,
+    udid: String,
+    local: String,
+    remote_dir: String,
+) -> Result<String, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .push_device_file(&udid, Path::new(&local), &remote_dir)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Delete a file or folder on the phone. The driver refuses storage roots; the UI confirms.
+#[tauri::command]
+pub async fn device_delete_path(
+    state: State<'_, AppState>,
+    udid: String,
+    path: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .delete_device_path(&udid, &path)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Turn the phone's Wi-Fi radio on or off, returning the state it settled at (xiaowei ADB
+/// submenu). Note this is the *phone's* Wi-Fi, not this app's wireless-adb link — a phone
+/// reached over Wi-Fi disconnects itself by obeying, which the UI warns about first.
+#[tauri::command]
+pub async fn set_wifi_radio(
+    state: State<'_, AppState>,
+    udid: String,
+    on: bool,
+) -> Result<bool, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .set_wifi_radio(&udid, on)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Put the display back to its factory density and/or resolution (xiaowei "Reset DPI" /
+/// "Reset resolution"). Returns what the phone reads as afterwards.
+#[tauri::command]
+pub async fn reset_display_metrics(
+    state: State<'_, AppState>,
+    udid: String,
+    density: bool,
+    size: bool,
+) -> Result<String, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .reset_display_metrics(&udid, density, size)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Power the phone off (xiaowei "Shutdown"). Irreversible from here — only a human at the
+/// phone can turn it back on — so the UI confirms with that said plainly.
+#[tauri::command]
+pub async fn power_off_device(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .power_off(&udid)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Open the phone's own Settings app (xiaowei "Phone Settings").
+#[tauri::command]
+pub async fn open_system_settings(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .open_system_settings(&udid)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Wake the screen (xiaowei "Turn On Screen"). KEYCODE_WAKEUP, so calling it on an awake
+/// phone does nothing — unlike the power key, which would put it to sleep.
+#[tauri::command]
+pub async fn wake_screen(state: State<'_, AppState>, udid: String) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .wake_screen(&udid)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Screenshot into the phone's own gallery (xiaowei "Screenshot to phone"). Returns the
+/// device path; the companion `screenshot` command is the one that copies to this machine.
+#[tauri::command]
+pub async fn screenshot_to_device(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<String, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .screenshot_to_device(&udid)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Switch the phone's keyboard (xiaowei "Switch Input Method"). The picker only ever offers
+/// ids the phone itself printed, and the driver refuses the Riviu helper's own IME.
+#[tauri::command]
+pub async fn set_input_method(
+    state: State<'_, AppState>,
+    udid: String,
+    ime_id: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let Some(android) = &state.android else {
+        return Err(CommandError::operation("Android không khả dụng"));
+    };
+    android
+        .set_input_method(&udid, &ime_id)
+        .await
+        .map_err(|e| CommandError::operation(e.to_string()))
+}
+
+/// Bring one app to the front of one phone (xiaowei's App List, where a click launches).
+///
+/// Goes through the control plane rather than the Android driver directly, because unlike
+/// everything else in this block it is *not* Android-only: foregrounding an app is a thing
+/// both platforms do, and the lease keeps the live tile up while it happens.
+#[tauri::command]
+pub async fn launch_device_app(
+    state: State<'_, AppState>,
+    udid: String,
+    bundle_id: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let context = state
+        .device_lease(&udid, DeviceWorkOwner::ManualControl, LeaseStream::Keep)
+        .await?;
+    state
+        .control
+        .launch_app(&context, &bundle_id)
+        .await
+        .map_err(CommandError::from)
+}
+
+/// What the phone had on its clipboard.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardRead {
+    /// The phone's own MIME description, e.g. `text/plain`. Reported rather than assumed:
+    /// a clipboard holding an image is a real answer and the UI has to be able to say so
+    /// instead of showing empty text.
+    pub content_type: String,
+    /// Decoded as UTF-8 when it is text. Non-text content leaves this empty and `bytes`
+    /// carries the size.
+    pub text: String,
+    pub bytes: usize,
+}
+
+/// Read the phone's clipboard onto this machine (xiaowei "Export Clipboard").
+///
+/// The one row of the reference product's menu that this app had a *session method* for and
+/// no command over it, which is why it went missing for so long: `UiSession::get_clipboard`
+/// has existed since the interaction work and nothing could call it.
+///
+/// The ceiling is [`MAX_INTERACTION_CLIPBOARD_BYTES`] and not a number chosen here. Measured
+/// 21/08/2026 on 23021RAAEG: asking for 256 KiB — which looked like a generous, harmless
+/// choice — is refused outright with `clipboard read limit exceeds 65536 bytes`, because the
+/// capability contract pins the value on both platforms rather than treating it as a maximum.
+/// So the constant is the contract's, and a clipboard bigger than that is the phone's answer
+/// to report, not something to raise a limit for.
+#[tauri::command]
+pub async fn device_get_clipboard(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<ClipboardRead, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let read = std::sync::Arc::new(parking_lot::Mutex::new(None));
+    let sink = read.clone();
+    with_manual_session(
+        &state,
+        &udid,
+        DeviceWorkOwner::ManualControl,
+        move |session| async move {
+            let (content_type, bytes) = session
+                .get_clipboard(riviu_core::MAX_INTERACTION_CLIPBOARD_BYTES)
+                .await?;
+            *sink.lock() = Some((content_type, bytes));
+            Ok(())
+        },
+    )
+    .await?;
+    let (content_type, bytes) = read
+        .lock()
+        .take()
+        .ok_or_else(|| CommandError::operation("máy không trả về nội dung clipboard"))?;
+    Ok(ClipboardRead {
+        // Lossy on purpose: a clipboard holding half a UTF-8 sequence is still worth
+        // showing, and refusing the whole read over one bad byte would lose the rest.
+        text: String::from_utf8_lossy(&bytes).to_string(),
+        bytes: bytes.len(),
+        content_type,
+    })
+}
+
+/// Write text onto the phone's clipboard, so the operator can paste it there by hand.
+#[tauri::command]
+pub async fn device_set_clipboard(
+    state: State<'_, AppState>,
+    udid: String,
+    text: String,
+) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    with_manual_session(
+        &state,
+        &udid,
+        DeviceWorkOwner::ManualControl,
+        move |session| async move { session.set_clipboard("text/plain", text.as_bytes()).await },
+    )
+    .await
+}
+
+/// One host discovered on the LAN via the ARP table (feature A9).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArpEntry {
+    pub ip: String,
+    pub mac: String,
+}
+
+/// Scan the host's ARP table for LAN devices, so the operator can pick one and `adb connect`
+/// to it wirelessly (A9, xiaowei ARP list). Reads the OS `arp -a`; does not touch any phone.
+#[tauri::command]
+pub async fn arp_scan(state: State<'_, AppState>) -> Result<Vec<ArpEntry>, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let output = tokio::process::Command::new("arp")
+        .arg("-a")
+        .output()
+        .await
+        .map_err(|e| CommandError::operation(format!("arp -a lỗi: {e}")))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(riviu_android_driver::adb::parse_arp_table(&stdout)
+        .into_iter()
+        .map(|(ip, mac)| ArpEntry { ip, mac })
+        .collect())
 }
 
 #[tauri::command]

@@ -968,6 +968,25 @@ impl AppState {
             }
         });
 
+        // Local automation API (Giai đoạn B, xiaowei "openapi"). Off unless the operator
+        // turned it on and a token exists; it binds loopback only. Startup-configured on
+        // purpose — a config change takes effect next launch, so the socket has one owner and
+        // the lifecycle stays a single spawn rather than a bind/unbind dance we could not
+        // verify without the running app.
+        {
+            let config = crate::local_api::load_config(&self.db);
+            if config.enabled && !config.token.is_empty() {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) =
+                        crate::local_api::serve(app, config.port, config.token).await
+                    {
+                        log::error!("local API failed to start: {error:#}");
+                    }
+                });
+            }
+        }
+
         if let Some(android) = self.android.clone() {
             let registry = self.registry.clone();
             let background_stop = self.background_stop.clone();

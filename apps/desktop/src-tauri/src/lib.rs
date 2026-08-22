@@ -10,7 +10,9 @@ mod flow_commands;
 mod interaction_commands;
 pub mod interaction_ocr;
 mod interaction_target;
+mod local_api;
 mod nurture_commands;
+mod peripherals;
 mod publish_commands;
 mod publish_driver;
 mod state;
@@ -220,9 +222,44 @@ pub fn run() {
             commands::device_type_text,
             commands::device_home,
             commands::device_key,
+            commands::set_screen_locked,
+            local_api::local_api_get_config,
+            local_api::local_api_set_config,
+            peripherals::list_serial_ports,
+            peripherals::relay_set_channel,
+            peripherals::relay_pulse_channel,
             commands::device_control_begin,
             commands::device_control_end,
             commands::group_input,
+            commands::distribute_text,
+            commands::distribute_files,
+            commands::enable_wifi_adb,
+            commands::wifi_adb_connect,
+            commands::wifi_adb_disconnect,
+            commands::arp_scan,
+            commands::set_wallpaper,
+            commands::set_wallpaper_bytes,
+            commands::set_mock_location,
+            commands::stop_mock_location,
+            commands::is_rooted,
+            commands::set_device_identity,
+            commands::factory_reset,
+            commands::root_shell,
+            // The per-phone function menu (xiaowei 功能), one command per row.
+            commands::device_list_dir,
+            commands::device_pull_path,
+            commands::device_push_file,
+            commands::device_delete_path,
+            commands::set_wifi_radio,
+            commands::reset_display_metrics,
+            commands::power_off_device,
+            commands::open_system_settings,
+            commands::wake_screen,
+            commands::screenshot_to_device,
+            commands::set_input_method,
+            commands::launch_device_app,
+            commands::device_get_clipboard,
+            commands::device_set_clipboard,
             commands::get_stream_settings,
             commands::set_stream_settings,
             commands::latest_frame,
@@ -250,6 +287,7 @@ pub fn run() {
             commands::update_check,
             commands::update_install,
             farm_commands::get_device_meta,
+            farm_commands::list_device_metas,
             farm_commands::save_device_meta,
             farm_commands::list_groups,
             farm_commands::save_group,

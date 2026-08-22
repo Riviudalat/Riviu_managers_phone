@@ -24,6 +24,16 @@ pub fn get_device_meta(state: State<'_, AppState>, udid: String) -> Result<Devic
     state.db.get_device_meta(&udid).map_err(err)
 }
 
+/// Every phone this app has a record for, in one call.
+///
+/// The grid reads it per refresh to label and order twenty tiles (alias, number). Per-device
+/// reads would be twenty IPC round trips to draw one frame, and `get_device_meta` stays for
+/// the one-phone editors that already use it.
+#[tauri::command]
+pub fn list_device_metas(state: State<'_, AppState>) -> Result<Vec<DeviceMeta>, String> {
+    state.db.list_device_metas().map_err(err)
+}
+
 #[tauri::command]
 pub fn save_device_meta(state: State<'_, AppState>, meta: DeviceMeta) -> Result<(), String> {
     let _admission = state.ensure_accepting_work()?;

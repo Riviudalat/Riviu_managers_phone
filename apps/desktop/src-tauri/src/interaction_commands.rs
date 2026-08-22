@@ -1140,6 +1140,15 @@ async fn run_cohort(
                     grounded.text
                 }
             };
+            // Tag the mentioned accounts at the front of the opening comment only. `@name` is
+            // plain text (TikTok does not linkify it); the fleet accounts among the mentions
+            // were already added to `actor_udids` by the caller, so they join this post and
+            // reply — the replies do not re-tag.
+            let text = if assignment.ordinal == 0 {
+                format!("{}{}", request.mention_prefix(), text)
+            } else {
+                text
+            };
             let prepared = PreparedThreadMessage::new(assignment, text);
             previous = Some(prepared.text.clone());
             db.prepare_interaction_assignment(id, &prepared)?;
