@@ -8,7 +8,6 @@ import {
   deviceControlBegin,
   deviceControlEnd,
   deviceKey,
-  deviceShell,
   deviceSwipe,
   deviceSwipePath,
   deviceTap,
@@ -26,15 +25,6 @@ import {
 } from "../api";
 import { createLiveDragGroup, liveTap, type LiveDragGroup } from "../liveDrag";
 import {
-  parseCurrentInputMethod,
-  parseInputMethods,
-  type InputMethod,
-} from "../imeList";
-import {
-  addQuickPhrase,
-  loadQuickPhrases,
-  removeQuickPhrase,
-  storeQuickPhrases,
   type QuickPhrase,
 } from "../quickPhrases";
 import { InstalledApps } from "./InstalledApps";
@@ -43,6 +33,8 @@ import { pickFile } from "../pickFile";
 import { pickDirectory } from "../pickFile";
 import { requestConfirm } from "../confirmStore";
 import { pushToast, toastError } from "../toastStore";
+import { useDeviceKeyboards } from "./focus/useDeviceKeyboards";
+import { useQuickPhrases } from "./focus/useQuickPhrases";
 import { exportViewJpeg, useViewDecodeFailed, useViewLive, useViewSize } from "../viewStore";
 import { streamPlaceholder } from "../streamPlaceholder";
 import { startDevicePreview } from "../startPreview";
@@ -130,12 +122,6 @@ export function FocusStream({
   const [showDevices, setShowDevices] = useState(false);
   const [showPhrases, setShowPhrases] = useState(false);
   const [showKeyboards, setShowKeyboards] = useState(false);
-  const [phrases, setPhrases] = useState<QuickPhrase[]>(() => loadQuickPhrases());
-  const [phraseName, setPhraseName] = useState("");
-  const [phraseContent, setPhraseContent] = useState("");
-  const [phraseError, setPhraseError] = useState<string | null>(null);
-  const [keyboards, setKeyboards] = useState<InputMethod[] | null>(null);
-  const [currentKeyboard, setCurrentKeyboard] = useState<string | null>(null);
   const [frameWidth, setFrameWidth] = useState(() => loadZoom(FOCUS_ZOOM));
   const screenRef = useRef<HTMLDivElement>(null);
   /// The drag in progress: where it started, every sample since, and when the last one was
@@ -306,6 +292,9 @@ export function FocusStream({
       setBusy(false);
     }
   };
+
+  const quick = useQuickPhrases();
+  const ime = useDeviceKeyboards(device.udid, runBusy);
 
   // Ctrl+wheel zooms the preview. Plain wheel scrolls the phone. Registered
   // by hand because React's synthetic onWheel is passive.
@@ -496,48 +485,6 @@ export function FocusStream({
     }
   };
 
-  /// Read the phone's keyboards, and which one is current.
-  ///
-  /// Two shells rather than one round trip because they answer different questions and a
-  /// failure of the second should not hide the first. The ids come back from the phone and
-  /// are only ever sent back verbatim — see `imeList.ts`.
-  const loadKeyboards = async () => {
-    try {
-      await runBusy(async () => {
-        const listed = await deviceShell(device.udid, "ime list -s");
-        setKeyboards(parseInputMethods(listed.stdout));
-        try {
-          const current = await deviceShell(
-            device.udid,
-            "settings get secure default_input_method",
-          );
-          setCurrentKeyboard(parseCurrentInputMethod(current.stdout));
-        } catch {
-          setCurrentKeyboard(null);
-        }
-      });
-    } catch (error) {
-      setKeyboards([]);
-      toastError("Không đọc được danh sách bàn phím", error);
-    }
-  };
-
-  const chooseKeyboard = async (method: InputMethod) => {
-    // Only an id the phone itself just printed, looked up in the parsed list rather than
-    // taken from the event: the value reaches a real shell.
-    const known = keyboards?.find((candidate) => candidate.id === method.id);
-    if (!known) return;
-    try {
-      await runBusy(async () => {
-        await deviceShell(device.udid, `ime set ${known.id}`);
-        setCurrentKeyboard(known.id);
-      });
-      pushToast("ok", "Đã đổi bàn phím", known.label);
-    } catch (error) {
-      toastError("Đổi bàn phím thất bại", error);
-    }
-  };
-
   const importFile = async () => {
     const path = await pickFile({
       title: "Chọn ảnh hoặc video",
@@ -590,21 +537,6 @@ export function FocusStream({
     } catch (error) {
       toastError("Lấy ảnh/video thất bại", error);
     }
-  };
-
-  const savePhrase = () => {
-    const { phrases: next, error } = addQuickPhrase(
-      phrases,
-      phraseName,
-      phraseContent,
-      `${Date.now()}-${phrases.length}`,
-    );
-    setPhraseError(error);
-    if (error) return;
-    setPhrases(next);
-    storeQuickPhrases(next);
-    setPhraseName("");
-    setPhraseContent("");
   };
 
   const copySerial = async () => {
@@ -815,7 +747,7 @@ export function FocusStream({
       run: () => {
         setShowKeyboards((open) => {
           const next = !open;
-          if (next && keyboards === null) void loadKeyboards();
+          if (next && ime.keyboards === null) void ime.load();
           return next;
         });
       },
@@ -1171,27 +1103,27 @@ export function FocusStream({
             <div className="focus-menu-panel" role="group" aria-label="Câu nhanh">
               <input
                 type="text"
-                value={phraseName}
+                value={quick.name}
                 placeholder="Tên (không bắt buộc)"
-                onChange={(event) => setPhraseName(event.target.value)}
+                onChange={(event) => quick.setName(event.target.value)}
               />
               <input
                 type="text"
-                value={phraseContent}
+                value={quick.content}
                 placeholder="Nội dung (vd: xin chào)"
-                onChange={(event) => setPhraseContent(event.target.value)}
+                onChange={(event) => quick.setContent(event.target.value)}
                 onKeyUp={(event) => {
-                  if (event.key === "Enter") savePhrase();
+                  if (event.key === "Enter") quick.save();
                 }}
               />
-              <button type="button" className="ghost" onClick={() => savePhrase()}>
+              <button type="button" className="ghost" onClick={() => quick.save()}>
                 Lưu câu
               </button>
-              {phraseError && <p className="error">{phraseError}</p>}
-              {!phrases.length ? (
+              {quick.error && <p className="error">{quick.error}</p>}
+              {!quick.phrases.length ? (
                 <p className="hint">Chưa có câu nào.</p>
               ) : (
-                phrases.map((phrase) => (
+                quick.phrases.map((phrase) => (
                   <div className="focus-phrase-row" key={phrase.id}>
                     <button
                       type="button"
@@ -1205,11 +1137,7 @@ export function FocusStream({
                       type="button"
                       className="danger"
                       aria-label={`Xoá ${phrase.name}`}
-                      onClick={() => {
-                        const next = removeQuickPhrase(phrases, phrase.id);
-                        setPhrases(next);
-                        storeQuickPhrases(next);
-                      }}
+                      onClick={() => quick.remove(phrase.id)}
                     >
                       <IconClose size={12} />
                     </button>
@@ -1220,22 +1148,22 @@ export function FocusStream({
           )}
           {showKeyboards && (
             <div className="focus-menu-panel" role="group" aria-label="Đổi bàn phím">
-              {keyboards === null ? (
+              {ime.keyboards === null ? (
                 <p className="hint">Đang đọc…</p>
-              ) : !keyboards.length ? (
+              ) : !ime.keyboards.length ? (
                 <p className="hint">Không đọc được bàn phím nào.</p>
               ) : (
-                keyboards.map((method) => (
+                ime.keyboards.map((method) => (
                   <button
                     key={method.id}
                     type="button"
                     disabled={busy}
-                    className={method.id === currentKeyboard ? "is-current" : ""}
+                    className={method.id === ime.current ? "is-current" : ""}
                     title={method.id}
-                    onClick={() => void chooseKeyboard(method)}
+                    onClick={() => void ime.choose(method)}
                   >
                     {method.label}
-                    {method.id === currentKeyboard && <span> ✓</span>}
+                    {method.id === ime.current && <span> ✓</span>}
                   </button>
                 ))
               )}
