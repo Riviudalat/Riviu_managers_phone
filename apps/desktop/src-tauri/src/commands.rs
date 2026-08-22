@@ -87,6 +87,22 @@ async fn continue_ui_context(
         .map_err(CommandError::from)
 }
 
+/// A udid reduced to something that cannot steer a path.
+///
+/// Every artifact this app writes is named after a device, and a udid is not a safe filename:
+/// a Wi-Fi serial carries a `:`, which Windows refuses outright. Worse, `Path::join` with an
+/// **absolute** component *replaces* the path rather than extending it, so an unsanitised udid
+/// was not merely a bad filename — `C:/Users/x/.../Startup/z` or `\\host\share\z` would be
+/// written there instead, and `create_dir_all` would build the tree to meet it.
+///
+/// Same reduction `set_wallpaper_bytes` already applies, promoted to a shared helper so the
+/// next artifact path gets it for free instead of re-deriving the reasoning.
+pub(crate) fn safe_udid_stem(udid: &str) -> String {
+    udid.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
 pub(crate) async fn with_manual_session<F, Fut>(
     state: &AppState,
     udid: &str,
@@ -412,7 +428,8 @@ pub async fn list_installed_apps(
 pub async fn screenshot(state: State<'_, AppState>, udid: String) -> Result<String, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let dest = state.artifacts_dir.join("screenshots").join(format!(
-        "{udid}-{}.jpg",
+        "{}-{}.jpg",
+        safe_udid_stem(&udid),
         chrono::Utc::now().timestamp_millis()
     ));
     if let Some(bytes) = state.streams.latest(&udid) {
@@ -623,7 +640,7 @@ pub async fn export_media(
     }
     // Per device, so exporting two phones into one folder does not interleave their camera
     // rolls into an unsortable pile.
-    let into = dest.join(format!("riviu-{udid}"));
+    let into = dest.join(format!("riviu-{}", safe_udid_stem(&udid)));
     let context = state
         .device_lease(&udid, DeviceWorkOwner::ManualControl, LeaseStream::Keep)
         .await?;
@@ -1306,12 +1323,7 @@ pub async fn set_wallpaper_bytes(
     };
     let dir = state.artifacts_dir.join("wallpaper");
     std::fs::create_dir_all(&dir).map_err(CommandError::operation)?;
-    // A wifi serial has a ':' in it, illegal in a Windows filename — keep only safe chars.
-    let safe: String = udid
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
-    let path = dir.join(format!("{safe}.png"));
+    let path = dir.join(format!("{}.png", safe_udid_stem(&udid)));
     std::fs::write(&path, &png).map_err(CommandError::operation)?;
     android
         .set_wallpaper(&udid, path.to_string_lossy().as_ref())
@@ -2025,7 +2037,8 @@ pub fn save_view_snapshot(
         return Err(CommandError::operation("view snapshot is not a JPEG"));
     }
     let dest = state.artifacts_dir.join("screenshots").join(format!(
-        "{udid}-{}.jpg",
+        "{}-{}.jpg",
+        safe_udid_stem(&udid),
         chrono::Utc::now().timestamp_millis()
     ));
     if let Some(parent) = dest.parent() {
@@ -2533,5 +2546,34 @@ mod tests {
         assert_eq!(driver.ordinary_session_calls(), 0);
         assert_eq!(driver.fresh_text_session_calls(), 0);
         assert_eq!(driver.stream_restart_calls(), 0);
+    }
+
+    /// A udid cannot decide *where* an artifact is written, only what it is called.
+    ///
+    /// `Path::join` with an absolute component **replaces** the path, so before this a udid of
+    /// `C:/…/Startup/z` did not produce a badly-named screenshot in the artifacts folder — it
+    /// produced a file in the Startup folder, with `create_dir_all` building the tree to reach
+    /// it. A UNC udid is the same primitive pointed at SMB, which also leaks an NTLM handshake.
+    #[test]
+    fn a_udid_can_never_steer_an_artifact_path_off_the_artifacts_dir() {
+        let artifacts = Path::new("C:/riviu/artifacts");
+        for hostile in [
+            "C:/Users/x/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/z",
+            r"\\attacker\share\z",
+            "../../../../Windows/System32/z",
+            "/etc/cron.d/z",
+        ] {
+            let joined = artifacts.join(format!("{}.png", safe_udid_stem(hostile)));
+            assert_eq!(
+                joined.parent(),
+                Some(artifacts),
+                "escaped the artifacts dir: {hostile:?} -> {joined:?}"
+            );
+        }
+
+        // And the ordinary cases still round-trip to something readable: a USB serial is
+        // untouched, and a Wi-Fi serial keeps its digits with the illegal ':' neutralised.
+        assert_eq!(safe_udid_stem("10969614"), "10969614");
+        assert_eq!(safe_udid_stem("192.168.1.44:5555"), "192_168_1_44_5555");
     }
 }
