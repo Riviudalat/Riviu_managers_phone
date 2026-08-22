@@ -70,6 +70,11 @@ public class RiviuWin32 {
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
     [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, IntPtr extra);
+    // For Ctrl+wheel, the app's zoom gesture. SendKeys cannot hold a modifier *across* a
+    // separate mouse event, so the key has to be pressed and released explicitly.
+    [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
+    public const byte VK_CONTROL = 0x11;
+    public const uint KEYEVENTF_KEYUP = 0x0002;
     [DllImport("user32.dll")] public static extern uint GetDoubleClickTime();
     public const uint MOUSEEVENTF_MOVE = 0x0001;
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
@@ -80,6 +85,10 @@ public class RiviuWin32 {
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
     [DllImport("user32.dll", CharSet = CharSet.Auto)] public static extern IntPtr PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+    // Save-WindowPng's occluded path calls this, and it was being called without ever
+    // being declared — so a `shot` that hit a covering window died on
+    // "[RiviuWin32] does not contain a method named 'PrintWindow'" instead of falling back.
+    [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
     [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lParam);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
@@ -122,6 +131,8 @@ public class RiviuWin32 {
 
     public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
     public const uint MOUSEEVENTF_LEFTUP   = 0x0004;
+    public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
+    public const uint MOUSEEVENTF_RIGHTUP   = 0x0010;
     public const uint WM_CLOSE             = 0x0010;
     public const int  SW_RESTORE           = 9;
     // SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW
@@ -527,6 +538,189 @@ function Invoke-Click {
     [void][RiviuWin32]::SetCursorPos($saved.X, $saved.Y)
 }
 
+function Invoke-RightClick {
+    # Right-click and capture in ONE process, because the menu it opens closes on the next
+    # `pointerdown` anywhere outside it — and a second driver invocation is a second process
+    # whose activation click is exactly that. `click` + `shot` therefore always photographs
+    # a closed menu, which looks identical to a menu that never opened.
+    #
+    # The cursor is deliberately NOT restored before the capture, for the same reason
+    # `hovershot` does not: a menu row under the pointer is the state being photographed.
+    if ($Rest.Count -lt 3) { throw 'usage: driver.ps1 rightclick <x> <y> <name>' }
+    $x = [int]$Rest[0]; $y = [int]$Rest[1]
+    $path = Join-Path $OutDir ("{0}.png" -f ($Rest[2] -replace '[^\w.-]', '_'))
+    Use-RaisedWindow -SettleMs 900 -Activate -Body {
+        param($win)
+        $sx = $win.Left + $x; $sy = $win.Top + $y
+        Write-Step "rightclick window($x,$y) -> screen($sx,$sy)"
+        [void][RiviuWin32]::SetCursorPos($sx, $sy)
+        Start-Sleep -Milliseconds 250
+        [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 90
+        [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_RIGHTUP, 0, 0, 0, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 900
+        Save-WindowPng -Window $win -Path $path
+        Write-Step "saved $path"
+    }
+}
+
+function Invoke-MenuShot {
+    # Right-click a tile, then left-click one row of the menu that opens, then capture —
+    # all in ONE process, because the menu closes on any `pointerdown` outside itself and
+    # every driver invocation begins with an activation click on the title bar. Split across
+    # two calls, the second call's activation is what closes the menu, so the row is never
+    # reached and the capture shows a closed menu: indistinguishable from a row that does
+    # nothing. Pass row coordinates read off a `rightclick` capture.
+    if ($Rest.Count -lt 5) {
+        throw 'usage: driver.ps1 menushot <tileX> <tileY> <rowX> <rowY> <name> [rowX2 rowY2 ...]'
+    }
+    $tx = [int]$Rest[0]; $ty = [int]$Rest[1]
+    $path = Join-Path $OutDir ("{0}.png" -f ($Rest[4] -replace '[^\w.-]', '_'))
+    # The first row pair sits before the name (so the one-row call reads naturally); any
+    # further pairs follow it, for a row that lives inside a submenu and therefore needs the
+    # submenu opened first — in the same process, for the reason above.
+    # The unary comma is load-bearing: `@(@(490,715))` flattens to two scalars in PS 5.1,
+    # so the first click went to (490,0) and the second to (715,0) — the title bar, twice.
+    $rows = @()
+    $rows += , @([int]$Rest[2], [int]$Rest[3])
+    for ($i = 5; $i + 1 -lt $Rest.Count; $i += 2) {
+        $rows += , @([int]$Rest[$i], [int]$Rest[$i + 1])
+    }
+    Use-RaisedWindow -SettleMs 900 -Activate -Body {
+        param($win)
+        [void][RiviuWin32]::SetCursorPos($win.Left + $tx, $win.Top + $ty)
+        Start-Sleep -Milliseconds 250
+        [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 90
+        [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_RIGHTUP, 0, 0, 0, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 800
+        foreach ($row in $rows) {
+            Write-Step "menushot tile($tx,$ty) row($($row[0]),$($row[1]))"
+            Invoke-RawClick -ScreenX ($win.Left + $row[0]) -ScreenY ($win.Top + $row[1])
+            Start-Sleep -Milliseconds 900
+        }
+        Start-Sleep -Milliseconds 900
+        Save-WindowPng -Window $win -Path $path
+        Write-Step "saved $path"
+    }
+}
+
+function Invoke-MenuSearch {
+    # Right-click a tile, type into the menu's search box, click the first result, capture —
+    # one process, same reason as `menushot`. This is the *reliable* way to reach a row that
+    # lives inside a submenu: the row's own coordinates depend on which submenus happen to be
+    # expanded and on where the menu scrolled to, while a search result is always the first
+    # row. The search box is autofocused when the menu opens, so no click is needed to type.
+    if ($Rest.Count -lt 4) {
+        throw 'usage: driver.ps1 menusearch <tileX> <tileY> <query> <name>'
+    }
+    $tx = [int]$Rest[0]; $ty = [int]$Rest[1]
+    $query = [string]$Rest[2]
+    $path = Join-Path $OutDir ("{0}.png" -f ($Rest[3] -replace '[^\w.-]', '_'))
+    Use-RaisedWindow -SettleMs 900 -Activate -Body {
+        param($win)
+        [void][RiviuWin32]::SetCursorPos($win.Left + $tx, $win.Top + $ty)
+        Start-Sleep -Milliseconds 250
+        [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 90
+        [RiviuWin32]::mouse_event([RiviuWin32]::MOUSEEVENTF_RIGHTUP, 0, 0, 0, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 900
+        Write-Step "menusearch tile($tx,$ty) query='$query'"
+        [System.Windows.Forms.SendKeys]::SendWait($query)
+        Start-Sleep -Milliseconds 700
+        # The first result sits 88 px below the right-click point: 22 for the device name,
+        # 34 for the search box, then the row's own half-height. Measured on this build at
+        # 100% scaling, and the reason a search is used rather than a row coordinate.
+        Invoke-RawClick -ScreenX ($win.Left + $tx + 56) -ScreenY ($win.Top + $ty + 88)
+        Start-Sleep -Milliseconds 2000
+        Save-WindowPng -Window $win -Path $path
+        Write-Step "saved $path"
+    }
+}
+
+function Invoke-HoverShot {
+    # Move the cursor over a window-relative point and capture *while hovering*, so a
+    # hover-triggered UI (tooltip, menu) is in the frame. Unlike click/scroll it does NOT
+    # restore the cursor before the shot — that restore is exactly what hides a hover state.
+    if ($Rest.Count -lt 3) { throw 'usage: driver.ps1 hovershot <x> <y> <name>' }
+    $x = [int]$Rest[0]; $y = [int]$Rest[1]
+    $path = Join-Path $OutDir ("{0}.png" -f ($Rest[2] -replace '[^\w.-]', '_'))
+    Use-RaisedWindow -SettleMs 800 -Body {
+        param($win)
+        $sx = $win.Left + $x; $sy = $win.Top + $y
+        # SetCursorPos alone often does not update Chromium/WebView2 :hover — it wants a
+        # genuine move *input*. Land 3px off, then nudge onto the target with a relative
+        # MOUSEEVENTF_MOVE so the webview sees a real mousemove ending on the element.
+        [void][RiviuWin32]::SetCursorPos($sx - 3, $sy)
+        Start-Sleep -Milliseconds 120
+        [RiviuWin32]::mouse_event([uint32]0x0001, 3, 0, 0, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 120
+        [RiviuWin32]::mouse_event([uint32]0x0001, 0, 0, 0, [IntPtr]::Zero)
+        # Let the webview render the hover UI before capturing.
+        Start-Sleep -Milliseconds 900
+        Save-WindowPng -Window $win -Path $path
+        Write-Step "hovershot window($x,$y) -> screen($sx,$sy) -> $path"
+    }
+}
+
+function Invoke-Scroll {
+    # Wheel-scroll at a window-relative point, for scrollable popups the window cannot grow to
+    # fit (e.g. the Interaction / Group Tools floating panels). Positive notches scroll down,
+    # negative up. One notch = WHEEL_DELTA (120). Mirrors Invoke-Click's raise+restore.
+    if ($Rest.Count -lt 2) { throw 'usage: driver.ps1 scroll <x> <y> [notches]  (window-relative; +down/-up)' }
+    $x = [int]$Rest[0]; $y = [int]$Rest[1]
+    $notches = if ($Rest.Count -ge 3) { [int]$Rest[2] } else { 3 }
+    $saved = New-Object 'RiviuWin32+POINT'
+    [void][RiviuWin32]::GetCursorPos([ref]$saved)
+    Use-RaisedWindow -SettleMs 900 -Activate -Body {
+        param($win)
+        $sx = $win.Left + $x; $sy = $win.Top + $y
+        [void][RiviuWin32]::SetCursorPos($sx, $sy)
+        Start-Sleep -Milliseconds 200
+        # Negative delta scrolls the content down (the wheel turns toward the user). Mask in
+        # Int64 (the `L` literal) so a negative delta becomes its two's-complement uint32 —
+        # `0xffffffff` alone is Int32 -1 in PS 5.1 and would leave the value negative, which
+        # then fails the uint32 cast.
+        $delta = -120 * $notches
+        $data = [uint32](([int64]$delta) -band ([int64]4294967295))
+        Write-Step "scroll window($x,$y) -> screen($sx,$sy) notches=$notches"
+        [RiviuWin32]::mouse_event([uint32]0x0800, 0, 0, $data, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 600
+    }
+    [void][RiviuWin32]::SetCursorPos($saved.X, $saved.Y)
+}
+
+function Invoke-CtrlScroll {
+    # Ctrl held across a wheel notch — the app's zoom gesture (`wheelWantsZoom` is `ctrlKey`).
+    # A separate `type "^"` cannot do this: SendKeys' modifier applies to the keystroke it
+    # prefixes, not to a mouse event that arrives afterwards.
+    if ($Rest.Count -lt 2) { throw 'usage: driver.ps1 ctrlscroll <x> <y> [notches]  (window-relative; +in/-out)' }
+    $x = [int]$Rest[0]; $y = [int]$Rest[1]
+    $notches = if ($Rest.Count -ge 3) { [int]$Rest[2] } else { 3 }
+    $saved = New-Object 'RiviuWin32+POINT'
+    [void][RiviuWin32]::GetCursorPos([ref]$saved)
+    Use-RaisedWindow -SettleMs 900 -Activate -Body {
+        param($win)
+        $sx = $win.Left + $x; $sy = $win.Top + $y
+        [void][RiviuWin32]::SetCursorPos($sx, $sy)
+        Start-Sleep -Milliseconds 200
+        Write-Step "ctrl+scroll window($x,$y) notches=$notches"
+        [RiviuWin32]::keybd_event([RiviuWin32]::VK_CONTROL, 0, 0, [IntPtr]::Zero)
+        try {
+            # Positive notches zoom IN, so the delta is positive (wheel away from the user);
+            # `stepZoom` reads `deltaY < 0` as in, and the OS reports the opposite sign.
+            $delta = 120 * $notches
+            $data = [uint32](([int64]$delta) -band ([int64]4294967295))
+            [RiviuWin32]::mouse_event([uint32]0x0800, 0, 0, $data, [IntPtr]::Zero)
+            Start-Sleep -Milliseconds 500
+        }
+        finally {
+            [RiviuWin32]::keybd_event([RiviuWin32]::VK_CONTROL, 0, [RiviuWin32]::KEYEVENTF_KEYUP, [IntPtr]::Zero)
+        }
+    }
+    [void][RiviuWin32]::SetCursorPos($saved.X, $saved.Y)
+}
+
 function Invoke-DblClick {
     if ($Rest.Count -lt 2) { throw 'usage: driver.ps1 dblclick <x> <y>   (window-relative)' }
     $x = [int]$Rest[0]; $y = [int]$Rest[1]
@@ -849,6 +1043,12 @@ switch ($Command.ToLowerInvariant()) {
     'status'  { Invoke-Status }
     'shot'    { Invoke-Shot }
     'click'   { Invoke-Click }
+    'scroll'  { Invoke-Scroll }
+    'ctrlscroll' { Invoke-CtrlScroll }
+    'hovershot' { Invoke-HoverShot }
+    'rightclick' { Invoke-RightClick }
+    'menushot'   { Invoke-MenuShot }
+    'menusearch' { Invoke-MenuSearch }
     'dblclick' { Invoke-DblClick }
     'drag'     { Invoke-Drag }
     'fill'    { Invoke-Fill }

@@ -5315,6 +5315,357 @@ moi lan doi preset va moi lan xoay may la mot cua so cham bien mat — upstream 
 agent **von khong cham** — 130–280 ms mot click do tren chinh Galaxy S8+. Con so 1502 ms la
 `adb shell input`, **khong phai** agent, dung nham hai cai.
 
+### 9.88 Menu chức năng từng máy: đo được gì trên máy thật, và bốn cái bẫy (21/08/2026)
+
+Người dùng đối chiếu menu từng-máy của xiaowei với của Riviu và kết luận đúng: **10 dòng so với
+35**. Không phải "bố cục khác" — tám lệnh của nó ở đây **chưa từng được viết**. Đợt này viết
+tám lệnh đó, dựng lại menu (có ô tìm, có submenu), thêm trình quản lý tệp trên máy, và thêm
+đổi-tên / đổi-số máy (migration 10). Gate: core 536 test, android 170, frontend 415, clippy +
+fmt sạch trên `riviu-core` / `riviu-android-driver` / `riviu-managers-phone`.
+
+**Số đo trên 23021RAAEG (Android 15), tất cả 21/08/2026.**
+
+1. **`ls -la /sdcard` in ra *symlink*, không phải nội dung** — một dòng
+   `/sdcard -> /storage/self/primary`. Phải có dấu `/` cuối: `ls -la /sdcard/`. Không có nó,
+   bộ nhớ chính của máy hiện ra như **một file lạ**.
+2. **Ba hình dạng dòng mà parser phải chịu được**, tất cả đều là dòng máy này thật sự in:
+   cột **đệm khác nhau theo từng lần liệt kê** (nên không đọc theo offset cố định); tên **có
+   dấu cách và có cả ` - `** (`Giao Trinh - Bai Giang - HDH`, nên chỉ tìm mũi tên `->` ở dòng
+   mode bắt đầu bằng `l`); và dòng máy **không stat được** in `?` cho mọi cột, **gộp cả ngày và
+   giờ thành một `?`** — thiếu đúng một trường so với mọi dòng khác. Bắt theo *số trường* là
+   mất dòng đó, nên phải tìm cặp ngày-rồi-giờ trước, chỉ khi không có mới rơi về trường thứ 7.
+3. **`svc wifi` không in gì cả** — bật được và bị từ chối trông y như nhau. Trạng thái thật đọc
+   ở `settings get global wifi_on`: `disable` + chờ 1 s ra `0`, `enable` + chờ 2 s ra `1`.
+4. **`am start` exit 0 khi nó KHÔNG mở activity**: mở Cài đặt lúc Cài đặt đang ở trên in
+   `Warning: Activity not started, intent has been delivered to currently running top-most
+   instance` và vẫn exit 0. Cho nên điều kiện đúng là tìm `Error:` trong output, không phải
+   exit code.
+5. **Trần clipboard là hợp đồng, không phải giới hạn trên.** Xin 256 KiB — trông vô hại — bị
+   từ chối thẳng: `clipboard read limit exceeds 65536 bytes`. `MAX_INTERACTION_CLIPBOARD_BYTES`
+   ghim đúng một giá trị ở cả hai nền tảng; lệnh mới phải dùng hằng đó, không tự chọn số.
+6. **Chụp vào máy đi một lệnh shell duy nhất**, tên do *máy* đóng dấu:
+   `p=/sdcard/Pictures/riviu-$(date +%Y%m%d-%H%M%S).png; mkdir -p … && screencap -p "$p" &&
+   ls -la "$p"`. Hai lý do, lý do thứ hai mới là chính: đồng hồ của máy là đồng hồ người vận
+   hành sẽ so khi lướt thư viện; và một lệnh thì **không thể liệt kê ra file khác** với file vừa
+   chụp — chuyện có thật nếu đặt tên ở host rồi `ls` ở lần gọi sau, trên máy vừa nhảy giây.
+   `ls` một file in ra **cả đường dẫn** làm tên, nên một dòng đó vừa là bằng chứng vừa là câu
+   trả lời. Ảnh 0 byte = màn hình đang có nội dung không cho chụp, phải báo, không được coi là
+   xong.
+
+**Menu: ô tìm + submenu mở tại chỗ.** 35 dòng thì cuộn tìm "Reset DPI" chậm hơn gõ "dpi", nên
+có ô tìm (`deviceMenu.ts`, thuần, có test) — và nó **gấp dấu tiếng Việt** vì mọi nhãn là tiếng
+Việt còn bàn phím thì không: `đ` là codepoint riêng nên NFD không tách được, phải xử lý tay.
+Submenu **mở tại chỗ (thụt lề), không bay ngang** — bay ngang thì mỗi cấp lại phải kẹp vào biên
+viewport, và một menu mở ra ngoài màn hình tệ hơn một menu thụt lề. Submenu **hỏi máy thì hỏi
+lúc mở** (`loadChildren`): danh sách app là một lệnh adb mỗi máy, không ai muốn mở menu là bắn
+20 lệnh. Nền tảng lọc ở `gateDeviceMenu` chứ không ở renderer, và phần dễ quên là **bỏ luôn
+submenu rỗng** — không thì iPhone hiện một mũi `ADB ▸` mở ra không có gì.
+
+**Trình quản lý tệp: ba thứ nó từ chối làm giả.** Thư mục đọc không được thì **nói ra** (exit 1
++ câu của máy trên stderr) chứ không vẽ thành thư mục rỗng — hai sự thật khác nhau. Xoá thì
+**đọc lại** (`rm -rf` im lặng về cái nó không xoá được). Và **điều hướng là xoá lựa chọn**: cùng
+một cái tên tồn tại ở hai mươi thư mục, giữ lựa chọn qua một lần chuyển thư mục chính là cách
+một lệnh xoá rơi vào file khác. Đường dẫn được validate ở Rust (`validate_device_path`): chỉ
+chặn `'`, ký tự điều khiển và đường dẫn tương đối, vì mọi đường dẫn đều được bọc nháy đơn —
+`$ & ; | < >` vô hại trong nháy đơn và **tên file thật có chúng**. Gốc lưu trữ (`/`, `/sdcard`,
+`/data`…) thì `is_undeletable_root` chặn hẳn.
+
+**Đổi tên / đổi số (migration 10).** `alias` rỗng = dùng tên máy báo về; `number` NULL = dùng vị
+trí trong lưới. `""` và `null` **không được lẫn**: rỗng là "bỏ tên riêng", `null` từ dialog là
+"thôi không đổi" — không phân biệt được thì mỗi lần bấm Escape là mất tên. Máy có số xếp lên đầu
+lưới theo thứ tự số; hai máy cùng số thì giữ nguyên thứ tự đến (không có gì trong UI ngăn gõ
+trùng số, và lưới không được xáo). Tên **không ghi xuống máy**: đổi tên máy Android cần root và
+là đổi fingerprint, còn việc người vận hành muốn là phân biệt hai mươi con SM-G955F giống nhau.
+Lưu thì **đọc lại bản ghi trước khi ghi**, nếu không đổi tên sẽ xoá số (và xoá cả `handle`
+TikTok nằm cùng dòng).
+
+**Driver: chuột phải phải nằm trong MỘT process.** Menu đóng khi có `pointerdown` ngoài nó, mà
+mỗi lần gọi `driver.ps1` lại mở đầu bằng một cú click activate lên title bar — nên `click` rồi
+`shot` **luôn** chụp được một menu đã đóng, trông y hệt menu chưa bao giờ mở. Đã thêm
+`rightclick`, `menushot` (chuột phải + click dòng) và `menusearch` (chuột phải + gõ vào ô tìm +
+click kết quả đầu). `menusearch` là cách **tin được** để tới một dòng nằm trong submenu: toạ độ
+dòng phụ thuộc submenu nào đang mở và menu đang cuộn tới đâu, còn kết quả tìm luôn là dòng đầu.
+Hai cái bẫy khi viết nó: `PrintWindow` **được gọi mà chưa hề được khai báo** trong khối
+`DllImport` (nên `shot` lúc bị cửa sổ khác che chết bằng "does not contain a method named
+'PrintWindow'" thay vì rơi về đường dự phòng), và `@(@(490,715))` trong PS 5.1 **bị làm phẳng
+thành hai số** nên hai cú click đầu bay lên title bar — phải có dấu phẩy đơn nguyên.
+
+**Còn thiếu so với xiaowei, nói thẳng:** ghi macro theo từng máy (Action Record — replay thì
+Công cụ nhóm đã có), auto swipe, "switch accessible casting", và toàn bộ tầng này trên iOS
+(mọi lệnh mới đều Android-only, iPhone bị `gateDeviceMenu` lọc ra).
+
+### 9.89 Lúc phóng to cũng phải có đủ chức năng, và nhãn + icon app thật (21/08/2026)
+
+Hai câu hỏi của người dùng ngay sau §9.88, và cả hai đều đúng chỗ.
+
+**1. "Phóng to ra thì vẫn kèm các chức năng đó chứ?"** Không — panel overlay có menu riêng 16
+dòng, tách rời menu chuột-phải. Hai khung nhìn của **cùng một máy** mà một cái làm được nhiều
+hơn cái kia là lỗi sản phẩm, không phải khác bố cục. Nay cả hai vẽ bằng **một** component
+(`DeviceFunctionList`) trên **một** danh mục (`tileActions` ở `App.tsx`). Overlay bỏ đúng những
+dòng nó tự làm tốt hơn tại chỗ — app list, bàn phím, adb console là panel nội tuyến; chụp màn
+hình, cài APK, hai chiều ảnh/video là dòng có icon phía trên; Home/Back/Recents là navbar phía
+dưới — qua `withoutMenuIds`, và giữ phần còn lại dưới nhãn "Chức năng khác". Dòng "Quay màn
+hình" riêng của overlay **bỏ** vì danh mục có submenu phải/trái/dọc, hai dòng cùng tên tệ hơn
+một dòng làm nhiều hơn.
+
+**Cái bẫy layout, cùng họ §9.57 nhưng một tầng cao hơn.** Thêm ~14 dòng vào
+`.focus-menu-list` làm **panel app và bàn phím rơi khỏi màn hình**. `flex: 1` +
+`overflow-y: auto` không giới hạn được gì nếu chiều cao **cha** là `auto`: `.focus-stage` là
+flex row `align-items: stretch`, nên nó cao bằng đứa cao nhất — và menu dài làm chính nó thành
+đứa cao nhất. Sửa: `.focus-menu { max-height: calc(100vh - 24px) }` (24px là padding của
+`.focus-overlay`), để cột có chiều cao **xác định** rồi tự cuộn bên trong. Khung ảnh điện thoại
+vẫn giữ đúng kích thước zoom, đúng như ghi chú trên `.focus-phone-screen` yêu cầu.
+
+**2. "Phải lấy được mấy cái icon app nữa."** §9.55 đã kết luận đúng rằng adb không trả nhãn
+được, và đã ghi rõ đường *sẽ* chạy: helper trên máy gọi `PackageManager`. Nay làm xong.
+
+- Helper **0.3.0** thêm `POST /v1/apps/describe` (`AppList.java`): nhận danh sách package,
+  trả `label` + `system` + `icon` (PNG base64). Icon vẽ **qua Canvas**, không cast
+  `BitmapDrawable` — mọi app Android 8+ dùng adaptive icon là drawable nhiều lớp, cast sẽ ném
+  cho phần lớn app của một máy hiện đại. Manifest thêm `QUERY_ALL_PACKAGES`: Android 11+ ẩn
+  package khác, thiếu nó thì `getApplicationInfo` ném `NameNotFound` cho **mọi** app trừ chính
+  nó và danh sách trả về trắng tên.
+- **adb vẫn là nguồn sự thật cho *có những app nào*** (đọc cả hai phân vùng, kể cả app không có
+  launcher activity); helper chỉ trả lời câu adb không trả lời được. Ghép theo tên package.
+- **Số đo trên 23021RAAEG (539 package, Android 15):** nhãn cho **cả 539** mất **4 559 ms**,
+  47 KB. Nhãn + icon 48 px cho **162 app người dùng** mất **3 599 ms**, 535 KB (≈2,2 KB/icon).
+  Tức ~8 ms mỗi app, là chi phí `PackageManager` trên máy — không phải đường truyền. Vì thế:
+  chỉ mô tả **phân vùng người dùng** (377 app hệ thống giữ tên gói, UI vẫn để sau một toggle),
+  và **cache theo serial**, key là fingerprint của *tập* package đã sắp xếp — cài/xoá app là
+  đúng lúc phải đọc lại, và không có gì khác là.
+- **Helper cũ trên fleet là cái bẫy im lặng thật sự.** `pm path` chỉ nói *có cài hay không*,
+  nên 20 máy mang bản trước `appLabels` sẽ để tính năng mới chết lặng trong khi `/status` vẫn
+  trả lời vui vẻ. Nên `/status` khai báo **features**, và `upgrade_if_stale` cài lại **một lần
+  mỗi máy mỗi lần chạy** khi thiếu feature — best-effort, thất bại thì log và vẫn trả helper cũ
+  cho việc mà người gọi đang cần.
+- Nhãn cũng làm câu chú thích cũ thành **sai**: "Android không trả tên qua adb" đọc bên cạnh
+  "Zalo", "TikTok" thành ra panel không biết nó đang hiện gì. `installedAppsFootnote` nay có ba
+  trường hợp và im lặng khi mọi dòng đều có tên.
+- **Build APK không cần Gradle.** Máy này có SDK 34 + build-tools 34.0.0 + JDK 21 nhưng
+  **không có Gradle**, nên `build.ps1` thêm nhánh thứ hai: aapt2 compile/link → javac
+  (`-source 8 -target 8`, classpath là `android.jar`, **không** `--release 8` — nó ghim thư
+  viện của JDK và chặn mọi import `android.*`) → d8 → `jar uf` chèn `classes.dex` → zipalign
+  → apksigner (align **trước** khi ký: chữ ký v2 phủ cả file). Một cái bẫy: aapt2 đòi
+  `package` trên thẻ `<manifest>` còn AGP 8 lại **từ chối** manifest có cả `package` lẫn
+  `namespace`, nên script tự chèn vào một **bản copy**.
+- Nghiệm thu máy thật: `agentVersion 0.3.0`, features có `appLabels`; overlay và menu
+  chuột-phải đều hiện icon + tên thật (kakaopay, GoPay, Bitget, TeraBox, Shopee, WeChat,
+  Grok, Proton VPN…). APK ghim lại: **25 047 byte**, sha256
+  `a0b8ac276aea40c2e1aefa5864f17e0cc7d16db822eea06c15a869a8da9a1c31`, `verify-android-tools`
+  báo ok.
+
+### 9.90 "Ba dòng này không chạy" — cả ba đều chạy, và đó mới là vấn đề (21/08/2026)
+
+Người dùng báo **Cài APK / Đưa ảnh-video vào máy / Lấy ảnh-video từ máy** "chưa hoạt động".
+Đo trên máy thật: **cả ba đều chạy**. Bấm → hộp thoại native mở thật (kiểm bằng
+`driver.ps1 occlusion`: cửa sổ `Chọn ảnh hoặc video` / `Chọn APK` đứng trên app). Cái sai là
+những gì người vận hành **nhìn thấy**, và có ba lỗ riêng biệt:
+
+**1. Hộp thoại lỗi thì mất hút.** Mọi chỗ gọi đều viết
+`const p = await pickFile(...); if (!p) return; try { …việc trên máy… } catch { toast }` —
+tức là **lời gọi picker nằm NGOÀI try**. Dialog không mở được (plugin từ chối, thiếu quyền,
+OS lỗi) → promise bị reject mà không ai await → **không toast, không log, không gì**. Đúng
+hình dạng "bấm mà chẳng có gì xảy ra". Sửa ở gốc: `pickFile`/`pickFiles`/`pickDirectory`
+**không bao giờ throw nữa** — chúng toast lý do rồi trả `null`/`[]`, cùng một câu trả lời với
+"người dùng bấm Cancel" mà mọi call site đã xử lý. Huỷ thì vẫn im lặng. 5 test ghim.
+
+**2. Dòng bị xám mà không nói vì sao.** `disabled={busy}` im lặng, và một dòng không bấm được
+mà không giải thích thì đọc y hệt một dòng không làm gì. Nay panel có băng
+"Đang chạy một thao tác trên máy này…" ngay trên danh sách — một dòng, luôn đúng, giải thích
+mọi dòng xám. (`runBusy` vốn có toast "Máy đang bận", nhưng nút **disabled thì không bấm
+được**, nên toast đó không bao giờ tới.)
+
+**3. Và cái lớn nhất: "Lấy ảnh/video từ máy" lấy TOÀN BỘ thư viện.** Đo trên 23021RAAEG:
+`/sdcard/DCIM` có **761 tệp, 3,3 GB**. Nó chạy vài phút, không có tiến độ, không có nút dừng.
+Người vận hành bấm → xám → im → kết luận "không chạy". Toast trước khi chạy nay nói rõ *toàn
+bộ* và *vài GB*, và chỉ sang "Tệp trên máy…" cho người chỉ muốn vài tệp. **Tiến độ theo tệp
+vẫn chưa có** — muốn có phải đẩy event từ Rust, ghi lại đây để đừng ai phải phát hiện lại.
+
+**App List: đúng hình dạng xiaowei, và không còn read-only.** Panel overlay trước đây ẩn danh
+sách app sau một dòng bật/tắt, và tìm ra app rồi vẫn **không mở được nó**. Nay App List là một
+phần thường trực của cột (header + nút làm mới + lọc + toggle app hệ thống), mỗi dòng là icon
+thật + tên thật, **bấm là mở app** (`launchDeviceApp`). Nghiệm thu: bấm TeraBox → app mở trên
+máy thật. Layout: `.installed-apps.is-launchable { flex: 1 1 45% }` và
+`.focus-menu-list { flex: 1 1 55% }` — hai list chia nhau chiều cao cột; `flex: 1` cho một cái
+và pixel `max-height` cho cái kia là đúng cách bản cũ tự co về 0 (§9.57).
+
+**Một chi tiết của gate, không phải của sản phẩm:** `designTokens.test.ts` chặn màu literal
+theo *substring*, nên `#fff7ed` — một màu amber hoàn toàn mới — bị bắt vì chứa `#fff`. Dùng
+`--warn-soft`/`--warn-line`/`--warn` có sẵn.
+
+### 9.91 Hover mở submenu, một vùng cuộn, và `[object Object]` (21/08/2026)
+
+Ba yêu cầu của người dùng, và cái thứ ba làm lộ một lỗi thật.
+
+**1. Submenu mở khi hover, không cần bấm.** Trước đó submenu mở *tại chỗ* khi bấm, với lý do
+"flyout phải kẹp viewport ở mọi cấp". Kẹp thì vẫn phải làm — nhưng mở tại chỗ sai hai lần: nó
+**đẩy mọi dòng bên dưới** đúng lúc người ta đang đọc, và biến việc mở submenu thành một cú bấm
+trong khi sản phẩm gốc không cần cú nào. Nay: `onPointerEnter` mở một flyout cạnh dòng, chọn
+bên phải nếu còn chỗ (`window.innerWidth - rect.right >= 236`), không thì lật sang trái, và kẹp
+`top` để không tràn đáy. **Portal ra `document.body`** — panel overlay nằm trong một ancestor có
+`transform`, và `position: fixed` bên trong một cái như thế được định vị theo *nó* chứ không
+theo viewport (đúng cái bẫy tooltip đã ghi trong memory). Có **grace 180 ms** khi rời chuột: giữa
+dòng và flyout có vài pixel trống, đóng ngay lập tức là biến submenu thành thứ không tới được —
+lỗi kinh điển của menu hover. Bấm vẫn mở (bàn phím, cảm ứng).
+
+**2. Một vùng cuộn cho cả cột.** Bố cục cũ là hai hộp cuộn xếp nhau (danh sách chức năng
+`flex: 1` + App List `flex: 1 1 45%`), nên **con lăn làm việc khác nhau tuỳ con trỏ ở nửa nào**
+và người vận hành phải tìm đường nối. Nay `.focus-menu-scroll` bọc toàn bộ thân panel (chức
+năng + panel đang mở + App List), mọi con bên trong để chiều cao tự nhiên (`overflow: visible`),
+và một con lăn ở bất cứ đâu cuộn cùng một danh sách.
+
+**3. Trình quản lý tệp: thêm ô đường dẫn gõ tay — và `[object Object]`.** Lối tắt và breadcrumb
+chỉ tới được thứ đã ở trên màn hình; muốn xem `/data/local/tmp` thì không có đường nào. Nay có
+ô "Đường dẫn" (Enter để đi), thêm lối tắt `Android/data` và `Gốc /`. Đo trên 23021RAAEG:
+`/sdcard/Android/data` **đọc được**, `/data` và `/data/data` trả `Permission denied` — đó là
+policy của Android, không phải lỗi tool.
+
+Và đây là lỗi thật, chỉ chạy máy thật mới thấy: một thư mục bị từ chối hiện ra
+**`[object Object]`**. Lệnh Tauri reject bằng một *object* (`{code, message}`), nên
+`String(error)` cho ra đúng chuỗi vô dụng đó — trong khi `describeError` (đã có sẵn trong
+`toastStore`) biết đọc nó. Rất có thể đây chính là lý do của câu "nó phải truy cập được thư mục
+của máy chứ": người dùng gặp `[object Object]` và kết luận là không vào được. Đã sửa ở
+`DeviceFilesPopup`, `InstalledApps`, `DeviceFunctionList`, `AdbConsole`. **`String(error)` vẫn
+còn ~15 chỗ trong `SettingsPanel.tsx`** với cùng lỗi này — chưa sửa, ghi lại để đừng ai phải
+phát hiện lại. Test của popup nay dùng `describeError` **thật** (chỉ mock `pushToast`/
+`toastError`), vì mock nó đi là mở đường cho `[object Object]` quay lại mà không ai thấy.
+
+**Một test flaky đã ghim:** `FlowWorkspace` chờ nút "Chạy Flow" enable với timeout mặc định 1 s
+— nó pass khi chạy riêng và fail rải rác trong full suite (54 file render song song). Đã cho
+timeout tường minh 5 s: một gate flaky dạy người ta chạy lại thay vì đọc.
+
+**Và ngay sau đó, cùng một họ lỗi một tầng nữa: dải trắng dưới ảnh điện thoại.** Cho `.focus-menu`
+`max-height: calc(100vh - 24px)` chữa được chuyện panel đẩy navbar ra ngoài (§9.89), nhưng lại
+cho phép nó **cao hơn ảnh máy** — và `.focus-stage` là flex row `align-items: stretch`, nên
+stage giãn theo đứa cao nhất và chừa một dải trắng dưới khung ảnh. Chiều cao xác định nay lấy
+từ chính component: `style={{ height: frameWidth * aspect }}`, **đúng biểu thức mà khung ảnh
+dùng**, nên ảnh máy luôn là mốc và panel cuộn bên trong đúng chiều cao đó. `max-height` giữ lại
+làm trần cho lúc zoom rất lớn — khi đó ảnh mới là đứa cao hơn, và không có dải trắng theo chiều
+nào. Ba lần sửa cùng một chỗ, cùng một nguyên nhân: **một cột flex chỉ tự cuộn được khi chiều
+cao của nó là xác định**, và "xác định" phải đến từ thứ định nghĩa layout — ở đây là khung ảnh.
+
+### 9.92 Một danh sách, và cái `max-height` cắt mất App List (21/08/2026)
+
+**Bỏ nhãn "CHỨC NĂNG KHÁC", ô tìm lên đầu, một danh sách duy nhất.** Panel overlay từng có hai
+nhóm: dòng của riêng nó, rồi nhãn "Chức năng khác" và danh mục dùng chung có ô tìm riêng. Cái
+nhãn đó chỉ dạy người vận hành **một chức năng nằm ở nửa nào** — và ô tìm chỉ lọc được nửa dưới.
+Nay `menuRows` của panel được khai báo thẳng là `DeviceMenuNode[]` và nối với danh mục
+(`panelNodes = [...menuRows, ...overlayFunctions]`), tất cả do **một** `DeviceFunctionList` vẽ:
+một ô tìm `position: sticky` ở đầu (lọc *mọi* dòng), một cổng nền tảng, không nhãn phân nhóm.
+
+`panelNodes` **không memo hoá**, và đó là cố ý: `menuRows` được dựng lại mỗi lần render theo
+thiết kế (nhãn của nó đọc `busy`, `showDevices`, `showPhrases`), nên memo theo bất cứ thứ gì
+nhỏ hơn chính mảng đó sẽ trả về **dòng cũ**, còn memo theo chính mảng thì không bao giờ hit.
+
+**`role="menuitem"` chỉ đúng khi có `role="menu"` bao ngoài.** Gộp danh sách làm mọi dòng của
+panel thành `menuitem` — nhưng panel là một `<aside>`, và một `menuitem` không nằm trong `menu`
+là ARIA sai, đọc còn tệ hơn cái `button` mà nó thực sự là. Nay có prop `menuSemantics`: menu
+chuột-phải bật (container của nó có `role="menu"`), panel tắt; dòng trong flyout **luôn** là
+`menuitem` vì flyout tự nó là một menu. Đây cũng là lý do 5 test của overlay đỏ cùng lúc — chúng
+tìm `role="button"`, thứ mà `role="menuitem"` ghi đè.
+
+**App List bị cắt ở 340 px và không lăn được — nguyên nhân nằm trong CSS gốc.** Quy tắc
+`.installed-apps` (viết cho bố cục panel-bật-tắt cũ) có `max-height: 340px` **và**
+`overflow: hidden`; bản `.is-launchable` của tôi không reset hai thứ đó, nên trong vùng cuộn
+duy nhất của panel các dòng app bị **cắt cụt** mà không có cách nào tới phần còn lại. Sửa:
+`max-height: none; overflow: visible;` và `gap: 0` (0.4rem giữa header/ô lọc/chú thích của quy
+tắc gốc chính là "khoảng trắng quá nhiều" trong một cột 220 px).
+
+**Chú thích của App List từng đổ lỗi cho máy.** Trên một máy fleet nó ghi "241 app máy không trả
+tên" — nhưng 241 cái đó là **phân vùng hệ thống mà driver cố ý không hỏi tên** (4,5 s cho 539
+gói so với 3,6 s cho 162 gói người dùng thật sự mở). Nay khi mọi dòng không tên đều là system,
+câu đó nói đúng chuyện: "chưa đọc tên (để không mất thêm ~4,5 s mỗi máy)".
+
+**Và ngưỡng test là ngưỡng *tải*, không phải hành vi.** `waitFor` mặc định 1 s và `testTimeout`
+mặc định 5 s — trên máy này (app + 20 máy đang stream + suite 54 file song song) ba file khác
+nhau đỏ trong ba lần chạy liên tiếp, mỗi cái đều xanh khi chạy riêng. Nâng `asyncUtilTimeout`
+lên 5 s (`src/test/setup.ts`) rồi phát hiện ngay bẫy thứ hai: nó **bằng đúng** `testTimeout`,
+nên một `waitFor` chậm ăn hết ngân sách của cả test và lỗi hiện ra là "test timed out" chứ
+không phải là tải. Nâng `testTimeout` lên 20 s (`vite.config.ts`). Sau đó 444/444 xanh ba lần
+liên tiếp. Nâng ngưỡng không tốn gì khi assertion sẽ đúng (`waitFor` poll và trả về ngay), chỉ
+làm chậm một lỗi thật — còn một gate flaky thì dạy người ta chạy lại thay vì đọc.
+
+### 9.93 Một nhãn bị hỏi "là sao?", và màu xanh trong một sản phẩm màu cam (21/08/2026)
+
+**"Đặt làm trung tâm điều khiển là sao?"** — chính câu hỏi đó là câu trả lời: một nhãn đặt tên
+cho một **khái niệm do sản phẩm tự nghĩ ra** thì không giải thích được gì. Việc nó làm là chọn
+xem overlay điều khiển máy nào khi **Sync đang bật**: mở tile nào cũng ra màn hình của máy đó,
+và mọi máy đã chọn làm theo thao tác trên đó (`focusDevice` ở `App.tsx`). Nếu Sync tắt thì nó
+**không có tác dụng gì**.
+
+Nay nhãn nói đúng việc: "Đặt làm máy chính khi bật Sync". Và vì một dòng menu không có chỗ cho
+lời giải thích, toast nói phần còn lại **đúng lúc có thể hành động**: bấm khi Sync đang tắt thì
+nó nói ra rằng đang tắt và bật ở đâu. Nhãn trên tile đổi từ "Trung tâm" sang "Máy chính", với
+`title` mang cả câu. Bài học chung: **đặt tên theo việc nó làm, không theo khái niệm mình vừa
+phát minh** — nếu nhãn cần một trang tài liệu thì nó là nhãn sai.
+
+**Màu xanh trong một sản phẩm màu cam đọc thành hai thương hiệu.** Người dùng yêu cầu đúng chữ:
+"UI hiện tại lại có màu xanh ở nhiều chỗ, chuyển qua màu cam". Nguồn lớn nhất là **token**:
+`--link: #2b6cb0` — được đặt với lý do "cam đọc như một cái nút trong chữ chạy" — nay trỏ vào
+`--primary-deep`, nên bảy chỗ dùng `var(--link)` (hover của mọi dòng menu, dòng đang chọn, link
+trong văn bản) đổi theo cùng lúc. `--bg-content` từ `#f8faff` sang `--primary-50`.
+
+Còn lại là literal, và chúng là những chỗ **nhấn** chứ không phải chữ/viền trung tính: viền
+khung overlay `#7aa7d9`, header panel `#dce6f5`/`#c5d4e8`, hover `#f3f6fb`/`#eaf1fb`, dòng đang
+chọn `#eff6ff`, viền tile đã chọn + khung kéo-chọn + `accent-color` của checkbox `#5671ff`, chip
+USB/WIFI trên tile `#2f6fed`, banner info `#d6e4f5`/`#f2f7fd`/`#2f5d8a` — tất cả sang token cam.
+**Cố ý KHÔNG đổi:** dãy xám-slate (`#94a3b8`, `#64748b`, `#334155`…) và hai màu xanh lá của
+trạng thái ok. Chúng đọc là trung tính/ngữ nghĩa, không phải "xanh", và nhuộm cam cả chữ phụ
+thì mất đúng cái tương phản mà một màu nhấn cần có. Cách tìm cho lần sau: liệt kê mọi literal
+rồi lọc `b - r >= 25` — nó tách "xanh thật" khỏi "xám hơi lạnh" mà mắt không làm nổi.
+
+`designTokens.test.ts` vẫn xanh: thay literal bằng token chỉ **giảm** số màu một-lần.
+
+**Kéo khung chọn máy thì bôi đen luôn chữ trong tile** (21/08/2026, người dùng báo kèm ảnh:
+số tile, model và "Android 9" xanh lè). Đó là text-selection mặc định của trình duyệt chạy dưới
+cú kéo. Sửa hai đầu: `event.preventDefault()` ở `onCanvasMouseDown` (chặn cho cả cú kéo) và
+`user-select: none` trên `.dev-phone` (chặn cả cú kéo bắt đầu *bên trong* một tile). Không mất
+gì: caption chỉ có hai dữ kiện và cả hai copy được từ menu của tile ("Sao chép ID máy").
+
+**Và trong lúc nghiệm thu cú kéo đó, phát hiện một lỗi nặng hơn nhiều: mỗi máy vào danh sách
+chọn HAI lần.** Dấu hiệu là hai con số cho cùng một thứ — kéo khung qua ba tile thì toolbar ghi
+`(3)` còn sidebar ghi `Đã chọn 6`; lần trước là 9 và 18. Đúng tỉ lệ 2:1, và đó là chỉ dẫn.
+Nguyên nhân: `querySelectorAll("[data-udid]")` — một tile mang thuộc tính đó trên **ba** phần tử
+(`<article>` của `DeviceTile`, host div của `PhoneCanvas`, và `<canvas>` khi đã có stream), nên
+một tile trả về hai-ba udid giống nhau. Sidebar đọc `selected.length` (có trùng), toolbar đọc
+`devices.filter(...)` (không trùng) — nên hai số vênh nhau, và **con số vênh chỉ là nửa nhìn
+thấy được**: `selected` là `udids` truyền vào `group_input`, nên mọi thao tác nhóm sẽ được gửi
+tới cùng một máy **hai lần** — một cú tap thành hai, một phím thành hai, một chuỗi chữ gõ hai
+lần. Sửa: selector thành `.dev-phone[data-udid]` (đúng gốc), **và** `tilesInBox` tự loại trùng +
+bỏ udid rỗng (không thể bị hỏng lại khi có phần tử mới mang thuộc tính đó). 3 test ghim.
+
+Bài học đáng ghi: **hai chỗ hiển thị cùng một con số là một máy dò lỗi miễn phí.** Nếu chúng
+vênh nhau theo một tỉ lệ tròn, đừng đi "sửa cái đếm" — tỉ lệ đó đang chỉ vào nguyên nhân.
+
+**"Quét chọn từ dưới lên thì không quét được" — và nguyên nhân cũng là của Ctrl+lăn chuột.**
+`.window-canvas` chỉ cao bằng đúng các tile của nó, nên **vùng trống dưới lưới thuộc về phần tử
+cha** — mà cả hai cử chỉ của lưới đều gắn vào canvas. Bắt đầu kéo khung ở dưới đó thì rơi vào
+`event.target !== event.currentTarget` và **không bao giờ khởi động**, còn Ctrl+lăn ở dưới đó thì
+cuộn trang thay vì zoom. Đo được: kéo từ (400,800) chọn **0 máy**, cùng cú kéo bắt đầu trong
+vùng tile chọn **9 máy**. Sửa: `.window-canvas { flex: 1 1 auto; min-height: 0 }` để nó chiếm
+hết phần còn lại của `.content`. Hướng kéo chưa bao giờ là vấn đề — `normalizeBox` xử lý cả bốn
+chiều — vấn đề là **điểm bắt đầu**; "từ dưới lên" chỉ là cách gặp nó.
+
+Kèm một tác dụng phụ phải sửa ngay: `align-content` mặc định là `stretch`, nên khoảnh khắc
+canvas cao hơn các tile thì các **hàng đã wrap giãn ra** để lấp chỗ và một khe hở mở ra giữa
+hàng một và hàng hai. `align-items: flex-start` có sẵn không cứu được vì nó là trục khác. Thêm
+`align-content: flex-start`.
+
+**Bỏ thanh trượt "Cỡ", giữ Ctrl+lăn chuột** (theo yêu cầu). Thanh trượt từng được thêm *vì*
+cử chỉ cần giữ Ctrl nên không có gì trên màn hình nói rằng cỡ đổi được — nay câu đó chuyển vào
+`title` của chính lưới ("Ctrl + lăn chuột để phóng to / thu nhỏ · kéo chuột để quét chọn máy"),
+đúng cách overlay đã làm với khung ảnh của nó. Cử chỉ không đổi: cùng `TILE_ZOOM`, cùng clamp,
+cùng khoá localStorage. `FilterToolbar` mất hai prop và có một test **ghim rằng không còn
+`input[type=range]`**, để không ai đặt lại theo phản xạ. `driver.ps1` thêm `ctrlscroll` — SendKeys
+không giữ được modifier *xuyên qua* một mouse event, nên phải `keybd_event` nhấn/nhả Ctrl quanh
+nốt lăn.
+
+**Bỏ ô tick ở góc tile** (21/08/2026, theo yêu cầu). Nó không mất chức năng nào: bấm tile là
+chọn (Ctrl/Shift/Cmd để cộng thêm), kéo khung là chọn nhiều (A7), Ctrl+A lấy cả tab, nháy đúp
+mở overlay — ô tick 15 px nằm trên một khung video đang chạy chỉ làm **đúng việc mà bấm vào
+khung đã làm**, tức thêm một thứ để nhắm và một thứ để bấm nhầm. Trạng thái chọn vẫn thấy được:
+viền cam của chính tile. Cùng lý do với cái nút mở-rộng đã bỏ trước đó.
+
 ### 9.87 Chay that tren 20 may bat duoc hai loi khong test nao bat duoc (17/08/2026)
 
 Mở app thật trên dàn 20 máy, sau khi 27 lỗi đã sửa và mọi gate đều xanh. Hai lỗi lộ ra, và
@@ -7032,3 +7383,234 @@ Suy đoán ban đầu của tôi — `model: "deepseek-v4-flash"` không phải 
 **Ghi thêm, không liên quan tới H6-d:** `apiKey` của AI nằm **plaintext** trong bảng `settings`
 (`nurture.settings` là một chuỗi JSON). Không phải lỗi do đợt này gây ra, và không nằm trong
 phạm vi đã thống nhất — ghi lại để đừng ai phải phát hiện lại.
+
+### 9.94 Bốn thanh kéo chia nhau một trăm phần trăm (21/08/2026)
+
+> Hai quyết định trong mục này bị **§9.95 (cùng ngày) sửa lại**: thang đo của thanh kéo
+> (không còn `Math.max(percent, ceiling)`) và con số 103% của cấu hình trên fleet.
+
+Yêu cầu, nguyên văn: *"Thêm 1 cái thanh kéo, ở 4 dòng 4 cái kéo, tất cả chung 100% 1 nếu 1 thanh
+chỉ có 90% thì 3 thanh kia chia đều 3% 1 thanh sẽ kéo được 4%"*. Đó là một luật số học rất gọn —
+**một tỉ lệ được phép lên tới đúng phần mà ba tỉ lệ kia để trống** — nên nó đi vào một module
+thuần (`apps/desktop/src/nurtureBudget.ts`, 11 test), không nằm rải trong `onChange` của bốn dòng.
+
+**Phải nói ra một điều trước khi nói nó chạy được: trong engine bốn con số này KHÔNG chia nhau
+cái gì.** `likeProb`/`commentProb`/`followProb`/`frenzyProb` là bốn con xúc xắc **độc lập** tung
+trên mỗi bài — "bao nhiêu phần bài được tim", "bao nhiêu phần bài được follow tác giả" — nên
+100 + 28 + 3 + 0 = 131 trước nay là một cấu hình hợp lệ và có nghĩa. Ngân sách chung là một
+**cách cấu hình chặt hơn**, không phải một thay đổi trong engine (Rust không bị chạm một dòng).
+Hệ quả bắt buộc phải chấp nhận: **cấu hình đang lưu mà cộng lại vượt 100 thì phải kéo xuống mới
+lưu lại được.** Đo trên máy người dùng lúc nghiệm thu: cấu hình đang lưu là 100/0/3/0 = **103%**,
+nên việc đầu tiên panel làm là nói ra con số đó.
+
+Bốn quyết định, mỗi cái đều là một lỗi nếu làm ngược:
+
+- **Kẹp, không chia lại.** Kéo Thích lên quá phần trống thì Thích dừng ở trần, **không** trừ của
+  Bình luận. Một ngân sách tự cân lại sau lưng người dùng sẽ phá đúng những con số họ vừa tinh
+  chỉnh — và cảm giác của nó là "máy bị ma nhập" chứ không phải "máy giúp mình".
+- **Trần của một tỉ lệ có tính chính nó.** `budgetCeiling` trừ ba cái *kia*, không trừ cả bốn.
+  Nếu không, mọi thanh kéo mở ra là đã nằm ngoài khoảng của chính nó.
+- **`max` của thanh kéo là `Math.max(percent, ceiling)`.** `<input type="range">` vẽ một giá trị
+  vượt `max` **tại** `max`, nên với cấu hình 103 thì con trượt sẽ nằm ở 3 trong khi ô số ghi 100 —
+  một cái điều khiển nói dối về giá trị của chính nó. Cho `max` nới ra tới vị trí hiện tại chỉ mở
+  thêm đúng một chiều: **kéo xuống**, mà đó là chiều cấu hình quá hạn đang cần.
+- **Làm tròn xuống số nguyên.** Engine nhận số nguyên; một thanh kéo báo 3.5 là báo một con số
+  backend sẽ tự làm tròn sau lưng người dùng.
+
+Và một đường thoát, cho đúng một tình huống người dùng **không** tự thoát được bằng thanh kéo:
+cấu hình đã vượt hạn thì mọi trần đều bằng 0, mọi thanh kéo đứng im, panel thành ngõ cụt.
+`fitToBudget` trừ dần **từ tỉ lệ lớn nhất** (103 của 100/0/3/0 thành 97/0/3/0) để giữ hình dạng
+những con số nhỏ đã tinh chỉnh, và nó nằm sau một câu hỏi (`đưa về 100%`) chứ **không** tự chạy
+lúc load — sửa lặng lẽ cấu hình của người khác tệ hơn hỏi một câu.
+
+Chỗ lưu: **một phép kiểm tra thay hai.** Trước đây có `Thích + Bình luận > 100` và
+`Follow/vuốt nhanh phải 0..100` — cả hai cùng **đúng** trên một cấu hình cộng lại 131, đó là lý
+do 131 lưu được. Nay là `isOverBudget(s)` trên cả bốn, và thông báo nói ra đang là bao nhiêu.
+
+**Đo trên 20 máy thật** (`target/run-skill/93..96`): mở panel ra thấy `Đang dùng 103% / 100%` màu
+đỏ kèm hộp cảnh báo; bấm `đưa về 100%` → Thích 100 thành **97**, Bình luận 0 và Follow 3 giữ
+nguyên, đầu mục đổi thành `Còn 0% / 100%`; kéo Thích xuống **48** thì đầu mục thành `Còn 49%` và
+thanh của Follow tự dài ra (3 trên trần 52, không còn 3 trên trần 3); kéo Bình luận **sang tận
+cùng bên phải** thì nó dừng ở **49** — không phải 100 — còn Thích vẫn 48, Follow vẫn 3, Vuốt nhanh
+vẫn 0. Đóng panel **không** bấm Lưu, nên cấu hình 103 của người dùng còn nguyên: chọn con số nào
+là việc của họ.
+
+Hai cái bẫy trong lúc sửa, đáng ghi vì cả hai đều **im lặng**:
+
+- **Một `assert` cho hai lần `replace` thì lần thứ hai hụt cũng vẫn "thành công".** Script python
+  đầu tiên thay import *và* thân `FeatureRow`, chỉ kiểm `s != before` ở cuối — import khớp nên
+  assert xanh, thân hàm không khớp và không ai biết, cho tới khi `tsc` hỏi `ceiling` ở đâu. Mỗi
+  lần thay một assert riêng.
+- **`NurturePopup.tsx` là CRLF trong working tree** (`core.autocrlf=true`), nên một lần sửa bằng
+  python với `newline=""` đã chèn 10 dòng LF trơ vào giữa file. Anchor tiếp theo hết khớp và thông
+  báo lỗi không hé một chữ nào về xuống dòng. Đọc bằng `newline=None`, ghi lại bằng
+  `newline="\r\n"`. (Ngược lại, `AGENTS.md` là **thuần LF** — xem §4525.)
+
+CSS: `.nu-feature-ranged` là **cột thứ tư** của riêng bốn dòng đó, vì dòng "Vuốt ngang" của Bài
+ảnh dùng lại `.nu-feature` với ba con và phải giữ ba. `.nu-budget` mang `order: 1` để ngồi ở đầu
+phải của đường kẻ nhóm thay vì chen vào cạnh tiêu đề. Không có literal màu mới:
+`accent-color: var(--primary)`, cảnh báo dùng dãy `--danger-*`.
+
+### 9.95 Thanh kéo đổi thang đo, và một công tắc tắt vẫn bị thu tiền (21/08/2026)
+
+Hai câu của người dùng, và câu thứ hai **sửa lại một con số trong §9.94**.
+
+**"Khi kéo thanh thứ 2 thì thanh 1 cũng bị kéo theo, % thì tính đúng rồi."** Đúng, và chẩn đoán
+nằm ngay trong nửa sau của câu: **con số không sai, cái điều khiển mới sai.** `max` của mỗi range
+là trần của dòng đó, nên trần đổi là **thang đo đổi**: Follow ở 3 trên thang 0..3 thì con trượt
+nằm sát phải; kéo Thích xuống nhả ra 49 điểm thì thang thành 0..52 và con trượt **tự trôi sang
+trái** trong khi 3 vẫn là 3. Một cái điều khiển tự di chuyển đang nói dối về việc người dùng vừa
+sửa dòng nào.
+
+Sửa: **cả bốn thanh chạy 0..100, luôn luôn.** Trần không còn là `max` nữa; nó được **vẽ** trên
+đường ray (cam đậm = đang dùng, cam nhạt = còn kéo được, xám = ba dòng kia đã lấy) và được
+**giữ** bằng `clampToBudget` trong `onChange` như trước. Kéo quá trần thì con trượt dựng lại ở
+trần trong khi con chuột đi tiếp — cảm giác đúng của một bức tường, và §9.94's lý do cho
+`Math.max(percent, ceiling)` biến mất cùng lúc: thang cố định thì một giá trị 100 không bao giờ
+nằm ngoài khoảng của chính nó. Thang cố định còn cho một thứ mà thang riêng không thể có:
+**48% ở dòng nào cũng cùng một khoảng cách** — điều kiện cần để bốn thanh đọc thành bốn phần
+của một thứ.
+
+Hai chi tiết hình học phải đo, không đoán: (1) đường ray phải tự vẽ bằng `linear-gradient` trên
+`::-webkit-slider-runnable-track`, vì hễ style track thì `accent-color` thôi tô phần đã chạy;
+(2) mốc **fill** phải thụt vào nửa con trượt (`thumb/2 + (100% - thumb) * fill`) vì thumb chỉ chạy
+trong khoảng đó — không thụt thì ranh giới màu lệch khỏi tâm thumb tới 7px ở hai đầu. Mốc **trần**
+thì **không** thụt: thụt vào, trần 100 rơi ở `100% - thumb/2` và để lại 7px xám ở cuối đường ray
+— 7px nói "ba dòng kia đang chiếm" trong khi chúng chiếm 0. Giữa dải, hai công thức lệch nhau
+dưới một pixel; nên hai đầu đúng thắng.
+
+**"Chức năng được chủ động tắt thì sao?"** — đây là một lỗ thật, và câu trả lời không phải là
+lựa chọn thiết kế: **engine đã trả lời rồi.** `NurtureSettings::into_effective`
+(`crates/core/src/types.rs`) gán `like_prob = 0` khi `like_enabled` false, và vòng lặp **chỉ bao
+giờ thấy bản đã gán đó**. Nên một tỉ lệ đang tắt sinh ra đúng 0 hành động, và một ngân sách thu
+tiền của nó là thu tiền cho những bài **chắc chắn không xảy ra**. Nay `budgetUsed` chỉ cộng các
+dòng đang bật; tắt một dòng là **trả phần trăm của nó lại** cho ba dòng kia ngay lập tức.
+
+**Và đây là chỗ nó sửa §9.94:** cấu hình trên fleet không phải "103% vượt hạn". Nó là
+100/0/3/0 **với Follow đang tắt**, nên nó tiêu đúng **100** và **lưu được y nguyên** — cái 3 kia
+thuộc về một tính năng người dùng đã tắt. Con số 103 trong §9.94 là con số của một luật mù công
+tắc, và chính câu hỏi của người dùng đã tìm ra nó. Bài học: **một quy tắc mới phải được thử với
+mọi công tắc mà hệ thống đã có**, không chỉ với các con số nó nhắm vào.
+
+Ba quyết định kèm theo, mỗi cái là một lỗi nếu làm ngược:
+
+- **Dòng đang tắt KHÔNG bị kẹp theo trần** (chỉ 0..100). Nó không tiêu gì thì không có gì để kẹp
+  nó vào; và kẹp nó sẽ phá đúng lời hứa của cái công tắc — *tắt để giữ số, chỉnh sau*. Đo được
+  trường hợp tệ nhất: ba dòng kia tiêu hết 100 thì dòng đang tắt sẽ bị đóng băng ở 0, tức là số
+  người dùng đang bảo vệ bị lấy mất.
+- **Bật lại mà không vừa thì panel nói ra, KHÔNG tự cắt dòng vừa bật.** Người dùng chỉ yêu cầu
+  "bật cái này"; cắt số của chính dòng đó là panel sửa một con số đã tinh chỉnh sau lưng họ.
+  Cảnh báo + nút `đưa về 100%` đã có sẵn cho đúng tình huống này (câu chữ đổi thành "các tỉ lệ
+  đang bật", vì nay nó có hai đường vào chứ không chỉ cấu hình cũ).
+- **`fitToBudget` không cắt dòng đang tắt** — cắt nó thì mất một con số mà **không** giải phóng
+  nổi một phần trăm nào.
+
+Kèm một lỗ cùng họ, tìm ra khi đi tìm mọi chỗ đọc `commentProb` mà không đọc công tắc: phép kiểm
+tra lúc lưu `commentProb > 0 && !apiKey` **từ chối lưu** vì thiếu API key cho một tính năng đang
+tắt — tức là chặn cả một lần lưu vì một tính năng chắc chắn không chạy. Nay có
+`isRateEnabled(s, "commentProb")` phía trước.
+
+**`designTokens.test.ts` đỏ, và nó đỏ đúng.** Nó đòi mọi `var(--x)` trong App.css phải được khai
+báo trong index.css; thanh kéo có bốn custom property **cục bộ** của riêng nó (`--nu-thumb`,
+`--nu-track`, hai mốc `calc`) cộng hai cái **đến từ inline style** (`--fill`, `--ceil`) mà không
+stylesheet nào thấy được. Không hạ ngưỡng: đổi lại phát biểu cho đúng thứ cần bảo vệ — **không
+`var()` nào được resolve thành rỗng**. Hợp lệ nếu (a) khai báo trong index.css, (b) khai báo cục
+bộ trong App.css, hoặc (c) có **fallback** trong chính `var()`. Lỗi gốc mà test này sinh ra để
+bắt (`var(--surface-2)` dùng một lần, khai báo không đâu, không fallback) vẫn bị bắt.
+
+**Đo trên fleet 20 máy** (`target/run-skill/100..104`): mở ra thấy `Còn 0% / 100%` và **không có
+cảnh báo** (Thích 100 một mình tiêu hết, Follow 3 đang tắt không tính); kéo Thích xuống **49** →
+`Còn 51%`, và con trượt của Follow **không nhích một pixel** (trước bản sửa nó nhảy từ sát phải
+sang gần trái); bật Follow lên → `Còn 48%`, dòng Follow chuyển cam, **vẫn không con trượt nào di
+chuyển**; đường ray của Thích hết vệt xám 7px ở cuối. Đóng panel không Lưu (vùng panel còn đúng
+một màu nền) nên cấu hình trên máy còn nguyên.
+
+Gate: frontend 473 test / 55 file xanh, `tsc -b` + `vite build` + oxlint sạch. Rust không chạm.
+
+### 9.96 `[object Object]` ở 47 chỗ, và ba lỗi mà chỉ e2e nhìn thấy (21/08/2026)
+
+**Một hàm, 47 lời gọi, sáu bản tự viết lại.** Mọi lệnh Tauri trong app này reject bằng một
+**object** `{ code, message }`, nên `String(error)` cho ra đúng chữ `[object Object]` — và nó
+**im lặng**: không có gì throw, chỉ là chỗ đáng ra ghi "Permission denied" thì ghi một câu vô
+nghĩa. §9.91 sửa 4 file thiết bị và ghi lại rằng còn ~15 chỗ trong `SettingsPanel.tsx`. Đo lại
+hôm nay: **47 chỗ** trên 11 file (Settings 14, FarmPages 9, InteractionPopup 7, NurturePopup 5,
+liveDrag 4, App 4, Flow 2 bản tự viết, JobsPanel/GroupTools/validation 1 mỗi).
+
+> **Sửa ngày 22/08 — đợt quét này CHƯA XONG, mà mục dưới đây đã tuyên bố là xong.** Nó grep
+> `String(error)`, `String(e)`, `String(err)` — tức là **grep theo tên biến**, nên bỏ sót ba
+> chỗ đặt tên `reason`, và cả ba là `[object Object]` **thật**:
+> `FlowJsonDialog.tsx:60` bắt `flowValidate` (`flow_commands.rs:69` trả
+> `Result<_, **Vec**<CommandError>>` — `String` một *mảng* object), `FlowJsonDialog.tsx:72` bắt
+> `flowExport`, `FlowImportDialog.tsx:33` bắt `flowImportLegacy`. Cả ba file không có test.
+> **Nguyên tắc để lại: quét một lớp lỗi thì phải quét theo *hình dạng lời gọi*, không theo tên
+> biến người ta đã đặt** — ở đây là `String(` ôm một binding của `catch`, và vì oxlint 1.77
+> **không có** `no-restricted-syntax` (đã kiểm schema), thứ chặn được nó là một convention
+> test đọc source, đúng khuôn `designTokens.test.ts`.
+
+Đáng ghi là **phân loại** chứ không phải số lượng, vì không phải chỗ nào cũng là lỗi:
+
+- **Lệnh trả `Result<_, CommandError>`** (**93** lệnh) reject bằng object → `String` sai. Đây là
+  lỗi. Nặng nhất: `interaction_start_thread` — mọi lần nó từ chối (kể cả
+  `require_parent_locator`, thứ chặn cả chuỗi trả lời, xem §9.85) đều hiện `[object Object]`.
+- **Lệnh trả `Result<_, String>`** (**57** lệnh) reject bằng chuỗi → `String` **đúng**.
+  `update_check`, `nurture_test_api` thuộc nhóm này; đổi sang `describeError` không sửa gì, chỉ
+  để một hàm. Còn **15** lệnh nữa không thuộc hai nhóm (infallible, hoặc
+  `Result<_, Vec<CommandError>>`) — tổng **165**.
+- **`FlowInspector.tsx` / `FlowWorkspace.tsx`** đã tự đọc `.code`/`.message` trước rồi mới
+  `String` — **không phải lỗi**, chỉ là hai bản tự viết lại của cùng một hàm. Gộp lại vì hai bản
+  song song là chỗ để lệch nhau sau này, không phải vì chúng báo sai.
+
+> **Sửa ngày 22/08 — hai con số trên đây từng ghi sai là 96/43.** Regex đếm
+> (`Result<[^>]*, String>`) không đi qua được generic lồng như `Result<Vec<DeviceInfo>, String>`,
+> nên nó **đếm thiếu 14 lệnh** đúng vào nhóm cần sửa. Bài học nhỏ mà đắt: **một regex đếm
+> bằng `[^>]*` thì không đếm được kiểu Rust** — phải tách theo `#[tauri::command]` rồi đọc cả
+> chữ ký, như `commands_in()` ở `lib.rs:428` vẫn làm.
+
+`describeError` chuyển ra module riêng `src/describeError.ts`, `toastStore` **re-export** (19 file
+đang import từ đó). Lý do tách: `liveDrag.ts` và `flow/validation.ts` là module thuần — chúng cần
+một dòng chữ, không cần import một store React để có nó. 6 test mới ghim đúng cái bug: hình
+`{code, message}`, payload lạ (phải ra JSON, **không** bao giờ ra `[object Object]`), payload
+cyclic (`JSON.stringify` throw → phải không throw, vì throw trong handler lỗi sẽ thay lỗi của
+người dùng bằng lỗi khác), và `message: ""` (chuỗi rỗng là một message về mặt kỹ thuật và vô dụng
+về mặt con người).
+
+**Rồi e2e tìm ra ba thứ mà 479 unit test không thấy** — nó đang ở 15/18:
+
+1. **Hai spec Flow đỏ vì cái checkbox đã bị xoá theo yêu cầu** (§9.93). Helper `openFlow` vẫn
+   `getByRole("checkbox").check()` trên tile, nên nó **timeout 30 s** chờ một phần tử không còn
+   tồn tại. Đây là lỗi *của test*, do một thay đổi sản phẩm cố ý — và nó nằm đó im lặng vì thay
+   đổi xoá checkbox chưa bao giờ được commit lên CI. Sửa: Ctrl-click chính tile (đường chọn thật,
+   `onSelect` trong `App.tsx`), kèm một assert `.selected` có 2 để lần sau nó **nói ra** là
+   "không chọn được máy" chứ không phải "không tìm thấy checkbox".
+2. **Snapshot trang Cài đặt "trôi"** — và nó không trôi, nó đang ghim một **thông báo lỗi**.
+   `tauriMock` thiếu handler cho 5 lệnh trang Settings gọi lúc mount (`agent_get_settings`,
+   `agent_list_statuses`, `local_api_get_config`, `get_apple_id`, `driver_mode`), mà registry của
+   mock cố ý throw `Unknown mock command` cho lệnh chưa khai. Năm lệnh **đua nhau**, nên *cái tên
+   nào* rơi vào băng đỏ thay đổi giữa các lần chạy → baseline pin một dòng chữ khác nhau mỗi lần.
+   Đó chính là "pre-existing Settings drift" repo mang theo mấy phiên nay: **không phải đổi giao
+   diện, mà là một fixture chưa làm xong.** Khai đủ 5 lệnh (+ 4 lệnh nút bấm) rồi refresh
+   baseline: trang nay hiện nội dung thật (artifact, protocol, hai máy `Sẵn sàng` với build).
+3. Sau hai cái trên: **18/18 xanh**, lần đầu.
+
+> **Sửa ngày 22/08 — bài học đầu tiên của mục này từng ghi là "một gate không chạy không phải
+> là một gate", với lý do `npm run test:e2e` không nằm trong CI. SAI.** Nó nằm ở
+> `.github/workflows/desktop-ci-cd.yml:143` (`playwright install --with-deps chromium`) và
+> `:147`, **trong bản đã commit**, từ `cb4a8e3` (08/08).
+>
+> Nguyên nhân thật thì đo được và khác hẳn: lúc viết mục này, `git status` = **119 file chưa
+> commit** (79 sửa + 40 mới, gồm cả module production mới như `local_api.rs`, `peripherals.rs`,
+> `GroupToolsPopup.tsx` 1.436 dòng) và **90 commit chưa push**, commit gần nhất 19/08. Gate rất
+> tốt, **có** e2e, và mọi action đều ghim theo SHA — ba ngày công việc chỉ là **chưa bao giờ tới
+> được nó**.
+>
+> Bài học đúng, và nó nặng hơn cái sai: **một gate chỉ bảo vệ thứ đã đi qua nó.** Trước khi kết
+> luận "gate thiếu", chạy `git status` — vì "CI không có cửa này" và "việc chưa tới CI" nhìn
+> từ trong máy dev thì **giống hệt nhau**, mà cách sửa thì ngược nhau hoàn toàn.
+
+Bài học thứ hai vẫn đúng: **một snapshot chụp được cả thông báo lỗi thì nó ghim lỗi làm chuẩn**
+— nhìn `-actual.png` trước khi `--update-snapshots`, đừng bao giờ chấp nhận mù. Và: hai trong
+ba lỗi trên do chính những thay đổi đã được nghiệm thu bằng mắt trên máy thật, tức là **nghiệm
+thu thủ công không thay được suite.**
+
+Gate: frontend 479 test / 56 file, e2e **18/18**, `tsc -b` + `vite build` + oxlint sạch. Rust
+không chạm.
