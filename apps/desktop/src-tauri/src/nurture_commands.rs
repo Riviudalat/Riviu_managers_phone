@@ -9,7 +9,6 @@ use riviu_core::{
     NurtureSettings,
 };
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::command_error::CommandError;
@@ -223,9 +222,14 @@ pub async fn nurture_test_api(
         .split('|')
         .map(str::trim)
         .find(|value| !value.is_empty());
-    let (result, evidence_mode) = prepare_comment_for_frames(&settings, &frames, direction)
-        .await
-        .map_err(err)?;
+    let (result, evidence_mode) = riviu_core::openai_client::prepare_comment_for_frames(
+        &settings,
+        &frames,
+        direction,
+        &crate::interaction_ocr::DesktopFrameTextSource,
+    )
+    .await
+    .map_err(err)?;
 
     Ok(NurtureApiTestResult {
         udid,
@@ -244,56 +248,6 @@ pub async fn nurture_test_api(
         completion_tokens: result.completion_tokens,
         usd: result.usd,
     })
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
-}
-
-/// Draft one grounded comment from post frames, whichever provider is configured.
-///
-/// Vision providers read the frames. Text-only endpoints get a locally OCR'd
-/// caption and the caption-scored gate instead — a weaker but real evidence
-/// path, not a refusal.
-///
-/// Both callers used to write this branch themselves, and the thread campaign
-/// never did: it called `prepare_grounded_comment` unconditionally, so a
-/// text-only provider aborted the whole campaign. Keep the two on one
-/// implementation so the fallback cannot go missing from one of them again.
-pub(crate) async fn prepare_comment_for_frames(
-    settings: &riviu_core::NurtureSettings,
-    frames: &[Vec<u8>],
-    direction: Option<&str>,
-) -> anyhow::Result<(
-    riviu_core::openai_client::GroundedCommentResult,
-    &'static str,
-)> {
-    if riviu_core::openai_client::provider_supports_vision(settings) {
-        let result =
-            riviu_core::openai_client::prepare_grounded_comment(settings, frames, direction)
-                .await?;
-        return Ok((result, "vision"));
-    }
-    let host = riviu_core::openai_client::host_of(&settings.base_url);
-    let frame = frames
-        .last()
-        .ok_or_else(|| anyhow::anyhow!("no_usable_evidence"))?;
-    let observations = crate::interaction_ocr::recognize(frame)
-        .await
-        .map_err(|error| anyhow::anyhow!("{host} chỉ nhận text và OCR caption lỗi: {error}"))?;
-    let caption = riviu_core::openai_client::ocr_caption(&observations).ok_or_else(|| {
-        anyhow::anyhow!("{host} chỉ nhận text; chưa đọc được caption từ frame hiện tại")
-    })?;
-    let result = riviu_core::openai_client::prepare_caption_comment(
-        settings,
-        &caption,
-        &sha256_hex(frame),
-        direction,
-    )
-    .await?;
-    Ok((result, "ocr-caption"))
 }
 
 #[tauri::command]

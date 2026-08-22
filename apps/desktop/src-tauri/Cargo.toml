@@ -4,7 +4,12 @@ version = "0.1.1"
 description = "Riviu Manager — iPhone and Android device farm"
 authors = ["Riviu"]
 edition = "2021"
-rust-version = "1.77.2"
+# Not 1.77.2, which this claimed. `riviu-core` is a path dependency of this crate and
+# already uses `Option::is_none_or` (stable 1.82) in five modules, so 1.77.2 has been
+# unbuildable for a while -- the number simply went unread. Nothing consumes these crates
+# (`publish = false` throughout), so this is documentation, and it should say the version
+# the workspace is actually built and tested with: the one in rust-toolchain.toml.
+rust-version = "1.95"
 default-run = "riviu-managers-phone"
 # Never published: this is a private product, not a library. Marking it here also lets
 # `cargo deny` treat it as private, so the workspace's own path dependencies are not

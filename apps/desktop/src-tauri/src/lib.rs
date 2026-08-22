@@ -9,7 +9,6 @@ mod farm_commands;
 mod flow_commands;
 mod interaction_commands;
 pub mod interaction_ocr;
-mod interaction_target;
 mod local_api;
 mod nurture_commands;
 mod peripherals;

@@ -76,6 +76,10 @@ impl FrameTextSource for DesktopFrameTextSource {
     async fn recognize(&self, frame: &[u8]) -> anyhow::Result<Vec<CommentOcrObservation>> {
         recognize(frame).await
     }
+
+    fn locator_version(&self) -> &'static str {
+        locator_version()
+    }
 }
 
 /// Only the macOS `recognize` shells out to the Swift Vision helper; elsewhere

@@ -1170,6 +1170,48 @@ fn builtin_pool() -> Vec<String> {
     .collect()
 }
 
+/// Draft one grounded comment from post frames, whichever provider is configured.
+///
+/// Two shapes of provider, one answer. A vision model is handed the frames; a text-only one
+/// is handed a caption that OCR read off the last frame, because a text endpoint given an
+/// image returns nothing useful and the operator would only see "chưa đọc được caption".
+/// The second return value says which route was taken, so the evidence record can say so too.
+///
+/// Takes the OCR source as a trait object rather than calling a platform API: the recogniser
+/// is Windows Media OCR on this fleet and a Swift helper on macOS, and neither belongs in
+/// `riviu-core`. This function used to live in the desktop crate for exactly that reason,
+/// which is what kept the interaction campaign engine out of core with it.
+pub async fn prepare_comment_for_frames(
+    settings: &crate::NurtureSettings,
+    frames: &[Vec<u8>],
+    direction: Option<&str>,
+    frame_text: &dyn crate::FrameTextSource,
+) -> anyhow::Result<(GroundedCommentResult, &'static str)> {
+    if provider_supports_vision(settings) {
+        let result = prepare_grounded_comment(settings, frames, direction).await?;
+        return Ok((result, "vision"));
+    }
+    let host = host_of(&settings.base_url);
+    let frame = frames
+        .last()
+        .ok_or_else(|| anyhow::anyhow!("no_usable_evidence"))?;
+    let observations = frame_text
+        .recognize(frame)
+        .await
+        .map_err(|error| anyhow::anyhow!("{host} chỉ nhận text và OCR caption lỗi: {error}"))?;
+    let caption = ocr_caption(&observations).ok_or_else(|| {
+        anyhow::anyhow!("{host} chỉ nhận text; chưa đọc được caption từ frame hiện tại")
+    })?;
+    let digest = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(frame);
+        format!("{:x}", hasher.finalize())
+    };
+    let result = prepare_caption_comment(settings, &caption, &digest, direction).await?;
+    Ok((result, "ocr-caption"))
+}
+
 #[cfg(test)]
 mod tests {
     use image::GenericImageView;

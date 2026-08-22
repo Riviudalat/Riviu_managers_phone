@@ -21,14 +21,18 @@
 //! `UiSession::supports_element_bounds()` — the runtime authority, asked of the session
 //! actually in hand rather than predicted from a platform name.
 
+//!
+//! Lives in `riviu-core` beside the campaign that uses it. It began in the desktop crate
+//! only because the campaign did, and neither has ever needed anything from Tauri.
+
 use std::sync::atomic::AtomicBool;
 
-use riviu_core::{
+use crate::{
     CommentLocatorIdentity, PreparedThreadMessage, ResolvedTikTokTarget, ThreadSendEvidence,
     UiSession,
 };
 
-use crate::interaction_commands::TargetProof;
+use crate::interaction_campaign::TargetProof;
 
 /// What one send produced: the evidence row, and the posted comment if it could be read
 /// back.
