@@ -290,11 +290,12 @@ jobs:
         run: |
           set -euo pipefail
           npx tauri signer generate --ci -f -p "" -w "${RUNNER_TEMP}/updater-throwaway.key"
-          {
-            echo "THROWAWAY_SIGNING_KEY<<__RIVIU_THROWAWAY_KEY__"
-            cat "${RUNNER_TEMP}/updater-throwaway.key"
-            echo "__RIVIU_THROWAWAY_KEY__"
-          } >> "$GITHUB_ENV"
+          # A plain `NAME=value`, not the heredoc form. Measured: the key the generator writes
+          # is one line of base64 with **no trailing newline** (348 bytes, 0 newline chars), so
+          # a `<<DELIM` block put the closing delimiter on the same line as the key and the
+          # runner rejected it with "Matching delimiter not found". A single-line value does not
+          # need the multi-line form, and the `$(cat …)` here cannot reintroduce a newline.
+          echo "THROWAWAY_SIGNING_KEY=$(cat "${RUNNER_TEMP}/updater-throwaway.key")" >> "$GITHUB_ENV"
           rm -f "${RUNNER_TEMP}/updater-throwaway.key" "${RUNNER_TEMP}/updater-throwaway.key.pub"
 
       - name: Build Tauri installers
