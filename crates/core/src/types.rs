@@ -1323,6 +1323,109 @@ pub struct NurtureCostSummary {
 mod nurture_tuning_tests {
     use super::NurtureSettings;
 
+    /// Rust field names `absorb_live_changes` copies, in the frontend's spelling.
+    fn fields_absorbed_live() -> std::collections::BTreeSet<String> {
+        let source = include_str!("types.rs");
+        let body = source
+            .split_once("pub fn absorb_live_changes(&mut self, fresh: &NurtureSettings) {")
+            .expect("absorb_live_changes is still declared with that signature")
+            .1
+            .split_once(
+                "
+    }
+",
+            )
+            .expect("absorb_live_changes ends at a top-level brace")
+            .0;
+        body.lines()
+            .filter_map(|line| {
+                let assignment = line.trim().strip_prefix("self.")?;
+                let (field, rest) = assignment.split_once(" = ")?;
+                // Only the plain `self.x = fresh.x` copies; anything computed is not a
+                // straight absorption and would need reading, not pattern-matching.
+                rest.starts_with("fresh.").then(|| camel(field))
+            })
+            .collect()
+    }
+
+    /// `recover_delay_min` -> `recoverDelayMin`.
+    fn camel(snake: &str) -> String {
+        let mut out = String::with_capacity(snake.len());
+        let mut upper_next = false;
+        for ch in snake.chars() {
+            if ch == '_' {
+                upper_next = true;
+            } else if upper_next {
+                out.extend(ch.to_uppercase());
+                upper_next = false;
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_form_promises_exactly_what_a_running_session_absorbs() {
+        // `absorb_live_changes` is documented as "this list and that list are the same
+        // list". They were not: this function copies `human_limits`, and the frontend's
+        // LIVE_TUNABLE_FIELDS had never listed it. Nothing showed, because nothing read the
+        // frontend list -- three restart badges hardcoded their reason strings instead. Now
+        // the badges read the list, so the drift would have become a badge telling the
+        // operator to restart for a field the loop picks up on its own.
+        let types_ts = include_str!("../../../apps/desktop/src/types.ts");
+        let declared: std::collections::BTreeSet<String> = types_ts
+            .lines()
+            .skip_while(|line| !line.contains("export const LIVE_TUNABLE_FIELDS"))
+            .skip(1)
+            .take_while(|line| !line.contains("]);"))
+            .filter_map(|line| {
+                let t = line.trim().trim_end_matches(',');
+                t.strip_prefix('"')?.strip_suffix('"').map(str::to_owned)
+            })
+            .collect();
+        assert!(
+            !declared.is_empty(),
+            "types.ts no longer declares LIVE_TUNABLE_FIELDS in a shape this test can read"
+        );
+
+        let absorbed = fields_absorbed_live();
+        assert!(
+            absorbed.len() > 20,
+            "only found {} absorbed fields -- the parser lost the function body",
+            absorbed.len()
+        );
+        assert_eq!(
+            absorbed, declared,
+            "the loop absorbs one set of fields and the form promises another"
+        );
+    }
+
+    #[test]
+    fn a_field_needing_a_restart_is_never_also_promised_as_live() {
+        // The two lists are shown to the operator as opposites; an overlap would put a
+        // "needs restart" badge on a field that does take effect immediately.
+        let types_ts = include_str!("../../../apps/desktop/src/types.ts");
+        let restart: Vec<&str> = types_ts
+            .lines()
+            .skip_while(|line| !line.contains("export const RESTART_REQUIRED_REASONS"))
+            .skip(1)
+            .take_while(|line| !line.starts_with('}'))
+            .filter_map(|line| line.trim().split_once(':').map(|(k, _)| k.trim()))
+            .collect();
+        assert!(
+            !restart.is_empty(),
+            "RESTART_REQUIRED_REASONS is unreadable"
+        );
+        let live = fields_absorbed_live();
+        for field in restart {
+            assert!(
+                !live.contains(field),
+                "`{field}` is marked restart-required and is absorbed live"
+            );
+        }
+    }
+
     #[test]
     fn an_old_stored_profile_upgrades_with_every_feature_still_on() {
         // Deliberately missing every field added for the switches and the carousel.

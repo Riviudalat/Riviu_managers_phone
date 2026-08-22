@@ -31,7 +31,9 @@ import type {
   NurtureApiTestResult,
   NurtureSessionStatus,
   NurtureSettings,
+  RestartRequiredField,
 } from "../types";
+import { RESTART_REQUIRED_REASONS } from "../types";
 import { describeError } from "../describeError";
 
 type Props = {
@@ -164,9 +166,17 @@ function FeatureRow({
   );
 }
 
-/** Marks a field a running session will not pick up, with the reason. */
-function RestartBadge({ reason }: { reason: string }) {
+/**
+ * Marks a field a running session will not pick up, with the reason.
+ *
+ * Takes the field, not the sentence: the sentences live in `RESTART_REQUIRED_REASONS`, which
+ * is pinned against `absorb_live_changes` on the Rust side. Passing prose here is how the
+ * three badges came to hold their own copies of two of those sentences while the list itself
+ * went unread — a field could be made live-tunable in the loop and still carry a badge.
+ */
+function RestartBadge({ field }: { field: RestartRequiredField }) {
   const [tip, setTip] = useState<{ left: number; top: number } | null>(null);
+  const reason = RESTART_REQUIRED_REASONS[field];
   const what = `${reason}. Đang chạy mà đổi thì phải bấm Dừng rồi Bắt đầu lại mới áp dụng.`;
   return (
     <span
@@ -713,7 +723,7 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                           of="Giới hạn video"
                           what="Phiên dừng sau đúng số video này (nhân với số vòng). Thời lượng phiên vẫn là trần riêng: cái nào tới trước thì dừng."
                         />
-                        <RestartBadge reason="Mục tiêu của phiên được tính lúc bắt đầu" />
+                        <RestartBadge field="numVideos" />
                       </span>
                       <input
                         type="number"
@@ -730,7 +740,7 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                           of="Vòng"
                           what="Nhân với giới hạn video để ra tổng số video của phiên: 15 video × 2 vòng = 30 video."
                         />
-                        <RestartBadge reason="Mục tiêu của phiên được tính lúc bắt đầu" />
+                        <RestartBadge field="numRounds" />
                       </span>
                       <input
                         type="number"
@@ -949,7 +959,7 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                         of="Bundle TikTok"
                         what="App id của TikTok. Trên Android app tự tìm package đã cài trên từng máy nên thường không cần sửa ô này; nó chủ yếu dành cho iPhone."
                       />
-                      <RestartBadge reason="App đã mở rồi; trên Android package được resolve theo từng máy" />
+                      <RestartBadge field="bundleId" />
                     </span>
                     <input value={settings.bundleId} onChange={(e) => patch("bundleId", e.target.value)} />
                   </label>

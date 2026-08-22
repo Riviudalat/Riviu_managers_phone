@@ -508,6 +508,7 @@ export const LIVE_TUNABLE_FIELDS = new Set<keyof NurtureSettings>([
   "fatigue",
   "timeOfDay",
   "pauseSwipe",
+  "humanLimits",
   "nightStart",
   "nightEnd",
   "recoverDelayMin",
@@ -529,7 +530,7 @@ export const LIVE_TUNABLE_FIELDS = new Set<keyof NurtureSettings>([
 ///
 /// Each reason is a fact about the session, not a policy: it built something out of the
 /// value and cannot rebuild it mid-run.
-export const RESTART_REQUIRED_REASONS: Partial<Record<keyof NurtureSettings, string>> = {
+export const RESTART_REQUIRED_REASONS = {
   numVideos: "Mục tiêu của phiên được tính lúc bắt đầu",
   numRounds: "Mục tiêu của phiên được tính lúc bắt đầu",
   persona: "Mô hình hành vi được dựng một lần từ persona",
@@ -541,7 +542,16 @@ export const RESTART_REQUIRED_REASONS: Partial<Record<keyof NurtureSettings, str
   scheduleEveryMinutes: "Lịch tác động giữa các phiên",
   scheduleDurationMinutes: "Lịch tác động giữa các phiên",
   scheduleUdids: "Lịch tác động giữa các phiên",
-};
+} satisfies Partial<Record<keyof NurtureSettings, string>>;
+
+/**
+ * A field that needs a restart, i.e. one this map has a reason for.
+ *
+ * `satisfies` rather than a type annotation keeps the literal keys, so `RestartBadge` can
+ * only be pointed at a field there is actually a sentence for — a badge on anything else is
+ * a compile error instead of the word "undefined" in a tooltip.
+ */
+export type RestartRequiredField = keyof typeof RESTART_REQUIRED_REASONS;
 
 export interface NurtureApiTestResult {
   udid: string;
