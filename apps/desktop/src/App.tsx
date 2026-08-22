@@ -1110,13 +1110,11 @@ function App() {
         if (issue) return;
 
         void reload();
-        void listenRiviuEvents((payload) => {
-          const p = payload as Record<string, unknown>;
-          if (p.type === "devicesUpdated" && Array.isArray(p.devices)) {
-            setDevices(p.devices as DeviceInfo[]);
-          }
-          if (p.type === "deviceUpdated" && p.device) {
-            const device = p.device as DeviceInfo;
+        void listenRiviuEvents((event) => {
+          if (event.type === "devicesUpdated") {
+            setDevices(event.devices);
+          } else if (event.type === "deviceUpdated") {
+            const { device } = event;
             setDevices((prev) => {
               const idx = prev.findIndex((d) => d.udid === device.udid);
               if (idx === -1) return [...prev, device];
@@ -1124,9 +1122,8 @@ function App() {
               next[idx] = device;
               return next;
             });
-          }
-          if (p.type === "jobUpdated" && p.job) {
-            const job = p.job as JobRecord;
+          } else if (event.type === "jobUpdated") {
+            const { job } = event;
             setJobs((prev) => {
               const idx = prev.findIndex((j) => j.id === job.id);
               if (idx === -1) return [job, ...prev];

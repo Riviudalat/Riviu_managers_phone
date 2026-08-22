@@ -87,19 +87,6 @@ function detailForRun(run: FlowRunRecord): FlowRunDetail {
   return { run, deviceRuns: [], attempts: [], artifacts: [] };
 }
 
-function flowDocumentEvent(value: unknown): { flowId: string; revision: number } | null {
-  if (typeof value !== "object" || value === null) return null;
-  const event = value as Record<string, unknown>;
-  return event.type === "flowUpdated" &&
-    typeof event.flowId === "string" &&
-    event.flowId.length > 0 &&
-    typeof event.revision === "number" &&
-    Number.isSafeInteger(event.revision) &&
-    event.revision > 0
-    ? { flowId: event.flowId, revision: event.revision }
-    : null;
-}
-
 export function FlowWorkspace({
   devices,
   selectedUdids,
@@ -301,13 +288,14 @@ export function FlowWorkspace({
       replaceFromRecord(record);
     };
 
-    void listenRiviuEvents((payload) => {
-      const event = flowDocumentEvent(payload);
-      if (event) {
-        void invalidate(event.flowId, event.revision).catch((error) => {
-          if (!disposed) setOperationError(describeError(error));
-        });
-      }
+    void listenRiviuEvents((event) => {
+      // A blank id or a revision of 0 would mean the backend announced a projection it has
+      // not written yet; invalidating on that fetches nothing and drops the draft.
+      if (event.type !== "flowUpdated") return;
+      if (!event.flowId || !Number.isSafeInteger(event.revision) || event.revision <= 0) return;
+      void invalidate(event.flowId, event.revision).catch((error) => {
+        if (!disposed) setOperationError(describeError(error));
+      });
     }).then((unlisten) => {
       if (disposed) unlisten();
       else stop = unlisten;

@@ -1321,3 +1321,49 @@ export interface ClipboardRead {
   text: string;
   bytes: number;
 }
+
+/**
+ * Everything that arrives on `riviu://event`.
+ *
+ * Mirrors `AppEvent` in `crates/core/src/events.rs`, and the mirror is checked:
+ * `the_event_union_matches_the_variants_this_enum_sends` reads the `type` literals out of
+ * this file and compares them to the enum's variants, so renaming one half fails the build
+ * on the other. Before the union existed, six subscribers each narrowed `unknown` with their
+ * own `as` cast, and three of them were narrowing to field names the wire never sent.
+ */
+export type AppEvent =
+  | { type: "devicesUpdated"; devices: DeviceInfo[] }
+  | { type: "deviceUpdated"; device: DeviceInfo }
+  | { type: "jobUpdated"; job: JobRecord }
+  | { type: "flowUpdated"; flowId: string; revision: number }
+  | { type: "flowRunUpdated"; runId: string; revision: number }
+  | { type: "interactionUpdated"; campaignId: string; revision: number }
+  | { type: "wdaExpiryWarning"; udid: string; daysRemaining: number }
+  | { type: "nurtureStatus"; status: NurtureSessionStatus };
+
+/**
+ * Narrow an untyped payload off the Tauri channel.
+ *
+ * The channel itself is untyped, so something has to make the first assertion. Doing it once
+ * here — where the `type` tag is actually checked against the known set — is the difference
+ * between one unchecked cast and one per subscriber.
+ */
+export function asAppEvent(payload: unknown): AppEvent | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const tag = (payload as { type?: unknown }).type;
+  return typeof tag === "string" && (APP_EVENT_TYPES as readonly string[]).includes(tag)
+    ? (payload as AppEvent)
+    : null;
+}
+
+/** The tag of every `AppEvent`. Exported so the Rust-side pin can read it. */
+export const APP_EVENT_TYPES = [
+  "devicesUpdated",
+  "deviceUpdated",
+  "jobUpdated",
+  "flowUpdated",
+  "flowRunUpdated",
+  "interactionUpdated",
+  "wdaExpiryWarning",
+  "nurtureStatus",
+] as const;

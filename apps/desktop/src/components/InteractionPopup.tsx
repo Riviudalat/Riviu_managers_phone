@@ -290,8 +290,7 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
-    listenRiviuEvents((payload) => {
-      const event = payload as { type?: string; campaignId?: string };
+    listenRiviuEvents((event) => {
       if (event.type !== "interactionUpdated") return;
       void reloadCampaigns();
       if (event.campaignId && detail?.summary.id === event.campaignId) {

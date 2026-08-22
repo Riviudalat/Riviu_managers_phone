@@ -1364,7 +1364,6 @@ impl AppState {
         // base64, no `<img src=data:...>`.
         let streams = self.streams.clone();
         let view_hub = self.view_hub.clone();
-        let app_frames = app.clone();
         tauri::async_runtime::spawn(async move {
             let mut rx = streams.subscribe();
             let mut ticker = tokio::time::interval(PREVIEW_TICK);
@@ -1421,12 +1420,6 @@ impl AppState {
                             };
                             next_due.insert(udid.clone(), now + gap);
                             view_hub.publish_jpeg(udid, frame.as_slice().to_vec());
-                            let payload = serde_json::json!({
-                                "type": "streamFrame",
-                                "udid": udid,
-                                "fps": per_device_fps,
-                            });
-                            let _ = app_frames.emit("riviu://event", payload);
                             break;
                         }
                     }

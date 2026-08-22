@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AnalyticsSummary,
+  AppEvent,
   AgentRuntimeView,
   AgentSettings,
   AgentStatus,
@@ -46,6 +47,7 @@ import type {
   ShellOutcome,
   UpdateStatus,
 } from "./types";
+import { asAppEvent } from "./types";
 
 export async function startupError() {
   return invoke<string | null>("startup_error");
@@ -903,8 +905,18 @@ export async function interactionReadArtifact(artifactId: string) {
   return invoke<InteractionArtifactPayload>("interaction_read_artifact", { artifactId });
 }
 
-export function listenRiviuEvents(handler: (payload: unknown) => void): Promise<UnlistenFn> {
-  return listen("riviu://event", (event) => handler(event.payload));
+/**
+ * Subscribe to `riviu://event`.
+ *
+ * Payloads that do not carry a known `type` are dropped here rather than handed on: the
+ * channel is shared, and a subscriber written against one variant should not have to defend
+ * itself against the others.
+ */
+export function listenRiviuEvents(handler: (event: AppEvent) => void): Promise<UnlistenFn> {
+  return listen("riviu://event", (event) => {
+    const parsed = asAppEvent(event.payload);
+    if (parsed) handler(parsed);
+  });
 }
 
 export async function flowActionCatalog() {

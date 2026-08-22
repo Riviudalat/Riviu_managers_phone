@@ -631,10 +631,7 @@ impl NurtureRuntime {
                                 runtime.set_status(st.clone());
                                 let _ = app2.emit(
                                     "riviu://event",
-                                    serde_json::json!({
-                                        "type": "nurtureStatus",
-                                        "status": st,
-                                    }),
+                                    riviu_core::AppEvent::NurtureStatus { status: st.clone() },
                                 );
                             },
                         )
@@ -664,10 +661,9 @@ impl NurtureRuntime {
                 runtime.finish_start(&udid_clone, &task_stop);
                 let _ = app2.emit(
                     "riviu://event",
-                    serde_json::json!({
-                        "type": "nurtureStatus",
-                        "status": final_status,
-                    }),
+                    riviu_core::AppEvent::NurtureStatus {
+                        status: final_status.clone(),
+                    },
                 );
             });
             started.push(udid);
@@ -962,6 +958,145 @@ mod tests {
         assert!(
             types_ts.contains(API_KEY_UNCHANGED),
             "apps/desktop/src/types.ts no longer documents the sentinel {API_KEY_UNCHANGED}"
+        );
+    }
+
+    /// The tag serde writes for one event, named beside the variant that produces it.
+    ///
+    /// Total on purpose: this is the half the compiler enforces. A variant added to
+    /// `AppEvent` does not compile until it is listed here, which is what puts the frontend
+    /// union in front of whoever adds it.
+    fn tag_of(event: &riviu_core::AppEvent) -> &'static str {
+        use riviu_core::AppEvent as E;
+        match event {
+            E::DevicesUpdated { .. } => "devicesUpdated",
+            E::DeviceUpdated { .. } => "deviceUpdated",
+            E::JobUpdated { .. } => "jobUpdated",
+            E::FlowUpdated { .. } => "flowUpdated",
+            E::FlowRunUpdated { .. } => "flowRunUpdated",
+            E::InteractionUpdated { .. } => "interactionUpdated",
+            E::WdaExpiryWarning { .. } => "wdaExpiryWarning",
+            E::NurtureStatus { .. } => "nurtureStatus",
+        }
+    }
+
+    /// Every tag `tag_of` can return.
+    ///
+    /// Hand-listed, but not hand-trusted: `tag_of` is total, so the names here are the ones
+    /// the compiler already made someone write next to the variant, and
+    /// `the_tag_names_are_the_ones_serde_writes` checks the naming convention against real
+    /// serialised output rather than against this list.
+    const EVERY_EVENT_TAG: [&str; 8] = [
+        "devicesUpdated",
+        "deviceUpdated",
+        "jobUpdated",
+        "flowUpdated",
+        "flowRunUpdated",
+        "interactionUpdated",
+        "wdaExpiryWarning",
+        "nurtureStatus",
+    ];
+
+    #[test]
+    fn the_tag_names_are_the_ones_serde_writes() {
+        // `tag_of` is only worth anything if its strings are what actually goes on the wire.
+        // Four variants are cheap to build and that is enough: `rename_all` is a container
+        // attribute, so the convention is on for every variant or for none.
+        let samples = [
+            riviu_core::AppEvent::FlowUpdated {
+                flow_id: uuid::Uuid::nil(),
+                revision: 1,
+            },
+            riviu_core::AppEvent::FlowRunUpdated {
+                run_id: uuid::Uuid::nil(),
+                revision: 1,
+            },
+            riviu_core::AppEvent::InteractionUpdated {
+                campaign_id: String::new(),
+                revision: 1,
+            },
+            riviu_core::AppEvent::WdaExpiryWarning {
+                udid: String::new(),
+                days_remaining: 0,
+            },
+        ];
+        for event in &samples {
+            let json = serde_json::to_value(event).expect("AppEvent serialises");
+            let wire = json
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .expect("every AppEvent carries a type tag");
+            assert_eq!(wire, tag_of(event), "serde and tag_of disagree: {json}");
+            assert!(
+                EVERY_EVENT_TAG.contains(&wire),
+                "{wire} is not in EVERY_EVENT_TAG"
+            );
+        }
+    }
+
+    #[test]
+    fn a_struct_variant_reaches_the_frontend_in_the_case_the_frontend_reads() {
+        // The bug this pins is not a missing tag but a field spelling, which no tag check can
+        // see. `rename_all` on an enum renames variants only -- the fields of a struct variant
+        // keep their Rust spelling unless `rename_all_fields` says otherwise, and without it
+        // this enum was the one payload in the app sending snake_case. `FlowRunMonitor`,
+        // `FlowWorkspace` and `InteractionPopup` had all been written against camelCase and so
+        // none of their guards ever matched. Nothing failed loudly; the run monitor just
+        // looked slow, because a 750 ms poll was doing all the work.
+        let json = serde_json::to_value(riviu_core::AppEvent::FlowRunUpdated {
+            run_id: uuid::Uuid::nil(),
+            revision: 4,
+        })
+        .expect("serialises");
+        assert!(
+            json.get("runId").is_some(),
+            "FlowRunMonitor reads `runId`; the wire says {json}"
+        );
+        assert!(json.get("run_id").is_none(), "both spellings on the wire");
+    }
+
+    #[test]
+    fn the_event_union_matches_the_variants_this_enum_sends() {
+        // `types.ts` carries a hand-written union for this channel, and it is pinned both
+        // ways: a tag the backend sends and the union omits is an event no subscriber can
+        // ever see, and a tag the union lists and nothing sends is a dead branch that reads
+        // like live code.
+        let types_ts = include_str!("../../src/types.ts");
+        let declared: Vec<String> = types_ts
+            .lines()
+            .skip_while(|line| !line.contains("export const APP_EVENT_TYPES"))
+            .skip(1)
+            .take_while(|line| !line.contains("] as const"))
+            .filter_map(|line| {
+                let t = line.trim().trim_end_matches(',');
+                t.strip_prefix('"')?.strip_suffix('"').map(str::to_owned)
+            })
+            .collect();
+        assert!(
+            !declared.is_empty(),
+            "types.ts no longer declares APP_EVENT_TYPES in a shape this test can read"
+        );
+
+        for tag in EVERY_EVENT_TAG {
+            assert!(
+                declared.iter().any(|d| d == tag),
+                "the backend sends `{tag}` and the frontend union does not list it"
+            );
+        }
+        for tag in &declared {
+            assert!(
+                EVERY_EVENT_TAG.contains(&tag.as_str()),
+                "the frontend union lists `{tag}` and nothing sends it"
+            );
+        }
+
+        // And the union must spell the payload fields the way the wire does, not just the
+        // tags -- that was the actual defect, and it lived under a correct tag.
+        assert!(
+            types_ts.contains("runId: string")
+                && types_ts.contains("flowId: string")
+                && types_ts.contains("campaignId: string"),
+            "the union stopped using the camelCase field names the wire sends"
         );
     }
 }

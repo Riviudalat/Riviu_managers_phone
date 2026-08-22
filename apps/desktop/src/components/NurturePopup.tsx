@@ -300,10 +300,9 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
 
   useEffect(() => {
     let un: (() => void) | undefined;
-    listenRiviuEvents((payload) => {
-      const p = payload as { type?: string; status?: NurtureSessionStatus };
-      if (p?.type !== "nurtureStatus" || !p.status) return;
-      const st = p.status;
+    listenRiviuEvents((event) => {
+      if (event.type !== "nurtureStatus") return;
+      const st = event.status;
       setStatuses((prev) => {
         const next = prev.filter((x) => x.udid !== st.udid);
         next.push(st);
