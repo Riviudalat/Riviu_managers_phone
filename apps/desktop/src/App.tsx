@@ -4,9 +4,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
-  useRef,
   useState,
-  type MouseEvent as ReactMouseEvent,
 } from "react";
 import {
   agentBulkRepair,
@@ -29,6 +27,7 @@ import { DeviceFilesPopup } from "./components/DeviceFilesPopup";
 import type { DeviceMenuNode } from "./deviceMenu";
 import { buildDeviceActions } from "./deviceActions";
 import { useFleet } from "./useFleet";
+import { useBoxSelection } from "./useBoxSelection";
 import { metaByUdid, orderDevicesByNumber, tileName, tileNumber } from "./deviceNaming";
 import { AdbConsole } from "./components/AdbConsole";
 import { ALL_DEVICES_TAB, devicesInTab, groupTabs, withDeviceAdded } from "./deviceGroups";
@@ -55,14 +54,6 @@ import {
 import type { DeviceInfo, PageId } from "./types";
 import { deviceModelOsLabel } from "./types";
 import { loadZoom, stepZoom, storeZoom, TILE_ZOOM, wheelWantsZoom } from "./zoom";
-import {
-  applyBoxSelection,
-  isDragMeaningful,
-  normalizeBox,
-  tilesInBox,
-  type Rect,
-  type TileRect,
-} from "./boxSelect";
 import "./App.css";
 
 const FlowWorkspace = lazy(async () => {
@@ -104,7 +95,6 @@ function App() {
   const [adbFor, setAdbFor] = useState<string | null>(null);
   /// Which phone's filesystem is open in the browser popup (xiaowei "Preview Mobile Files").
   const [filesFor, setFilesFor] = useState<string | null>(null);
-  const [selected, setSelected] = useState<string[]>([]);
   const [groupMode, setGroupMode] = useState(false);
   /// The phone the operator drives when Sync is on; every other selected phone follows it.
   ///
@@ -117,12 +107,6 @@ function App() {
   const [jobsScriptSeed, setJobsScriptSeed] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("window");
   const [tileWidth, setTileWidth] = useState(() => loadZoom(TILE_ZOOM));
-  const canvasRef = useRef<HTMLDivElement | null>(null);
-  // Rubber-band (box) selection over the window grid (A7). `bandOrigin` holds the mousedown
-  // point and modifier; `band` is the live rectangle in client coords, non-null only while
-  // dragging (which is also the effect's on/off signal).
-  const bandOrigin = useRef<{ x: number; y: number; additive: boolean } | null>(null);
-  const [band, setBand] = useState<Rect | null>(null);
   const [nurtureOpen, setNurtureOpen] = useState(false);
   const [interactionOpen, setInteractionOpen] = useState(false);
   const [groupToolsOpen, setGroupToolsOpen] = useState(false);
@@ -173,6 +157,26 @@ function App() {
     storeZoom(TILE_ZOOM, tileWidth);
   }, [tileWidth]);
 
+  const tabs = useMemo(() => groupTabs(devices, groups), [devices, groups]);
+  const metaMap = useMemo(() => metaByUdid(metas), [metas]);
+  // Numbered phones lead, in number order; an unnumbered fleet is left exactly as the
+  // driver listed it. That is the point of a number — a grid position moves when a phone
+  // drops off USB, a number does not.
+  const visibleDevices = useMemo(
+    () => orderDevicesByNumber(devicesInTab(devices, groups, groupTab), metaMap),
+    [devices, groups, groupTab, metaMap],
+  );
+
+  const {
+    selected,
+    setSelected,
+    selectedDevices,
+    onSelect,
+    canvasRef,
+    onCanvasMouseDown,
+    band,
+  } = useBoxSelection(devices, visibleDevices, page === "control" && viewMode === "window");
+
   // Wheel over the phone grid zooms the tiles. Registered by hand because
   // React's synthetic onWheel is passive and cannot preventDefault the page
   // scroll. Re-runs when the canvas mounts (control page, window view).
@@ -186,17 +190,9 @@ function App() {
     };
     canvas.addEventListener("wheel", onWheel, { passive: false });
     return () => canvas.removeEventListener("wheel", onWheel);
-  }, [page, viewMode]);
-
-  const tabs = useMemo(() => groupTabs(devices, groups), [devices, groups]);
-  const metaMap = useMemo(() => metaByUdid(metas), [metas]);
-  // Numbered phones lead, in number order; an unnumbered fleet is left exactly as the
-  // driver listed it. That is the point of a number — a grid position moves when a phone
-  // drops off USB, a number does not.
-  const visibleDevices = useMemo(
-    () => orderDevicesByNumber(devicesInTab(devices, groups, groupTab), metaMap),
-    [devices, groups, groupTab, metaMap],
-  );
+  // `canvasRef` is a ref object and never changes identity, but it now arrives through
+  // `useBoxSelection`'s return value where the rule cannot see that. Listing it is free.
+  }, [page, viewMode, canvasRef]);
   const menuAdbDevice = useMemo(
     () => (adbFor ? (devices.find((d) => d.udid === adbFor) ?? null) : null),
     [adbFor, devices],
@@ -209,84 +205,6 @@ function App() {
     () => (filesFor ? (devices.find((d) => d.udid === filesFor) ?? null) : null),
     [filesFor, devices],
   );
-
-  // Start a marquee only from empty canvas space with the left button; a mousedown that
-  // lands on a tile is that tile's own click, not a selection box.
-  const onCanvasMouseDown = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || event.target !== event.currentTarget) return;
-    // Stops the browser starting a *text* selection under the marquee. Without it, dragging a
-    // box across the grid highlighted the captions it passed over — the tile number, model and
-    // OS came back blue — so the gesture that selects phones also looked like it was selecting
-    // words. `preventDefault` here covers the whole drag; `user-select: none` on the tile
-    // covers a stray drag that begins inside one.
-    event.preventDefault();
-    bandOrigin.current = {
-      x: event.clientX,
-      y: event.clientY,
-      additive: event.shiftKey || event.ctrlKey || event.metaKey,
-    };
-    setBand(normalizeBox(event.clientX, event.clientY, event.clientX, event.clientY));
-  };
-
-  // While a marquee is live, track the pointer on `window` (not the canvas) so a drag that
-  // leaves the grid still updates and still commits on release. Attaches once per drag.
-  const dragging = band !== null;
-  useEffect(() => {
-    if (!dragging) return;
-    const onMove = (event: MouseEvent) => {
-      const origin = bandOrigin.current;
-      if (origin) setBand(normalizeBox(origin.x, origin.y, event.clientX, event.clientY));
-    };
-    const onUp = (event: MouseEvent) => {
-      const origin = bandOrigin.current;
-      bandOrigin.current = null;
-      setBand(null);
-      const canvas = canvasRef.current;
-      if (!origin || !canvas) return;
-      if (!isDragMeaningful(origin.x, origin.y, event.clientX, event.clientY)) return;
-      const box = normalizeBox(origin.x, origin.y, event.clientX, event.clientY);
-      // `.dev-phone[data-udid]`, not `[data-udid]`: a tile carries that attribute on three
-      // elements — the article, `PhoneCanvas`'s host div, and the canvas once a stream
-      // attaches — so the bare selector returned the same phone two or three times and the
-      // selection held duplicates. Measured on the 20-phone fleet: a box over three tiles
-      // gave the toolbar 3 and the sidebar 6. `tilesInBox` de-duplicates as well, because a
-      // duplicated udid reaches `group_input` and sends every group action to that phone twice.
-      const tiles: TileRect[] = Array.from(
-        canvas.querySelectorAll<HTMLElement>(".dev-phone[data-udid]"),
-      ).map((el) => {
-        const r = el.getBoundingClientRect();
-        return {
-          udid: el.dataset.udid ?? "",
-          rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom },
-        };
-      });
-      const hits = tilesInBox(box, tiles);
-      setSelected((prev) => applyBoxSelection(prev, hits, origin.additive));
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    return () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-  }, [dragging]);
-
-  // Ctrl/Cmd+A selects every phone in the current tab while the grid is up — the farm
-  // shortcut from xiaowei. Ignored while typing in a field so it never steals the browser's
-  // own select-all inside an input.
-  useEffect(() => {
-    if (page !== "control" || viewMode !== "window") return;
-    const onKey = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "a") return;
-      const target = event.target as HTMLElement | null;
-      const tag = target?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
-      event.preventDefault();
-      setSelected(visibleDevices.map((device) => device.udid));
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [page, viewMode, visibleDevices]);
 
   /**
    * The per-phone function menu, and every row of it is a command this app already has.
@@ -407,20 +325,6 @@ function App() {
     () => jobs.filter((j) => j.status === "running" || j.status === "queued").length,
     [jobs],
   );
-
-  const selectedDevices = useMemo(
-    () => devices.filter((d) => selected.includes(d.udid)),
-    [devices, selected],
-  );
-
-  const onSelect = (udid: string, additive: boolean) => {
-    setSelected((prev) => {
-      if (additive) {
-        return prev.includes(udid) ? prev.filter((x) => x !== udid) : [...prev, udid];
-      }
-      return prev.includes(udid) && prev.length === 1 ? [] : [udid];
-    });
-  };
 
   const title = PAGE_TITLE[page] ?? page;
 
