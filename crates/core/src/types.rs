@@ -529,6 +529,30 @@ pub struct DeviceMeta {
     pub tags: Vec<String>,
     pub group_id: Option<String>,
     pub proxy_id: Option<String>,
+    /// The TikTok @handle this phone is logged into, without the leading `@`.
+    ///
+    /// Entered by the operator (there is no reliable on-device read for it). Empty when
+    /// unknown. It is what lets an interaction @-mention resolve to the phone that owns the
+    /// account, so tagging `@name` can bring that phone into the same post to reply — see
+    /// `interaction::ThreadCampaignRequest::mentions`.
+    #[serde(default)]
+    pub handle: String,
+    /// What the operator calls this phone (xiaowei "Change Name"). Empty means "use the name
+    /// the phone reports", which is what the grid showed before this existed.
+    ///
+    /// Deliberately not written back to the device. Renaming the *phone* needs root on
+    /// Android and is a fingerprint change; what an operator wants when they rename a tile is
+    /// to tell twenty identical SM-G955Fs apart, and that is a fact about this app's records.
+    #[serde(default)]
+    pub alias: String,
+    /// The number written on the phone, on the shelf, in the operator's notes (xiaowei
+    /// "Change Number").
+    ///
+    /// `None` means unnumbered, and the grid then shows the tile's position instead — which
+    /// is what every tile showed before, and is exactly the thing a number is for replacing:
+    /// a position changes when the fleet list changes, so it cannot be written on a sticker.
+    #[serde(default)]
+    pub number: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -579,6 +603,47 @@ pub struct ShellOutcome {
     pub stderr: String,
 }
 
+/// What one row of a device directory listing is.
+///
+/// `Other` is not a failure and not a leftover: a phone's filesystem holds sockets, fifos
+/// and block devices, and a browser that dropped every row it did not recognise would show
+/// a directory as empty when it is not. The UI can refuse to *open* one; it must still say
+/// it is there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DeviceFileKind {
+    File,
+    Directory,
+    /// A symlink. Which of the two it points at is deliberately not resolved here — that
+    /// costs a second `ls` per row — so the browser follows it by listing its path and
+    /// letting the phone answer.
+    Symlink,
+    Other,
+}
+
+/// One entry in a phone's own directory listing (xiaowei "Preview Mobile Files").
+///
+/// Every field is what the phone printed, never something computed here. `modified` is the
+/// phone's own `YYYY-MM-DD HH:MM` string rather than a parsed timestamp, and that is
+/// deliberate: `ls` prints in the *device's* timezone with no offset, so turning it into an
+/// instant here would invent a precision the source does not have. Measured on
+/// 23021RAAEG (Android 15) and SM-G955F (Android 9): both print exactly that shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceFileEntry {
+    /// The bare name, not the path — `Download`, not `/sdcard/Download`.
+    pub name: String,
+    pub kind: DeviceFileKind,
+    /// Bytes for a file; for a directory this is the size of the directory *inode*
+    /// (3452 on this fleet's sdcard), which is why the UI shows it only for files.
+    pub size: u64,
+    /// `None` when the phone printed `?` for it, which happens on rows it cannot stat —
+    /// a dangling symlink under `/`, measured on 23021RAAEG.
+    pub modified: Option<String>,
+    /// Present only for `Symlink`, and exactly the text after `->`.
+    pub link_target: Option<String>,
+}
+
 /// Whether an app came with the phone or was installed onto it.
 ///
 /// **Tagged, never inferred, and never used as a filter.** Listing only third-party
@@ -607,9 +672,11 @@ pub enum InstalledAppKind {
 /// is absurd at the measured sizes (one base.apk was 261 MB). So a listing shows package
 /// names, and a `None` here means "this phone cannot tell us", not "unnamed".
 ///
-/// The route that *would* work is the on-device `com.riviu.agent` helper calling
-/// `PackageManager.getApplicationLabel`, one HTTP call for the whole list. That is a
-/// separate piece of work; the field exists so adding it later changes no shape.
+/// **That route is now built** (21/08/2026): the helper answers `/v1/apps/describe` with the
+/// label and a rendered icon for a list of packages, and the Android driver joins it onto the
+/// adb listing. The paragraph above still describes what happens on a phone *without* the
+/// helper, which is why `label` stays an `Option` — the fallback is a package name, never an
+/// invented one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstalledApp {
@@ -618,9 +685,16 @@ pub struct InstalledApp {
     /// use to name an app.
     pub bundle_id: String,
     pub kind: InstalledAppKind,
-    /// Human-readable name where the platform gives one for free. Always `None` on
-    /// Android — see the type doc.
+    /// Human-readable name where the platform gives one, or the helper can read one.
+    /// `None` means "nothing on this phone could tell us", not "unnamed".
     pub label: Option<String>,
+    /// The app's icon as a base64 PNG, at the size the helper rendered it (48 px edge).
+    ///
+    /// `None` is the ordinary case for a phone with no helper, and also for the handful of
+    /// system packages that genuinely have no icon — never a placeholder image, so the UI can
+    /// draw its own neutral square instead of showing one the phone did not give.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_png_base64: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1032,6 +1032,263 @@ pub fn parse_current_focus_package(stdout: &str) -> Option<String> {
         })
 }
 
+/// The command that prints the Wi-Fi interface address, for WIFI-adb (feature A4). `ip addr`
+/// is present on modern Android; the caller pairs it with [`parse_wlan_ipv4`].
+pub const WLAN_IP_SHELL: &str = "ip -f inet addr show wlan0";
+
+/// Parse the host's `arp -a` table (Windows format) into `(ip, mac)` pairs, for discovering
+/// phones on the LAN to `adb connect` (feature A9). Header/interface lines and incomplete
+/// entries are skipped; only IPv4 rows with a MAC survive.
+pub fn parse_arp_table(stdout: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for line in stdout.lines() {
+        let mut cols = line.split_whitespace();
+        let (Some(ip), Some(mac)) = (cols.next(), cols.next()) else {
+            continue;
+        };
+        let octets: Vec<&str> = ip.split('.').collect();
+        let is_ipv4 = octets.len() == 4 && octets.iter().all(|o| o.parse::<u8>().is_ok());
+        // Windows prints MACs as aa-bb-cc-dd-ee-ff; require the shape so header words
+        // ("Internet", "Interface:") and IPv6 rows do not slip through.
+        let is_mac = mac.len() == 17 && mac.split('-').count() == 6;
+        if is_ipv4 && is_mac && ip != "255.255.255.255" && !ip.ends_with(".255") {
+            out.push((ip.to_string(), mac.to_string()));
+        }
+    }
+    out
+}
+
+/// Pull the first IPv4 address out of `ip -f inet addr show wlan0`, e.g. the `192.168.1.42`
+/// in `    inet 192.168.1.42/24 brd 192.168.1.255 scope global wlan0`. Loopback and
+/// link-local (169.254.x) are skipped — neither is reachable for `adb connect`.
+pub fn parse_wlan_ipv4(stdout: &str) -> Option<String> {
+    stdout.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("inet ")?;
+        let cidr = rest.split_whitespace().next()?;
+        let ip = cidr.split('/').next()?;
+        let octets: Vec<&str> = ip.split('.').collect();
+        if octets.len() != 4 || !octets.iter().all(|o| o.parse::<u8>().is_ok()) {
+            return None;
+        }
+        if ip == "127.0.0.1" || ip.starts_with("169.254.") {
+            return None;
+        }
+        Some(ip.to_string())
+    })
+}
+
+/// Check a path before it is pasted into a device shell command, and say why not.
+///
+/// The companion of [`validate_package_name`], and the reasoning is the same one: `adb
+/// shell` runs a real shell on the phone, so a path typed by an operator or clicked out of
+/// a listing reaches it as code. What differs is how strict it can afford to be. A package
+/// name has a narrow grammar; a *filename* does not — real ones on this fleet contain
+/// spaces, dashes and Vietnamese diacritics (`Giao Trinh - Bai Giang - HDH`, measured on
+/// 23021RAAEG), so rejecting everything outside `[A-Za-z0-9._-]` would refuse to browse the
+/// phone's actual contents.
+///
+/// So the rule is narrower and provable instead: every path this module sends is wrapped in
+/// **single quotes** by [`quote_device_path`], inside which `$`, `&`, `;`, `|`, `<`, `>` and
+/// backtick are all inert. The only characters that can escape single quotes are the single
+/// quote itself and a newline, and those two are what this rejects — plus control characters
+/// and anything not anchored at `/`, because a relative path resolves against a working
+/// directory the caller never chose.
+pub fn validate_device_path(path: &str) -> anyhow::Result<&str> {
+    if path.is_empty() {
+        anyhow::bail!("đường dẫn rỗng");
+    }
+    if !path.starts_with('/') {
+        anyhow::bail!("đường dẫn phải bắt đầu bằng / (nhận: {path})");
+    }
+    if path.len() > 1024 {
+        anyhow::bail!("đường dẫn dài quá 1024 ký tự");
+    }
+    if path.contains('\'') {
+        anyhow::bail!("đường dẫn có dấu nháy đơn, không gửi được xuống shell máy: {path}");
+    }
+    if let Some(bad) = path.chars().find(|c| c.is_control()) {
+        anyhow::bail!("đường dẫn có ký tự điều khiển U+{:04X}", bad as u32);
+    }
+    Ok(path)
+}
+
+/// Wrap a validated path for a device shell command. Only ever call this on the output of
+/// [`validate_device_path`] — single quotes are safe *because* the quote character itself
+/// has already been ruled out.
+pub fn quote_device_path(path: &str) -> String {
+    format!("'{path}'")
+}
+
+/// Paths that must never be handed to `rm -rf`, whatever the operator clicked.
+///
+/// Not a permission model — adb already has whatever rights it has — but a guard against the
+/// one gesture that cannot be undone from a UI: a delete aimed at a *root* rather than at
+/// something in it. Everything below these survives; the roots themselves do not.
+const UNDELETABLE_ROOTS: &[&str] = &[
+    "/",
+    "/sdcard",
+    "/storage",
+    "/storage/emulated",
+    "/storage/emulated/0",
+    "/storage/self",
+    "/storage/self/primary",
+    "/data",
+    "/data/local",
+    "/data/local/tmp",
+    "/system",
+    "/vendor",
+    "/mnt",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/cache",
+    "/config",
+    "/apex",
+];
+
+/// True when a delete aimed here would take out a whole storage root rather than a file.
+/// Trailing slashes are stripped first, because `/sdcard/` and `/sdcard` are the same
+/// directory and only one of them would otherwise be caught.
+pub fn is_undeletable_root(path: &str) -> bool {
+    let trimmed = path.trim_end_matches('/');
+    let candidate = if trimmed.is_empty() { "/" } else { trimmed };
+    UNDELETABLE_ROOTS.contains(&candidate)
+}
+
+/// `2026-08-19`, as `ls -la` prints the date column.
+fn looks_like_ls_date(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit())
+}
+
+/// `15:45`, as `ls -la` prints the time column.
+fn looks_like_ls_time(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    bytes.len() == 5
+        && bytes[2] == b':'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i == 2 || b.is_ascii_digit())
+}
+
+/// Split a line into tokens, keeping each one's byte offset so the *name* can be taken as
+/// the untouched remainder of the line. Splitting the whole line and re-joining would
+/// collapse the runs of spaces inside a filename into one.
+fn tokens_with_offsets(line: &str) -> Vec<(usize, &str)> {
+    let mut out = Vec::new();
+    let mut start: Option<usize> = None;
+    for (index, ch) in line.char_indices() {
+        if ch.is_whitespace() {
+            if let Some(from) = start.take() {
+                out.push((from, &line[from..index]));
+            }
+        } else if start.is_none() {
+            start = Some(index);
+        }
+    }
+    if let Some(from) = start {
+        out.push((from, &line[from..]));
+    }
+    out
+}
+
+/// Parse one phone's `ls -la` into rows a file browser can draw (xiaowei "Preview Mobile
+/// Files").
+///
+/// **Measured on 23021RAAEG, Android 15, 21/08/2026** — every shape below is a line this
+/// fleet actually printed, not a guess at toybox's format:
+///
+/// ```text
+/// total 223
+/// drwxrws---  2 u0_a269  media_rw  3452 2024-07-11 11:16 Alarms
+/// -rwxrwx--- 1 u0_a269 media_rw 138078 2025-11-25 08:49 CV prototype.pdf
+/// lrw-r--r--   1 root   root        11 2009-01-01 07:00 bin -> /system/bin
+/// l?????????   ? ?      ?            ?                ? cache -> ?
+/// ```
+///
+/// Three things in there decide the whole implementation. **Column widths are padded per
+/// listing**, so nothing can be read at a fixed offset. **Names contain spaces** — and
+/// worse, contain ` - ` (`Giao Trinh - Bai Giang - HDH`), so the arrow of a symlink is only
+/// looked for on rows whose mode begins with `l`. And **a row the phone cannot stat prints
+/// `?` for every column including a merged date/time**, which is one field short of every
+/// other row: keying off a field *count* drops it, so the name is found by locating the
+/// date-then-time pair and falling back to the seventh token only when there is none.
+pub fn parse_ls_listing(stdout: &str) -> Vec<riviu_core::DeviceFileEntry> {
+    let mut entries = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.trim().is_empty() || line.starts_with("total ") {
+            continue;
+        }
+        // `ls: /sdcard/nope: No such file or directory` arrives here whenever the caller
+        // merged the two pipes; it is a message, never a row.
+        if line.starts_with("ls:") {
+            continue;
+        }
+        let tokens = tokens_with_offsets(line);
+        if tokens.len() < 7 {
+            continue;
+        }
+        let dated = tokens.iter().enumerate().find_map(|(index, (_, token))| {
+            let next_is_time = tokens
+                .get(index + 1)
+                .is_some_and(|(_, next)| looks_like_ls_time(next));
+            (looks_like_ls_date(token) && next_is_time).then_some(index)
+        });
+        let (name_start, modified) = match dated {
+            Some(index) => {
+                let Some((offset, _)) = tokens.get(index + 2) else {
+                    continue;
+                };
+                (
+                    *offset,
+                    Some(format!("{} {}", tokens[index].1, tokens[index + 1].1)),
+                )
+            }
+            None => (tokens[6].0, None),
+        };
+        let rest = line[name_start..].trim();
+        if rest.is_empty() {
+            continue;
+        }
+        let mode = tokens[0].1;
+        let kind = match mode.as_bytes().first() {
+            Some(b'd') => riviu_core::DeviceFileKind::Directory,
+            Some(b'l') => riviu_core::DeviceFileKind::Symlink,
+            Some(b'-') => riviu_core::DeviceFileKind::File,
+            _ => riviu_core::DeviceFileKind::Other,
+        };
+        // Only on a symlink row, and only the *last* arrow: a name may contain " - " but a
+        // target may itself be a path with spaces, so the split has to be the final one.
+        let (name, link_target) = if kind == riviu_core::DeviceFileKind::Symlink {
+            match rest.rsplit_once(" -> ") {
+                Some((name, target)) => (name.trim(), Some(target.trim().to_string())),
+                None => (rest, None),
+            }
+        } else {
+            (rest, None)
+        };
+        if name.is_empty() || name == "." || name == ".." {
+            continue;
+        }
+        entries.push(riviu_core::DeviceFileEntry {
+            name: name.to_string(),
+            kind,
+            size: tokens[4].1.parse::<u64>().unwrap_or(0),
+            modified,
+            link_target,
+        });
+    }
+    entries
+}
+
 #[cfg(test)]
 mod tests {
     /// A sentence an operator reads must not carry the source code's indentation.
@@ -1067,6 +1324,147 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn parse_wlan_ipv4_pulls_the_usable_address() {
+        let out = "12: wlan0: <UP>\n    inet 192.168.1.42/24 brd 192.168.1.255 scope global wlan0\n       valid_lft forever";
+        assert_eq!(parse_wlan_ipv4(out).as_deref(), Some("192.168.1.42"));
+    }
+
+    #[test]
+    fn parse_wlan_ipv4_skips_loopback_and_link_local() {
+        assert_eq!(parse_wlan_ipv4("    inet 127.0.0.1/8 scope host lo"), None);
+        assert_eq!(
+            parse_wlan_ipv4("    inet 169.254.3.9/16 scope link wlan0"),
+            None
+        );
+        assert_eq!(parse_wlan_ipv4("no address here"), None);
+    }
+
+    #[test]
+    fn parse_arp_table_keeps_only_host_rows() {
+        let out = "\nInterface: 192.168.1.10 --- 0x2\n  Internet Address      Physical Address      Type\n  192.168.1.1           aa-bb-cc-dd-ee-ff     dynamic\n  192.168.1.42          11-22-33-44-55-66     dynamic\n  192.168.1.255         ff-ff-ff-ff-ff-ff     static\n";
+        let table = parse_arp_table(out);
+        assert_eq!(
+            table,
+            vec![
+                ("192.168.1.1".to_string(), "aa-bb-cc-dd-ee-ff".to_string()),
+                ("192.168.1.42".to_string(), "11-22-33-44-55-66".to_string()),
+            ]
+        );
+    }
+
+    /// The real thing, pasted from `adb -s 10969614 shell "ls -la /sdcard/Download"` and
+    /// `ls -la /` on 21/08/2026. Every awkward row this fleet has is in here: padded
+    /// columns, a name with spaces, a name containing ` - `, a symlink, and the unstattable
+    /// row that prints `?` for a merged date/time.
+    const MEASURED_LS: &str = "total 41893\n\
+-rwxrwx--- 1 u0_a269 media_rw      108 2026-07-26 20:29 .admaster_._u_i_d_f_k.txt\n\
+drwxrws--- 2 u0_a269 media_rw     3452 2025-03-08 08:51 .temp_mivideo\n\
+-rwxrwx--- 1 u0_a269 media_rw   138078 2025-11-25 08:49 CV prototype.pdf\n\
+drwxrws--- 3 u0_a269 media_rw     3452 2025-02-15 07:39 Giao Trinh - Bai Giang - HDH\n\
+lrw-r--r--   1 root   root        11 2009-01-01 07:00 bin -> /system/bin\n\
+l?????????   ? ?      ?            ?                ? cache -> ?\n\
+drwxr-xr-x  32 root   root       788 2009-01-01 07:00 .\n\
+drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
+
+    #[test]
+    fn parse_ls_listing_reads_every_row_shape_the_fleet_prints() {
+        let rows = parse_ls_listing(MEASURED_LS);
+        let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                ".admaster_._u_i_d_f_k.txt",
+                ".temp_mivideo",
+                "CV prototype.pdf",
+                "Giao Trinh - Bai Giang - HDH",
+                "bin",
+                "cache",
+            ],
+            "the `total` line, `.` and `..` are not rows"
+        );
+        assert_eq!(rows[0].kind, riviu_core::DeviceFileKind::File);
+        assert_eq!(rows[0].size, 108);
+        assert_eq!(rows[0].modified.as_deref(), Some("2026-07-26 20:29"));
+        assert_eq!(rows[1].kind, riviu_core::DeviceFileKind::Directory);
+        assert_eq!(
+            rows[2].size, 138_078,
+            "a name with a space must not shift the size column"
+        );
+        assert_eq!(
+            rows[3].name, "Giao Trinh - Bai Giang - HDH",
+            "` - ` inside a name is not a symlink arrow"
+        );
+        assert_eq!(rows[3].link_target, None);
+        assert_eq!(rows[4].kind, riviu_core::DeviceFileKind::Symlink);
+        assert_eq!(rows[4].link_target.as_deref(), Some("/system/bin"));
+    }
+
+    /// The row that keying off a field count would silently drop. It is one token short of
+    /// every other row because the phone printed a single `?` where the date and the time
+    /// both go — and a directory browser that hides entries it cannot stat shows a folder as
+    /// emptier than it is.
+    #[test]
+    fn parse_ls_listing_keeps_a_row_the_phone_could_not_stat() {
+        let rows = parse_ls_listing(MEASURED_LS);
+        let broken = rows
+            .iter()
+            .find(|row| row.name == "cache")
+            .expect("the unstattable row survives");
+        assert_eq!(broken.kind, riviu_core::DeviceFileKind::Symlink);
+        assert_eq!(broken.modified, None, "`?` is not a timestamp");
+        assert_eq!(broken.size, 0);
+        assert_eq!(broken.link_target.as_deref(), Some("?"));
+    }
+
+    #[test]
+    fn parse_ls_listing_ignores_the_error_line_a_missing_path_prints() {
+        // Measured: exit 1, this exact sentence, stdout empty. A caller that merges the
+        // pipes must not end up with a file named after the complaint.
+        assert!(parse_ls_listing("ls: /sdcard/nope-nothing: No such file or directory").is_empty());
+    }
+
+    #[test]
+    fn validate_device_path_allows_the_names_this_fleet_really_has() {
+        for path in [
+            "/sdcard/Download/CV prototype.pdf",
+            "/sdcard/Download/Giao Trinh - Bai Giang - HDH",
+            "/sdcard/DCIM/Camera",
+            "/data/local/tmp/riviu-wallpaper.png",
+        ] {
+            assert!(
+                validate_device_path(path).is_ok(),
+                "{path} is an ordinary path and must be browsable"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_device_path_refuses_what_single_quoting_cannot_contain() {
+        // A single quote closes the quoting this module wraps every path in, so it is the
+        // one character that turns a filename into a command.
+        assert!(validate_device_path("/sdcard/'; rm -rf /sdcard; echo '").is_err());
+        assert!(validate_device_path("/sdcard/a\nrm -rf /sdcard").is_err());
+        assert!(validate_device_path("sdcard/Download").is_err(), "relative");
+        assert!(validate_device_path("").is_err());
+        // Inert inside single quotes, and real filenames use them — so they stay allowed.
+        assert!(validate_device_path("/sdcard/Download/a$b&c;d|e.txt").is_ok());
+    }
+
+    #[test]
+    fn is_undeletable_root_catches_the_roots_however_they_are_written() {
+        for path in ["/", "/sdcard", "/sdcard/", "/storage/emulated/0", "/data"] {
+            assert!(is_undeletable_root(path), "{path} must not be deletable");
+        }
+        for path in [
+            "/sdcard/Download",
+            "/sdcard/DCIM/Camera",
+            "/data/local/tmp/x",
+        ] {
+            assert!(!is_undeletable_root(path), "{path} is a normal target");
+        }
+    }
 
     #[test]
     fn a_pending_usb_prompt_is_not_a_transport_blip() {

@@ -555,6 +555,7 @@ mod tests {
                 bundle_id: format!("com.stub.{udid}"),
                 kind: crate::types::InstalledAppKind::User,
                 label: None,
+                icon_png_base64: None,
             }])
         }
         async fn refresh_device(&self, udid: &str) -> anyhow::Result<DeviceInfo> {

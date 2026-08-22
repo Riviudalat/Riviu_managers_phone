@@ -24,6 +24,12 @@ const KEYCODE_POWER: i64 = 26;
 const KEYCODE_NOTIFICATION: i64 = 83;
 /// `KEYCODE_APP_SWITCH` — Recents.
 const KEYCODE_APP_SWITCH: i64 = 187;
+/// `KEYCODE_SLEEP` — screen off / lock, deterministically (POWER only toggles).
+const KEYCODE_SLEEP: i64 = 223;
+/// `KEYCODE_WAKEUP` — screen on, deterministically.
+const KEYCODE_WAKEUP: i64 = 224;
+/// `KEYCODE_MENU` — dismisses a swipe-only keyguard on many builds.
+const KEYCODE_MENU: i64 = 82;
 
 pub(crate) fn hardware_keycode(key: HardwareKey) -> i64 {
     match key {
@@ -408,6 +414,20 @@ impl UiSession for AndroidUiSession {
 
     async fn press_hardware_key(&self, key: HardwareKey) -> anyhow::Result<()> {
         self.agent.press_key(hardware_keycode(key)).await
+    }
+
+    /// Sleep locks; wake then nudges past a swipe-only keyguard.
+    ///
+    /// A secure PIN is deliberately left alone — this is a screen on/off for the fleet, not
+    /// a lock-screen bypass, so a PIN-protected phone wakes to its own lock screen.
+    async fn set_locked(&self, locked: bool) -> anyhow::Result<()> {
+        if locked {
+            self.agent.press_key(KEYCODE_SLEEP).await
+        } else {
+            self.agent.press_key(KEYCODE_WAKEUP).await?;
+            let _ = self.agent.press_key(KEYCODE_MENU).await;
+            Ok(())
+        }
     }
 
     /// Find by `content-desc`, then touch it like a finger would.

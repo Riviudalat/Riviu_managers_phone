@@ -192,21 +192,36 @@ impl Database {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
+    /// The columns of one `device_meta` row, in the order both readers below bind them.
+    /// One constant so a column added to the table cannot be added to one reader only —
+    /// which is how `handle` came to be selected by the single-row read and not by anything
+    /// else for a while.
+    const DEVICE_META_COLUMNS: &'static str =
+        "udid, notes, tags_json, group_id, proxy_id, handle, alias, number";
+
+    fn device_meta_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::types::DeviceMeta> {
+        let tags_json: String = row.get(2)?;
+        Ok(crate::types::DeviceMeta {
+            udid: row.get(0)?,
+            notes: row.get(1)?,
+            tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+            group_id: row.get(3)?,
+            proxy_id: row.get(4)?,
+            handle: row.get(5)?,
+            alias: row.get(6)?,
+            number: row.get(7)?,
+        })
+    }
+
     pub fn get_device_meta(&self, udid: &str) -> anyhow::Result<crate::types::DeviceMeta> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT udid, notes, tags_json, group_id, proxy_id FROM device_meta WHERE udid = ?1",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM device_meta WHERE udid = ?1",
+            Self::DEVICE_META_COLUMNS
+        ))?;
         let mut rows = stmt.query(params![udid])?;
         if let Some(row) = rows.next()? {
-            let tags_json: String = row.get(2)?;
-            Ok(crate::types::DeviceMeta {
-                udid: row.get(0)?,
-                notes: row.get(1)?,
-                tags: serde_json::from_str(&tags_json).unwrap_or_default(),
-                group_id: row.get(3)?,
-                proxy_id: row.get(4)?,
-            })
+            Ok(Self::device_meta_from_row(row)?)
         } else {
             Ok(crate::types::DeviceMeta {
                 udid: udid.to_string(),
@@ -214,24 +229,48 @@ impl Database {
                 tags: vec![],
                 group_id: None,
                 proxy_id: None,
+                handle: String::new(),
+                alias: String::new(),
+                number: None,
             })
         }
+    }
+
+    /// Every phone this app has a record for, in one read.
+    ///
+    /// The grid needs the alias and the number of *twenty* phones to draw one frame, and
+    /// asking per device is twenty IPC round trips for a table that fits in a page. Rows
+    /// exist only for phones somebody has edited, so a fleet with no records answers empty
+    /// and every tile falls back to what the phone reports.
+    pub fn list_device_metas(&self) -> anyhow::Result<Vec<crate::types::DeviceMeta>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM device_meta",
+            Self::DEVICE_META_COLUMNS
+        ))?;
+        let rows = stmt.query_map([], Self::device_meta_from_row)?;
+        Ok(rows.filter_map(|row| row.ok()).collect())
     }
 
     pub fn upsert_device_meta(&self, meta: &crate::types::DeviceMeta) -> anyhow::Result<()> {
         let conn = self.conn()?;
         conn.execute(
-            r#"INSERT INTO device_meta (udid, notes, tags_json, group_id, proxy_id)
-               VALUES (?1,?2,?3,?4,?5)
+            r#"INSERT INTO device_meta (udid, notes, tags_json, group_id, proxy_id, handle, alias, number)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
                ON CONFLICT(udid) DO UPDATE SET
                  notes=excluded.notes, tags_json=excluded.tags_json,
-                 group_id=excluded.group_id, proxy_id=excluded.proxy_id"#,
+                 group_id=excluded.group_id, proxy_id=excluded.proxy_id,
+                 handle=excluded.handle, alias=excluded.alias,
+                 number=excluded.number"#,
             params![
                 meta.udid,
                 meta.notes,
                 serde_json::to_string(&meta.tags)?,
                 meta.group_id,
-                meta.proxy_id
+                meta.proxy_id,
+                meta.handle,
+                meta.alias,
+                meta.number
             ],
         )?;
         Ok(())
@@ -1702,6 +1741,106 @@ mod group_tests {
 }
 
 #[cfg(test)]
+mod device_meta_tests {
+    use super::*;
+
+    fn fixture() -> (Database, PathBuf) {
+        let path = std::env::temp_dir().join(format!("riviu-device-meta-{}.db", Uuid::new_v4()));
+        (Database::open(&path).expect("open fixture database"), path)
+    }
+
+    fn meta(udid: &str) -> crate::types::DeviceMeta {
+        crate::types::DeviceMeta {
+            udid: udid.into(),
+            notes: String::new(),
+            tags: vec![],
+            group_id: None,
+            proxy_id: None,
+            handle: String::new(),
+            alias: String::new(),
+            number: None,
+        }
+    }
+
+    #[test]
+    fn an_alias_and_a_number_survive_a_write_and_a_reopen() {
+        let (db, path) = fixture();
+        db.upsert_device_meta(&crate::types::DeviceMeta {
+            alias: "Máy kệ trên, cột 3".into(),
+            number: Some(21),
+            handle: "riviu.demo".into(),
+            ..meta("10969614")
+        })
+        .expect("write");
+
+        let read = db.get_device_meta("10969614").expect("read");
+        assert_eq!(read.alias, "Máy kệ trên, cột 3");
+        assert_eq!(read.number, Some(21));
+        // The neighbouring column, because the update statement lists every column by hand
+        // and the way that breaks is by overwriting the one nobody looked at.
+        assert_eq!(read.handle, "riviu.demo");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_unnumbered_phone_reads_back_as_unnumbered_rather_than_zero() {
+        // `None` and `Some(0)` are different facts: the grid falls back to a tile's position
+        // for the first and would print "0" for the second.
+        let (db, path) = fixture();
+        db.upsert_device_meta(&meta("ce0417145199e0490c"))
+            .expect("write");
+        assert_eq!(
+            db.get_device_meta("ce0417145199e0490c")
+                .expect("read")
+                .number,
+            None
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_phone_with_no_record_answers_with_an_empty_one_instead_of_failing() {
+        let (db, path) = fixture();
+        let read = db.get_device_meta("never-seen").expect("read");
+        assert_eq!(read.udid, "never-seen");
+        assert_eq!(read.alias, "");
+        assert_eq!(read.number, None);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn listing_returns_only_the_phones_that_have_a_record() {
+        // What the grid reads once per refresh. Rows exist only for edited phones, so a fleet
+        // nobody has renamed answers empty and every tile keeps the name the phone reports.
+        let (db, path) = fixture();
+        assert!(db.list_device_metas().expect("empty list").is_empty());
+        db.upsert_device_meta(&crate::types::DeviceMeta {
+            number: Some(2),
+            ..meta("b")
+        })
+        .expect("write b");
+        db.upsert_device_meta(&crate::types::DeviceMeta {
+            number: Some(1),
+            ..meta("a")
+        })
+        .expect("write a");
+
+        let listed = db.list_device_metas().expect("list");
+        assert_eq!(listed.len(), 2);
+        let mut numbered: Vec<(String, Option<u32>)> = listed
+            .into_iter()
+            .map(|row| (row.udid, row.number))
+            .collect();
+        numbered.sort();
+        assert_eq!(
+            numbered,
+            vec![("a".to_string(), Some(1)), ("b".to_string(), Some(2))]
+        );
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
 mod agent_settings_tests {
     use super::*;
     use crate::types::AgentSettings;
@@ -2018,6 +2157,7 @@ mod interaction_tests {
             mode: ThreadMode::Threaded,
             shape: crate::interaction::ThreadShape::Chain,
             cohort_size: None,
+            mentions: Vec::new(),
         }
     }
 

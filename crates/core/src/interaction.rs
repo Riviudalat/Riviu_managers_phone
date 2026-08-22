@@ -245,6 +245,16 @@ pub struct ThreadCampaignRequest {
     /// Off by default, and off is also what a stored campaign from before this reads as.
     #[serde(default)]
     pub like_target: bool,
+    /// @-handles to tag at the front of every comment, without the leading `@`.
+    ///
+    /// Inserted as **plain text** (`@name`), which TikTok does not turn into a linked
+    /// mention or a notification — matching what a person typing the same characters gets.
+    /// A handle that belongs to a fleet phone is *also* added to `actor_udids` by the caller,
+    /// so tagging an owned account brings that phone into the same post to reply; a handle
+    /// that matches no phone is tagged in text only. Empty (the default, and what a campaign
+    /// stored before this reads as) prepends nothing.
+    #[serde(default)]
+    pub mentions: Vec<String>,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -363,6 +373,28 @@ impl ThreadCampaignRequest {
         let index =
             (target_index.wrapping_mul(stride) + ordinal as usize) % self.manual_comments.len();
         self.manual_comments.get(index).map(String::as_str)
+    }
+
+    /// The `@name ` text prepended to the **opening** comment of a thread, or empty.
+    ///
+    /// Each entry is trimmed, its leading `@` dropped and re-added, and blanks are skipped,
+    /// so `["@ann", " bob ", ""]` yields `"@ann @bob "` (one trailing space before the
+    /// comment body). Only the root (ordinal 0) carries it: the opener tags the accounts and
+    /// the replies are those accounts answering, so re-tagging on every reply would read as
+    /// spam. Plain text — TikTok does not linkify or notify it — see [`Self::mentions`].
+    pub fn mention_prefix(&self) -> String {
+        let tags: Vec<String> = self
+            .mentions
+            .iter()
+            .map(|raw| raw.trim().trim_start_matches('@').trim())
+            .filter(|handle| !handle.is_empty())
+            .map(|handle| format!("@{handle}"))
+            .collect();
+        if tags.is_empty() {
+            String::new()
+        } else {
+            format!("{} ", tags.join(" "))
+        }
     }
 
     /// Whether the run has to open each target once up front just to photograph it.
@@ -927,6 +959,7 @@ mod tests {
                 cohort_size: None,
                 manual_comments: pool.into_iter().map(str::to_string).collect(),
                 like_target: false,
+                mentions: Vec::new(),
             }
         }
 
@@ -936,6 +969,22 @@ mod tests {
             assert!(!ai.is_manual());
             assert_eq!(ai.manual_comment_for(0, 0), None);
             assert!(ai.validate().is_ok());
+        }
+
+        #[test]
+        fn mention_prefix_normalizes_handles_and_is_empty_without_any() {
+            let mut req = request(vec![]);
+            // No mentions -> nothing prepended, so an ordinary comment is unchanged.
+            assert_eq!(req.mention_prefix(), "");
+            // Leading `@` optional, blanks skipped, one trailing space before the body.
+            req.mentions = vec![
+                "@ann".into(),
+                " bob ".into(),
+                String::new(),
+                "   ".into(),
+                "@cara".into(),
+            ];
+            assert_eq!(req.mention_prefix(), "@ann @bob @cara ");
         }
 
         #[test]
@@ -1060,6 +1109,7 @@ mod tests {
             mode: ThreadMode::Threaded,
             shape: ThreadShape::Chain,
             cohort_size: None,
+            mentions: Vec::new(),
         }
     }
 

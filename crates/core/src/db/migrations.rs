@@ -54,6 +54,16 @@ const MIGRATIONS: &[Migration] = &[
         name: "schedule-last-error",
         apply: apply_migration_8,
     },
+    Migration {
+        version: 9,
+        name: "device-account-handle",
+        apply: apply_migration_9,
+    },
+    Migration {
+        version: 10,
+        name: "device-alias-and-number",
+        apply: apply_migration_10,
+    },
 ];
 
 const LEDGER_SQL: &str = r#"
@@ -765,6 +775,28 @@ fn apply_migration_8(transaction: &Transaction<'_>) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn apply_migration_9(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    // The TikTok @handle a phone is logged into, so an interaction @-mention can resolve to
+    // the owning phone. Kept out of the V1 baseline schema on purpose, so legacy-DB
+    // detection (`expected_v1_fingerprint`) still recognises pre-ledger databases.
+    transaction
+        .execute_batch("ALTER TABLE device_meta ADD COLUMN handle TEXT NOT NULL DEFAULT '';")?;
+    Ok(())
+}
+
+fn apply_migration_10(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    // What the operator calls this phone and the number written on it (xiaowei "Change Name"
+    // / "Change Number"). Two columns rather than one, because they answer different
+    // questions: the alias is how a tile is labelled, the number is how the fleet is ordered
+    // and what goes on the sticker. `number` is nullable — unnumbered is a real state, and a
+    // default of 0 would put every phone in the fleet at position zero.
+    transaction.execute_batch(
+        "ALTER TABLE device_meta ADD COLUMN alias TEXT NOT NULL DEFAULT '';\n\
+         ALTER TABLE device_meta ADD COLUMN number INTEGER;",
+    )?;
+    Ok(())
+}
+
 fn apply_v1_schema(connection: &Connection) -> anyhow::Result<()> {
     connection.execute_batch(V1_SCHEMA_SQL)?;
     Ok(())
@@ -1125,7 +1157,7 @@ mod tests {
                 .iter()
                 .map(|(version, _)| *version)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5, 6, 7, 8]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         );
         assert!(table_exists(&connection, "flow_documents"));
         assert!(table_exists(&connection, "nurture_comment_attempts"));
@@ -1325,7 +1357,7 @@ mod tests {
                     .iter()
                     .map(|(version, _)| *version)
                     .collect::<Vec<_>>(),
-                vec![1, 2, 3, 4, 5, 6, 7, 8]
+                vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
             );
             // The local login is gone and migration 7 takes its credentials with it. This
             // used to assert the seeded `guest@local` row existed; the point of the change
@@ -1365,7 +1397,7 @@ mod tests {
                 .iter()
                 .map(|(version, _)| *version)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5, 6, 7, 8]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         );
         drop(connection);
         cleanup(&path);
@@ -1410,7 +1442,7 @@ mod tests {
                 .iter()
                 .map(|(version, _)| *version)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5, 6, 7, 8]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         );
         drop(connection);
         cleanup(&path);
@@ -1459,7 +1491,7 @@ mod tests {
                                     // ledger from a NEWER build, so this has to move
                                     // whenever a migration is added.
                                     "INSERT INTO schema_migrations(version,name,applied_at)
-                                     VALUES(9,'future','2026-07-30T00:00:02Z')",
+                                     VALUES(11,'future','2026-07-30T00:00:02Z')",
                                     [],
                                 )
                                 .expect("future migration");

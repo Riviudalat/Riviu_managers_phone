@@ -604,6 +604,16 @@ pub trait UiSession: Send + Sync {
             | HardwareKey::Notification => unsupported("pressHardwareKey"),
         }
     }
+    /// Lock (screen off) or unlock the device — xiaowei "锁屏 / 解锁", batched over a fleet.
+    ///
+    /// Default unsupported, so every mock and minimal backend inherits it untouched. iOS
+    /// maps this to WDA `/wda/lock` and `/wda/unlock`. Android sleeps with `KEYCODE_SLEEP`
+    /// and wakes with `KEYCODE_WAKEUP`, then best-effort dismisses a swipe-only keyguard; a
+    /// phone with a secure PIN stays at its lock screen, which is the honest outcome rather
+    /// than a pretended unlock.
+    async fn set_locked(&self, _locked: bool) -> anyhow::Result<()> {
+        unsupported("setLocked")
+    }
     /// Go back one step, the way the platform's own back gesture would.
     ///
     /// Default unsupported because iOS has no system-wide back: there, leaving a

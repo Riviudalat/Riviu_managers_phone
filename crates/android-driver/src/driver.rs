@@ -337,6 +337,54 @@ struct ViewProducer {
     control_drain: tokio::task::JoinHandle<()>,
 }
 
+/// What one phone's apps are called and what they look like, plus the package set it was read
+/// for. See [`AndroidDriver::app_descriptions`] for the measurements that make it worth
+/// keeping.
+struct AppDescriptionCache {
+    fingerprint: u64,
+    rows: Vec<crate::riviu_agent::HelperApp>,
+}
+
+/// A hash of *which* packages a description covers.
+///
+/// Sorted first, so the same set in a different order is the same fingerprint: adb's listing
+/// order is not stable across calls and an order-sensitive key would miss the cache every
+/// time. Installing or removing an app changes the set and therefore the key, which is the
+/// only event that should invalidate the names.
+fn package_set_fingerprint(packages: &[String]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut sorted: Vec<&str> = packages.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    sorted.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Copy labels and icons onto the rows adb produced, joining on the package name.
+///
+/// An empty label is dropped rather than written: a row labelled with an empty string reads
+/// as an app called nothing, where `None` reads as "the package name is all we have".
+fn apply_app_descriptions(
+    apps: &mut [riviu_core::InstalledApp],
+    described: &[crate::riviu_agent::HelperApp],
+) {
+    let by_package: HashMap<&str, &crate::riviu_agent::HelperApp> = described
+        .iter()
+        .map(|row| (row.package.as_str(), row))
+        .collect();
+    for app in apps.iter_mut() {
+        let Some(row) = by_package.get(app.bundle_id.as_str()) else {
+            continue;
+        };
+        if !row.label.trim().is_empty() {
+            app.label = Some(row.label.clone());
+        }
+        if let Some(icon) = &row.icon_png_base64 {
+            app.icon_png_base64 = Some(icon.clone());
+        }
+    }
+}
+
 pub struct AndroidDriver {
     adb: AdbProgram,
     minicap_apk: Option<PathBuf>,
@@ -451,6 +499,17 @@ pub struct AndroidDriver {
     /// serial -> a live helper client. Same reuse rule as [`Self::agents`]:
     /// opening a second forward per session leaks a host port.
     helpers: Mutex<HashMap<String, crate::riviu_agent::HelperClient>>,
+    /// serial -> app names and icons the helper already described, keyed on the exact set of
+    /// packages they were read for.
+    ///
+    /// **Measured on 23021RAAEG, 21/08/2026, and the numbers are why this cache exists:**
+    /// labels for all 539 packages cost 4 559 ms and 47 KB; labels plus 48 px icons for the
+    /// 162 user-partition packages cost 3 599 ms and 535 KB. That is per `PackageManager`
+    /// call on the device, roughly 8 ms an app, and it is not something a faster wire makes
+    /// better. A menu that spends four seconds every time it opens is a menu nobody opens
+    /// twice, so the answer is kept until the package set itself changes — installing or
+    /// removing an app is exactly when it must be re-read, and nothing else is.
+    app_descriptions: Mutex<HashMap<String, AppDescriptionCache>>,
     /// serial -> the last thing we proved about its agent.
     ///
     /// `DeviceDriver::cached_agent_status` is synchronous and Flow's preflight reads it, so
@@ -548,6 +607,7 @@ impl AndroidDriver {
             forwarded: Mutex::new(HashSet::new()),
             riviu_agent_apk,
             helpers: Mutex::new(HashMap::new()),
+            app_descriptions: Mutex::new(HashMap::new()),
             agent_statuses: Mutex::new(HashMap::new()),
         }
     }
@@ -823,6 +883,678 @@ impl AndroidDriver {
             },
         );
         Ok(first_frame_observed)
+    }
+
+    /// Put a USB-attached phone into TCP/IP adb mode, discover its Wi-Fi address, and
+    /// `adb connect` to it — so it can be driven over the LAN without the cable (feature A4,
+    /// xiaowei WIFI mode). Returns the `host:port` now connected. The USB serial keeps
+    /// working; the wireless endpoint shows up as an additional device on the next refresh.
+    pub async fn enable_wifi_adb(&self, serial: &str) -> anyhow::Result<String> {
+        // 5555 is adb's conventional wireless port and what `adb tcpip` restarts adbd on.
+        self.adb
+            .run(
+                &["-s", serial, "tcpip", "5555"],
+                std::time::Duration::from_secs(10),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("adb tcpip failed: {e}"))?;
+        // adbd restarts; give it a beat before asking the phone for its address.
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        let out = self
+            .adb
+            .shell(serial, adb::WLAN_IP_SHELL)
+            .await
+            .map_err(|e| anyhow::anyhow!("read wlan0 address failed: {e}"))?;
+        let ip = adb::parse_wlan_ipv4(&out)
+            .ok_or_else(|| anyhow::anyhow!("no Wi-Fi (wlan0) address — is the phone on Wi-Fi?"))?;
+        let host = format!("{ip}:5555");
+        self.wifi_connect(&host).await?;
+        Ok(host)
+    }
+
+    /// `adb connect <host:port>` to a phone already in TCP/IP mode (manual entry, or after
+    /// [`Self::enable_wifi_adb`]). adb prints "connected"/"already connected" on success and a
+    /// human reason on failure, which is surfaced verbatim.
+    pub async fn wifi_connect(&self, host: &str) -> anyhow::Result<()> {
+        let out = self
+            .adb
+            .run(&["connect", host], std::time::Duration::from_secs(10))
+            .await
+            .map_err(|e| anyhow::anyhow!("adb connect failed: {e}"))?;
+        let low = out.to_lowercase();
+        if low.contains("connected") {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("adb connect {host}: {}", out.trim()))
+        }
+    }
+
+    /// `adb disconnect <host:port>`, dropping a wireless endpoint (the USB side, if any, is
+    /// unaffected).
+    pub async fn wifi_disconnect(&self, host: &str) -> anyhow::Result<()> {
+        self.adb
+            .run(&["disconnect", host], std::time::Duration::from_secs(10))
+            .await
+            .map_err(|e| anyhow::anyhow!("adb disconnect failed: {e}"))?;
+        Ok(())
+    }
+
+    /// Set the phone's wallpaper from a local image file (feature A3, "number as wallpaper").
+    /// Pushes the file to the device then asks the helper to apply it. Requires the Riviu
+    /// helper APK (bundled); errors clearly if it is not attachable.
+    pub async fn set_wallpaper(&self, serial: &str, local_path: &str) -> anyhow::Result<()> {
+        let helper = self
+            .try_attach_helper(serial)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Riviu helper không sẵn sàng trên máy này"))?;
+        let device_path = "/data/local/tmp/riviu-wallpaper.png";
+        self.adb
+            .run(
+                &["-s", serial, "push", local_path, device_path],
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("push wallpaper failed: {e}"))?;
+        helper.set_wallpaper(device_path).await
+    }
+
+    /// Inject a mock GPS location (feature B). Grants the helper the mock-location appop
+    /// (best-effort — on some builds it must be set once in Developer Options) then asks the
+    /// helper to feed the coordinates into the GPS/network providers.
+    pub async fn set_mock_location(&self, serial: &str, lat: f64, lng: f64) -> anyhow::Result<()> {
+        let helper = self
+            .try_attach_helper(serial)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Riviu helper không sẵn sàng trên máy này"))?;
+        // Best-effort: needs WRITE_SECURE_SETTINGS-level appop, which `adb shell` has.
+        let _ = self
+            .adb
+            .shell(
+                serial,
+                &format!(
+                    "appops set {} android:mock_location allow",
+                    crate::riviu_agent::PACKAGE
+                ),
+            )
+            .await;
+        helper.set_mock_location(lat, lng).await
+    }
+
+    /// Stop mock location, returning the phone to its real GPS (feature B).
+    pub async fn stop_mock_location(&self, serial: &str) -> anyhow::Result<()> {
+        let helper = self
+            .try_attach_helper(serial)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Riviu helper không sẵn sàng trên máy này"))?;
+        helper.stop_mock_location().await
+    }
+
+    // --- Root tier (feature C, xiaowei "ROOT 模式 / 一键新机"). These need a rooted phone
+    // (Magisk `su`); on a non-rooted phone `is_rooted` returns false and the mutating calls
+    // report that rather than half-applying. Only android_id can be set without root (adb
+    // carries WRITE_SECURE_SETTINGS). ---
+
+    /// True when `su` grants uid 0 — i.e. the phone is rooted (Magisk) and has authorised adb.
+    pub async fn is_rooted(&self, serial: &str) -> bool {
+        match self.adb.shell(serial, "su -c id").await {
+            Ok(out) => out.contains("uid=0"),
+            Err(_) => false,
+        }
+    }
+
+    /// Run a command as root (`su -c`). Errors if the phone is not rooted, rather than
+    /// silently running it unprivileged.
+    pub async fn root_shell(&self, serial: &str, command: &str) -> anyhow::Result<String> {
+        if !self.is_rooted(serial).await {
+            anyhow::bail!("máy chưa root (không có su)");
+        }
+        // Double quotes so the caller's command keeps its own single quotes; callers here
+        // pass fixed commands, not operator free-text.
+        self.adb
+            .shell(serial, &format!("su -c \"{command}\""))
+            .await
+    }
+
+    /// One-click new identity (xiaowei 一键新机): overwrite the app-visible device fingerprint.
+    /// `android_id` applies without root (adb WRITE_SECURE_SETTINGS); `serialno` and `mac`
+    /// need root (`resetprop`, `ip link`). Each field is best-effort and reported; a field the
+    /// device or its root state rejects does not fail the others. Note this changes what apps
+    /// *read* (Build/Settings/MAC), not the baseband IMEI.
+    pub async fn set_device_identity(
+        &self,
+        serial: &str,
+        android_id: Option<&str>,
+        serialno: Option<&str>,
+        mac: Option<&str>,
+    ) -> anyhow::Result<String> {
+        let rooted = self.is_rooted(serial).await;
+        let mut done: Vec<String> = Vec::new();
+        let mut failed: Vec<String> = Vec::new();
+
+        if let Some(id) = android_id {
+            // Try plain first (adb has WRITE_SECURE_SETTINGS); fall back to root.
+            let plain = self
+                .adb
+                .shell(serial, &format!("settings put secure android_id {id}"))
+                .await;
+            let ok = plain.is_ok()
+                || (rooted
+                    && self
+                        .adb
+                        .shell(
+                            serial,
+                            &format!("su -c \"settings put secure android_id {id}\""),
+                        )
+                        .await
+                        .is_ok());
+            if ok {
+                done.push("android_id".into());
+            } else {
+                failed.push("android_id".into());
+            }
+        }
+
+        if let Some(sn) = serialno {
+            if rooted {
+                let a = self
+                    .adb
+                    .shell(serial, &format!("su -c \"resetprop ro.serialno {sn}\""))
+                    .await;
+                let b = self
+                    .adb
+                    .shell(
+                        serial,
+                        &format!("su -c \"resetprop ro.boot.serialno {sn}\""),
+                    )
+                    .await;
+                if a.is_ok() || b.is_ok() {
+                    done.push("serialno".into());
+                } else {
+                    failed.push("serialno".into());
+                }
+            } else {
+                failed.push("serialno(cần root)".into());
+            }
+        }
+
+        if let Some(m) = mac {
+            if rooted {
+                let cmd = format!(
+                    "su -c \"ip link set wlan0 down; ip link set wlan0 address {m}; ip link set wlan0 up\""
+                );
+                if self.adb.shell(serial, &cmd).await.is_ok() {
+                    done.push("wifi_mac".into());
+                } else {
+                    failed.push("wifi_mac".into());
+                }
+            } else {
+                failed.push("wifi_mac(cần root)".into());
+            }
+        }
+
+        let mut summary = format!(
+            "Đã đổi: {}",
+            if done.is_empty() {
+                "—".into()
+            } else {
+                done.join(", ")
+            }
+        );
+        if !failed.is_empty() {
+            summary.push_str(&format!(" · Không đổi được: {}", failed.join(", ")));
+        }
+        Ok(summary)
+    }
+
+    // --- The per-phone function menu (xiaowei 功能, one row each). Everything here is one
+    // or two adb calls and none of it needs the helper APK or root, which is the reason this
+    // block exists as its own tier: the operator gets the whole menu on a stock phone. ---
+
+    /// List one directory on the phone (xiaowei "Preview Mobile Files").
+    ///
+    /// The trailing slash is not cosmetic. Measured on 23021RAAEG: `ls -la /sdcard` prints
+    /// *the symlink* — one line, `/sdcard -> /storage/self/primary` — while `ls -la /sdcard/`
+    /// prints the contents. Browsing without it shows the phone's main storage as a single
+    /// mysterious file.
+    ///
+    /// A non-zero exit is surfaced as an error with the phone's own sentence, because for a
+    /// browser that is the honest outcome: `ls: /sdcard/nope: No such file or directory` on
+    /// stderr with an empty stdout is a refusal, and rendering it as an empty folder would
+    /// claim the directory exists and is empty.
+    pub async fn list_device_dir(
+        &self,
+        serial: &str,
+        path: &str,
+    ) -> anyhow::Result<Vec<riviu_core::DeviceFileEntry>> {
+        let path = adb::validate_device_path(path)?;
+        let listed = if path.ends_with('/') {
+            path.to_string()
+        } else {
+            format!("{path}/")
+        };
+        let out = self
+            .adb
+            .shell_output(
+                serial,
+                &format!("ls -la {}", adb::quote_device_path(&listed)),
+                Duration::from_secs(30),
+            )
+            .await?;
+        let entries = adb::parse_ls_listing(&out.stdout);
+        if entries.is_empty() && out.exit_code != 0 {
+            let reason = if out.stderr.trim().is_empty() {
+                out.stdout.trim().to_string()
+            } else {
+                out.stderr.trim().to_string()
+            };
+            anyhow::bail!("không đọc được {path}: {reason}");
+        }
+        Ok(entries)
+    }
+
+    /// Copy one file or folder off the phone onto this machine (xiaowei "Export File").
+    ///
+    /// Returns where it landed. `adb pull` is given the destination *directory*, so the
+    /// phone's own name for the file is kept — renaming it here would make an export of
+    /// twenty phones into twenty files whose origin is only in the log.
+    pub async fn pull_device_path(
+        &self,
+        serial: &str,
+        remote: &str,
+        dest_dir: &Path,
+    ) -> anyhow::Result<PathBuf> {
+        let remote = adb::validate_device_path(remote)?;
+        std::fs::create_dir_all(dest_dir)
+            .with_context(|| format!("tạo thư mục {}", dest_dir.display()))?;
+        let name = remote
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .filter(|part| !part.is_empty())
+            .unwrap_or("pulled");
+        // Not `shell`: `adb pull` is a client subcommand, so the path never reaches a device
+        // shell and needs no quoting — it is one argv element.
+        self.adb
+            .device(
+                serial,
+                &["pull", remote, &dest_dir.to_string_lossy()],
+                Duration::from_secs(300),
+            )
+            .await
+            .map_err(|e| anyhow!("adb pull thất bại: {e}"))?;
+        let landed = dest_dir.join(name);
+        if !landed.exists() {
+            anyhow::bail!(
+                "adb pull báo xong nhưng không thấy {} — đường dẫn trên máy có thể là thư mục rỗng",
+                landed.display()
+            );
+        }
+        Ok(landed)
+    }
+
+    /// Put a local file onto the phone (xiaowei "Import File").
+    ///
+    /// Deliberately *not* the media-import path: that one stages a campaign and tells
+    /// MediaStore about the result so a picture shows up in the gallery. This is the file
+    /// manager's own push — whatever the file is, wherever the operator pointed — and it
+    /// promises nothing more than "the bytes are at this path now", which it verifies.
+    pub async fn push_device_file(
+        &self,
+        serial: &str,
+        local: &Path,
+        remote_dir: &str,
+    ) -> anyhow::Result<String> {
+        let remote_dir = adb::validate_device_path(remote_dir)?;
+        if !local.is_file() {
+            anyhow::bail!("không thấy file {}", local.display());
+        }
+        let name = local
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .ok_or_else(|| anyhow!("đường dẫn nguồn không có tên file"))?;
+        let target = format!("{}/{name}", remote_dir.trim_end_matches('/'));
+        adb::validate_device_path(&target)?;
+        self.adb
+            .device(
+                serial,
+                &["push", &local.to_string_lossy(), &target],
+                Duration::from_secs(300),
+            )
+            .await
+            .map_err(|e| anyhow!("adb push thất bại: {e}"))?;
+        // Proof, not optimism: `adb push` has been seen to report success while the target
+        // directory was read-only, and a file manager that then lists nothing new looks
+        // broken rather than refused.
+        let check = self
+            .adb
+            .shell_output(
+                serial,
+                &format!("ls -la {}", adb::quote_device_path(&target)),
+                Duration::from_secs(20),
+            )
+            .await?;
+        if adb::parse_ls_listing(&check.stdout).is_empty() {
+            anyhow::bail!("đẩy xong nhưng máy không thấy {target}");
+        }
+        Ok(target)
+    }
+
+    /// Delete a file or folder on the phone.
+    ///
+    /// Two guards, and they answer different fears. [`adb::is_undeletable_root`] refuses a
+    /// delete aimed at a storage root — the one gesture no confirm dialog can undo — and the
+    /// path validator refuses anything a single quote could break out of. Everything else is
+    /// the operator's call, and the UI asks first.
+    pub async fn delete_device_path(&self, serial: &str, path: &str) -> anyhow::Result<()> {
+        let path = adb::validate_device_path(path)?;
+        if adb::is_undeletable_root(path) {
+            anyhow::bail!("{path} là gốc lưu trữ — không xoá cả gốc, chỉ xoá thứ bên trong");
+        }
+        let out = self
+            .adb
+            .shell_output(
+                serial,
+                &format!("rm -rf {}", adb::quote_device_path(path)),
+                Duration::from_secs(60),
+            )
+            .await?;
+        if out.exit_code != 0 {
+            let reason = if out.stderr.trim().is_empty() {
+                out.stdout.trim().to_string()
+            } else {
+                out.stderr.trim().to_string()
+            };
+            anyhow::bail!("xoá {path} thất bại: {reason}");
+        }
+        // `rm -rf` is silent about a path it could not remove for a reason it swallows, so
+        // absence is read back rather than assumed.
+        let check = self
+            .adb
+            .shell_output(
+                serial,
+                &format!("ls -la {}", adb::quote_device_path(path)),
+                Duration::from_secs(20),
+            )
+            .await?;
+        if !adb::parse_ls_listing(&check.stdout).is_empty() {
+            anyhow::bail!("{path} vẫn còn trên máy sau khi xoá");
+        }
+        Ok(())
+    }
+
+    /// Turn the phone's own Wi-Fi radio on or off (xiaowei ADB submenu "Turn on/off WIFI"),
+    /// and report the state it actually settled at.
+    ///
+    /// `svc wifi` prints nothing at all — success and refusal look identical — so the answer
+    /// comes from reading `settings get global wifi_on` back. Measured end to end on
+    /// 23021RAAEG (Android 15) 21/08/2026: `disable` then a 1 s wait reads `0`, `enable` then
+    /// a 2 s wait reads `1`, and both `svc` calls exit 0 with empty output either way.
+    ///
+    /// **A phone reached over wireless adb disconnects itself by obeying this.** The serial
+    /// says which — `10969614` is USB, `192.168.1.42:5555` is not — and the UI warns before
+    /// asking; the driver still obeys, because an operator switching a phone to cable next is
+    /// a legitimate thing to want.
+    pub async fn set_wifi_radio(&self, serial: &str, on: bool) -> anyhow::Result<bool> {
+        let verb = if on { "enable" } else { "disable" };
+        self.adb
+            .shell(serial, &format!("svc wifi {verb}"))
+            .await
+            .map_err(|e| anyhow!("svc wifi {verb} thất bại: {e}"))?;
+        // The radio takes a moment to report its new state; asking immediately reads the old
+        // one and makes a working toggle look like it did nothing. Two seconds because that
+        // is what the slower direction (on) needed when measured, not because it looks safe.
+        tokio::time::sleep(Duration::from_millis(2000)).await;
+        let read = self
+            .adb
+            .shell(serial, "settings get global wifi_on")
+            .await
+            .unwrap_or_default();
+        Ok(read.trim() == "1")
+    }
+
+    /// Put the display back to the resolution and density the phone shipped with (xiaowei
+    /// ADB submenu "Reset DPI" / "Reset resolution"), and say what it reads as afterwards.
+    ///
+    /// Returns the phone's own two lines so the operator sees the result rather than a
+    /// claim. Measured on 23021RAAEG: `Physical size: 1080x2400` and `Physical density: 440`.
+    /// `wm` prints only the *override* when one is set, so a reset that worked is a listing
+    /// with the physical values and no override line.
+    pub async fn reset_display_metrics(
+        &self,
+        serial: &str,
+        density: bool,
+        size: bool,
+    ) -> anyhow::Result<String> {
+        if !density && !size {
+            anyhow::bail!("không có gì để đặt lại");
+        }
+        if size {
+            self.adb
+                .shell(serial, "wm size reset")
+                .await
+                .map_err(|e| anyhow!("wm size reset thất bại: {e}"))?;
+        }
+        if density {
+            self.adb
+                .shell(serial, "wm density reset")
+                .await
+                .map_err(|e| anyhow!("wm density reset thất bại: {e}"))?;
+        }
+        let read = self
+            .adb
+            .shell(serial, "wm size; wm density")
+            .await
+            .unwrap_or_default();
+        Ok(read.trim().to_string())
+    }
+
+    /// Power the phone off (xiaowei "Shutdown").
+    ///
+    /// `adb reboot -p` and not `adb shell reboot -p`: the client subcommand is the one that
+    /// survives the connection dying underneath it, which is guaranteed here — the device
+    /// this is aimed at stops answering as a direct result. A transport error *after* the
+    /// request went out is therefore not treated as a failure; the fleet list noticing the
+    /// phone is gone is the real confirmation, and it arrives on the next refresh.
+    pub async fn power_off(&self, serial: &str) -> anyhow::Result<()> {
+        match self
+            .adb
+            .device(serial, &["reboot", "-p"], Duration::from_secs(20))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                let text = error.to_string().to_lowercase();
+                if text.contains("closed")
+                    || text.contains("device offline")
+                    || text.contains("device not found")
+                    || text.contains("no devices")
+                {
+                    tracing::info!(
+                        serial,
+                        "tắt máy: adb mất kết nối ngay sau lệnh, coi là đã tắt"
+                    );
+                    Ok(())
+                } else {
+                    Err(anyhow!("tắt máy thất bại: {error}"))
+                }
+            }
+        }
+    }
+
+    /// Open the phone's own Settings app (xiaowei hidden-function "Phone Settings").
+    ///
+    /// An action intent rather than a package launch: the Settings *package* differs by ROM
+    /// (`com.android.settings` on AOSP, MIUI ships its own on this fleet's Redmi), while
+    /// `android.settings.SETTINGS` is resolved by the phone itself and cannot be wrong.
+    pub async fn open_system_settings(&self, serial: &str) -> anyhow::Result<()> {
+        let out = self
+            .adb
+            .shell_output(
+                serial,
+                "am start -a android.settings.SETTINGS",
+                Duration::from_secs(20),
+            )
+            .await?;
+        // `am start` exits 0 while printing `Error: Activity not started`, so the exit code
+        // alone would let a refusal pass as a success.
+        let text = format!("{}{}", out.stdout, out.stderr);
+        if text.contains("Error:") {
+            anyhow::bail!("mở Cài đặt thất bại: {}", text.trim());
+        }
+        Ok(())
+    }
+
+    /// Wake the screen (xiaowei hidden-function "Turn On Screen").
+    ///
+    /// KEYCODE_WAKEUP, which is idempotent — unlike KEYCODE_POWER, which *toggles* and so
+    /// puts an already-awake phone to sleep. The same constant the capture path uses.
+    pub async fn wake_screen(&self, serial: &str) -> anyhow::Result<()> {
+        self.adb
+            .shell(serial, adb::WAKE_KEYEVENT)
+            .await
+            .map(|_| ())
+            .map_err(|e| anyhow!("bật màn hình thất bại: {e}"))
+    }
+
+    /// Take a screenshot and leave it *on the phone* (xiaowei "Screenshot to phone").
+    ///
+    /// The other screenshot command copies the picture to this machine; this one is the row
+    /// beside it in xiaowei's menu, and the difference is the point — a phone whose gallery
+    /// has pictures in it looks like a phone somebody uses.
+    ///
+    /// Verified by reading the size back: `screencap` on a phone that refuses to capture
+    /// (secure window in front, measured on TikTok's own screens) exits 0 and leaves a
+    /// zero-byte file, which is exactly the silent failure this project's rules forbid.
+    /// The name is stamped **by the phone**, in one shell call that also lists the result.
+    /// Two reasons, and the second is the load-bearing one: the phone's clock is the one an
+    /// operator scrolling its gallery will compare against, and a single call cannot end up
+    /// listing a *different* file than the one it captured — which a host-side name plus a
+    /// separate `ls` can, on a phone whose second ticked over between them.
+    pub async fn screenshot_to_device(&self, serial: &str) -> anyhow::Result<String> {
+        // Fixed script, no operator input in it, so `$(…)` here is ours and not an injection
+        // surface. `Pictures/` exists on every phone here; a fresh flash may not have it.
+        const SCRIPT: &str = "p=/sdcard/Pictures/riviu-$(date +%Y%m%d-%H%M%S).png; \
+             mkdir -p /sdcard/Pictures && screencap -p \"$p\" && ls -la \"$p\"";
+        let out = self
+            .adb
+            .shell_output(serial, SCRIPT, Duration::from_secs(60))
+            .await?;
+        if out.exit_code != 0 {
+            let reason = if out.stderr.trim().is_empty() {
+                out.stdout.trim().to_string()
+            } else {
+                out.stderr.trim().to_string()
+            };
+            anyhow::bail!("chụp vào máy thất bại: {reason}");
+        }
+        // Listing a file by path prints that whole path as the name — measured on
+        // 23021RAAEG — so this row carries both the proof and the answer.
+        let captured = adb::parse_ls_listing(&out.stdout)
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("chụp xong nhưng máy không liệt kê được ảnh vừa tạo"))?;
+        if captured.size == 0 {
+            anyhow::bail!(
+                "chụp xong nhưng ảnh rỗng — màn hình đang mở nội dung không cho chụp (secure window)"
+            );
+        }
+        Ok(captured.name)
+    }
+
+    /// Put the phone's own names and icons onto a listing adb produced.
+    ///
+    /// adb stays the source of truth for *which* apps exist — it reads both partitions and
+    /// includes apps with no launcher activity, which a `queryIntentActivities` sweep would
+    /// miss. The helper answers the one question adb cannot: what an app is called, and what
+    /// it looks like (AGENTS.md §9.55).
+    ///
+    /// **The user partition only, and that is a measurement rather than a preference.** On
+    /// 23021RAAEG (21/08/2026) describing all 539 packages took 4 559 ms; the 162
+    /// user-partition packages with icons took 3 599 ms. The system partition is 377 rows the
+    /// UI keeps behind a toggle and a farm operator does not launch, so paying four seconds
+    /// to name them on every listing buys nothing. They keep their package names, which is
+    /// what every row showed before this existed.
+    ///
+    /// Best effort throughout: a phone with no helper keeps its package names and says so
+    /// once in the log rather than failing the listing.
+    async fn name_apps_with_helper(&self, serial: &str, apps: &mut [riviu_core::InstalledApp]) {
+        let wanted: Vec<String> = apps
+            .iter()
+            .filter(|app| app.kind == riviu_core::InstalledAppKind::User)
+            .map(|app| app.bundle_id.clone())
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+        let fingerprint = package_set_fingerprint(&wanted);
+        if let Some(cached) = self.app_descriptions.lock().get(serial) {
+            if cached.fingerprint == fingerprint {
+                apply_app_descriptions(apps, &cached.rows);
+                return;
+            }
+        }
+
+        let helper = match self.try_attach_helper(serial).await {
+            Ok(Some(helper)) => helper,
+            Ok(None) => {
+                tracing::info!(
+                    serial,
+                    "không có Riviu helper — danh sách app chỉ có tên gói, không có nhãn/icon"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(serial, %error, "không gắn được helper để đọc nhãn app");
+                return;
+            }
+        };
+        let described = match helper.describe_apps(&wanted, true).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(serial, %error, "helper không trả nhãn app");
+                return;
+            }
+        };
+        apply_app_descriptions(apps, &described);
+        self.app_descriptions.lock().insert(
+            serial.to_string(),
+            AppDescriptionCache {
+                fingerprint,
+                rows: described,
+            },
+        );
+    }
+
+    /// Switch the phone's keyboard (xiaowei "Switch Input Method").
+    ///
+    /// The id is validated the same way the picker in the UI validates it, and for the same
+    /// reason twice over: it is interpolated into a device shell, and the helper's own IME
+    /// must never be left installed as the phone's keyboard (AGENTS.md §9.5x).
+    pub async fn set_input_method(&self, serial: &str, ime_id: &str) -> anyhow::Result<()> {
+        let ime_id = crate::riviu_agent::validate_ime_id(ime_id)?;
+        if ime_id == crate::riviu_agent::IME_ID {
+            anyhow::bail!("không đặt bàn phím của Riviu làm bàn phím chính của máy");
+        }
+        self.adb
+            .shell(serial, &format!("ime set {ime_id}"))
+            .await
+            .map(|_| ())
+            .map_err(|e| anyhow!("đổi bàn phím thất bại: {e}"))
+    }
+
+    /// Factory-reset the phone (xiaowei 恢复出厂). Needs root; sends the system MASTER_CLEAR
+    /// broadcast. Irreversible — the UI gates this behind an explicit confirm.
+    pub async fn factory_reset(&self, serial: &str) -> anyhow::Result<()> {
+        if !self.is_rooted(serial).await {
+            anyhow::bail!("máy chưa root (không có su) — không thể khôi phục gốc từ xa");
+        }
+        self.adb
+            .shell(
+                serial,
+                "su -c \"am broadcast -a android.intent.action.MASTER_CLEAR\"",
+            )
+            .await?;
+        Ok(())
     }
 
     /// What the phone says about its own display, for a caller that needs to explain
@@ -2962,12 +3694,14 @@ impl DeviceDriver for AndroidDriver {
                 apps.push(riviu_core::InstalledApp {
                     bundle_id,
                     kind,
-                    // Not obtainable over adb at any price worth paying. See the doc on
-                    // `InstalledApp`.
+                    // Filled in below when the helper is there; not obtainable over adb at
+                    // any price worth paying. See the doc on `InstalledApp`.
                     label: None,
+                    icon_png_base64: None,
                 });
             }
         }
+        self.name_apps_with_helper(udid, &mut apps).await;
         Ok(apps)
     }
 

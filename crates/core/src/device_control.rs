@@ -660,6 +660,25 @@ impl DeviceControlPlane {
             .map_err(|error| driver_error(lease.udid(), "uninstallApp", error))
     }
 
+    /// Start one app on a leased phone, because an operator asked for it.
+    ///
+    /// The counterpart of [`Self::uninstall_app`] and deliberately *not* of
+    /// [`Self::foreground_target_app`], which takes an exclusive context because it is a step
+    /// of the interaction sequence and has a foreground *proof* to keep. This one is a menu
+    /// row: it starts the app and reports whether the start command was accepted, nothing
+    /// more. Promising a foreground proof here would be promising something no caller checks.
+    pub async fn launch_app<'a>(
+        &self,
+        context: impl Into<DeviceLeaseRef<'a>>,
+        bundle_id: &str,
+    ) -> Result<(), DeviceControlError> {
+        let lease = self.validate_leased(context.into())?;
+        self.driver
+            .launch_app(lease.udid(), bundle_id)
+            .await
+            .map_err(|error| driver_error(lease.udid(), "launchApp", error))
+    }
+
     pub async fn screenshot<'a>(
         &self,
         context: impl Into<DeviceLeaseRef<'a>>,
