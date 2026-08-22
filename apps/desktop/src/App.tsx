@@ -11,17 +11,8 @@ import {
 import {
   agentBulkRepair,
   agentListStatuses,
-  androidUnavailableReason,
-  driverDegradedReason,
-  listenRiviuEvents,
-  listDevices,
-  listDeviceMetas,
-  listGroups,
-  listJobs,
   refreshDevices,
   saveGroup,
-  retryStartup,
-  startupError,
   viewSetPreset,
 } from "./api";
 import { startDevicePreview, startFleetPreview } from "./startPreview";
@@ -37,6 +28,7 @@ import { DeviceContextMenu } from "./components/DeviceContextMenu";
 import { DeviceFilesPopup } from "./components/DeviceFilesPopup";
 import type { DeviceMenuNode } from "./deviceMenu";
 import { buildDeviceActions } from "./deviceActions";
+import { useFleet } from "./useFleet";
 import { metaByUdid, orderDevicesByNumber, tileName, tileNumber } from "./deviceNaming";
 import { AdbConsole } from "./components/AdbConsole";
 import { ALL_DEVICES_TAB, devicesInTab, groupTabs, withDeviceAdded } from "./deviceGroups";
@@ -60,7 +52,7 @@ import {
   PublishPage,
   ScheduleBlock,
 } from "./pages/FarmPages";
-import type { DeviceGroup, DeviceInfo, DeviceMeta, JobRecord, PageId } from "./types";
+import type { DeviceInfo, PageId } from "./types";
 import { deviceModelOsLabel } from "./types";
 import { loadZoom, stepZoom, storeZoom, TILE_ZOOM, wheelWantsZoom } from "./zoom";
 import {
@@ -92,19 +84,26 @@ const PAGE_TITLE: Partial<Record<PageId, string>> = {
 
 function App() {
   const [page, setPage] = useState<PageId>("control");
+  const {
+    devices,
+    groups,
+    metas,
+    setMetas,
+    jobs,
+    reload,
+    startupIssue,
+    bootError,
+    driverIssue,
+    androidIssue,
+    retryingStartup,
+    retry: retryStartupAndResubscribe,
+  } = useFleet();
   const [asideCollapsed, setAsideCollapsed] = useState(false);
-  const [devices, setDevices] = useState<DeviceInfo[]>([]);
-  const [groups, setGroups] = useState<DeviceGroup[]>([]);
-  /// The operator's own records for the fleet: what each phone is called and its number
-  /// (xiaowei "Change Name" / "Change Number"). Only edited phones have a row, so this is
-  /// normally shorter than the device list and often empty.
-  const [metas, setMetas] = useState<DeviceMeta[]>([]);
   const [groupTab, setGroupTab] = useState<string>(ALL_DEVICES_TAB);
   const [tileMenu, setTileMenu] = useState<{ udid: string; x: number; y: number } | null>(null);
   const [adbFor, setAdbFor] = useState<string | null>(null);
   /// Which phone's filesystem is open in the browser popup (xiaowei "Preview Mobile Files").
   const [filesFor, setFilesFor] = useState<string | null>(null);
-  const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [groupMode, setGroupMode] = useState(false);
   /// The phone the operator drives when Sync is on; every other selected phone follows it.
@@ -116,17 +115,6 @@ function App() {
   const [controlCenter, setControlCenter] = useState<string | null>(null);
   const [focusUdid, setFocusUdid] = useState<string | null>(null);
   const [jobsScriptSeed, setJobsScriptSeed] = useState<string | null>(null);
-  const [bootError, setBootError] = useState<string | null>(null);
-  const [driverIssue, setDriverIssue] = useState<string | null>(null);
-  const [androidIssue, setAndroidIssue] = useState<string | null>(null);
-  const [startupIssue, setStartupIssue] = useState<string | null | undefined>(undefined);
-  /// Bumped by the retry button, and read by the boot effect below as a reason to run
-  /// again. A counter rather than `startupIssue` in that effect's dependencies: the
-  /// effect *sets* the issue, so depending on it makes every ordinary startup run the
-  /// whole thing twice — two `startup_error` calls, two subscriptions, one of them
-  /// immediately torn down.
-  const [startupAttempt, setStartupAttempt] = useState(0);
-  const [retryingStartup, setRetryingStartup] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("window");
   const [tileWidth, setTileWidth] = useState(() => loadZoom(TILE_ZOOM));
   const canvasRef = useRef<HTMLDivElement | null>(null);
@@ -300,32 +288,6 @@ function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [page, viewMode, visibleDevices]);
 
-  const reload = useCallback(async () => {
-    try {
-      const [d, j] = await Promise.all([listDevices(), listJobs()]);
-      setDevices(d);
-      setJobs(j);
-      // Groups are auxiliary and load separately, on purpose. Inside the Promise.all
-      // above, a group-listing failure rejected the whole reload and left the grid empty
-      // — the fleet blanked because a tab strip could not be drawn. Caught by e2e, which
-      // had no handler registered for it. Losing the tabs is a smaller loss than losing
-      // every phone, so this failure degrades to "no groups".
-      setGroups(await listGroups().catch(() => []));
-      // Same reasoning as the groups above, and the same failure mode to avoid: a records
-      // read that throws must cost the grid its labels, never its phones.
-      setMetas(await listDeviceMetas().catch(() => []));
-      setBootError(null);
-      // An empty list can mean "nothing plugged in" or "the device sidecar never
-      // started". Ask which, so the UI does not report the wrong one.
-      setDriverIssue(await driverDegradedReason().catch(() => null));
-      // Asked separately, because the two halves of the fleet fail for different
-      // reasons and an Android phone that never appears used to say nothing at all.
-      setAndroidIssue(await androidUnavailableReason().catch(() => null));
-    } catch (e) {
-      setBootError(describeError(e));
-    }
-  }, []);
-
   /**
    * The per-phone function menu, and every row of it is a command this app already has.
    *
@@ -359,75 +321,13 @@ function App() {
         setFilesFor,
         setAdbFor,
       }),
-    // Setters from `useState` are stable, so the list is the five values that are not.
+    // Setters straight from `useState` are stable and stay out of the list. `setMetas` is
+    // in it because it now arrives through `useFleet`'s return object, where the rule cannot
+    // see that it is a setter — including it is free and cheaper than an exemption.
     // The stale-closure note that used to sit here still applies and now lives with the
     // catalog: a stale `metas` pre-fills the rename dialog with the value just replaced.
-    [reload, controlCenter, groupMode, metaMap, metas],
+    [reload, controlCenter, groupMode, metaMap, metas, setMetas],
   );
-
-
-  useEffect(() => {
-    let cancelled = false;
-    let unlisten: (() => void) | undefined;
-
-    startupError()
-      .then((issue) => {
-        if (cancelled) return;
-        setStartupIssue(issue);
-        if (issue) return;
-
-        void reload();
-        void listenRiviuEvents((event) => {
-          if (event.type === "devicesUpdated") {
-            setDevices(event.devices);
-          } else if (event.type === "deviceUpdated") {
-            const { device } = event;
-            setDevices((prev) => {
-              const idx = prev.findIndex((d) => d.udid === device.udid);
-              if (idx === -1) return [...prev, device];
-              const next = [...prev];
-              next[idx] = device;
-              return next;
-            });
-          } else if (event.type === "jobUpdated") {
-            const { job } = event;
-            setJobs((prev) => {
-              const idx = prev.findIndex((j) => j.id === job.id);
-              if (idx === -1) return [job, ...prev];
-              const next = [...prev];
-              next[idx] = job;
-              return next;
-            });
-          }
-        }).then((fn) => {
-          if (cancelled) {
-            fn();
-          } else {
-            unlisten = fn;
-          }
-        });
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        setStartupIssue(null);
-        setBootError(describeError(error));
-        void reload();
-      });
-
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-    // **`startupAttempt` is a dependency so a successful retry gets a subscription.**
-    //
-    // This effect returns early when startup failed, so nothing is listening. The retry
-    // button cleared the issue and the app rendered — but the effect never ran again, so
-    // `devicesUpdated`, `deviceUpdated`, `jobUpdated` and `streamFrame` were never
-    // subscribed for the rest of the session. The retry handler knew half of this: it
-    // replayed `reload()` by hand, with a comment saying the boot effect had already run.
-    // It could not replay the subscription, and that is the half that matters — without it
-    // the grid moves only on the three-second poll and no tile ever learns a frame arrived.
-  }, [reload, startupAttempt]);
 
   /// The phone the overlay actually drives.
   ///
@@ -540,21 +440,7 @@ function App() {
             type="button"
             className="primary"
             disabled={retryingStartup}
-            onClick={async () => {
-              setRetryingStartup(true);
-              try {
-                const stillBlocked = await retryStartup();
-                setStartupIssue(stillBlocked);
-                // Came up: run the boot effect again, which loads the fleet *and*
-                // subscribes to events. This used to call `reload()` by hand instead,
-                // which did the first and could not do the second.
-                if (!stillBlocked) setStartupAttempt((attempt) => attempt + 1);
-              } catch (error) {
-                setStartupIssue(describeError(error));
-              } finally {
-                setRetryingStartup(false);
-              }
-            }}
+            onClick={() => void retryStartupAndResubscribe()}
           >
             {retryingStartup ? "Đang thử lại…" : "Thử lại"}
           </button>
