@@ -983,6 +983,25 @@ impl AppState {
         })
     }
 
+    /// The Android backend, or the reason there isn't one.
+    ///
+    /// Twenty-two commands opened with the same three lines and the same flat sentence,
+    /// "Android không khả dụng" — which is the one thing the operator already knows by the
+    /// time they see it. `android_unavailable_reason` has held the actual cause the whole
+    /// time ("adb not on PATH", "the sidecar died"), two fields away, and no command read it.
+    pub(crate) fn require_android(
+        &self,
+    ) -> Result<&Arc<riviu_android_driver::AndroidDriver>, CommandError> {
+        self.android
+            .as_ref()
+            .ok_or_else(|| match &self.android_unavailable_reason {
+                Some(reason) => {
+                    CommandError::operation(format!("Android không khả dụng: {reason}"))
+                }
+                None => CommandError::operation("Android không khả dụng"),
+            })
+    }
+
     pub(crate) fn ensure_accepting_work(&self) -> Result<CommandAdmission, CommandError> {
         self.command_admission.ensure_accepting_work()
     }

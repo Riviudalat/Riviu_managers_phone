@@ -1215,9 +1215,7 @@ pub async fn enable_wifi_adb(
     udid: String,
 ) -> Result<String, CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let Some(android) = &state.android else {
-        return Err(CommandError::operation("Android không khả dụng"));
-    };
+    let android = state.require_android()?;
     // On Android the udid is the adb serial.
     android
         .enable_wifi_adb(&udid)
@@ -1235,9 +1233,7 @@ pub async fn disable_wifi_adb(
     udid: String,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let Some(android) = &state.android else {
-        return Err(CommandError::operation("Android không khả dụng"));
-    };
+    let android = state.require_android()?;
     android
         .disable_wifi_adb(&udid)
         .await
@@ -1251,9 +1247,7 @@ pub async fn wifi_adb_connect(
     host: String,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let Some(android) = &state.android else {
-        return Err(CommandError::operation("Android không khả dụng"));
-    };
+    let android = state.require_android()?;
     android
         .wifi_connect(&host)
         .await
@@ -1267,9 +1261,7 @@ pub async fn wifi_adb_disconnect(
     host: String,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let Some(android) = &state.android else {
-        return Err(CommandError::operation("Android không khả dụng"));
-    };
+    let android = state.require_android()?;
     android
         .wifi_disconnect(&host)
         .await
@@ -1284,9 +1276,7 @@ pub async fn set_wallpaper(
     path: String,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let Some(android) = &state.android else {
-        return Err(CommandError::operation("Android không khả dụng"));
-    };
+    let android = state.require_android()?;
     android
         .set_wallpaper(&udid, &path)
         .await
@@ -1302,9 +1292,7 @@ pub async fn set_mock_location(
     lng: f64,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let Some(android) = &state.android else {
-        return Err(CommandError::operation("Android không khả dụng"));
-    };
+    let android = state.require_android()?;
     android
         .set_mock_location(&udid, lat, lng)
         .await
@@ -1318,9 +1306,7 @@ pub async fn stop_mock_location(
     udid: String,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let Some(android) = &state.android else {
-        return Err(CommandError::operation("Android không khả dụng"));
-    };
+    let android = state.require_android()?;
     android
         .stop_mock_location(&udid)
         .await
@@ -1337,9 +1323,7 @@ pub async fn set_wallpaper_bytes(
     png: Vec<u8>,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let Some(android) = &state.android else {
-        return Err(CommandError::operation("Android không khả dụng"));
-    };
+    let android = state.require_android()?;
     let dir = state.artifacts_dir.join("wallpaper");
     std::fs::create_dir_all(&dir).map_err(CommandError::operation)?;
     let path = dir.join(format!("{}.png", safe_udid_stem(&udid)));
@@ -1371,9 +1355,7 @@ pub async fn set_device_identity(
     mac: Option<String>,
 ) -> Result<String, CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let Some(android) = &state.android else {
-        return Err(CommandError::operation("Android không khả dụng"));
-    };
+    let android = state.require_android()?;
     android
         .set_device_identity(
             &udid,
@@ -1389,9 +1371,7 @@ pub async fn set_device_identity(
 #[tauri::command]
 pub async fn factory_reset(state: State<'_, AppState>, udid: String) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let Some(android) = &state.android else {
-        return Err(CommandError::operation("Android không khả dụng"));
-    };
+    let android = state.require_android()?;
     android
         .factory_reset(&udid)
         .await
@@ -1406,9 +1386,7 @@ pub async fn root_shell(
     command: String,
 ) -> Result<String, CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let Some(android) = &state.android else {
-        return Err(CommandError::operation("Android không khả dụng"));
-    };
+    let android = state.require_android()?;
     android
         .root_shell(&udid, &command)
         .await
@@ -1433,9 +1411,7 @@ pub async fn device_list_dir(
     path: String,
 ) -> Result<Vec<riviu_core::DeviceFileEntry>, CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let Some(android) = &state.android else {
-        return Err(CommandError::operation("Android không khả dụng"));
-    };
+    let android = state.require_android()?;
     android
         .list_device_dir(&udid, &path)
         .await
@@ -1452,9 +1428,7 @@ pub async fn device_pull_path(
     dest_dir: String,
 ) -> Result<String, CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let Some(android) = &state.android else {
-        return Err(CommandError::operation("Android không khả dụng"));
-    };
+    let android = state.require_android()?;
     let dest = PathBuf::from(&dest_dir);
     if !dest.is_dir() {
         return Err(CommandError::invalid_argument(format!(
@@ -1477,9 +1451,7 @@ pub async fn device_push_file(
     remote_dir: String,
 ) -> Result<String, CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let Some(android) = &state.android else {
-        return Err(CommandError::operation("Android không khả dụng"));
-    };
+    let android = state.require_android()?;
     android
         .push_device_file(&udid, Path::new(&local), &remote_dir)
         .await
@@ -1494,9 +1466,7 @@ pub async fn device_delete_path(
     path: String,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let Some(android) = &state.android else {
-        return Err(CommandError::operation("Android không khả dụng"));
-    };
+    let android = state.require_android()?;
     android
         .delete_device_path(&udid, &path)
         .await
@@ -1513,9 +1483,7 @@ pub async fn set_wifi_radio(
     on: bool,
 ) -> Result<bool, CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let Some(android) = &state.android else {
-        return Err(CommandError::operation("Android không khả dụng"));
-    };
+    let android = state.require_android()?;
     android
         .set_wifi_radio(&udid, on)
         .await
@@ -1532,9 +1500,7 @@ pub async fn reset_display_metrics(
     size: bool,
 ) -> Result<String, CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let Some(android) = &state.android else {
-        return Err(CommandError::operation("Android không khả dụng"));
-    };
+    let android = state.require_android()?;
     android
         .reset_display_metrics(&udid, density, size)
         .await
@@ -1549,9 +1515,7 @@ pub async fn power_off_device(
     udid: String,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let Some(android) = &state.android else {
-        return Err(CommandError::operation("Android không khả dụng"));
-    };
+    let android = state.require_android()?;
     android
         .power_off(&udid)
         .await
@@ -1565,9 +1529,7 @@ pub async fn open_system_settings(
     udid: String,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let Some(android) = &state.android else {
-        return Err(CommandError::operation("Android không khả dụng"));
-    };
+    let android = state.require_android()?;
     android
         .open_system_settings(&udid)
         .await
@@ -1579,9 +1541,7 @@ pub async fn open_system_settings(
 #[tauri::command]
 pub async fn wake_screen(state: State<'_, AppState>, udid: String) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let Some(android) = &state.android else {
-        return Err(CommandError::operation("Android không khả dụng"));
-    };
+    let android = state.require_android()?;
     android
         .wake_screen(&udid)
         .await
@@ -1596,9 +1556,7 @@ pub async fn screenshot_to_device(
     udid: String,
 ) -> Result<String, CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let Some(android) = &state.android else {
-        return Err(CommandError::operation("Android không khả dụng"));
-    };
+    let android = state.require_android()?;
     android
         .screenshot_to_device(&udid)
         .await
@@ -1614,9 +1572,7 @@ pub async fn set_input_method(
     ime_id: String,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
-    let Some(android) = &state.android else {
-        return Err(CommandError::operation("Android không khả dụng"));
-    };
+    let android = state.require_android()?;
     android
         .set_input_method(&udid, &ime_id)
         .await
