@@ -7814,75 +7814,62 @@ trị đang được dùng hàng chục lần. Bài học: khi kết luận là 
 thật và đếm lại cho đúng** trước khi ghi nó xuống — hai giả định sai đủ để biến một việc làm được
 thành một việc bị từ chối.
 
-*Thân vòng `'feed`: tách được hai khối lớn, phần còn lại thì không — và ranh giới là **tỉ lệ
-dòng trên tham số**, không phải "có `break` hay không".*
+*Thân vòng `'feed`: **cả năm pha đã ra**, và cái ngăn chúng không phải "có `break` hay không",
+cũng không phải tỉ lệ dòng/tham số như tôi từng ghi ở đây. Là **state phiên nằm rời trong scope**.*
 
-Lối thoát không phải rào: `break 'feed` và `continue` biến thành một `FeedStep` trả về, ánh xạ
-một-đối-một, và compiler kiểm cả hai đầu (mọi nhánh phải trả về một `FeedStep`; caller phải match
-đủ variant). Đã làm thế cho hai khối lớn nhất — `handle_off_feed` (123 dòng, 3 lối thoát) và
-`watch_one_card` (183 dòng, 2 lối thoát). `run_session` **1.369 → 1.030**.
+Lối thoát chưa bao giờ là rào: `break 'feed` biến thành một `FeedStep` trả về, ánh xạ một-đối-một,
+compiler kiểm cả hai đầu. Điều đó đúng cho cả năm pha.
 
-Rào thật là **state dùng chung**. Đếm biến tự do cho từng khối còn lại:
+**Đoạn tôi viết trước đó ở mục này là sai, và sai theo cách đáng ghi lại.** Tôi đã kết luận các
+khối còn lại "nhỏ mà nhiều tham số → tách là làm xấu đi", và lấy tỉ lệ dòng/tham số làm ranh giới.
+Phép đo đúng cho thấy con số tham số **không phải thuộc tính của khối**: cắt khối hành động theo
+từng nhánh cho ra **14 và 15** tham số, tức gần y hệt cả khối (15). Nó là thuộc tính của **hàm bao
+quanh** — bao nhiêu state phiên đang nằm rời. Sửa cái đó thì mọi khối tách được:
 
-| khối | dòng | lối thoát | biến tự do | ghi chú |
-|---|---|---|---|---|
-| `match roll_feed_action_in_mood(…)` | 206 | 5 | **19** (8 mutable) | sửa cả `ui_context` **lẫn** `session` |
-| khối phục hồi stream | 104 | 2 | ~12 | |
-| `if advanced_to_next_video` | 60 | 1 | 11 | sửa `ui_context`, `session` |
-| `if roll_follow_in_mood(…)` | 58 | 2 | ~10 | |
-| `if !rail_present` | 31 | 1 | 12 | 31 dòng sau một chữ ký 12 tham số |
-| `if blocked_streak >= …` | 15 | 1 | 6 | |
+| pha | dòng | tham số | ghi chú |
+|---|---|---|---|
+| `open_for_session` | 121 | 4 | |
+| `handle_off_feed` | 130 | 9 | |
+| `watch_one_card` | 198 | 10 | |
+| `roll_and_execute_action` | 220 | 14 | `comment_recovery_action` là **đầu ra**, không phải biến vòng |
+| `swipe_to_next_video` | 123 | 8 | trả `(FeedStep, bool)` — vuốt có ăn không |
+| `settle_after_advance` | 67 | 5 | |
+| `roll_and_execute_follow` | 65 | 9 | |
 
-Hai khối đã tách có tỉ lệ tốt (123 dòng/11 tham số, 183/12). Những khối còn lại thì hoặc **nhỏ mà
-nhiều tham số** — 31 dòng sau chữ ký 12 tham số không phải cải thiện, chỉ là đổi hàm dài lấy chữ
-ký dài — hoặc **lớn và sửa chính cái handle phiên** (`ui_context` + `session` cùng lúc, vì đường
-phục hồi stream thay cả hai).
+**`run_session`: 1.369 → 631 dòng (−54%).**
 
-**Hai mối nguy của việc gom state, đã đo — và cả hai đều KHÔNG chặn:** không một biến nào trong
-14 biến state phiên bị shadow bên trong `run_session` (nên thay hàng loạt là an toàn, compiler che
-phần còn lại), và chỉ **một** chỗ dùng inline capture (`{blocked_streak}`) cần sửa tay. Nếu ai đó
-định làm tiếp, đừng đo lại hai thứ này.
+**Hai struct, không phải một.** Sáu biến *tiến độ và phán quyết* → `SessionProgress`. Bốn thứ
+*bất biến suốt phiên* → `SessionCtx`: `udid`, `stop`, `gestures`, và chỗ đẩy status. Cái thứ hai
+mới là cái mở khoá phần còn lại — nó gỡ ba tham số khỏi **mọi** pha cùng lúc, và hai cách một pha
+nói ngược về caller thành method chứ không còn là closure đi kèm. Gom cả 14 vào **một** struct thì
+chỉ dời đống lộn xộn; chia làm hai theo đúng câu hỏi chúng trả lời thì mới ăn.
 
-**Lý do dừng không phải kỹ thuật, mà là hình dạng chưa chốt.** 14 biến ấy không phải một khối:
-bảy cái là *mô hình hành vi* (`human`, `policy`, `moods`, `budget`, `text_health`,
-`last_interaction_at`, `rail`), sáu cái là *tiến độ và phán quyết* (`status`, `outcome`,
-`last_error`, `hit_video_cap`, `off_feed_streak`, `blocked_streak`). Gom thành **một** struct 16
-field chỉ dời đống lộn xộn đi chỗ khác; gom thành **hai** thì các pha còn lại nhận `&mut behaviour,
-&mut progress` thay cho mười ba `&mut`.
+`handle` trông như thuộc `SessionCtx` nhưng **không**: nó dựng từ `device.session`, nên lúc
+context ra đời thì nó chưa tồn tại. Cùng lý do với `suppress` và `pool`.
 
-Cách chia đó là một quyết định thiết kế, và nó nên được chốt trước khi ai đó chạy một lần thay thế
-~200 chỗ trên đường chạy nhiều nhất sản phẩm — kiểu hỏng ở đây là **im lặng** và rơi xuống 19 máy
-đang chạy tài khoản thật. Kèm một phiên nuôi thật để nghiệm thu.
+**`FeedStep::Stop` không mang gì.** Năm lối thoát của pha hành động là **ba phán quyết khác nhau**
+(hai `Stopped`, hai `Failed`, một `Failed` kèm message riêng). Trả `reason` ra cho caller ghi sẽ
+chẻ một quyết định làm hai chỗ và vẫn không diễn tả được ba trường hợp đó. Mỗi chỗ tự gọi
+`SessionProgress::give_up` hoặc tự đặt field, caller chỉ rời vòng.
 
-Số đo gốc, để không phải đo lại: 78 câu lệnh mức trên cùng, lối thoát không-cục-bộ theo từng khối:
+**Đếm biến tự do bằng danh sách tự nghĩ ra thì sẽ thiếu — hai lần liền.** Lần một sót `suppress`
+và `pool`. Lần hai sót `device`, vì `let Some(mut device)` bind `device` chứ không phải `Some`, mà
+regex của tôi bắt `Some`. Cả hai lần **trình biên dịch** mới là thứ chặn lại. Cách đúng: lấy tập
+local **thật** của hàm (mọi `let`, mọi tham số, mọi pattern binding, loại tên viết hoa) rồi trừ đi
+những gì khối tự khai báo — đừng liệt kê ứng viên bằng tay.
 
-| khối | dòng | lối thoát |
-|---|---|---|
-| `if !self.on_feed(…)` — plan gọi là `handle_off_feed` | 123 | 3 |
-| `match card_kind` — plan gọi là `watch_one_video` | 183 | 2 |
-| `match roll_feed_action_in_mood(…)` — plan gọi là `roll_and_execute_action` | 206 | 5 |
-| `if roll_follow_in_mood(…)` | 58 | 2 |
-| khối `{ … }` phục hồi stream | 104 | 2 |
-| `if advanced_to_next_video` | 60 | 1 |
-| `if !rail_present` | 31 | 1 |
-| `if blocked_streak >= BLOCKED_SWIPE_LIMIT` | 15 | 1 |
+**Cái cố ý để nguyên, kèm số đo.** `if !rail_present`: 34 dòng, 8 tham số. Đây mới thật sự là
+trường hợp chữ ký dài gần bằng thân — tách là làm xấu đi. Và hai điều kiện `if advanced_to_next_video`
+với `if roll_follow_in_mood(…)` **giữ ở call site**: chúng nói một điều mà người đọc cần thấy ở
+tầng vòng lặp — pha sau chỉ chạy khi feed thật sự nhảy, còn tim/bình luận/follow là *một* quyết
+định đọc liền nhau.
 
-Nhấc ra được **mà không đụng gì cả**: 6 dòng trên 898 — nhưng con số đó gây hiểu lầm, vì biến
-lối thoát thành giá trị trả về là việc compiler kiểm được, và hai khối lớn nhất đã đi ra theo
-đúng cách đó. Con số đáng nhìn là bảng tỉ lệ ở trên.
+**Luật nghiệm thu cho một phép di chuyển, và cái nó không chứng minh được.** Bảy commit, không
+một dòng test nào bị sửa, 598 test riviu-core xanh — đó là bằng chứng. `git diff --stat` thì
++1.535/−1.085, và phần dôi **không** kết luận được gì: 120 dòng doc mới, ~70 dòng chữ ký, ~70 dòng
+đối số call site, phần còn lại là rustfmt xuống dòng lại sau khi dedent. Phép so tập-dòng không
+tách được "xuống dòng lại" khỏi "viết lại", nên đừng dùng nó làm cửa. Test và compiler mới là cửa.
 
-Một cạm bẫy khi tự đo lại: các *dải dòng* không chứa `break 'feed` thì có (dải dài nhất 307
-dòng), nhưng chúng **không phải khối cú pháp** — dải đó mở đầu bằng hai dấu `}` và bên trong có
-5 `continue;` nhắm ra vòng ngoài. Đếm theo dải dòng sẽ ra kết luận ngược; phải đếm theo khối.
-
-Đã tách khỏi `run_session`: `open_for_session` (121 dòng), `handle_off_feed` (130),
-`watch_one_card` (198), và `session_verdict` (hàm thuần, luật "trần không phải mục tiêu", 6 test).
-Còn lại là phần cần struct trạng thái.
-
-Nghiệm thu bằng một phiên nuôi thật vẫn nên chạy trước khi đụng tiếp vào vùng này — nhưng đó là
-việc người vận hành chọn lúc, không phải điều kiện chặn phần đã làm.
-
-**Kỹ thuật "cắt theo khoảng dòng" trượt hai lần, cả hai đều đỏ ngay lúc build:** một lần vơ luôn
-`WorkerCommand`/`QuarantineStore` khi tách context ra khỏi `device_control`, một lần gắn
-`DEVICE_META_COLUMNS` vào `db/jobs.rs` trong khi cả hai người đọc nó ở `db/fleet.rs`. Cắt theo
-**span của khai báo** (kèm doc comment) thì đúng; cắt theo số dòng thì không.
+Một cạm bẫy khi tự đo lại: các *dải dòng* không chứa `break 'feed` thì có (dải dài nhất 307 dòng),
+nhưng chúng **không phải khối cú pháp** — dải đó mở đầu bằng hai dấu `}` và bên trong có 5
+`continue;` nhắm ra vòng ngoài. Đếm theo dải dòng sẽ ra kết luận ngược; phải đếm theo khối.
