@@ -173,6 +173,23 @@ pub struct NurtureEngine {
     touch_points: Arc<Mutex<HashMap<String, TouchPointPlanner>>>,
 }
 
+/// What one phase of the feed loop decided should happen next.
+///
+/// The `'feed` loop's phases used to end with `break 'feed` or `continue` written inline,
+/// which is precisely why none of them could be moved out of `run_session`: an exit that
+/// names an enclosing loop cannot cross a function boundary. As a returned value it can, and
+/// the compiler then checks both halves — every path must produce one of these, and the
+/// caller must handle each variant.
+#[derive(Debug)]
+enum FeedStep {
+    /// Carry on with this post.
+    Proceed,
+    /// Nothing more to do here; take the next post.
+    NextVideo,
+    /// End the session. `reason` is already reported; the caller records it and stops.
+    Stop { reason: String },
+}
+
 /// A phone opened for a nurture session, and what was measured while opening it.
 ///
 /// Five values, which is why `open_for_session` could be lifted out of `run_session` at all:
@@ -613,6 +630,152 @@ impl NurtureEngine {
         }))
     }
 
+    /// Get back to the For You feed, or decide the session cannot go on.
+    ///
+    /// Called once per post, and it is the phase that runs when the phone is *not* where the
+    /// loop expects it. `FeedStep` is how it reports back: the three exits it used to take out
+    /// of the `'feed` loop directly — one `break` and two `continue` — are now values the
+    /// caller matches on, which is what let this phase leave `run_session` at all.
+    ///
+    /// Backing out comes before relaunching, and that order is measured rather than tidy:
+    /// relaunching does not leave a detail page because iOS restores TikTok's navigation
+    /// stack, and a live run pressed Home and relaunched three times without moving off one
+    /// search-results page.
+    ///
+    /// Returns the streak alongside the step because the two `format!` messages capture it
+    /// inline, and `{*ptr}` is not something an inline capture accepts.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_off_feed(
+        &self,
+        udid: &str,
+        settings: &NurtureSettings,
+        ui_context: &crate::UiWithStreamContext,
+        session: &std::sync::Arc<dyn crate::UiSession>,
+        screen_size: (f64, f64),
+        human: &mut HumanBehavior,
+        gestures: &tokio::sync::Mutex<()>,
+        stop: &AtomicBool,
+        mut off_feed_streak: u32,
+        status: &mut NurtureSessionStatus,
+        report: &impl Fn(&mut NurtureSessionStatus, String),
+    ) -> anyhow::Result<(FeedStep, u32)> {
+        off_feed_streak += 1;
+        if off_feed_streak >= OFF_FEED_LIMIT {
+            report(
+                status,
+                format!("kẹt ngoài FYP {off_feed_streak} lượt — mở lại TikTok"),
+            );
+            // Back out first — that is what actually leaves a detail
+            // page. Relaunching does not: iOS restores TikTok's
+            // navigation stack, and a live run pressed Home and
+            // relaunched three times without moving off a search-results
+            // page.
+            let mut recovered = self
+                .escape_to_feed(
+                    udid,
+                    session.as_ref(),
+                    gestures,
+                    screen_size,
+                    OFF_FEED_BACK_ATTEMPTS,
+                    stop,
+                )
+                .await;
+            if !recovered {
+                report(status, "vuốt lùi không về được — mở lại TikTok".into());
+                {
+                    let _guard = gestures.lock().await;
+                    if let Err(error) = session.home().await {
+                        report(status, format!("không bấm được Home: {error}"));
+                    }
+                }
+                sleep_interruptible(Duration::from_millis(1_200), stop).await;
+                let _ = self
+                    .bring_tiktok_foreground(
+                        udid,
+                        ui_context,
+                        session.as_ref(),
+                        settings,
+                        screen_size.0,
+                        gestures,
+                        stop,
+                    )
+                    .await;
+                // Only the screen decides whether it worked.
+                // `bring_tiktok_foreground` returns Ok(true) from its
+                // fallback path without ever checking, and believing it
+                // is what let the streak reset and the loop run on
+                // forever.
+                recovered = self
+                    .wait_for_frame(udid, Duration::from_secs(8), stop, |img| {
+                        screen::feed_ready(img, Some(screen_size.0))
+                    })
+                    .await
+                    .is_some();
+            }
+            if recovered {
+                off_feed_streak = 0;
+                report(status, "đã về FYP sau khi mở lại TikTok".into());
+            } else {
+                let message = format!(
+                    "không rời được màn hình ngoài FYP sau {off_feed_streak} lượt \
+                     (thường là phòng LIVE mà detector không nhận ra) — dừng phiên"
+                );
+                report(status, message.clone());
+                return Ok((FeedStep::Stop { reason: message }, off_feed_streak));
+            }
+        }
+        let observation = self
+            .latest_image(udid)
+            .map(|img| screen::classify(&img, Some(screen_size.0)));
+        let kind = observation.map(|obs| obs.kind);
+        // Two screens the watcher clears with a tap, and that a swipe
+        // cannot: a LIVE room scrolls its own content instead of
+        // leaving, and an iOS alert is not TikTok's to swipe at all.
+        let watcher_owned = matches!(
+            kind,
+            Some(ScreenKind::LiveRoom) | Some(ScreenKind::SystemAlert { .. })
+        ) || observation.is_some_and(|obs| obs.evidence.ad_feedback_notice);
+        if watcher_owned {
+            let note = if observation.is_some_and(|obs| obs.evidence.ad_feedback_notice) {
+                "thông báo quảng cáo đang hiện — chờ TikTok tự đóng"
+            } else if matches!(kind, Some(ScreenKind::SystemAlert { .. })) {
+                "hộp thoại hệ thống — chờ watcher bấm nút bỏ qua"
+            } else {
+                "đang ở phòng LIVE — chờ watcher bấm ✕"
+            };
+            report(status, note.into());
+            let back = self
+                .wait_for_frame(udid, Duration::from_secs(12), stop, |img| {
+                    screen::feed_ready(img, Some(screen_size.0))
+                })
+                .await;
+            if back.is_none() {
+                return Ok((FeedStep::NextVideo, off_feed_streak));
+            }
+            report(status, "đã về FYP".into());
+        } else {
+            report(status, "không ở FYP — vuốt để về feed".into());
+            status.swipe_attempts += 1;
+            let _ = self
+                .do_swipe(
+                    udid,
+                    session.as_ref(),
+                    gestures,
+                    screen_size,
+                    human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
+                    stop,
+                )
+                .await;
+            sleep_interruptible(Duration::from_millis(1_200), stop).await;
+            if !self.on_feed(udid, screen_size.0) {
+                return Ok((FeedStep::NextVideo, off_feed_streak));
+            }
+            report(status, "đã về FYP".into());
+        }
+
+        Ok((FeedStep::Proceed, off_feed_streak))
+    }
+
     pub async fn run_session(
         &self,
         udid: &str,
@@ -973,127 +1136,38 @@ impl NurtureEngine {
             // different — a live run spent several videos tapping rail
             // positions that do not exist there and opening the LIVE chat
             // keyboard. A swipe leaves; blind taps do not.
-            if !self.on_feed(udid, screen_size.0) {
-                off_feed_streak += 1;
-                if off_feed_streak >= OFF_FEED_LIMIT {
-                    report(
-                        &mut status,
-                        format!("kẹt ngoài FYP {off_feed_streak} lượt — mở lại TikTok"),
-                    );
-                    // Back out first — that is what actually leaves a detail
-                    // page. Relaunching does not: iOS restores TikTok's
-                    // navigation stack, and a live run pressed Home and
-                    // relaunched three times without moving off a search-results
-                    // page.
-                    let mut recovered = self
-                        .escape_to_feed(
-                            udid,
-                            session.as_ref(),
-                            &gestures,
-                            screen_size,
-                            OFF_FEED_BACK_ATTEMPTS,
-                            &stop,
-                        )
-                        .await;
-                    if !recovered {
-                        report(&mut status, "vuốt lùi không về được — mở lại TikTok".into());
-                        {
-                            let _guard = gestures.lock().await;
-                            if let Err(error) = session.home().await {
-                                report(&mut status, format!("không bấm được Home: {error}"));
-                            }
-                        }
-                        sleep_interruptible(Duration::from_millis(1_200), &stop).await;
-                        let _ = self
-                            .bring_tiktok_foreground(
-                                udid,
-                                &ui_context,
-                                session.as_ref(),
-                                &settings,
-                                screen_size.0,
-                                &gestures,
-                                &stop,
-                            )
-                            .await;
-                        // Only the screen decides whether it worked.
-                        // `bring_tiktok_foreground` returns Ok(true) from its
-                        // fallback path without ever checking, and believing it
-                        // is what let the streak reset and the loop run on
-                        // forever.
-                        recovered = self
-                            .wait_for_frame(udid, Duration::from_secs(8), &stop, |img| {
-                                screen::feed_ready(img, Some(screen_size.0))
-                            })
-                            .await
-                            .is_some();
-                    }
-                    if recovered {
-                        off_feed_streak = 0;
-                        report(&mut status, "đã về FYP sau khi mở lại TikTok".into());
-                    } else {
-                        let message = format!(
-                            "không rời được màn hình ngoài FYP sau {off_feed_streak} lượt \
-                             (thường là phòng LIVE mà detector không nhận ra) — dừng phiên"
-                        );
-                        report(&mut status, message.clone());
-                        last_error = Some(message);
-                        hit_video_cap = false;
-                        outcome = if status.videos_done == 0 {
-                            Outcome::Failed
-                        } else {
-                            Outcome::Partial
-                        };
-                        break 'feed;
-                    }
+            match self
+                .handle_off_feed(
+                    udid,
+                    &settings,
+                    &ui_context,
+                    &session,
+                    screen_size,
+                    &mut human,
+                    &gestures,
+                    &stop,
+                    off_feed_streak,
+                    &mut status,
+                    &report,
+                )
+                .await?
+            {
+                // The streak is dropped on this path on purpose: the line just past this
+                // match zeroes it, because getting here means the phone is on the feed.
+                (FeedStep::Proceed, _) => {}
+                (FeedStep::NextVideo, streak) => {
+                    off_feed_streak = streak;
+                    continue;
                 }
-                let observation = self
-                    .latest_image(udid)
-                    .map(|img| screen::classify(&img, Some(screen_size.0)));
-                let kind = observation.map(|obs| obs.kind);
-                // Two screens the watcher clears with a tap, and that a swipe
-                // cannot: a LIVE room scrolls its own content instead of
-                // leaving, and an iOS alert is not TikTok's to swipe at all.
-                let watcher_owned = matches!(
-                    kind,
-                    Some(ScreenKind::LiveRoom) | Some(ScreenKind::SystemAlert { .. })
-                ) || observation
-                    .is_some_and(|obs| obs.evidence.ad_feedback_notice);
-                if watcher_owned {
-                    let note = if observation.is_some_and(|obs| obs.evidence.ad_feedback_notice) {
-                        "thông báo quảng cáo đang hiện — chờ TikTok tự đóng"
-                    } else if matches!(kind, Some(ScreenKind::SystemAlert { .. })) {
-                        "hộp thoại hệ thống — chờ watcher bấm nút bỏ qua"
+                (FeedStep::Stop { reason }, _) => {
+                    last_error = Some(reason);
+                    hit_video_cap = false;
+                    outcome = if status.videos_done == 0 {
+                        Outcome::Failed
                     } else {
-                        "đang ở phòng LIVE — chờ watcher bấm ✕"
+                        Outcome::Partial
                     };
-                    report(&mut status, note.into());
-                    let back = self
-                        .wait_for_frame(udid, Duration::from_secs(12), &stop, |img| {
-                            screen::feed_ready(img, Some(screen_size.0))
-                        })
-                        .await;
-                    if back.is_none() {
-                        continue;
-                    }
-                    report(&mut status, "đã về FYP".into());
-                } else {
-                    report(&mut status, "không ở FYP — vuốt để về feed".into());
-                    status.swipe_attempts += 1;
-                    let _ = self
-                        .do_swipe(
-                            udid,
-                            session.as_ref(),
-                            &gestures,
-                            screen_size,
-                            human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
-                            &stop,
-                        )
-                        .await;
-                    sleep_interruptible(Duration::from_millis(1_200), &stop).await;
-                    if !self.on_feed(udid, screen_size.0) {
-                        continue;
-                    }
-                    report(&mut status, "đã về FYP".into());
+                    break 'feed;
                 }
             }
             // Every path that gets here is on the feed: either it always was, or
