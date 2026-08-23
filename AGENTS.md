@@ -7838,10 +7838,21 @@ nhiều tham số** — 31 dòng sau chữ ký 12 tham số không phải cải 
 ký dài — hoặc **lớn và sửa chính cái handle phiên** (`ui_context` + `session` cùng lúc, vì đường
 phục hồi stream thay cả hai).
 
-Muốn đi tiếp thì phải gom ~9 biến mutable của vòng lặp thành một struct trạng thái và biến các pha
-thành method trên nó. Đó là hình dạng đúng nếu viết lại từ đầu, nhưng nó là **thay đổi thiết kế**
-chứ không phải di chuyển — trên đường chạy nhiều nhất sản phẩm, và lưới an toàn duy nhất là một
-phiên nuôi thật. Việc đó nên có người vận hành gật.
+**Hai mối nguy của việc gom state, đã đo — và cả hai đều KHÔNG chặn:** không một biến nào trong
+14 biến state phiên bị shadow bên trong `run_session` (nên thay hàng loạt là an toàn, compiler che
+phần còn lại), và chỉ **một** chỗ dùng inline capture (`{blocked_streak}`) cần sửa tay. Nếu ai đó
+định làm tiếp, đừng đo lại hai thứ này.
+
+**Lý do dừng không phải kỹ thuật, mà là hình dạng chưa chốt.** 14 biến ấy không phải một khối:
+bảy cái là *mô hình hành vi* (`human`, `policy`, `moods`, `budget`, `text_health`,
+`last_interaction_at`, `rail`), sáu cái là *tiến độ và phán quyết* (`status`, `outcome`,
+`last_error`, `hit_video_cap`, `off_feed_streak`, `blocked_streak`). Gom thành **một** struct 16
+field chỉ dời đống lộn xộn đi chỗ khác; gom thành **hai** thì các pha còn lại nhận `&mut behaviour,
+&mut progress` thay cho mười ba `&mut`.
+
+Cách chia đó là một quyết định thiết kế, và nó nên được chốt trước khi ai đó chạy một lần thay thế
+~200 chỗ trên đường chạy nhiều nhất sản phẩm — kiểu hỏng ở đây là **im lặng** và rơi xuống 19 máy
+đang chạy tài khoản thật. Kèm một phiên nuôi thật để nghiệm thu.
 
 Số đo gốc, để không phải đo lại: 78 câu lệnh mức trên cùng, lối thoát không-cục-bộ theo từng khối:
 
