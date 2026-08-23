@@ -1,0 +1,723 @@
+/* Floating Nuôi TikTok panel (control tab) */
+.nurture-float-layer {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-float-popup);
+  pointer-events: none;
+}
+.nurture-float {
+  pointer-events: auto;
+  position: absolute;
+  right: 1.25rem;
+  bottom: 1.25rem;
+  width: min(360px, calc(100vw - 2.5rem));
+  max-height: min(560px, calc(100vh - 5rem));
+  background: var(--bg-elevated);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  box-shadow: 0 10px 32px rgba(15, 18, 25, 0.16);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.nurture-float-title {
+  height: 36px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0 0.4rem 0 0.7rem;
+  background: #f3f4f6;
+  cursor: grab;
+  user-select: none;
+  color: var(--text-1);
+}
+.nurture-float-title:active {
+  cursor: grabbing;
+}
+.nurture-float-title strong {
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+.nurture-float-title .hint {
+  font-size: var(--text-sm);
+  color: var(--text-3);
+}
+.nurture-float-title .grow {
+  flex: 1;
+}
+.nurture-float-title button.close {
+  width: 28px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-2);
+  display: grid;
+  place-items: center;
+}
+.nurture-float-title button.close:hover {
+  background: #ef4444;
+  color: var(--text-inverse);
+}
+.nurture-float-body {
+  padding: 0.65rem 0.75rem 0.85rem;
+  overflow: auto;
+  font-size: var(--text-md);
+}
+.nurture-float-actions {
+  display: flex;
+  gap: 0.4rem;
+  margin-bottom: 0.65rem;
+}
+.nurture-float-actions button {
+  flex: 1;
+  padding: 0.4rem 0.5rem;
+  font-size: var(--text-md);
+}
+.nurture-float-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.4rem;
+  margin-bottom: 0.55rem;
+}
+.nurture-float-stats > div {
+  background: var(--bg-muted);
+  border-radius: 6px;
+  padding: 0.4rem 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+.nurture-float-stats span {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+.nurture-float-stats strong {
+  font-size: var(--text-base);
+  color: var(--primary);
+}
+.nurture-float-live {
+  margin: 0 0 0.45rem;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  background: var(--primary-50);
+  border-radius: 4px;
+  padding: 0.35rem 0.45rem;
+}
+.nurture-float-log {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0 0 0.55rem;
+  max-height: 9.5rem;
+  overflow: auto;
+}
+.nurture-float-log-row {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.4rem 0.5rem;
+  background: var(--bg-subtle);
+}
+.nurture-float-log-row.is-run {
+  border-color: color-mix(in srgb, var(--primary) 35%, var(--line));
+  background: var(--primary-50);
+}
+.nurture-float-log-head {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-bottom: 0.15rem;
+}
+.nurture-float-log-head strong {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 9rem;
+}
+.nurture-float-log-head .hint {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+.nurture-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #c4c7cc;
+  flex-shrink: 0;
+}
+.nurture-dot.on {
+  background: #16a34a;
+  box-shadow: 0 0 0 2px rgba(22, 163, 74, 0.2);
+}
+.nurture-float-log-msg {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  line-height: 1.35;
+  word-break: break-word;
+}
+.nurture-float-err {
+  margin: 0 0 0.45rem;
+  font-size: var(--text-sm);
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-radius: 4px;
+  padding: 0.35rem 0.45rem;
+}
+.nurture-sect-toggle {
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  padding: 0.35rem 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-1);
+  cursor: pointer;
+}
+.nurture-sect {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 0.4rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid var(--line);
+}
+.nurture-sect label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+.nurture-sect input,
+.nurture-sect select,
+.nurture-sched input[type="number"] {
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  padding: 0.3rem 0.4rem;
+  font-size: var(--text-md);
+  background: var(--bg-elevated);
+}
+.nurture-api-test {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: 0.15rem;
+  padding: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-muted);
+}
+.nurture-api-test-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 0.4rem;
+}
+.nurture-api-test-button {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  white-space: nowrap;
+}
+.nurture-api-test > .hint {
+  margin: 0;
+  font-size: var(--text-xs);
+}
+.nurture-api-result {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--line);
+}
+.nurture-api-result-comment {
+  margin: 0;
+  color: var(--text-1);
+  font-size: var(--text-base);
+  line-height: 1.4;
+  word-break: break-word;
+}
+.nurture-api-result-meta {
+  margin: 0;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  word-break: break-word;
+}
+.nurture-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+  gap: 0.4rem;
+}
+/* ---- Nuôi TikTok panel ----------------------------------------------------------
+   Same palette as the rest of the app (--primary, --line, --text-1/2/3, --bg-muted);
+   what changed is structure and weight, so the panel reads as a designed surface
+   instead of a stack of form rows. */
+
+/* Segmented control rather than text links with an underline: the selected group is a
+   filled pill, so which tab you are on is legible at a glance from across the screen. */
+.nurture-tabs {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  margin: 0.5rem 0 0.1rem;
+  padding: 0.15rem;
+  border-radius: 7px;
+  background: var(--bg-muted);
+}
+.nurture-tab {
+  flex: 1 1 0;
+  padding: 0.3rem 0.5rem;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.nurture-tab:hover {
+  color: var(--text-1);
+}
+.nurture-tab.is-on {
+  background: var(--bg);
+  color: var(--primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+.nurture-live-flag {
+  flex: 0 0 auto;
+  padding: 0 0.4rem;
+  color: var(--primary);
+  font-size: var(--text-2xs);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: help;
+}
+
+/* The live block stays above the tabs: it is what the panel is open to watch, and putting
+   it behind a tab would hide it exactly while settings are being tuned. */
+.nurture-live {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+/* done / attempted, four times over. `b` is confirmed, `i` attempted, `em` the unit. */
+.nurture-metrics {
+  display: flex;
+  align-items: baseline;
+  gap: 0.1rem;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  white-space: nowrap;
+  cursor: help;
+}
+.nurture-metrics b {
+  color: var(--text-1);
+  font-weight: 600;
+}
+.nurture-metrics i {
+  color: var(--text-3);
+  font-style: normal;
+}
+.nurture-metrics em {
+  margin-right: 0.34rem;
+  color: var(--text-3);
+  font-style: normal;
+}
+
+.nu-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+/* Micro-cap field labels. Small, spaced, quiet — the value is what should carry weight. */
+.nu-pane .nu-label {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+  color: var(--text-3);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.nu-pane .nu-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin: 0;
+}
+.nu-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.45rem;
+}
+
+/* A titled group. The rule sits behind the title so the heading reads as a divider rather
+   than as another line of text competing with the labels. */
+.nu-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.nu-group-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text-2);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.nu-group-head::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+/* How much of the shared 100% the four rates below have left. `order: 1` puts it after the
+   group's rule, so it sits at the right edge of the divider instead of crowding the title. */
+.nu-budget {
+  order: 1;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.nu-budget.is-over {
+  color: var(--danger-strong);
+}
+/* Said in a box rather than in passing: it blocks saving until the operator acts on it. */
+.nu-budget-warn {
+  margin: 0 0 0.15rem;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--danger-line);
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: var(--text-1);
+  font-size: var(--text-2xs);
+  line-height: 1.5;
+}
+/* Inline in a sentence, so it drops the button padding that would otherwise open a gap
+   in the middle of the line. */
+.nu-budget-warn button.link {
+  padding: 0;
+  font-size: inherit;
+  text-decoration: underline;
+}
+
+/* One feature per row: switch, name, percentage. Aligned so the four read as a list of
+   the same kind of thing, which is what they are. */
+.nu-feature {
+  display: grid;
+  grid-template-columns: auto 1fr 4.9rem;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 1.7rem;
+}
+/* The four interaction rates carry a slider as well, so they get a fourth column. The
+   carousel row below reuses `.nu-feature` without one and must keep its three. */
+.nu-feature-ranged {
+  grid-template-columns: auto minmax(4.5rem, 1fr) 6.5rem 4.9rem;
+}
+.nu-feature-name {
+  color: var(--text-1);
+  font-size: var(--text-sm);
+}
+
+/* The slider is the same value as the number box beside it, so it is styled as a control of
+   the row rather than as the row's main event: thin track, small thumb.
+
+   The track is painted in three parts, and that is the whole reason it is hand-styled rather
+   than left to `accent-color`: filled (what this rate uses), pale (what it may still take),
+   grey (what the other three already spent). All four sliders run 0..100 so a thumb only ever
+   moves when its own number moves — see the note in NurturePopup.tsx.
+
+   `--fill` and `--ceil` arrive as fractions. The **fill** boundary is inset by half a thumb,
+   because a native thumb travels between `thumb/2` and `100% - thumb/2` and this is the one
+   edge the eye checks against the thumb it sits under. The **ceiling** boundary is not: inset,
+   a ceiling of 100 lands at `100% - thumb/2` and leaves a half-thumb of grey at the far end —
+   7px saying "the other three own this" when they own nothing. Measured across the range, the
+   two formulas differ by under a pixel anywhere in the middle, so the honest ends win. */
+.nu-pane .nu-feature-slider {
+  --nu-thumb: 0.85rem;
+  --nu-track: 0.3rem;
+  --nu-fill-pos: calc(var(--nu-thumb) / 2 + (100% - var(--nu-thumb)) * var(--fill, 0));
+  --nu-ceil-pos: calc(100% * var(--ceil, 1));
+  width: 100%;
+  min-width: 0;
+  height: var(--nu-thumb);
+  margin: 0;
+  padding: 0;
+  appearance: none;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.nu-pane .nu-feature-slider::-webkit-slider-runnable-track {
+  height: var(--nu-track);
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--primary) 0 var(--nu-fill-pos),
+    var(--primary-100) var(--nu-fill-pos) var(--nu-ceil-pos),
+    var(--line-strong) var(--nu-ceil-pos) 100%
+  );
+}
+.nu-pane .nu-feature-slider::-webkit-slider-thumb {
+  appearance: none;
+  width: var(--nu-thumb);
+  height: var(--nu-thumb);
+  /* Centre the thumb on a track thinner than itself. */
+  margin-top: calc((var(--nu-track) - var(--nu-thumb)) / 2);
+  border: 2px solid var(--bg-panel);
+  border-radius: 50%;
+  background: var(--primary);
+  box-shadow: var(--shadow-sm);
+}
+.nu-pane .nu-feature-slider:focus-visible::-webkit-slider-thumb {
+  outline: 2px solid var(--primary-ring);
+  outline-offset: 1px;
+}
+/* Switched off: the number is kept on purpose and stays draggable, but nothing about the row
+   may read as active — and it spends none of the budget, so it has no filled part. */
+.nu-pane .nu-feature.is-off .nu-feature-slider::-webkit-slider-runnable-track {
+  background: linear-gradient(
+    to right,
+    var(--text-3) 0 var(--nu-fill-pos),
+    var(--line) var(--nu-fill-pos) 100%
+  );
+}
+.nu-pane .nu-feature.is-off .nu-feature-slider::-webkit-slider-thumb {
+  background: var(--text-3);
+}
+.nu-feature.is-off .nu-feature-name {
+  color: var(--text-3);
+}
+.nu-pane .nu-feature-pct {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.2rem;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+}
+.nu-pane .nu-feature-pct input {
+  width: 3.5rem;
+  min-width: 0;
+  text-align: right;
+}
+/* Dashed while switched off — the number is kept on purpose, so it must stay readable
+   rather than be greyed into looking disabled. */
+.nu-pane .nu-feature.is-off .nu-feature-pct input {
+  border-style: dashed;
+  color: var(--text-3);
+}
+.nu-summary {
+  margin: 0.1rem 0 0;
+  color: var(--text-3);
+  font-size: var(--text-2xs);
+  line-height: 1.45;
+}
+
+/* A switch, not a checkbox. `appearance: none` keeps it a checkbox to the accessibility
+   tree and to every test that finds it by label. */
+.nu-pane .nu-switch {
+  display: flex;
+  /* Stated, not inherited: the panel's `label` rule is `flex-direction: column`, which put
+     the switch's label underneath its track. Same trap as the restart badge. */
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.45rem;
+  min-height: 1.6rem;
+  margin: 0;
+  color: var(--text-1);
+  font-size: var(--text-sm);
+  font-weight: 400;
+  cursor: pointer;
+}
+.nu-pane .nu-switch input[type="checkbox"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.nu-pane .nu-switch-track {
+  position: relative;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 15px;
+  border-radius: 999px;
+  background: var(--line-strong);
+  transition: background 0.15s ease;
+}
+.nu-pane .nu-switch-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--bg-elevated);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  transition: transform 0.15s ease;
+}
+.nu-pane .nu-switch input:checked + .nu-switch-track {
+  background: var(--primary);
+}
+.nu-pane .nu-switch input:checked + .nu-switch-track::after {
+  transform: translateX(11px);
+}
+.nu-pane .nu-switch input:focus-visible + .nu-switch-track {
+  outline: 2px solid var(--primary-ring);
+  outline-offset: 1px;
+}
+.nu-pane .nu-switch-label {
+  line-height: 1.3;
+}
+.nu-pane .nu-switch-bare {
+  gap: 0;
+  min-height: 0;
+}
+
+/* The `!` after a control's name. Quiet by default so twelve of them do not read as
+   twelve warnings, and it only takes the accent on hover — at which point the tooltip is
+   about to appear anyway. `cursor: help` is the affordance; there is nothing to click. */
+.nu-info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  margin-left: 0.28rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  color: var(--text-3);
+  font-size: var(--text-2xs);
+  font-weight: 700;
+  font-style: normal;
+  line-height: 1;
+  letter-spacing: 0;
+  text-transform: none;
+  cursor: help;
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+.nu-info:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+/* Instant, styled hover tooltip for the `!` glyph and the "cần chạy lại" badge.
+   `position: fixed` (coordinates from the trigger's getBoundingClientRect) so it is not
+   clipped by the panel's scroll container and needs no hover delay — it renders the moment
+   the pointer enters, unlike the native `title` it replaces. */
+.nu-tip {
+  position: fixed;
+  z-index: var(--z-menu);
+  transform: translate(-50%, calc(-100% - 8px));
+  max-width: 260px;
+  width: max-content;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  color: var(--text-1);
+  box-shadow: var(--shadow-lg);
+  font-size: var(--text-sm);
+  font-weight: 400;
+  font-style: normal;
+  line-height: 1.4;
+  letter-spacing: 0;
+  text-transform: none;
+  text-align: left;
+  white-space: normal;
+  pointer-events: none;
+}
+/* `.nurture-sect label` is `flex-direction: column` (2244), so every child of a label in
+   the AI and Lịch tabs is its own row — a bare `!` there would sit on a line of its own
+   between the caption and the field. Wrapping the caption and the `!` in this makes them
+   one row, which is the honest fix; the alternative was a negative top margin pulling the
+   glyph back up over the line above it. */
+.nu-inline {
+  display: inline-flex;
+  align-items: center;
+}
+
+.nurture-restart-badge {
+  padding: 0 0.26rem;
+  border: 1px solid var(--warn);
+  border-radius: 3px;
+  color: var(--warn);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.nurture-sched {
+  margin-top: 0.25rem;
+  border-bottom: none;
+}
+.nurture-sched label.check {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: var(--text-md);
+  color: var(--text-1);
+  font-weight: 500;
+}
+.nurture-cost-mini {
+  margin-top: 0.35rem;
+}
+.nurture-cost-head {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  margin-bottom: 0.3rem;
+  color: var(--text-1);
+}
+.nurture-cost-row {
+  display: grid;
+  grid-template-columns: 64px 48px 1fr;
+  gap: 0.35rem;
+  font-size: var(--text-sm);
+  padding: 0.2rem 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--text-2);
+}
+.nurture-cost-row span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}

@@ -1,0 +1,314 @@
+/* Swarmote admin shell layout · Riviu orange */
+
+.shell {
+  display: flex;
+  height: 100%;
+  min-height: 100vh;
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+
+.startup-state {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+  background: #f7f8fa;
+  color: var(--text-1);
+}
+
+.startup-state-card {
+  width: min(620px, 100%);
+  padding: 2rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  box-shadow: 0 12px 32px rgb(15 23 42 / 8%);
+}
+
+.startup-state-card h1,
+.startup-state-card h2 {
+  margin: 0;
+}
+
+.startup-state-card h1 {
+  font-size: var(--text-xl);
+}
+
+.startup-state-card h2 {
+  margin-top: 0.75rem;
+  font-size: var(--text-lg);
+}
+
+.startup-state-card p {
+  margin: 1rem 0 0;
+  line-height: 1.5;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.startup-state-card code {
+  overflow-wrap: anywhere;
+}
+
+.startup-state-card button {
+  margin-top: 1.25rem;
+}
+
+/* ——— Aside 240 / 64 ——— */
+.aside {
+  width: var(--aside-w);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-elevated);
+  border-right: 1px solid var(--line);
+  position: relative;
+  transition: width 0.25s ease;
+  user-select: none;
+}
+.aside.collapsed {
+  width: var(--aside-w-collapsed);
+}
+
+.aside-logo {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.85rem 0.9rem 0.65rem;
+  min-height: 56px;
+}
+.aside-logo img {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  object-fit: contain;
+  background: var(--bg-elevated);
+  border: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.aside-logo strong {
+  font-size: var(--text-base);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  color: var(--text-1);
+}
+
+.aside-scroll {
+  flex: 1;
+  overflow: auto;
+  padding: 0.15rem 0.5rem 0.75rem;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text-2);
+  /* Flush left: the old 2.15rem indent existed to sit under a group title. */
+  padding: 0.48rem 0.55rem;
+  border-radius: 6px;
+  text-align: left;
+  font-weight: 500;
+  font-size: var(--text-base);
+  margin: 1px 0;
+  height: 36px;
+}
+.menu-item:hover {
+  background: var(--bg-muted);
+  color: var(--primary);
+}
+.menu-item.active {
+  background: var(--primary-50);
+  color: var(--primary);
+}
+.aside.collapsed .menu-item {
+  padding-left: 0.35rem;
+}
+.menu-item .mi {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+
+.aside-stats {
+  margin: 0.65rem 0.35rem 0.35rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--primary);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+}
+.aside-stats h4 {
+  margin: 0 0 0.4rem;
+  font-size: var(--text-md);
+  font-weight: 700;
+  color: var(--text-1);
+}
+.aside-stat-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 0.35rem;
+  align-items: center;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  margin: 0.15rem 0;
+}
+.aside-stat-row strong {
+  color: var(--primary);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-sm);
+}
+
+.aside-collapse {
+  height: 40px;
+  border-top: 1px solid var(--line);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+.aside-collapse:hover {
+  color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.aside.collapsed .aside-logo strong,
+.aside.collapsed .menu-item span:not(.mi),
+.aside.collapsed .aside-stats {
+  display: none;
+}
+.aside.collapsed .menu-item {
+  justify-content: center;
+  padding-left: 0.35rem;
+  padding-right: 0.35rem;
+}
+
+/* ——— Main column ——— */
+.main-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-content);
+}
+
+.topbar {
+  height: 48px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0 1.25rem 0 0.5rem;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--line);
+}
+.topbar-drag {
+  flex: 1;
+  height: 100%;
+  min-width: 40px;
+  -webkit-app-region: drag;
+}
+.topbar-title {
+  font-weight: 600;
+  font-size: var(--text-base);
+  color: var(--text-1);
+  padding-left: 0.5rem;
+  white-space: nowrap;
+}
+.topbar-sub {
+  display: none;
+}
+.topbar-spacer {
+  display: none;
+}
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  -webkit-app-region: no-drag;
+}
+.topbar-actions .icon-btn {
+  color: var(--primary);
+}
+
+.icon-btn {
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  color: var(--text-2);
+  display: grid;
+  place-items: center;
+}
+.icon-btn:hover,
+.icon-btn.active {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0.65rem 1rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+/* Flow V2 work surface */
+.content-flow {
+  overflow: hidden;
+  padding: 0.55rem 0.75rem 0.75rem;
+}
+
+.automation-surface {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.automation-tabs {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+  border-bottom: 1px solid var(--line);
+}
+
+.automation-tabs button {
+  min-width: 72px;
+  height: 34px;
+  justify-content: center;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-2);
+}
+
+.automation-tabs button[aria-selected="true"] {
+  border-bottom-color: var(--primary);
+  color: var(--primary);
+}
+
+.automation-legacy {
+  min-height: 0;
+  overflow: auto;
+}
+
+.automation-legacy-schedule {
+  margin-top: 12px;
+}

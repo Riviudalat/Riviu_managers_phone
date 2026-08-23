@@ -1,0 +1,473 @@
+/* Right-click menu on a tile. Fixed position: the coordinates come from the pointer
+   event, and an absolutely-positioned menu would be offset by whatever scrolled. */
+.device-menu {
+  position: fixed;
+  z-index: var(--z-menu);
+  min-width: 196px;
+  padding: 4px;
+  border: 1px solid #dfe6ef;
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  box-shadow: 0 12px 32px rgb(15 23 42 / 18%);
+  display: flex;
+  flex-direction: column;
+}
+.device-menu-head {
+  margin: 0;
+  padding: 0.32rem 0.55rem 0.4rem;
+  border-bottom: 1px solid #eef2f7;
+  color: #0f172a;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.device-menu-label {
+  margin: 0.25rem 0 0.1rem;
+  padding: 0 0.55rem;
+  color: #94a3b8;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.device-menu button {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: 100%;
+  padding: 0.4rem 0.55rem;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: #334155;
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.device-menu button:hover {
+  background: #f1f5f9;
+}
+.device-menu button.danger {
+  color: var(--danger-deep);
+}
+.device-menu button.danger:hover {
+  background: #fef2f2;
+}
+.device-menu-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+/* Row icons, app icons included. `flex: 0 0 auto` so a long app name shrinks and the picture
+   does not. */
+.device-menu button > svg,
+.device-menu button > img {
+  flex: 0 0 auto;
+}
+/* The 搜索菜单 box. Sticky rather than a sibling above the scroll area, because the same
+   component draws it inside the focus overlay's panel too — one element that stays put in
+   both, instead of two layouts to keep in step. */
+.device-menu-search {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-raised);
+  margin: 0.3rem 0.2rem;
+  padding: 0.32rem 0.5rem;
+  border: 1px solid #dfe6ef;
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  font-size: var(--text-sm);
+}
+/* The menu is now taller than most screens with every row expanded, so the rows scroll and
+   the header, search box and device name do not. */
+.device-menu-scroll {
+  display: flex;
+  flex-direction: column;
+  max-height: min(60vh, 460px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.device-menu-branch {
+  display: flex;
+  flex-direction: column;
+}
+/* A submenu's rows, in a panel beside the row that owns it — opened by hovering, and
+   positioned in viewport coordinates by the component. It is portalled to `body`, so it is a
+   sibling of every menu rather than a child of one, and it must out-stack both the tile menu
+   (60) and the focus overlay (40). */
+.device-flyout {
+  position: fixed;
+  z-index: var(--z-flyout);
+  width: 236px;
+  max-height: 60vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  box-shadow: 0 12px 32px rgb(15 23 42 / 18%);
+  display: flex;
+  flex-direction: column;
+}
+.device-flyout button {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.4rem 0.55rem;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.device-flyout button > span {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.device-flyout button > svg,
+.device-flyout button > img {
+  flex: 0 0 auto;
+}
+.device-flyout button:hover:not(:disabled) {
+  background: var(--bg-muted);
+  color: var(--link);
+}
+.device-flyout button.danger {
+  color: var(--danger-deep);
+}
+.device-flyout button.is-disabled,
+.device-flyout button:disabled {
+  color: #94a3b8;
+  cursor: default;
+}
+.device-flyout .device-menu-note {
+  margin: 0;
+  padding: 0.3rem 0.55rem;
+  color: #64748b;
+  font-size: var(--text-xs);
+}
+/* The row that owns an open flyout stays highlighted, so it is obvious which one the panel
+   belongs to when two rows are close together. */
+.device-menu-parent.is-open {
+  background: var(--bg-muted);
+}
+.device-menu button > span:first-child {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.device-menu-chev {
+  flex: 0 0 auto;
+  color: #94a3b8;
+  font-size: var(--text-xs);
+}
+.device-menu button.is-disabled {
+  color: #94a3b8;
+  cursor: default;
+}
+.device-menu button.is-disabled:hover {
+  background: none;
+}
+/* "Đang đọc từ máy…", "Máy không trả về mục nào", or the phone's own refusal. A sentence,
+   never a silently empty submenu. */
+.device-menu-note {
+  margin: 0.1rem 0;
+  padding: 0.3rem 0.7rem;
+  color: #64748b;
+  font-size: var(--text-xs);
+}
+
+/* Centred dialog over a dimmed page.
+   `modal-backdrop` / `modal` were being used by the adb console with **no rules at all** —
+   the class names outlived whatever stylesheet once defined them, so that dialog rendered as
+   an unstyled block in the page flow. The file browser needs a real window, so the two rules
+   are written here and the adb console gets its frame back with them. */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal-backdrop);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: rgb(15 23 42 / 38%);
+}
+.modal {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-height: calc(100vh - 3rem);
+  padding: 0.85rem 1rem 1rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  box-shadow: 0 18px 48px rgb(15 23 42 / 24%);
+  overflow: hidden;
+}
+.modal > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+/* The phone's own filesystem (xiaowei "Preview Mobile Files"). Wide, because a listing has
+   four columns and a filename on this fleet can be sixty characters of Vietnamese. */
+.device-files {
+  width: min(920px, 94vw);
+}
+.device-files-jumps,
+.device-files-bar {
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+/* The typed path bar. Wide, monospace-ish alignment not needed, but the field must be the
+   part that grows — a path is long and the label and button are not. */
+.device-files-goto {
+  align-items: center;
+  gap: 0.4rem;
+}
+.device-files-goto label {
+  flex: 0 0 auto;
+  color: #64748b;
+  font-size: var(--text-xs);
+}
+.device-files-goto input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.32rem 0.5rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  font-size: var(--text-sm);
+}
+.device-files-crumbs {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--text-sm);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.device-files-list {
+  flex: 1 1 auto;
+  margin: 0.3rem 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+}
+.device-files-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.28rem 0.55rem;
+  border-bottom: 1px solid #f1f5f9;
+  font-size: var(--text-sm);
+}
+.device-files-list li:last-child {
+  border-bottom: none;
+}
+.device-files-list li.is-picked {
+  background: var(--primary-50);
+}
+.device-files-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.device-files-size {
+  flex: 0 0 88px;
+  color: #475569;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* The phone's own clock, in the phone's own timezone — see `DeviceFileEntry`. */
+.device-files-when {
+  flex: 0 0 132px;
+  color: #94a3b8;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.device-files-actions {
+  align-items: center;
+  gap: 0.4rem;
+}
+.device-files-actions .hint {
+  flex: 1 1 auto;
+  margin: 0;
+}
+
+/* adb shell console. Output is preformatted and scrolls on both axes: device output is
+   wide and a wrapped `dumpsys` line is unreadable. */
+.adb-console {
+  width: min(680px, 92vw);
+}
+.adb-console header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-bottom: 0.35rem;
+}
+.adb-console .row input {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--text-sm);
+}
+.adb-output {
+  margin: 0.55rem 0 0;
+  padding: 0.5rem 0.6rem;
+  max-height: 320px;
+  overflow: auto;
+  border-radius: 8px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  white-space: pre;
+}
+.adb-output.failed {
+  border-left: 3px solid #f87171;
+}
+
+/* Group tabs and the size/view controls share one row.
+   The border lives here, not on `.group-tabs`, so the rule spans the whole width instead
+   of stopping where the tabs stop. `.group-tabs` keeps `overflow-x: auto` for the tab
+   buttons alone; the controls are `flex-shrink: 0` so they cannot be scrolled out of
+   reach with them. */
+.device-toolrow {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  border-bottom: 1px solid var(--line);
+}
+.device-toolrow .group-tabs {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-bottom: none;
+}
+.device-toolrow .filter-toolbar {
+  flex: 0 0 auto;
+  padding: 0 4px;
+}
+.device-toolrow .filter-toolbar .grow {
+  display: none;
+}
+
+/* Group Tools popup (feature A2+) — reuses the .nurture-float shell, a touch wider for the
+   text area + preview. */
+.nurture-float.group-tools {
+  width: min(480px, calc(100vw - 2.5rem));
+}
+.group-tools-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-bottom: 0.6rem;
+}
+.group-tools-field textarea {
+  width: 100%;
+  min-height: 120px;
+  resize: vertical;
+  font-family: inherit;
+  font-size: var(--text-md);
+  padding: 0.5rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text-1);
+}
+.group-tools-preview {
+  margin-top: 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  max-height: 200px;
+  overflow: auto;
+}
+.group-tools-preview .row-item {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.25rem 0.5rem;
+  border-bottom: 1px solid var(--line);
+  font-size: var(--text-sm);
+}
+.group-tools-preview .row-item:last-child {
+  border-bottom: none;
+}
+.group-tools-preview .who {
+  color: var(--text-2);
+  min-width: 104px;
+  flex-shrink: 0;
+}
+.group-tools-preview .what {
+  color: var(--text-1);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.group-tools-keys {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.4rem;
+  margin-top: 0.4rem;
+}
+.group-tools-keys .tb-btn {
+  justify-content: center;
+}
+.group-tools-fieldset {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.5rem 0.7rem 0.7rem;
+  margin: 0.6rem 0 0;
+}
+.group-tools-fieldset legend {
+  font-size: var(--text-sm);
+  color: var(--text-2);
+  padding: 0 0.35rem;
+}
+.group-tools .check {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: var(--text-md);
+  color: var(--text-1);
+  margin: 0.15rem 0;
+}
+.group-tools .check input {
+  width: auto;
+}
+.group-tools-log {
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text-1);
+  font-size: var(--text-sm);
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.group-tools-fieldset.danger-zone {
+  border-color: var(--danger-line);
+  background: var(--danger-soft);
+}
+.group-tools-fieldset.danger-zone legend {
+  color: var(--danger-strong);
+}
