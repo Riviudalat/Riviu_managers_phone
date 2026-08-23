@@ -7741,7 +7741,7 @@ List vẫn báo "Máy chưa có Riviu helper nên chưa đọc được tên và
 thích đó nên nói "chưa với tới được helper" thay vì "chưa có helper".
 
 
-### 9.98 Bốn lỗi mà chỉ việc dọn mới lôi ra, và ba mục tôi từ chối làm (23/08/2026)
+### 9.98 Bốn lỗi mà chỉ việc dọn mới lôi ra, và năm mục tôi từ chối làm (23/08/2026)
 
 Đợt D+E: hợp đồng, code chết, và cấu trúc. Mục này ghi lại **thứ đáng nhớ**, không phải danh
 sách file đã di chuyển — cái đó nằm trong git.
@@ -7788,7 +7788,9 @@ cùng field**. Kèm một luật cho chính các cửa: mỗi cái phải khẳn
 nhiêu** thứ — một bộ quét trả rỗng thì xanh vĩnh viễn mà không kiểm gì, và đó là cách một
 source-scanning test mục đi.
 
-**Ba mục trong plan tôi không làm, kèm số đo.**
+**Năm mục trong plan tôi không làm, kèm số đo.** Hai trong số đó là mục mà tiền đề của plan
+**đúng lúc viết** và **hết đúng sau khi các mục khác chạy** — ghi rõ vì đó là lý do khác hẳn
+với "đo ra không đáng".
 
 - **E7 (định tuyến 21 lệnh Android qua `MultiplexDriver`).** Đo lại: **29 thao tác, 31 chỗ gọi,
   0 cái nào có trên trait `DeviceDriver`**, và driver iOS cài đặt **0/7** những cái nghe có vẻ
@@ -7800,8 +7802,20 @@ source-scanning test mục đi.
   không ném được. Không có bug để sửa. Thay 39 chỗ đang chạy đúng trong lớp UI test thưa là đổi
   rủi ro thật lấy sự đồng đều. Thay bằng một cửa giữ kỷ luật đó khỏi mòn.
 - **E4 tab "setup" của `InteractionPopup`.** Đo: nó chạm **50 symbol**. Tách ra là đổi một file
-  dài lấy một danh sách tham số dài. Tab "monitor" và ba tab của `NurturePopup` thì tách được vì
-  chúng chạm 15 và 4-10.
+  dài lấy một danh sách tham số dài. Ba tab của `NurturePopup` thì tách được vì chúng chạm 4-10.
+  *Tab "monitor" hoá ra không còn gì để tách*: đo lại sau khi tách xong, nó chỉ còn **25 dòng và
+  1 symbol** — đã là vỏ mỏng gọi component con.
+- **E6 gộp bốn họ vỏ popup thành một `<Popup variant>`.** Tiền đề của plan **đúng lúc viết** và
+  **hết đúng sau E3/E4**: bốn chỗ lệch đo được (`z-index` 30 vs 45, `border-radius`, offset,
+  hai `flow-dialog` thiếu `aria-modal`) đã sửa hết, và việc tách component đã làm số vỏ tụt
+  xuống. Đo lại: `flow-dialog-layer` còn **4 chỗ nhưng nằm trong đúng một file**, vỏ float còn
+  **2 chỗ** — và hai cái đó **khác nhau thật**: `NurturePopup` kéo được (`transform` + ba
+  handler pointer), `GroupToolsPopup` cố ý không (`cursor: default`). Một component chung cho
+  N=2 với một khác biệt hành vi là thêm trừu tượng, không phải bớt. Còn
+  `nurture-float-actions` (13 chỗ / 9 file) **không phải vỏ bị chép** — nó là một class CSS bọc
+  một hàng nút, đã một dòng rồi.
+- **`FocusStream` phần JSX overlay.** 363 dòng nhưng **33 symbol** — đúng chỗ chữ ký dài hơn
+  phần tiết kiệm. Chín hành động thiết bị (195 dòng / **6 symbol**) thì đã tách.
 
 **`run_session`: đo ba lần, và lần thứ ba mới tìm ra đường cắt.** 1.369 dòng, 58% của
 `nurture/mod.rs`. Kết luận cuối, chia làm hai phần vì hai phần khác hẳn nhau:
