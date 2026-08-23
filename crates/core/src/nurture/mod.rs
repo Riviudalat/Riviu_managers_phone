@@ -230,8 +230,9 @@ enum FeedStep {
     Proceed,
     /// Nothing more to do here; take the next post.
     NextVideo,
-    /// End the session. `reason` is already reported; the caller records it and stops.
-    Stop { reason: String },
+    /// End the session. The phase has already called `SessionProgress::give_up`, so the
+    /// verdict and the message are recorded; the caller only has to leave the loop.
+    Stop,
 }
 
 /// A phone opened for a nurture session, and what was measured while opening it.
@@ -700,13 +701,13 @@ impl NurtureEngine {
         gestures: &tokio::sync::Mutex<()>,
         stop: &AtomicBool,
         mut off_feed_streak: u32,
-        status: &mut NurtureSessionStatus,
+        progress: &mut SessionProgress,
         report: &impl Fn(&mut NurtureSessionStatus, String),
     ) -> anyhow::Result<(FeedStep, u32)> {
         off_feed_streak += 1;
         if off_feed_streak >= OFF_FEED_LIMIT {
             report(
-                status,
+                &mut progress.status,
                 format!("kẹt ngoài FYP {off_feed_streak} lượt — mở lại TikTok"),
             );
             // Back out first — that is what actually leaves a detail
@@ -725,11 +726,17 @@ impl NurtureEngine {
                 )
                 .await;
             if !recovered {
-                report(status, "vuốt lùi không về được — mở lại TikTok".into());
+                report(
+                    &mut progress.status,
+                    "vuốt lùi không về được — mở lại TikTok".into(),
+                );
                 {
                     let _guard = gestures.lock().await;
                     if let Err(error) = session.home().await {
-                        report(status, format!("không bấm được Home: {error}"));
+                        report(
+                            &mut progress.status,
+                            format!("không bấm được Home: {error}"),
+                        );
                     }
                 }
                 sleep_interruptible(Duration::from_millis(1_200), stop).await;
@@ -758,14 +765,17 @@ impl NurtureEngine {
             }
             if recovered {
                 off_feed_streak = 0;
-                report(status, "đã về FYP sau khi mở lại TikTok".into());
+                report(
+                    &mut progress.status,
+                    "đã về FYP sau khi mở lại TikTok".into(),
+                );
             } else {
                 let message = format!(
                     "không rời được màn hình ngoài FYP sau {off_feed_streak} lượt \
                      (thường là phòng LIVE mà detector không nhận ra) — dừng phiên"
                 );
-                report(status, message.clone());
-                return Ok((FeedStep::Stop { reason: message }, off_feed_streak));
+                progress.give_up(message, report);
+                return Ok((FeedStep::Stop, off_feed_streak));
             }
         }
         let observation = self
@@ -787,7 +797,7 @@ impl NurtureEngine {
             } else {
                 "đang ở phòng LIVE — chờ watcher bấm ✕"
             };
-            report(status, note.into());
+            report(&mut progress.status, note.into());
             let back = self
                 .wait_for_frame(udid, Duration::from_secs(12), stop, |img| {
                     screen::feed_ready(img, Some(screen_size.0))
@@ -796,10 +806,10 @@ impl NurtureEngine {
             if back.is_none() {
                 return Ok((FeedStep::NextVideo, off_feed_streak));
             }
-            report(status, "đã về FYP".into());
+            report(&mut progress.status, "đã về FYP".into());
         } else {
-            report(status, "không ở FYP — vuốt để về feed".into());
-            status.swipe_attempts += 1;
+            report(&mut progress.status, "không ở FYP — vuốt để về feed".into());
+            progress.status.swipe_attempts += 1;
             let _ = self
                 .do_swipe(
                     udid,
@@ -814,7 +824,7 @@ impl NurtureEngine {
             if !self.on_feed(udid, screen_size.0) {
                 return Ok((FeedStep::NextVideo, off_feed_streak));
             }
-            report(status, "đã về FYP".into());
+            report(&mut progress.status, "đã về FYP".into());
         }
 
         Ok((FeedStep::Proceed, off_feed_streak))
@@ -846,7 +856,7 @@ impl NurtureEngine {
         live_owned: &AtomicBool,
         gestures: &tokio::sync::Mutex<()>,
         stop: &AtomicBool,
-        status: &mut NurtureSessionStatus,
+        progress: &mut SessionProgress,
         report: &impl Fn(&mut NurtureSessionStatus, String),
     ) -> anyhow::Result<(FeedStep, Option<ActionRail>)> {
         let mut rail: Option<ActionRail> = None;
@@ -854,7 +864,10 @@ impl NurtureEngine {
         match card_kind {
             screen::FeedCardKind::LivePreview => {
                 if policy.should_enter_live() {
-                    report(status, "gặp LIVE — vào xem một lúc rồi thoát".into());
+                    report(
+                        &mut progress.status,
+                        "gặp LIVE — vào xem một lúc rồi thoát".into(),
+                    );
                     live_owned.store(true, Ordering::Relaxed);
                     let entered = {
                         let _guard = gestures.lock().await;
@@ -906,8 +919,11 @@ impl NurtureEngine {
                     }
                     live_owned.store(false, Ordering::Relaxed);
                 } else {
-                    report(status, "gặp thẻ LIVE — lướt qua thẻ xem trước".into());
-                    status.swipe_attempts += 1;
+                    report(
+                        &mut progress.status,
+                        "gặp thẻ LIVE — lướt qua thẻ xem trước".into(),
+                    );
+                    progress.status.swipe_attempts += 1;
                     let _ = self
                         .do_swipe(
                             udid,
@@ -923,7 +939,10 @@ impl NurtureEngine {
                 return Ok((FeedStep::NextVideo, rail));
             }
             screen::FeedCardKind::TransitionOrUnknown => {
-                report(status, "khung đang chuyển — chờ frame ổn định".into());
+                report(
+                    &mut progress.status,
+                    "khung đang chuyển — chờ frame ổn định".into(),
+                );
                 sleep_interruptible(Duration::from_millis(700), stop).await;
             }
             screen::FeedCardKind::Video if self.card_is_still(udid, stop).await => {
@@ -947,14 +966,14 @@ impl NurtureEngine {
                 let budget = settings.carousel_slide_budget();
                 if budget == 0 {
                     report(
-                        status,
+                        &mut progress.status,
                         "gặp bài ảnh — bỏ qua vuốt ngang (tính năng đang tắt)".into(),
                     );
                     sleep_interruptible(Duration::from_secs(2 + (card_digest % 6)), stop).await;
                     return Ok((FeedStep::NextVideo, rail));
                 }
                 report(
-                    status,
+                    &mut progress.status,
                     format!("gặp bài ảnh (khung đứng yên) — vuốt ngang tối đa {budget} ảnh"),
                 );
                 let mut slides_seen = 0u32;
@@ -986,7 +1005,10 @@ impl NurtureEngine {
                     // proof, so the branch checks its own work and undoes
                     // it — the back gesture is what leaves a detail page.
                     if !self.on_feed(udid, screen_size.0) {
-                        report(status, "vuốt ngang đã rời feed — lùi lại".into());
+                        report(
+                            &mut progress.status,
+                            "vuốt ngang đã rời feed — lùi lại".into(),
+                        );
                         let back = self
                             .escape_to_feed(
                                 udid,
@@ -998,7 +1020,7 @@ impl NurtureEngine {
                             )
                             .await;
                         report(
-                            status,
+                            &mut progress.status,
                             if back {
                                 "đã lùi về FYP".into()
                             } else {
@@ -1019,7 +1041,10 @@ impl NurtureEngine {
                     slides_seen += 1;
                 }
                 if slides_seen > 0 {
-                    report(status, format!("bài ảnh: đã xem thêm {slides_seen} ảnh"));
+                    report(
+                        &mut progress.status,
+                        format!("bài ảnh: đã xem thêm {slides_seen} ảnh"),
+                    );
                 }
                 if let Some(img) = self.latest_image(udid) {
                     if let Some(found) = screen::locate_action_rail(&img) {
@@ -1409,7 +1434,7 @@ impl NurtureEngine {
                     &gestures,
                     &stop,
                     progress.off_feed_streak,
-                    &mut progress.status,
+                    &mut progress,
                     &report,
                 )
                 .await?
@@ -1421,10 +1446,7 @@ impl NurtureEngine {
                     progress.off_feed_streak = streak;
                     continue;
                 }
-                (FeedStep::Stop { reason }, _) => {
-                    progress.give_up(reason, &report);
-                    break 'feed;
-                }
+                (FeedStep::Stop, _) => break 'feed,
             }
             // Every path that gets here is on the feed: either it always was, or
             // one of the branches above got back to it.
@@ -1456,7 +1478,7 @@ impl NurtureEngine {
                     &live_owned,
                     &gestures,
                     &stop,
-                    &mut progress.status,
+                    &mut progress,
                     &report,
                 )
                 .await?
@@ -1468,12 +1490,7 @@ impl NurtureEngine {
                     }
                 }
                 (FeedStep::NextVideo, _) => continue,
-                (FeedStep::Stop { reason }, _) => {
-                    progress.last_error = Some(reason);
-                    progress.hit_video_cap = false;
-                    progress.outcome = Outcome::Partial;
-                    break 'feed;
-                }
+                (FeedStep::Stop, _) => break 'feed,
             }
 
             // No rail on this card: watch it out and move on rather than tap
