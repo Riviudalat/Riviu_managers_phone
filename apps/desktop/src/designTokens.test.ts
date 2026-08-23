@@ -1,8 +1,19 @@
 import { describe, expect, it } from "vitest";
 
-import appCssRaw from "./App.css?raw";
+import appManifestRaw from "./App.css?raw";
 import fontsCssRaw from "./assets/fonts/fonts.css?raw";
 import indexCssRaw from "./index.css?raw";
+
+// `App.css` is a manifest of `@import`s now, so reading it alone reads no rules at all — which
+// is how a source-scanning test goes green while checking nothing. The count below is the
+// guard: it fails loudly if a stylesheet stops being found rather than quietly passing.
+const styleSheets = Object.entries(
+  import.meta.glob("./styles/*.css", { eager: true, query: "?raw", import: "default" }),
+) as [string, string][];
+if (styleSheets.length < 10) {
+  throw new Error(`expected the split stylesheets, found ${styleSheets.length}`);
+}
+const appCssRaw = [appManifestRaw, ...styleSheets.map(([, css]) => css)].join("\n");
 
 // Read through Vite rather than through `node:fs`: this project's app tsconfig
 // declares only `vite/client`, so a test that reaches for `readFileSync` compiles

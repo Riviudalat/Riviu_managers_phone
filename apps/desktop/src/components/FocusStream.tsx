@@ -2,45 +2,40 @@ import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import type { DeviceInfo, GroupInputReport, HardwareKey } from "../types";
 import { groupInputOutcome } from "../groupInput";
 import { getGroupSync } from "../groupSync";
-import { recordKey, recordSwipe, recordTap } from "../macroStore";
+import { recordSwipe, recordTap } from "../macroStore";
 import {
-  backupDevice,
   deviceControlBegin,
   deviceControlEnd,
-  deviceKey,
   deviceSwipe,
   deviceSwipePath,
   deviceTap,
-  deviceTypeText,
-  exportMedia,
   groupInput,
-  importMedia,
-  rebootDevice,
   installIpa,
-  restoreDevice,
-  saveViewSnapshot,
-  screenshot,
   viewInjectTouch,
   viewRequestKeyframe,
 } from "../api";
 import { createLiveDragGroup, liveTap, type LiveDragGroup } from "../liveDrag";
-import {
-  type QuickPhrase,
-} from "../quickPhrases";
+
 import { InstalledApps } from "./InstalledApps";
 import { AdbConsole } from "./AdbConsole";
 import { pickFile } from "../pickFile";
-import { pickDirectory } from "../pickFile";
-import { requestConfirm } from "../confirmStore";
+
 import { pushToast, toastError } from "../toastStore";
 import { useDeviceKeyboards } from "./focus/useDeviceKeyboards";
+import { useFocusActions } from "./focus/useFocusActions";
 import { useQuickPhrases } from "./focus/useQuickPhrases";
-import { exportViewJpeg, useViewDecodeFailed, useViewLive, useViewSize } from "../viewStore";
+import { useViewDecodeFailed, useViewLive, useViewSize } from "../viewStore";
 import { streamPlaceholder } from "../streamPlaceholder";
 import { startDevicePreview } from "../startPreview";
 import { StreamPlaceholder } from "./StreamPlaceholder";
 import { mapClientToImage, paintedViewBox } from "../viewHit";
-import { FOCUS_ZOOM, loadZoom, stepZoom, storeZoom, wheelWantsZoom } from "../zoom";
+import {
+  FOCUS_ZOOM,
+  loadZoom,
+  stepZoom,
+  storeZoom,
+  wheelWantsZoom,
+} from "../zoom";
 import { PhoneCanvas } from "./PhoneCanvas";
 import {
   IconBack,
@@ -147,7 +142,8 @@ export function FocusStream({
   /// not state: the gesture handlers read it imperatively and must see the current value, and
   /// readiness changing should not force a re-render.
   const controlReady = useRef<Set<string>>(new Set());
-  const targets = groupMode && groupUdids.length > 1 ? groupUdids : [device.udid];
+  const targets =
+    groupMode && groupUdids.length > 1 ? groupUdids : [device.udid];
   const targetKey = targets.join("\0");
   const isIos = device.platform === "ios";
 
@@ -184,7 +180,8 @@ export function FocusStream({
   /// straight line at constant speed. That is what "not smooth" was.
   const canDragLive = !isIos;
   const encodedW = viewSize?.width && viewSize.width > 0 ? viewSize.width : 0;
-  const encodedH = viewSize?.height && viewSize.height > 0 ? viewSize.height : 0;
+  const encodedH =
+    viewSize?.height && viewSize.height > 0 ? viewSize.height : 0;
   const aspect = encodedW > 0 && encodedH > 0 ? encodedH / encodedW : 2;
   const decodeFailed = useViewDecodeFailed(device.udid);
   const placeholder = streamPlaceholder({
@@ -226,7 +223,9 @@ export function FocusStream({
     controlReady.current = new Set();
     // One promise per device, kept so the cleanup queues behind the right one rather than
     // behind all of them: a slow phone must not delay releasing a fast one.
-    const opening = new Map(udids.map((udid) => [udid, deviceControlBegin(udid)] as const));
+    const opening = new Map(
+      udids.map((udid) => [udid, deviceControlBegin(udid)] as const),
+    );
     for (const [udid, begin] of opening) {
       void begin
         .then(() => {
@@ -317,7 +316,16 @@ export function FocusStream({
       const startY = encodedH * 0.55;
       const endY = startY - Math.sign(event.deltaY) * encodedH * 0.18;
       void runExclusive(async () => {
-        await deviceSwipe(device.udid, x, startY, x, endY, encodedW, encodedH, 160);
+        await deviceSwipe(
+          device.udid,
+          x,
+          startY,
+          x,
+          endY,
+          encodedW,
+          encodedH,
+          160,
+        );
       }).catch((error) => toastError("Không cuộn được", error));
     };
     screen.addEventListener("wheel", onWheel, { passive: false });
@@ -372,11 +380,14 @@ export function FocusStream({
                 (action, x, y) => viewInjectTouch(udid, action, x, y, iw, ih),
                 end.x,
                 end.y,
-                (reason) => console.warn(`live tap fell back on ${udid}: ${reason}`),
+                (reason) =>
+                  console.warn(`live tap fell back on ${udid}: ${reason}`),
               ),
             })),
           );
-          remaining = outcomes.filter((row) => row.outcome !== "live").map((row) => row.udid);
+          remaining = outcomes
+            .filter((row) => row.outcome !== "live")
+            .map((row) => row.udid);
           if (remaining.length === 0) return;
         }
         if (remaining.length > 1) {
@@ -421,201 +432,40 @@ export function FocusStream({
         await deviceSwipePath(remaining[0], start, steps, iw, ih);
       } else {
         // Too few samples to be a path -- a fast flick the pointer only reported twice.
-        await deviceSwipe(remaining[0], start.x, start.y, end.x, end.y, iw, ih, 160);
+        await deviceSwipe(
+          remaining[0],
+          start.x,
+          start.y,
+          end.x,
+          end.y,
+          iw,
+          ih,
+          160,
+        );
       }
     });
   };
 
-  const pressKey = async (key: HardwareKey) => {
-    recordKey(key); // A8: no-op unless a macro recording is armed.
-    // Single-device gestures go through the manual-session lease; wait for control to open
-    // rather than race it. The group path (`group_input`) skips and reports per device, so
-    // it needs no gate.
-    if (targets.length <= 1 && !controlReady.current.has(device.udid)) {
-      pushToast("warn", "Đang mở điều khiển", "Đợi một giây rồi thử lại.");
-      return;
-    }
-    try {
-      await runExclusive(async () => {
-        if (targets.length > 1) {
-          reportGroup(
-            await groupInput({ udids: targets, kind: "key", key, sync: getGroupSync() }),
-            false,
-          );
-        } else {
-          await deviceKey(device.udid, key);
-        }
-      });
-    } catch (error) {
-      toastError("Không bấm được phím", error);
-    }
-  };
-
-  /// Type a saved phrase onto every phone the overlay is driving.
-  ///
-  /// Goes through the same `group_input` `type` path the keyboard uses, which reaches the
-  /// agent's `ACTION_SET_TEXT` — the only route here that carries Vietnamese diacritics.
-  /// `adb shell input text` is killed outright by them.
-  const sendPhrase = async (phrase: QuickPhrase) => {
-    if (targets.length <= 1 && !controlReady.current.has(device.udid)) {
-      pushToast("warn", "Đang mở điều khiển", "Đợi một giây rồi thử lại.");
-      return;
-    }
-    try {
-      let delivered = false;
-      const ran = await runBusy(async () => {
-        if (targets.length > 1) {
-          delivered = reportGroup(
-            await groupInput({
-              udids: targets,
-              kind: "type",
-              text: phrase.content,
-              sync: getGroupSync(),
-            }),
-            false,
-          );
-        } else {
-          await deviceTypeText(device.udid, phrase.content);
-          delivered = true;
-        }
-      });
-      if (ran && delivered) pushToast("ok", "Đã gõ câu nhanh", phrase.name);
-    } catch (error) {
-      toastError("Gõ câu nhanh thất bại", error);
-    }
-  };
-
-  const importFile = async () => {
-    const path = await pickFile({
-      title: "Chọn ảnh hoặc video",
-      filters: [{ name: "Ảnh / video", extensions: ["jpg", "jpeg", "png", "webp", "gif", "mp4", "mov", "3gp"] }],
-    });
-    if (!path) return;
-    pushToast("info", "Đang đưa vào máy…", device.name);
-    try {
-      await runBusy(async () => {
-        pushToast("ok", "Đã vào thư viện", await importMedia(device.udid, path));
-      });
-    } catch (error) {
-      toastError("Đưa file vào máy thất bại", error);
-    }
-  };
-
-  const exportFiles = async () => {
-    const dir = await pickDirectory("Chọn thư mục lưu ảnh/video lấy từ máy");
-    if (!dir) return;
-    // A full camera roll over USB 2.0 takes minutes, so say so before it starts rather than
-    // leaving the operator watching a disabled button — and say *how much*, because the
-    // number is the part nobody expects. Measured on 23021RAAEG: `/sdcard/DCIM` held **761
-    // files, 3.3 GB**, and the row pulls all of it with no way to stop. An operator who
-    // wanted three photos should use "Tệp trên máy…" and pick them.
-    pushToast(
-      "info",
-      "Đang lấy TOÀN BỘ ảnh/video…",
-      `${device.name} — cả thư viện, có thể vài GB và vài phút. Muốn lấy vài tệp thì dùng "Tệp trên máy…".`,
-    );
-    try {
-      await runBusy(async () => {
-        const report = await exportMedia(device.udid, dir);
-        if (report.found === 0) {
-          // Not an error: an empty gallery is an answer, and reporting it as a failure
-          // would send the operator looking for a bug that is not there.
-          pushToast("info", "Máy không có ảnh/video nào", device.name);
-        } else if (report.missed > 0) {
-          // Said out loud, and as a warning. These files were on the phone and are not on
-          // this machine; a plain "Đã lấy N file" reads as success and quietly loses the
-          // rest, which is the whole complaint.
-          pushToast(
-            "warn",
-            `Chỉ lấy được ${report.fetched}/${report.found} file`,
-            `${report.missed} file trên máy không sao chép được — xem log để biết file nào. Đã lưu vào ${dir}`,
-          );
-        } else {
-          pushToast("ok", `Đã lấy ${report.fetched} file`, dir);
-        }
-      });
-    } catch (error) {
-      toastError("Lấy ảnh/video thất bại", error);
-    }
-  };
-
-  const copySerial = async () => {
-    try {
-      await navigator.clipboard.writeText(device.udid);
-      pushToast("ok", "Đã copy serial", device.udid);
-    } catch (error) {
-      toastError("Không copy được serial", error);
-    }
-  };
-
-  const capture = async () => {
-    try {
-      await runBusy(async () => {
-        try {
-          pushToast("ok", "Đã chụp màn hình", await screenshot(device.udid));
-        } catch (first) {
-          const bytes = await exportViewJpeg(device.udid);
-          if (!bytes) throw first;
-          pushToast("ok", "Đã chụp màn hình", await saveViewSnapshot(device.udid, Array.from(bytes)));
-        }
-      });
-    } catch (e) {
-      toastError("Chụp màn hình thất bại", e);
-    }
-  };
-
-  const reboot = async () => {
-    const proceed = await requestConfirm({
-      title: `Khởi động lại ${device.name}?`,
-      message: "Thiết bị sẽ ngắt kết nối vài phút và stream dừng cho tới khi khởi động xong.",
-      confirmLabel: "Khởi động lại",
-      danger: true,
-    });
-    if (!proceed) return;
-    try {
-      const ran = await runBusy(async () => {
-        await rebootDevice(device.udid);
-      });
-      if (ran) pushToast("info", "Đang khởi động lại", device.name);
-    } catch (e) {
-      toastError("Khởi động lại thất bại", e);
-    }
-  };
-
-  const backup = async () => {
-    const dir = await pickDirectory("Chọn thư mục lưu backup");
-    if (!dir) return;
-    pushToast("info", "Đang backup…", `${device.name} — có thể mất vài phút.`);
-    try {
-      const ran = await runBusy(async () => {
-        await backupDevice(device.udid, dir);
-      });
-      if (ran) pushToast("ok", "Backup xong", dir);
-    } catch (e) {
-      toastError("Backup thất bại", e);
-    }
-  };
-
-  const restore = async () => {
-    const dir = await pickDirectory("Chọn thư mục backup để phục hồi");
-    if (!dir) return;
-    const proceed = await requestConfirm({
-      title: `Phục hồi ${device.name} từ backup?`,
-      message: "Toàn bộ dữ liệu hiện tại trên thiết bị sẽ bị ghi đè và máy sẽ khởi động lại.",
-      confirmLabel: "Ghi đè & phục hồi",
-      danger: true,
-    });
-    if (!proceed) return;
-    pushToast("info", "Đang phục hồi…", device.name);
-    try {
-      const ran = await runBusy(async () => {
-        await restoreDevice(device.udid, dir);
-      });
-      if (ran) pushToast("ok", "Đã phục hồi", "Thiết bị sẽ khởi động lại.");
-    } catch (e) {
-      toastError("Phục hồi thất bại", e);
-    }
-  };
+  // The nine actions live in `focus/useFocusActions` — 195 lines for six symbols. They are
+  // destructured back into the same names so nothing below this line had to change.
+  const {
+    pressKey,
+    sendPhrase,
+    importFile,
+    exportFiles,
+    copySerial,
+    capture,
+    reboot,
+    backup,
+    restore,
+  } = useFocusActions({
+    device,
+    targets,
+    controlReady,
+    reportGroup,
+    runExclusive,
+    runBusy,
+  });
 
   /// The overlay's own rows. Typed as `DeviceMenuNode` rather than a local shape, because
   /// they are concatenated with the shared catalog below and drawn by the same component: one
@@ -822,14 +672,17 @@ export function FocusStream({
   /// Concatenating forty objects costs nothing next to the render it happens inside.
   const panelNodes = [...menuRows, ...overlayFunctions];
 
-  const navKeys: { key: HardwareKey; title: string; Icon: (props: { size?: number }) => ReactElement }[] =
-    isIos
-      ? [{ key: "home", title: "Home", Icon: IconHome }]
-      : [
-          { key: "recents", title: "Recents", Icon: IconRecents },
-          { key: "home", title: "Home", Icon: IconHome },
-          { key: "back", title: "Back", Icon: IconBack },
-        ];
+  const navKeys: {
+    key: HardwareKey;
+    title: string;
+    Icon: (props: { size?: number }) => ReactElement;
+  }[] = isIos
+    ? [{ key: "home", title: "Home", Icon: IconHome }]
+    : [
+        { key: "recents", title: "Recents", Icon: IconRecents },
+        { key: "home", title: "Home", Icon: IconHome },
+        { key: "back", title: "Back", Icon: IconBack },
+      ];
 
   return (
     <div
@@ -868,10 +721,21 @@ export function FocusStream({
               );
               return;
             }
-            const start = mapToDevice(e.currentTarget, e.clientX, e.clientY, encodedW, encodedH);
+            const start = mapToDevice(
+              e.currentTarget,
+              e.clientX,
+              e.clientY,
+              encodedW,
+              encodedH,
+            );
             if (!start) return;
             e.preventDefault();
-            drag.current = { start, steps: [], lastAt: performance.now(), live: null };
+            drag.current = {
+              start,
+              steps: [],
+              lastAt: performance.now(),
+              live: null,
+            };
             e.currentTarget.setPointerCapture(e.pointerId);
           }}
           onPointerMove={(e) => {
@@ -885,17 +749,25 @@ export function FocusStream({
             // Ignore a sample that is neither far enough nor late enough to carry
             // information; a pointer reports far more often than a gesture changes.
             if (elapsed < 8) return;
-            const point = mapToDevice(e.currentTarget, e.clientX, e.clientY, encodedW, encodedH);
+            const point = mapToDevice(
+              e.currentTarget,
+              e.clientX,
+              e.clientY,
+              encodedW,
+              encodedH,
+            );
             if (!point) return;
             const previous = held.steps.at(-1) ?? held.start;
-            if (Math.hypot(point.x - previous.x, point.y - previous.y) < 2) return;
+            if (Math.hypot(point.x - previous.x, point.y - previous.y) < 2)
+              return;
             // Past the tap threshold this is a drag, and a drag the phone can follow while
             // it happens instead of replaying it after release. Started from `held.start`,
             // not from here: the finger has to land where the operator put it.
             if (
               !held.live &&
               canDragLive &&
-              Math.hypot(point.x - held.start.x, point.y - held.start.y) >= TAP_SLOP
+              Math.hypot(point.x - held.start.x, point.y - held.start.y) >=
+                TAP_SLOP
             ) {
               held.live = createLiveDragGroup(
                 targets.map((udid) => ({
@@ -944,7 +816,13 @@ export function FocusStream({
               return;
             }
             e.preventDefault();
-            const end = mapToDevice(e.currentTarget, e.clientX, e.clientY, encodedW, encodedH);
+            const end = mapToDevice(
+              e.currentTarget,
+              e.clientX,
+              e.clientY,
+              encodedW,
+              encodedH,
+            );
             if (!end) {
               lift();
               return;
@@ -1017,7 +895,10 @@ export function FocusStream({
               {index} {device.name}
             </strong>
             {groupMode && targets.length > 1 && (
-              <span className="focus-menu-group" title={`Đồng bộ ${targets.length} máy`}>
+              <span
+                className="focus-menu-group"
+                title={`Đồng bộ ${targets.length} máy`}
+              >
                 ×{targets.length}
               </span>
             )}
@@ -1045,137 +926,174 @@ export function FocusStream({
             >
               <IconCopy size={14} />
             </button>
-            <button type="button" className="close" title="Đóng" aria-label="Đóng" onClick={onClose}>
+            <button
+              type="button"
+              className="close"
+              title="Đóng"
+              aria-label="Đóng"
+              onClick={onClose}
+            >
               <IconClose size={14} />
             </button>
           </header>
           {/* Why every row is greyed out. `disabled={busy}` alone is silent, and a row that
               cannot be clicked and does not say why reads exactly like a row that does
               nothing — which is how three working rows came to be reported as broken. */}
-          {busy && <p className="focus-menu-busy">Đang chạy một thao tác trên máy này…</p>}
+          {busy && (
+            <p className="focus-menu-busy">
+              Đang chạy một thao tác trên máy này…
+            </p>
+          )}
           {/* ONE scroll region for the whole column: the function rows, whatever panel is
               open, and the App List all live in here, so a wheel anywhere in the panel moves
               the same list. Two scroll boxes stacked (which is what a `flex: 1` list plus a
               `flex: 1 1 45%` App List gave) means the wheel does different things depending on
               which half the pointer is over, and the operator has to find the seam. */}
           <div className="focus-menu-scroll">
-          {/* ONE list, and no "other functions" heading: the panel's own rows and the shared
+            {/* ONE list, and no "other functions" heading: the panel's own rows and the shared
               per-phone catalog are the same kind of thing, so splitting them under a heading
               only made the operator learn which half a function lived in. The search box is
               the first row of the list and is `position: sticky`, so it stays at the top of
               the panel while everything under it scrolls — and it filters *everything*, which
               a box above only half the rows could not do. */}
-          <div className="focus-menu-list">
-            <DeviceFunctionList nodes={panelNodes} platform={device.platform} />
-          </div>
-          {/* Every one of these sits BEFORE the navbar and carries its own height. The menu
+            <div className="focus-menu-list">
+              <DeviceFunctionList
+                nodes={panelNodes}
+                platform={device.platform}
+              />
+            </div>
+            {/* Every one of these sits BEFORE the navbar and carries its own height. The menu
               list is `flex: 1`, so a sibling added after the navbar collapses to nothing and
               pushes the navbar out of the column (AGENTS.md §9.57). */}
-          {showDevices && (
-            <div className="focus-menu-panel" role="group" aria-label="Đổi máy">
-              {devices.length <= 1 ? (
-                <p className="hint">Chỉ có một máy đang hiển thị.</p>
-              ) : (
-                devices.map((candidate, position) => (
-                  <button
-                    key={candidate.udid}
-                    type="button"
-                    className={candidate.udid === device.udid ? "is-current" : ""}
-                    title={candidate.udid}
-                    onClick={() => {
-                      if (candidate.udid === device.udid) return;
-                      // Lift the swap to the parent rather than swapping a local device:
-                      // the overlay's preset effect and this component's control lease are
-                      // both keyed on the udid, so changing it there releases the old phone
-                      // and claims the new one with no extra code.
-                      onSelectDevice(candidate.udid);
-                      setShowDevices(false);
-                    }}
-                  >
-                    <span className="focus-device-index">{position + 1}</span>
-                    <span>{candidate.name}</span>
-                  </button>
-                ))
-              )}
-            </div>
-          )}
-          {showPhrases && (
-            <div className="focus-menu-panel" role="group" aria-label="Câu nhanh">
-              <input
-                type="text"
-                value={quick.name}
-                placeholder="Tên (không bắt buộc)"
-                onChange={(event) => quick.setName(event.target.value)}
-              />
-              <input
-                type="text"
-                value={quick.content}
-                placeholder="Nội dung (vd: xin chào)"
-                onChange={(event) => quick.setContent(event.target.value)}
-                onKeyUp={(event) => {
-                  if (event.key === "Enter") quick.save();
-                }}
-              />
-              <button type="button" className="ghost" onClick={() => quick.save()}>
-                Lưu câu
-              </button>
-              {quick.error && <p className="error">{quick.error}</p>}
-              {!quick.phrases.length ? (
-                <p className="hint">Chưa có câu nào.</p>
-              ) : (
-                quick.phrases.map((phrase) => (
-                  <div className="focus-phrase-row" key={phrase.id}>
+            {showDevices && (
+              <div
+                className="focus-menu-panel"
+                role="group"
+                aria-label="Đổi máy"
+              >
+                {devices.length <= 1 ? (
+                  <p className="hint">Chỉ có một máy đang hiển thị.</p>
+                ) : (
+                  devices.map((candidate, position) => (
                     <button
+                      key={candidate.udid}
+                      type="button"
+                      className={
+                        candidate.udid === device.udid ? "is-current" : ""
+                      }
+                      title={candidate.udid}
+                      onClick={() => {
+                        if (candidate.udid === device.udid) return;
+                        // Lift the swap to the parent rather than swapping a local device:
+                        // the overlay's preset effect and this component's control lease are
+                        // both keyed on the udid, so changing it there releases the old phone
+                        // and claims the new one with no extra code.
+                        onSelectDevice(candidate.udid);
+                        setShowDevices(false);
+                      }}
+                    >
+                      <span className="focus-device-index">{position + 1}</span>
+                      <span>{candidate.name}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+            {showPhrases && (
+              <div
+                className="focus-menu-panel"
+                role="group"
+                aria-label="Câu nhanh"
+              >
+                <input
+                  type="text"
+                  value={quick.name}
+                  placeholder="Tên (không bắt buộc)"
+                  onChange={(event) => quick.setName(event.target.value)}
+                />
+                <input
+                  type="text"
+                  value={quick.content}
+                  placeholder="Nội dung (vd: xin chào)"
+                  onChange={(event) => quick.setContent(event.target.value)}
+                  onKeyUp={(event) => {
+                    if (event.key === "Enter") quick.save();
+                  }}
+                />
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => quick.save()}
+                >
+                  Lưu câu
+                </button>
+                {quick.error && <p className="error">{quick.error}</p>}
+                {!quick.phrases.length ? (
+                  <p className="hint">Chưa có câu nào.</p>
+                ) : (
+                  quick.phrases.map((phrase) => (
+                    <div className="focus-phrase-row" key={phrase.id}>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        title={phrase.content}
+                        onClick={() => void sendPhrase(phrase)}
+                      >
+                        {phrase.name}
+                      </button>
+                      <button
+                        type="button"
+                        className="danger"
+                        aria-label={`Xoá ${phrase.name}`}
+                        onClick={() => quick.remove(phrase.id)}
+                      >
+                        <IconClose size={12} />
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+            {showKeyboards && (
+              <div
+                className="focus-menu-panel"
+                role="group"
+                aria-label="Đổi bàn phím"
+              >
+                {ime.keyboards === null ? (
+                  <p className="hint">Đang đọc…</p>
+                ) : !ime.keyboards.length ? (
+                  <p className="hint">Không đọc được bàn phím nào.</p>
+                ) : (
+                  ime.keyboards.map((method) => (
+                    <button
+                      key={method.id}
                       type="button"
                       disabled={busy}
-                      title={phrase.content}
-                      onClick={() => void sendPhrase(phrase)}
+                      className={method.id === ime.current ? "is-current" : ""}
+                      title={method.id}
+                      onClick={() => void ime.choose(method)}
                     >
-                      {phrase.name}
+                      {method.label}
+                      {method.id === ime.current && <span> ✓</span>}
                     </button>
-                    <button
-                      type="button"
-                      className="danger"
-                      aria-label={`Xoá ${phrase.name}`}
-                      onClick={() => quick.remove(phrase.id)}
-                    >
-                      <IconClose size={12} />
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-          )}
-          {showKeyboards && (
-            <div className="focus-menu-panel" role="group" aria-label="Đổi bàn phím">
-              {ime.keyboards === null ? (
-                <p className="hint">Đang đọc…</p>
-              ) : !ime.keyboards.length ? (
-                <p className="hint">Không đọc được bàn phím nào.</p>
-              ) : (
-                ime.keyboards.map((method) => (
-                  <button
-                    key={method.id}
-                    type="button"
-                    disabled={busy}
-                    className={method.id === ime.current ? "is-current" : ""}
-                    title={method.id}
-                    onClick={() => void ime.choose(method)}
-                  >
-                    {method.label}
-                    {method.id === ime.current && <span> ✓</span>}
-                  </button>
-                ))
-              )}
-            </div>
-          )}
-          {/* Always here, never behind a toggle — the reference product's App List sits
+                  ))
+                )}
+              </div>
+            )}
+            {/* Always here, never behind a toggle — the reference product's App List sits
               under its Functions list and so does this one. `launchable` makes a row a
               button: finding an app and being unable to open it was the other half of the
               complaint. */}
-          <InstalledApps udid={device.udid} deviceName={device.name} launchable />
+            <InstalledApps
+              udid={device.udid}
+              deviceName={device.name}
+              launchable
+            />
           </div>
-          {showAdb && <AdbConsole device={device} onClose={() => setShowAdb(false)} />}
+          {showAdb && (
+            <AdbConsole device={device} onClose={() => setShowAdb(false)} />
+          )}
           <nav className="focus-navbar" aria-label="Phím điều hướng">
             {navKeys.map(({ key, title, Icon }) => (
               <button
