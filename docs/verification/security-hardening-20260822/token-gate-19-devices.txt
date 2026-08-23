@@ -1,0 +1,22 @@
+# helper 0.4.0 token gate, every phone, 23/08/2026
+# /status open; clipboard/get needs the token; /v1/media/delete is gone
+
+98895a3355424e484f     status=200 no-token=401 wrong=401 right=200 delete=not_found OK
+9889db374744474635     status=200 no-token=401 wrong=401 right=200 delete=not_found OK
+ce021712b33054090c     status=200 no-token=401 wrong=401 right=200 delete=not_found OK
+ce021712d2ae60880c     status=200 no-token=401 wrong=401 right=200 delete=not_found OK
+ce021822e3f548f40b     status=200 no-token=401 wrong=401 right=200 delete=not_found OK
+ce031713840038030c     status=200 no-token=401 wrong=401 right=200 delete=not_found OK
+ce03171392f9390c01     status=200 no-token=401 wrong=401 right=200 delete=not_found OK
+ce031713dd735a1103     status=200 no-token=401 wrong=401 right=200 delete=not_found OK
+ce0417145199e0490c     status=200 no-token=401 wrong=401 right=200 delete=not_found OK
+ce0517151215a00304     status=200 no-token=401 wrong=401 right=200 delete=not_found OK
+ce0517152c898c6f0d     status=200 no-token=401 wrong=401 right=200 delete=not_found OK
+ce0517155ab38c390d     status=200 no-token=401 wrong=401 right=200 delete=not_found OK
+ce051715a0df1b3a02     status=200 no-token=401 wrong=401 right=200 delete=not_found OK
+ce051715ac247a3f01     status=200 no-token=401 wrong=401 right=200 delete=not_found OK
+ce051715cb22c30403     status=200 no-token=401 wrong=401 right=200 delete=not_found OK
+ce0717171c2a64d50d     status=200 no-token=401 wrong=401 right=200 delete=not_found OK
+ce11171be88ba30d01     status=200 no-token=401 wrong=401 right=200 delete=not_found OK
+ce11171beb408a1501     status=200 no-token=401 wrong=401 right=200 delete=not_found OK
+ce12171c4b37d62705     status=200 no-token=401 wrong=401 right=200 delete=not_found OK
