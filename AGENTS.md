@@ -7803,10 +7803,26 @@ source-scanning test mục đi.
   dài lấy một danh sách tham số dài. Tab "monitor" và ba tab của `NurturePopup` thì tách được vì
   chúng chạm 15 và 4-10.
 
-**Một mục bị chặn, không phải bị bỏ.** `run_session` (1.369 dòng, 58% của `nurture/mod.rs`) tách
-được, nhưng luật nghiệm thu của Đợt E đòi chạy lại một phiên nuôi **trên máy thật** trước khi đi
-tiếp — mà phiên đó đăng bình luận thật từ tài khoản thật. Đó là việc cần anh gật, không phải việc
-tự quyết.
+**`run_session`: đo ba lần, và lần thứ ba mới tìm ra đường cắt.** 1.369 dòng, 58% của
+`nurture/mod.rs`. Kết luận cuối, chia làm hai phần vì hai phần khác hẳn nhau:
+
+*Phần trước vòng lặp thì tách được, và đã tách.* `open_for_session` — 121 dòng, trả
+`Option<OpenedDevice>` với sáu giá trị. Hai lần đo đầu tôi bỏ qua nó vì hai giả định sai của
+chính mình: tưởng `streaming_session` **mượn** `ui_context` (nó trả `Arc` sở hữu, nên hai thứ ra
+khỏi hàm cùng nhau được), và một lần đếm bằng awk có escape hỏng nên báo "0 chỗ dùng" cho sáu giá
+trị đang được dùng hàng chục lần. Bài học: khi kết luận là "không tách được", **kiểm lại chữ ký
+thật và đếm lại cho đúng** trước khi ghi nó xuống — hai giả định sai đủ để biến một việc làm được
+thành một việc bị từ chối.
+
+*Thân vòng `'feed` thì không, và đây là số đo:* 899 dòng, **15+ local mutable** sống xuyên suốt,
+**13 `break 'feed`** cộng 7 `break` + 5 `continue`. Nhấc một pha ra khỏi đó không phải chuyển chữ
+— phải biến từng nhánh thoát thành một enum trả về rồi cho caller match lại, tức **viết lại luồng
+điều khiển** của đường chạy nhiều nhất sản phẩm. Đó là từ chối kèm số đo, cùng loại với E7 ở trên,
+không phải một việc đang chờ ai gật. Mảnh thuần duy nhất trong đó (`session_verdict`, luật "trần
+không phải mục tiêu") đã ra ngoài kèm 6 test.
+
+Nghiệm thu bằng một phiên nuôi thật vẫn nên chạy trước khi đụng tiếp vào vùng này — nhưng đó là
+việc người vận hành chọn lúc, không phải điều kiện chặn phần đã làm.
 
 **Kỹ thuật "cắt theo khoảng dòng" trượt hai lần, cả hai đều đỏ ngay lúc build:** một lần vơ luôn
 `WorkerCommand`/`QuarantineStore` khi tách context ra khỏi `device_control`, một lần gắn
