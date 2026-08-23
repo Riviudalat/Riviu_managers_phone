@@ -49,7 +49,7 @@ use crate::frame_source::FrameSource;
 use crate::frame_text::{FrameTextSource, NullFrameTextSource};
 use crate::human_behavior::{
     in_night_window, roll_bool, roll_feed_action_in_mood, roll_follow_in_mood, FeedAction,
-    HumanBehavior, HumanSessionPolicy, MoodCycle, PolicyAction,
+    HumanBehavior, HumanSessionPolicy, Mood, MoodCycle, PolicyAction,
 };
 use crate::screen::{self, ActionRail, ScreenKind};
 use crate::screen_watch::{ScreenWatcher, SessionHandle};
@@ -1091,6 +1091,251 @@ impl NurtureEngine {
         Ok((FeedStep::Proceed, rail))
     }
 
+    /// Roll one interaction for the card on screen, and carry it out.
+    ///
+    /// The largest phase of the feed loop, and the one that could not be lifted until
+    /// `SessionCtx` existed: measured against the loop it had fifteen free variables, and
+    /// cutting it per-arm did not help (14 for Like, 15 for Comment). The count came from how
+    /// much session state was loose in scope, not from the phase's size.
+    ///
+    /// Five ways out, three different verdicts — twice `Stopped` because the operator asked,
+    /// twice `Failed` because recovery did not take, and once `Failed` with its own message.
+    /// Each records that on `progress` before returning `FeedStep::Stop`; the caller only has
+    /// to leave the loop.
+    #[allow(clippy::too_many_arguments)]
+    async fn roll_and_execute_action<F: Fn(NurtureSessionStatus) + Send + Sync>(
+        &self,
+        ctx: &SessionCtx<'_, F>,
+        progress: &mut SessionProgress,
+        device: &mut OpenedDevice,
+        settings: &NurtureSettings,
+        policy: &mut crate::human_behavior::HumanSessionPolicy,
+        budget: &mut Budget,
+        rail: &ActionRail,
+        text_health: &mut TextCommentHealth,
+        last_interaction_at: &mut Option<Instant>,
+        mood: Mood,
+        handle: &SessionHandle,
+        // Raised around a comment so the watcher does not read the keyboard as a screen change.
+        suppress: &AtomicBool,
+        // Deliberately always empty — see the note where it is declared: an uncertain comment
+        // is not written at all rather than falling back to a generic line.
+        pool: &[String],
+    ) -> anyhow::Result<(FeedStep, CommentRecoveryAction)> {
+        let mut comment_recovery_action = CommentRecoveryAction::None;
+        match roll_feed_action_in_mood(settings.like_prob, settings.comment_prob, mood) {
+            FeedAction::Like
+                if !policy.can_interact_with_post() || !policy.can_attempt(PolicyAction::Like) =>
+            {
+                ctx.report(
+                    &mut progress.status,
+                    "bỏ qua tim: nhịp phiên hiện tại đã đủ".into(),
+                );
+            }
+            FeedAction::Like => {
+                if !wait_for_action_gap(last_interaction_at, policy.min_action_gap(), ctx.stop)
+                    .await
+                {
+                    progress.outcome = Outcome::Stopped;
+                    progress.hit_video_cap = false;
+                    return Ok((FeedStep::Stop, comment_recovery_action));
+                }
+                policy.record_attempt(PolicyAction::Like);
+                policy.mark_post_interacted();
+                progress.status.like_attempts += 1;
+                ctx.push(&progress.status);
+                ctx.report(&mut progress.status, "thả tim".into());
+                match self
+                    .do_like(
+                        ctx.udid,
+                        device.session.as_ref(),
+                        ctx.gestures,
+                        device.screen_size,
+                        ctx.stop,
+                    )
+                    .await
+                {
+                    Ok(LikeResult::Liked) => {
+                        progress.status.likes += 1;
+                        ctx.report(
+                            &mut progress.status,
+                            "tim thành công (xác nhận icon đỏ)".into(),
+                        );
+                    }
+                    Ok(LikeResult::AlreadyLiked) => ctx.report(
+                        &mut progress.status,
+                        "video đã tim từ trước — bỏ qua".into(),
+                    ),
+                    Ok(LikeResult::NotOnFeed) => ctx.report(
+                        &mut progress.status,
+                        "bỏ qua tim: khung hiện tại không phải thẻ feed có thanh hành động".into(),
+                    ),
+                    Ok(LikeResult::NotConfirmed { before, best }) => {
+                        ctx.report(
+                            &mut progress.status,
+                            format!(
+                            "tim: tap gửi được nhưng icon không đổi (đỏ {before:.0}→{best:.0}, \
+                             cần >{:.0}; rail layout {}{}, tim y={:.0}pt)",
+                            screen::LIKE_FILLED_REDNESS,
+                            rail.layout(),
+                            if rail.located { "" } else { ", dùng mặc định" },
+                            rail.like_y * 667.0
+                        ),
+                        )
+                    }
+                    Err(e) => {
+                        let msg = format!("tim thất bại: {}", describe(&e));
+                        ctx.report(&mut progress.status, msg.clone());
+                        progress.last_error = Some(msg);
+                        if !self
+                            .recover(
+                                ctx.udid,
+                                &device.bundle_id,
+                                device.fresh_text_session,
+                                &mut device.ui_context,
+                                &mut device.session,
+                                handle,
+                                budget,
+                                text_health,
+                                &e,
+                                &mut progress.status,
+                                ctx.on_status,
+                            )
+                            .await
+                        {
+                            progress.outcome = Outcome::Failed;
+                            return Ok((FeedStep::Stop, comment_recovery_action));
+                        }
+                    }
+                }
+            }
+            FeedAction::Comment
+                if !policy.can_interact_with_post()
+                    || !policy.can_attempt(PolicyAction::Comment) =>
+            {
+                ctx.report(
+                    &mut progress.status,
+                    "bỏ qua bình luận: nhịp phiên hiện tại đã đủ".into(),
+                );
+            }
+            FeedAction::Comment => {
+                if !wait_for_action_gap(last_interaction_at, policy.min_action_gap(), ctx.stop)
+                    .await
+                {
+                    progress.outcome = Outcome::Stopped;
+                    progress.hit_video_cap = false;
+                    return Ok((FeedStep::Stop, comment_recovery_action));
+                }
+                policy.record_attempt(PolicyAction::Comment);
+                policy.mark_post_interacted();
+                progress.status.comment_attempts += 1;
+                ctx.push(&progress.status);
+                ctx.report(&mut progress.status, "bình luận".into());
+                suppress.store(true, Ordering::Relaxed);
+                let res = self
+                    .do_comment(
+                        ctx.udid,
+                        device.session.as_ref(),
+                        ctx.gestures,
+                        rail,
+                        device.screen_size,
+                        settings,
+                        pool,
+                        ctx.stop,
+                    )
+                    .await;
+                suppress.store(false, Ordering::Relaxed);
+                match res {
+                    Ok(result) => {
+                        comment_recovery_action = text_health.observe(result);
+                        match result {
+                            CommentResult::TextSent(usd) => {
+                                progress.status.comments += 1;
+                                progress.status.session_usd += usd;
+                                ctx.report(
+                                    &mut progress.status,
+                                    "đã gửi bình luận chữ (xác nhận nút gửi tắt)".into(),
+                                );
+                            }
+                            CommentResult::TextNotSent => ctx.report(
+                                &mut progress.status,
+                                "bỏ qua bình luận: đã bấm Gửi nhưng chưa xác nhận được; không retry vì trạng thái giao nhận mơ hồ"
+                                    .into(),
+                            ),
+                            other => {
+                                let msg = format!("bỏ qua bình luận: {}", other.reason());
+                                ctx.report(&mut progress.status, msg);
+                            }
+                        }
+
+                        if comment_recovery_action == CommentRecoveryAction::RefreshFreshSession {
+                            ctx.report(
+                                &mut progress.status,
+                                "nút Gửi không sáng 2 lượt liên tiếp — làm mới text device.session"
+                                    .into(),
+                            );
+                            let error = anyhow::Error::new(UiError::new(
+                                UiErrorKind::Session,
+                                "comment.text_not_armed",
+                                "two consecutive frame-confirmed non-arming results",
+                            ));
+                            if !self
+                                .recover(
+                                    ctx.udid,
+                                    &device.bundle_id,
+                                    true,
+                                    &mut device.ui_context,
+                                    &mut device.session,
+                                    handle,
+                                    budget,
+                                    text_health,
+                                    &error,
+                                    &mut progress.status,
+                                    ctx.on_status,
+                                )
+                                .await
+                            {
+                                progress.last_error = Some(
+                                    "không làm mới được text device.session sau 2 lượt không armed"
+                                        .into(),
+                                );
+                                progress.outcome = Outcome::Failed;
+                                return Ok((FeedStep::Stop, comment_recovery_action));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let msg = format!("bình luận thất bại: {}", describe(&e));
+                        ctx.report(&mut progress.status, msg.clone());
+                        progress.last_error = Some(msg);
+                        if ui_error_kind(&e) != UiErrorKind::Other
+                            && !self
+                                .recover(
+                                    ctx.udid,
+                                    &device.bundle_id,
+                                    device.fresh_text_session,
+                                    &mut device.ui_context,
+                                    &mut device.session,
+                                    handle,
+                                    budget,
+                                    text_health,
+                                    &e,
+                                    &mut progress.status,
+                                    ctx.on_status,
+                                )
+                                .await
+                        {
+                            progress.outcome = Outcome::Failed;
+                            return Ok((FeedStep::Stop, comment_recovery_action));
+                        }
+                    }
+                }
+            }
+            FeedAction::None => {}
+        }
+        Ok((FeedStep::Proceed, comment_recovery_action))
+    }
+
     pub async fn run_session(
         &self,
         udid: &str,
@@ -1561,225 +1806,26 @@ impl NurtureEngine {
             }
 
             human.note_action();
-            let mut comment_recovery_action = CommentRecoveryAction::None;
-            match roll_feed_action_in_mood(settings.like_prob, settings.comment_prob, mood) {
-                FeedAction::Like
-                    if !policy.can_interact_with_post()
-                        || !policy.can_attempt(PolicyAction::Like) =>
-                {
-                    ctx.report(
-                        &mut progress.status,
-                        "bỏ qua tim: nhịp phiên hiện tại đã đủ".into(),
-                    );
-                }
-                FeedAction::Like => {
-                    if !wait_for_action_gap(
-                        &mut last_interaction_at,
-                        policy.min_action_gap(),
-                        &stop,
-                    )
-                    .await
-                    {
-                        progress.outcome = Outcome::Stopped;
-                        progress.hit_video_cap = false;
-                        break 'feed;
-                    }
-                    policy.record_attempt(PolicyAction::Like);
-                    policy.mark_post_interacted();
-                    progress.status.like_attempts += 1;
-                    ctx.push(&progress.status);
-                    ctx.report(&mut progress.status, "thả tim".into());
-                    match self
-                        .do_like(
-                            udid,
-                            device.session.as_ref(),
-                            &gestures,
-                            device.screen_size,
-                            &stop,
-                        )
-                        .await
-                    {
-                        Ok(LikeResult::Liked) => {
-                            progress.status.likes += 1;
-                            ctx.report(
-                                &mut progress.status,
-                                "tim thành công (xác nhận icon đỏ)".into(),
-                            );
-                        }
-                        Ok(LikeResult::AlreadyLiked) => ctx.report(
-                            &mut progress.status,
-                            "video đã tim từ trước — bỏ qua".into(),
-                        ),
-                        Ok(LikeResult::NotOnFeed) => ctx.report(
-                            &mut progress.status,
-                            "bỏ qua tim: khung hiện tại không phải thẻ feed có thanh hành động"
-                                .into(),
-                        ),
-                        Ok(LikeResult::NotConfirmed { before, best }) => ctx.report(
-                            &mut progress.status,
-                            format!(
-                                "tim: tap gửi được nhưng icon không đổi (đỏ {before:.0}→{best:.0}, \
-                                 cần >{:.0}; rail layout {}{}, tim y={:.0}pt)",
-                                screen::LIKE_FILLED_REDNESS,
-                                rail.layout(),
-                                if rail.located { "" } else { ", dùng mặc định" },
-                                rail.like_y * 667.0
-                            ),
-                        ),
-                        Err(e) => {
-                            let msg = format!("tim thất bại: {}", describe(&e));
-                            ctx.report(&mut progress.status, msg.clone());
-                            progress.last_error = Some(msg);
-                            if !self
-                                .recover(
-                                    udid,
-                                    &device.bundle_id,
-                                    device.fresh_text_session,
-                                    &mut device.ui_context,
-                                    &mut device.session,
-                                    &handle,
-                                    &mut budget,
-                                    &mut text_health,
-                                    &e,
-                                    &mut progress.status,
-                                    ctx.on_status,
-                                )
-                                .await
-                            {
-                                progress.outcome = Outcome::Failed;
-                                break 'feed;
-                            }
-                        }
-                    }
-                }
-                FeedAction::Comment
-                    if !policy.can_interact_with_post()
-                        || !policy.can_attempt(PolicyAction::Comment) =>
-                {
-                    ctx.report(
-                        &mut progress.status,
-                        "bỏ qua bình luận: nhịp phiên hiện tại đã đủ".into(),
-                    );
-                }
-                FeedAction::Comment => {
-                    if !wait_for_action_gap(
-                        &mut last_interaction_at,
-                        policy.min_action_gap(),
-                        &stop,
-                    )
-                    .await
-                    {
-                        progress.outcome = Outcome::Stopped;
-                        progress.hit_video_cap = false;
-                        break 'feed;
-                    }
-                    policy.record_attempt(PolicyAction::Comment);
-                    policy.mark_post_interacted();
-                    progress.status.comment_attempts += 1;
-                    ctx.push(&progress.status);
-                    ctx.report(&mut progress.status, "bình luận".into());
-                    suppress.store(true, Ordering::Relaxed);
-                    let res = self
-                        .do_comment(
-                            udid,
-                            device.session.as_ref(),
-                            &gestures,
-                            &rail,
-                            device.screen_size,
-                            &settings,
-                            &pool,
-                            &stop,
-                        )
-                        .await;
-                    suppress.store(false, Ordering::Relaxed);
-                    match res {
-                        Ok(result) => {
-                            comment_recovery_action = text_health.observe(result);
-                            match result {
-                                CommentResult::TextSent(usd) => {
-                                    progress.status.comments += 1;
-                                    progress.status.session_usd += usd;
-                                    ctx.report(
-                                        &mut progress.status,
-                                        "đã gửi bình luận chữ (xác nhận nút gửi tắt)".into(),
-                                    );
-                                }
-                                CommentResult::TextNotSent => ctx.report(
-                                    &mut progress.status,
-                                    "bỏ qua bình luận: đã bấm Gửi nhưng chưa xác nhận được; không retry vì trạng thái giao nhận mơ hồ"
-                                        .into(),
-                                ),
-                                other => {
-                                    let msg = format!("bỏ qua bình luận: {}", other.reason());
-                                    ctx.report(&mut progress.status, msg);
-                                }
-                            }
-
-                            if comment_recovery_action == CommentRecoveryAction::RefreshFreshSession
-                            {
-                                ctx.report(
-                                    &mut progress.status,
-                                    "nút Gửi không sáng 2 lượt liên tiếp — làm mới text device.session"
-                                        .into(),
-                                );
-                                let error = anyhow::Error::new(UiError::new(
-                                    UiErrorKind::Session,
-                                    "comment.text_not_armed",
-                                    "two consecutive frame-confirmed non-arming results",
-                                ));
-                                if !self
-                                    .recover(
-                                        udid,
-                                        &device.bundle_id,
-                                        true,
-                                        &mut device.ui_context,
-                                        &mut device.session,
-                                        &handle,
-                                        &mut budget,
-                                        &mut text_health,
-                                        &error,
-                                        &mut progress.status,
-                                        ctx.on_status,
-                                    )
-                                    .await
-                                {
-                                    progress.last_error = Some(
-                                        "không làm mới được text device.session sau 2 lượt không armed"
-                                            .into(),
-                                    );
-                                    progress.outcome = Outcome::Failed;
-                                    break 'feed;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            let msg = format!("bình luận thất bại: {}", describe(&e));
-                            ctx.report(&mut progress.status, msg.clone());
-                            progress.last_error = Some(msg);
-                            if ui_error_kind(&e) != UiErrorKind::Other
-                                && !self
-                                    .recover(
-                                        udid,
-                                        &device.bundle_id,
-                                        device.fresh_text_session,
-                                        &mut device.ui_context,
-                                        &mut device.session,
-                                        &handle,
-                                        &mut budget,
-                                        &mut text_health,
-                                        &e,
-                                        &mut progress.status,
-                                        ctx.on_status,
-                                    )
-                                    .await
-                            {
-                                progress.outcome = Outcome::Failed;
-                                break 'feed;
-                            }
-                        }
-                    }
-                }
-                FeedAction::None => {}
+            let (action_step, comment_recovery_action) = self
+                .roll_and_execute_action(
+                    &ctx,
+                    &mut progress,
+                    &mut device,
+                    &settings,
+                    &mut policy,
+                    &mut budget,
+                    &rail,
+                    &mut text_health,
+                    &mut last_interaction_at,
+                    mood,
+                    &handle,
+                    &suppress,
+                    &pool,
+                )
+                .await?;
+            match action_step {
+                FeedStep::Stop => break 'feed,
+                FeedStep::Proceed | FeedStep::NextVideo => {}
             }
 
             if roll_follow_in_mood(settings.follow_prob, mood) {
