@@ -1336,6 +1336,310 @@ impl NurtureEngine {
         Ok((FeedStep::Proceed, comment_recovery_action))
     }
 
+    /// Swipe to the next video, and deal with every way that can fail to take.
+    ///
+    /// The swipe itself is one line; the other hundred are what happens when the card does not
+    /// move — the stream is re-established, the app is checked, recovery runs. Whether the feed
+    /// actually advanced is the phase's real answer, so it comes back with the verdict.
+    #[allow(clippy::too_many_arguments)]
+    async fn swipe_to_next_video<F: Fn(NurtureSessionStatus) + Send + Sync>(
+        &self,
+        ctx: &SessionCtx<'_, F>,
+        progress: &mut SessionProgress,
+        device: &mut OpenedDevice,
+        settings: &NurtureSettings,
+        human: &mut HumanBehavior,
+        budget: &mut Budget,
+        text_health: &mut TextCommentHealth,
+        handle: &SessionHandle,
+    ) -> anyhow::Result<(FeedStep, bool)> {
+        ctx.report(&mut progress.status, "vuốt video tiếp".into());
+        let mut advanced_to_next_video = false;
+        progress.status.swipe_attempts += 1;
+        match self
+            .do_swipe(
+                ctx.udid,
+                device.session.as_ref(),
+                ctx.gestures,
+                device.screen_size,
+                human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
+                ctx.stop,
+            )
+            .await
+        {
+            Ok(SwipeOutcome::Advanced) => {
+                advanced_to_next_video = true;
+                progress.blocked_streak = 0;
+                progress.status.videos_done += 1;
+                ctx.push(&progress.status);
+            }
+            Ok(SwipeOutcome::Moved) => {
+                progress.blocked_streak = 0;
+                // The rail left, so the gesture landed and the card we were
+                // on is gone. Swiping again here would skip whatever came
+                // next; the loop re-reads the screen at the top instead.
+                // Not counted: nothing settled that could be counted.
+                advanced_to_next_video = true;
+                ctx.report(
+                    &mut progress.status,
+                    "đã rời thẻ cũ nhưng chưa thấy thẻ mới ổn định — đọc lại màn hình".into(),
+                );
+            }
+            Ok(SwipeOutcome::Blocked) => {
+                // The rail never left: the feed swallowed the gesture,
+                // usually under a popup. The watcher closes those on its
+                // own; give it a beat, then try once more.
+                ctx.report(
+                    &mut progress.status,
+                    "vuốt không ăn — chờ popup rồi thử lại".into(),
+                );
+                sleep_interruptible(Duration::from_millis(1_800), ctx.stop).await;
+                progress.status.swipe_attempts += 1;
+                match self
+                    .do_swipe(
+                        ctx.udid,
+                        device.session.as_ref(),
+                        ctx.gestures,
+                        device.screen_size,
+                        human.swipe_duration_ms(false),
+                        ctx.stop,
+                    )
+                    .await
+                {
+                    Ok(SwipeOutcome::Advanced) => {
+                        advanced_to_next_video = true;
+                        progress.blocked_streak = 0;
+                        progress.status.videos_done += 1;
+                        ctx.push(&progress.status);
+                    }
+                    Ok(SwipeOutcome::Moved) => {
+                        advanced_to_next_video = true;
+                        progress.blocked_streak = 0;
+                        ctx.report(
+                            &mut progress.status,
+                            "đã rời thẻ cũ, chưa xác nhận thẻ mới".into(),
+                        );
+                    }
+                    Ok(SwipeOutcome::Blocked) => {
+                        ctx.report(&mut progress.status, "vuốt vẫn không ăn".into());
+                        progress.last_error = Some("swipe không rời được thẻ hiện tại".into());
+                        progress.blocked_streak += 1;
+                    }
+                    Err(e) => {
+                        let msg = format!("vuốt lỗi: {}", describe(&e));
+                        ctx.report(&mut progress.status, msg.clone());
+                        progress.last_error = Some(msg);
+                        if !self
+                            .recover(
+                                ctx.udid,
+                                &device.bundle_id,
+                                device.fresh_text_session,
+                                &mut device.ui_context,
+                                &mut device.session,
+                                handle,
+                                budget,
+                                text_health,
+                                &e,
+                                &mut progress.status,
+                                ctx.on_status,
+                            )
+                            .await
+                        {
+                            progress.outcome = Outcome::Failed;
+                            return Ok((FeedStep::Stop, advanced_to_next_video));
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                let msg = format!("vuốt lỗi: {}", describe(&e));
+                ctx.report(&mut progress.status, msg.clone());
+                progress.last_error = Some(msg);
+                if !self
+                    .recover(
+                        ctx.udid,
+                        &device.bundle_id,
+                        device.fresh_text_session,
+                        &mut device.ui_context,
+                        &mut device.session,
+                        handle,
+                        budget,
+                        text_health,
+                        &e,
+                        &mut progress.status,
+                        ctx.on_status,
+                    )
+                    .await
+                {
+                    progress.outcome = Outcome::Failed;
+                    return Ok((FeedStep::Stop, advanced_to_next_video));
+                }
+            }
+        }
+        Ok((FeedStep::Proceed, advanced_to_next_video))
+    }
+
+    /// Settle after the feed moved on: the natural rest, and the checks that follow it.
+    ///
+    /// Kept behind its `if` at the call site rather than taking the flag: "only when the feed
+    /// actually advanced" is a fact about the loop, and reading it there is the point.
+    #[allow(clippy::too_many_arguments)]
+    async fn settle_after_advance<F: Fn(NurtureSessionStatus) + Send + Sync>(
+        &self,
+        ctx: &SessionCtx<'_, F>,
+        progress: &mut SessionProgress,
+        device: &mut OpenedDevice,
+        policy: &mut crate::human_behavior::HumanSessionPolicy,
+        handle: &SessionHandle,
+    ) -> anyhow::Result<FeedStep> {
+        if let Some(rest) = policy.rest_after_video() {
+            ctx.report(
+                &mut progress.status,
+                format!("nghỉ tự nhiên {}s", rest.as_secs()),
+            );
+            sleep_interruptible(rest, ctx.stop).await;
+        }
+        if policy.should_take_block_break() || policy.should_take_home_break() {
+            let break_for = policy.home_break_duration();
+            ctx.report(
+                &mut progress.status,
+                format!(
+                    "tạm về màn hình chính khoảng {}s rồi mở TikTok lại",
+                    break_for.as_secs()
+                ),
+            );
+            {
+                let _guard = ctx.gestures.lock().await;
+                let _ = device.session.home().await;
+            }
+            sleep_interruptible(break_for, ctx.stop).await;
+            if policy.should_cold_restart() {
+                ctx.report(
+                    &mut progress.status,
+                    "khởi động lại TikTok sau một quãng nghỉ".into(),
+                );
+                let _ = self
+                    .control
+                    .terminate_streaming_app(&device.ui_context, &device.bundle_id)
+                    .await;
+                sleep_interruptible(Duration::from_secs(2), ctx.stop).await;
+                match self
+                    .control
+                    .recover_streaming_session(
+                        &mut device.ui_context,
+                        &device.bundle_id,
+                        device.session_kind,
+                        false,
+                    )
+                    .await
+                {
+                    Ok(next) => {
+                        // Swap the watcher's device.session handle too, or the
+                        // popup watcher keeps tapping through the dead
+                        // pre-restart device.session for the rest of the run.
+                        device.session = next;
+                        handle.set(device.session.clone());
+                    }
+                    Err(error) => {
+                        ctx.report(
+                            &mut progress.status,
+                            format!("không mở lại được TikTok: {error}"),
+                        );
+                        progress.outcome = Outcome::Partial;
+                        return Ok(FeedStep::Stop);
+                    }
+                }
+            } else {
+                let _guard = ctx.gestures.lock().await;
+                let _ = device
+                    .session
+                    .launch_app_foreground(&device.bundle_id)
+                    .await;
+            }
+            sleep_interruptible(Duration::from_secs(4), ctx.stop).await;
+            policy.reset_block();
+        }
+        Ok(FeedStep::Proceed)
+    }
+
+    /// Follow the author of the card on screen.
+    ///
+    /// The roll stays at the call site with the other two — like, comment, follow read as one
+    /// decision there, and burying one of the three inside a phase would break that.
+    #[allow(clippy::too_many_arguments)]
+    async fn roll_and_execute_follow<F: Fn(NurtureSessionStatus) + Send + Sync>(
+        &self,
+        ctx: &SessionCtx<'_, F>,
+        progress: &mut SessionProgress,
+        device: &mut OpenedDevice,
+        policy: &mut crate::human_behavior::HumanSessionPolicy,
+        budget: &mut Budget,
+        rail: &ActionRail,
+        text_health: &mut TextCommentHealth,
+        last_interaction_at: &mut Option<Instant>,
+        handle: &SessionHandle,
+    ) -> anyhow::Result<FeedStep> {
+        if !policy.can_interact_with_post() || !policy.can_attempt(PolicyAction::Follow) {
+            ctx.report(
+                &mut progress.status,
+                "bỏ qua follow: nhịp phiên hiện tại đã đủ".into(),
+            );
+        } else if !wait_for_action_gap(last_interaction_at, policy.min_action_gap(), ctx.stop).await
+        {
+            progress.outcome = Outcome::Stopped;
+            progress.hit_video_cap = false;
+            return Ok(FeedStep::Stop);
+        } else {
+            policy.record_attempt(PolicyAction::Follow);
+            policy.mark_post_interacted();
+            progress.status.follow_attempts += 1;
+            ctx.push(&progress.status);
+            ctx.report(&mut progress.status, "follow".into());
+            match self
+                .do_follow(
+                    ctx.udid,
+                    device.session.as_ref(),
+                    ctx.gestures,
+                    rail,
+                    device.screen_size,
+                    ctx.stop,
+                )
+                .await
+            {
+                Ok(true) => {
+                    progress.status.follows += 1;
+                    ctx.report(&mut progress.status, "follow thành công".into());
+                }
+                Ok(false) => ctx.report(&mut progress.status, "follow không đổi trạng thái".into()),
+                Err(e) => {
+                    let msg = format!("follow thất bại: {}", describe(&e));
+                    ctx.report(&mut progress.status, msg.clone());
+                    progress.last_error = Some(msg);
+                    if !self
+                        .recover(
+                            ctx.udid,
+                            &device.bundle_id,
+                            device.fresh_text_session,
+                            &mut device.ui_context,
+                            &mut device.session,
+                            handle,
+                            budget,
+                            text_health,
+                            &e,
+                            &mut progress.status,
+                            ctx.on_status,
+                        )
+                        .await
+                    {
+                        progress.outcome = Outcome::Failed;
+                        return Ok(FeedStep::Stop);
+                    }
+                }
+            }
+        }
+        Ok(FeedStep::Proceed)
+    }
+
     pub async fn run_session(
         &self,
         udid: &str,
@@ -1829,197 +2133,42 @@ impl NurtureEngine {
             }
 
             if roll_follow_in_mood(settings.follow_prob, mood) {
-                if !policy.can_interact_with_post() || !policy.can_attempt(PolicyAction::Follow) {
-                    ctx.report(
-                        &mut progress.status,
-                        "bỏ qua follow: nhịp phiên hiện tại đã đủ".into(),
-                    );
-                } else if !wait_for_action_gap(
-                    &mut last_interaction_at,
-                    policy.min_action_gap(),
-                    &stop,
-                )
-                .await
+                match self
+                    .roll_and_execute_follow(
+                        &ctx,
+                        &mut progress,
+                        &mut device,
+                        &mut policy,
+                        &mut budget,
+                        &rail,
+                        &mut text_health,
+                        &mut last_interaction_at,
+                        &handle,
+                    )
+                    .await?
                 {
-                    progress.outcome = Outcome::Stopped;
-                    progress.hit_video_cap = false;
-                    break 'feed;
-                } else {
-                    policy.record_attempt(PolicyAction::Follow);
-                    policy.mark_post_interacted();
-                    progress.status.follow_attempts += 1;
-                    ctx.push(&progress.status);
-                    ctx.report(&mut progress.status, "follow".into());
-                    match self
-                        .do_follow(
-                            udid,
-                            device.session.as_ref(),
-                            &gestures,
-                            &rail,
-                            device.screen_size,
-                            &stop,
-                        )
-                        .await
-                    {
-                        Ok(true) => {
-                            progress.status.follows += 1;
-                            ctx.report(&mut progress.status, "follow thành công".into());
-                        }
-                        Ok(false) => {
-                            ctx.report(&mut progress.status, "follow không đổi trạng thái".into())
-                        }
-                        Err(e) => {
-                            let msg = format!("follow thất bại: {}", describe(&e));
-                            ctx.report(&mut progress.status, msg.clone());
-                            progress.last_error = Some(msg);
-                            if !self
-                                .recover(
-                                    udid,
-                                    &device.bundle_id,
-                                    device.fresh_text_session,
-                                    &mut device.ui_context,
-                                    &mut device.session,
-                                    &handle,
-                                    &mut budget,
-                                    &mut text_health,
-                                    &e,
-                                    &mut progress.status,
-                                    ctx.on_status,
-                                )
-                                .await
-                            {
-                                progress.outcome = Outcome::Failed;
-                                break 'feed;
-                            }
-                        }
-                    }
+                    FeedStep::Stop => break 'feed,
+                    FeedStep::Proceed | FeedStep::NextVideo => {}
                 }
             }
 
             sleep_interruptible(Duration::from_millis(human.think_pause_ms()), &stop).await;
 
-            ctx.report(&mut progress.status, "vuốt video tiếp".into());
-            let mut advanced_to_next_video = false;
-            progress.status.swipe_attempts += 1;
-            match self
-                .do_swipe(
-                    udid,
-                    device.session.as_ref(),
-                    &gestures,
-                    device.screen_size,
-                    human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
-                    &stop,
+            let (swipe_step, advanced_to_next_video) = self
+                .swipe_to_next_video(
+                    &ctx,
+                    &mut progress,
+                    &mut device,
+                    &settings,
+                    &mut human,
+                    &mut budget,
+                    &mut text_health,
+                    &handle,
                 )
-                .await
-            {
-                Ok(SwipeOutcome::Advanced) => {
-                    advanced_to_next_video = true;
-                    progress.blocked_streak = 0;
-                    progress.status.videos_done += 1;
-                    ctx.push(&progress.status);
-                }
-                Ok(SwipeOutcome::Moved) => {
-                    progress.blocked_streak = 0;
-                    // The rail left, so the gesture landed and the card we were
-                    // on is gone. Swiping again here would skip whatever came
-                    // next; the loop re-reads the screen at the top instead.
-                    // Not counted: nothing settled that could be counted.
-                    advanced_to_next_video = true;
-                    ctx.report(
-                        &mut progress.status,
-                        "đã rời thẻ cũ nhưng chưa thấy thẻ mới ổn định — đọc lại màn hình".into(),
-                    );
-                }
-                Ok(SwipeOutcome::Blocked) => {
-                    // The rail never left: the feed swallowed the gesture,
-                    // usually under a popup. The watcher closes those on its
-                    // own; give it a beat, then try once more.
-                    ctx.report(
-                        &mut progress.status,
-                        "vuốt không ăn — chờ popup rồi thử lại".into(),
-                    );
-                    sleep_interruptible(Duration::from_millis(1_800), &stop).await;
-                    progress.status.swipe_attempts += 1;
-                    match self
-                        .do_swipe(
-                            udid,
-                            device.session.as_ref(),
-                            &gestures,
-                            device.screen_size,
-                            human.swipe_duration_ms(false),
-                            &stop,
-                        )
-                        .await
-                    {
-                        Ok(SwipeOutcome::Advanced) => {
-                            advanced_to_next_video = true;
-                            progress.blocked_streak = 0;
-                            progress.status.videos_done += 1;
-                            ctx.push(&progress.status);
-                        }
-                        Ok(SwipeOutcome::Moved) => {
-                            advanced_to_next_video = true;
-                            progress.blocked_streak = 0;
-                            ctx.report(
-                                &mut progress.status,
-                                "đã rời thẻ cũ, chưa xác nhận thẻ mới".into(),
-                            );
-                        }
-                        Ok(SwipeOutcome::Blocked) => {
-                            ctx.report(&mut progress.status, "vuốt vẫn không ăn".into());
-                            progress.last_error = Some("swipe không rời được thẻ hiện tại".into());
-                            progress.blocked_streak += 1;
-                        }
-                        Err(e) => {
-                            let msg = format!("vuốt lỗi: {}", describe(&e));
-                            ctx.report(&mut progress.status, msg.clone());
-                            progress.last_error = Some(msg);
-                            if !self
-                                .recover(
-                                    udid,
-                                    &device.bundle_id,
-                                    device.fresh_text_session,
-                                    &mut device.ui_context,
-                                    &mut device.session,
-                                    &handle,
-                                    &mut budget,
-                                    &mut text_health,
-                                    &e,
-                                    &mut progress.status,
-                                    ctx.on_status,
-                                )
-                                .await
-                            {
-                                progress.outcome = Outcome::Failed;
-                                break 'feed;
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    let msg = format!("vuốt lỗi: {}", describe(&e));
-                    ctx.report(&mut progress.status, msg.clone());
-                    progress.last_error = Some(msg);
-                    if !self
-                        .recover(
-                            udid,
-                            &device.bundle_id,
-                            device.fresh_text_session,
-                            &mut device.ui_context,
-                            &mut device.session,
-                            &handle,
-                            &mut budget,
-                            &mut text_health,
-                            &e,
-                            &mut progress.status,
-                            ctx.on_status,
-                        )
-                        .await
-                    {
-                        progress.outcome = Outcome::Failed;
-                        break 'feed;
-                    }
-                }
+                .await?;
+            match swipe_step {
+                FeedStep::Stop => break 'feed,
+                FeedStep::Proceed | FeedStep::NextVideo => {}
             }
             // A card that swallows both the swipe and its retry, turn after
             // turn, is not going to start working. A live run spent 280 seconds
@@ -2044,72 +2193,12 @@ impl NurtureEngine {
                 break 'feed;
             }
             if advanced_to_next_video {
-                if let Some(rest) = policy.rest_after_video() {
-                    ctx.report(
-                        &mut progress.status,
-                        format!("nghỉ tự nhiên {}s", rest.as_secs()),
-                    );
-                    sleep_interruptible(rest, &stop).await;
-                }
-                if policy.should_take_block_break() || policy.should_take_home_break() {
-                    let break_for = policy.home_break_duration();
-                    ctx.report(
-                        &mut progress.status,
-                        format!(
-                            "tạm về màn hình chính khoảng {}s rồi mở TikTok lại",
-                            break_for.as_secs()
-                        ),
-                    );
-                    {
-                        let _guard = gestures.lock().await;
-                        let _ = device.session.home().await;
-                    }
-                    sleep_interruptible(break_for, &stop).await;
-                    if policy.should_cold_restart() {
-                        ctx.report(
-                            &mut progress.status,
-                            "khởi động lại TikTok sau một quãng nghỉ".into(),
-                        );
-                        let _ = self
-                            .control
-                            .terminate_streaming_app(&device.ui_context, &device.bundle_id)
-                            .await;
-                        sleep_interruptible(Duration::from_secs(2), &stop).await;
-                        match self
-                            .control
-                            .recover_streaming_session(
-                                &mut device.ui_context,
-                                &device.bundle_id,
-                                device.session_kind,
-                                false,
-                            )
-                            .await
-                        {
-                            Ok(next) => {
-                                // Swap the watcher's device.session handle too, or the
-                                // popup watcher keeps tapping through the dead
-                                // pre-restart device.session for the rest of the run.
-                                device.session = next;
-                                handle.set(device.session.clone());
-                            }
-                            Err(error) => {
-                                ctx.report(
-                                    &mut progress.status,
-                                    format!("không mở lại được TikTok: {error}"),
-                                );
-                                progress.outcome = Outcome::Partial;
-                                break 'feed;
-                            }
-                        }
-                    } else {
-                        let _guard = gestures.lock().await;
-                        let _ = device
-                            .session
-                            .launch_app_foreground(&device.bundle_id)
-                            .await;
-                    }
-                    sleep_interruptible(Duration::from_secs(4), &stop).await;
-                    policy.reset_block();
+                match self
+                    .settle_after_advance(&ctx, &mut progress, &mut device, &mut policy, &handle)
+                    .await?
+                {
+                    FeedStep::Stop => break 'feed,
+                    FeedStep::Proceed | FeedStep::NextVideo => {}
                 }
             }
             sleep_interruptible(Duration::from_millis(human.after_swipe_pause_ms()), &stop).await;
