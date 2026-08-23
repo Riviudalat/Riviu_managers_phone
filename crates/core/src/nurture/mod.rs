@@ -776,6 +776,219 @@ impl NurtureEngine {
         Ok((FeedStep::Proceed, off_feed_streak))
     }
 
+    /// Watch one card out, and report the action rail if this kind of card has one.
+    ///
+    /// The plan called this `watch_one_video`; it is really "deal with whatever kind of card
+    /// is on screen" — a LIVE room is entered or skipped by policy, a photo carousel is swiped
+    /// through slide by slide, and a plain video is simply watched. Only the carousel ends
+    /// with a rail worth reporting, which is why the rail comes back as an `Option` rather
+    /// than through a `&mut`.
+    ///
+    /// `FeedStep::NextVideo` covers the two places this used to `continue` the `'feed` loop
+    /// from the inside.
+    ///
+    /// `live_owned` is the watcher's flag: true while this run is deliberately inside a LIVE
+    /// room, so the watcher leaves it alone instead of escaping a screen we chose.
+    #[allow(clippy::too_many_arguments)]
+    async fn watch_one_card(
+        &self,
+        udid: &str,
+        settings: &NurtureSettings,
+        card_kind: screen::FeedCardKind,
+        session: &std::sync::Arc<dyn crate::UiSession>,
+        screen_size: (f64, f64),
+        human: &mut HumanBehavior,
+        policy: &mut crate::human_behavior::HumanSessionPolicy,
+        live_owned: &AtomicBool,
+        gestures: &tokio::sync::Mutex<()>,
+        stop: &AtomicBool,
+        status: &mut NurtureSessionStatus,
+        report: &impl Fn(&mut NurtureSessionStatus, String),
+    ) -> anyhow::Result<(FeedStep, Option<ActionRail>)> {
+        let mut rail: Option<ActionRail> = None;
+
+        match card_kind {
+            screen::FeedCardKind::LivePreview => {
+                if policy.should_enter_live() {
+                    report(status, "gặp LIVE — vào xem một lúc rồi thoát".into());
+                    live_owned.store(true, Ordering::Relaxed);
+                    let entered = {
+                        let _guard = gestures.lock().await;
+                        let point = self.next_touch_point(
+                            udid,
+                            screen_size,
+                            TapPoint {
+                                x: screen_size.0 * 0.50,
+                                y: screen_size.1 * 0.46,
+                            },
+                            (18.0, 20.0),
+                        );
+                        session.tap(point).await.is_ok()
+                    };
+                    if entered {
+                        let _ = self
+                            .wait_for_frame(udid, Duration::from_secs(8), stop, |img| {
+                                matches!(
+                                    screen::classify(img, Some(screen_size.0)).kind,
+                                    screen::ScreenKind::LiveRoom
+                                )
+                            })
+                            .await;
+                        let live_digest = self
+                            .frames
+                            .latest(udid)
+                            .map(|frame| frame_digest(&frame))
+                            .unwrap_or_default();
+                        let dwell = Duration::from_secs(20 + (live_digest % 71));
+                        sleep_interruptible(dwell, stop).await;
+                        {
+                            let _guard = gestures.lock().await;
+                            let point = self.next_touch_point(
+                                udid,
+                                screen_size,
+                                TapPoint {
+                                    x: screen_size.0 * screen::LIVE_EXIT.0,
+                                    y: screen_size.1 * screen::LIVE_EXIT.1,
+                                },
+                                (12.0, 10.0),
+                            );
+                            let _ = session.tap(point).await;
+                        }
+                        let _ = self
+                            .wait_for_frame(udid, Duration::from_secs(8), stop, |img| {
+                                screen::feed_ready(img, Some(screen_size.0))
+                            })
+                            .await;
+                    }
+                    live_owned.store(false, Ordering::Relaxed);
+                } else {
+                    report(status, "gặp thẻ LIVE — lướt qua thẻ xem trước".into());
+                    status.swipe_attempts += 1;
+                    let _ = self
+                        .do_swipe(
+                            udid,
+                            session.as_ref(),
+                            gestures,
+                            screen_size,
+                            human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
+                            stop,
+                        )
+                        .await;
+                    sleep_interruptible(Duration::from_millis(1_200), stop).await;
+                }
+                return Ok((FeedStep::NextVideo, rail));
+            }
+            screen::FeedCardKind::TransitionOrUnknown => {
+                report(status, "khung đang chuyển — chờ frame ổn định".into());
+                sleep_interruptible(Duration::from_millis(700), stop).await;
+            }
+            screen::FeedCardKind::Video if self.card_is_still(udid, stop).await => {
+                let card_digest = self
+                    .frames
+                    .latest(udid)
+                    .map(|frame| frame_digest(&frame))
+                    .unwrap_or_default();
+                // How far through the carousel to go, from the operator's settings.
+                //
+                // This used to be `1 + (card_digest % 3)` — one to three slides picked
+                // pseudo-randomly from the frame's own bytes, with no relation to how
+                // many slides the post actually has. A seven-image post got two or
+                // three of them.
+                //
+                // Now the end of the carousel is *observed*: `do_photo_swipe` already
+                // returns whether a new frame arrived, which is exactly "the page
+                // turned". So the traversal runs until a swipe changes nothing, and the
+                // budget is only a ceiling for a post that never stops changing — a
+                // video misread as a photo, or a card that animates.
+                let budget = settings.carousel_slide_budget();
+                if budget == 0 {
+                    report(
+                        status,
+                        "gặp bài ảnh — bỏ qua vuốt ngang (tính năng đang tắt)".into(),
+                    );
+                    sleep_interruptible(Duration::from_secs(2 + (card_digest % 6)), stop).await;
+                    return Ok((FeedStep::NextVideo, rail));
+                }
+                report(
+                    status,
+                    format!("gặp bài ảnh (khung đứng yên) — vuốt ngang tối đa {budget} ảnh"),
+                );
+                let mut slides_seen = 0u32;
+                for slide in 0..budget {
+                    // Varied per slide rather than one constant for the whole card: an
+                    // identical dwell on every image of every carousel is a tell.
+                    let dwell = Duration::from_secs(2 + ((card_digest + u64::from(slide)) % 6));
+                    sleep_interruptible(dwell, stop).await;
+                    let advanced = self
+                        .do_photo_swipe(
+                            udid,
+                            session.as_ref(),
+                            gestures,
+                            screen_size,
+                            human.photo_swipe_duration_ms(),
+                            stop,
+                        )
+                        .await
+                        // A swipe that could not be delivered at all is not evidence
+                        // that the carousel ended, but it is a reason to stop pushing:
+                        // treated as "did not advance", which ends the traversal
+                        // without claiming the post had exactly this many slides.
+                        .unwrap_or(false);
+                    // A horizontal swipe only turns a page while the card
+                    // really is a photo post; on anything else TikTok reads
+                    // it as navigation and leaves the feed. Both times a
+                    // live run wandered off the FYP it was immediately after
+                    // this branch. Stillness is strong evidence but not
+                    // proof, so the branch checks its own work and undoes
+                    // it — the back gesture is what leaves a detail page.
+                    if !self.on_feed(udid, screen_size.0) {
+                        report(status, "vuốt ngang đã rời feed — lùi lại".into());
+                        let back = self
+                            .escape_to_feed(
+                                udid,
+                                session.as_ref(),
+                                gestures,
+                                screen_size,
+                                OFF_FEED_BACK_ATTEMPTS,
+                                stop,
+                            )
+                            .await;
+                        report(
+                            status,
+                            if back {
+                                "đã lùi về FYP".into()
+                            } else {
+                                "lùi chưa về được FYP".to_string()
+                            },
+                        );
+                        break;
+                    }
+                    // The swipe delivered and the screen did not change: that is the
+                    // last slide. Stopping here is what makes "swipe to the end" mean
+                    // the end of *this* post rather than a fixed number of swipes — and
+                    // it also stops the loop pushing horizontal swipes at a card that
+                    // has run out of them, which is how TikTok gets navigated off the
+                    // feed.
+                    if !advanced {
+                        break;
+                    }
+                    slides_seen += 1;
+                }
+                if slides_seen > 0 {
+                    report(status, format!("bài ảnh: đã xem thêm {slides_seen} ảnh"));
+                }
+                if let Some(img) = self.latest_image(udid) {
+                    if let Some(found) = screen::locate_action_rail(&img) {
+                        rail = Some(found);
+                    }
+                }
+            }
+            screen::FeedCardKind::Video => {}
+        }
+
+        Ok((FeedStep::Proceed, rail))
+    }
+
     pub async fn run_session(
         &self,
         udid: &str,
@@ -1188,188 +1401,36 @@ impl NurtureEngine {
                 .latest_image(udid)
                 .map(|img| screen::feed_card_kind(&img))
                 .unwrap_or(screen::FeedCardKind::TransitionOrUnknown);
-            match card_kind {
-                screen::FeedCardKind::LivePreview => {
-                    if policy.should_enter_live() {
-                        report(&mut status, "gặp LIVE — vào xem một lúc rồi thoát".into());
-                        live_owned.store(true, Ordering::Relaxed);
-                        let entered = {
-                            let _guard = gestures.lock().await;
-                            let point = self.next_touch_point(
-                                udid,
-                                screen_size,
-                                TapPoint {
-                                    x: screen_size.0 * 0.50,
-                                    y: screen_size.1 * 0.46,
-                                },
-                                (18.0, 20.0),
-                            );
-                            session.tap(point).await.is_ok()
-                        };
-                        if entered {
-                            let _ = self
-                                .wait_for_frame(udid, Duration::from_secs(8), &stop, |img| {
-                                    matches!(
-                                        screen::classify(img, Some(screen_size.0)).kind,
-                                        screen::ScreenKind::LiveRoom
-                                    )
-                                })
-                                .await;
-                            let live_digest = self
-                                .frames
-                                .latest(udid)
-                                .map(|frame| frame_digest(&frame))
-                                .unwrap_or_default();
-                            let dwell = Duration::from_secs(20 + (live_digest % 71));
-                            sleep_interruptible(dwell, &stop).await;
-                            {
-                                let _guard = gestures.lock().await;
-                                let point = self.next_touch_point(
-                                    udid,
-                                    screen_size,
-                                    TapPoint {
-                                        x: screen_size.0 * screen::LIVE_EXIT.0,
-                                        y: screen_size.1 * screen::LIVE_EXIT.1,
-                                    },
-                                    (12.0, 10.0),
-                                );
-                                let _ = session.tap(point).await;
-                            }
-                            let _ = self
-                                .wait_for_frame(udid, Duration::from_secs(8), &stop, |img| {
-                                    screen::feed_ready(img, Some(screen_size.0))
-                                })
-                                .await;
-                        }
-                        live_owned.store(false, Ordering::Relaxed);
-                    } else {
-                        report(&mut status, "gặp thẻ LIVE — lướt qua thẻ xem trước".into());
-                        status.swipe_attempts += 1;
-                        let _ = self
-                            .do_swipe(
-                                udid,
-                                session.as_ref(),
-                                &gestures,
-                                screen_size,
-                                human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
-                                &stop,
-                            )
-                            .await;
-                        sleep_interruptible(Duration::from_millis(1_200), &stop).await;
-                    }
-                    continue;
-                }
-                screen::FeedCardKind::TransitionOrUnknown => {
-                    report(&mut status, "khung đang chuyển — chờ frame ổn định".into());
-                    sleep_interruptible(Duration::from_millis(700), &stop).await;
-                }
-                screen::FeedCardKind::Video if self.card_is_still(udid, &stop).await => {
-                    let card_digest = self
-                        .frames
-                        .latest(udid)
-                        .map(|frame| frame_digest(&frame))
-                        .unwrap_or_default();
-                    // How far through the carousel to go, from the operator's settings.
-                    //
-                    // This used to be `1 + (card_digest % 3)` — one to three slides picked
-                    // pseudo-randomly from the frame's own bytes, with no relation to how
-                    // many slides the post actually has. A seven-image post got two or
-                    // three of them.
-                    //
-                    // Now the end of the carousel is *observed*: `do_photo_swipe` already
-                    // returns whether a new frame arrived, which is exactly "the page
-                    // turned". So the traversal runs until a swipe changes nothing, and the
-                    // budget is only a ceiling for a post that never stops changing — a
-                    // video misread as a photo, or a card that animates.
-                    let budget = settings.carousel_slide_budget();
-                    if budget == 0 {
-                        report(
-                            &mut status,
-                            "gặp bài ảnh — bỏ qua vuốt ngang (tính năng đang tắt)".into(),
-                        );
-                        sleep_interruptible(Duration::from_secs(2 + (card_digest % 6)), &stop)
-                            .await;
-                        continue;
-                    }
-                    report(
-                        &mut status,
-                        format!("gặp bài ảnh (khung đứng yên) — vuốt ngang tối đa {budget} ảnh"),
-                    );
-                    let mut slides_seen = 0u32;
-                    for slide in 0..budget {
-                        // Varied per slide rather than one constant for the whole card: an
-                        // identical dwell on every image of every carousel is a tell.
-                        let dwell = Duration::from_secs(2 + ((card_digest + u64::from(slide)) % 6));
-                        sleep_interruptible(dwell, &stop).await;
-                        let advanced = self
-                            .do_photo_swipe(
-                                udid,
-                                session.as_ref(),
-                                &gestures,
-                                screen_size,
-                                human.photo_swipe_duration_ms(),
-                                &stop,
-                            )
-                            .await
-                            // A swipe that could not be delivered at all is not evidence
-                            // that the carousel ended, but it is a reason to stop pushing:
-                            // treated as "did not advance", which ends the traversal
-                            // without claiming the post had exactly this many slides.
-                            .unwrap_or(false);
-                        // A horizontal swipe only turns a page while the card
-                        // really is a photo post; on anything else TikTok reads
-                        // it as navigation and leaves the feed. Both times a
-                        // live run wandered off the FYP it was immediately after
-                        // this branch. Stillness is strong evidence but not
-                        // proof, so the branch checks its own work and undoes
-                        // it — the back gesture is what leaves a detail page.
-                        if !self.on_feed(udid, screen_size.0) {
-                            report(&mut status, "vuốt ngang đã rời feed — lùi lại".into());
-                            let back = self
-                                .escape_to_feed(
-                                    udid,
-                                    session.as_ref(),
-                                    &gestures,
-                                    screen_size,
-                                    OFF_FEED_BACK_ATTEMPTS,
-                                    &stop,
-                                )
-                                .await;
-                            report(
-                                &mut status,
-                                if back {
-                                    "đã lùi về FYP".into()
-                                } else {
-                                    "lùi chưa về được FYP".to_string()
-                                },
-                            );
-                            break;
-                        }
-                        // The swipe delivered and the screen did not change: that is the
-                        // last slide. Stopping here is what makes "swipe to the end" mean
-                        // the end of *this* post rather than a fixed number of swipes — and
-                        // it also stops the loop pushing horizontal swipes at a card that
-                        // has run out of them, which is how TikTok gets navigated off the
-                        // feed.
-                        if !advanced {
-                            break;
-                        }
-                        slides_seen += 1;
-                    }
-                    if slides_seen > 0 {
-                        report(
-                            &mut status,
-                            format!("bài ảnh: đã xem thêm {slides_seen} ảnh"),
-                        );
-                    }
-                    if let Some(img) = self.latest_image(udid) {
-                        if let Some(found) = screen::locate_action_rail(&img) {
-                            rail = found;
-                            rail_present = true;
-                        }
+            match self
+                .watch_one_card(
+                    udid,
+                    &settings,
+                    card_kind,
+                    &session,
+                    screen_size,
+                    &mut human,
+                    &mut policy,
+                    &live_owned,
+                    &gestures,
+                    &stop,
+                    &mut status,
+                    &report,
+                )
+                .await?
+            {
+                (FeedStep::Proceed, found) => {
+                    if let Some(found) = found {
+                        rail = found;
+                        rail_present = true;
                     }
                 }
-                screen::FeedCardKind::Video => {}
+                (FeedStep::NextVideo, _) => continue,
+                (FeedStep::Stop { reason }, _) => {
+                    last_error = Some(reason);
+                    hit_video_cap = false;
+                    outcome = Outcome::Partial;
+                    break 'feed;
+                }
             }
 
             // No rail on this card: watch it out and move on rather than tap
