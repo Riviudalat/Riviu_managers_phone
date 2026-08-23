@@ -173,6 +173,22 @@ pub struct NurtureEngine {
     touch_points: Arc<Mutex<HashMap<String, TouchPointPlanner>>>,
 }
 
+/// A phone opened for a nurture session, and what was measured while opening it.
+///
+/// Five values, which is why `open_for_session` could be lifted out of `run_session` at all:
+/// everything else that phase touches dies with it.
+struct OpenedDevice {
+    ui_context: crate::UiWithStreamContext,
+    session: std::sync::Arc<dyn crate::UiSession>,
+    /// Measured, never assumed. See the refusals in `open_for_session`.
+    screen_size: (f64, f64),
+    bundle_id: String,
+    /// A fresh text session was required for this run and was opened.
+    fresh_text_session: bool,
+    /// Recovering a dropped stream has to ask for the same kind that was opened.
+    session_kind: crate::InteractionSessionKind,
+}
+
 impl NurtureEngine {
     pub fn new(
         db: Arc<Database>,
@@ -459,6 +475,144 @@ impl NurtureEngine {
         *settings = std::mem::take(settings).into_effective();
     }
 
+    /// Open one phone and measure it, or give up with the reason already reported.
+    ///
+    /// `Ok(None)` means the session is over before it started and `status` already carries
+    /// the message the operator will read; the caller returns it unchanged. Every refusal in
+    /// here is deliberate and none of them are caution:
+    ///
+    /// * a text-comment run on an agent with no text channel would tap Send into nothing;
+    /// * a screen size that cannot be read used to fall back to `(375.0, 667.0)`, so every
+    ///   tap afterwards was computed from a fabricated iPhone 8 — which is exactly what
+    ///   AGENTS.md 691-692 forbids.
+    ///
+    /// **The statement order is the content here, not the layout.** The WDA session is
+    /// created and primed *before* the stream is attached, because both live in the same
+    /// agent on the device: with frames already pumping, the first hierarchy-touching command
+    /// never returned and the runner stayed blocked for the whole run — the "tap dies / swipe
+    /// blocked" failure this project chased for a long time. Nothing here may be reordered.
+    async fn open_for_session(
+        &self,
+        udid: &str,
+        settings: &NurtureSettings,
+        stop: &AtomicBool,
+        status: &mut NurtureSessionStatus,
+        report: &impl Fn(&mut NurtureSessionStatus, String),
+    ) -> anyhow::Result<Option<OpenedDevice>> {
+        if stop.load(Ordering::Acquire) {
+            status.running = false;
+            report(status, "stopped before device start".to_string());
+            return Ok(None);
+        }
+
+        if settings.comment_prob > 0 && !self.control.supports_text_comments(udid) {
+            report(
+                status,
+                "failed — Riviu Agent chưa có kênh bình luận chữ; chạy Agent Repair".into(),
+            );
+            status.running = false;
+            return Ok(None);
+        }
+
+        // Order matters: the WDA session is created and primed **before** the
+        // MJPEG stream is started.
+        //
+        // Both live inside the same agent on the device. With the stream
+        // already pumping frames, the first hierarchy-touching session command
+        // never returned and the runner stayed blocked for the rest of the run
+        // — the exact "tap dies / swipe blocked" failure this project kept
+        // chasing. Priming first, then attaching the stream, is reliable; the
+        // same probe run without a stream passed every time.
+        //
+        // One session per device; the supervisor reuses a healthy relay and
+        // runner rather than starting a second one.
+        let bundle_id = self.tiktok_bundle_for(udid, settings).await;
+        let fresh_text_session =
+            settings.comment_prob > 0 && self.control.requires_fresh_text_session(udid);
+        let session_kind = if fresh_text_session {
+            InteractionSessionKind::FreshText
+        } else {
+            InteractionSessionKind::Ordinary
+        };
+        let cached = false;
+        report(
+            status,
+            if fresh_text_session {
+                "chuẩn bị RT-MMO text session mới".into()
+            } else if cached {
+                "WDA đã có — reuse".into()
+            } else {
+                "khởi động WDA mới".to_string()
+            },
+        );
+        // Session creation can transiently fail while the relay settles. Retry
+        // by dropping only the cached session; startup probes are not evidence
+        // that the transport itself is wedged.
+        let first_session = self.open_ui_context(udid, &bundle_id, session_kind).await;
+        let ui_context = match first_session {
+            Ok(context) => context,
+            Err(first) => {
+                report(
+                    status,
+                    format!("WDA chưa tạo được session ({first}) — thử session mới"),
+                );
+                let second_session = self.open_ui_context(udid, &bundle_id, session_kind).await;
+                match second_session {
+                    Ok(context) => {
+                        report(status, "WDA đã tạo session mới".into());
+                        context
+                    }
+                    Err(e) => {
+                        report(status, format!("failed — không mở được WDA: {e}"));
+                        status.running = false;
+                        return Ok(None);
+                    }
+                }
+            }
+        };
+        let session = self.control.streaming_session(&ui_context)?;
+
+        // Two refusals here, both closing holes rather than adding caution.
+        //
+        // The fallback used to be `(375.0, 667.0)`: when the size could not be
+        // read the run carried on against a fabricated iPhone 8 screen. Every
+        // tap after that was computed from a number nothing had measured.
+        //
+        // And nothing on this path ever checked the screen class at all. The
+        // qualification registry gates the Flow/Interaction path
+        // (`device_control.rs` negotiate), but nurture went straight from
+        // `window_size()` to multiplying iPhone 8 fractions — so a phone of any
+        // other size would have been tapped with iPhone 8 coordinates, which is
+        // exactly what AGENTS.md 691-692 forbids.
+        let screen_size = match session.window_size().await {
+            Ok(size) if size.0 > 0.0 && size.1 > 0.0 => size,
+            Ok(size) => {
+                report(
+                    status,
+                    format!("failed — máy báo kích thước màn hình không dùng được {size:?}"),
+                );
+                status.running = false;
+                return Ok(None);
+            }
+            Err(error) => {
+                report(
+                    status,
+                    format!("failed — không đọc được kích thước màn hình: {error}"),
+                );
+                status.running = false;
+                return Ok(None);
+            }
+        };
+        Ok(Some(OpenedDevice {
+            ui_context,
+            session,
+            screen_size,
+            bundle_id,
+            fresh_text_session,
+            session_kind,
+        }))
+    }
+
     pub async fn run_session(
         &self,
         udid: &str,
@@ -494,109 +648,18 @@ impl NurtureEngine {
             on_status(status.clone());
         };
 
-        if stop.load(Ordering::Acquire) {
-            status.running = false;
-            report(&mut status, "stopped before device start".to_string());
+        let Some(OpenedDevice {
+            mut ui_context,
+            mut session,
+            screen_size,
+            bundle_id,
+            fresh_text_session,
+            session_kind,
+        }) = self
+            .open_for_session(udid, &settings, &stop, &mut status, &report)
+            .await?
+        else {
             return Ok(status);
-        }
-
-        if settings.comment_prob > 0 && !self.control.supports_text_comments(udid) {
-            report(
-                &mut status,
-                "failed — Riviu Agent chưa có kênh bình luận chữ; chạy Agent Repair".into(),
-            );
-            status.running = false;
-            return Ok(status);
-        }
-
-        // Order matters: the WDA session is created and primed **before** the
-        // MJPEG stream is started.
-        //
-        // Both live inside the same agent on the device. With the stream
-        // already pumping frames, the first hierarchy-touching session command
-        // never returned and the runner stayed blocked for the rest of the run
-        // — the exact "tap dies / swipe blocked" failure this project kept
-        // chasing. Priming first, then attaching the stream, is reliable; the
-        // same probe run without a stream passed every time.
-        //
-        // One session per device; the supervisor reuses a healthy relay and
-        // runner rather than starting a second one.
-        let bundle_id = self.tiktok_bundle_for(udid, &settings).await;
-        let fresh_text_session =
-            settings.comment_prob > 0 && self.control.requires_fresh_text_session(udid);
-        let session_kind = if fresh_text_session {
-            InteractionSessionKind::FreshText
-        } else {
-            InteractionSessionKind::Ordinary
-        };
-        let cached = false;
-        report(
-            &mut status,
-            if fresh_text_session {
-                "chuẩn bị RT-MMO text session mới".into()
-            } else if cached {
-                "WDA đã có — reuse".into()
-            } else {
-                "khởi động WDA mới".to_string()
-            },
-        );
-        // Session creation can transiently fail while the relay settles. Retry
-        // by dropping only the cached session; startup probes are not evidence
-        // that the transport itself is wedged.
-        let first_session = self.open_ui_context(udid, &bundle_id, session_kind).await;
-        let mut ui_context = match first_session {
-            Ok(context) => context,
-            Err(first) => {
-                report(
-                    &mut status,
-                    format!("WDA chưa tạo được session ({first}) — thử session mới"),
-                );
-                let second_session = self.open_ui_context(udid, &bundle_id, session_kind).await;
-                match second_session {
-                    Ok(context) => {
-                        report(&mut status, "WDA đã tạo session mới".into());
-                        context
-                    }
-                    Err(e) => {
-                        report(&mut status, format!("failed — không mở được WDA: {e}"));
-                        status.running = false;
-                        return Ok(status);
-                    }
-                }
-            }
-        };
-        let mut session = self.control.streaming_session(&ui_context)?;
-
-        // Two refusals here, both closing holes rather than adding caution.
-        //
-        // The fallback used to be `(375.0, 667.0)`: when the size could not be
-        // read the run carried on against a fabricated iPhone 8 screen. Every
-        // tap after that was computed from a number nothing had measured.
-        //
-        // And nothing on this path ever checked the screen class at all. The
-        // qualification registry gates the Flow/Interaction path
-        // (`device_control.rs` negotiate), but nurture went straight from
-        // `window_size()` to multiplying iPhone 8 fractions — so a phone of any
-        // other size would have been tapped with iPhone 8 coordinates, which is
-        // exactly what AGENTS.md 691-692 forbids.
-        let screen_size = match session.window_size().await {
-            Ok(size) if size.0 > 0.0 && size.1 > 0.0 => size,
-            Ok(size) => {
-                report(
-                    &mut status,
-                    format!("failed — máy báo kích thước màn hình không dùng được {size:?}"),
-                );
-                status.running = false;
-                return Ok(status);
-            }
-            Err(error) => {
-                report(
-                    &mut status,
-                    format!("failed — không đọc được kích thước màn hình: {error}"),
-                );
-                status.running = false;
-                return Ok(status);
-            }
         };
         // A backend that can report *where* a control is does not need a
         // calibrated screen at all — it taps inside the rectangle the device
