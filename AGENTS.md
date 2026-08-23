@@ -7814,9 +7814,36 @@ trị đang được dùng hàng chục lần. Bài học: khi kết luận là 
 thật và đếm lại cho đúng** trước khi ghi nó xuống — hai giả định sai đủ để biến một việc làm được
 thành một việc bị từ chối.
 
-*Thân vòng `'feed` thì không.* 898 dòng, **78 câu lệnh mức trên cùng**. Đếm lối thoát
-không-cục-bộ (`break 'feed`, và `break;`/`continue;` không nằm trong vòng lồng) **cho từng khối
-cú pháp một**:
+*Thân vòng `'feed`: tách được hai khối lớn, phần còn lại thì không — và ranh giới là **tỉ lệ
+dòng trên tham số**, không phải "có `break` hay không".*
+
+Lối thoát không phải rào: `break 'feed` và `continue` biến thành một `FeedStep` trả về, ánh xạ
+một-đối-một, và compiler kiểm cả hai đầu (mọi nhánh phải trả về một `FeedStep`; caller phải match
+đủ variant). Đã làm thế cho hai khối lớn nhất — `handle_off_feed` (123 dòng, 3 lối thoát) và
+`watch_one_card` (183 dòng, 2 lối thoát). `run_session` **1.369 → 1.030**.
+
+Rào thật là **state dùng chung**. Đếm biến tự do cho từng khối còn lại:
+
+| khối | dòng | lối thoát | biến tự do | ghi chú |
+|---|---|---|---|---|
+| `match roll_feed_action_in_mood(…)` | 206 | 5 | **19** (8 mutable) | sửa cả `ui_context` **lẫn** `session` |
+| khối phục hồi stream | 104 | 2 | ~12 | |
+| `if advanced_to_next_video` | 60 | 1 | 11 | sửa `ui_context`, `session` |
+| `if roll_follow_in_mood(…)` | 58 | 2 | ~10 | |
+| `if !rail_present` | 31 | 1 | 12 | 31 dòng sau một chữ ký 12 tham số |
+| `if blocked_streak >= …` | 15 | 1 | 6 | |
+
+Hai khối đã tách có tỉ lệ tốt (123 dòng/11 tham số, 183/12). Những khối còn lại thì hoặc **nhỏ mà
+nhiều tham số** — 31 dòng sau chữ ký 12 tham số không phải cải thiện, chỉ là đổi hàm dài lấy chữ
+ký dài — hoặc **lớn và sửa chính cái handle phiên** (`ui_context` + `session` cùng lúc, vì đường
+phục hồi stream thay cả hai).
+
+Muốn đi tiếp thì phải gom ~9 biến mutable của vòng lặp thành một struct trạng thái và biến các pha
+thành method trên nó. Đó là hình dạng đúng nếu viết lại từ đầu, nhưng nó là **thay đổi thiết kế**
+chứ không phải di chuyển — trên đường chạy nhiều nhất sản phẩm, và lưới an toàn duy nhất là một
+phiên nuôi thật. Việc đó nên có người vận hành gật.
+
+Số đo gốc, để không phải đo lại: 78 câu lệnh mức trên cùng, lối thoát không-cục-bộ theo từng khối:
 
 | khối | dòng | lối thoát |
 |---|---|---|
@@ -7829,18 +7856,17 @@ cú pháp một**:
 | `if !rail_present` | 31 | 1 |
 | `if blocked_streak >= BLOCKED_SWIPE_LIMIT` | 15 | 1 |
 
-**Nhấc ra được mà không đụng luồng điều khiển: 6 dòng trên 898.** Và ba khối mà plan *đặt tên
-sẵn* đúng là ba khối mang nhiều lối thoát nhất — tức decomposition plan đề xuất chính là cái
-không làm được dạng di chuyển. Muốn tách thì phải biến từng lối thoát thành một enum trả về rồi
-cho caller match lại: **viết lại luồng điều khiển** của đường chạy nhiều nhất sản phẩm.
+Nhấc ra được **mà không đụng gì cả**: 6 dòng trên 898 — nhưng con số đó gây hiểu lầm, vì biến
+lối thoát thành giá trị trả về là việc compiler kiểm được, và hai khối lớn nhất đã đi ra theo
+đúng cách đó. Con số đáng nhìn là bảng tỉ lệ ở trên.
 
 Một cạm bẫy khi tự đo lại: các *dải dòng* không chứa `break 'feed` thì có (dải dài nhất 307
 dòng), nhưng chúng **không phải khối cú pháp** — dải đó mở đầu bằng hai dấu `}` và bên trong có
 5 `continue;` nhắm ra vòng ngoài. Đếm theo dải dòng sẽ ra kết luận ngược; phải đếm theo khối.
 
-Đó là từ chối kèm số đo, cùng loại với E7, không phải việc đang chờ ai gật. Hai mảnh tách được
-thì đã tách: `open_for_session` (121 dòng) và `session_verdict` (luật "trần không phải mục tiêu",
-6 test).
+Đã tách khỏi `run_session`: `open_for_session` (121 dòng), `handle_off_feed` (130),
+`watch_one_card` (198), và `session_verdict` (hàm thuần, luật "trần không phải mục tiêu", 6 test).
+Còn lại là phần cần struct trạng thái.
 
 Nghiệm thu bằng một phiên nuôi thật vẫn nên chạy trước khi đụng tiếp vào vùng này — nhưng đó là
 việc người vận hành chọn lúc, không phải điều kiện chặn phần đã làm.
