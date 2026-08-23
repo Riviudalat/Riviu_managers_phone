@@ -196,6 +196,27 @@ struct SessionProgress {
     blocked_streak: u32,
 }
 
+impl SessionProgress {
+    /// Record why the session is stopping early, and judge it accordingly.
+    ///
+    /// Written out longhand in three places before this, identically each time: report the
+    /// message, keep it as the last error, and mark that the loop did *not* simply run out of
+    /// videos — which is what stops `session_verdict` from calling a healthy timed run short.
+    ///
+    /// `Failed` when nothing was watched at all, `Partial` otherwise: a session that did some
+    /// work and then hit a wall is not the same as one that never started.
+    fn give_up(&mut self, message: String, report: &impl Fn(&mut NurtureSessionStatus, String)) {
+        report(&mut self.status, message.clone());
+        self.last_error = Some(message);
+        self.hit_video_cap = false;
+        self.outcome = if self.status.videos_done == 0 {
+            Outcome::Failed
+        } else {
+            Outcome::Partial
+        };
+    }
+}
+
 /// What one phase of the feed loop decided should happen next.
 ///
 /// The `'feed` loop's phases used to end with `break 'feed` or `continue` written inline,
@@ -1401,13 +1422,7 @@ impl NurtureEngine {
                     continue;
                 }
                 (FeedStep::Stop { reason }, _) => {
-                    progress.last_error = Some(reason);
-                    progress.hit_video_cap = false;
-                    progress.outcome = if progress.status.videos_done == 0 {
-                        Outcome::Failed
-                    } else {
-                        Outcome::Partial
-                    };
+                    progress.give_up(reason, &report);
                     break 'feed;
                 }
             }
@@ -1924,14 +1939,7 @@ impl NurtureEngine {
                     "thẻ hiện tại nuốt {streak} lượt vuốt liên tiếp — dừng phiên \
                      thay vì vuốt tiếp vô ích"
                 );
-                report(&mut progress.status, message.clone());
-                progress.last_error = Some(message);
-                progress.hit_video_cap = false;
-                progress.outcome = if progress.status.videos_done == 0 {
-                    Outcome::Failed
-                } else {
-                    Outcome::Partial
-                };
+                progress.give_up(message, &report);
                 break 'feed;
             }
             if must_stop_before_next_feed_iteration(comment_recovery_action, advanced_to_next_video)
@@ -1939,14 +1947,7 @@ impl NurtureEngine {
                 let message =
                     "dừng trước lượt feed kế tiếp: chưa xác nhận rời video có trạng thái gửi mơ hồ"
                         .to_string();
-                report(&mut progress.status, message.clone());
-                progress.last_error = Some(message);
-                progress.hit_video_cap = false;
-                progress.outcome = if progress.status.videos_done == 0 {
-                    Outcome::Failed
-                } else {
-                    Outcome::Partial
-                };
+                progress.give_up(message, &report);
                 break 'feed;
             }
             if advanced_to_next_video {
