@@ -1054,14 +1054,7 @@ impl NurtureEngine {
             on_status(into.clone());
         };
 
-        let Some(OpenedDevice {
-            mut ui_context,
-            mut session,
-            screen_size,
-            bundle_id,
-            fresh_text_session,
-            session_kind,
-        }) = self
+        let Some(mut device) = self
             .open_for_session(udid, &settings, &stop, &mut progress.status, &report)
             .await?
         else {
@@ -1074,7 +1067,7 @@ impl NurtureEngine {
         // through to the pixel engine below, unchanged.
         //
         // This is what AGENTS.md §9 means by not porting `screen.rs` to Android:
-        // the same session policy, a different way of seeing.
+        // the same device.session policy, a different way of seeing.
         // The hierarchy loop gets its words from the engine's own grounded
         // generator, so a comment on Android is written from the same evidence, by
         // the same provider, into the same audit table as one on iOS.
@@ -1085,10 +1078,10 @@ impl NurtureEngine {
         };
         let live_source = EngineLiveSettings { engine: self };
         let attempt = hierarchy::run_hierarchy_session(
-            session.as_ref(),
-            screen_size,
+            device.session.as_ref(),
+            device.screen_size,
             &settings,
-            &bundle_id,
+            &device.bundle_id,
             started,
             max_duration,
             &stop,
@@ -1100,13 +1093,13 @@ impl NurtureEngine {
         .await;
         match attempt {
             hierarchy::HierarchySession::Ran(mut ran_outcome) => {
-                // Same judgement the pixel path applies: a session that moved no
+                // Same judgement the pixel path applies: a device.session that moved no
                 // videos did not work, whatever else it reported.
                 if ran_outcome == Outcome::Done && progress.status.videos_done == 0 {
                     ran_outcome = Outcome::Failed;
                 }
                 let mut cleanup_error = None;
-                if let Err(error) = self.control.close_ui_context(ui_context).await {
+                if let Err(error) = self.control.close_ui_context(device.ui_context).await {
                     ran_outcome = if progress.status.videos_done == 0 {
                         Outcome::Failed
                     } else {
@@ -1145,13 +1138,14 @@ impl NurtureEngine {
             // iPhone 8. The reason is already in `progress.status.last_message`.
             hierarchy::HierarchySession::Refused => {
                 progress.status.running = false;
-                let _ = self.control.close_ui_context(ui_context).await;
+                let _ = self.control.close_ui_context(device.ui_context).await;
                 on_status(progress.status.clone());
                 return Ok(progress.status);
             }
         }
 
-        let Some(layout) = screen::calibrated_layout(screen_size.0, screen_size.1) else {
+        let Some(layout) = screen::calibrated_layout(device.screen_size.0, device.screen_size.1)
+        else {
             let known = screen::CALIBRATED_LAYOUTS
                 .iter()
                 .map(|entry| {
@@ -1168,14 +1162,14 @@ impl NurtureEngine {
                     "failed — chưa hiệu chỉnh bộ dò cho màn hình {}x{}; \
                      đã hiệu chỉnh: {known}. Chạy quy trình hiệu chỉnh (AGENTS.md mục 6) \
                      trước khi dùng máy này",
-                    screen_size.0, screen_size.1
+                    device.screen_size.0, device.screen_size.1
                 ),
             );
             progress.status.running = false;
             return Ok(progress.status);
         };
         tracing::debug!("[nurture {udid}] layout đã hiệu chỉnh: {}", layout.id);
-        self.reset_touch_points(udid, screen_size);
+        self.reset_touch_points(udid, device.screen_size);
 
         // Now the agent is warm, attach the stream that the watcher reads.
         report(&mut progress.status, "mở stream màn hình".into());
@@ -1195,11 +1189,11 @@ impl NurtureEngine {
         // What is on screen before we touch anything?
         let already_on_tiktok = self
             .latest_image(udid)
-            .map(|img| screen::feed_ready(&img, Some(screen_size.0)))
+            .map(|img| screen::feed_ready(&img, Some(device.screen_size.0)))
             .unwrap_or(false);
 
         let handle = SessionHandle::new();
-        handle.set(session.clone());
+        handle.set(device.session.clone());
         let gestures = Arc::new(tokio::sync::Mutex::new(()));
         let suppress = Arc::new(AtomicBool::new(false));
 
@@ -1217,10 +1211,10 @@ impl NurtureEngine {
             let brought = self
                 .bring_tiktok_foreground(
                     udid,
-                    &ui_context,
-                    session.as_ref(),
+                    &device.ui_context,
+                    device.session.as_ref(),
                     &settings,
-                    screen_size.0,
+                    device.screen_size.0,
                     &gestures,
                     &stop,
                 )
@@ -1239,7 +1233,7 @@ impl NurtureEngine {
             handle.clone(),
             gestures.clone(),
             stop.clone(),
-            screen_size,
+            device.screen_size,
             {
                 let logger = std::sync::Mutex::new(());
                 let _ = logger;
@@ -1255,7 +1249,7 @@ impl NurtureEngine {
         // The watcher normally runs in parallel with nurture. At startup we
         // add one small gate so a notification/sheet that appeared during app
         // launch cannot receive the first like or swipe. The watcher keeps
-        // running after this gate for overlays that appear mid-session.
+        // running after this gate for overlays that appear mid-device.session.
         let popup_closed_before = watcher_stats.popups_closed.load(Ordering::Relaxed);
         let startup_ready = watcher_state
             .wait_until_feed(&stop, STARTUP_POPUP_DRAIN)
@@ -1354,7 +1348,7 @@ impl NurtureEngine {
             }
             policy.begin_post();
 
-            // One mood runs for several videos, so a session looks like a
+            // One mood runs for several videos, so a device.session looks like a
             // person skimming, then liking a run, then chatting — not an
             // independent coin flip per clip.
             let (mood, mood_changed) = moods.next();
@@ -1387,9 +1381,9 @@ impl NurtureEngine {
                 .handle_off_feed(
                     udid,
                     &settings,
-                    &ui_context,
-                    &session,
-                    screen_size,
+                    &device.ui_context,
+                    &device.session,
+                    device.screen_size,
                     &mut human,
                     &gestures,
                     &stop,
@@ -1440,8 +1434,8 @@ impl NurtureEngine {
                     udid,
                     &settings,
                     card_kind,
-                    &session,
-                    screen_size,
+                    &device.session,
+                    device.screen_size,
                     &mut human,
                     &mut policy,
                     &live_owned,
@@ -1482,9 +1476,9 @@ impl NurtureEngine {
                 if self
                     .do_swipe(
                         udid,
-                        session.as_ref(),
+                        device.session.as_ref(),
                         &gestures,
-                        screen_size,
+                        device.screen_size,
                         human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
                         &stop,
                     )
@@ -1534,7 +1528,13 @@ impl NurtureEngine {
                     on_status(progress.status.clone());
                     report(&mut progress.status, "thả tim".into());
                     match self
-                        .do_like(udid, session.as_ref(), &gestures, screen_size, &stop)
+                        .do_like(
+                            udid,
+                            device.session.as_ref(),
+                            &gestures,
+                            device.screen_size,
+                            &stop,
+                        )
                         .await
                     {
                         Ok(LikeResult::Liked) => {
@@ -1571,10 +1571,10 @@ impl NurtureEngine {
                             if !self
                                 .recover(
                                     udid,
-                                    &bundle_id,
-                                    fresh_text_session,
-                                    &mut ui_context,
-                                    &mut session,
+                                    &device.bundle_id,
+                                    device.fresh_text_session,
+                                    &mut device.ui_context,
+                                    &mut device.session,
                                     &handle,
                                     &mut budget,
                                     &mut text_health,
@@ -1620,10 +1620,10 @@ impl NurtureEngine {
                     let res = self
                         .do_comment(
                             udid,
-                            session.as_ref(),
+                            device.session.as_ref(),
                             &gestures,
                             &rail,
-                            screen_size,
+                            device.screen_size,
                             &settings,
                             &pool,
                             &stop,
@@ -1657,7 +1657,7 @@ impl NurtureEngine {
                             {
                                 report(
                                     &mut progress.status,
-                                    "nút Gửi không sáng 2 lượt liên tiếp — làm mới text session"
+                                    "nút Gửi không sáng 2 lượt liên tiếp — làm mới text device.session"
                                         .into(),
                                 );
                                 let error = anyhow::Error::new(UiError::new(
@@ -1668,10 +1668,10 @@ impl NurtureEngine {
                                 if !self
                                     .recover(
                                         udid,
-                                        &bundle_id,
+                                        &device.bundle_id,
                                         true,
-                                        &mut ui_context,
-                                        &mut session,
+                                        &mut device.ui_context,
+                                        &mut device.session,
                                         &handle,
                                         &mut budget,
                                         &mut text_health,
@@ -1682,7 +1682,7 @@ impl NurtureEngine {
                                     .await
                                 {
                                     progress.last_error = Some(
-                                        "không làm mới được text session sau 2 lượt không armed"
+                                        "không làm mới được text device.session sau 2 lượt không armed"
                                             .into(),
                                     );
                                     progress.outcome = Outcome::Failed;
@@ -1698,10 +1698,10 @@ impl NurtureEngine {
                                 && !self
                                     .recover(
                                         udid,
-                                        &bundle_id,
-                                        fresh_text_session,
-                                        &mut ui_context,
-                                        &mut session,
+                                        &device.bundle_id,
+                                        device.fresh_text_session,
+                                        &mut device.ui_context,
+                                        &mut device.session,
                                         &handle,
                                         &mut budget,
                                         &mut text_health,
@@ -1743,7 +1743,14 @@ impl NurtureEngine {
                     on_status(progress.status.clone());
                     report(&mut progress.status, "follow".into());
                     match self
-                        .do_follow(udid, session.as_ref(), &gestures, &rail, screen_size, &stop)
+                        .do_follow(
+                            udid,
+                            device.session.as_ref(),
+                            &gestures,
+                            &rail,
+                            device.screen_size,
+                            &stop,
+                        )
                         .await
                     {
                         Ok(true) => {
@@ -1760,10 +1767,10 @@ impl NurtureEngine {
                             if !self
                                 .recover(
                                     udid,
-                                    &bundle_id,
-                                    fresh_text_session,
-                                    &mut ui_context,
-                                    &mut session,
+                                    &device.bundle_id,
+                                    device.fresh_text_session,
+                                    &mut device.ui_context,
+                                    &mut device.session,
                                     &handle,
                                     &mut budget,
                                     &mut text_health,
@@ -1789,9 +1796,9 @@ impl NurtureEngine {
             match self
                 .do_swipe(
                     udid,
-                    session.as_ref(),
+                    device.session.as_ref(),
                     &gestures,
-                    screen_size,
+                    device.screen_size,
                     human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
                     &stop,
                 )
@@ -1828,9 +1835,9 @@ impl NurtureEngine {
                     match self
                         .do_swipe(
                             udid,
-                            session.as_ref(),
+                            device.session.as_ref(),
                             &gestures,
-                            screen_size,
+                            device.screen_size,
                             human.swipe_duration_ms(false),
                             &stop,
                         )
@@ -1862,10 +1869,10 @@ impl NurtureEngine {
                             if !self
                                 .recover(
                                     udid,
-                                    &bundle_id,
-                                    fresh_text_session,
-                                    &mut ui_context,
-                                    &mut session,
+                                    &device.bundle_id,
+                                    device.fresh_text_session,
+                                    &mut device.ui_context,
+                                    &mut device.session,
                                     &handle,
                                     &mut budget,
                                     &mut text_health,
@@ -1888,10 +1895,10 @@ impl NurtureEngine {
                     if !self
                         .recover(
                             udid,
-                            &bundle_id,
-                            fresh_text_session,
-                            &mut ui_context,
-                            &mut session,
+                            &device.bundle_id,
+                            device.fresh_text_session,
+                            &mut device.ui_context,
+                            &mut device.session,
                             &handle,
                             &mut budget,
                             &mut text_health,
@@ -1909,7 +1916,7 @@ impl NurtureEngine {
             // A card that swallows both the swipe and its retry, turn after
             // turn, is not going to start working. A live run spent 280 seconds
             // — 46 of its 53 swipes — on one photo post before the clock ran
-            // out. Ending the session says so; continuing just burns the budget
+            // out. Ending the device.session says so; continuing just burns the budget
             // in silence.
             if progress.blocked_streak >= BLOCKED_SWIPE_LIMIT {
                 let streak = progress.blocked_streak;
@@ -1961,7 +1968,7 @@ impl NurtureEngine {
                     );
                     {
                         let _guard = gestures.lock().await;
-                        let _ = session.home().await;
+                        let _ = device.session.home().await;
                     }
                     sleep_interruptible(break_for, &stop).await;
                     if policy.should_cold_restart() {
@@ -1971,25 +1978,25 @@ impl NurtureEngine {
                         );
                         let _ = self
                             .control
-                            .terminate_streaming_app(&ui_context, &bundle_id)
+                            .terminate_streaming_app(&device.ui_context, &device.bundle_id)
                             .await;
                         sleep_interruptible(Duration::from_secs(2), &stop).await;
                         match self
                             .control
                             .recover_streaming_session(
-                                &mut ui_context,
-                                &bundle_id,
-                                session_kind,
+                                &mut device.ui_context,
+                                &device.bundle_id,
+                                device.session_kind,
                                 false,
                             )
                             .await
                         {
                             Ok(next) => {
-                                // Swap the watcher's session handle too, or the
+                                // Swap the watcher's device.session handle too, or the
                                 // popup watcher keeps tapping through the dead
-                                // pre-restart session for the rest of the run.
-                                session = next;
-                                handle.set(session.clone());
+                                // pre-restart device.session for the rest of the run.
+                                device.session = next;
+                                handle.set(device.session.clone());
                             }
                             Err(error) => {
                                 report(
@@ -2002,7 +2009,10 @@ impl NurtureEngine {
                         }
                     } else {
                         let _guard = gestures.lock().await;
-                        let _ = session.launch_app_foreground(&bundle_id).await;
+                        let _ = device
+                            .session
+                            .launch_app_foreground(&device.bundle_id)
+                            .await;
                     }
                     sleep_interruptible(Duration::from_secs(4), &stop).await;
                     policy.reset_block();
@@ -2023,7 +2033,7 @@ impl NurtureEngine {
         let never = AtomicBool::new(false);
         let ended_on_tiktok = self
             .wait_for_frame(udid, Duration::from_millis(2_500), &never, |img| {
-                screen::feed_ready(img, Some(screen_size.0))
+                screen::feed_ready(img, Some(device.screen_size.0))
             })
             .await
             .is_some();
@@ -2036,7 +2046,7 @@ impl NurtureEngine {
             progress.last_error.is_some(),
         );
 
-        if let Err(error) = self.control.close_ui_context(ui_context).await {
+        if let Err(error) = self.control.close_ui_context(device.ui_context).await {
             progress.outcome = if progress.status.videos_done == 0 {
                 Outcome::Failed
             } else {
