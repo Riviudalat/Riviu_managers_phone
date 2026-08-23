@@ -128,16 +128,22 @@
    * enough. Twelve distinct values were in use and no two of them were near each other by
    * design.
    *
-   * The one disagreement worth naming rather than hiding: the two floating popup layers sit
-   * at different heights, so with both open the nurture panel always covers the interaction
-   * panel. Nothing chose that, and correcting it changes which popup is on top — a decision
-   * about the product, not a tidy-up, so the numbers stay as they are and say so here. */
+   * The two floating popup layers share one height. They used to differ — interaction 30,
+   * nurture 45 — which looked like a rule about which covers which, and was not: opening
+   * either one from the toolbar closes the other, so the two are never on screen together
+   * and the numbers decided nothing. Equalising removes the trap rather than the behaviour:
+   * if these are ever allowed to co-exist, the stacking has to be a decision taken then, not
+   * a leftover from two numbers nobody compared.
+   *
+   * 45 rather than 30 because it changes the least — the nurture panel stays exactly where it
+   * was, above the inspector and the focus overlay. Levelling down would have pushed it
+   * behind the focus overlay, which is the panel an operator keeps open to watch. */
   --z-raised: 1;
   --z-toolbar: 8;
   --z-palette: 20;
-  --z-float-interaction: 30;
+  --z-overlay: 30;
   --z-panel: 40;
-  --z-float-nurture: 45;
+  --z-float-popup: 45;
   --z-dialog-layer: 50;
   --z-menu: 60;
   --z-modal-backdrop: 70;

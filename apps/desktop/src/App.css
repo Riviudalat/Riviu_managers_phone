@@ -869,7 +869,7 @@
 
 .flow-coordinate-popover {
   position: absolute;
-  z-index: var(--z-float-interaction);
+  z-index: var(--z-overlay);
   width: min(420px, calc(100% - 24px));
   inset: 48px 12px auto;
   padding: 10px;
@@ -1274,7 +1274,7 @@ button:disabled {
    selected tile's border, at low alpha — brand orange since 21/08/2026, see `--link`. */
 .select-band {
   position: fixed;
-  z-index: var(--z-float-interaction);
+  z-index: var(--z-overlay);
   border: 1px solid var(--primary);
   background: var(--primary-ring);
   pointer-events: none;
@@ -2254,7 +2254,7 @@ button.danger:hover:not(:disabled) {
 .nurture-float-layer {
   position: fixed;
   inset: 0;
-  z-index: var(--z-float-nurture);
+  z-index: var(--z-float-popup);
   pointer-events: none;
 }
 .nurture-float {
@@ -2978,7 +2978,7 @@ button.danger:hover:not(:disabled) {
   position: fixed;
   right: 1.1rem;
   bottom: 1.1rem;
-  z-index: var(--z-float-interaction);
+  z-index: var(--z-float-popup);
   pointer-events: none;
 }
 .interaction-float {
