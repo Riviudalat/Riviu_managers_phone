@@ -173,6 +173,29 @@ pub struct NurtureEngine {
     touch_points: Arc<Mutex<HashMap<String, TouchPointPlanner>>>,
 }
 
+/// What a nurture session has done so far, and how it will be judged.
+///
+/// Six values every phase of the feed loop reads or writes, and that never travel apart.
+/// Bundled so a phase can leave `run_session` and still take a signature someone would want
+/// to read: one `&mut SessionProgress` rather than six separate `&mut`s.
+///
+/// Not one struct for all fourteen of the loop's locals. The other seven are the behaviour
+/// model — `human`, `policy`, `moods`, `budget` and friends — and they answer a different
+/// question. A fourteen-field blob would have moved the mess rather than removed it.
+struct SessionProgress {
+    status: NurtureSessionStatus,
+    /// Refined once at the end by `session_verdict`; set directly only when a phase gives up.
+    outcome: Outcome,
+    last_error: Option<String>,
+    /// False when the loop ended for a reason other than running out of videos. The verdict
+    /// rule needs it: a run that stopped on the clock is not a run that fell short.
+    hit_video_cap: bool,
+    /// Consecutive posts that found the phone somewhere other than the feed.
+    off_feed_streak: u32,
+    /// Consecutive swipes the current card refused to move for.
+    blocked_streak: u32,
+}
+
 /// What one phase of the feed loop decided should happen next.
 ///
 /// The `'feed` loop's phases used to end with `break 'feed` or `continue` written inline,
@@ -1002,26 +1025,33 @@ impl NurtureEngine {
         // switch exists (`NurtureSettings::into_effective`). Refreshed the same way.
         let mut settings = settings.into_effective();
         let started = Instant::now();
-        let mut status = NurtureSessionStatus {
-            udid: udid.to_string(),
-            running: true,
-            videos_done: 0,
-            swipe_attempts: 0,
-            like_attempts: 0,
-            comment_attempts: 0,
-            follow_attempts: 0,
-            likes: 0,
-            comments: 0,
-            follows: 0,
-            last_message: "bắt đầu".into(),
-            session_usd: 0.0,
+        let mut progress = SessionProgress {
+            status: NurtureSessionStatus {
+                udid: udid.to_string(),
+                running: true,
+                videos_done: 0,
+                swipe_attempts: 0,
+                like_attempts: 0,
+                comment_attempts: 0,
+                follow_attempts: 0,
+                likes: 0,
+                comments: 0,
+                follows: 0,
+                last_message: "bắt đầu".into(),
+                session_usd: 0.0,
+            },
+            outcome: Outcome::Done,
+            last_error: None,
+            hit_video_cap: true,
+            off_feed_streak: 0,
+            blocked_streak: 0,
         };
-        on_status(status.clone());
+        on_status(progress.status.clone());
 
-        let report = |status: &mut NurtureSessionStatus, msg: String| {
+        let report = |into: &mut NurtureSessionStatus, msg: String| {
             tracing::info!("[nurture {udid}] {msg}");
-            status.last_message = msg;
-            on_status(status.clone());
+            into.last_message = msg;
+            on_status(into.clone());
         };
 
         let Some(OpenedDevice {
@@ -1032,10 +1062,10 @@ impl NurtureEngine {
             fresh_text_session,
             session_kind,
         }) = self
-            .open_for_session(udid, &settings, &stop, &mut status, &report)
+            .open_for_session(udid, &settings, &stop, &mut progress.status, &report)
             .await?
         else {
-            return Ok(status);
+            return Ok(progress.status);
         };
         // A backend that can report *where* a control is does not need a
         // calibrated screen at all — it taps inside the rectangle the device
@@ -1062,22 +1092,22 @@ impl NurtureEngine {
             started,
             max_duration,
             &stop,
-            &mut status,
+            &mut progress.status,
             &report,
             Some(&comment_source),
             Some(&live_source),
         )
         .await;
         match attempt {
-            hierarchy::HierarchySession::Ran(mut outcome) => {
+            hierarchy::HierarchySession::Ran(mut ran_outcome) => {
                 // Same judgement the pixel path applies: a session that moved no
                 // videos did not work, whatever else it reported.
-                if outcome == Outcome::Done && status.videos_done == 0 {
-                    outcome = Outcome::Failed;
+                if ran_outcome == Outcome::Done && progress.status.videos_done == 0 {
+                    ran_outcome = Outcome::Failed;
                 }
                 let mut cleanup_error = None;
                 if let Err(error) = self.control.close_ui_context(ui_context).await {
-                    outcome = if status.videos_done == 0 {
+                    ran_outcome = if progress.status.videos_done == 0 {
                         Outcome::Failed
                     } else {
                         Outcome::Partial
@@ -1086,38 +1116,38 @@ impl NurtureEngine {
                 }
                 let summary = format!(
                     "{} — {}/{} video, {} tim, {} bình luận, {} follow, {:.0}s (hierarchy){}",
-                    outcome.as_str(),
-                    status.videos_done,
-                    status.swipe_attempts,
-                    status.likes,
-                    status.comments,
-                    status.follows,
+                    ran_outcome.as_str(),
+                    progress.status.videos_done,
+                    progress.status.swipe_attempts,
+                    progress.status.likes,
+                    progress.status.comments,
+                    progress.status.follows,
                     started.elapsed().as_secs_f64(),
                     cleanup_error
                         .as_ref()
                         .map(|error| format!(", lỗi cuối: {error}"))
                         .unwrap_or_default(),
                 );
-                status.running = false;
-                status.last_message = summary.clone();
-                on_status(status.clone());
+                progress.status.running = false;
+                progress.status.last_message = summary.clone();
+                on_status(progress.status.clone());
                 let _ = self.db.log_op(
                     "nurture.session",
-                    &format!("{udid} {summary} usd={:.4}", status.session_usd),
+                    &format!("{udid} {summary} usd={:.4}", progress.status.session_usd),
                 );
                 self.clear_touch_points(udid);
-                return Ok(status);
+                return Ok(progress.status);
             }
             // The ordinary iOS case: no geometry, so use pixels.
             hierarchy::HierarchySession::NotSupported => {}
             // Geometry works but something measured is missing. Stop, rather than
             // falling through to a pixel engine whose only calibrated layout is an
-            // iPhone 8. The reason is already in `status.last_message`.
+            // iPhone 8. The reason is already in `progress.status.last_message`.
             hierarchy::HierarchySession::Refused => {
-                status.running = false;
+                progress.status.running = false;
                 let _ = self.control.close_ui_context(ui_context).await;
-                on_status(status.clone());
-                return Ok(status);
+                on_status(progress.status.clone());
+                return Ok(progress.status);
             }
         }
 
@@ -1133,7 +1163,7 @@ impl NurtureEngine {
                 .collect::<Vec<_>>()
                 .join(", ");
             report(
-                &mut status,
+                &mut progress.status,
                 format!(
                     "failed — chưa hiệu chỉnh bộ dò cho màn hình {}x{}; \
                      đã hiệu chỉnh: {known}. Chạy quy trình hiệu chỉnh (AGENTS.md mục 6) \
@@ -1141,22 +1171,25 @@ impl NurtureEngine {
                     screen_size.0, screen_size.1
                 ),
             );
-            status.running = false;
-            return Ok(status);
+            progress.status.running = false;
+            return Ok(progress.status);
         };
         tracing::debug!("[nurture {udid}] layout đã hiệu chỉnh: {}", layout.id);
         self.reset_touch_points(udid, screen_size);
 
         // Now the agent is warm, attach the stream that the watcher reads.
-        report(&mut status, "mở stream màn hình".into());
+        report(&mut progress.status, "mở stream màn hình".into());
         if self
             .wait_for_frame(udid, Duration::from_secs(20), &stop, |_| true)
             .await
             .is_none()
         {
-            report(&mut status, "failed — stream không có frame".into());
-            status.running = false;
-            return Ok(status);
+            report(
+                &mut progress.status,
+                "failed — stream không có frame".into(),
+            );
+            progress.status.running = false;
+            return Ok(progress.status);
         }
 
         // What is on screen before we touch anything?
@@ -1173,12 +1206,12 @@ impl NurtureEngine {
         // TikTok forward only if the frame says we are not already there.
         if already_on_tiktok {
             report(
-                &mut status,
+                &mut progress.status,
                 "TikTok đã mở sẵn — reuse, không khởi động lại".into(),
             );
         } else {
             report(
-                &mut status,
+                &mut progress.status,
                 "TikTok chưa ở foreground — đưa lên trước".into(),
             );
             let brought = self
@@ -1193,9 +1226,9 @@ impl NurtureEngine {
                 )
                 .await;
             match brought {
-                Ok(true) => report(&mut status, "đã bring TikTok foreground".into()),
-                Ok(false) => report(&mut status, "TikTok đã ở foreground".into()),
-                Err(e) => report(&mut status, format!("không mở được TikTok: {e}")),
+                Ok(true) => report(&mut progress.status, "đã bring TikTok foreground".into()),
+                Ok(false) => report(&mut progress.status, "TikTok đã ở foreground".into()),
+                Err(e) => report(&mut progress.status, format!("không mở được TikTok: {e}")),
             }
         }
 
@@ -1230,7 +1263,7 @@ impl NurtureEngine {
         let popup_closed_after = watcher_stats.popups_closed.load(Ordering::Relaxed);
         if popup_closed_after > popup_closed_before {
             report(
-                &mut status,
+                &mut progress.status,
                 format!(
                     "đã tự tắt {} thông báo/popup đầu phiên",
                     popup_closed_after - popup_closed_before
@@ -1239,7 +1272,7 @@ impl NurtureEngine {
         }
         if !startup_ready && !stop.load(Ordering::Relaxed) {
             report(
-                &mut status,
+                &mut progress.status,
                 "chưa xác nhận frame TikTok sau khi dọn thông báo — tiếp tục theo dõi".into(),
             );
         }
@@ -1279,8 +1312,6 @@ impl NurtureEngine {
             }
         };
         let mut rail = ActionRail::fallback();
-        let mut outcome = Outcome::Done;
-        let mut last_error: Option<String> = None;
         // The pixel loop's door back to the settings row. The same object the hierarchy
         // loop is handed, so "live" means one thing across both.
         let live_source = EngineLiveSettings { engine: self };
@@ -1289,9 +1320,6 @@ impl NurtureEngine {
         // `live::video_target` for why the duration used to silently win.
         let total_videos = video_target(&settings);
         // True when the loop ran out of videos rather than out of time.
-        let mut hit_video_cap = true;
-        let mut off_feed_streak = 0u32;
-        let mut blocked_streak = 0u32;
         'feed: for _video in 0..total_videos {
             // Live tuning, once per post rather than per action. The UI writes one settings
             // row and this picks it up, so "save" means "applies to the run in progress"
@@ -1306,22 +1334,22 @@ impl NurtureEngine {
                 &mut moods,
             );
             if stop.load(Ordering::Relaxed) {
-                outcome = Outcome::Stopped;
-                hit_video_cap = false;
+                progress.outcome = Outcome::Stopped;
+                progress.hit_video_cap = false;
                 break;
             }
             if max_duration.is_some_and(|max| started.elapsed() >= max) {
-                hit_video_cap = false;
+                progress.hit_video_cap = false;
                 break;
             }
             if in_night_window(settings.night_start, settings.night_end) {
-                report(&mut status, "giờ nghỉ đêm — dừng".into());
-                hit_video_cap = false;
+                report(&mut progress.status, "giờ nghỉ đêm — dừng".into());
+                progress.hit_video_cap = false;
                 break;
             }
             if budget.exhausted() {
-                outcome = Outcome::Failed;
-                last_error = Some("hết ngân sách recovery".into());
+                progress.outcome = Outcome::Failed;
+                progress.last_error = Some("hết ngân sách recovery".into());
                 break;
             }
             policy.begin_post();
@@ -1331,16 +1359,22 @@ impl NurtureEngine {
             // independent coin flip per clip.
             let (mood, mood_changed) = moods.next();
             if mood_changed {
-                report(&mut status, format!("chuyển nhịp: {}", mood.label()));
+                report(
+                    &mut progress.status,
+                    format!("chuyển nhịp: {}", mood.label()),
+                );
             }
 
             let watch =
                 human.watch_seconds(settings.watch_min, settings.watch_max) * mood.watch_mult();
-            report(&mut status, format!("xem {watch:.1}s ({})", mood.label()));
+            report(
+                &mut progress.status,
+                format!("xem {watch:.1}s ({})", mood.label()),
+            );
             sleep_interruptible(Duration::from_secs_f64(watch.max(0.5)), &stop).await;
             if stop.load(Ordering::Relaxed) {
-                outcome = Outcome::Stopped;
-                hit_video_cap = false;
+                progress.outcome = Outcome::Stopped;
+                progress.hit_video_cap = false;
                 break;
             }
 
@@ -1359,8 +1393,8 @@ impl NurtureEngine {
                     &mut human,
                     &gestures,
                     &stop,
-                    off_feed_streak,
-                    &mut status,
+                    progress.off_feed_streak,
+                    &mut progress.status,
                     &report,
                 )
                 .await?
@@ -1369,13 +1403,13 @@ impl NurtureEngine {
                 // match zeroes it, because getting here means the phone is on the feed.
                 (FeedStep::Proceed, _) => {}
                 (FeedStep::NextVideo, streak) => {
-                    off_feed_streak = streak;
+                    progress.off_feed_streak = streak;
                     continue;
                 }
                 (FeedStep::Stop { reason }, _) => {
-                    last_error = Some(reason);
-                    hit_video_cap = false;
-                    outcome = if status.videos_done == 0 {
+                    progress.last_error = Some(reason);
+                    progress.hit_video_cap = false;
+                    progress.outcome = if progress.status.videos_done == 0 {
                         Outcome::Failed
                     } else {
                         Outcome::Partial
@@ -1385,7 +1419,7 @@ impl NurtureEngine {
             }
             // Every path that gets here is on the feed: either it always was, or
             // one of the branches above got back to it.
-            off_feed_streak = 0;
+            progress.off_feed_streak = 0;
 
             // Re-read the rail after the watch and after any overlay drain.
             // The previous frame may belong to the card just left, so it is
@@ -1413,7 +1447,7 @@ impl NurtureEngine {
                     &live_owned,
                     &gestures,
                     &stop,
-                    &mut status,
+                    &mut progress.status,
                     &report,
                 )
                 .await?
@@ -1426,9 +1460,9 @@ impl NurtureEngine {
                 }
                 (FeedStep::NextVideo, _) => continue,
                 (FeedStep::Stop { reason }, _) => {
-                    last_error = Some(reason);
-                    hit_video_cap = false;
-                    outcome = Outcome::Partial;
+                    progress.last_error = Some(reason);
+                    progress.hit_video_cap = false;
+                    progress.outcome = Outcome::Partial;
                     break 'feed;
                 }
             }
@@ -1437,10 +1471,10 @@ impl NurtureEngine {
             // where nothing is. Follow is skipped for the same reason.
             if !rail_present {
                 report(
-                    &mut status,
+                    &mut progress.status,
                     "thẻ không có thanh hành động (LIVE / đang chuyển) — chỉ vuốt tiếp".into(),
                 );
-                status.swipe_attempts += 1;
+                progress.status.swipe_attempts += 1;
                 // Leaving a card that has no rail is still provable, from the
                 // other side: the rail *arriving* on a settled card is the
                 // card change. Landing on another rail-less card is not, and
@@ -1455,12 +1489,15 @@ impl NurtureEngine {
                         &stop,
                     )
                     .await
-                    .is_ok_and(|outcome| outcome == SwipeOutcome::Advanced)
+                    .is_ok_and(|swipe| swipe == SwipeOutcome::Advanced)
                 {
-                    status.videos_done += 1;
-                    on_status(status.clone());
+                    progress.status.videos_done += 1;
+                    on_status(progress.status.clone());
                     if let Some(rest) = policy.rest_after_video() {
-                        report(&mut status, format!("nghỉ tự nhiên {}s", rest.as_secs()));
+                        report(
+                            &mut progress.status,
+                            format!("nghỉ tự nhiên {}s", rest.as_secs()),
+                        );
                         sleep_interruptible(rest, &stop).await;
                     }
                 }
@@ -1474,7 +1511,10 @@ impl NurtureEngine {
                     if !policy.can_interact_with_post()
                         || !policy.can_attempt(PolicyAction::Like) =>
                 {
-                    report(&mut status, "bỏ qua tim: nhịp phiên hiện tại đã đủ".into());
+                    report(
+                        &mut progress.status,
+                        "bỏ qua tim: nhịp phiên hiện tại đã đủ".into(),
+                    );
                 }
                 FeedAction::Like => {
                     if !wait_for_action_gap(
@@ -1484,33 +1524,37 @@ impl NurtureEngine {
                     )
                     .await
                     {
-                        outcome = Outcome::Stopped;
-                        hit_video_cap = false;
+                        progress.outcome = Outcome::Stopped;
+                        progress.hit_video_cap = false;
                         break 'feed;
                     }
                     policy.record_attempt(PolicyAction::Like);
                     policy.mark_post_interacted();
-                    status.like_attempts += 1;
-                    on_status(status.clone());
-                    report(&mut status, "thả tim".into());
+                    progress.status.like_attempts += 1;
+                    on_status(progress.status.clone());
+                    report(&mut progress.status, "thả tim".into());
                     match self
                         .do_like(udid, session.as_ref(), &gestures, screen_size, &stop)
                         .await
                     {
                         Ok(LikeResult::Liked) => {
-                            status.likes += 1;
-                            report(&mut status, "tim thành công (xác nhận icon đỏ)".into());
+                            progress.status.likes += 1;
+                            report(
+                                &mut progress.status,
+                                "tim thành công (xác nhận icon đỏ)".into(),
+                            );
                         }
-                        Ok(LikeResult::AlreadyLiked) => {
-                            report(&mut status, "video đã tim từ trước — bỏ qua".into())
-                        }
+                        Ok(LikeResult::AlreadyLiked) => report(
+                            &mut progress.status,
+                            "video đã tim từ trước — bỏ qua".into(),
+                        ),
                         Ok(LikeResult::NotOnFeed) => report(
-                            &mut status,
+                            &mut progress.status,
                             "bỏ qua tim: khung hiện tại không phải thẻ feed có thanh hành động"
                                 .into(),
                         ),
                         Ok(LikeResult::NotConfirmed { before, best }) => report(
-                            &mut status,
+                            &mut progress.status,
                             format!(
                                 "tim: tap gửi được nhưng icon không đổi (đỏ {before:.0}→{best:.0}, \
                                  cần >{:.0}; rail layout {}{}, tim y={:.0}pt)",
@@ -1522,8 +1566,8 @@ impl NurtureEngine {
                         ),
                         Err(e) => {
                             let msg = format!("tim thất bại: {}", describe(&e));
-                            report(&mut status, msg.clone());
-                            last_error = Some(msg);
+                            report(&mut progress.status, msg.clone());
+                            progress.last_error = Some(msg);
                             if !self
                                 .recover(
                                     udid,
@@ -1535,12 +1579,12 @@ impl NurtureEngine {
                                     &mut budget,
                                     &mut text_health,
                                     &e,
-                                    &mut status,
+                                    &mut progress.status,
                                     &on_status,
                                 )
                                 .await
                             {
-                                outcome = Outcome::Failed;
+                                progress.outcome = Outcome::Failed;
                                 break 'feed;
                             }
                         }
@@ -1551,7 +1595,7 @@ impl NurtureEngine {
                         || !policy.can_attempt(PolicyAction::Comment) =>
                 {
                     report(
-                        &mut status,
+                        &mut progress.status,
                         "bỏ qua bình luận: nhịp phiên hiện tại đã đủ".into(),
                     );
                 }
@@ -1563,15 +1607,15 @@ impl NurtureEngine {
                     )
                     .await
                     {
-                        outcome = Outcome::Stopped;
-                        hit_video_cap = false;
+                        progress.outcome = Outcome::Stopped;
+                        progress.hit_video_cap = false;
                         break 'feed;
                     }
                     policy.record_attempt(PolicyAction::Comment);
                     policy.mark_post_interacted();
-                    status.comment_attempts += 1;
-                    on_status(status.clone());
-                    report(&mut status, "bình luận".into());
+                    progress.status.comment_attempts += 1;
+                    on_status(progress.status.clone());
+                    report(&mut progress.status, "bình luận".into());
                     suppress.store(true, Ordering::Relaxed);
                     let res = self
                         .do_comment(
@@ -1591,28 +1635,28 @@ impl NurtureEngine {
                             comment_recovery_action = text_health.observe(result);
                             match result {
                                 CommentResult::TextSent(usd) => {
-                                    status.comments += 1;
-                                    status.session_usd += usd;
+                                    progress.status.comments += 1;
+                                    progress.status.session_usd += usd;
                                     report(
-                                        &mut status,
+                                        &mut progress.status,
                                         "đã gửi bình luận chữ (xác nhận nút gửi tắt)".into(),
                                     );
                                 }
                                 CommentResult::TextNotSent => report(
-                                    &mut status,
+                                    &mut progress.status,
                                     "bỏ qua bình luận: đã bấm Gửi nhưng chưa xác nhận được; không retry vì trạng thái giao nhận mơ hồ"
                                         .into(),
                                 ),
                                 other => {
                                     let msg = format!("bỏ qua bình luận: {}", other.reason());
-                                    report(&mut status, msg);
+                                    report(&mut progress.status, msg);
                                 }
                             }
 
                             if comment_recovery_action == CommentRecoveryAction::RefreshFreshSession
                             {
                                 report(
-                                    &mut status,
+                                    &mut progress.status,
                                     "nút Gửi không sáng 2 lượt liên tiếp — làm mới text session"
                                         .into(),
                                 );
@@ -1632,24 +1676,24 @@ impl NurtureEngine {
                                         &mut budget,
                                         &mut text_health,
                                         &error,
-                                        &mut status,
+                                        &mut progress.status,
                                         &on_status,
                                     )
                                     .await
                                 {
-                                    last_error = Some(
+                                    progress.last_error = Some(
                                         "không làm mới được text session sau 2 lượt không armed"
                                             .into(),
                                     );
-                                    outcome = Outcome::Failed;
+                                    progress.outcome = Outcome::Failed;
                                     break 'feed;
                                 }
                             }
                         }
                         Err(e) => {
                             let msg = format!("bình luận thất bại: {}", describe(&e));
-                            report(&mut status, msg.clone());
-                            last_error = Some(msg);
+                            report(&mut progress.status, msg.clone());
+                            progress.last_error = Some(msg);
                             if ui_error_kind(&e) != UiErrorKind::Other
                                 && !self
                                     .recover(
@@ -1662,12 +1706,12 @@ impl NurtureEngine {
                                         &mut budget,
                                         &mut text_health,
                                         &e,
-                                        &mut status,
+                                        &mut progress.status,
                                         &on_status,
                                     )
                                     .await
                             {
-                                outcome = Outcome::Failed;
+                                progress.outcome = Outcome::Failed;
                                 break 'feed;
                             }
                         }
@@ -1679,7 +1723,7 @@ impl NurtureEngine {
             if roll_follow_in_mood(settings.follow_prob, mood) {
                 if !policy.can_interact_with_post() || !policy.can_attempt(PolicyAction::Follow) {
                     report(
-                        &mut status,
+                        &mut progress.status,
                         "bỏ qua follow: nhịp phiên hiện tại đã đủ".into(),
                     );
                 } else if !wait_for_action_gap(
@@ -1689,28 +1733,30 @@ impl NurtureEngine {
                 )
                 .await
                 {
-                    outcome = Outcome::Stopped;
-                    hit_video_cap = false;
+                    progress.outcome = Outcome::Stopped;
+                    progress.hit_video_cap = false;
                     break 'feed;
                 } else {
                     policy.record_attempt(PolicyAction::Follow);
                     policy.mark_post_interacted();
-                    status.follow_attempts += 1;
-                    on_status(status.clone());
-                    report(&mut status, "follow".into());
+                    progress.status.follow_attempts += 1;
+                    on_status(progress.status.clone());
+                    report(&mut progress.status, "follow".into());
                     match self
                         .do_follow(udid, session.as_ref(), &gestures, &rail, screen_size, &stop)
                         .await
                     {
                         Ok(true) => {
-                            status.follows += 1;
-                            report(&mut status, "follow thành công".into());
+                            progress.status.follows += 1;
+                            report(&mut progress.status, "follow thành công".into());
                         }
-                        Ok(false) => report(&mut status, "follow không đổi trạng thái".into()),
+                        Ok(false) => {
+                            report(&mut progress.status, "follow không đổi trạng thái".into())
+                        }
                         Err(e) => {
                             let msg = format!("follow thất bại: {}", describe(&e));
-                            report(&mut status, msg.clone());
-                            last_error = Some(msg);
+                            report(&mut progress.status, msg.clone());
+                            progress.last_error = Some(msg);
                             if !self
                                 .recover(
                                     udid,
@@ -1722,12 +1768,12 @@ impl NurtureEngine {
                                     &mut budget,
                                     &mut text_health,
                                     &e,
-                                    &mut status,
+                                    &mut progress.status,
                                     &on_status,
                                 )
                                 .await
                             {
-                                outcome = Outcome::Failed;
+                                progress.outcome = Outcome::Failed;
                                 break 'feed;
                             }
                         }
@@ -1737,9 +1783,9 @@ impl NurtureEngine {
 
             sleep_interruptible(Duration::from_millis(human.think_pause_ms()), &stop).await;
 
-            report(&mut status, "vuốt video tiếp".into());
+            report(&mut progress.status, "vuốt video tiếp".into());
             let mut advanced_to_next_video = false;
-            status.swipe_attempts += 1;
+            progress.status.swipe_attempts += 1;
             match self
                 .do_swipe(
                     udid,
@@ -1753,19 +1799,19 @@ impl NurtureEngine {
             {
                 Ok(SwipeOutcome::Advanced) => {
                     advanced_to_next_video = true;
-                    blocked_streak = 0;
-                    status.videos_done += 1;
-                    on_status(status.clone());
+                    progress.blocked_streak = 0;
+                    progress.status.videos_done += 1;
+                    on_status(progress.status.clone());
                 }
                 Ok(SwipeOutcome::Moved) => {
-                    blocked_streak = 0;
+                    progress.blocked_streak = 0;
                     // The rail left, so the gesture landed and the card we were
                     // on is gone. Swiping again here would skip whatever came
                     // next; the loop re-reads the screen at the top instead.
                     // Not counted: nothing settled that could be counted.
                     advanced_to_next_video = true;
                     report(
-                        &mut status,
+                        &mut progress.status,
                         "đã rời thẻ cũ nhưng chưa thấy thẻ mới ổn định — đọc lại màn hình".into(),
                     );
                 }
@@ -1773,9 +1819,12 @@ impl NurtureEngine {
                     // The rail never left: the feed swallowed the gesture,
                     // usually under a popup. The watcher closes those on its
                     // own; give it a beat, then try once more.
-                    report(&mut status, "vuốt không ăn — chờ popup rồi thử lại".into());
+                    report(
+                        &mut progress.status,
+                        "vuốt không ăn — chờ popup rồi thử lại".into(),
+                    );
                     sleep_interruptible(Duration::from_millis(1_800), &stop).await;
-                    status.swipe_attempts += 1;
+                    progress.status.swipe_attempts += 1;
                     match self
                         .do_swipe(
                             udid,
@@ -1789,24 +1838,27 @@ impl NurtureEngine {
                     {
                         Ok(SwipeOutcome::Advanced) => {
                             advanced_to_next_video = true;
-                            blocked_streak = 0;
-                            status.videos_done += 1;
-                            on_status(status.clone());
+                            progress.blocked_streak = 0;
+                            progress.status.videos_done += 1;
+                            on_status(progress.status.clone());
                         }
                         Ok(SwipeOutcome::Moved) => {
                             advanced_to_next_video = true;
-                            blocked_streak = 0;
-                            report(&mut status, "đã rời thẻ cũ, chưa xác nhận thẻ mới".into());
+                            progress.blocked_streak = 0;
+                            report(
+                                &mut progress.status,
+                                "đã rời thẻ cũ, chưa xác nhận thẻ mới".into(),
+                            );
                         }
                         Ok(SwipeOutcome::Blocked) => {
-                            report(&mut status, "vuốt vẫn không ăn".into());
-                            last_error = Some("swipe không rời được thẻ hiện tại".into());
-                            blocked_streak += 1;
+                            report(&mut progress.status, "vuốt vẫn không ăn".into());
+                            progress.last_error = Some("swipe không rời được thẻ hiện tại".into());
+                            progress.blocked_streak += 1;
                         }
                         Err(e) => {
                             let msg = format!("vuốt lỗi: {}", describe(&e));
-                            report(&mut status, msg.clone());
-                            last_error = Some(msg);
+                            report(&mut progress.status, msg.clone());
+                            progress.last_error = Some(msg);
                             if !self
                                 .recover(
                                     udid,
@@ -1818,12 +1870,12 @@ impl NurtureEngine {
                                     &mut budget,
                                     &mut text_health,
                                     &e,
-                                    &mut status,
+                                    &mut progress.status,
                                     &on_status,
                                 )
                                 .await
                             {
-                                outcome = Outcome::Failed;
+                                progress.outcome = Outcome::Failed;
                                 break 'feed;
                             }
                         }
@@ -1831,8 +1883,8 @@ impl NurtureEngine {
                 }
                 Err(e) => {
                     let msg = format!("vuốt lỗi: {}", describe(&e));
-                    report(&mut status, msg.clone());
-                    last_error = Some(msg);
+                    report(&mut progress.status, msg.clone());
+                    progress.last_error = Some(msg);
                     if !self
                         .recover(
                             udid,
@@ -1844,12 +1896,12 @@ impl NurtureEngine {
                             &mut budget,
                             &mut text_health,
                             &e,
-                            &mut status,
+                            &mut progress.status,
                             &on_status,
                         )
                         .await
                     {
-                        outcome = Outcome::Failed;
+                        progress.outcome = Outcome::Failed;
                         break 'feed;
                     }
                 }
@@ -1859,15 +1911,16 @@ impl NurtureEngine {
             // — 46 of its 53 swipes — on one photo post before the clock ran
             // out. Ending the session says so; continuing just burns the budget
             // in silence.
-            if blocked_streak >= BLOCKED_SWIPE_LIMIT {
+            if progress.blocked_streak >= BLOCKED_SWIPE_LIMIT {
+                let streak = progress.blocked_streak;
                 let message = format!(
-                    "thẻ hiện tại nuốt {blocked_streak} lượt vuốt liên tiếp — dừng phiên \
+                    "thẻ hiện tại nuốt {streak} lượt vuốt liên tiếp — dừng phiên \
                      thay vì vuốt tiếp vô ích"
                 );
-                report(&mut status, message.clone());
-                last_error = Some(message);
-                hit_video_cap = false;
-                outcome = if status.videos_done == 0 {
+                report(&mut progress.status, message.clone());
+                progress.last_error = Some(message);
+                progress.hit_video_cap = false;
+                progress.outcome = if progress.status.videos_done == 0 {
                     Outcome::Failed
                 } else {
                     Outcome::Partial
@@ -1879,10 +1932,10 @@ impl NurtureEngine {
                 let message =
                     "dừng trước lượt feed kế tiếp: chưa xác nhận rời video có trạng thái gửi mơ hồ"
                         .to_string();
-                report(&mut status, message.clone());
-                last_error = Some(message);
-                hit_video_cap = false;
-                outcome = if status.videos_done == 0 {
+                report(&mut progress.status, message.clone());
+                progress.last_error = Some(message);
+                progress.hit_video_cap = false;
+                progress.outcome = if progress.status.videos_done == 0 {
                     Outcome::Failed
                 } else {
                     Outcome::Partial
@@ -1891,13 +1944,16 @@ impl NurtureEngine {
             }
             if advanced_to_next_video {
                 if let Some(rest) = policy.rest_after_video() {
-                    report(&mut status, format!("nghỉ tự nhiên {}s", rest.as_secs()));
+                    report(
+                        &mut progress.status,
+                        format!("nghỉ tự nhiên {}s", rest.as_secs()),
+                    );
                     sleep_interruptible(rest, &stop).await;
                 }
                 if policy.should_take_block_break() || policy.should_take_home_break() {
                     let break_for = policy.home_break_duration();
                     report(
-                        &mut status,
+                        &mut progress.status,
                         format!(
                             "tạm về màn hình chính khoảng {}s rồi mở TikTok lại",
                             break_for.as_secs()
@@ -1910,7 +1966,7 @@ impl NurtureEngine {
                     sleep_interruptible(break_for, &stop).await;
                     if policy.should_cold_restart() {
                         report(
-                            &mut status,
+                            &mut progress.status,
                             "khởi động lại TikTok sau một quãng nghỉ".into(),
                         );
                         let _ = self
@@ -1936,8 +1992,11 @@ impl NurtureEngine {
                                 handle.set(session.clone());
                             }
                             Err(error) => {
-                                report(&mut status, format!("không mở lại được TikTok: {error}"));
-                                outcome = Outcome::Partial;
+                                report(
+                                    &mut progress.status,
+                                    format!("không mở lại được TikTok: {error}"),
+                                );
+                                progress.outcome = Outcome::Partial;
                                 break 'feed;
                             }
                         }
@@ -1969,32 +2028,32 @@ impl NurtureEngine {
             .await
             .is_some();
 
-        outcome = session_verdict(
-            outcome,
-            status.videos_done,
-            hit_video_cap,
+        progress.outcome = session_verdict(
+            progress.outcome,
+            progress.status.videos_done,
+            progress.hit_video_cap,
             total_videos,
-            last_error.is_some(),
+            progress.last_error.is_some(),
         );
 
         if let Err(error) = self.control.close_ui_context(ui_context).await {
-            outcome = if status.videos_done == 0 {
+            progress.outcome = if progress.status.videos_done == 0 {
                 Outcome::Failed
             } else {
                 Outcome::Partial
             };
-            last_error = Some(format!("device cleanup failed: {error}"));
+            progress.last_error = Some(format!("device cleanup failed: {error}"));
         }
 
         let elapsed = started.elapsed();
         let summary = format!(
             "{} — {}/{} video, {} tim, {} bình luận, {} follow, {} popup đóng, {} recovery, {:.0}s{}{}",
-            outcome.as_str(),
-            status.videos_done,
-            status.swipe_attempts,
-            status.likes,
-            status.comments,
-            status.follows,
+            progress.outcome.as_str(),
+            progress.status.videos_done,
+            progress.status.swipe_attempts,
+            progress.status.likes,
+            progress.status.comments,
+            progress.status.follows,
             watch.popups_closed,
             budget.soft + budget.hard,
             elapsed.as_secs_f64(),
@@ -2003,21 +2062,21 @@ impl NurtureEngine {
             } else {
                 ", KHÔNG ở TikTok lúc kết thúc"
             },
-            last_error
+            progress.last_error
                 .as_ref()
                 .map(|e| format!(", lỗi cuối: {e}"))
                 .unwrap_or_default(),
         );
-        status.running = false;
-        status.last_message = summary.clone();
-        on_status(status.clone());
+        progress.status.running = false;
+        progress.status.last_message = summary.clone();
+        on_status(progress.status.clone());
 
         let _ = self.db.log_op(
             "nurture.session",
-            &format!("{udid} {summary} usd={:.4}", status.session_usd),
+            &format!("{udid} {summary} usd={:.4}", progress.status.session_usd),
         );
         self.clear_touch_points(udid);
-        Ok(status)
+        Ok(progress.status)
     }
 
     /// Bring TikTok forward. Prefers WDA activate, which does not restart a
