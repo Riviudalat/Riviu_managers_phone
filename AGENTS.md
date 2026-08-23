@@ -7814,12 +7814,33 @@ trị đang được dùng hàng chục lần. Bài học: khi kết luận là 
 thật và đếm lại cho đúng** trước khi ghi nó xuống — hai giả định sai đủ để biến một việc làm được
 thành một việc bị từ chối.
 
-*Thân vòng `'feed` thì không, và đây là số đo:* 899 dòng, **15+ local mutable** sống xuyên suốt,
-**13 `break 'feed`** cộng 7 `break` + 5 `continue`. Nhấc một pha ra khỏi đó không phải chuyển chữ
-— phải biến từng nhánh thoát thành một enum trả về rồi cho caller match lại, tức **viết lại luồng
-điều khiển** của đường chạy nhiều nhất sản phẩm. Đó là từ chối kèm số đo, cùng loại với E7 ở trên,
-không phải một việc đang chờ ai gật. Mảnh thuần duy nhất trong đó (`session_verdict`, luật "trần
-không phải mục tiêu") đã ra ngoài kèm 6 test.
+*Thân vòng `'feed` thì không.* 898 dòng, **78 câu lệnh mức trên cùng**. Đếm lối thoát
+không-cục-bộ (`break 'feed`, và `break;`/`continue;` không nằm trong vòng lồng) **cho từng khối
+cú pháp một**:
+
+| khối | dòng | lối thoát |
+|---|---|---|
+| `if !self.on_feed(…)` — plan gọi là `handle_off_feed` | 123 | 3 |
+| `match card_kind` — plan gọi là `watch_one_video` | 183 | 2 |
+| `match roll_feed_action_in_mood(…)` — plan gọi là `roll_and_execute_action` | 206 | 5 |
+| `if roll_follow_in_mood(…)` | 58 | 2 |
+| khối `{ … }` phục hồi stream | 104 | 2 |
+| `if advanced_to_next_video` | 60 | 1 |
+| `if !rail_present` | 31 | 1 |
+| `if blocked_streak >= BLOCKED_SWIPE_LIMIT` | 15 | 1 |
+
+**Nhấc ra được mà không đụng luồng điều khiển: 6 dòng trên 898.** Và ba khối mà plan *đặt tên
+sẵn* đúng là ba khối mang nhiều lối thoát nhất — tức decomposition plan đề xuất chính là cái
+không làm được dạng di chuyển. Muốn tách thì phải biến từng lối thoát thành một enum trả về rồi
+cho caller match lại: **viết lại luồng điều khiển** của đường chạy nhiều nhất sản phẩm.
+
+Một cạm bẫy khi tự đo lại: các *dải dòng* không chứa `break 'feed` thì có (dải dài nhất 307
+dòng), nhưng chúng **không phải khối cú pháp** — dải đó mở đầu bằng hai dấu `}` và bên trong có
+5 `continue;` nhắm ra vòng ngoài. Đếm theo dải dòng sẽ ra kết luận ngược; phải đếm theo khối.
+
+Đó là từ chối kèm số đo, cùng loại với E7, không phải việc đang chờ ai gật. Hai mảnh tách được
+thì đã tách: `open_for_session` (121 dòng) và `session_verdict` (luật "trần không phải mục tiêu",
+6 test).
 
 Nghiệm thu bằng một phiên nuôi thật vẫn nên chạy trước khi đụng tiếp vào vùng này — nhưng đó là
 việc người vận hành chọn lúc, không phải điều kiện chặn phần đã làm.
