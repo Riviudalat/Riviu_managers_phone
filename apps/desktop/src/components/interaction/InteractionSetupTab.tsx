@@ -7,6 +7,7 @@ import { linkErrorVi } from "../../interactionErrors";
 import {
   effectiveMessageCount,
   manualCommentsOf,
+  wholeNumber,
   type DraftIssue,
   type InteractionDraft,
   type ThreadKind,
@@ -256,7 +257,7 @@ export function InteractionSetupTab({
               onChange={(event) =>
                 patch(
                   "messageCount",
-                  event.target.value === "" ? null : Number(event.target.value),
+                  event.target.value === "" ? null : wholeNumber(event.target.value),
                 )
               }
             />
@@ -268,7 +269,7 @@ export function InteractionSetupTab({
               min={0}
               max={64}
               value={draft.cohortSize}
-              onChange={(event) => patch("cohortSize", Number(event.target.value))}
+              onChange={(event) => patch("cohortSize", wholeNumber(event.target.value))}
             />
           </label>
           <label className="nu-field">
@@ -278,7 +279,7 @@ export function InteractionSetupTab({
               min={4}
               max={20}
               value={draft.maxWords}
-              onChange={(event) => patch("maxWords", Number(event.target.value))}
+              onChange={(event) => patch("maxWords", wholeNumber(event.target.value))}
             />
           </label>
         </div>

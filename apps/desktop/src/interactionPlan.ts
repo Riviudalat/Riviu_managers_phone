@@ -7,6 +7,7 @@
  * string — so a form that could not possibly succeed looked identical to one that could, and
  * the reason arrived only once the attempt had already been made.
  */
+import { interactionErrorVi } from "./interactionErrors";
 import type {
   ResolvedTikTokTarget,
   ThreadCampaignRequest,
@@ -81,6 +82,25 @@ export const MIXED_THREAD_REASON =
   "Chuỗi lồng nhau không chạy trộn iPhone với Android: hai bên đọc nhãn tác giả theo hai " +
   "cách nên mắt xích có thể đứt giữa chừng. Chọn toàn iPhone, toàn Android, hoặc chuyển " +
   "sang Riêng lẻ.";
+
+/**
+ * What a `<input type="number">` really hands back, read as a whole number.
+ *
+ * The box returns its raw text and a `step` violation does not blank `.value`, so `"2.5"`
+ * arrives verbatim. `Number("2.5")` then passed every range check in this file — `2.5 !== 0`
+ * and `!(2.5 < 2 || 2.5 > 64)` — and was serialised into a `cohortSize` the Rust side
+ * deserialises as `Option<u8>`: a serde failure at dispatch, in English, with no field to hang
+ * it on. Truncated rather than refused, because `2.5` typed into a box labelled "Số máy mỗi
+ * cụm" means 2.
+ *
+ * An empty box still reads as `0`, which for the cohort size is a real value — the hint says
+ * `0 = một cụm`. Only `messageCount` treats empty as "automatic", and it checks for the empty
+ * string before calling this.
+ */
+export function wholeNumber(value: string): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.trunc(parsed) : 0;
+}
 
 /** Comments the operator typed: one per non-blank line, in order. */
 export function manualCommentsOf(draft: InteractionDraft): string[] {
@@ -260,8 +280,15 @@ export function validateDraft(
     issues.push({ field: "maxWords", message: "Số từ tối đa mỗi câu phải từ 4 đến 20" });
   }
 
-  if (context.planError) {
-    issues.push({ field: "plan", message: context.planError });
+  // **Translated, and only when nothing above already said it.** The planner runs the same
+  // `validate()` this function mirrors, so its refusal is usually the Vietnamese reason already
+  // on screen said again in English — the existing test walked straight into a panel showing
+  // both "Cụm lớn nhất có 3 máy nên cần ≥ 3 bình luận" and "InteractionFailed: message count
+  // must cover every selected actor", and asserted only the first, so it passed while the UI was
+  // visibly wrong. A refusal the panel has no field for is still worth showing: that one is a
+  // rule this copy does not know about.
+  if (context.planError && issues.length === 0) {
+    issues.push({ field: "plan", message: interactionErrorVi(context.planError).title });
   }
 
   return issues;

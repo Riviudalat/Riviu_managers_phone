@@ -344,6 +344,39 @@ describe("InteractionPopup", () => {
   it("warns when more teams are planned than the app can stream at once", async () => {
     // `CapacityExhausted` is a refusal, not a queue: the cohorts past the limit fail rather
     // than wait, and before this the operator learned that from the Monitor tab.
+    //
+    // Six links for six cohorts, so all six really do run. With fewer links than cohorts the
+    // spare cohorts get no assignments at all and the warning would be about nothing — see the
+    // test below.
+    previewThread.mockResolvedValueOnce({
+      lines: [],
+      validTargetCount: 6,
+      cohortCount: 6,
+      streamCapacity: 2,
+      plan: {
+        requestId: "r",
+        assignments: [
+          {
+            targetKey: "content:123",
+            ordinal: 0,
+            actorUdid: "actor-a",
+            parentOrdinal: null,
+            cohort: 0,
+          },
+        ],
+      },
+    } as never);
+    render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
+    await pasteLink();
+    expect(await screen.findByText(/chỉ mở được 2 luồng màn hình/)).toBeVisible();
+  });
+
+  it("does not warn about cohorts that have no link to work on", async () => {
+    // `plan_threads` deals links round-robin and emits nothing for a cohort with no link, so
+    // `cohortCount` is the partition and not the number of teams that run. Fourteen phones in
+    // teams of three with **one** link gave `cohortCount = 4` against a capacity of 2, and the
+    // panel warned that four cohorts would run and the excess be refused — directly above a
+    // preview drawing exactly one, advising a change that would fix nothing.
     previewThread.mockResolvedValueOnce({
       lines: [],
       validTargetCount: 1,
@@ -364,7 +397,43 @@ describe("InteractionPopup", () => {
     } as never);
     render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
     await pasteLink();
-    expect(await screen.findByText(/chỉ mở được 2 luồng màn hình/)).toBeVisible();
+    await waitFor(() => expect(screen.getByText("Sẽ chạy như thế này")).toBeVisible());
+    expect(screen.queryByText(/luồng màn hình/)).toBeNull();
+  });
+
+  it("gives the actors back when the phones come back", async () => {
+    // The drop effect removed and the seeding effect never restored, so narrowing the wall
+    // selection to one tile stripped the actor list — and widening it again did not undo that.
+    // The operator had to re-tick every tile by hand, and a fleet poll that briefly returned a
+    // short device list did the same thing.
+    const { rerender } = render(
+      <InteractionPopup
+        devices={devices}
+        selected={["actor-a", "actor-b"]}
+        onClose={() => undefined}
+      />,
+    );
+    await pasteLink();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeEnabled());
+
+    // One tile on the wall, so one phone is in scope and two actors cannot be selected.
+    rerender(
+      <InteractionPopup devices={devices} selected={["actor-a"]} onClose={() => undefined} />,
+    );
+    await waitFor(() => expect(screen.getByText(/đang chọn 1/)).toBeVisible());
+
+    // Back to both. The selection has to come back with them.
+    rerender(
+      <InteractionPopup
+        devices={devices}
+        selected={["actor-a", "actor-b"]}
+        onClose={() => undefined}
+      />,
+    );
+    await clickRun();
+    await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
+    const request = (startThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>)[0][0];
+    expect(request.actorUdids).toEqual(["actor-a", "actor-b"]);
   });
 
   it("keeps the manual pool rule it has always advertised", async () => {

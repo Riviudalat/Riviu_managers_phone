@@ -19,6 +19,51 @@ describe("interactionErrorVi", () => {
     expect(view.raw).toContain("target_open_screen_unchanged");
   });
 
+  it("finds the code inside an anyhow chain, not only at the head", () => {
+    // `interaction_commands.rs` writes the campaign-level reason as `format!("{error:#}")`, and
+    // an anyhow chain renders outermost-first — so the head is context and the code is one
+    // segment in. Splitting only at the head printed the same failure two ways in one panel:
+    // the assignment row read "AI không viết được bình luận" and the campaign row above it
+    // printed the whole chain untranslated.
+    const view = interactionErrorVi(
+      "AI chuẩn bị assignment 0: ai_comment_unavailable: ordinal 0 — comment_context_rejected: context=0 overall=0",
+    );
+    expect(view.title).toBe("AI không viết được bình luận");
+    expect(view.detail).toContain("AI chuẩn bị assignment 0");
+    expect(view.detail).toContain("comment_context_rejected");
+  });
+
+  it("translates the planner's own refusals, which arrive in English", () => {
+    // `plan_threads` runs `validate()` and the desktop wraps its `Display` impl as
+    // `CommandError::code("InteractionFailed", …)`. `describeError` keeps named codes, so this
+    // is exactly the string that used to be pushed into the reasons list verbatim — in a panel
+    // whose whole premise is that raw codes never reach the operator.
+    expect(
+      interactionErrorVi(
+        "InteractionFailed: message count must cover every selected actor",
+      ).title,
+    ).toBe("Số bình luận phải đủ cho cụm lớn nhất");
+    expect(
+      interactionErrorVi(
+        "InteractionFailed: manual mode needs at least as many comments as there are messages",
+      ).title,
+    ).toBe("Danh sách bình luận ít hơn số bình luận cần gửi");
+  });
+
+  it("does not read an ordinal it cannot trust", () => {
+    // `message_ordinal` is a `u8` capped at 63, so three digits is already generous. An
+    // unbounded `\d+` through `Number` makes the `+ 1` a silent no-op past 2^53 and renders
+    // "bình luận thứ 1e+21" past 1e21.
+    const view = interactionErrorVi(
+      "parent_identity_not_confirmed_at_ordinal_99999999999999999999",
+    );
+    expect(view.title).toBe("parent_identity_not_confirmed_at_ordinal_99999999999999999999");
+    // …while a real one still reads as a one-based position.
+    expect(
+      interactionErrorVi("parent_identity_not_confirmed_at_ordinal_2").title,
+    ).toContain("thứ 3");
+  });
+
   it("counts the skipped parent from one, the way the operator reads it", () => {
     // The ordinal is zero-based in the code and one-based in every list on screen.
     expect(interactionErrorVi("parent_identity_not_confirmed_at_ordinal_5").title).toContain(

@@ -173,18 +173,33 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
     }));
   }, [hierarchyActors, pixelActors]);
 
-  /// A phone that has left the fleet drops out of the selection, and nothing else moves.
+  /// A phone that has left the fleet drops out of the selection — **and comes back selected.**
   ///
-  /// Returning the previous array unchanged when nothing departed is what keeps this from
-  /// being the old bug in a new shape: a new array on every poll re-renders forever.
+  /// The two effects were asymmetric: this one removed, and the seeding one above is guarded by
+  /// `seededActors` so it never restored. Clicking a single different phone on the wall narrows
+  /// `selected`, and so `inScope`, and so stripped the actor list — then re-selecting the three
+  /// phones on the wall did *not* bring them back, and the operator had to re-tick every tile by
+  /// hand. A momentary fleet-poll blip that returned a short device list did the same.
+  ///
+  /// So departure is remembered rather than acted on once. Deliberately unticking a phone that
+  /// is present records nothing, because that phone never left.
+  ///
+  /// Returning early when nothing moved is what keeps this from being the old bug in a new
+  /// shape: a new array on every poll re-renders forever.
+  const departed = useRef<string[]>([]);
   useEffect(() => {
-    setDraft((previous) => {
-      const present = previous.actors.filter((udid) =>
-        inScope.some((device) => device.udid === udid),
-      );
-      return present.length === previous.actors.length ? previous : { ...previous, actors: present };
-    });
-  }, [inScope]);
+    const here = (udid: string) => inScope.some((device) => device.udid === udid);
+    const gone = draft.actors.filter((udid) => !here(udid));
+    const back = departed.current.filter(here);
+    if (!gone.length && !back.length) return;
+    departed.current = [
+      ...new Set([...departed.current.filter((udid) => !here(udid)), ...gone]),
+    ];
+    setDraft((previous) => ({
+      ...previous,
+      actors: [...previous.actors.filter(here), ...back],
+    }));
+  }, [inScope, draft.actors]);
 
   // Debounced: this used to fire one IPC round trip per keystroke.
   useEffect(() => {
