@@ -364,7 +364,7 @@ async fn main() -> anyhow::Result<()> {
             "
 == mention suggestions for @{prefix} =="
         );
-        match measure_mention_suggestions(&session, ui, labels, &prefix, &serial).await {
+        match measure_mention_suggestions(&session, ui, labels, &prefix).await {
             Ok(()) => {}
             Err(error) => println!("  FAILED: {error:#}"),
         }
@@ -901,6 +901,12 @@ async fn copy_post_link(
         .await?;
     tokio::time::sleep(Duration::from_millis(2_000)).await;
     let (_kind, bytes) = ui.get_clipboard(4_096).await?;
+    // **Put the sheet away.** Tapping `Copy link` leaves the share sheet up on this build, and
+    // the probe's other measurements run in the same process on the same screen — so
+    // `--copy-link --measure-mention` measured the share sheet's nodes and called them the
+    // comment drawer's. Back, then settle, so the phone is where the next measurement expects.
+    ui.back().await.ok();
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
     Ok(String::from_utf8_lossy(&bytes).trim().to_string())
 }
 
@@ -919,7 +925,6 @@ async fn measure_mention_suggestions(
     ui: &dyn UiSession,
     labels: TikTokControls,
     prefix: &str,
-    serial: &str,
 ) -> anyhow::Result<()> {
     let Some(comments) = labels.label(TikTokControl::Comments) else {
         anyhow::bail!("no measured comment label on this build");
@@ -966,22 +971,16 @@ async fn measure_mention_suggestions(
     // TikTok never notices it. That also sidesteps the unlabelled icon strip, which moves
     // between three positions depending on the keyboard and whether the field has text.
     println!("  sending \"@{prefix}\" as real key events");
-    let typed_ok = std::process::Command::new("adb")
-        .args([
-            "-s",
-            serial,
-            "shell",
-            "input",
-            "text",
-            &format!("@{prefix}"),
-        ])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    println!(
-        "    adb input text -> {}",
-        if typed_ok { "ok" } else { "FAILED" }
-    );
+    // **Through the production path.** This used to be the one bare `Command::new("adb")` in
+    // the tree, and it cost three things: it bypassed `RIVIU_ADB_PATH` (the app's own adb
+    // precedence), so on a machine where adb is not on `PATH` it reported the *measurement* as
+    // negative rather than reporting that there was no adb; it bypassed the character whitelist
+    // `type_keys` exists to enforce; and it measured a re-implementation, so a pass here proved
+    // nothing about what the campaign runner does.
+    match session.type_keys(&format!("@{prefix}")).await {
+        Ok(()) => println!("    type_keys -> ok"),
+        Err(error) => println!("    type_keys -> không gửi được: {error:#}"),
+    }
     tokio::time::sleep(Duration::from_millis(3_000)).await;
     let filtered = report_nodes("mention-keyed", &session.agent().source().await?);
 
