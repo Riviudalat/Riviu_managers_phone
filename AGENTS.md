@@ -7887,3 +7887,524 @@ tách được "xuống dòng lại" khỏi "viết lại", nên đừng dùng n
 Một cạm bẫy khi tự đo lại: các *dải dòng* không chứa `break 'feed` thì có (dải dài nhất 307 dòng),
 nhưng chúng **không phải khối cú pháp** — dải đó mở đầu bằng hai dấu `}` và bên trong có 5
 `continue;` nhắm ra vòng ngoài. Đếm theo dải dòng sẽ ra kết luận ngược; phải đếm theo khối.
+
+### 9.99 Sáu máy kẹt sau một trang không ai gỡ được, và cái thang phải chuyển nhà (23/08/2026)
+
+**Số đo mở đầu.** 14 máy cắm, **6 máy** đang đứng ở
+`com.ss.android.ugc.aweme.journey.NewUserJourneyActivity` — trang *"TikTok is better with
+friends!"*. Không có gì trong app gỡ được, và lý do không phải nhãn thiếu: **mọi cái thang gỡ kẹt
+của dự án này đều nằm *bên trong* một phiên nurture** (`await_feed`). Máy kẹt *trước khi* phiên
+bắt đầu thì cứ kẹt, còn phiên nó được nhận sau đó thì tiêu trọn 30 giây cửa sổ chỉ để phát hiện ra
+điều đó. Một cái thang tốt đặt sai chỗ vẫn là không có thang.
+
+**Đo trước, code sau — và lần này cái đo được là ba trang chứ không phải một.** Dump hierarchy qua
+chính agent đang chạy trên máy (`POST /session` → `GET /source` qua cổng `adb forward` sẵn có),
+**không** dùng `adb shell uiautomator dump`: cái đó câm lặng vì `io.appium.uiautomator2.server`
+đang giữ `UiAutomation`. Năm máy dump ra **giống nhau từng nhãn**, chỉ khác `bounds` — nên phải
+định vị bằng `locate`, không hằng số.
+
+| bước | trang | nút thoát | nút nguy hiểm bên cạnh |
+|---|---|---|---|
+| 1 | "TikTok is better with friends!" | `Skip` — `Button`, `text`, `id/cxx` | `Sync` (`id/cxy`) |
+| 2 | hộp xác nhận "Skip finding Facebook friends?" | `Skip` — `Button`, `text`, **không có id** | `Find friends` |
+| 3 | "Your friends on TikTok" | `Done` — `Button`, `text`, `id/b9r` | mỗi hàng một `Follow` |
+
+Ba điều đã đo, không suy:
+
+1. **`Skip` phải khớp *chính xác*.** Tiêu đề của hộp bước 2 là "Skip finding Facebook friends?" —
+   một `TextView`, không bấm được. `TextContains("Skip")` sẽ trả về cái tiêu đề đó thay vì cái
+   nút, vì locator lấy phần tử đầu tiên.
+2. **Một nhãn đóng được hai bước.** Bước 1 và bước 2 cùng chuỗi, cùng thuộc tính — nên rung
+   `JourneySkip` phải được phép lặp.
+3. **`Done` không follow ai, và đây là phép đo quan trọng nhất.** Luật của repo là *nhãn đo được
+   chưa chắc là nhãn an toàn*, và một cái nút nằm giữa màn hình đầy nút `Follow` là đúng chỗ luật
+   đó cắn. Đo trên `9889db374744474635`: trang mời 5 tài khoản, bấm `Done`, rồi mở hồ sơ —
+   **Following vẫn là 1** (`hương phạm`, có từ trước), cả 5 gợi ý vẫn còn nút `Follow` chưa bấm.
+   `Back` trên trang này **không làm gì**: dump trước và sau giống nhau từng byte (47.509).
+
+**Cái thang chuyển nhà, không nhân bản.** Rung + thứ tự + lập luận an toàn giờ ở
+`crates/core/src/feed_ladder.rs`; `await_feed` và bộ quét lúc rảnh cùng gọi nó. Hai bản sao của
+"nút nào bấm được, theo thứ tự nào" chính là kiểu trôi dạt dự án này đã dính: sửa một bên quên bên
+kia thì nhìn như máy hỏng chứ không như bug. Thứ tự: `DialogDismiss` → `JourneySkip` →
+`JourneyDone` → `HomeTab` (một lần) → `Back`. Modal đứng đầu vì nó chiếm cả cây accessibility;
+`Back` đứng cuối vì **chỉ ở vị trí đó nó mới an toàn** — Back trên feed là thoát TikTok.
+
+**Cái `await_feed` giữ lại, và tại sao nó thành hai nhánh.** Hết cửa sổ 30 giây thì *nhìn, không
+chạm*: vẫn hỏi `on_feed` một lần cuối (feed lên ở nhịp cuối vẫn phải tính), rồi báo thua — nhưng
+không bấm. Một cú bấm mà phiên sắp bỏ dở để lại cái máy đang giữa chừng chuyển màn cho người kế
+tiếp.
+
+**Lỗ hổng `TikTokControl::ALL` đã có sẵn, và thêm nhãn mới mới lôi nó ra.** `ALL` có 23 phần tử
+trong khi enum có 27: `HomeTab`, `SoundLink`, `DialogDismiss`, `FoldedComments` mang ordinal 23–26
+và **không** nằm trong mảng — đúng cái doc-comment của `ALL` đã dự báo. Hệ quả:
+`no_entry_carries_an_empty_label` chưa từng kiểm bốn nhãn đó, và `every_control_appears_in_all`
+không thấy gì vì nó tự lấy kích thước từ `ALL`. Nay `ALL` đủ 29, ordinal 0–28 liền mạch, và test
+kia mới thật sự chặn được.
+
+**Nghiệm thu trên máy thật.** Năm máy còn kẹt (một máy đã gỡ tay lúc đo) — mở app, **cả năm sạch
+trong ~40 giây**, ba máy ngay lượt quét đầu, hai máy lượt sau (trần 3 máy song song). Cả năm về
+`SplashActivity` với feed thật trên tile. Không máy nào bị đẩy ra ngoài TikTok.
+
+**Bộ quét sống dưới bốn luật, và mỗi luật là một bài học cũ.** Không tranh chấp
+(`open_manual_session` + `DeviceWorkOwner::IdleSweep`, không được xếp hàng — overlay của người
+vận hành đang mở là bị từ chối, đúng ý). Không park stream (§9.67: nếu park thì 14 tile đen mỗi
+lượt). Không chạm máy đang ở ngoài TikTok (`foreground_labels` từ chối trước khi dò bất cứ rung
+nào). Có trần — 3 máy một lúc, 45 giây một lượt, 3 bước một lượt thăm. Tắt bằng
+`RIVIU_IDLE_SWEEP=off`.
+
+**Một chỗ suýt làm tính năng thành vô hình.** Dòng trong panel Nuôi TT dựng từ *status nurture*,
+mà bộ quét thì không sinh session cũng không sinh status — nên máy nó vừa gỡ có nguyên lịch sử và
+**không có dòng nào để bấm mở**. Đó là lý do có `SessionLogBook::summaries()`: hàng ghép từ cả
+status lẫn sổ log. Một tính năng ghi log mà không ai mở được thì bằng không ghi.
+
+### 9.100 Hai máy khoá màn hình, một câu báo lỗi nói sai, và thanh tiến trình đầu tiên (23/08/2026)
+
+**Khiếu nại của người vận hành: "nhiều máy bị lỗi kìa".** Đo ra đúng hai trong mười bốn máy,
+và cả hai fail vì cùng một chuyện — **đang ở màn hình khoá**. `dumpsys window` trên chúng:
+`mCurrentFocus=Window{… StatusBar}` và `mDreamingLockscreen=true`, trong khi `mFocusedApp` là
+TikTok nằm dưới. Đo cả 14 máy: `mDreamingLockscreen` **true đúng ở hai máy đó, false ở cả 12
+máy còn lại** — key này phân biệt hoàn hảo. `isKeyguardShowing`/`mKeyguardShowing` **không tồn
+tại** trên Android 9.
+
+**Ba lỗi xếp lên nhau, và không lỗi nào nằm trong code keyguard.**
+
+1. `parse_current_focus_package` mở đầu bằng `line.rsplit_once('/')?`. Dòng `StatusBar` không
+   có dấu `/`, nên nó bị **bỏ qua trong im lặng** và hàm trả `None`. Ba biến thể `dumpsys`
+   đều thế, nên `active_app_bundle` báo *"`<source>` had no mCurrentFocus line"* — **câu đó
+   sai**: dòng có, nó chỉ tên một cửa sổ hệ thống. Người vận hành nhận được chữ
+   "unreadable", là thứ không ai làm gì được; "đang ở màn hình khoá" thì làm được.
+2. `parse_keyguard_locked` **có** caller — `refuse_undrivable_screen` trong `driver/stream.rs`
+   — nhưng nó nằm ở đường **stream**, mà nurture mở *session trước, stream sau*. Nên kiểm tra
+   keyguard ở hoàn toàn phía dưới cái bước vừa chết, và chưa từng chạy. Đây là đúng cái
+   §9.64 đã ghi: *kiến thức đã có mà đường mới không đi qua chỗ giữ nó* — lần thứ hai, cùng
+   một chủ đề.
+3. Chuỗi báo lỗi là `"failed — không mở được WDA: {e}"`, cứng, ở `open_for_session` — đường
+   **dùng chung cho cả hai nền tảng**. WDA là agent iOS; mười ba trên mười bốn máy ở đây là
+   Android. Bốn chuỗi cạnh nó cũng nói WDA. `crates/core/src/nurture/` không tham chiếu
+   `DevicePlatform` ở đâu cả, nên cách sửa đúng là **đổi chữ**, không phải rẽ nhánh.
+
+**Đo cách chữa trước khi viết.** `KEYCODE_WAKEUP` rồi `KEYCODE_MENU` qua adb: `mDreamingLockscreen`
+`true → false` và TikTok lên `mCurrentFocus` **ngay**, trên cả hai máy. Nên fleet này không có
+khoá bảo mật và cặp phím đó là đủ. `KEYCODE_POWER` thì **không bao giờ** — nó *lật*, nên trên
+máy đang sáng nó tắt màn hình.
+
+**Nghiệm thu end-to-end, không phải chỉ cặp phím.** Cố ý khoá lại máy
+`ce0717171c2a64d50d` rồi chạy nuôi qua UI:
+
+```
+09:54:38  mở phiên điều khiển mới
+09:54:39  phone is behind its lock screen; dismissing before waiting out the
+          foreground proof   udid=ce0717171c2a64d50d  blocker=StatusBar
+09:54:45  nhãn đã đo: com.zhiliaoapp.musically / en …
+09:54:47  xem 3.9s
+09:54:53  tim thành công (nhãn đổi trạng thái)
+```
+
+**~1 giây thay cho 40 giây rồi fail.** Dùng `dismiss_keyguard` (đọc lại keyguard rồi trả lời
+thật) chứ **không** `set_locked(false)` — cái đó bấm hai phím qua HTTP agent và không kiểm
+chứng gì, nên máy có PIN sẽ trở về trông như đã mở. Dump không đọc được (`locked: None` +
+`Unreadable`) thì **rơi xuống timeout cũ, không được từ chối** — từ chối sai sẽ đuổi một máy
+đang chạy tốt.
+
+**Thanh tiến trình: cái làm nó trung thực là mẫu số, không phải cái thanh.**
+
+Một phiên nuôi kết thúc ở **cái nào tới trước** trong hai mốc: số video, và một đồng hồ mà
+với lượt chạy tay là **ngẫu nhiên 120–180 phút, tính trong `nurture_start` rồi bỏ đi**. Hệ quả:
+
+- Thanh chỉ theo số video **đứng ở 40%** trên phiên còn mười phút là xong, và đọc như treo.
+- Thanh chỉ theo đồng hồ đứng ở 3% trên phiên sắp cạn số video.
+- Nên phần lấp = **max của hai phân số**, và **nhãn phải gọi tên mốc nào đang dẫn** — "42/120
+  video" và "còn ~18 phút" là hai câu khác nhau, mỗi thời điểm chỉ một câu đúng.
+
+Bốn thứ phải đi cùng số đếm, và mỗi thứ là một cách nói dối nếu thiếu:
+
+| trường | thiếu thì sao |
+|---|---|
+| `video_target` | mẫu số lấy từ form settings. Hạ "Giới hạn video" 120→15 giữa lượt: vòng lặp vẫn đếm tới 120, UI chia cho 15, thanh đọc **800%** |
+| `deadline_at` | mốc thứ hai vô hình, thanh nói sai về lúc phiên kết thúc |
+| `run_id` + `run_size` | `set_status` chèn theo udid và **không bao giờ xoá**, nên tổng cộng gộp cả máy của lượt trước; khởi động lại một máy làm thanh tổng **chạy lùi** |
+| `phase` + `outcome` | máy fail và máy xong đều là một dòng xám. Và 0% trong phút đầu (40s chờ foreground + 30s chờ feed) không phân biệt được với máy chưa mở nổi app — **đúng cái đã che hai máy khoá màn hình** |
+
+`swipe_attempts` **không dùng được làm tử số**: đường Blocked tăng nó hai lần trong một vòng
+lặp, nên nó vượt được `total_videos`.
+
+**Luật đã pin hai phía.** Chính sách viết hai lần — Rust là bản tham chiếu, TypeScript vì mốc
+đồng hồ buộc thanh phải nhích *giữa hai lần push status* (máy xem video dài không phát gì
+trong hai mươi giây). `progress_tests` trong `types.rs` và `nurtureProgress.test.ts` khớp nhau
+từng ca. Một luật sửa một bên là thanh không đồng ý với engine về việc lượt chạy đã xong chưa.
+
+**Ngưỡng `CLOCK_LABEL_LEAD = 0.05`, và nó đến từ màn hình thật.** Không có nó, đồng hồ thắng
+ngay giây đầu (`videos_done` = 0 nên mọi giây đã trôi đều lớn hơn), và thứ đầu tiên người vận
+hành thấy là *"còn ~154 phút"* trên lượt chạy họ vừa gõ 5 vào giới hạn video. Phần **lấp** vẫn
+lấy max thẳng; chỉ **câu chữ** chờ độ dẫn.
+
+**Máy fail đếm là một suất đã xong, và cái giữ cho thanh đầy vẫn trung thực là con số bên
+cạnh.** 12 xong + 2 lỗi = 100% *đã ngã ngũ*, nên phải có đuôi đỏ trên thanh và chip `2 lỗi` —
+thiếu chúng thì thanh đầy đọc thành thành công.
+
+**Ba lỗ hổng khác lôi ra được trên đường đi.**
+
+- **`cargo build` xanh trong khi `cargo test` đỏ.** Chín lỗi E0063 nằm trong `#[cfg(test)]`
+  (bảy ở `hierarchy.rs`, hai ở `recovery.rs`), nên `check`/`build` không thấy. Bài học:
+  thêm trường vào struct thì **cửa là `cargo test`**, không phải `build`.
+- **Có một test Rust đối chiếu từng trường mọi `struct` trong `types.rs` với mọi
+  `export interface` trong `types.ts`, cả hai chiều** (`types.rs`, guard `shared >= 24`). Nó
+  là test của riviu-core, nên người review frontend không bao giờ thấy — và nó đỏ ngay khi
+  crate compile được.
+- **Key React trùng `adb`, và nó không chỉ là ồn console.** `FocusStream` nối hàng riêng của
+  panel với catalog dùng chung thành **một** danh sách; `withoutMenuIds` bỏ *con*
+  `adb-console` mà giữ *cha* `adb`, còn hàng của panel cũng `id: "adb"`.
+  `DeviceFunctionList` khoá trạng thái flyout theo `node.id`, nên hover cái lá "Lệnh adb" lại
+  mở submenu của cái kia. Id ở catalog là hợp đồng đã bị `deviceMenu.test.ts` ghim, nên
+  **bên phải đổi là panel** (`adb-inline`). Stub trong test cũ chỉ có một con nên submenu rỗng
+  đi và collision không tái hiện được — test mới tự dựng stub hai con.
+
+**Đừng tin cú bấm của driver mà không có bằng chứng pixel.** Cuối phiên này ba control khác
+nhau đều không phản hồi trong khi `status` báo `responding=True foreground=True` và
+`occlusion` báo `clear`. Không có lỗi nào ở webview log. Đó là cái §"focusing click loses
+races" trong skill nói, ở dạng nặng hơn — bằng chứng là **ảnh chụp trước/sau**, không phải
+exit code của `click`.
+
+### 9.101 Giá tiền tự bịa, một cổng vision hết hạn, và cái field `vision_body` không gửi (23/08/2026)
+
+**Người vận hành nói: "bỏ cái giá tiền ở trong code nó ko có đúng."** Đúng, và tệ hơn — năm
+lỗi cùng chỗ, mỗi cái tự đủ để mọi con số USD thành vô nghĩa:
+
+1. `input_price_per_1m` / `output_price_per_1m` **không bao giờ được gửi cho API**. Chúng chỉ
+   nuôi `estimate_usd`, và tích số đó nằm trong cột `usd` của hai bảng audit.
+2. **Ba cặp giá khác nhau tồn tại cùng lúc**: `types.rs` mặc định `0.10/0.60`, `db.rs` dùng
+   `1.25/10.0`, và một nhánh trong `adopt_openrouter_luna_if_still_shipped_deepseek` ghi
+   `1.25/10.0` **về lại** `0.10/0.60`. DB thật đang giữ `1.25/10.0`.
+3. **Không có ô nào để sửa.** Hai doc comment khẳng định "the panel can edit these"; cả hai
+   sai — `NurtureAiTab.tsx` 183 dòng, không một input giá nào.
+4. `nurture_comment_costs` **chỉ có một writer**, ở đường iOS/pixel. Trên fleet 14 máy Android
+   nó rỗng, nên `nurture_cost_summary` báo **0 cho mọi lượt chạy**.
+5. Lượt bị gate từ chối ghi `prompt_tokens 0, completion_tokens 0, usd 0.0` — **bỏ trắng token
+   của tối đa 4 lời gọi**. Kiểu hỏng đắt nhất được ghi là miễn phí.
+
+Và cả `session_usd`, `nurture_cost_summary`, `nurture_list_comment_attempts` **không được vẽ ở
+đâu cả** — command đã đăng ký, không caller nào. Nên không ai thấy được rằng con số là bịa.
+
+**Cách sửa: đừng đổi đơn vị của một con số bịa, hãy ghi thứ đo được.** Token đến từ chính
+`usage` của API, nên chúng đúng với bất kỳ model nào đang cấu hình. `usd` bị **drop** khỏi cả
+hai bảng (migration 11) chứ không để lại đọc ra 0 — một cột 0,0 cạnh token thật đọc thành
+"comment này miễn phí", tức là lời dối tệ hơn cái vừa bỏ. Muốn ra tiền thì nhân với giá thật
+của provider, **ngoài app** — đó là số duy nhất app không thể tự biết.
+
+Ba việc kèm theo, vì thiếu chúng thì con số mới cũng dối theo cách khác: `nurture_cost_summary`
+nay đọc `nurture_comment_attempts` (bảng mà **cả hai** đường đều ghi) thay vì bảng costs; token
+được cộng trên **mọi** lượt kể cả bị từ chối; và ô "Token AI" hiện trong khung thống kê của
+panel — vì "ghi rồi không ai thấy" đúng là cái bug lặp lại của repo này.
+
+**Cổng vision theo host đã hết hạn, đúng như doc của nó dự báo.** `provider_supports_vision`
+là một dòng cứng `host != "api.deepseek.com"`, từ phép đo 09/08/2026 khi cả hai model DeepSeek
+trả `unknown variant "image_url", expected "text"`. Doc tự ghi: *"the day DeepSeek ships an
+image part, this goes stale silently."* Ngày đó đến. Đo lại 23/08/2026 trên cùng host:
+
+| model | `image_url` |
+|---|---|
+| `deepseek-v4-flash-vision-exp` | **nhận** — lỗi là `.messages[0].image[0]: unsupported image`, tức nó đã *đọc* được part và chỉ chê tấm ảnh 8×8 |
+| `deepseek-v4-flash` | `This model does not support image` — từ chối ở **model**, không phải ở schema |
+
+Nên dòng cứng đó **sai cả hai chiều cùng lúc**: nó chặn một host đã học được vision, và nó sẽ
+vui vẻ gửi ảnh tới bất kỳ host nào khác chưa học. Nay **học từ chính lỗi endpoint trả về**,
+khoá theo `(host, model)`, per-process: lạc quan mặc định (thử request chuẩn trước), và chỉ
+chuyển sang caption khi endpoint nói không. Giá phải trả là **một** request lãng phí mỗi
+`(host, model)` mỗi lần chạy; đổi lại là không bao giờ hết hạn. `error_refuses_images` phân
+biệt "endpoint không chở ảnh" với "endpoint không thích tấm ảnh này" — vế sau (`unsupported
+image`, `invalid image`, `image size`) **không** được coi là từ chối, vì một khung xấu không
+được phép hạ cả phiên xuống caption.
+
+**Và cái field `text_body` vẫn gửi mà `vision_body` thì không.** `"thinking": {"type":
+"disabled"}`. Trên model suy luận, phần nghĩ ẩn bị tính là completion và rút từ **cùng**
+`max_tokens`, nên nghĩ dài là hết chỗ trả lời. Đo trên tấm ghép 750×1334 thật của app:
+
+| | có `thinking: disabled` | không (như `vision_body` cũ) |
+|---|---|---|
+| JSON dùng được | **4/4** | 3/4 — một lần `finish=length`, 1200 token toàn bộ là reasoning, body **rỗng** |
+| completion token | **135** | 777 |
+| p50 | **2,1s** | 8,0s |
+
+Đó chính là `malformed_model_output` mà dự án đã trả giá một lần khi `max_tokens` là 500 — cùng
+một triệu chứng, nguyên nhân khác: lần trước là schema đặt `caption` trước `comment`, lần này
+là phần nghĩ ăn hết ngân sách.
+
+**Đường caption dự phòng không phải "suy giảm nhẹ" trên fleet này.**
+`interaction_ocr::recognizer_language` đã ghi: Windows **không phát hành** pack OCR `vi-VN`
+nào — không phải máy này thiếu. Reader `en-US` đọc `mới` thành `mdi`, `thư` thành `thif` —
+**thay chữ**, không phải mất dấu, nên không gấp dấu nào chữa được. Trỏ app sang một endpoint
+không chở ảnh là chấp nhận caption **hỏng**, không phải caption kém.
+
+**Bốn cổng mà `cargo build` không thấy, cả bốn đều đỏ trong lần này:**
+
+1. Bỏ trường khỏi struct → lỗi E0063 nằm trong `#[cfg(test)]`. **Cửa là `cargo test`.**
+2. Một test **Rust** đối chiếu từng trường mọi struct trong `types.rs` với mọi
+   `export interface` trong `types.ts`, **cả hai chiều**. Nó khớp **đúng 24** kiểu với guard
+   `shared >= 24` — **không có dư**: bỏ *trường* thì an toàn, bỏ hẳn một cặp struct/interface
+   là nó nổ.
+3. `the_form_promises_exactly_what_a_running_session_absorbs` **đọc thân hàm
+   `absorb_live_changes` như văn bản** và so bằng với `LIVE_TUNABLE_FIELDS` trong `types.ts`.
+   Xoá một bên mà không xoá bên kia là đỏ.
+4. Bốn chỗ trong `db/migrations.rs` ghim danh sách migration, **cộng** một fixture chèn
+   `version: 11` để mô phỏng "ledger từ bản mới hơn" — thêm migration 11 làm fixture đó không
+   còn ở tương lai nữa.
+
+Một chỗ **cổng parity không nhìn thấy**: `NurtureApiTestResult` sống ở crate desktop, không ở
+`types.rs`, nên `usd` của nó có thể lệch giữa hai ngôn ngữ trong im lặng. Phải sửa bằng tay.
+
+**Không cần migration settings v4.** `NurtureSettings` có `#[serde(default)]` và **không** có
+`deny_unknown_fields`, nên blob đã lưu với `inputPricePer1m` vẫn nạp được; hai key chết bị dọn
+ở lần `save_nurture_settings` kế tiếp. Fixture JSON legacy trong `db.rs` **giữ lại** hai key
+đó có chủ đích — nay nó chính là bằng chứng cho tính tương thích ngược.
+
+### 9.102 Tại sao 3 máy không lướt ngang — và đo ra thì nhãn có, tôi đọc sai một lần (23/08/2026)
+
+**Câu hỏi: tại sao không lướt ngang được?** Chuỗi từ chối, nguyên văn:
+
+1. `musically/en` có `photo_badge: None` — "never measured on this build".
+2. `locate()` (`hierarchy.rs:241`): `let Some(label) = labels.label(control) else { return Ok(None) };`
+   Doc của nó nói rõ **"no measured label means *do not look*"** — nó không hỏi máy một câu nào.
+3. `looks_like_photo_post()` → `false`.
+4. `traverse_carousel()`: `if !self.looks_like_photo_post().await { return 0; }` — **không in
+   dòng nào**.
+
+Và lý do thiết kế để từ chối, nguyên văn trong code: *"a sideways swipe on a **video** card is
+TikTok's open-the-author's-profile gesture, so guessing here walks the session off the feed."*
+Cái badge là **thứ duy nhất** đứng giữa cú vuốt ngang và việc phiên bị đẩy khỏi feed. Đây không
+phải bug, là một sự từ chối có chủ đích chờ một phép đo.
+
+**Một lý do thứ hai, áp cho cả 14 máy.** `trill/en` có `live_room: None`, nên một thẻ bị coi là
+"không có rail" **chỉ vì** `Comments` không định vị được đúng lúc đó — và code tự đặt tên *"a
+photo carousel mid-transition"* là một ca railless. Thẻ như thế bị vuốt dọc qua, badge hay
+không.
+
+**Đo, và nhãn có thật.** Vuốt feed + dump từng thẻ trên hai máy 46.2.1:
+`ce0717171c2a64d50d` (4/14 thẻ) và `ce11171beb408a1501` (1/10). Năm bài ảnh, tất cả có
+`TextView text="Photo"`, `resource-id …:id/tv_label`, `clickable=false`, ngay bên phải
+`…:id/title`, vẽ ra thành pill `⧉ Photo` cạnh tên tác giả — xác nhận bằng mắt trên ba bài.
+**Mười chín thẻ không-ảnh không có node `Photo` nào**, kể cả một thẻ LIVE bán hàng và một quảng
+cáo. Không false positive nào để cân lại.
+
+Cố ý nhiều bằng chứng hơn cái `trill/en` từng được: cái đó bật từ **một** màn hình hôm
+18/08/2026 và **cùng ngày phải tắt lại**. Hai máy cộng một bộ đối chứng âm là mức đáng ra phải
+đòi từ lúc ấy.
+
+**`y` của badge di chuyển — phải `locate`, không được tap theo tỉ lệ.** Năm lần thấy ở y 1332,
+1566, 1698, 1704, 1887: hàng caption xê dịch theo độ mở của caption, và thẻ 13 với 14 của cùng
+một lượt quét là **cùng một bài** ở hai độ cao khác nhau.
+
+**Tôi đọc sai một lần, và cách sai đáng ghi lại.** Máy 46.2.42 đứng một thẻ suốt 12 vòng:
+`SeekBar` lặp ~10 giây, ảnh đổi liên tục, có mấy chấm ở dưới. Tôi đã kết luận "build này không
+có badge nào cả" — sai. Đó là **video montage**, không phải carousel. `SeekBar` **không** phải
+dấu hiệu ảnh: đo trên thẻ 10 của cùng lượt quét, một video thường có `Effect · 97` cũng có
+`SeekBar`. Feed máy đó không nhích vì kẹt (bẫy 5: cần force-stop, không phải vuốt mạnh hơn),
+nên 46.2.42 **vẫn chưa được kiểm** — bảng khoá theo package+language nên nhãn áp sang nó, và
+điều đó an toàn theo đúng chiều cần: nếu 46.2.42 không vẽ badge thì máy đó chỉ tiếp tục không
+lướt ngang, y như trước.
+
+**Và cái im lặng đã bịt.** `can_page_carousel(labels)` đặt cạnh `can_follow` — cùng một lý do
+đã viết ở đó: câu trả lời là *không* với phần lớn fleet, và giá của việc không hỏi không phải
+một gesture bị thiếu mà là **một câu sai**. Nay khi `carousel_ceiling() > 0` mà build không có
+badge, phiên nói một lần: *"bỏ qua vuốt ngang cả phiên: chưa đo nhãn bài ảnh cho bản build
+này."* Không tốn gì lúc chạy — badge lookup là đọc bảng, không phải hỏi máy.
+
+**Dòng provenance bị ngược, và vẫn còn ngược.** `TIKTOK_RESOURCE_SETS` không có mục cho `trill`
+38.3.2, nên 11 máy **lướt ngang được** in "CHƯA đo resource id cho phiên bản app này", còn 3 máy
+trước đây **không** lướt được lại là 3 máy duy nhất in dòng version yên tâm. `measured_app_version`
+— trường mà mọi provenance dẫn ra — **không có code production nào đọc**. Chưa sửa.
+
+**Dòng provenance ngược — đã sửa.** Nó rẽ nhánh theo *bảng resource có khớp không*, chứ không
+theo *có thiếu gì không*. Nên nó in "CHƯA đo resource id cho phiên bản app này" mỗi khi
+`TIKTOK_RESOURCE_SETS` không có mục cho version của máy — bất kể build đó có **cần** resource id
+hay không.
+
+Đo trên farm này: `trill/en` mang `comment_send: Some("Post comment")` nên **không cần id**, và
+`label()` lấy nó từ bảng chữ — nhưng bảng resource không có mục 38.3.2, nên **11 máy khoẻ mạnh
+nhận câu báo động**. Còn `musically/en` có `comment_send: None`, nút Gửi là `@2131…` mà **chỉ**
+một resource set khớp mới gọi tên được — và 3 máy đó là 3 máy duy nhất nhận dòng version yên
+tâm. Cảnh báo to nhất trong log chỉ vào đúng nhóm không có vấn đề.
+
+Nay nó báo cáo nút Gửi theo **cái gì đã giải quyết được nó** — control duy nhất khoá theo
+version (`TikTokResourceLabels::resource` không khớp gì khác):
+
+| tình huống | dòng in ra |
+|---|---|
+| resource set khớp | `nút Gửi theo resource id, đo trên app {version} ({measured_on})` |
+| không có set, bảng chữ có | `nút Gửi đọc theo chữ — bản build này không cần resource id` |
+| không có cả hai | `CHƯA đo được nút Gửi cho bản app này — phiên sẽ bỏ bình luận cả phiên` |
+
+Chỉ ca cuối còn cảnh báo, và đó là ca duy nhất thật sự không bình luận được. Cảnh báo tương ứng
+trong `probe.rs` cũng đổi từ `resource_version().is_none()` sang
+`label(CommentSend).is_none()` — hai câu hỏi khác nhau, và lẫn chúng là nguồn gốc của cả chuyện
+này.
+
+**Và `measured_app_version` giờ có người đọc.** Trước đó nó được ghi cho ba bộ nhãn, **không có
+code production nào đọc**, trong khi doc của chính nó gọi mình là "a note for the next reader" —
+một ghi chú không ai được xem. Nó thuộc về dòng này: bảng chữ được áp cho **mọi** version của
+một cặp (package, language), nên version mà chúng thật sự được đọc trên là một caveat thật về
+từng máy đang dùng chúng.
+
+## §9.103 — Bằng chứng cho bình luận: tấm ghép, khung trùng, và thứ tự
+
+Ba việc trong một đợt (23/08/2026). Cả ba đều xuất phát từ một câu hỏi: **một bài ảnh thì
+model thực sự nhìn thấy gì?**
+
+### 1. Tấm ghép là hình học iPhone 8 đem áp lên Android
+
+`make_contact_sheet` dựng một tấm 750x1334 với ba thumb 375x667 và một ô caption 375x260. Đó
+là **khung vật lý của iPhone 8 và lưới điểm logic của nó** (`screen.rs`) — trên iPhone 8 thumb
+là bản thu nhỏ đúng 0,5x, không méo. Không ai dẫn lại phép tính đó cho khung 1080x2220 của
+Android, nên trên farm này:
+
+- thumb bị **kéo ngang 15,6%**, ô caption bị kéo **19,9%** — *hai* độ méo khác nhau trên cùng
+  một tấm, cùng một chữ;
+- ô "phóng caption" chỉ lớn hơn **1,19x** so với chính vùng đó trong thumb 3 ngay bên cạnh —
+  nghĩa là gần như vô dụng;
+- **15,25% tấm ảnh là màu đen thuần** (khối 375x464 ở góc dưới phải);
+- thanh action rail (x 958–1027) nằm ngoài vùng cắt (kết thúc ở x 907).
+
+Đã dựng lại: giữ **đúng diện tích cũ** (750x1334 = 1.000.500 px, vì giá ảnh ở các API này tính
+theo diện tích — đo được 475 token vào cho tấm cũ trên `deepseek-v4-flash-vision-exp`), giữ tỉ
+lệ theo khung mà máy thật gửi về, và bỏ hẳn phần đệm. Chiều rộng tấm là biến duy nhất, giải từ
+`W²/(n·a) + W²/c = 1.000.500`.
+
+| khung phân biệt | thumb (1080x2220) | dải caption | dải chiếm |
+|---|---|---|---|
+| 1 | 589x1211 | 589x490 | 28,8% |
+| 2 | 367x754 | 734x610 | 44,7% |
+| 3 | 271x557 | 813x676 | 54,8% |
+
+**A/B đã xem bằng mắt, không phải suy luận** (ba fixture `feed-same-card-*.jpg`, cùng đầu vào
+qua hai layout): tấm cũ có ô caption *mờ hơn chính thumb bên cạnh nó*; tấm mới đọc rõ
+`tiktokshop_viet ✓ / TIKTOK SHOP 8.8 – SALE VUI… / Được tài trợ / Mua ngay ›`. Đổi lại thumb
+nhỏ hơn 0,72x tuyến tính ở trường hợp 3 khung. Đó là **đánh đổi có chủ ý**: caption là trường
+prompt hỏi trước tiên và là thứ neo câu bình luận, còn cảnh trong thumb ở 0,25 tuyến tính vẫn
+đủ để gọi tên. Nếu về sau muốn đổi lại, con số phải đo lại — đừng đổi theo cảm giác.
+
+### 2. Băm cả khung **không bao giờ** nhận ra hai khung giống nhau
+
+Bài ảnh phát ra cùng một tấm hình ở mọi lần lấy mẫu, nên tấm ghép nên gộp ba mẫu thành một.
+Bản đầu tôi gộp bằng `nurture::frame_digest` trên **byte đã mã hoá** — và nó sai trong thực tế.
+
+Đo trên `ce0717171c2a64d50d` (S8, 1080x2220), ba `screencap` cách nhau 600 ms trên một bài ảnh
+thật (`Hynxy ở Nha Trang · Photo`, 6 ảnh):
+
+```
+f1 vs f2: cả khung khác ở (935, 16, 1015, 49) | dưới dải status: None
+f1 vs f3: cả khung khác ở (141, 16, 1015, 49) | dưới dải status: None
+f2 vs f3: cả khung khác ở (141, 19, 160,  49) | dưới dải status: None
+```
+
+**Mọi pixel khác nhau đều nằm trong y 16..49** — cái mũi tên tải xuống nhấp nháy trên icon
+WiFi. Dưới đó: `None`, quét toàn bộ, không một pixel nào khác. Nên băm cả khung nói "ba khung
+khác nhau" về một bài đứng yên hoàn toàn, và phép gộp sẽ chỉ chạy trong unit test.
+
+Sửa: `openai_client::picture_digest` băm **pixel đã decode**, bỏ 4% trên cùng
+(`STATUS_BAR_FRACTION`, = 88 px, thoát khỏi y=49 và vẫn ở trên hàng tab `For You` đo được ở
+y=141). Tấm ghép decode sẵn rồi nên gần như không tốn gì.
+
+**Chưa sửa, và cùng một lỗi:** `nurture::card_is_still` (mod.rs) cũng băm cả khung bằng
+`frame_digest`. Trên máy nào status bar có icon động thì nó trả `false` cho một thẻ đứng yên
+thật. Số "4/40 thẻ đứng yên" trong repo do đó là **sàn**, không phải số thật, và nó đo trên
+những máy mà icon tình cờ không đổi trong cửa sổ lấy mẫu. Chưa đo lại nên chưa sửa — nhưng
+đừng đọc con số đó như một tỉ lệ.
+
+### 3. Câu chữ được viết **trước** khi xem ảnh
+
+`FeedAction::Comment` gọi `comment_for_post` ngay tại chỗ roll — tức là trước khi
+`traverse_carousel` tồn tại trong luồng. Một bài 6 ảnh được bình luận từ ảnh 1, mà vì bài đứng
+yên nên là **một tấm hình lấy mẫu ba lần**. Trong khi đó chính vòng traversal đã trả tiền cho
+mỗi cú flick, 900 ms settle và một lần dump hierarchy mỗi ảnh — và bình luận không thấy gì
+trong số đó.
+
+Đã đổi thứ tự, hẹp và có bảo vệ:
+
+- `CommentTextSource` thêm hai method **có mặc định** (`note_slide`, `record_skip`) nên
+  `examples/nurture.rs` không phải sửa.
+- `traverse_carousel` nhận thêm `evidence: Option<&dyn CommentTextSource>` và gọi `note_slide`
+  ở ảnh 1 rồi mỗi lượt, **trong cả hai nhánh** của `carousel_position()` — nhánh `None` là
+  nhánh duy nhất đi qua trên bài không hiện số ảnh, và đó là 6/10 bài ảnh trong một lần chạy.
+- Bộ đệm giữ **hai** khung: ảnh đầu và ảnh cuối *khác* nó (`SlideEvidence`). Hai, không phải
+  một-mỗi-ảnh, vì bảng ở §1: ba ảnh là cắt 4,7x mỗi ảnh và đưa 55% tấm cho dải caption.
+- Ngân sách nhịp (`wait_gap`, `record_attempt`, `mark_post_interacted`, `comment_attempts`)
+  **không di chuyển** — vẫn ở chỗ roll, nên bài ảnh nhịp giống bài video. `wait_gap` đóng dấu
+  lúc *kiểm tra*, nên hoãn drawer chỉ làm khoảng cách thật rộng ra.
+- Sau traversal, trước khi mở drawer: settle → `fingerprint` → ba cửa. `stop` →
+  `deferred_stopped`; `after.is_empty()` (rời khỏi thẻ, gồm cả trường hợp follow điều hướng đi
+  — đo 18/08/2026) → `deferred_no_rail`; `after != before` → `deferred_card_changed`. Gửi
+  được thì lấy `fingerprint` lại, vì bình luận vừa gửi làm đổi chính số comment của thẻ, mà số
+  đó nằm trong fingerprint mà cú vuốt dọc kế tiếp bị xử theo.
+- Video giữ **đúng** thứ tự cũ.
+
+### 4. Con số nào không ai đọc thì không kiểm được
+
+`nurture_list_comment_attempts` đã đăng ký và allowlist từ lâu, `NurtureCommentAttempt` đã
+mirror sang TypeScript — và `api.ts` **chưa bao giờ gọi**. Toàn bộ audit bình luận chỉ xem được
+qua bản dump cuối của `live_nurture_android`. Nên hai cột mới ở đây (`distinct_frames` migration
+12, `carousel_slides` migration 13) đi kèm một tab **Bình luận** trong popup Nuôi TT: nó là chỗ
+đọc cặp số đó, và cặp mới là thứ nói được điều gì —
+
+- `lướt 7 ảnh` + `1 khung` → pager quay bảy lần, stream trả về đúng một tấm: bình luận neo trên
+  1/7 bài;
+- `lướt 7 ảnh` + `2 khung` → đúng như thiết kế;
+- `bằng chứng 40` + `1 khung` là **bằng chứng mỏng**, còn `bằng chứng 40` + `3 khung` là model
+  đọc không ra. Trước khi có cột này hai thứ đó in ra giống nhau.
+
+Cả hai migration đều **nullable, không default**: hàng ghi trước đó không biết mình thấy bao
+nhiêu khung, và điền `3` vào đó là bịa ra một phép đo — đúng cái sai mà migration 11 vừa dọn.
+
+## §9.104 — `card_is_still` cũng băm cả khung; và ba máy chung một AP không có mạng
+
+Hai mục treo ở §9.103 đã xong (mục 1) và đã chốt là **bị chặn ngoài code** (mục 2).
+
+### `card_is_still` đã sửa — nó chưa bao giờ chạy được trên máy có icon động
+
+`card_is_still` là **thứ duy nhất** phân biệt bài ảnh với video trên đường pixel, và nó băm cả
+khung mã hoá bằng `frame_digest`. Status bar của máy nằm trong đó.
+
+Đo lại và lần này **đi qua đúng pipeline của minicap** (nửa mỗi cạnh, JPEG `-Q 70`) chứ không
+chỉ trên screencap: ba khung của một bài ảnh đứng yên hoàn toàn mã hoá thành **83.113 /
+83.201 / 83.212 byte**, và `frame_digest` khác nhau ở **cả ba** cặp. Nghĩa là trên máy đó không
+một bài ảnh nào có thể được nhận ra, bao giờ.
+
+Sửa: `nurture::picture_digest` / `picture_digest_of` băm pixel đã decode và bỏ 4% trên cùng
+(`STATUS_BAR_FRACTION` giờ ở `nurture/mod.rs`, dùng chung với tấm ghép trong `openai_client` —
+trước đó mỗi bên một bản). Giá: `STILL_CARD_SAMPLES + 1` lần decode khung nửa cỡ.
+
+**Con số "4/40 thẻ đứng yên" trong repo là SÀN, không phải tỉ lệ.** Nó đo trên những máy mà góc
+màn hình tình cờ không đổi trong cửa sổ lấy mẫu.
+
+Một cái bẫy trong chính test: JPEG lượng tử theo block 8x8, nên một khối vẽ xuống tới y=51 nằm
+trong hàng block 48..55 và sai số lượng tử của nó rơi xuống y=53..55 — **dưới** mốc 4%. Bản
+test đầu vì thế đỏ vì một lý do không liên quan gì tới status bar. Ba khối giờ đặt ở y 8/16/20,
+kết thúc muộn nhất ở y=43, nằm trong hàng block 40..47.
+
+### Badge 46.2.42: chặn ở mạng, không phải ở code
+
+`ce0517155ab38c390d` là máy 46.2.42 **duy nhất** trên farm (khảo sát 23/08/2026: mười một
+`trill` 38.3.2, hai `musically` 46.2.1, một cái này). Force-stop + relaunch + 22 lượt vuốt cho
+ra **22 cây giống hệt nhau, 123.827 byte mỗi cái**. Lý do không phải thẻ kẹt:
+
+```
+wifi     : Riviu 3 Ruijie 5G, COMPLETED, RSSI -69, 390 Mbps, IP 192.168.110.157/24
+gateway  : 192.168.110.1 -> 0% loss, 4,0 ms
+internet : 1.1.1.1 -> 100% loss · 8.8.8.8 -> 100% loss · www.tiktok.com -> unknown host
+android  : everValidated{false}, lastValidated{false}, everCaptivePortalDetected{false}
+```
+
+Khảo sát cả 14 máy: **đúng ba máy trên `Riviu 3 Ruijie 5G` (ce0517155ab38c390d,
+ce021712b33054090c, ce021712d2ae60880c) không ra được internet; mười một máy trên
+`Riviu 2 Ruijie 2.4G` / `Riviu 2 Ruijie 5G` / `VNPT Riviu Dalat_5G` đều phân giải DNS và ping
+được.** AP đó không có upstream — sửa ở phía hạ tầng, hoặc chuyển ba máy sang SSID khác. Không
+phải chuyện của repo này, nhưng nó là nguyên nhân của một phần "nhiều máy kẹt ở app".
+
+Đây là **cái bẫy thứ hai** khác với cái ở §9.103: `ce0717171c2a64d50d` có mạng bình thường mà
+feed vẫn không đi, vì nó đậu trên một **carousel ảnh được tài trợ** (`Ad`) mà một cú kéo dọc
+không rời được — 9 lượt vuốt, ảnh chụp giống nhau từng pixel dưới dải status. Hai nguyên nhân
+khác nhau, cùng một triệu chứng.
+
+Chạy lại khi AP có mạng:
+`.claude/skills/run-riviu-managers-phone/hunt_badge_4642.ps1 -ForceStop` — nó dump cây mỗi thẻ
+và giữ lại ảnh của thẻ nào có badge, để lời khẳng định còn kiểm được bằng mắt. Script **chỉ
+ASCII**: PowerShell 5.1 đọc file theo codepage ANSI, nên một dấu gạch dài hay một chữ có dấu
+trong đó là parser error, không phải lỗi hiển thị.
