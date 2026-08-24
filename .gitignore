@@ -27,3 +27,11 @@ sidecars/riviu-android-agent/app/build/
 sidecars/riviu-android-agent/local.properties
 **/xcuserdata/
 **/*.xcuserstate
+# UI hierarchy dumps. `uiautomator dump` / `label_scout --raw` write these wherever the shell
+# happened to be, which is usually the repo root, and they carry the device serial plus whatever
+# the account was looking at — real handles, real captions, real comment text. Eleven of them sat
+# untracked at the root on 24/08/2026, one `git add -A` away from being published. Dump into
+# target/ (already ignored) when you want to keep one.
+*.xml
+!apps/desktop/**/*.xml
+!sidecars/**/*.xml
