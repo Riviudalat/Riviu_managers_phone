@@ -780,18 +780,24 @@ const MENTION_PICKER_POLL: Duration = Duration::from_millis(400);
 /// What became of each handle the operator asked to tag.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MentionOutcome {
-    /// Picked out of TikTok's own list, so the comment carries a real mention.
+    /// Picked out of TikTok's own list **and confirmed against the composer afterwards**,
+    /// so the comment carries a real mention.
     pub linked: Vec<String>,
-    /// Typed but never offered, so it stays literal text — the account is not notified.
+    /// Typed into the comment, but no suggestion row ever arrived — so it posts as grey text
+    /// and notifies nobody. The characters *are* in the comment.
     pub literal: Vec<String>,
+    /// Never reached the field at all: refused before the keystrokes, or the keystroke path
+    /// failed. **Not in the comment in any form** — which is why it cannot share a bucket with
+    /// `literal`, whose whole meaning is "it is in there, just as plain text".
+    pub untyped: Vec<String>,
+    /// A row was tapped and the composer could not be read back afterwards, so whether the
+    /// token landed is unknown — and the tap may have left the drawer entirely.
+    pub unverified: Vec<String>,
 }
 
 impl MentionOutcome {
     /// One line for the operator, or `None` when nothing was asked for.
     pub fn note(&self) -> Option<String> {
-        if self.linked.is_empty() && self.literal.is_empty() {
-            return None;
-        }
         let mut parts = Vec::new();
         if !self.linked.is_empty() {
             parts.push(format!("tag thật: @{}", self.linked.join(" @")));
@@ -802,7 +808,19 @@ impl MentionOutcome {
                 self.literal.join(" @")
             ));
         }
-        Some(parts.join(" · "))
+        if !self.untyped.is_empty() {
+            parts.push(format!(
+                "không gõ được nên không có trong bình luận: @{}",
+                self.untyped.join(" @")
+            ));
+        }
+        if !self.unverified.is_empty() {
+            parts.push(format!(
+                "đã bấm nhưng không đọc lại được ô soạn: @{}",
+                self.unverified.join(" @")
+            ));
+        }
+        (!parts.is_empty()).then(|| parts.join(" · "))
     }
 }
 
@@ -839,12 +857,16 @@ pub async fn append_mentions_by_picker(
     let mut outcome = MentionOutcome::default();
     let mut planner = crate::nurture::touch::TouchPointPlanner::new(screen);
     for handle in handles {
-        if stop.load(Ordering::Relaxed) {
-            outcome.literal.push(handle.clone());
-            continue;
-        }
         let handle = handle.trim().trim_start_matches('@');
         if handle.is_empty() {
+            continue;
+        }
+        if stop.load(Ordering::Relaxed) {
+            // Nothing was typed, so the comment does not carry these characters in any form.
+            // Reported as `untyped` and not `literal`, and the old code got this wrong twice
+            // over: it claimed the handle was in the comment as text, and it pushed the
+            // untrimmed original, so a leading `@` came back out as `@@name`.
+            outcome.untyped.push(handle.to_string());
             continue;
         }
         // Checked **here**, not only in the backend. `type_keys` reaches a real device shell,
@@ -852,18 +874,26 @@ pub async fn append_mentions_by_picker(
         // leaving it to the Android session alone would mean every other backend, and every
         // test double, silently gets a laxer one. The session keeps its own check as well.
         if !is_typeable_handle(handle) {
-            outcome.literal.push(handle.to_string());
+            outcome.untyped.push(handle.to_string());
             continue;
         }
+        // **Everything that already claims this handle, before a key is pressed.** The comment
+        // list is open behind the composer and its rows are `TextView`s carrying author
+        // handles, so tagging somebody who has already commented under the post — its own
+        // author, most often — puts an exact match on screen that has nothing to do with the
+        // picker. The picker's container has never been measured, so the discrimination cannot
+        // come from *where* a row sits; it comes from the fact that a suggestion row was not
+        // there before typing.
+        let before = mention_rows(session, handle).await;
         // A leading space, or the tag runs into the last word of the comment — measured
         // 24/08/2026: the first real run posted `…đi được ngay@ghin.lt.sng.sng`. TikTok adds
         // its own trailing space when it inserts the token, so consecutive tags separate
         // themselves and only the first needs this.
         if session.type_keys(&format!(" @{handle}")).await.is_err() {
-            outcome.literal.push(handle.to_string());
+            outcome.untyped.push(handle.to_string());
             continue;
         }
-        match await_mention_row(session, handle, stop).await {
+        match await_mention_row(session, handle, &before, stop).await {
             Some(row) => {
                 let point = planner.next(row.centre(), row.jitter_radius());
                 if session.tap(point).await.is_err() {
@@ -871,12 +901,35 @@ pub async fn append_mentions_by_picker(
                     continue;
                 }
                 tokio::time::sleep(MENTION_PICKER_POLL).await;
-                // The list closing over this handle is the only readable proof the pick
-                // landed; a row still offering it means the tap did nothing.
-                if find_mention_row(session, handle).await.is_some() {
-                    outcome.literal.push(handle.to_string());
-                } else {
-                    outcome.linked.push(handle.to_string());
+                // **Ask the field, not the list.** The old check read "the row is gone" as
+                // proof the pick landed — but a tap that misses the picker and opens somebody's
+                // profile also makes the row go away, and takes the drawer and the unsent draft
+                // with it. Those two outcomes were indistinguishable, and the wrong one was
+                // recorded as a real mention. The composer can only answer while the drawer is
+                // still on screen, so it is the one witness that separates them.
+                match composer_text(session).await {
+                    None => {
+                        // The field is gone, so that tap did not land in a suggestion list —
+                        // and nothing after this can be typed into a drawer that is not there.
+                        outcome.unverified.push(handle.to_string());
+                        return outcome;
+                    }
+                    Some(field) if !field.contains(handle) => {
+                        // Still a drawer, but the handle is no longer in it: the tap changed
+                        // the field into something this function did not ask for.
+                        outcome.unverified.push(handle.to_string());
+                        return outcome;
+                    }
+                    Some(_) => {
+                        // Drawer alive, handle still in the field. A fresh row that still
+                        // offers the handle means the tap did nothing at all.
+                        let offered = new_mention_row(mention_rows(session, handle).await, &before);
+                        if offered.is_some() {
+                            outcome.literal.push(handle.to_string());
+                        } else {
+                            outcome.linked.push(handle.to_string());
+                        }
+                    }
                 }
             }
             None => outcome.literal.push(handle.to_string()),
@@ -972,7 +1025,16 @@ fn parse_count(text: &str) -> Option<(u32, bool)> {
         raw.replace([',', '.'], "")
     };
     let value: f64 = cleaned.parse().ok()?;
-    Some(((value * multiplier).round() as u32, abbreviated))
+    // **Refused rather than saturated.** `value * multiplier` on a long digit run is `inf`,
+    // and `inf as u32` has saturated to `u32::MAX` since Rust 1.45 — no panic, no overflow,
+    // just a number. A threshold measured against `u32::MAX` reads as already satisfied, so
+    // the quiet answer is the dangerous one: the farm stops working towards a target it never
+    // reached. Anything that does not fit a play count is not a play count.
+    let scaled = (value * multiplier).round();
+    if !scaled.is_finite() || scaled < 0.0 || scaled > f64::from(u32::MAX) {
+        return None;
+    }
+    Some((scaled as u32, abbreviated))
 }
 
 /// A post as it appears on the author's profile grid.
@@ -1016,15 +1078,39 @@ pub async fn read_profile_tiles(session: &dyn UiSession, screen: (f64, f64)) -> 
         .filter(|node| node.y > header)
         .filter_map(|node| {
             let text = node.description.as_deref()?;
-            if !text.chars().next()?.is_ascii_digit() {
+            // **A play count node carries the number and nothing else.** Measured 24/08/2026:
+            // the grid overlays read `431`, `1.2K` — no words, no spaces. "Starts with a digit"
+            // was the only test, so a caption like `2026 was the year…` became a tile claiming
+            // 2026 views, with a tap point derived from a caption's position.
+            if !text.chars().all(|c| {
+                c.is_ascii_digit() || matches!(c, '.' | ',' | 'K' | 'M' | 'B' | 'k' | 'm' | 'b')
+            }) {
+                return None;
+            }
+            if !text.starts_with(|c: char| c.is_ascii_digit()) {
                 return None;
             }
             let (views, approximate) = parse_count(text)?;
+            let tap = crate::types::TapPoint {
+                x: node.x + TILE_TAP_RIGHT,
+                y: node.y - TILE_TAP_UP,
+            };
+            // **The filter above guards where the count sits; this guards where the tap lands,
+            // and they are `TILE_TAP_UP` apart.** A count just below the header line derives a
+            // tap 200 px *inside* the strip that filter exists to exclude — and on a profile
+            // that strip carries **Follow** and **Message**. A function documented as a read
+            // would then follow a stranger from a real logged-in account, and a follow does not
+            // undo itself. Discarded rather than clamped: a tile whose tap falls up there is
+            // only part-scrolled into view, and it comes back whole on the next scroll.
+            //
+            // The screen bounds are checked for the same reason in the other direction: nothing
+            // guarantees `window_size` reported anything sane, and a negative or off-screen tap
+            // lands wherever the platform decides.
+            if tap.y < header || tap.y >= screen.1 || tap.x < 0.0 || tap.x >= screen.0 {
+                return None;
+            }
             Some(ProfileTile {
-                tap: crate::types::TapPoint {
-                    x: node.x + TILE_TAP_RIGHT,
-                    y: node.y - TILE_TAP_UP,
-                },
+                tap,
                 views,
                 approximate,
             })
@@ -1083,11 +1169,15 @@ pub const PROFILE_SCROLL_ATTEMPTS: u32 = 6;
 ///
 /// **This is a navigation, not a read**, and that is the honest cost of a view threshold:
 /// the number is only on the grid, the grid says nothing about which post a tile is, so each
-/// candidate is opened and its caption compared before its count is believed. Returns to the
-/// post page when it is done.
+/// candidate is opened and its caption compared before its count is believed.
 ///
-/// `None` means the post was not found within the scroll budget, or the caption could not be
-/// read — never a number from a tile that was not checked.
+/// **Where it leaves the phone.** On success, on the matched post's own page, reached through
+/// the profile — so two frames deep, not back where it started. On every `None`, wherever the
+/// refusal happened: the grid, usually. It does not restore the screen it was given, and the
+/// doc used to claim it did on every path, which was true on none of them.
+///
+/// `None` means the post was not found within the scroll budget, the caption could not be
+/// read, or the walk lost the grid — never a number from a tile that was not checked.
 pub async fn read_view_count(
     session: &dyn UiSession,
     labels: TikTokControls,
@@ -1100,18 +1190,27 @@ pub async fn read_view_count(
     session.tap(link.centre()).await.ok()?;
     tokio::time::sleep(PROFILE_SETTLE).await;
 
-    let mut checked: Vec<f64> = Vec::new();
+    // Keyed on the **pair**, because a row of the grid shares one `y`. `ElementBox.y` is the
+    // top edge and `tap.y` is a fixed offset from it, so every count in a row derives exactly
+    // the same y — and a y-only guard skipped every tile but the leftmost. On a three-column
+    // grid that silently examined one post in three while scrolling past the rest, then
+    // reported the indistinguishable "not found".
+    let mut checked: Vec<(f64, f64)> = Vec::new();
     for _ in 0..PROFILE_SCROLL_ATTEMPTS {
         if stop.load(Ordering::Relaxed) {
             return None;
         }
         for tile in read_profile_tiles(session, screen).await {
-            // Tiles already opened on an earlier row keep their y after a scroll only by
-            // accident; the guard is against re-opening the same tile in the same view.
-            if checked.iter().any(|seen| (seen - tile.tap.y).abs() < 20.0) {
+            // Tiles already opened keep their position only within one view; `checked` is
+            // cleared after every scroll for that reason. The guard is against re-opening the
+            // same tile in the same view.
+            if checked
+                .iter()
+                .any(|(x, y)| (x - tile.tap.x).abs() < 20.0 && (y - tile.tap.y).abs() < 20.0)
+            {
                 continue;
             }
-            checked.push(tile.tap.y);
+            checked.push((tile.tap.x, tile.tap.y));
             if session.tap(tile.tap.clone()).await.is_err() {
                 continue;
             }
@@ -1126,9 +1225,18 @@ pub async fn read_view_count(
                 );
                 return Some(tile.views);
             }
-            // Back to the grid, whichever post that was.
+            // **Back to the grid — and then check that is where it landed.** Back from a post
+            // opened through a tile does not reliably return to the grid; it can leave the phone
+            // on the feed. The next act of this loop is to tap a coordinate computed from the
+            // *grid*, and on the feed that point is the video surface, where a tap opens the
+            // author or the comment drawer. An empty grid read is the refusal: scrolling cannot
+            // recover a screen that is not the grid.
             session.back().await.ok()?;
             tokio::time::sleep(PROFILE_SETTLE).await;
+            if read_profile_tiles(session, screen).await.is_empty() {
+                tracing::warn!("back from a tile did not return to the profile grid; refusing");
+                return None;
+            }
         }
         checked.clear();
         scroll_profile_grid(session, screen).await.ok()?;
@@ -1198,10 +1306,11 @@ fn is_typeable_handle(handle: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-/// Wait for a suggestion row that *is* this handle, not one that merely starts like it.
+/// Wait for a suggestion row that *is* this handle and was not on screen before it was typed.
 async fn await_mention_row(
     session: &dyn UiSession,
     handle: &str,
+    before: &[ElementBox],
     stop: &AtomicBool,
 ) -> Option<ElementBox> {
     let deadline = Instant::now() + MENTION_PICKER_WAIT;
@@ -1209,35 +1318,78 @@ async fn await_mention_row(
         if stop.load(Ordering::Relaxed) {
             return None;
         }
-        if let Some(row) = find_mention_row(session, handle).await {
+        // **Sleep before the first read, not after it.** The list is a network fetch, so at
+        // t=0 it definitionally has not arrived — and the only thing a read taken then can
+        // match is something that was already on screen, which is exactly the comment row
+        // this must never tap.
+        tokio::time::sleep(MENTION_PICKER_POLL).await;
+        if let Some(row) = new_mention_row(mention_rows(session, handle).await, before) {
             return Some(row);
         }
         if Instant::now() >= deadline {
             return None;
         }
-        tokio::time::sleep(MENTION_PICKER_POLL).await;
     }
 }
 
-/// The one row whose text is exactly this handle, or nothing.
+/// Every row on screen whose text is exactly this handle.
 ///
-/// Two rows claiming the same handle cannot happen on TikTok, but if the read ever returns
-/// two this refuses rather than picking the first — the cost of being wrong is a mention of
-/// somebody else's account from a real login.
-async fn find_mention_row(session: &dyn UiSession, handle: &str) -> Option<ElementBox> {
+/// Deliberately unscoped. The picker's own container has never been measured, and inventing a
+/// selector for it would be the kind of guess this file refuses everywhere else — so the
+/// sweep stays wide and [`new_mention_row`] supplies the discrimination instead.
+async fn mention_rows(session: &dyn UiSession, handle: &str) -> Vec<ElementBox> {
     let wanted = handle.trim_start_matches('@').to_lowercase();
-    let rows = session
+    session
         .locate_all_described(ElementQuery::ClassName("android.widget.TextView"))
         .await
-        .ok()?;
-    let mut matches = rows.into_iter().filter(|row| {
-        row.description
-            .as_deref()
-            .map(|text| text.trim().trim_start_matches('@').to_lowercase() == wanted)
-            .unwrap_or(false)
-    });
-    let first = matches.next()?;
-    matches.next().is_none().then_some(first)
+        .map(|rows| {
+            rows.into_iter()
+                .filter(|row| {
+                    row.description
+                        .as_deref()
+                        .map(|text| text.trim().trim_start_matches('@').to_lowercase() == wanted)
+                        .unwrap_or(false)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The one row claiming this handle that was **not** there before the handle was typed.
+///
+/// `before` is the same sweep taken a moment earlier, so a comment author who happens to be
+/// the tag target cancels out. Without it the sweep matched that author's comment row while
+/// the picker was still in flight, tapped it, opened their profile, and destroyed the drawer
+/// with the unsent draft in it — and then recorded the handle as a real mention because the
+/// row was no longer on screen.
+///
+/// Two *new* rows cannot happen on TikTok, but if the read ever returns two this refuses
+/// rather than picking one: the cost of being wrong is a mention of somebody else's account
+/// from a real login.
+fn new_mention_row(now: Vec<ElementBox>, before: &[ElementBox]) -> Option<ElementBox> {
+    let mut fresh = now
+        .into_iter()
+        .filter(|row| !before.iter().any(|seen| same_box(seen, row)));
+    let first = fresh.next()?;
+    fresh.next().is_none().then_some(first)
+}
+
+/// How far a node may move between two reads and still be the same node, in pixels.
+///
+/// Not a tuned threshold so much as a tolerance for redraw: the comparison exists to tell
+/// "this row was already here" from "this row is new", and those differ by a whole row height
+/// (≈120 px on the 1080-wide phones on this farm), not by a few pixels. Four is small enough
+/// that no two distinct rows can collapse into one and large enough to absorb a sub-pixel
+/// layout pass. Comparing all four edges rather than the centre is deliberate — two rows in a
+/// list share a centre column, so x alone identifies nothing.
+const BOX_SLACK: f64 = 4.0;
+
+/// Whether two reads describe the same node on screen.
+fn same_box(left: &ElementBox, right: &ElementBox) -> bool {
+    (left.x - right.x).abs() < BOX_SLACK
+        && (left.y - right.y).abs() < BOX_SLACK
+        && (left.width - right.width).abs() < BOX_SLACK
+        && (left.height - right.height).abs() < BOX_SLACK
 }
 
 /// How many times the comment list is scrolled looking for the parent.
@@ -1889,19 +2041,35 @@ fn bare_author_label(observed: &str, label: LabelMatch) -> Option<String> {
 /// which is how description matching behaves on the device, so the stripper has to agree
 /// with the matcher that found the node.
 fn strip_ignoring_case(haystack: &str, needle: &str, prefix: bool) -> Option<String> {
-    let lower_haystack = haystack.to_lowercase();
     let lower_needle = needle.to_lowercase();
-    if lower_needle.len() > lower_haystack.len() {
-        return None;
+    // Stripping nothing leaves everything, and the old shape answered that way too.
+    if lower_needle.is_empty() {
+        return Some(haystack.trim().to_string());
     }
+    // **The match and the cut have to be measured on the same string.** This used to test
+    // `lower_haystack.starts_with(&lower_needle)` and then slice `haystack` by `needle.len()`
+    // — one comparison on the lowercased text, one index counted in bytes of the original.
+    // Those agree only while every character in the matched region keeps its byte length
+    // through `to_lowercase`, an invariant nothing stated and nothing checked. All three
+    // needles in the catalogue today happen to satisfy it; the first that does not is a panic,
+    // not a wrong answer, and `read_author_label` sits on the arrival hot path. U+212A KELVIN
+    // SIGN is three bytes and lowercases to a one-byte `k`, so a needle containing `k` against
+    // a display name using it indexes into the middle of a character.
+    //
+    // Walking real char boundaries costs a `to_lowercase` per boundary, on strings the length
+    // of a button label. That is the right price for not being able to crash a live campaign.
     if prefix {
-        lower_haystack
-            .starts_with(&lower_needle)
-            .then(|| haystack[needle.len()..].trim().to_string())
+        haystack
+            .char_indices()
+            .map(|(at, ch)| at + ch.len_utf8())
+            .find(|&end| haystack[..end].to_lowercase() == lower_needle)
+            .map(|end| haystack[end..].trim().to_string())
     } else {
-        lower_haystack
-            .ends_with(&lower_needle)
-            .then(|| haystack[..haystack.len() - needle.len()].trim().to_string())
+        haystack
+            .char_indices()
+            .map(|(at, _)| at)
+            .find(|&start| haystack[start..].to_lowercase() == lower_needle)
+            .map(|start| haystack[..start].trim().to_string())
     }
 }
 
@@ -2588,6 +2756,8 @@ mod tests {
         multiples: Mutex<Vec<(String, Vec<ElementBox>)>>,
         /// Replacement answers installed after the first read of a key.
         after_first: Mutex<Vec<(String, Vec<ElementBox>)>>,
+        /// Successive answers for a key, one per read, last one repeating.
+        queues: Mutex<Vec<(String, Vec<Vec<ElementBox>>)>>,
         taps: Mutex<Vec<TapPoint>>,
         typed: Mutex<Vec<String>>,
         /// What went in as **real key events**, which is a different channel from `typed`.
@@ -2610,6 +2780,17 @@ mod tests {
         }
         fn with_many(self, key: &str, elements: Vec<ElementBox>) -> Self {
             self.multiples.lock().push((key.to_string(), elements));
+            self
+        }
+        /// Answers each screen in `answers` in turn, then repeats the last for ever.
+        ///
+        /// A mention needs **three** distinct screens to be described at all: what already
+        /// claimed the handle before a key was pressed, what the picker offered, and what is
+        /// left after the pick. Two-state `with_many_then` cannot say that — and a fixture
+        /// that cannot say it also cannot tell a token that landed from a tap that did
+        /// nothing, which is exactly the confusion the code under test exists to resolve.
+        fn with_many_queue(self, key: &str, answers: Vec<Vec<ElementBox>>) -> Self {
+            self.queues.lock().push((key.to_string(), answers));
             self
         }
         /// Answers `first` once, then `rest` for ever after.
@@ -2684,6 +2865,16 @@ mod tests {
         }
         async fn locate_all(&self, query: ElementQuery<'_>) -> anyhow::Result<Vec<ElementBox>> {
             let wanted = query_value(query);
+            {
+                let mut queues = self.queues.lock();
+                if let Some((_, answers)) = queues.iter_mut().find(|(key, _)| key == wanted) {
+                    let answer = answers.first().cloned().unwrap_or_default();
+                    if answers.len() > 1 {
+                        answers.remove(0);
+                    }
+                    return Ok(answer);
+                }
+            }
             let answer = self
                 .multiples
                 .lock()
@@ -3296,13 +3487,21 @@ mod tests {
     }
 
     /// Two rows claiming one handle is refused rather than resolved by picking the first.
+    ///
+    /// Both rows have to arrive **after** typing for this to be about ambiguity at all: a row
+    /// already on screen beforehand is a comment, not a suggestion, and is refused for a
+    /// different reason — see
+    /// `a_comment_row_bearing_the_handle_is_never_mistaken_for_the_picker`.
     #[tokio::test(start_paused = true)]
     async fn an_ambiguous_suggestion_list_tags_nobody() {
-        let session = DrawerSession::default().with_many(
+        let session = DrawerSession::default().with_many_queue(
             "android.widget.TextView",
             vec![
-                node(179.0, 291.0, 70.0, 50.0, "lt.gi"),
-                node(179.0, 438.0, 70.0, 50.0, "lt.gi"),
+                Vec::new(),
+                vec![
+                    node(179.0, 291.0, 70.0, 50.0, "lt.gi"),
+                    node(179.0, 438.0, 70.0, 50.0, "lt.gi"),
+                ],
             ],
         );
         let outcome = append_mentions_by_picker(
@@ -3316,13 +3515,14 @@ mod tests {
         assert_eq!(outcome.literal, vec!["lt.gi".to_string()]);
     }
 
-    /// A handle that cannot be typed safely is not typed at all.
+    /// A handle that cannot be typed safely is not typed at all — and is reported that way.
     ///
     /// `type_keys` reaches a real device shell, so its character whitelist is a security
-    /// boundary — see `UiSession::type_keys`. A refusal there has to end as plain text, not
-    /// as a tap into an unfiltered list.
+    /// boundary — see `UiSession::type_keys`. A refusal there must not tap into an unfiltered
+    /// list, and it must not claim the handle is in the comment: nothing was typed, so the
+    /// characters are not there in any form. Reporting it as `literal` said the opposite.
     #[tokio::test(start_paused = true)]
-    async fn a_handle_the_key_channel_refuses_is_left_as_text() {
+    async fn a_handle_the_key_channel_refuses_is_never_typed() {
         let session = DrawerSession::default().with_many(
             "android.widget.TextView",
             vec![node(179.0, 291.0, 70.0, 50.0, "ai đó")],
@@ -3335,7 +3535,317 @@ mod tests {
         )
         .await;
         assert!(session.taps.lock().is_empty());
-        assert_eq!(outcome.literal, vec!["ai đó".to_string()]);
+        assert!(session.keyed.lock().is_empty(), "nothing reached the shell");
+        assert_eq!(outcome.untyped, vec!["ai đó".to_string()]);
+        assert!(
+            outcome.literal.is_empty(),
+            "it is not in the comment as text either"
+        );
+        assert!(outcome
+            .note()
+            .is_some_and(|note| note.contains("không gõ được")));
+    }
+
+    /// A comment row is not a suggestion row, and the difference is *when it appeared*.
+    ///
+    /// Reachable straight from the product path. While `append_mentions_by_picker` runs the
+    /// drawer is open and the comment **list** is on screen behind the composer; every row in
+    /// it is a `TextView` whose text is an author handle. Ask to tag somebody who has already
+    /// commented under the post — its own author, most often — and an exact match is on screen
+    /// before a key is pressed. The old sweep read the whole screen the instant after typing,
+    /// when the picker (a network fetch) definitionally had not arrived, found that one match
+    /// and tapped it: profile opened, drawer gone, draft lost. It then asked whether the row
+    /// was still there, found it was not — because the screen had been replaced — and recorded
+    /// a **real mention**.
+    #[tokio::test(start_paused = true)]
+    async fn a_comment_row_bearing_the_handle_is_never_mistaken_for_the_picker() {
+        // One screen throughout: a comment by the tag target, and no picker, ever.
+        let session = DrawerSession::default().with_many(
+            "android.widget.TextView",
+            vec![node(48.0, 1002.0, 223.0, 50.0, ".lt.gi.mang.v")],
+        );
+
+        let outcome = append_mentions_by_picker(
+            &session,
+            (1080.0, 2400.0),
+            &[".lt.gi.mang.v".to_string()],
+            &AtomicBool::new(false),
+        )
+        .await;
+
+        assert!(
+            session.taps.lock().is_empty(),
+            "the only row claiming the handle was there before a key was pressed"
+        );
+        assert_eq!(outcome.linked, Vec::<String>::new());
+        assert_eq!(outcome.literal, vec![".lt.gi.mang.v".to_string()]);
+    }
+
+    /// A tap that loses the composer is not a mention, and it stops the pass.
+    ///
+    /// "The row went away" was the old proof of success, and a tap that navigates off the
+    /// drawer satisfies it exactly as well as a token does. The composer is the witness that
+    /// separates the two: it can only answer while the drawer is still on screen.
+    #[tokio::test(start_paused = true)]
+    async fn a_tap_that_loses_the_composer_is_not_a_mention() {
+        let session = DrawerSession::default().with_many_queue(
+            "android.widget.TextView",
+            vec![
+                Vec::new(),
+                vec![node(179.0, 291.0, 223.0, 50.0, ".lt.gi.mang.v")],
+            ],
+        );
+        // No `EditText` answer at all — which is what a profile page looks like from here.
+
+        let outcome = append_mentions_by_picker(
+            &session,
+            (1080.0, 2400.0),
+            &[".lt.gi.mang.v".to_string(), "lt.gi".to_string()],
+            &AtomicBool::new(false),
+        )
+        .await;
+
+        assert_eq!(session.taps.lock().len(), 1);
+        assert_eq!(outcome.linked, Vec::<String>::new());
+        assert_eq!(outcome.unverified, vec![".lt.gi.mang.v".to_string()]);
+        assert_eq!(
+            *session.keyed.lock(),
+            vec![" @.lt.gi.mang.v".to_string()],
+            "a second handle cannot be typed into a drawer that is gone"
+        );
+        assert!(outcome
+            .note()
+            .is_some_and(|note| note.contains("không đọc lại được ô soạn")));
+    }
+
+    /// The one shape that really is a mention: a fresh row, tapped, list closes, drawer stays.
+    #[tokio::test(start_paused = true)]
+    async fn a_fresh_row_that_closes_over_the_handle_is_a_real_mention() {
+        let session = DrawerSession::default()
+            // Three screens: before typing, what the picker offered, what is left after.
+            .with_many_queue(
+                "android.widget.TextView",
+                vec![
+                    Vec::new(),
+                    vec![node(179.0, 291.0, 223.0, 50.0, ".lt.gi.mang.v")],
+                    Vec::new(),
+                ],
+            )
+            .with_many(
+                EDIT,
+                vec![node(64.0, 1379.0, 800.0, 88.0, "xin chào @.lt.gi.mang.v ")],
+            );
+
+        let outcome = append_mentions_by_picker(
+            &session,
+            (1080.0, 2400.0),
+            &[".lt.gi.mang.v".to_string()],
+            &AtomicBool::new(false),
+        )
+        .await;
+
+        assert_eq!(session.taps.lock().len(), 1);
+        assert_eq!(outcome.linked, vec![".lt.gi.mang.v".to_string()]);
+        assert!(
+            outcome.literal.is_empty()
+                && outcome.untyped.is_empty()
+                && outcome.unverified.is_empty(),
+            "exactly one bucket may claim a handle"
+        );
+    }
+
+    /// A three-column grid gets nine tiles opened, not three.
+    ///
+    /// `ElementBox.y` is the **top edge** and `tap.y` is a fixed offset from it, so every count
+    /// in a grid row derives exactly the same y. The de-dup guard compared y alone, which made
+    /// tiles two and three of every row look like tiles already visited: on a three-column grid
+    /// it examined one post in three, scrolled past the rest, and reported the indistinguishable
+    /// "not found". There was no test on this function at all, which is how it survived.
+    #[tokio::test(start_paused = true)]
+    async fn every_tile_in_a_grid_row_is_opened_not_just_the_leftmost() {
+        const TARGET: &str = "bài của tôi hôm nay, chú thích đủ dài để được coi là caption";
+        const OTHER: &str = "một bài khác hoàn toàn, cũng đủ dài để được coi là một caption";
+        // Three rows of three, laid out the way the grid lays them out: one y per row.
+        let grid: Vec<ElementBox> = [900.0, 1400.0, 1900.0]
+            .into_iter()
+            .flat_map(|y| {
+                [12.0, 370.0, 728.0]
+                    .into_iter()
+                    .map(move |x| node(x, y, 60.0, 40.0, "431"))
+            })
+            .collect();
+        let session = DrawerSession::default()
+            .with_many("android.widget.TextView", grid)
+            // The post being measured first, then a different post for every tile opened, so
+            // nothing ever matches and the walk has to visit them all.
+            .with_many_queue(
+                "com.bytedance.tux.input.TuxTextLayoutView",
+                vec![
+                    vec![node(48.0, 700.0, 900.0, 60.0, TARGET)],
+                    vec![node(48.0, 700.0, 900.0, 60.0, OTHER)],
+                ],
+            )
+            .with_single("Hồ sơ ", node(940.0, 1500.0, 90.0, 90.0, "Hồ sơ ai đó"));
+
+        let views = read_view_count(
+            &session,
+            vietnamese(),
+            (1080.0, 2400.0),
+            &AtomicBool::new(false),
+        )
+        .await;
+
+        assert_eq!(views, None, "no tile carried the wanted caption");
+        let mut distinct: Vec<(i64, i64)> = session
+            .taps
+            .lock()
+            .iter()
+            .map(|point| (point.x as i64, point.y as i64))
+            .collect();
+        distinct.sort_unstable();
+        distinct.dedup();
+        // Nine tiles plus the one tap on the profile link. A y-only guard reached four.
+        assert_eq!(
+            distinct.len(),
+            10,
+            "expected every tile of every row to be opened, got {distinct:?}"
+        );
+    }
+
+    /// The derived tap point never lands in the profile header, whatever the count's own y.
+    ///
+    /// The count filter and the tap offset are `TILE_TAP_UP` apart, so guarding where the count
+    /// sits is not guarding where the tap lands. On a 1080x2400 phone the header line is 600 and
+    /// a count at 610 derived a tap at 410 — the header/action strip, which carries **Follow**
+    /// and **Message**. A read that can follow a stranger from a real logged-in account is not a
+    /// read, and a follow does not undo itself.
+    #[tokio::test(start_paused = true)]
+    async fn a_tile_tap_never_lands_in_the_profile_header() {
+        let screen = (1080.0, 2400.0);
+        let header = screen.1 * 0.25;
+        // Every y from just inside the count filter down to the bottom of the screen.
+        let nodes: Vec<ElementBox> = (0..120)
+            .map(|step| {
+                node(
+                    12.0,
+                    header + 1.0 + f64::from(step) * 15.0,
+                    60.0,
+                    40.0,
+                    "431",
+                )
+            })
+            .collect();
+        let session = DrawerSession::default().with_many("android.widget.TextView", nodes);
+
+        let tiles = read_profile_tiles(&session, screen).await;
+        assert!(!tiles.is_empty(), "the fixture has to yield some tiles");
+        for tile in tiles {
+            assert!(
+                tile.tap.y >= header,
+                "tap at y={} is inside the header strip (< {header})",
+                tile.tap.y
+            );
+            assert!(
+                tile.tap.y < screen.1,
+                "tap at y={} is off-screen",
+                tile.tap.y
+            );
+            assert!(
+                tile.tap.x >= 0.0 && tile.tap.x < screen.0,
+                "tap at x={} is off-screen",
+                tile.tap.x
+            );
+        }
+    }
+
+    /// Stripping a label never indexes into the middle of a character.
+    ///
+    /// The old shape matched on `haystack.to_lowercase()` and then cut `haystack` by
+    /// `needle.len()`. Those two agree only while every character in the matched region keeps
+    /// its byte length through `to_lowercase` — U+212A KELVIN SIGN is three bytes and lowercases
+    /// to a one-byte `k`, so byte 1 is inside the first character and the slice **panics**. No
+    /// needle in the catalogue contains a `k` today, which is the whole reason to pin it: adding
+    /// one must not be able to crash a live campaign from the arrival hot path.
+    #[test]
+    fn stripping_a_label_never_indexes_into_the_middle_of_a_character() {
+        assert_eq!(
+            strip_ignoring_case("\u{212A}xyz", "k", true).as_deref(),
+            Some("xyz")
+        );
+        assert_eq!(
+            strip_ignoring_case("ai đó \u{212A}", "k", false).as_deref(),
+            Some("ai đó")
+        );
+        // The same character inside a longer needle, where the old code gave a plausible but
+        // wrong answer instead of panicking — and a wrong author identity means commenting
+        // under the wrong post.
+        assert_eq!(
+            strip_ignoring_case("\u{212A}elvin Trần", "kelvin", true).as_deref(),
+            Some("Trần")
+        );
+    }
+
+    /// The needles that are actually catalogued keep working, in both directions.
+    #[test]
+    fn stripping_a_label_still_folds_the_two_measured_prefixes() {
+        assert_eq!(
+            strip_ignoring_case("Follow ai đó", "Follow ", true).as_deref(),
+            Some("ai đó")
+        );
+        assert_eq!(
+            strip_ignoring_case("Hồ sơ ai đó", "Hồ sơ ", true).as_deref(),
+            Some("ai đó")
+        );
+        assert_eq!(
+            strip_ignoring_case("someone profile", " profile", false).as_deref(),
+            Some("someone")
+        );
+        // A prefix-only label is not an identity.
+        assert_eq!(
+            strip_ignoring_case("Follow ", "Follow ", true).as_deref(),
+            Some("")
+        );
+        assert_eq!(strip_ignoring_case("ai đó", "Follow ", true), None);
+    }
+
+    /// A number too big to be a play count is refused, not saturated.
+    #[test]
+    fn a_number_too_big_to_be_a_count_is_refused_rather_than_saturated() {
+        // `value * multiplier` on a long digit run is `inf`, and `inf as u32` has saturated to
+        // `u32::MAX` since Rust 1.45 — no panic, no overflow, just a number. Every threshold
+        // measured against `u32::MAX` then reads as already satisfied, so the farm quietly
+        // stops working towards a target it never reached.
+        assert_eq!(parse_count(&"9".repeat(400)), None);
+        assert_eq!(parse_count("999999999999B"), None);
+        // The counts that really appear on the rail and the grid still parse.
+        assert_eq!(parse_count("Like video. 1,160 likes"), Some((1_160, false)));
+        assert_eq!(parse_count("1.2K"), Some((1_200, true)));
+        assert_eq!(parse_count("431"), Some((431, false)));
+    }
+
+    /// A caption that happens to begin with digits is not a play count.
+    ///
+    /// Measured 24/08/2026: a grid overlay carries the number and nothing else — `431`, `1.2K`.
+    /// "Starts with a digit" was the only test, so `2026 was the year…` became a tile claiming
+    /// 2026 views with a tap point derived from a caption's position on screen.
+    #[tokio::test(start_paused = true)]
+    async fn a_caption_that_begins_with_digits_is_not_a_play_count() {
+        let session = DrawerSession::default().with_many(
+            "android.widget.TextView",
+            vec![
+                node(
+                    48.0,
+                    900.0,
+                    900.0,
+                    60.0,
+                    "2026 was the year everything changed",
+                ),
+                node(12.0, 1400.0, 60.0, 40.0, "431"),
+            ],
+        );
+        let tiles = read_profile_tiles(&session, (1080.0, 2400.0)).await;
+        assert_eq!(tiles.len(), 1, "only the bare number is a count");
+        assert_eq!(tiles[0].views, 431);
     }
 
     #[tokio::test(start_paused = true)]
