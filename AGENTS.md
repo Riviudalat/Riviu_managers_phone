@@ -8408,3 +8408,148 @@ Chạy lại khi AP có mạng:
 và giữ lại ảnh của thẻ nào có badge, để lời khẳng định còn kiểm được bằng mắt. Script **chỉ
 ASCII**: PowerShell 5.1 đọc file theo codepage ANSI, nên một dấu gạch dài hay một chữ có dấu
 trong đó là parser error, không phải lỗi hiển thị.
+
+## §9.105 — Mention thật cần phím thật; view tích luỹ; và một cổng đo bắn vào splash (24/08/2026)
+
+### Mention: `set_text` không mở được danh sách gợi ý
+
+Đo trên `ce051715ac247a3f01`, bài `.../@.lt.gi.mang.v/photo/7668947001618320660`:
+
+* viết `@lt.gi` bằng `set_text` (`ACTION_SET_TEXT`) → chữ vào ô, **không có gì mở ra**. Không
+  một keystroke nào tới app, nên bộ theo dõi nhập liệu của TikTok không thấy gì;
+* bơm đúng mấy ký tự đó bằng **key event thật** (`adb shell input text`) → danh sách mở và lọc
+  còn bốn account thật: `lt.gi`, `.lt.gi.mang.v`, `lt.g94`, `lt.gr37`;
+* chạm hàng khớp → ô thành `…@lt.gi ` (một token, TikTok tự thêm dấu cách sau).
+
+Nên: `@name` ghép sẵn vào chữ **không phải mention** — TikTok render xám, không link ai, không
+thông báo cho ai. Ba trong bốn hàng trên là người khác, nên luật là **khớp chính xác hoặc
+không chạm**: `lt.g94` cho `lt.gi` là tag nhầm một người lạ từ một acc đang đăng nhập thật.
+
+Hai cái bẫy đã trả giá: bản đầu không có dấu cách trước `@` nên đăng ra
+`…đi được ngay@ghin.lt.sng.sng`; và đọc-lại so khớp đúng thân bình luận trong khi chuỗi đăng ra
+đã có tag ở cuối, nên mọi reply mất định danh cha. Cả hai đã sửa và đo lại.
+
+### View tích luỹ theo lượt, và chỉ đọc được trên lưới hồ sơ
+
+Trang bài **không** nói số view. Rail chỉ có `Like video. 22 likes`,
+`Read or add comments. 21 comments`, `Share video. 8 shares`. Chỗ duy nhất TikTok hiện số phát
+là **lưới hồ sơ tác giả**, dưới mỗi ô — và lưới không nói ô nào là bài nào, nên phải mở từng ô
+và so caption. Caption là `com.bytedance.tux.input.TuxTextLayoutView` (resource-id `/desc`),
+không phải `TextView`; đọc nhầm class thì trả về một *bình luận* làm caption.
+
+Ba lượt mười máy trên một bài fleet chưa từng mở: **439 → 448 → 457 → 466**, tức **+9, +9, +8**,
+trong khi mọi ô khác đứng yên. Nên view **không** phải một-lần-mỗi-acc; nó tích luỹ theo lượt,
+cỡ **0,9 view mỗi máy mỗi lượt**. Với 14 máy là ~12-13 view/lượt.
+
+Mẫu chạy được là **một lệnh shell**: `am force-stop <pkg>; am start -a VIEW -d '<url>' -p <pkg>`
+— ActivityManager xếp hàng intent và TikTok nhận nó làm launch intent trên đường lên.
+
+Link rút gọn `vt.tiktok.com/...` mở ra một hộp "đã chia sẻ bài này" và **không tính view**. Phải
+dùng URL canonical.
+
+### Cổng đo `threshold_gate` bắn deep link vào splash — và một kết luận tôi đã rút lại
+
+Bản đầu của `examples/threshold_gate.rs` làm ba bước: `force-stop` → sleep 2 s → `launch_app`
+→ sleep 3 s → mới bắn deep link. §9.19 đã đo TikTok lên foreground sau **15,86 / 19,71 /
+19,42 s** — một lần **26,9 s** — sau `am force-stop`, và production dùng cửa sổ **40 s** vì đúng
+lý do đó. Nên link rơi vào splash.
+
+Tôi đã báo "bài của khách vẫn 350 → 350 sau một lượt mười máy" và để ngỏ hai cách giải thích
+(trần tích luỹ, hay máy trôi khỏi bài). **Cả hai đều không có căn cứ**, và con số "7/10 còn
+trong app" là hệ quả của chính lỗi timing chứ không phải bằng chứng gì. Chưa từng có một phép đo
+hợp lệ nào cho bài đó: hai lần đầu tôi đọc nhầm ô lưới (1.285 là bài khác), lần cuối lượt chạy
+không tới bài.
+
+Hai bài học ghi lại vì chúng sẽ quay lại:
+
+* **một lượt phải chứng minh được là đã tới bài.** Số cũ đếm số lần `open_url_in_app` trả `Ok`,
+  tức số lần ActivityManager *nhận* một intent — không phải sự thật nào về màn hình. Giờ mỗi
+  máy phải có TikTok ở foreground **và** caption đọc được trùng caption của bài, trong 40 s.
+* **`read_view_count` từng bỏ qua 2/3 số ô.** Guard chống mở lại ô so `tap.y` đơn lẻ, mà
+  `ElementBox.y` là mép trên và `tap.y` lệch nó một khoảng cố định — nên cả một hàng lưới sinh
+  ra **cùng một y**. Lưới ba cột soi một bài trong ba rồi trả "không tìm thấy".
+
+### Hai mục cần sửa lời trong file này
+
+`interaction_events` ở §9.98 ghi là "rỗng, chưa quyết" — **migration 14 đã xoá nó**, cùng với
+`interaction_retry_requests` và `interaction_dispatch`. Và cổng boundary
+`every_command_answers_in_one_error_shape` đã **đỏ với mọi clone trên máy Windows** từ trước:
+nó cắt test module bằng `source.find("#[cfg(test)]\nmod ")`, mà `core.autocrlf=true` khiến
+checkout ghi CRLF nên cái kim LF đó không khớp gì cả. Nó xanh ở máy này chỉ vì các file tình cờ
+do editor ghi ra chứ không phải `git checkout` ghi ra.
+
+### Fleet không dùng chung một package TikTok (24/08/2026)
+
+Khảo sát cả 14 máy bằng `pm list packages`:
+
+```
+com.ss.android.ugc.trill      11 máy
+com.zhiliaoapp.musically       3 máy  (ce0517155ab38c390d, ce0717171c2a64d50d, ce11171beb408a1501)
+```
+
+Điều này quan trọng vì **một `RIVIU_TIKTOK_PACKAGE` cho cả fleet là sai trên ba máy đó.**
+`am force-stop com.ss.android.ugc.trill` không dừng gì, `am start -p …trill` không mở gì, và
+phép kiểm foreground so với một package không được cài — nên cả ba bị báo là
+"TikTok không ở foreground sau 40s", tức trông như lỗi máy trong khi là lỗi cấu hình.
+
+Production **không** có lỗi này: `DeviceDriver::resolve_tiktok_package` giải theo từng máy và
+cache, và campaign runner đi qua nó. Chỉ các example/probe từng lấy env var. Đã sửa
+`threshold_gate` sang giải theo máy; nếu viết example mới thì dùng
+`driver.resolve_tiktok_package(serial)`, đừng dùng env var — env var chỉ nên là fallback.
+
+Cả hai package đều có bộ nhãn đã đo trong `TIKTOK_LABEL_SETS`, nên không cần đo thêm gì.
+
+### Máy đọc phải khởi động vào **feed**, không phải vào bài
+
+`open_target_by_hierarchy` kết luận đã tới bài bằng cách xem nhãn tác giả **đổi**. Nên một máy
+đang đứng sẵn ở bài mục tiêu thì nó không có gì để quan sát và từ chối với
+`target_open_screen_unchanged` — câu đó đọc ra như "bài đã bị xoá/riêng tư", không phải như
+"máy vốn đã ở đây".
+
+Đây là cách lần chạy thật đầu tiên của `threshold_gate` kết thúc: `read_view_count` dắt máy đọc
+đi `bài → hồ sơ → ô → bài`, nên lần đọc thứ hai bắt đầu từ chính bài đó. Cách đúng là force-stop
+rồi **launch trơn** (`monkey -c LAUNCHER`) để app lên feed, chờ 40 s, rồi để phép arrival tự bắn
+link — với máy xem thì ngược lại, một lệnh `force-stop; am start -a VIEW -d <url>` là đúng, vì
+chúng không cần arrival check.
+
+### Bài của khách CÓ lên view — và trần thật là tỉ lệ máy tới được bài (24/08/2026)
+
+Đo bằng `threshold_gate` đã sửa, trên
+`https://www.tiktok.com/@.lt.gi.mang.v/photo/7668947001618320660`, một máy đọc
+(`ce051715ac247a3f01`) + 11 máy xem:
+
+```
+đọc lần 1 (không lượt nào ở giữa)   1338
+đọc lần 2 (~10 phút sau)            1341     -> trôi tự nhiên ~+3 / 10 phút
+đọc lần 3                            1353
+   một lượt, 11 máy nhận intent, 7 máy XÁC NHẬN đang ở đúng bài
+đọc lần 4                            1365     -> +12
+```
+
+likes 22 / comments 26 không đổi qua cả bốn lần đọc, khớp phép đo trước — nên số view là số
+thật, không phải một ô lưới khác. Trừ phần trôi tự nhiên (~+2 trong khoảng thời gian của lượt),
+lượt đó đóng góp khoảng **+10 với 7 máy**, tức ~1,4 view/máy xác nhận.
+
+**Và đây là con số quan trọng hơn: 4 trong 11 máy không tới được bài.** Cổng cũ báo
+"11/11 đã mở bài" vì nó chỉ đếm số lần ActivityManager *nhận* một intent — không phải một sự
+thật nào về màn hình. Đếm thật:
+
+| máy | chuyện gì |
+|---|---|
+| ×7 | caption trùng caption của bài — tính |
+| ce0717171c2a64d50d, ce11171beb408a1501 | `com.zhiliaoapp.musically`: deep link mở app nhưng đậu ở `MainActivity` (feed), không tới bài |
+| ce021712b33054090c | `com.ss.android.ugc.trill`, **cũng** đậu ở feed, và caption đọc ra là một bài khác của cùng tác giả |
+| ce0517151215a00304 | kẹt ở `UnintentionalLcdOn` — màn đang ngủ, app không lên foreground trong 40 s |
+
+Ba nguyên nhân đã xử lý: package giải theo từng máy (xem mục trên), `KEYCODE_WAKEUP` trước khi
+bắn link, và ước lượng số lượt tính theo **số máy xác nhận tới bài** chứ không theo số máy nối
+vào — dùng số máy nối vào thì nói quá hơn một phần ba.
+
+**Nguyên nhân còn lại chưa giải quyết được: `am start -a VIEW -d <url>` không điều hướng tới bài
+trên một số máy, kể cả trill.** Nó mở app rồi để nguyên feed. Đó là trần thật của throughput
+farm view, và nó là số đo chứ không phải phỏng đoán. Ai muốn nâng throughput thì đo chỗ này
+trước, đừng thêm máy.
+
+Chi phí một lượt: cold start 40 s + dwell + một lần đọc view (walk lưới hồ sơ, ~2-4 phút). Nên
+135 view còn thiếu ước 14 lượt ≈ ~1,5 giờ. Ngưỡng view là một tính năng thật, nhưng nó chậm, và
+biến quyết định là tỉ lệ tới bài, không phải cỡ fleet.

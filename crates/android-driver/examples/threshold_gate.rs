@@ -42,13 +42,31 @@ use riviu_core::interaction_hierarchy::{
 use riviu_core::interaction_threshold::{plan_thresholds, PostNow, PostTargets};
 use riviu_core::tiktok_labels;
 
-static TIKTOK: LazyLock<String> = LazyLock::new(|| {
+/// Fallback only. **Not** the package for the fleet — see [`package_for`].
+static TIKTOK_FALLBACK: LazyLock<String> = LazyLock::new(|| {
     std::env::var("RIVIU_TIKTOK_PACKAGE")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "com.ss.android.ugc.trill".to_string())
 });
+
+/// Which TikTok **this phone** has.
+///
+/// Measured 24/08/2026 on this farm: eleven of fourteen phones carry
+/// `com.ss.android.ugc.trill` and **three carry `com.zhiliaoapp.musically`**. This gate used to
+/// take one package from the environment and use it for every phone, so on those three
+/// `am force-stop com.ss.android.ugc.trill` stopped nothing, `am start -p …trill` started
+/// nothing, and the foreground check compared against a package that is not installed. All
+/// three were then reported as "TikTok không ở foreground sau 40s" — a phone problem, when it
+/// was a configuration one. Production never had this: `DeviceDriver::resolve_tiktok_package`
+/// resolves per device and caches, and the campaign runner goes through it.
+async fn package_for(driver: &AndroidDriver, serial: &str) -> String {
+    driver
+        .resolve_tiktok_package(serial)
+        .await
+        .unwrap_or_else(|_| TIKTOK_FALLBACK.clone())
+}
 
 /// How long a cold TikTok gets to reach the post before a phone is written off for this pass.
 ///
@@ -89,14 +107,43 @@ fn safe_url(url: &str) -> anyhow::Result<&str> {
 /// so ActivityManager queues it and TikTok handles it when it comes up. Splitting that into
 /// stop / launch / link — with sleeps between — is what fired the link at a splash screen; see
 /// the module header for the measurement.
+///
+/// `KEYCODE_WAKEUP` first, because a sleeping screen is one of the ways a pass silently does not
+/// land: measured 24/08/2026, `ce0517151215a00304` sat in `UnintentionalLcdOn` through a whole
+/// pass. Waking is idempotent on a screen that is already on, and it does **not** unlock — a
+/// locked phone still fails the confirmation, which is the honest outcome rather than a silent
+/// one.
 async fn open_on(driver: &AndroidDriver, serial: &str, url: &str) -> anyhow::Result<()> {
-    let package = TIKTOK.as_str();
+    let package = package_for(driver, serial).await;
     driver
         .device_shell(
             serial,
             &format!(
-                "am force-stop {package}; am start -a android.intent.action.VIEW \
+                "input keyevent KEYCODE_WAKEUP; am force-stop {package}; \
+                 am start -a android.intent.action.VIEW \
                  -c android.intent.category.BROWSABLE -d '{url}' -p {package}"
+            ),
+        )
+        .await
+        .map(|_| ())
+}
+
+/// Force-stop, then a **plain** launch: the app comes up on the feed, not on the post.
+///
+/// For the reader, and the difference is the whole reason it exists. `open_target_by_hierarchy`
+/// decides it arrived by watching the author label *change* — so a phone already sitting on the
+/// target post gives it nothing to observe and it refuses with `target_open_screen_unchanged`,
+/// which reads as "the post is gone". That is exactly what happened on the second measurement of
+/// the first real run: `read_view_count` had walked the reader post → profile → tile → post, so
+/// it was already there. The feed is the only starting screen from which arriving is visible.
+async fn cold_feed(driver: &AndroidDriver, serial: &str) -> anyhow::Result<()> {
+    let package = package_for(driver, serial).await;
+    driver
+        .device_shell(
+            serial,
+            &format!(
+                "input keyevent KEYCODE_WAKEUP; am force-stop {package}; \
+                 monkey -p {package} -c android.intent.category.LAUNCHER 1"
             ),
         )
         .await
@@ -141,37 +188,58 @@ async fn main() -> anyhow::Result<()> {
     // The reader is the phone that measures. Kept separate from the watchers so a reading is
     // never taken on a phone that is mid-pass.
     println!("== reader {reader} ==");
-    // Same one-command cold start as the watchers, and the same 40 s. A phone left on a profile
-    // or a search page has no author label to take a baseline from, and the arrival check
-    // correctly refuses — which reads as a broken gate when it is really a phone parked
-    // somewhere.
-    open_on(&driver, reader, url).await?;
+    let package = package_for(&driver, reader).await;
+    println!("  package = {package}");
+    // Onto the **feed**, not onto the post: `measure` fires the link itself and decides it
+    // arrived by watching the author label change. See `cold_feed`.
+    cold_feed(&driver, reader).await?;
     tokio::time::sleep(ARRIVAL_WINDOW).await;
     let session = driver.open_session(reader).await?;
     let language = session.ui_language().await.unwrap_or_default();
-    let app_version = session
-        .app_version(TIKTOK.as_str())
-        .await
-        .unwrap_or_default();
-    let labels = tiktok_labels::controls_for(TIKTOK.as_str(), &language, &app_version)
-        .ok_or_else(|| anyhow::anyhow!("no measured labels for {language:?}"))?;
+    let app_version = session.app_version(&package).await.unwrap_or_default();
+    let labels = tiktok_labels::controls_for(&package, &language, &app_version)
+        .ok_or_else(|| anyhow::anyhow!("no measured labels for {package} + {language:?}"))?;
     let screen = session.window_size().await?;
     let stop = AtomicBool::new(false);
 
-    // The post's own caption, read once, from the phone that is definitely on the post. It is
-    // what every watcher is checked against afterwards — the counters are what a threshold is
-    // moving, so they cannot identify a post, and the caption does not change.
-    let caption = read_post_caption(&session)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("reader could not read the post's caption"))?;
-    println!(
-        "  caption = {:?}",
-        caption.chars().take(60).collect::<String>()
-    );
-
+    // The post's own caption comes out of the first reading, taken while the reader is still on
+    // the post — it is what every watcher is checked against afterwards, because the counters are
+    // what a threshold is moving and so cannot identify a post, while a caption does not change.
+    let mut caption: Option<String> = None;
     let mut previous: Option<u32> = None;
+    // How many phones the last pass could be **shown** to have put on the post.
+    //
+    // The estimate uses this rather than the number of phones handed in, because those are
+    // different numbers and the difference is large: measured 24/08/2026, eleven attached phones
+    // put **seven** on the post — one landed on a different post of the same author, one never
+    // reached the foreground inside 40 s, and two run `com.zhiliaoapp.musically`, where the VIEW
+    // intent opens the app on its feed instead of the post. Estimating from eleven would overstate
+    // the rate by more than a third, and an estimate that flatters the fleet is how a threshold
+    // ends up chasing a number it will not reach.
+    let mut landing: Option<usize> = None;
     for pass in 0..=max_passes {
-        let now = measure(&session, labels, screen, url, &handle, &stop).await?;
+        // **Cold onto the feed before every reading, without exception.** `measure` decides it
+        // arrived by watching the author label change, and `read_view_count` leaves the reader on
+        // the post it just matched — so a second reading from there sees no transition and
+        // refuses with `target_open_screen_unchanged`, which reads as "the post is gone". That is
+        // what ended the first real run of this gate, and skipping the cold start on pass 0 alone
+        // was not enough: the caption read left the reader on the post just as surely.
+        cold_feed(&driver, reader).await?;
+        tokio::time::sleep(ARRIVAL_WINDOW).await;
+        let reading = measure(&session, labels, &package, screen, url, &handle, &stop).await?;
+        let now = reading.now;
+        if caption.is_none() {
+            caption = reading.caption.clone();
+            match caption.as_deref() {
+                Some(text) => println!(
+                    "  caption = {:?}",
+                    text.chars().take(60).collect::<String>()
+                ),
+                None => {
+                    println!("  ! không đọc được caption của bài — không xác nhận được máy nào")
+                }
+            }
+        }
         println!(
             "  after pass {pass}: views={:?} likes={:?} comments={:?}",
             now.views, now.likes, now.comments
@@ -182,8 +250,8 @@ async fn main() -> anyhow::Result<()> {
                 ..Default::default()
             },
             now,
-            watchers.len() as u32,
-            watchers.len() as u32,
+            landing.unwrap_or(watchers.len()) as u32,
+            landing.unwrap_or(watchers.len()) as u32,
         );
         for refusal in plan.refusals() {
             println!("  ! {refusal}");
@@ -194,10 +262,14 @@ async fn main() -> anyhow::Result<()> {
         }
         if let Some(views) = plan.views.as_ref() {
             println!(
-                "  còn thiếu {} view; ước {} lượt nữa với {} máy",
+                "  còn thiếu {} view; ước {} lượt nữa với {} máy{}",
                 views.shortfall,
                 views.passes.unwrap_or(0),
-                watchers.len()
+                landing.unwrap_or(watchers.len()),
+                match landing {
+                    Some(_) => format!(" đã xác nhận tới bài, trên {} máy nối vào", watchers.len()),
+                    None => String::new(),
+                }
             );
         }
         // A pass that moved nothing is the signal the arithmetic cannot give. Stopping here is
@@ -214,8 +286,14 @@ async fn main() -> anyhow::Result<()> {
             println!("  hết số lượt cho phép");
             return Ok(());
         }
+        let Some(caption) = caption.as_deref() else {
+            anyhow::bail!(
+                "no caption to check the watchers against, so a pass could not be measured"
+            );
+        };
         println!("== pass {} on {} phones ==", pass + 1, watchers.len());
-        let confirmed = run_pass(&driver, &watchers, url, &caption, watch_secs).await;
+        let confirmed = run_pass(&driver, &watchers, url, caption, watch_secs).await;
+        landing = Some(confirmed);
         if confirmed == 0 {
             println!("  ! không máy nào xác nhận đang ở bài — lượt này không đo được gì, dừng lại");
             return Ok(());
@@ -224,26 +302,40 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// One reading of the post: its numbers, and the caption that identifies it.
+struct Reading {
+    now: PostNow,
+    /// Read right after arrival, before `read_view_count` navigates off the post.
+    caption: Option<String>,
+}
+
 /// Everything the post says about itself, from the reader phone.
+#[allow(clippy::too_many_arguments)]
 async fn measure(
     session: &dyn UiSession,
     labels: tiktok_labels::TikTokControls,
+    package: &str,
     screen: (f64, f64),
     url: &str,
     handle: &str,
     stop: &AtomicBool,
-) -> anyhow::Result<PostNow> {
-    match open_target_by_hierarchy(session, labels, TIKTOK.as_str(), url, handle, stop).await {
+) -> anyhow::Result<Reading> {
+    match open_target_by_hierarchy(session, labels, package, url, handle, stop).await {
         Ok(TargetArrival::Identified { .. }) | Ok(TargetArrival::Structural) => {}
         Err(refusal) => anyhow::bail!("reader could not reach the post: {}", refusal.message()),
     }
+    // Before anything navigates: `read_view_count` walks off to the profile grid.
+    let caption = read_post_caption(session).await;
     let rail = read_post_counters(session, labels).await;
     // The view count is a navigation away and costs the post page, so it is read last.
     let views = read_view_count(session, labels, screen, stop).await;
-    Ok(PostNow {
-        views,
-        likes: rail.likes,
-        comments: rail.comments,
+    Ok(Reading {
+        now: PostNow {
+            views,
+            likes: rail.likes,
+            comments: rail.comments,
+        },
+        caption,
     })
 }
 
@@ -280,12 +372,13 @@ async fn run_pass(
             println!("  {serial}: no session");
             continue;
         };
+        let wanted = package_for(driver, serial).await;
         let foreground = session
             .active_app_bundle()
             .await
-            .is_ok_and(|bundle| bundle == *TIKTOK);
+            .is_ok_and(|bundle| bundle == wanted);
         if !foreground {
-            println!("  {serial}: TikTok không ở foreground sau {ARRIVAL_WINDOW:?}");
+            println!("  {serial}: {wanted} không ở foreground sau {ARRIVAL_WINDOW:?}");
             continue;
         }
         match read_post_caption(&session).await {
