@@ -426,6 +426,9 @@ mod tests {
                     self.desc.lock().expect("desc").contains(&value)
                 }
                 ElementQuery::ClassName(_) => false,
+                // The ladder never looks a node up by id; a fixture that pretended otherwise
+                // would be answering a question the code does not ask.
+                ElementQuery::ResourceIdSuffix(_) => false,
             };
             Ok(found.then_some(ElementBox {
                 x: 100.0,

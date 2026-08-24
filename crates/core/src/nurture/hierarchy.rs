@@ -2008,6 +2008,8 @@ mod tests {
                 // the dialog is gone. Both being absent is the whole difficulty.
                 ElementQuery::Description { value, .. } => dismissed && value == "For You",
                 ElementQuery::ClassName(_) => false,
+                // This path looks nothing up by id; answering it would be inventing a screen.
+                ElementQuery::ResourceIdSuffix(_) => false,
             };
             Ok(found.then_some(ElementBox {
                 x: 420.0,

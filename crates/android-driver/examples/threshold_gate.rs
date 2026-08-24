@@ -37,7 +37,8 @@ use std::time::Duration;
 use riviu_android_driver::{AndroidDriver, AndroidDriverConfig};
 use riviu_core::driver::{DeviceDriver, UiSession};
 use riviu_core::interaction_hierarchy::{
-    open_target_by_hierarchy, read_post_caption, read_post_now, TargetArrival,
+    open_target_by_hierarchy, read_author_label, read_post_caption, read_post_counters,
+    read_post_now, PostCounters, TargetArrival,
 };
 use riviu_core::interaction_threshold::{plan_thresholds, PostNow, PostTargets};
 use riviu_core::tiktok_labels;
@@ -211,11 +212,18 @@ async fn main() -> anyhow::Result<()> {
     //
     // The estimate uses this rather than the number of phones handed in, because those are
     // different numbers and the difference is large: measured 24/08/2026, eleven attached phones
-    // put **seven** on the post — one landed on a different post of the same author, one never
-    // reached the foreground inside 40 s, and two run `com.zhiliaoapp.musically`, where the VIEW
-    // intent opens the app on its feed instead of the post. Estimating from eleven would overstate
-    // the rate by more than a third, and an estimate that flatters the fleet is how a threshold
-    // ends up chasing a number it will not reach.
+    // confirmed **seven**. One read a different post's caption, one never reached the foreground
+    // inside 40 s, and two `com.zhiliaoapp.musically` phones could not have their caption read at
+    // all.
+    //
+    // **Confirmed, not landed** — and the distinction is one I got wrong first time round. A
+    // later logcat comparison showed the deep link reaching `AppLinkHandlerV2` on a phone that
+    // confirmed and on a phone that did not, both ending on `MainActivity`, so TikTok pushes the
+    // post *inside* that activity and the foreground component says nothing about which post is
+    // showing. The unconfirmed four may well have been on the post with a caption this build
+    // reads differently. Estimating from eleven would still overstate the rate — an estimate that
+    // flatters the fleet is how a threshold ends up chasing a number it will not reach — but
+    // estimating from seven understates it by however many of those four were really there.
     let mut landing: Option<usize> = None;
     for pass in 0..=max_passes {
         // **Cold onto the feed before every reading, without exception.** `measure` decides it
@@ -286,25 +294,133 @@ async fn main() -> anyhow::Result<()> {
             println!("  hết số lượt cho phép");
             return Ok(());
         }
-        let Some(caption) = caption.as_deref() else {
+        let Some(author) = reading.author.clone() else {
             anyhow::bail!(
-                "no caption to check the watchers against, so a pass could not be measured"
+                "reader could not read the post's author label, \n                 so no watcher could be checked against it"
             );
         };
+        let identity = PostIdentity {
+            author,
+            likes: now.likes,
+            comments: now.comments,
+        };
         println!("== pass {} on {} phones ==", pass + 1, watchers.len());
-        let confirmed = run_pass(&driver, &watchers, url, caption, watch_secs).await;
-        landing = Some(confirmed);
-        if confirmed == 0 {
-            println!("  ! không máy nào xác nhận đang ở bài — lượt này không đo được gì, dừng lại");
+        let tally = run_pass(&driver, &watchers, url, &identity, watch_secs).await;
+        // The **lower** bound drives the estimate: it is the only number that is evidence. The
+        // upper bound is printed next to it so the error bar is not invisible.
+        landing = Some(tally.confirmed);
+        if tally.upper() == 0 {
+            println!(
+                "  ! không máy nào xác nhận đang ở bài, và không máy nào để ngỏ — lượt này không \
+                 đo được gì, dừng lại"
+            );
             return Ok(());
+        }
+        if tally.upper() > tally.confirmed {
+            println!(
+                "  (ước lượng dùng {} máy chắc chắn; tối đa có thể là {} nếu mấy máy không đọc \
+                 được caption vẫn ở trên bài)",
+                tally.confirmed,
+                tally.upper()
+            );
         }
     }
     Ok(())
 }
 
+/// What one pass could be shown to have done, split by *why* a phone did not count.
+///
+/// One number was not enough, and lumping them cost a wrong conclusion. "The caption says a
+/// different post" is a phone that was somewhere else. "The caption could not be read" is a
+/// phone this gate cannot speak about — it may have been on the post the whole time with a
+/// caption this build renders in a class nobody has measured. Reporting both as "did not land"
+/// turned an unknown into a claim.
+#[derive(Debug, Default, Clone, Copy)]
+struct PassTally {
+    /// Caption matched the post's. The only number that is evidence.
+    confirmed: usize,
+    /// Caption read, and it belonged to something else.
+    wrong_post: usize,
+    /// TikTok was up but no caption came back — unknown, not negative.
+    unreadable: usize,
+    /// The app never reached the foreground inside the arrival window.
+    absent: usize,
+}
+
+impl PassTally {
+    /// The most phones that could have been on the post: confirmed plus the ones we cannot
+    /// speak about. Printed beside `confirmed` so the estimate's error bar is visible.
+    fn upper(&self) -> usize {
+        self.confirmed + self.unreadable
+    }
+}
+
+/// What identifies a post **across phones**.
+///
+/// **Not the caption**, and getting that wrong cost two reports to the operator. Measured
+/// 24/08/2026 with the same post open on four phones at once: three read
+/// `Một list gọn để lên Đà Lạt mà không phải…` and one read
+/// `A compact list to go to Da Lat without struggling to choose…` — TikTok localises the caption
+/// to the account's language — and every one of them was **truncated with an ellipsis** at a
+/// length that depends on the screen. A caption identifies a post only *within one phone*, which
+/// is exactly how `read_view_count` uses it and exactly not what a pass needs.
+///
+/// The author and the post's own counters are properties of the **post**, not of the viewer: the
+/// same on every phone at a given moment, in every language, untruncated.
+struct PostIdentity {
+    /// The **reader's** author label, compared against each watcher's own.
+    ///
+    /// Not the URL's handle through `author_matches_handle`: measured 24/08/2026, that returns
+    /// `false` for this very account, because `.lt.gi.mang.v` abbreviates each word of
+    /// `Đà Lạt Gói Mang Về` instead of taking a prefix, and the comparison is run-containment.
+    /// Two phones reading the same account's nickname get the same string, which is all this
+    /// needs — and it needs no heuristic at all.
+    author: String,
+    likes: Option<u32>,
+    comments: Option<u32>,
+}
+
+/// How far a counter may drift between the reader's reading and a watcher's, and still be the
+/// same post.
+///
+/// A pass is about ninety seconds and the post is live, so a like or a comment can land inside
+/// it — the reader's numbers are from before the pass. Three is wide enough for that and narrow
+/// enough that two *different* posts by the same author would have to agree on both counters to
+/// within three to be confused, which the author check has already made unlikely.
+const COUNT_DRIFT: u32 = 3;
+
+impl PostIdentity {
+    /// Whether what this phone is showing is the same post.
+    fn matches(&self, author_label: Option<&str>, seen: &PostCounters) -> Option<bool> {
+        let author = author_label?;
+        if !author.trim().eq_ignore_ascii_case(self.author.trim()) {
+            return Some(false);
+        }
+        Some(near(self.likes, seen.likes) && near(self.comments, seen.comments))
+    }
+}
+
+/// Two readings of the same counter, allowing for the post moving under us.
+///
+/// `None` on either side is not a mismatch: a build that cannot state a number says nothing about
+/// which post this is, and treating silence as disagreement would fail every phone on a build
+/// where the counted-like control was never measured.
+fn near(reader: Option<u32>, seen: Option<u32>) -> bool {
+    match (reader, seen) {
+        (Some(a), Some(b)) => a.abs_diff(b) <= COUNT_DRIFT,
+        _ => true,
+    }
+}
+
 /// One reading of the post: its numbers, and the caption that identifies it.
 struct Reading {
     now: PostNow,
+    /// The author's nickname as **this** phone renders it, read right after arrival.
+    ///
+    /// Taken here rather than from `TargetArrival::Identified`, because arrival at this account
+    /// resolves `Structural`: its handle abbreviates the nickname and `author_matches_handle`
+    /// therefore does not fire. The label is still on the rail and still readable.
+    author: Option<String>,
     /// Read right after arrival, before `read_view_count` navigates off the post.
     caption: Option<String>,
 }
@@ -326,11 +442,16 @@ async fn measure(
     }
     // Before anything navigates: `read_view_count` walks off to the profile grid.
     let caption = read_post_caption(session).await;
+    let author = read_author_label(session, labels).await;
     // The same function the desktop's `interaction_measure_post` calls, not a second copy of the
     // same reads in a different order — a gate that measures a re-implementation proves nothing
     // about the product.
     let now = read_post_now(session, labels, screen, true, stop).await;
-    Ok(Reading { now, caption })
+    Ok(Reading {
+        now,
+        caption,
+        author,
+    })
 }
 
 /// One pass: every watcher opens the post and stays on it. Returns how many were *shown* to be.
@@ -344,9 +465,9 @@ async fn run_pass(
     driver: &AndroidDriver,
     watchers: &[String],
     url: &str,
-    caption: &str,
+    identity: &PostIdentity,
     watch_secs: u64,
-) -> usize {
+) -> PassTally {
     // Fired at every phone first, so the fleet cold-starts in parallel rather than in series.
     let mut fired = 0usize;
     for serial in watchers {
@@ -360,10 +481,11 @@ async fn run_pass(
 
     // **Proof of watching, not of asking.** Checked before the dwell, so a phone counted here
     // was on the post for the whole of it.
-    let mut confirmed = 0usize;
+    let mut tally = PassTally::default();
     for serial in watchers {
         let Ok(session) = driver.open_session(serial).await else {
             println!("  {serial}: no session");
+            tally.absent += 1;
             continue;
         };
         let wanted = package_for(driver, serial).await;
@@ -373,21 +495,48 @@ async fn run_pass(
             .is_ok_and(|bundle| bundle == wanted);
         if !foreground {
             println!("  {serial}: {wanted} không ở foreground sau {ARRIVAL_WINDOW:?}");
+            tally.absent += 1;
             continue;
         }
-        match read_post_caption(&session).await {
-            Some(seen) if seen == caption => confirmed += 1,
-            Some(seen) => println!(
-                "  {serial}: đang ở bài khác ({:?})",
-                seen.chars().take(40).collect::<String>()
-            ),
-            None => println!("  {serial}: không đọc được caption, không tính"),
+        // Labels per phone: the fleet runs two packages and two UI languages, and an author
+        // label is read through whichever pair this phone is.
+        let language = session.ui_language().await.unwrap_or_default();
+        let app_version = session.app_version(&wanted).await.unwrap_or_default();
+        let Some(labels) = tiktok_labels::controls_for(&wanted, &language, &app_version) else {
+            tally.unreadable += 1;
+            println!("  {serial}: chưa đo nhãn cho {wanted} + {language:?}");
+            continue;
+        };
+        let author = read_author_label(&session, labels).await;
+        let seen = read_post_counters(&session, labels).await;
+        match identity.matches(author.as_deref(), &seen) {
+            Some(true) => tally.confirmed += 1,
+            Some(false) => {
+                tally.wrong_post += 1;
+                println!(
+                    "  {serial}: bài khác — tác giả {:?}, tim {:?}, bình luận {:?}",
+                    author.as_deref().unwrap_or("?"),
+                    seen.likes,
+                    seen.comments
+                );
+            }
+            // The author label is the one thing this cannot do without. No label is not a
+            // negative: TikTok pushes the post inside `MainActivity`, so a phone whose rail this
+            // build labels differently looks exactly like one on the feed.
+            None => {
+                tally.unreadable += 1;
+                println!("  {serial}: không đọc được nhãn tác giả — không kết luận được");
+            }
         }
     }
     println!(
-        "  {confirmed}/{} máy xác nhận đang ở đúng bài",
-        watchers.len()
+        "  {}/{} máy xác nhận đúng bài · {} bài khác · {} không đọc được · {} không lên foreground",
+        tally.confirmed,
+        watchers.len(),
+        tally.wrong_post,
+        tally.unreadable,
+        tally.absent
     );
     tokio::time::sleep(Duration::from_secs(watch_secs)).await;
-    confirmed
+    tally
 }

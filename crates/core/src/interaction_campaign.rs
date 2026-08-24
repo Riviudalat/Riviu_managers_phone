@@ -2299,6 +2299,39 @@ mod boundary_tests {
     /// needs a Tauri `State`, a database, a control plane and a spawned worker to call. The
     /// ordering is the whole fix, and a test that cannot run is worse than a crude one that
     /// can.
+    /// A refusal from the arrival check is never turned into a success.
+    ///
+    /// `interaction_measure_post` retries once, and only when the refusal is
+    /// `target_open_screen_unchanged` — the ordinary case of pressing Đo bài twice, because the
+    /// first press leaves the phone on the post and the check decides it arrived by watching the
+    /// author label *change*. The retry is a real second arrival: the phone is stepped off the
+    /// post and asked again.
+    ///
+    /// What this pins is the tempting shortcut: matching that code and carrying on as though the
+    /// phone were there. The arrival gate is what keeps a campaign from commenting under the
+    /// wrong post, and a *measurement* that bypassed it would be the first crack in it.
+    #[test]
+    fn measuring_a_post_never_swallows_an_arrival_refusal() {
+        let body = command_body("interaction_measure_post");
+        assert_eq!(
+            body.matches("open_target_by_hierarchy").count(),
+            2,
+            "one arrival and one retry: a single call is no retry, a third is a loop"
+        );
+        // The **comparison**, not the bare string: the code is named in the comment above it
+        // too, and counting mentions counts prose.
+        assert_eq!(
+            body.matches(r#"refusal.code() == "target_open_screen_unchanged""#)
+                .count(),
+            1,
+            "the code is compared once, to decide whether to retry — nothing else"
+        );
+        assert!(
+            body.contains("arrival.map_err("),
+            "whatever the second arrival said still has to reach the operator"
+        );
+    }
+
     fn command_body(name: &str) -> &'static str {
         let desktop = include_str!("../../../apps/desktop/src-tauri/src/interaction_commands.rs");
         let start = desktop

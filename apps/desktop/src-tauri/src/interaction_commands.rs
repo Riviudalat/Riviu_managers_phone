@@ -301,7 +301,8 @@ pub async fn interaction_start_thread(
 /// **Manual on purpose.** Likes and comments are two label reads on a page already open, but a
 /// view count is a navigation — TikTok states a play count only on the author's profile grid,
 /// and the grid says nothing about which post a tile is, so each candidate is opened and its
-/// caption compared. That measured 2-4 minutes on this farm, on top of a cold start. A panel
+/// caption compared. Timed 24/08/2026: about four and a half minutes per reading for a post near
+/// the top of the author's grid, and longer when it sits deeper — on top of a cold start. A panel
 /// that did it on its own, on a link the operator had only just pasted, would take a phone away
 /// for minutes without being asked; so `read_views` is a flag the operator sets and this command
 /// only ever runs when a button is pressed.
@@ -348,7 +349,22 @@ pub async fn interaction_measure_post(
             })?;
     let screen = session.window_size().await.map_err(interaction_error)?;
     let stop = std::sync::atomic::AtomicBool::new(false);
-    riviu_core::interaction_hierarchy::open_target_by_hierarchy(
+    // **Pressing Đo bài twice must not report the post as gone.** The arrival check decides it
+    // got there by watching the author label *change*, so a phone already sitting on this post
+    // gives it nothing to observe and it refuses `target_open_screen_unchanged` — a message that
+    // reads "bài đã bị xoá/riêng tư/chặn vùng". The second press is the ordinary case: the first
+    // one left the phone right there.
+    //
+    // The answer is a real second arrival, not a relaxed first one. The gate is what keeps a
+    // campaign from commenting under the wrong post, so it is never loosened; instead the phone
+    // is stepped off the post — Back from a deep-linked post leaves the feed, or leaves the app,
+    // and arriving is visible from either — and asked again. Once only, and any other refusal is
+    // returned as it came.
+    //
+    // Back rather than a force-stop: `device_shell` requires a lease context and stopping the
+    // app underneath a live session and stream would break both, to save an arrival that costs
+    // one screen change.
+    let mut arrival = riviu_core::interaction_hierarchy::open_target_by_hierarchy(
         session,
         labels,
         &device.target_package,
@@ -356,8 +372,25 @@ pub async fn interaction_measure_post(
         &target.author,
         &stop,
     )
-    .await
-    .map_err(|refusal| CommandError::code("InteractionFailed", refusal.message()))?;
+    .await;
+    if arrival
+        .as_ref()
+        .err()
+        .is_some_and(|refusal| refusal.code() == "target_open_screen_unchanged")
+    {
+        session.back().await.map_err(interaction_error)?;
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
+        arrival = riviu_core::interaction_hierarchy::open_target_by_hierarchy(
+            session,
+            labels,
+            &device.target_package,
+            &target.normalized_url,
+            &target.author,
+            &stop,
+        )
+        .await;
+    }
+    arrival.map_err(|refusal| CommandError::code("InteractionFailed", refusal.message()))?;
     let now = riviu_core::interaction_hierarchy::read_post_now(
         session, labels, screen, read_views, &stop,
     )

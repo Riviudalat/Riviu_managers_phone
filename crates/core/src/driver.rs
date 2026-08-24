@@ -824,6 +824,21 @@ pub enum ElementQuery<'a> {
     Description { value: &'a str, exact: bool },
     /// Match the widget class, e.g. `android.widget.EditText`.
     ClassName(&'a str),
+    /// Match the **suffix** of the fully-qualified `resource-id`.
+    ///
+    /// Measured 24/08/2026, and the measurement is the whole reason this exists. TikTok's caption
+    /// node is `com.bytedance.tux.input.TuxTextLayoutView` on `com.ss.android.ugc.trill` and
+    /// **`X.1BOr`** on `com.zhiliaoapp.musically` — the class name is obfuscated and changes with
+    /// the build — while *both* carry a `resource-id` ending `:id/desc`. Keying the caption on the
+    /// class therefore read it on one build and returned nothing on the other, which is what made
+    /// four of twenty phones unconfirmable during a pass and got recorded as "the deep link did
+    /// not navigate" when the post had been open the whole time.
+    ///
+    /// A suffix rather than the whole id because the id embeds the package, and the package is
+    /// exactly what differs between the two builds.
+    ///
+    /// **A literal, not a pattern** — the driver escapes it before building the match.
+    ResourceIdSuffix(&'a str),
     /// Match the node's rendered `text`, not its `content-desc`.
     ///
     /// Needed because the two are not interchangeable: TikTok's action rail is

@@ -456,6 +456,9 @@ mod tests {
                 ElementQuery::Description { value, .. } => value,
                 ElementQuery::ClassName(value) => value,
                 ElementQuery::Text { value, .. } => value,
+                // Registered by value like every other strategy, so a fixture can key on an id
+                // suffix without this double having to model resource ids.
+                ElementQuery::ResourceIdSuffix(value) => value,
             };
             let mut answers = self.answers.lock();
             if let Some(index) = answers.iter().position(|(key, _)| key == wanted) {

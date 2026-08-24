@@ -266,6 +266,11 @@ fn to_agent_locator(query: riviu_core::ElementQuery<'_>) -> Locator {
             exact: false,
         } => Locator::DescriptionContains(value.to_string()),
         riviu_core::ElementQuery::ClassName(value) => Locator::ClassName(value.to_string()),
+        // Anchored at the end, and the literal is escaped: the caller passes an id suffix, not a
+        // pattern.
+        riviu_core::ElementQuery::ResourceIdSuffix(value) => {
+            Locator::ResourceIdMatches(format!(".*{}", crate::agent::escape_java_regex(value)))
+        }
         riviu_core::ElementQuery::Text { value, exact: true } => Locator::Text(value.to_string()),
         riviu_core::ElementQuery::Text {
             value,

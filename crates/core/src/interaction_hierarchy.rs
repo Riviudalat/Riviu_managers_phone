@@ -374,11 +374,19 @@ pub fn author_matches_handle(author_label: &str, handle: &str) -> bool {
         return false;
     }
     // Compared as **contiguous word runs**, not as one string, because a handle is usually
-    // built from *part* of the nickname: `Đà Lạt Gói Mang Về` against `.lt.gi.mang.v`
-    // matches on a run, never on the whole. The label reaching here is already the bare
-    // nickname — `bare_author_label` strips whichever catalogued needle wrapped it — so this
-    // no longer has to see past a `Follow ` prefix, but it still has to see past the words
-    // the handle left out.
+    // built from *part* of the nickname — it matches on a run, never on the whole. The label
+    // reaching here is already the bare nickname (`bare_author_label` strips whichever
+    // catalogued needle wrapped it), so this no longer has to see past a `Follow ` prefix, but
+    // it still has to see past the words the handle left out.
+    //
+    // **It does not catch a handle that drops letters, and the example this comment used to
+    // claim as a match is one of those.** Measured 24/08/2026: `Đà Lạt Gói Mang Về` squashes to
+    // runs of `da lat goi mang ve` while `.lt.gi.mang.v` squashes to `ltgimangv` — the handle
+    // abbreviates each word rather than taking a prefix of the whole, so no run of one contains
+    // the other and this returns `false`. Arrival at that account's posts therefore succeeds as
+    // `TargetArrival::Structural`, not `Identified`. That is a weaker guarantee and it is the
+    // honest one; loosening the comparison to catch abbreviations would make it match handles
+    // that belong to other people, which is the failure this whole check exists to prevent.
     let words: Vec<String> = crate::interaction::normalize_locator_text(author_label)
         .split_whitespace()
         .map(squash)
@@ -1051,8 +1059,9 @@ fn parse_count(text: &str) -> Option<(u32, bool)> {
 ///
 /// `read_views` exists because the two numbers cost three orders of magnitude apart. Likes and
 /// comments are two label reads on a page already open; a view count walks the profile grid
-/// opening tiles until a caption matches, which measured 2-4 minutes on this farm. A caller that
-/// only needs the cheap two must be able to say so rather than pay for both.
+/// opening tiles until a caption matches. Timed 24/08/2026: about four and a half minutes per
+/// reading for a post near the top of the author's grid, and longer when it sits deeper. A caller
+/// that only needs the cheap two must be able to say so rather than pay for both.
 pub async fn read_post_now(
     session: &dyn UiSession,
     labels: TikTokControls,
@@ -1160,26 +1169,39 @@ pub async fn read_profile_tiles(session: &dyn UiSession, screen: (f64, f64)) -> 
 /// moving, so identifying a post by them would mean the post stops being recognisable as
 /// soon as the farming works. A caption is long, unique and does not change.
 ///
-/// **The caption is not a `TextView`.** Measured 24/08/2026: it is
-/// `com.bytedance.tux.input.TuxTextLayoutView` (`resource-id` ending `/desc`), while the
-/// comment bodies below it are ordinary `TextView`s. Reading only `TextView` therefore
-/// returned a *comment* as the caption when the drawer was open, and nothing at all when it
-/// was closed — which is exactly how the first run of the view reader answered "not found"
-/// for a post that was on screen.
+/// **Found by `resource-id`, because the class name is not stable.** Measured 24/08/2026, the
+/// same post open on both builds this farm runs:
+///
+/// ```text
+/// com.ss.android.ugc.trill      class=com.bytedance.tux.input.TuxTextLayoutView   id=…:id/desc
+/// com.zhiliaoapp.musically      class=X.1BOr                                      id=…:id/desc
+/// ```
+///
+/// `X.1BOr` is an obfuscated name that changes with the build, so a class-keyed lookup read the
+/// caption on sixteen phones and returned nothing on four — and "nothing" is indistinguishable
+/// from "this is not a post page", which is how a whole pass got recorded as "the deep link did
+/// not navigate" when the post had been open the entire time. The id suffix is the same on both
+/// and carries no package, so one query serves every build.
+///
+/// The two classes stay as a fallback: they are what was measured first, they still work, and a
+/// build that renames `desc` would otherwise take the caption with it. `TextView` is last on
+/// purpose — with the comment drawer open it returns a *comment*, which is worse than nothing
+/// because it looks like an answer.
 ///
 /// The `TextView` sweep stays as a fallback for a build that renders it the ordinary way, and
 /// the longest string wins in both: a caption is longer than any label or button on the page.
 pub async fn read_post_caption(session: &dyn UiSession) -> Option<String> {
     const CAPTION_MIN_CHARS: usize = 40;
+    /// The id suffix first, then the classes that were measured before it.
+    const CAPTION_ID_SUFFIX: &str = ":id/desc";
     const CAPTION_CLASSES: [&str; 2] = [
         "com.bytedance.tux.input.TuxTextLayoutView",
         "android.widget.TextView",
     ];
-    for class in CAPTION_CLASSES {
-        let Ok(nodes) = session
-            .locate_all_described(ElementQuery::ClassName(class))
-            .await
-        else {
+    let by_id = std::iter::once(ElementQuery::ResourceIdSuffix(CAPTION_ID_SUFFIX));
+    let by_class = CAPTION_CLASSES.into_iter().map(ElementQuery::ClassName);
+    for query in by_id.chain(by_class) {
+        let Ok(nodes) = session.locate_all_described(query).await else {
             continue;
         };
         let longest = nodes
@@ -1192,8 +1214,24 @@ pub async fn read_post_caption(session: &dyn UiSession) -> Option<String> {
             return longest;
         }
     }
+    // **Say so, loudly.** A silent `None` here is indistinguishable from "this is not a post
+    // page", and that ambiguity is what made a whole pass unmeasurable on three phones: they had
+    // TikTok in the foreground with the post very possibly open, and all this could report was
+    // nothing. Naming the classes it tried turns the next investigation into one grep instead of
+    // a hierarchy dump and a guess — run `examples/label_scout` on the phone at its post page and
+    // add whatever class the caption really uses.
+    tracing::warn!(
+        "no caption node with >= {CAPTION_MIN_CHARS} characters under an id ending \n         {CAPTION_ID_SUFFIX:?} or in any of {CAPTION_CLASSES:?} — either this is not a post \n         page, or this TikTok build names the caption something never measured"
+    );
     None
 }
+
+/// How many times the grid is re-read after `back()` before concluding it is not there.
+///
+/// Three at `PROFILE_SETTLE` each, so 7.5 s. A grid that has not come back by then is a screen
+/// that is not the grid; a grid that comes back on the second read is just a slow frame, and
+/// treating that as a failure aborted whole readings.
+const PROFILE_BACK_ATTEMPTS: u32 = 3;
 
 /// How many grid rows to scroll through looking for the post.
 ///
@@ -1268,8 +1306,22 @@ pub async fn read_view_count(
             // author or the comment drawer. An empty grid read is the refusal: scrolling cannot
             // recover a screen that is not the grid.
             session.back().await.ok()?;
-            tokio::time::sleep(PROFILE_SETTLE).await;
-            if read_profile_tiles(session, screen).await.is_empty() {
+            // **Read until it answers, not once.** The first version checked the grid a single
+            // `PROFILE_SETTLE` after `back()` and refused on an empty read — and an empty read
+            // there usually means "the grid has not re-rendered yet", exactly the mistake the
+            // parent-scroll loop in this file made and had to be fixed for. Measured 24/08/2026:
+            // it aborted the whole walk on the first tile often enough to turn a working reading
+            // into `views=None`. Refusing only after the budget is spent keeps the check that a
+            // blind tap never lands on the feed, without inventing a failure out of a slow frame.
+            let mut back_on_grid = false;
+            for _ in 0..PROFILE_BACK_ATTEMPTS {
+                tokio::time::sleep(PROFILE_SETTLE).await;
+                if !read_profile_tiles(session, screen).await.is_empty() {
+                    back_on_grid = true;
+                    break;
+                }
+            }
+            if !back_on_grid {
                 tracing::warn!("back from a tile did not return to the profile grid; refusing");
                 return None;
             }
@@ -2125,7 +2177,13 @@ fn strip_ignoring_case(haystack: &str, needle: &str, prefix: bool) -> Option<Str
 ///
 /// Unreadable still means `None`, and `None` still means the caller refuses. Widening where
 /// the name can be read from must never widen what counts as having read one.
-async fn read_author_label(session: &dyn UiSession, labels: TikTokControls) -> Option<String> {
+/// Public so a measurement can ask "whose post is this?" without navigating.
+///
+/// `open_target_by_hierarchy` answers the same question but *arrives* to do it, which is wrong for
+/// a phone that is already there — and it is the only other way to get at this. See
+/// `examples/threshold_gate`, which needs the author to tell one post from another across phones
+/// after a caption turned out not to be able to.
+pub async fn read_author_label(session: &dyn UiSession, labels: TikTokControls) -> Option<String> {
     for control in [TikTokControl::AuthorProfileLink, TikTokControl::Follow] {
         let Some(label) = labels.label(control) else {
             continue;
@@ -2325,6 +2383,9 @@ mod tests {
                 ElementQuery::Description { value, .. } => value,
                 ElementQuery::ClassName(value) => value,
                 ElementQuery::Text { value, .. } => value,
+                // Keyed the same way as everything else here: this fixture answers by the query's
+                // value, whatever the strategy, and the arrival path does not use ids.
+                ElementQuery::ResourceIdSuffix(value) => value,
             };
             if wanted == follow_key() {
                 let mut reads = self.follow_reads.lock();
@@ -2937,6 +2998,9 @@ mod tests {
             ElementQuery::Description { value, .. } => value,
             ElementQuery::ClassName(value) => value,
             ElementQuery::Text { value, .. } => value,
+            // So a test can register an id suffix as a key like any other — which is how the
+            // caption lookup is exercised now that it asks for `:id/desc` first.
+            ElementQuery::ResourceIdSuffix(value) => value,
         }
     }
 
@@ -3916,6 +3980,40 @@ mod tests {
         let tiles = read_profile_tiles(&session, (1080.0, 2400.0)).await;
         assert_eq!(tiles.len(), 1, "only the bare number is a count");
         assert_eq!(tiles[0].views, 431);
+    }
+
+    /// The caption is found by `resource-id`, not by class name.
+    ///
+    /// Measured 24/08/2026 with the same post open on both builds this farm runs: the caption node
+    /// is `com.bytedance.tux.input.TuxTextLayoutView` on `com.ss.android.ugc.trill` and **`X.1BOr`**
+    /// on `com.zhiliaoapp.musically` — obfuscated, and it changes with the build — while both carry
+    /// a `resource-id` ending `:id/desc`.
+    ///
+    /// The class-keyed lookup therefore read the caption on sixteen phones and returned nothing on
+    /// four. `None` is indistinguishable from "this is not a post page", so a whole pass was
+    /// recorded as "the deep link did not navigate" while the post had been open the entire time.
+    /// This fixture offers **only** the id, the way an obfuscated build does.
+    #[tokio::test(start_paused = true)]
+    async fn the_caption_is_found_by_resource_id_not_by_class() {
+        const CAPTION: &str =
+            "A compact list to go to Da Lat without struggling to choose a place.";
+        let session = DrawerSession::default()
+            .with_many(":id/desc", vec![node(32.0, 1688.0, 838.0, 200.0, CAPTION)]);
+
+        assert_eq!(read_post_caption(&session).await.as_deref(), Some(CAPTION));
+    }
+
+    /// And the classes measured first still work, for a build that renames `desc`.
+    #[tokio::test(start_paused = true)]
+    async fn the_measured_caption_classes_stay_as_a_fallback() {
+        const CAPTION: &str =
+            "A compact list to go to Da Lat without struggling to choose a place.";
+        let session = DrawerSession::default().with_many(
+            "com.bytedance.tux.input.TuxTextLayoutView",
+            vec![node(32.0, 1688.0, 838.0, 200.0, CAPTION)],
+        );
+
+        assert_eq!(read_post_caption(&session).await.as_deref(), Some(CAPTION));
     }
 
     #[tokio::test(start_paused = true)]

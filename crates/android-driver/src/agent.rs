@@ -62,6 +62,11 @@ pub enum Locator {
     TextContains(String),
     /// Fully-qualified `resource-id`. Obfuscated in TikTok; use sparingly.
     ResourceId(String),
+    /// A Java regex over the fully-qualified `resource-id`.
+    ///
+    /// The way to reach a node whose *class* is obfuscated but whose id is not — see
+    /// [`riviu_core::ElementQuery::ResourceIdSuffix`] for the measurement that needs it.
+    ResourceIdMatches(String),
     /// Raw `UiSelector` expression, for the cases the above cannot express.
     UiSelector(String),
 }
@@ -99,6 +104,13 @@ impl Locator {
                 "strategy": "id",
                 "selector": value,
             }),
+            Self::ResourceIdMatches(pattern) => json!({
+                "strategy": "-android uiautomator",
+                "selector": format!(
+                    "new UiSelector().resourceIdMatches({})",
+                    quote_java(pattern)
+                ),
+            }),
             Self::UiSelector(expression) => json!({
                 "strategy": "-android uiautomator",
                 "selector": expression,
@@ -133,10 +145,35 @@ impl Locator {
             Self::ResourceId(value) => {
                 format!("new UiSelector().resourceId({})", quote_java(&value))
             }
+            Self::ResourceIdMatches(pattern) => {
+                format!(
+                    "new UiSelector().resourceIdMatches({})",
+                    quote_java(&pattern)
+                )
+            }
             Self::UiSelector(expression) => expression,
         };
         Self::UiSelector(format!("{inner}.focused(true)"))
     }
+}
+
+/// Escape the regex metacharacters in a literal, for `resourceIdMatches`.
+///
+/// Separate from [`quote_java`] because the two protect against different things: that one stops
+/// a quote from ending the Java string, this one stops a `.` from matching any character. A
+/// resource-id suffix like `:id/desc` needs neither today, and the next one will.
+pub(crate) fn escape_java_regex(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(
+            ch,
+            '.' | '\\' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|'
+        ) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// Quote a Java string literal for embedding in a `UiSelector` expression.
