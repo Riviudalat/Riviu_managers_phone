@@ -172,7 +172,21 @@ export function buildRequest(
   };
 }
 
-export interface ValidateContext extends BuildContext {
+/**
+ * What the checks need — which is **not** what a request needs.
+ *
+ * It used to extend `BuildContext`, so it carried a `requestId` and a `mentions` list that
+ * nothing in this file reads. Worse than dead weight: the popup builds this in a `useMemo`
+ * whose dependency array cannot list `requestIdRef`, so that copy went stale the moment `run()`
+ * rotated the id after a successful dispatch. Harmless only for as long as nobody reads it, and
+ * a field that exists to be ignored is a field the next person will read.
+ */
+export interface ValidateContext {
+  targets: ResolvedTikTokTarget[];
+  /** Selected actors already unioned with the phones the mentions name. */
+  actorUdids: string[];
+  /** The biggest cohort the backend's own plan produced, or the fleet size with no plan yet. */
+  largestCohort: number;
   /** Lines that were pasted but could not be read as a target. */
   badLineCount: number;
   /**

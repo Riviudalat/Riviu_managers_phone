@@ -10,6 +10,7 @@ import {
   requestShapeOf,
   validateDraft,
   type InteractionDraft,
+  type BuildContext,
   type ValidateContext,
 } from "./interactionPlan";
 import type { ResolvedTikTokTarget, ThreadPlan } from "./types";
@@ -25,13 +26,23 @@ const target: ResolvedTikTokTarget = {
 
 function context(over: Partial<ValidateContext> = {}): ValidateContext {
   return {
+    targets: [target],
+    actorUdids: ["a", "b"],
+    largestCohort: 2,
+    badLineCount: 0,
+    mixedThread: false,
+    ...over,
+  };
+}
+
+/** What a *request* needs, which the checks do not: an id, and the mention list. */
+function buildContext(over: Partial<BuildContext> = {}): BuildContext {
+  return {
     requestId: "req-1",
     targets: [target],
     actorUdids: ["a", "b"],
     mentions: [],
     largestCohort: 2,
-    badLineCount: 0,
-    mixedThread: false,
     ...over,
   };
 }
@@ -167,7 +178,7 @@ describe("buildRequest", () => {
   it("sends the shape, the resolved message count, and the trimmed manual pool", () => {
     const request = buildRequest(
       draft({ textSource: "manual", manualText: " một \n\n hai " }),
-      context({ largestCohort: 2, mentions: ["ann"] }),
+      buildContext({ largestCohort: 2, mentions: ["ann"] }),
     );
     expect(request).toMatchObject({
       requestId: "req-1",

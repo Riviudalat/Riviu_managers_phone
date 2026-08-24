@@ -40,6 +40,11 @@ export function InteractionActorPicker({
 }) {
   /// Saved device groups, offered as a way to fill the actor list in one go.
   ///
+  /// Fetched per mount, so a tab switch re-asks. Left that way deliberately: it is a read of a
+  /// small table with no device involved, and a group renamed in Tài khoản while this panel sat
+  /// open should show up. Unlike the disclosure state above it, nothing the operator did is
+  /// lost by re-reading it.
+  ///
   /// Deliberately not `SelectionStrip`, which every other page uses: that component says
   /// "chưa chọn → sẽ dùng tất cả", and here an empty actor list is refused rather than
   /// meaning everything. Borrowing it would have put a sentence on screen that is false.

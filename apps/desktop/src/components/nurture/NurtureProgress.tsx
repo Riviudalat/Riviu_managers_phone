@@ -13,9 +13,8 @@ import type { NurtureSessionStatus } from "../../types";
  * the numbers stay on screen beside the bar rather than being replaced by it.
  *
  * The bar itself now lives in `components/ProgressBar.tsx` because the interaction panel grew
- * one too. Re-exported so every existing importer keeps working.
+ * one too.
  */
-export { ProgressBar } from "../ProgressBar";
 import { ProgressBar, type BarProps } from "../ProgressBar";
 
 /** The tone a device's bar should take from its terminal state. */

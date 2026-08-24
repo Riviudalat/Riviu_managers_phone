@@ -4,8 +4,8 @@
  * It began life inside `nurture/NurtureProgress.tsx` because nurture was the first thing in
  * this app with a bounded run to draw. Interaction has one too — a campaign is N messages
  * over M links — and copying a `role="progressbar"` is how two bars end up disagreeing about
- * what an unknown fraction looks like. `NurtureProgress` re-exports this, so nothing that
- * already imported it had to move.
+ * what an unknown fraction looks like. Both panels import it from here — the re-export left
+ * behind in `NurtureProgress` for "every existing importer" turned out to have none.
  *
  * The `nu-` class prefix stays: these are the float-panel styles both popups share, the same
  * way both use `nu-field` and `nu-switch`.

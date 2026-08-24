@@ -42,6 +42,16 @@ function newRequestId() {
  * panel was split: a 965-line component with eighteen `useState` had nowhere left to put a
  * rule, and the rules were the problem.
  */
+/**
+ * Keep at least this much of the card reachable while dragging, in pixels.
+ *
+ * The drag had no bounds at all: pulled far enough up and left, the card — including its close
+ * button — left the viewport, and the only way back was the sidebar toggle, which unmounts the
+ * popup and discards the whole draft. A strip this wide always leaves the header, and so the
+ * drag handle itself, under the cursor.
+ */
+const DRAG_KEEP = 64;
+
 export function InteractionPopup({ devices, selected, onClose }: Props) {
   const inScope = useMemo(
     () => devices.filter((device) => (selected.length ? selected.includes(device.udid) : true)),
@@ -69,9 +79,25 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
 
   const [tab, setTab] = useState<"setup" | "monitor">("setup");
   const [draft, setDraft] = useState<InteractionDraft>(DEFAULT_DRAFT);
+  /// Set one draft field, from a value or from the value it currently has.
+  ///
+  /// The updater form matters for the actor list. `patch("actors", draft.actors.filter(...))`
+  /// looks functional because `patch` wraps it in `setDraft(previous => …)`, but the array
+  /// handed in was computed from the *rendered* prop — so a departed-phone sweep landing between
+  /// that render and the click would be undone by the toggle, resurrecting a phone that is no
+  /// longer in the fleet.
   const patch = useCallback(
-    <K extends keyof InteractionDraft>(key: K, value: InteractionDraft[K]) =>
-      setDraft((previous) => ({ ...previous, [key]: value })),
+    <K extends keyof InteractionDraft>(
+      key: K,
+      value: InteractionDraft[K] | ((previous: InteractionDraft[K]) => InteractionDraft[K]),
+    ) =>
+      setDraft((previous) => ({
+        ...previous,
+        [key]:
+          typeof value === "function"
+            ? (value as (from: InteractionDraft[K]) => InteractionDraft[K])(previous[key])
+            : value,
+      })),
     [],
   );
   const [lines, setLines] = useState<TikTokLinkLine[]>([]);
@@ -91,7 +117,16 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
   /// It used to be a `crypto.randomUUID()` inside the `useMemo` that built the request, so it
   /// changed on every character typed into any field. The backend treats it as the campaign's
   /// identity, and `request_id` is `UNIQUE`.
-  const requestIdRef = useRef(newRequestId());
+  ///
+  /// Lazily, too: `useRef(newRequestId())` evaluates its argument on **every** render and
+  /// discards the result — during a header drag that is one `crypto.randomUUID()` per
+  /// `pointermove`.
+  const requestIdRef = useRef<string>("");
+  if (!requestIdRef.current) requestIdRef.current = newRequestId();
+
+  /// Whether the Nâng cao disclosure is open — see `InteractionSetupTab`'s prop for why it
+  /// lives up here rather than in the tab that draws it.
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const [pos, setPos] = useState({ x: 0, y: 0 });
   const drag = useRef<{ ox: number; oy: number; sx: number; sy: number } | null>(null);
@@ -201,22 +236,46 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
     }));
   }, [inScope, draft.actors]);
 
+  /// Cancels the debounced parse below.
+  ///
+  /// `interaction_resolve_links` is `async` while `interaction_parse_links` is not, so pressing
+  /// Gỡ link rút gọn with a parse timer still pending let the parse land *after* the resolve and
+  /// silently throw the resolved links away — the operator pressed the button, watched the list
+  /// change, and then watched it change back.
+  const cancelParse = useRef<() => void>(() => undefined);
+
   // Debounced: this used to fire one IPC round trip per keystroke.
   useEffect(() => {
     const raw = draft.rawLinks;
     if (!raw.trim()) {
       setLines([]);
+      // Cleared here too. Paste something the parser rejects, then select-all and delete: the
+      // list emptied and the red banner stayed on screen for the rest of the session, because
+      // this branch returned before touching it.
+      setLinkError(null);
       return;
     }
+    let live = true;
     const timer = setTimeout(() => {
       void interactionParseLinks(raw)
         .then((next) => {
+          if (!live) return;
           setLines(next);
           setLinkError(null);
         })
-        .catch((e) => setLinkError(describeError(e)));
+        .catch((e) => {
+          if (!live) return;
+          setLinkError(describeError(e));
+        });
     }, 300);
-    return () => clearTimeout(timer);
+    cancelParse.current = () => {
+      live = false;
+      clearTimeout(timer);
+    };
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
   }, [draft.rawLinks]);
 
   /// What the plan on screen was computed for.
@@ -284,10 +343,8 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
 
   const validationContext = useMemo(
     () => ({
-      requestId: requestIdRef.current,
       targets: validTargets,
       actorUdids: effectiveActors,
-      mentions,
       largestCohort,
       badLineCount,
       mixedThread,
@@ -297,7 +354,6 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
     [
       validTargets,
       effectiveActors,
-      mentions,
       largestCohort,
       badLineCount,
       mixedThread,
@@ -317,6 +373,8 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
 
   const resolveShortLinks = useCallback(async () => {
     if (!draft.rawLinks.trim()) return;
+    // Drop any parse still in flight for the same text; see `cancelParse`.
+    cancelParse.current();
     setLinkBusy(true);
     try {
       setLines(await interactionResolveLinks(draft.rawLinks));
@@ -361,9 +419,28 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
   };
   const onTitleMove = (event: React.PointerEvent<HTMLElement>) => {
     if (!drag.current) return;
-    setPos({
+    const card = event.currentTarget.parentElement?.getBoundingClientRect();
+    const clamp = (value: number, min: number, max: number) =>
+      Math.min(Math.max(value, min), max);
+    const wanted = {
       x: drag.current.sx + (event.clientX - drag.current.ox),
       y: drag.current.sy + (event.clientY - drag.current.oy),
+    };
+    setPos({
+      x: card
+        ? clamp(
+            wanted.x,
+            wanted.x - (card.right - DRAG_KEEP),
+            wanted.x + (window.innerWidth - DRAG_KEEP - card.left),
+          )
+        : wanted.x,
+      y: card
+        ? clamp(
+            wanted.y,
+            wanted.y - (card.bottom - DRAG_KEEP),
+            wanted.y + (window.innerHeight - DRAG_KEEP - card.top),
+          )
+        : wanted.y,
     });
   };
   const onTitleUp = () => {
@@ -371,9 +448,10 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
   };
 
   return (
-    <div className="interaction-float-layer" aria-label="Tương tác comment">
+    <div className="interaction-float-layer">
       <section
         className="interaction-float"
+        aria-label="Tương tác comment"
         style={{ transform: `translate(${pos.x}px, ${pos.y}px)` }}
       >
         <header
@@ -381,6 +459,12 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
           onPointerDown={onTitleDown}
           onPointerMove={onTitleMove}
           onPointerUp={onTitleUp}
+          // A pointer sequence can end without an `up` — the browser cancels it, or capture is
+          // lost. Without these, `drag.current` stayed set and the panel then followed the
+          // cursor on plain hover, because `onPointerMove` fires whether or not a button is
+          // down.
+          onPointerCancel={onTitleUp}
+          onLostPointerCapture={onTitleUp}
         >
           <IconChat size={15} />
           <strong>Tương tác</strong>
@@ -390,11 +474,18 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
             <IconClose size={14} />
           </button>
         </header>
+        {/* A `role="tab"` with no `aria-controls` and no `role="tabpanel"` to point at is a
+            tablist in name only: nothing tells the reader which region the tab governs, and
+            `tabIndex` stays on both buttons instead of roving. `NurtureBehaviourTab` next door
+            already does this properly. */}
         <div className="interaction-tabs" role="tablist">
           <button
             type="button"
             role="tab"
+            id="interaction-tab-setup"
+            aria-controls="interaction-panel-setup"
             aria-selected={tab === "setup"}
+            tabIndex={tab === "setup" ? 0 : -1}
             onClick={() => setTab("setup")}
           >
             Thiết lập
@@ -402,15 +493,25 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
           <button
             type="button"
             role="tab"
+            id="interaction-tab-monitor"
+            aria-controls="interaction-panel-monitor"
             aria-selected={tab === "monitor"}
+            tabIndex={tab === "monitor" ? 0 : -1}
             onClick={() => setTab("monitor")}
           >
             Theo dõi
           </button>
         </div>
-        <div className="interaction-float-body">
+        <div
+          className="interaction-float-body"
+          role="tabpanel"
+          id={tab === "setup" ? "interaction-panel-setup" : "interaction-panel-monitor"}
+          aria-labelledby={tab === "setup" ? "interaction-tab-setup" : "interaction-tab-monitor"}
+        >
           {tab === "setup" ? (
             <InteractionSetupTab
+              advancedOpen={advancedOpen}
+              setAdvancedOpen={setAdvancedOpen}
               draft={draft}
               patch={patch}
               lines={lines}

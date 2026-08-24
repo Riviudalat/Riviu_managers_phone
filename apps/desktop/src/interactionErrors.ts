@@ -52,6 +52,14 @@ const EXACT: Record<string, string> = {
   reply_drawer_closed_by_scroll: "Cuộn làm đóng mất khay bình luận",
   reply_no_composer: "Không thấy ô nhập trả lời",
   reply_wrong_parent: "Bấm nhầm nút Trả lời của bình luận khác",
+  // The pixel path's own five. They come from `nurture/actions.rs`, not from the hierarchy
+  // driver, and interaction runs on iPhones through it — so they do reach this panel, where all
+  // five used to collapse into the family fallback "Không trả lời được" and read identically.
+  reply_composer_not_confirmed: "Bấm Trả lời rồi mà khay không mở ra",
+  reply_send_not_armed: "Nút Gửi không sáng lên",
+  reply_armed_frame_missing: "Không chụp được ảnh lúc nút Gửi sáng",
+  reply_clear_not_confirmed: "Gửi rồi mà ô nhập không trống lại",
+  reply_cleared_frame_missing: "Không chụp được ảnh sau khi gửi",
 };
 
 /**

@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { InfoDot as Info } from "../InfoDot";
 import { Banner } from "../States";
 import { InteractionActorPicker } from "./InteractionActorPicker";
@@ -34,6 +33,8 @@ const THREAD_KINDS: { value: ThreadKind; label: string; hint: string }[] = [
 ];
 
 export function InteractionSetupTab({
+  advancedOpen,
+  setAdvancedOpen,
   draft,
   patch,
   lines,
@@ -58,7 +59,10 @@ export function InteractionSetupTab({
   onRun,
 }: {
   draft: InteractionDraft;
-  patch: <K extends keyof InteractionDraft>(key: K, value: InteractionDraft[K]) => void;
+  patch: <K extends keyof InteractionDraft>(
+    key: K,
+    value: InteractionDraft[K] | ((previous: InteractionDraft[K]) => InteractionDraft[K]),
+  ) => void;
   lines: TikTokLinkLine[];
   preview: ThreadPreview | null;
   issues: DraftIssue[];
@@ -80,10 +84,18 @@ export function InteractionSetupTab({
   busy: boolean;
   onResolveShortLinks: () => void;
   onRun: () => void;
+  /**
+   * Closed by default. Three numbers that mostly want their defaults were the widest part of a
+   * form the operator had to scroll four screens of.
+   *
+   * Held by the shell rather than here, because it is state a tab switch has to survive — which
+   * is what the shell's own docstring promises, and what this being a `useState` in a component
+   * mounted per tab quietly broke: opening Nâng cao, checking the Monitor tab and coming back
+   * collapsed it again.
+   */
+  advancedOpen: boolean;
+  setAdvancedOpen: (open: boolean) => void;
 }) {
-  // Closed by default. Three numbers that mostly want their defaults were the widest part of
-  // a form the operator had to scroll four screens of.
-  const [advancedOpen, setAdvancedOpen] = useState(false);
   const messages = effectiveMessageCount(draft, largestCohort);
   const manualCount = manualCommentsOf(draft).length;
 
@@ -213,11 +225,11 @@ export function InteractionSetupTab({
         deviceNumber={deviceNumber}
         actors={draft.actors}
         onToggle={(udid) =>
-          patch(
-            "actors",
-            draft.actors.includes(udid)
-              ? draft.actors.filter((id) => id !== udid)
-              : [...draft.actors, udid],
+          // The updater form, not a value computed from the rendered prop: see `patch`.
+          patch("actors", (previous) =>
+            previous.includes(udid)
+              ? previous.filter((id) => id !== udid)
+              : [...previous, udid],
           )
         }
         onReplace={(udids) => patch("actors", udids)}
@@ -234,7 +246,7 @@ export function InteractionSetupTab({
         type="button"
         className="ghost interaction-advanced-toggle"
         aria-expanded={advancedOpen}
-        onClick={() => setAdvancedOpen((open) => !open)}
+        onClick={() => setAdvancedOpen(!advancedOpen)}
       >
         {advancedOpen ? "Ẩn tuỳ chỉnh nâng cao" : "Tuỳ chỉnh nâng cao"}
       </button>

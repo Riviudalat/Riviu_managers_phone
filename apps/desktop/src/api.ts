@@ -898,11 +898,6 @@ export async function interactionPreviewThread(request: ThreadCampaignRequest) {
   return invoke<ThreadPreview>("interaction_preview_thread", { request });
 }
 
-/** Open one link on one phone, by hand. Registered in Rust; offered here for the detail view. */
-export async function interactionOpenOnDevice(udid: string, url: string) {
-  return invoke<void>("interaction_open_on_device", { udid, url });
-}
-
 export async function interactionStartThread(request: ThreadCampaignRequest) {
   return invoke<{ campaign: InteractionCampaignSummary; queued: boolean }>(
     "interaction_start_thread",
