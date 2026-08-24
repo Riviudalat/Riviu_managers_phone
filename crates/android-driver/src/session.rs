@@ -396,20 +396,7 @@ impl UiSession for AndroidUiSession {
     /// It is also ASCII-only for a second reason: `input text` is *killed* by diacritics,
     /// which is why `type_text` goes through accessibility instead.
     async fn type_keys(&self, text: &str) -> anyhow::Result<()> {
-        if text.is_empty() {
-            return Ok(());
-        }
-        let allowed =
-            |c: char| c.is_ascii_alphanumeric() || matches!(c, '@' | '.' | '_' | '-' | ' ');
-        if !text.chars().all(allowed) {
-            anyhow::bail!(
-                "typeKeys refuses {text:?}: only ASCII letters, digits, space and @._- reach the device shell, and anything else would need escaping this deliberately does not do"
-            );
-        }
-        // `input text` splits its argument on spaces, so a literal space is `%s` — its own
-        // documented escape, not a shell one. That is why the whitelist can stay this narrow:
-        // every character it admits either passes through untouched or has an escape here.
-        let typed = text.replace(' ', "%s");
+        let typed = keys_payload(text)?;
         self.adb
             .shell(&self.serial, &format!("input text {typed}"))
             .await?;
@@ -830,6 +817,48 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
+/// The exact argument `input text` will receive, or a refusal.
+///
+/// **Pure and separate because this is a security boundary.** The string ends up inside
+/// `adb -s <serial> shell "input text …"`, which is executed by `/system/bin/sh` **on the
+/// device** — so what the whitelist admits decides whether a handle can become a command. It
+/// was only reachable through a method needing a live `Adb` and a phone, so nothing tested it.
+///
+/// Three properties, each load-bearing:
+///
+/// * the admitted set is `[A-Za-z0-9@._- ]`, so no metacharacter survives — not `;` `|` `&`
+///   `$` backtick `(` `)` `<` `>` newline `*` `?` `[` `]` `{` `}` `~` `!` `#` `'` `"` `\`;
+/// * `%` is **not** admitted, which is what makes the space handling safe rather than merely
+///   convenient: a caller cannot forge the `%s` escape;
+/// * space becomes `%s` — Android's own escape, `Input.java` does `text.replace("%s", " ")` —
+///   so the emitted command has zero user-controlled spaces and `input text <token>` is always
+///   exactly three shell words. Word-splitting is structurally impossible, not merely unlikely.
+fn keys_payload(text: &str) -> anyhow::Result<String> {
+    // **Refused, not silently accepted.** `Ok(())` on an empty string is a success that reports
+    // "typed" about a device nothing was sent to — the same flattened answer the
+    // `ForegroundWindow` split in this file exists to stop producing.
+    anyhow::ensure!(!text.is_empty(), "typeKeys refuses an empty string");
+    // A handle is tens of characters. `adb shell` has a transport-level limit on the command
+    // string, so without a bound here a long one fails inside adb with an opaque message
+    // instead of here with a clear one. Counted in characters, not bytes, because this runs
+    // before the ASCII whitelist and a non-ASCII string would otherwise be refused for a
+    // length it does not have.
+    const MAX_KEYS: usize = 256;
+    anyhow::ensure!(
+        text.chars().count() <= MAX_KEYS,
+        "typeKeys refuses {} characters: the limit is {MAX_KEYS}, and `adb shell` truncates a \
+         longer command string rather than reporting it",
+        text.chars().count()
+    );
+    let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '@' | '.' | '_' | '-' | ' ');
+    anyhow::ensure!(
+        text.chars().all(allowed),
+        "typeKeys refuses {text:?}: only ASCII letters, digits, space and @._- reach the device \
+         shell, and anything else would need escaping this deliberately does not do"
+    );
+    Ok(text.replace(' ', "%s"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -853,6 +882,35 @@ mod tests {
             to_locator(&locator),
             Locator::ClassName("android.widget.EditText".into())
         );
+    }
+
+    /// The key payload is a security boundary, so it is tested like one.
+    #[test]
+    fn the_key_payload_lets_no_metacharacter_reach_the_device_shell() {
+        // What the one caller actually sends: a leading space so the tag does not run into the
+        // last word of the comment, and the space arrives as Android's own escape.
+        assert_eq!(keys_payload(" @lt.gi").expect("a handle"), "%s@lt.gi");
+
+        // `%` is not admitted, so the escape cannot be forged by a caller.
+        assert!(keys_payload("%s").is_err(), "`%s` must not be forgeable");
+
+        for hostile in [
+            "a;id", "a|id", "a&id", "a$(id)", "a`id`", "a>f", "a<f", "a\nid", "a*", "a?", "a[b]",
+            "a{b}", "a~b", "a!b", "a#b", "a'b", "a\"b", "a\\b", "tên",
+        ] {
+            assert!(
+                keys_payload(hostile).is_err(),
+                "{hostile:?} must not reach /system/bin/sh"
+            );
+        }
+
+        // Doing nothing is not a success.
+        assert!(keys_payload("").is_err());
+
+        // And a command string too long to survive `adb shell` is refused here, where the
+        // message says so, rather than inside adb where it does not.
+        assert!(keys_payload(&"a".repeat(256)).is_ok());
+        assert!(keys_payload(&"a".repeat(257)).is_err());
     }
 
     #[test]

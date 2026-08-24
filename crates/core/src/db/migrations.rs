@@ -1773,12 +1773,38 @@ mod tests {
 
     #[test]
     fn every_migration_rolls_back_its_schema_and_ledger_row_on_failure() {
-        for failed_version in [1, 2, 3, 4, 5, 6, 7, 14] {
+        // **Every version, not a hand-picked eight.** The list was `[1..=7, 14]`, so 8 through
+        // 13 were never shown to roll back at all — and three of them create tables. A
+        // migration that half-applies leaves a database no later run can repair, which is the
+        // one failure mode this test exists for, so the set has to be the whole ledger rather
+        // than the versions somebody happened to write an assertion for.
+        for failed_version in crate::db::migrations::MIGRATIONS
+            .iter()
+            .map(|migration| migration.version)
+        {
             let path = temp_db_path(&format!("migration-{failed_version}-rollback"));
             let mut connection = Connection::open(&path).expect("rollback fixture");
             let error = run_with_failpoint(&mut connection, Some(failed_version))
                 .expect_err("injected migration failure");
             assert!(error.to_string().contains("InjectedMigrationFailure"));
+
+            // The invariant that holds for all of them, whether or not anyone wrote a
+            // table-level assertion below: the ledger stops one short, and the version that
+            // failed left no row claiming it applied.
+            //
+            // Except at 1, which creates the ledger itself — a failure there leaves no table to
+            // read, and the branch below asserts the stronger thing instead: no user objects at
+            // all.
+            if failed_version > 1 {
+                assert_eq!(
+                    migration_rows(&connection)
+                        .iter()
+                        .map(|(version, _)| *version)
+                        .collect::<Vec<_>>(),
+                    (1..failed_version).collect::<Vec<_>>(),
+                    "migration {failed_version} rolled back but the ledger disagrees"
+                );
+            }
 
             if failed_version == 1 {
                 assert!(user_objects(&connection).is_empty());
@@ -1875,20 +1901,15 @@ mod tests {
                     refused.to_string().contains("CHECK"),
                     "expected the old CHECK to refuse 7 messages, got {refused}"
                 );
-            } else {
+            } else if failed_version == 8 {
                 // Failed at 8: the schedules table is back to the shape it had before the
                 // column was added. A rolled-back `ALTER TABLE` that left the column behind
                 // would make the retry fail with "duplicate column name" forever.
-                assert_eq!(
-                    migration_rows(&connection)
-                        .iter()
-                        .map(|(version, _)| *version)
-                        .collect::<Vec<_>>(),
-                    vec![1, 2, 3, 4, 5, 6, 7]
-                );
                 assert!(!table_exists(&connection, "users"));
                 assert!(!column_exists(&connection, "schedules", "last_error"));
             }
+            // 9 through 13 carry no table-level assertion of their own; the ledger check above
+            // is what they are here for, plus the retry below.
 
             run(&mut connection).expect("retry migrations");
             assert_eq!(

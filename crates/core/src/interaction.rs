@@ -375,28 +375,6 @@ impl ThreadCampaignRequest {
         self.manual_comments.get(index).map(String::as_str)
     }
 
-    /// The `@name ` text prepended to the **opening** comment of a thread, or empty.
-    ///
-    /// Each entry is trimmed, its leading `@` dropped and re-added, and blanks are skipped,
-    /// so `["@ann", " bob ", ""]` yields `"@ann @bob "` (one trailing space before the
-    /// comment body). Only the root (ordinal 0) carries it: the opener tags the accounts and
-    /// the replies are those accounts answering, so re-tagging on every reply would read as
-    /// spam. Plain text — TikTok does not linkify or notify it — see [`Self::mentions`].
-    pub fn mention_prefix(&self) -> String {
-        let tags: Vec<String> = self
-            .mentions
-            .iter()
-            .map(|raw| raw.trim().trim_start_matches('@').trim())
-            .filter(|handle| !handle.is_empty())
-            .map(|handle| format!("@{handle}"))
-            .collect();
-        if tags.is_empty() {
-            String::new()
-        } else {
-            format!("{} ", tags.join(" "))
-        }
-    }
-
     /// Whether the run has to open each target once up front just to photograph it.
     ///
     /// Only the AI needs that: it writes from frames of the post. A manual pool covers
@@ -1182,22 +1160,6 @@ mod tests {
             assert!(!ai.is_manual());
             assert_eq!(ai.manual_comment_for(0, 0), None);
             assert!(ai.validate().is_ok());
-        }
-
-        #[test]
-        fn mention_prefix_normalizes_handles_and_is_empty_without_any() {
-            let mut req = request(vec![]);
-            // No mentions -> nothing prepended, so an ordinary comment is unchanged.
-            assert_eq!(req.mention_prefix(), "");
-            // Leading `@` optional, blanks skipped, one trailing space before the body.
-            req.mentions = vec![
-                "@ann".into(),
-                " bob ".into(),
-                String::new(),
-                "   ".into(),
-                "@cara".into(),
-            ];
-            assert_eq!(req.mention_prefix(), "@ann @bob @cara ");
         }
 
         #[test]

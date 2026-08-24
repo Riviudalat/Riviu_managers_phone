@@ -84,7 +84,12 @@
 .interaction-actors > .interaction-mention,
 .interaction-actors > .hint,
 .interaction-actor-group { grid-column: 1 / -1; }
-.interaction-mention { flex-direction: column; align-items: stretch; overflow: visible; white-space: normal; }
+/* Scoped to a child so it outweighs `.interaction-actors label` above, which is (0,1,1) against
+   this rule's (0,1,0) and therefore won its `overflow: hidden; white-space: nowrap` regardless
+   of order. `flex-direction` was rescued by accident — `.nu-pane .nu-field` is (0,2,0) — but the
+   wrapping was not, so the tag field's label ellipsised inside a 460px card the moment it grew
+   from "Tag / nhắc (@)" to "Tag thêm acc (@handle) - cách nhau bằng dấu cách hoặc phẩy". */
+.interaction-actors > .interaction-mention { flex-direction: column; align-items: stretch; overflow: visible; white-space: normal; }
 /* The device pickers are a wall of small tiles — the same shape as the phone grid, so a
    number here means the same phone as that number on the wall. Section label spans the row. */
 .interaction-actor-group { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.3rem; }

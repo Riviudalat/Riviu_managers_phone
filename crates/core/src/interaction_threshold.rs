@@ -52,6 +52,9 @@ pub struct MetricPlan {
 }
 
 impl MetricPlan {
+    /// Nothing to add, so nothing bounds it — including `ceiling`, which would otherwise
+    /// differ between a like target that is met and one that is not, for no reason a caller
+    /// could act on.
     fn met() -> Self {
         Self {
             shortfall: 0,
@@ -119,9 +122,12 @@ pub fn plan_thresholds(
         views: targets
             .views
             .map(|want| plan_views(want, now.views, actors)),
+        // `unliked` is read from like history, `actors` from the phones actually here — so a
+        // stale history can name more unliked accounts than there are phones, and the ceiling
+        // would then promise likes nothing could deliver. The fleet is the harder bound.
         likes: targets
             .likes
-            .map(|want| plan_likes(want, now.likes, unliked)),
+            .map(|want| plan_likes(want, now.likes, unliked.min(actors))),
         comments: targets
             .comments
             .map(|want| plan_comments(want, now.comments, actors)),
@@ -155,6 +161,11 @@ fn plan_views(want: u32, now: Option<u32>, actors: u32) -> MetricPlan {
     }
     // Views accumulate across passes, so nothing caps them but time — which is why this is
     // the one metric where a big target is a schedule rather than a refusal.
+    // The `.max(1.0)` is a floor, not a rounding: without it one device at 0.9 views a pass
+    // would divide fine but two-thirds of a device would not, and zero would divide by zero. It
+    // does make a one-phone plan optimistic — 100 views reported as 100 passes where the
+    // measured rate implies ~112 — and that is left standing because the loop re-reads the post
+    // after every pass and believes the post, not this number.
     let per_pass = (f64::from(actors) * VIEWS_PER_DEVICE_PER_PASS).max(1.0);
     let passes = (f64::from(shortfall) / per_pass).ceil() as u32;
     MetricPlan {
@@ -186,7 +197,10 @@ fn plan_likes(want: u32, now: Option<u32>, unliked: u32) -> MetricPlan {
         return MetricPlan {
             shortfall,
             ceiling: Some(unliked),
-            passes: Some(1),
+            // **No pass count on a plan that cannot finish.** It said `Some(1)`, so the same
+            // struct claimed "one pass" and "this is impossible" — and a caller reading only
+            // `passes` would schedule that pass.
+            passes: None,
             unreachable: Some(format!(
                 "cần thêm {shortfall} like nhưng chỉ có {unliked} máy chưa like bài này — mỗi acc \
                  chỉ like được một lần, nên chạy bao lâu cũng không quá {unliked}"
@@ -258,6 +272,33 @@ mod tests {
         assert_eq!(likes.shortfall, 28);
         assert_eq!(likes.ceiling, Some(14));
         assert!(likes.unreachable.is_some());
+        // And it does not also offer a pass count. The same struct used to say "one pass" and
+        // "this is impossible", and a caller reading only `passes` would schedule that pass.
+        assert_eq!(likes.passes, None);
+    }
+
+    /// A like ceiling can never exceed the phones that are actually here.
+    #[test]
+    fn a_stale_like_history_cannot_promise_more_likes_than_there_are_phones() {
+        // `unliked` comes from like history and `actors` from the fleet, so a history that has
+        // not caught up can name twenty unliked accounts on a five-phone farm. The ceiling then
+        // promises likes nothing could deliver, which is the one thing this metric exists to
+        // refuse.
+        let plan = plan_thresholds(
+            PostTargets {
+                likes: Some(30),
+                ..Default::default()
+            },
+            PostNow {
+                likes: Some(22),
+                ..Default::default()
+            },
+            5,
+            20,
+        );
+        let likes = plan.likes.expect("asked for");
+        assert_eq!(likes.ceiling, Some(5), "the fleet is the harder bound");
+        assert!(likes.unreachable.is_some(), "eight more likes, five phones");
     }
 
     #[test]

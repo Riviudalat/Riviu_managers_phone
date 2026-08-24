@@ -914,9 +914,14 @@ pub async fn append_mentions_by_picker(
                         outcome.unverified.push(handle.to_string());
                         return outcome;
                     }
-                    Some(field) if !field.contains(handle) => {
+                    Some(field) if !field.to_lowercase().contains(&handle.to_lowercase()) => {
                         // Still a drawer, but the handle is no longer in it: the tap changed
                         // the field into something this function did not ask for.
+                        //
+                        // Compared case-insensitively, the same way the row match is. TikTok's
+                        // token carries the account's own spelling, so an operator who typed
+                        // `LT.GI` for `lt.gi` would otherwise have a real mention reported as
+                        // unverified — and the pass abandoned with it.
                         outcome.unverified.push(handle.to_string());
                         return outcome;
                     }
@@ -3652,6 +3657,40 @@ mod tests {
                 && outcome.unverified.is_empty(),
             "exactly one bucket may claim a handle"
         );
+    }
+
+    /// A handle typed in a different case than the account's own is still a real mention.
+    ///
+    /// The row match has always been case-insensitive, so the pick succeeds — but the read-back
+    /// compared the composer against the operator's spelling, so `LT.GI` for `lt.gi` would have
+    /// been filed `unverified` and the whole pass abandoned on a mention that actually landed.
+    #[tokio::test(start_paused = true)]
+    async fn a_handle_typed_in_another_case_is_still_linked() {
+        let session = DrawerSession::default()
+            .with_many_queue(
+                "android.widget.TextView",
+                vec![
+                    Vec::new(),
+                    vec![node(179.0, 291.0, 223.0, 50.0, ".lt.gi.mang.v")],
+                    Vec::new(),
+                ],
+            )
+            // The token carries the account's own spelling, not what was typed.
+            .with_many(
+                EDIT,
+                vec![node(64.0, 1379.0, 800.0, 88.0, "xin chào @.lt.gi.mang.v ")],
+            );
+
+        let outcome = append_mentions_by_picker(
+            &session,
+            (1080.0, 2400.0),
+            &[".LT.GI.MANG.V".to_string()],
+            &AtomicBool::new(false),
+        )
+        .await;
+
+        assert_eq!(outcome.linked, vec![".LT.GI.MANG.V".to_string()]);
+        assert!(outcome.unverified.is_empty(), "the mention did land");
     }
 
     /// A three-column grid gets nine tiles opened, not three.

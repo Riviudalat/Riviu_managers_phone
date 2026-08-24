@@ -158,6 +158,14 @@ mod tuned_constant_tests {
             "interaction_hierarchy.rs",
             include_str!("interaction_hierarchy.rs"),
         ),
+        (
+            "interaction_threshold.rs",
+            include_str!("interaction_threshold.rs"),
+        ),
+        (
+            "interaction_campaign.rs",
+            include_str!("interaction_campaign.rs"),
+        ),
         ("screen.rs", include_str!("screen.rs")),
         ("tiktok_drawer.rs", include_str!("tiktok_drawer.rs")),
         ("tiktok_like.rs", include_str!("tiktok_like.rs")),
