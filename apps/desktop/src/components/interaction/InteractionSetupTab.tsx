@@ -1,4 +1,5 @@
 import { InfoDot as Info } from "../InfoDot";
+import { InteractionThreshold, type ThresholdControls } from "./InteractionThreshold";
 import { Banner } from "../States";
 import { InteractionActorPicker } from "./InteractionActorPicker";
 import { InteractionPlanPreview } from "./InteractionPlanPreview";
@@ -33,6 +34,7 @@ const THREAD_KINDS: { value: ThreadKind; label: string; hint: string }[] = [
 ];
 
 export function InteractionSetupTab({
+  threshold,
   advancedOpen,
   setAdvancedOpen,
   draft,
@@ -84,6 +86,8 @@ export function InteractionSetupTab({
   busy: boolean;
   onResolveShortLinks: () => void;
   onRun: () => void;
+  /** The threshold section's state, owned by the shell so a tab switch keeps it. */
+  threshold: ThresholdControls;
   /**
    * Closed by default. Three numbers that mostly want their defaults were the widest part of a
    * form the operator had to scroll four screens of.
@@ -217,6 +221,8 @@ export function InteractionSetupTab({
           </p>
         </>
       )}
+
+      <InteractionThreshold controls={threshold} />
 
       <div className="nu-group-head">Thiết bị &amp; tag</div>
       <InteractionActorPicker

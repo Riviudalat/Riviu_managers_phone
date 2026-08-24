@@ -812,6 +812,55 @@ export type ThreadCampaignState =
   | "failed"
   | "cancelled";
 
+/**
+ * Numbers the operator wants a post to reach. `null` means "leave this one alone".
+ *
+ * Three different problems, not three of the same one. A like is one per account and an account
+ * cannot like twice, so a like target above the number of accounts that have not liked yet is
+ * unreachable however long it runs. A comment can be repeated, so its ceiling is taste rather
+ * than arithmetic. A view accumulates across passes — measured 24/08/2026 — so a view target is a
+ * schedule.
+ */
+export interface PostTargets {
+  views: number | null;
+  likes: number | null;
+  comments: number | null;
+}
+
+/** Where the post is now. `null` for a number this build or this screen could not state. */
+export interface PostNow {
+  views: number | null;
+  likes: number | null;
+  comments: number | null;
+}
+
+/** One metric's verdict, before anything runs. */
+export interface MetricPlan {
+  /** How far short the post is; `0` when it is already there. */
+  shortfall: number;
+  /** The most this fleet could add, or `null` when nothing bounds it but time. */
+  ceiling: number | null;
+  /** Passes of the whole fleet needed, when that is a meaningful number. */
+  passes: number | null;
+  /** Why it cannot be reached, in the operator's language. `null` means it can. */
+  unreachable: string | null;
+}
+
+/** The whole plan, one entry per metric asked for. */
+export interface ThresholdPlan {
+  views: MetricPlan | null;
+  likes: MetricPlan | null;
+  comments: MetricPlan | null;
+}
+
+/** What one phone read off a post, and what the targets would take. */
+export interface InteractionPostReading {
+  now: PostNow;
+  plan: ThresholdPlan;
+  /** Whether the view count was asked for — it is the slow half. */
+  viewsRead: boolean;
+}
+
 export interface InteractionCampaignSummary {
   id: string;
   requestId: string;

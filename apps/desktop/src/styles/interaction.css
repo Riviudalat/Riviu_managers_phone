@@ -283,3 +283,10 @@ span.interaction-error > small { color: var(--text-2); white-space: pre-wrap; ov
    ones whenever a post had two campaigns. */
 .interaction-campaign-row { display: flex; flex-direction: column; gap: 0.25rem; border: 1px solid var(--line); border-radius: 5px; background: var(--bg-elevated); padding: 0.45rem; }
 .interaction-campaign-row:hover { border-color: var(--primary); background: var(--primary-50); }
+
+/* The threshold reading: one line per metric, stacked under the Đo bài button. Deliberately
+   plain text rather than three more cards — the numbers are what matter and a reading that has
+   to be hunted for in a layout is a reading nobody checks. */
+.interaction-threshold-read { display: flex; flex-direction: column; gap: 0.15rem; margin-top: 0.2rem; }
+.interaction-threshold-read small { color: var(--text-2); font-size: var(--text-xs); }
+.interaction-threshold-read small.hint { color: var(--text-3); }

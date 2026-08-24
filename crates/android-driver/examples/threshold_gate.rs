@@ -37,7 +37,7 @@ use std::time::Duration;
 use riviu_android_driver::{AndroidDriver, AndroidDriverConfig};
 use riviu_core::driver::{DeviceDriver, UiSession};
 use riviu_core::interaction_hierarchy::{
-    open_target_by_hierarchy, read_post_caption, read_post_counters, read_view_count, TargetArrival,
+    open_target_by_hierarchy, read_post_caption, read_post_now, TargetArrival,
 };
 use riviu_core::interaction_threshold::{plan_thresholds, PostNow, PostTargets};
 use riviu_core::tiktok_labels;
@@ -326,17 +326,11 @@ async fn measure(
     }
     // Before anything navigates: `read_view_count` walks off to the profile grid.
     let caption = read_post_caption(session).await;
-    let rail = read_post_counters(session, labels).await;
-    // The view count is a navigation away and costs the post page, so it is read last.
-    let views = read_view_count(session, labels, screen, stop).await;
-    Ok(Reading {
-        now: PostNow {
-            views,
-            likes: rail.likes,
-            comments: rail.comments,
-        },
-        caption,
-    })
+    // The same function the desktop's `interaction_measure_post` calls, not a second copy of the
+    // same reads in a different order — a gate that measures a re-implementation proves nothing
+    // about the product.
+    let now = read_post_now(session, labels, screen, true, stop).await;
+    Ok(Reading { now, caption })
 }
 
 /// One pass: every watcher opens the post and stays on it. Returns how many were *shown* to be.

@@ -21,8 +21,18 @@ use riviu_core::interaction_campaign::{
     retryable_assignments, revision, InteractionDevice,
 };
 
-/// One device's TikTok build plus the context opened against it.
-///
+/// What one phone read off a post, and what that means for the numbers asked for.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InteractionPostReading {
+    /// What the post says about itself right now. A `null` field is one this build or this
+    /// screen could not state — never a zero standing in for "unknown".
+    pub now: riviu_core::interaction_threshold::PostNow,
+    /// What it would take to reach the targets, or why it cannot be reached.
+    pub plan: riviu_core::interaction_threshold::ThresholdPlan,
+    /// Whether the view count was asked for. It is the expensive half; see `read_post_now`.
+    pub views_read: bool,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -283,6 +293,81 @@ pub async fn interaction_start_thread(
     Ok(InteractionStartResult {
         campaign,
         queued: true,
+    })
+}
+
+/// Read one post's numbers from one phone, and say what the targets would take.
+///
+/// **Manual on purpose.** Likes and comments are two label reads on a page already open, but a
+/// view count is a navigation — TikTok states a play count only on the author's profile grid,
+/// and the grid says nothing about which post a tile is, so each candidate is opened and its
+/// caption compared. That measured 2-4 minutes on this farm, on top of a cold start. A panel
+/// that did it on its own, on a link the operator had only just pasted, would take a phone away
+/// for minutes without being asked; so `read_views` is a flag the operator sets and this command
+/// only ever runs when a button is pressed.
+///
+/// Holds admission and takes the same exclusive lease a campaign does, because it drives a real
+/// phone. `unliked` is the actor count: without like history the honest assumption is that none
+/// of them has liked the post yet, which is the *largest* a like ceiling can be — so a like
+/// target this refuses is one no fleet state could have reached.
+#[tauri::command]
+pub async fn interaction_measure_post(
+    state: State<'_, AppState>,
+    udid: String,
+    target: riviu_core::ResolvedTikTokTarget,
+    targets: riviu_core::interaction_threshold::PostTargets,
+    actor_count: u32,
+    read_views: bool,
+) -> Result<InteractionPostReading, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let device = open_interaction_context(&state.control, &udid)
+        .await
+        .map_err(CommandError::operation)?;
+    let session = state
+        .control
+        .streaming_session(&device.context)
+        .map_err(CommandError::operation)?;
+    let session = session.as_ref();
+    if !session.supports_element_bounds() {
+        return Err(interaction_error(
+            "máy này đọc màn hình bằng ảnh, không đọc được số của bài — chọn một máy Android",
+        ));
+    }
+    let language = session.ui_language().await.unwrap_or_default();
+    let app_version = session
+        .app_version(&device.target_package)
+        .await
+        .unwrap_or_default();
+    let labels =
+        riviu_core::tiktok_labels::controls_for(&device.target_package, &language, &app_version)
+            .ok_or_else(|| {
+                interaction_error(format!(
+                    "chưa đo nhãn cho {} + {language:?}",
+                    device.target_package
+                ))
+            })?;
+    let screen = session.window_size().await.map_err(interaction_error)?;
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    riviu_core::interaction_hierarchy::open_target_by_hierarchy(
+        session,
+        labels,
+        &device.target_package,
+        &target.normalized_url,
+        &target.author,
+        &stop,
+    )
+    .await
+    .map_err(|refusal| CommandError::code("InteractionFailed", refusal.message()))?;
+    let now = riviu_core::interaction_hierarchy::read_post_now(
+        session, labels, screen, read_views, &stop,
+    )
+    .await;
+    let plan =
+        riviu_core::interaction_threshold::plan_thresholds(targets, now, actor_count, actor_count);
+    Ok(InteractionPostReading {
+        now,
+        plan,
+        views_read: read_views,
     })
 }
 

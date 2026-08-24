@@ -46,6 +46,9 @@ import type {
   InteractionCampaignSummary,
   ThreadCampaignRequest,
   ThreadPreview,
+  InteractionPostReading,
+  PostTargets,
+  ResolvedTikTokTarget,
   TikTokLinkLine,
   InstalledApp,
   ShellOutcome,
@@ -896,6 +899,33 @@ export async function interactionResolveLinks(rawText: string) {
  */
 export async function interactionPreviewThread(request: ThreadCampaignRequest) {
   return invoke<ThreadPreview>("interaction_preview_thread", { request });
+}
+
+/**
+ * Read one post's numbers from one phone, and ask what the targets would take.
+ *
+ * **Slow on purpose, and only on a press.** Likes and comments are two label reads on a page
+ * already open; a view count is a navigation — TikTok states a play count only on the author's
+ * profile grid, and the grid says nothing about which post a tile is, so each candidate is opened
+ * and its caption compared. Measured 2-4 minutes on this farm, on top of a cold start. So
+ * `readViews` is the operator's choice, and nothing calls this on a debounce.
+ *
+ * Takes the same exclusive lease a campaign does, because it drives a real phone.
+ */
+export async function interactionMeasurePost(
+  udid: string,
+  target: ResolvedTikTokTarget,
+  targets: PostTargets,
+  actorCount: number,
+  readViews: boolean,
+) {
+  return invoke<InteractionPostReading>("interaction_measure_post", {
+    udid,
+    target,
+    targets,
+    actorCount,
+    readViews,
+  });
 }
 
 export async function interactionStartThread(request: ThreadCampaignRequest) {

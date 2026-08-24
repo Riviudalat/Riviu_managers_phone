@@ -6,6 +6,7 @@ import {
   interactionResolveLinks,
   interactionStartThread,
   saveDeviceMeta,
+  interactionMeasurePost,
 } from "../api";
 import { describeError } from "../describeError";
 import { parseMentions, resolveMentionActors, unionActors } from "../interactionMentions";
@@ -18,7 +19,13 @@ import {
   validateDraft,
   type InteractionDraft,
 } from "../interactionPlan";
-import type { DeviceInfo, ThreadPreview, TikTokLinkLine } from "../types";
+import type {
+  DeviceInfo,
+  InteractionPostReading,
+  PostTargets,
+  ThreadPreview,
+  TikTokLinkLine,
+} from "../types";
 import { IconChat, IconClose } from "./Icons";
 import { InteractionMonitorTab } from "./interaction/InteractionMonitorTab";
 import { InteractionSetupTab } from "./interaction/InteractionSetupTab";
@@ -127,6 +134,20 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
   /// Whether the Nâng cao disclosure is open — see `InteractionSetupTab`'s prop for why it
   /// lives up here rather than in the tab that draws it.
   const [advancedOpen, setAdvancedOpen] = useState(false);
+
+  /// The numbers the operator wants the post to reach, and the last reading of it.
+  ///
+  /// Up here for the same reason as the disclosure: a look at Theo dõi must not throw away a
+  /// reading that cost a phone two to four minutes.
+  const [wanted, setWanted] = useState<PostTargets>({
+    views: null,
+    likes: null,
+    comments: null,
+  });
+  const [readViews, setReadViews] = useState(false);
+  const [reading, setReading] = useState<InteractionPostReading | null>(null);
+  const [measureBusy, setMeasureBusy] = useState(false);
+  const [measureError, setMeasureError] = useState<string | null>(null);
 
   const [pos, setPos] = useState({ x: 0, y: 0 });
   const drag = useRef<{ ox: number; oy: number; sx: number; sy: number } | null>(null);
@@ -386,6 +407,39 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
     }
   }, [draft.rawLinks]);
 
+  /// Read the first link on the first selected phone.
+  ///
+  /// The first of each rather than all of them: a reading is a property of the **post**, so one
+  /// phone answers it, and taking more than one lease to learn the same number would be a cost
+  /// with nothing behind it. `effectiveActors.length` goes in as the fleet size, which is what
+  /// bounds a like target.
+  const measure = useCallback(async () => {
+    const target = validTargets[0];
+    const udid = effectiveActors[0];
+    if (!target || !udid) return;
+    setMeasureBusy(true);
+    setMeasureError(null);
+    try {
+      setReading(
+        await interactionMeasurePost(
+          udid,
+          target,
+          wanted,
+          effectiveActors.length,
+          readViews,
+        ),
+      );
+    } catch (e) {
+      // The old reading is dropped rather than left on screen next to a fresh error: it
+      // describes a post as it was before something went wrong, and which of the two the
+      // operator would believe is not a question worth creating.
+      setReading(null);
+      setMeasureError(describeError(e));
+    } finally {
+      setMeasureBusy(false);
+    }
+  }, [validTargets, effectiveActors, wanted, readViews]);
+
   const run = useCallback(async () => {
     if (issues.length) return;
     setRunBusy(true);
@@ -510,6 +564,17 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
         >
           {tab === "setup" ? (
             <InteractionSetupTab
+              threshold={{
+                wanted,
+                setWanted,
+                readViews,
+                setReadViews,
+                reading,
+                busy: measureBusy,
+                error: measureError,
+                onMeasure: () => void measure(),
+                canMeasure: validTargets.length > 0 && effectiveActors.length > 0,
+              }}
               advancedOpen={advancedOpen}
               setAdvancedOpen={setAdvancedOpen}
               draft={draft}

@@ -1042,6 +1042,37 @@ fn parse_count(text: &str) -> Option<(u32, bool)> {
     Some((scaled as u32, abbreviated))
 }
 
+/// Everything a threshold can be measured against, read from one phone already on the post.
+///
+/// Arrival is the caller's job — this only reads. The order is not arbitrary: the rail is on the
+/// post page and costs nothing, while the view count is a **navigation** (post → profile → tile
+/// → post, see [`read_view_count`]) and leaves the phone somewhere else. Reading it first would
+/// take the rail off a screen that is no longer the post.
+///
+/// `read_views` exists because the two numbers cost three orders of magnitude apart. Likes and
+/// comments are two label reads on a page already open; a view count walks the profile grid
+/// opening tiles until a caption matches, which measured 2-4 minutes on this farm. A caller that
+/// only needs the cheap two must be able to say so rather than pay for both.
+pub async fn read_post_now(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    screen: (f64, f64),
+    read_views: bool,
+    stop: &AtomicBool,
+) -> crate::interaction_threshold::PostNow {
+    let rail = read_post_counters(session, labels).await;
+    let views = if read_views {
+        read_view_count(session, labels, screen, stop).await
+    } else {
+        None
+    };
+    crate::interaction_threshold::PostNow {
+        views,
+        likes: rail.likes,
+        comments: rail.comments,
+    }
+}
+
 /// A post as it appears on the author's profile grid.
 ///
 /// The grid is the **only** place TikTok states a play count — the post page does not, which

@@ -4,7 +4,21 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { InteractionPopup } from "./InteractionPopup";
 import type { ThreadCampaignRequest, ThreadPlanAssignment } from "../types";
 
-const { parseLinks, startThread, previewThread } = vi.hoisted(() => ({
+const { parseLinks, startThread, previewThread, measurePost } = vi.hoisted(() => ({
+  measurePost: vi.fn(async () => ({
+    now: { views: 1353, likes: 22, comments: 26 },
+    plan: {
+      views: { shortfall: 147, ceiling: null, passes: 15, unreachable: null },
+      likes: {
+        shortfall: 28,
+        ceiling: 2,
+        passes: null,
+        unreachable: "cần thêm 28 like nhưng chỉ có 2 máy chưa like bài này",
+      },
+      comments: null,
+    },
+    viewsRead: true,
+  })),
   parseLinks: vi.fn(async () => [
     {
       lineNo: 1,
@@ -84,6 +98,7 @@ vi.mock("../api", () => ({
   interactionList: vi.fn(async () => []),
   interactionParseLinks: parseLinks,
   interactionPreviewThread: previewThread,
+  interactionMeasurePost: measurePost,
   interactionResolveLinks: vi.fn(async () => []),
   interactionStartThread: startThread,
   listenRiviuEvents: vi.fn(async () => () => undefined),
@@ -609,5 +624,49 @@ describe("InteractionPopup", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Đặt = 3" })).toBeVisible());
     fireEvent.click(screen.getByRole("button", { name: "Đặt = 3" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeEnabled());
+  });
+
+  it("reads the post on a press, and says what each target would take", async () => {
+    // A view count is a navigation — TikTok states a play count only on the author's profile
+    // grid, and the grid does not say which post a tile is, so each candidate is opened and its
+    // caption compared. That measured 2-4 minutes on this farm and holds a phone for all of it,
+    // which is why nothing here runs on a paste or a debounce.
+    render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
+    await pasteLink();
+    expect(measurePost).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText("View muốn đạt"), { target: { value: "1500" } });
+    fireEvent.change(screen.getByLabelText("Tim muốn đạt"), { target: { value: "50" } });
+    fireEvent.click(screen.getByLabelText("Đọc cả số view"));
+    fireEvent.click(screen.getByRole("button", { name: "Đo bài" }));
+
+    await waitFor(() => expect(measurePost).toHaveBeenCalledTimes(1));
+    const call = measurePost.mock.calls[0] as unknown as [
+      string,
+      unknown,
+      { views: number | null; likes: number | null; comments: number | null },
+      number,
+      boolean,
+    ];
+    // One phone answers a question about the post; the fleet size is what bounds a like target.
+    expect(call[0]).toBe("actor-a");
+    expect(call[2]).toEqual({ views: 1500, likes: 50, comments: null });
+    expect(call[3]).toBe(2);
+    expect(call[4]).toBe(true);
+
+    // The shortfall and the pass estimate for what can be done…
+    expect(await screen.findByText(/còn thiếu 147/)).toBeVisible();
+    expect(screen.getByText(/ước 15 lượt/)).toBeVisible();
+    // …and the refusal, in Vietnamese, for what cannot — before an hour of farming, not after.
+    expect(screen.getByText(/chỉ có 2 máy chưa like/)).toBeVisible();
+    // A metric with no target set is not a claim about the post.
+    expect(screen.getByText(/Bình luận: đang 26 — không đặt ngưỡng/)).toBeVisible();
+  });
+
+  it("cannot read a post with no link to read", async () => {
+    render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
+    expect(screen.getByRole("button", { name: "Đo bài" })).toBeDisabled();
+    await pasteLink();
+    expect(screen.getByRole("button", { name: "Đo bài" })).toBeEnabled();
   });
 });

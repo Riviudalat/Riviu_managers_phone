@@ -332,6 +332,7 @@ pub fn run() {
             interaction_commands::interaction_parse_links,
             interaction_commands::interaction_resolve_links,
             interaction_commands::interaction_preview_thread,
+            interaction_commands::interaction_measure_post,
             interaction_commands::interaction_start_thread,
             interaction_commands::interaction_list,
             interaction_commands::interaction_get,
