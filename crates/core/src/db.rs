@@ -874,6 +874,59 @@ mod interaction_tests {
         }
     }
 
+    /// A failure reported after the fact never erases a verdict the engine already reached.
+    ///
+    /// `execute_thread_campaign` reads the campaign's own rows, writes `Partial` when some
+    /// messages really did post, and *then* returns `Err` for the first failure it saw. Both
+    /// desktop callers answered that `Err` with an unconditional `Failed`, so the scenario the
+    /// totals read was written for — "a campaign the operator could see five posted comments
+    /// under, filed as a total loss" — still happened on every path where a cohort task
+    /// errored rather than failing per-assignment. The state read here comes back out of the
+    /// database, not out of the call.
+    #[test]
+    fn a_late_failure_keeps_a_settled_verdict_and_still_records_why() {
+        let (db, path) = fixture();
+        let request = request();
+        let plan = plan_threads(&request).expect("plan");
+        let campaign = db
+            .create_interaction_campaign(&request, &plan)
+            .expect("create");
+
+        db.update_interaction_campaign_state(&campaign, ThreadCampaignState::Partial, None)
+            .expect("settle as partial");
+        db.fail_interaction_campaign_unless_settled(&campaign, "cohort task chết")
+            .expect("record the reason");
+
+        let settled = db
+            .get_interaction_campaign(&campaign)
+            .expect("read")
+            .expect("present");
+        assert_eq!(
+            settled.summary.state,
+            ThreadCampaignState::Partial,
+            "the posted comments are still posted"
+        );
+        assert_eq!(
+            settled.summary.error_code.as_deref(),
+            Some("cohort task chết"),
+            "and the operator is told what went wrong"
+        );
+
+        // The other direction: a campaign still running is exactly what this may move.
+        db.update_interaction_campaign_state(&campaign, ThreadCampaignState::Running, None)
+            .expect("back to running");
+        db.fail_interaction_campaign_unless_settled(&campaign, "worker chết")
+            .expect("fail it");
+        let failed = db
+            .get_interaction_campaign(&campaign)
+            .expect("read")
+            .expect("present");
+        assert_eq!(failed.summary.state, ThreadCampaignState::Failed);
+        assert_eq!(failed.summary.error_code.as_deref(), Some("worker chết"));
+
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
     /// A thread across the whole farm has to fit the schema, and until migration 14 it did
     /// not.
     ///

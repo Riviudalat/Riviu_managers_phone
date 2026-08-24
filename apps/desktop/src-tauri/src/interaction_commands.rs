@@ -268,11 +268,11 @@ pub async fn interaction_start_thread(
             // behind it. Logged too, because this is the only place the reason exists.
             let detail = format!("{error:#}");
             log::error!("interaction campaign thất bại: {detail}");
-            let _ = db.update_interaction_campaign_state(
-                &campaign_id,
-                ThreadCampaignState::Failed,
-                Some(&detail),
-            );
+            // Not an unconditional `Failed`: the engine may already have written `Partial`
+            // off the campaign's own totals, and stomping that is how a run with real posted
+            // comments under it got filed as a total loss. See
+            // `Database::fail_interaction_campaign_unless_settled`.
+            let _ = db.fail_interaction_campaign_unless_settled(&campaign_id, &detail);
             events.emit(AppEvent::InteractionUpdated {
                 campaign_id,
                 revision: revision(),
@@ -419,11 +419,8 @@ pub fn interaction_retry(
             // behind it. Logged too, because this is the only place the reason exists.
             let detail = format!("{error:#}");
             log::error!("interaction campaign thất bại: {detail}");
-            let _ = db.update_interaction_campaign_state(
-                &worker_id,
-                ThreadCampaignState::Failed,
-                Some(&detail),
-            );
+            // Same reason as the start path: keep a terminal verdict, record the reason.
+            let _ = db.fail_interaction_campaign_unless_settled(&worker_id, &detail);
             // The start path has always emitted here; retry did not, so a retry that died in
             // the worker left the Monitor showing "Đang chạy" until something else happened
             // to refresh it. The state write above is invisible without this.

@@ -344,6 +344,64 @@ fn protected_assignment_ids(
         .collect()
 }
 
+/// What a campaign's own rows say happened, counted once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CampaignTally {
+    succeeded: usize,
+    failed: usize,
+    /// Messages still in a **non-terminal** state: meant to go, never went, and nothing left
+    /// running that would move them. A subset retry leaves these behind by design — the whole
+    /// point of `only_assignments` is not to touch the rest — so "not failed" and "not
+    /// outstanding" are different questions and answering only the first was the bug.
+    outstanding: usize,
+}
+
+/// Count a campaign's rows into [`CampaignTally`].
+fn tally_assignments(
+    assignments: &[crate::interaction::InteractionAssignmentRecord],
+) -> CampaignTally {
+    let mut tally = CampaignTally {
+        succeeded: 0,
+        failed: 0,
+        outstanding: 0,
+    };
+    for assignment in assignments {
+        match assignment.state {
+            ThreadMessageState::Succeeded => tally.succeeded += 1,
+            // Everything that was meant to be posted and was not, counted the way
+            // `InteractionCampaignSummary::failed_messages` counts it.
+            ThreadMessageState::Failed
+            | ThreadMessageState::Uncertain
+            | ThreadMessageState::SkippedParent => tally.failed += 1,
+            ThreadMessageState::Queued
+            | ThreadMessageState::Preparing
+            | ThreadMessageState::Ready
+            | ThreadMessageState::Sending => tally.outstanding += 1,
+        }
+    }
+    tally
+}
+
+/// The verdict those rows imply.
+///
+/// **Pure, and lifted out of the run loop on purpose.** This arithmetic is the campaign's
+/// terminal state — what the Monitor draws, and what decides whether it offers Thử lại at all
+/// — and it lived inside a two-hundred-line async function that cannot be called without a
+/// real driver. So nothing exercised it, and it was wrong: `Queued`, `Preparing`, `Ready` and
+/// `Sending` fell into a catch-all arm and were counted as neither success nor failure, which
+/// made `failed == 0` read as "nothing outstanding". Retrying one message of fourteen — which
+/// the UI offers per row — then filed the campaign `Succeeded` with thirteen comments never
+/// sent, and since Thử lại is drawn only for partial/failed/cancelled, put it out of reach.
+fn settle_state(tally: CampaignTally, had_error: bool) -> ThreadCampaignState {
+    if tally.failed == 0 && tally.outstanding == 0 && !had_error {
+        ThreadCampaignState::Succeeded
+    } else if tally.succeeded == 0 {
+        ThreadCampaignState::Failed
+    } else {
+        ThreadCampaignState::Partial
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Run a campaign's cohorts at the same time, then decide what the campaign was.
 ///
@@ -451,33 +509,30 @@ pub async fn execute_thread_campaign(
         detail.as_ref().map(|detail| detail.summary.state),
         Some(ThreadCampaignState::Cancelled)
     );
-    let (succeeded, failed) = match detail.as_ref() {
-        Some(detail) => detail
-            .assignments
-            .iter()
-            .fold((0, 0), |(ok, bad), assignment| {
-                match assignment.state {
-                    ThreadMessageState::Succeeded => (ok + 1, bad),
-                    // Everything that was meant to be posted and was not, counted the way
-                    // `InteractionCampaignSummary::failed_messages` counts it.
-                    ThreadMessageState::Failed
-                    | ThreadMessageState::Uncertain
-                    | ThreadMessageState::SkippedParent => (ok, bad + 1),
-                    _ => (ok, bad),
-                }
-            }),
+    let tally = match detail.as_ref() {
+        Some(detail) => tally_assignments(&detail.assignments),
         // Unreadable: fall back to this pass's own tally rather than inventing a verdict.
-        None => (succeeded, failed),
+        None => CampaignTally {
+            succeeded,
+            failed,
+            outstanding: 0,
+        },
     };
     if !cancelled {
-        let final_state = if failed == 0 && first_error.is_none() {
-            ThreadCampaignState::Succeeded
-        } else if succeeded == 0 {
-            ThreadCampaignState::Failed
-        } else {
-            ThreadCampaignState::Partial
+        let final_state = settle_state(tally, first_error.is_some());
+        // **`Partial` has to say why.** The SQL sets `error_code=?2` unconditionally, so `None`
+        // wrote NULL rather than preserving anything — and `Partial` is the state most in need
+        // of an explanation and the one guaranteed not to have had one. The counts are the
+        // explanation the engine actually holds here; the per-assignment rows carry the detail
+        // beneath it.
+        let reason = match final_state {
+            ThreadCampaignState::Partial => Some(format!(
+                "xong {}, lỗi {}, còn dở {}",
+                tally.succeeded, tally.failed, tally.outstanding
+            )),
+            _ => first_error.as_ref().map(|error| format!("{error:#}")),
         };
-        db.update_interaction_campaign_state(&campaign_id, final_state, None)?;
+        db.update_interaction_campaign_state(&campaign_id, final_state, reason.as_deref())?;
     }
     events.emit(AppEvent::InteractionUpdated {
         campaign_id,
@@ -2146,6 +2201,93 @@ mod tests {
 
         assert_eq!(retryable.len(), 1);
         assert!(retryable.contains("a1"));
+    }
+
+    /// Thirteen messages still queued is not a success, however well the fourteenth went.
+    ///
+    /// The reachable sequence: run fourteen assignments with no AI key, `run_cohort` bails and
+    /// all fourteen stay `Queued`, campaign `Failed` — correct. Configure the key and retry
+    /// **one** row, which the detail view offers per row. `only_assignments` filters, so the
+    /// other thirteen are never touched and stay `Queued`. The one succeeds. `failed == 0` and
+    /// no error, so the old arithmetic wrote `Succeeded` — thirteen comments never sent, and
+    /// Thử lại is drawn only for partial/failed/cancelled, so the campaign left the UI.
+    #[test]
+    fn a_subset_retry_never_settles_a_campaign_that_still_has_work() {
+        let mut assignments = vec![assignment("a0", 0, ThreadMessageState::Succeeded)];
+        for ordinal in 1..14u8 {
+            assignments.push(assignment(
+                &format!("a{ordinal}"),
+                ordinal,
+                ThreadMessageState::Queued,
+            ));
+        }
+
+        let tally = tally_assignments(&assignments);
+
+        assert_eq!(tally.succeeded, 1);
+        assert_eq!(tally.failed, 0, "nothing is in a terminal-bad state…");
+        assert_eq!(tally.outstanding, 13, "…and yet thirteen never went");
+        assert_eq!(
+            settle_state(tally, false),
+            ThreadCampaignState::Partial,
+            "a campaign with unsent messages is not a success"
+        );
+    }
+
+    /// Every non-terminal message state counts as outstanding, by name and not by catch-all.
+    ///
+    /// Listed one at a time so that adding a state to `ThreadMessageState` makes the compiler
+    /// ask where it belongs. A catch-all arm is what silently swallowed four of them.
+    #[test]
+    fn every_state_lands_in_exactly_one_bucket() {
+        let tally = tally_assignments(&[
+            assignment("q", 0, ThreadMessageState::Queued),
+            assignment("p", 1, ThreadMessageState::Preparing),
+            assignment("r", 2, ThreadMessageState::Ready),
+            assignment("s", 3, ThreadMessageState::Sending),
+            assignment("ok", 4, ThreadMessageState::Succeeded),
+            assignment("f", 5, ThreadMessageState::Failed),
+            assignment("u", 6, ThreadMessageState::Uncertain),
+            assignment("k", 7, ThreadMessageState::SkippedParent),
+        ]);
+        assert_eq!(tally.outstanding, 4);
+        assert_eq!(tally.succeeded, 1);
+        assert_eq!(tally.failed, 3);
+    }
+
+    /// The three verdicts a settled campaign can carry.
+    #[test]
+    fn a_settled_campaign_gets_the_verdict_its_rows_imply() {
+        let all_done = CampaignTally {
+            succeeded: 14,
+            failed: 0,
+            outstanding: 0,
+        };
+        assert_eq!(
+            settle_state(all_done, false),
+            ThreadCampaignState::Succeeded
+        );
+        // An error the run reported keeps it out of `Succeeded` even with clean rows: the
+        // failure may be the one that stopped a cohort before its rows were written.
+        assert_eq!(settle_state(all_done, true), ThreadCampaignState::Partial);
+        let nothing_posted = CampaignTally {
+            succeeded: 0,
+            failed: 14,
+            outstanding: 0,
+        };
+        assert_eq!(
+            settle_state(nothing_posted, true),
+            ThreadCampaignState::Failed
+        );
+        let some_posted = CampaignTally {
+            succeeded: 5,
+            failed: 9,
+            outstanding: 0,
+        };
+        assert_eq!(
+            settle_state(some_posted, true),
+            ThreadCampaignState::Partial
+        );
     }
 }
 

@@ -23,8 +23,14 @@ struct Migration {
     /// has to be opened around the one [`apply_one`] opens, which is what this flag buys.
     ///
     /// A field rather than a list of versions kept elsewhere: a new migration that rebuilds
-    /// a table and forgets to say so would silently erase rows, and the compiler asking the
-    /// question once per migration is cheaper than finding that out from a user's database.
+    /// a table and forgets to say so would silently erase rows, and the question being asked
+    /// once per migration is cheaper than finding that out from a user's database.
+    ///
+    /// The compiler only forces a `bool` to be *written*, not the right one, so the
+    /// correspondence is pinned by `a_migration_that_drops_or_renames_a_table_declares_it`
+    /// instead. It has to be: `PRAGMA foreign_key_check` cannot catch the mistake, because a
+    /// cascade **deletes** children rather than orphaning them — the check finds nothing wrong
+    /// and the migration commits the loss.
     rebuilds_tables: bool,
 }
 
@@ -723,9 +729,16 @@ fn apply_one(
     }
     connection.pragma_update(None, "foreign_keys", "OFF")?;
     let applied = apply_one_transaction(connection, migration, failed_version);
-    // Restored whether the migration committed or rolled back. Returning early on failure
-    // here would leave enforcement off on a connection the caller keeps using, which turns
-    // one failed migration into silent referential damage later.
+    // Restored whether the migration committed or rolled back, and the return value carries
+    // a failure to restore rather than swallowing it.
+    //
+    // Not because the caller keeps this connection — it does not. `Database::migrate` owns a
+    // local `Connection` and drops it on return, and `foreign_keys` is per-connection and not
+    // persisted, so enforcement cannot actually leak out of here. The reason is narrower: a
+    // pragma that refuses to go back on means this connection is in a state nothing else in
+    // the file reasons about, and the rest of `migrate` still runs on it. There is no RAII
+    // guard, so a panic inside the transaction skips this line — harmless for the same reason,
+    // and `Transaction`'s own `Drop` still rolls the migration back.
     let restored = connection
         .pragma_update(None, "foreign_keys", "ON")
         .map_err(anyhow::Error::from);
@@ -1392,6 +1405,91 @@ mod tests {
     /// still works afterwards (a campaign delete still cascades). The pragma is set ON here
     /// deliberately — `Database::conn` does that in production, and it is the state the
     /// rebuild is dangerous in.
+    /// A migration whose body drops or renames a table has to declare `rebuilds_tables`.
+    ///
+    /// The flag is a correspondence the compiler cannot check: it forces a `bool` to be
+    /// *written*, not the right one. And the `PRAGMA foreign_key_check` in `apply_migration_14`
+    /// cannot catch the mistake either, because a cascade **deletes** children rather than
+    /// orphaning them — the check finds zero bad rows and the migration commits the loss. The
+    /// only thing that can catch it before a user's database does is the source.
+    ///
+    /// Exemptions are written down one line each, the way `ALLOWED_HELPERS` is. Dropping a
+    /// table nothing references is genuinely safe; naming which table and why is the price of
+    /// skipping the window.
+    #[test]
+    fn a_migration_that_drops_or_renames_a_table_declares_it() {
+        const EXEMPT: &[(i64, &str)] = &[(
+            7,
+            "drops `users`, which no table references — no cascade, so nothing to lose",
+        )];
+
+        let source = include_str!("migrations.rs");
+        // What the array says.
+        let declared: Vec<(i64, bool)> = source
+            .split("Migration {")
+            .skip(1)
+            .filter_map(|block| {
+                let head = &block[..block.find('}')?];
+                let version = head
+                    .lines()
+                    .find_map(|line| line.trim().strip_prefix("version: "))?
+                    .trim_end_matches(',')
+                    .parse::<i64>()
+                    .ok()?;
+                Some((version, head.contains("rebuilds_tables: true")))
+            })
+            .collect();
+        assert_eq!(
+            declared.len(),
+            crate::db::migrations::MIGRATIONS.len(),
+            "the scan did not find every entry in MIGRATIONS, so it proves nothing"
+        );
+
+        // What the bodies do. Each function is a top-level item, so it ends at the first `}`
+        // in the first column.
+        let mut rebuilds = Vec::new();
+        for chunk in source.split("\nfn apply_migration_").skip(1) {
+            let Some((number, rest)) = chunk.split_once('(') else {
+                continue;
+            };
+            let Ok(version) = number.parse::<i64>() else {
+                continue;
+            };
+            let body = rest.split("\n}\n").next().unwrap_or(rest);
+            if body.contains("DROP TABLE") || body.contains("RENAME TO") {
+                rebuilds.push(version);
+            }
+        }
+        assert!(
+            rebuilds.contains(&14),
+            "migration 14 rebuilds two tables; a scan that cannot see it cannot see anything"
+        );
+
+        let undeclared: Vec<i64> = rebuilds
+            .iter()
+            .copied()
+            .filter(|version| !EXEMPT.iter().any(|(exempt, _)| exempt == version))
+            .filter(|version| !declared.iter().any(|(v, flag)| v == version && *flag))
+            .collect();
+        assert!(
+            undeclared.is_empty(),
+            "migration(s) {undeclared:?} drop or rename a table without `rebuilds_tables: true`. \
+             Under the `foreign_keys=ON` every production connection opens with, that cascades \
+             children away, and `PRAGMA foreign_key_check` cannot see it because the rows are \
+             deleted rather than orphaned. Declare the flag, or add a written exemption."
+        );
+
+        // Stale exemptions are their own hazard: one that no longer describes anything is a
+        // hole standing open for the next migration to fall into.
+        for (version, reason) in EXEMPT {
+            assert!(
+                rebuilds.contains(version),
+                "migration {version} is exempted ({reason}) but no longer drops or renames \
+                 anything — remove the exemption"
+            );
+        }
+    }
+
     #[test]
     fn migration_14_relaxes_the_check_without_rewriting_interaction_rows() {
         let path = temp_db_path("interaction-64-rebuild");

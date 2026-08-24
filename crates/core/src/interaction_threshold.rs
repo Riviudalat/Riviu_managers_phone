@@ -73,11 +73,19 @@ pub struct ThresholdPlan {
 
 impl ThresholdPlan {
     /// Everything asked for is already true.
+    ///
+    /// A metric that could not be read is **not** satisfied, whatever its shortfall says. The
+    /// unreadable branches set `shortfall: want` alongside `unreachable: Some(..)`, so a target
+    /// of `0` on a metric this build cannot measure gave `shortfall == 0` — and this method
+    /// then answered "satisfied" about the same plan `refusals()` was refusing. Which accessor
+    /// a caller reached for first decided the behaviour; `threshold_gate` happens to check
+    /// refusals first, so it was latent rather than visible. "Satisfied implies no refusals" is
+    /// what the two methods jointly promise, and now they keep it.
     pub fn satisfied(&self) -> bool {
         [&self.views, &self.likes, &self.comments]
             .into_iter()
             .flatten()
-            .all(|metric| metric.shortfall == 0)
+            .all(|metric| metric.shortfall == 0 && metric.unreachable.is_none())
     }
 
     /// The reasons, if any, that this plan cannot finish — for showing before it starts.
@@ -327,6 +335,27 @@ mod tests {
             14,
         );
         assert!(plan.views.expect("asked for").unreachable.is_some());
+    }
+
+    /// `satisfied()` and `refusals()` cannot disagree about the same plan.
+    #[test]
+    fn a_metric_that_could_not_be_read_is_never_satisfied() {
+        // Target zero on an unreadable metric: shortfall is zero because `want` is zero, while
+        // the reading itself failed. The two accessors used to answer opposite questions here.
+        let plan = plan_thresholds(
+            PostTargets {
+                views: Some(0),
+                ..Default::default()
+            },
+            PostNow::default(),
+            14,
+            14,
+        );
+        assert!(!plan.refusals().is_empty(), "the view could not be read");
+        assert!(
+            !plan.satisfied(),
+            "a plan with a refusal in it is not satisfied"
+        );
     }
 
     #[test]

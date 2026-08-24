@@ -223,6 +223,33 @@ impl Database {
         )?;
         Ok(())
     }
+    /// Record a failure reason **without** overwriting a verdict that is already terminal.
+    ///
+    /// `execute_thread_campaign` reads the campaign's own totals, writes `Partial` when some
+    /// messages really did post, and *then* returns `Err` for the first failure it saw. Both
+    /// callers used to answer that `Err` with an unconditional `Failed` — which erased exactly
+    /// the verdict the totals read was added to produce, on exactly the path it was added for.
+    /// The scenario in its own comment ("a campaign the operator could see five posted comments
+    /// under, filed as a total loss") therefore still happened, every time any cohort task
+    /// returned an error rather than failing per-assignment.
+    ///
+    /// So the reason is always recorded and the state moves only from a non-terminal one. Done
+    /// as one statement rather than read-then-write: two workers can finish at once, and a
+    /// read-modify-write between them would reintroduce the same overwrite through the back
+    /// door.
+    pub fn fail_interaction_campaign_unless_settled(
+        &self,
+        campaign_id: &str,
+        reason: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE interaction_campaigns SET              state=CASE WHEN state IN ('queued','running') THEN 'failed' ELSE state END,             revision=revision+1,error_code=?1,updated_at=?2 WHERE id=?3",
+            params![reason, Utc::now().to_rfc3339(), campaign_id],
+        )?;
+        Ok(())
+    }
+
     /// Close out campaigns whose worker died with the process, and say so.
     ///
     /// An interaction worker is a `tokio::spawn` inside this process: it cannot outlive the
