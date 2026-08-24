@@ -118,6 +118,19 @@ export interface BuildContext {
   actorUdids: string[];
   mentions: string[];
   largestCohort: number;
+  /**
+   * What the request is for. `"preview"` leaves the manual comment list out.
+   *
+   * The preview exists to answer one question — how the planner would split these phones into
+   * cohorts — and it is the *only* channel that can tell the panel the real cohort size. Sending
+   * the comment list with it made that channel depend on a number it was being asked to
+   * provide: fourteen phones, cohort size 3 and four pasted comments needs exactly four
+   * comments, but with no preview yet the panel guesses the fleet count, the preview is refused
+   * for `TooFewManualComments` against fourteen, so no preview arrives, so the guess never
+   * improves. The screen then demanded "cần ≥ 14" — a number that was never true — with no way
+   * out but typing `4` by hand.
+   */
+  purpose?: "run" | "preview";
 }
 
 export function buildRequest(
@@ -133,7 +146,7 @@ export function buildRequest(
     maxWords: draft.maxWords,
     ...requestShapeOf(draft.threadKind),
     cohortSize: draft.cohortSize >= 2 ? draft.cohortSize : undefined,
-    manualComments: manualCommentsOf(draft),
+    manualComments: context.purpose === "preview" ? [] : manualCommentsOf(draft),
     likeTarget: draft.likeTarget,
     mentions: context.mentions,
   };
@@ -142,6 +155,16 @@ export function buildRequest(
 export interface ValidateContext extends BuildContext {
   /** Lines that were pasted but could not be read as a target. */
   badLineCount: number;
+  /**
+   * True while the plan on screen was computed for a different draft.
+   *
+   * `largestCohort` comes from the last preview, and the preview is 350 ms behind the draft. Any
+   * gap there is a number the run would use and the planner would refuse: deselect a phone, wait
+   * for the preview, reselect it, press Chạy ngay inside the debounce, and the request goes out
+   * with thirteen messages for fourteen actors. Blocking for the length of one round trip is the
+   * only answer that does not involve guessing.
+   */
+  previewStale?: boolean;
   /** True when a threaded run would mix the two ways of reading the screen. */
   mixedThread: boolean;
   /** A refusal the backend's own planner gave for this draft, if it gave one. */
@@ -180,6 +203,15 @@ export function validateDraft(
 
   if (draft.threadKind !== "standalone" && context.mixedThread) {
     issues.push({ field: "actors", message: MIXED_THREAD_REASON });
+  }
+
+  // **The plan on screen has to be the plan for this draft.** `largestCohort` is read out of
+  // the last preview, so any moment the two disagree is a moment `messages` is a number the run
+  // would send and the planner would refuse. Held for the length of one round trip rather than
+  // guessed — which is what the rewrite claimed to do, and did only in the direction where the
+  // stale value happened to be too small.
+  if (context.previewStale) {
+    issues.push({ field: "plan", message: "Đang tính lại kế hoạch cho lựa chọn mới…" });
   }
 
   const messages = effectiveMessageCount(draft, context.largestCohort);

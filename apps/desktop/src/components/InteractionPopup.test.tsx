@@ -39,6 +39,15 @@ const { parseLinks, startThread, previewThread } = vi.hoisted(() => ({
   // spreading the remainder — because the popup reads `largestCohort` off this answer and a
   // mock that always returns one team would validate against the wrong number.
   previewThread: vi.fn(async (request: ThreadCampaignRequest) => {
+    // `plan_threads` runs the same `validate()` the dispatch will, so a preview carrying a
+    // comment list shorter than its own message count is refused — `TooFewManualComments`.
+    // Modelled here because leaving it out is what hid a deadlock: the panel guessed the fleet
+    // count, the preview was refused against that guess, so the real cohort size never arrived
+    // and the guess never improved.
+    const manual = request.manualComments ?? [];
+    if (manual.length > 0 && manual.length < request.messageCount) {
+      throw new Error("InteractionFailed: manual mode needs as many comments as messages");
+    }
     const size = request.cohortSize ?? 0;
     const teams = size >= 2 ? Math.max(1, Math.floor(request.actorUdids.length / size)) : 1;
     const base = Math.floor(request.actorUdids.length / teams);
@@ -149,6 +158,20 @@ async function pasteLink() {
   await screen.findByText("✓");
 }
 
+/**
+ * Wait for the panel to be ready, then press Chạy ngay.
+ *
+ * The waiting is the point. `largestCohort` is read out of the last preview and the preview is
+ * 350 ms behind the draft, so a click inside that gap dispatches a message count computed for a
+ * different selection — thirteen messages for fourteen actors, which the planner refuses. The
+ * panel now holds the button while the plan catches up, and a test that clicks without waiting
+ * is testing a race the operator cannot win either.
+ */
+async function clickRun() {
+  await waitFor(() => expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
+}
+
 /** Open the collapsed advanced group, where the three numbers live. */
 function openAdvanced() {
   fireEvent.click(screen.getByRole("button", { name: "Tuỳ chỉnh nâng cao" }));
@@ -159,7 +182,7 @@ describe("InteractionPopup", () => {
     render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
     await pasteLink();
 
-    fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
+    await clickRun();
     await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
     const request = (startThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>)[0][0];
     expect(request.actorUdids).toEqual(["actor-a", "actor-b"]);
@@ -177,7 +200,7 @@ describe("InteractionPopup", () => {
     const api = await import("../api");
     render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
     await pasteLink();
-    fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
+    await clickRun();
     await waitFor(() => expect(api.interactionGet).toHaveBeenCalledWith("campaign-1"));
   });
 
@@ -192,7 +215,7 @@ describe("InteractionPopup", () => {
     expect(screen.getByText("Android (đọc cây giao diện)")).toBeVisible();
 
     await pasteLink();
-    fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
+    await clickRun();
     await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
     const request = (startThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>)[0][0];
     // Pre-selection comes from one group only, so the default is a runnable thread. Two
@@ -269,8 +292,7 @@ describe("InteractionPopup", () => {
     // One control, three choices — the two dependent dropdowns are gone.
     fireEvent.click(screen.getByRole("radio", { name: /Riêng lẻ/ }));
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeEnabled());
-    fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
+    await clickRun();
     await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
     const request = (startThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>)[0][0];
     expect(request.actorUdids).toEqual(["actor-a", "actor-android"]);
@@ -294,7 +316,7 @@ describe("InteractionPopup", () => {
     // a chain runs strictly one after another and one broken link stops the rest.
     render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
     await pasteLink();
-    fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
+    await clickRun();
     await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
     let request = (startThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>)[0][0];
     expect(request.mode).toBe("threaded");
@@ -303,7 +325,7 @@ describe("InteractionPopup", () => {
     // The first run navigates to Theo dõi, which is the point of it — come back.
     fireEvent.click(screen.getByRole("tab", { name: "Thiết lập" }));
     fireEvent.click(screen.getByRole("radio", { name: /Nối tiếp/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
+    await clickRun();
     await waitFor(() => expect(startThread).toHaveBeenCalledTimes(2));
     request = (startThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>)[1][0];
     expect(request.shape).toBe("chain");
@@ -364,11 +386,90 @@ describe("InteractionPopup", () => {
     fireEvent.change(screen.getByLabelText(/Danh sách bình luận/), {
       target: { value: "đẹp quá\nchỗ này ở đâu ạ" },
     });
-    await waitFor(() => expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeEnabled());
-    fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
+    await clickRun();
     await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
     const request = (startThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>)[0][0];
     expect(request.manualComments).toEqual(["đẹp quá", "chỗ này ở đâu ạ"]);
+  });
+
+  it("holds Chạy ngay while the plan is being recomputed for a new selection", async () => {
+    // No IPC reordering needed. `largestCohort` is read out of the last preview, so between
+    // changing the selection and the preview answering, the panel holds a number for a fleet
+    // that is no longer selected. Deselect a phone, wait for the plan, reselect it, press
+    // inside the 350 ms debounce, and the request went out with a message count for thirteen
+    // actors and fourteen in the list — refused by the planner it was supposed to have asked.
+    const fleet = Array.from({ length: 9 }, (_, index) => ({
+      udid: `android-${index}`,
+      name: `Android ${index}`,
+      model: "SM-G955F",
+      platform: "android",
+      osVersion: "9",
+      connection: "usb",
+      status: "ready",
+      wdaReady: true,
+    })) as never[];
+    render(<InteractionPopup devices={fleet} selected={[]} onClose={() => undefined} />);
+    await pasteLink();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeEnabled());
+
+    // Deselect one and let the plan settle on eight, which is the state that makes the stale
+    // number wrong in the dangerous direction.
+    fireEvent.click(screen.getByLabelText("Android 8"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeEnabled());
+
+    // Now put it back. Nine actors are selected and the plan on screen still says eight, so a
+    // press here used to dispatch eight messages for nine actors — `TooFewMessagesForActors`,
+    // from the planner the panel had just been talking to.
+    fireEvent.click(screen.getByLabelText("Android 8"));
+    expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeDisabled();
+    expect(screen.getByText(/Đang tính lại kế hoạch/)).toBeVisible();
+    expect(startThread).not.toHaveBeenCalled();
+
+    // And it lets go on its own once the plan catches up, with the count the fleet needs.
+    await clickRun();
+    await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
+    const request = (startThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>)[0][0];
+    expect(request.actorUdids).toHaveLength(9);
+    expect(request.messageCount).toBe(9);
+  });
+
+  it("does not make the operator know the cohort size before pasting the comments", async () => {
+    // Nine phones in teams of three needs three comments, and three is what is pasted — a
+    // legal configuration the panel made unusable. The only channel that knows the cohort size
+    // is the preview, and the preview was refused for a comment count computed from the cohort
+    // size it was being asked to supply: the screen demanded "cần ≥ 9", a number that was never
+    // true, with no way out but typing 3 by hand.
+    const fleet = Array.from({ length: 9 }, (_, index) => ({
+      udid: `android-${index}`,
+      name: `Android ${index}`,
+      model: "SM-G955F",
+      platform: "android",
+      osVersion: "9",
+      connection: "usb",
+      status: "ready",
+      wdaReady: true,
+    })) as never[];
+    render(<InteractionPopup devices={fleet} selected={[]} onClose={() => undefined} />);
+    await pasteLink();
+
+    openAdvanced();
+    fireEvent.change(screen.getByLabelText("Số máy mỗi cụm"), { target: { value: "3" } });
+    fireEvent.change(screen.getByLabelText(/Nội dung bình luận/), {
+      target: { value: "manual" },
+    });
+    fireEvent.change(screen.getByLabelText(/Danh sách bình luận/), {
+      target: { value: "đẹp quá\nchỗ này ở đâu ạ\nxin info với" },
+    });
+
+    await clickRun();
+    await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
+    const request = (startThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>)[0][0];
+    expect(request.cohortSize).toBe(3);
+    expect(request.messageCount).toBe(3);
+    expect(request.manualComments).toHaveLength(3);
+    // The run carries the comments; the preview never did — that is what broke the loop.
+    const previews = previewThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>;
+    expect(previews.at(-1)?.[0].manualComments).toEqual([]);
   });
 
   it("no longer refuses a fleet larger than six", async () => {
@@ -395,8 +496,7 @@ describe("InteractionPopup", () => {
     // The plan is re-asked for on a debounce, and until it answers the popup is still holding
     // the previous split — one team of nine, which three messages would not cover. It blocks
     // rather than guesses, so wait for the new plan the way the operator would.
-    await waitFor(() => expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeEnabled());
-    fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
+    await clickRun();
 
     await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
     const request = (startThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>)[0][0];
@@ -421,8 +521,7 @@ describe("InteractionPopup", () => {
     })) as never[];
     render(<InteractionPopup devices={fleet} selected={[]} onClose={() => undefined} />);
     await pasteLink();
-    await waitFor(() => expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeEnabled());
-    fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
+    await clickRun();
     await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
     const request = (startThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>)[0][0];
     expect(request.actorUdids).toHaveLength(14);

@@ -220,8 +220,7 @@ span.interaction-error > small { color: var(--text-2); white-space: pre-wrap; ov
 .interaction-monitor-head { display: flex; align-items: center; gap: 0.5rem; }
 .interaction-monitor-head .ghost { margin-left: auto; }
 .interaction-campaign-list { display: flex; flex-direction: column; gap: 0.25rem; }
-.interaction-campaign { display: flex; align-items: center; gap: 0.45rem; width: 100%; border: 1px solid var(--line); border-radius: 5px; background: var(--bg-elevated); padding: 0.45rem; text-align: left; cursor: pointer; }
-.interaction-campaign:hover { border-color: var(--primary); background: var(--primary-50); }
+.interaction-campaign { display: flex; align-items: center; gap: 0.45rem; width: 100%; border: 0; background: none; padding: 0; text-align: left; cursor: pointer; }
 .interaction-campaign strong, .interaction-assignment strong { display: block; font-size: var(--text-sm); color: var(--text-1); }
 .interaction-campaign small, .interaction-assignment small { display: block; color: var(--text-3); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .interaction-detail { display: flex; flex-direction: column; gap: 0.25rem; border-top: 1px solid var(--line); padding-top: 0.55rem; }
@@ -271,3 +270,11 @@ span.interaction-error > small { color: var(--text-2); white-space: pre-wrap; ov
     animation: none;
   }
 }
+
+/* The campaign row is the bordered box; the button inside it is the clickable part and the
+   progress bar sits under it as a sibling. The bar was inside the `<button>`, where a
+   `<div role="progressbar">` is invalid content and its `aria-label` gets folded into the
+   button's name-from-content — one ninety-character accessible name per row, and two identical
+   ones whenever a post had two campaigns. */
+.interaction-campaign-row { display: flex; flex-direction: column; gap: 0.25rem; border: 1px solid var(--line); border-radius: 5px; background: var(--bg-elevated); padding: 0.45rem; }
+.interaction-campaign-row:hover { border-color: var(--primary); background: var(--primary-50); }

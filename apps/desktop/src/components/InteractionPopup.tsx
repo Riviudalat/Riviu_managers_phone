@@ -204,6 +204,22 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
     return () => clearTimeout(timer);
   }, [draft.rawLinks]);
 
+  /// What the plan on screen was computed for.
+  ///
+  /// Everything the partition depends on, and nothing else — a changed instruction or word
+  /// limit does not move the cohorts, so it must not disable the run button either.
+  const previewKey = useMemo(
+    () =>
+      JSON.stringify([
+        validTargets.map((target) => target.targetKey),
+        effectiveActors,
+        draft.cohortSize,
+      ]),
+    [validTargets, effectiveActors, draft.cohortSize],
+  );
+  const [previewFor, setPreviewFor] = useState<string | null>(null);
+  const previewStale = previewFor !== previewKey;
+
   const cohorts = useMemo(() => groupPlanByCohort(preview?.plan), [preview]);
   const largestCohort = largestCohortOf(cohorts, effectiveActors.length);
 
@@ -218,6 +234,7 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
       setPlanError(null);
       return;
     }
+    const key = previewKey;
     const timer = setTimeout(() => {
       void interactionPreviewThread(
         buildRequest(draft, {
@@ -225,20 +242,26 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
           targets: validTargets,
           actorUdids: effectiveActors,
           mentions,
+          // The fleet count, not the derived one: this is the request that *discovers* the
+          // cohort size, so it cannot be built from it. Safe because the planner only requires
+          // `messageCount >= largest cohort`, and the fleet is never smaller than a cohort.
           largestCohort: effectiveActors.length,
+          purpose: "preview",
         }),
       )
         .then((next) => {
           setPreview(next);
+          setPreviewFor(key);
           setPlanError(null);
         })
         .catch((e) => {
           setPreview(null);
+          setPreviewFor(key);
           setPlanError(describeError(e));
         });
     }, 350);
     return () => clearTimeout(timer);
-  }, [draft, validTargets, effectiveActors, mentions]);
+  }, [draft, validTargets, effectiveActors, mentions, previewKey]);
 
   const mixedThread =
     effectiveActors.some((udid) => pixelActors.some((device) => device.udid === udid)) &&
@@ -254,6 +277,7 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
       badLineCount,
       mixedThread,
       planError,
+      previewStale,
     }),
     [
       validTargets,
@@ -263,6 +287,7 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
       badLineCount,
       mixedThread,
       planError,
+      previewStale,
     ],
   );
   const issues = useMemo(
