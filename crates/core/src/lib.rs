@@ -7,6 +7,7 @@ pub mod device_work;
 pub mod driver;
 pub mod driver_multiplex;
 pub mod events;
+pub mod feed_ladder;
 pub mod flow;
 pub mod frame_source;
 pub mod frame_text;
@@ -25,6 +26,7 @@ pub mod registry;
 pub mod screen;
 pub mod screen_match;
 pub mod screen_watch;
+pub mod session_log;
 pub mod stream_budget;
 pub mod tiktok_drawer;
 pub mod tiktok_labels;
@@ -49,6 +51,7 @@ pub use driver::{
     UiSession, UnsupportedCapability,
 };
 pub use events::{AppEvent, EventBus};
+pub use feed_ladder::{step as feed_ladder_step, LadderSpend, LadderStep, FEED_LADDER};
 pub use flow::*;
 pub use frame_source::{
     decodes_as_jpeg, Frame, FrameSink, FrameSource, FrameStream, GenerationFrame,
@@ -64,11 +67,12 @@ pub use interaction_lifecycle::{
     InteractionLifecycleRegistry, InteractionSessionReservation, InteractionStreamReservation,
 };
 pub use job_queue::JobQueue;
-pub use nurture::NurtureEngine;
+pub use nurture::{NurtureEngine, Outcome};
 pub use publish::*;
 pub use registry::DeviceRegistry;
 pub use screen::{ScreenKind, ScreenObservation};
 pub use screen_watch::{ScreenWatcher, WatchStats};
+pub use session_log::{SessionLogBook, SessionLogEntry, SessionLogSummary, SESSION_LOG_CAPACITY};
 pub use stream_budget::{
     BackgroundStreamLease, ForegroundStreamReservation, ForegroundTransfer, StreamBudgetError,
     StreamBudgetManager, StreamStopRequest,

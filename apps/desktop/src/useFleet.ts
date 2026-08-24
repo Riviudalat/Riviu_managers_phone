@@ -12,7 +12,17 @@ import {
   startupError,
 } from "./api";
 import { describeError } from "./describeError";
+import { NurtureFailureWatch } from "./nurtureFailureWatch";
 import type { DeviceGroup, DeviceInfo, DeviceMeta, JobRecord } from "./types";
+
+/**
+ * One watch for the whole app, outside the hook.
+ *
+ * Module scope rather than a `useRef`: it batches failures over a couple of seconds, and a
+ * per-mount instance would split one fleet run's failures across two batches if the hook
+ * ever remounted — which is the shape that turns one toast into several.
+ */
+const failureWatch = new NurtureFailureWatch();
 
 /**
  * The fleet as the shell sees it, and whether the backend came up at all.
@@ -112,6 +122,14 @@ export function useFleet(): Fleet {
               next[idx] = device;
               return next;
             });
+          } else if (event.type === "nurtureStatus") {
+            // **The always-mounted listener, and that is the point.** This event had exactly
+            // one subscriber and it lived inside `NurturePopup`, so a session that failed
+            // while the panel was closed was seen by nothing at all. On 23/08/2026 two of
+            // fourteen phones failed on their lock screens while the fleet chip still read
+            // "14 sẵn sàng" — that chip counts phones that stream, and a locked phone
+            // streams its lock screen perfectly.
+            failureWatch.observe(event.status);
           } else if (event.type === "jobUpdated") {
             const { job } = event;
             setJobs((prev) => {

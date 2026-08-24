@@ -145,13 +145,17 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     };
     println!("  using {}", labels.provenance());
-    if labels.resource_version().is_none() {
-        // Not fatal, and worth stating precisely: the translated labels still work, so
-        // liking and reading are fine; only the resource-id controls are absent.
+    // Keyed on whether the Send button actually resolved, not on whether a resource set
+    // matched. Those are different questions, and confusing them is what made the session
+    // log warn at the eleven healthy phones on this farm while reassuring the three that
+    // needed the id (see `TikTokControls::provenance`). `trill` 38.3.2 has no resource set
+    // and needs none — it renders `Post comment` as text.
+    if labels
+        .label(riviu_core::tiktok_labels::TikTokControl::CommentSend)
+        .is_none()
+    {
         println!(
-            "  ! no resource ids measured for app version {app_version:?} — controls whose \
-             label is an `@2131…` reference (the drawer Send button) will refuse. Run \
-             --measure-comment and add a TIKTOK_RESOURCE_SETS entry."
+            "  ! the drawer Send button cannot be named on app version {app_version:?}: no              `@2131...` resource id measured for it, and this build does not render it as              text. Liking and reading still work; commenting will refuse. Run              --measure-comment and add a TIKTOK_RESOURCE_SETS entry."
         );
     }
 

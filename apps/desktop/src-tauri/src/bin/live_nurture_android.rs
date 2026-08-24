@@ -372,12 +372,31 @@ async fn main() -> anyhow::Result<()> {
     match database.list_nurture_comment_attempts(200) {
         Ok(attempts) if !attempts.is_empty() => {
             println!("\nbình luận — {} lượt:", attempts.len());
-            let mut spent = 0.0;
+            let (mut prompt_tokens, mut completion_tokens) = (0u64, 0u64);
             for attempt in &attempts {
-                spent += attempt.usd;
+                // Tokens over every attempt, sent or rejected: a comment the gate threw
+                // away still burned API calls, and the USD this used to sum was two
+                // hand-typed prices multiplied by exactly these counts.
+                prompt_tokens += u64::from(attempt.prompt_tokens);
+                completion_tokens += u64::from(attempt.completion_tokens);
                 let scores = match (attempt.relevance, attempt.evidence_support) {
                     (Some(relevance), Some(evidence)) => {
-                        format!("  [hợp đề {relevance}, bằng chứng {evidence}]")
+                        // The frame count belongs next to the evidence score, not somewhere
+                        // else: `bằng chứng 40` on one frame and on three are different
+                        // findings, and until this column existed they printed identically.
+                        let frames = match attempt.distinct_frames {
+                            Some(0) => ", không ảnh".to_string(),
+                            Some(1) => ", 1 khung (bài tĩnh)".to_string(),
+                            Some(n) => format!(", {n} khung"),
+                            None => String::new(),
+                        };
+                        // The slide count only next to the frame count: seven slides and one
+                        // frame says the pager turned and the stream never repainted.
+                        let slides = match attempt.carousel_slides {
+                            Some(0) | None => String::new(),
+                            Some(n) => format!(", lướt {n} ảnh"),
+                        };
+                        format!("  [hợp đề {relevance}, bằng chứng {evidence}{frames}{slides}]")
                     }
                     _ => String::new(),
                 };
@@ -393,7 +412,7 @@ async fn main() -> anyhow::Result<()> {
                     scores
                 );
             }
-            println!("  chi phí: {spent:.4} USD");
+            println!("  token: {prompt_tokens} vào / {completion_tokens} ra");
         }
         Ok(_) if args.comment_prob > 0 => {
             println!("\nbình luận: bật {}% nhưng không lượt nào được thử — xác suất chưa nổ, hoặc phiên kết thúc trước đó", args.comment_prob);

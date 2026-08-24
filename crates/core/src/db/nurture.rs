@@ -153,8 +153,8 @@ impl Database {
         conn.execute(
             r#"
             INSERT INTO nurture_comment_costs
-              (id, udid, model, base_url_host, prompt_tokens, completion_tokens, usd, preview, created_at)
-            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+              (id, udid, model, base_url_host, prompt_tokens, completion_tokens, preview, created_at)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
             "#,
             params![
                 cost.id,
@@ -163,7 +163,6 @@ impl Database {
                 cost.base_url_host,
                 cost.prompt_tokens as i64,
                 cost.completion_tokens as i64,
-                cost.usd,
                 cost.preview,
                 cost.created_at,
             ],
@@ -179,9 +178,10 @@ impl Database {
             r#"
             INSERT INTO nurture_comment_attempts
               (id, udid, outcome, source, model, base_url_host, prompt_tokens,
-               completion_tokens, usd, preview, caption_preview, frame_sha256,
-               context_confidence, relevance, evidence_support, created_at)
-            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+               completion_tokens, preview, caption_preview, frame_sha256,
+               context_confidence, relevance, evidence_support, distinct_frames,
+               carousel_slides, created_at)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
             "#,
             params![
                 attempt.id,
@@ -192,13 +192,14 @@ impl Database {
                 attempt.base_url_host,
                 attempt.prompt_tokens as i64,
                 attempt.completion_tokens as i64,
-                attempt.usd,
                 attempt.preview,
                 attempt.caption_preview,
                 attempt.frame_sha256,
                 attempt.context_confidence.map(i64::from),
                 attempt.relevance.map(i64::from),
                 attempt.evidence_support.map(i64::from),
+                attempt.distinct_frames.map(i64::from),
+                attempt.carousel_slides.map(i64::from),
                 attempt.created_at,
             ],
         )?;
@@ -223,8 +224,9 @@ impl Database {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id,udid,outcome,source,model,base_url_host,prompt_tokens,
-                    completion_tokens,usd,preview,caption_preview,frame_sha256,
-                    context_confidence,relevance,evidence_support,created_at
+                    completion_tokens,preview,caption_preview,frame_sha256,
+                    context_confidence,relevance,evidence_support,distinct_frames,
+                    carousel_slides,created_at
              FROM nurture_comment_attempts ORDER BY created_at DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], |row| {
@@ -237,23 +239,30 @@ impl Database {
                 base_url_host: row.get(5)?,
                 prompt_tokens: narrow(row.get::<_, i64>(6)?, "prompt_tokens")?,
                 completion_tokens: narrow(row.get::<_, i64>(7)?, "completion_tokens")?,
-                usd: row.get(8)?,
-                preview: row.get(9)?,
-                caption_preview: row.get(10)?,
-                frame_sha256: row.get(11)?,
+                preview: row.get(8)?,
+                caption_preview: row.get(9)?,
+                frame_sha256: row.get(10)?,
                 context_confidence: row
-                    .get::<_, Option<i64>>(12)?
+                    .get::<_, Option<i64>>(11)?
                     .map(|v| narrow(v, "context_confidence"))
                     .transpose()?,
                 relevance: row
-                    .get::<_, Option<i64>>(13)?
+                    .get::<_, Option<i64>>(12)?
                     .map(|v| narrow(v, "relevance"))
                     .transpose()?,
                 evidence_support: row
-                    .get::<_, Option<i64>>(14)?
+                    .get::<_, Option<i64>>(13)?
                     .map(|v| narrow(v, "evidence_support"))
                     .transpose()?,
-                created_at: row.get(15)?,
+                distinct_frames: row
+                    .get::<_, Option<i64>>(14)?
+                    .map(|v| narrow(v, "distinct_frames"))
+                    .transpose()?,
+                carousel_slides: row
+                    .get::<_, Option<i64>>(15)?
+                    .map(|v| narrow(v, "carousel_slides"))
+                    .transpose()?,
+                created_at: row.get(16)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -264,7 +273,7 @@ impl Database {
     ) -> anyhow::Result<Vec<crate::types::NurtureCommentCost>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, udid, model, base_url_host, prompt_tokens, completion_tokens, usd, preview, created_at
+            "SELECT id, udid, model, base_url_host, prompt_tokens, completion_tokens, preview, created_at
              FROM nurture_comment_costs ORDER BY created_at DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], |row| {
@@ -275,31 +284,41 @@ impl Database {
                 base_url_host: row.get(3)?,
                 prompt_tokens: narrow(row.get::<_, i64>(4)?, "prompt_tokens")?,
                 completion_tokens: narrow(row.get::<_, i64>(5)?, "completion_tokens")?,
-                usd: row.get(6)?,
-                preview: row.get(7)?,
-                created_at: row.get(8)?,
+                preview: row.get(6)?,
+                created_at: row.get(7)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+    /// Tokens and comment counts, today and all time.
+    ///
+    /// **Reads `nurture_comment_attempts`, not `nurture_comment_costs`, and that is the fix
+    /// that made this function mean anything.** The costs table has exactly one writer — the
+    /// iOS/pixel `do_comment` — so on a fourteen-phone Android fleet it is empty and this
+    /// summary reported zero for every run. The attempts table is written by both paths.
+    ///
+    /// Counting only `outcome = 'sent'` for the comment tallies, but summing tokens over
+    /// **every** attempt: a comment the verification gate rejected still burned up to four
+    /// API calls, and recording that as free was how the most expensive failure mode became
+    /// invisible.
     pub fn nurture_cost_summary(&self) -> anyhow::Result<crate::types::NurtureCostSummary> {
         let conn = self.conn()?;
         let today = Utc::now().format("%Y-%m-%d").to_string();
-        let total: (f64, i64) = conn.query_row(
-            "SELECT COALESCE(SUM(usd),0), COUNT(*) FROM nurture_comment_costs",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        let today_row: (f64, i64) = conn.query_row(
-            "SELECT COALESCE(SUM(usd),0), COUNT(*) FROM nurture_comment_costs WHERE created_at LIKE ?1",
+        const QUERY: &str = "SELECT COALESCE(SUM(prompt_tokens),0),              COALESCE(SUM(completion_tokens),0),              COALESCE(SUM(CASE WHEN outcome = 'sent' THEN 1 ELSE 0 END),0)              FROM nurture_comment_attempts";
+        let total: (i64, i64, i64) =
+            conn.query_row(QUERY, [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        let today_row: (i64, i64, i64) = conn.query_row(
+            &format!("{QUERY} WHERE created_at LIKE ?1"),
             params![format!("{today}%")],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
         Ok(crate::types::NurtureCostSummary {
-            today_usd: today_row.0,
-            total_usd: total.0,
-            today_comments: narrow(today_row.1, "today_comments")?,
-            total_comments: narrow(total.1, "total_comments")?,
+            today_prompt_tokens: today_row.0.max(0) as u64,
+            today_completion_tokens: today_row.1.max(0) as u64,
+            total_prompt_tokens: total.0.max(0) as u64,
+            total_completion_tokens: total.1.max(0) as u64,
+            today_comments: narrow(today_row.2, "today_comments")?,
+            total_comments: narrow(total.2, "total_comments")?,
         })
     }
 }

@@ -529,9 +529,21 @@ impl UiSession for AndroidUiSession {
         let mut tried: Vec<String> = Vec::new();
         for source in SOURCES {
             match self.adb.shell(&self.serial, source).await {
-                Ok(stdout) => match crate::adb::parse_current_focus_package(&stdout) {
-                    Some(package) => return Ok(package),
-                    None => tried.push(format!("`{source}` had no mCurrentFocus line")),
+                // **The three-way answer matters, and flattening it produced a false
+                // sentence.** Measured 23/08/2026 on two locked phones: `mCurrentFocus` read
+                // `Window{… StatusBar}`, which has no `package/activity` pair, so the old
+                // code reported *"had no mCurrentFocus line"* — about a line that was right
+                // there. The operator was then told the phone was "unreadable", which is not
+                // a thing anybody can act on; "on the lock screen" is.
+                Ok(stdout) => match crate::adb::parse_foreground_window(&stdout) {
+                    crate::adb::ForegroundWindow::App(package) => return Ok(package),
+                    crate::adb::ForegroundWindow::System(window) => tried.push(format!(
+                        "`{source}` reported the system window {window}, not an app — the phone \
+                         is most likely on its lock screen"
+                    )),
+                    crate::adb::ForegroundWindow::Unreadable => {
+                        tried.push(format!("`{source}` had no readable mCurrentFocus line"))
+                    }
                 },
                 Err(error) => tried.push(format!("`{source}` failed: {error}")),
             }

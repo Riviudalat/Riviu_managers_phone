@@ -6,7 +6,7 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use riviu_core::{
     DeviceControlPlane, DeviceWorkOwner, FrameSource, NurtureEngine, NurtureSessionStatus,
-    NurtureSettings,
+    NurtureSettings, SessionLogBook, SessionLogEntry, SessionLogSummary,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -31,9 +31,12 @@ pub struct NurtureApiTestResult {
     pub model: String,
     pub base_url_host: String,
     pub evidence_mode: String,
+    /// How many *different* frames went into the picture the model read. The UI used to print
+    /// a flat "3-frame vision" here, which is wrong on any still card: a photo post publishes
+    /// byte-identical frames, so the three samples were one image three times.
+    pub distinct_frames: u8,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
-    pub usd: f64,
 }
 
 fn validate_nurture_settings(settings: &NurtureSettings) -> Result<(), String> {
@@ -244,9 +247,9 @@ pub async fn nurture_test_api(
         model: result.model,
         base_url_host: result.base_url_host,
         evidence_mode: evidence_mode.into(),
+        distinct_frames: result.distinct_frames,
         prompt_tokens: result.prompt_tokens,
         completion_tokens: result.completion_tokens,
-        usd: result.usd,
     })
 }
 
@@ -284,6 +287,42 @@ pub fn nurture_session_status(
     state: State<'_, AppState>,
 ) -> Result<Vec<NurtureSessionStatus>, CommandError> {
     Ok(state.nurture.list_status())
+}
+
+/// One device's log, oldest line first.
+///
+/// Separate from `nurture_session_status` on purpose: the status list is polled and
+/// pushed for every device continuously, and hanging a two-hundred-line history off each
+/// row would multiply that traffic by the number of phones for a panel that shows one at
+/// a time. This is fetched when a row is opened.
+#[tauri::command]
+pub fn nurture_session_log(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<Vec<SessionLogEntry>, CommandError> {
+    Ok(state.nurture.log().entries(&udid))
+}
+
+/// Which phones have any history, and the last thing each one said.
+///
+/// The panel's rows used to be the live nurture statuses and nothing else. The idle sweep
+/// produces neither a session nor a status, so a phone it had just unstuck had a full
+/// history and nowhere to open it from — this is what gives it a row.
+#[tauri::command]
+pub fn nurture_session_log_summary(
+    state: State<'_, AppState>,
+) -> Result<Vec<SessionLogSummary>, CommandError> {
+    Ok(state.nurture.log().summaries())
+}
+
+/// Throw away one device's history.
+#[tauri::command]
+pub fn nurture_clear_session_log(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<(), CommandError> {
+    state.nurture.log().clear(&udid);
+    Ok(())
 }
 
 #[tauri::command]
@@ -427,6 +466,12 @@ pub struct NurtureRuntime {
 struct NurtureRuntimeInner {
     runs: Mutex<NurtureRuns>,
     status: Mutex<HashMap<String, NurtureSessionStatus>>,
+    /// Every line these sessions ever said, per device.
+    ///
+    /// Shared with the idle sweeper, which writes into the same book — from the operator's
+    /// side "what has this phone been doing" is one question, and answering it from two
+    /// places would mean two panels showing two halves of the story.
+    log: SessionLogBook,
 }
 
 struct NurtureRuns {
@@ -443,15 +488,28 @@ impl NurtureRuntime {
                     stops: HashMap::new(),
                 }),
                 status: Mutex::new(HashMap::new()),
+                log: SessionLogBook::new(),
             }),
         }
+    }
+
+    /// The shared log book, for the idle sweeper and the command that reads it.
+    pub fn log(&self) -> SessionLogBook {
+        self.inner.log.clone()
     }
 
     pub fn list_status(&self) -> Vec<NurtureSessionStatus> {
         self.inner.status.lock().values().cloned().collect()
     }
 
+    /// Record a status change, and keep what it said.
+    ///
+    /// The log is written here rather than at the call sites because *every* status —
+    /// the queued one, each update from the engine, the final one and the error one —
+    /// already funnels through this method. A second write anywhere else would be the
+    /// line that goes missing when somebody adds a third call site.
     pub fn set_status(&self, st: NurtureSessionStatus) {
+        self.inner.log.record(&st.udid, &st.last_message);
         self.inner.status.lock().insert(st.udid.clone(), st);
     }
 
@@ -518,24 +576,43 @@ impl NurtureRuntime {
         settings: NurtureSettings,
         max_duration: Option<Duration>,
     ) -> Vec<String> {
+        // **The identity of this run, and the only place it exists.**
+        //
+        // `set_status` inserts by udid and nothing ever removes an entry, so the status list
+        // accumulates every phone that has run since the process started. A fleet total
+        // summed over it therefore already includes finished phones from earlier runs, and
+        // restarting one phone makes an overall bar go *backwards* — that row's counters
+        // reset to zero while the others keep their finished values. Stamping a run id here
+        // is what lets a reader ask "this run" instead of "everything ever". Flow runs
+        // already carry one for the same reason.
+        //
+        // `run_size` is the count that were *asked for*, not the count that started: a phone
+        // `reserve_start` turns away still occupies a slot in the operator's mind, and a
+        // denominator that shrank when a phone failed to start would report 100% on a run
+        // that was two phones short.
+        let run_id = uuid::Uuid::new_v4();
+        let run_size = udids.len() as u32;
         let mut started = Vec::new();
         for (idx, udid) in udids.into_iter().enumerate() {
             let Some(stop) = self.reserve_start(&udid) else {
                 continue;
             };
             let initial = NurtureSessionStatus {
-                udid: udid.clone(),
                 running: true,
-                videos_done: 0,
-                swipe_attempts: 0,
-                like_attempts: 0,
-                comment_attempts: 0,
-                follow_attempts: 0,
-                likes: 0,
-                comments: 0,
-                follows: 0,
                 last_message: "queued".into(),
-                session_usd: 0.0,
+                run_id: Some(run_id),
+                run_size,
+                phase: riviu_core::NurturePhase::Queued,
+                // The whole fleet's target and horizon are known before any session starts,
+                // so a queued row can already draw an honest empty bar with a real
+                // denominator instead of an unknown one.
+                video_target: settings.num_videos.max(1) * settings.num_rounds.max(1),
+                deadline_at: max_duration.and_then(|window| {
+                    chrono::Duration::from_std(window)
+                        .ok()
+                        .map(|window| chrono::Utc::now() + window)
+                }),
+                ..NurtureSessionStatus::new(&udid)
             };
             self.set_status(initial);
 
@@ -556,24 +633,28 @@ impl NurtureRuntime {
             };
 
             tauri::async_runtime::spawn(async move {
+                // **The run's identity is the batch's, not the session's, so it is stamped
+                // here.** `run_session` takes a udid and knows nothing about the other
+                // thirteen phones; asking it to carry a run id would put a fact about the
+                // caller into a signature five harnesses also call. Stamping on the way past
+                // means every status this device ever emits — queued, mid-run, terminal, and
+                // the error path below — carries it, and there is exactly one place to get
+                // it wrong.
+                let tag = move |mut st: NurtureSessionStatus| {
+                    st.run_id = Some(run_id);
+                    st.run_size = run_size;
+                    st
+                };
                 let stopped_before_start =
                     Self::wait_stagger_or_stop(&task_stop, Duration::from_secs(stagger as u64))
                         .await;
                 let final_status = if stopped_before_start || task_stop.load(Ordering::Acquire) {
-                    NurtureSessionStatus {
-                        udid: udid_clone.clone(),
-                        running: false,
-                        videos_done: 0,
-                        swipe_attempts: 0,
-                        like_attempts: 0,
-                        comment_attempts: 0,
-                        follow_attempts: 0,
-                        likes: 0,
-                        comments: 0,
-                        follows: 0,
+                    let mut status = NurtureSessionStatus {
                         last_message: "stopped before start".to_string(),
-                        session_usd: 0.0,
-                    }
+                        ..NurtureSessionStatus::new(&udid_clone)
+                    };
+                    status.finish(riviu_core::Outcome::Stopped);
+                    status
                 } else {
                     match engine
                         .run_session(
@@ -582,35 +663,38 @@ impl NurtureRuntime {
                             task_stop.clone(),
                             max_duration,
                             |st| {
+                                let st = tag(st);
                                 runtime.set_status(st.clone());
                                 let _ = app2.emit(
                                     "riviu://event",
-                                    riviu_core::AppEvent::NurtureStatus { status: st.clone() },
+                                    riviu_core::AppEvent::NurtureStatus { status: st },
                                 );
                             },
                         )
                         .await
                     {
                         Ok(mut status) => {
-                            status.running = false;
+                            // `run_session` already went through `finish`, so the verdict is
+                            // on it. Belt and braces for the paths that return a row the
+                            // engine built before its own terminal handling: a row that
+                            // reaches here still `running` has no verdict, and a bar drawn
+                            // from it would sit at whatever fraction it died at forever.
+                            if status.outcome.is_none() {
+                                status.finish(riviu_core::Outcome::Partial);
+                            }
                             status
                         }
-                        Err(error) => NurtureSessionStatus {
-                            udid: udid_clone.clone(),
-                            running: false,
-                            videos_done: 0,
-                            swipe_attempts: 0,
-                            like_attempts: 0,
-                            comment_attempts: 0,
-                            follow_attempts: 0,
-                            likes: 0,
-                            comments: 0,
-                            follows: 0,
-                            last_message: format!("error: {error}"),
-                            session_usd: 0.0,
-                        },
+                        Err(error) => {
+                            let mut status = NurtureSessionStatus {
+                                last_message: format!("error: {error}"),
+                                ..NurtureSessionStatus::new(&udid_clone)
+                            };
+                            status.finish(riviu_core::Outcome::Failed);
+                            status
+                        }
                     }
                 };
+                let final_status = tag(final_status);
                 runtime.set_status(final_status.clone());
                 runtime.finish_start(&udid_clone, &task_stop);
                 let _ = app2.emit(

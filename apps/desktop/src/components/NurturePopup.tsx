@@ -6,6 +6,7 @@ import {
   listenRiviuEvents,
   nurtureGetSettings,
   nurtureSaveSettings,
+  nurtureSessionLogSummary,
   nurtureSessionStatus,
   nurtureStart,
   nurtureStop,
@@ -19,7 +20,11 @@ import {
   type BudgetKey,
 } from "../nurtureBudget";
 import { targetsOf } from "../selectionTargets";
+import { useTickWhile } from "../useTickWhile";
 import { NurtureAiTab } from "./nurture/NurtureAiTab";
+import { NurtureCommentsTab } from "./nurture/NurtureCommentsTab";
+import { NurtureDeviceLog } from "./nurture/NurtureDeviceLog";
+import { NurtureDeviceProgress, NurtureRunProgress } from "./nurture/NurtureProgress";
 import { NurtureBehaviourTab } from "./nurture/NurtureBehaviourTab";
 import { NurtureScheduleTab } from "./nurture/NurtureScheduleTab";
 import { IconClose, IconHeart } from "./Icons";
@@ -29,9 +34,26 @@ import type {
   NurtureSessionStatus,
   NurtureSettings,
   RestartRequiredField,
+  SessionLogSummary,
 } from "../types";
 import { RESTART_REQUIRED_REASONS } from "../types";
 import { describeError } from "../describeError";
+
+/**
+ * One line in the live list.
+ *
+ * `status` is null for a phone that has history but never ran a session — the idle popup
+ * sweep leaves those. Keeping them in the same list rather than a second section is
+ * deliberate: from the operator's side "what has this phone been doing" is one question,
+ * and splitting the answer by which subsystem happened to write it would be an
+ * implementation detail leaking into the panel.
+ */
+type NurtureRow = {
+  udid: string;
+  running: boolean;
+  message: string;
+  status: NurtureSessionStatus | null;
+};
 
 type Props = {
   devices: DeviceInfo[];
@@ -206,9 +228,9 @@ function statusVi(raw: string): string {
     queued: "Đang xếp hàng…",
     stopped: "Đã dừng",
     done: "Xong phiên",
-    "ui session": "Mở phiên WDA…",
+    "ui session": "Mở phiên điều khiển…",
     "launch TikTok": "Mở TikTok…",
-    "ui session: timeout": "WDA timeout — thử lại",
+    "ui session: timeout": "Phiên điều khiển quá hạn — thử lại",
     "clear popups": "Đóng popup",
     like: "Đang thích",
     follow: "Đang follow",
@@ -235,7 +257,11 @@ function statusVi(raw: string): string {
   if (s.startsWith("ensure failed:")) return `Mở TikTok lỗi: ${s.slice("ensure failed:".length).trim()}`;
   if (s.startsWith("like fail:")) return `Thích lỗi: ${s.slice("like fail:".length).trim()}`;
   if (s.startsWith("comment skip:")) return `Bỏ bình luận: ${s.slice("comment skip:".length).trim()}`;
-  if (s.startsWith("ui session:")) return `WDA: ${s.slice("ui session:".length).trim()}`;
+  // Not "WDA": that is the iOS agent, and thirteen of the fourteen phones on this
+  // desk are Android. The status stream is shared by both platforms, so the word has
+  // to be one that is true of either.
+  if (s.startsWith("ui session:"))
+    return `Phiên điều khiển: ${s.slice("ui session:".length).trim()}`;
   if (s.startsWith("error:")) return `Lỗi: ${s.slice("error:".length).trim()}`;
   return s;
 }
@@ -256,7 +282,24 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
   // be folded away, so tuning two related numbers meant scrolling past a closed section —
   // and opening two at once pushed the live log off the bottom, which is the one thing the
   // panel is open to watch. One group at a time, full width, log pinned above.
-  const [tab, setTab] = useState<"behaviour" | "ai" | "schedule">("behaviour");
+  const [tab, setTab] = useState<"behaviour" | "ai" | "schedule" | "comments">("behaviour");
+  /**
+   * Which device's history is open, or `null`.
+   *
+   * One at a time, not a set. Two open logs in a panel this narrow means neither is
+   * readable, and the question being asked is always about one phone — the row that says
+   * something surprising.
+   */
+  const [openLog, setOpenLog] = useState<string | null>(null);
+  /**
+   * Phones that have said something, whether or not they ever ran a session.
+   *
+   * The rows used to come from the live statuses alone, and the idle sweep produces
+   * neither — so a phone it had just unstuck off TikTok's onboarding page had a full
+   * history and no row anywhere to open it from. That is the whole point of the sweep
+   * writing into the same book, so the rows have to come from both.
+   */
+  const [logged, setLogged] = useState<SessionLogSummary[]>([]);
   const [pos, setPos] = useState({ x: 0, y: 0 });
   const drag = useRef<{ ox: number; oy: number; sx: number; sy: number } | null>(null);
   const targets = targetsOf(selected, devices);
@@ -269,21 +312,64 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
         acc.likes += s.likes;
         acc.comments += s.comments;
         acc.follows += s.follows;
+        // Tokens, not money. The USD that used to sit here was two hand-typed per-million
+        // prices multiplied by exactly these counts, and no form could edit them — so after
+        // any model change every figure was silently wrong. These come from the API's own
+        // `usage`, so they are true of whatever model is configured.
+        acc.promptTokens += s.sessionPromptTokens;
+        acc.completionTokens += s.sessionCompletionTokens;
         return acc;
       },
-      { videos: 0, likes: 0, comments: 0, follows: 0 },
+      { videos: 0, likes: 0, comments: 0, follows: 0, promptTokens: 0, completionTokens: 0 },
     );
   }, [statuses]);
 
-  const sortedStatuses = useMemo(() => {
-    return [...statuses].sort((a, b) => Number(b.running) - Number(a.running));
-  }, [statuses]);
+  /**
+   * One row per phone with anything to show: a live status if it has one, otherwise the
+   * last line the idle sweep left. Running phones first — they are what the panel is open
+   * to watch — then the rest by udid so the list does not shuffle under the cursor.
+   */
+  /// One of the two bounds on a session is a wall clock, so the bars have to advance between
+  /// status pushes — a phone watching a long video emits nothing for twenty seconds. Ticking
+  /// only while something runs keeps a panel left open on a finished run quiet.
+  const nowTick = useTickWhile(statuses.some((s) => s.running));
+
+  const rows = useMemo((): NurtureRow[] => {
+    const withStatus = new Set(statuses.map((s) => s.udid));
+    const fromStatus: NurtureRow[] = statuses.map((status) => ({
+      udid: status.udid,
+      running: status.running,
+      message: status.lastMessage,
+      status,
+    }));
+    const logOnly: NurtureRow[] = logged
+      .filter((entry) => !withStatus.has(entry.udid))
+      .map((entry) => ({
+        udid: entry.udid,
+        running: false,
+        message: entry.last?.text ?? "",
+        status: null,
+      }));
+    // Running first — that is what the panel is open to watch — then **failures**, then the
+    // rest. Failures used to sort to the bottom with the finished runs and render as the same
+    // grey row, which is how two dead phones went unnoticed on a fourteen-phone run.
+    const rank = (r: NurtureRow) =>
+      r.running ? 0 : r.status?.outcome === "failed" ? 1 : 2;
+    return [...fromStatus, ...logOnly].sort(
+      (a, b) => rank(a) - rank(b) || a.udid.localeCompare(b.udid),
+    );
+  }, [statuses, logged]);
 
   const reload = useCallback(async () => {
     try {
-      const [s, st] = await Promise.all([nurtureGetSettings(), nurtureSessionStatus()]);
+      const [s, st, summary] = await Promise.all([
+        nurtureGetSettings(),
+        nurtureSessionStatus(),
+        nurtureSessionLogSummary(),
+      ]);
       setSettings(s);
       setStatuses(st);
+      setLogged(summary);
       setMsg(null);
     } catch (e) {
       setMsg(describeError(e));
@@ -293,6 +379,20 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
   useEffect(() => {
     reload();
   }, [reload]);
+
+  /**
+   * The idle sweep writes lines without emitting a status, so its rows can only appear by
+   * asking. Five seconds against a sweep every forty-five: slow enough to be free, quick
+   * enough that a phone unstuck while the panel is open shows up in it.
+   */
+  useEffect(() => {
+    const timer = setInterval(() => {
+      nurtureSessionLogSummary()
+        .then(setLogged)
+        .catch(() => undefined);
+    }, 5_000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     let un: (() => void) | undefined;
@@ -471,7 +571,7 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                 </button>
               </div>
 
-              {statuses.length > 0 && (
+              {rows.length > 0 && (
                 <div className="nurture-live">
                   <div className="nurture-float-stats">
                     <div>
@@ -488,37 +588,101 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                         {totals.comments}/{totals.follows}
                       </strong>
                     </div>
+                    {/* Rendered at all, which is the point: the AI spend was recorded for
+                        months and shown nowhere, so nobody could see that the number was
+                        fabricated. Only appears once a comment has actually cost something. */}
+                    {totals.promptTokens + totals.completionTokens > 0 && (
+                      <div title="token vào / ra mà API báo — nhân với giá thật của provider để ra tiền">
+                        <span>Token AI</span>
+                        <strong>
+                          {totals.promptTokens.toLocaleString("vi-VN")}/
+                          {totals.completionTokens.toLocaleString("vi-VN")}
+                        </strong>
+                      </div>
+                    )}
                   </div>
-                  <div className="nurture-float-log" aria-live="polite">
-                    {sortedStatuses.map((s) => (
-                      <div key={s.udid} className={`nurture-float-log-row${s.running ? " is-run" : ""}`}>
-                        <div className="nurture-float-log-head">
-                          <span className={`nurture-dot${s.running ? " on" : ""}`} />
-                          <strong title={s.udid}>{deviceLabel(devices, s.udid)}</strong>
+                  {/* Above the per-device rows, because it is the answer to the question the
+                      operator asks first. Renders nothing until a row carries a run id, so a
+                      panel showing only idle-sweep rows is unchanged. */}
+                  <NurtureRunProgress statuses={statuses} now={nowTick} />
+                  <div
+                    className={`nurture-float-log${openLog ? " is-expanded" : ""}`}
+                    aria-live="polite"
+                  >
+                    {rows.map((row) => (
+                      <div
+                        key={row.udid}
+                        className={`nurture-float-log-row${row.running ? " is-run" : ""}${
+                          row.status?.outcome === "failed" ? " is-failed" : ""
+                        }${
+                          row.status?.outcome && row.status.outcome !== "failed" ? " is-done" : ""
+                        }${openLog === row.udid ? " is-open" : ""}`}
+                      >
+                        {/* The head is the control. A row is the only handle the operator has
+                            on one phone here, and `lastMessage` — one overwritten string — was
+                            the whole of what it could say. Opening it asks the Rust ring for
+                            the rest. A real `button` rather than an `onClick` div, so it is
+                            reachable by keyboard and announces its own state. */}
+                        <button
+                          type="button"
+                          className="nurture-float-log-head"
+                          aria-expanded={openLog === row.udid}
+                          title={openLog === row.udid ? "Đóng nhật ký" : "Xem nhật ký riêng máy này"}
+                          onClick={() => setOpenLog((prev) => (prev === row.udid ? null : row.udid))}
+                        >
+                          <span
+                            className={`nurture-dot${row.running ? " on" : ""}${
+                              row.status?.outcome === "failed" ? " bad" : ""
+                            }`}
+                          />
+                          <strong title={row.udid}>{deviceLabel(devices, row.udid)}</strong>
                           <div className="grow" />
                           {/* The same four numbers as before, but as labelled cells: the old
                               single string ("12/34v · ♥5/6 · BL1/1 · +0/0") packed done-vs-
                               attempted for four different things into one line, and the only
                               way to read it was the tooltip. The tooltip stays. */}
-                          <span
-                            className="nurture-metrics"
-                            title="đã xác nhận / đã thử — video · tim · bình luận · follow"
-                          >
-                            <b>{s.videosDone}</b>
-                            <i>/{s.swipeAttempts}</i>
-                            <em>v</em>
-                            <b>{s.likes}</b>
-                            <i>/{s.likeAttempts}</i>
-                            <em>♥</em>
-                            <b>{s.comments}</b>
-                            <i>/{s.commentAttempts}</i>
-                            <em>BL</em>
-                            <b>{s.follows}</b>
-                            <i>/{s.followAttempts}</i>
-                            <em>+</em>
+                          {/* Only a phone that ran a session has counters. A row that
+                              exists because the idle sweep unstuck it has none, and printing
+                              "0/0v ♥0/0" against it would read as a session that did
+                              nothing rather than as no session at all. */}
+                          {row.status ? (
+                            <span
+                              className="nurture-metrics"
+                              title="đã xác nhận / đã thử — video · tim · bình luận · follow"
+                            >
+                              <b>{row.status.videosDone}</b>
+                              <i>/{row.status.swipeAttempts}</i>
+                              <em>v</em>
+                              <b>{row.status.likes}</b>
+                              <i>/{row.status.likeAttempts}</i>
+                              <em>♥</em>
+                              <b>{row.status.comments}</b>
+                              <i>/{row.status.commentAttempts}</i>
+                              <em>BL</em>
+                              <b>{row.status.follows}</b>
+                              <i>/{row.status.followAttempts}</i>
+                              <em>+</em>
+                            </span>
+                          ) : (
+                            <span className="nurture-metrics is-idle" title="chưa chạy phiên nào — dòng này do bộ tự dọn popup ghi">
+                              tự dọn
+                            </span>
+                          )}
+                          <span className="nurture-log-chevron" aria-hidden="true">
+                            {openLog === row.udid ? "▾" : "▸"}
                           </span>
-                        </div>
-                        <p className="nurture-float-log-msg">{statusVi(s.lastMessage)}</p>
+                        </button>
+                        <p className="nurture-float-log-msg">{statusVi(row.message)}</p>
+                        {/* Outside the head `<button>` on purpose: a `progressbar` nested in a
+                            button is neither, and the row head has to stay a plain control.
+                            Gated on `row.status` so an idle-sweep row — which never ran a
+                            session and has no target — does not draw a bar stuck at 0%. */}
+                        {row.status && (
+                          <NurtureDeviceProgress status={row.status} now={nowTick} />
+                        )}
+                        {openLog === row.udid && (
+                          <NurtureDeviceLog udid={row.udid} running={row.running} />
+                        )}
                       </div>
                     ))}
                   </div>
@@ -532,6 +696,7 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                     ["behaviour", "Hành vi"],
                     ["ai", "AI"],
                     ["schedule", "Lịch"],
+                    ["comments", "Bình luận"],
                   ] as const
                 ).map(([key, label]) => (
                   <button
@@ -573,6 +738,7 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                 />
               )}
               {tab === "schedule" && <NurtureScheduleTab settings={settings} patch={patch} />}
+              {tab === "comments" && <NurtureCommentsTab live={anyRunning} />}
             </>
           )}
         </div>

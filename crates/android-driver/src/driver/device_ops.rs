@@ -7,6 +7,42 @@
 
 use super::*;
 
+/// The two facts one `dumpsys window` answers about who can be driven.
+///
+/// Read together because they explain each other: a `System` foreground with `locked:
+/// Some(true)` is a lock screen, the same reading with `locked: None` is a build whose
+/// keyguard keys are not printed, and an `App` foreground with `locked: Some(true)` is a
+/// keyguard occluded by an app that is nonetheless not reachable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenGuardState {
+    /// `None` means the dump carried none of the three keyguard keys — unknown, which is
+    /// not the same as unlocked.
+    pub locked: Option<bool>,
+    pub foreground: adb::ForegroundWindow,
+}
+
+impl ScreenGuardState {
+    /// Whether this phone is behind a lock screen, judged from both facts.
+    ///
+    /// The keyguard keys are the evidence when they are there. When they are not, a system
+    /// window in front is the next best thing — measured on this fleet, `StatusBar` owning
+    /// focus was true of exactly the two locked phones and of none of the twelve others.
+    pub fn behind_lock_screen(&self) -> bool {
+        match self.locked {
+            Some(locked) => locked,
+            None => matches!(self.foreground, adb::ForegroundWindow::System(_)),
+        }
+    }
+
+    /// The operator-facing name of what is in the way, for a message that names it.
+    pub fn blocker(&self) -> Option<&str> {
+        match &self.foreground {
+            adb::ForegroundWindow::System(name) => Some(name.as_str()),
+            adb::ForegroundWindow::App(_) | adb::ForegroundWindow::Unreadable => None,
+        }
+    }
+}
+
 impl AndroidDriver {
     /// Put a USB-attached phone into TCP/IP adb mode, discover its Wi-Fi address, and
     /// `adb connect` to it — so it can be driven over the LAN without the cable (feature A4,
@@ -590,6 +626,59 @@ impl AndroidDriver {
             .map(|_| ())
             .map_err(|e| anyhow!("bật màn hình thất bại: {e}"))
     }
+    /// Whether the lock screen is up **and** what owns the screen, from one `dumpsys window`.
+    ///
+    /// Two facts, one round trip, deliberately. Both callers need both: a phone whose
+    /// foreground reads as a system window is almost always a locked phone, and a phone that
+    /// reports locked needs its foreground read again after the unlock to prove anything.
+    /// Asking twice would double the cost of the check on a fleet where `dumpsys window` is
+    /// the thing being done fourteen times.
+    ///
+    /// `locked: None` means the dump carried none of the three keys — unknown, which
+    /// [`adb::parse_keyguard_locked`] documents callers must not read as "unlocked".
+    pub async fn screen_guard_state(&self, serial: &str) -> anyhow::Result<ScreenGuardState> {
+        let dump = self
+            .adb
+            .shell(serial, "dumpsys window")
+            .await
+            .map_err(|e| anyhow!("đọc trạng thái màn hình thất bại: {e}"))?;
+        Ok(ScreenGuardState {
+            locked: adb::parse_keyguard_locked(&dump),
+            foreground: adb::parse_foreground_window(&dump),
+        })
+    }
+
+    /// Try to get past a swipe-only lock screen, and say honestly whether it worked.
+    ///
+    /// Sends [`adb::KEYGUARD_DISMISS_KEYEVENTS`] and then **re-reads** the keyguard rather
+    /// than trusting the keys. That re-read is the whole contract: a phone with a PIN,
+    /// pattern or fingerprint stays locked and this returns `false`, so a caller reports
+    /// "cần mở khoá bằng tay" instead of going on to tap a lock screen. Measured on both
+    /// locked phones on 23/08/2026 — `mDreamingLockscreen` true → false, TikTok focused
+    /// immediately after — so on this fleet it returns `true`.
+    ///
+    /// Idempotent and safe on an already-unlocked phone: `KEYCODE_WAKEUP` only wakes, and
+    /// `KEYCODE_MENU` goes to a focused window that ignores it.
+    pub async fn dismiss_keyguard(&self, serial: &str) -> anyhow::Result<bool> {
+        for keyevent in adb::KEYGUARD_DISMISS_KEYEVENTS {
+            // A refused keyevent is not fatal on its own — the re-read below is the only
+            // thing that decides — so this does not abandon the sequence half-sent.
+            if let Err(error) = self.adb.shell(serial, keyevent).await {
+                tracing::warn!(serial, %error, keyevent, "keyevent mở khoá bị từ chối");
+            }
+        }
+        // The keyguard animates out. Without this the re-read races it and reports a phone
+        // still locked that is already on its way open.
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        let state = self.screen_guard_state(serial).await?;
+        // `None` — the build printed none of the three keys — is not proof of success.
+        // Fall back to the foreground: an app in front is evidence the keyguard is gone.
+        Ok(match state.locked {
+            Some(locked) => !locked,
+            None => matches!(state.foreground, adb::ForegroundWindow::App(_)),
+        })
+    }
+
     /// Take a screenshot and leave it *on the phone* (xiaowei "Screenshot to phone").
     ///
     /// The other screenshot command copies the picture to this machine; this one is the row

@@ -8,10 +8,12 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 use crate::device_control::UiWithStreamContext;
 use crate::driver::{ui_error_kind, UiErrorKind, UiSession};
 use crate::screen_watch::SessionHandle;
-use crate::types::{InteractionSessionKind, NurtureSessionStatus};
+use crate::types::{InteractionSessionKind, NurturePhase, NurtureSessionStatus};
 
 use super::{NurtureEngine, TextCommentHealth};
 
@@ -31,7 +33,15 @@ fn should_hard_recycle(kind: UiErrorKind) -> bool {
 
 /// How a session ended. `done` is reserved for a session that actually did the
 /// work: a run that timed out having processed nothing is `failed`, not `done`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// **Serializable because it has to cross IPC now, and that was a real gap.** The verdict
+/// was computed here, stringified into the first token of a Vietnamese summary sentence,
+/// and then dropped — so the desktop could not tell a phone that finished 47 videos from
+/// one that failed to open the app except by parsing prose, and it did not try. Both
+/// rendered as the same grey row. The sentence is still worth keeping; the enum now travels
+/// beside it instead of inside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Outcome {
     Done,
     Partial,
@@ -98,6 +108,11 @@ impl NurtureEngine {
 
         let started = Instant::now();
         budget.soft += 1;
+        // Distinct from `AwaitingFeed` on purpose: both are "not watching yet", but this one
+        // means something already broke. An operator scanning fourteen bars wants to see the
+        // difference between a phone starting up and a phone being rescued.
+        let phase_before = status.phase;
+        status.phase = NurturePhase::Recovering;
         status.last_message = format!(
             "soft recovery {}/{} ({}s ngân sách)",
             budget.soft,
@@ -126,6 +141,10 @@ impl NurtureEngine {
                             text_health.fresh_session_installed();
                         }
                         budget.spent += started.elapsed();
+                        // Back to whatever it was doing. Restored rather than hardcoded to
+                        // `Watching`: a failure during the walk back to the feed must not
+                        // come out of recovery claiming to be watching video.
+                        status.phase = phase_before;
                         status.last_message = format!(
                             "soft recovery xong sau {:.0}s",
                             started.elapsed().as_secs_f64()
@@ -176,6 +195,7 @@ impl NurtureEngine {
                 if fresh_text_session {
                     text_health.fresh_session_installed();
                 }
+                status.phase = phase_before;
                 status.last_message = format!(
                     "hard recovery xong sau {:.0}s",
                     hard_started.elapsed().as_secs_f64()
@@ -512,18 +532,9 @@ mod tests {
         handle.set(original.clone());
         let mut budget = Budget::new();
         let mut status = NurtureSessionStatus {
-            udid: "udid-a".into(),
             running: true,
-            videos_done: 0,
-            swipe_attempts: 0,
-            like_attempts: 0,
-            comment_attempts: 0,
-            follow_attempts: 0,
-            likes: 0,
-            comments: 0,
-            follows: 0,
             last_message: String::new(),
-            session_usd: 0.0,
+            ..NurtureSessionStatus::new("udid-a")
         };
         let error =
             anyhow::Error::new(UiError::new(UiErrorKind::Session, "tap", "session expired"));
@@ -610,18 +621,9 @@ mod tests {
         let mut budget = Budget::new();
         let mut text_health = super::super::TextCommentHealth::default();
         let mut status = NurtureSessionStatus {
-            udid: "udid-hard".into(),
             running: true,
-            videos_done: 0,
-            swipe_attempts: 0,
-            like_attempts: 0,
-            comment_attempts: 0,
-            follow_attempts: 0,
-            likes: 0,
-            comments: 0,
-            follows: 0,
             last_message: String::new(),
-            session_usd: 0.0,
+            ..NurtureSessionStatus::new("udid-hard")
         };
         let error = anyhow::Error::new(UiError::new(UiErrorKind::Transport, "tap", "relay reset"));
 

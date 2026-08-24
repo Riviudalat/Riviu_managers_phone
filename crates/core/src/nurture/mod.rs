@@ -53,7 +53,9 @@ use crate::human_behavior::{
 };
 use crate::screen::{self, ActionRail, ScreenKind};
 use crate::screen_watch::{ScreenWatcher, SessionHandle};
-use crate::types::{InteractionSessionKind, NurtureSessionStatus, NurtureSettings, TapPoint};
+use crate::types::{
+    InteractionSessionKind, NurturePhase, NurtureSessionStatus, NurtureSettings, TapPoint,
+};
 use crate::DeviceWorkOwner;
 use touch::TouchPointPlanner;
 
@@ -138,7 +140,7 @@ impl TextCommentHealth {
                     CommentRecoveryAction::None
                 }
             }
-            CommentResult::TextSent(_) => {
+            CommentResult::TextSent { .. } => {
                 self.text_not_armed_streak = 0;
                 CommentRecoveryAction::None
             }
@@ -197,12 +199,39 @@ impl<F: Fn(NurtureSessionStatus) + Send + Sync> SessionCtx<'_, F> {
         let udid = self.udid;
         tracing::info!("[nurture {udid}] {msg}");
         into.last_message = msg;
+        Self::assert_terminal_rows_carry_a_verdict(into);
         (self.on_status)(into.clone());
     }
 
     /// Push the row without changing its message — for the counters that move on their own.
     fn push(&self, status: &NurtureSessionStatus) {
+        Self::assert_terminal_rows_carry_a_verdict(status);
         (self.on_status)(status.clone());
+    }
+
+    /// A stopped row must say **why** it stopped.
+    ///
+    /// This is the guard for the shape that produced the bug: ten separate exits from
+    /// `run_session` each set `running = false` by hand, and the verdict lived only inside a
+    /// Vietnamese sentence, so the desktop could not tell a finished run from a failed one
+    /// and rendered both as the same grey row. They all go through
+    /// [`NurtureSessionStatus::finish`] now — and an eleventh exit that forgets trips here
+    /// in every test and debug build rather than shipping a row nobody can classify.
+    ///
+    /// `debug_assert` rather than a hard panic: a release build must not kill a live session
+    /// over a missing label, and every test run is a debug build.
+    fn assert_terminal_rows_carry_a_verdict(status: &NurtureSessionStatus) {
+        debug_assert!(
+            status.running || status.outcome.is_some(),
+            "a stopped nurture row must carry an Outcome — use \
+             NurtureSessionStatus::finish rather than setting `running = false`: {:?}",
+            status.last_message
+        );
+        debug_assert!(
+            status.running || status.phase.is_terminal(),
+            "a stopped nurture row must be in a terminal phase: {:?}",
+            status.phase
+        );
     }
 }
 
@@ -585,7 +614,7 @@ impl NurtureEngine {
     ///   tap afterwards was computed from a fabricated iPhone 8 — which is exactly what
     ///   AGENTS.md 691-692 forbids.
     ///
-    /// **The statement order is the content here, not the layout.** The WDA session is
+    /// **The statement order is the content here, not the layout.** The control session is
     /// created and primed *before* the stream is attached, because both live in the same
     /// agent on the device: with frames already pumping, the first hierarchy-touching command
     /// never returned and the runner stayed blocked for the whole run — the "tap dies / swipe
@@ -597,7 +626,7 @@ impl NurtureEngine {
         ctx: &SessionCtx<'_, F>,
     ) -> anyhow::Result<Option<OpenedDevice>> {
         if ctx.stop.load(Ordering::Acquire) {
-            status.running = false;
+            status.finish(Outcome::Stopped);
             ctx.report(status, "stopped before device start".to_string());
             return Ok(None);
         }
@@ -607,11 +636,11 @@ impl NurtureEngine {
                 status,
                 "failed — Riviu Agent chưa có kênh bình luận chữ; chạy Agent Repair".into(),
             );
-            status.running = false;
+            status.finish(Outcome::Failed);
             return Ok(None);
         }
 
-        // Order matters: the WDA session is created and primed **before** the
+        // Order matters: the control session is created and primed **before** the
         // MJPEG stream is started.
         //
         // Both live inside the same agent on the device. With the stream
@@ -637,9 +666,9 @@ impl NurtureEngine {
             if fresh_text_session {
                 "chuẩn bị RT-MMO text session mới".into()
             } else if cached {
-                "WDA đã có — reuse".into()
+                "phiên điều khiển đã có — dùng lại".into()
             } else {
-                "khởi động WDA mới".to_string()
+                "mở phiên điều khiển mới".to_string()
             },
         );
         // Session creation can transiently fail while the relay settles. Retry
@@ -653,19 +682,22 @@ impl NurtureEngine {
             Err(first) => {
                 ctx.report(
                     status,
-                    format!("WDA chưa tạo được session ({first}) — thử session mới"),
+                    format!("chưa mở được phiên điều khiển ({first}) — thử lần nữa"),
                 );
                 let second_session = self
                     .open_ui_context(ctx.udid, &bundle_id, session_kind)
                     .await;
                 match second_session {
                     Ok(context) => {
-                        ctx.report(status, "WDA đã tạo session mới".into());
+                        ctx.report(status, "đã mở phiên điều khiển mới".into());
                         context
                     }
                     Err(e) => {
-                        ctx.report(status, format!("failed — không mở được WDA: {e}"));
-                        status.running = false;
+                        ctx.report(
+                            status,
+                            format!("failed — không mở được phiên điều khiển: {e}"),
+                        );
+                        status.finish(Outcome::Failed);
                         return Ok(None);
                     }
                 }
@@ -692,7 +724,7 @@ impl NurtureEngine {
                     status,
                     format!("failed — máy báo kích thước màn hình không dùng được {size:?}"),
                 );
-                status.running = false;
+                status.finish(Outcome::Failed);
                 return Ok(None);
             }
             Err(error) => {
@@ -700,7 +732,7 @@ impl NurtureEngine {
                     status,
                     format!("failed — không đọc được kích thước màn hình: {error}"),
                 );
-                status.running = false;
+                status.finish(Outcome::Failed);
                 return Ok(None);
             }
         };
@@ -1249,9 +1281,13 @@ impl NurtureEngine {
                     Ok(result) => {
                         comment_recovery_action = text_health.observe(result);
                         match result {
-                            CommentResult::TextSent(usd) => {
+                            CommentResult::TextSent {
+                                prompt_tokens,
+                                completion_tokens,
+                            } => {
                                 progress.status.comments += 1;
-                                progress.status.session_usd += usd;
+                                progress.status.session_prompt_tokens += prompt_tokens;
+                                progress.status.session_completion_tokens += completion_tokens;
                                 ctx.report(
                                     &mut progress.status,
                                     "đã gửi bình luận chữ (xác nhận nút gửi tắt)".into(),
@@ -1663,20 +1699,29 @@ impl NurtureEngine {
             gestures: &gestures,
             on_status: &on_status,
         };
+        // The two bounds, stamped on the status the moment they are known.
+        //
+        // Both of these were locals that died with the function. The video target is a
+        // start-time snapshot — `num_videos` is deliberately not absorbed mid-run — so a
+        // frontend dividing by the live settings row would rescale the bar under a session
+        // that never changed. The deadline is worse: for a manual start it is a randomised
+        // 2–3 hour horizon that nothing outside this function had ever seen, so a progress
+        // bar drawn from the video count alone stalls at 40% on a run that is minutes from
+        // finishing on time and reads as hung.
+        let session_began = chrono::Utc::now();
         let mut progress = SessionProgress {
             status: NurtureSessionStatus {
-                udid: udid.to_string(),
                 running: true,
-                videos_done: 0,
-                swipe_attempts: 0,
-                like_attempts: 0,
-                comment_attempts: 0,
-                follow_attempts: 0,
-                likes: 0,
-                comments: 0,
-                follows: 0,
                 last_message: "bắt đầu".into(),
-                session_usd: 0.0,
+                phase: NurturePhase::Opening,
+                video_target: live::video_target(&settings),
+                started_at: Some(session_began),
+                deadline_at: max_duration.and_then(|window| {
+                    chrono::Duration::from_std(window)
+                        .ok()
+                        .map(|window| session_began + window)
+                }),
+                ..NurtureSessionStatus::new(udid)
             },
             outcome: Outcome::Done,
             last_error: None,
@@ -1692,6 +1737,13 @@ impl NurtureEngine {
         else {
             return Ok(progress.status);
         };
+        // The session exists; from here to the first counted video the phone is being
+        // steered onto a usable feed — dialogs declined, the onboarding journey skipped,
+        // the action rail found. That can legitimately take a minute, and it is the window
+        // the two lock-screen phones died in on 23/08/2026, so it is worth being its own
+        // phase rather than a stretch of 0%.
+        progress.status.phase = NurturePhase::AwaitingFeed;
+        ctx.push(&progress.status);
         // A backend that can report *where* a control is does not need a
         // calibrated screen at all — it taps inside the rectangle the device
         // handed back instead of multiplying an iPhone 8 fraction. So try that
@@ -1707,6 +1759,7 @@ impl NurtureEngine {
             engine: self,
             udid,
             stop: &stop,
+            slides: parking_lot::Mutex::new(SlideEvidence::default()),
         };
         let live_source = EngineLiveSettings { engine: self };
         let attempt = hierarchy::run_hierarchy_session(
@@ -1753,12 +1806,16 @@ impl NurtureEngine {
                         .map(|error| format!(", lỗi cuối: {error}"))
                         .unwrap_or_default(),
                 );
-                progress.status.running = false;
+                progress.status.finish(ran_outcome);
                 progress.status.last_message = summary.clone();
                 ctx.push(&progress.status);
                 let _ = self.db.log_op(
                     "nurture.session",
-                    &format!("{udid} {summary} usd={:.4}", progress.status.session_usd),
+                    &format!(
+                        "{udid} {summary} tokens={}/{}",
+                        progress.status.session_prompt_tokens,
+                        progress.status.session_completion_tokens
+                    ),
                 );
                 self.clear_touch_points(udid);
                 return Ok(progress.status);
@@ -1769,7 +1826,7 @@ impl NurtureEngine {
             // falling through to a pixel engine whose only calibrated layout is an
             // iPhone 8. The reason is already in `progress.status.last_message`.
             hierarchy::HierarchySession::Refused => {
-                progress.status.running = false;
+                progress.status.finish(Outcome::Failed);
                 let _ = self.control.close_ui_context(device.ui_context).await;
                 ctx.push(&progress.status);
                 return Ok(progress.status);
@@ -1797,7 +1854,7 @@ impl NurtureEngine {
                     device.screen_size.0, device.screen_size.1
                 ),
             );
-            progress.status.running = false;
+            progress.status.finish(Outcome::Failed);
             return Ok(progress.status);
         };
         tracing::debug!("[nurture {udid}] layout đã hiệu chỉnh: {}", layout.id);
@@ -1814,7 +1871,7 @@ impl NurtureEngine {
                 &mut progress.status,
                 "failed — stream không có frame".into(),
             );
-            progress.status.running = false;
+            progress.status.finish(Outcome::Failed);
             return Ok(progress.status);
         }
 
@@ -1945,6 +2002,12 @@ impl NurtureEngine {
         // `live::video_target` for why the duration used to silently win.
         let total_videos = video_target(&settings);
         // True when the loop ran out of videos rather than out of time.
+        // The feed loop proper. Set once outside the loop: a phase that flickered per post
+        // would be a worse signal than no phase at all.
+        if progress.status.phase != NurturePhase::Watching {
+            progress.status.phase = NurturePhase::Watching;
+            ctx.push(&progress.status);
+        }
         'feed: for _video in 0..total_videos {
             // Live tuning, once per post rather than per action. The UI writes one settings
             // row and this picks it up, so "save" means "applies to the run in progress"
@@ -2260,13 +2323,16 @@ impl NurtureEngine {
                 .map(|e| format!(", lỗi cuối: {e}"))
                 .unwrap_or_default(),
         );
-        progress.status.running = false;
+        progress.status.finish(progress.outcome);
         progress.status.last_message = summary.clone();
         ctx.push(&progress.status);
 
         let _ = self.db.log_op(
             "nurture.session",
-            &format!("{udid} {summary} usd={:.4}", progress.status.session_usd),
+            &format!(
+                "{udid} {summary} tokens={}/{}",
+                progress.status.session_prompt_tokens, progress.status.session_completion_tokens
+            ),
         );
         self.clear_touch_points(udid);
         Ok(progress.status)
@@ -2307,21 +2373,36 @@ impl NurtureEngine {
     /// Is this card a still post rather than a playing video?
     ///
     /// This is what tells a photo carousel from a video, and it is the only
-    /// thing measured that does. A photo post publishes byte-identical frames
-    /// because nothing on screen moves; a video cannot, since the stream
-    /// re-encodes every frame at 24 FPS with no deduplication — the same fact
-    /// that made the old swipe check useless is what makes this reliable.
+    /// thing measured that does. A photo post publishes the same picture on
+    /// every sample because nothing on screen moves; a video cannot, since the
+    /// stream re-encodes every frame at 24 FPS with no deduplication — the same
+    /// fact that made the old swipe check useless is what makes this reliable.
     ///
     /// Measured over 40 real cards: 4 came back still, at least three of them
     /// confirmed photo posts by eye (page dots and the "Ảnh" badge), and none
     /// of the 36 videos did. The page-dot detector this replaces scored 1 true
     /// positive against 9 false ones on the same cards.
     ///
-    /// Only a video that holds a perfectly static frame for the whole window
+    /// **Compares the picture, not the screen, and the difference is measured.** This used to
+    /// hash the whole encoded frame, which the phone's own status bar is part of: on
+    /// ce0717171c2a64d50d three samples of a genuinely still photo post differed only inside
+    /// y 16..49, the animated network icon, and that survived minicap's half-scale JPEG — so a
+    /// still card read as moving and no photo post on that phone could ever pass. The 4-of-40
+    /// figure above is therefore a **floor**: it was taken on phones whose corner happened not
+    /// to change inside the sampling window.
+    ///
+    /// Costs [`STILL_CARD_SAMPLES`] + 1 decodes of a half-scale stream frame, which is the
+    /// price of asking the question that was actually meant.
+    ///
+    /// Only a video that holds a perfectly static picture for the whole window
     /// can pass, and the caller still has to survive being wrong — a horizontal
     /// swipe on a video navigates away from the feed.
     async fn card_is_still(&self, udid: &str, stop: &AtomicBool) -> bool {
-        let Some(first) = self.frames.latest(udid).map(|f| frame_digest(&f)) else {
+        let Some(first) = self
+            .frames
+            .latest(udid)
+            .and_then(|frame| picture_digest_of(&frame))
+        else {
             return false;
         };
         for _ in 0..STILL_CARD_SAMPLES {
@@ -2329,7 +2410,11 @@ impl NurtureEngine {
             if stop.load(Ordering::Relaxed) {
                 return false;
             }
-            match self.frames.latest(udid).map(|f| frame_digest(&f)) {
+            match self
+                .frames
+                .latest(udid)
+                .and_then(|frame| picture_digest_of(&frame))
+            {
                 Some(next) if next == first => {}
                 _ => return false,
             }
@@ -2410,6 +2495,69 @@ struct EngineCommentSource<'a> {
     engine: &'a NurtureEngine,
     udid: &'a str,
     stop: &'a AtomicBool,
+    /// Slides offered by the traversal since the last comment was written.
+    slides: parking_lot::Mutex<SlideEvidence>,
+}
+
+/// The frames a photo post's traversal offered, kept two at a time.
+///
+/// **Two, not one per slide, and the number is arithmetic rather than taste.** The contact
+/// sheet spends a fixed pixel budget (`openai_client::SHEET_PIXEL_BUDGET`, held at the old
+/// sheet's area so the token cost does not move), so every extra thumbnail shrinks all of
+/// them. On this fleet's 1080x2220 frames that is 589x1211 for one slide, 367x754 for two and
+/// 271x557 for three — and `visualFacts` and `evidenceSupport` are read off exactly the small
+/// text that disappears first. Two slides buys a second scene for a 2.6x per-slide cut; three
+/// costs 4.7x and hands 55% of the sheet to the caption strip.
+///
+/// **First and last, not the first two.** On a product post that is hero plus call-to-action,
+/// on a photo story beginning plus end, on a meme set setup plus punchline. The first two
+/// slides of a six-slide post are usually the same setup twice.
+#[derive(Default)]
+struct SlideEvidence {
+    /// The first slide offered, with its digest so a repeat can be recognised.
+    first: Option<(u64, Vec<u8>)>,
+    /// The most recent slide whose picture differed from the first.
+    last: Option<Vec<u8>>,
+    /// How many slides were offered, duplicates included.
+    ///
+    /// Kept separately from the frames because the pair is what can be read: `offered = 7`
+    /// with one distinct frame says the pager turned seven times and the stream handed back
+    /// the same picture every time — a parked stream — while `offered = 7` with two says the
+    /// change is working. Either number alone is ambiguous.
+    offered: u32,
+}
+
+impl SlideEvidence {
+    /// Take a frame, keeping at most two.
+    ///
+    /// De-duplication is inherent rather than bolted on: a post whose pager never turned —
+    /// or whose stream is parked, which is the ordinary state on a still card — leaves exactly
+    /// one frame here, and the sheet then says "one khung" instead of pasting it twice.
+    fn offer(&mut self, frame: Vec<u8>) {
+        self.offered = self.offered.saturating_add(1);
+        let digest = frame_digest(&frame);
+        match &self.first {
+            None => self.first = Some((digest, frame)),
+            Some((seen, _)) if *seen == digest => {}
+            Some(_) => self.last = Some(frame),
+        }
+    }
+
+    /// Hand over what was collected and reset, oldest first.
+    ///
+    /// Draining matters: the source lives for the whole session, so slides left behind would
+    /// ground post N+1 on post N's pictures — the exact failure `collect_grounding_frames`
+    /// refuses by design.
+    fn drain(&mut self) -> (Vec<Vec<u8>>, u32) {
+        let taken = std::mem::take(self);
+        let frames = taken
+            .first
+            .map(|(_, frame)| frame)
+            .into_iter()
+            .chain(taken.last)
+            .collect();
+        (frames, taken.offered)
+    }
 }
 
 /// The hierarchy loop's door back to the settings row.
@@ -2434,8 +2582,9 @@ impl hierarchy::CommentTextSource for EngineCommentSource<'_> {
         &self,
         settings: &NurtureSettings,
     ) -> Option<hierarchy::PreparedComment> {
+        let (slides, offered) = self.slides.lock().drain();
         self.engine
-            .prepare_hierarchy_comment(self.udid, settings, self.stop)
+            .prepare_hierarchy_comment(self.udid, settings, slides, offered, self.stop)
             .await
     }
 
@@ -2443,13 +2592,89 @@ impl hierarchy::CommentTextSource for EngineCommentSource<'_> {
         self.engine
             .finish_hierarchy_comment(prepared.attempt_id.as_deref(), outcome);
     }
+
+    fn note_slide(&self) {
+        // `latest` is documented as exactly this — a one-shot cache read for a caller that
+        // must not wait for the next frame — so a slide costs an `RwLock` read and an `Arc`
+        // clone on top of gestures it was already spending.
+        if let Some(frame) = self.engine.frames.latest(self.udid) {
+            self.slides.lock().offer((*frame).clone());
+        }
+    }
+
+    async fn record_skip(&self, settings: &NurtureSettings, reason: &str) {
+        // Drop the slides with the row: they belong to the post that was abandoned.
+        let (_, offered) = self.slides.lock().drain();
+        self.engine
+            .record_deferred_skip(self.udid, settings, reason, offered);
+    }
 }
 
 fn describe(err: &anyhow::Error) -> String {
     format!("{} ({})", err, ui_error_kind(err).as_str())
 }
 
+/// Rows the phone's own status bar owns, as a fraction of the frame height.
+///
+/// **This is the difference between "did the screen change" and "did the picture change".**
+/// Measured 23/08/2026 on ce0717171c2a64d50d (Galaxy S8, 1080x2220): three screencaps 600 ms
+/// apart of one photo post (`Hynxy ở Nha Trang · Photo`, 6 slides) differed by 185, 267 and 82
+/// sampled pixels, and an exhaustive comparison put **every one of them inside y 16..49** —
+/// the animated network icon. Below that line the three frames were pixel-identical.
+///
+/// It survives the stream, too, which is what makes it matter here rather than only in a
+/// screenshot: pushed through minicap's own pipeline — half of each edge, JPEG `-Q 70` — the
+/// three frames still encoded to 83,113 / 83,201 / 83,212 bytes and [`frame_digest`] differed
+/// on all three pairs. So a hash of the whole frame calls a perfectly still card "moving".
+///
+/// 0.04 is 88 px on these phones: clear of the icons at y=49, and still above TikTok's own
+/// `For You` tab row, measured at y=141 in the same capture.
+pub(crate) const STATUS_BAR_FRACTION: f64 = 0.04;
+
+/// A hash of the picture, ignoring the phone's status bar.
+///
+/// Walks decoded pixels on a fixed grid rather than encoded bytes, so it answers "is this the
+/// same picture" instead of "are these the same bytes" — two encodings of one picture are never
+/// byte-equal, and one animated icon in the corner is enough to separate two that are.
+///
+/// ~1024 samples, the same order as [`frame_digest`]'s 512 and for the same reason: a still
+/// card must hash identically every time, and a card that moved at all must not.
+pub(crate) fn picture_digest(image: &image::RgbImage) -> u64 {
+    let top = (f64::from(image.height()) * STATUS_BAR_FRACTION) as u32;
+    let (width, height) = (image.width(), image.height().max(top + 1));
+    let step_x = (width / 32).max(1);
+    let step_y = ((height - top) / 32).max(1);
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325 ^ u64::from(width) ^ (u64::from(height) << 20);
+    let mut y = top;
+    while y < height {
+        let mut x = 0;
+        while x < width {
+            for channel in image.get_pixel(x, y).0 {
+                hash ^= u64::from(channel);
+                hash = hash.wrapping_mul(0x100_0000_01b3);
+            }
+            x += step_x;
+        }
+        y += step_y;
+    }
+    hash
+}
+
+/// [`picture_digest`] for a caller holding an encoded frame.
+///
+/// `None` when the bytes will not decode, which the callers treat as "cannot say" rather than
+/// as "unchanged" — guessing either way here would be a claim about a screen nobody read.
+pub(crate) fn picture_digest_of(frame: &[u8]) -> Option<u64> {
+    image::load_from_memory(frame)
+        .ok()
+        .map(|image| picture_digest(&image.to_rgb8()))
+}
+
 /// Cheap content fingerprint for "did the screen change?".
+///
+/// Whole encoded bytes, which is the right question for a *screen* — and the wrong one for a
+/// picture. Use [`picture_digest_of`] when the question is whether the card itself moved; see
+/// [`STATUS_BAR_FRACTION`] for the capture that separated the two.
 pub(super) fn frame_digest(frame: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ frame.len() as u64;
     let step = (frame.len() / 512).max(1);
@@ -2740,7 +2965,10 @@ mod tests {
         );
 
         assert_eq!(
-            health.observe(CommentResult::TextSent(0.0)),
+            health.observe(CommentResult::TextSent {
+                prompt_tokens: 0,
+                completion_tokens: 0
+            }),
             CommentRecoveryAction::None
         );
         assert_eq!(
@@ -2776,5 +3004,71 @@ mod tests {
             CommentRecoveryAction::DoNotRetry,
             true
         ));
+    }
+}
+
+#[cfg(test)]
+mod slide_evidence_tests {
+    use super::SlideEvidence;
+
+    fn frame(byte: u8) -> Vec<u8> {
+        // Long enough that `frame_digest`'s 512-point stride actually samples the difference.
+        let mut bytes = vec![7u8; 4096];
+        bytes[2048] = byte;
+        bytes
+    }
+
+    /// First and last, and the reason it is two rather than one per slide is arithmetic: the
+    /// contact sheet spends a fixed pixel budget, so on this fleet's 1080x2220 frames one slide
+    /// gets a 589x1211 thumb, two get 367x754 and three get 271x557 — and `visualFacts` is read
+    /// off exactly the small text that goes first.
+    #[test]
+    fn the_buffer_keeps_the_first_slide_and_the_last_different_one() {
+        let mut evidence = SlideEvidence::default();
+        for byte in [1u8, 2, 3, 4] {
+            evidence.offer(frame(byte));
+        }
+        let (frames, offered) = evidence.drain();
+        assert_eq!(offered, 4, "all four slides were offered");
+        assert_eq!(frames.len(), 2, "and two of them were kept");
+        assert_eq!(frames[0], frame(1), "the first slide");
+        assert_eq!(
+            frames[1],
+            frame(4),
+            "and the last one that differed from it"
+        );
+    }
+
+    /// **The ordinary photo-post case.** A still card publishes the same picture on every
+    /// sample — measured on a live card, 0 of 2,170,800 picture pixels changed over 13 s
+    /// untouched — so a post the stream never repainted leaves exactly one frame here, and the
+    /// sheet says "one khung" instead of pasting it twice and calling it evidence.
+    #[test]
+    fn a_parked_stream_leaves_one_frame_and_still_counts_its_slides() {
+        let mut evidence = SlideEvidence::default();
+        for _ in 0..7 {
+            evidence.offer(frame(9));
+        }
+        let (frames, offered) = evidence.drain();
+        assert_eq!((frames.len(), offered), (1, 7), "seven slides, one picture");
+    }
+
+    /// Draining matters: the source lives for the whole session, so a slide left behind would
+    /// ground the next post's comment on this post's pictures.
+    #[test]
+    fn draining_leaves_nothing_for_the_next_post() {
+        let mut evidence = SlideEvidence::default();
+        evidence.offer(frame(1));
+        evidence.offer(frame(2));
+        assert_eq!(evidence.drain().0.len(), 2);
+        assert_eq!(evidence.drain(), (Vec::new(), 0));
+    }
+
+    /// A post that was never paged asks for nothing, and gets nothing — which is the signal
+    /// `prepare_hierarchy_comment` reads to sample the frames itself, exactly as before.
+    #[test]
+    fn a_post_that_was_never_paged_is_empty_rather_than_stale() {
+        let mut evidence = SlideEvidence::default();
+        assert_eq!(evidence.drain(), (Vec::new(), 0));
     }
 }

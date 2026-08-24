@@ -37,7 +37,10 @@ import type {
   ScheduleItem,
   StreamSettings,
   NurtureApiTestResult,
+  NurtureCommentAttempt,
   NurtureSessionStatus,
+  SessionLogEntry,
+  SessionLogSummary,
   NurtureSettings,
   InteractionCampaignDetail,
   InteractionCampaignSummary,
@@ -834,6 +837,34 @@ export async function nurtureTestApi(udid: string, frames?: Uint8Array[]) {
 
 export async function nurtureSessionStatus() {
   return invoke<NurtureSessionStatus[]>("nurture_session_status");
+}
+
+/// One device's history, oldest line first.
+///
+/// Fetched per device rather than pushed with the status stream: the statuses go to every
+/// row continuously, and hanging two hundred lines off each one would multiply that by the
+/// fleet size for a panel that shows one phone at a time.
+export async function nurtureSessionLog(udid: string) {
+  return invoke<SessionLogEntry[]>("nurture_session_log", { udid });
+}
+
+/// Which phones have history, and their last line.
+export async function nurtureSessionLogSummary() {
+  return invoke<SessionLogSummary[]>("nurture_session_log_summary");
+}
+
+/// Every comment a session *considered*, newest first — sent, gate-rejected and skipped.
+///
+/// The command has existed since the audit table did; nothing in the app called it, so the
+/// whole record was visible only from the `live_nurture_android` binary's final dump. That is
+/// why `distinctFrames` had to come with a panel: a column no screen reads cannot be checked
+/// against a run, and this table is where a run explains why a post got no comment.
+export async function nurtureListCommentAttempts(limit?: number) {
+  return invoke<NurtureCommentAttempt[]>("nurture_list_comment_attempts", { limit });
+}
+
+export async function nurtureClearSessionLog(udid: string) {
+  return invoke<void>("nurture_clear_session_log", { udid });
 }
 
 export async function nurtureStart(udids: string[], durationMinutes?: number | null) {

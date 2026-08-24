@@ -572,7 +572,14 @@ export function FocusStream({
       run: () => void exportFiles(),
     },
     {
-      id: "adb",
+      // **`adb-inline`, not `adb`.** `panelNodes` concatenates these rows with the shared
+      // per-phone catalog, and that catalog's ADB *submenu* is also `id: "adb"` —
+      // `withoutMenuIds` below drops only its `adb-console` child, not the parent. Two nodes
+      // with one id in one list is a duplicate React key, and worse than the warning:
+      // `DeviceFunctionList` keys its open-flyout state on `node.id`, so hovering this leaf
+      // opened the submenu's flyout. The catalog's id is a contract pinned by
+      // `deviceMenu.test.ts` and `DeviceContextMenu.test.tsx`, so this is the side that moves.
+      id: "adb-inline",
       label: "Lệnh adb",
       Icon: IconGrid,
       androidOnly: true,

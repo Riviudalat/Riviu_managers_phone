@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::nurture::Outcome;
+
 pub const STREAM_FPS: u32 = 24;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -779,8 +781,6 @@ pub struct NurtureSettings {
     /// meaningfully.
     #[serde(default)]
     pub has_api_key: bool,
-    pub input_price_per_1m: f64,
-    pub output_price_per_1m: f64,
     pub bundle_id: String,
     pub num_videos: u32,
     pub num_rounds: u32,
@@ -902,11 +902,6 @@ impl Default for NurtureSettings {
             model: "openai/gpt-5.6-luna".into(),
             api_key: String::new(),
             has_api_key: false,
-            // OpenRouter's OpenAI route listed $0.10 / $0.60 on 14/08/2026
-            // (50% off the $0.20 / $1.20 list). Display only; the panel can
-            // edit these if the promo ends.
-            input_price_per_1m: 0.10,
-            output_price_per_1m: 0.60,
             bundle_id: "com.ss.iphone.ugc.Ame".into(),
             // Manual runs use a varied 2–3 hour horizon; this remains the
             // legacy fixture ceiling for callers that do not pass a duration.
@@ -1066,8 +1061,6 @@ impl NurtureSettings {
         self.base_url = fresh.base_url.clone();
         self.model = fresh.model.clone();
         self.api_key = fresh.api_key.clone();
-        self.input_price_per_1m = fresh.input_price_per_1m;
-        self.output_price_per_1m = fresh.output_price_per_1m;
         self.comment_lang = fresh.comment_lang.clone();
         self.ai_directions = fresh.ai_directions.clone();
         self.max_comment_words = fresh.max_comment_words;
@@ -1124,12 +1117,6 @@ impl NurtureSettings {
         let defaults = Self::default();
         self.base_url = defaults.base_url;
         self.model = defaults.model;
-        if (self.input_price_per_1m - 1.25).abs() < f64::EPSILON
-            && (self.output_price_per_1m - 10.0).abs() < f64::EPSILON
-        {
-            self.input_price_per_1m = defaults.input_price_per_1m;
-            self.output_price_per_1m = defaults.output_price_per_1m;
-        }
         true
     }
 }
@@ -1216,8 +1203,6 @@ mod nurture_settings_tests {
             base_url: "https://api.deepseek.com/".into(),
             model: "deepseek-v4-flash".into(),
             api_key: "sk-or-keep-me".into(),
-            input_price_per_1m: 1.25,
-            output_price_per_1m: 10.0,
             like_prob: 80,
             ..NurtureSettings::default()
         };
@@ -1226,8 +1211,6 @@ mod nurture_settings_tests {
         assert_eq!(settings.model, "openai/gpt-5.6-luna");
         assert_eq!(settings.api_key, "sk-or-keep-me");
         assert_eq!(settings.like_prob, 80);
-        assert!((settings.input_price_per_1m - 0.10).abs() < f64::EPSILON);
-        assert!((settings.output_price_per_1m - 0.60).abs() < f64::EPSILON);
         assert!(!settings.adopt_openrouter_luna_if_still_shipped_deepseek());
     }
 
@@ -1254,7 +1237,6 @@ pub struct NurtureCommentCost {
     pub base_url_host: String,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
-    pub usd: f64,
     pub preview: String,
     pub created_at: String,
 }
@@ -1270,14 +1252,67 @@ pub struct NurtureCommentAttempt {
     pub base_url_host: String,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
-    pub usd: f64,
     pub preview: String,
     pub caption_preview: String,
     pub frame_sha256: String,
     pub context_confidence: Option<u8>,
     pub relevance: Option<u8>,
     pub evidence_support: Option<u8>,
+    /// How many *different* frames the model was shown. `Some(1)` on a photo post, where the
+    /// three samples were one byte-identical picture; `Some(0)` on the caption-only path,
+    /// which sends no picture at all; `None` on rows written before this was recorded.
+    ///
+    /// It is here so `evidence_support` can be read. A low score next to `1` means there was
+    /// only ever one frame of evidence; the same score next to `3` means the model read three
+    /// and still could not ground the comment. Those are different problems.
+    pub distinct_frames: Option<u8>,
+    /// Slides the carousel traversal paged before this comment was written, duplicates
+    /// included. `Some(0)` on a post that was never paged; `None` on rows from before it was
+    /// recorded.
+    ///
+    /// Read it next to [`Self::distinct_frames`], which is the pair that says anything:
+    /// `carousel_slides = 7, distinct_frames = 1` means the pager turned seven times and the
+    /// stream handed back one picture every time — a parked stream, and the comment is
+    /// grounded on a seventh of the post. `7` and `2` means it is working.
+    pub carousel_slides: Option<u32>,
     pub created_at: String,
+}
+
+/// Where one device is in its session, as a value rather than as a sentence.
+///
+/// **Every phase below already existed — as Vietnamese prose in `last_message`.** A bar
+/// drawn from `videos_done` alone reads 0% for the first minute of a healthy run (up to 40 s
+/// waiting for TikTok to reach the foreground, then up to 30 s waiting for the feed), and it
+/// reads exactly the same 0% for a phone that failed to open the app at all. That is the
+/// case this enum exists for: the two lock-screen phones on 23/08/2026 died inside that
+/// window, and no number could have told them apart from a phone that was merely starting.
+///
+/// Ordered roughly as a session passes through them, so a UI can render them as a track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NurturePhase {
+    /// Accepted, waiting out its stagger delay. Not yet touching the phone.
+    #[default]
+    Queued,
+    /// Opening a control session and bringing TikTok to the front.
+    Opening,
+    /// Session up, working back to a usable feed — declining dialogs, skipping the
+    /// onboarding journey, finding the action rail.
+    AwaitingFeed,
+    /// The feed loop proper: watching, liking, commenting, swiping.
+    Watching,
+    /// Spending recovery budget after a failure. Distinct from [`Self::AwaitingFeed`]
+    /// because it means something already went wrong, which is worth seeing.
+    Recovering,
+    /// Terminal. Pair with [`NurtureSessionStatus::outcome`] for the verdict.
+    Finished,
+}
+
+impl NurturePhase {
+    /// Whether nothing more will happen on this device.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Finished)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1303,14 +1338,220 @@ pub struct NurtureSessionStatus {
     pub comments: u32,
     pub follows: u32,
     pub last_message: String,
-    pub session_usd: f64,
+    /// What the comment model actually reported spending on this device, in tokens.
+    ///
+    /// **Tokens and not money, because money was fabricated.** This used to be `session_usd`,
+    /// the product of two hand-typed per-million prices that were never sent to the API and
+    /// existed in three different values at once — `types.rs` said $0.10/$0.60, `db.rs` said
+    /// $1.25/$10.00, and a migration rewrote the second back to the first. No UI could edit
+    /// them, so after any model change every USD figure in the database was silently wrong.
+    /// Tokens come from the API's own `usage` object, which means they are true of whatever
+    /// model is configured. Multiply by the provider's real rate outside the app.
+    #[serde(default)]
+    pub session_prompt_tokens: u32,
+    #[serde(default)]
+    pub session_completion_tokens: u32,
+    /// Which run this row belongs to.
+    ///
+    /// **Without this there is no such thing as "the current run".** `set_status` inserts by
+    /// udid and nothing ever removes an entry, so the status list accumulates every phone
+    /// that has run since the process started — a fleet total summed over it already
+    /// includes finished phones from earlier runs, and restarting one phone makes a fleet
+    /// bar go *backwards* because that row's counters reset to zero while the others keep
+    /// their finished values. Flow runs already carry a `run_id` for the same reason.
+    #[serde(default)]
+    pub run_id: Option<Uuid>,
+    /// How many devices were started together in this run.
+    ///
+    /// The denominator for an overall bar, and it must be this rather than the number of
+    /// rows present: a phone that failed before producing a second status still occupies a
+    /// slot, and one that never produced a row at all must not shrink the total.
+    #[serde(default)]
+    pub run_size: u32,
+    #[serde(default)]
+    pub phase: NurturePhase,
+    /// The verdict, once there is one. See [`crate::Outcome`].
+    #[serde(default)]
+    pub outcome: Option<Outcome>,
+    /// Posts this session is aiming for — `num_videos × num_rounds`, snapshotted at start.
+    ///
+    /// **The denominator has to travel with the numerator.** `num_videos` is deliberately
+    /// not absorbed by a running session, so a frontend dividing by the *live* settings row
+    /// would rescale the bar under a session that never changed: lower "Giới hạn video"
+    /// from 120 to 15 mid-run and the loop keeps counting to 120 while the UI divides by 15,
+    /// which reads 800%.
+    #[serde(default)]
+    pub video_target: u32,
+    /// When this device's session actually began — after its stagger, before the app opened.
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    /// When the wall clock will end this session regardless of the video count.
+    ///
+    /// A run ends at **whichever bound arrives first**, and for a manual start this one is a
+    /// randomised 2–3 hour horizon that was previously invisible to the UI entirely. A bar
+    /// drawn from the video count alone stalls at 40% on a run that is about to finish on
+    /// time and reads as hung.
+    #[serde(default)]
+    pub deadline_at: Option<DateTime<Utc>>,
+}
+
+impl Default for NurtureSessionStatus {
+    fn default() -> Self {
+        Self {
+            udid: String::new(),
+            running: false,
+            videos_done: 0,
+            swipe_attempts: 0,
+            like_attempts: 0,
+            comment_attempts: 0,
+            follow_attempts: 0,
+            likes: 0,
+            comments: 0,
+            follows: 0,
+            last_message: String::new(),
+            session_prompt_tokens: 0,
+            session_completion_tokens: 0,
+            run_id: None,
+            run_size: 0,
+            phase: NurturePhase::Queued,
+            outcome: None,
+            video_target: 0,
+            started_at: None,
+            deadline_at: None,
+        }
+    }
+}
+
+impl NurtureSessionStatus {
+    /// A fresh row for one device, with everything else at its default.
+    ///
+    /// Exists so the eight construction sites that spelled out all twelve fields — four of
+    /// them in one file, identical apart from `last_message` — do not each have to grow a
+    /// line every time a field is added. That churn is how a field ends up set in three
+    /// places and forgotten in the fourth.
+    pub fn new(udid: impl Into<String>) -> Self {
+        Self {
+            udid: udid.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Close this row out: terminal phase, `running` down, and the verdict *beside* the
+    /// summary sentence rather than only inside it.
+    ///
+    /// One method rather than three assignments at ten sites, and that is not tidiness. The
+    /// verdict used to be stringified into the first token of a Vietnamese sentence and
+    /// then dropped, so a phone that finished 47 videos and one that never opened the app
+    /// were both a grey row with prose in it. Ten separate exits each setting
+    /// `running = false` is exactly the shape where the eleventh forgets — which is why
+    /// `SessionCtx::push` now debug-asserts that a stopped row carries a verdict.
+    pub fn finish(&mut self, outcome: Outcome) {
+        self.running = false;
+        self.phase = NurturePhase::Finished;
+        self.outcome = Some(outcome);
+    }
+
+    /// How far along this device is, as a fraction in `0.0..=1.0`.
+    ///
+    /// **The maximum of the two bounds, because the session ends at whichever arrives
+    /// first.** A count-only reading under-reports every timed run — it sits at 40% on a
+    /// session with ten minutes left — and a clock-only reading under-reports a run that is
+    /// about to hit its video cap in the first twenty minutes of a three-hour horizon.
+    /// Taking the larger is the only reading that cannot promise more time than remains.
+    ///
+    /// Monotone by construction: `videos_done` only ever increments and the clock only ever
+    /// advances, so this never goes backwards for a given run. A terminal phase reads 1.0
+    /// whatever the counters say — a session that stopped at 40 of 120 videos is finished,
+    /// and leaving its bar short would read as still working.
+    ///
+    /// `None` when there is nothing to divide by yet: a queued device with no target and no
+    /// deadline is honestly *unknown*, not zero, and a bar should say so rather than draw an
+    /// empty track that looks like a stall.
+    pub fn progress_fraction(&self, now: DateTime<Utc>) -> Option<f64> {
+        if self.phase.is_terminal() {
+            return Some(1.0);
+        }
+        let (by_videos, by_clock) = self.bounds(now);
+        let best = match (by_videos, by_clock) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        };
+        best.map(|value| value.clamp(0.0, 1.0))
+    }
+
+    /// Which bound is currently governing, for a label beside the bar.
+    ///
+    /// Named rather than inferred by the UI: "42/120 video" and "còn 18 phút" are different
+    /// sentences and only one of them is true of any given moment.
+    ///
+    /// A terminal row has no governing bound — it is over, and naming the bound that would
+    /// have ended it next invites a label like "còn 18 phút" beside a finished session.
+    pub fn governing_bound(&self, now: DateTime<Utc>) -> Option<NurtureBound> {
+        if self.phase.is_terminal() {
+            return None;
+        }
+        match self.bounds(now) {
+            (Some(videos), Some(clock)) if clock > videos + CLOCK_LABEL_LEAD => {
+                Some(NurtureBound::Clock)
+            }
+            (Some(_), _) => Some(NurtureBound::Videos),
+            (None, Some(_)) => Some(NurtureBound::Clock),
+            (None, None) => None,
+        }
+    }
+
+    /// The two fractions, each `None` when its bound is not known yet.
+    ///
+    /// One function because the two callers above had fourteen identical lines each, and a
+    /// rule fixed in one copy and not the other is exactly the drift this repo keeps paying
+    /// for. `None` rather than `0.0` throughout: a queued device with no target is *unknown*,
+    /// and a bar that draws unknown as empty looks like a stall.
+    fn bounds(&self, now: DateTime<Utc>) -> (Option<f64>, Option<f64>) {
+        let by_videos =
+            (self.video_target > 0).then(|| self.videos_done as f64 / self.video_target as f64);
+        let by_clock = match (self.started_at, self.deadline_at) {
+            (Some(started), Some(deadline)) => {
+                let total = (deadline - started).num_seconds();
+                // A non-positive window is nonsense, not zero progress: a deadline at or
+                // before the start would divide by zero or invert the fraction.
+                (total > 0).then(|| (now - started).num_seconds().max(0) as f64 / total as f64)
+            }
+            _ => None,
+        };
+        (by_videos, by_clock)
+    }
+}
+
+/// How far ahead the clock must be before it is called the governing bound.
+///
+/// Without it the clock wins the instant a run starts — `videos_done` is 0, so any elapsed
+/// second beats it — and the operator's first reading was "còn ~154 phút" rather than the
+/// "0/5 video" they had just typed. Measured on the live fleet on 23/08/2026. The *fraction*
+/// still takes the plain maximum; this only decides which sentence is printed.
+const CLOCK_LABEL_LEAD: f64 = 0.05;
+
+/// Which of a session's two bounds is closer to ending it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NurtureBound {
+    /// The video count is ahead — the run will end on posts watched.
+    Videos,
+    /// The wall clock is ahead — the run will end on time, short of its video target.
+    Clock,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NurtureCostSummary {
-    pub today_usd: f64,
-    pub total_usd: f64,
+    /// Tokens the comment model reported for today's and all-time attempts.
+    ///
+    /// Was `today_usd`/`total_usd`, computed from prices the app could not know. See
+    /// [`NurtureSessionStatus::session_prompt_tokens`].
+    pub today_prompt_tokens: u64,
+    pub today_completion_tokens: u64,
+    pub total_prompt_tokens: u64,
+    pub total_completion_tokens: u64,
     pub today_comments: u32,
     pub total_comments: u32,
 }
@@ -1766,5 +2007,210 @@ mod wire_shape_tests {
             "the two halves of the wire disagree:\n  {}",
             drift.join("\n  ")
         );
+    }
+}
+
+/// The two pure decisions behind a progress bar.
+///
+/// They encode policy — which bound wins, what a terminal row reads, what "unknown" means —
+/// and policy without tests is how a bar ends up reporting 800% on a run nobody changed.
+/// Sibling to `nurture::recovery::session_verdict`, which this repo already treats as a
+/// pure, unit-tested function.
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    fn at(seconds: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(1_800_000_000 + seconds, 0).expect("fixed timestamp")
+    }
+
+    /// A row mid-run: 120 posts wanted, a three-hour horizon, nothing done yet.
+    fn running(videos_done: u32) -> NurtureSessionStatus {
+        NurtureSessionStatus {
+            running: true,
+            phase: NurturePhase::Watching,
+            videos_done,
+            video_target: 120,
+            started_at: Some(at(0)),
+            deadline_at: Some(at(3 * 3600)),
+            ..NurtureSessionStatus::new("fixture")
+        }
+    }
+
+    #[test]
+    fn a_queued_row_with_nothing_to_divide_by_is_unknown_not_zero() {
+        // The distinction the `Option` exists for: an empty track reads as a stall, and a
+        // phone that has not started is not stalled.
+        let queued = NurtureSessionStatus::new("fixture");
+        assert_eq!(queued.progress_fraction(at(0)), None);
+        assert_eq!(queued.governing_bound(at(0)), None);
+    }
+
+    #[test]
+    fn the_video_count_governs_when_it_is_ahead_of_the_clock() {
+        // 60 of 120 posts = 50%, against 6 minutes of a 180-minute horizon = 3.3%.
+        let status = running(60);
+        assert_eq!(status.progress_fraction(at(6 * 60)), Some(0.5));
+        assert_eq!(
+            status.governing_bound(at(6 * 60)),
+            Some(NurtureBound::Videos)
+        );
+    }
+
+    /// The reading a count-only bar gets wrong, and the reason for taking the maximum: this
+    /// session is twelve minutes from ending and a video bar would call it 40%.
+    #[test]
+    fn the_clock_governs_when_it_is_ahead_and_the_bar_follows_it() {
+        let status = running(48); // 40% of the posts…
+        let nearly_over = at(168 * 60); // …but 93% of the horizon.
+        let fraction = status.progress_fraction(nearly_over).expect("known");
+        assert!(
+            (fraction - 168.0 / 180.0).abs() < 1e-9,
+            "the closer bound wins: {fraction}"
+        );
+        assert_eq!(
+            status.governing_bound(nearly_over),
+            Some(NurtureBound::Clock)
+        );
+    }
+
+    #[test]
+    fn a_terminal_row_reads_full_whatever_its_counters_say() {
+        // A run that stopped at 40 of 120 is finished, not 33% done. Leaving its bar short
+        // would read as still working — which is the whole reason `phase` exists.
+        let mut status = running(40);
+        status.finish(crate::Outcome::Partial);
+        assert_eq!(status.progress_fraction(at(60)), Some(1.0));
+        assert_eq!(
+            status.governing_bound(at(60)),
+            None,
+            "a finished session has no bound left to name"
+        );
+    }
+
+    #[test]
+    fn a_failed_row_also_reads_full_because_it_is_over() {
+        // Deliberate: the bar means "this slot is settled", and the *colour* carries the
+        // verdict. A failed phone frozen at 0% would look like one that never started.
+        let mut status = running(0);
+        status.finish(crate::Outcome::Failed);
+        assert_eq!(status.progress_fraction(at(0)), Some(1.0));
+        assert_eq!(status.outcome, Some(crate::Outcome::Failed));
+    }
+
+    #[test]
+    fn the_fraction_never_exceeds_one_even_past_the_deadline() {
+        let status = running(0);
+        assert_eq!(status.progress_fraction(at(10 * 3600)), Some(1.0));
+    }
+
+    #[test]
+    fn a_clock_before_the_start_reads_zero_rather_than_negative() {
+        // Clocks are not monotone across a machine's time changes; a negative fraction would
+        // render as a bar growing leftwards.
+        let status = running(0);
+        assert_eq!(status.progress_fraction(at(-600)), Some(0.0));
+    }
+
+    #[test]
+    fn a_deadline_at_or_before_the_start_is_ignored_rather_than_dividing_by_zero() {
+        let status = NurtureSessionStatus {
+            running: true,
+            phase: NurturePhase::Watching,
+            videos_done: 30,
+            video_target: 120,
+            started_at: Some(at(0)),
+            deadline_at: Some(at(0)),
+            ..NurtureSessionStatus::new("fixture")
+        };
+        assert_eq!(status.progress_fraction(at(60)), Some(0.25));
+        assert_eq!(status.governing_bound(at(60)), Some(NurtureBound::Videos));
+    }
+
+    #[test]
+    fn a_run_with_no_deadline_still_tracks_its_video_count() {
+        let status = NurtureSessionStatus {
+            running: true,
+            phase: NurturePhase::Watching,
+            videos_done: 15,
+            video_target: 60,
+            started_at: Some(at(0)),
+            deadline_at: None,
+            ..NurtureSessionStatus::new("fixture")
+        };
+        assert_eq!(status.progress_fraction(at(60)), Some(0.25));
+        assert_eq!(status.governing_bound(at(60)), Some(NurtureBound::Videos));
+    }
+
+    /// The lead threshold: a clock barely ahead of a zero count must not steal the label.
+    /// Measured on the live fleet — the first thing shown was "còn ~154 phút" on a run whose
+    /// operator had just typed 5 into the video limit.
+    #[test]
+    fn the_video_count_keeps_the_label_until_the_clock_is_meaningfully_ahead() {
+        let just_started = running(0);
+        assert_eq!(
+            just_started.governing_bound(at(2 * 60)),
+            Some(NurtureBound::Videos),
+            "two minutes into three hours is not the clock governing"
+        );
+        assert_eq!(
+            just_started.governing_bound(at(20 * 60)),
+            Some(NurtureBound::Clock),
+            "twenty minutes in with nothing watched, it is"
+        );
+    }
+
+    #[test]
+    fn the_fraction_still_follows_the_clock_while_the_label_says_videos() {
+        // The fill takes the plain maximum; only the sentence waits for the lead.
+        let just_started = running(0);
+        let fraction = just_started.progress_fraction(at(2 * 60)).expect("known");
+        assert!((fraction - 2.0 / 180.0).abs() < 1e-9, "{fraction}");
+        assert_eq!(
+            just_started.governing_bound(at(2 * 60)),
+            Some(NurtureBound::Videos)
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_video_target_still_tracks_the_clock() {
+        let status = NurtureSessionStatus {
+            running: true,
+            phase: NurturePhase::Watching,
+            video_target: 0,
+            started_at: Some(at(0)),
+            deadline_at: Some(at(100)),
+            ..NurtureSessionStatus::new("fixture")
+        };
+        assert_eq!(status.progress_fraction(at(25)), Some(0.25));
+        assert_eq!(status.governing_bound(at(25)), Some(NurtureBound::Clock));
+    }
+
+    /// Monotone, which is what stops a bar jittering backwards while an operator watches it.
+    #[test]
+    fn the_fraction_never_goes_backwards_as_a_run_proceeds() {
+        let mut last = 0.0;
+        for minute in 0..180 {
+            let status = running(minute / 2);
+            let value = status
+                .progress_fraction(at(minute as i64 * 60))
+                .expect("known");
+            assert!(
+                value >= last,
+                "went backwards at minute {minute}: {value} < {last}"
+            );
+            last = value;
+        }
+    }
+
+    #[test]
+    fn finish_marks_the_row_terminal_and_carries_the_verdict() {
+        let mut status = running(5);
+        assert!(status.running);
+        assert!(!status.phase.is_terminal());
+        status.finish(crate::Outcome::Done);
+        assert!(!status.running);
+        assert!(status.phase.is_terminal());
+        assert_eq!(status.outcome, Some(crate::Outcome::Done));
     }
 }

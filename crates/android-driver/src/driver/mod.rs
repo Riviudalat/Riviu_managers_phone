@@ -1465,12 +1465,62 @@ impl DeviceDriver for AndroidDriver {
         // table: both its buttons are labelled, one of them grants a permission on a real
         // account's phone, and that is the operator's decision and not a recovery path's.
         let mut backed_at: Option<std::time::Instant> = None;
+        // **The lock screen, which used to eat the whole forty seconds and then blame the
+        // parser.** Measured 23/08/2026: of fourteen phones attached, two sat behind their
+        // keyguard, and this loop reported *"the phone is showing <unreadable: could not read
+        // the foreground package … had no mCurrentFocus line>"*. The line was there; it named
+        // `StatusBar`, which carries no `package/activity` pair. So the sentence described the
+        // parser rather than the phone, and the phone was in a state the app can fix.
+        //
+        // Latched, not polled: `screen_guard_state` is a `dumpsys window` round trip, and
+        // asking every 250 ms for forty seconds would be 160 of them per phone. Consulted
+        // once, exactly like `backed_at` above.
+        let mut keyguard_tried = false;
         loop {
             let observed = match riviu_core::driver::UiSession::active_app_bundle(&session).await {
                 Ok(package) if package == bundle_id => break,
                 Ok(package) => package,
                 Err(error) => format!("<unreadable: {error}>"),
             };
+
+            if !keyguard_tried {
+                keyguard_tried = true;
+                // An unreadable dump must fall through to the timeout rather than refuse:
+                // `behind_lock_screen` answers `false` when it has no evidence, and
+                // `parse_keyguard_locked` is explicit that unknown is not "unlocked". A
+                // false refusal here would turn a working phone away.
+                if let Ok(state) = self.screen_guard_state(udid).await {
+                    if state.behind_lock_screen() {
+                        let blocker = state.blocker().unwrap_or("lock screen").to_string();
+                        tracing::info!(
+                            udid,
+                            blocker = %blocker,
+                            "phone is behind its lock screen; dismissing before waiting out the \
+                             foreground proof"
+                        );
+                        // `dismiss_keyguard` re-reads the keyguard and returns the honest
+                        // answer, which is why it is used rather than `set_locked(false)`:
+                        // that one presses two keys over the HTTP agent and verifies nothing,
+                        // so a PIN-locked phone would come back looking unlocked.
+                        let opened = self.dismiss_keyguard(udid).await.unwrap_or(false);
+                        if opened {
+                            let _ = riviu_core::driver::UiSession::launch_app_foreground(
+                                &session, &bundle_id,
+                            )
+                            .await;
+                        } else {
+                            self.interaction.clear(udid);
+                            anyhow::bail!(
+                                "{udid} đang ở màn hình khoá ({blocker}) và không mở được bằng \
+                                 phím — máy này có PIN/pattern/vân tay. Màn hình có thể đang \
+                                 sáng, nhưng không app nào lên foreground được cho tới khi \
+                                 nó được mở khoá bằng tay"
+                            );
+                        }
+                    }
+                }
+            }
+
             let over_the_app = dialog_over_app(&observed);
             if over_the_app && backed_at.is_none() {
                 backed_at = Some(std::time::Instant::now());

@@ -17,9 +17,24 @@ pub enum DeviceWorkOwner {
     Repair,
     ManualControl,
     GroupSync,
+    /// The background sweep that clears TikTok's onboarding pages and modals off phones
+    /// nobody is driving.
+    ///
+    /// **The lowest-priority owner there is, and it has to stay that way.** It only ever
+    /// asks with [`DeviceControlPlane::try_acquire_exclusive`], so a device already held
+    /// by anything else is skipped rather than queued for; it never waits (see
+    /// [`Self::may_wait`]); and it holds the lease for a couple of taps at a time. A
+    /// sweeper that could make an operator's own click wait behind it would be a worse
+    /// problem than the stuck phones it exists to clear.
+    IdleSweep,
 }
 
 impl DeviceWorkOwner {
+    /// Whether this owner may queue for a busy device rather than being turned away.
+    ///
+    /// `IdleSweep` deliberately may not: it is background tidying with no deadline, and
+    /// the next sweep is thirty seconds away. Waiting would put it in the queue ahead of
+    /// work somebody is watching.
     fn may_wait(self) -> bool {
         matches!(self, Self::Nurture | Self::Script)
     }

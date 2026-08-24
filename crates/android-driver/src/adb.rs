@@ -1077,15 +1077,107 @@ pub fn parse_keyguard_locked(stdout: &str) -> Option<bool> {
 /// Redmi Note 12, where `null` came first. Same shape of trap as `wm size`
 /// printing two lines (§9): the first line is not the answer.
 pub fn parse_current_focus_package(stdout: &str) -> Option<String> {
-    stdout
-        .lines()
-        .filter(|line| line.contains("mCurrentFocus"))
-        .find_map(|line| {
-            let inside = line.rsplit_once('/')?.0;
-            let package = inside.rsplit_once(' ')?.1;
-            (!package.is_empty()).then(|| package.to_string())
-        })
+    match parse_foreground_window(stdout) {
+        ForegroundWindow::App(package) => Some(package),
+        ForegroundWindow::System(_) | ForegroundWindow::Unreadable => None,
+    }
 }
+
+/// What actually owns the screen, as `dumpsys window` describes it.
+///
+/// [`parse_current_focus_package`] answers `None` for two situations that are nothing alike,
+/// and telling them apart is the whole reason this exists. Measured across all fourteen
+/// phones on 23/08/2026:
+///
+/// ```text
+/// mCurrentFocus=Window{be9279f u0 com.ss.android.ugc.trill/…SplashActivity}   -> App
+/// mCurrentFocus=Window{4b5766b u0 StatusBar}                                  -> System
+/// ```
+///
+/// The second is what a **locked** phone shows: the keyguard hands focus to `StatusBar`
+/// (or `NotificationShade` on other builds), which carries no `package/activity` pair, so
+/// the `/` split finds nothing and the old function reported "no foreground app". Two of the
+/// fourteen were in exactly that state, and the nurture session they were given failed with
+/// *"the phone is showing &lt;unreadable: could not read the foreground package&gt;"* — a
+/// sentence that describes the parser rather than the phone. The phone was on its lock
+/// screen, which is a thing the app can fix; "unreadable" is not.
+///
+/// [`Self::Unreadable`] stays a distinct answer because it is a distinct fact: no
+/// `mCurrentFocus` line said anything at all, which means adb answered but this build does
+/// not print what we expected. That is a reason to stop, not to press keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForegroundWindow {
+    /// An app activity is focused; the payload is its package.
+    App(String),
+    /// A window with no package — the keyguard's `StatusBar`, a notification shade, a
+    /// system dialog. The payload is the window name, verbatim, so a log line can say
+    /// which one.
+    System(String),
+    /// Nothing on any `mCurrentFocus` line could be read.
+    Unreadable,
+}
+
+/// Read [`ForegroundWindow`] out of `dumpsys window` (or `dumpsys window windows`).
+///
+/// Scans **every** `mCurrentFocus` line for the same reason
+/// [`parse_current_focus_package`] does: a multi-display phone prints one per display and
+/// the unfocused ones say `null`, so the first line is not the answer. An app anywhere in
+/// the list wins over a system window, because a phone with TikTok focused on one display
+/// and a shade open on another is a phone TikTok is running on.
+pub fn parse_foreground_window(stdout: &str) -> ForegroundWindow {
+    let mut system: Option<String> = None;
+    for line in stdout.lines().filter(|line| line.contains("mCurrentFocus")) {
+        // `mCurrentFocus=Window{<hash> u0 <what>}` — take what is inside the braces after
+        // the user id, then decide by whether it carries a `package/activity` pair.
+        let Some(after) = line.split_once("mCurrentFocus=") else {
+            continue;
+        };
+        let inside = after
+            .1
+            .trim()
+            .trim_start_matches("Window{")
+            .trim_end_matches('}');
+        let Some(what) = inside.split_whitespace().nth(2) else {
+            continue;
+        };
+        if what == "null" || what.is_empty() {
+            continue;
+        }
+        match what.split_once('/') {
+            Some((package, _activity)) if !package.is_empty() => {
+                return ForegroundWindow::App(package.to_string())
+            }
+            // A name with no slash is a system window. Remember it, but keep looking: an
+            // app on another display outranks it.
+            _ => {
+                if system.is_none() {
+                    system = Some(what.trim_end_matches('}').to_string());
+                }
+            }
+        }
+    }
+    system.map_or(ForegroundWindow::Unreadable, ForegroundWindow::System)
+}
+
+/// The keys that dismiss a swipe-only keyguard, in the order they must be sent.
+///
+/// **Measured on this fleet on 23/08/2026, on both locked phones**: `mDreamingLockscreen`
+/// went `true` → `false` and TikTok appeared in `mCurrentFocus` immediately afterwards. So
+/// these phones carry no secure lock, and the pair is enough.
+///
+/// `KEYCODE_WAKEUP` first and never `KEYCODE_POWER`: power *toggles*, so on an
+/// already-awake phone it would turn the screen off — see [`WAKE_KEYEVENT`].
+/// `KEYCODE_MENU` is what actually dismisses the keyguard, and it is safe on an unlocked
+/// phone: no app in this fleet's flow has a menu key binding, and Android 9 delivers it to
+/// the focused window which ignores it.
+///
+/// **This cannot open a phone with a PIN, pattern or fingerprint**, and must not pretend
+/// to. The caller re-reads [`parse_keyguard_locked`] afterwards and reports the honest
+/// answer if the phone is still locked — a human has to unlock that one.
+pub const KEYGUARD_DISMISS_KEYEVENTS: [&str; 2] = [
+    "input keyevent KEYCODE_WAKEUP",
+    "input keyevent KEYCODE_MENU",
+];
 
 /// The command that prints the Wi-Fi interface address, for WIFI-adb (feature A4). `ip addr`
 /// is present on modern Android; the caller pairs it with [`parse_wlan_ipv4`].
@@ -1860,6 +1952,84 @@ drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
                                  mScreenOnEarly=true mScreenOnFully=true\n    \
                                  mShowingDream=false mDreamingLockscreen=true\n    \
                                  isKeyguardShowing=true\n";
+
+    /// Verbatim from `ce0717171c2a64d50d` while it sat on its lock screen, 23/08/2026 —
+    /// one of the two phones whose nurture session failed calling this "unreadable".
+    const LOCKED_FOCUS: &str = "  mCurrentFocus=Window{4b5766b u0 StatusBar}\n";
+
+    /// The same line off a healthy phone in the same sweep.
+    const TIKTOK_FOCUS: &str = "  mCurrentFocus=Window{be9279f u0 com.ss.android.ugc.trill/\
+         com.ss.android.ugc.aweme.splash.SplashActivity}\n";
+
+    #[test]
+    fn a_locked_phone_reads_as_a_system_window_not_as_unreadable() {
+        // The distinction this enum exists for. "Unreadable" describes the parser;
+        // "StatusBar" describes a phone somebody can unlock.
+        assert_eq!(
+            parse_foreground_window(LOCKED_FOCUS),
+            ForegroundWindow::System("StatusBar".into())
+        );
+        assert_eq!(
+            parse_foreground_window(TIKTOK_FOCUS),
+            ForegroundWindow::App("com.ss.android.ugc.trill".into())
+        );
+    }
+
+    #[test]
+    fn nothing_readable_is_its_own_answer() {
+        assert_eq!(parse_foreground_window(""), ForegroundWindow::Unreadable);
+        assert_eq!(
+            parse_foreground_window("  mCurrentFocus=null\n"),
+            ForegroundWindow::Unreadable
+        );
+        assert_eq!(
+            parse_foreground_window("Window #0 mOwnerUid=1000\n"),
+            ForegroundWindow::Unreadable
+        );
+    }
+
+    /// The multi-display trap, restated for the new function: `null` comes first on a Redmi
+    /// Note 12, so a first-line reader says "nothing focused" with TikTok on screen.
+    #[test]
+    fn an_app_on_any_display_outranks_null_and_a_system_window() {
+        let stdout = format!("  mCurrentFocus=null\n{LOCKED_FOCUS}{TIKTOK_FOCUS}");
+        assert_eq!(
+            parse_foreground_window(&stdout),
+            ForegroundWindow::App("com.ss.android.ugc.trill".into()),
+            "a real app anywhere in the list is the answer"
+        );
+    }
+
+    /// The old entry point must keep answering exactly what it always did, because callers
+    /// treat its `None` as "not the app I asked about" and that reading is still correct.
+    #[test]
+    fn the_package_helper_still_answers_the_way_it_used_to() {
+        assert_eq!(
+            parse_current_focus_package(TIKTOK_FOCUS).as_deref(),
+            Some("com.ss.android.ugc.trill")
+        );
+        assert_eq!(parse_current_focus_package(LOCKED_FOCUS), None);
+        assert_eq!(parse_current_focus_package(""), None);
+    }
+
+    #[test]
+    fn the_keyguard_keys_wake_before_they_dismiss_and_never_use_power() {
+        assert_eq!(KEYGUARD_DISMISS_KEYEVENTS.len(), 2);
+        assert!(
+            KEYGUARD_DISMISS_KEYEVENTS[0].contains("KEYCODE_WAKEUP"),
+            "wake first, and idempotently: {KEYGUARD_DISMISS_KEYEVENTS:?}"
+        );
+        assert!(
+            KEYGUARD_DISMISS_KEYEVENTS[1].contains("KEYCODE_MENU"),
+            "{KEYGUARD_DISMISS_KEYEVENTS:?}"
+        );
+        assert!(
+            !KEYGUARD_DISMISS_KEYEVENTS
+                .iter()
+                .any(|key| key.contains("KEYCODE_POWER")),
+            "POWER toggles — on an awake phone it would turn the screen off"
+        );
+    }
 
     #[test]
     fn wakefulness_alone_cannot_see_a_locked_phone() {

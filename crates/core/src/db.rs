@@ -686,6 +686,9 @@ mod nurture_settings_migration_tests {
             "baseUrl": "https://api.deepseek.com",
             "model": "custom-model",
             "apiKey": "fixture-key",
+            // Kept deliberately after the prices were removed from the struct: this is the
+            // proof that a blob stored by an older build still loads. `NurtureSettings` has
+            // no `deny_unknown_fields`, so serde drops them.
             "inputPricePer1m": 1.25,
             "outputPricePer1m": 10.0,
             "bundleId": "com.ss.iphone.ugc.Ame",
@@ -785,8 +788,6 @@ mod nurture_settings_migration_tests {
             base_url: "https://api.deepseek.com".into(),
             model: "deepseek-v4-flash".into(),
             api_key: "replace-me".into(),
-            input_price_per_1m: 1.25,
-            output_price_per_1m: 10.0,
             ..Default::default()
         };
         db.set_setting(

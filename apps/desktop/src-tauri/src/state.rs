@@ -1495,6 +1495,18 @@ impl AppState {
             }
         });
 
+        // Idle popup sweep. Clears TikTok's onboarding pages and modals off phones nobody
+        // is driving — see `crate::idle_sweeper` for why it can never compete with real
+        // work, park a stream, or touch a phone that is not in TikTok.
+        tauri::async_runtime::spawn(
+            crate::idle_sweeper::IdleSweeper::new(
+                self.control.clone(),
+                self.registry.clone(),
+                self.nurture.log(),
+            )
+            .run(),
+        );
+
         // Local schedule runner
         let db = self.db.clone();
         let jobs = self.jobs.clone();

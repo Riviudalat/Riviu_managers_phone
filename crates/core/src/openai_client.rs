@@ -11,9 +11,12 @@
 //! reasoning blocks and quoting, collapsed to one line and word-capped before
 //! it can be typed into someone's comment box.
 
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
+
 use anyhow::{anyhow, Context};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use image::{imageops::FilterType, GenericImage, Rgb, RgbImage};
+use image::{imageops::FilterType, GenericImage, RgbImage};
 use rand::seq::SliceRandom;
 use serde::Deserialize;
 use serde_json::json;
@@ -32,7 +35,6 @@ pub struct VisionCommentResult {
     pub text: String,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
-    pub usd: f64,
     pub model: String,
     pub base_url_host: String,
 }
@@ -48,9 +50,12 @@ pub struct GroundedCommentResult {
     pub relevance: u8,
     pub evidence_support: u8,
     pub frame_sha256: String,
+    /// How many *different* frames the contact sheet actually carried, after identical ones
+    /// collapsed. `1` on a photo post or a paused video. This is the number that makes a low
+    /// `evidence_support` readable: thin evidence and a bad model otherwise score the same.
+    pub distinct_frames: u8,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
-    pub usd: f64,
     pub model: String,
     pub base_url_host: String,
 }
@@ -122,11 +127,6 @@ struct Usage {
     completion_tokens: Option<u32>,
 }
 
-pub fn estimate_usd(settings: &NurtureSettings, prompt: u32, completion: u32) -> f64 {
-    (prompt as f64 * settings.input_price_per_1m + completion as f64 * settings.output_price_per_1m)
-        / 1_000_000.0
-}
-
 pub fn host_of(base_url: &str) -> String {
     base_url
         .trim()
@@ -140,23 +140,123 @@ pub fn host_of(base_url: &str) -> String {
         .to_string()
 }
 
-/// Whether the configured endpoint accepts image content parts.
+/// Endpoints that have refused a picture **in this process**, by `(host, model)`.
 ///
-/// Keyed on host, not model, and that is deliberate: measured against
-/// `api.deepseek.com` on 09/08/2026, **both** `deepseek-v4-flash` and
-/// `deepseek-v4-pro` reject an `image_url` part with
-/// `unknown variant "image_url", expected "text"`. Serde names exactly one
-/// variant there, so the content-part enum has no image case at all — the
-/// limit is the endpoint's request schema, not the model's capability, and no
-/// model string reaches vision through it. Whatever a DeepSeek model can do
-/// elsewhere, this API surface cannot carry a picture to it.
+/// Learned at runtime rather than written down, and that change was forced by being wrong.
+/// This used to be one hardcoded line — `host != "api.deepseek.com"` — from a measurement on
+/// 09/08/2026 where both DeepSeek models rejected an `image_url` part with
+/// `unknown variant "image_url", expected "text"`. Its own doc predicted the failure: *"the
+/// day DeepSeek ships an image part, this goes stale silently."* That day arrived. Measured
+/// 23/08/2026 against the same host: `deepseek-v4-flash-vision-exp` now **accepts** the part
+/// (it validates the bytes and complains about the picture, not the schema), while
+/// `deepseek-v4-flash` refuses at the model layer with `This model does not support image`.
+/// So the old line was wrong in both directions at once — it blocked a host that had learned
+/// vision, and it would have happily posted images at any other host that had not.
 ///
-/// A `false` here is not a refusal: callers fall back to a locally OCR'd
-/// caption and the caption-scored gate (`accepts_caption`). Re-measure before
-/// trusting this — the day DeepSeek ships an image part, this goes stale
-/// silently.
+/// Keyed by `(host, model)` because that is where the answer actually lives: the same host
+/// now says yes to one model and no to another.
+///
+/// **Self-correcting, which is the whole point.** Nothing here is a permanent verdict: the
+/// map is per-process, so a provider that ships vision tomorrow is picked up the next time
+/// the app starts, with no code change and nothing to re-measure. The cost is one wasted
+/// request per `(host, model)` per process — paid once, and it buys never being stale.
+static VISION_REFUSED: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
+
+fn vision_refused() -> &'static Mutex<HashSet<(String, String)>> {
+    VISION_REFUSED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Whether this endpoint will carry a picture, as far as anything has been able to tell.
+///
+/// Optimistic by default: **try the standard request first**. An OpenAI-compatible endpoint
+/// that takes images is the normal case, and asking permission from a hardcoded list is how
+/// the old version came to block a host that had stopped refusing.
+///
+/// A `false` is not a hard refusal — callers fall back to a locally OCR'd caption and the
+/// caption-scored gate (`accepts_caption`). Be aware of what that fallback costs on this
+/// machine: `interaction_ocr::recognizer_language` records that Windows ships **no** `vi-VN`
+/// OCR pack at all, so an English reader renders `mới` as `mdi` and `thư` as `thif`. On a
+/// Vietnamese fleet the caption path is a degraded path, not an equivalent one.
 pub fn provider_supports_vision(settings: &NurtureSettings) -> bool {
-    !host_of(&settings.base_url).eq_ignore_ascii_case("api.deepseek.com")
+    let key = (
+        host_of(&settings.base_url).to_ascii_lowercase(),
+        settings.model.trim().to_ascii_lowercase(),
+    );
+    !vision_refused()
+        .lock()
+        .map(|set| set.contains(&key))
+        .unwrap_or(false)
+}
+
+/// Remember that this endpoint refused a picture, so the rest of the process uses captions.
+pub fn note_vision_refused(settings: &NurtureSettings) {
+    let key = (
+        host_of(&settings.base_url).to_ascii_lowercase(),
+        settings.model.trim().to_ascii_lowercase(),
+    );
+    if let Ok(mut set) = vision_refused().lock() {
+        if set.insert(key) {
+            tracing::warn!(
+                host = %host_of(&settings.base_url),
+                model = %settings.model,
+                "endpoint refused an image part — falling back to OCR captions for the rest                  of this run"
+            );
+        }
+    }
+}
+
+/// Whether an API error means *this endpoint will not carry a picture*, as opposed to
+/// anything else that can go wrong with a request.
+///
+/// String matching on an error message is fragile and it is still the right call here,
+/// because it is the only signal the API gives and the alternative — a hardcoded host list —
+/// was measured wrong in both directions. Being wrong here is cheap and temporary: a false
+/// positive costs captions until the process restarts, a false negative costs one more failed
+/// request. Being wrong in a `const` cost fourteen phones their vision path for two weeks.
+///
+/// The three forms below are measured, not guessed:
+/// * `unknown variant "image_url", expected "text"` — DeepSeek, 09/08/2026, the request
+///   schema had no image case at all.
+/// * `This model does not support image` — DeepSeek `deepseek-v4-flash`, 23/08/2026, the
+///   schema accepts the part and the model layer declines it.
+/// * `Invalid content type. image_url is only supported by certain models.` — OpenAI's own
+///   wording for a text-only model, kept because the app targets any OpenAI-compatible
+///   gateway and this is the phrasing the reference implementation uses.
+pub fn error_refuses_images(message: &str) -> bool {
+    let low = message.to_ascii_lowercase();
+    let mentions_images = low.contains("image_url") || low.contains("image");
+    if !mentions_images {
+        return false;
+    }
+    // "unsupported image", "invalid image", "image too small" are complaints about the
+    // *picture*, which means the endpoint parsed the part and would accept a better one.
+    // Treating those as a refusal would switch a working vision endpoint to captions over
+    // one bad frame — measured on 23/08/2026, when an 8x8 test JPEG produced
+    // `You have uploaded an unsupported image`.
+    let complains_about_the_picture = low.contains("unsupported image")
+        || low.contains("invalid image")
+        || low.contains("uploaded an unsupported")
+        || low.contains("image is too")
+        || low.contains("image size");
+    if complains_about_the_picture {
+        return false;
+    }
+    low.contains("unknown variant")
+        || low.contains("does not support image")
+        || low.contains("only supported by certain models")
+        || low.contains("not support image")
+        || low.contains("image input is not supported")
+}
+
+/// Whether a request body carries a picture, so a failure can be attributed to it.
+fn body_has_image(body: &serde_json::Value) -> bool {
+    body["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|message| message["content"].as_array())
+        .flatten()
+        .any(|part| part["type"] == "image_url")
 }
 
 fn client() -> anyhow::Result<reqwest::Client> {
@@ -189,6 +289,12 @@ async fn chat(
             .ok()
             .and_then(|v| v["error"]["message"].as_str().map(|s| s.to_string()))
             .unwrap_or_else(|| raw.chars().take(200).collect());
+        // The one place every request's error passes through, which is why the learning
+        // lives here rather than at each of the three vision call sites: a gateway that
+        // cannot carry a picture says so once, and the rest of the run stops asking.
+        if body_has_image(&body) && error_refuses_images(&msg) {
+            note_vision_refused(settings);
+        }
         return Err(anyhow!("API {status}: {msg}"));
     }
     let parsed: ChatResponse = serde_json::from_str(&raw).context("parse API response")?;
@@ -244,7 +350,6 @@ pub async fn generate_vision_comment(
         text,
         prompt_tokens,
         completion_tokens,
-        usd: estimate_usd(settings, prompt_tokens, completion_tokens),
         model,
         base_url_host: host_of(&settings.base_url),
     })
@@ -268,7 +373,7 @@ pub async fn prepare_grounded_comment(
         return Err(anyhow!("no_usable_evidence"));
     }
     let sheet = make_contact_sheet(frames)?;
-    let frame_sha256 = sha256_hex(&sheet);
+    let frame_sha256 = sha256_hex(&sheet.jpeg);
     let max_words = settings.max_comment_words.clamp(4, 30) as usize;
     let lang = language_label(&settings.comment_lang);
     let direction = direction.map(str::trim).filter(|d| !d.is_empty());
@@ -330,9 +435,9 @@ pub async fn prepare_grounded_comment(
                 relevance: verification.relevance,
                 evidence_support: verification.evidence_support,
                 frame_sha256,
+                distinct_frames: sheet.distinct_frames,
                 prompt_tokens: total_prompt,
                 completion_tokens: total_completion,
-                usd: estimate_usd(settings, total_prompt, total_completion),
                 model: verification.model,
                 base_url_host: host_of(&settings.base_url),
             });
@@ -463,9 +568,11 @@ pub async fn prepare_caption_comment(
                 relevance,
                 evidence_support,
                 frame_sha256: frame_sha256.to_string(),
+                // Zero, and it means something: this is the caption-only path, so the model
+                // was shown no picture at all. It is not the same claim as `1`.
+                distinct_frames: 0,
                 prompt_tokens: total_prompt_tokens,
                 completion_tokens: total_completion_tokens,
-                usd: estimate_usd(settings, total_prompt_tokens, total_completion_tokens),
                 model,
                 base_url_host: host_of(&settings.base_url),
             });
@@ -579,7 +686,7 @@ fn model_said(raw: &str) -> String {
 
 async fn grounded_generate(
     settings: &NurtureSettings,
-    sheet: &[u8],
+    sheet: &ContactSheet,
     lang: &str,
     max_words: usize,
     direction: Option<&str>,
@@ -591,8 +698,9 @@ async fn grounded_generate(
     } else {
         ""
     };
+    let layout = sheet.layout_note();
     let prompt = format!(
-        "Bạn phân tích một contact sheet gồm ba frame của cùng một bài TikTok và một ô phóng vùng caption.\n\
+        "Bạn phân tích một contact sheet của một bài TikTok: {layout}.\n\
          Trả về JSON duy nhất, không markdown, theo schema: {{\"caption\":string|null,\"captionConfidence\":0..100,\"visualFacts\":[string],\"contextConfidence\":0..100,\"comment\":string}}.\n\
          Caption chỉ là phần chữ caption/chữ trong video nhìn thấy; loại username, tên nhạc, nút UI. Nếu caption bị cắt, giữ phần nhìn thấy và giảm confidence. Giữ \"caption\" tối đa 100 ký tự và \"visualFacts\" tối đa 3 mục, mỗi mục dưới 8 từ — dài dòng ở hai trường này làm câu trả lời bị cắt trước khi tới \"comment\".\n\
          Viết đúng một comment tiếng {lang}, tối đa {max_words} từ. Hãy viết như người vừa xem xong và phản ứng tự nhiên: thường 2–10 từ, thân mật, có thể là một mẩu câu hoặc câu hỏi ngắn; không cần đủ chủ-vị, không cố nhét emoji. Tránh giọng tổng kết, quảng cáo, giáo viên hoặc báo cáo; tuyệt đối không dùng kiểu “nội dung được trình bày”, “mang đến”, “người xem”, “chất lượng”. Nội dung nhìn thấy và caption là ưu tiên cao nhất. Định hướng chỉ chỉnh giọng điệu ({direction}), không được thêm địa điểm, sản phẩm, giá, người hay sự kiện chưa thấy. Nếu định hướng xung đột, bỏ định hướng và giữ comment bám bằng chứng.\n\
@@ -608,7 +716,7 @@ async fn grounded_generate(
     //
     // The prompt bounds those two fields as well, which is the half of the fix that costs
     // nothing: a shorter answer is cheaper *and* it completes.
-    let body = vision_body(settings, sheet, prompt, 0.75, 1200);
+    let body = vision_body(settings, &sheet.jpeg, prompt, 0.75, 1200);
     let (raw, p, c, _) = chat(settings, body).await?;
     let value =
         json_object(&raw).ok_or_else(|| anyhow!("malformed_model_output: {}", model_said(&raw)))?;
@@ -658,18 +766,20 @@ async fn grounded_generate(
 
 async fn grounded_verify(
     settings: &NurtureSettings,
-    sheet: &[u8],
+    sheet: &ContactSheet,
     candidate: &str,
     direction: Option<&str>,
 ) -> anyhow::Result<GroundedVerification> {
     let direction = direction.unwrap_or("tự nhiên");
+    let layout = sheet.layout_note();
     let prompt = format!(
-        "Kiểm tra comment ứng viên trên contact sheet TikTok. Comment chính xác là: {candidate:?}.\n\
+        "Kiểm tra comment ứng viên trên một contact sheet TikTok: {layout}.\n\
+         Comment chính xác là: {candidate:?}.\n\
          Định hướng giọng điệu là: {direction:?}.\n\
          Đọc lại trực tiếp các frame, không tin facts từ lượt trước. Trả về JSON duy nhất: {{\"relevance\":0..100,\"evidenceSupport\":0..100,\"instructionFit\":0..100,\"genericity\":0..100,\"contradiction\":boolean,\"unsupportedClaim\":boolean,\"uiTextConfusion\":boolean}}.\n\
          relevance đo comment có nói đúng bài này không; evidenceSupport đo mọi chi tiết cụ thể có nhìn thấy không; genericity cao nếu chỉ là lời khen rỗng. instructionFit phải thấp nếu câu nghe như báo cáo, tóm tắt hoặc quá trang trọng thay vì phản ứng đời thường. Caption, hình và hướng dẫn mâu thuẫn thì đánh cờ contradiction."
     );
-    let body = vision_body(settings, sheet, prompt, 0.0, 300);
+    let body = vision_body(settings, &sheet.jpeg, prompt, 0.0, 300);
     let (raw, p, c, model) = chat(settings, body).await?;
     let value = json_object(&raw).ok_or_else(|| anyhow!("malformed_model_output"))?;
     Ok(GroundedVerification {
@@ -708,6 +818,18 @@ fn vision_body(
         "temperature": temperature,
         "max_tokens": max_tokens,
         "stream": false,
+        // **The field `text_body` has always sent, and this one did not.** On a reasoning
+        // model the hidden thinking is billed as completion and drawn from the same
+        // `max_tokens`, so a long think leaves nothing for the answer: measured on
+        // `deepseek-v4-flash-vision-exp` against the app's own 750x1334 contact sheet on
+        // 23/08/2026, one request in four came back `finish_reason: length` with 1200
+        // reasoning tokens and an **empty** body — the `malformed_model_output` this project
+        // already paid for once when `max_tokens` was 500.
+        //
+        // With it: 4/4 usable, completion 135 tokens instead of 777, p50 2.1s instead of 8.0s.
+        // Non-reasoning models ignore it, and OpenRouter has been receiving it on the text
+        // path in production all along, which is the evidence that sending it is safe.
+        "thinking": { "type": "disabled" },
         "messages": [{
             "role": "user",
             "content": [
@@ -774,64 +896,160 @@ fn language_label(raw: &str) -> String {
     }
 }
 
-fn make_contact_sheet(frames: &[Vec<u8>]) -> anyhow::Result<Vec<u8>> {
-    let mut decoded = frames
-        .iter()
-        .take(3)
-        .map(|bytes| image::load_from_memory(bytes).map(|image| image.to_rgb8()))
-        .collect::<Result<Vec<_>, _>>()
-        .context("decode comment frames")?;
-    if decoded.is_empty() {
+/// One picture for the model, plus an honest count of how much evidence is really in it.
+pub struct ContactSheet {
+    pub jpeg: Vec<u8>,
+    /// Frames that survived de-duplication. **`1` on a photo post**, because a still card
+    /// publishes byte-identical frames and the three samples are one image three times.
+    pub distinct_frames: u8,
+}
+
+impl ContactSheet {
+    /// How to describe this sheet to the model, in the operator's language.
+    ///
+    /// Both prompts used to open with a flat "gồm ba frame" on every request. On a photo post
+    /// that is false — the three samples are one picture three times — and it invites exactly
+    /// the failure the verification gate exists to catch: a model told it is looking at three
+    /// moments will narrate motion that no pixel supports.
+    fn layout_note(&self) -> String {
+        let frames = match self.distinct_frames {
+            0 | 1 => "ĐÚNG MỘT khung của bài (chụp ba lần đều ra cùng một khung — bài ảnh \
+                      tĩnh hoặc video đang dừng, nên KHÔNG có chuyển động để mô tả; đừng nói \
+                      về hành động, diễn biến hay thứ tự xảy ra)"
+                .to_string(),
+            n => format!(
+                "{n} khung KHÁC NHAU của cùng một bài, xếp từ trái sang phải theo thời gian"
+            ),
+        };
+        format!("{frames}, và bên dưới là dải phóng to vùng caption/tên tài khoản")
+    }
+}
+
+/// Total pixels the sheet is allowed, whatever its shape.
+///
+/// 1_000_500 is exactly the old 750x1334, kept on purpose: image cost at these APIs scales
+/// with area, and the measured prompt cost of the old sheet was 475 tokens
+/// (`deepseek-v4-flash-vision-exp`, 23/08/2026). Holding the area fixed means the layout below
+/// buys resolution and honesty without buying a bigger bill.
+const SHEET_PIXEL_BUDGET: f64 = 750.0 * 1334.0;
+
+/// Where the caption and author row sit, as fractions of the frame.
+///
+/// Unchanged from the original, and verified rather than inherited: this band covers all five
+/// author-row sightings the project has actually recorded — y 1332, 1566, 1698, 1704 and 1887
+/// on 1080x2220 screens, i.e. fractions 0.600 to 0.850 (see `tiktok_labels`'s `tv_label`
+/// provenance and AGENTS.md 9.102). The lowest sighting clears the top edge by 45 px, which is
+/// thin; widening the band is the change to make if a sighting ever falls outside it.
+const CAPTION_BAND: (f64, f64) = (0.58, 0.92);
+/// How much of the width the caption band takes. The action rail sits at x 0.919 +/- 0.032
+/// (`screen::RAIL_X`), so this deliberately stops short of it — the rail's counts are read
+/// from the hierarchy, not from pixels.
+const CAPTION_WIDTH: f64 = 0.84;
+
+/// Compose the evidence the comment model sees.
+///
+/// **Rewritten because the old layout was iPhone 8 geometry applied to Android phones.** The
+/// 750x1334 sheet and its 375x667 thumbs are the iPhone 8's physical frame and its logical
+/// point grid (`screen.rs`), where a thumb is an exact 0.5x downscale and aspect-correct.
+/// Nothing re-derived it for a 1080x2220 Android frame, so every thumb was stretched 15.6%
+/// horizontally and the caption crop 19.9% — the *same* text at two different aspect ratios on
+/// one sheet — while 15.25% of the sheet was pure black padding and the "caption zoom" rendered
+/// a region only 1.19x larger than the thumb already showed it.
+///
+/// Three things changed, all measured:
+///
+/// 1. **Aspect is preserved**, computed from the frame the phone actually sent. No stretch.
+/// 2. **No padding.** The sheet is exactly the size of what it carries, so the pixel budget
+///    goes to evidence instead of to black.
+/// 3. **Identical frames collapse.** A photo post publishes byte-identical frames — measured
+///    on a live card, 0 of 2,170,800 picture pixels changed over 13 seconds untouched, and the
+///    repo's own `card_is_still` found 4 of 40 cards still and 0 of 36 videos. The old sheet
+///    pasted that one image three times and told the model it was looking at "ba frame". Now
+///    one image gets the whole budget — on this fleet that is a 589x1210 thumb where it used
+///    to be 375x667 — and [`ContactSheet::distinct_frames`] says how much evidence there
+///    really was, so a low `evidenceSupport` score can be read as thin evidence rather than as
+///    a bad model.
+fn make_contact_sheet(frames: &[Vec<u8>]) -> anyhow::Result<ContactSheet> {
+    let mut seen = Vec::new();
+    let mut decoded: Vec<image::RgbImage> = Vec::new();
+    for bytes in frames.iter().take(3) {
+        let frame = image::load_from_memory(bytes)
+            .context("decode comment frames")?
+            .to_rgb8();
+        // On the picture, not on the bytes, and not on the whole screen either — see
+        // `nurture::STATUS_BAR_FRACTION` for the capture that made the difference measurable.
+        // Shared with `card_is_still`, which is the other place this distinction decides
+        // whether a photo post is recognised at all.
+        let digest = crate::nurture::picture_digest(&frame);
+        if seen.contains(&digest) {
+            continue;
+        }
+        seen.push(digest);
+        decoded.push(frame);
+    }
+    let Some(source) = decoded.last().cloned() else {
+        return Err(anyhow!("no_usable_evidence"));
+    };
+    let count = decoded.len();
+
+    let (frame_w, frame_h) = (source.width() as f64, source.height() as f64);
+    if frame_w < 1.0 || frame_h < 1.0 {
         return Err(anyhow!("no_usable_evidence"));
     }
-    while decoded.len() < 3 {
-        decoded.push(decoded.last().cloned().unwrap());
-    }
+    let frame_aspect = frame_w / frame_h;
 
-    let mut sheet = RgbImage::from_pixel(750, 1334, Rgb([0, 0, 0]));
+    // The caption band, in source pixels, clamped so a strange frame size cannot index out.
+    let band_y = ((frame_h * CAPTION_BAND.0) as u32).min(source.height().saturating_sub(1));
+    let band_h = ((frame_h * (CAPTION_BAND.1 - CAPTION_BAND.0)) as u32)
+        .max(1)
+        .min(source.height() - band_y);
+    let band_w = ((frame_w * CAPTION_WIDTH) as u32)
+        .max(1)
+        .min(source.width());
+    let band_aspect = band_w as f64 / band_h as f64;
+
+    // Solve the one free variable — the width of the whole sheet — so that a row of `count`
+    // aspect-correct thumbs plus a full-width caption strip lands on the pixel budget:
+    //     area = W^2 / (count * frame_aspect)  +  W^2 / band_aspect
+    let per_pixel = 1.0 / (count as f64 * frame_aspect) + 1.0 / band_aspect;
+    let sheet_w = (SHEET_PIXEL_BUDGET / per_pixel).sqrt();
+    // Derive everything from the *rounded* thumb width so `count * thumb_w` is the sheet width
+    // exactly. A one-pixel rounding gap would be a black seam, which is what this rewrite is
+    // removing.
+    let thumb_w = ((sheet_w / count as f64).round() as u32).max(1);
+    let thumb_h = ((thumb_w as f64 / frame_aspect).round() as u32).max(1);
+    let sheet_w = thumb_w * count as u32;
+    let strip_h = ((sheet_w as f64 / band_aspect).round() as u32).max(1);
+
+    let mut sheet = RgbImage::new(sheet_w, thumb_h + strip_h);
     for (index, frame) in decoded.iter().enumerate() {
-        let thumb = image::imageops::resize(frame, 375, 667, FilterType::Lanczos3);
-        let (x, y) = match index {
-            0 => (0, 0),
-            1 => (375, 0),
-            _ => (0, 667),
-        };
+        let thumb = image::imageops::resize(frame, thumb_w, thumb_h, FilterType::Lanczos3);
         sheet
-            .copy_from(&thumb, x, y)
+            .copy_from(&thumb, thumb_w * index as u32, 0)
             .map_err(|_| anyhow!("compose comment frames"))?;
     }
-    let source = decoded.last().unwrap();
-    let crop_y = ((source.height() as f32) * 0.58) as u32;
-    let crop_h = ((source.height() as f32) * 0.34) as u32;
-    let crop_w = ((source.width() as f32) * 0.84) as u32;
-    let crop = image::imageops::crop_imm(
-        source,
-        0,
-        crop_y.min(source.height().saturating_sub(1)),
-        crop_w.max(1).min(source.width()),
-        crop_h.max(1).min(
-            source
-                .height()
-                .saturating_sub(crop_y.min(source.height().saturating_sub(1))),
-        ),
-    )
-    .to_image();
-    let crop = image::imageops::resize(&crop, 375, 260, FilterType::Lanczos3);
+    // The caption strip comes from the **last** frame: on a photo post every frame is the same
+    // picture, and on a video the most recent one is the state the comment is about.
+    let band = image::imageops::crop_imm(&source, 0, band_y, band_w, band_h).to_image();
+    let band = image::imageops::resize(&band, sheet_w, strip_h, FilterType::Lanczos3);
     sheet
-        .copy_from(&crop, 375, 870)
+        .copy_from(&band, 0, thumb_h)
         .map_err(|_| anyhow!("compose caption crop"))?;
 
     let mut encoded = Cursor::new(Vec::new());
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, 85)
         .encode_image(&image::DynamicImage::ImageRgb8(sheet))
         .context("encode comment contact sheet")?;
-    Ok(encoded.into_inner())
+    Ok(ContactSheet {
+        jpeg: encoded.into_inner(),
+        distinct_frames: count.min(u8::MAX as usize) as u8,
+    })
 }
 
 /// Legacy generic-comment helper kept for offline fixtures. The nurture engine
 /// does not call it for production text comments because an ungrounded sentence
 /// must never be posted under an account.
-pub async fn generate_comment_pool(settings: &NurtureSettings, count: usize) -> (Vec<String>, f64) {
+pub async fn generate_comment_pool(settings: &NurtureSettings, count: usize) -> Vec<String> {
     let count = count.clamp(5, 60);
     let max_words = settings.max_comment_words.max(4) as usize;
     let directions: Vec<&str> = settings
@@ -850,19 +1068,19 @@ pub async fn generate_comment_pool(settings: &NurtureSettings, count: usize) -> 
     });
 
     match chat(settings, body).await {
-        Ok((raw, p, c, _)) => {
+        Ok((raw, _, _, _)) => {
             let mut pool: Vec<String> = raw
                 .lines()
                 .filter_map(|line| sanitize_comment(line, max_words))
                 .collect();
             pool.dedup();
             if pool.len() < 5 {
-                (builtin_pool(), estimate_usd(settings, p, c))
+                builtin_pool()
             } else {
-                (pool, estimate_usd(settings, p, c))
+                pool
             }
         }
-        Err(_) => (builtin_pool(), 0.0),
+        Err(_) => builtin_pool(),
     }
 }
 
@@ -919,10 +1137,7 @@ pub const EMOJI_MENU: [EmojiReaction; 6] = [
 
 /// Ask the model which reaction suits this video. Falls back to a random pick
 /// so a failed call never blocks a session.
-pub async fn choose_emoji_reaction(
-    settings: &NurtureSettings,
-    jpeg_bytes: &[u8],
-) -> (EmojiReaction, f64) {
+pub async fn choose_emoji_reaction(settings: &NurtureSettings, jpeg_bytes: &[u8]) -> EmojiReaction {
     let menu = EMOJI_MENU
         .iter()
         .enumerate()
@@ -954,7 +1169,7 @@ pub async fn choose_emoji_reaction(
         *EMOJI_MENU.choose(&mut rng).unwrap_or(&EMOJI_MENU[0])
     };
     match chat(settings, body).await {
-        Ok((raw, p, c, _)) => {
+        Ok((raw, _, _, _)) => {
             let pick = raw
                 .chars()
                 .find(|c| c.is_ascii_digit())
@@ -963,9 +1178,9 @@ pub async fn choose_emoji_reaction(
                 .filter(|d| *d >= 1 && *d <= EMOJI_MENU.len())
                 .map(|d| EMOJI_MENU[d - 1])
                 .unwrap_or_else(fallback);
-            (pick, estimate_usd(settings, p, c))
+            pick
         }
-        Err(_) => (fallback(), 0.0),
+        Err(_) => fallback(),
     }
 }
 
@@ -1521,18 +1736,158 @@ mod tests {",
         .retryable());
     }
 
+    /// Every fixture below is 750x1334 — a real iPhone 8 feed frame, aspect 0.5622.
+    ///
+    /// The arithmetic the assertions pin, so a reader can check it rather than trust it:
+    /// the caption band is 750*0.84 = 630 wide by 1334*0.34 = 453 tall, aspect 1.3907. For
+    /// `n` thumbs the sheet width `W` solves `W^2/(n*0.5622) + W^2/1.3907 = 1_000_500`.
+    /// n=1 gives W=633, thumb 633x1126, strip 633x455 -> 633x1581.
+    /// n=3 gives W=873, thumbs 291x518, strip 873x628 -> 873x1146.
     #[test]
-    fn contact_sheet_is_a_stable_portrait_jpeg_for_one_or_three_frames() {
+    fn the_contact_sheet_spends_its_whole_area_on_evidence_and_never_stretches() {
         let frame = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
-        let sheet =
-            make_contact_sheet(std::slice::from_ref(&frame)).expect("one frame contact sheet");
-        let image = image::load_from_memory(&sheet).expect("decode contact sheet");
-        assert_eq!(image.dimensions(), (750, 1334));
-        let sheet_three = make_contact_sheet(&[frame.clone(), frame.clone(), frame]).unwrap();
-        assert_eq!(
-            image::load_from_memory(&sheet_three).unwrap().dimensions(),
-            (750, 1334)
+        let one = make_contact_sheet(std::slice::from_ref(&frame)).expect("one frame");
+        let sheet = image::load_from_memory(&one.jpeg).expect("decode one-frame sheet");
+        let (w, h) = sheet.dimensions();
+        assert_eq!((w, h), (633, 1581));
+
+        // Same pixel budget as the 750x1334 sheet this replaced, so the image token cost does
+        // not move — whole-pixel rounding is the only slack.
+        assert!(
+            (w * h).abs_diff(750 * 1334) < 4_000,
+            "{w}x{h} is not the old area"
         );
+
+        // No stretch. The thumb is 633x1126 and 1126/633 = 1.7788 = 1334/750, whereas the old
+        // 375x667 thumb of a 1080x2220 Android frame was 15.6% too wide.
+        let thumb_h = h - 455;
+        let stretch = (f64::from(thumb_h) / f64::from(w)) / (1334.0 / 750.0);
+        assert!(
+            (stretch - 1.0).abs() < 0.002,
+            "thumb stretched by {stretch}"
+        );
+
+        // No padding. The old sheet left a 375x464 black block in the bottom-right corner —
+        // 15.25% of it carried nothing. Sample the four corners and the centre of what used to
+        // be that block; a JPEG-encoded photo has no pure black there.
+        let rgb = sheet.to_rgb8();
+        for (x, y) in [
+            (0, 0),
+            (w - 1, 0),
+            (0, h - 1),
+            (w - 1, h - 1),
+            (w / 2, h - 200),
+        ] {
+            let px = rgb.get_pixel(x, y);
+            assert!(
+                px.0.iter().any(|c| *c > 8),
+                "({x},{y}) is padding, not evidence"
+            );
+        }
+
+        // And the point of it: the one thing the model reads the caption from is now 2.8x the
+        // pixels the old thumb gave it.
+        assert!(w * thumb_h > 2 * 375 * 667);
+    }
+
+    /// Paint a block over one frame and re-encode it, so two frames differ in exactly one
+    /// known place. PNG on purpose: a JPEG round trip spreads a small edit across its 8x8
+    /// blocks, which would make the test prove something softer than it claims.
+    fn frame_with_block_at(y: u32) -> Vec<u8> {
+        let mut image =
+            image::load_from_memory(include_bytes!("../tests/fixtures/feed-iphone8.jpg"))
+                .unwrap()
+                .to_rgb8();
+        for dy in 0..24 {
+            for dx in 0..120 {
+                image.put_pixel(500 + dx, y + dy, image::Rgb([255, 255, 255]));
+            }
+        }
+        let mut out = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    }
+
+    /// The bug this closes: on a real photo post the frames are **not** byte-identical, so
+    /// hashing the encoded bytes would have collapsed nothing outside the unit tests.
+    ///
+    /// Measured 23/08/2026 on ce0717171c2a64d50d — three screencaps 600 ms apart of one photo
+    /// post differed by 185, 267 and 82 sampled pixels, every one of them in y 16..48, the
+    /// animated network icon in the status bar. The picture below it was identical.
+    #[test]
+    fn a_ticking_status_bar_is_not_a_second_piece_of_evidence() {
+        // The fixture is 1334 tall, so the status band is the top 53 px.
+        let clean = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
+        let png = frame_with_block_at(600);
+
+        let status_bar_only = make_contact_sheet(&[
+            frame_with_block_at(8),
+            frame_with_block_at(20),
+            frame_with_block_at(28),
+        ])
+        .unwrap();
+        assert_eq!(status_bar_only.distinct_frames, 1);
+
+        // A change in the picture is still a change, and one in the status bar next to it does
+        // not hide it.
+        let moved = make_contact_sheet(&[frame_with_block_at(8), png.clone()]).unwrap();
+        assert_eq!(moved.distinct_frames, 2);
+
+        // And re-encoding alone does not invent a frame: the same picture through PNG and
+        // through the original JPEG is one piece of evidence, which hashing bytes could never
+        // have said.
+        let recoded = make_contact_sheet(&[clean.clone(), png_of(&clean)]).unwrap();
+        assert_eq!(recoded.distinct_frames, 1);
+    }
+
+    /// The fixture's own pixels, re-encoded losslessly and untouched.
+    fn png_of(jpeg: &[u8]) -> Vec<u8> {
+        let image = image::load_from_memory(jpeg).unwrap().to_rgb8();
+        let mut out = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn identical_frames_collapse_into_one_piece_of_evidence() {
+        let frame = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
+        // A photo post publishes byte-identical frames — measured on a live card, 0 of
+        // 2,170,800 picture pixels changed over 13 seconds untouched. The old sheet pasted
+        // that one image three times and told the model it was reading "ba frame".
+        let three_of_one =
+            make_contact_sheet(&[frame.clone(), frame.clone(), frame.clone()]).unwrap();
+        let one = make_contact_sheet(std::slice::from_ref(&frame)).unwrap();
+        assert_eq!(three_of_one.distinct_frames, 1);
+        // Not merely the same count — the same picture, at the full single-frame size.
+        assert_eq!(three_of_one.jpeg, one.jpeg);
+        assert!(one.layout_note().contains("ĐÚNG MỘT khung"));
+        assert!(one.layout_note().contains("KHÔNG có chuyển động"));
+
+        // Three real samples of a moving card stay three.
+        let moving = make_contact_sheet(&[
+            include_bytes!("../tests/fixtures/feed-same-card-1.jpg").to_vec(),
+            include_bytes!("../tests/fixtures/feed-same-card-2.jpg").to_vec(),
+            include_bytes!("../tests/fixtures/feed-same-card-3.jpg").to_vec(),
+        ])
+        .unwrap();
+        assert_eq!(moving.distinct_frames, 3);
+        assert!(moving.layout_note().starts_with("3 khung KHÁC NHAU"));
+        assert_eq!(
+            image::load_from_memory(&moving.jpeg).unwrap().dimensions(),
+            (873, 1146)
+        );
+
+        // A middle duplicate collapses too, and the survivors share the budget as two.
+        let other = include_bytes!("../tests/fixtures/feed-iphone8-b.jpg").to_vec();
+        let two = make_contact_sheet(&[frame.clone(), frame, other]).unwrap();
+        assert_eq!(two.distinct_frames, 2);
+        assert!(two.layout_note().starts_with("2 khung KHÁC NHAU"));
+
+        assert!(make_contact_sheet(&[]).is_err());
     }
 
     #[test]
@@ -1543,17 +1898,101 @@ mod tests {",
     }
 
     #[test]
-    fn deepseek_uses_text_only_body_for_caption_preview() {
+    fn the_text_only_body_stays_text_only() {
+        // Unchanged contract, kept as its own test now that the vision gate no longer
+        // decides it by host: the caption pass sends a plain string, disables thinking and
+        // asks for JSON.
         let settings = NurtureSettings {
             base_url: "https://api.deepseek.com".into(),
             model: "deepseek-v4-flash".into(),
             ..NurtureSettings::default()
         };
-        assert!(!provider_supports_vision(&settings));
         let body = text_body(&settings, "trả JSON".into(), 0.0, 100);
         assert!(body["messages"][0]["content"].is_string());
         assert_eq!(body["thinking"]["type"], "disabled");
         assert_eq!(body["response_format"]["type"], "json_object");
+    }
+
+    /// The vision body must carry the same reasoning switch the text body always did.
+    ///
+    /// Measured on `deepseek-v4-flash-vision-exp`, 23/08/2026: without it one request in four
+    /// returned `finish_reason: length` with 1200 reasoning tokens and an empty body.
+    #[test]
+    fn the_vision_body_disables_hidden_reasoning_and_carries_one_picture() {
+        let settings = NurtureSettings::default();
+        let body = vision_body(&settings, &[0xff, 0xd8, 0xff], "xem ảnh".into(), 1.0, 1200);
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert_eq!(body["max_tokens"], 1200);
+        let parts = body["messages"][0]["content"]
+            .as_array()
+            .expect("content parts");
+        assert_eq!(
+            parts.iter().filter(|p| p["type"] == "image_url").count(),
+            1,
+            "one contact sheet, so a gateway with a one-image limit still works"
+        );
+        assert!(body_has_image(&body));
+        assert!(!body_has_image(&text_body(&settings, "x".into(), 0.0, 8)));
+    }
+
+    /// **Optimistic by default.** The old gate was a hardcoded `host != "api.deepseek.com"`,
+    /// and it was measured wrong in both directions on 23/08/2026: it blocked a host that had
+    /// shipped image parts, and it would have posted images at any other host that had not.
+    #[test]
+    fn an_unknown_endpoint_is_assumed_to_take_pictures_until_it_says_otherwise() {
+        let settings = NurtureSettings {
+            // A host no other test touches, because the learned set is process-wide.
+            base_url: "https://vision-optimism.example/v1".into(),
+            model: "some/vision-model".into(),
+            ..NurtureSettings::default()
+        };
+        assert!(provider_supports_vision(&settings));
+        note_vision_refused(&settings);
+        assert!(!provider_supports_vision(&settings));
+
+        // Learned per (host, model): the same host now says no to one model and nothing
+        // about another, which is exactly what DeepSeek does today.
+        let other_model = NurtureSettings {
+            model: "some/other-model".into(),
+            ..settings.clone()
+        };
+        assert!(
+            provider_supports_vision(&other_model),
+            "a refusal by one model must not condemn the whole host"
+        );
+    }
+
+    #[test]
+    fn an_error_that_refuses_images_is_told_apart_from_one_that_dislikes_the_picture() {
+        // Measured refusals — the endpoint will not carry a picture at all.
+        for message in [
+            r#"unknown variant "image_url", expected "text""#,
+            "This model does not support image",
+            "Invalid content type. image_url is only supported by certain models.",
+        ] {
+            assert!(error_refuses_images(message), "should refuse: {message}");
+        }
+        // Measured complaints about the *picture* — the part was parsed, so vision works and
+        // switching to captions over one bad frame would be a self-inflicted downgrade.
+        for message in [
+            ".messages[0].image[0]: You have uploaded an unsupported image. Please make sure              your image is valid and has one of the following formats: webp, png, jpeg, gif.",
+            "invalid image data",
+            "image size exceeds the limit",
+        ] {
+            assert!(!error_refuses_images(message), "should not refuse: {message}");
+        }
+        // Everything unrelated stays unrelated.
+        for message in [
+            "Rate limit exceeded",
+            "Insufficient balance",
+            "context length exceeded",
+            "",
+        ] {
+            assert!(
+                !error_refuses_images(message),
+                "should not refuse: {message}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1633,6 +2072,9 @@ mod tests {",
         assert_eq!(result.completion_tokens, 21);
         assert_eq!(result.model, "mock-verifier");
         assert_eq!(result.frame_sha256.len(), 64);
-        assert!(result.usd > 0.0);
+        // Tokens, summed across the draft and the verification pass. There is no price here
+        // any more: the USD this used to assert on was two hand-typed numbers multiplied by
+        // exactly these counts.
+        assert!(result.prompt_tokens > 0 && result.completion_tokens > 0);
     }
 }

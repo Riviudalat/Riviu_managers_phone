@@ -435,8 +435,6 @@ export interface NurtureSettings {
   apiKey: string;
   /** Whether a key is stored. The only thing the form can honestly show about it. */
   hasApiKey?: boolean;
-  inputPricePer1m: number;
-  outputPricePer1m: number;
   bundleId: string;
   numVideos: number;
   numRounds: number;
@@ -519,8 +517,6 @@ export const LIVE_TUNABLE_FIELDS = new Set<keyof NurtureSettings>([
   "baseUrl",
   "model",
   "apiKey",
-  "inputPricePer1m",
-  "outputPricePer1m",
   "commentLang",
   "aiDirections",
   "maxCommentWords",
@@ -564,9 +560,10 @@ export interface NurtureApiTestResult {
   model: string;
   baseUrlHost: string;
   evidenceMode: string;
+  /** How many *different* frames the picture carried — `1` on a still card, `0` on OCR. */
+  distinctFrames: number;
   promptTokens: number;
   completionTokens: number;
-  usd: number;
 }
 
 export interface NurtureCommentCost {
@@ -576,7 +573,6 @@ export interface NurtureCommentCost {
   baseUrlHost: string;
   promptTokens: number;
   completionTokens: number;
-  usd: number;
   preview: string;
   createdAt: string;
 }
@@ -590,15 +586,52 @@ export interface NurtureCommentAttempt {
   baseUrlHost: string;
   promptTokens: number;
   completionTokens: number;
-  usd: number;
   preview: string;
   captionPreview: string;
   frameSha256: string;
   contextConfidence?: number;
   relevance?: number;
   evidenceSupport?: number;
+  /**
+   * How many *different* frames the model was shown: `1` on a photo post, where the three
+   * samples were one byte-identical picture, `0` on the caption-only path, which sends no
+   * picture, and `null` on rows written before this was recorded.
+   *
+   * Read `evidenceSupport` next to this. Low with `1` means there was one frame of evidence;
+   * low with `3` means the model saw three and still could not ground the comment.
+   */
+  distinctFrames?: number;
+  /**
+   * Slides the traversal paged before the comment was written, duplicates included. `0` on a
+   * post that was never paged; `undefined` on rows from before it was recorded.
+   *
+   * The pair is what says anything: `7` slides with `distinctFrames: 1` means the pager turned
+   * seven times and the stream handed back one picture every time.
+   */
+  carouselSlides?: number;
   createdAt: string;
 }
+
+/// Where one device is in its session — the same enum as Rust's `NurturePhase`.
+///
+/// Exists because a bar drawn from `videosDone` alone reads 0% for the first minute of a
+/// perfectly healthy run (up to 40s waiting for TikTok to reach the foreground, then up to
+/// 30s waiting for the feed) and reads exactly the same 0% for a phone that never opened the
+/// app at all. The two lock-screen phones on 23/08/2026 died inside that window.
+export type NurturePhase =
+  | "queued"
+  | "opening"
+  | "awaitingFeed"
+  | "watching"
+  | "recovering"
+  | "finished";
+
+/// How a session ended. Mirrors Rust's `Outcome`.
+///
+/// This used to be stringified into the first token of a Vietnamese summary sentence and
+/// then dropped, so the panel could not tell a phone that finished 47 videos from one that
+/// failed to open the app, and rendered both as the same grey row.
+export type NurtureOutcome = "done" | "partial" | "failed" | "stopped";
 
 export interface NurtureSessionStatus {
   udid: string;
@@ -612,12 +645,77 @@ export interface NurtureSessionStatus {
   comments: number;
   follows: number;
   lastMessage: string;
-  sessionUsd: number;
+  /// What the comment model reported spending on this device, in tokens.
+  ///
+  /// **Tokens and not money, because money was fabricated.** This was `sessionUsd`: the
+  /// product of two hand-typed per-million prices that were never sent to the API and
+  /// existed in three different values at once, with no UI able to edit them. Tokens come
+  /// from the API's own `usage`, so they are true of whatever model is configured. Multiply
+  /// by the provider's real rate outside the app.
+  sessionPromptTokens: number;
+  sessionCompletionTokens: number;
+  /// Which run this row belongs to. `null` on a row from before run ids existed.
+  ///
+  /// Load-bearing for any fleet total: the status list is keyed by udid and never pruned,
+  /// so it accumulates every phone that has run since the app started. Summing over it
+  /// without filtering counts finished phones from earlier runs, and restarting one phone
+  /// makes an overall bar go *backwards* — that row's counters reset while the others keep
+  /// their finished values.
+  runId: string | null;
+  /// How many devices were started together in this run — the denominator for an overall
+  /// bar. Must be this rather than the number of rows present: a phone that failed before
+  /// producing a second status still occupies a slot.
+  runSize: number;
+  phase: NurturePhase;
+  outcome: NurtureOutcome | null;
+  /// Posts this session is aiming for, snapshotted at start.
+  ///
+  /// Never recompute this from the settings form: `numVideos` is a RESTART-required field,
+  /// so dividing by the live value rescales the bar under a session that never changed —
+  /// lower it from 120 to 15 mid-run and the bar reads 800%.
+  videoTarget: number;
+  /// ISO timestamp: when this device's session began, after its stagger.
+  startedAt: string | null;
+  /// ISO timestamp: when the wall clock ends this session regardless of the video count.
+  ///
+  /// A run ends at **whichever bound arrives first**, and for a manual start this is a
+  /// randomised 2–3 hour horizon. A bar drawn from the video count alone stalls at 40% on a
+  /// run that is minutes from finishing on time, and reads as hung.
+  deadlineAt: string | null;
+}
+
+/// One line a phone said, with the moment it first said it.
+///
+/// `repeats` is why the ring is readable at all: a session polling for the feed emits the
+/// same sentence every second, and collapsing those into a count is what keeps the line
+/// before them from being pushed out. Render it as `×N`, and prefer `at` over `lastAt` —
+/// "stuck here since 14:22" is the reading that helps.
+export interface SessionLogEntry {
+  at: string;
+  lastAt: string;
+  text: string;
+  repeats: number;
+}
+
+/// One phone that has history, for building the row list.
+///
+/// Needed because the idle sweep writes lines for phones that never ran a session, so
+/// "which phones have anything to show" cannot be answered from the status list.
+export interface SessionLogSummary {
+  udid: string;
+  lines: number;
+  last?: SessionLogEntry | null;
 }
 
 export interface NurtureCostSummary {
-  todayUsd: number;
-  totalUsd: number;
+  /// Tokens summed over **every** attempt, sent or rejected — a comment the verification
+  /// gate threw away still burned up to four API calls, and recording that as free is how
+  /// the most expensive failure mode became invisible.
+  todayPromptTokens: number;
+  todayCompletionTokens: number;
+  totalPromptTokens: number;
+  totalCompletionTokens: number;
+  /// Comments actually sent.
   todayComments: number;
   totalComments: number;
 }
@@ -1020,7 +1118,8 @@ export type DeviceWorkOwner =
   | "script"
   | "repair"
   | "manualControl"
-  | "groupSync";
+  | "groupSync"
+  | "idleSweep";
 
 export interface CommandError {
   code: string;

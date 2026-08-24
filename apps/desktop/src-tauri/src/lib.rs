@@ -7,6 +7,7 @@ mod command_error;
 mod commands;
 mod farm_commands;
 mod flow_commands;
+mod idle_sweeper;
 mod interaction_commands;
 pub mod interaction_ocr;
 mod local_api;
@@ -346,6 +347,9 @@ pub fn run() {
             nurture_commands::nurture_list_comment_attempts,
             nurture_commands::nurture_cost_summary,
             nurture_commands::nurture_session_status,
+            nurture_commands::nurture_session_log,
+            nurture_commands::nurture_session_log_summary,
+            nurture_commands::nurture_clear_session_log,
             nurture_commands::nurture_start,
             nurture_commands::nurture_stop,
             publish_commands::publish_scan_folder,
@@ -618,6 +622,15 @@ mod tests {
         ("nurture_list_comment_attempts", "read: DB"),
         ("nurture_cost_summary", "read: DB aggregate"),
         ("nurture_session_status", "read: in-memory session state"),
+        ("nurture_session_log", "read: in-memory ring, one device"),
+        (
+            "nurture_session_log_summary",
+            "read: in-memory ring, all devices",
+        ),
+        (
+            "nurture_clear_session_log",
+            "drops an in-memory ring the operator asked to clear; touches no device",
+        ),
         ("publish_list", "read: DB"),
         ("publish_get", "read: DB"),
         // Not reads, and not oversights — each guards differently, on purpose.

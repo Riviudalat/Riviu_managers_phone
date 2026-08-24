@@ -39,6 +39,7 @@ use std::time::{Duration, Instant};
 // is load-bearing rather than tidiness.
 use super::live::{apply_live_settings, video_target, LiveSettings};
 use crate::driver::{ElementBox, ElementQuery, UiSession};
+use crate::feed_ladder::{self, LadderSpend, LadderStep};
 use crate::human_behavior::{
     in_night_window, roll_bool, roll_feed_action_in_mood, roll_follow_in_mood, FeedAction,
     HumanBehavior, HumanSessionPolicy, MoodCycle, PolicyAction,
@@ -46,7 +47,7 @@ use crate::human_behavior::{
 use crate::tiktok_drawer::CommentVerdict;
 use crate::tiktok_labels::{controls_for, TikTokControl, TikTokControls};
 use crate::tiktok_like::LikeVerdict;
-use crate::types::{NurtureSessionStatus, NurtureSettings, TapPoint};
+use crate::types::{NurturePhase, NurtureSessionStatus, NurtureSettings, TapPoint};
 
 use super::recovery::Outcome;
 use super::sleep_interruptible;
@@ -195,8 +196,12 @@ impl PostFingerprint {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedComment {
     pub text: String,
-    /// Provider spend for generating it, added to the session total.
-    pub usd: f64,
+    /// What the API reported spending to generate it, added to the session total.
+    ///
+    /// Tokens rather than money: the price this used to carry was two hand-typed numbers
+    /// the app multiplied itself, and they matched no configured model.
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
     /// Opaque id for the caller's own audit row, echoed back to
     /// [`CommentTextSource::record_outcome`].
     pub attempt_id: Option<String>,
@@ -227,6 +232,26 @@ pub trait CommentTextSource: Send + Sync {
     /// Record how the attempt ended. Default does nothing, for callers with no
     /// audit trail to keep.
     async fn record_outcome(&self, _prepared: &PreparedComment, _outcome: &str) {}
+
+    /// Offer whatever is on screen right now as evidence for the comment that follows.
+    ///
+    /// Called once per slide of a photo post, from inside [`HierarchyRun::traverse_carousel`],
+    /// at the settled moment just after the page counter was read. **The comment used to be
+    /// written before the first sideways gesture existed**, so a six-image post was commented
+    /// on from three samples of image one — and since a still card publishes the same picture
+    /// every time, that was one picture, three times.
+    ///
+    /// Sync, and cheap by contract: the implementor is expected to read a frame cache, not to
+    /// ask the device for anything. A slide costs a flick, a 900 ms settle and a hierarchy
+    /// dump already; this must add nothing to that.
+    fn note_slide(&self) {}
+
+    /// Record a comment the post's budget was charged for that never reached the drawer.
+    ///
+    /// The deferred path spends `record_attempt` and the action gap *before* the slides are
+    /// paged, so a card that changes underneath the traversal leaves an attempt with no row.
+    /// Default does nothing, for callers with no audit trail to keep.
+    async fn record_skip(&self, _settings: &NurtureSettings, _reason: &str) {}
 }
 
 /// Locate a control, or `None` when the label for it was never measured.
@@ -243,6 +268,23 @@ async fn locate(
         return Ok(None);
     };
     session.locate(label.to_query()).await
+}
+
+/// Whether this build can be asked to page a photo carousel at all.
+///
+/// A named check beside [`can_follow`] for the same reason that one exists: the answer was
+/// *no* for three of the fourteen phones on this farm, and the consequence of not asking was
+/// not a missing gesture — it was **silence**. `traverse_carousel` returns 0 on an unmeasured
+/// badge without reporting anything, so the panel showed a "Bài ảnh" group promising a
+/// feature those phones could never perform, and the session-start provenance line read
+/// perfectly healthy. Worse, that line is *inverted*: `TIKTOK_RESOURCE_SETS` has no entry for
+/// `trill` 38.3.2, so the eleven phones that **can** page carousels print "CHƯA đo resource id
+/// cho phiên bản app này" while the three that could not were the only ones printing a
+/// reassuring version.
+///
+/// Costs nothing at runtime — the badge lookup is a table read, not a device query.
+fn can_page_carousel(labels: TikTokControls) -> bool {
+    labels.label(TikTokControl::PhotoBadge).is_some()
 }
 
 /// Whether this build can be asked to follow at all.
@@ -592,6 +634,10 @@ impl<'a> HierarchyRun<'a> {
         stop: &AtomicBool,
         status: &mut NurtureSessionStatus,
         report: &(dyn Fn(&mut NurtureSessionStatus, String) + Send + Sync),
+        // Where each slide is offered as evidence for the comment that follows. `None` from
+        // callers with no comment to write — the probe, and the tests that switch commenting
+        // off — and then this behaves exactly as it did.
+        evidence: Option<&dyn CommentTextSource>,
     ) -> u32 {
         if !self.looks_like_photo_post().await {
             return 0;
@@ -606,10 +652,21 @@ impl<'a> HierarchyRun<'a> {
                     status,
                     format!("bài ảnh {total} ảnh — chỉ xem ảnh đầu ({portion_percent}%)"),
                 );
+                // One slide is still one slide of evidence, and a deferred comment is waiting
+                // on it. Returning without offering it would leave the sheet empty and the
+                // post silently uncommented for a reason the operator never asked for.
+                if let Some(evidence) = evidence {
+                    evidence.note_slide();
+                }
                 return 1;
             }
         }
         report(status, "gặp bài ảnh — vuốt ngang".into());
+        // Slide one, before any gesture: the picture the card arrived on, and the one the
+        // fingerprint at the top of the post describes.
+        if let Some(evidence) = evidence {
+            evidence.note_slide();
+        }
 
         let mut seen = 1u32;
         // Consecutive turns whose effect could not be read. Reset by any readable counter.
@@ -630,7 +687,16 @@ impl<'a> HierarchyRun<'a> {
                 report(status, format!("vuốt ngang lỗi: {error}"));
                 break;
             }
-            match self.carousel_position().await {
+            let position = self.carousel_position().await;
+            // **After `CAROUSEL_SETTLE` and a full hierarchy dump**, which is the most settled
+            // this loop ever is, so it needs no new wait and costs no new round trip. Offered
+            // in **both** arms below: the `None` arm is the only one reached on a post whose
+            // counter never renders, and that was 6 of 10 photo posts on one fleet run — a
+            // sink fed only where the counter is readable would miss the majority case.
+            if let Some(evidence) = evidence {
+                evidence.note_slide();
+            }
+            match position {
                 Some((now, post_total)) => {
                     unproven = 0;
                     if total.is_none() {
@@ -988,33 +1054,32 @@ async fn await_feed(
     let started = Instant::now();
     let deadline = started + FEED_READY_WINDOW;
     let mut said = false;
-    let mut nudged = false;
-    let mut backs = 0u32;
+    // The rungs, their order and the argument for each live in [`crate::feed_ladder`]; the
+    // idle sweeper drives the same ones. What stays here is this caller's *budget*: a
+    // thirty-second window, a poll every second, and Back held back for ten of those.
+    let mut spend = LadderSpend::new(MODAL_BACK_LIMIT);
     loop {
         if stop.load(Ordering::Relaxed) {
             return false;
         }
-        if run.on_feed().await {
-            if said {
-                report(status, "feed đã lên".into());
-            }
-            return true;
-        }
 
-        // **The window is checked here so every branch below sits inside it.**
-        //
-        // It used to sit at the bottom, past the recovery branches, which was safe only
-        // while each of those could fire once: `nudged` guards the Home tap, `backed`
-        // guards the Back press. The dialog decline deliberately has no such guard —
-        // TikTok stacks prompts and each one hides the next — so a decline label that
-        // stays on screen (a tap that misses, a screen that genuinely carries the word)
-        // put this loop in a tap-sleep-continue cycle that never reached the check at
-        // all. A session promising to give up after thirty seconds instead ran until
-        // something else stopped it.
-        //
-        // Above the branches but below `on_feed`, so a feed arriving on the last poll
-        // still counts. That costs one cheap read and is the answer the operator wanted.
+        // **Past the window: look, never touch.** The check sits here — above every rung
+        // and below nothing — for two reasons that used to fight each other. It has to be
+        // above the rungs, because a decline label that stays on screen once put this loop
+        // in a tap-sleep-continue cycle that never reached a check at the bottom, and a
+        // session promising to give up after thirty seconds ran until something else
+        // stopped it. And a feed arriving on the very last poll still has to count, which
+        // is why the expiry path takes one more look before reporting failure rather than
+        // returning on the clock alone. Acting on that last look would be worse than not
+        // looking: a tap the session is about to abandon leaves the phone mid-transition
+        // for whoever comes next.
         if Instant::now() >= deadline {
+            if feed_ladder::on_feed(run.session, run.labels).await {
+                if said {
+                    report(status, "feed đã lên".into());
+                }
+                return true;
+            }
             report(
                 status,
                 format!(
@@ -1025,82 +1090,21 @@ async fn await_feed(
             );
             return false;
         }
-        // **A modal owns the whole tree, so nothing else on this screen is findable.**
-        // Measured 18/08/2026: a phone held behind "Save login for next time?" dumped a
-        // single `content-desc` of `Dialog`, which is why neither the feed tab nor the Home
-        // tab could be seen and the session could only report that it never saw a feed.
-        //
-        // Declining is safe without knowing which dialog it is — `Not now` changes no
-        // setting and no account, and the dialog comes back next time. Cleared on every
-        // poll rather than once: TikTok stacks these, and each one hides the next.
-        if let Some(element) = locate(run.session, run.labels, TikTokControl::DialogDismiss)
-            .await
-            .ok()
-            .flatten()
-        {
-            report(status, "đóng hộp thoại TikTok chắn feed".into());
-            let _ = run.session.tap(element.centre()).await;
-            sleep_interruptible(FEED_READY_POLL, stop).await;
-            continue;
-        }
 
-        // **Try to go there before giving up.** A phone is left wherever the last session
-        // or the last person left it, and Profile / Shop / Inbox are each one tap from the
-        // feed — but `FeedTab` is a tab *inside* the feed, so on any of them this loop saw
-        // nothing and waited out the whole window. Measured 18/08/2026: phones parked on
-        // Profile failed every session, with a message that guessed at a splash screen or a
-        // login page while the app was logged in and perfectly healthy.
-        //
-        // Once, not on every poll. The tap is cheap but not free, and a phone that does not
-        // reach the feed after being sent there has something wrong that tapping again will
-        // not fix.
-        if !nudged && present(run.session, run.labels, TikTokControl::HomeTab).await {
-            nudged = true;
-            report(
-                status,
-                "TikTok đang ở tab khác — bấm Home để về feed".into(),
-            );
-            if let Some(element) = locate(run.session, run.labels, TikTokControl::HomeTab)
-                .await
-                .ok()
-                .flatten()
-            {
-                let _ = run.session.tap(element.centre()).await;
+        // Patience is this caller's to spend, not the ladder's. Ten seconds before Back
+        // becomes available, so a slow splash screen is waited out rather than answered
+        // with a keypress — see [`MODAL_BACK_DELAY`].
+        spend.allow_back = started.elapsed() >= MODAL_BACK_DELAY;
+        let step = feed_ladder::step(run.session, run.labels, &mut spend).await;
+        if step == LadderStep::OnFeed {
+            if said {
+                report(status, "feed đã lên".into());
             }
-            sleep_interruptible(FEED_READY_POLL, stop).await;
-            continue;
+            return true;
         }
-
-        // **Nothing on this screen carries a label, so use the way out that needs none.**
-        //
-        // Measured 18/08/2026 on ce0517155ab38c390d: TikTok held the phone behind "Get
-        // updates sent to your email?", and the whole dump had *no* `content-desc` at all —
-        // no feed tab, no bottom bar, nothing any branch above could find. The dialog's only
-        // labelled control was its accept button, and accepting subscribes a real account to
-        // marketing email; the decline is an unlabelled `ImageView`. So no label can reach
-        // it. Back can, and did: one press dismissed it and the feed was underneath.
-        //
-        // This is why it is worth having as well as [`TikTokControl::DialogDismiss`] rather
-        // than instead of it. A measured decline is better when it exists — it is the button
-        // a person would choose. But dialogs arrive faster than anyone can measure them, in
-        // languages nobody has dumped, and this one had no reachable decline at all.
-        //
-        // Safe *here specifically*, because every branch above has already failed. Back on
-        // the feed would leave TikTok — but then `on_feed` would have returned. On Profile,
-        // Inbox or Shop the Home tab would have been found. What is left is a screen with
-        // neither, which is a dialog or a splash.
-        if backs < MODAL_BACK_LIMIT && started.elapsed() >= MODAL_BACK_DELAY {
-            backs += 1;
-            report(
-                status,
-                format!("màn hình bị chặn và không có nút nào đọc được — bấm Back ({backs}/{MODAL_BACK_LIMIT})"),
-            );
-            let _ = run.session.back().await;
-            sleep_interruptible(FEED_READY_POLL, stop).await;
-            continue;
-        }
-
-        if !said {
+        if let Some(line) = step.says() {
+            report(status, line);
+        } else if !said {
             said = true;
             report(status, "TikTok đang khởi động — chờ feed lên".into());
         }
@@ -1119,6 +1123,67 @@ async fn await_feed(
 /// Mirrors the shape of the pixel engine's loop — dwell, decide, act, swipe,
 /// rest — using the same policy objects, so a session on Android paces like a
 /// session on iOS rather than like a script.
+/// Write the comment for the post in front of us and send it, recording whichever way it
+/// ended.
+///
+/// Lifted verbatim out of the `FeedAction::Comment` arm when the deferral gave it a second
+/// caller. Returns whether the drawer reported `Sent`, which is the one thing the caller needs
+/// afterwards: a comment that landed changes the card's own comment count, so the fingerprint
+/// the next vertical swipe is judged against has to be retaken.
+///
+/// It deliberately does **not** spend any policy budget — `wait_gap`, `record_attempt`,
+/// `mark_post_interacted` and `comment_attempts` all stay at the roll site, so a deferred
+/// comment paces exactly like an immediate one.
+async fn post_rolled_comment(
+    run: &mut HierarchyRun<'_>,
+    source: &dyn CommentTextSource,
+    settings: &NurtureSettings,
+    stop: &AtomicBool,
+    status: &mut NurtureSessionStatus,
+    report: &(dyn Fn(&mut NurtureSessionStatus, String) + Send + Sync),
+) -> bool {
+    let Some(prepared) = source.comment_for_post(settings).await else {
+        report(
+            status,
+            format!(
+                "bỏ qua bình luận: {}",
+                CommentVerdict::ContextSkipped.reason()
+            ),
+        );
+        return false;
+    };
+    match run.comment(&prepared.text, stop).await {
+        Ok(CommentVerdict::Sent) => {
+            status.comments += 1;
+            status.session_prompt_tokens += prepared.prompt_tokens;
+            status.session_completion_tokens += prepared.completion_tokens;
+            report(status, "đã gửi bình luận (nút Gửi tắt lại)".into());
+            source.record_outcome(&prepared, "sent").await;
+            true
+        }
+        Ok(verdict) => {
+            report(status, format!("bỏ qua bình luận: {}", verdict.reason()));
+            // **The verdict, not just "skipped".** A comment that was written, scored and
+            // then not posted is a device-level failure, and the four ways it happens want
+            // four different answers: the drawer never opened, the Send control was not
+            // there, it never armed, or the tap could not be proved. The audit row said the
+            // same word for all of them, so the only place the distinction survived was a
+            // status line nobody stores.
+            source
+                .record_outcome(&prepared, &format!("skipped: {verdict:?}"))
+                .await;
+            false
+        }
+        Err(error) => {
+            report(status, format!("bình luận thất bại: {error}"));
+            source
+                .record_outcome(&prepared, &format!("failed: {error}"))
+                .await;
+            false
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_feed(
     mut run: HierarchyRun<'_>,
@@ -1184,6 +1249,18 @@ pub(super) async fn run_feed(
             format!("bỏ qua bình luận cả phiên: {why}. Phiên vẫn chạy tim/follow/xem"),
         );
     }
+    // Same shape as the line above, for the same reason: a feature the operator switched on
+    // that this build cannot perform must say so once, not fail quietly for a whole session.
+    // Only when the carousel is actually wanted — `carousel_ceiling()` is 0 with the switch
+    // off, and announcing a gap in a feature nobody asked for is noise.
+    if settings.carousel_ceiling() > 0 && !can_page_carousel(run.labels) {
+        report(
+            status,
+            "bỏ qua vuốt ngang cả phiên: chưa đo nhãn bài ảnh cho bản build này. \
+             Bài ảnh vẫn được xem và tương tác như video, chỉ không lướt qua từng ảnh"
+                .into(),
+        );
+    }
 
     let total_videos = video_target(&settings);
 
@@ -1196,6 +1273,12 @@ pub(super) async fn run_feed(
     // happens, instead of watching a switch that reports nothing at all.
     let mut said_comments_impossible = settings.comment_prob > 0 && !comment_capable;
 
+    // The feed loop proper. Set once outside the loop, for the same reason the pixel path
+    // does it: a phase that flickered per post would be noise, not signal.
+    if status.phase != NurturePhase::Watching {
+        status.phase = NurturePhase::Watching;
+        report(status, status.last_message.clone());
+    }
     'feed: for _video in 0..total_videos {
         // Live tuning, once per post — same place, same function, same reason as the pixel
         // loop.
@@ -1307,6 +1390,12 @@ pub(super) async fn run_feed(
 
         let before = fingerprint(run.session, run.labels).await;
         human.note_action();
+        // Hoisted above the roll because the Comment arm needs it to decide whether to wait.
+        // Safe to read here: `apply_live_settings` runs only at the top of the loop, so this
+        // is the same value the carousel block below would have read.
+        let ceiling = settings.carousel_ceiling();
+        // Set when the comment was charged for but held until the slides have been paged.
+        let mut deferred_comment = false;
 
         match roll_feed_action_in_mood(settings.like_prob, settings.comment_prob, mood) {
             FeedAction::Like
@@ -1364,43 +1453,25 @@ pub(super) async fn run_feed(
                 status.comment_attempts += 1;
                 report(status, "bình luận".into());
                 let source = comments.expect("comment_capable implies a text source");
-                let prepared = source.comment_for_post(&settings).await;
-                match prepared {
-                    None => report(
+                // **Wait for the slides on a post that has them.** The comment used to be
+                // written right here, before a single sideways gesture existed, so a
+                // six-image post was commented on from image one — and because a still card
+                // publishes the same picture on every sample, from one picture sampled three
+                // times. The traversal below already pays for every flick, its settle and a
+                // hierarchy dump per slide; the comment simply never saw any of it.
+                //
+                // A video keeps this exact order. There is nothing to wait for, and the
+                // follow block below can navigate off the feed — which a deferred comment has
+                // to survive, and an immediate one never meets.
+                if ceiling > 0 && can_page_carousel(run.labels) && run.looks_like_photo_post().await
+                {
+                    report(
                         status,
-                        format!(
-                            "bỏ qua bình luận: {}",
-                            CommentVerdict::ContextSkipped.reason()
-                        ),
-                    ),
-                    Some(prepared) => match run.comment(&prepared.text, stop).await {
-                        Ok(CommentVerdict::Sent) => {
-                            status.comments += 1;
-                            status.session_usd += prepared.usd;
-                            report(status, "đã gửi bình luận (nút Gửi tắt lại)".into());
-                            source.record_outcome(&prepared, "sent").await;
-                        }
-                        Ok(verdict) => {
-                            report(status, format!("bỏ qua bình luận: {}", verdict.reason()));
-                            // **The verdict, not just "skipped".** A comment that was
-                            // written, scored and then not posted is a device-level
-                            // failure, and the four ways it happens want four different
-                            // answers: the drawer never opened, the Send control was not
-                            // there, it never armed, or the tap could not be proved. The
-                            // audit row said the same word for all of them, so the only
-                            // place the distinction survived was a status line nobody
-                            // stores.
-                            source
-                                .record_outcome(&prepared, &format!("skipped: {verdict:?}"))
-                                .await;
-                        }
-                        Err(error) => {
-                            report(status, format!("bình luận thất bại: {error}"));
-                            source
-                                .record_outcome(&prepared, &format!("failed: {error}"))
-                                .await;
-                        }
-                    },
+                        "bài ảnh — soạn bình luận sau khi xem hết ảnh".into(),
+                    );
+                    deferred_comment = true;
+                } else {
+                    post_rolled_comment(&mut run, source, &settings, stop, status, report).await;
                 }
             }
             FeedAction::None => {}
@@ -1449,7 +1520,6 @@ pub(super) async fn run_feed(
         // The **ceiling**, not `carousel_slide_budget()`: that one has the portion already
         // folded in for the pixel engine, and this path applies the portion to the post's
         // real image count. Using it here would apply the percentage twice.
-        let ceiling = settings.carousel_ceiling();
         let mut before = before;
         if ceiling > 0 {
             let slides = run
@@ -1459,13 +1529,54 @@ pub(super) async fn run_feed(
                     stop,
                     status,
                     report,
+                    // Only a deferred comment has a use for the slides. Handing the sink over
+                    // on every photo post would fill it on posts nobody is going to comment
+                    // on, and the next comment would then be grounded on the wrong card.
+                    deferred_comment.then_some(comments).flatten(),
                 )
                 .await;
+            // **The deferred comment, before the stop check below.** A session told to stop
+            // mid-traversal has already spent this post's comment budget, so the row has to
+            // be written either way — that is the same hole `no_api_key` used to leave, and
+            // the reason `record_skip` exists.
+            if deferred_comment {
+                let source = comments.expect("deferred implies a text source");
+                // Let the pager finish, then re-read the card. `before` was taken at the top
+                // of the post, several sideways gestures ago.
+                sleep_interruptible(SWIPE_SETTLE, stop).await;
+                let after = fingerprint(run.session, run.labels).await;
+                if stop.load(Ordering::Relaxed) {
+                    source.record_skip(&settings, "deferred_stopped").await;
+                } else if after.is_empty() {
+                    // No rail at all: either the follow above navigated off the feed —
+                    // measured on 18/08/2026 and the reason the walk-back below exists — or
+                    // the card is mid-transition. Either way the drawer would open on the
+                    // wrong screen.
+                    report(status, "bỏ qua bình luận: không còn thấy thẻ bài".into());
+                    source.record_skip(&settings, "deferred_no_rail").await;
+                } else if after != before {
+                    // The card changed underneath the traversal. Posting now would comment on
+                    // whatever arrived, which is worse than not commenting.
+                    report(
+                        status,
+                        "bỏ qua bình luận: thẻ đã đổi khi đang xem ảnh".into(),
+                    );
+                    source.record_skip(&settings, "deferred_card_changed").await;
+                } else if post_rolled_comment(&mut run, source, &settings, stop, status, report)
+                    .await
+                {
+                    // A sent comment changes this card's own comment count, and that count is
+                    // part of the fingerprint the next vertical swipe is judged against.
+                    before = fingerprint(run.session, run.labels).await;
+                } else {
+                    before = after;
+                }
+            }
             if stop.load(Ordering::Relaxed) {
                 outcome = Outcome::Stopped;
                 break 'feed;
             }
-            if slides > 1 {
+            if slides > 1 && !deferred_comment {
                 // Re-read the card we are about to leave, and let the pager finish.
                 //
                 // `before` was taken at the top of the post, several sideways gestures ago,
@@ -1921,18 +2032,9 @@ mod tests {
         };
         let stop = AtomicBool::new(false);
         let mut status = NurtureSessionStatus {
-            udid: "modal-phone".into(),
             running: true,
-            videos_done: 0,
-            swipe_attempts: 0,
-            like_attempts: 0,
-            comment_attempts: 0,
-            follow_attempts: 0,
-            likes: 0,
-            comments: 0,
-            follows: 0,
             last_message: String::new(),
-            session_usd: 0.0,
+            ..NurtureSessionStatus::new("modal-phone")
         };
         let said = std::sync::Mutex::new(Vec::<String>::new());
         let report = |status: &mut NurtureSessionStatus, message: String| {
@@ -2040,18 +2142,9 @@ mod tests {
         };
         let stop = AtomicBool::new(false);
         let mut status = NurtureSessionStatus {
-            udid: "unlabelled-modal".into(),
             running: true,
-            videos_done: 0,
-            swipe_attempts: 0,
-            like_attempts: 0,
-            comment_attempts: 0,
-            follow_attempts: 0,
-            likes: 0,
-            comments: 0,
-            follows: 0,
             last_message: String::new(),
-            session_usd: 0.0,
+            ..NurtureSessionStatus::new("unlabelled-modal")
         };
         let report = |status: &mut NurtureSessionStatus, message: String| {
             status.last_message = message;
@@ -2150,18 +2243,9 @@ mod tests {
         };
         let stop = AtomicBool::new(false);
         let mut status = NurtureSessionStatus {
-            udid: "stuck-dialog".into(),
             running: true,
-            videos_done: 0,
-            swipe_attempts: 0,
-            like_attempts: 0,
-            comment_attempts: 0,
-            follow_attempts: 0,
-            likes: 0,
-            comments: 0,
-            follows: 0,
             last_message: String::new(),
-            session_usd: 0.0,
+            ..NurtureSessionStatus::new("stuck-dialog")
         };
         let report = |status: &mut NurtureSessionStatus, message: String| {
             status.last_message = message;
@@ -2314,18 +2398,9 @@ mod tests {
         };
         let stop = AtomicBool::new(false);
         let mut status = NurtureSessionStatus {
-            udid: "stuck-feed".into(),
             running: true,
-            videos_done: 0,
-            swipe_attempts: 0,
-            like_attempts: 0,
-            comment_attempts: 0,
-            follow_attempts: 0,
-            likes: 0,
-            comments: 0,
-            follows: 0,
             last_message: String::new(),
-            session_usd: 0.0,
+            ..NurtureSessionStatus::new("stuck-feed")
         };
         let said = std::sync::Mutex::new(Vec::<String>::new());
         let report = |status: &mut NurtureSessionStatus, message: String| {
@@ -2509,18 +2584,9 @@ mod tests {
         };
         let stop = AtomicBool::new(false);
         let mut status = NurtureSessionStatus {
-            udid: "wanders-off".into(),
             running: true,
-            videos_done: 0,
-            swipe_attempts: 0,
-            like_attempts: 0,
-            comment_attempts: 0,
-            follow_attempts: 0,
-            likes: 0,
-            comments: 0,
-            follows: 0,
             last_message: String::new(),
-            session_usd: 0.0,
+            ..NurtureSessionStatus::new("wanders-off")
         };
         let said = std::sync::Mutex::new(Vec::<String>::new());
         let report = |status: &mut NurtureSessionStatus, message: String| {
@@ -2695,18 +2761,9 @@ mod tests {
         };
         let stop = AtomicBool::new(false);
         let mut status = NurtureSessionStatus {
-            udid: "pager-phone".into(),
             running: true,
-            videos_done: 0,
-            swipe_attempts: 0,
-            like_attempts: 0,
-            comment_attempts: 0,
-            follow_attempts: 0,
-            likes: 0,
-            comments: 0,
-            follows: 0,
             last_message: String::new(),
-            session_usd: 0.0,
+            ..NurtureSessionStatus::new("pager-phone")
         };
         let said = std::sync::Mutex::new(Vec::<String>::new());
         let report = |status: &mut NurtureSessionStatus, message: String| {
@@ -2715,7 +2772,7 @@ mod tests {
         };
 
         let seen = run
-            .traverse_carousel(100, 20, &stop, &mut status, &report)
+            .traverse_carousel(100, 20, &stop, &mut status, &report, None)
             .await;
 
         let said = said.lock().expect("messages").clone();
@@ -2733,6 +2790,207 @@ mod tests {
             said.iter().any(|line| line.contains("7/7")),
             "and the operator is told the post was finished, not abandoned: {said:?}"
         );
+    }
+
+    /// A sink that only counts, so the traversal can be asked what it offered.
+    #[derive(Default)]
+    struct SlideCounter {
+        slides: std::sync::atomic::AtomicUsize,
+        skips: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CommentTextSource for SlideCounter {
+        async fn comment_for_post(&self, _settings: &NurtureSettings) -> Option<PreparedComment> {
+            None
+        }
+
+        fn note_slide(&self) {
+            self.slides.fetch_add(1, Ordering::Relaxed);
+        }
+
+        async fn record_skip(&self, _settings: &NurtureSettings, reason: &str) {
+            self.skips.lock().expect("skips").push(reason.to_string());
+        }
+    }
+
+    /// **Every slide, including the ones whose counter never rendered.**
+    ///
+    /// The comment used to be written before this traversal began, so a seven-image post was
+    /// commented on from image one — and because a still card publishes the same picture on
+    /// every sample, from one picture sampled three times. The count here is what the sheet
+    /// gets to choose from.
+    #[tokio::test]
+    async fn every_slide_of_a_photo_post_is_offered_as_evidence() {
+        let phone = PagerPhone::default();
+        let screen = (1_080.0, 2_220.0);
+        let mut run = HierarchyRun {
+            session: &phone,
+            labels: vietnamese(),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        };
+        let stop = AtomicBool::new(false);
+        let mut status = NurtureSessionStatus {
+            running: true,
+            last_message: String::new(),
+            ..NurtureSessionStatus::new("pager-phone")
+        };
+        let report = |status: &mut NurtureSessionStatus, message: String| {
+            status.last_message = message;
+        };
+        let sink = SlideCounter::default();
+
+        let seen = run
+            .traverse_carousel(100, 20, &stop, &mut status, &report, Some(&sink))
+            .await;
+
+        assert_eq!(seen, PagerPhone::TOTAL);
+        // One per slide: the card it arrived on, then one per turn. Not `seen + 1` — slide one
+        // is offered before the loop, and the loop offers one per turn it takes.
+        assert_eq!(
+            sink.slides.load(Ordering::Relaxed),
+            PagerPhone::TOTAL as usize,
+            "a seven-image post offers seven slides"
+        );
+    }
+
+    /// A sink that hands back a fixed comment and remembers when it was asked.
+    struct OrderedComment {
+        slides_when_asked: std::sync::Mutex<Option<usize>>,
+        slides: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl CommentTextSource for OrderedComment {
+        async fn comment_for_post(&self, _settings: &NurtureSettings) -> Option<PreparedComment> {
+            *self.slides_when_asked.lock().expect("asked") =
+                Some(self.slides.load(Ordering::Relaxed));
+            None
+        }
+
+        fn note_slide(&self) {
+            self.slides.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// The property the whole reorder exists for: **the words are written after the pictures**.
+    ///
+    /// Driven through `traverse_carousel` plus the guard rather than through `run_feed`, because
+    /// the guard is where the decision lives and `run_feed` needs a phone that can also serve a
+    /// feed, a drawer and a rail. What this pins is the ordering: at the moment the source is
+    /// asked for words, it has already been offered every slide.
+    #[tokio::test]
+    async fn the_words_are_written_after_the_slides_not_before_them() {
+        let phone = PagerPhone::default();
+        let screen = (1_080.0, 2_220.0);
+        let mut run = HierarchyRun {
+            session: &phone,
+            labels: vietnamese(),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        };
+        let stop = AtomicBool::new(false);
+        let mut status = NurtureSessionStatus {
+            running: true,
+            last_message: String::new(),
+            ..NurtureSessionStatus::new("pager-phone")
+        };
+        let report = |status: &mut NurtureSessionStatus, message: String| {
+            status.last_message = message;
+        };
+        let source = OrderedComment {
+            slides_when_asked: std::sync::Mutex::new(None),
+            slides: std::sync::atomic::AtomicUsize::new(0),
+        };
+
+        run.traverse_carousel(100, 20, &stop, &mut status, &report, Some(&source))
+            .await;
+        let settings = NurtureSettings::default();
+        post_rolled_comment(&mut run, &source, &settings, &stop, &mut status, &report).await;
+
+        assert_eq!(
+            *source.slides_when_asked.lock().expect("asked"),
+            Some(PagerPhone::TOTAL as usize),
+            "the source must have seen every slide before it was asked for words"
+        );
+    }
+
+    /// A traversal a caller has no comment for must behave exactly as it did.
+    #[tokio::test]
+    async fn a_post_nobody_is_commenting_on_offers_nothing() {
+        let phone = PagerPhone::default();
+        let screen = (1_080.0, 2_220.0);
+        let mut run = HierarchyRun {
+            session: &phone,
+            labels: vietnamese(),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        };
+        let stop = AtomicBool::new(false);
+        let mut status = NurtureSessionStatus {
+            running: true,
+            last_message: String::new(),
+            ..NurtureSessionStatus::new("pager-phone")
+        };
+        let report = |status: &mut NurtureSessionStatus, message: String| {
+            status.last_message = message;
+        };
+        let sink = SlideCounter::default();
+
+        // `None`, which is what the roll site passes on a post it did not defer a comment for.
+        let seen = run
+            .traverse_carousel(100, 20, &stop, &mut status, &report, None)
+            .await;
+
+        assert_eq!(seen, PagerPhone::TOTAL);
+        assert_eq!(
+            sink.slides.load(Ordering::Relaxed),
+            0,
+            "the sink was not handed over, so nothing may reach it"
+        );
+    }
+
+    /// A post whose first image is all the operator asked for still hands that image over.
+    ///
+    /// The early return used to leave with the sink empty, which would have left a deferred
+    /// comment with no evidence at all and skipped the post for a reason nobody chose.
+    #[tokio::test]
+    async fn the_one_slide_case_still_offers_its_one_slide() {
+        let phone = PagerPhone::default();
+        // Start with the counter already showing, which is what a post page does — that is the
+        // surface where `wanted <= 1` is reachable at all.
+        phone.at.store(1, Ordering::Relaxed);
+        let screen = (1_080.0, 2_220.0);
+        let mut run = HierarchyRun {
+            session: &phone,
+            labels: vietnamese(),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        };
+        let stop = AtomicBool::new(false);
+        let mut status = NurtureSessionStatus {
+            running: true,
+            last_message: String::new(),
+            ..NurtureSessionStatus::new("pager-phone")
+        };
+        let report = |status: &mut NurtureSessionStatus, message: String| {
+            status.last_message = message;
+        };
+        let sink = SlideCounter::default();
+
+        // 1% of seven images rounds to one, so this takes the early return.
+        let seen = run
+            .traverse_carousel(1, 20, &stop, &mut status, &report, Some(&sink))
+            .await;
+
+        assert_eq!(seen, 1);
+        assert_eq!(
+            sink.slides.load(Ordering::Relaxed),
+            1,
+            "the one image the operator asked for is still evidence"
+        );
+        assert_eq!(phone.at.load(Ordering::Relaxed), 1, "and nothing was paged");
     }
 
     #[tokio::test(start_paused = true)]
@@ -2755,18 +3013,9 @@ mod tests {
         };
         let stop = AtomicBool::new(false);
         let mut status = NurtureSessionStatus {
-            udid: "deep-stack".into(),
             running: true,
-            videos_done: 0,
-            swipe_attempts: 0,
-            like_attempts: 0,
-            comment_attempts: 0,
-            follow_attempts: 0,
-            likes: 0,
-            comments: 0,
-            follows: 0,
             last_message: String::new(),
-            session_usd: 0.0,
+            ..NurtureSessionStatus::new("deep-stack")
         };
         let report = |status: &mut NurtureSessionStatus, message: String| {
             status.last_message = message;
@@ -2782,5 +3031,50 @@ mod tests {
             "exactly as many as it took — the loop re-judges after each one, so the moment \
              the feed appears the rest are never spent"
         );
+    }
+}
+
+#[cfg(test)]
+mod carousel_capability_tests {
+    use super::*;
+    use crate::tiktok_labels::controls_for;
+
+    /// The three phones this check exists for, and the eleven it must stay quiet about.
+    ///
+    /// Measured 23/08/2026: the fleet ran eleven `trill` 38.3.2 phones that could page
+    /// carousels and three `musically` 46.2.1 that could not, and nothing anywhere said so —
+    /// `traverse_carousel` returned 0 without a word while the panel's "Bài ảnh" group
+    /// promised the feature. The badge has since been measured on `musically` too, which is
+    /// exactly why this test asserts the *rule* against the set that refuses everything: the
+    /// gap will come back with the next unmeasured build, and it must announce itself then.
+    #[test]
+    fn a_build_without_a_measured_badge_is_known_to_be_unable_to_page() {
+        assert!(
+            !can_page_carousel(crate::tiktok_labels::nothing_measured()),
+            "an unmeasured badge means this build cannot page carousels"
+        );
+        for (package, language) in [
+            ("com.ss.android.ugc.trill", "en"),
+            ("com.ss.android.ugc.trill", "vi"),
+            ("com.zhiliaoapp.musically", "en"),
+        ] {
+            let labels = controls_for(package, language, "").expect("measured set");
+            assert!(
+                can_page_carousel(labels),
+                "{package}/{language} has a measured badge, so it must not be warned about"
+            );
+        }
+    }
+
+    /// The check must cost nothing: it reads the label table, never the device.
+    ///
+    /// Stated as a test because the reason the missing-carousel case was silent in the first
+    /// place is that nobody wanted to pay a device round trip per session to announce it.
+    #[test]
+    fn the_check_is_a_table_read_and_needs_no_session() {
+        // No `UiSession` argument exists to pass, which is the property itself: this cannot
+        // touch a phone even by accident.
+        let labels = controls_for("com.zhiliaoapp.musically", "en", "").expect("measured set");
+        assert!(can_page_carousel(labels));
     }
 }

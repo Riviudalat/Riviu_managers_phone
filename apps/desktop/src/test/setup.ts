@@ -22,3 +22,12 @@ class ResizeObserverStub implements ResizeObserver {
 }
 
 globalThis.ResizeObserver = ResizeObserverStub;
+
+/**
+ * jsdom implements no layout, so it ships no `scrollIntoView` at all — calling it throws
+ * `is not a function` rather than doing nothing. That is a gap in the environment, not a
+ * fact about the component: a log panel that keeps its newest line in view is right, and
+ * guarding every such call with a `typeof` check would push the environment's shortcoming
+ * into product code. Stub it once here instead.
+ */
+Element.prototype.scrollIntoView = function scrollIntoView(): void {};

@@ -4,6 +4,8 @@ import { exportViewJpegBurst } from "../../viewStore";
 import { IconApi } from "../Icons";
 import type { DeviceInfo, NurtureApiTestResult, NurtureSettings } from "../../types";
 import { describeError } from "../../describeError";
+import { COMMENT_MODEL_SUGGESTIONS } from "../../commentModels";
+import { evidenceLabel } from "../../commentEvidence";
 import { InfoDot as Info } from "../InfoDot";
 
 /**
@@ -22,6 +24,14 @@ export function NurtureAiTab({ settings, patch, devices, targets, save, onMessag
   save: (next?: NurtureSettings) => Promise<boolean>;
   onMessage: (text: string | null) => void;
 }) {
+  /// What this project measured about the model currently typed in, if anything.
+  ///
+  /// Matched on the model string alone, not the pair: an operator pointing a proxy at the
+  /// same model is still running that model, and refusing to show the note because the host
+  /// differs would be withholding the one useful thing here.
+  const measured = COMMENT_MODEL_SUGGESTIONS.find(
+    (s) => s.model.toLowerCase() === settings.model.trim().toLowerCase(),
+  );
   const [apiTesting, setApiTesting] = useState(false);
   const [apiTest, setApiTest] = useState<NurtureApiTestResult | null>(null);
   const [testUdid, setTestUdid] = useState("");
@@ -65,14 +75,42 @@ export function NurtureAiTab({ settings, patch, devices, targets, save, onMessag
             what="Endpoint tương thích OpenAI dùng để sinh bình luận. Đổi được trong lúc phiên đang chạy, áp từ bình luận kế tiếp."
           />
         </span>
-        <input value={settings.baseUrl} onChange={(e) => patch("baseUrl", e.target.value)} />
+        <input
+          value={settings.baseUrl}
+          list="riviu-comment-base-urls"
+          onChange={(e) => patch("baseUrl", e.target.value)}
+        />
+        <datalist id="riviu-comment-base-urls">
+          {[...new Set(COMMENT_MODEL_SUGGESTIONS.map((s) => s.baseUrl))].map((url) => (
+            <option key={url} value={url} />
+          ))}
+        </datalist>
       </label>
       <label>
         <span className="nu-inline">
           Model
-          <Info of="Model" what="Tên model gửi kèm mỗi lần gọi endpoint ở trên." />
+          <Info
+            of="Model"
+            what="Tên model gửi kèm mỗi lần gọi endpoint ở trên. Bất kỳ endpoint tương thích OpenAI nào cũng chạy — danh sách gợi ý bên dưới chỉ là những cái dự án này đã đo thật."
+          />
         </span>
-        <input value={settings.model} onChange={(e) => patch("model", e.target.value)} />
+        {/* A `datalist`, not a `select`: the client speaks plain OpenAI-compatible
+            `chat/completions`, so any model string works and locking the field to a list
+            would be inventing a restriction the code does not have. */}
+        <input
+          value={settings.model}
+          list="riviu-comment-models"
+          onChange={(e) => patch("model", e.target.value)}
+        />
+        <datalist id="riviu-comment-models">
+          {COMMENT_MODEL_SUGGESTIONS.map((s) => (
+            <option key={s.model} value={s.model} />
+          ))}
+        </datalist>
+        {/* The measurement behind the currently-typed model, when there is one. Nothing is
+            gated on it — the vision capability is detected at runtime now, because the old
+            hardcoded host check went stale and blocked a provider that had shipped it. */}
+        {measured && <span className="hint">{measured.note}</span>}
       </label>
       <label>
         <span className="nu-inline">
@@ -169,7 +207,7 @@ export function NurtureAiTab({ settings, patch, devices, targets, save, onMessag
             <strong>Comment trả về</strong>
             <p className="nurture-api-result-comment">“{apiTest.comment}”</p>
             <p className="nurture-api-result-meta">
-              {apiTest.model} · {apiTest.baseUrlHost} · {apiTest.evidenceMode === "ocr-caption" ? "OCR caption + text" : "3-frame vision"} · {apiTest.promptTokens + apiTest.completionTokens} tokens · ${apiTest.usd.toFixed(5)}
+              {apiTest.model} · {apiTest.baseUrlHost} · {evidenceLabel(apiTest)} · {apiTest.promptTokens} token vào / {apiTest.completionTokens} ra
             </p>
             <p className="hint">
               Context {apiTest.contextConfidence}/100 · liên quan {apiTest.relevance}/100 · bằng chứng {apiTest.evidenceSupport}/100

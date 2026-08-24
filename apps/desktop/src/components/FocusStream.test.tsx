@@ -277,7 +277,10 @@ describe("overlay panel rows", () => {
           { id: "power-off", label: "Tắt máy", danger: true, run },
           // Dropped: the panel has its own "Chụp màn hình" row above.
           { id: "screenshot", label: "Chụp màn hình về máy tính", run: vi.fn() },
-          // Dropped whole, because its only row is one the panel owns.
+          // Dropped whole, because its only row is one the panel owns. Kept single-child
+          // deliberately: this test is about the panel dropping what it already offers, and
+          // a second child would make the submenu survive and break that assertion. The
+          // duplicate-id collision is covered by its own test with its own two-child stub.
           { id: "adb", label: "ADB", children: [{ id: "adb-console", label: "Lệnh adb…" }] },
         ]}
       />,
@@ -710,5 +713,49 @@ describe("FocusStream control lease lifecycle", () => {
     unmount();
 
     await waitFor(() => expect(deviceControlEnd).toHaveBeenCalledWith(fixture.udid));
+  });
+  /**
+   * The overlay's own rows and the shared per-phone catalog are concatenated into ONE list,
+   * so an id used by both is a duplicate React key — and `DeviceFunctionList` keys its
+   * open-flyout state on `node.id`, which made hovering the plain "Lệnh adb" leaf open the
+   * ADB submenu's flyout instead. React only warns on the console, so nothing failed.
+   */
+  it("gives the inline adb row an id the shared catalog does not also use", () => {
+    const warn = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const { getByText } = render(
+        <FocusStream
+          device={fixture}
+          index={1}
+          onClose={() => undefined}
+          groupUdids={[]}
+          groupMode={false}
+          devices={[fixture]}
+          onSelectDevice={() => undefined}
+          functions={[
+            // The catalog's ADB submenu keeps its `adb` id and a surviving child, which is
+            // what made the collision reachable in the real app.
+            {
+              id: "adb",
+              label: "ADB",
+              children: [
+                { id: "adb-console", label: "Lệnh adb…" },
+                { id: "wifi-on", label: "Bật Wi-Fi trên máy" },
+              ],
+            },
+          ]}
+        />,
+      );
+      // Both rows are present, which is the point: they are different functions and must not
+      // share an id. The panel's own leaf opens the console inline; the submenu holds the rest.
+      expect(getByText("Lệnh adb")).toBeTruthy();
+      expect(getByText("ADB")).toBeTruthy();
+      const duplicateKeyWarning = warn.mock.calls
+        .map((call) => String(call[0] ?? ""))
+        .find((message) => message.includes("same key"));
+      expect(duplicateKeyWarning).toBeUndefined();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
