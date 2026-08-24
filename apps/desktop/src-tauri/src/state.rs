@@ -762,6 +762,18 @@ impl AppState {
             artifacts: flow_artifacts.clone(),
         });
         flows.recover_startup().await?;
+        // Interaction workers are `tokio::spawn`s inside this process, so a campaign the DB
+        // still calls `running` is one the app was killed in the middle of. Closed here for
+        // the same reason Flow recovers here: the alternative is a row that says "Đang chạy"
+        // for ever and offers no button that would move it.
+        match db.interrupt_orphaned_interaction_campaigns() {
+            Ok(0) => {}
+            Ok(count) => log::warn!(
+                "{count} chiến dịch tương tác còn dở từ lần chạy trước đã được đánh dấu là đã dừng"
+            ),
+            // Not fatal: the app is more useful with a stale row than not at all.
+            Err(error) => log::warn!("không dọn được chiến dịch tương tác dở: {error:#}"),
+        }
         let committed_artifacts = db.list_committed_flow_artifacts()?;
         for failure in flow_artifacts.reconcile(&committed_artifacts)? {
             log::warn!(

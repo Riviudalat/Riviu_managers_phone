@@ -38,7 +38,7 @@ use tokio::time::Instant;
 
 use crate::driver::{ElementBox, ElementQuery, UiSession};
 use crate::interaction::CommentLocatorIdentity;
-use crate::tiktok_labels::{TikTokControl, TikTokControls};
+use crate::tiktok_labels::{LabelMatch, TikTokControl, TikTokControls};
 
 /// Where to tap to reply to one specific comment, and whose comment it is.
 #[derive(Debug, Clone, PartialEq)]
@@ -373,10 +373,12 @@ pub fn author_matches_handle(author_label: &str, handle: &str) -> bool {
     if handle.len() < MIN_HANDLE_RUN {
         return false;
     }
-    // Compared as **contiguous word runs**, not as one string, because the label carries a
-    // prefix: it is `Follow <nickname>`, so squashing the whole thing yields
-    // `followmongquynh`, which is inside nothing. Stripping the literal `Follow` instead
-    // would hard-code a translated word that the catalogue already owns.
+    // Compared as **contiguous word runs**, not as one string, because a handle is usually
+    // built from *part* of the nickname: `Đà Lạt Gói Mang Về` against `.lt.gi.mang.v`
+    // matches on a run, never on the whole. The label reaching here is already the bare
+    // nickname — `bare_author_label` strips whichever catalogued needle wrapped it — so this
+    // no longer has to see past a `Follow ` prefix, but it still has to see past the words
+    // the handle left out.
     let words: Vec<String> = crate::interaction::normalize_locator_text(author_label)
         .split_whitespace()
         .map(squash)
@@ -627,6 +629,13 @@ pub struct HierarchySendOutcome {
     /// The posted comment, read back out of the still-open list. `None` when it could
     /// not be found unambiguously, which breaks the chain rather than guessing.
     pub identity: Option<CommentLocatorIdentity>,
+    /// What happened to the `@` tags, when any were asked for.
+    ///
+    /// A tag that could not be picked out of TikTok's list is still *typed*, so the comment
+    /// goes out either way — but "tagged" and "wrote the characters of a tag" are different
+    /// outcomes and the operator has to be able to tell them apart. See
+    /// [`append_mentions_by_picker`].
+    pub mention_note: Option<String>,
     /// The parent was only reachable after expanding `View folded comments`.
     ///
     /// A reply under a folded comment is posted, confirmed, and **seen by nobody** —
@@ -658,6 +667,7 @@ pub async fn send_root_by_hierarchy<F>(
     labels: TikTokControls,
     screen: (f64, f64),
     text: &str,
+    mentions: &[String],
     stop: &AtomicBool,
     mut frame_sha: F,
 ) -> anyhow::Result<HierarchySendOutcome>
@@ -668,6 +678,7 @@ where
 
     let outcome = |verdict, armed: String, cleared: String, identity| HierarchySendOutcome {
         verdict,
+        mention_note: None,
         parent_was_folded: false,
         armed_frame_sha256: armed,
         cleared_frame_sha256: cleared,
@@ -706,6 +717,22 @@ where
             None,
         ));
     }
+    // After the body and before the send: the body is written with `set_text`, which replaces
+    // the whole field, so a token added first would not survive it. See
+    // `append_mentions_by_picker` for why the tags land at the end rather than the front.
+    let mut posted: Option<String> = None;
+    let mention_note = if mentions.is_empty() {
+        None
+    } else {
+        let outcome = append_mentions_by_picker(session, screen, mentions, stop).await;
+        // Whatever is in the box now is what Send will publish, tags and spacing included.
+        // Read rather than reconstructed: the token's exact spelling and trailing space are
+        // TikTok's to decide, and guessing them is how the read-back missed the first time.
+        posted = composer_text(session)
+            .await
+            .filter(|value| value.contains(text));
+        outcome.note()
+    };
     let Some(send) = drawer.await_armed(stop).await? else {
         return Ok(outcome(
             CommentVerdict::NotArmed,
@@ -720,14 +747,497 @@ where
     if !confirmed {
         // `NotConfirmed` and never retried: the tap went out, so a retry is how a post
         // ends up with two identical comments on it. The frames are still returned —
-        // they are the only way a person can settle what happened.
-        return Ok(outcome(CommentVerdict::NotConfirmed, armed, cleared, None));
+        // they are the only way a person can settle what happened. The tag note rides along
+        // for the same reason: whatever went out, it went out with these tags on it.
+        let mut refused = outcome(CommentVerdict::NotConfirmed, armed, cleared, None);
+        refused.mention_note = mention_note;
+        return Ok(refused);
     }
 
     // Read the comment back out of the list that is still on screen. A failure here
     // does not un-send anything, so it downgrades the identity rather than the verdict.
-    let identity = read_back_identity(session, text, &cleared).await;
-    Ok(outcome(CommentVerdict::Sent, armed, cleared, identity))
+    //
+    // **Read back what was actually posted, which is not always `text`.** Appending tags puts
+    // `@handle` after the body, so a comment sent with a tag is longer than the string this
+    // function was given — and the read-back matches exactly, by design. Measured 24/08/2026
+    // on the first real tagged send: the comment went out fine and came back unfindable,
+    // which silently costs the identity every reply in the thread needs. `posted` is the
+    // composer's own contents, captured before Send.
+    let identity = read_back_identity(session, posted.as_deref().unwrap_or(text), &cleared).await;
+    let mut sent = outcome(CommentVerdict::Sent, armed, cleared, identity);
+    sent.mention_note = mention_note;
+    Ok(sent)
+}
+
+/// How long to wait for TikTok's mention list to arrive after the handle is typed.
+///
+/// It is a network fetch, and a list that has not come back yet looks exactly like one that
+/// has nothing in it — which is the wrong conclusion, because it would silently downgrade a
+/// mention to plain text.
+const MENTION_PICKER_WAIT: Duration = Duration::from_millis(4_000);
+const MENTION_PICKER_POLL: Duration = Duration::from_millis(400);
+
+/// What became of each handle the operator asked to tag.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MentionOutcome {
+    /// Picked out of TikTok's own list, so the comment carries a real mention.
+    pub linked: Vec<String>,
+    /// Typed but never offered, so it stays literal text — the account is not notified.
+    pub literal: Vec<String>,
+}
+
+impl MentionOutcome {
+    /// One line for the operator, or `None` when nothing was asked for.
+    pub fn note(&self) -> Option<String> {
+        if self.linked.is_empty() && self.literal.is_empty() {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if !self.linked.is_empty() {
+            parts.push(format!("tag thật: @{}", self.linked.join(" @")));
+        }
+        if !self.literal.is_empty() {
+            parts.push(format!(
+                "chỉ là chữ (TikTok không gợi ý ra): @{}",
+                self.literal.join(" @")
+            ));
+        }
+        Some(parts.join(" · "))
+    }
+}
+
+/// Append real `@mentions` to whatever is already in the composer.
+///
+/// **Why this is not just more text.** Typing an `@handle` into a comment produces literal
+/// characters: TikTok renders them grey, links nothing, and notifies nobody. A real mention
+/// only exists if it is *chosen from the app's own suggestion list*, which inserts a token.
+/// Measured 24/08/2026 on `ce051715ac247a3f01` against
+/// `.../@.lt.gi.mang.v/photo/7668947001618320660`:
+///
+/// * writing `@lt.gi` with `set_text` put the characters in the field and opened nothing —
+///   accessibility text does not reach the app's input watchers;
+/// * injecting the same characters as **key events** opened the list and filtered it to four
+///   real accounts (`lt.gi`, `.lt.gi.mang.v`, `lt.g94`, `lt.gr37`);
+/// * tapping the matching row turned the field into `…@lt.gi `, a token.
+///
+/// **The body has to be in the field first, and that ordering is forced.** `set_text` is the
+/// only path that carries Vietnamese (`input text` is killed by diacritics), and it replaces
+/// the whole editable — so anything it writes after a token would take the token with it. The
+/// mentions therefore land at the end of the comment rather than the front. A mention notifies
+/// the account wherever it sits.
+///
+/// **It never guesses.** A row is tapped only when its text equals the wanted handle exactly;
+/// the measured list is full of near-misses (`lt.g94` for `lt.gi`) and tapping one would tag a
+/// stranger from the operator's account. A handle with no exact row is left as the literal
+/// text already typed — today's behaviour — and reported as such.
+pub async fn append_mentions_by_picker(
+    session: &dyn UiSession,
+    screen: (f64, f64),
+    handles: &[String],
+    stop: &AtomicBool,
+) -> MentionOutcome {
+    let mut outcome = MentionOutcome::default();
+    let mut planner = crate::nurture::touch::TouchPointPlanner::new(screen);
+    for handle in handles {
+        if stop.load(Ordering::Relaxed) {
+            outcome.literal.push(handle.clone());
+            continue;
+        }
+        let handle = handle.trim().trim_start_matches('@');
+        if handle.is_empty() {
+            continue;
+        }
+        // Checked **here**, not only in the backend. `type_keys` reaches a real device shell,
+        // and the rule about what may go into it belongs to whoever composes the string —
+        // leaving it to the Android session alone would mean every other backend, and every
+        // test double, silently gets a laxer one. The session keeps its own check as well.
+        if !is_typeable_handle(handle) {
+            outcome.literal.push(handle.to_string());
+            continue;
+        }
+        // A leading space, or the tag runs into the last word of the comment — measured
+        // 24/08/2026: the first real run posted `…đi được ngay@ghin.lt.sng.sng`. TikTok adds
+        // its own trailing space when it inserts the token, so consecutive tags separate
+        // themselves and only the first needs this.
+        if session.type_keys(&format!(" @{handle}")).await.is_err() {
+            outcome.literal.push(handle.to_string());
+            continue;
+        }
+        match await_mention_row(session, handle, stop).await {
+            Some(row) => {
+                let point = planner.next(row.centre(), row.jitter_radius());
+                if session.tap(point).await.is_err() {
+                    outcome.literal.push(handle.to_string());
+                    continue;
+                }
+                tokio::time::sleep(MENTION_PICKER_POLL).await;
+                // The list closing over this handle is the only readable proof the pick
+                // landed; a row still offering it means the tap did nothing.
+                if find_mention_row(session, handle).await.is_some() {
+                    outcome.literal.push(handle.to_string());
+                } else {
+                    outcome.linked.push(handle.to_string());
+                }
+            }
+            None => outcome.literal.push(handle.to_string()),
+        }
+    }
+    outcome
+}
+
+/// What a post says about itself, read off the action rail.
+///
+/// The numbers a threshold can be measured against — and the set is short on purpose,
+/// because it is exactly what the post page states. **Views are not here.** Measured
+/// 24/08/2026 on `.../@.lt.gi.mang.v/photo/7668947001618320660`: the rail carries
+/// `Like video. 22 likes`, `Read or add comments. 21 comments` and `Share video. 8 shares`,
+/// and nothing anywhere on the page states a play count. The only place TikTok shows one is
+/// the author's profile grid, under each thumbnail, where nothing identifies *which* post a
+/// number belongs to — so a view target could be worked towards but never checked, and a
+/// threshold nobody can verify is a promise, not a feature.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PostCounters {
+    /// `None` when this build has no measured counted-like control, or the rail was
+    /// unreadable — never `0`, which would read as "nobody liked it".
+    pub likes: Option<u32>,
+    pub comments: Option<u32>,
+    /// Whether either number came from an abbreviated string like `1.2K`.
+    ///
+    /// TikTok stops showing exact totals in the thousands, so above that a threshold can only
+    /// be met to the nearest hundred. Saying so beats reporting `1200` as if it were counted.
+    pub approximate: bool,
+}
+
+/// Read the post's own totals. Taps nothing.
+pub async fn read_post_counters(session: &dyn UiSession, labels: TikTokControls) -> PostCounters {
+    let mut counters = PostCounters::default();
+    for (control, slot) in [
+        (TikTokControl::LikeCount, 0usize),
+        (TikTokControl::Comments, 1usize),
+    ] {
+        let Some(label) = labels.label(control) else {
+            continue;
+        };
+        let Some(found) = session.locate(label.to_query()).await.ok().flatten() else {
+            continue;
+        };
+        let Some(text) = found.description.as_deref() else {
+            continue;
+        };
+        if let Some((value, approximate)) = parse_count(text) {
+            if slot == 0 {
+                counters.likes = Some(value);
+            } else {
+                counters.comments = Some(value);
+            }
+            counters.approximate |= approximate;
+        }
+    }
+    counters
+}
+
+/// The first number in a rail label, and whether it was abbreviated.
+///
+/// The labels read `Like video. 22 likes` and `Read or add comments. 21 comments`, so the
+/// count is the first run of digits. Two shapes have to survive: thousands separators
+/// (`1,160`) and TikTok's own abbreviation (`1.2K`, `3M`), which is *rounded* — the caller is
+/// told so rather than being handed a number that looks exact.
+fn parse_count(text: &str) -> Option<(u32, bool)> {
+    let bytes: Vec<char> = text.chars().collect();
+    let start = bytes.iter().position(|c| c.is_ascii_digit())?;
+    let mut end = start;
+    while end < bytes.len()
+        && (bytes[end].is_ascii_digit() || bytes[end] == ',' || bytes[end] == '.')
+    {
+        end += 1;
+    }
+    // A trailing separator belongs to the sentence, not to the number: `22 likes.`
+    while end > start && !bytes[end - 1].is_ascii_digit() {
+        end -= 1;
+    }
+    let raw: String = bytes[start..end].iter().collect();
+    let suffix = bytes.get(end).copied().unwrap_or(' ');
+    let multiplier = match suffix.to_ascii_uppercase() {
+        'K' => 1_000f64,
+        'M' => 1_000_000f64,
+        'B' => 1_000_000_000f64,
+        _ => 1f64,
+    };
+    let abbreviated = multiplier > 1f64;
+    // With a multiplier the dot is a decimal point; without one it is a thousands separator,
+    // which is how `1.2K` and `1,160` can both be right.
+    let cleaned = if abbreviated {
+        raw.replace(',', "")
+    } else {
+        raw.replace([',', '.'], "")
+    };
+    let value: f64 = cleaned.parse().ok()?;
+    Some(((value * multiplier).round() as u32, abbreviated))
+}
+
+/// A post as it appears on the author's profile grid.
+///
+/// The grid is the **only** place TikTok states a play count — the post page does not, which
+/// is why a view threshold has to come here at all (measured 24/08/2026: the rail carries
+/// likes, comments and shares and nothing else).
+#[derive(Debug, Clone)]
+pub struct ProfileTile {
+    /// A point inside the thumbnail, for opening it.
+    pub tap: crate::types::TapPoint,
+    pub views: u32,
+    /// The count was abbreviated (`1.2K`), so it is rounded.
+    pub approximate: bool,
+}
+
+/// Every play count currently on the profile grid, with somewhere to tap for each.
+///
+/// Paired **within one dump**, never across two. That is not fussiness: the same grid read
+/// after a different scroll puts the tiles at different y, and pairing a count from one read
+/// with a tile from another is how a measurement ends up describing the wrong post — it
+/// happened twice while this was being worked out.
+///
+/// The tap point is derived from the count rather than from the tile node, because the
+/// thumbnail is a bare `ImageView` with no id worth keying on: the count sits near the
+/// bottom-left of its own tile, so a point up and to the right of it is inside that tile and
+/// no other.
+pub async fn read_profile_tiles(session: &dyn UiSession, screen: (f64, f64)) -> Vec<ProfileTile> {
+    let Ok(nodes) = session
+        .locate_all_described(ElementQuery::ClassName("android.widget.TextView"))
+        .await
+    else {
+        return Vec::new();
+    };
+    // The header's own three numbers (following / followers / likes) live in the top strip.
+    // Excluded by position: after one scroll they are gone anyway, and a threshold reading
+    // the follower count as a play count would be badly wrong rather than slightly wrong.
+    let header = screen.1 * 0.25;
+    nodes
+        .into_iter()
+        .filter(|node| node.y > header)
+        .filter_map(|node| {
+            let text = node.description.as_deref()?;
+            if !text.chars().next()?.is_ascii_digit() {
+                return None;
+            }
+            let (views, approximate) = parse_count(text)?;
+            Some(ProfileTile {
+                tap: crate::types::TapPoint {
+                    x: node.x + TILE_TAP_RIGHT,
+                    y: node.y - TILE_TAP_UP,
+                },
+                views,
+                approximate,
+            })
+        })
+        .collect()
+}
+
+/// The caption of whatever post is on screen, used to tell one post from another.
+///
+/// Deliberately the **caption** and not the counters. The counters are what a threshold is
+/// moving, so identifying a post by them would mean the post stops being recognisable as
+/// soon as the farming works. A caption is long, unique and does not change.
+///
+/// **The caption is not a `TextView`.** Measured 24/08/2026: it is
+/// `com.bytedance.tux.input.TuxTextLayoutView` (`resource-id` ending `/desc`), while the
+/// comment bodies below it are ordinary `TextView`s. Reading only `TextView` therefore
+/// returned a *comment* as the caption when the drawer was open, and nothing at all when it
+/// was closed — which is exactly how the first run of the view reader answered "not found"
+/// for a post that was on screen.
+///
+/// The `TextView` sweep stays as a fallback for a build that renders it the ordinary way, and
+/// the longest string wins in both: a caption is longer than any label or button on the page.
+pub async fn read_post_caption(session: &dyn UiSession) -> Option<String> {
+    const CAPTION_MIN_CHARS: usize = 40;
+    const CAPTION_CLASSES: [&str; 2] = [
+        "com.bytedance.tux.input.TuxTextLayoutView",
+        "android.widget.TextView",
+    ];
+    for class in CAPTION_CLASSES {
+        let Ok(nodes) = session
+            .locate_all_described(ElementQuery::ClassName(class))
+            .await
+        else {
+            continue;
+        };
+        let longest = nodes
+            .into_iter()
+            .filter_map(|node| node.description)
+            .map(|text| text.trim().to_string())
+            .filter(|text| text.chars().count() >= CAPTION_MIN_CHARS)
+            .max_by_key(|text| text.chars().count());
+        if longest.is_some() {
+            return longest;
+        }
+    }
+    None
+}
+
+/// How many grid rows to scroll through looking for the post.
+///
+/// Bounded so a profile with hundreds of posts cannot turn one reading into an unbounded
+/// walk. A post further down than this reports `None` — "not found", never a guess.
+pub const PROFILE_SCROLL_ATTEMPTS: u32 = 6;
+
+/// The target post's play count, read off the author's profile grid.
+///
+/// **This is a navigation, not a read**, and that is the honest cost of a view threshold:
+/// the number is only on the grid, the grid says nothing about which post a tile is, so each
+/// candidate is opened and its caption compared before its count is believed. Returns to the
+/// post page when it is done.
+///
+/// `None` means the post was not found within the scroll budget, or the caption could not be
+/// read — never a number from a tile that was not checked.
+pub async fn read_view_count(
+    session: &dyn UiSession,
+    labels: TikTokControls,
+    screen: (f64, f64),
+    stop: &AtomicBool,
+) -> Option<u32> {
+    let wanted = read_post_caption(session).await?;
+    let profile = labels.label(TikTokControl::AuthorProfileLink)?;
+    let link = session.locate(profile.to_query()).await.ok().flatten()?;
+    session.tap(link.centre()).await.ok()?;
+    tokio::time::sleep(PROFILE_SETTLE).await;
+
+    let mut checked: Vec<f64> = Vec::new();
+    for _ in 0..PROFILE_SCROLL_ATTEMPTS {
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        for tile in read_profile_tiles(session, screen).await {
+            // Tiles already opened on an earlier row keep their y after a scroll only by
+            // accident; the guard is against re-opening the same tile in the same view.
+            if checked.iter().any(|seen| (seen - tile.tap.y).abs() < 20.0) {
+                continue;
+            }
+            checked.push(tile.tap.y);
+            if session.tap(tile.tap.clone()).await.is_err() {
+                continue;
+            }
+            tokio::time::sleep(PROFILE_SETTLE).await;
+            let caption = read_post_caption(session).await;
+            let found = caption.as_deref() == Some(wanted.as_str());
+            if found {
+                tracing::info!(
+                    "view count {} read from the tile whose caption matched {:?}",
+                    tile.views,
+                    wanted.chars().take(50).collect::<String>()
+                );
+                return Some(tile.views);
+            }
+            // Back to the grid, whichever post that was.
+            session.back().await.ok()?;
+            tokio::time::sleep(PROFILE_SETTLE).await;
+        }
+        checked.clear();
+        scroll_profile_grid(session, screen).await.ok()?;
+    }
+    None
+}
+
+/// One grid row's worth of scroll, inside the grid rather than over the header.
+async fn scroll_profile_grid(session: &dyn UiSession, screen: (f64, f64)) -> anyhow::Result<()> {
+    session
+        .swipe(crate::types::SwipeGesture {
+            from: crate::types::TapPoint {
+                x: screen.0 / 2.0,
+                y: screen.1 * 0.75,
+            },
+            to: crate::types::TapPoint {
+                x: screen.0 / 2.0,
+                y: screen.1 * 0.30,
+            },
+            duration_ms: 300,
+        })
+        .await?;
+    tokio::time::sleep(PROFILE_SETTLE).await;
+    Ok(())
+}
+
+/// How long to let the profile settle after a tap or a scroll.
+///
+/// Waiting for the **grid or the post page to finish drawing**: both are network-backed, and
+/// a read taken too early sees an empty grid — which the caller cannot tell apart from a
+/// profile with no posts. Matched to `PARENT_SCROLL_SETTLE`, measured on the same fleet.
+const PROFILE_SETTLE: Duration = Duration::from_millis(2_500);
+
+/// How far from a play count the middle of its thumbnail is.
+///
+/// Measured on the 1080-wide grid: tiles are 358x477 with the count at the bottom-left, so
+/// this lands well inside the same tile and nowhere near its neighbours.
+const TILE_TAP_RIGHT: f64 = 100.0;
+const TILE_TAP_UP: f64 = 200.0;
+
+/// What the comment box holds right now.
+///
+/// `locate_all_described` reads the rendered `text` into `description`, which for an
+/// `EditText` is its contents — the same read the drawer uses to tell a placeholder from a
+/// draft. `None` when there is no field or it is empty.
+async fn composer_text(session: &dyn UiSession) -> Option<String> {
+    session
+        .locate_all_described(ElementQuery::ClassName(crate::tiktok_drawer::EDIT_TEXT))
+        .await
+        .ok()?
+        .into_iter()
+        .find_map(|field| field.description)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Whether a handle can be sent as key events at all.
+///
+/// TikTok handles are `[A-Za-z0-9._-]`; anything else is either not a handle or would need
+/// shell escaping that deliberately does not exist (see [`UiSession::type_keys`]). A handle
+/// that fails this is left as the literal text the operator typed, which is what the feature
+/// did for every handle before real mentions existed.
+fn is_typeable_handle(handle: &str) -> bool {
+    !handle.is_empty()
+        && handle
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// Wait for a suggestion row that *is* this handle, not one that merely starts like it.
+async fn await_mention_row(
+    session: &dyn UiSession,
+    handle: &str,
+    stop: &AtomicBool,
+) -> Option<ElementBox> {
+    let deadline = Instant::now() + MENTION_PICKER_WAIT;
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        if let Some(row) = find_mention_row(session, handle).await {
+            return Some(row);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(MENTION_PICKER_POLL).await;
+    }
+}
+
+/// The one row whose text is exactly this handle, or nothing.
+///
+/// Two rows claiming the same handle cannot happen on TikTok, but if the read ever returns
+/// two this refuses rather than picking the first — the cost of being wrong is a mention of
+/// somebody else's account from a real login.
+async fn find_mention_row(session: &dyn UiSession, handle: &str) -> Option<ElementBox> {
+    let wanted = handle.trim_start_matches('@').to_lowercase();
+    let rows = session
+        .locate_all_described(ElementQuery::ClassName("android.widget.TextView"))
+        .await
+        .ok()?;
+    let mut matches = rows.into_iter().filter(|row| {
+        row.description
+            .as_deref()
+            .map(|text| text.trim().trim_start_matches('@').to_lowercase() == wanted)
+            .unwrap_or(false)
+    });
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
 }
 
 /// How many times the comment list is scrolled looking for the parent.
@@ -802,7 +1312,14 @@ pub enum ReplyRefusal {
     /// The drawer never opened.
     NoDrawer,
     /// The parent comment was not on screen after the scroll budget ran out.
-    ParentNotFound { scrolls: u32, unfolded: bool },
+    ParentNotFound {
+        scrolls: u32,
+        unfolded: bool,
+        /// Whether the comment list ever showed a single row. `false` means the drawer was
+        /// open and empty the whole time, which is a different problem from a parent that
+        /// is simply not in the list.
+        saw_rows: bool,
+    },
     /// A swipe closed the drawer instead of scrolling the list.
     DrawerClosedByScroll,
     /// The Reply button was tapped and no composer appeared.
@@ -834,7 +1351,18 @@ impl ReplyRefusal {
                 "build/ngôn ngữ này chưa đo nút Trả lời, nên không có gì để bấm".to_string()
             }
             Self::NoDrawer => "drawer bình luận không mở ra ô nhập".to_string(),
-            Self::ParentNotFound { scrolls, unfolded } => {
+            Self::ParentNotFound {
+                scrolls,
+                unfolded,
+                saw_rows,
+            } => {
+                // A drawer that never rendered a row is not a list that ran out. Saying so
+                // sends the operator to the phone's network rather than to the post.
+                if !*saw_rows {
+                    return format!(
+                        "khay bình luận mở ra nhưng không hiện dòng nào sau {scrolls} lần cuộn —                          nhiều khả năng máy chưa tải được bình luận (mạng), chứ không phải bài                          thiếu bình luận cha; không gõ gì cả"
+                    );
+                }
                 let folded = if *unfolded {
                     " (đã mở phần bị gấp và tìm cả trong đó)"
                 } else {
@@ -895,6 +1423,8 @@ where
     if drawer.send_query().is_none() {
         return Ok(Ok(HierarchySendOutcome {
             verdict: CommentVerdict::SendUnmeasured,
+            // Replies never re-tag: only the opening comment carries the mentions.
+            mention_note: None,
             parent_was_folded: false,
             armed_frame_sha256: String::new(),
             cleared_frame_sha256: String::new(),
@@ -910,12 +1440,18 @@ where
 
     let mut scrolls = 0u32;
     let mut unfolded = false;
+    // Whether the list was ever legible at all — see the `unreadable` branch below.
+    let mut saw_rows = false;
     let target = loop {
         if let Some(found) = find_parent(session, reply_label, parent).await {
             break found;
         }
         if scrolls >= PARENT_SCROLL_ATTEMPTS || stop.load(Ordering::Relaxed) {
-            return Ok(Err(ReplyRefusal::ParentNotFound { scrolls, unfolded }));
+            return Ok(Err(ReplyRefusal::ParentNotFound {
+                scrolls,
+                unfolded,
+                saw_rows,
+            }));
         }
         // Anchors before the swipe, so "the list did not move" is observable rather than
         // assumed. Reply controls are the cheapest anchor: geometry only, no text.
@@ -936,11 +1472,30 @@ where
             return Ok(Err(ReplyRefusal::DrawerClosedByScroll));
         }
         let after = anchor_positions(session, reply_label).await;
+        let rows_after = visible_rows(session).await;
+        // **An empty read is not a stationary list.** Both anchors answer with an empty
+        // vector when they cannot see anything, and empty compares equal to empty: zero
+        // reply controls before and zero after satisfy `!moved`, zero rows before and zero
+        // rows after satisfy the text check, and the loop concludes it reached the end of a
+        // list it never managed to read one row of.
+        //
+        // Measured 24/08/2026 on `.../@.lt.gi.mang.v/photo/7668947001618320660`, a post with
+        // 22 comments: three replies refused `reply_parent_not_found` after **one** scroll,
+        // with a budget of ten. The drawer opens before TikTok has rendered the comments, so
+        // on a slow phone the first look is always empty — and that first look was being
+        // read as proof there was nothing to find.
+        //
+        // Spending a scroll instead is the conservative reading: the budget still bounds the
+        // loop, and the refusal at the end now says which of the two happened.
+        if after.is_empty() && rows_after.is_empty() {
+            continue;
+        }
+        saw_rows = true;
         if !moved(&before, &after) {
             // The cheap anchor says stopped. It is wrong often enough to matter — evenly
             // spaced rows alias — so the expensive one gets the final word, and only here,
             // where the alternative is refusing a reply whose parent is further down.
-            if visible_rows(session).await != rows_before {
+            if rows_after != rows_before {
                 continue;
             }
             // The end of the *open* list, which is not the end of the comments. TikTok
@@ -957,7 +1512,11 @@ where
                 scrolls = 0;
                 continue;
             }
-            return Ok(Err(ReplyRefusal::ParentNotFound { scrolls, unfolded }));
+            return Ok(Err(ReplyRefusal::ParentNotFound {
+                scrolls,
+                unfolded,
+                saw_rows,
+            }));
         }
     };
 
@@ -998,6 +1557,8 @@ where
     if !drawer.focus_and_type(&field, text, stop).await? {
         return Ok(Ok(HierarchySendOutcome {
             verdict: CommentVerdict::NoSendControl,
+            // Replies never re-tag: only the opening comment carries the mentions.
+            mention_note: None,
             parent_was_folded: false,
             armed_frame_sha256: String::new(),
             cleared_frame_sha256: String::new(),
@@ -1007,6 +1568,8 @@ where
     let Some(send) = drawer.await_armed(stop).await? else {
         return Ok(Ok(HierarchySendOutcome {
             verdict: CommentVerdict::NotArmed,
+            // Replies never re-tag: only the opening comment carries the mentions.
+            mention_note: None,
             parent_was_folded: unfolded,
             armed_frame_sha256: String::new(),
             cleared_frame_sha256: String::new(),
@@ -1019,6 +1582,8 @@ where
     if !confirmed {
         return Ok(Ok(HierarchySendOutcome {
             verdict: CommentVerdict::NotConfirmed,
+            // Replies never re-tag: only the opening comment carries the mentions.
+            mention_note: None,
             parent_was_folded: unfolded,
             armed_frame_sha256: armed,
             cleared_frame_sha256: cleared,
@@ -1044,6 +1609,7 @@ where
     let identity = read_back_identity(session, text, &cleared).await;
     Ok(Ok(HierarchySendOutcome {
         verdict: CommentVerdict::Sent,
+        mention_note: None,
         parent_was_folded: unfolded,
         armed_frame_sha256: armed,
         cleared_frame_sha256: cleared,
@@ -1288,17 +1854,87 @@ async fn read_back_once(
     )
 }
 
+/// The bare nickname inside an author-bearing label, whichever label it came from.
+///
+/// **This is the safety-critical half of `read_author_label` and the reason the two sources
+/// can be mixed at all.** The baseline is read before the link is opened and the arrival is
+/// read after; if one of them came back `Follow Ánh` and the other `Ánh profile`, the check
+/// would call an unchanged screen *changed* — and "the screen changed" is the entire proof
+/// that the phone reached the post it was sent to. Folding both to `Ánh` is what keeps that
+/// comparison honest.
+///
+/// The needle is stripped from wherever the catalogue puts it, because the builds disagree:
+/// English is `<tên> profile`, Vietnamese is `Hồ sơ <tên>`, and `Follow ` is a prefix in
+/// both. Returns `None` for a label with no name left in it — a prefix on its own is not an
+/// identity, and an empty string here would make every post look like every other post.
+fn bare_author_label(observed: &str, label: LabelMatch) -> Option<String> {
+    let observed = observed.trim();
+    let needle = label.value().trim();
+    // An exact label carries no name by construction, so there is nothing to strip and
+    // nothing to learn — the value *is* the label.
+    let bare = if needle.is_empty() || label.is_exact() {
+        observed.to_string()
+    } else if let Some(rest) = strip_ignoring_case(observed, needle, true) {
+        rest
+    } else if let Some(rest) = strip_ignoring_case(observed, needle, false) {
+        rest
+    } else {
+        observed.to_string()
+    };
+    let bare = bare.trim();
+    (!bare.is_empty()).then(|| bare.to_string())
+}
+
+/// Strip `needle` from the front (`prefix`) or the back of `haystack`, case-insensitively —
+/// which is how description matching behaves on the device, so the stripper has to agree
+/// with the matcher that found the node.
+fn strip_ignoring_case(haystack: &str, needle: &str, prefix: bool) -> Option<String> {
+    let lower_haystack = haystack.to_lowercase();
+    let lower_needle = needle.to_lowercase();
+    if lower_needle.len() > lower_haystack.len() {
+        return None;
+    }
+    if prefix {
+        lower_haystack
+            .starts_with(&lower_needle)
+            .then(|| haystack[needle.len()..].trim().to_string())
+    } else {
+        lower_haystack
+            .ends_with(&lower_needle)
+            .then(|| haystack[..haystack.len() - needle.len()].trim().to_string())
+    }
+}
+
 /// The author label of whatever post is on screen.
 ///
-/// Measured: the only labels carrying an author string are `Follow <name>` and
-/// `Hồ sơ <name>`, and both carry the **nickname**. That is enough to tell one post from
-/// another — which is what the arrival check needs — even when it cannot tell which
-/// account it is.
+/// Two sources, in this order, because they fail on opposite screens. The **author's profile
+/// link** on the action rail is there whether or not this account follows the creator; the
+/// **Follow button** is not — it disappears the moment you follow, and on the account's own
+/// post it never existed. Reading only the button is what made a followed post indistinguishable
+/// from any other, so a perfectly good open was refused as `target_open_no_baseline`
+/// (measured on the live fleet 24/08/2026, and again as `arrival = Structural` on the posts
+/// that did get through: the comment landed, and nothing on screen could confirm it was the
+/// right post).
+///
+/// Both are folded to the bare nickname by [`bare_author_label`] — see there for why that
+/// matters more than the extra source does.
+///
+/// Unreadable still means `None`, and `None` still means the caller refuses. Widening where
+/// the name can be read from must never widen what counts as having read one.
 async fn read_author_label(session: &dyn UiSession, labels: TikTokControls) -> Option<String> {
-    let label = labels.label(TikTokControl::Follow)?;
-    let found = session.locate(label.to_query()).await.ok().flatten()?;
-    let observed = found.description.as_deref().unwrap_or_default().trim();
-    (!observed.is_empty()).then(|| observed.to_string())
+    for control in [TikTokControl::AuthorProfileLink, TikTokControl::Follow] {
+        let Some(label) = labels.label(control) else {
+            continue;
+        };
+        let Some(found) = session.locate(label.to_query()).await.ok().flatten() else {
+            continue;
+        };
+        let observed = found.description.as_deref().unwrap_or_default();
+        if let Some(bare) = bare_author_label(observed, label) {
+            return Some(bare);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1325,6 +1961,15 @@ mod tests {
             .value()
     }
 
+    /// The catalogued author-profile-link needle, for the same reason `follow_key` exists:
+    /// the fixture must key on whatever the product keys on.
+    fn profile_link_key() -> &'static str {
+        vietnamese()
+            .label(TikTokControl::AuthorProfileLink)
+            .expect("the Vietnamese set measures the author profile link")
+            .value()
+    }
+
     fn vietnamese() -> TikTokControls {
         controls_for(TIKTOK, "vi", "46.3.3").expect("measured set")
     }
@@ -1338,6 +1983,8 @@ mod tests {
     #[derive(Default)]
     struct ArrivalSession {
         foreground: Mutex<Vec<String>>,
+        /// Whether `landing_on` should write the profile link rather than the Follow button.
+        after_open_via_profile: Mutex<bool>,
         /// Label values that answer `locate`, and what they answer with.
         present: Mutex<Vec<(String, ElementBox)>>,
         opened: Mutex<Vec<String>>,
@@ -1378,6 +2025,18 @@ mod tests {
         /// nothing".
         fn landing_on(self, author_label: &str) -> Self {
             *self.after_open.lock() = Some(author_label.to_string());
+            self
+        }
+
+        /// Land on the new post with only the **profile link** carrying the author.
+        ///
+        /// This is the followed-post shape: measured 24/08/2026 on the live fleet, following
+        /// a creator removes `Follow <tên>` from the rail and leaves `<tên> profile` exactly
+        /// as it was. A fixture that can only express the Follow button cannot express the
+        /// screen this whole second source exists for.
+        fn landing_on_profile_link(self, author_label: &str) -> Self {
+            *self.after_open.lock() = Some(author_label.to_string());
+            *self.after_open_via_profile.lock() = true;
             self
         }
 
@@ -1445,9 +2104,14 @@ mod tests {
             if let Some(author) = self.after_open.lock().take() {
                 let mut present = self.present.lock();
                 let node = node(0.0, 0.0, 100.0, 100.0, &author);
-                match present.iter_mut().find(|(key, _)| key == follow_key()) {
+                let key = if *self.after_open_via_profile.lock() {
+                    profile_link_key()
+                } else {
+                    follow_key()
+                };
+                match present.iter_mut().find(|(slot, _)| slot == key) {
                     Some(slot) => slot.1 = node,
-                    None => present.push((follow_key().to_string(), node)),
+                    None => present.push((key.to_string(), node)),
                 }
             }
             Ok(())
@@ -1481,6 +2145,96 @@ mod tests {
             present.push((follow_key(), Box::leak(label.to_string().into_boxed_str())));
         }
         present
+    }
+
+    /// The two author sources have to fold to the same string, or mixing them lies.
+    ///
+    /// The baseline is read before the link opens and the arrival after. If a phone read
+    /// `Follow Ánh` on one side and `Ánh profile` on the other, the check would call an
+    /// unchanged screen *changed* — and "the screen changed" is the whole proof that the
+    /// phone reached the post it was sent to. Getting this wrong types into a stranger's post.
+    #[test]
+    fn the_two_author_sources_fold_to_one_identity() {
+        let vi = vietnamese();
+        let en = controls_for(TIKTOK, "en", "38.3.2").expect("the English set is measured");
+        let follow_vi = vi.label(TikTokControl::Follow).expect("Follow is measured");
+        let profile_vi = vi
+            .label(TikTokControl::AuthorProfileLink)
+            .expect("the profile link is measured");
+        let profile_en = en
+            .label(TikTokControl::AuthorProfileLink)
+            .expect("the profile link is measured");
+
+        // Vietnamese puts the name last in both labels; English puts it first in the profile
+        // link. All three are the same author.
+        assert_eq!(
+            bare_author_label("Follow Mộng Quỳnh", follow_vi).as_deref(),
+            Some("Mộng Quỳnh")
+        );
+        assert_eq!(
+            bare_author_label("Hồ sơ Mộng Quỳnh", profile_vi).as_deref(),
+            Some("Mộng Quỳnh")
+        );
+        assert_eq!(
+            bare_author_label("Đà Lạt Gói Mang Về profile", profile_en).as_deref(),
+            Some("Đà Lạt Gói Mang Về")
+        );
+    }
+
+    /// A label with the name stripped out of it is not an identity.
+    ///
+    /// Returning the empty string here would make every post look like every other post,
+    /// which is precisely the comparison the arrival check is.
+    #[test]
+    fn a_prefix_only_label_is_not_an_identity() {
+        let vi = vietnamese();
+        let follow = vi.label(TikTokControl::Follow).expect("measured");
+        let profile = vi
+            .label(TikTokControl::AuthorProfileLink)
+            .expect("measured");
+        assert_eq!(bare_author_label("Follow ", follow), None);
+        assert_eq!(bare_author_label("Hồ sơ", profile), None);
+        assert_eq!(bare_author_label("   ", follow), None);
+    }
+
+    /// A post by a creator this account already follows still has an author to read.
+    ///
+    /// This is the gap the second source exists for, and it was measured on the live fleet
+    /// on 24/08/2026: with only the Follow button to read, a followed post produced no
+    /// baseline and no arrival, so the engine refused a perfectly good open as
+    /// `target_open_no_baseline` — or got through with the proof downgraded to Structural,
+    /// meaning the comment landed somewhere nobody could confirm was the right post.
+    #[tokio::test(start_paused = true)]
+    async fn a_followed_post_still_yields_a_baseline_and_arrives() {
+        // Before: a post page whose author is readable only from the profile link. After:
+        // a different author, again only from the profile link. No Follow button anywhere,
+        // which is exactly what following the creator does to this screen.
+        let session = ArrivalSession::new(
+            TIKTOK,
+            &[
+                ("bình luận", "Đọc hoặc viết bình luận. 3 bình luận"),
+                (profile_link_key(), "Hồ sơ Bích Vân"),
+            ],
+        )
+        .landing_on_profile_link("Hồ sơ Mộng Quỳnh");
+
+        let arrival = open_target_by_hierarchy(
+            &session,
+            vietnamese(),
+            TIKTOK,
+            "https://www.tiktok.com/@x/photo/1",
+            "someone",
+            &AtomicBool::new(false),
+        )
+        .await
+        .expect("a followed post is still an arrival");
+
+        // Structural rather than Identified only because this nickname does not fold onto
+        // the handle — the point here is that it is an arrival at all. Before the second
+        // source it was not one: no Follow button meant no author, and no author meant
+        // `target_open_no_baseline` before the link was even opened.
+        assert_eq!(arrival, TargetArrival::Structural);
+        assert!(session.typed.lock().is_empty(), "arrival must not type");
     }
 
     #[test]
@@ -1571,7 +2325,10 @@ mod tests {
         assert_eq!(
             refusal,
             ArrivalRefusal::ScreenNeverChanged {
-                author_label: "Follow Bích Vân".into()
+                // Bare, because both author sources now fold to the nickname — see
+                // `bare_author_label`. A baseline read off `Follow ` and an arrival read
+                // off the profile link have to be the same string or the comparison lies.
+                author_label: "Bích Vân".into()
             }
         );
         assert_eq!(refusal.code(), "target_open_screen_unchanged");
@@ -1602,7 +2359,7 @@ mod tests {
         assert_eq!(
             arrival,
             TargetArrival::Identified {
-                author_label: "Follow Mộng Quỳnh".into()
+                author_label: "Mộng Quỳnh".into()
             }
         );
     }
@@ -1658,7 +2415,7 @@ mod tests {
         assert_eq!(
             arrival,
             TargetArrival::Identified {
-                author_label: "Follow nguyenvantoan8584".into()
+                author_label: "nguyenvantoan8584".into()
             }
         );
         assert!(session.taps.lock().is_empty());
@@ -1833,6 +2590,8 @@ mod tests {
         after_first: Mutex<Vec<(String, Vec<ElementBox>)>>,
         taps: Mutex<Vec<TapPoint>>,
         typed: Mutex<Vec<String>>,
+        /// What went in as **real key events**, which is a different channel from `typed`.
+        keyed: Mutex<Vec<String>>,
         swipes: Mutex<usize>,
         backs: Mutex<usize>,
     }
@@ -1878,6 +2637,10 @@ mod tests {
         }
         async fn type_text(&self, text: &str) -> anyhow::Result<()> {
             self.typed.lock().push(text.to_string());
+            Ok(())
+        }
+        async fn type_keys(&self, text: &str) -> anyhow::Result<()> {
+            self.keyed.lock().push(text.to_string());
             Ok(())
         }
         async fn home(&self) -> anyhow::Result<()> {
@@ -2190,6 +2953,7 @@ mod tests {
             vietnamese(),
             (1080.0, 2400.0),
             "hello",
+            &[],
             &AtomicBool::new(false),
             || shas.next().unwrap_or_default(),
         )
@@ -2217,6 +2981,7 @@ mod tests {
             english,
             (1080.0, 2400.0),
             "hello",
+            &[],
             &AtomicBool::new(false),
             String::new,
         )
@@ -2458,6 +3223,178 @@ mod tests {
         );
         assert!(
             *session.typed.lock() == Vec::<String>::new(),
+            "still nothing typed: a parent that was never found is never replied to"
+        );
+    }
+
+    /// The counts a threshold is measured against, in the shapes TikTok actually writes.
+    #[test]
+    fn a_rail_label_yields_the_number_it_states() {
+        // The two measured labels, verbatim.
+        assert_eq!(parse_count("Like video. 22 likes"), Some((22, false)));
+        assert_eq!(
+            parse_count("Read or add comments. 21 comments"),
+            Some((21, false))
+        );
+        // A thousands separator is not a decimal point…
+        assert_eq!(parse_count("1,160 likes"), Some((1_160, false)));
+        // …but inside an abbreviation it is, and the result is rounded — which the caller has
+        // to know, because a threshold cannot be met exactly against a rounded total.
+        assert_eq!(parse_count("1.2K likes"), Some((1_200, true)));
+        assert_eq!(parse_count("3M likes"), Some((3_000_000, true)));
+        // Nothing to read is `None`, never `0`: "no number here" and "nobody liked it" are
+        // different answers and a threshold would act on them differently.
+        assert_eq!(parse_count("Like"), None);
+        assert_eq!(parse_count(""), None);
+    }
+
+    /// A build with no measured counted-like control reports nothing rather than guessing.
+    #[tokio::test(start_paused = true)]
+    async fn an_unmeasured_build_reports_no_like_count() {
+        // The Vietnamese set has `like_count: None` — see the catalogue entry for why.
+        let session = ArrivalSession::new(TIKTOK, &[]);
+        let counters = read_post_counters(&session, vietnamese()).await;
+        assert_eq!(counters.likes, None);
+    }
+
+    /// A near-miss in the suggestion list must never be tapped.
+    ///
+    /// Measured 24/08/2026: typing `@lt.gi` returned `lt.gi`, `.lt.gi.mang.v`, `lt.g94` and
+    /// `lt.gr37`. Three of those are different people. Tapping the wrong one mentions a
+    /// stranger from a real logged-in account, and nothing in the posted comment would show
+    /// that the operator had not asked for it — so the rule is exact match or nothing.
+    #[tokio::test(start_paused = true)]
+    async fn a_mention_is_only_picked_when_the_row_is_exactly_that_handle() {
+        let rows = vec![
+            node(179.0, 291.0, 70.0, 50.0, "lt.g94"),
+            node(179.0, 438.0, 223.0, 50.0, ".lt.gi.mang.v"),
+            node(179.0, 585.0, 118.0, 50.0, "lt.gr37"),
+        ];
+        let session = DrawerSession::default().with_many("android.widget.TextView", rows);
+
+        let outcome = append_mentions_by_picker(
+            &session,
+            (1080.0, 2400.0),
+            &["lt.gi".to_string()],
+            &AtomicBool::new(false),
+        )
+        .await;
+
+        // Typed as real keys — that is the only channel the picker reacts to — and with a
+        // leading space, or the tag runs into the last word of the comment.
+        assert_eq!(*session.keyed.lock(), vec![" @lt.gi".to_string()]);
+        // …and then nothing was tapped, because no row *is* `lt.gi`.
+        assert!(
+            session.taps.lock().is_empty(),
+            "a row that merely starts like the handle is a different account"
+        );
+        assert_eq!(outcome.linked, Vec::<String>::new());
+        assert_eq!(outcome.literal, vec!["lt.gi".to_string()]);
+        assert!(outcome
+            .note()
+            .is_some_and(|note| note.contains("chỉ là chữ")));
+    }
+
+    /// Two rows claiming one handle is refused rather than resolved by picking the first.
+    #[tokio::test(start_paused = true)]
+    async fn an_ambiguous_suggestion_list_tags_nobody() {
+        let session = DrawerSession::default().with_many(
+            "android.widget.TextView",
+            vec![
+                node(179.0, 291.0, 70.0, 50.0, "lt.gi"),
+                node(179.0, 438.0, 70.0, 50.0, "lt.gi"),
+            ],
+        );
+        let outcome = append_mentions_by_picker(
+            &session,
+            (1080.0, 2400.0),
+            &["lt.gi".to_string()],
+            &AtomicBool::new(false),
+        )
+        .await;
+        assert!(session.taps.lock().is_empty());
+        assert_eq!(outcome.literal, vec!["lt.gi".to_string()]);
+    }
+
+    /// A handle that cannot be typed safely is not typed at all.
+    ///
+    /// `type_keys` reaches a real device shell, so its character whitelist is a security
+    /// boundary — see `UiSession::type_keys`. A refusal there has to end as plain text, not
+    /// as a tap into an unfiltered list.
+    #[tokio::test(start_paused = true)]
+    async fn a_handle_the_key_channel_refuses_is_left_as_text() {
+        let session = DrawerSession::default().with_many(
+            "android.widget.TextView",
+            vec![node(179.0, 291.0, 70.0, 50.0, "ai đó")],
+        );
+        let outcome = append_mentions_by_picker(
+            &session,
+            (1080.0, 2400.0),
+            &["ai đó".to_string()],
+            &AtomicBool::new(false),
+        )
+        .await;
+        assert!(session.taps.lock().is_empty());
+        assert_eq!(outcome.literal, vec!["ai đó".to_string()]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_drawer_that_has_not_rendered_yet_is_not_the_end_of_the_list() {
+        // The sibling of the aliasing bug above, and a worse one: both anchors answer with an
+        // **empty** vector when they cannot see anything, and empty compares equal to empty.
+        // Zero reply controls before and zero after satisfy `!moved`; zero rows before and
+        // zero after satisfy the text check; so the loop concluded it had reached the end of a
+        // list it had not read one row of.
+        //
+        // Measured 24/08/2026 on `.../@.lt.gi.mang.v/photo/7668947001618320660`, a post
+        // carrying 22 comments: three replies refused after **one** scroll out of a budget of
+        // ten, because the drawer opens before TikTok has rendered anything into it.
+        let parent = CommentLocatorIdentity {
+            author_label: "Tồi nhưng tử tế".into(),
+            text: "a comment nobody posted".into(),
+            locator_version: HIERARCHY_LOCATOR_VERSION.into(),
+            frame_sha256: "sha".into(),
+        };
+        // A drawer that opens and stays empty: the field is there, the list is not.
+        let session = DrawerSession::default()
+            .with_single("bình luận", node(880.0, 900.0, 120.0, 120.0, "bình luận"))
+            .with_single(EDIT, node(199.0, 1175.0, 700.0, 100.0, ""))
+            .with_single(SEND_ID, send_button(false));
+
+        let refusal = send_reply_by_hierarchy(
+            &session,
+            vietnamese(),
+            (1080.0, 2400.0),
+            &parent,
+            "reply text",
+            &AtomicBool::new(false),
+            String::new,
+        )
+        .await
+        .expect("no device error")
+        .expect_err("there is no parent to find, so this must still refuse");
+
+        let ReplyRefusal::ParentNotFound {
+            scrolls, saw_rows, ..
+        } = refusal
+        else {
+            panic!("expected ParentNotFound, got {refusal:?}");
+        };
+        assert_eq!(
+            scrolls, PARENT_SCROLL_ATTEMPTS,
+            "an unreadable list must cost the whole budget, not one scroll — otherwise              'I could not see it' is being reported as 'it was not there'"
+        );
+        assert!(
+            !saw_rows,
+            "the refusal has to remember that nothing was ever legible, or its message              sends the operator to the post instead of to the phone's network"
+        );
+        assert!(
+            refusal.message().contains("không hiện dòng nào"),
+            "got {:?}",
+            refusal.message()
+        );
+        assert!(
+            session.typed.lock().is_empty(),
             "still nothing typed: a parent that was never found is never replied to"
         );
     }

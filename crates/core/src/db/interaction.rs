@@ -90,10 +90,10 @@ impl Database {
                 assignment_id,
             );
         }
-        transaction.execute(
-            "INSERT INTO interaction_dispatch(campaign_id,state,updated_at) VALUES(?1,'queued',?2)",
-            params![campaign_id, now],
-        )?;
+        // `interaction_dispatch` used to get a 'queued' row here. Migration 14 dropped the
+        // table: it was shaped as a single-owner lease and nothing ever claimed it, so the
+        // row proved nothing while looking like proof. If two app instances over one data
+        // directory ever becomes possible, the guard belongs here — it never was one.
         transaction.commit()?;
         Ok(campaign_id)
     }
@@ -106,7 +106,8 @@ impl Database {
             "SELECT c.id,c.request_id,c.state,c.message_count,c.updated_at,c.error_code,
                     (SELECT COUNT(*) FROM interaction_targets t WHERE t.campaign_id=c.id),
                     (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state='succeeded'),
-                    (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state IN ('failed','uncertain','skipped_parent'))
+                    (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state IN ('failed','uncertain','skipped_parent')),
+                    c.request_json
              FROM interaction_campaigns c ORDER BY c.updated_at DESC LIMIT ?1",
         )?;
         let rows = statement.query_map(params![limit as i64], interaction_summary_from_row)?;
@@ -122,7 +123,8 @@ impl Database {
                 "SELECT c.id,c.request_id,c.state,c.message_count,c.updated_at,c.error_code,
                         (SELECT COUNT(*) FROM interaction_targets t WHERE t.campaign_id=c.id),
                         (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state='succeeded'),
-                        (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state IN ('failed','uncertain','skipped_parent'))
+                        (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state IN ('failed','uncertain','skipped_parent')),
+                        c.request_json
                  FROM interaction_campaigns c WHERE c.id=?1",
                 params![campaign_id],
                 interaction_summary_from_row,
@@ -166,6 +168,7 @@ impl Database {
                 // Filled from the blob just below, so every reader of a stored campaign gets
                 // the same answer without parsing it again.
                 like: None,
+                mention: None,
             })
         })?;
         let assignments = rows
@@ -173,6 +176,7 @@ impl Database {
             .into_iter()
             .map(|mut assignment| {
                 assignment.like = assignment.like_note();
+                assignment.mention = assignment.mention_note();
                 assignment
             })
             .collect();
@@ -218,6 +222,55 @@ impl Database {
             params![interaction_campaign_state_label(state), error_code, Utc::now().to_rfc3339(), campaign_id],
         )?;
         Ok(())
+    }
+    /// Close out campaigns whose worker died with the process, and say so.
+    ///
+    /// An interaction worker is a `tokio::spawn` inside this process: it cannot outlive the
+    /// app, and nothing restarts it. So a campaign left `running` or `queued` at startup is
+    /// not running — it is a campaign the app was killed in the middle of, and the Monitor
+    /// tab draws it as "Đang chạy" for ever. That state also draws no Retry button (partial /
+    /// failed / cancelled only), so the campaign becomes unreachable from the UI by the same
+    /// route it became stuck.
+    ///
+    /// Two different writes, and the difference is the safety-critical part:
+    ///
+    /// * an assignment left `sending` had its Send tap go out with no confirmation coming
+    ///   back, which is exactly what `uncertain` means — and `uncertain` is permanently
+    ///   excluded from retry, so the comment can never be posted twice. Leaving it `sending`
+    ///   would claim an in-flight message that no longer exists.
+    /// * an assignment left `preparing` or `ready` never touched the device, so it stays
+    ///   retryable and is not rewritten at all.
+    ///
+    /// The campaign itself becomes `cancelled`: it is the state that says "stopped before it
+    /// finished" and it is retryable, so the operator's next action is one button.
+    ///
+    /// Returns how many campaigns were closed, for the caller to log.
+    pub fn interrupt_orphaned_interaction_campaigns(&self) -> anyhow::Result<usize> {
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = Utc::now().to_rfc3339();
+        let stranded: Vec<String> = transaction
+            .prepare("SELECT id FROM interaction_campaigns WHERE state IN ('running','queued')")?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        for campaign_id in &stranded {
+            transaction.execute(
+                "UPDATE interaction_assignments
+                 SET state='uncertain',revision=revision+1,updated_at=?2,
+                     error_code=COALESCE(error_code,'interaction_worker_lost: app đóng khi tin này đang gửi — không xác nhận được là đã đăng hay chưa, nên không gửi lại')
+                 WHERE campaign_id=?1 AND state='sending'",
+                params![campaign_id, now],
+            )?;
+            transaction.execute(
+                "UPDATE interaction_campaigns
+                 SET state='cancelled',revision=revision+1,updated_at=?2,
+                     error_code=COALESCE(error_code,'interaction_worker_lost: app đóng khi chiến dịch đang chạy — phần chưa gửi vẫn thử lại được')
+                 WHERE id=?1",
+                params![campaign_id, now],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(stranded.len())
     }
     pub fn prepare_interaction_assignment(
         &self,

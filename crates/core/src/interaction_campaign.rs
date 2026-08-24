@@ -49,6 +49,38 @@ pub fn revision() -> u64 {
     chrono::Utc::now().timestamp_millis().max(0) as u64
 }
 
+/// Tell the frontend this campaign changed.
+///
+/// The event carries no state, only the id: it is an invalidation hint, and the UI answers it
+/// by re-reading the campaign. That is deliberate — a payload would be a second source of
+/// truth for something a cheap SQLite read already answers, and a dropped hint costs nothing
+/// because the next one restores the whole picture.
+///
+/// It exists as a helper because the runner has to send one after **every** state a message
+/// passes through. It used to send one only after a send reached a verdict, so a campaign
+/// spent its entire preparation phase — the slow part, where the AI is writing — looking
+/// motionless, and a campaign that failed before any send ever ran said nothing at all until
+/// the final tally.
+fn notify(events: &crate::EventBus, campaign_id: &str) {
+    events.emit(AppEvent::InteractionUpdated {
+        campaign_id: campaign_id.to_string(),
+        revision: revision(),
+    });
+}
+
+/// Whether this campaign is blocked for want of an AI key.
+///
+/// The gate used to be unconditional, so a manual campaign — one whose every comment the
+/// operator had already typed — refused to run on a machine with no key configured, and it
+/// refused *after* the campaign row had been written as Running, which reads as a campaign
+/// that started and died rather than one that was never allowed to start.
+///
+/// [`ThreadCampaignRequest::needs_ai_evidence_frames`] is the same predicate the evidence
+/// pass keys on, so "does this run touch the AI at all" has exactly one definition.
+pub fn ai_key_missing(request: &ThreadCampaignRequest, api_key: &str) -> bool {
+    request.needs_ai_evidence_frames() && api_key.trim().is_empty()
+}
+
 /// Which assignments a retry may re-send.
 ///
 /// Excluding `Succeeded` is the whole point: tapping Send is not idempotent, so
@@ -407,11 +439,36 @@ pub async fn execute_thread_campaign(
         }
     }
 
+    // Read the campaign, not the run, to decide how it ended.
+    //
+    // `succeeded`/`failed` count what *this* pass did, and on a retry that is only the
+    // messages the retry touched. Measured 24/08/2026: a campaign with five comments already
+    // live had every retried message fail, so `succeeded == 0` for the pass and the row was
+    // written `Failed` — a campaign the operator could see five posted comments under, filed
+    // as a total loss. The question the state answers is about the campaign.
+    let detail = db.get_interaction_campaign(&campaign_id)?;
     let cancelled = matches!(
-        db.get_interaction_campaign(&campaign_id)?
-            .map(|detail| detail.summary.state),
+        detail.as_ref().map(|detail| detail.summary.state),
         Some(ThreadCampaignState::Cancelled)
     );
+    let (succeeded, failed) = match detail.as_ref() {
+        Some(detail) => detail
+            .assignments
+            .iter()
+            .fold((0, 0), |(ok, bad), assignment| {
+                match assignment.state {
+                    ThreadMessageState::Succeeded => (ok + 1, bad),
+                    // Everything that was meant to be posted and was not, counted the way
+                    // `InteractionCampaignSummary::failed_messages` counts it.
+                    ThreadMessageState::Failed
+                    | ThreadMessageState::Uncertain
+                    | ThreadMessageState::SkippedParent => (ok, bad + 1),
+                    _ => (ok, bad),
+                }
+            }),
+        // Unreadable: fall back to this pass's own tally rather than inventing a verdict.
+        None => (succeeded, failed),
+    };
     if !cancelled {
         let final_state = if failed == 0 && first_error.is_none() {
             ThreadCampaignState::Succeeded
@@ -504,7 +561,7 @@ async fn run_cohort(
     frame_source: Arc<dyn crate::GenerationFrameSource>,
 ) -> anyhow::Result<(usize, usize)> {
     let settings = db.get_nurture_settings().context("đọc cấu hình AI")?;
-    if settings.api_key.trim().is_empty() {
+    if ai_key_missing(&request, &settings.api_key) {
         anyhow::bail!("AI API key chưa được cấu hình cho Interaction");
     }
     let detail = db
@@ -594,6 +651,7 @@ async fn run_cohort(
                         target,
                         &format!("target_evidence_unavailable: {error}"),
                     )?;
+                    notify(&events, &campaign_id);
                     failed += request.message_count as usize;
                     continue;
                 }
@@ -633,6 +691,12 @@ async fn run_cohort(
                 None,
                 None,
             )?;
+            // Skipped in manual mode on purpose: there, Preparing and Ready are microseconds
+            // apart because the text is already written, and two events per message would be
+            // a burst that says nothing the Ready one does not.
+            if !request.is_manual() {
+                notify(&events, &campaign_id);
+            }
             // The operator's own comments win when they gave any. Dealt across
             // (target, ordinal) so ten links do not all open with the same sentence, and
             // deterministically, so a replay of this campaign sends the same text — which is
@@ -684,6 +748,7 @@ async fn run_cohort(
                                 None,
                                 None,
                             )?;
+                            notify(&events, &campaign_id);
                             failed += 1;
                             continue;
                         }
@@ -692,18 +757,26 @@ async fn run_cohort(
                     grounded.text
                 }
             };
-            // Tag the mentioned accounts at the front of the opening comment only. `@name` is
-            // plain text (TikTok does not linkify it); the fleet accounts among the mentions
-            // were already added to `actor_udids` by the caller, so they join this post and
-            // reply — the replies do not re-tag.
-            let text = if assignment.ordinal == 0 {
-                format!("{}{}", request.mention_prefix(), text)
+            // Tag the mentioned accounts on the opening comment only — the replies do not
+            // re-tag. Carried beside the text rather than pasted into it: the hierarchy driver
+            // turns each handle into a **real** mention by picking it out of TikTok's own
+            // suggestion list, and a handle already sitting in the body would just be typed
+            // twice. The pixel driver, which cannot reach that list, prepends them as literal
+            // text itself — exactly what both used to do.
+            let mentions = if assignment.ordinal == 0 {
+                request
+                    .mentions
+                    .iter()
+                    .map(|handle| handle.trim().trim_start_matches('@').to_string())
+                    .filter(|handle| !handle.is_empty())
+                    .collect()
             } else {
-                text
+                Vec::new()
             };
-            let prepared = PreparedThreadMessage::new(assignment, text);
+            let prepared = PreparedThreadMessage::with_mentions(assignment, text, mentions);
             previous = Some(prepared.text.clone());
             db.prepare_interaction_assignment(id, &prepared)?;
+            notify(&events, &campaign_id);
             prepared_messages.push((id.clone(), prepared));
         }
 
@@ -768,6 +841,7 @@ async fn run_cohort(
                     None,
                     None,
                 )?;
+                notify(&events, &campaign_id);
                 failed += 1;
                 continue;
             }
@@ -781,6 +855,7 @@ async fn run_cohort(
                         None,
                         None,
                     )?;
+                    notify(&events, &campaign_id);
                     failed += 1;
                     continue;
                 }
@@ -892,6 +967,7 @@ async fn run_cohort(
                         Some("reply_comment"),
                         None,
                     )?;
+                    notify(&events, &campaign_id);
                     // Strictly the frame that was current when Send was tapped, so
                     // anything published afterwards has to be newer than the comment.
                     watermark = frame_source
@@ -914,6 +990,10 @@ async fn run_cohort(
                         "reader": driver.kind(),
                         "arrival": proof.as_str(),
                         "like": like_note,
+                        // Only the opening comment can carry tags, so this is `None` on every
+                        // reply — filed beside the like note because both are outcomes the
+                        // comment's own text cannot show.
+                        "mention": sent.mention_note,
                     }))
                 } else {
                     db.update_interaction_assignment_state(
@@ -923,6 +1003,7 @@ async fn run_cohort(
                         Some("post_comment"),
                         None,
                     )?;
+                    notify(&events, &campaign_id);
                     // Strictly the frame that was current when Send was tapped, so
                     // anything published afterwards has to be newer than the comment.
                     watermark = frame_source
@@ -941,6 +1022,10 @@ async fn run_cohort(
                         "reader": driver.kind(),
                         "arrival": proof.as_str(),
                         "like": like_note,
+                        // Only the opening comment can carry tags, so this is `None` on every
+                        // reply — filed beside the like note because both are outcomes the
+                        // comment's own text cannot show.
+                        "mention": sent.mention_note,
                     }))
                 }
             }
@@ -1042,10 +1127,9 @@ async fn run_cohort(
             if let Err(error) = cleanup {
                 tracing::warn!("interaction cleanup {}: {}", prepared.actor_udid, error);
             }
-            events.emit(AppEvent::InteractionUpdated {
-                campaign_id: campaign_id.clone(),
-                revision: revision(),
-            });
+            // Covers both arms of the match above — a send either succeeded or it did not,
+            // and this fires once for whichever ran.
+            notify(&events, &campaign_id);
         }
     }
 
@@ -1352,7 +1436,13 @@ impl TargetDriver for PixelTargetDriver<'_> {
         )
         .await
         .ok();
-        Ok(SendOutcome { evidence, identity })
+        // The pixel path prepends the tags as literal characters — it cannot reach TikTok's
+        // suggestion list — so there is nothing to report beyond what the text already shows.
+        Ok(SendOutcome {
+            evidence,
+            identity,
+            mention_note: None,
+        })
     }
 
     async fn send_reply(
@@ -1412,7 +1502,13 @@ impl TargetDriver for PixelTargetDriver<'_> {
         )
         .await
         .ok();
-        Ok(SendOutcome { evidence, identity })
+        // The pixel path prepends the tags as literal characters — it cannot reach TikTok's
+        // suggestion list — so there is nothing to report beyond what the text already shows.
+        Ok(SendOutcome {
+            evidence,
+            identity,
+            mention_note: None,
+        })
     }
 }
 
@@ -1472,6 +1568,7 @@ impl HierarchyTargetDriver<'_> {
                 cleared_frame_sha256: outcome.cleared_frame_sha256,
             },
             identity: outcome.identity,
+            mention_note: outcome.mention_note,
         })
     }
 }
@@ -1546,6 +1643,7 @@ impl TargetDriver for HierarchyTargetDriver<'_> {
             self.labels,
             self.screen,
             &prepared.text,
+            &prepared.mentions,
             stop,
             || self.frame_sha(),
         )
@@ -1783,6 +1881,54 @@ fn campaign_is_cancelled(db: &crate::db::Database, campaign_id: &str) -> anyhow:
 mod tests {
     use super::*;
 
+    /// Who actually needs the AI key.
+    mod ai_key {
+        use super::*;
+        use crate::interaction::{ResolvedTikTokTarget, ThreadMode, TikTokPostKind};
+
+        fn request(manual_comments: Vec<String>) -> ThreadCampaignRequest {
+            ThreadCampaignRequest {
+                request_id: "ai-key".into(),
+                targets: vec![ResolvedTikTokTarget {
+                    original_url: "https://www.tiktok.com/@creator/photo/1".into(),
+                    normalized_url: "https://www.tiktok.com/@creator/photo/1".into(),
+                    target_key: "content:1".into(),
+                    content_id: "1".into(),
+                    author: "creator".into(),
+                    kind: TikTokPostKind::Photo,
+                }],
+                actor_udids: vec!["a".into(), "b".into()],
+                message_count: 2,
+                instruction: "tự nhiên".into(),
+                max_words: 12,
+                manual_comments,
+                like_target: false,
+                mode: ThreadMode::Standalone,
+                shape: crate::interaction::ThreadShape::Star,
+                cohort_size: None,
+                mentions: Vec::new(),
+            }
+        }
+
+        #[test]
+        fn a_manual_campaign_runs_without_an_ai_key() {
+            // The operator typed every comment already. Refusing here was refusing to use
+            // the work they had done, and it happened after the campaign row said Running.
+            let manual = request(vec!["đẹp quá".into(), "chỗ này ở đâu ạ".into()]);
+            assert!(!ai_key_missing(&manual, ""));
+            assert!(!ai_key_missing(&manual, "   "));
+        }
+
+        #[test]
+        fn an_ai_campaign_still_refuses_without_a_key() {
+            // The gate still has to close where it matters, and whitespace is not a key.
+            let ai = request(Vec::new());
+            assert!(ai_key_missing(&ai, ""));
+            assert!(ai_key_missing(&ai, "  \t "));
+            assert!(!ai_key_missing(&ai, "sk-real"));
+        }
+    }
+
     /// The states a target-level failure must not touch.
     mod protected_deliveries {
         use super::*;
@@ -1800,6 +1946,7 @@ mod tests {
                 error_code: None,
                 evidence_json: None,
                 like: None,
+                mention: None,
             }
         }
 
@@ -1942,6 +2089,7 @@ mod tests {
             error_code: None,
             evidence_json: None,
             like: None,
+            mention: None,
         }
     }
 
@@ -2003,6 +2151,124 @@ mod tests {
 
 #[cfg(test)]
 mod boundary_tests {
+    /// The body of one `#[tauri::command]` in the desktop wrapper, for the two tests below.
+    ///
+    /// They are source scans because what they pin is an *ordering* inside a function that
+    /// needs a Tauri `State`, a database, a control plane and a spawned worker to call. The
+    /// ordering is the whole fix, and a test that cannot run is worse than a crude one that
+    /// can.
+    fn command_body(name: &str) -> &'static str {
+        let desktop = include_str!("../../../apps/desktop/src-tauri/src/interaction_commands.rs");
+        let start = desktop
+            .find(&format!("pub fn {name}("))
+            .or_else(|| desktop.find(&format!("pub async fn {name}(")))
+            .unwrap_or_else(|| panic!("{name} must exist in the wrapper"));
+        let rest = &desktop[start..];
+        let end = rest[1..]
+            .find("\n#[tauri::command]")
+            .map(|at| at + 1)
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// Every state a message passes through has to reach the operator.
+    ///
+    /// The Monitor tab cannot show progress it is never told about, and the runner used to
+    /// tell it only after a send reached a verdict — so the whole preparation phase, which is
+    /// the slow one because the AI is writing, looked motionless, and a campaign that failed
+    /// before any send ran was silent until the final tally.
+    ///
+    /// Counted rather than observed because `run_cohort` needs a device to call. The rule it
+    /// encodes: a write of an assignment state that no `notify` follows is a change the
+    /// operator cannot see.
+    #[test]
+    fn every_assignment_transition_in_the_runner_is_followed_by_a_notify() {
+        let source = include_str!("interaction_campaign.rs");
+        let runner = {
+            let start = source
+                .find("async fn run_cohort(")
+                .expect("the runner still exists");
+            let rest = &source[start..];
+            let end = rest.find("\n#[cfg(test)]").unwrap_or(rest.len());
+            &rest[..end]
+        };
+        // The rule is about the paths that *leave* — a write followed by `continue` skips
+        // the emit at the bottom of the loop, and that is exactly the set that was silent.
+        // The two terminal writes (a send succeeded, a send failed) are deliberately not in
+        // it: they are the two arms of one attempt and the emit after the teardown covers
+        // whichever ran, so demanding one each would double every send.
+        let mut silent = Vec::new();
+        for marker in [
+            "update_interaction_assignment_state",
+            "prepare_interaction_assignment",
+            "fail_whole_target(",
+        ] {
+            let mut from = 0;
+            while let Some(offset) = runner[from..].find(marker) {
+                let at = from + offset;
+                from = at + marker.len();
+                let tail = &runner[at..];
+                let Some(leaves) = tail.find("continue;") else {
+                    continue;
+                };
+                if !tail[..leaves].contains("notify(&events") {
+                    silent.push(format!("{marker} on line {}", runner[..at].lines().count()));
+                }
+            }
+        }
+        assert!(
+            silent.is_empty(),
+            "these writes change an assignment and then leave without telling the \
+             frontend: {silent:?}"
+        );
+    }
+
+    /// A retry that is going to be refused must leave the campaign exactly as it found it.
+    ///
+    /// It did not: `Queued` was written before the request could be re-read and before
+    /// `require_parent_locator` could refuse, so a refused retry parked the campaign in a
+    /// state the Monitor draws no buttons for — not Cancel (running only), not Retry
+    /// (partial/failed/cancelled only). Asking to repair a campaign made it unreachable.
+    #[test]
+    fn a_refused_retry_never_touches_the_campaign_state() {
+        let body = command_body("interaction_retry");
+        let first_write = body
+            .find("update_interaction_campaign_state")
+            .expect("retry still writes the campaign state");
+        for refusal in [
+            "get_interaction_campaign_request",
+            "require_parent_locator",
+            "ai_key_missing",
+            "RetryNotAllowed",
+        ] {
+            let at = body.find(refusal).unwrap_or_else(|| {
+                panic!("{refusal} must still be a refusal in interaction_retry")
+            });
+            assert!(
+                at < first_write,
+                "{refusal} can refuse after the campaign state was already moved"
+            );
+        }
+    }
+
+    /// A retry whose worker dies has to say so, the way the start path always has.
+    ///
+    /// The worker writes `Failed` either way; without the emit the Monitor keeps showing
+    /// "Đang chạy" until some unrelated event happens to refresh it, and the operator waits
+    /// on a campaign that ended.
+    #[test]
+    fn a_retry_that_dies_in_the_worker_still_tells_the_frontend() {
+        for command in ["interaction_retry", "interaction_start_thread"] {
+            let emits = command_body(command)
+                .matches("AppEvent::InteractionUpdated")
+                .count();
+            assert_eq!(
+                emits, 2,
+                "{command} must emit both when it accepts the work and when its worker dies"
+            );
+        }
+    }
+
     /// The engine has one home, and the tuning number that proves it has one definition.
     ///
     /// This is the test that would have caught the bug that motivated the move.

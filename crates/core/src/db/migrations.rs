@@ -11,6 +11,21 @@ struct Migration {
     version: i64,
     name: &'static str,
     apply: ApplyMigration,
+    /// Whether this migration rebuilds a table — create-copy-drop-rename, the only way
+    /// SQLite lets a `CHECK` constraint change.
+    ///
+    /// It exists because a rebuild is unsafe under the enforcement every production
+    /// connection opens with (`foreign_keys=ON`, [`super::Database::conn`]). With foreign
+    /// keys on, `DROP TABLE` runs an implicit `DELETE FROM` first, so dropping a parent
+    /// cascades through every `ON DELETE CASCADE` child — for `interaction_campaigns` that
+    /// is the entire campaign history — and `RENAME` rewrites the `REFERENCES` clauses of
+    /// other tables. `PRAGMA foreign_keys` is a no-op inside a transaction, so the window
+    /// has to be opened around the one [`apply_one`] opens, which is what this flag buys.
+    ///
+    /// A field rather than a list of versions kept elsewhere: a new migration that rebuilds
+    /// a table and forgets to say so would silently erase rows, and the compiler asking the
+    /// question once per migration is cheaper than finding that out from a user's database.
+    rebuilds_tables: bool,
 }
 
 const MIGRATIONS: &[Migration] = &[
@@ -18,51 +33,85 @@ const MIGRATIONS: &[Migration] = &[
         version: 1,
         name: "legacy-schema-baseline",
         apply: apply_migration_1,
+        rebuilds_tables: false,
     },
     Migration {
         version: 2,
         name: "flow-v2-schema",
         apply: apply_migration_2,
+        rebuilds_tables: false,
     },
     Migration {
         version: 3,
         name: "nurture-comment-attempts",
         apply: apply_migration_3,
+        rebuilds_tables: false,
     },
     Migration {
         version: 4,
         name: "interaction-comment-threads",
         apply: apply_migration_4,
+        rebuilds_tables: false,
     },
     Migration {
         version: 5,
         name: "publish-campaigns",
         apply: apply_migration_5,
+        rebuilds_tables: false,
     },
     Migration {
         version: 6,
         name: "flow-ifvision-branch",
         apply: apply_migration_6,
+        rebuilds_tables: false,
     },
     Migration {
         version: 7,
         name: "drop-local-users",
         apply: apply_migration_7,
+        rebuilds_tables: false,
     },
     Migration {
         version: 8,
         name: "schedule-last-error",
         apply: apply_migration_8,
+        rebuilds_tables: false,
     },
     Migration {
         version: 9,
         name: "device-account-handle",
         apply: apply_migration_9,
+        rebuilds_tables: false,
     },
     Migration {
         version: 10,
         name: "device-alias-and-number",
         apply: apply_migration_10,
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 11,
+        name: "drop-fabricated-comment-usd",
+        apply: apply_migration_11,
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 12,
+        name: "comment-distinct-frames",
+        apply: apply_migration_12,
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 13,
+        name: "comment-carousel-slides",
+        apply: apply_migration_13,
+        rebuilds_tables: false,
+    },
+    Migration {
+        version: 14,
+        name: "interaction-64-message-rebuild",
+        apply: apply_migration_14,
+        rebuilds_tables: true,
     },
 ];
 
@@ -662,6 +711,32 @@ fn apply_one(
     migration: &Migration,
     failed_version: Option<i64>,
 ) -> anyhow::Result<()> {
+    if !migration.rebuilds_tables {
+        return apply_one_transaction(connection, migration, failed_version);
+    }
+
+    // See [`Migration::rebuilds_tables`] for why this window has to exist, and why it has
+    // to be out here rather than inside the transaction.
+    let was_on: bool = connection.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
+    if !was_on {
+        return apply_one_transaction(connection, migration, failed_version);
+    }
+    connection.pragma_update(None, "foreign_keys", "OFF")?;
+    let applied = apply_one_transaction(connection, migration, failed_version);
+    // Restored whether the migration committed or rolled back. Returning early on failure
+    // here would leave enforcement off on a connection the caller keeps using, which turns
+    // one failed migration into silent referential damage later.
+    let restored = connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .map_err(anyhow::Error::from);
+    applied.and(restored)
+}
+
+fn apply_one_transaction(
+    connection: &mut Connection,
+    migration: &Migration,
+    failed_version: Option<i64>,
+) -> anyhow::Result<()> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let applied = validate_ledger(&transaction)?;
     let migration_index = usize::try_from(migration.version - 1)
@@ -794,6 +869,175 @@ fn apply_migration_10(transaction: &Transaction<'_>) -> anyhow::Result<()> {
         "ALTER TABLE device_meta ADD COLUMN alias TEXT NOT NULL DEFAULT '';\n\
          ALTER TABLE device_meta ADD COLUMN number INTEGER;",
     )?;
+    Ok(())
+}
+
+fn apply_migration_11(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    // **Dropping a column that was always a guess.** The `usd` in both comment tables was
+    // `prompt_tokens * input_price_per_1m + completion_tokens * output_price_per_1m`, over two
+    // numbers typed into the settings blob by hand and never sent to the API. Three different
+    // pairs of them existed in the codebase at once — `types.rs` said $0.10/$0.60, `db.rs`
+    // said $1.25/$10.00, and a migration rewrote the second back to the first — and no UI
+    // could edit any of them, so after any model change every figure in this column was
+    // silently wrong.
+    //
+    // Dropped rather than left in place and ignored. A column reading 0.0 next to a real
+    // token count reads as "this comment was free", which is a worse lie than the one being
+    // removed: `prompt_tokens` and `completion_tokens` stay, they come from the API's own
+    // `usage` object, and they are true of whatever model is configured. Multiply by the
+    // provider's real rate outside the app.
+    //
+    // `DROP COLUMN` needs SQLite 3.35+; rusqlite 0.32 bundles well past that.
+    transaction.execute_batch(
+        "ALTER TABLE nurture_comment_attempts DROP COLUMN usd;
+         ALTER TABLE nurture_comment_costs DROP COLUMN usd;",
+    )?;
+    Ok(())
+}
+
+fn apply_migration_12(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    // **How many different frames the model was actually shown.** The contact sheet always
+    // carried three thumbnails, and on a photo post all three were the same picture — a still
+    // card publishes byte-identical frames (measured: 0 of 2,170,800 picture pixels changed
+    // over 13 s untouched, and the repo's own `card_is_still` found 4 of 40 cards still).
+    // `evidence_support` therefore had two very different meanings that looked identical in
+    // this table: "the model read the post badly" and "there was only ever one frame to read".
+    //
+    // Nullable on purpose, with no default. Every row written before this build was grounded
+    // on an unknown number of distinct frames, and writing `3` into them would invent a
+    // measurement — exactly the mistake migration 11 removed. NULL reads as "not recorded".
+    transaction.execute_batch(
+        "ALTER TABLE nurture_comment_attempts ADD COLUMN distinct_frames INTEGER;",
+    )?;
+    Ok(())
+}
+
+fn apply_migration_13(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    // **The other half of migration 12's number.** `distinct_frames = 1` is ambiguous on its
+    // own: it is what a photo post looks like when the stream is parked on one picture, and
+    // also what a still video looks like, and also what a post the pager never turned looks
+    // like. Paired with the slides the traversal actually paged, each of those reads
+    // differently — and the deferral that grounds a comment on more than image one cannot be
+    // told apart from the old behaviour without it.
+    //
+    // Nullable, no default, same discipline as 12: rows written before this know nothing
+    // about how many slides they saw, and `0` would be a claim rather than an absence.
+    transaction.execute_batch(
+        "ALTER TABLE nurture_comment_attempts ADD COLUMN carousel_slides INTEGER;",
+    )?;
+    Ok(())
+}
+
+fn apply_migration_14(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    // **The interaction schema said a thread could hold six messages; the engine has said
+    // sixty-four since the cohort work landed.** `MIN_MESSAGE_COUNT`/`MAX_MESSAGE_COUNT` are
+    // `2..=64` and validation demands `message_count >= the largest cohort`, so a single
+    // cohort over the fourteen phones attached to this box needs fourteen messages — and
+    // `CREATE TABLE interaction_campaigns` still carried `CHECK (message_count BETWEEN 2 AND
+    // 6)` from migration 4. Every whole-fleet campaign therefore died inside
+    // `create_interaction_campaign` as a SQLite CHECK violation, surfaced as `OperationFailed`
+    // with no hint that the number the operator typed was the problem. The UI offered 2..=64
+    // the whole time.
+    //
+    // A CHECK cannot be altered, so both tables are rebuilt. Read
+    // [`Migration::rebuilds_tables`] before touching this: it only runs with foreign keys
+    // off, and it must stay that way.
+    //
+    // The three dead tables go with it, because a rebuild is the one moment their absence is
+    // free. All three are documented in migration 4 as never read: `interaction_events` has
+    // no writer at all and its shape invites "no events, so nothing happened";
+    // `interaction_retry_requests` is never touched by anything; `interaction_dispatch` is
+    // INSERT-only and shaped like a single-owner lease nothing ever claims, which is worse
+    // than absent — a future reader could mistake the row for proof of an owner. Its one
+    // writer in `create_interaction_campaign` goes in the same commit as this migration.
+    //
+    // `interaction_campaign_actors` and `interaction_targets.state` are deliberately kept:
+    // the first has a real writer and reads as provenance, the second is a documented
+    // default-only column, and neither is worth widening this migration's blast radius for.
+    transaction.execute_batch(
+        r#"
+DROP TABLE interaction_events;
+DROP TABLE interaction_retry_requests;
+DROP TABLE interaction_dispatch;
+
+CREATE TABLE interaction_campaigns_new (
+  id TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL UNIQUE,
+  request_json TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('queued','running','succeeded','partial','failed','cancelled')),
+  message_count INTEGER NOT NULL CHECK (message_count BETWEEN 2 AND 64),
+  revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+  error_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+INSERT INTO interaction_campaigns_new
+  (id,request_id,request_json,state,message_count,revision,error_code,created_at,updated_at)
+  SELECT id,request_id,request_json,state,message_count,revision,error_code,created_at,updated_at
+  FROM interaction_campaigns;
+
+DROP TABLE interaction_campaigns;
+ALTER TABLE interaction_campaigns_new RENAME TO interaction_campaigns;
+CREATE INDEX idx_interaction_campaigns_updated ON interaction_campaigns(updated_at DESC);
+
+CREATE TABLE interaction_assignments_new (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  message_ordinal INTEGER NOT NULL CHECK (message_ordinal BETWEEN 0 AND 63),
+  actor_udid TEXT NOT NULL,
+  parent_assignment_id TEXT,
+  prepared_json TEXT,
+  state TEXT NOT NULL DEFAULT 'queued',
+  effect_intent TEXT,
+  evidence_json TEXT,
+  error_code TEXT,
+  revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (campaign_id, target_id, message_ordinal),
+  FOREIGN KEY (campaign_id) REFERENCES interaction_campaigns(id) ON DELETE CASCADE,
+  FOREIGN KEY (target_id) REFERENCES interaction_targets(id) ON DELETE CASCADE,
+  FOREIGN KEY (parent_assignment_id) REFERENCES interaction_assignments(id) ON DELETE RESTRICT
+);
+
+INSERT INTO interaction_assignments_new
+  (id,campaign_id,target_id,message_ordinal,actor_udid,parent_assignment_id,prepared_json,
+   state,effect_intent,evidence_json,error_code,revision,created_at,updated_at)
+  SELECT id,campaign_id,target_id,message_ordinal,actor_udid,parent_assignment_id,prepared_json,
+         state,effect_intent,evidence_json,error_code,revision,created_at,updated_at
+  FROM interaction_assignments;
+
+DROP TABLE interaction_assignments;
+ALTER TABLE interaction_assignments_new RENAME TO interaction_assignments;
+CREATE INDEX idx_interaction_assignments_target ON interaction_assignments(target_id, message_ordinal);
+CREATE INDEX idx_interaction_assignments_state ON interaction_assignments(campaign_id, state);
+"#,
+    )?;
+
+    // Enforcement is off for the whole rebuild, so nothing above would have complained about
+    // a child left pointing at a row the copy dropped. Checked here, inside the transaction,
+    // so a bad copy rolls the whole thing back instead of shipping a database whose children
+    // are orphans. Scoped to the interaction tables on purpose: a pre-existing violation
+    // somewhere else in the file is not this migration's to refuse.
+    for table in [
+        "interaction_campaign_actors",
+        "interaction_targets",
+        "interaction_assignments",
+        "interaction_artifacts",
+    ] {
+        let orphans = transaction
+            .prepare(&format!("PRAGMA foreign_key_check({table})"))?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+            .len();
+        if orphans > 0 {
+            anyhow::bail!(
+                "InteractionRebuildLostReferences: {orphans} row(s) in {table} no longer resolve to a parent"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1138,6 +1382,174 @@ mod tests {
             .expect("column existence")
     }
 
+    /// The interaction rebuild has to change two CHECK constraints without touching a single
+    /// row — and it runs with foreign keys off, which is exactly when a wrong `DROP` order
+    /// erases a campaign's children in silence.
+    ///
+    /// So this stops at 13, fills every interaction table by hand, and then proves four
+    /// separate things about the rebuild: the rows come out byte-identical, the three dead
+    /// tables are gone, the new bounds are the ones in force at both ends, and enforcement
+    /// still works afterwards (a campaign delete still cascades). The pragma is set ON here
+    /// deliberately — `Database::conn` does that in production, and it is the state the
+    /// rebuild is dangerous in.
+    #[test]
+    fn migration_14_relaxes_the_check_without_rewriting_interaction_rows() {
+        let path = temp_db_path("interaction-64-rebuild");
+        let mut connection = Connection::open(&path).expect("rebuild fixture");
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .expect("enforce like production does");
+        run_with_failpoint(&mut connection, Some(14)).expect_err("stop before the rebuild");
+        connection
+            .execute_batch(
+                "INSERT INTO interaction_campaigns
+                   (id,request_id,request_json,state,message_count,revision,error_code,created_at,updated_at)
+                   VALUES('camp-1','req-1','{\"requestId\":\"req-1\"}','partial',2,3,'lỗi cũ','2026-08-01T00:00:00Z','2026-08-01T01:00:00Z');
+                 INSERT INTO interaction_campaign_actors(campaign_id,actor_ordinal,udid)
+                   VALUES('camp-1',0,'udid-a');
+                 INSERT INTO interaction_targets
+                   (id,campaign_id,line_no,original_url,normalized_url,target_key,content_id,kind,created_at)
+                   VALUES('tgt-1','camp-1',1,'https://x/1','https://y/1','content:1','1','photo','2026-08-01T00:00:00Z');
+                 INSERT INTO interaction_assignments
+                   (id,campaign_id,target_id,message_ordinal,actor_udid,prepared_json,state,
+                    effect_intent,evidence_json,error_code,revision,created_at,updated_at)
+                   VALUES('asg-1','camp-1','tgt-1',0,'udid-a','{\"text\":\"chào\"}','succeeded',
+                          'post_comment','{\"reader\":\"hierarchy\"}',NULL,5,
+                          '2026-08-01T00:00:00Z','2026-08-01T00:30:00Z');
+                 INSERT INTO interaction_assignments
+                   (id,campaign_id,target_id,message_ordinal,actor_udid,parent_assignment_id,
+                    state,error_code,created_at,updated_at)
+                   VALUES('asg-2','camp-1','tgt-1',1,'udid-b','asg-1','skipped_parent',
+                          'parent_identity_not_confirmed_at_ordinal_0',
+                          '2026-08-01T00:00:00Z','2026-08-01T00:31:00Z');
+                 INSERT INTO interaction_artifacts
+                   (id,campaign_id,target_id,assignment_id,kind,metadata_json,relative_path,sha256,created_at)
+                   VALUES('art-1','camp-1','tgt-1','asg-1','comment-root-evidence','{}','a/b.jpg','beef','2026-08-01T00:32:00Z');",
+            )
+            .expect("seed the pre-rebuild interaction rows");
+        let before = read_interaction_rows(&connection);
+
+        run(&mut connection).expect("apply the rebuild");
+
+        assert_eq!(
+            read_interaction_rows(&connection),
+            before,
+            "the rebuild copied rows, it must not have rewritten them"
+        );
+        assert_eq!(
+            migration_rows(&connection)
+                .iter()
+                .map(|(version, _)| *version)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        );
+        assert!(!table_exists(&connection, "interaction_events"));
+        assert!(!table_exists(&connection, "interaction_dispatch"));
+        assert!(!table_exists(&connection, "interaction_retry_requests"));
+
+        // Both ends of the new range, on both rebuilt tables. Sixty-four is the number the
+        // engine has always allowed; sixty-five must still be refused, or the CHECK stopped
+        // being a bound and became decoration.
+        for (message_count, allowed) in [(64_i64, true), (65, false)] {
+            let attempt = connection.execute(
+                "INSERT INTO interaction_campaigns
+                 (id,request_id,request_json,state,message_count,created_at,updated_at)
+                 VALUES(?1,?1,'{}','queued',?2,'t','t')",
+                params![format!("camp-{message_count}"), message_count],
+            );
+            assert_eq!(attempt.is_ok(), allowed, "message_count {message_count}");
+        }
+        for (ordinal, allowed) in [(63_i64, true), (64, false)] {
+            let attempt = connection.execute(
+                "INSERT INTO interaction_assignments
+                 (id,campaign_id,target_id,message_ordinal,actor_udid,created_at,updated_at)
+                 VALUES(?1,'camp-1','tgt-1',?2,'udid-z','t','t')",
+                params![format!("asg-{ordinal}"), ordinal],
+            );
+            assert_eq!(attempt.is_ok(), allowed, "message_ordinal {ordinal}");
+        }
+
+        // The rebuild dropped and renamed two tables with enforcement off, and
+        // `interaction_assignments` references *itself* — the one clause that had to keep
+        // resolving to the renamed table rather than the one that was dropped. Proof it did:
+        // deleting the campaign is refused while a reply still points at its parent, because
+        // the cascade reaches `asg-1` and the self-FK is `ON DELETE RESTRICT`. A clause left
+        // dangling would have let this through.
+        let restricted = connection
+            .execute("DELETE FROM interaction_campaigns WHERE id='camp-1'", [])
+            .expect_err("the self-reference must still restrict");
+        assert!(
+            restricted.to_string().contains("FOREIGN KEY"),
+            "expected the parent reference to refuse the delete, got {restricted}"
+        );
+
+        // With the reply gone the same delete must now reach every child, which is the other
+        // half: the cascades survived too.
+        connection
+            .execute("DELETE FROM interaction_assignments WHERE id='asg-2'", [])
+            .expect("drop the reply that pinned its parent");
+        connection
+            .execute("DELETE FROM interaction_campaigns WHERE id='camp-1'", [])
+            .expect("delete the campaign");
+        for (table, remaining) in [
+            ("interaction_campaign_actors", 0_i64),
+            ("interaction_targets", 0),
+            ("interaction_assignments", 0),
+            ("interaction_artifacts", 0),
+        ] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("count survivors");
+            assert_eq!(count, remaining, "{table} did not cascade");
+        }
+
+        drop(connection);
+        cleanup(&path);
+    }
+
+    /// Every interaction row as raw bytes, so a rebuild that "helpfully" reformats a value
+    /// fails the comparison instead of passing it.
+    fn read_interaction_rows(connection: &Connection) -> Vec<Vec<Option<Vec<u8>>>> {
+        let mut rows = Vec::new();
+        for query in [
+            "SELECT CAST(id AS BLOB),CAST(request_id AS BLOB),CAST(request_json AS BLOB),
+                    CAST(state AS BLOB),CAST(message_count AS BLOB),CAST(revision AS BLOB),
+                    CAST(error_code AS BLOB),CAST(created_at AS BLOB),CAST(updated_at AS BLOB)
+             FROM interaction_campaigns ORDER BY id",
+            "SELECT CAST(campaign_id AS BLOB),CAST(actor_ordinal AS BLOB),CAST(udid AS BLOB),
+                    CAST(state AS BLOB),CAST(error_code AS BLOB),NULL,NULL,NULL,NULL
+             FROM interaction_campaign_actors ORDER BY campaign_id,actor_ordinal",
+            "SELECT CAST(id AS BLOB),CAST(campaign_id AS BLOB),CAST(target_key AS BLOB),
+                    CAST(content_id AS BLOB),CAST(kind AS BLOB),CAST(state AS BLOB),
+                    CAST(normalized_url AS BLOB),CAST(created_at AS BLOB),NULL
+             FROM interaction_targets ORDER BY id",
+            "SELECT CAST(id AS BLOB),CAST(campaign_id AS BLOB),CAST(message_ordinal AS BLOB),
+                    CAST(actor_udid AS BLOB),CAST(parent_assignment_id AS BLOB),
+                    CAST(prepared_json AS BLOB),CAST(state AS BLOB),CAST(evidence_json AS BLOB),
+                    CAST(error_code AS BLOB)
+             FROM interaction_assignments ORDER BY id",
+            "SELECT CAST(id AS BLOB),CAST(campaign_id AS BLOB),CAST(assignment_id AS BLOB),
+                    CAST(kind AS BLOB),CAST(relative_path AS BLOB),CAST(sha256 AS BLOB),
+                    CAST(created_at AS BLOB),NULL,NULL
+             FROM interaction_artifacts ORDER BY id",
+        ] {
+            let mut statement = connection.prepare(query).expect("prepare interaction read");
+            let mapped = statement
+                .query_map([], |row| {
+                    (0..9)
+                        .map(|index| row.get::<_, Option<Vec<u8>>>(index))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .expect("read interaction rows")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect interaction rows");
+            rows.extend(mapped);
+        }
+        rows
+    }
+
     #[test]
     fn populated_legacy_database_upgrades_once_without_rewriting_rows() {
         let path = temp_db_path("flow-migration");
@@ -1157,7 +1569,7 @@ mod tests {
                 .iter()
                 .map(|(version, _)| *version)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
         );
         assert!(table_exists(&connection, "flow_documents"));
         assert!(table_exists(&connection, "nurture_comment_attempts"));
@@ -1263,7 +1675,7 @@ mod tests {
 
     #[test]
     fn every_migration_rolls_back_its_schema_and_ledger_row_on_failure() {
-        for failed_version in [1, 2, 3, 4, 5, 6, 7] {
+        for failed_version in [1, 2, 3, 4, 5, 6, 7, 14] {
             let path = temp_db_path(&format!("migration-{failed_version}-rollback"));
             let mut connection = Connection::open(&path).expect("rollback fixture");
             let error = run_with_failpoint(&mut connection, Some(failed_version))
@@ -1336,6 +1748,35 @@ mod tests {
                     vec![1, 2, 3, 4, 5, 6]
                 );
                 assert!(table_exists(&connection, "users"));
+            } else if failed_version == 14 {
+                // Failed at 14: the interaction rebuild rolled back whole. This is the one
+                // rollback in the file that can destroy data rather than just leave work
+                // undone — it drops three tables and two more out from under their children
+                // — so the assertion is that the *old* schema is byte-for-byte still in
+                // charge: the dead tables are back, and the old CHECK still refuses the
+                // seventh message the rebuild exists to allow.
+                assert_eq!(
+                    migration_rows(&connection)
+                        .iter()
+                        .map(|(version, _)| *version)
+                        .collect::<Vec<_>>(),
+                    vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+                );
+                assert!(table_exists(&connection, "interaction_events"));
+                assert!(table_exists(&connection, "interaction_dispatch"));
+                assert!(table_exists(&connection, "interaction_retry_requests"));
+                let refused = connection
+                    .execute(
+                        "INSERT INTO interaction_campaigns
+                         (id,request_id,request_json,state,message_count,created_at,updated_at)
+                         VALUES('c','r','{}','queued',7,'t','t')",
+                        [],
+                    )
+                    .expect_err("the pre-rebuild CHECK is still the one in force");
+                assert!(
+                    refused.to_string().contains("CHECK"),
+                    "expected the old CHECK to refuse 7 messages, got {refused}"
+                );
             } else {
                 // Failed at 8: the schedules table is back to the shape it had before the
                 // column was added. A rolled-back `ALTER TABLE` that left the column behind
@@ -1357,7 +1798,7 @@ mod tests {
                     .iter()
                     .map(|(version, _)| *version)
                     .collect::<Vec<_>>(),
-                vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+                vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
             );
             // The local login is gone and migration 7 takes its credentials with it. This
             // used to assert the seeded `guest@local` row existed; the point of the change
@@ -1397,7 +1838,7 @@ mod tests {
                 .iter()
                 .map(|(version, _)| *version)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
         );
         drop(connection);
         cleanup(&path);
@@ -1442,7 +1883,7 @@ mod tests {
                 .iter()
                 .map(|(version, _)| *version)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
         );
         drop(connection);
         cleanup(&path);
@@ -1491,7 +1932,7 @@ mod tests {
                                     // ledger from a NEWER build, so this has to move
                                     // whenever a migration is added.
                                     "INSERT INTO schema_migrations(version,name,applied_at)
-                                     VALUES(11,'future','2026-07-30T00:00:02Z')",
+                                     VALUES(15,'future','2026-07-30T00:00:02Z')",
                                     [],
                                 )
                                 .expect("future migration");

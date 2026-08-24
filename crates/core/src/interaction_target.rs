@@ -43,6 +43,12 @@ use crate::interaction_campaign::TargetProof;
 pub(crate) struct SendOutcome {
     pub evidence: ThreadSendEvidence,
     pub identity: Option<CommentLocatorIdentity>,
+    /// What became of the `@` tags, when the campaign asked for any.
+    ///
+    /// Carried the same way the like note is, and for the same reason: a tag that TikTok
+    /// never offered goes out as plain text, the account is not notified, and nothing else on
+    /// screen would tell the operator that happened.
+    pub mention_note: Option<String>,
 }
 
 /// A send that did not succeed, and **which side of the effect line it fell on**.

@@ -580,6 +580,24 @@ pub trait UiSession: Send + Sync {
         .await
     }
     async fn type_text(&self, text: &str) -> anyhow::Result<()>;
+    /// Type **as real key events**, the way a keyboard would, appending at the cursor.
+    ///
+    /// [`Self::type_text`] writes through accessibility (`ACTION_SET_TEXT` on Android), which
+    /// replaces the whole field and — measured 24/08/2026 — is invisible to the app's own
+    /// input watchers: setting a comment box to `@name` never opened TikTok's mention picker,
+    /// while the same characters injected as key events opened it and filtered it to real
+    /// accounts. Anything that has to make the app *react to typing* needs this path.
+    ///
+    /// **ASCII only.** The Android implementation shells out to `input text`, which is killed
+    /// outright by diacritics — the reason `type_text` exists in the first place. Callers put
+    /// Vietnamese through `type_text` and use this only for things like an `@handle`.
+    ///
+    /// Unsupported by default: a session that cannot inject real keys must say so rather than
+    /// silently fall back to the accessibility path, because the caller is asking for the one
+    /// property that path does not have.
+    async fn type_keys(&self, _text: &str) -> anyhow::Result<()> {
+        unsupported("typeKeys")
+    }
     /// Whether this session's text injection is accepted by the foreground
     /// app. Stock XCTest WDA reports successful key requests that TikTok drops;
     /// the standalone RT-MMO backend supplies the trusted text channel.

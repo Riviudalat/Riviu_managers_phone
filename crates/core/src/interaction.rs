@@ -19,7 +19,7 @@ use thiserror::Error;
 /// far above the fleet exists only so a typo cannot ask for eight thousand.
 const MAX_MESSAGE_COUNT: u8 = 64;
 const MIN_MESSAGE_COUNT: u8 = 2;
-const MAX_ACTOR_COUNT: usize = 64;
+pub(crate) const MAX_ACTOR_COUNT: usize = 64;
 /// Two, because one account replying to itself is not a conversation.
 const MIN_ACTOR_COUNT: usize = 2;
 /// A cohort has to be able to hold a conversation on its own, so it needs two.
@@ -540,6 +540,19 @@ pub struct PreparedThreadMessage {
     pub text: String,
     pub text_sha256: String,
     pub parent_ordinal: Option<u8>,
+    /// Handles to tag on this message, without the `@`.
+    ///
+    /// Carried beside the text rather than baked into it, because the two backends can do
+    /// genuinely different things with them: the hierarchy driver types the body and then
+    /// picks each handle out of TikTok's suggestion list, which produces a **real** mention;
+    /// the pixel driver has no way to reach that list and prepends them as literal text, the
+    /// way both used to. Baking the prefix into `text` would have forced the second behaviour
+    /// on both, and it also puts the handles into `text_sha256`, which is the digest the
+    /// evidence checks a delivered comment against.
+    ///
+    /// `#[serde(default)]` so a message prepared before this reads as "no tags".
+    #[serde(default)]
+    pub mentions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -566,6 +579,14 @@ pub fn frame_sha256(frame: &[u8]) -> String {
 
 impl PreparedThreadMessage {
     pub fn new(plan: &ThreadMessagePlan, text: impl Into<String>) -> Self {
+        Self::with_mentions(plan, text, Vec::new())
+    }
+
+    pub fn with_mentions(
+        plan: &ThreadMessagePlan,
+        text: impl Into<String>,
+        mentions: Vec<String>,
+    ) -> Self {
         let text = normalize_comment_text(&text.into());
         let mut digest = Sha256::new();
         digest.update(text.as_bytes());
@@ -576,7 +597,23 @@ impl PreparedThreadMessage {
             text,
             text_sha256,
             parent_ordinal: plan.parent_ordinal,
+            mentions,
         }
+    }
+
+    /// The handles as literal text, for a backend that cannot reach the suggestion list.
+    pub fn literal_mention_prefix(&self) -> String {
+        if self.mentions.is_empty() {
+            return String::new();
+        }
+        format!(
+            "{} ",
+            self.mentions
+                .iter()
+                .map(|handle| format!("@{}", handle.trim().trim_start_matches('@')))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
     }
 }
 
@@ -849,6 +886,53 @@ pub struct InteractionCampaignSummary {
     /// column and the operator's only signal was the word "Lỗi".
     pub error_code: Option<String>,
     pub updated_at: String,
+    /// What this campaign actually was, for a human reading a list of them.
+    ///
+    /// The Monitor tab had nothing to name a row with but `requestId.slice(0, 14)` — a UUID
+    /// fragment — so seven campaigns against three different posts were seven
+    /// indistinguishable rows, and finding the one you just launched meant guessing.
+    /// Everything here already existed in `request_json`; none of it was ever read back.
+    ///
+    /// Derived at read time rather than denormalised into columns: the request blob is the
+    /// record, and a copy of it in columns is a second version that can drift from the one
+    /// the campaign actually ran with. `None` when the blob will not parse, which must stay
+    /// survivable — a corrupt request is a reason to show a row plainly, not to hide it.
+    #[serde(default)]
+    pub brief: Option<InteractionCampaignBrief>,
+}
+
+/// The human-readable shape of a campaign, read back out of its stored request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InteractionCampaignBrief {
+    /// Author of the first link, e.g. `.lt.gi.mang.v`.
+    pub first_author: Option<String>,
+    /// Content id of the first link, so two campaigns against one author are still distinct.
+    pub first_content_id: Option<String>,
+    pub mode: ThreadMode,
+    pub shape: ThreadShape,
+    pub cohort_size: Option<u8>,
+    pub actor_count: u32,
+    /// Whether the operator wrote the comments, rather than the AI.
+    pub manual: bool,
+    pub like_target: bool,
+}
+
+impl InteractionCampaignBrief {
+    /// Read a brief out of the request a campaign was created with.
+    pub fn from_request(request: &ThreadCampaignRequest) -> Self {
+        let first = request.targets.first();
+        Self {
+            first_author: first.map(|target| target.author.clone()),
+            first_content_id: first.map(|target| target.content_id.clone()),
+            mode: request.mode,
+            shape: request.shape,
+            cohort_size: request.cohort_size,
+            actor_count: request.actor_udids.len() as u32,
+            manual: request.is_manual(),
+            like_target: request.like_target,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -882,6 +966,9 @@ pub struct InteractionAssignmentRecord {
     /// the record is loaded — see [`Self::like_note`].
     #[serde(default)]
     pub like: Option<String>,
+    /// What happened to the `@` tags — see [`Self::mention_note`]. Same shape, same reason.
+    #[serde(default)]
+    pub mention: Option<String>,
 }
 
 impl InteractionAssignmentRecord {
@@ -899,6 +986,19 @@ impl InteractionAssignmentRecord {
         serde_json::from_str::<serde_json::Value>(self.evidence_json.as_deref()?)
             .ok()?
             .get("like")?
+            .as_str()
+            .map(str::to_string)
+    }
+
+    /// What happened to the `@` tags on this message, if it carried any.
+    ///
+    /// Read out of the evidence the same way the like note is: a tag TikTok never offered was
+    /// typed as plain text, which posts fine and notifies nobody, and the difference is
+    /// invisible in the comment itself.
+    pub fn mention_note(&self) -> Option<String> {
+        serde_json::from_str::<serde_json::Value>(self.evidence_json.as_deref()?)
+            .ok()?
+            .get("mention")?
             .as_str()
             .map(str::to_string)
     }
@@ -936,10 +1036,123 @@ pub struct ThreadPreview {
     pub lines: Vec<TikTokLinkLine>,
     pub plan: Option<ThreadPlan>,
     pub valid_target_count: u32,
+    /// How many cohorts this plan would run at once — `partition_actors(..).len()`.
+    ///
+    /// The desktop used to compute this itself, in TypeScript, by reimplementing
+    /// [`partition_actors`] including its remainder-spreading. Two implementations of one
+    /// split is two chances to disagree about what the operator is about to launch.
+    #[serde(default)]
+    pub cohort_count: u32,
+    /// How many device streams the whole app can hold open at once.
+    ///
+    /// Paired with `cohort_count` because exceeding it is a **refusal, not a queue**:
+    /// `preview_foreground_victim` answers `CapacityExhausted` and the assignment is marked
+    /// Failed. Eight cohorts against a budget of four does not run slowly, it fails half the
+    /// campaign — and the only moment that is cheap to learn is before pressing start.
+    #[serde(default)]
+    pub stream_capacity: u32,
 }
 
 #[cfg(test)]
 mod tests {
+    /// The two payloads the desktop reads field-by-field, pinned by name.
+    ///
+    /// TypeScript cannot check a Rust struct, so a renamed or dropped field here shows up as
+    /// `undefined` in the UI and nowhere else. `ThreadPlanAssignment` on the desktop side had
+    /// already drifted this way: the planner emitted `cohort` and the TS type never declared
+    /// it, so a cohort could not be displayed even though it was on the wire.
+    mod wire_shape {
+        use super::super::*;
+
+        #[test]
+        fn the_preview_wire_shape_is_what_the_frontend_types_say() {
+            let preview = ThreadPreview {
+                lines: Vec::new(),
+                plan: Some(ThreadPlan {
+                    request_id: "r".into(),
+                    assignments: vec![ThreadMessagePlan {
+                        target_key: "content:1".into(),
+                        ordinal: 1,
+                        actor_udid: "udid".into(),
+                        parent_ordinal: Some(0),
+                        cohort: 2,
+                    }],
+                }),
+                valid_target_count: 1,
+                cohort_count: 3,
+                stream_capacity: 4,
+            };
+            let json = serde_json::to_value(&preview).expect("serialise preview");
+            for key in [
+                "lines",
+                "plan",
+                "validTargetCount",
+                "cohortCount",
+                "streamCapacity",
+            ] {
+                assert!(json.get(key).is_some(), "preview lost `{key}`");
+            }
+            let assignment = &json["plan"]["assignments"][0];
+            for key in [
+                "targetKey",
+                "ordinal",
+                "actorUdid",
+                "parentOrdinal",
+                "cohort",
+            ] {
+                assert!(
+                    assignment.get(key).is_some(),
+                    "plan assignment lost `{key}`"
+                );
+            }
+        }
+
+        #[test]
+        fn a_brief_names_the_campaign_by_its_first_link() {
+            let mut request = ThreadCampaignRequest {
+                request_id: "r".into(),
+                targets: vec![super::target("7668947001618320660")],
+                actor_udids: vec!["one".into(), "two".into(), "three".into()],
+                message_count: 3,
+                instruction: "tự nhiên".into(),
+                max_words: 12,
+                mode: ThreadMode::Threaded,
+                shape: ThreadShape::Star,
+                cohort_size: Some(3),
+                manual_comments: Vec::new(),
+                like_target: true,
+                mentions: Vec::new(),
+            };
+            let brief = InteractionCampaignBrief::from_request(&request);
+            assert_eq!(
+                brief.first_content_id.as_deref(),
+                Some("7668947001618320660")
+            );
+            assert_eq!(brief.actor_count, 3);
+            assert_eq!(brief.shape, ThreadShape::Star);
+            assert!(brief.like_target);
+            assert!(!brief.manual, "an empty pool means the AI writes");
+
+            request.manual_comments = vec!["đẹp quá".into(), "ở đâu vậy ạ".into(), "lưu".into()];
+            assert!(InteractionCampaignBrief::from_request(&request).manual);
+
+            let json = serde_json::to_value(InteractionCampaignBrief::from_request(&request))
+                .expect("serialise brief");
+            for key in [
+                "firstAuthor",
+                "firstContentId",
+                "mode",
+                "shape",
+                "cohortSize",
+                "actorCount",
+                "manual",
+                "likeTarget",
+            ] {
+                assert!(json.get(key).is_some(), "brief lost `{key}`");
+            }
+        }
+    }
+
     // Manual comments and the like flag. Both are additive to a persisted request, so the
     // round-trip of an old payload is asserted too — a stored campaign must keep behaving the
     // way it was created.
@@ -1711,6 +1924,7 @@ mod tests {
             error_code: None,
             evidence_json: evidence.map(str::to_string),
             like: None,
+            mention: None,
         }
     }
 

@@ -253,6 +253,16 @@ fn interaction_summary_from_row(
         target_count: narrow(row.get::<_, i64>(6)?, "target_count")?,
         succeeded_messages: narrow(row.get::<_, i64>(7)?, "succeeded_messages")?,
         failed_messages: narrow(row.get::<_, i64>(8)?, "failed_messages")?,
+        // Index 9, appended last on purpose — see the note above about what inserting a
+        // column mid-list did the first time. Parsed leniently: a request blob this build
+        // cannot read is a row that shows without a name, never a list that refuses to load.
+        brief: row
+            .get::<_, String>(9)
+            .ok()
+            .and_then(|json| {
+                serde_json::from_str::<crate::interaction::ThreadCampaignRequest>(&json).ok()
+            })
+            .map(|request| crate::interaction::InteractionCampaignBrief::from_request(&request)),
     })
 }
 
@@ -828,7 +838,7 @@ mod interaction_tests {
     use super::*;
     use crate::interaction::{
         plan_threads, PreparedThreadMessage, ResolvedTikTokTarget, ThreadCampaignRequest,
-        ThreadMessageState, ThreadMode, TikTokPostKind,
+        ThreadCampaignState, ThreadMessageState, ThreadMode, TikTokPostKind,
     };
 
     fn fixture() -> (Database, PathBuf) {
@@ -862,6 +872,268 @@ mod interaction_tests {
             cohort_size: None,
             mentions: Vec::new(),
         }
+    }
+
+    /// A thread across the whole farm has to fit the schema, and until migration 14 it did
+    /// not.
+    ///
+    /// Validation demands `message_count >= the largest cohort`, so one cohort over the
+    /// fourteen phones on this box needs fourteen messages — and the table carried
+    /// `CHECK (message_count BETWEEN 2 AND 6)`, so every whole-fleet campaign died in this
+    /// function as a CHECK violation the operator saw as `OperationFailed`. The engine and
+    /// the UI had allowed 2..=64 for months, which is why nothing above this layer caught it.
+    ///
+    /// Both the real fleet size and the engine's own ceiling are pinned: a bound that only
+    /// holds for the number of phones plugged in today is not a bound.
+    #[test]
+    fn a_whole_fleet_thread_fits_the_relaxed_schema() {
+        for actor_count in [14_usize, crate::interaction::MAX_ACTOR_COUNT] {
+            let (db, path) = fixture();
+            let mut request = request();
+            request.request_id = format!("fleet-{actor_count}");
+            request.actor_udids = (0..actor_count)
+                .map(|index| format!("udid-{index}"))
+                .collect();
+            request.message_count = u8::try_from(actor_count).expect("fleet fits a u8");
+            let plan = plan_threads(&request).expect("plan a single cohort over the fleet");
+
+            let campaign_id = db
+                .create_interaction_campaign(&request, &plan)
+                .unwrap_or_else(|error| panic!("{actor_count} actors must persist, got {error:#}"));
+            let detail = db
+                .get_interaction_campaign(&campaign_id)
+                .expect("read back")
+                .expect("campaign exists");
+            assert_eq!(detail.summary.message_count as usize, actor_count);
+            assert_eq!(detail.assignments.len(), actor_count);
+            // The last ordinal is the one the old `message_ordinal BETWEEN 0 AND 5` refused.
+            assert_eq!(
+                detail
+                    .assignments
+                    .iter()
+                    .map(|assignment| assignment.ordinal)
+                    .max(),
+                Some(u8::try_from(actor_count - 1).expect("fits a u8"))
+            );
+            drop(db);
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// A campaign row has to say what it was, on both read paths.
+    ///
+    /// The Monitor tab could name a campaign only by a slice of its UUID, so a list of runs
+    /// against three different posts read as three identical rows. Everything needed was in
+    /// `request_json` and no query selected it.
+    #[test]
+    fn the_list_row_names_the_campaign_it_summarises() {
+        let (db, path) = fixture();
+        let request = request();
+        let plan = plan_threads(&request).expect("plan");
+        let campaign_id = db
+            .create_interaction_campaign(&request, &plan)
+            .expect("create campaign");
+
+        for (source, summary) in [
+            (
+                "list",
+                db.list_interaction_campaigns(10)
+                    .expect("list")
+                    .into_iter()
+                    .next()
+                    .expect("one campaign"),
+            ),
+            (
+                "get",
+                db.get_interaction_campaign(&campaign_id)
+                    .expect("get")
+                    .expect("exists")
+                    .summary,
+            ),
+        ] {
+            let brief = summary
+                .brief
+                .unwrap_or_else(|| panic!("{source} must carry a brief"));
+            assert_eq!(brief.first_author.as_deref(), Some("creator"), "{source}");
+            assert_eq!(brief.first_content_id.as_deref(), Some("123"), "{source}");
+            assert_eq!(brief.actor_count, 2, "{source}");
+            assert_eq!(brief.mode, ThreadMode::Threaded, "{source}");
+            assert!(!brief.manual, "{source}");
+        }
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A request blob this build cannot read must cost the name, not the row.
+    ///
+    /// The brief is parsed at read time, so a payload from a future build — or a corrupted
+    /// one — reaches the same code path as a good one. Refusing there would make the whole
+    /// Monitor list fail to load over a single bad campaign.
+    #[test]
+    fn a_summary_with_unreadable_request_json_still_lists() {
+        let (db, path) = fixture();
+        let request = request();
+        let plan = plan_threads(&request).expect("plan");
+        let campaign_id = db
+            .create_interaction_campaign(&request, &plan)
+            .expect("create campaign");
+        db.conn()
+            .expect("connection")
+            .execute(
+                "UPDATE interaction_campaigns SET request_json='hỏng' WHERE id=?1",
+                params![campaign_id],
+            )
+            .expect("corrupt the stored request");
+
+        let listed = db.list_interaction_campaigns(10).expect("list");
+        assert_eq!(listed.len(), 1, "the row must still be listed");
+        assert!(
+            listed[0].brief.is_none(),
+            "an unreadable request has no name to show"
+        );
+        assert_eq!(listed[0].id, campaign_id);
+        assert_eq!(listed[0].message_count, 2, "the real columns still read");
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A campaign the app was killed in the middle of has to stop calling itself running.
+    ///
+    /// The worker is a `tokio::spawn` in the app process: once the app is gone there is
+    /// nothing to finish it, and the Monitor draws `running` with a Dừng button and no Retry.
+    /// Measured 24/08/2026 — a `tauri dev` rebuild restarted the app mid-campaign and left
+    /// exactly this: a row frozen at "Đang chạy", rows frozen at "Đang gửi".
+    #[test]
+    fn a_campaign_whose_worker_died_is_closed_out_and_stays_safe_to_retry() {
+        let (db, path) = fixture();
+        let request = request();
+        let plan = plan_threads(&request).expect("plan");
+        let campaign_id = db
+            .create_interaction_campaign(&request, &plan)
+            .expect("create campaign");
+        db.update_interaction_campaign_state(&campaign_id, ThreadCampaignState::Running, None)
+            .expect("start it");
+        let detail = db
+            .get_interaction_campaign(&campaign_id)
+            .expect("get")
+            .expect("exists");
+        let (sending, waiting) = (&detail.assignments[0], &detail.assignments[1]);
+        db.update_interaction_assignment_state(
+            &sending.id,
+            ThreadMessageState::Sending,
+            None,
+            Some("post_comment"),
+            None,
+        )
+        .expect("one message was in flight");
+
+        assert_eq!(
+            db.interrupt_orphaned_interaction_campaigns()
+                .expect("sweep"),
+            1
+        );
+
+        let after = db
+            .get_interaction_campaign(&campaign_id)
+            .expect("get")
+            .expect("exists");
+        assert_eq!(after.summary.state, ThreadCampaignState::Cancelled);
+        assert!(
+            after
+                .summary
+                .error_code
+                .as_deref()
+                .is_some_and(|reason| reason.contains("interaction_worker_lost")),
+            "the row has to say why it stopped, or it reads as an operator cancelling it"
+        );
+
+        let by_id = |id: &str| {
+            after
+                .assignments
+                .iter()
+                .find(|assignment| assignment.id == id)
+                .expect("assignment survives")
+                .state
+        };
+        // The safety-critical half: a message whose Send tap went out with no confirmation is
+        // `Uncertain`, and `Uncertain` is permanently excluded from retry — so a comment that
+        // may already be public can never be posted a second time.
+        assert_eq!(by_id(&sending.id), ThreadMessageState::Uncertain);
+        assert!(
+            !crate::interaction_campaign::retryable_assignments(&after.assignments, None)
+                .contains(&sending.id),
+            "an interrupted send must never become retryable"
+        );
+        // A message that never touched the device is untouched, and still repairable.
+        assert_eq!(by_id(&waiting.id), ThreadMessageState::Queued);
+        assert!(
+            crate::interaction_campaign::retryable_assignments(&after.assignments, None)
+                .contains(&waiting.id)
+        );
+
+        // Idempotent: a second start-up finds nothing left to close.
+        assert_eq!(
+            db.interrupt_orphaned_interaction_campaigns()
+                .expect("sweep again"),
+            0
+        );
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A campaign with live comments under it must never be filed as a total loss.
+    ///
+    /// The final state used to be decided from the counters of the pass that had just run,
+    /// and on a retry those count only the messages the retry touched. Measured 24/08/2026 on
+    /// the fleet: five comments were already public, the retry's eight all failed, so
+    /// `succeeded == 0` for the pass and the row was written `Failed`. The summary the row is
+    /// drawn from said `5/14` at the same moment.
+    ///
+    /// Pinned here rather than in the runner because the runner needs a device; what the
+    /// runner now reads is exactly this projection of the assignment states.
+    #[test]
+    fn a_retry_that_lands_nothing_still_reports_the_comments_that_are_live() {
+        let (db, path) = fixture();
+        let request = request();
+        let plan = plan_threads(&request).expect("plan");
+        let campaign_id = db
+            .create_interaction_campaign(&request, &plan)
+            .expect("create campaign");
+        let detail = db
+            .get_interaction_campaign(&campaign_id)
+            .expect("get")
+            .expect("exists");
+        db.update_interaction_assignment_state(
+            &detail.assignments[0].id,
+            ThreadMessageState::Succeeded,
+            None,
+            None,
+            None,
+        )
+        .expect("one comment is live");
+        db.update_interaction_assignment_state(
+            &detail.assignments[1].id,
+            ThreadMessageState::Failed,
+            Some("reply_parent_not_found: …"),
+            None,
+            None,
+        )
+        .expect("the other is not");
+
+        let after = db
+            .get_interaction_campaign(&campaign_id)
+            .expect("get")
+            .expect("exists");
+        assert_eq!(after.summary.succeeded_messages, 1);
+        assert_eq!(after.summary.failed_messages, 1);
+        // "Some of it worked" is the only honest reading of that pair, whichever pass
+        // produced it.
+        assert!(
+            after.summary.succeeded_messages > 0 && after.summary.failed_messages > 0,
+            "the projection the runner reads has to see both, or Partial is unreachable"
+        );
+        drop(db);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

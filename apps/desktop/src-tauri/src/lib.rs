@@ -607,7 +607,7 @@ mod tests {
         ),
         (
             "interaction_preview_thread",
-            "pure: plans a campaign without running it",
+            "read: plans a campaign and reads the in-memory stream budget; touches no device",
         ),
         ("interaction_list", "read: DB"),
         ("interaction_get", "read: DB"),

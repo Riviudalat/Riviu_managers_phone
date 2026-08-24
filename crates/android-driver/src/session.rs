@@ -379,6 +379,43 @@ impl UiSession for AndroidUiSession {
         self.agent.set_text(&element, text).await
     }
 
+    /// Real key events, via `input text`.
+    ///
+    /// This exists because `set_text` is invisible to the app: `ACTION_SET_TEXT` changes the
+    /// field's contents without any keystroke reaching TikTok, so its mention picker — which
+    /// watches typing — never opens. Measured 24/08/2026 on `ce051715ac247a3f01`: setting the
+    /// comment box to `@lt.gi` did nothing, while injecting the same characters here opened
+    /// the picker and filtered it to four real accounts.
+    ///
+    /// **The character set is a whitelist, and that is a security boundary, not tidiness.**
+    /// `adb shell` runs a real shell on the phone, so this string reaches it as code — the
+    /// same hazard `validate_bundle_id` exists for. Handles are `[A-Za-z0-9._-]` with a
+    /// leading `@`; anything else is refused rather than escaped, because the only caller
+    /// needs nothing else and an escaping bug here is a remote shell.
+    ///
+    /// It is also ASCII-only for a second reason: `input text` is *killed* by diacritics,
+    /// which is why `type_text` goes through accessibility instead.
+    async fn type_keys(&self, text: &str) -> anyhow::Result<()> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        let allowed =
+            |c: char| c.is_ascii_alphanumeric() || matches!(c, '@' | '.' | '_' | '-' | ' ');
+        if !text.chars().all(allowed) {
+            anyhow::bail!(
+                "typeKeys refuses {text:?}: only ASCII letters, digits, space and @._- reach the device shell, and anything else would need escaping this deliberately does not do"
+            );
+        }
+        // `input text` splits its argument on spaces, so a literal space is `%s` — its own
+        // documented escape, not a shell one. That is why the whitelist can stay this narrow:
+        // every character it admits either passes through untouched or has an escape here.
+        let typed = text.replace(' ', "%s");
+        self.adb
+            .shell(&self.serial, &format!("input text {typed}"))
+            .await?;
+        Ok(())
+    }
+
     async fn set_clipboard(&self, content_type: &str, bytes: &[u8]) -> anyhow::Result<()> {
         let helper = self
             .helper

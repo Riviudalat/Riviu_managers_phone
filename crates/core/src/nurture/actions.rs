@@ -245,7 +245,15 @@ impl NurtureEngine {
                 .map_err(|e| anyhow!("focus_comment_input: {e}"))?;
             sleep_interruptible(COMMENT_INPUT_SETTLE, stop).await;
             session
-                .type_text(&prepared.text)
+                // The literal prefix, because this path cannot reach TikTok's suggestion list
+                // and so cannot make a real mention — see `append_mentions_by_picker`. Empty
+                // unless the campaign asked for tags, which keeps every other comment
+                // byte-identical to what it was.
+                .type_text(&format!(
+                    "{}{}",
+                    prepared.literal_mention_prefix(),
+                    prepared.text
+                ))
                 .await
                 .map_err(|e| anyhow!("type_comment: {e}"))?;
         }
@@ -364,7 +372,15 @@ impl NurtureEngine {
                 .map_err(|e| anyhow!("focus_reply_input: {e}"))?;
             sleep_interruptible(COMMENT_INPUT_SETTLE, stop).await;
             session
-                .type_text(&prepared.text)
+                // The literal prefix, because this path cannot reach TikTok's suggestion list
+                // and so cannot make a real mention — see `append_mentions_by_picker`. Empty
+                // unless the campaign asked for tags, which keeps every other comment
+                // byte-identical to what it was.
+                .type_text(&format!(
+                    "{}{}",
+                    prepared.literal_mention_prefix(),
+                    prepared.text
+                ))
                 .await
                 .map_err(|e| anyhow!("type_reply: {e}"))?;
         }
@@ -2430,6 +2446,7 @@ mod tests {
             text: COMMENT.to_string(),
             text_sha256: "deadbeef".into(),
             parent_ordinal: None,
+            mentions: Vec::new(),
         };
 
         let result = engine

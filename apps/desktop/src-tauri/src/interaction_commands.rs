@@ -93,6 +93,7 @@ pub async fn interaction_resolve_links(
 
 #[tauri::command]
 pub fn interaction_preview_thread(
+    state: State<'_, AppState>,
     request: ThreadCampaignRequest,
 ) -> Result<ThreadPreview, CommandError> {
     let lines = request
@@ -109,6 +110,12 @@ pub fn interaction_preview_thread(
     let plan = plan_threads(&request).map_err(interaction_error)?;
     Ok(ThreadPreview {
         valid_target_count: request.targets.len() as u32,
+        // Both from the real planner and the real budget, so the desktop stops maintaining a
+        // second copy of the cohort split in TypeScript and can warn about a capacity the
+        // campaign would actually hit.
+        cohort_count: riviu_core::partition_actors(&request.actor_udids, request.cohort_size).len()
+            as u32,
+        stream_capacity: state.control.stream_capacity() as u32,
         lines,
         plan: Some(plan),
     })
@@ -196,6 +203,23 @@ pub async fn interaction_start_thread(
     let admission = state.ensure_accepting_work()?;
     require_parent_locator(&state.control, request.mode, &request.actor_udids)?;
     let plan = plan_threads(&request).map_err(interaction_error)?;
+    // Asked before anything is persisted. The engine checks this too, but by then the row
+    // exists and the operator's history fills with campaigns that were Running for a second
+    // and then Failed on a missing key — an AI campaign with no key never started, and the
+    // list should not claim it did. A manual campaign passes: it never calls the AI.
+    if riviu_core::interaction_campaign::ai_key_missing(
+        &request,
+        &state
+            .db
+            .get_nurture_settings()
+            .map_err(CommandError::operation)?
+            .api_key,
+    ) {
+        return Err(CommandError::code(
+            "AiKeyMissing",
+            "chưa cấu hình AI API key — dùng bình luận thủ công hoặc nhập key trong Nuôi TT",
+        ));
+    }
     let campaign_id = state
         .db
         .create_interaction_campaign(&request, &plan)
@@ -329,10 +353,12 @@ pub fn interaction_retry(
             "không có tin nào gửi lại được: mọi tin đã đăng, đang gửi, hoặc ở trạng thái không chắc chắn",
         ));
     }
-    state
-        .db
-        .update_interaction_campaign_state(&campaign_id, ThreadCampaignState::Queued, None)
-        .map_err(CommandError::operation)?;
+    // Every refusal below this point used to sit *after* a write of `Queued`, and a refused
+    // retry therefore left the campaign parked there — a state the Monitor shows neither a
+    // Cancel button for (running only) nor a Retry button for (partial/failed/cancelled
+    // only), so the campaign became unreachable from the UI by asking to repair it. Read the
+    // whole request and judge it first; the state moves only once, and only once nothing can
+    // still say no.
     let (request, plan) = state
         .db
         .get_interaction_campaign_request(&campaign_id)
@@ -343,6 +369,22 @@ pub fn interaction_retry(
     // The mode is whatever the campaign was created with, so the reader
     // requirement has to be judged against that rather than a fresh choice.
     require_parent_locator(&state.control, request.mode, &request.actor_udids)?;
+    // A manual campaign never calls the AI, so only an AI one needs the key — and asking here
+    // rather than inside the worker means the refusal reaches the operator as a refusal
+    // instead of as a campaign that flipped to Failed a second after they pressed retry.
+    if riviu_core::interaction_campaign::ai_key_missing(
+        &request,
+        &state
+            .db
+            .get_nurture_settings()
+            .map_err(CommandError::operation)?
+            .api_key,
+    ) {
+        return Err(CommandError::code(
+            "AiKeyMissing",
+            "chưa cấu hình AI API key — dùng bình luận thủ công hoặc nhập key trong Nuôi TT",
+        ));
+    }
     state
         .db
         .update_interaction_campaign_state(&campaign_id, ThreadCampaignState::Running, None)
@@ -382,6 +424,13 @@ pub fn interaction_retry(
                 ThreadCampaignState::Failed,
                 Some(&detail),
             );
+            // The start path has always emitted here; retry did not, so a retry that died in
+            // the worker left the Monitor showing "Đang chạy" until something else happened
+            // to refresh it. The state write above is invisible without this.
+            events.emit(AppEvent::InteractionUpdated {
+                campaign_id: worker_id,
+                revision: revision(),
+            });
         }
     });
     state.events.emit(AppEvent::InteractionUpdated {

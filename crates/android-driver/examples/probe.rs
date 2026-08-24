@@ -1181,7 +1181,7 @@ async fn gate_standalone(
 
     println!("  sending {text:?} …");
     let sent = Instant::now();
-    let outcome = send_root_by_hierarchy(ui, labels, screen, text, &stop, String::new).await?;
+    let outcome = send_root_by_hierarchy(ui, labels, screen, text, &[], &stop, String::new).await?;
     println!(
         "  verdict = {:?} ({}) in {} ms",
         outcome.verdict,

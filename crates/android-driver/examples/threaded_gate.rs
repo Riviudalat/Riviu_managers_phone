@@ -211,6 +211,8 @@ async fn main() -> anyhow::Result<()> {
         actor_a.labels,
         actor_a.screen,
         root_text,
+        // This gate proves nesting, not tagging: no mentions, so the picker never runs.
+        &[],
         &stop,
         String::new,
     )
