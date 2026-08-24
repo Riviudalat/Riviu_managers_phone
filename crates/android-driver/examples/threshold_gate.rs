@@ -9,6 +9,17 @@
 //! the same ten phones on a post they had opened all day added **nothing**, and no formula
 //! predicts that. So a pass that moves nothing stops the loop instead of running forever.
 //!
+//! **A pass has to land before it can count, and the first version of this gate did not.** It
+//! force-stopped TikTok, slept 2 s, ran a plain launch, slept 3 s, and only then fired the
+//! deep link — into a splash screen. AGENTS.md §9.19 measured TikTok reaching foreground
+//! **15.86 / 19.71 / 19.42 s** after `am force-stop`, once **26.9 s**, which is why production
+//! waits 40 s. Every "+0" this gate reported was taken through that hole, including the one on
+//! the operator's own post. The three passes that really moved a number were run by hand as a
+//! single shell command — `am force-stop …; am start -a VIEW -d <url>` — where
+//! ActivityManager queues the intent and TikTok handles it as its launch intent on the way up.
+//! That is what [`open_on`] now does, and [`run_pass`] no longer counts a phone unless the
+//! phone can be shown to be looking at the post.
+//!
 //! ```text
 //! RIVIU_TIKTOK_PACKAGE=com.ss.android.ugc.trill \
 //!   cargo run -p riviu-android-driver --example threshold_gate -- \
@@ -26,7 +37,7 @@ use std::time::Duration;
 use riviu_android_driver::{AndroidDriver, AndroidDriverConfig};
 use riviu_core::driver::{DeviceDriver, UiSession};
 use riviu_core::interaction_hierarchy::{
-    open_target_by_hierarchy, read_post_counters, read_view_count, TargetArrival,
+    open_target_by_hierarchy, read_post_caption, read_post_counters, read_view_count, TargetArrival,
 };
 use riviu_core::interaction_threshold::{plan_thresholds, PostNow, PostTargets};
 use riviu_core::tiktok_labels;
@@ -39,11 +50,57 @@ static TIKTOK: LazyLock<String> = LazyLock::new(|| {
         .unwrap_or_else(|| "com.ss.android.ugc.trill".to_string())
 });
 
+/// How long a cold TikTok gets to reach the post before a phone is written off for this pass.
+///
+/// AGENTS.md §9.19 measured the app reaching foreground 15.86 / 19.71 / 19.42 s after
+/// `am force-stop`, and once 26.9 s. Production uses 40 s for exactly this, so this uses 40 s
+/// too rather than inventing a second number for the same event.
+const ARRIVAL_WINDOW: Duration = Duration::from_secs(40);
+
 fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter()
         .position(|arg| arg == name)
         .and_then(|at| args.get(at + 1))
         .cloned()
+}
+
+/// The URL is about to go into a shell command, so it is checked rather than trusted.
+///
+/// Not defence against a hostile operator — defence against a paste that silently changes what
+/// the command does. `device_shell` hands the string to `/system/bin/sh` on the phone.
+fn safe_url(url: &str) -> anyhow::Result<&str> {
+    let allowed = |c: char| {
+        c.is_ascii_alphanumeric()
+            || matches!(
+                c,
+                ':' | '/' | '.' | '-' | '_' | '?' | '=' | '&' | '@' | '~' | '%'
+            )
+    };
+    anyhow::ensure!(
+        url.starts_with("https://") && url.chars().all(allowed),
+        "refusing {url:?}: a post URL has to be https and free of shell metacharacters"
+    );
+    Ok(url)
+}
+
+/// Force-stop, then fire the deep link **in the same command**.
+///
+/// `am start -a VIEW` against a stopped app is a cold start whose launch intent *is* the link,
+/// so ActivityManager queues it and TikTok handles it when it comes up. Splitting that into
+/// stop / launch / link — with sleeps between — is what fired the link at a splash screen; see
+/// the module header for the measurement.
+async fn open_on(driver: &AndroidDriver, serial: &str, url: &str) -> anyhow::Result<()> {
+    let package = TIKTOK.as_str();
+    driver
+        .device_shell(
+            serial,
+            &format!(
+                "am force-stop {package}; am start -a android.intent.action.VIEW \
+                 -c android.intent.category.BROWSABLE -d '{url}' -p {package}"
+            ),
+        )
+        .await
+        .map(|_| ())
 }
 
 #[tokio::main]
@@ -64,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
         );
         return Ok(());
     }
-    let (reader, url) = (&head[0], &head[1]);
+    let (reader, url) = (&head[0], safe_url(&head[1])?);
     let want_views: Option<u32> = flag(head, "--views").and_then(|v| v.parse().ok());
     let max_passes: u32 = flag(head, "--passes")
         .and_then(|v| v.parse().ok())
@@ -84,13 +141,12 @@ async fn main() -> anyhow::Result<()> {
     // The reader is the phone that measures. Kept separate from the watchers so a reading is
     // never taken on a phone that is mid-pass.
     println!("== reader {reader} ==");
-    // Cold start, not just "bring to front". A phone left on a profile or a search page has
-    // no author label to take a baseline from, and the arrival check correctly refuses —
-    // which reads as a broken gate when it is really a phone parked somewhere.
-    driver.terminate_app(reader, TIKTOK.as_str()).await.ok();
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    driver.launch_app(reader, TIKTOK.as_str()).await?;
-    tokio::time::sleep(Duration::from_secs(8)).await;
+    // Same one-command cold start as the watchers, and the same 40 s. A phone left on a profile
+    // or a search page has no author label to take a baseline from, and the arrival check
+    // correctly refuses — which reads as a broken gate when it is really a phone parked
+    // somewhere.
+    open_on(&driver, reader, url).await?;
+    tokio::time::sleep(ARRIVAL_WINDOW).await;
     let session = driver.open_session(reader).await?;
     let language = session.ui_language().await.unwrap_or_default();
     let app_version = session
@@ -101,6 +157,17 @@ async fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("no measured labels for {language:?}"))?;
     let screen = session.window_size().await?;
     let stop = AtomicBool::new(false);
+
+    // The post's own caption, read once, from the phone that is definitely on the post. It is
+    // what every watcher is checked against afterwards — the counters are what a threshold is
+    // moving, so they cannot identify a post, and the caption does not change.
+    let caption = read_post_caption(&session)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("reader could not read the post's caption"))?;
+    println!(
+        "  caption = {:?}",
+        caption.chars().take(60).collect::<String>()
+    );
 
     let mut previous: Option<u32> = None;
     for pass in 0..=max_passes {
@@ -134,7 +201,8 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         // A pass that moved nothing is the signal the arithmetic cannot give. Stopping here is
-        // what keeps a saturated post from being farmed all night for zero.
+        // what keeps a saturated post from being farmed all night for zero — but only a pass
+        // that *landed* is evidence of anything, which is what `confirmed` below is for.
         if let (Some(before), Some(after)) = (previous, now.views) {
             if after <= before {
                 println!("  ! lượt vừa rồi không thêm được view nào — dừng thay vì chạy tiếp mù");
@@ -147,7 +215,11 @@ async fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         println!("== pass {} on {} phones ==", pass + 1, watchers.len());
-        run_pass(&driver, &watchers, url, watch_secs).await;
+        let confirmed = run_pass(&driver, &watchers, url, &caption, watch_secs).await;
+        if confirmed == 0 {
+            println!("  ! không máy nào xác nhận đang ở bài — lượt này không đo được gì, dừng lại");
+            return Ok(());
+        }
     }
     Ok(())
 }
@@ -175,54 +247,60 @@ async fn measure(
     })
 }
 
-/// One pass: every watcher opens the post and stays on it.
+/// One pass: every watcher opens the post and stays on it. Returns how many were *shown* to be.
 ///
-/// Each phone is checked for actually being on a post page afterwards. The first time this
-/// was measured by hand the check was skipped, and a pass that landed nowhere was read as
-/// "views do not count" — an hour of wrong conclusions from one missing assertion.
-async fn run_pass(driver: &AndroidDriver, watchers: &[String], url: &str, watch_secs: u64) {
+/// The number that matters is the confirmed one, and the first version of this counted the
+/// wrong thing entirely: it reported how many `open_url_in_app` calls returned `Ok`, which only
+/// says ActivityManager accepted an intent. That is not a fact about any screen, and it read as
+/// "10/10 phones opened the post" on passes where the link had gone to a splash screen. A phone
+/// is counted here only when its own caption matches the post's.
+async fn run_pass(
+    driver: &AndroidDriver,
+    watchers: &[String],
+    url: &str,
+    caption: &str,
+    watch_secs: u64,
+) -> usize {
+    // Fired at every phone first, so the fleet cold-starts in parallel rather than in series.
+    let mut fired = 0usize;
     for serial in watchers {
-        // Same reason as the reader: a cold start puts the phone on the feed, so the deep
-        // link lands on the post rather than on whatever it was showing.
-        driver.terminate_app(serial, TIKTOK.as_str()).await.ok();
-        if let Err(error) = driver.launch_app(serial, TIKTOK.as_str()).await {
-            println!("  {serial}: could not launch TikTok: {error:#}");
-            continue;
+        match open_on(driver, serial, url).await {
+            Ok(()) => fired += 1,
+            Err(error) => println!("  {serial}: intent không gửi được: {error:#}"),
         }
     }
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    let mut opened = 0usize;
+    println!("  {fired}/{} máy nhận được intent", watchers.len());
+    tokio::time::sleep(ARRIVAL_WINDOW).await;
+
+    // **Proof of watching, not of asking.** Checked before the dwell, so a phone counted here
+    // was on the post for the whole of it.
+    let mut confirmed = 0usize;
     for serial in watchers {
         let Ok(session) = driver.open_session(serial).await else {
             println!("  {serial}: no session");
             continue;
         };
-        if session.open_url_in_app(url, TIKTOK.as_str()).await.is_err() {
-            println!("  {serial}: intent refused");
-            continue;
-        }
-        opened += 1;
-    }
-    println!("  {opened}/{} phones opened the post", watchers.len());
-    tokio::time::sleep(Duration::from_secs(watch_secs)).await;
-
-    // Proof of watching, not just of asking: a phone that drifted off the post contributed
-    // nothing and the tally has to say so.
-    let mut still = 0usize;
-    for serial in watchers {
-        let Ok(session) = driver.open_session(serial).await else {
-            continue;
-        };
-        if session
+        let foreground = session
             .active_app_bundle()
             .await
-            .is_ok_and(|bundle| bundle == *TIKTOK)
-        {
-            still += 1;
+            .is_ok_and(|bundle| bundle == *TIKTOK);
+        if !foreground {
+            println!("  {serial}: TikTok không ở foreground sau {ARRIVAL_WINDOW:?}");
+            continue;
+        }
+        match read_post_caption(&session).await {
+            Some(seen) if seen == caption => confirmed += 1,
+            Some(seen) => println!(
+                "  {serial}: đang ở bài khác ({:?})",
+                seen.chars().take(40).collect::<String>()
+            ),
+            None => println!("  {serial}: không đọc được caption, không tính"),
         }
     }
     println!(
-        "  {still}/{} still in TikTok at the end of the pass",
+        "  {confirmed}/{} máy xác nhận đang ở đúng bài",
         watchers.len()
     );
+    tokio::time::sleep(Duration::from_secs(watch_secs)).await;
+    confirmed
 }
