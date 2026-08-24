@@ -18,6 +18,7 @@ pub mod interaction_campaign;
 pub mod interaction_hierarchy;
 pub mod interaction_lifecycle;
 pub mod interaction_target;
+pub mod interaction_threshold;
 pub mod job_queue;
 pub mod nurture;
 pub mod openai_client;

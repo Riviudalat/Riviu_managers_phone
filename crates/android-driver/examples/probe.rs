@@ -336,6 +336,45 @@ async fn main() -> anyhow::Result<()> {
         println!("\n(skipping the comment-drawer measurement; pass --measure-comment — it opens and closes the drawer, sends nothing)");
     }
 
+    // The share sheet's `Copy link`, read back off the clipboard. The only way to learn a
+    // post's URL from the device — the hierarchy never states an id — and a URL the fleet has
+    // never opened is what separates "views are not counted" from "these accounts were
+    // already counted".
+    if args.iter().any(|arg| arg == "--copy-link") {
+        println!(
+            "
+== copying this post's link =="
+        );
+        match copy_post_link(&session, ui, labels).await {
+            Ok(link) => println!("  link = {link}"),
+            Err(error) => println!("  FAILED: {error:#}"),
+        }
+    }
+
+    // Whether an `@handle` can be turned into a real mention rather than plain text.
+    // Types `@<prefix>` into the drawer and reports whatever list TikTok puts up; sends
+    // nothing and taps nothing but the comment opener.
+    if let Some(index) = args.iter().position(|arg| arg == "--measure-mention") {
+        let prefix = args
+            .get(index + 1)
+            .filter(|arg| !arg.starts_with("--"))
+            .cloned()
+            .unwrap_or_else(|| "ri".to_string());
+        println!(
+            "
+== mention suggestions for @{prefix} =="
+        );
+        match measure_mention_suggestions(&session, ui, labels, &prefix, &serial).await {
+            Ok(()) => {}
+            Err(error) => println!("  FAILED: {error:#}"),
+        }
+    } else {
+        println!(
+            "
+(skipping the mention measurement; pass --measure-mention <prefix>)"
+        );
+    }
+
     // The seam the Interaction reply path needs: many matches for one label, and a
     // geometric choice among them. Opens the drawer, reads the rows, and runs the
     // real `locate_parent_in_elements` against a body it read off this phone.
@@ -824,6 +863,196 @@ async fn measure_comment_drawer(
         }
     }
     println!("  ! still not back on the feed after three Backs — check the phone");
+    Ok(())
+}
+
+/// Tap Share, then `Copy link`, then read the clipboard.
+///
+/// Taps only the share control and the copy row; posts nothing and sends nothing.
+async fn copy_post_link(
+    session: &riviu_android_driver::AndroidUiSession,
+    ui: &dyn UiSession,
+    labels: TikTokControls,
+) -> anyhow::Result<String> {
+    let Some(share) = labels.label(TikTokControl::Share) else {
+        anyhow::bail!("no measured Share control on this build");
+    };
+    let element = ui
+        .locate(share.to_query())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("the share control is not on screen"))?;
+    ui.tap(element.centre()).await?;
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    let sheet = report_nodes("share-sheet", &session.agent().source().await?);
+    // `Copy link` carries its label as text on this build; matched case-insensitively so a
+    // translated sheet still has a chance rather than failing on capitalisation.
+    let copy = sheet
+        .iter()
+        .find(|node| {
+            let hay = format!("{} {}", node.text, node.desc).to_lowercase();
+            hay.contains("copy link") || hay.contains("sao chép liên kết")
+        })
+        .ok_or_else(|| anyhow::anyhow!("no `Copy link` row in the share sheet"))?;
+    let (x1, y1, x2, y2) =
+        parse_bounds(&copy.bounds).ok_or_else(|| anyhow::anyhow!("copy row has no bounds"))?;
+    session
+        .agent()
+        .tap((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+        .await?;
+    tokio::time::sleep(Duration::from_millis(2_000)).await;
+    let (_kind, bytes) = ui.get_clipboard(4_096).await?;
+    Ok(String::from_utf8_lossy(&bytes).trim().to_string())
+}
+
+/// Can an `@handle` be made into a real mention, or only into text that looks like one?
+///
+/// The interaction feature prepends `@name` as plain characters, and TikTok does not linkify
+/// that: the comment renders the literal string and the account is never notified. A real
+/// mention is created by typing `@` and **choosing from the suggestion list** the app puts up,
+/// which inserts a token. Whether that list is reachable through the accessibility tree is the
+/// entire question, and it has to be measured rather than assumed.
+///
+/// Sends nothing: it types into the drawer, dumps what appeared, clears the field and backs
+/// out.
+async fn measure_mention_suggestions(
+    session: &riviu_android_driver::AndroidUiSession,
+    ui: &dyn UiSession,
+    labels: TikTokControls,
+    prefix: &str,
+    serial: &str,
+) -> anyhow::Result<()> {
+    let Some(comments) = labels.label(TikTokControl::Comments) else {
+        anyhow::bail!("no measured comment label on this build");
+    };
+    let element = ui
+        .locate(comments.to_query())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("the comment control is not on screen"))?;
+    println!("  opening the drawer from {:?}", element.description);
+    ui.tap(element.centre()).await?;
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+
+    report_nodes("mention-opened", &session.agent().source().await?);
+
+    let input = session
+        .agent()
+        .find(&Locator::ClassName("android.widget.EditText".into()))
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no EditText in the opened drawer"))?;
+    let rect = session.agent().rect(&input).await?;
+    let (x, y) = rect.centre();
+    println!("  input row at {x:.0},{y:.0} — tapping to focus");
+    session.agent().tap(x, y).await?;
+    tokio::time::sleep(Duration::from_millis(1_800)).await;
+
+    // Body first, mention second. `set_text` is the only path that carries Vietnamese, and it
+    // replaces the whole field — so anything it writes has to be written *before* a token
+    // exists, not after. A mention at the end still notifies the account.
+    let body_first = "đi Đà Lạt thật đã";
+    println!("  writing the body first: {body_first:?}");
+    if let Some(edit) = session
+        .agent()
+        .find(&Locator::ClassName("android.widget.EditText".into()).focused())
+        .await?
+    {
+        session.agent().set_text(&edit, body_first).await.ok();
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+    }
+
+    report_nodes("mention-body", &session.agent().source().await?);
+
+    // No icon tap at all. The `@` itself goes in as a **real key event**, which is the thing
+    // the picker listens for — `set_text` writes the same character through accessibility and
+    // TikTok never notices it. That also sidesteps the unlabelled icon strip, which moves
+    // between three positions depending on the keyboard and whether the field has text.
+    println!("  sending \"@{prefix}\" as real key events");
+    let typed_ok = std::process::Command::new("adb")
+        .args([
+            "-s",
+            serial,
+            "shell",
+            "input",
+            "text",
+            &format!("@{prefix}"),
+        ])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    println!(
+        "    adb input text -> {}",
+        if typed_ok { "ok" } else { "FAILED" }
+    );
+    tokio::time::sleep(Duration::from_millis(3_000)).await;
+    let filtered = report_nodes("mention-keyed", &session.agent().source().await?);
+
+    // Rows that look like a handle, inside the picker panel and below the nav tabs. The nav
+    // row (`Explore`, `Friends`, …) is ASCII too, which is how a looser filter tapped
+    // `Explore` and measured nothing.
+    let candidates: Vec<&Node> = filtered
+        .iter()
+        .filter(|node| node.class.contains("TextView") && !node.text.is_empty())
+        .filter(|node| {
+            parse_bounds(&node.bounds)
+                .is_some_and(|(x1, y1, _, _)| (250.0..900.0).contains(&y1) && x1 < 500.0)
+        })
+        .collect();
+    println!("  rows in the picker after filtering:");
+    for node in &candidates {
+        println!("    text={:?} {}", node.text, node.bounds);
+    }
+    let handle_row = candidates.iter().find(|node| {
+        node.text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+            && node.text.to_lowercase().contains(&prefix.to_lowercase())
+    });
+    let Some(row) = handle_row else {
+        println!("  ! no row whose handle contains {prefix:?} — the filter did not narrow to it");
+        return back_out(session, ui, labels).await;
+    };
+    let Some((x1, y1, x2, y2)) = parse_bounds(&row.bounds) else {
+        return back_out(session, ui, labels).await;
+    };
+    println!("  tapping the suggestion {:?} at {}", row.text, row.bounds);
+    session
+        .agent()
+        .tap((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+        .await?;
+    tokio::time::sleep(Duration::from_millis(2_000)).await;
+    if let Some(edit) = session
+        .agent()
+        .find(&Locator::ClassName("android.widget.EditText".into()))
+        .await?
+    {
+        println!(
+            "  field after picking: {:?}  <-- a real mention if this is the handle, not just @",
+            session.agent().text(&edit).await.unwrap_or_default()
+        );
+
+        session.agent().clear(&edit).await.ok();
+    }
+
+    back_out(session, ui, labels).await
+}
+
+/// Leave the drawer without sending anything.
+async fn back_out(
+    session: &riviu_android_driver::AndroidUiSession,
+    ui: &dyn UiSession,
+    labels: TikTokControls,
+) -> anyhow::Result<()> {
+    const KEYCODE_BACK: i64 = 4;
+    for _ in 0..4 {
+        session.agent().press_key(KEYCODE_BACK).await?;
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        if let Some(feed) = labels.label(TikTokControl::FeedTab) {
+            if ui.locate(feed.to_query()).await?.is_some() {
+                println!("  backed out — feed tab visible again");
+                return Ok(());
+            }
+        }
+    }
+    println!("  ! still not back on the feed after four Backs — check the phone");
     Ok(())
 }
 
