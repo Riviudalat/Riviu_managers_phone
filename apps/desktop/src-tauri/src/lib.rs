@@ -658,7 +658,24 @@ mod tests {
             // imports at the *top*, and cutting there truncated the entire file. Not
             // hypothetical — it hid all six commands in `agent_commands.rs`, and the
             // cross-check below is what caught it.
-            let source = match source.find("#[cfg(test)]\nmod ") {
+            //
+            // Matched **newline-agnostically**, and that is not a detail. This repo is developed
+            // on Windows with `core.autocrlf=true`: the index holds LF and a fresh checkout
+            // writes CRLF, so a `"#[cfg(test)]\nmod "` needle finds nothing there. The cut then
+            // never happens, the scan reads this file's own test module, and it reports the test
+            // helpers `commands_in` and `all_commands` as commands answering in the wrong shape.
+            // It passed here for months only because these files happened to have been written
+            // by an editor rather than by `git checkout` — one history rewrite was enough to
+            // turn it red, which means every clone on a Windows box was already red.
+            let cut = source
+                .match_indices("#[cfg(test)]")
+                .find(|(at, marker)| {
+                    source[at + marker.len()..]
+                        .trim_start_matches(['\r', '\n'])
+                        .starts_with("mod ")
+                })
+                .map(|(at, _)| at);
+            let source = match cut {
                 Some(at) => &source[..at],
                 None => source,
             };

@@ -2462,7 +2462,20 @@ mod boundary_tests {
     #[test]
     fn the_command_wrappers_do_not_reach_into_the_engine() {
         let desktop = include_str!("../../../apps/desktop/src-tauri/src/interaction_commands.rs");
-        let body = match desktop.find("#[cfg(test)]\nmod ") {
+        // Newline-agnostic for the same reason as the twin scan in `lib.rs`: with
+        // `core.autocrlf=true` a checked-out file is CRLF, an LF needle misses, and the cut
+        // silently does not happen. This one only survived that by luck — every function in the
+        // test module is indented and the column-zero check below skips indented lines — but
+        // luck is not a boundary.
+        let cut = desktop
+            .match_indices("#[cfg(test)]")
+            .find(|(at, marker)| {
+                desktop[at + marker.len()..]
+                    .trim_start_matches(['\r', '\n'])
+                    .starts_with("mod ")
+            })
+            .map(|(at, _)| at);
+        let body = match cut {
             Some(at) => &desktop[..at],
             None => desktop,
         };
@@ -2501,7 +2514,20 @@ mod boundary_tests {
             ),
         ];
         let desktop = include_str!("../../../apps/desktop/src-tauri/src/interaction_commands.rs");
-        let body = match desktop.find("#[cfg(test)]\nmod ") {
+        // Newline-agnostic for the same reason as the twin scan in `lib.rs`: with
+        // `core.autocrlf=true` a checked-out file is CRLF, an LF needle misses, and the cut
+        // silently does not happen. This one only survived that by luck — every function in the
+        // test module is indented and the column-zero check below skips indented lines — but
+        // luck is not a boundary.
+        let cut = desktop
+            .match_indices("#[cfg(test)]")
+            .find(|(at, marker)| {
+                desktop[at + marker.len()..]
+                    .trim_start_matches(['\r', '\n'])
+                    .starts_with("mod ")
+            })
+            .map(|(at, _)| at);
+        let body = match cut {
             Some(at) => &desktop[..at],
             None => desktop,
         };
