@@ -45,6 +45,7 @@ import type {
   InteractionCampaignDetail,
   InteractionCampaignSummary,
   ThreadCampaignRequest,
+  ThreadPreview,
   TikTokLinkLine,
   InstalledApp,
   ShellOutcome,
@@ -884,6 +885,22 @@ export async function interactionParseLinks(rawText: string) {
 
 export async function interactionResolveLinks(rawText: string) {
   return invoke<TikTokLinkLine[]>("interaction_resolve_links", { rawText });
+}
+
+/**
+ * Plan a campaign without running it, and ask what the fleet could actually carry.
+ *
+ * Registered in Rust since the feature shipped with no caller at all, while the desktop kept
+ * its own TypeScript copy of `partition_actors` to draw the same preview. This is the real
+ * planner, so what the operator sees before pressing Chạy ngay is what will run.
+ */
+export async function interactionPreviewThread(request: ThreadCampaignRequest) {
+  return invoke<ThreadPreview>("interaction_preview_thread", { request });
+}
+
+/** Open one link on one phone, by hand. Registered in Rust; offered here for the detail view. */
+export async function interactionOpenOnDevice(udid: string, url: string) {
+  return invoke<void>("interaction_open_on_device", { udid, url });
 }
 
 export async function interactionStartThread(request: ThreadCampaignRequest) {

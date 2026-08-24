@@ -823,6 +823,25 @@ export interface InteractionCampaignSummary {
   /** Why the campaign ended, when something ended it. Rendered — see InteractionPopup. */
   errorCode: string | null;
   updatedAt: string;
+  /**
+   * What the campaign was, read back out of its stored request.
+   *
+   * Null when the stored request will not parse. The list used to name a row with a slice of
+   * its UUID, so runs against different posts were indistinguishable.
+   */
+  brief: InteractionCampaignBrief | null;
+}
+
+export interface InteractionCampaignBrief {
+  firstAuthor: string | null;
+  firstContentId: string | null;
+  mode: ThreadMode;
+  shape: ThreadShape;
+  cohortSize: number | null;
+  actorCount: number;
+  /** The operator wrote the comments rather than the AI. */
+  manual: boolean;
+  likeTarget: boolean;
 }
 
 export interface InteractionAssignmentRecord {
@@ -842,6 +861,14 @@ export interface InteractionAssignmentRecord {
    * used to go only to the log, which meant a refused like was invisible.
    */
   like?: string | null;
+  /**
+   * What happened to the `@` tags on this message, when the campaign asked for any.
+   *
+   * A tag only becomes a real mention if the driver could pick it out of TikTok's own
+   * suggestion list; one that was merely typed posts as grey text and notifies nobody. The
+   * comment itself looks the same either way, which is why this is reported separately.
+   */
+  mention?: string | null;
 }
 
 export interface InteractionCampaignDetail {
@@ -854,6 +881,14 @@ export interface ThreadPlanAssignment {
   ordinal: number;
   actorUdid: string;
   parentOrdinal: number | null;
+  /**
+   * Which team runs this message.
+   *
+   * The planner has emitted it since cohorts landed and this type never declared it, so the
+   * one field that says which conversation a row belongs to arrived as `undefined` on the
+   * desktop. Pinned on the Rust side by `the_preview_wire_shape_is_what_the_frontend_types_say`.
+   */
+  cohort: number;
 }
 
 export interface ThreadPlan {
@@ -865,6 +900,15 @@ export interface ThreadPreview {
   lines: TikTokLinkLine[];
   plan: ThreadPlan | null;
   validTargetCount: number;
+  /** Teams this plan would run at once — the backend's own `partition_actors`, not a copy. */
+  cohortCount: number;
+  /**
+   * Device streams the app can hold open at once.
+   *
+   * Worth warning about before starting, because exceeding it is a refusal and not a queue:
+   * the cohorts past the limit fail rather than wait.
+   */
+  streamCapacity: number;
 }
 
 export type JsonValue = string | number | boolean | null | JsonObject | JsonValue[];

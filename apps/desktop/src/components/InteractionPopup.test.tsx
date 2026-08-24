@@ -2,9 +2,9 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { InteractionPopup } from "./InteractionPopup";
-import type { ThreadCampaignRequest } from "../types";
+import type { ThreadCampaignRequest, ThreadPlanAssignment } from "../types";
 
-const { parseLinks, startThread } = vi.hoisted(() => ({
+const { parseLinks, startThread, previewThread } = vi.hoisted(() => ({
   parseLinks: vi.fn(async () => [
     {
       lineNo: 1,
@@ -31,8 +31,42 @@ const { parseLinks, startThread } = vi.hoisted(() => ({
       succeededMessages: 0,
       failedMessages: 0,
       updatedAt: "2026-08-04T00:00:00Z",
+      brief: null,
     },
   })),
+  // The plan preview is the backend's own planner now, so every render with enough of a
+  // draft reaches for it. The stand-in splits actors the way `partition_actors` does —
+  // spreading the remainder — because the popup reads `largestCohort` off this answer and a
+  // mock that always returns one team would validate against the wrong number.
+  previewThread: vi.fn(async (request: ThreadCampaignRequest) => {
+    const size = request.cohortSize ?? 0;
+    const teams = size >= 2 ? Math.max(1, Math.floor(request.actorUdids.length / size)) : 1;
+    const base = Math.floor(request.actorUdids.length / teams);
+    let remainder = request.actorUdids.length % teams;
+    const assignments: ThreadPlanAssignment[] = [];
+    let at = 0;
+    for (let team = 0; team < teams; team += 1) {
+      const take = base + (remainder > 0 ? 1 : 0);
+      if (remainder > 0) remainder -= 1;
+      request.actorUdids.slice(at, at + take).forEach((actorUdid, index) => {
+        assignments.push({
+          targetKey: request.targets[0]?.targetKey ?? "content:123",
+          ordinal: index,
+          actorUdid,
+          parentOrdinal: index === 0 ? null : 0,
+          cohort: team,
+        });
+      });
+      at += take;
+    }
+    return {
+      lines: [],
+      validTargetCount: request.targets.length,
+      cohortCount: teams,
+      streamCapacity: 8,
+      plan: { requestId: request.requestId, assignments },
+    };
+  }),
 }));
 
 vi.mock("../api", () => ({
@@ -40,6 +74,7 @@ vi.mock("../api", () => ({
   interactionGet: vi.fn(async () => null),
   interactionList: vi.fn(async () => []),
   interactionParseLinks: parseLinks,
+  interactionPreviewThread: previewThread,
   interactionResolveLinks: vi.fn(async () => []),
   interactionStartThread: startThread,
   listenRiviuEvents: vi.fn(async () => () => undefined),
@@ -100,12 +135,29 @@ const devices = [
   },
 ] as never[];
 
+/**
+ * Paste the one link the parse mock knows, and wait until it has actually been parsed.
+ *
+ * The wait is on the ✓ marker in the link list, not on the URL text: React mirrors a
+ * textarea's value into its child text, so matching the URL matches what was just typed and
+ * resolves before the (debounced) parse has returned anything.
+ */
+async function pasteLink() {
+  fireEvent.change(screen.getByPlaceholderText("https://www.tiktok.com/@creator/video/123"), {
+    target: { value: "https://www.tiktok.com/@creator/video/123" },
+  });
+  await screen.findByText("✓");
+}
+
+/** Open the collapsed advanced group, where the three numbers live. */
+function openAdvanced() {
+  fireEvent.click(screen.getByRole("button", { name: "Tuỳ chỉnh nâng cao" }));
+}
+
 describe("InteractionPopup", () => {
   it("parses multiline links and submits every selected actor", async () => {
     render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
-    const input = screen.getByPlaceholderText("https://www.tiktok.com/@creator/video/123");
-    fireEvent.change(input, { target: { value: "https://www.tiktok.com/@creator/video/123" } });
-    await waitFor(() => expect(screen.getByText(/creator\/video\/123/)).toBeVisible());
+    await pasteLink();
 
     fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
     await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
@@ -113,7 +165,20 @@ describe("InteractionPopup", () => {
     expect(request.actorUdids).toEqual(["actor-a", "actor-b"]);
     expect(request.messageCount).toBe(2);
     expect(request.targets[0].targetKey).toBe("content:123");
-    expect(screen.getByRole("tab", { name: "Monitor" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Theo dõi" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+  });
+
+  it("opens the campaign it just started instead of dropping the operator in a list", async () => {
+    // `interactionStartThread` returns the campaign and the popup used to throw it away, so
+    // finding your own run meant recognising a slice of its UUID among the others.
+    const api = await import("../api");
+    render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
+    await pasteLink();
+    fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
+    await waitFor(() => expect(api.interactionGet).toHaveBeenCalledWith("campaign-1"));
   });
 
   it("offers Android as an actor, grouped by how it reads the screen", async () => {
@@ -124,31 +189,25 @@ describe("InteractionPopup", () => {
     render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
     expect(screen.getByLabelText("Phone C")).toBeVisible();
     expect(screen.getByText("iPhone (nhận dạng ảnh)")).toBeVisible();
-    expect(screen.getByText("Android (hierarchy)")).toBeVisible();
-    // Pre-selection comes from one group only, so the default is a runnable thread. Two
-    // iPhones outnumber one Android here, so the iPhones win.
-    expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeEnabled();
+    expect(screen.getByText("Android (đọc cây giao diện)")).toBeVisible();
 
-    fireEvent.change(screen.getByPlaceholderText("https://www.tiktok.com/@creator/video/123"), {
-      target: { value: "https://www.tiktok.com/@creator/video/123" },
-    });
-    await waitFor(() => expect(screen.getByText(/creator\/video\/123/)).toBeVisible());
+    await pasteLink();
     fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
     await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
     const request = (startThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>)[0][0];
+    // Pre-selection comes from one group only, so the default is a runnable thread. Two
+    // iPhones outnumber one Android here, so the iPhones win.
     expect(request.actorUdids).toEqual(["actor-a", "actor-b"]);
   });
 
   it("keeps the operator's actor selection across a fleet poll", async () => {
     // The seeding effect depended on the actor lists, which are memos over `devices` -- a
-    // fresh array every three seconds from the fleet poll. So `setActors` re-ran on every
+    // fresh array every three seconds from the fleet poll. So the selection re-ran on every
     // tick and threw away whatever had just been chosen: selecting actors for a threaded
-    // campaign was a race against the next poll, and nobody wins that. A re-render with an
-    // equal-but-new `devices` array is exactly what the poll does.
+    // campaign was a race against the next poll, and nobody wins that.
     const { rerender } = render(
       <InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />,
     );
-    // Drop one of the two defaults; the operator's choice is now one iPhone.
     fireEvent.click(screen.getByLabelText("Phone B"));
     expect(screen.getByLabelText("Phone B")).not.toBeChecked();
 
@@ -190,10 +249,7 @@ describe("InteractionPopup", () => {
     // explanation. The server refuses this as well; this is the round trip saved and the
     // reason stated where the operator is looking.
     render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
-    fireEvent.change(screen.getByPlaceholderText("https://www.tiktok.com/@creator/video/123"), {
-      target: { value: "https://www.tiktok.com/@creator/video/123" },
-    });
-    await waitFor(() => expect(screen.getByText(/creator\/video\/123/)).toBeVisible());
+    await pasteLink();
 
     // Add the Android device to the two already-selected iPhones.
     fireEvent.click(screen.getByLabelText("Phone C"));
@@ -204,75 +260,115 @@ describe("InteractionPopup", () => {
     expect(startThread).not.toHaveBeenCalled();
   });
 
-  it("allows the same mixed selection in Standalone, which has no parent to find", async () => {
+  it("allows the same mixed selection in Riêng lẻ, which has no parent to find", async () => {
     render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
-    fireEvent.change(screen.getByPlaceholderText("https://www.tiktok.com/@creator/video/123"), {
-      target: { value: "https://www.tiktok.com/@creator/video/123" },
-    });
-    await waitFor(() => expect(screen.getByText(/creator\/video\/123/)).toBeVisible());
-    // One from each group, so the selection is genuinely mixed and still within the
-    // default message budget (2 messages, 2 actors).
+    await pasteLink();
+    // One from each group, so the selection is genuinely mixed.
     fireEvent.click(screen.getByLabelText("Phone B"));
     fireEvent.click(screen.getByLabelText("Phone C"));
-    // The mode is a `<select>`, not a radio — changing its value is what switches modes.
-    fireEvent.change(screen.getByLabelText(/Kiểu tương tác/), {
-      target: { value: "standalone" },
-    });
+    // One control, three choices — the two dependent dropdowns are gone.
+    fireEvent.click(screen.getByRole("radio", { name: /Riêng lẻ/ }));
 
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeEnabled(),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
     await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
     const request = (startThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>)[0][0];
     expect(request.actorUdids).toEqual(["actor-a", "actor-android"]);
     expect(request.mode).toBe("standalone");
+    expect(request.shape).toBeUndefined();
   });
 
-  it("requires at least two actors before dispatch", async () => {
+  it("blocks a one-actor run before dispatch rather than after it", async () => {
+    // This used to dispatch, fail, and write the reason into a shared error string. The
+    // check has not moved to the server — it has moved *earlier*, onto the button.
     render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
-    fireEvent.change(screen.getByPlaceholderText("https://www.tiktok.com/@creator/video/123"), {
-      target: { value: "https://www.tiktok.com/@creator/video/123" },
-    });
-    await waitFor(() => expect(screen.getByText(/creator\/video\/123/)).toBeVisible());
+    await pasteLink();
     fireEvent.click(screen.getByLabelText("Phone B"));
-    fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
-    await waitFor(() =>
-      expect(screen.getByText(/Chọn từ 2 đến 64 thiết bị làm actor/)).toBeVisible(),
-    );
+    await waitFor(() => expect(screen.getByText(/Chọn từ 2 đến 64 máy/)).toBeVisible());
+    expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeDisabled();
     expect(startThread).not.toHaveBeenCalled();
   });
 
-  it("sends the star shape, which is the one the operator asked for", async () => {
-    // "Một máy bình luận gốc rồi các máy còn lại vào rep" — a star. The popup only ever
-    // offered a chain, and a chain is a different thing: each account answers the one
-    // before it, which is also why a chain cannot run in parallel.
+  it("sends the star shape by default, and the chain only when asked", async () => {
+    // "Một máy bình luận gốc rồi các máy còn lại vào rep" — a star, and now the default:
+    // a chain runs strictly one after another and one broken link stops the rest.
     render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
-    fireEvent.change(screen.getByPlaceholderText("https://www.tiktok.com/@creator/video/123"), {
-      target: { value: "https://www.tiktok.com/@creator/video/123" },
-    });
-    await waitFor(() => expect(screen.getByText(/creator\/video\/123/)).toBeVisible());
-
-    fireEvent.change(screen.getByLabelText(/^Hình chuỗi/), { target: { value: "star" } });
+    await pasteLink();
     fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
-
     await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
-    const request = (startThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>)[0][0];
+    let request = (startThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>)[0][0];
+    expect(request.mode).toBe("threaded");
     expect(request.shape).toBe("star");
+
+    // The first run navigates to Theo dõi, which is the point of it — come back.
+    fireEvent.click(screen.getByRole("tab", { name: "Thiết lập" }));
+    fireEvent.click(screen.getByRole("radio", { name: /Nối tiếp/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
+    await waitFor(() => expect(startThread).toHaveBeenCalledTimes(2));
+    request = (startThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>)[1][0];
+    expect(request.shape).toBe("chain");
   });
 
-  it("shows how the phones split into teams before anything runs", async () => {
-    // The split is a decision the operator should see rather than discover from the
-    // Monitor tab. Three phones in teams of two is one team of three, not a two and a
-    // one: `partition_actors` spreads the remainder, and this line has to say the same
-    // thing the backend will do.
+  it("shows the teams the backend planned, not a copy of the split", async () => {
+    // The popup used to reimplement `partition_actors` in TypeScript — remainder-spreading
+    // and all — purely to draw this. Two implementations of one split are two chances to
+    // show a plan that is not the plan.
     render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
-    fireEvent.change(screen.getByLabelText("Cỡ cụm"), { target: { value: "2" } });
+    await pasteLink();
+    await waitFor(() => expect(previewThread).toHaveBeenCalled());
+    expect(await screen.findByText(/Cụm 1 · 2 máy/)).toBeVisible();
+  });
 
-    const teams = await screen.findByTestId("cohort-preview");
-    expect(teams.textContent).toContain("cụm 1");
-    // Two iPhones are pre-selected, so teams of two is exactly one team.
-    expect(teams.querySelectorAll("li")).toHaveLength(1);
+  it("warns when more teams are planned than the app can stream at once", async () => {
+    // `CapacityExhausted` is a refusal, not a queue: the cohorts past the limit fail rather
+    // than wait, and before this the operator learned that from the Monitor tab.
+    previewThread.mockResolvedValueOnce({
+      lines: [],
+      validTargetCount: 1,
+      cohortCount: 6,
+      streamCapacity: 2,
+      plan: {
+        requestId: "r",
+        assignments: [
+          {
+            targetKey: "content:123",
+            ordinal: 0,
+            actorUdid: "actor-a",
+            parentOrdinal: null,
+            cohort: 0,
+          },
+        ],
+      },
+    } as never);
+    render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
+    await pasteLink();
+    expect(await screen.findByText(/chỉ mở được 2 luồng màn hình/)).toBeVisible();
+  });
+
+  it("keeps the manual pool rule it has always advertised", async () => {
+    // The hint said "cần ≥ N" and nothing enforced it, so the campaign row was written and
+    // the backend refused it afterwards.
+    render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
+    await pasteLink();
+    fireEvent.change(screen.getByLabelText(/Nội dung bình luận/), {
+      target: { value: "manual" },
+    });
+    fireEvent.change(screen.getByLabelText(/Danh sách bình luận/), {
+      target: { value: "đẹp quá" },
+    });
+    await waitFor(() =>
+      expect(screen.getByText(/đang có 1 câu, cần ≥ 2/)).toBeVisible(),
+    );
+    expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText(/Danh sách bình luận/), {
+      target: { value: "đẹp quá\nchỗ này ở đâu ạ" },
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
+    await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
+    const request = (startThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>)[0][0];
+    expect(request.manualComments).toEqual(["đẹp quá", "chỗ này ở đâu ạ"]);
   });
 
   it("no longer refuses a fleet larger than six", async () => {
@@ -289,15 +385,17 @@ describe("InteractionPopup", () => {
       wdaReady: true,
     })) as never[];
     render(<InteractionPopup devices={fleet} selected={[]} onClose={() => undefined} />);
-    fireEvent.change(screen.getByPlaceholderText("https://www.tiktok.com/@creator/video/123"), {
-      target: { value: "https://www.tiktok.com/@creator/video/123" },
-    });
-    await waitFor(() => expect(screen.getByText(/creator\/video\/123/)).toBeVisible());
+    await pasteLink();
 
-    // Nine phones in teams of three: three messages a link covers the biggest team, which
-    // is the rule that replaced "message count must cover the whole fleet".
-    fireEvent.change(screen.getByLabelText("Cỡ cụm"), { target: { value: "3" } });
-    fireEvent.change(screen.getByLabelText("Số message"), { target: { value: "3" } });
+    openAdvanced();
+    fireEvent.change(screen.getByLabelText("Số máy mỗi cụm"), { target: { value: "3" } });
+    fireEvent.change(screen.getByLabelText(/Số bình luận mỗi link/), {
+      target: { value: "3" },
+    });
+    // The plan is re-asked for on a debounce, and until it answers the popup is still holding
+    // the previous split — one team of nine, which three messages would not cover. It blocks
+    // rather than guesses, so wait for the new plan the way the operator would.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
 
     await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
@@ -307,84 +405,41 @@ describe("InteractionPopup", () => {
     expect(request.messageCount).toBe(3);
   });
 
-  it("groups the monitor by link, shows a refused like, and offers a retry", async () => {
-    // Three things the Monitor could not do. Sixty rows from six teams running at once
-    // interleave into an unreadable list; a like that was refused went only to the log; and
-    // `interaction_retry` had existed since the feature shipped with nothing calling it.
-    const api = await import("../api");
-    vi.mocked(api.interactionList).mockResolvedValue([
-      {
-        id: "campaign-1",
-        requestId: "request-1",
-        state: "partial",
-        messageCount: 2,
-        targetCount: 2,
-        succeededMessages: 3,
-        failedMessages: 1,
-        updatedAt: "2026-08-18T00:00:00Z",
-      },
-    ] as never);
-    vi.mocked(api.interactionGet).mockResolvedValue({
-      summary: {
-        id: "campaign-1",
-        requestId: "request-1",
-        state: "partial",
-        messageCount: 2,
-        targetCount: 2,
-        succeededMessages: 3,
-        failedMessages: 1,
-        updatedAt: "2026-08-18T00:00:00Z",
-      },
-      assignments: [
-        {
-          id: "a1",
-          targetKey: "content:111",
-          ordinal: 0,
-          actorUdid: "android-0",
-          parentAssignmentId: null,
-          state: "succeeded",
-          preparedText: "gốc của cụm một",
-          errorCode: null,
-          like: "không tim được: nhãn nút tim chưa đo",
-        },
-        {
-          id: "a2",
-          targetKey: "content:111",
-          ordinal: 1,
-          actorUdid: "android-1",
-          parentAssignmentId: "a1",
-          state: "succeeded",
-          preparedText: "rep của cụm một",
-          errorCode: null,
-        },
-        {
-          id: "a3",
-          targetKey: "content:222",
-          ordinal: 0,
-          actorUdid: "android-3",
-          parentAssignmentId: null,
-          state: "failed",
-          preparedText: "gốc của cụm hai",
-          errorCode: "target_open_no_post_page",
-        },
-      ],
-    } as never);
+  it("lets a whole-fleet run start without the operator doing the arithmetic", async () => {
+    // `messageCount >= largest cohort` is a backend rule, and the old literal default of 2
+    // against a pre-selected fleet meant the form opened already invalid. Auto follows the
+    // plan instead.
+    const fleet = Array.from({ length: 14 }, (_, index) => ({
+      udid: `android-${index}`,
+      name: `Android ${index}`,
+      model: "SM-G955F",
+      platform: "android",
+      osVersion: "9",
+      connection: "usb",
+      status: "ready",
+      wdaReady: true,
+    })) as never[];
+    render(<InteractionPopup devices={fleet} selected={[]} onClose={() => undefined} />);
+    await pasteLink();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Chạy ngay" }));
+    await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
+    const request = (startThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>)[0][0];
+    expect(request.actorUdids).toHaveLength(14);
+    expect(request.messageCount).toBe(14);
+  });
 
+  it("offers the number that would fix a too-small message count", async () => {
     render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
-    fireEvent.click(screen.getByRole("tab", { name: "Monitor" }));
-    fireEvent.click(await screen.findByText("request-1"));
-
-    // One heading per link, because a link belongs to exactly one team.
-    expect(await screen.findByText("link 111")).toBeVisible();
-    expect(screen.getByText("link 222")).toBeVisible();
-    expect(screen.getByText("2/2 message")).toBeVisible();
-    expect(screen.getByText("0/1 message")).toBeVisible();
-
-    // The like was refused while the comment posted: a note beside a succeeded row, not a
-    // failure of it.
-    expect(screen.getByText("không tim được: nhãn nút tim chưa đo")).toBeVisible();
-
-    fireEvent.click(screen.getByRole("button", { name: "Thử lại phần hỏng" }));
-    await waitFor(() => expect(api.interactionRetry).toHaveBeenCalledWith("campaign-1"));
+    await pasteLink();
+    openAdvanced();
+    fireEvent.change(screen.getByLabelText(/Số bình luận mỗi link/), {
+      target: { value: "2" },
+    });
+    fireEvent.click(screen.getByLabelText("Phone C"));
+    fireEvent.click(screen.getByRole("radio", { name: /Riêng lẻ/ }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Đặt = 3" })).toBeVisible());
+    fireEvent.click(screen.getByRole("button", { name: "Đặt = 3" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeEnabled());
   });
 });

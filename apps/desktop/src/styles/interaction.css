@@ -1,22 +1,33 @@
 .interaction-float-layer {
   position: fixed;
-  right: 1.1rem;
-  bottom: 1.1rem;
+  inset: 0;
   z-index: var(--z-float-popup);
   pointer-events: none;
 }
+/* The header and the tab strip stay put and only the body scrolls. The whole card used to
+   scroll, so on a long form the tabs — the way back to the campaign you had just started —
+   scrolled off the top. */
 .interaction-float {
+  position: absolute;
+  right: 1.1rem;
+  bottom: 1.1rem;
   width: min(460px, calc(100vw - 2rem));
   max-height: min(760px, calc(100vh - 2rem));
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   pointer-events: auto;
   background: var(--bg-elevated);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
   box-shadow: 0 18px 44px rgb(15 23 42 / 18%);
 }
+.interaction-float-body { overflow: auto; }
 .interaction-title {
   min-height: 42px;
+  flex: 0 0 auto;
+  cursor: grab;
+  user-select: none;
   display: flex;
   align-items: center;
   gap: 0.45rem;
@@ -24,6 +35,7 @@
   border-bottom: 1px solid var(--line);
   color: var(--text-1);
 }
+.interaction-title:active { cursor: grabbing; }
 .interaction-title > svg { color: var(--primary); }
 .interaction-title .close {
   border: none;
@@ -37,6 +49,7 @@
 }
 .interaction-title .close:hover { background: var(--primary-soft); color: var(--primary); }
 .interaction-tabs {
+  flex: 0 0 auto;
   display: flex;
   gap: 0.2rem;
   padding: 0.45rem 0.7rem 0;
@@ -58,16 +71,13 @@
 .interaction-body textarea { resize: vertical; min-height: 92px; }
 .interaction-link-list { display: flex; flex-direction: column; gap: 0.2rem; max-height: 120px; overflow: auto; font-size: var(--text-sm); }
 .interaction-link-list > div { display: flex; gap: 0.35rem; align-items: flex-start; overflow-wrap: anywhere; }
-.interaction-link-list .ok { color: #15803d; }
+.interaction-link-list .ok { color: var(--ok); }
 .interaction-link-list .bad { color: var(--danger-deep); }
-.interaction-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
-/* A checkbox row (e.g. "Thả tim bài") reads as one line — checkbox, label, then its `!` —
-   not the stacked column the other fields use. */
-.interaction-body label.check { flex-direction: row; align-items: center; gap: 0.4rem; }
 .interaction-actors { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.3rem; }
-/* Three compact number fields (message / cluster / max-words) on one row. */
-.nu-grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.interaction-actors legend { padding: 0 0.25rem; font-size: var(--text-sm); color: var(--text-2); }
+/* Three compact number fields on one row. Named for this file rather than redefining
+   `.nu-grid-3`: those classes belong to the shared float-panel styles, and an unscoped
+   override here changed them for the nurture panel too. */
+.interaction-grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .interaction-actors label { flex-direction: row; align-items: center; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 /* The tag input, its feedback hint, and each device group span the full grid width; only the
    device rows themselves sit in the two-column list. */
@@ -116,6 +126,97 @@
 .tile-name { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: var(--text-sm); }
 .interaction-actor-tile.selected .tile-name { color: var(--primary-deep); font-weight: 600; }
 .interaction-handle { width: 100%; font-size: var(--text-xs); padding: 0.15rem 0.3rem; }
+/* One decision, three cards. It was two dependent dropdowns, the second of which only meant
+   anything when the first said "qua lại". */
+.interaction-mode-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.3rem; }
+.interaction-mode-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.4rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--tile);
+  cursor: pointer;
+  min-width: 0;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.interaction-mode-card.selected { border-color: var(--primary); background: var(--primary-50); box-shadow: 0 0 0 1px var(--primary-ring); }
+.interaction-mode-card strong { font-size: var(--text-sm); color: var(--text-1); }
+.interaction-mode-card.selected strong { color: var(--primary-deep); }
+.interaction-mode-card small { font-size: var(--text-xs); color: var(--text-3); white-space: normal; }
+
+.interaction-advanced-toggle { align-self: flex-start; }
+
+/* What the backend says it will do, before it does it. */
+.interaction-preview { display: flex; flex-direction: column; gap: 0.3rem; }
+.interaction-cohort {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.35rem 0.45rem;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--primary);
+  border-radius: var(--radius-sm);
+  background: var(--tile);
+}
+.interaction-cohort strong { font-size: var(--text-sm); color: var(--text-1); }
+.interaction-cohort small { font-size: var(--text-xs); color: var(--text-2); white-space: normal; overflow-wrap: anywhere; }
+
+/* Why the run button is off. One reason per line, next to the button, rather than one shared
+   error string that each new failure overwrote. */
+.interaction-reasons { display: flex; flex-direction: column; gap: 0.25rem; margin: 0; padding: 0; list-style: none; }
+.interaction-reasons li {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: var(--text-xs);
+  color: var(--danger-deep);
+  overflow-wrap: anywhere;
+}
+.interaction-reasons li .ghost { margin-left: auto; flex: 0 0 auto; }
+
+/* Monitor: one heading per link, because a link belongs to exactly one team. Had no styling
+   at all, so the grouping that makes a multi-team run readable rendered as stacked divs. */
+.interaction-thread { display: flex; flex-direction: column; gap: 0.15rem; margin-top: 0.35rem; }
+.interaction-thread-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding-bottom: 0.15rem;
+  border-bottom: 1px solid var(--line-strong);
+}
+.interaction-thread-head strong { font-size: var(--text-sm); color: var(--text-1); }
+.interaction-thread-head small { margin-left: auto; color: var(--text-3); font-size: var(--text-xs); }
+
+.interaction-detail-head { display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; }
+.interaction-detail-head small { color: var(--text-3); font-size: var(--text-xs); }
+.interaction-detail-head button { margin-left: auto; }
+.interaction-back { align-self: flex-start; }
+.interaction-campaign-head { display: flex; align-items: center; gap: 0.4rem; }
+.interaction-campaign-head .chip { margin-left: auto; }
+
+/* A refusal in the detail view: the Vietnamese headline, the engine's own sentence under it,
+   and the code folded away. A `<span>` rather than the `<small>` the campaign rows use, so it
+   needs its own rule — the one in feedback.css is keyed to `small.interaction-error`. */
+span.interaction-error {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  margin-top: 0.15rem;
+  color: var(--danger-deep);
+  font-size: var(--text-xs);
+  line-height: 1.35;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+span.interaction-error > strong { color: var(--danger-deep); font-size: var(--text-xs); }
+span.interaction-error > small { color: var(--text-2); white-space: pre-wrap; overflow: visible; text-overflow: clip; }
+
+/* The raw code, kept but not competing with the Vietnamese for attention. */
+.interaction-raw-code summary { cursor: pointer; color: var(--text-3); font-size: var(--text-xs); }
+.interaction-raw-code code { display: block; overflow-wrap: anywhere; color: var(--text-3); font-size: var(--text-xs); }
+
 .interaction-monitor-head { display: flex; align-items: center; gap: 0.5rem; }
 .interaction-monitor-head .ghost { margin-left: auto; }
 .interaction-campaign-list { display: flex; flex-direction: column; gap: 0.25rem; }
@@ -123,10 +224,6 @@
 .interaction-campaign:hover { border-color: var(--primary); background: var(--primary-50); }
 .interaction-campaign strong, .interaction-assignment strong { display: block; font-size: var(--text-sm); color: var(--text-1); }
 .interaction-campaign small, .interaction-assignment small { display: block; color: var(--text-3); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.status-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--text-3); }
-.status-dot.running { background: #d97706; }
-.status-dot.succeeded { background: #16a34a; }
-.status-dot.failed, .status-dot.cancelled { background: #dc2626; }
 .interaction-detail { display: flex; flex-direction: column; gap: 0.25rem; border-top: 1px solid var(--line); padding-top: 0.55rem; }
 .interaction-assignment { display: flex; align-items: center; gap: 0.45rem; min-width: 0; border-bottom: 1px solid var(--line); padding: 0.3rem 0; font-size: var(--text-xs); }
 .interaction-assignment > .grow { min-width: 0; }
