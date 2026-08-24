@@ -629,7 +629,8 @@ describe("InteractionPopup", () => {
   it("reads the post on a press, and says what each target would take", async () => {
     // A view count is a navigation — TikTok states a play count only on the author's profile
     // grid, and the grid does not say which post a tile is, so each candidate is opened and its
-    // caption compared. That measured 2-4 minutes on this farm and holds a phone for all of it,
+    // caption compared. Timed 24/08/2026 that took about four and a half minutes for a post near
+    // the top of the grid, longer when it sits deeper, and it holds a phone for all of it —
     // which is why nothing here runs on a paste or a debounce.
     render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
     await pasteLink();

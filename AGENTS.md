@@ -8483,9 +8483,19 @@ do editor ghi ra chứ không phải `git checkout` ghi ra.
 Khảo sát cả 14 máy bằng `pm list packages`:
 
 ```
-com.ss.android.ugc.trill      11 máy
-com.zhiliaoapp.musically       3 máy  (ce0517155ab38c390d, ce0717171c2a64d50d, ce11171beb408a1501)
+com.ss.android.ugc.trill      11 / 14 máy đang cắm lúc đó
+com.zhiliaoapp.musically       3 / 14  (ce0517155ab38c390d, ce0717171c2a64d50d, ce11171beb408a1501)
 ```
+
+Đo lại khi **cả 20 máy** cắm vào (cùng ngày, sau khi cắm lại hub):
+
+```
+com.ss.android.ugc.trill      16 / 20
+com.zhiliaoapp.musically       4 / 20  (thêm ce0517152c898c6f0d)
+```
+
+Nên tỉ lệ ổn định quanh **một phần năm fleet là `musically`** — không phải một hai máy lẻ, và
+danh sách serial thì trôi theo việc máy nào đang cắm. Đừng hard-code danh sách; hỏi từng máy.
 
 Điều này quan trọng vì **một `RIVIU_TIKTOK_PACKAGE` cho cả fleet là sai trên ba máy đó.**
 `am force-stop com.ss.android.ugc.trill` không dừng gì, `am start -p …trill` không mở gì, và
@@ -8550,6 +8560,111 @@ trên một số máy, kể cả trill.** Nó mở app rồi để nguyên feed.
 farm view, và nó là số đo chứ không phải phỏng đoán. Ai muốn nâng throughput thì đo chỗ này
 trước, đừng thêm máy.
 
-Chi phí một lượt: cold start 40 s + dwell + một lần đọc view (walk lưới hồ sơ, ~2-4 phút). Nên
+Chi phí một lượt: cold start 40 s + dwell + một lần đọc view — walk lưới hồ sơ, đo 24/08/2026 là
+~4,5 phút khi bài nằm gần đầu lưới và lâu hơn khi bài nằm sâu. Nên
 135 view còn thiếu ước 14 lượt ≈ ~1,5 giờ. Ngưỡng view là một tính năng thật, nhưng nó chậm, và
 biến quyết định là tỉ lệ tới bài, không phải cỡ fleet.
+
+### Hai chỗ sửa lại chính ghi chép ở trên (24/08/2026, cùng ngày)
+
+**1. `MainActivity` ở foreground KHÔNG có nghĩa là bài không mở.** Mục trên kết luận "deep link
+mở app rồi để nguyên feed" từ việc `mCurrentFocus` là
+`com.ss.android.ugc.aweme.main.MainActivity`. Đo lại bằng logcat trên **một máy chạy được** và
+**một máy không chạy được**, cùng package `com.ss.android.ugc.trill`, cùng một link:
+
+```
+I ActivityManager: START u0 {act=…VIEW … cmp=ComponentInfo{
+    com.ss.android.ugc.trill/com.ss.android.ugc.aweme.deeplink.AppLinkHandlerV2}} from uid 2000
+I ActivityManager: Start proc … for activity …/AppLinkHandlerV2
+```
+
+**Cả hai máy đều đi vào `AppLinkHandlerV2`, và cả hai đều kết thúc ở `MainActivity`.** Nên deep
+link được route **đúng** trên cả hai; TikTok đẩy trang bài vào *trong* `MainActivity` chứ không
+mở một activity riêng. `am start` cũng in ra cùng một dòng `Starting: Intent {…}` không lỗi trên
+cả hai.
+
+Hệ quả cho phép đo: con số "k/N máy xác nhận tới bài" của `threshold_gate` **đứng trên phép đọc
+caption**, không đứng trên activity. Và trên hai máy `com.zhiliaoapp.musically` cái trượt là
+"không đọc được caption" — có thể vì caption trên build đó không phải
+`com.bytedance.tux.input.TuxTextLayoutView`. **Chưa đo được** (fleet rơi khỏi USB giữa lúc đo),
+nên "4/11 máy không tới được bài" phải đọc là **"4/11 máy không xác nhận được"** — một câu yếu
+hơn, và cho tới khi đo xong nhãn caption của musically thì không được viết mạnh hơn thế.
+
+Cách đo tiếp: bắn link trên một máy musically, chờ 40 s, `uiautomator dump`, rồi tìm xem node nào
+mang caption của bài và class của nó là gì. Nếu khác thì thêm vào `CAPTION_CLASSES` trong
+`read_post_caption` — đo, đừng đoán.
+
+**2. Ba máy trên `Riviu 3 Ruijie 5G` KHÔNG phải "AP không có upstream".** §9.104 viết vậy dựa
+trên `gateway -> 0% loss` nhưng không so với một máy chạy được. So rồi:
+
+```
+ce021712d2ae60880c  192.168.110.102/24  ping 192.168.110.1 -> 0% loss   1.1.1.1 -> DEAD
+ce0517155ab38c390d  192.168.110.157/24  ping 192.168.110.1 -> 0% loss   1.1.1.1 -> DEAD
+98895a3355424e484f  192.168.110.41/24   ping 192.168.110.1 -> 0% loss   1.1.1.1 -> OK
+```
+
+**Cùng subnet, cùng gateway, gateway ping được từ cả ba** — chỉ khác SSID/AP
+(`Riviu 3 Ruijie 5G`, BSSID `72:85:c4:1a:5b:ed` so với `Riviu 2 Ruijie 2.4G`, BSSID
+`28:d0:f5:2a:df:a5`). Nên chặn nằm **sau** gateway và **theo client**, không phải "AP không có
+upstream": một AP không có upstream thì gateway của nó cũng không ping được. Ứng viên: client
+isolation, MAC filter, hoặc một policy per-SSID không NAT. Sửa ở phía hạ tầng; từ repo này chỉ
+làm được một việc là chuyển hai máy đó sang SSID khác, và việc đó cần mật khẩu Wi-Fi.
+
+**Và một cách phân biệt đáng ghi:** giữa buổi, cả fleet biến mất — `adb devices` rỗng, và
+`Win32_PnPEntity` không còn thấy một thiết bị Samsung/ADB nào, trong khi **không thiết bị nào báo
+`ConfigManagerErrorCode`**. Đó là dấu hiệu của **mất ở tầng USB**, không phải tầng adb:
+`adb reconnect` vô dụng, phải có người cắm lại. Phân biệt với
+chỗ §9 ghi "`adb kill-server` không bao giờ được gọi tự động": ở đó server khởi động lại và
+`adb devices` vẫn thấy máy — mất `adb forward`, không mất thiết bị.
+
+Kiểm nhanh:
+
+```powershell
+Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name -match 'SAMSUNG|ADB|Android' }
+```
+
+Rỗng ⇒ tầng USB. **Nguyên nhân lần này là người vận hành tự tháo hub**, không phải tải adb —
+tôi đã quy cho việc chạy adb song song và **kết luận đó sai**, nêu ra đây vì suy ra nguyên nhân
+từ một tương quan thời gian là đúng cái sai cần tránh.
+
+### §9.105 tiếp — bốn máy đó vẫn ở đúng bài, và ba lần tôi nói khác đều là lỗi dụng cụ
+
+Đo lại cùng ngày, sau ba bản sửa. Một lượt, ba máy `com.zhiliaoapp.musically`:
+
+```
+after pass 0: views=1386  likes=22  comments=26
+pass 1: 3/3 máy nhận intent
+        3/3 máy xác nhận đúng bài · 0 bài khác · 0 không đọc được · 0 không lên foreground
+after pass 1: views=1391
+tổng 10 phút 51 giây cho 2 phép đo + 1 lượt
+```
+
+**+5 view với 3 máy xác nhận**, và **3/3** ở đúng bài. Nên câu "4/11 máy không tới được bài" mà
+mục trên ghi là **sai**: bốn máy đó ở đúng bài suốt thời gian đó. Ba lần sai liên tiếp, cả ba đều
+nằm trong dụng cụ đo chứ không nằm trong fleet:
+
+1. **"deep link không điều hướng"** — logcat cho thấy nó vào đúng `AppLinkHandlerV2` trên cả máy
+   xác nhận được và máy không, và cả hai kết thúc ở `MainActivity`. Activity ở foreground không
+   nói được bài nào đang mở.
+2. **"không đọc được caption"** — caption **có** trong cây. Class bị obfuscate (`X.1BOr`) nhưng
+   `resource-id` là `:id/desc`, giống hệt trill. Sửa bằng `ElementQuery::ResourceIdSuffix`.
+3. **"đang ở bài khác"** — TikTok **dịch caption theo người xem**: ba máy đọc ra
+   `Một list gọn để lên Đà Lạt…`, một máy đọc ra `A compact list to go to Da Lat…`, locale cả bốn
+   đều `en`. Và caption bị cắt bằng `…` ở độ dài tuỳ màn hình. Caption là định danh **chỉ trong
+   một máy** — đúng như `read_view_count` dùng nó, và đúng như một lượt chạy thì không.
+
+Định danh dùng chung giữa các máy giờ là **nhãn tác giả của máy đọc + số tim + số bình luận**, cả
+ba là thuộc tính của bài. Không dùng `author_matches_handle` với handle trong URL: đo ra nó trả
+`false` cho chính account này, vì `.lt.gi.mang.v` **viết tắt từng chữ** của `Đà Lạt Gói Mang Về`
+chứ không lấy tiền tố, và phép so là chứa-run. Doc của hàm đó lấy đúng cặp này làm ví dụ và bảo là
+khớp — doc sai, đã sửa. Hệ quả: arrival ở các bài của account này thành công dạng
+`TargetArrival::Structural`, không phải `Identified`.
+
+**Chi phí một lần đọc view: ~4,5 phút** (10ph51 trừ ~105 s của lượt chạy, chia hai), với bài nằm
+gần đầu lưới hồ sơ. Con số "2-4 phút" trong mọi doc trước đó đo từ hồi bộ đọc còn bỏ sót hai ô
+trong ba; đã sửa hết tám chỗ.
+
+Và một lỗi tự gây khi sửa: phép kiểm sau `back()` đọc lưới **một lần** rồi từ chối nếu rỗng — mà
+rỗng ở đó thường là "lưới chưa render". Nó làm cả vòng đọc trả `views=None`. Đúng cái lỗi
+"đọc rỗng ≠ hết danh sách" đã phải sửa cho vòng cuộn bình luận trong cùng file. Giờ retry
+`PROFILE_BACK_ATTEMPTS = 3` lần trước khi từ chối.

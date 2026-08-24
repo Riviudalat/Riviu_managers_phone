@@ -907,8 +907,9 @@ export async function interactionPreviewThread(request: ThreadCampaignRequest) {
  * **Slow on purpose, and only on a press.** Likes and comments are two label reads on a page
  * already open; a view count is a navigation — TikTok states a play count only on the author's
  * profile grid, and the grid says nothing about which post a tile is, so each candidate is opened
- * and its caption compared. Measured 2-4 minutes on this farm, on top of a cold start. So
- * `readViews` is the operator's choice, and nothing calls this on a debounce.
+ * and its caption compared. Timed 24/08/2026: about four and a half minutes per reading for a
+ * post near the top of the author's grid, and longer when it sits deeper — on top of a cold
+ * start. So `readViews` is the operator's choice, and nothing calls this on a debounce.
  *
  * Takes the same exclusive lease a campaign does, because it drives a real phone.
  */

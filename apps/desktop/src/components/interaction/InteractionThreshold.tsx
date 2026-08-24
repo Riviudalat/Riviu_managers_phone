@@ -26,8 +26,9 @@ const METRICS: { key: MetricKey; label: string; what: string }[] = [
     label: "View",
     what:
       "Số phát chỉ hiện trên lưới hồ sơ tác giả, dưới từng ô — và lưới không nói ô nào là bài " +
-      "nào, nên phải mở từng ô và so caption. Đo 24/08/2026: mất 2-4 phút một lần đọc, trên " +
-      "một máy thật. Đo được thì view tích luỹ theo lượt (~1,4 view mỗi máy xác nhận tới bài), " +
+      "nào, nên phải mở từng ô và so caption. Đo 24/08/2026: ~4,5 phút một lần đọc khi bài nằm " +
+      "gần đầu lưới, lâu hơn khi bài nằm sâu. Đo được thì view tích luỹ theo lượt (~1,4 view " +
+      "mỗi máy xác nhận tới bài), " +
       "nên ngưỡng view là một lịch chạy chứ không phải một lần bấm.",
   },
   {
@@ -66,8 +67,9 @@ function metricLine(label: string, now: number | null, plan: MetricPlan | null):
  * "Bài này mới bao nhiêu, tôi muốn bao nhiêu, farm thế nào là đủ?"
  *
  * **The reading is a button, not a side effect.** Likes and comments come off the post page in
- * two label reads, but a view count is a navigation that measured 2-4 minutes and takes a phone
- * away for all of it — so nothing here runs on a debounce or on a paste. The operator presses Đo
+ * two label reads, but a view count is a navigation that took about four and a half minutes when
+ * timed 24/08/2026 — longer when the post sits deeper in the grid — and takes a phone away for
+ * all of it, so nothing here runs on a debounce or on a paste. The operator presses Đo
  * bài, and `readViews` decides whether they are paying for the slow half.
  *
  * The plan is the backend's own `plan_thresholds`, not a copy: a like target above the accounts
@@ -125,7 +127,7 @@ export function InteractionThreshold({ controls }: { controls: ThresholdControls
           Đọc cả số view (chậm)
           <Info
             of="Đọc cả số view"
-            what="Tắt thì chỉ đọc tim và bình luận — hai lần đọc nhãn trên trang bài, vài giây. Bật thì thêm một vòng đi bộ lưới hồ sơ để tìm ô của bài, đo 2-4 phút và chiếm một máy suốt thời gian đó."
+            what="Tắt thì chỉ đọc tim và bình luận — hai lần đọc nhãn trên trang bài, vài giây. Bật thì thêm một vòng đi bộ lưới hồ sơ để tìm ô của bài, đo 24/08/2026 là ~4,5 phút với bài nằm gần đầu lưới, lâu hơn khi bài nằm sâu — và chiếm một máy suốt thời gian đó."
           />
         </span>
       </label>
