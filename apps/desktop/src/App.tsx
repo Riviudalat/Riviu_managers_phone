@@ -37,6 +37,7 @@ import { Banner, EmptyState, LoadingState } from "./components/States";
 import { InteractionPopup } from "./components/InteractionPopup";
 import { JobsPanel } from "./components/JobsPanel";
 import { NurturePopup } from "./components/NurturePopup";
+import { GroupManagerPopup } from "./components/GroupManagerPopup";
 import { GroupToolsPopup } from "./components/GroupToolsPopup";
 import { ProfileToolbar } from "./components/ProfileToolbar";
 import { ScriptsPanel } from "./components/ScriptsPanel";
@@ -108,6 +109,7 @@ function App() {
   const [nurtureOpen, setNurtureOpen] = useState(false);
   const [interactionOpen, setInteractionOpen] = useState(false);
   const [groupToolsOpen, setGroupToolsOpen] = useState(false);
+  const [groupsOpen, setGroupsOpen] = useState(false);
   const [flowDirty, setFlowDirty] = useState(false);
   const [automationView, setAutomationView] = useState<"flow" | "legacy">("flow");
   useViewClient();
@@ -445,12 +447,21 @@ function App() {
                 onInteraction={() => {
                   setNurtureOpen(false);
                   setGroupToolsOpen(false);
+                  setGroupsOpen(false);
                   setInteractionOpen((v) => !v);
+                }}
+                groupsOpen={groupsOpen}
+                onGroups={() => {
+                  setNurtureOpen(false);
+                  setInteractionOpen(false);
+                  setGroupToolsOpen(false);
+                  setGroupsOpen((v) => !v);
                 }}
                 groupToolsOpen={groupToolsOpen}
                 onGroupTools={() => {
                   setNurtureOpen(false);
                   setInteractionOpen(false);
+                  setGroupsOpen(false);
                   setGroupToolsOpen((v) => !v);
                 }}
                 onStart={async () => {
@@ -537,6 +548,33 @@ function App() {
                   join it — otherwise the slider scrolls away with the tabs. */}
               <div className="device-toolrow">
                 <GroupTabs tabs={tabs} active={groupTab} onSelect={setGroupTab} />
+                {/* **Selects what is on screen, and says how many.**
+                    `visibleDevices`, not `devices`: this sits beside the group tabs, so
+                    "tất cả" has to mean the tab the operator is looking at. Saying the
+                    number in the label is what keeps that honest — a bare "Chọn tất cả"
+                    next to a filtered tab is the kind of button that quietly picks eight
+                    when the operator meant twenty, and with Sync on, the next thing they
+                    press reaches every one of them. */}
+                <div className="device-selectall">
+                  <button
+                    type="button"
+                    className="ghost"
+                    disabled={!visibleDevices.length}
+                    onClick={() =>
+                      setSelected(visibleDevices.map((device) => device.udid))
+                    }
+                  >
+                    Chọn tất cả ({visibleDevices.length})
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost"
+                    disabled={!selected.length}
+                    onClick={() => setSelected([])}
+                  >
+                    Bỏ chọn
+                  </button>
+                </div>
                 <FilterToolbar viewMode={viewMode} onViewMode={setViewMode} />
               </div>
 
@@ -822,7 +860,18 @@ function App() {
         <InteractionPopup
           devices={devices}
           selected={selected}
+          metas={metaMap}
           onClose={() => setInteractionOpen(false)}
+        />
+      )}
+
+      {page === "control" && groupsOpen && (
+        <GroupManagerPopup
+          devices={devices}
+          groups={groups}
+          metas={metaMap}
+          onChanged={reload}
+          onClose={() => setGroupsOpen(false)}
         />
       )}
 

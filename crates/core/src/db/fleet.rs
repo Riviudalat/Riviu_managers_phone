@@ -95,7 +95,20 @@ impl Database {
             .collect::<rusqlite::Result<_>>()?;
         let mut out = Vec::new();
         for (id, name, color, created_at) in groups {
-            let mut mstmt = conn.prepare("SELECT udid FROM group_members WHERE group_id = ?1")?;
+            // **`ORDER BY` on purpose, even though the rows come back sorted anyway.**
+            //
+            // Without it this reads through `sqlite_autoindex_group_members_1` — a covering
+            // index on `(group_id, udid)` — so the order is udid-ascending by accident of the
+            // query plan, and nothing in the schema promises it stays that way. That order is
+            // not decoration: `InteractionActorPicker` loads a group straight into the actor
+            // list, and the actor list is what decides who replies to whom in a `Chain`. An
+            // order nobody wrote down is an order that changes under an index change.
+            //
+            // udid is the stable tie-break; the *meaningful* order is the operator's device
+            // number, which lives in `device_meta` and is applied by the frontend where the
+            // numbers are already in hand.
+            let mut mstmt =
+                conn.prepare("SELECT udid FROM group_members WHERE group_id = ?1 ORDER BY udid")?;
             let udids: Vec<String> = mstmt
                 .query_map(params![id], |row| row.get(0))?
                 .collect::<rusqlite::Result<_>>()?;

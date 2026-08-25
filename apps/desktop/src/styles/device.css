@@ -360,6 +360,15 @@
   min-width: 0;
   border-bottom: none;
 }
+/* Sits between the tabs and the view switch; never grows, never wraps, and never steals
+   the tab strip's horizontal scroll. */
+.device-selectall {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.25rem;
+  white-space: nowrap;
+}
 .device-toolrow .filter-toolbar {
   flex: 0 0 auto;
   padding: 0 4px;
@@ -470,4 +479,48 @@
 }
 .group-tools-fieldset.danger-zone legend {
   color: var(--danger-strong);
+}
+
+/* Nurture schedule windows — one card per stretch of the day, inside the Hành vi pane. */
+.nu-window {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.5rem 0.6rem;
+  margin-top: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+/* The nurture panel is 360px wide, so every row here has to survive wrapping: a label and
+   two buttons do not fit on one line, and squeezing them turned "Máy: tất cả" into two
+   stacked words with the buttons crushed beside them. */
+.nu-window-head,
+.nu-window-phones {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+.nu-window-head input[type="time"] {
+  flex: 0 1 auto;
+  min-width: 0;
+  width: 8.5em;
+}
+/* The phone line reads as a sentence, so it takes the full width and the buttons drop
+   below it rather than fighting it for room. */
+.nu-window-phones .nu-window-who {
+  flex: 1 0 100%;
+}
+.nu-window-phones button {
+  flex: 1 1 auto;
+}
+.nu-window-behaviour {
+  grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
+}
+.nu-window-wrap {
+  padding: 0 0.35rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: var(--text-sm);
+  opacity: 0.8;
 }

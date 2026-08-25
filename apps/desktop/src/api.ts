@@ -719,6 +719,16 @@ export async function saveGroup(group: DeviceGroup) {
   return invoke<DeviceGroup>("save_group", { group });
 }
 
+/**
+ * Delete a group and its membership.
+ *
+ * The phones are not touched — a group is a label this app keeps, so deleting one returns its
+ * phones to "chưa thuộc nhóm nào" and nothing else changes.
+ */
+export async function deleteGroup(id: string) {
+  return invoke<void>("delete_group", { id });
+}
+
 export async function listMaterials() {
   return invoke<MaterialItem[]>("list_materials");
 }

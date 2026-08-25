@@ -173,6 +173,17 @@ fn write_group(
         params![group.id],
     )?;
     for udid in &group.udids {
+        // **A phone belongs to one group, and that is enforced here rather than asked for.**
+        //
+        // Groups are how the operator divides the fleet into shifts — "nhóm 1 chạy sáng, nhóm
+        // 2 chạy chiều" — so a phone in two of them is a phone running two campaigns at once,
+        // which is the thing the whole exclusive-lease layer exists to prevent. Doing the
+        // eviction in the caller would take two `save_group` round trips with a window in
+        // between where the phone is in neither group, or in both.
+        transaction.execute(
+            "DELETE FROM group_members WHERE udid = ?1 AND group_id <> ?2",
+            params![udid, group.id],
+        )?;
         transaction.execute(
             "INSERT OR IGNORE INTO group_members (group_id, udid) VALUES (?1,?2)",
             params![group.id, udid],
@@ -379,6 +390,56 @@ mod group_tests {
             udids: udids.iter().map(|udid| (*udid).to_string()).collect(),
             created_at: "2026-08-17T00:00:00Z".into(),
         }
+    }
+
+    /// **A phone belongs to one group, so saving a group takes it out of the others.**
+    ///
+    /// Groups are how the fleet is divided into shifts, and the interaction panel loads one
+    /// straight into its actor list. A phone in two groups is a phone two campaigns can pick
+    /// up at once — the exact collision the exclusive lease exists to refuse, arrived at by
+    /// configuration instead of by accident.
+    #[test]
+    fn joining_a_group_leaves_the_previous_one() {
+        let (db, path) = fixture();
+        db.upsert_group(&group("g1", &["a", "b", "c"]))
+            .expect("seed the first group");
+        db.upsert_group(&group("g2", &["b"]))
+            .expect("move b across");
+
+        let groups = db.list_groups().expect("list");
+        let first = groups.iter().find(|g| g.id == "g1").expect("g1 survives");
+        let second = groups.iter().find(|g| g.id == "g2").expect("g2 exists");
+        assert_eq!(first.udids, vec!["a".to_string(), "c".to_string()]);
+        assert_eq!(second.udids, vec!["b".to_string()]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Membership comes back in a stated order, not in whatever order the query plan picked.
+    ///
+    /// The order is load-bearing downstream: the interaction picker loads a group into the
+    /// actor list, and in a `Chain` the actor list *is* who replies to whom.
+    ///
+    /// **This one does not go red if the `ORDER BY` is deleted, and that is worth knowing.**
+    /// Tried it: the query reads through `sqlite_autoindex_group_members_1`, a covering index
+    /// on `(group_id, udid)`, so udid-ascending comes back either way and the test cannot tell
+    /// the two apart. What it pins is the *promise* — today's order is a side effect of a
+    /// query plan, and a plan changes when an index does. Keeping the clause and this test is
+    /// how the order stops being an accident; neither of them is evidence that anything was
+    /// caught.
+    #[test]
+    fn group_membership_comes_back_in_a_stated_order() {
+        let (db, path) = fixture();
+        db.upsert_group(&group("g3", &["zz", "mm", "aa"]))
+            .expect("seed out of order");
+
+        let groups = db.list_groups().expect("list");
+        let found = groups.iter().find(|g| g.id == "g3").expect("g3 exists");
+        assert_eq!(
+            found.udids,
+            vec!["aa".to_string(), "mm".to_string(), "zz".to_string()],
+            "the write order was zz, mm, aa -- what comes back has to be the stated order"
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -871,6 +932,7 @@ mod interaction_tests {
             shape: crate::interaction::ThreadShape::Chain,
             cohort_size: None,
             mentions: Vec::new(),
+            mention_parent: false,
         }
     }
 

@@ -14,6 +14,8 @@ interface Props {
   onInteraction: () => void;
   interactionOpen: boolean;
   onGroupTools: () => void;
+  onGroups: () => void;
+  groupsOpen: boolean;
   groupToolsOpen: boolean;
   syncOn: boolean;
 }
@@ -30,6 +32,8 @@ export function ProfileToolbar({
   onInteraction,
   interactionOpen,
   onGroupTools,
+  onGroups,
+  groupsOpen,
   groupToolsOpen,
   syncOn,
 }: Props) {
@@ -111,6 +115,14 @@ export function ProfileToolbar({
       >
         <IconChat size={15} />
         Tương tác
+      </button>
+      <button
+        type="button"
+        className={`tb-btn ${groupsOpen ? "active" : ""}`}
+        onClick={onGroups}
+        title="Chia fleet thành nhóm — mỗi máy thuộc đúng một nhóm"
+      >
+        Nhóm
       </button>
       <button
         type="button"
