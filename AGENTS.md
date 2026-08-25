@@ -8938,6 +8938,25 @@ chứng minh.
 được phủ bằng test với fixture — vì ép chúng trên thật nghĩa là cố tình để máy nhảy vào trang hồ
 sơ người lạ.
 
+### Bằng chứng cuối: AI viết gì
+
+`bin/carousel_comment` đưa cùng bộ ảnh vào `prepare_comment_for_frames` hai lần — **không đăng
+gì** — một lần đúng như bằng chứng cũ (chỉ ảnh 1, `Moments`), một lần như bây giờ (cả bộ,
+`CarouselSlides`). Trên ảnh chụp từ `ce0717171c2a64d50d`, `openai/gpt-5.6-luna`:
+
+| bằng chứng | AI viết | evidence_support |
+|---|---|---|
+| chỉ ảnh 1 | *"Nằm dài bên hồ, đúng kiểu trốn phố."* | 90 |
+| cả 2 ảnh | *"Lịch chi tiết thật, xem là muốn đi luôn."* | 95 |
+
+Dòng trên là **đúng nguyên văn** cái người vận hành báo là lệch. Trên bộ ảnh của
+`ce03171392f9390c01`, nhánh cũ còn bị chính cổng kiểm chứng chặn
+(`context=84 genericity=18 [nói điều không có bằng chứng]`) trong khi nhánh mới ra
+*"Lịch trình chi tiết thật!"* với `evidence_support=98`.
+
+Đây là phép đo duy nhất trả lời được câu hỏi thật — ba cổng còn lại chỉ chứng minh cái máy chụp
+đủ ảnh và tấm ghép chở đủ ảnh, không cái nào nói bình luận có nói đúng chuyện hay không.
+
 ### Môi trường: đo được trong lúc làm
 
 - **15/20 máy không ra internet.** Mọi máy trên `Riviu 2 Ruijie` (2.4G lẫn 5G) ping 0/3; 5 máy
