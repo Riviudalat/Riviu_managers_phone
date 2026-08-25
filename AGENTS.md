@@ -8668,3 +8668,199 @@ Và một lỗi tự gây khi sửa: phép kiểm sau `back()` đọc lưới **
 rỗng ở đó thường là "lưới chưa render". Nó làm cả vòng đọc trả `views=None`. Đúng cái lỗi
 "đọc rỗng ≠ hết danh sách" đã phải sửa cho vòng cuộn bình luận trong cùng file. Giờ retry
 `PROFILE_BACK_ATTEMPTS = 3` lần trước khi từ chối.
+
+## 9.106 Lịch tự chạy của nuôi TikTok (24/08/2026)
+
+Câu hỏi được hỏi là "tính năng hẹn giờ ở nuôi TT ok chưa". Đọc hết đường đi rồi đo:
+**cơ chế có thật và đủ, nhưng trước hôm nay gần như không có gì về nó được đo.**
+
+Vòng lặp sống ở `state.rs`, sau mốc `// TikTok nurture schedule ticks`: tick 30 giây, mốc
+`nurture.schedule.next_run_at` nằm trong bảng settings nên sống qua restart app, thoát vòng lặp
+chỉ khi `accepting_work` đã tắt (một chiều, chỉ lúc shutdown), đi qua `preflight_comment_job`
+đúng như nút bấm tay, và `reserve_start` chặn double-start nên một tick tới lúc phiên cũ còn chạy
+thì không nhân đôi phiên.
+
+**Cái đã sửa: quyết định của tick giờ có seam.** Trước đây nó là một khối inline trong
+`tauri::async_runtime::spawn`, và test canh nó tự viết trong doc của mình rằng *"there is no seam
+a unit test can drive the spawned scheduler through"* — nên thứ duy nhất kiểm được là **thứ tự
+hai lời gọi trong văn bản file**. Chuyện lịch có arm không, khi nào tick là tới hạn, mốc hỏng thì
+sao, chọn máy nào: không đo được cái nào. Giờ `nurture_schedule::decide(settings, mốc, máy_đang_kết_nối, now)`
+là hàm thuần trả `Wait | Rearm | Run`, còn vòng lặp giữ phần tác động. Tám test, và **ba trong số
+đó đã chứng minh đỏ** bằng cách phá đúng hành vi rồi chạy lại:
+
+```
+so mốc kiểu naive thay vì theo instant      -> ĐỎ  a_mark_with_an_offset_is_compared_as_an_instant
+mốc không đọc được coi là chưa tới hạn      -> ĐỎ  an_unreadable_mark_is_treated_as_due
+danh sách rỗng nghĩa là không máy nào        -> ĐỎ  the_empty_list_means_the_whole_fleet_not_no_phones
+                                                   (left: Rearm, right: Run ["A","B","C"])
+```
+
+**Trần thời lượng: được tôn trọng, sai số vài giây ở cấu hình thật.** Đo bằng
+`live_nurture_android` (gọi thẳng `run_session` production) trên 2 máy, `--videos` đặt cao để cái
+dừng phiên chắc chắn là trần thời gian, like/follow/comment tắt hết:
+
+```
+trần 900s (nhỏ nhất app cho phép)
+  98895a3355424e484f   dừng ở 904s   +4s   53/58 video
+  ce051715ac247a3f01   dừng ở 905s   +5s   92/97 video
+
+trần 120s (dưới ngưỡng app, chỉ để đo độ hạt)
+  ce051715ac247a3f01   dừng ở 124s   +4s    9/10 video
+  98895a3355424e484f   dừng ở 187s   +67s   1/2 video
+```
+
+Cả bốn lượt dừng vì **trần**, không vì đạt đích video (số video luôn nhỏ hơn đích). Ở 900 s thì
+vượt 4-5 giây, tức 0,5%.
+
+Vì sao lượt 120 s có một cái vượt 67 giây trong khi ba cái kia vượt 4-5:
+`if max_duration.is_some_and(|max| started.elapsed() >= max)` nằm ở **đầu vòng xử lý một bài**
+(`nurture/mod.rs`, và bản hierarchy ở `nurture/hierarchy.rs`), nên mức vượt bị chặn bởi thời gian
+xử lý **một bài**, không bị chặn bởi trần. 67 giây đó là một bài chậm — không phải tính chất hệ
+thống, và **đừng suy nó thành 7% ở mọi trần** như tôi đã suy trước khi có lượt 900 s. Nhưng cũng
+đừng hiểu trần là hard deadline: một bài kẹt lâu thì phiên chạy dài đúng bấy nhiêu.
+
+Và hai máy chạy đồng thời đều nhận đủ 900 s, nên với 2 máy không có chuyện tranh slot foreground.
+Thông lượng lệch nhau nhiều (53 so với 92 video trong cùng 15 phút) — cùng một cặp máy đã lệch như
+vậy ở lượt 120 s.
+
+**Hai chỗ chưa ok, và cả hai là quyết định của người vận hành, không phải bug để tự sửa:**
+
+1. **Tooltip nói ngược với code, về phía nguy hiểm.** `NurtureScheduleTab.tsx` ghi *"Chỉ chạy trên
+   những máy đã chọn khi lưu"*. Nhưng `scheduleUdids` lấy từ lưới đang chọn, và khi nó rỗng thì
+   `decide` trả **toàn bộ máy đang kết nối** — hành vi có từ commit đầu. Nút Bắt đầu thủ công từ
+   chối trường hợp này ("Chọn máy trên lưới trước"); đường Lưu thì không. Nên tick "Lịch tự chạy"
+   rồi Lưu khi chưa chọn máy nào = arm cả fleet. Test
+   `the_empty_list_means_the_whole_fleet_not_no_phones` **ghim hành vi hiện tại như nó đang là**,
+   để không ai đổi nó nhầm trước khi có người quyết định bên nào sai.
+2. **UI không nói lịch đang bật hay chạy lúc nào.** Mốc chỉ nằm trong DB; chỗ `ScheduleBlock.tsx`
+   hiện "next …" là lịch script farm, không phải lịch nuôi. Và lúc bật thì mốc đặt là
+   `now + every` chứ không chạy ngay, nên bật với 240 phút là bốn tiếng im lặng không phân biệt
+   được với "không hoạt động". `nurture.schedule.skipped` / `.blocked` có ghi op log nhưng không
+   lên panel.
+
+**Còn một thứ vẫn không đo được, nói rõ ra:** bản thân vòng `interval(30s)` — tức chuyện tick có
+thật sự nổ trong process đang chạy — chỉ được ghim bằng source-scan. Muốn thấy nó nổ thì phải chạy
+app. `decide` giờ đo được, phần tác động thì không.
+
+**Cảnh báo về dụng cụ:** `date +%s` trong Git Bash ở máy này **không trôi đúng thời gian thực**
+giữa các lệnh (một chỗ báo 203s trong khi đồng hồ hệ thống nói 178s cho một khoảng dài hơn nhiều).
+Đừng đo thời lượng bằng hiệu hai lần gọi `date`. Dùng số `done in Ns` mà chính tiến trình đo, hoặc
+`(Get-Process X).StartTime` trong PowerShell.
+
+## 9.107 Khung giờ cho lịch nuôi, và nút chọn tất cả (24/08/2026)
+
+Bốn việc người vận hành giao: lịch có nhiều khung giờ và mỗi khung cấu hình riêng; lịch chuyển
+vào tab Hành vi; thêm nút chọn tất cả; và "điều khiển một máy, bấm Home thì cả fleet thoát
+TikTok".
+
+**Việc thứ tư hoá ra đã có sẵn.** `groupInput` + `groupSync` (cổng A1 port từ xiaowei) đã fan-out
+mọi thao tác Focus — gồm phím cứng — cho `groupUdids`, tức tập đang chọn trên lưới, khi bật Sync ở
+sidebar. Nên thao tác là: Chọn tất cả → Sync → Home. Không viết thêm dòng nào cho nó, chỉ thiếu
+đúng nút chọn tất cả.
+
+**Nút chọn tất cả nằm cạnh tab nhóm và chọn `visibleDevices`, không phải `devices`.** Nó ở ngay
+cạnh một tab đang lọc, nên "tất cả" phải nghĩa là tab đang nhìn; và con số nằm luôn trong nhãn
+(`Chọn tất cả (N)`) vì một nút trơn cạnh tab lọc là loại nút lặng lẽ chọn tám máy khi người bấm
+tưởng hai mươi — mà bật Sync thì thứ bấm kế tiếp tới cả hai mươi.
+
+**Ba quyết định trong `NurtureWindow`, mỗi cái tránh một lỗi im lặng:**
+
+1. **Giờ đọc theo offset thật của người vận hành**, không phải UTC. `decide` nhận `FixedOffset`.
+   Đọc theo UTC thì khung `08:00-11:00` chạy lúc 2 giờ sáng ở VN — đúng cái giờ khung sinh ra để
+   tránh — và **không dòng log nào tố cáo**: mọi thứ vẫn "chạy đúng lịch".
+2. **Mỗi khung một mốc** `nurture.schedule.next_run_at.<id>`. Dùng chung một mốc thì khung sáng
+   chu kỳ 240 phút ghi mốc quá xa và bịt miệng khung chiều. Chứng minh đỏ: sửa thành mốc chung
+   thì `one_windows_mark_does_not_gag_another` trả `Wait` thay vì `Run`.
+3. **Ngoài mọi khung thì để nguyên mốc**, không re-arm. Nhờ vậy khung nổ đúng phút mở cửa (mốc của
+   nó đã ở quá khứ). Re-arm ở ngoài sẽ đẩy mốc qua phút mở cửa và khung khởi động trễ đúng bằng
+   chu kỳ của nó.
+
+Khung vắt qua nửa đêm viết là `end <= start` (`22:00-02:00`), UI ghi "qua đêm". Cấu hình riêng của
+khung là **cả năm giá trị hoặc không cái nào** — ba tỉ lệ dùng chung một ngân sách 100% ở panel,
+ngân sách ghép từ hai nguồn thì không ai đọc được trên một màn hình; và nó được áp **trước**
+`preflight_comment_job` chứ không sau, nếu không thì cổng kiểm một con số còn phiên chạy con số
+khác.
+
+**Không có khung nào = hành vi cũ**, một chu kỳ cả ngày. Đó là thứ mọi DB ghi trước đợt này chứa,
+nên nó là một chế độ thật chứ không phải trạng thái chưa cấu hình — và UI nói thẳng "kể cả ban
+đêm" thay vì để hai ô trống.
+
+**Lịch bỏ tab riêng, xuống cuối tab Hành vi**, vì một khung ghi đè đúng các tỉ lệ ở ngay trên nó
+mà trước đây hai thứ cách nhau một tab.
+
+Ba phép thử đỏ đã chạy: đọc khung theo UTC, mốc dùng chung, và ngoài khung vẫn chạy — cả ba đỏ
+đúng test của nó. Gate tám cổng xanh (682 test core, 668 test FE).
+
+**Vẫn để nguyên, chờ người vận hành quyết:** lưu lịch khi chưa chọn máy nào thì arm cả fleet,
+trong khi tooltip nói ngược. Trong khung mới thì UI in chữ "tất cả" nên nhìn thấy được; đường cũ
+thì vẫn là cái bẫy, và `the_empty_list_means_the_whole_fleet_not_no_phones` ghim nó **như nó đang
+là** để không ai đổi nhầm trước khi có quyết định.
+
+## 9.108 Chạy Tương tác ở quy mô 20 máy (25/08/2026)
+
+Chạy thật trên `https://www.tiktok.com/@pht.th.h.slay/photo/7668948504827448583`, kiểu **Riêng
+lẻ**, cả 20 máy, đo lại sau từng bản sửa. Bảng này là toàn bộ phép đo, gồm cả một bản sửa của
+tôi **làm tệ đi** và đã bị rút.
+
+```
+lượt                                   gửi     thời gian   lỗi còn lại
+nền: một cụm, chạy nối tiếp            6/20    13 phút     19 máy đứng không mọi lúc
++ fan-out theo assignment              13/20   3,5 phút    5 × foreground quá 40 s
++ giãn nhịp 2 s/máy                    16/20   3,4 phút    4 × no_baseline
++ bắt chờ qua splash mới tính sẵn sàng 7/20    3,8 phút    13 × foreground  ← SAI, đã rút
++ chờ splash có hạn, không đánh trượt  15/20   3,6 phút    4 × no_baseline
++ chuyển sang tab For You lấy mốc      18/20   3,5 phút    1 máy + cổng AI
++ interaction nhường IdleSweep 9 s     17/20   3,4 phút    1 × IdleSweep (máy khác)
++ sweeper đứng yên khi có chiến dịch   18/20   3,5 phút    1 máy + cổng AI
+```
+
+**Cụm là đơn vị song song, và một cụm nghĩa là nối tiếp.** `execute_thread_campaign` spawn một
+task mỗi cụm. Bỏ ô "Số máy mỗi cụm" (người vận hành yêu cầu) khiến mọi lượt chỉ còn một cụm, tức
+20 máy chạy lần lượt. `Standalone` không có `parent_ordinal` nào nên assignment mới là đơn vị
+đúng; mỗi task nhận `only_assignments` **một phần tử**, cùng cơ chế đường Thử lại dùng, nên hai
+task không thể chạm cùng một dòng — tính chất đó đúng do cách dựng chứ không do ai cẩn thận.
+
+**Đừng cho mỗi máy một cụm.** `plan_threads` chia link cho cụm bằng `index % cohorts.len()`, nên
+với **một link** và 20 cụm chỉ cụm 0 có việc.
+
+**Chụp bài cho AI phải bằng máy sắp bình luận.** `collect_target_evidence_frames` trước đây luôn
+mở máy của ordinal 0; fan-out biến nó thành 20 task giành một máy — 0/20 trong 1,8 phút với
+`device … is busy with Interaction`. Cũng sửa luôn một lỗi âm thầm: Thử lại một dòng ở giữa từng
+đánh thức máy của ordinal 0, một máy không liên quan.
+
+**Splash mang đúng package của app.** Cổng "đã lên foreground" chỉ so package nên nó qua khi máy
+còn ở `…aweme.splash.SplashActivity`, rồi mọi bước sau đọc màn hình trống và từ chối `no_baseline`.
+Bắt nó **chờ qua splash** thì tệ hơn hẳn (7/20): 20 máy cold-start cùng lúc giữ splash quá cả 40
+giây. Splash là thứ **đáng chờ có hạn, không đáng đánh trượt** — `wait_out_splash`, 8 giây rồi đi
+tiếp.
+
+**Tab Friends không có nhãn tác giả.** Bốn máy hỏng ở mọi lượt đều đậu ở tab Friends; thẻ ở đó có
+dải story và không có hàng tác giả, mà cú chạm Home chỉ trả về tab đang chọn. Chuyển sang For You
+(`TikTokControl::FeedTab`) khi chưa có mốc — bốn máy vào được ngay. Phát hiện bằng `screencap`,
+không phải bằng suy luận.
+
+**`BASELINE_SETTLE` 4 → 12 giây không giúp gì** (15/20 với 5 lỗi, đúng bằng trước) và đã trả về 4.
+Ghi lại vì một con số được nới bằng một giả thuyết mà phép đo bác bỏ thì tệ hơn con số cũ.
+
+**IdleSweep chỉ nhường việc đang chạy.** Nó lấy lease không chờ và bỏ qua máy đang bận, nhưng
+campaign tới từng máy cách nhau 2 giây nên máy chưa tới lượt **trông như rảnh**. Ba lượt, ba máy
+khác nhau. Giờ campaign giữ một bộ đếm và sweeper bỏ qua cả lượt quét; interaction cũng hỏi lại
+tối đa 9 giây, và **chỉ** nhường cho `IdleSweep` — máy trong tay nurture, script hay overlay vẫn
+từ chối ngay.
+
+**Thông báo từ chối của cổng AI từng giấu lý do.** `context=86 overall=86 instruction=98
+genericity=12` — bốn số đều đạt ngưỡng, thứ chặn là một cờ boolean không được in. Giờ nó ghi rõ,
+và đã thấy trên thật: `genericity=12 [nói điều không có bằng chứng]`.
+
+**Còn lại chưa xong, nói rõ:**
+
+- **Máy `9889db374744474635` có hộp thoại `Select input method` đứng đè lên app.** Gỡ bằng một
+  cú `input keyevent KEYCODE_BACK` thì máy vào được lượt kế tiếp — nhưng nó quay lại trong lượt
+  sau. Tôi viết hai bản tự gỡ (khớp chuỗi lỗi, rồi đọc `ForegroundWindow::System`), **cả hai đều
+  không kích hoạt trên máy thật**: thông báo vẫn là timeout 40 giây chứ không phải câu "Back
+  không gỡ được". `dumpsys` cho thấy đúng hai dòng `mCurrentFocus=Window{… Select input method}`,
+  nên phép so lẽ ra phải khớp. Cần thêm log trong vòng lặp foreground để biết `observed` thật là
+  gì; đừng sửa tiếp nếu chưa có nó.
+- **Lỗi `NoComposer` ở bước trả lời** (Toả / Nối tiếp) vẫn còn: bấm Trả lời xong không thấy ô nhập
+  trong 6 giây, lặp lại hai lần liên tiếp nên có cấu trúc. Mọi phép đo ở trên chạy **Riêng lẻ** nên
+  không đi qua bước đó.
