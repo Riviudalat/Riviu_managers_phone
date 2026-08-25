@@ -9051,3 +9051,58 @@ Kiểm chứng gửi lại **cùng một tấm ảnh 20 lần** cho 20 máy, m�
 ứng viên vào **một** lượt kiểm chứng sẽ đưa phần đó từ ~$0,0147 xuống ~$0,0008 mỗi link — cả
 link từ ~$0,018 xuống ~$0,004, rẻ khoảng **4,5 lần**. Chưa làm: nó đổi cấu trúc vòng lặp
 per-assignment (chuỗi `previous`, đường retry) trên đúng đường đăng bình luận thật.
+
+## 9.111 Gộp một lượt nháp cho cả link, và cái gộp bị phép đo loại bỏ (25/08/2026)
+
+Tấm ảnh **là** cái prompt: một tấm ghép 2 slide chiếm ~2.840 trong ~2.880 token prompt của một
+bản nháp. Đường từng-câu gửi nó **hai lần mỗi máy** — một để viết, một để kiểm chứng — nên một
+link 20 máy trả tiền cho cùng tấm ảnh **40 lần**, và không lần nào cache được: provider cache
+theo prompt nguyên vẹn, mà prompt mỗi máy có một câu chống-trùng khác nhau.
+
+### Gộp cả hai bước: đã thử, bị bác bỏ
+
+| | gộp cả hai | gộp chỉ bản nháp |
+|---|---|---|
+| câu lấy được từ gộp | **2/20** | **15/20** |
+| câu khác nhau | 13/20 | **19/19** |
+| thời gian | 479 s | 255 s |
+| $/câu | 0,000881 | **0,000839** |
+
+Cổng kiểm chứng gộp **từ chối 18/20**. Cùng loại câu, chấm riêng thì `ev=98 rel=98`; nằm trong
+danh sách 20 câu thì `overall=35` kèm cờ `unsupportedClaim`. Vài ví dụ thật từ log:
+
+```text
+#10 overall=10 instruction=100 genericity=85 [nói điều không có bằng chứng]
+#12 overall=25 instruction=100 genericity=80 [nói điều không có bằng chứng]
+#2  overall=30 instruction=98  genericity=35 [mâu thuẫn với bài, nói điều không có bằng chứng]
+```
+
+Model làm gì với 20 câu ngắn giống nhau cùng lúc thì không rõ, nhưng đó **không phải** phép kiểm
+mà cổng này tồn tại để làm. Và một cổng từ chối câu tốt thì **đắt hơn** phần gộp tiết kiệm: mỗi
+lần từ chối là một lượt nháp + một lượt kiểm chứng đầy đủ làm lại. `grounded_verify_batch` đã bị
+xoá khỏi cây, không để lại dưới dạng code chết.
+
+### Gộp bản nháp: giữ
+
+Một lượt gọi, một tấm ảnh, 20 câu; kiểm chứng vẫn **từng câu một** đúng như trước. 21 lượt gọi
+một link thay vì 40. Rẻ **42%** so với 0,001439, và **đa dạng hơn hẳn**: 19/19 câu khác nhau, so
+với 13–14/20 của chuỗi `previous`. Cùng một nguyên nhân cho cả hai — chuỗi cũ chỉ nói cho mỗi máy
+biết về **đúng một câu ngay trước nó**, còn ở đây model viết cả bộ và thấy hết.
+
+Câu thật lấy được, để so giọng: *"Có cả bảng chi phí luôn"*, *"Hai triệu ba nghe ổn áp"*,
+*"Ngày đầu lịch hơi dày"*, *"Nhiều quán cà phê quá"* — thay cho bảy bản *"Lịch trình chi tiết
+thật, lưu lại thôi"*.
+
+**Chỉ cho `Standalone`.** Chuỗi trả lời thì `direction` của một câu **trích câu nó đang trả lời**,
+và văn bản đó chưa tồn tại cho tới khi câu cha đăng xong — nên Toả/Nối tiếp giữ nguyên đường
+từng-câu. Bỏ qua luôn khi chỉ có một câu: một lượt nháp vẫn là một lượt nháp, mà bản gộp xin
+budget token lớn hơn không dùng tới.
+
+**Mọi đường hỏng đều lùi về đường cũ**: câu bị cổng từ chối, bản nháp về thiếu số câu, hay kiểm
+chứng không đọc được — tất cả gọi `prepare_grounded_comment` cho đúng câu đó. Nên trường hợp tệ
+nhất là **giá cũ**, không phải một máy im lặng.
+
+**Tính tiền đúng một lần.** Lượt nháp gộp được ghi cho câu đầu, mỗi lượt kiểm chứng ghi cho câu
+nó chấm. Sai ở đây là chép giá lượt nháp lên cả 20 câu, và sổ của người vận hành sẽ báo gấp hai
+mươi lần số thật — biến một tối ưu thành một hồi quy trên giấy. Có test khẳng định tổng cộng lại
+đúng bằng cái gateway thu.

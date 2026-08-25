@@ -1044,6 +1044,65 @@ async fn run_cohort(
             }
         };
 
+        // **One draft call for the whole target, where the shape allows it.** Only `Standalone`:
+        // there every comment is independent, so the only thing the per-comment chain was doing
+        // was telling each phone to avoid the one before it. A thread is different — a reply's
+        // direction quotes the comment it answers, and that text is not known until the parent
+        // has actually posted — so threads keep the per-comment path unchanged.
+        //
+        // Measured 25/08/2026, twenty comments on one two-slide post: $0.000839 a comment
+        // against $0.001439, and **19 of 19 distinct** where the per-comment chain produced 13
+        // or 14 distinct out of 20. Both come from the same cause — the picture is nearly the
+        // whole prompt and it was being sent forty times, and each phone could only be told
+        // about its immediate predecessor.
+        //
+        // Skipped for a single comment: one draft is one draft either way, and the batch asks
+        // for a larger token budget it would not use.
+        let mut batched_ai = HashMap::new();
+        if request.mode == crate::interaction::ThreadMode::Standalone && !frames.is_empty() {
+            let ordinals: Vec<u8> = plan
+                .assignments
+                .iter()
+                .filter(|assignment| assignment.target_key == target.target_key)
+                .filter(|assignment| {
+                    assignment_ids
+                        .get(&(assignment.target_key.clone(), assignment.ordinal))
+                        .is_some_and(|id| {
+                            only_assignments
+                                .as_ref()
+                                .is_none_or(|scope| scope.contains(id))
+                        })
+                })
+                .filter(|assignment| {
+                    request
+                        .manual_comment_for(target_index, assignment.ordinal)
+                        .is_none()
+                })
+                .map(|assignment| assignment.ordinal)
+                .collect();
+            if ordinals.len() > 1 {
+                let mut scoped = settings.clone();
+                scoped.max_comment_words = u32::from(request.max_words);
+                let batched = crate::openai_client::prepare_grounded_comments_batch(
+                    &scoped,
+                    &frames,
+                    evidence_kind,
+                    Some(&request.instruction),
+                    ordinals.len(),
+                )
+                .await;
+                tracing::info!(
+                    "interaction {}: {}/{} câu lấy từ một lượt nháp gộp",
+                    target.target_key,
+                    batched.accepted_from_batch(),
+                    ordinals.len()
+                );
+                for (ordinal, result) in ordinals.into_iter().zip(batched.results) {
+                    batched_ai.insert(ordinal, result);
+                }
+            }
+        }
+
         let mut prepared_messages = Vec::with_capacity(request.message_count as usize);
         let mut previous = None::<String>;
         for assignment in plan
@@ -1087,6 +1146,36 @@ async fn run_cohort(
             // what makes the stored evidence checkable.
             let text = match request.manual_comment_for(target_index, assignment.ordinal) {
                 Some(manual) => manual.to_string(),
+                // Already written by the batch above, when there was one. Failures are kept
+                // as failures rather than quietly retried here: the batch has its own
+                // per-comment fallback, so anything still failing has already had both goes.
+                None if batched_ai.contains_key(&assignment.ordinal) => {
+                    match batched_ai.remove(&assignment.ordinal) {
+                        Some(Ok(grounded)) => grounded.text,
+                        Some(Err(error)) => {
+                            let detail = format!("{error:#}");
+                            tracing::error!(
+                                "interaction {}: AI không viết được cho ordinal {}: {detail}",
+                                target.target_key,
+                                assignment.ordinal
+                            );
+                            db.update_interaction_assignment_state(
+                                id,
+                                ThreadMessageState::Failed,
+                                Some(&format!(
+                                    "ai_comment_unavailable: ordinal {} — {detail}",
+                                    assignment.ordinal
+                                )),
+                                None,
+                                None,
+                            )?;
+                            notify(&events, &campaign_id);
+                            failed += 1;
+                            continue;
+                        }
+                        None => unreachable!("checked by the guard above"),
+                    }
+                }
                 None => {
                     let mut scoped = settings.clone();
                     scoped.max_comment_words = u32::from(request.max_words);

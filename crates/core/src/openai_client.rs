@@ -912,6 +912,321 @@ async fn grounded_generate(
     })
 }
 
+/// Every comment one post needs, in two API calls instead of forty.
+///
+/// **What it costs, measured on OpenRouter 25/08/2026.** The per-comment path sends the contact
+/// sheet twice per phone — once to draft, once to verify — and none of it caches, because this
+/// provider caches whole prompts and every phone's prompt differs. A twenty-phone link therefore
+/// paid for the same picture forty times, ~$0.00144 a comment. This path sends it twice for the
+/// whole link.
+///
+/// **What it gives up, said plainly.** One draft call means one sample: if the model writes a
+/// dull set, all of them are dull together, where twenty independent calls would have produced
+/// one good one by luck. And one malformed answer loses every comment at once. Both are answered
+/// the same way — a comment the gate refuses, or a batch that comes back unusable, falls back to
+/// [`prepare_grounded_comment`] for that one comment, which is the path with its own retry. The
+/// fallback is the reason this is safe to try: the worst case is the old cost, not a silent post.
+///
+/// **What it should improve.** Anti-repetition was local before: each phone was told only about
+/// the comment immediately before it, and twenty of them drifted back onto the same phrasing —
+/// measured, 6 of 10 comments on one post were near-copies. Here the model writes the whole set
+/// at once and is asked to make them differ.
+///
+/// One result per phone, in order. Errors are per comment so that one refusal is one phone
+/// staying quiet, never the whole target failing.
+pub async fn prepare_grounded_comments_batch(
+    settings: &NurtureSettings,
+    frames: &[Vec<u8>],
+    kind: EvidenceKind,
+    direction: Option<&str>,
+    count: usize,
+) -> BatchedComments {
+    if count == 0 {
+        return BatchedComments::default();
+    }
+    if settings.api_key.trim().is_empty() {
+        return BatchedComments::all_individual(
+            (0..count).map(|_| Err(anyhow!("ai_unavailable"))).collect(),
+        );
+    }
+    if count > VERIFY_BATCH_MAX {
+        // Above the batch ceiling there is nothing to decide: the per-comment path is correct
+        // and merely more expensive, and splitting into several batches would need a second
+        // set of measurements nobody has taken.
+        let mut out = Vec::with_capacity(count);
+        for _ in 0..count {
+            out.push(prepare_grounded_comment(settings, frames, kind, direction).await);
+        }
+        return BatchedComments::all_individual(out);
+    }
+
+    let sheet = match make_contact_sheet(frames, kind) {
+        Ok(sheet) => sheet,
+        Err(error) => {
+            let detail = error.to_string();
+            return BatchedComments::all_individual(
+                (0..count).map(|_| Err(anyhow!("{detail}"))).collect(),
+            );
+        }
+    };
+    let frame_sha256 = sha256_hex(&sheet.jpeg);
+    let max_words = settings.max_comment_words.clamp(4, 30) as usize;
+    let lang = language_label(&settings.comment_lang);
+
+    let batch =
+        match grounded_generate_batch(settings, &sheet, &lang, max_words, direction, count).await {
+            Ok(batch) => batch,
+            Err(error) => {
+                tracing::warn!("gộp bản nháp thất bại, lùi về từng câu: {error}");
+                let mut out = Vec::with_capacity(count);
+                for _ in 0..count {
+                    out.push(prepare_grounded_comment(settings, frames, kind, direction).await);
+                }
+                return BatchedComments::all_individual(out);
+            }
+        };
+
+    // Sanitised before verification, so the gate judges exactly the string that would be typed.
+    let candidates: Vec<String> = batch
+        .comments
+        .iter()
+        .map(|text| sanitize_comment(text, max_words).unwrap_or_default())
+        .collect();
+
+    // **Verified one at a time, and the measurement is why.** Judging all twenty in one call
+    // was tried first — it is the same picture, so it should have been the whole saving — and it
+    // refused eighteen of twenty. Measured 25/08/2026 on the same post: candidates that score
+    // `ev=98 rel=98` when judged alone came back `overall=35` with `unsupportedClaim` set when
+    // judged in a list of twenty. Whatever the model is doing with twenty short similar
+    // sentences at once, it is not the check this gate exists to be, and a gate that refuses
+    // good comments costs *more* than the batch saves: every refusal falls back to a full
+    // per-comment draft and verify.
+    //
+    // So the drafting is batched — one picture, twenty comments, and the model can see the whole
+    // set while making them differ — and the judging is not. Twenty-one calls a link instead of
+    // forty, with the gate behaving exactly as it always has.
+    let mut out = Vec::with_capacity(count);
+    let mut from_batch = Vec::with_capacity(count);
+    let mut refusals = Vec::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        let verification = match grounded_verify(settings, &sheet, candidate, direction).await {
+            Ok(verification) => verification,
+            Err(error) => {
+                // A verification that could not be read is not a refusal: hand this one comment
+                // to the path that knows how to try again.
+                tracing::warn!("gộp: không kiểm chứng được câu #{index}: {error}");
+                out.push(prepare_grounded_comment(settings, frames, kind, direction).await);
+                from_batch.push(false);
+                continue;
+            }
+        };
+        // **Assembled exactly as the per-comment path assembles it.** Same three scores folded
+        // by `min`, and `formal_style` from the same local reader — a batch that judged by a
+        // looser rule would be cheaper by letting comments through, which is not the trade
+        // being made here.
+        let gate = VerificationGate {
+            overall: batch
+                .context_confidence
+                .min(verification.relevance)
+                .min(verification.evidence_support),
+            instruction_fit: verification.instruction_fit,
+            genericity: verification.genericity,
+            contradiction: verification.contradiction,
+            unsupported_claim: verification.unsupported_claim,
+            ui_text_confusion: verification.ui_text_confusion,
+            formal_style: sounds_like_report(candidate),
+        };
+        if candidate.is_empty() || !gate.accepts() {
+            // One refusal is one phone going the slow way, not twenty.
+            refusals.push(format!(
+                "#{index} overall={} instruction={} genericity={}{}",
+                gate.overall,
+                gate.instruction_fit,
+                gate.genericity,
+                gate.blocking_flags()
+            ));
+            out.push(prepare_grounded_comment(settings, frames, kind, direction).await);
+            from_batch.push(false);
+            continue;
+        }
+        // The two batch calls are charged once. Attributing them to the first comment and zero
+        // to the rest keeps a sum over the target equal to the real bill; attributing the whole
+        // thing to each would report twenty times what was spent.
+        let first = index == 0;
+        from_batch.push(true);
+        out.push(Ok(GroundedCommentResult {
+            text: candidate.clone(),
+            caption: batch.caption.clone(),
+            context_confidence: batch.context_confidence,
+            relevance: verification.relevance,
+            evidence_support: verification.evidence_support,
+            frame_sha256: frame_sha256.clone(),
+            distinct_frames: sheet.distinct_frames,
+            // The one draft call is charged to the first comment and the verification to the
+            // comment it judged, so a sum over the target is the real bill. Charging the draft
+            // to every comment would report twenty times what was spent.
+            prompt_tokens: if first {
+                batch.prompt_tokens + verification.prompt_tokens
+            } else {
+                verification.prompt_tokens
+            },
+            completion_tokens: if first {
+                batch.completion_tokens + verification.completion_tokens
+            } else {
+                verification.completion_tokens
+            },
+            cost_usd: match (
+                if first { batch.cost_usd } else { None },
+                verification.cost_usd,
+            ) {
+                (None, None) => None,
+                (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
+            },
+            model: verification.model.clone(),
+            base_url_host: host_of(&settings.base_url),
+        }));
+    }
+    if !refusals.is_empty() {
+        tracing::info!(
+            "gộp: {}/{} câu bị cổng từ chối và phải làm lại từng câu — {}",
+            refusals.len(),
+            count,
+            refusals.join("; ")
+        );
+    }
+    BatchedComments {
+        results: out,
+        from_batch,
+        refusals,
+    }
+}
+
+/// What a batched preparation produced, and how much of it actually came from the batch.
+///
+/// **The counts are the whole point of the type.** A batch whose comments the gate refuses is
+/// not a saving: every refusal falls back to the per-comment path, which pays for the picture
+/// twice more. Measured 25/08/2026 on a twenty-phone run, the first version of this reported one
+/// average price and hid that a large share had gone the slow way — the figure read like a 2.3x
+/// win over a run that was in fact slower and no more varied.
+#[derive(Default)]
+pub struct BatchedComments {
+    /// One result per phone, in order.
+    pub results: Vec<anyhow::Result<GroundedCommentResult>>,
+    /// `true` where the comment came out of the batch, `false` where it fell back.
+    pub from_batch: Vec<bool>,
+    /// Why each refusal was refused, for a log line an operator can read.
+    pub refusals: Vec<String>,
+}
+
+impl BatchedComments {
+    fn all_individual(results: Vec<anyhow::Result<GroundedCommentResult>>) -> Self {
+        let from_batch = vec![false; results.len()];
+        Self {
+            results,
+            from_batch,
+            refusals: Vec::new(),
+        }
+    }
+
+    /// How many comments the batch itself produced.
+    pub fn accepted_from_batch(&self) -> usize {
+        self.from_batch.iter().filter(|kept| **kept).count()
+    }
+}
+
+/// Draft every comment a post needs in one call.
+///
+/// **The picture is the prompt.** A two-slide sheet is ~2,840 of the ~2,880 prompt tokens a
+/// draft costs, and the per-comment path sent it once per phone and once again per verification
+/// — forty times for a twenty-phone link, and never cacheable, because this provider caches
+/// whole prompts and every phone's prompt carries a different anti-repetition clause. Asking for
+/// twenty comments in one answer sends the picture once.
+///
+/// It also makes the anti-repetition real instead of local. The per-comment path only ever told
+/// the model about the *previous* comment, so twenty phones drifted back onto the same phrasing;
+/// here the model writes the whole set at once and can see all of it.
+///
+/// A short answer is an error, not a partial success: the caller must never hand out fewer
+/// comments than it has phones and let the rest fall back to silence.
+async fn grounded_generate_batch(
+    settings: &NurtureSettings,
+    sheet: &ContactSheet,
+    lang: &str,
+    max_words: usize,
+    direction: Option<&str>,
+    count: usize,
+) -> anyhow::Result<GroundedDraftBatch> {
+    let direction = direction.unwrap_or("tự nhiên");
+    let layout = sheet.layout_note();
+    let prompt = format!(
+        "Bạn phân tích một contact sheet của một bài TikTok: {layout}.\n\
+         Trả về JSON duy nhất, không markdown, theo schema: {{\"caption\":string|null,\"captionConfidence\":0..100,\"visualFacts\":[string],\"contextConfidence\":0..100,\"comments\":[string]}}.\n\
+         Caption chỉ là phần chữ caption/chữ trong video nhìn thấy; loại username, tên nhạc, nút UI. Nếu caption bị cắt, giữ phần nhìn thấy và giảm confidence. Giữ \"caption\" tối đa 100 ký tự và \"visualFacts\" tối đa 3 mục, mỗi mục dưới 8 từ.\n\
+         \"comments\" phải có ĐÚNG {count} câu tiếng {lang}, mỗi câu tối đa {max_words} từ. Đây là {count} người KHÁC NHAU vừa xem cùng một bài và mỗi người tự phản ứng — nên {count} câu phải khác nhau rõ rệt: khác cách mở đầu, khác chi tiết được nhắc, khác độ dài. KHÔNG được là biến thể chữ nghĩa của cùng một câu.\n\
+         Viết như người vừa xem xong và phản ứng tự nhiên: thường 2–10 từ, thân mật, có thể là một mẩu câu hoặc câu hỏi ngắn; không cần đủ chủ-vị, không cố nhét emoji. Tránh giọng tổng kết, quảng cáo, giáo viên hoặc báo cáo; tuyệt đối không dùng kiểu “nội dung được trình bày”, “mang đến”, “người xem”, “chất lượng”. Nội dung nhìn thấy và caption là ưu tiên cao nhất. Định hướng chỉ chỉnh giọng điệu ({direction}), không được thêm địa điểm, sản phẩm, giá, người hay sự kiện chưa thấy."
+    );
+    // The draft budget that one comment needs, plus room per extra comment. `1200` for one is a
+    // number this file paid for twice; the per-comment slack is deliberately generous because a
+    // truncated array is the failure that loses every comment at once, not just the last.
+    let budget = 1_200 + 90 * count as u32;
+    let body = vision_body(settings, &sheet.jpeg, prompt, 0.9, budget);
+    let (raw, p, c, cost, _) = chat(settings, body).await?;
+    let value =
+        json_object(&raw).ok_or_else(|| anyhow!("malformed_model_output: {}", model_said(&raw)))?;
+    let comments: Vec<String> = value
+        .get("comments")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(|text| text.trim().to_string())
+                .filter(|text| !text.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if comments.len() != count {
+        anyhow::bail!(
+            "draft_batch_incomplete: {} comments for {count} phones: {}",
+            comments.len(),
+            model_said(&raw)
+        );
+    }
+    let caption = value
+        .get("caption")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string);
+    Ok(GroundedDraftBatch {
+        comments,
+        caption,
+        context_confidence: score(value.get("contextConfidence")).unwrap_or(0),
+        prompt_tokens: p,
+        completion_tokens: c,
+        cost_usd: cost,
+    })
+}
+
+/// One answer carrying every comment a post needs.
+#[derive(Debug)]
+struct GroundedDraftBatch {
+    comments: Vec<String>,
+    caption: Option<String>,
+    context_confidence: u8,
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    cost_usd: Option<f64>,
+}
+
+/// The most comments one batched draft will ask for.
+///
+/// Twenty, because that is this fleet. Past that the answer is a long JSON array and the failure
+/// mode is one this file has paid for twice: an answer truncated before its last element, which
+/// here would mean a phone with nothing to say. Above the ceiling the per-comment path runs
+/// instead — correct, merely more expensive, and already measured.
+const VERIFY_BATCH_MAX: usize = 20;
+
 async fn grounded_verify(
     settings: &NurtureSettings,
     sheet: &ContactSheet,
@@ -2719,5 +3034,141 @@ mod tests {",
         let spend = spend_of_failure(&error).expect("a rejection knows what it spent");
         assert_eq!(spend.prompt_tokens, 300, "the draft and its verification");
         assert_eq!(spend.completion_tokens, 30);
+    }
+
+    /// One draft call, one verification each, and the bill counted once.
+    ///
+    /// **The cost assertion is the load-bearing one.** The batch pays for its draft once, and
+    /// the obvious mistake is to copy that figure onto every comment it produced — which would
+    /// report twenty times what was spent and make the optimisation look like a regression in
+    /// the operator's own ledger. So the draft is charged to the first comment only, while each
+    /// verification is charged to the comment it judged.
+    #[tokio::test]
+    async fn a_batched_draft_is_verified_one_at_a_time_and_charged_once() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock gateway bind");
+        let address = listener.local_addr().expect("mock gateway address");
+        let draft = serde_json::json!({
+            "choices": [{"message": {"content": "{\"caption\":\"lịch Đà Lạt\",\"captionConfidence\":95,\"visualFacts\":[\"bảng lịch\"],\"contextConfidence\":95,\"comments\":[\"Có cả bảng chi phí luôn\",\"Ngày đầu lịch hơi dày\",\"Hai triệu ba nghe ổn áp\"]}"}}],
+            "usage": {"prompt_tokens": 2842, "completion_tokens": 120, "cost": 0.0018},
+            "model": "mock-draft"
+        });
+        let pass = serde_json::json!({
+            "choices": [{"message": {"content": "{\"relevance\":96,\"evidenceSupport\":95,\"instructionFit\":92,\"genericity\":15,\"contradiction\":false,\"unsupportedClaim\":false,\"uiTextConfusion\":false}"}}],
+            "usage": {"prompt_tokens": 2725, "completion_tokens": 44, "cost": 0.0007},
+            "model": "mock-verifier"
+        });
+        let server = serve_mock_gateway(listener, vec![draft, pass.clone(), pass.clone(), pass]);
+
+        let settings = NurtureSettings {
+            api_key: "test-key".into(),
+            base_url: format!("http://{address}/v1"),
+            ..NurtureSettings::default()
+        };
+        let frame = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
+        let batched = prepare_grounded_comments_batch(
+            &settings,
+            &[frame],
+            EvidenceKind::CarouselSlides,
+            Some("tự nhiên"),
+            3,
+        )
+        .await;
+        server.await.expect("mock gateway task");
+
+        assert_eq!(batched.accepted_from_batch(), 3, "{:?}", batched.refusals);
+        assert!(batched.refusals.is_empty());
+        let texts: Vec<&str> = batched
+            .results
+            .iter()
+            .map(|result| result.as_ref().expect("a comment").text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "Có cả bảng chi phí luôn",
+                "Ngày đầu lịch hơi dày",
+                "Hai triệu ba nghe ổn áp"
+            ]
+        );
+
+        let costs: Vec<Option<f64>> = batched
+            .results
+            .iter()
+            .map(|result| result.as_ref().expect("a comment").cost_usd)
+            .collect();
+        // The draft plus one verification on the first, one verification on each of the rest.
+        assert_eq!(costs[0], Some(0.0018 + 0.0007));
+        assert_eq!(costs[1], Some(0.0007));
+        assert_eq!(costs[2], Some(0.0007));
+        let total: f64 = costs.iter().flatten().sum();
+        assert!(
+            (total - 0.0039).abs() < 1e-9,
+            "the sum over the target has to be what the gateway charged: {total}"
+        );
+    }
+
+    /// A draft that comes back with the wrong number of comments does not hand out silence.
+    ///
+    /// Three phones asked for, two comments offered. The batch must not fill the gap with an
+    /// empty string or drop a phone from the list: it falls back to the per-comment path, which
+    /// is exactly the path that was working before any of this existed.
+    #[tokio::test]
+    async fn a_short_batch_falls_back_instead_of_leaving_a_phone_silent() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock gateway bind");
+        let address = listener.local_addr().expect("mock gateway address");
+        let short = serde_json::json!({
+            "choices": [{"message": {"content": "{\"caption\":\"x\",\"captionConfidence\":90,\"visualFacts\":[],\"contextConfidence\":90,\"comments\":[\"Có cả bảng chi phí luôn\",\"Ngày đầu lịch hơi dày\"]}"}}],
+            "usage": {"prompt_tokens": 2842, "completion_tokens": 90},
+            "model": "mock-draft"
+        });
+        // Then three per-comment attempts, each a draft and a verification.
+        let single = serde_json::json!({
+            "choices": [{"message": {"content": "{\"caption\":\"x\",\"captionConfidence\":90,\"visualFacts\":[],\"contextConfidence\":95,\"comment\":\"Có cả bảng chi phí luôn\"}"}}],
+            "usage": {"prompt_tokens": 2842, "completion_tokens": 40},
+            "model": "mock-draft"
+        });
+        let pass = serde_json::json!({
+            "choices": [{"message": {"content": "{\"relevance\":96,\"evidenceSupport\":95,\"instructionFit\":92,\"genericity\":15,\"contradiction\":false,\"unsupportedClaim\":false,\"uiTextConfusion\":false}"}}],
+            "usage": {"prompt_tokens": 2725, "completion_tokens": 44},
+            "model": "mock-verifier"
+        });
+        let server = serve_mock_gateway(
+            listener,
+            vec![
+                short,
+                single.clone(),
+                pass.clone(),
+                single.clone(),
+                pass.clone(),
+                single,
+                pass,
+            ],
+        );
+
+        let settings = NurtureSettings {
+            api_key: "test-key".into(),
+            base_url: format!("http://{address}/v1"),
+            ..NurtureSettings::default()
+        };
+        let frame = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
+        let batched = prepare_grounded_comments_batch(
+            &settings,
+            &[frame],
+            EvidenceKind::CarouselSlides,
+            Some("tự nhiên"),
+            3,
+        )
+        .await;
+        server.await.expect("mock gateway task");
+
+        assert_eq!(batched.results.len(), 3, "one result per phone, always");
+        assert_eq!(batched.accepted_from_batch(), 0, "the batch was unusable");
+        for result in &batched.results {
+            assert!(result.is_ok(), "the fallback path still wrote a comment");
+        }
     }
 }

@@ -23,7 +23,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use riviu_core::db::{Database, SecretStore};
-use riviu_core::openai_client::{prepare_comment_for_frames, EvidenceKind};
+use riviu_core::openai_client::{
+    prepare_comment_for_frames, prepare_grounded_comments_batch, EvidenceKind,
+};
 use riviu_signing::CredentialStore;
 
 /// The same seam `AppState::bootstrap` uses, so the key comes out of the same place the app put
@@ -89,6 +91,14 @@ async fn main() -> anyhow::Result<()> {
     let direction = std::env::args()
         .position(|arg| arg == "--direction")
         .and_then(|at| std::env::args().nth(at + 1));
+    // `--batch N` asks for the whole fleet's comments the way a twenty-phone link would, in two
+    // API calls rather than 2N. What it prints is what has to be judged: whether N comments come
+    // back distinct, whether the gate still refuses what it used to refuse, and what the two
+    // calls actually cost against the per-comment path printed above.
+    let batch: Option<usize> = std::env::args()
+        .position(|arg| arg == "--batch")
+        .and_then(|at| std::env::args().nth(at + 1))
+        .and_then(|value| value.parse().ok());
 
     // First, the old evidence, reproduced exactly: slide one on its own, described as moments.
     if !new_only {
@@ -140,5 +150,64 @@ async fn main() -> anyhow::Result<()> {
         ),
         Err(error) => println!("lỗi: {error:#}"),
     }
+    if let Some(count) = batch {
+        println!("\n--- GỘP: {count} câu trong hai lượt gọi ---");
+        let started = std::time::Instant::now();
+        let batched = prepare_grounded_comments_batch(
+            &settings,
+            &frames,
+            EvidenceKind::CarouselSlides,
+            direction.as_deref(),
+            count,
+        )
+        .await;
+        let mut total = 0.0f64;
+        let mut reported = false;
+        let mut texts = Vec::new();
+        for (index, result) in batched.results.iter().enumerate() {
+            match result {
+                Ok(comment) => {
+                    if let Some(usd) = comment.cost_usd {
+                        total += usd;
+                        reported = true;
+                    }
+                    println!(
+                        "  {:>2}. {} {}  [ev={} rel={}]",
+                        index + 1,
+                        if batched.from_batch.get(index) == Some(&true) {
+                            "[gop]"
+                        } else {
+                            "[LUI VE TUNG CAU]"
+                        },
+                        comment.text,
+                        comment.evidence_support,
+                        comment.relevance
+                    );
+                    texts.push(comment.text.clone());
+                }
+                Err(error) => println!("  {:>2}. LỖI: {error:#}", index + 1),
+            }
+        }
+        let unique: std::collections::BTreeSet<&String> = texts.iter().collect();
+        for refusal in &batched.refusals {
+            println!("     cổng từ chối: {refusal}");
+        }
+        println!(
+            "  => {} câu, {} khác nhau, {} từ gộp, {:.1}s, tổng {}",
+            texts.len(),
+            unique.len(),
+            batched.accepted_from_batch(),
+            started.elapsed().as_secs_f64(),
+            if reported {
+                format!(
+                    "${total:.6} (${:.6}/câu)",
+                    total / texts.len().max(1) as f64
+                )
+            } else {
+                "khong bao gia".to_string()
+            }
+        );
+    }
+
     Ok(())
 }
