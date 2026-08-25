@@ -8984,13 +8984,26 @@ bước kiểm chứng `193` trong đó `147`. Tức khoảng **sáu token trong
 chữ model nghĩ thầm rồi vứt**. Cờ `"thinking": {"type":"disabled"}` đã có trong code **không có
 tác dụng** với model này — nó được thêm cho `deepseek-v4-flash-vision-exp` và chỉ đúng ở đó.
 
-Ba arm, mỗi arm 8 lượt trên cùng bài 2 ảnh, tính cả retry:
+Ba arm, mỗi arm 8 lượt trên cùng bài 2 ảnh, tính cả retry, **`direction` để trống**:
 
 | reasoning | call | retry | $/bình luận | bị cổng từ chối |
 |---|---|---|---|---|
 | mặc định | 16 | 0 | 0,001369 | 0/8 |
-| `effort=minimal` | 16 | 0 | **0,001166** | 0/8 |
+| `effort=minimal` | 16 | 0 | 0,001166 | 0/8 |
 | `enabled=false` | 22 | 3 | 0,000920 | 0/8 |
+
+**Ba con số trên đều quá đẹp, và tôi đã báo con số quá đẹp trước khi nhận ra.** Bỏ trống
+`direction` làm mọi prompt bản nháp giống hệt nhau nên 19/20 lượt hit cache — còn campaign thật
+nhét câu trước vào `direction` cho mỗi máy, nên **không lượt nào hit**. Đo lại cho giống thật,
+`direction` chuỗi theo câu trước, 6 lượt mỗi arm:
+
+| reasoning | $/bình luận | khoảng | câu khác nhau |
+|---|---|---|---|
+| mặc định | 0,001724 | 0,001386–0,002289 | 5/5 |
+| `effort=minimal` | **0,001439** | 0,001134–0,002020 | 6/6 |
+
+Tiết kiệm thật là **17%**, không phải 28% như tôi tính lần đầu. Và chuỗi `previous` có tác dụng
+thật: 6/6 câu khác nhau, so với 5/6 khi bỏ trống `direction`.
 
 **Chọn `minimal`.** `false` rẻ hơn trên giấy và đổi bằng **3 retry trong 8**; repo này đã một
 lần trả giá cho những bản nháp về không dùng được, và một lượt thử lại là cơ hội mà máy giữa

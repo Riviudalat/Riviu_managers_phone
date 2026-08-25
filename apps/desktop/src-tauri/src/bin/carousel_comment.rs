@@ -82,6 +82,13 @@ async fn main() -> anyhow::Result<()> {
     // evidence: the old path is a second API call whose numbers would land in the same
     // aggregate and quietly halve whatever average is being computed.
     let new_only = std::env::args().any(|arg| arg == "--new-only");
+    // `--direction` exists because leaving it out flatters the numbers. The campaign builds a
+    // direction per phone that quotes the comment before it, so in a real twenty-phone run every
+    // draft prompt is different and none of them hit the prompt cache. Measuring with no
+    // direction at all made twenty identical prompts and a cache hit on nineteen of them.
+    let direction = std::env::args()
+        .position(|arg| arg == "--direction")
+        .and_then(|at| std::env::args().nth(at + 1));
 
     // First, the old evidence, reproduced exactly: slide one on its own, described as moments.
     if !new_only {
@@ -111,8 +118,14 @@ async fn main() -> anyhow::Result<()> {
     }
 
     println!("\n--- BẰNG CHỨNG MỚI: {} ảnh ---", frames.len());
-    match prepare_comment_for_frames(&settings, &frames, EvidenceKind::CarouselSlides, None, &ocr)
-        .await
+    match prepare_comment_for_frames(
+        &settings,
+        &frames,
+        EvidenceKind::CarouselSlides,
+        direction.as_deref(),
+        &ocr,
+    )
+    .await
     {
         Ok((result, mode)) => println!(
             "[{mode}] {}
