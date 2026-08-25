@@ -18,7 +18,10 @@
   box-shadow: 0 10px 32px rgba(15, 18, 25, 0.16);
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  /* `clip`, not `hidden`: same trap the interaction panel fell into. `hidden` still leaves
+     the card scrollable, so focusing a control the browser cannot see scrolls the whole
+     card — header and all — with no scrollbar to bring it back. See `.interaction-float`. */
+  overflow: clip;
 }
 .nurture-float-title {
   height: 36px;
@@ -1029,4 +1032,76 @@
 .nurture-attempt-text.is-caption {
   font-style: italic;
   color: var(--text-3);
+}
+
+/* Quản lý nhóm — reuses the nurture float shell, wider because the phone chips are a grid. */
+.nurture-float.group-manager {
+  width: min(460px, calc(100vw - 2.5rem));
+  max-height: min(640px, calc(100vh - 5rem));
+}
+.group-new {
+  display: flex;
+  gap: 0.35rem;
+  margin-bottom: 0.5rem;
+}
+.group-new input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.group-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-bottom: 0.25rem;
+}
+.group-head {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+.group-head.is-on {
+  border-color: var(--primary);
+}
+.group-pick {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--line);
+}
+.group-pick-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 0.3rem;
+  margin-top: 0.4rem;
+}
+.group-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  min-width: 0;
+}
+.group-chip.selected {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--text-inverse);
+}
+.group-chip-num {
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+.group-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

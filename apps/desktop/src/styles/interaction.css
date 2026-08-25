@@ -15,13 +15,27 @@
   max-height: min(760px, calc(100vh - 2rem));
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  /* **`clip`, not `hidden` — the difference is whether this box can be scrolled.**
+     `overflow: hidden` clips *and* leaves the box programmatically scrollable, so when
+     focus moved to a control the browser could not see, it scrolled **the card** to reveal
+     it. The actor tiles hide their checkbox off-screen on purpose, so picking a phone
+     focused exactly such a control: measured 24/08/2026 in the running app, deselecting one
+     phone took the card's scrollTop from 0 to 409 and the header from y=123 to y=-286. With
+     no scrollbar to drag it back, the panel was a blank white rectangle for the rest of the
+     session. `clip` makes it a clip container that cannot scroll at all, so the browser
+     scrolls `.interaction-float-body` instead — which is the box that has a scrollbar. */
+  overflow: clip;
   pointer-events: auto;
   background: var(--bg-elevated);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
   box-shadow: 0 18px 44px rgb(15 23 42 / 18%);
 }
+/* `overflow: auto` is doing more than clipping here: a flex item whose overflow is not
+   `visible` loses the automatic minimum size, so this is also what lets the body shrink
+   inside the card's `max-height` instead of pushing past it. Adding `min-height: 0` on top
+   changed nothing measurable — proved by reverting it against `e2e/float-panels.spec.ts` —
+   so it is not here pretending to. */
 .interaction-float-body { overflow: auto; }
 .interaction-title {
   min-height: 42px;
