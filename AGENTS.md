@@ -9221,3 +9221,56 @@ Máy `ce051715cb22c30403` trượt **3/3 lượt campaign thật**, cùng một 
 `minicap produced no decodable frame in 12s`. Ba trên ba không phải flake — máy đó hỏng stream
 cố định, và lần chạy gần nhất nó **đã có text soạn sẵn**, nên lỗi nằm đúng ở tầng stream chứ
 không phải tầng bình luận.
+
+## 9.114 5/5 máy, và cái máy hỏng bốn lượt liền là stream kẹt chứ không phải code (26/08/2026)
+
+Lượt nghiệm thu sau §9.113, 5 máy có mạng, chế độ Riêng lẻ:
+
+```text
+campaign xong sau 106.9s     trạng thái: Succeeded
+  ordinal 0  Succeeded  Lịch này chi tiết thật
+  ordinal 1  Succeeded  Tổng chi phí khoảng bao nhiêu vậy?
+  ordinal 2  Succeeded  Bảng lịch chi tiết thật, mở ra là biết đi đâu trước.
+  ordinal 3  Succeeded  Mình lưu lại ngay
+  ordinal 4  Succeeded  Hồ nhìn yên bình, nhưng lịch ba ngày này khá kín.
+```
+
+**5/5, năm câu khác nhau, 106,9 s** — so với 150 s và 4/5 ở lượt trước. Và câu cuối là bằng chứng
+trực tiếp cho §9.109: nó nhắc **cả hai ảnh** trong một câu — cái hồ ở ảnh 1 và lịch ba ngày ở
+ảnh 2. Trước bản sửa carousel, model không có cách nào biết ảnh 2 tồn tại.
+
+### `ce051715cb22c30403`: loại từng nguyên nhân bằng đo
+
+Máy này trượt **4/4 lượt** với `minicap produced no decodable frame in 12s`. Đã loại:
+
+| giả thuyết | cách loại |
+|---|---|
+| màn hình tắt / khoá | `mWakefulness=Awake`, `Display Power: state=ON` — giống máy chạy được |
+| sai abi / sdk / kích thước | `arm64-v8a`, sdk 28, `1080x2220` — giống hệt |
+| tiến trình minicap cũ còn kẹt | không có tiến trình nào |
+| màn hình đứng yên (minicap chỉ phát khi có thay đổi) | **vừa vuốt liên tục vừa kiểm, vẫn FAIL** |
+| ai đó đang giữ virtual display / cast | `Media Projection: null`, một display, giống hệt |
+
+Phép đo quyết định là **tự kiểm của chính minicap**, không phải log của app:
+
+```text
+LD_LIBRARY_PATH=/data/local/tmp /data/local/tmp/minicap -P 1080x2220@1080x2220/0 -t
+
+máy hỏng: ERROR (jni/minicap/minicap.cpp:461) Did not receive any frames   FAIL
+máy tốt : INFO  Destroying virtual display                                  OK
+```
+
+Cùng lệnh, cùng tham số, hai máy cùng đời — nên lỗi nằm ở **trạng thái máy**, không ở code.
+**Reboot xong tự kiểm ra `OK`**, và lượt campaign ngay sau đó máy đó `Succeeded`.
+
+Một khác biệt còn lại **chưa chứng minh là nguyên nhân**, ghi để người sau đỡ tìm lại: trên máy
+hỏng mọi file trong `/data/local/tmp` thuộc **root** (máy tốt thuộc `shell`) và thiếu
+`minicap.log`. Quyền vẫn đủ để `shell` chạy — binary có chạy và có in banner — nên đây chỉ là
+điểm khác biệt, không phải kết luận.
+
+**Cách chẩn đoán nhanh cho lần sau:** chạy đúng dòng `-t` ở trên trên máy nghi ngờ. `FAIL` nghĩa
+là minicap không chụp được ở trạng thái hiện tại của máy đó và **reboot là việc đầu tiên nên
+thử**; `OK` nghĩa là lỗi nằm ở đường của app chứ không ở minicap.
+
+`stream.rs` **không có đường dự phòng** — chỉ minicap, nên minicap chết là cả assignment chết ở
+tầng stream sau khi đã tốn công mở TikTok.
