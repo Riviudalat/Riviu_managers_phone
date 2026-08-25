@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   deviceModelOsLabel,
   deviceOsLabel,
-  markDeviceFrameLive,
+  deviceTileSubtitle,
   tileStreamStateView,
   type DeviceInfo,
 } from "../types";
@@ -65,25 +65,27 @@ describe("deviceOsLabel", () => {
   });
 });
 
-describe("markDeviceFrameLive", () => {
-  it("marks only the device that emitted a fresh frame as live", () => {
-    const fixture = (udid: string): DeviceInfo => ({
-      udid,
-      name: udid,
-      model: "fixture",
+describe("deviceTileSubtitle", () => {
+  it("drops the model when it only repeats the name a phone reported no name for", () => {
+    // A Redmi with no friendly name: name === model === "23021RAAEG". The tile already
+    // prints that serial in bold above, so the subtitle must not print it again — just
+    // the OS.
+    const anon: Pick<DeviceInfo, "name" | "model" | "platform" | "osVersion"> = {
+      name: "23021RAAEG",
+      model: "23021RAAEG",
+      platform: "android",
+      osVersion: "15",
+    };
+    expect(deviceTileSubtitle(anon)).toBe("Android 15");
+  });
+
+  it("keeps the model when it adds information the name does not", () => {
+    const named: Pick<DeviceInfo, "name" | "model" | "platform" | "osVersion"> = {
+      name: "iPhone 8 (Global)",
+      model: "iPhone10,1",
       platform: "ios",
-      osVersion: "fixture",
-      connection: "mock",
-      status: "ready",
-      wdaReady: true,
-      tileStreamState: "sampling",
-    });
-    const devices = [fixture("a"), fixture("b")];
-
-    const next = markDeviceFrameLive(devices, "b");
-
-    expect(next[0]).toBe(devices[0]);
-    expect(next[0].tileStreamState).toBe("sampling");
-    expect(next[1].tileStreamState).toBe("live");
+      osVersion: "16.7.15",
+    };
+    expect(deviceTileSubtitle(named)).toBe("iPhone10,1 · iOS 16.7.15");
   });
 });

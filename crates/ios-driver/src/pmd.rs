@@ -2413,6 +2413,14 @@ impl UiSession for PmdUiSession {
         self.client.home().await.map_err(anyhow::Error::new)
     }
 
+    async fn set_locked(&self, locked: bool) -> anyhow::Result<()> {
+        if locked {
+            self.client.lock().await.map_err(anyhow::Error::new)
+        } else {
+            self.client.unlock().await.map_err(anyhow::Error::new)
+        }
+    }
+
     async fn find_and_tap(&self, accessibility_id: &str) -> anyhow::Result<()> {
         self.client
             .find_and_tap(accessibility_id)

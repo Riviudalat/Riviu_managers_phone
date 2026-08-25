@@ -16,6 +16,18 @@ edition = "2021"
 license = "MIT"
 authors = ["Riviu"]
 
+# Lint policy, so `cargo clippy` on a dev machine fails on what CI fails on.
+#
+# CI runs `cargo clippy --workspace --all-targets --locked -- -D warnings`; that `-D` lives in
+# the workflow, so locally the same code merely warned and the drift was only discovered on
+# push. Denying here moves it back to the machine that wrote the code.
+#
+# Scoped to clippy on purpose. Putting rustc's own warnings at `deny` would also fail plain
+# `cargo build`, so an unused variable would block a half-finished edit. Those stay warnings
+# locally and are still denied by CI, which is the one gap this does not close.
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -25,7 +37,12 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
-tracing = "0.1"
+# `log` feature, not just the bare crate: every driver diagnostic in this workspace is a
+# `tracing::` macro, and with no subscriber installed those events went **nowhere** --
+# measured, `tauri-dev.log` contained not one line while two phones restarted their video
+# producer in a loop. The feature makes `tracing` emit `log` records when no subscriber is
+# set, which is what `tauri-plugin-log` already collects.
+tracing = { version = "0.1", features = ["log"] }
 parking_lot = "0.12"
 dirs = "6"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }

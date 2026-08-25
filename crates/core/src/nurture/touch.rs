@@ -27,6 +27,19 @@ const SWIPE_ENDPOINT_JITTER: f64 = 18.0;
 /// How long the finger keeps contact after the last move.
 const SWIPE_SETTLE_MS: (u64, u64) = (12, 45);
 
+/// What a planned gesture is meant to *be*, which decides three things about its shape.
+///
+/// Not a style knob: [`TouchPointPlanner::plan_flick`] carries the measurement that says a
+/// pager ignores a drag, and a caller picking the wrong one here gets a gesture the app
+/// quietly declines to act on rather than an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Curve {
+    /// A finger dragging something: bowed, decelerating, resting a moment before it lifts.
+    Drag,
+    /// A finger throwing something: straight, still speeding up, gone the instant it stops.
+    Flick,
+}
+
 // Native XCTest ultimately synthesizes integer-ish logical points. Keeping the
 // planner on that grid prevents two distinct floats from landing on one device
 // coordinate after transport rounding.
@@ -68,7 +81,7 @@ const HAND_BIAS: f64 = 7.0;
 /// out of fresh coordinates, which for the like heart's (10, 12) radius is ±60 logical
 /// points — a full rail icon pitch, so it tapped comment and opened the drawer.
 #[derive(Debug)]
-pub(crate) struct TouchPointPlanner {
+pub struct TouchPointPlanner {
     width: f64,
     height: f64,
     rng: StdRng,
@@ -77,7 +90,7 @@ pub(crate) struct TouchPointPlanner {
 }
 
 impl TouchPointPlanner {
-    pub(crate) fn new(screen_size: (f64, f64)) -> Self {
+    pub fn new(screen_size: (f64, f64)) -> Self {
         let mut rng = StdRng::from_entropy();
         let bias = (
             rng.gen_range(-HAND_BIAS..=HAND_BIAS),
@@ -99,7 +112,7 @@ impl TouchPointPlanner {
     /// six: a large lean pins the draws against one edge of a small control and the sample
     /// stops looking like the normal it is.
     #[cfg(test)]
-    pub(crate) fn with_bias(screen_size: (f64, f64), bias: (f64, f64)) -> Self {
+    pub fn with_bias(screen_size: (f64, f64), bias: (f64, f64)) -> Self {
         let mut planner = Self::new(screen_size);
         planner.bias = bias;
         planner
@@ -167,7 +180,55 @@ impl TouchPointPlanner {
     /// `total_ms` stays the caller's number: this changes the shape of the gesture, not how
     /// long it takes, so nothing that tuned a duration has to be re-tuned. The endpoints are
     /// clamped inside the screen, so jitter can never push a gesture off the display.
-    pub(crate) fn plan_swipe(&mut self, from: TapPoint, to: TapPoint, total_ms: u64) -> SwipePath {
+    pub fn plan_swipe(&mut self, from: TapPoint, to: TapPoint, total_ms: u64) -> SwipePath {
+        self.plan(from, to, total_ms, Curve::Drag)
+    }
+
+    /// [`Self::plan_swipe`]'s gesture, shaped so the app reads it as a **fling**.
+    ///
+    /// Three of `plan_swipe`'s properties are right for a drag and were each measured to stop
+    /// a pager turning. A flick drops all three and keeps everything else:
+    ///
+    /// * The **pause before the lift**. [`SwipePath::settle_ms`] exists because a real flick
+    ///   keeps contact for a few milliseconds after the motion stops. Android reads the
+    ///   release velocity out of the recent motion history, so a pause with no movement in it
+    ///   describes a finger that had already stopped.
+    /// * The **bow**, which is perpendicular to travel — so on a *horizontal* gesture it is
+    ///   vertical, into the axis the feed's own pager is watching.
+    /// * The **deceleration**. [`Self::ease`] is a smoothstep, whose slope at the end is
+    ///   zero: the last leg of a 600 px path crawls about ten pixels. That is what a finger
+    ///   coming to rest looks like, and it is the opposite of a flick, where the hand is
+    ///   still speeding up as it leaves the glass.
+    ///
+    /// **Measured on the feed, TikTok 38.3.2, one component at a time on the same card**, on
+    /// ce021822e3f548f40b / ce03171392f9390c01 / ce031713dd735a1103 / ce0417145199e0490c /
+    /// ce0517151215a00304, 18/08/2026. Turns that advanced the page counter, counting only
+    /// turns whose previous reading was known and whose post had images left:
+    ///
+    /// | gesture | turns that paged |
+    /// |---|---|
+    /// | the full planned path | 13 of 40 |
+    /// | the bow removed | 6 of 15 |
+    /// | the pause removed | 7 of 12 |
+    /// | bow and pause removed, still decelerating | 18 of 27 |
+    /// | **all three removed — this** | **19 of 19** |
+    /// | a plain straight swipe, for reference | 31 of 32 |
+    ///
+    /// Removing any one of them leaves a gesture that works between a third and two thirds of
+    /// the time, which the loop reads as "no further image" — and that is exactly how a photo
+    /// post used to end a session at two images. All three had to go, and the order they were
+    /// found in is the order they are listed: each looked like the answer on its own.
+    ///
+    /// What survives is what the pager does not object to: the endpoints still wander
+    /// ([`SWIPE_ENDPOINT_JITTER`]), the path is still cut into [`SWIPE_STEPS`] legs rather
+    /// than one, and the leg spacing still varies. So this is not the fixed-pixel straight
+    /// line the planner exists to replace.
+    pub fn plan_flick(&mut self, from: TapPoint, to: TapPoint, total_ms: u64) -> SwipePath {
+        self.plan(from, to, total_ms, Curve::Flick)
+    }
+
+    /// The one path builder. [`Curve`] is the only thing the two gestures disagree about.
+    fn plan(&mut self, from: TapPoint, to: TapPoint, total_ms: u64, curve: Curve) -> SwipePath {
         let start = self.jitter_endpoint(&from);
         let end = self.jitter_endpoint(&to);
 
@@ -176,15 +237,26 @@ impl TouchPointPlanner {
         let length = (dx * dx + dy * dy).sqrt();
         // Perpendicular to the direction of travel, so the bow is across the swipe rather
         // than along it. Sign per gesture: a hand does not curve the same way twice.
-        let bow = length * self.rng.gen_range(SWIPE_BOW.0..=SWIPE_BOW.1);
-        let bow = if self.rng.gen_bool(0.5) { bow } else { -bow };
+        let bow = match curve {
+            Curve::Drag => {
+                let bow = length * self.rng.gen_range(SWIPE_BOW.0..=SWIPE_BOW.1);
+                if self.rng.gen_bool(0.5) {
+                    bow
+                } else {
+                    -bow
+                }
+            }
+            Curve::Flick => 0.0,
+        };
         let (nx, ny) = if length > f64::EPSILON {
             (-dy / length, dx / length)
         } else {
             (0.0, 0.0)
         };
         // Quadratic Bézier control point: the midpoint pushed sideways by the bow. Placed
-        // slightly off-centre so the arc is not symmetric, which a wrist is not either.
+        // slightly off-centre so the arc is not symmetric, which a wrist is not either. With
+        // no bow the control sits on the line, so the curve degenerates to it — and the lean
+        // still varies where along it the legs fall.
         let lean = self.rng.gen_range(0.40..=0.60);
         let control = TapPoint {
             x: start.x + dx * lean + nx * bow,
@@ -197,7 +269,10 @@ impl TouchPointPlanner {
         let mut previous_t = 0.0;
         for step in 1..=SWIPE_STEPS {
             let raw = step as f64 / SWIPE_STEPS as f64;
-            let t = Self::ease(raw);
+            let t = match curve {
+                Curve::Drag => Self::ease(raw),
+                Curve::Flick => Self::ease_in(raw),
+            };
             let point = Self::bezier(&start, &control, &end, t);
             // The time for this leg is the *eased* time it represents, so a leg that covers
             // more distance gets proportionally less of the clock — which is what "moving
@@ -220,18 +295,32 @@ impl TouchPointPlanner {
         SwipePath {
             start: self.clamp(start),
             steps,
-            settle_ms: self.rng.gen_range(SWIPE_SETTLE_MS.0..=SWIPE_SETTLE_MS.1),
+            settle_ms: match curve {
+                Curve::Drag => self.rng.gen_range(SWIPE_SETTLE_MS.0..=SWIPE_SETTLE_MS.1),
+                Curve::Flick => 0,
+            },
         }
     }
 
-    /// Ease-in-out, so the finger builds speed, runs, and slows before it lifts.
+    /// A drag's profile: the finger builds speed, runs, and slows before it lifts.
     ///
     /// `raw` is the fraction of the way through the steps; the return is the fraction of the
     /// way along the path. The two differ, and that difference *is* the velocity profile.
     fn ease(raw: f64) -> f64 {
-        // Smoothstep. Chosen over a cubic because a flick's deceleration is gentle, not a
-        // stop — the finger is still moving when it leaves the glass.
+        // Smoothstep, whose slope at both ends is zero. Right for a drag, and the reason a
+        // drag cannot double as a flick: see [`Self::ease_in`].
         raw * raw * (3.0 - 2.0 * raw)
+    }
+
+    /// A flick's profile: still accelerating when the finger leaves the glass.
+    ///
+    /// [`Self::ease`]'s slope at the end is zero, which on a 600 px path leaves the last leg
+    /// covering about ten pixels — a finger coming to rest. Android reads the release
+    /// velocity out of the recent motion history, so a path that ends that way is a drag
+    /// however fast its middle was. Quadratic rather than anything steeper: the gesture still
+    /// has to start from a standstill.
+    fn ease_in(raw: f64) -> f64 {
+        raw * raw
     }
 
     fn bezier(start: &TapPoint, control: &TapPoint, end: &TapPoint, t: f64) -> TapPoint {
@@ -602,5 +691,108 @@ mod tests {
             assert!((0.5..=374.5).contains(&point.x));
             assert!((0.5..=666.5).contains(&point.y));
         }
+    }
+
+    #[test]
+    fn a_flick_leaves_the_pager_nothing_to_snap_back_to() {
+        // Both properties go, and they go together: removing either one on its own was
+        // measured to leave a page turn that lands about a third of the time, which the
+        // nurture loop reads as "no further image". See `plan_flick` for the numbers.
+        let mut planner = TouchPointPlanner::new((1080.0, 2220.0));
+        let from = TapPoint { x: 842.0, y: 888.0 };
+        let to = TapPoint { x: 237.0, y: 888.0 };
+        for _ in 0..40 {
+            let flick = planner.plan_flick(from.clone(), to.clone(), 320);
+            assert_eq!(
+                flick.settle_ms, 0,
+                "a pause with no movement in it describes a finger that had already stopped"
+            );
+            let end = flick.end();
+            let (dx, dy) = (end.x - flick.start.x, end.y - flick.start.y);
+            let span = dx * dx + dy * dy;
+            for step in &flick.steps {
+                let along = (((step.point.x - flick.start.x) * dx
+                    + (step.point.y - flick.start.y) * dy)
+                    / span)
+                    .clamp(0.0, 1.0);
+                let (lx, ly) = (flick.start.x + dx * along, flick.start.y + dy * along);
+                let off = ((step.point.x - lx).powi(2) + (step.point.y - ly).powi(2)).sqrt();
+                assert!(
+                    off < 0.5,
+                    "a horizontal flick must not bow into the vertical axis the feed's own \
+                     pager is watching, but this step sits {off:.1}px off the line"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_flick_keeps_everything_the_pager_does_not_object_to() {
+        // `plan_swipe` minus two measured obstacles, not a return to the fixed-pixel
+        // straight line the planner exists to replace.
+        let mut planner = TouchPointPlanner::new((1080.0, 2220.0));
+        let from = TapPoint { x: 842.0, y: 888.0 };
+        let to = TapPoint { x: 237.0, y: 888.0 };
+        let first = planner.plan_flick(from.clone(), to.clone(), 320);
+        let second = planner.plan_flick(from, to, 320);
+        assert!(
+            (first.start.x - second.start.x).abs() > f64::EPSILON
+                || (first.start.y - second.start.y).abs() > f64::EPSILON,
+            "two flicks aimed at the same target should not start on the same pixel"
+        );
+        let durations: Vec<u64> = first.steps.iter().map(|step| step.duration_ms).collect();
+        let shortest = *durations.iter().min().expect("steps");
+        let longest = *durations.iter().max().expect("steps");
+        assert!(
+            longest >= shortest * 2,
+            "the velocity profile survives being straightened: {durations:?}"
+        );
+        assert_eq!(
+            durations.iter().sum::<u64>(),
+            320,
+            "the caller's duration is still the caller's"
+        );
+    }
+
+    #[test]
+    fn a_flick_is_still_speeding_up_when_the_finger_leaves() {
+        // The property the pager actually reads. `plan_swipe`'s smoothstep has zero slope at
+        // the end, so its last leg crawls; a flick's last leg must be its longest, or the
+        // release velocity describes a finger that had already stopped.
+        let mut planner = TouchPointPlanner::new((1080.0, 2220.0));
+        let from = TapPoint { x: 842.0, y: 888.0 };
+        let to = TapPoint { x: 237.0, y: 888.0 };
+        for _ in 0..40 {
+            let flick = planner.plan_flick(from.clone(), to.clone(), 320);
+            let hops: Vec<f64> = std::iter::once(&flick.start)
+                .chain(flick.steps.iter().map(|step| &step.point))
+                .collect::<Vec<_>>()
+                .windows(2)
+                .map(|pair| {
+                    ((pair[1].x - pair[0].x).powi(2) + (pair[1].y - pair[0].y).powi(2)).sqrt()
+                })
+                .collect();
+            let last = *hops.last().expect("legs");
+            let longest = hops.iter().cloned().fold(0.0_f64, f64::max);
+            assert!(
+                (last - longest).abs() < f64::EPSILON,
+                "the last leg should be the longest, got {last:.1}px against {longest:.1}px"
+            );
+        }
+        // And the drag it is derived from must still decelerate, or the two are the same
+        // gesture and the measurement that separated them has been undone.
+        let drag = planner.plan_swipe(from, to, 320);
+        let hops: Vec<f64> = std::iter::once(&drag.start)
+            .chain(drag.steps.iter().map(|step| &step.point))
+            .collect::<Vec<_>>()
+            .windows(2)
+            .map(|pair| ((pair[1].x - pair[0].x).powi(2) + (pair[1].y - pair[0].y).powi(2)).sqrt())
+            .collect();
+        let last = *hops.last().expect("legs");
+        let longest = hops.iter().cloned().fold(0.0_f64, f64::max);
+        assert!(
+            last < longest / 2.0,
+            "a drag still eases to a stop: last {last:.1}px against longest {longest:.1}px"
+        );
     }
 }

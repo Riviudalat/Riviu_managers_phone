@@ -13,6 +13,10 @@ interface Props {
   nurtureOpen: boolean;
   onInteraction: () => void;
   interactionOpen: boolean;
+  onGroupTools: () => void;
+  onGroups: () => void;
+  groupsOpen: boolean;
+  groupToolsOpen: boolean;
   syncOn: boolean;
 }
 
@@ -27,6 +31,10 @@ export function ProfileToolbar({
   nurtureOpen,
   onInteraction,
   interactionOpen,
+  onGroupTools,
+  onGroups,
+  groupsOpen,
+  groupToolsOpen,
   syncOn,
 }: Props) {
   const startable = selected.filter(
@@ -108,8 +116,24 @@ export function ProfileToolbar({
         <IconChat size={15} />
         Tương tác
       </button>
+      <button
+        type="button"
+        className={`tb-btn ${groupsOpen ? "active" : ""}`}
+        onClick={onGroups}
+        title="Chia fleet thành nhóm — mỗi máy thuộc đúng một nhóm"
+      >
+        Nhóm
+      </button>
+      <button
+        type="button"
+        className={`tb-btn ${groupToolsOpen ? "active" : ""}`}
+        onClick={onGroupTools}
+        title="Công cụ nhóm: phân phối văn bản/tệp…"
+      >
+        Công cụ
+      </button>
       <div className="grow" />
-      <button type="button" className="tb-btn refresh" onClick={() => void onRefresh()} title="Refresh">
+      <button type="button" className="tb-btn refresh" onClick={() => void onRefresh()} title="Quét lại thiết bị">
         <IconRefresh size={15} />
       </button>
     </div>

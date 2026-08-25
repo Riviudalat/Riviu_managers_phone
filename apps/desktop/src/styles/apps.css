@@ -1,0 +1,240 @@
+/* Installed-apps panel inside the control overlay's right-hand menu.
+   Bounded height with its own scroll: a phone reports hundreds of packages and the
+   panel must not push the navbar off the bottom of the overlay. */
+.installed-apps {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  /* `flex: 0 0 auto` and a px cap, not a percentage. As a shrinkable item next to a
+     `flex: 1` list this collapsed to zero height and rendered nothing at all, and a
+     percentage max-height needs a definite parent height it does not reliably have. */
+  flex: 0 0 auto;
+  max-height: 340px;
+  padding: 0.55rem 0.9rem 0.7rem;
+  border-top: 1px solid #e2e8f0;
+  overflow: hidden;
+}
+.installed-apps-controls {
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.installed-apps-controls input[type="text"],
+.installed-apps-controls input:not([type]) {
+  flex: 1;
+  min-width: 0;
+  padding: 0.3rem 0.45rem;
+  font-size: var(--text-sm);
+}
+.installed-apps-controls label {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: var(--text-sm);
+  color: #4a5568;
+  white-space: nowrap;
+}
+.installed-apps .hint {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+/* The App List section of the overlay panel.
+   `max-height: none` and `overflow: visible` are the load-bearing pair, and their absence was
+   a reported bug: the base `.installed-apps` rule caps itself at 340 px and **hides** the
+   overflow, which it must for the old toggle-panel arrangement — so inside the panel's single
+   scroll region the app rows were simply cut off at 340 px with no way to reach the rest.
+   Nothing scrolls in here: the column above does the scrolling, and a scrollbar inside a
+   scrollbar is the seam that arrangement exists to remove.
+   `gap: 0` because the base rule's 0.4rem between header, filter and footnote is what read as
+   "too much white space" in a 220 px column. */
+.installed-apps.is-launchable {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  gap: 0;
+  max-height: none;
+  overflow: visible;
+  border-top: 1px solid #dbe3ee;
+  padding: 0.25rem 0 0;
+}
+.installed-apps.is-launchable .installed-apps-list {
+  overflow: visible;
+  max-height: none;
+}
+.installed-apps-head {
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.3rem;
+  padding: 0 0.4rem 0 0.9rem;
+  flex: 0 0 auto;
+}
+.installed-apps-title {
+  color: #94a3b8;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.installed-apps.is-launchable .installed-apps-controls {
+  flex: 0 0 auto;
+  gap: 0.3rem;
+  padding: 0.1rem 0.6rem 0.1rem;
+  font-size: var(--text-xs);
+}
+/* The filter and the system toggle on one line each, tight: in a 220 px column the wrapped
+   arrangement left two half-empty rows above the apps. */
+.installed-apps.is-launchable .installed-apps-controls input[type="text"],
+.installed-apps.is-launchable .installed-apps-controls input:not([type]) {
+  padding: 0.22rem 0.4rem;
+}
+.installed-apps.is-launchable .installed-apps-controls label {
+  font-size: var(--text-xs);
+}
+.installed-apps.is-launchable .installed-apps-controls input[type="text"],
+.installed-apps.is-launchable .installed-apps-controls input:not([type]) {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.installed-apps.is-launchable .hint {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0 0.9rem 0.15rem;
+  font-size: var(--text-xs);
+  line-height: 1.3;
+}
+/* A whole row is the click target, so the pointer never has to find the icon or the text. */
+.installed-apps-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  padding: 0.22rem 0.9rem;
+  border: none;
+  border-radius: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+.installed-apps-row:hover:not(:disabled) {
+  background: var(--primary-50);
+  color: var(--link);
+}
+.installed-apps-row:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+.installed-apps.is-launchable .installed-apps-list li {
+  padding: 0;
+  border-bottom: none;
+}
+.installed-apps-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+  min-height: 0;
+}
+.installed-apps-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  padding: 0.22rem 0;
+  border-bottom: 1px solid #f1f5f9;
+}
+.installed-apps-list code {
+  font-size: var(--text-sm);
+  word-break: break-all;
+}
+/* The app's own icon, or a neutral square where the phone gave none. Same footprint either
+   way, so a list of named apps and a list of unnamed ones do not read as two different
+   layouts. */
+.installed-apps-icon {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+}
+.installed-apps-icon.is-blank {
+  background: #e2e8f0;
+}
+.installed-apps-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+}
+
+/* Scrim behind the tile caption.
+   text-shadow alone was not enough: over a bright stream — a white TikTok profile, a
+   pale lock screen — white text with a soft shadow disappears, and the tile stops
+   saying which phone it is at exactly the moment the phone is working. A gradient
+   costs nothing on a dark screen and rescues the bright ones. */
+.dev-phone-info::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    to bottom,
+    rgb(0 0 0 / 62%) 0%,
+    rgb(0 0 0 / 38%) 55%,
+    rgb(0 0 0 / 0%) 100%
+  );
+  pointer-events: none;
+}
+.dev-phone-info > * {
+  position: relative;
+}
+
+/* Tile-size slider in the device toolbar. */
+
+/* Group tabs above the device grid.
+   Always rendered, even with no groups: a strip that appears and disappears as groups
+   are created moves the grid up and down under the cursor. */
+.group-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px;
+  overflow-x: auto;
+}
+.group-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.42rem 0.7rem;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  color: #64748b;
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.group-tabs button:hover {
+  color: #1f2937;
+}
+.group-tabs button.active {
+  color: #ea580c;
+  border-bottom-color: #f97316;
+  font-weight: 600;
+}
+.group-tabs-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+.group-tabs-count {
+  padding: 0 0.32rem;
+  border-radius: 8px;
+  background: #eef2f7;
+  color: #64748b;
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+.group-tabs button.active .group-tabs-count {
+  background: #ffedd5;
+  color: #c2410c;
+}

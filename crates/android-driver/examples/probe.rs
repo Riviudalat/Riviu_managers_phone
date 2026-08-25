@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use riviu_android_driver::{AndroidDriver, AndroidDriverConfig, Locator};
 use riviu_core::driver::{DeviceDriver, UiSession};
+use riviu_core::nurture::touch::TouchPointPlanner;
 use riviu_core::tiktok_labels::{self, LabelMatch, TikTokControl, TikTokControls};
 
 /// A catalogued label becomes the driver's own locator, keeping exact vs substring
@@ -144,13 +145,17 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     };
     println!("  using {}", labels.provenance());
-    if labels.resource_version().is_none() {
-        // Not fatal, and worth stating precisely: the translated labels still work, so
-        // liking and reading are fine; only the resource-id controls are absent.
+    // Keyed on whether the Send button actually resolved, not on whether a resource set
+    // matched. Those are different questions, and confusing them is what made the session
+    // log warn at the eleven healthy phones on this farm while reassuring the three that
+    // needed the id (see `TikTokControls::provenance`). `trill` 38.3.2 has no resource set
+    // and needs none — it renders `Post comment` as text.
+    if labels
+        .label(riviu_core::tiktok_labels::TikTokControl::CommentSend)
+        .is_none()
+    {
         println!(
-            "  ! no resource ids measured for app version {app_version:?} — controls whose \
-             label is an `@2131…` reference (the drawer Send button) will refuse. Run \
-             --measure-comment and add a TIKTOK_RESOURCE_SETS entry."
+            "  ! the drawer Send button cannot be named on app version {app_version:?}: no              `@2131...` resource id measured for it, and this build does not render it as              text. Liking and reading still work; commenting will refuse. Run              --measure-comment and add a TIKTOK_RESOURCE_SETS entry."
         );
     }
 
@@ -331,6 +336,45 @@ async fn main() -> anyhow::Result<()> {
         println!("\n(skipping the comment-drawer measurement; pass --measure-comment — it opens and closes the drawer, sends nothing)");
     }
 
+    // The share sheet's `Copy link`, read back off the clipboard. The only way to learn a
+    // post's URL from the device — the hierarchy never states an id — and a URL the fleet has
+    // never opened is what separates "views are not counted" from "these accounts were
+    // already counted".
+    if args.iter().any(|arg| arg == "--copy-link") {
+        println!(
+            "
+== copying this post's link =="
+        );
+        match copy_post_link(&session, ui, labels).await {
+            Ok(link) => println!("  link = {link}"),
+            Err(error) => println!("  FAILED: {error:#}"),
+        }
+    }
+
+    // Whether an `@handle` can be turned into a real mention rather than plain text.
+    // Types `@<prefix>` into the drawer and reports whatever list TikTok puts up; sends
+    // nothing and taps nothing but the comment opener.
+    if let Some(index) = args.iter().position(|arg| arg == "--measure-mention") {
+        let prefix = args
+            .get(index + 1)
+            .filter(|arg| !arg.starts_with("--"))
+            .cloned()
+            .unwrap_or_else(|| "ri".to_string());
+        println!(
+            "
+== mention suggestions for @{prefix} =="
+        );
+        match measure_mention_suggestions(&session, ui, labels, &prefix).await {
+            Ok(()) => {}
+            Err(error) => println!("  FAILED: {error:#}"),
+        }
+    } else {
+        println!(
+            "
+(skipping the mention measurement; pass --measure-mention <prefix>)"
+        );
+    }
+
     // The seam the Interaction reply path needs: many matches for one label, and a
     // geometric choice among them. Opens the drawer, reads the rows, and runs the
     // real `locate_parent_in_elements` against a body it read off this phone.
@@ -415,7 +459,8 @@ async fn main() -> anyhow::Result<()> {
     } else {
         println!(
             "\n(skipping the feed-carousel measurement; pass --measure-feed-carousel <n> — \
-             swipes the feed n times, reads only)"
+             swipes the feed n times, and on every photo card compares three sideways \
+             gestures: plan_swipe, plan_flick, and a plain straight swipe. Posts nothing.)"
         );
     }
 
@@ -821,6 +866,195 @@ async fn measure_comment_drawer(
     Ok(())
 }
 
+/// Tap Share, then `Copy link`, then read the clipboard.
+///
+/// Taps only the share control and the copy row; posts nothing and sends nothing.
+async fn copy_post_link(
+    session: &riviu_android_driver::AndroidUiSession,
+    ui: &dyn UiSession,
+    labels: TikTokControls,
+) -> anyhow::Result<String> {
+    let Some(share) = labels.label(TikTokControl::Share) else {
+        anyhow::bail!("no measured Share control on this build");
+    };
+    let element = ui
+        .locate(share.to_query())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("the share control is not on screen"))?;
+    ui.tap(element.centre()).await?;
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    let sheet = report_nodes("share-sheet", &session.agent().source().await?);
+    // `Copy link` carries its label as text on this build; matched case-insensitively so a
+    // translated sheet still has a chance rather than failing on capitalisation.
+    let copy = sheet
+        .iter()
+        .find(|node| {
+            let hay = format!("{} {}", node.text, node.desc).to_lowercase();
+            hay.contains("copy link") || hay.contains("sao chép liên kết")
+        })
+        .ok_or_else(|| anyhow::anyhow!("no `Copy link` row in the share sheet"))?;
+    let (x1, y1, x2, y2) =
+        parse_bounds(&copy.bounds).ok_or_else(|| anyhow::anyhow!("copy row has no bounds"))?;
+    session
+        .agent()
+        .tap((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+        .await?;
+    tokio::time::sleep(Duration::from_millis(2_000)).await;
+    let (_kind, bytes) = ui.get_clipboard(4_096).await?;
+    // **Put the sheet away.** Tapping `Copy link` leaves the share sheet up on this build, and
+    // the probe's other measurements run in the same process on the same screen — so
+    // `--copy-link --measure-mention` measured the share sheet's nodes and called them the
+    // comment drawer's. Back, then settle, so the phone is where the next measurement expects.
+    ui.back().await.ok();
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    Ok(String::from_utf8_lossy(&bytes).trim().to_string())
+}
+
+/// Can an `@handle` be made into a real mention, or only into text that looks like one?
+///
+/// The interaction feature prepends `@name` as plain characters, and TikTok does not linkify
+/// that: the comment renders the literal string and the account is never notified. A real
+/// mention is created by typing `@` and **choosing from the suggestion list** the app puts up,
+/// which inserts a token. Whether that list is reachable through the accessibility tree is the
+/// entire question, and it has to be measured rather than assumed.
+///
+/// Sends nothing: it types into the drawer, dumps what appeared, clears the field and backs
+/// out.
+async fn measure_mention_suggestions(
+    session: &riviu_android_driver::AndroidUiSession,
+    ui: &dyn UiSession,
+    labels: TikTokControls,
+    prefix: &str,
+) -> anyhow::Result<()> {
+    let Some(comments) = labels.label(TikTokControl::Comments) else {
+        anyhow::bail!("no measured comment label on this build");
+    };
+    let element = ui
+        .locate(comments.to_query())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("the comment control is not on screen"))?;
+    println!("  opening the drawer from {:?}", element.description);
+    ui.tap(element.centre()).await?;
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+
+    report_nodes("mention-opened", &session.agent().source().await?);
+
+    let input = session
+        .agent()
+        .find(&Locator::ClassName("android.widget.EditText".into()))
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no EditText in the opened drawer"))?;
+    let rect = session.agent().rect(&input).await?;
+    let (x, y) = rect.centre();
+    println!("  input row at {x:.0},{y:.0} — tapping to focus");
+    session.agent().tap(x, y).await?;
+    tokio::time::sleep(Duration::from_millis(1_800)).await;
+
+    // Body first, mention second. `set_text` is the only path that carries Vietnamese, and it
+    // replaces the whole field — so anything it writes has to be written *before* a token
+    // exists, not after. A mention at the end still notifies the account.
+    let body_first = "đi Đà Lạt thật đã";
+    println!("  writing the body first: {body_first:?}");
+    if let Some(edit) = session
+        .agent()
+        .find(&Locator::ClassName("android.widget.EditText".into()).focused())
+        .await?
+    {
+        session.agent().set_text(&edit, body_first).await.ok();
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+    }
+
+    report_nodes("mention-body", &session.agent().source().await?);
+
+    // No icon tap at all. The `@` itself goes in as a **real key event**, which is the thing
+    // the picker listens for — `set_text` writes the same character through accessibility and
+    // TikTok never notices it. That also sidesteps the unlabelled icon strip, which moves
+    // between three positions depending on the keyboard and whether the field has text.
+    println!("  sending \"@{prefix}\" as real key events");
+    // **Through the production path.** This used to be the one bare `Command::new("adb")` in
+    // the tree, and it cost three things: it bypassed `RIVIU_ADB_PATH` (the app's own adb
+    // precedence), so on a machine where adb is not on `PATH` it reported the *measurement* as
+    // negative rather than reporting that there was no adb; it bypassed the character whitelist
+    // `type_keys` exists to enforce; and it measured a re-implementation, so a pass here proved
+    // nothing about what the campaign runner does.
+    match session.type_keys(&format!("@{prefix}")).await {
+        Ok(()) => println!("    type_keys -> ok"),
+        Err(error) => println!("    type_keys -> không gửi được: {error:#}"),
+    }
+    tokio::time::sleep(Duration::from_millis(3_000)).await;
+    let filtered = report_nodes("mention-keyed", &session.agent().source().await?);
+
+    // Rows that look like a handle, inside the picker panel and below the nav tabs. The nav
+    // row (`Explore`, `Friends`, …) is ASCII too, which is how a looser filter tapped
+    // `Explore` and measured nothing.
+    let candidates: Vec<&Node> = filtered
+        .iter()
+        .filter(|node| node.class.contains("TextView") && !node.text.is_empty())
+        .filter(|node| {
+            parse_bounds(&node.bounds)
+                .is_some_and(|(x1, y1, _, _)| (250.0..900.0).contains(&y1) && x1 < 500.0)
+        })
+        .collect();
+    println!("  rows in the picker after filtering:");
+    for node in &candidates {
+        println!("    text={:?} {}", node.text, node.bounds);
+    }
+    let handle_row = candidates.iter().find(|node| {
+        node.text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+            && node.text.to_lowercase().contains(&prefix.to_lowercase())
+    });
+    let Some(row) = handle_row else {
+        println!("  ! no row whose handle contains {prefix:?} — the filter did not narrow to it");
+        return back_out(session, ui, labels).await;
+    };
+    let Some((x1, y1, x2, y2)) = parse_bounds(&row.bounds) else {
+        return back_out(session, ui, labels).await;
+    };
+    println!("  tapping the suggestion {:?} at {}", row.text, row.bounds);
+    session
+        .agent()
+        .tap((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+        .await?;
+    tokio::time::sleep(Duration::from_millis(2_000)).await;
+    if let Some(edit) = session
+        .agent()
+        .find(&Locator::ClassName("android.widget.EditText".into()))
+        .await?
+    {
+        println!(
+            "  field after picking: {:?}  <-- a real mention if this is the handle, not just @",
+            session.agent().text(&edit).await.unwrap_or_default()
+        );
+
+        session.agent().clear(&edit).await.ok();
+    }
+
+    back_out(session, ui, labels).await
+}
+
+/// Leave the drawer without sending anything.
+async fn back_out(
+    session: &riviu_android_driver::AndroidUiSession,
+    ui: &dyn UiSession,
+    labels: TikTokControls,
+) -> anyhow::Result<()> {
+    const KEYCODE_BACK: i64 = 4;
+    for _ in 0..4 {
+        session.agent().press_key(KEYCODE_BACK).await?;
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        if let Some(feed) = labels.label(TikTokControl::FeedTab) {
+            if ui.locate(feed.to_query()).await?.is_some() {
+                println!("  backed out — feed tab visible again");
+                return Ok(());
+            }
+        }
+    }
+    println!("  ! still not back on the feed after four Backs — check the phone");
+    Ok(())
+}
+
 /// Read the comment rows through `locate_all`, then resolve one by geometry.
 ///
 /// This is the end-to-end check for the Interaction reply path: `locate_all` must
@@ -1158,11 +1392,16 @@ async fn gate_standalone(
             started.elapsed().as_millis()
         ),
         Ok(TargetArrival::Structural) => println!(
-            "  arrival: Structural in {} ms — the post changed but the nickname does not              reveal the handle",
+            "  arrival: Structural in {} ms — the post changed but the nickname does not \
+             reveal the handle",
             started.elapsed().as_millis()
         ),
         Err(refusal) => {
-            println!("  arrival REFUSED: {} — {}", refusal.code(), refusal.message());
+            println!(
+                "  arrival REFUSED: {} — {}",
+                refusal.code(),
+                refusal.message()
+            );
             println!("  nothing was typed. Gate H4 did not run.");
             return Ok(());
         }
@@ -1170,7 +1409,7 @@ async fn gate_standalone(
 
     println!("  sending {text:?} …");
     let sent = Instant::now();
-    let outcome = send_root_by_hierarchy(ui, labels, screen, text, &stop, String::new).await?;
+    let outcome = send_root_by_hierarchy(ui, labels, screen, text, &[], &stop, String::new).await?;
     println!(
         "  verdict = {:?} ({}) in {} ms",
         outcome.verdict,
@@ -1183,7 +1422,8 @@ async fn gate_standalone(
             identity.author_label, identity.text, identity.locator_version
         ),
         None => println!(
-            "  ! the posted comment could not be read back unambiguously — a Threaded              chain would stop here rather than reply to a row nobody confirmed"
+            "  ! the posted comment could not be read back unambiguously — a Threaded \
+             chain would stop here rather than reply to a row nobody confirmed"
         ),
     }
     if outcome.verdict.is_sent() && outcome.identity.is_some() {
@@ -1209,6 +1449,12 @@ async fn measure_feed_carousel(
 ) -> anyhow::Result<()> {
     let (w, h) = ui.window_size().await?;
     let mut with_counter = 0u32;
+    // Turns offered to each gesture, and turns that actually paged. Counted only where
+    // the answer is knowable: the previous reading has to be known, and the post has to
+    // have images left. This is the regression check for the whole finding — a future
+    // change to the planner that quietly turns a flick back into a drag shows up here.
+    let mut offered = [0u32; 3];
+    let mut paged = [0u32; 3];
     let mut with_photo_word = 0u32;
     for card in 1..=cards {
         let counter = ui
@@ -1251,56 +1497,114 @@ async fn measure_feed_carousel(
                 node.x, node.y, node.width, node.height, node.description
             );
             // And the question the implementation actually turns on: does a sideways swipe
-            // change anything the loop can read, *here on the feed*? The digits are absent,
-            // so if nothing else moves either then a feed carousel cannot be paged by
-            // hierarchy at all and the honest answer is to say so rather than to swipe
-            // blindly — a sideways gesture on a video card opens the author's profile.
+            // change anything the loop can read, *here on the feed*? Two gestures, on the
+            // same card, in this order — because the **shape** of the swipe is the one
+            // variable no earlier measurement ever changed. Every mode above swipes a
+            // dead-straight line; the shipped loop swipes `plan_swipe`'s path, which is
+            // bowed, eased, and held still for a moment before the lift.
+            //
+            // The bow is perpendicular to travel, and travel here is horizontal — so the
+            // bow is **vertical**, up to ~4.5% of the path, plus endpoint jitter. A
+            // link-opened post page has nothing competing for that axis; the feed has its
+            // own vertical pager. If the planned gesture turns nothing and the straight one
+            // turns pages on the same card, that is the bug — and it is also why the card
+            // afterwards has no action rail: the feed is left stranded between two posts.
+            //
+            // `parse` is what `carousel_position` would return, read the way it reads it. A
+            // gesture that moves pixels but leaves that `None` is as broken as one that
+            // moves nothing, so both are printed rather than one standing in for the other.
+            // Four gestures on the same card. The first is what the engine actually sends;
+            // the last is what every measurement before this one sent. The two in between
+            // take the engine's own path and remove **one component each**, so the answer
+            // names a component rather than a vibe.
+            //
+            // Order is deliberate and costs nothing: a gesture that fails to turn the page
+            // consumes no image, so the suspects go first and the known-good straight swipe
+            // goes last, where running out of post no longer confounds anything.
+            // Three gestures on the same card: what the engine used to send, what it sends
+            // now, and the plain straight swipe every earlier measurement used as its only
+            // gesture. Both planned variants call the **shipped** functions rather than
+            // lookalikes — the point is to measure `plan_flick`, not something shaped like it.
+            //
+            // A gesture that fails to turn the page consumes no image, so the control goes
+            // first and the reference last, where running out of post confounds nothing.
+            let mut planner = TouchPointPlanner::new((w, h));
             let mut before = CarouselLook::read(ui, labels).await?;
-            for turn in 1..=3u32 {
-                ui.swipe(riviu_core::types::SwipeGesture {
-                    from: riviu_core::types::TapPoint {
+            let mut turn = 0u32;
+            // Seeded from the screen, not from zero: the counter is already up here, so
+            // the very first turn is judgeable too.
+            let mut previous = shipped_counter(ui).await;
+            for (variant, (style, repeats)) in [
+                ("plan_swipe — cử chỉ cũ", 3u32),
+                ("plan_flick — cử chỉ mới", 4),
+                ("thẳng một đoạn", 3),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                for _ in 0..repeats {
+                    turn += 1;
+                    let from = riviu_core::types::TapPoint {
                         x: w * 0.78,
                         y: h * 0.40,
-                    },
-                    to: riviu_core::types::TapPoint {
+                    };
+                    let to = riviu_core::types::TapPoint {
                         x: w * 0.22,
                         y: h * 0.40,
-                    },
-                    duration_ms: 320,
-                })
-                .await?;
-                tokio::time::sleep(Duration::from_millis(900)).await;
-                let slash = ui
-                    .locate(riviu_core::driver::ElementQuery::Text {
-                        value: " / ",
-                        exact: true,
-                    })
-                    .await
-                    .ok()
-                    .flatten();
-                let now = CarouselLook::read(ui, labels).await?;
-                println!(
-                    "      ngang {turn}: đếm={}  ImageView đổi={}  TextView đổi={}  \
-                     Comments đổi={}",
-                    match &slash {
-                        Some(node) => format!("x={:.0} y={:.0}", node.x, node.y),
-                        None => "MẤT".to_string(),
-                    },
-                    now.images != before.images,
-                    now.texts != before.texts,
-                    now.comments != before.comments
-                );
-                for text in &now.texts {
-                    if !before.texts.contains(text) {
-                        println!("        + {text:?}");
+                    };
+                    let settle_ms;
+                    match variant {
+                        0 => {
+                            let path = planner.plan_swipe(from, to, 320);
+                            settle_ms = path.settle_ms;
+                            ui.swipe_path(path).await?;
+                        }
+                        1 => {
+                            let path = planner.plan_flick(from, to, 320);
+                            settle_ms = path.settle_ms;
+                            ui.swipe_path(path).await?;
+                        }
+                        _ => {
+                            settle_ms = 0;
+                            ui.swipe(riviu_core::types::SwipeGesture {
+                                from,
+                                to,
+                                duration_ms: 320,
+                            })
+                            .await?;
+                        }
                     }
-                }
-                for text in &before.texts {
-                    if !now.texts.contains(text) {
-                        println!("        - {text:?}");
+                    tokio::time::sleep(Duration::from_millis(900)).await;
+                    let parsed = shipped_counter(ui).await;
+                    // A turn only counts when the answer is knowable. If the previous
+                    // reading was lost, or the post had no image left to turn to, the turn
+                    // says nothing about the gesture and is not held against it.
+                    if let (Some((was, total)), Some((now, _))) = (previous, parsed) {
+                        if was < total {
+                            offered[variant] += 1;
+                            if now > was {
+                                paged[variant] += 1;
+                            }
+                        }
                     }
+                    previous = parsed;
+                    let now = CarouselLook::read(ui, labels).await?;
+                    println!(
+                        "      ngang {turn:>2} [{style}]: parse={}  giữ={settle_ms}ms  \
+                         Comments đổi={}",
+                        match parsed {
+                            Some((current, total)) => format!("{current}/{total}"),
+                            None => "None".to_string(),
+                        },
+                        now.comments != before.comments
+                    );
+                    if now.comments.is_none() {
+                        println!(
+                            "        ! RAIL MẤT — đã rời khỏi bài, đúng triệu chứng phiên nuôi chết"
+                        );
+                    }
+                    before = now;
                 }
-                before = now;
             }
         }
         ui.swipe(riviu_core::types::SwipeGesture {
@@ -1328,7 +1632,54 @@ async fn measure_feed_carousel(
             "Không gặp bài ảnh nào trong lần chạy này — chưa kết luận được"
         }
     );
+    if offered.iter().any(|count| *count > 0) {
+        println!("\n  Lượt lật được / lượt được trao, theo cử chỉ:");
+        for (variant, style) in [
+            "plan_swipe (cũ)",
+            "plan_flick (đang dùng)",
+            "thẳng một đoạn",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            println!("    {style:<24} {}/{}", paged[variant], offered[variant]);
+        }
+        // The claim this mode exists to keep honest. `plan_flick` was measured at 19 of 19
+        // against `plan_swipe`'s 13 of 40; a run where it drops back toward the old number
+        // means the planner has quietly started sending a drag again.
+        println!(
+            "    -> plan_flick phải bám sát cột 'thẳng', không bám 'cũ'. Xem \
+             TouchPointPlanner::plan_flick."
+        );
+    }
     Ok(())
+}
+
+/// `(current, total)` exactly as `carousel_position` would read it on this screen.
+///
+/// A copy of the shipped three-node parse rather than a call to it, because that function
+/// is private to the nurture module — and the copy is faithful in the one way that matters
+/// here: it reads `locate_all_described` **unfiltered**, empty descriptions and all, which
+/// is what the engine does and is not what `CarouselLook` does. If an empty node ever lands
+/// between the digits and the slash, the engine sees `None` where the eye sees `2 / 10`.
+async fn shipped_counter(ui: &dyn UiSession) -> Option<(u32, u32)> {
+    let texts: Vec<String> = ui
+        .locate_all_described(riviu_core::driver::ElementQuery::ClassName(
+            "android.widget.TextView",
+        ))
+        .await
+        .ok()?
+        .into_iter()
+        .filter_map(|element| element.description)
+        .collect();
+    texts.windows(3).find_map(|window| {
+        if window[1].trim() != "/" {
+            return None;
+        }
+        let current = window[0].trim().parse::<u32>().ok()?;
+        let total = window[2].trim().parse::<u32>().ok()?;
+        (current >= 1 && total >= current).then_some((current, total))
+    })
 }
 
 /// What one look at a photo post sees, in the only terms the hierarchy loop has.
@@ -1714,7 +2065,10 @@ async fn measure_target_open(
         println!("  => NO RAIL: nothing is up. Refusal: NoPostPage.");
     } else if after.is_empty() || after == before_author {
         println!(
-            "  => UNCHANGED: same post as before the link. This is the signature of an              unavailable post (deleted / private / region-blocked) — TikTok takes the              intent, fails server-side, and leaves the feed alone. Refusal:              ScreenNeverChanged. THE LINK IS THE PROBLEM, NOT THE PHONE."
+            "  => UNCHANGED: same post as before the link. This is the signature of an \
+             unavailable post (deleted / private / region-blocked) — TikTok takes the \
+             intent, fails server-side, and leaves the feed alone. Refusal: \
+             ScreenNeverChanged. THE LINK IS THE PROBLEM, NOT THE PHONE."
         );
     } else {
         println!("  => ARRIVED: a different post is up.");

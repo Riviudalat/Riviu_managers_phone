@@ -143,15 +143,19 @@ impl SigningService {
             anyhow::bail!("Thiếu sidecar signer. Kiểm tra sidecars/signer/riviu_signer.py");
         }
 
+        // The Apple ID and its app-specific password go through the **environment**, not argv.
+        // On Windows any process running as the same user can read another's command line
+        // (`Win32_Process.CommandLine`, and EDR/Sysmon record it as a matter of course), so
+        // `--password <secret>` published the value the OS credential store exists to protect.
+        // `ios-driver/src/supervisor.rs` already passes its fingerprint by environment with the
+        // same reasoning stated there.
         let output = self
             .signer_command()
+            .env("RIVIU_APPLE_ID", &email)
+            .env("RIVIU_APPLE_PASSWORD", &password)
             .arg("sign-install-wda")
             .arg("--udid")
             .arg(udid)
-            .arg("--apple-id")
-            .arg(&email)
-            .arg("--password")
-            .arg(&password)
             .arg("--wda")
             .arg(wda_source)
             .stdout(Stdio::piped())

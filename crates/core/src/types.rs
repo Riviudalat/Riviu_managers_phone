@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::nurture::Outcome;
+
 pub const STREAM_FPS: u32 = 24;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -402,16 +404,7 @@ pub struct JobRecord {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum TileSize {
-    Thumbnail,
-    Medium,
-    Large,
-    ExtraLarge,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum StreamQuality {
     Low,
@@ -420,12 +413,20 @@ pub enum StreamQuality {
     Extra,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// What the operator asked the view path for. Persisted under `stream.settings.v1`.
+///
+/// `#[serde(default)]` is not decoration: this round-trips through the database now, so a
+/// blob written by an older build has to keep loading when a field is added. Without it the
+/// first new field would make every stored row fail to deserialize — and the load happens at
+/// startup, so that is a boot failure over a quality setting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct StreamSettings {
     pub fps: u32,
-    pub tile_size: TileSize,
+    /// What a grid tile encodes at.
     pub grid_quality: StreamQuality,
+    /// What the overlay encodes at, which is a separate choice because it is a separate
+    /// picture: one phone filling a window rather than one of twenty tiles.
     pub focus_quality: StreamQuality,
 }
 
@@ -433,7 +434,6 @@ impl Default for StreamSettings {
     fn default() -> Self {
         Self {
             fps: STREAM_FPS,
-            tile_size: TileSize::Medium,
             grid_quality: StreamQuality::Medium,
             focus_quality: StreamQuality::High,
         }
@@ -531,6 +531,30 @@ pub struct DeviceMeta {
     pub tags: Vec<String>,
     pub group_id: Option<String>,
     pub proxy_id: Option<String>,
+    /// The TikTok @handle this phone is logged into, without the leading `@`.
+    ///
+    /// Entered by the operator (there is no reliable on-device read for it). Empty when
+    /// unknown. It is what lets an interaction @-mention resolve to the phone that owns the
+    /// account, so tagging `@name` can bring that phone into the same post to reply — see
+    /// `interaction::ThreadCampaignRequest::mentions`.
+    #[serde(default)]
+    pub handle: String,
+    /// What the operator calls this phone (xiaowei "Change Name"). Empty means "use the name
+    /// the phone reports", which is what the grid showed before this existed.
+    ///
+    /// Deliberately not written back to the device. Renaming the *phone* needs root on
+    /// Android and is a fingerprint change; what an operator wants when they rename a tile is
+    /// to tell twenty identical SM-G955Fs apart, and that is a fact about this app's records.
+    #[serde(default)]
+    pub alias: String,
+    /// The number written on the phone, on the shelf, in the operator's notes (xiaowei
+    /// "Change Number").
+    ///
+    /// `None` means unnumbered, and the grid then shows the tile's position instead — which
+    /// is what every tile showed before, and is exactly the thing a number is for replacing:
+    /// a position changes when the fleet list changes, so it cannot be written on a sticker.
+    #[serde(default)]
+    pub number: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -581,6 +605,47 @@ pub struct ShellOutcome {
     pub stderr: String,
 }
 
+/// What one row of a device directory listing is.
+///
+/// `Other` is not a failure and not a leftover: a phone's filesystem holds sockets, fifos
+/// and block devices, and a browser that dropped every row it did not recognise would show
+/// a directory as empty when it is not. The UI can refuse to *open* one; it must still say
+/// it is there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DeviceFileKind {
+    File,
+    Directory,
+    /// A symlink. Which of the two it points at is deliberately not resolved here — that
+    /// costs a second `ls` per row — so the browser follows it by listing its path and
+    /// letting the phone answer.
+    Symlink,
+    Other,
+}
+
+/// One entry in a phone's own directory listing (xiaowei "Preview Mobile Files").
+///
+/// Every field is what the phone printed, never something computed here. `modified` is the
+/// phone's own `YYYY-MM-DD HH:MM` string rather than a parsed timestamp, and that is
+/// deliberate: `ls` prints in the *device's* timezone with no offset, so turning it into an
+/// instant here would invent a precision the source does not have. Measured on
+/// 23021RAAEG (Android 15) and SM-G955F (Android 9): both print exactly that shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceFileEntry {
+    /// The bare name, not the path — `Download`, not `/sdcard/Download`.
+    pub name: String,
+    pub kind: DeviceFileKind,
+    /// Bytes for a file; for a directory this is the size of the directory *inode*
+    /// (3452 on this fleet's sdcard), which is why the UI shows it only for files.
+    pub size: u64,
+    /// `None` when the phone printed `?` for it, which happens on rows it cannot stat —
+    /// a dangling symlink under `/`, measured on 23021RAAEG.
+    pub modified: Option<String>,
+    /// Present only for `Symlink`, and exactly the text after `->`.
+    pub link_target: Option<String>,
+}
+
 /// Whether an app came with the phone or was installed onto it.
 ///
 /// **Tagged, never inferred, and never used as a filter.** Listing only third-party
@@ -609,9 +674,11 @@ pub enum InstalledAppKind {
 /// is absurd at the measured sizes (one base.apk was 261 MB). So a listing shows package
 /// names, and a `None` here means "this phone cannot tell us", not "unnamed".
 ///
-/// The route that *would* work is the on-device `com.riviu.agent` helper calling
-/// `PackageManager.getApplicationLabel`, one HTTP call for the whole list. That is a
-/// separate piece of work; the field exists so adding it later changes no shape.
+/// **That route is now built** (21/08/2026): the helper answers `/v1/apps/describe` with the
+/// label and a rendered icon for a list of packages, and the Android driver joins it onto the
+/// adb listing. The paragraph above still describes what happens on a phone *without* the
+/// helper, which is why `label` stays an `Option` — the fallback is a package name, never an
+/// invented one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstalledApp {
@@ -620,9 +687,16 @@ pub struct InstalledApp {
     /// use to name an app.
     pub bundle_id: String,
     pub kind: InstalledAppKind,
-    /// Human-readable name where the platform gives one for free. Always `None` on
-    /// Android — see the type doc.
+    /// Human-readable name where the platform gives one, or the helper can read one.
+    /// `None` means "nothing on this phone could tell us", not "unnamed".
     pub label: Option<String>,
+    /// The app's icon as a base64 PNG, at the size the helper rendered it (48 px edge).
+    ///
+    /// `None` is the ordinary case for a phone with no helper, and also for the handful of
+    /// system packages that genuinely have no icon — never a placeholder image, so the UI can
+    /// draw its own neutral square instead of showing one the phone did not give.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_png_base64: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -647,6 +721,13 @@ pub struct ScheduleItem {
     pub enabled: bool,
     pub last_run_at: Option<String>,
     pub next_run_at: Option<String>,
+    /// Why the last due tick did not enqueue anything, or `None` if it did.
+    ///
+    /// Exists because the runner used to fail in complete silence: a schedule whose script
+    /// had been renamed or deleted advanced both timestamps on every tick and enqueued
+    /// nothing, so the page showed a healthy job that had never run.
+    #[serde(default)]
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -672,23 +753,6 @@ pub struct OpLog {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LocalUser {
-    pub id: String,
-    pub email: String,
-    pub role: String,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AuthSession {
-    pub show_auth_ui: bool,
-    pub bypassed: bool,
-    pub user: Option<LocalUser>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AnalyticsSummary {
     pub device_total: usize,
     pub device_ready: usize,
@@ -703,14 +767,90 @@ pub struct AnalyticsSummary {
     pub recent_logs: Vec<OpLog>,
 }
 
+/// The part of a window that overrides how a session behaves, when it overrides it at all.
+///
+/// **All five or none**, rather than five independent `Option`s. A window that carries a
+/// half-set of rates would leave the other half inheriting a global the operator edited
+/// later, and the four rates here share one 100% budget (`nurtureBudget.ts`) — a budget
+/// assembled from two sources is a budget nobody can read off the screen. One switch, one
+/// complete block: either this window behaves like the panel above it, or it behaves like
+/// exactly what is written in it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NurtureWindowBehaviour {
+    pub num_videos: u32,
+    pub num_rounds: u32,
+    pub like_prob: u32,
+    pub comment_prob: u32,
+    pub follow_prob: u32,
+}
+
+impl Default for NurtureWindowBehaviour {
+    fn default() -> Self {
+        let base = NurtureSettings::default();
+        Self {
+            num_videos: base.num_videos,
+            num_rounds: base.num_rounds,
+            like_prob: base.like_prob,
+            comment_prob: base.comment_prob,
+            follow_prob: base.follow_prob,
+        }
+    }
+}
+
+/// One stretch of the local day the schedule may run in.
+///
+/// Times are **minutes from local midnight**, because that is the number the operator is
+/// thinking in when they type `08:00` — the mark that says when the next run is due stays a
+/// UTC instant. `end_minute <= start_minute` means the window wraps past midnight, which is
+/// how "22:00 tới 02:00" is written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NurtureWindow {
+    /// Stable across edits, so the mark for "when is this window next due" survives the
+    /// operator reordering the list or changing the hours.
+    pub id: String,
+    pub start_minute: u32,
+    pub end_minute: u32,
+    /// How often a run starts *inside* the window.
+    pub every_minutes: u32,
+    /// The cap handed to each session this window starts.
+    pub duration_minutes: u32,
+    /// Empty means every connected phone, and the editor says so in words rather than
+    /// leaving a blank that reads as "none".
+    pub udids: Vec<String>,
+    /// `None` means "behave like the panel above".
+    pub behaviour: Option<NurtureWindowBehaviour>,
+}
+
+impl Default for NurtureWindow {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            start_minute: 8 * 60,
+            end_minute: 11 * 60,
+            every_minutes: 60,
+            duration_minutes: 20,
+            udids: Vec::new(),
+            behaviour: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct NurtureSettings {
     pub base_url: String,
     pub model: String,
     pub api_key: String,
-    pub input_price_per_1m: f64,
-    pub output_price_per_1m: f64,
+    /// Whether a key is stored, for a form that must not receive the key itself.
+    ///
+    /// `#[serde(skip_serializing_if)]`-free on purpose: the frontend reads it on every load.
+    /// Derived at the command boundary, never persisted — `save_nurture_settings` writes the
+    /// key to the OS credential store and the settings blob keeps neither it nor this flag
+    /// meaningfully.
+    #[serde(default)]
+    pub has_api_key: bool,
     pub bundle_id: String,
     pub num_videos: u32,
     pub num_rounds: u32,
@@ -738,6 +878,14 @@ pub struct NurtureSettings {
     pub schedule_duration_minutes: u32,
     #[serde(default)]
     pub schedule_udids: Vec<String>,
+    /// Stretches of the day the schedule may run in, each with its own cadence.
+    ///
+    /// **Empty keeps the old single-cadence behaviour**, which is what every database written
+    /// before this field existed contains: run every `schedule_every_minutes`, all day, on
+    /// `schedule_udids`. That fallback is not a deprecation shim to be removed quietly — it is
+    /// what an operator who never opens the window editor still gets.
+    #[serde(default)]
+    pub schedule_windows: Vec<NurtureWindow>,
     /// Pin the behaviour cycle to one mood (`chatty` / `liking` / `skimming`).
     /// Empty means the normal varied cycle. Only for isolating a feature during
     /// a test — a real session should vary.
@@ -831,11 +979,7 @@ impl Default for NurtureSettings {
             base_url: "https://openrouter.ai/api/v1".into(),
             model: "openai/gpt-5.6-luna".into(),
             api_key: String::new(),
-            // OpenRouter's OpenAI route listed $0.10 / $0.60 on 14/08/2026
-            // (50% off the $0.20 / $1.20 list). Display only; the panel can
-            // edit these if the promo ends.
-            input_price_per_1m: 0.10,
-            output_price_per_1m: 0.60,
+            has_api_key: false,
             bundle_id: "com.ss.iphone.ugc.Ame".into(),
             // Manual runs use a varied 2–3 hour horizon; this remains the
             // legacy fixture ceiling for callers that do not pass a duration.
@@ -868,6 +1012,7 @@ impl Default for NurtureSettings {
             schedule_every_minutes: 240,
             schedule_duration_minutes: 150,
             schedule_udids: Vec::new(),
+            schedule_windows: Vec::new(),
             steady_mood: String::new(),
             like_enabled: true,
             comment_enabled: true,
@@ -995,8 +1140,6 @@ impl NurtureSettings {
         self.base_url = fresh.base_url.clone();
         self.model = fresh.model.clone();
         self.api_key = fresh.api_key.clone();
-        self.input_price_per_1m = fresh.input_price_per_1m;
-        self.output_price_per_1m = fresh.output_price_per_1m;
         self.comment_lang = fresh.comment_lang.clone();
         self.ai_directions = fresh.ai_directions.clone();
         self.max_comment_words = fresh.max_comment_words;
@@ -1053,12 +1196,6 @@ impl NurtureSettings {
         let defaults = Self::default();
         self.base_url = defaults.base_url;
         self.model = defaults.model;
-        if (self.input_price_per_1m - 1.25).abs() < f64::EPSILON
-            && (self.output_price_per_1m - 10.0).abs() < f64::EPSILON
-        {
-            self.input_price_per_1m = defaults.input_price_per_1m;
-            self.output_price_per_1m = defaults.output_price_per_1m;
-        }
         true
     }
 }
@@ -1145,8 +1282,6 @@ mod nurture_settings_tests {
             base_url: "https://api.deepseek.com/".into(),
             model: "deepseek-v4-flash".into(),
             api_key: "sk-or-keep-me".into(),
-            input_price_per_1m: 1.25,
-            output_price_per_1m: 10.0,
             like_prob: 80,
             ..NurtureSettings::default()
         };
@@ -1155,8 +1290,6 @@ mod nurture_settings_tests {
         assert_eq!(settings.model, "openai/gpt-5.6-luna");
         assert_eq!(settings.api_key, "sk-or-keep-me");
         assert_eq!(settings.like_prob, 80);
-        assert!((settings.input_price_per_1m - 0.10).abs() < f64::EPSILON);
-        assert!((settings.output_price_per_1m - 0.60).abs() < f64::EPSILON);
         assert!(!settings.adopt_openrouter_luna_if_still_shipped_deepseek());
     }
 
@@ -1183,7 +1316,6 @@ pub struct NurtureCommentCost {
     pub base_url_host: String,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
-    pub usd: f64,
     pub preview: String,
     pub created_at: String,
 }
@@ -1199,14 +1331,73 @@ pub struct NurtureCommentAttempt {
     pub base_url_host: String,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
-    pub usd: f64,
+    /// What the gateway said this attempt cost, in USD, summed over every call it took.
+    ///
+    /// **`None` means the gateway did not say, and that is not the same as free.** The column
+    /// this feeds is nullable for exactly that reason — see `apply_migration_15`, and see
+    /// migration 11 for the fabricated column whose zeroes this must never become.
+    pub cost_usd: Option<f64>,
     pub preview: String,
     pub caption_preview: String,
     pub frame_sha256: String,
     pub context_confidence: Option<u8>,
     pub relevance: Option<u8>,
     pub evidence_support: Option<u8>,
+    /// How many *different* frames the model was shown. `Some(1)` on a photo post, where the
+    /// three samples were one byte-identical picture; `Some(0)` on the caption-only path,
+    /// which sends no picture at all; `None` on rows written before this was recorded.
+    ///
+    /// It is here so `evidence_support` can be read. A low score next to `1` means there was
+    /// only ever one frame of evidence; the same score next to `3` means the model read three
+    /// and still could not ground the comment. Those are different problems.
+    pub distinct_frames: Option<u8>,
+    /// Slides the carousel traversal paged before this comment was written, duplicates
+    /// included. `Some(0)` on a post that was never paged; `None` on rows from before it was
+    /// recorded.
+    ///
+    /// Read it next to [`Self::distinct_frames`], which is the pair that says anything:
+    /// `carousel_slides = 7, distinct_frames = 1` means the pager turned seven times and the
+    /// stream handed back one picture every time — a parked stream, and the comment is
+    /// grounded on a seventh of the post. `7` and `2` means it is working.
+    pub carousel_slides: Option<u32>,
     pub created_at: String,
+}
+
+/// Where one device is in its session, as a value rather than as a sentence.
+///
+/// **Every phase below already existed — as Vietnamese prose in `last_message`.** A bar
+/// drawn from `videos_done` alone reads 0% for the first minute of a healthy run (up to 40 s
+/// waiting for TikTok to reach the foreground, then up to 30 s waiting for the feed), and it
+/// reads exactly the same 0% for a phone that failed to open the app at all. That is the
+/// case this enum exists for: the two lock-screen phones on 23/08/2026 died inside that
+/// window, and no number could have told them apart from a phone that was merely starting.
+///
+/// Ordered roughly as a session passes through them, so a UI can render them as a track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NurturePhase {
+    /// Accepted, waiting out its stagger delay. Not yet touching the phone.
+    #[default]
+    Queued,
+    /// Opening a control session and bringing TikTok to the front.
+    Opening,
+    /// Session up, working back to a usable feed — declining dialogs, skipping the
+    /// onboarding journey, finding the action rail.
+    AwaitingFeed,
+    /// The feed loop proper: watching, liking, commenting, swiping.
+    Watching,
+    /// Spending recovery budget after a failure. Distinct from [`Self::AwaitingFeed`]
+    /// because it means something already went wrong, which is worth seeing.
+    Recovering,
+    /// Terminal. Pair with [`NurtureSessionStatus::outcome`] for the verdict.
+    Finished,
+}
+
+impl NurturePhase {
+    /// Whether nothing more will happen on this device.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Finished)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1232,14 +1423,220 @@ pub struct NurtureSessionStatus {
     pub comments: u32,
     pub follows: u32,
     pub last_message: String,
-    pub session_usd: f64,
+    /// What the comment model actually reported spending on this device, in tokens.
+    ///
+    /// **Tokens and not money, because money was fabricated.** This used to be `session_usd`,
+    /// the product of two hand-typed per-million prices that were never sent to the API and
+    /// existed in three different values at once — `types.rs` said $0.10/$0.60, `db.rs` said
+    /// $1.25/$10.00, and a migration rewrote the second back to the first. No UI could edit
+    /// them, so after any model change every USD figure in the database was silently wrong.
+    /// Tokens come from the API's own `usage` object, which means they are true of whatever
+    /// model is configured. Multiply by the provider's real rate outside the app.
+    #[serde(default)]
+    pub session_prompt_tokens: u32,
+    #[serde(default)]
+    pub session_completion_tokens: u32,
+    /// Which run this row belongs to.
+    ///
+    /// **Without this there is no such thing as "the current run".** `set_status` inserts by
+    /// udid and nothing ever removes an entry, so the status list accumulates every phone
+    /// that has run since the process started — a fleet total summed over it already
+    /// includes finished phones from earlier runs, and restarting one phone makes a fleet
+    /// bar go *backwards* because that row's counters reset to zero while the others keep
+    /// their finished values. Flow runs already carry a `run_id` for the same reason.
+    #[serde(default)]
+    pub run_id: Option<Uuid>,
+    /// How many devices were started together in this run.
+    ///
+    /// The denominator for an overall bar, and it must be this rather than the number of
+    /// rows present: a phone that failed before producing a second status still occupies a
+    /// slot, and one that never produced a row at all must not shrink the total.
+    #[serde(default)]
+    pub run_size: u32,
+    #[serde(default)]
+    pub phase: NurturePhase,
+    /// The verdict, once there is one. See [`crate::Outcome`].
+    #[serde(default)]
+    pub outcome: Option<Outcome>,
+    /// Posts this session is aiming for — `num_videos × num_rounds`, snapshotted at start.
+    ///
+    /// **The denominator has to travel with the numerator.** `num_videos` is deliberately
+    /// not absorbed by a running session, so a frontend dividing by the *live* settings row
+    /// would rescale the bar under a session that never changed: lower "Giới hạn video"
+    /// from 120 to 15 mid-run and the loop keeps counting to 120 while the UI divides by 15,
+    /// which reads 800%.
+    #[serde(default)]
+    pub video_target: u32,
+    /// When this device's session actually began — after its stagger, before the app opened.
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    /// When the wall clock will end this session regardless of the video count.
+    ///
+    /// A run ends at **whichever bound arrives first**, and for a manual start this one is a
+    /// randomised 2–3 hour horizon that was previously invisible to the UI entirely. A bar
+    /// drawn from the video count alone stalls at 40% on a run that is about to finish on
+    /// time and reads as hung.
+    #[serde(default)]
+    pub deadline_at: Option<DateTime<Utc>>,
+}
+
+impl Default for NurtureSessionStatus {
+    fn default() -> Self {
+        Self {
+            udid: String::new(),
+            running: false,
+            videos_done: 0,
+            swipe_attempts: 0,
+            like_attempts: 0,
+            comment_attempts: 0,
+            follow_attempts: 0,
+            likes: 0,
+            comments: 0,
+            follows: 0,
+            last_message: String::new(),
+            session_prompt_tokens: 0,
+            session_completion_tokens: 0,
+            run_id: None,
+            run_size: 0,
+            phase: NurturePhase::Queued,
+            outcome: None,
+            video_target: 0,
+            started_at: None,
+            deadline_at: None,
+        }
+    }
+}
+
+impl NurtureSessionStatus {
+    /// A fresh row for one device, with everything else at its default.
+    ///
+    /// Exists so the eight construction sites that spelled out all twelve fields — four of
+    /// them in one file, identical apart from `last_message` — do not each have to grow a
+    /// line every time a field is added. That churn is how a field ends up set in three
+    /// places and forgotten in the fourth.
+    pub fn new(udid: impl Into<String>) -> Self {
+        Self {
+            udid: udid.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Close this row out: terminal phase, `running` down, and the verdict *beside* the
+    /// summary sentence rather than only inside it.
+    ///
+    /// One method rather than three assignments at ten sites, and that is not tidiness. The
+    /// verdict used to be stringified into the first token of a Vietnamese sentence and
+    /// then dropped, so a phone that finished 47 videos and one that never opened the app
+    /// were both a grey row with prose in it. Ten separate exits each setting
+    /// `running = false` is exactly the shape where the eleventh forgets — which is why
+    /// `SessionCtx::push` now debug-asserts that a stopped row carries a verdict.
+    pub fn finish(&mut self, outcome: Outcome) {
+        self.running = false;
+        self.phase = NurturePhase::Finished;
+        self.outcome = Some(outcome);
+    }
+
+    /// How far along this device is, as a fraction in `0.0..=1.0`.
+    ///
+    /// **The maximum of the two bounds, because the session ends at whichever arrives
+    /// first.** A count-only reading under-reports every timed run — it sits at 40% on a
+    /// session with ten minutes left — and a clock-only reading under-reports a run that is
+    /// about to hit its video cap in the first twenty minutes of a three-hour horizon.
+    /// Taking the larger is the only reading that cannot promise more time than remains.
+    ///
+    /// Monotone by construction: `videos_done` only ever increments and the clock only ever
+    /// advances, so this never goes backwards for a given run. A terminal phase reads 1.0
+    /// whatever the counters say — a session that stopped at 40 of 120 videos is finished,
+    /// and leaving its bar short would read as still working.
+    ///
+    /// `None` when there is nothing to divide by yet: a queued device with no target and no
+    /// deadline is honestly *unknown*, not zero, and a bar should say so rather than draw an
+    /// empty track that looks like a stall.
+    pub fn progress_fraction(&self, now: DateTime<Utc>) -> Option<f64> {
+        if self.phase.is_terminal() {
+            return Some(1.0);
+        }
+        let (by_videos, by_clock) = self.bounds(now);
+        let best = match (by_videos, by_clock) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        };
+        best.map(|value| value.clamp(0.0, 1.0))
+    }
+
+    /// Which bound is currently governing, for a label beside the bar.
+    ///
+    /// Named rather than inferred by the UI: "42/120 video" and "còn 18 phút" are different
+    /// sentences and only one of them is true of any given moment.
+    ///
+    /// A terminal row has no governing bound — it is over, and naming the bound that would
+    /// have ended it next invites a label like "còn 18 phút" beside a finished session.
+    pub fn governing_bound(&self, now: DateTime<Utc>) -> Option<NurtureBound> {
+        if self.phase.is_terminal() {
+            return None;
+        }
+        match self.bounds(now) {
+            (Some(videos), Some(clock)) if clock > videos + CLOCK_LABEL_LEAD => {
+                Some(NurtureBound::Clock)
+            }
+            (Some(_), _) => Some(NurtureBound::Videos),
+            (None, Some(_)) => Some(NurtureBound::Clock),
+            (None, None) => None,
+        }
+    }
+
+    /// The two fractions, each `None` when its bound is not known yet.
+    ///
+    /// One function because the two callers above had fourteen identical lines each, and a
+    /// rule fixed in one copy and not the other is exactly the drift this repo keeps paying
+    /// for. `None` rather than `0.0` throughout: a queued device with no target is *unknown*,
+    /// and a bar that draws unknown as empty looks like a stall.
+    fn bounds(&self, now: DateTime<Utc>) -> (Option<f64>, Option<f64>) {
+        let by_videos =
+            (self.video_target > 0).then(|| self.videos_done as f64 / self.video_target as f64);
+        let by_clock = match (self.started_at, self.deadline_at) {
+            (Some(started), Some(deadline)) => {
+                let total = (deadline - started).num_seconds();
+                // A non-positive window is nonsense, not zero progress: a deadline at or
+                // before the start would divide by zero or invert the fraction.
+                (total > 0).then(|| (now - started).num_seconds().max(0) as f64 / total as f64)
+            }
+            _ => None,
+        };
+        (by_videos, by_clock)
+    }
+}
+
+/// How far ahead the clock must be before it is called the governing bound.
+///
+/// Without it the clock wins the instant a run starts — `videos_done` is 0, so any elapsed
+/// second beats it — and the operator's first reading was "còn ~154 phút" rather than the
+/// "0/5 video" they had just typed. Measured on the live fleet on 23/08/2026. The *fraction*
+/// still takes the plain maximum; this only decides which sentence is printed.
+const CLOCK_LABEL_LEAD: f64 = 0.05;
+
+/// Which of a session's two bounds is closer to ending it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NurtureBound {
+    /// The video count is ahead — the run will end on posts watched.
+    Videos,
+    /// The wall clock is ahead — the run will end on time, short of its video target.
+    Clock,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NurtureCostSummary {
-    pub today_usd: f64,
-    pub total_usd: f64,
+    /// Tokens the comment model reported for today's and all-time attempts.
+    ///
+    /// Was `today_usd`/`total_usd`, computed from prices the app could not know. See
+    /// [`NurtureSessionStatus::session_prompt_tokens`].
+    pub today_prompt_tokens: u64,
+    pub today_completion_tokens: u64,
+    pub total_prompt_tokens: u64,
+    pub total_completion_tokens: u64,
     pub today_comments: u32,
     pub total_comments: u32,
 }
@@ -1251,6 +1648,109 @@ pub struct NurtureCostSummary {
 #[cfg(test)]
 mod nurture_tuning_tests {
     use super::NurtureSettings;
+
+    /// Rust field names `absorb_live_changes` copies, in the frontend's spelling.
+    fn fields_absorbed_live() -> std::collections::BTreeSet<String> {
+        let source = include_str!("types.rs");
+        let body = source
+            .split_once("pub fn absorb_live_changes(&mut self, fresh: &NurtureSettings) {")
+            .expect("absorb_live_changes is still declared with that signature")
+            .1
+            .split_once(
+                "
+    }
+",
+            )
+            .expect("absorb_live_changes ends at a top-level brace")
+            .0;
+        body.lines()
+            .filter_map(|line| {
+                let assignment = line.trim().strip_prefix("self.")?;
+                let (field, rest) = assignment.split_once(" = ")?;
+                // Only the plain `self.x = fresh.x` copies; anything computed is not a
+                // straight absorption and would need reading, not pattern-matching.
+                rest.starts_with("fresh.").then(|| camel(field))
+            })
+            .collect()
+    }
+
+    /// `recover_delay_min` -> `recoverDelayMin`.
+    fn camel(snake: &str) -> String {
+        let mut out = String::with_capacity(snake.len());
+        let mut upper_next = false;
+        for ch in snake.chars() {
+            if ch == '_' {
+                upper_next = true;
+            } else if upper_next {
+                out.extend(ch.to_uppercase());
+                upper_next = false;
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_form_promises_exactly_what_a_running_session_absorbs() {
+        // `absorb_live_changes` is documented as "this list and that list are the same
+        // list". They were not: this function copies `human_limits`, and the frontend's
+        // LIVE_TUNABLE_FIELDS had never listed it. Nothing showed, because nothing read the
+        // frontend list -- three restart badges hardcoded their reason strings instead. Now
+        // the badges read the list, so the drift would have become a badge telling the
+        // operator to restart for a field the loop picks up on its own.
+        let types_ts = include_str!("../../../apps/desktop/src/types.ts");
+        let declared: std::collections::BTreeSet<String> = types_ts
+            .lines()
+            .skip_while(|line| !line.contains("export const LIVE_TUNABLE_FIELDS"))
+            .skip(1)
+            .take_while(|line| !line.contains("]);"))
+            .filter_map(|line| {
+                let t = line.trim().trim_end_matches(',');
+                t.strip_prefix('"')?.strip_suffix('"').map(str::to_owned)
+            })
+            .collect();
+        assert!(
+            !declared.is_empty(),
+            "types.ts no longer declares LIVE_TUNABLE_FIELDS in a shape this test can read"
+        );
+
+        let absorbed = fields_absorbed_live();
+        assert!(
+            absorbed.len() > 20,
+            "only found {} absorbed fields -- the parser lost the function body",
+            absorbed.len()
+        );
+        assert_eq!(
+            absorbed, declared,
+            "the loop absorbs one set of fields and the form promises another"
+        );
+    }
+
+    #[test]
+    fn a_field_needing_a_restart_is_never_also_promised_as_live() {
+        // The two lists are shown to the operator as opposites; an overlap would put a
+        // "needs restart" badge on a field that does take effect immediately.
+        let types_ts = include_str!("../../../apps/desktop/src/types.ts");
+        let restart: Vec<&str> = types_ts
+            .lines()
+            .skip_while(|line| !line.contains("export const RESTART_REQUIRED_REASONS"))
+            .skip(1)
+            .take_while(|line| !line.starts_with('}'))
+            .filter_map(|line| line.trim().split_once(':').map(|(k, _)| k.trim()))
+            .collect();
+        assert!(
+            !restart.is_empty(),
+            "RESTART_REQUIRED_REASONS is unreadable"
+        );
+        let live = fields_absorbed_live();
+        for field in restart {
+            assert!(
+                !live.contains(field),
+                "`{field}` is marked restart-required and is absorbed live"
+            );
+        }
+    }
 
     #[test]
     fn an_old_stored_profile_upgrades_with_every_feature_still_on() {
@@ -1407,5 +1907,395 @@ mod nurture_tuning_tests {
             "acts between sessions, not inside one"
         );
         assert_eq!(running.schedule_every_minutes, 240);
+    }
+}
+
+/// The frontend's copy of these types has to describe the same wire.
+///
+/// `apps/desktop/src/types.ts` is 1,300 lines written by hand against `types.rs`, and nothing
+/// checked the two. Renaming a serde field is therefore not a compile error and not a test
+/// failure — the frontend simply reads `undefined` at runtime, on whichever screen happens to
+/// use that field, and the value renders as blank rather than as an error.
+///
+/// This does not replace the hand-written file with generated code; it holds it to the shape
+/// of the Rust side, which is the part that was missing. Twenty-four types carry the same name
+/// on both sides and all twenty-four agree today, so this starts green and stays useful.
+#[cfg(test)]
+mod wire_shape_tests {
+    use std::collections::BTreeSet;
+
+    /// `recover_delay_min` -> `recoverDelayMin`.
+    fn camel(snake: &str) -> String {
+        let mut out = String::with_capacity(snake.len());
+        let mut upper = false;
+        for ch in snake.chars() {
+            if ch == '_' {
+                upper = true;
+            } else if upper {
+                out.extend(ch.to_uppercase());
+                upper = false;
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    /// Field names each `#[derive(Serialize)]` struct puts on the wire.
+    ///
+    /// A line scanner rather than a parser, and deliberately conservative: a struct it cannot
+    /// read is one it does not report, which the count assertion below then catches.
+    fn rust_structs(source: &str) -> Vec<(String, BTreeSet<String>)> {
+        let lines: Vec<&str> = source.lines().collect();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i].trim_start();
+            if !line.starts_with("pub struct ") || !line.ends_with('{') {
+                i += 1;
+                continue;
+            }
+            let name = line
+                .trim_start_matches("pub struct ")
+                .split([' ', '<', '{'])
+                .next()
+                .unwrap_or("")
+                .to_string();
+
+            // Attributes sit directly above the declaration.
+            let mut attrs = String::new();
+            let mut j = i;
+            while j > 0 {
+                let prev = lines[j - 1].trim();
+                if prev.starts_with("#[") {
+                    attrs.push_str(prev);
+                    j -= 1;
+                } else if prev.starts_with("///") || prev.starts_with("//") {
+                    j -= 1;
+                } else {
+                    break;
+                }
+            }
+            if !attrs.contains("Serialize") && !attrs.contains("Deserialize") {
+                i += 1;
+                continue;
+            }
+            let camel_all = attrs.contains("rename_all = \"camelCase\"");
+
+            let mut fields = BTreeSet::new();
+            let mut k = i + 1;
+            let mut pending = String::new();
+            while k < lines.len() && lines[k].trim() != "}" {
+                let f = lines[k].trim();
+                if f.starts_with("#[") {
+                    pending.push_str(f);
+                } else if let Some(rest) = f.strip_prefix("pub ") {
+                    if let Some((field, _)) = rest.split_once(':') {
+                        let field = field.trim();
+                        let skipped =
+                            pending.contains("skip") && !pending.contains("skip_serializing_if");
+                        if !skipped && !field.is_empty() {
+                            let renamed = pending
+                                .split_once("rename = \"")
+                                .and_then(|(_, r)| r.split_once('"'))
+                                .map(|(v, _)| v.to_string());
+                            fields.insert(match renamed {
+                                Some(v) => v,
+                                None if camel_all => camel(field),
+                                None => field.to_string(),
+                            });
+                        }
+                    }
+                    pending.clear();
+                } else if !f.is_empty() && !f.starts_with("//") {
+                    pending.clear();
+                }
+                k += 1;
+            }
+            out.push((name, fields));
+            i = k;
+        }
+        out
+    }
+
+    /// Field names each `export interface` declares.
+    fn ts_interfaces(source: &str) -> Vec<(String, BTreeSet<String>)> {
+        let lines: Vec<&str> = source.lines().collect();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i].trim_start();
+            if !line.starts_with("export interface ") || !line.ends_with('{') {
+                i += 1;
+                continue;
+            }
+            let name = line
+                .trim_start_matches("export interface ")
+                .split([' ', '<', '{'])
+                .next()
+                .unwrap_or("")
+                .to_string();
+            let mut fields = BTreeSet::new();
+            let mut k = i + 1;
+            while k < lines.len() && lines[k] != "}" {
+                let f = lines[k].trim();
+                let is_comment = f.starts_with("//") || f.starts_with("/*") || f.starts_with('*');
+                if !is_comment {
+                    if let Some((field, _)) = f.split_once(':') {
+                        let field = field.trim().trim_end_matches('?');
+                        if !field.is_empty()
+                            && field.chars().all(|c| c.is_alphanumeric() || c == '_')
+                        {
+                            fields.insert(field.to_string());
+                        }
+                    }
+                }
+                k += 1;
+            }
+            out.push((name, fields));
+            i = k;
+        }
+        out
+    }
+
+    #[test]
+    fn the_frontend_types_describe_the_same_fields_the_backend_sends() {
+        let rust = rust_structs(include_str!("types.rs"));
+        let ts = ts_interfaces(include_str!("../../../apps/desktop/src/types.ts"));
+
+        let mut shared = 0;
+        let mut drift = Vec::new();
+        for (name, rust_fields) in &rust {
+            let Some((_, ts_fields)) = ts.iter().find(|(n, _)| n == name) else {
+                continue;
+            };
+            shared += 1;
+            let only_rust: Vec<_> = rust_fields.difference(ts_fields).cloned().collect();
+            let only_ts: Vec<_> = ts_fields.difference(rust_fields).cloned().collect();
+            if !only_rust.is_empty() || !only_ts.is_empty() {
+                drift.push(format!(
+                    "{name}: only in Rust {only_rust:?}, only in TypeScript {only_ts:?}"
+                ));
+            }
+        }
+
+        // A scanner that reads nothing passes every assertion below it.
+        assert!(
+            shared >= 24,
+            "only {shared} types matched by name; the scanner has stopped reading one of the \
+             two files (Rust structs seen: {}, TS interfaces seen: {})",
+            rust.len(),
+            ts.len()
+        );
+        assert!(
+            drift.is_empty(),
+            "the two halves of the wire disagree:\n  {}",
+            drift.join("\n  ")
+        );
+    }
+}
+
+/// The two pure decisions behind a progress bar.
+///
+/// They encode policy — which bound wins, what a terminal row reads, what "unknown" means —
+/// and policy without tests is how a bar ends up reporting 800% on a run nobody changed.
+/// Sibling to `nurture::recovery::session_verdict`, which this repo already treats as a
+/// pure, unit-tested function.
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    fn at(seconds: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(1_800_000_000 + seconds, 0).expect("fixed timestamp")
+    }
+
+    /// A row mid-run: 120 posts wanted, a three-hour horizon, nothing done yet.
+    fn running(videos_done: u32) -> NurtureSessionStatus {
+        NurtureSessionStatus {
+            running: true,
+            phase: NurturePhase::Watching,
+            videos_done,
+            video_target: 120,
+            started_at: Some(at(0)),
+            deadline_at: Some(at(3 * 3600)),
+            ..NurtureSessionStatus::new("fixture")
+        }
+    }
+
+    #[test]
+    fn a_queued_row_with_nothing_to_divide_by_is_unknown_not_zero() {
+        // The distinction the `Option` exists for: an empty track reads as a stall, and a
+        // phone that has not started is not stalled.
+        let queued = NurtureSessionStatus::new("fixture");
+        assert_eq!(queued.progress_fraction(at(0)), None);
+        assert_eq!(queued.governing_bound(at(0)), None);
+    }
+
+    #[test]
+    fn the_video_count_governs_when_it_is_ahead_of_the_clock() {
+        // 60 of 120 posts = 50%, against 6 minutes of a 180-minute horizon = 3.3%.
+        let status = running(60);
+        assert_eq!(status.progress_fraction(at(6 * 60)), Some(0.5));
+        assert_eq!(
+            status.governing_bound(at(6 * 60)),
+            Some(NurtureBound::Videos)
+        );
+    }
+
+    /// The reading a count-only bar gets wrong, and the reason for taking the maximum: this
+    /// session is twelve minutes from ending and a video bar would call it 40%.
+    #[test]
+    fn the_clock_governs_when_it_is_ahead_and_the_bar_follows_it() {
+        let status = running(48); // 40% of the posts…
+        let nearly_over = at(168 * 60); // …but 93% of the horizon.
+        let fraction = status.progress_fraction(nearly_over).expect("known");
+        assert!(
+            (fraction - 168.0 / 180.0).abs() < 1e-9,
+            "the closer bound wins: {fraction}"
+        );
+        assert_eq!(
+            status.governing_bound(nearly_over),
+            Some(NurtureBound::Clock)
+        );
+    }
+
+    #[test]
+    fn a_terminal_row_reads_full_whatever_its_counters_say() {
+        // A run that stopped at 40 of 120 is finished, not 33% done. Leaving its bar short
+        // would read as still working — which is the whole reason `phase` exists.
+        let mut status = running(40);
+        status.finish(crate::Outcome::Partial);
+        assert_eq!(status.progress_fraction(at(60)), Some(1.0));
+        assert_eq!(
+            status.governing_bound(at(60)),
+            None,
+            "a finished session has no bound left to name"
+        );
+    }
+
+    #[test]
+    fn a_failed_row_also_reads_full_because_it_is_over() {
+        // Deliberate: the bar means "this slot is settled", and the *colour* carries the
+        // verdict. A failed phone frozen at 0% would look like one that never started.
+        let mut status = running(0);
+        status.finish(crate::Outcome::Failed);
+        assert_eq!(status.progress_fraction(at(0)), Some(1.0));
+        assert_eq!(status.outcome, Some(crate::Outcome::Failed));
+    }
+
+    #[test]
+    fn the_fraction_never_exceeds_one_even_past_the_deadline() {
+        let status = running(0);
+        assert_eq!(status.progress_fraction(at(10 * 3600)), Some(1.0));
+    }
+
+    #[test]
+    fn a_clock_before_the_start_reads_zero_rather_than_negative() {
+        // Clocks are not monotone across a machine's time changes; a negative fraction would
+        // render as a bar growing leftwards.
+        let status = running(0);
+        assert_eq!(status.progress_fraction(at(-600)), Some(0.0));
+    }
+
+    #[test]
+    fn a_deadline_at_or_before_the_start_is_ignored_rather_than_dividing_by_zero() {
+        let status = NurtureSessionStatus {
+            running: true,
+            phase: NurturePhase::Watching,
+            videos_done: 30,
+            video_target: 120,
+            started_at: Some(at(0)),
+            deadline_at: Some(at(0)),
+            ..NurtureSessionStatus::new("fixture")
+        };
+        assert_eq!(status.progress_fraction(at(60)), Some(0.25));
+        assert_eq!(status.governing_bound(at(60)), Some(NurtureBound::Videos));
+    }
+
+    #[test]
+    fn a_run_with_no_deadline_still_tracks_its_video_count() {
+        let status = NurtureSessionStatus {
+            running: true,
+            phase: NurturePhase::Watching,
+            videos_done: 15,
+            video_target: 60,
+            started_at: Some(at(0)),
+            deadline_at: None,
+            ..NurtureSessionStatus::new("fixture")
+        };
+        assert_eq!(status.progress_fraction(at(60)), Some(0.25));
+        assert_eq!(status.governing_bound(at(60)), Some(NurtureBound::Videos));
+    }
+
+    /// The lead threshold: a clock barely ahead of a zero count must not steal the label.
+    /// Measured on the live fleet — the first thing shown was "còn ~154 phút" on a run whose
+    /// operator had just typed 5 into the video limit.
+    #[test]
+    fn the_video_count_keeps_the_label_until_the_clock_is_meaningfully_ahead() {
+        let just_started = running(0);
+        assert_eq!(
+            just_started.governing_bound(at(2 * 60)),
+            Some(NurtureBound::Videos),
+            "two minutes into three hours is not the clock governing"
+        );
+        assert_eq!(
+            just_started.governing_bound(at(20 * 60)),
+            Some(NurtureBound::Clock),
+            "twenty minutes in with nothing watched, it is"
+        );
+    }
+
+    #[test]
+    fn the_fraction_still_follows_the_clock_while_the_label_says_videos() {
+        // The fill takes the plain maximum; only the sentence waits for the lead.
+        let just_started = running(0);
+        let fraction = just_started.progress_fraction(at(2 * 60)).expect("known");
+        assert!((fraction - 2.0 / 180.0).abs() < 1e-9, "{fraction}");
+        assert_eq!(
+            just_started.governing_bound(at(2 * 60)),
+            Some(NurtureBound::Videos)
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_video_target_still_tracks_the_clock() {
+        let status = NurtureSessionStatus {
+            running: true,
+            phase: NurturePhase::Watching,
+            video_target: 0,
+            started_at: Some(at(0)),
+            deadline_at: Some(at(100)),
+            ..NurtureSessionStatus::new("fixture")
+        };
+        assert_eq!(status.progress_fraction(at(25)), Some(0.25));
+        assert_eq!(status.governing_bound(at(25)), Some(NurtureBound::Clock));
+    }
+
+    /// Monotone, which is what stops a bar jittering backwards while an operator watches it.
+    #[test]
+    fn the_fraction_never_goes_backwards_as_a_run_proceeds() {
+        let mut last = 0.0;
+        for minute in 0..180 {
+            let status = running(minute / 2);
+            let value = status
+                .progress_fraction(at(minute as i64 * 60))
+                .expect("known");
+            assert!(
+                value >= last,
+                "went backwards at minute {minute}: {value} < {last}"
+            );
+            last = value;
+        }
+    }
+
+    #[test]
+    fn finish_marks_the_row_terminal_and_carries_the_verdict() {
+        let mut status = running(5);
+        assert!(status.running);
+        assert!(!status.phase.is_terminal());
+        status.finish(crate::Outcome::Done);
+        assert!(!status.running);
+        assert!(status.phase.is_terminal());
+        assert_eq!(status.outcome, Some(crate::Outcome::Done));
     }
 }

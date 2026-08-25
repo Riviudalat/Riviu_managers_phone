@@ -27,16 +27,6 @@ export function tileStreamStateView(
   return { state: resolved, label: TILE_STREAM_LABELS[resolved] };
 }
 
-export function markDeviceFrameLive(devices: DeviceInfo[], udid: string): DeviceInfo[] {
-  let changed = false;
-  const next = devices.map((device) => {
-    if (device.udid !== udid || device.tileStreamState === "live") return device;
-    changed = true;
-    return { ...device, tileStreamState: "live" as const };
-  });
-  return changed ? next : devices;
-}
-
 export type DevicePlatform = "ios" | "android";
 
 export type HardwareKey =
@@ -76,6 +66,55 @@ export function deviceModelOsLabel(
   return os ? `${device.model} · ${os}` : device.model;
 }
 
+/**
+ * The line under a tile's bold name. When a phone reports no friendly name its `name` is
+ * its model — an Android serial like "23021RAAEG" — so the full "model · OS" caption would
+ * print that serial a *second* time right beneath the name and the tile reads as a cluttered
+ * duplicate. In that case show only the OS ("Android 15"); otherwise the model still adds
+ * information (an iPhone named "iPhone 8 (Global)" over model "iPhone10,1"), so keep it.
+ */
+export function deviceTileSubtitle(
+  device: Pick<DeviceInfo, "name" | "model" | "platform" | "osVersion">,
+): string {
+  return device.name === device.model
+    ? deviceOsLabel(device)
+    : deviceModelOsLabel(device);
+}
+
+/// One phone a group action did not reach, and why.
+export interface GroupInputSkip {
+  udid: string;
+  /// `DeviceBusy` when something else holds the phone, `ActionFailed` when the action itself
+  /// did not work.
+  code: string;
+  /// Set for `DeviceBusy`: who is holding it. This is the field the operator can act on.
+  currentOwner?: string | null;
+  /// Set for `ActionFailed`.
+  message?: string | null;
+}
+
+export interface GroupInputReport {
+  completedUdids: string[];
+  skipped: GroupInputSkip[];
+}
+
+/// Group-sync timing/offset policy (A1). Mirrors `riviu_core::group_sync`. All fields
+/// optional — an absent policy (or `{}`) is the old lockstep behaviour.
+export type DelayPolicy =
+  | { mode: "none" }
+  | { mode: "random"; minMs: number; maxMs: number }
+  | { mode: "staggered"; stepMs: number };
+
+export interface OffsetPolicy {
+  /// Max absolute pixel jitter applied independently to x and y. 0 disables offset.
+  maxPx: number;
+}
+
+export interface GroupSyncPolicy {
+  delay?: DelayPolicy;
+  offset?: OffsetPolicy;
+}
+
 export interface DeviceInfo {
   udid: string;
   name: string;
@@ -92,12 +131,10 @@ export interface DeviceInfo {
   lastError?: string | null;
 }
 
-export type TileSize = "thumbnail" | "medium" | "large" | "extraLarge";
 export type StreamQuality = "low" | "medium" | "high" | "extra";
 
 export interface StreamSettings {
   fps: number;
-  tileSize: TileSize;
   gridQuality: StreamQuality;
   focusQuality: StreamQuality;
 }
@@ -166,23 +203,14 @@ export interface AgentRuntimeView {
 
 export type PageId =
   | "control"
-  | "groups"
-  | "proxy"
   | "material"
   | "apps"
   | "scripts"
   | "jobs"
-  | "sync"
   | "publish"
   | "data"
-  | "team"
-  | "logs"
-  | "account"
   | "api"
-  | "settings"
-  | "nurture"
-  | "login"
-  | "register";
+  | "settings";
 
 /** @deprecated use PageId */
 export type TabId = PageId;
@@ -193,6 +221,19 @@ export interface DeviceMeta {
   tags: string[];
   groupId?: string | null;
   proxyId?: string | null;
+  /** TikTok @handle this phone is logged into, without the leading `@`. Empty if unknown. */
+  handle?: string;
+  /**
+   * What the operator calls this phone (xiaowei "Change Name"). Empty means "use the name
+   * the phone reports" — this is a label in this app's records, never written to the device.
+   */
+  alias?: string;
+  /**
+   * The number written on the phone and on the shelf (xiaowei "Change Number"). `null` means
+   * unnumbered, and the tile then shows its position in the grid instead — which is the very
+   * thing a number replaces, since a position moves when the fleet list changes.
+   */
+  number?: number | null;
 }
 
 export interface DeviceGroup {
@@ -247,6 +288,8 @@ export interface ScheduleItem {
   enabled: boolean;
   lastRunAt?: string | null;
   nextRunAt?: string | null;
+  /// Why the last due tick enqueued nothing, or absent if it enqueued something.
+  lastError?: string | null;
 }
 
 export interface PublishTask {
@@ -364,19 +407,6 @@ export interface OpLog {
   createdAt: string;
 }
 
-export interface LocalUser {
-  id: string;
-  email: string;
-  role: string;
-  createdAt: string;
-}
-
-export interface AuthSession {
-  showAuthUi: boolean;
-  bypassed: boolean;
-  user?: LocalUser | null;
-}
-
 export interface AnalyticsSummary {
   deviceTotal: number;
   deviceReady: number;
@@ -391,12 +421,52 @@ export interface AnalyticsSummary {
   recentLogs: OpLog[];
 }
 
+/**
+ * The part of a window that overrides how a session behaves, when it overrides it at all.
+ *
+ * All five or none: the three rates share the panel's one 100% budget, and a budget assembled
+ * from two sources is one nobody can read off the screen.
+ */
+export interface NurtureWindowBehaviour {
+  numVideos: number;
+  numRounds: number;
+  likeProb: number;
+  commentProb: number;
+  followProb: number;
+}
+
+/**
+ * One stretch of the local day the schedule may run in.
+ *
+ * Times are minutes from local midnight — the number the operator is thinking in when they
+ * type `08:00`. `endMinute <= startMinute` wraps past midnight, which is how `22:00 - 02:00`
+ * is written. `udids` empty means every connected phone, and the editor says so in words.
+ */
+export interface NurtureWindow {
+  id: string;
+  startMinute: number;
+  endMinute: number;
+  everyMinutes: number;
+  durationMinutes: number;
+  udids: string[];
+  /** `null` means "behave like the panel above". */
+  behaviour?: NurtureWindowBehaviour | null;
+}
+
 export interface NurtureSettings {
   baseUrl: string;
   model: string;
+  /**
+   * Never the real key on the way *out* of the backend.
+   *
+   * The key lives in the OS credential store, not in the settings row, and it is not handed to
+   * this page: a load returns the sentinel `__riviu_keep_stored_key__` when one is configured,
+   * and sending that same value back means "leave it alone". Anything else — including an
+   * empty string — is taken literally, so the key can still be replaced or cleared.
+   */
   apiKey: string;
-  inputPricePer1m: number;
-  outputPricePer1m: number;
+  /** Whether a key is stored. The only thing the form can honestly show about it. */
+  hasApiKey?: boolean;
   bundleId: string;
   numVideos: number;
   numRounds: number;
@@ -423,6 +493,15 @@ export interface NurtureSettings {
   scheduleEveryMinutes: number;
   scheduleDurationMinutes: number;
   scheduleUdids: string[];
+  /**
+   * Stretches of the local day the schedule may run in, each with its own cadence.
+   *
+   * Optional because a settings row written before windows existed has no key for it, and
+   * because **empty means the old all-day cadence** rather than "never runs" — see
+   * `decide_single_cadence` in `nurture_schedule.rs`. Anything reading this has to treat
+   * absent and empty the same way.
+   */
+  scheduleWindows?: NurtureWindow[];
   steadyMood?: string;
 
   // Per-feature switches. Separate from the probabilities so pausing a feature does not
@@ -468,6 +547,7 @@ export const LIVE_TUNABLE_FIELDS = new Set<keyof NurtureSettings>([
   "fatigue",
   "timeOfDay",
   "pauseSwipe",
+  "humanLimits",
   "nightStart",
   "nightEnd",
   "recoverDelayMin",
@@ -478,8 +558,6 @@ export const LIVE_TUNABLE_FIELDS = new Set<keyof NurtureSettings>([
   "baseUrl",
   "model",
   "apiKey",
-  "inputPricePer1m",
-  "outputPricePer1m",
   "commentLang",
   "aiDirections",
   "maxCommentWords",
@@ -489,7 +567,7 @@ export const LIVE_TUNABLE_FIELDS = new Set<keyof NurtureSettings>([
 ///
 /// Each reason is a fact about the session, not a policy: it built something out of the
 /// value and cannot rebuild it mid-run.
-export const RESTART_REQUIRED_REASONS: Partial<Record<keyof NurtureSettings, string>> = {
+export const RESTART_REQUIRED_REASONS = {
   numVideos: "Mục tiêu của phiên được tính lúc bắt đầu",
   numRounds: "Mục tiêu của phiên được tính lúc bắt đầu",
   persona: "Mô hình hành vi được dựng một lần từ persona",
@@ -501,7 +579,16 @@ export const RESTART_REQUIRED_REASONS: Partial<Record<keyof NurtureSettings, str
   scheduleEveryMinutes: "Lịch tác động giữa các phiên",
   scheduleDurationMinutes: "Lịch tác động giữa các phiên",
   scheduleUdids: "Lịch tác động giữa các phiên",
-};
+} satisfies Partial<Record<keyof NurtureSettings, string>>;
+
+/**
+ * A field that needs a restart, i.e. one this map has a reason for.
+ *
+ * `satisfies` rather than a type annotation keeps the literal keys, so `RestartBadge` can
+ * only be pointed at a field there is actually a sentence for — a badge on anything else is
+ * a compile error instead of the word "undefined" in a tooltip.
+ */
+export type RestartRequiredField = keyof typeof RESTART_REQUIRED_REASONS;
 
 export interface NurtureApiTestResult {
   udid: string;
@@ -514,9 +601,10 @@ export interface NurtureApiTestResult {
   model: string;
   baseUrlHost: string;
   evidenceMode: string;
+  /** How many *different* frames the picture carried — `1` on a still card, `0` on OCR. */
+  distinctFrames: number;
   promptTokens: number;
   completionTokens: number;
-  usd: number;
 }
 
 export interface NurtureCommentCost {
@@ -526,7 +614,6 @@ export interface NurtureCommentCost {
   baseUrlHost: string;
   promptTokens: number;
   completionTokens: number;
-  usd: number;
   preview: string;
   createdAt: string;
 }
@@ -540,15 +627,57 @@ export interface NurtureCommentAttempt {
   baseUrlHost: string;
   promptTokens: number;
   completionTokens: number;
-  usd: number;
+  /**
+   * What the gateway said this attempt cost, in USD. `null` means it did not say, which
+   * is not the same as free -- the column is nullable so the two can never be confused.
+   */
+  costUsd?: number;
   preview: string;
   captionPreview: string;
   frameSha256: string;
   contextConfidence?: number;
   relevance?: number;
   evidenceSupport?: number;
+  /**
+   * How many *different* frames the model was shown: `1` on a photo post, where the three
+   * samples were one byte-identical picture, `0` on the caption-only path, which sends no
+   * picture, and `null` on rows written before this was recorded.
+   *
+   * Read `evidenceSupport` next to this. Low with `1` means there was one frame of evidence;
+   * low with `3` means the model saw three and still could not ground the comment.
+   */
+  distinctFrames?: number;
+  /**
+   * Slides the traversal paged before the comment was written, duplicates included. `0` on a
+   * post that was never paged; `undefined` on rows from before it was recorded.
+   *
+   * The pair is what says anything: `7` slides with `distinctFrames: 1` means the pager turned
+   * seven times and the stream handed back one picture every time.
+   */
+  carouselSlides?: number;
   createdAt: string;
 }
+
+/// Where one device is in its session — the same enum as Rust's `NurturePhase`.
+///
+/// Exists because a bar drawn from `videosDone` alone reads 0% for the first minute of a
+/// perfectly healthy run (up to 40s waiting for TikTok to reach the foreground, then up to
+/// 30s waiting for the feed) and reads exactly the same 0% for a phone that never opened the
+/// app at all. The two lock-screen phones on 23/08/2026 died inside that window.
+export type NurturePhase =
+  | "queued"
+  | "opening"
+  | "awaitingFeed"
+  | "watching"
+  | "recovering"
+  | "finished";
+
+/// How a session ended. Mirrors Rust's `Outcome`.
+///
+/// This used to be stringified into the first token of a Vietnamese summary sentence and
+/// then dropped, so the panel could not tell a phone that finished 47 videos from one that
+/// failed to open the app, and rendered both as the same grey row.
+export type NurtureOutcome = "done" | "partial" | "failed" | "stopped";
 
 export interface NurtureSessionStatus {
   udid: string;
@@ -562,12 +691,77 @@ export interface NurtureSessionStatus {
   comments: number;
   follows: number;
   lastMessage: string;
-  sessionUsd: number;
+  /// What the comment model reported spending on this device, in tokens.
+  ///
+  /// **Tokens and not money, because money was fabricated.** This was `sessionUsd`: the
+  /// product of two hand-typed per-million prices that were never sent to the API and
+  /// existed in three different values at once, with no UI able to edit them. Tokens come
+  /// from the API's own `usage`, so they are true of whatever model is configured. Multiply
+  /// by the provider's real rate outside the app.
+  sessionPromptTokens: number;
+  sessionCompletionTokens: number;
+  /// Which run this row belongs to. `null` on a row from before run ids existed.
+  ///
+  /// Load-bearing for any fleet total: the status list is keyed by udid and never pruned,
+  /// so it accumulates every phone that has run since the app started. Summing over it
+  /// without filtering counts finished phones from earlier runs, and restarting one phone
+  /// makes an overall bar go *backwards* — that row's counters reset while the others keep
+  /// their finished values.
+  runId: string | null;
+  /// How many devices were started together in this run — the denominator for an overall
+  /// bar. Must be this rather than the number of rows present: a phone that failed before
+  /// producing a second status still occupies a slot.
+  runSize: number;
+  phase: NurturePhase;
+  outcome: NurtureOutcome | null;
+  /// Posts this session is aiming for, snapshotted at start.
+  ///
+  /// Never recompute this from the settings form: `numVideos` is a RESTART-required field,
+  /// so dividing by the live value rescales the bar under a session that never changed —
+  /// lower it from 120 to 15 mid-run and the bar reads 800%.
+  videoTarget: number;
+  /// ISO timestamp: when this device's session began, after its stagger.
+  startedAt: string | null;
+  /// ISO timestamp: when the wall clock ends this session regardless of the video count.
+  ///
+  /// A run ends at **whichever bound arrives first**, and for a manual start this is a
+  /// randomised 2–3 hour horizon. A bar drawn from the video count alone stalls at 40% on a
+  /// run that is minutes from finishing on time, and reads as hung.
+  deadlineAt: string | null;
+}
+
+/// One line a phone said, with the moment it first said it.
+///
+/// `repeats` is why the ring is readable at all: a session polling for the feed emits the
+/// same sentence every second, and collapsing those into a count is what keeps the line
+/// before them from being pushed out. Render it as `×N`, and prefer `at` over `lastAt` —
+/// "stuck here since 14:22" is the reading that helps.
+export interface SessionLogEntry {
+  at: string;
+  lastAt: string;
+  text: string;
+  repeats: number;
+}
+
+/// One phone that has history, for building the row list.
+///
+/// Needed because the idle sweep writes lines for phones that never ran a session, so
+/// "which phones have anything to show" cannot be answered from the status list.
+export interface SessionLogSummary {
+  udid: string;
+  lines: number;
+  last?: SessionLogEntry | null;
 }
 
 export interface NurtureCostSummary {
-  todayUsd: number;
-  totalUsd: number;
+  /// Tokens summed over **every** attempt, sent or rejected — a comment the verification
+  /// gate threw away still burned up to four API calls, and recording that as free is how
+  /// the most expensive failure mode became invisible.
+  todayPromptTokens: number;
+  todayCompletionTokens: number;
+  totalPromptTokens: number;
+  totalCompletionTokens: number;
+  /// Comments actually sent.
   todayComments: number;
   totalComments: number;
 }
@@ -602,6 +796,9 @@ export interface TikTokLinkLine {
 /** Reply chain, or independent top-level comments from each account. */
 export type ThreadMode = "threaded" | "standalone";
 
+/** Chain: message N answers N-1. Star: every message answers message 0. */
+export type ThreadShape = "chain" | "star";
+
 export interface ThreadCampaignRequest {
   requestId: string;
   targets: ResolvedTikTokTarget[];
@@ -611,6 +808,22 @@ export interface ThreadCampaignRequest {
   maxWords: number;
   mode: ThreadMode;
   /**
+   * Chain or star, and only read in `threaded` mode.
+   *
+   * Optional so a caller that never sets it keeps the chain, matching the Rust
+   * `#[serde(default)]`. Star is the shape that lets a run go parallel: every reply
+   * answers message 0, so they no longer have to wait for each other.
+   */
+  shape?: ThreadShape;
+  /**
+   * Split the actors into teams of this size, each team taking its own links.
+   *
+   * Absent means one team holding every actor — the whole selection working the same
+   * link, one phone at a time. The remainder is spread rather than left idle, so twenty
+   * phones at three become 4,4,3,3,3,3.
+   */
+  cohortSize?: number;
+  /**
    * Comments written by the operator, used instead of the AI when non-empty.
    *
    * Optional so a caller that never sets it keeps the AI behaviour, matching the Rust
@@ -619,6 +832,15 @@ export interface ThreadCampaignRequest {
   manualComments?: string[];
   /** Also like each target, once per actor that comments on it. */
   likeTarget?: boolean;
+  /**
+   * @-handles (without the leading `@`) tagged at the front of each thread's opening
+   * comment, as plain text. A handle that belongs to a fleet phone is also added to
+   * `actorUdids` by the caller so that phone joins the post and replies; a handle matching
+   * no phone is tagged in text only. Optional/empty prepends nothing (Rust `#[serde(default)]`).
+   */
+  mentions?: string[];
+  /** Each reply tags the account it answers; ignored for `standalone`. */
+  mentionParent?: boolean;
 }
 
 export type ThreadMessageState =
@@ -638,6 +860,55 @@ export type ThreadCampaignState =
   | "failed"
   | "cancelled";
 
+/**
+ * Numbers the operator wants a post to reach. `null` means "leave this one alone".
+ *
+ * Three different problems, not three of the same one. A like is one per account and an account
+ * cannot like twice, so a like target above the number of accounts that have not liked yet is
+ * unreachable however long it runs. A comment can be repeated, so its ceiling is taste rather
+ * than arithmetic. A view accumulates across passes — measured 24/08/2026 — so a view target is a
+ * schedule.
+ */
+export interface PostTargets {
+  views: number | null;
+  likes: number | null;
+  comments: number | null;
+}
+
+/** Where the post is now. `null` for a number this build or this screen could not state. */
+export interface PostNow {
+  views: number | null;
+  likes: number | null;
+  comments: number | null;
+}
+
+/** One metric's verdict, before anything runs. */
+export interface MetricPlan {
+  /** How far short the post is; `0` when it is already there. */
+  shortfall: number;
+  /** The most this fleet could add, or `null` when nothing bounds it but time. */
+  ceiling: number | null;
+  /** Passes of the whole fleet needed, when that is a meaningful number. */
+  passes: number | null;
+  /** Why it cannot be reached, in the operator's language. `null` means it can. */
+  unreachable: string | null;
+}
+
+/** The whole plan, one entry per metric asked for. */
+export interface ThresholdPlan {
+  views: MetricPlan | null;
+  likes: MetricPlan | null;
+  comments: MetricPlan | null;
+}
+
+/** What one phone read off a post, and what the targets would take. */
+export interface InteractionPostReading {
+  now: PostNow;
+  plan: ThresholdPlan;
+  /** Whether the view count was asked for — it is the slow half. */
+  viewsRead: boolean;
+}
+
 export interface InteractionCampaignSummary {
   id: string;
   requestId: string;
@@ -649,6 +920,25 @@ export interface InteractionCampaignSummary {
   /** Why the campaign ended, when something ended it. Rendered — see InteractionPopup. */
   errorCode: string | null;
   updatedAt: string;
+  /**
+   * What the campaign was, read back out of its stored request.
+   *
+   * Null when the stored request will not parse. The list used to name a row with a slice of
+   * its UUID, so runs against different posts were indistinguishable.
+   */
+  brief: InteractionCampaignBrief | null;
+}
+
+export interface InteractionCampaignBrief {
+  firstAuthor: string | null;
+  firstContentId: string | null;
+  mode: ThreadMode;
+  shape: ThreadShape;
+  cohortSize: number | null;
+  actorCount: number;
+  /** The operator wrote the comments rather than the AI. */
+  manual: boolean;
+  likeTarget: boolean;
 }
 
 export interface InteractionAssignmentRecord {
@@ -660,6 +950,22 @@ export interface InteractionAssignmentRecord {
   state: ThreadMessageState;
   preparedText: string | null;
   errorCode: string | null;
+  /**
+   * What happened to the like on this message, when the campaign asked for one.
+   *
+   * Separate from `errorCode` on purpose: a like that fails must not cost the comment, so
+   * a message that posted is `succeeded` and this is a note beside it — not a failure. It
+   * used to go only to the log, which meant a refused like was invisible.
+   */
+  like?: string | null;
+  /**
+   * What happened to the `@` tags on this message, when the campaign asked for any.
+   *
+   * A tag only becomes a real mention if the driver could pick it out of TikTok's own
+   * suggestion list; one that was merely typed posts as grey text and notifies nobody. The
+   * comment itself looks the same either way, which is why this is reported separately.
+   */
+  mention?: string | null;
 }
 
 export interface InteractionCampaignDetail {
@@ -672,6 +978,14 @@ export interface ThreadPlanAssignment {
   ordinal: number;
   actorUdid: string;
   parentOrdinal: number | null;
+  /**
+   * Which team runs this message.
+   *
+   * The planner has emitted it since cohorts landed and this type never declared it, so the
+   * one field that says which conversation a row belongs to arrived as `undefined` on the
+   * desktop. Pinned on the Rust side by `the_preview_wire_shape_is_what_the_frontend_types_say`.
+   */
+  cohort: number;
 }
 
 export interface ThreadPlan {
@@ -683,6 +997,15 @@ export interface ThreadPreview {
   lines: TikTokLinkLine[];
   plan: ThreadPlan | null;
   validTargetCount: number;
+  /** Teams this plan would run at once — the backend's own `partition_actors`, not a copy. */
+  cohortCount: number;
+  /**
+   * Device streams the app can hold open at once.
+   *
+   * Worth warning about before starting, because exceeding it is a refusal and not a queue:
+   * the cohorts past the limit fail rather than wait.
+   */
+  streamCapacity: number;
 }
 
 export type JsonValue = string | number | boolean | null | JsonObject | JsonValue[];
@@ -936,7 +1259,8 @@ export type DeviceWorkOwner =
   | "script"
   | "repair"
   | "manualControl"
-  | "groupSync";
+  | "groupSync"
+  | "idleSweep";
 
 export interface CommandError {
   code: string;
@@ -1187,6 +1511,15 @@ export interface InstalledApp {
   bundleId: string;
   kind: InstalledAppKind;
   label: string | null;
+  /**
+   * The app's icon as a base64 PNG (48 px edge), from the on-device helper.
+   *
+   * Absent for a phone with no helper, for the system partition (which the driver does not
+   * pay to describe — see `name_apps_with_helper`), and for the handful of packages that
+   * genuinely have no icon. Never a placeholder: the UI draws its own neutral square, so
+   * "no icon" cannot be mistaken for "this is what the app looks like".
+   */
+  iconPngBase64?: string | null;
 }
 
 /**
@@ -1201,3 +1534,86 @@ export interface ShellOutcome {
   stdout: string;
   stderr: string;
 }
+
+/**
+ * What one row of a phone's directory listing is.
+ *
+ * `other` is a real answer — a socket, a fifo, a block device — and not a parse failure.
+ * A browser that dropped rows it did not recognise would show a folder as emptier than it
+ * is, which is the worst kind of wrong for a file manager.
+ */
+export type DeviceFileKind = "file" | "directory" | "symlink" | "other";
+
+/**
+ * One entry in a phone's own directory listing (xiaowei "Preview Mobile Files").
+ *
+ * `modified` is the phone's own `YYYY-MM-DD HH:MM` text, not a parsed date: `ls` prints in
+ * the *device's* timezone with no offset, so turning it into a Date here would invent a
+ * precision the source does not have. `null` means the phone printed `?` — it could not
+ * stat the row, which happens on dangling symlinks.
+ *
+ * `size` is meaningful for files. For a directory it is the inode size (3452 on this
+ * fleet's sdcard), which says nothing about what is inside, so the UI does not show it.
+ */
+export interface DeviceFileEntry {
+  name: string;
+  kind: DeviceFileKind;
+  size: number;
+  modified: string | null;
+  linkTarget: string | null;
+}
+
+/** What the phone had on its clipboard (xiaowei "Export Clipboard"). */
+export interface ClipboardRead {
+  /** The phone's own MIME description, e.g. `text/plain`. */
+  contentType: string;
+  /** Decoded as text. Empty for non-text content, where `bytes` still says how much. */
+  text: string;
+  bytes: number;
+}
+
+/**
+ * Everything that arrives on `riviu://event`.
+ *
+ * Mirrors `AppEvent` in `crates/core/src/events.rs`, and the mirror is checked:
+ * `the_event_union_matches_the_variants_this_enum_sends` reads the `type` literals out of
+ * this file and compares them to the enum's variants, so renaming one half fails the build
+ * on the other. Before the union existed, six subscribers each narrowed `unknown` with their
+ * own `as` cast, and three of them were narrowing to field names the wire never sent.
+ */
+export type AppEvent =
+  | { type: "devicesUpdated"; devices: DeviceInfo[] }
+  | { type: "deviceUpdated"; device: DeviceInfo }
+  | { type: "jobUpdated"; job: JobRecord }
+  | { type: "flowUpdated"; flowId: string; revision: number }
+  | { type: "flowRunUpdated"; runId: string; revision: number }
+  | { type: "interactionUpdated"; campaignId: string; revision: number }
+  | { type: "wdaExpiryWarning"; udid: string; daysRemaining: number }
+  | { type: "nurtureStatus"; status: NurtureSessionStatus };
+
+/**
+ * Narrow an untyped payload off the Tauri channel.
+ *
+ * The channel itself is untyped, so something has to make the first assertion. Doing it once
+ * here — where the `type` tag is actually checked against the known set — is the difference
+ * between one unchecked cast and one per subscriber.
+ */
+export function asAppEvent(payload: unknown): AppEvent | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const tag = (payload as { type?: unknown }).type;
+  return typeof tag === "string" && (APP_EVENT_TYPES as readonly string[]).includes(tag)
+    ? (payload as AppEvent)
+    : null;
+}
+
+/** The tag of every `AppEvent`. Exported so the Rust-side pin can read it. */
+export const APP_EVENT_TYPES = [
+  "devicesUpdated",
+  "deviceUpdated",
+  "jobUpdated",
+  "flowUpdated",
+  "flowRunUpdated",
+  "interactionUpdated",
+  "wdaExpiryWarning",
+  "nurtureStatus",
+] as const;

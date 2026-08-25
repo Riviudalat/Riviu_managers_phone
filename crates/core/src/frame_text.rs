@@ -8,6 +8,17 @@ use crate::CommentOcrObservation;
 #[async_trait]
 pub trait FrameTextSource: Send + Sync {
     async fn recognize(&self, frame: &[u8]) -> anyhow::Result<Vec<CommentOcrObservation>>;
+
+    /// Which recogniser produced these observations, recorded with the evidence.
+    ///
+    /// Filed alongside a comment's locator identity, so a stored identity can be read back
+    /// knowing whether Vision or Windows Media OCR drew the boxes -- the two do not agree on
+    /// character-level bounds, and an identity is only comparable against its own version.
+    /// It belongs on the source rather than on a free function because it *is* the source's
+    /// identity; a free function is what tied the interaction campaign to a desktop module.
+    fn locator_version(&self) -> &'static str {
+        "none"
+    }
 }
 
 #[derive(Debug, Default)]

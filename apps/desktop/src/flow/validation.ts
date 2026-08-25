@@ -6,6 +6,7 @@ import type {
   JsonObject,
   JsonValue,
 } from "../types";
+import { describeError } from "../describeError";
 
 const ACTION_KINDS = new Set<ActionKind>([
   "start",
@@ -84,7 +85,7 @@ export function normalizeFlowIssues(error: unknown): FlowValidationIssue[] {
     if (issues.length > 0) return issues;
   }
   if (isCommandError(error)) return [{ ...error }];
-  return [{ code: "ValidationTransportFailed", message: errorMessage(error) }];
+  return [{ code: "ValidationTransportFailed", message: describeError(error) }];
 }
 
 export function isFlowDocumentV2(value: unknown): value is FlowDocumentV2 {
@@ -180,6 +181,3 @@ function numberIssue(field: string, nodeId?: string): FlowValidationIssue {
   };
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}

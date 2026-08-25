@@ -13,6 +13,16 @@ pub const OPEN_URL_TIMEOUT_MS: u32 = 10_000;
 pub enum ActiveTransport {
     LegacyUsbmuxTransport,
     RsdTransport,
+    /// adb, plus the uiautomator2 server reached over `adb forward`.
+    ///
+    /// Added when Android joined the Flow qualification path. A new variant is additive
+    /// on both sides of the persistence boundary: no stored row can contain `adb`, so
+    /// nothing historical fails to decode, and no existing snapshot's serialised value
+    /// changes — which matters because this value is hash material for
+    /// `qualified_geometry_profile_id`. Reusing `legacyUsbmuxTransport` for a phone on
+    /// adb would have avoided the variant by writing something untrue into a record whose
+    /// whole purpose is identity.
+    AdbTransport,
     Mock,
 }
 

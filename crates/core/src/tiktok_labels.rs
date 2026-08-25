@@ -50,6 +50,97 @@
 pub enum TikTokControl {
     /// The "For You" / `Đề xuất` feed tab.
     FeedTab,
+    /// The button that declines a modal TikTok puts in the way — `Not now`.
+    ///
+    /// Only ever the *declining* option, which is what makes tapping it safe without
+    /// knowing which dialog is up: declining changes no setting and no account, and the
+    /// dialog simply comes back next time. The affirmative button is deliberately not
+    /// catalogued — there is no dialog this project wants to say yes to on its own.
+    ///
+    /// Worth naming why it matters: a modal owns the whole accessibility tree. Measured
+    /// 18/08/2026 on an SM-G955U1 sitting behind "Save login for next time?", the entire
+    /// dump was one `content-desc` of `Dialog` — so the feed tab, the Home tab and the
+    /// action rail were all equally invisible and the session could only report that it
+    /// never saw a feed.
+    DialogDismiss,
+    /// The declining button on TikTok's new-user **journey** — `Skip`.
+    ///
+    /// Not the same thing as [`Self::DialogDismiss`], and giving it its own variant is the
+    /// point. A journey page is not a modal over the feed: it is
+    /// `com.ss.android.ugc.aweme.journey.NewUserJourneyActivity`, a full activity the app
+    /// puts in front of the feed and keeps there. `Not now` is nowhere on it, so the
+    /// modal decline could not clear it, and Back does not either — measured below.
+    ///
+    /// **Measured 23/08/2026 on five phones at once** — 9889db374744474635,
+    /// 98895a3355424e484f, ce03171392f9390c01, ce031713dd735a1103, ce051715ac247a3f01, all
+    /// `com.ss.android.ugc.trill` 38.3.2 in English. Six of the fourteen phones attached
+    /// that day were sitting on this page, and the five dumped were identical in every
+    /// label. The page reads *"TikTok is better with friends!"* over a Facebook
+    /// friend-sync pitch, and its decline is `android.widget.Button` with `text="Skip"`
+    /// and no `content-desc`, so this is a [`LabelMatch::Text`].
+    ///
+    /// **What makes it safe is what sits beside it.** `Skip` has a sibling `Sync` (the
+    /// same page) and, one step later, `Find friends` (the confirmation dialog) — both
+    /// affirmative, both of which would hand a real account's friend list to TikTok. So
+    /// this must stay an *exact* match on the decline. Never widen it to a substring: a
+    /// `Contains("Skip")` would also match the confirmation dialog's title
+    /// *"Skip finding Facebook friends?"*, which is a `TextView` and not tappable, and the
+    /// locator returns the first hit rather than the button.
+    ///
+    /// One label clears **two** consecutive steps, which is why there is no separate
+    /// variant for the confirmation: tapping `Skip` on the page raises the dialog
+    /// *"Skip finding Facebook friends?"*, whose decline is also a `Button` reading
+    /// `Skip` — no resource id on that one. Same string, same attribute, so the same
+    /// locator dismisses both in turn.
+    JourneySkip,
+    /// The way out of the journey's last page — `Done`.
+    ///
+    /// The suggested-follow list, *"Your friends on TikTok"*, reached after
+    /// [`Self::JourneySkip`] has cleared the two friend-sync steps. It offers no decline
+    /// at all: every row carries its own `Follow` / `Remove` pair and the only control
+    /// that leaves is a full-width `Button` reading `Done`.
+    ///
+    /// **Back is not an alternative here, and that was measured rather than assumed.** One
+    /// `KEYCODE_BACK` on this page changed nothing — the dump before and after was
+    /// byte-identical at 47,509 bytes, same activity, same window id. An onboarding page
+    /// that swallows Back is exactly the shape that strands a phone forever.
+    ///
+    /// **`Done` does not follow anybody, and this is the measurement that mattered.** The
+    /// repo's own rule is that a measured label is not a safe label, and a button on a
+    /// screen full of `Follow` buttons is precisely where that bites. Measured on
+    /// 9889db374744474635, 23/08/2026: the page offered five accounts, `Done` was tapped,
+    /// and the account's profile then read **Following 1** — `hương phạm`, a follow that
+    /// predated the test — with all five suggestions still showing an untapped `Follow`
+    /// in the Following screen's own suggestion strip. So `Done` dismisses; it does not
+    /// accept on the account's behalf.
+    JourneyDone,
+    /// The control that reveals comments TikTok has hidden — `View folded comments`.
+    ///
+    /// Not a tidiness feature. TikTok folds comments it considers "similar to others
+    /// flagged by our community", and it does this to these accounts progressively: the
+    /// first few comments on a post are visible and later ones are not. A reply looking
+    /// for its parent then scrolls to the end of a list the parent is not in, and refuses
+    /// with `reply_parent_not_found` — which is correct, and useless, because the parent
+    /// is one tap away.
+    ///
+    /// Tapping it is safe in the way that matters: it reveals, it does not post, follow or
+    /// subscribe anything. What it changes is what the *account* can see, not what it does.
+    FoldedComments,
+    /// The post's sound strip — `Original sound by <creator>`.
+    ///
+    /// Not something to tap. It is read for its *value*, because it is the one description
+    /// on the rail that differs between two ordinary posts: comments and shares both read
+    /// `0` on a low-engagement feed, so a fingerprint built from them alone cannot tell two
+    /// cards apart and every swipe looks unproven. Measured 18/08/2026 — see
+    /// `nurture::hierarchy::PostFingerprint`.
+    SoundLink,
+    /// The bottom bar's Home tab — the way *back* to the feed from anywhere else.
+    ///
+    /// Distinct from [`Self::FeedTab`], which is a tab *inside* the feed and is therefore
+    /// only visible once you are already there. A phone parked on Profile, Shop or Inbox
+    /// shows this one and not that one, and telling them apart is the difference between
+    /// a session that recovers and one that waits thirty seconds and gives up.
+    HomeTab,
     /// The badge that marks a card as a **photo post** rather than a video.
     ///
     /// The gate for paging sideways, and it has to be this rather than the page
@@ -129,6 +220,45 @@ pub enum TikTokControl {
     /// **Measured** on a Redmi Note 12 (`trill` 46.3.3, vi) 13/08/2026 — see AGENTS.md 9.36.
     /// `None` on `musically`/en, which has not been looked at.
     ProfileTab,
+    /// The **author's** profile link on the action rail. Embeds the author name, and unlike
+    /// [`Self::Follow`] it is there whether or not this account already follows them.
+    ///
+    /// That difference is the whole reason it exists. `read_author_label` used to read the
+    /// author only out of the Follow button, so on a post by a creator the account already
+    /// follows — or on the account's own post — there was no button, no author, and the
+    /// arrival check refused a perfectly good open as `target_open_no_baseline`. The gate is
+    /// right to refuse when it cannot tell one post from another; it just had only one place
+    /// to look.
+    ///
+    /// **Measured 24/08/2026** on `.../@.lt.gi.mang.v/photo/7668947001618320660`, the same
+    /// post before and after tapping Follow on `ce051715ac247a3f01`
+    /// (`trill` en, SM-G950F): with Follow present the rail carried both
+    /// `content-desc="Follow Đà Lạt Gói Mang Về"` and
+    /// `content-desc="Đà Lạt Gói Mang Về profile"`; after following, the first was gone and
+    /// the second unchanged. `musically`/en (`ce11171beb408a1501`) reads identically.
+    ///
+    /// **The two builds put the name on opposite sides**, which is why
+    /// `bare_author_label` strips by the catalogued needle rather than by a fixed prefix:
+    /// English is `<tên> profile`, Vietnamese is `Hồ sơ <tên>`.
+    ///
+    /// The space in the needle is load-bearing in both, for the same reason it is in
+    /// `Follow `: the bottom bar carries our *own* profile tab as a bare `Profile` / `Hồ sơ`,
+    /// description matching is case-insensitive, and a match on that would read the wrong
+    /// account's name as the author of the post.
+    AuthorProfileLink,
+    /// The like button **that carries the count**, which is not the one [`Self::Like`] finds.
+    ///
+    /// Measured 24/08/2026 on `ce051715ac247a3f01` (`trill` en 38.3.2): the action rail holds
+    /// three like-ish nodes — `content-desc="Like"` on an `ImageView` (what `Like` matches,
+    /// and it has no number), `content-desc="Like video. 22 likes"` on the `Button`, and
+    /// `content-desc="Like or undo like"` once per comment row. Only the middle one states a
+    /// total, and `Contains("likes")` matches it alone: `liked` and `like` are different
+    /// words, so neither of the others contains it.
+    ///
+    /// `None` on the Vietnamese set: the string is a translation and translations are
+    /// measured here, never derived. Until somebody dumps a vi rail, a like *threshold*
+    /// refuses on that build rather than reading a number it guessed.
+    LikeCount,
     /// Advances out of the picker's edit step toward the post screen.
     ///
     /// **Not measured.** Everything after `Tiếp` is unmeasured — see AGENTS.md 9.10, the
@@ -187,7 +317,15 @@ impl TikTokControl {
     /// generating enum and array together. Until then, treat `ALL` as hard to drift rather
     /// than impossible — which is still a long way from the hand-written list it replaced,
     /// where a new control was simply never checked.
-    pub const ALL: [Self; 23] = [
+    ///
+    /// **That drift had already happened, and this is the repair.** Adding
+    /// [`Self::JourneySkip`] found four variants — `HomeTab`, `SoundLink`, `DialogDismiss`
+    /// and `FoldedComments` — that carried ordinals 23–26 and were absent from this array,
+    /// so `no_entry_carries_an_empty_label` had never checked a single one of them. They
+    /// are here now, the ordinals run 0–28 with no holes, and `every_control_appears_in_all`
+    /// is finally strong enough to notice: with `seen` sized from this array, a variant
+    /// whose ordinal exceeds it now panics on the index instead of passing quietly.
+    pub const ALL: [Self; 31] = [
         Self::FeedTab,
         Self::PhotoBadge,
         Self::Like,
@@ -206,11 +344,19 @@ impl TikTokControl {
         Self::PickerMultiSelect,
         Self::PickerNext,
         Self::ProfileTab,
+        Self::AuthorProfileLink,
+        Self::LikeCount,
         Self::ComposerNext,
         Self::PostButton,
         Self::PostDeleteMenu,
         Self::PostDelete,
         Self::PostDeleteConfirm,
+        Self::HomeTab,
+        Self::SoundLink,
+        Self::DialogDismiss,
+        Self::FoldedComments,
+        Self::JourneySkip,
+        Self::JourneyDone,
     ];
 
     /// A stable position per variant, matched exhaustively on purpose.
@@ -244,6 +390,14 @@ impl TikTokControl {
             Self::PostDeleteMenu => 20,
             Self::PostDelete => 21,
             Self::PostDeleteConfirm => 22,
+            Self::HomeTab => 23,
+            Self::SoundLink => 24,
+            Self::DialogDismiss => 25,
+            Self::FoldedComments => 26,
+            Self::JourneySkip => 27,
+            Self::JourneyDone => 28,
+            Self::AuthorProfileLink => 29,
+            Self::LikeCount => 30,
         }
     }
 }
@@ -339,6 +493,23 @@ pub struct TikTokLabels {
     /// keyed by this value rather than merely recording it.
     pub measured_app_version: &'static str,
     feed_tab: Option<LabelMatch>,
+    /// The bottom bar's Home tab. `None` means a session that finds TikTok on another tab
+    /// cannot get back to the feed and will refuse rather than swipe somewhere unknown.
+    home_tab: Option<LabelMatch>,
+    /// The sound strip, matched by its stable prefix and read for its whole value.
+    sound_link: Option<LabelMatch>,
+    /// The decline button on a modal. `None` means modals are not cleared on this build.
+    dialog_dismiss: Option<LabelMatch>,
+    /// The new-user journey's `Skip`. `None` means a phone that lands in the onboarding
+    /// journey on this build stays there — it is not a screen any other label can clear.
+    journey_skip: Option<LabelMatch>,
+    /// The journey's final `Done`. `None` for the same reason, and with the same cost:
+    /// the suggested-follow page has no decline and ignores Back, so without this label
+    /// the last step of the journey is a dead end.
+    journey_done: Option<LabelMatch>,
+    /// The `View folded comments` control, in `text`. `None` means a folded parent stays
+    /// unreachable on this build, which is a refusal rather than a wrong reply.
+    folded_comments: Option<LabelMatch>,
     /// Matched on the node's rendered `text`, not its `content-desc`: measured as a
     /// plain `TextView` reading `Ảnh` beside the caption, with no description at all.
     photo_badge: Option<LabelMatch>,
@@ -368,6 +539,18 @@ pub struct TikTokLabels {
     /// unique: every comment row has one, and picking the wrong one posts the reply
     /// under a stranger's comment. Match it, then choose by geometry
     /// (`crate::interaction_hierarchy`).
+    /// The drawer's Send button **when this build renders it as a string**.
+    ///
+    /// Normally version-keyed and absent here — see the module docs. But `keyed by
+    /// version` describes the *reason*, not a law: 46.3.3 and 46.4.3 leave the control as
+    /// an unresolved `@2131…` reference, which changes on every rebuild, while 38.3.2
+    /// renders `Post comment`. A string is language-keyed by nature, so writing it into
+    /// the version table would have told a Vietnamese 38.3.2 phone to look for English.
+    ///
+    /// [`TikTokControls::label`] takes the resource id when there is one and this
+    /// otherwise, so a build that has both keeps the id — which is the one that cannot be
+    /// wrong about the language.
+    comment_send: Option<LabelMatch>,
     comment_reply: Option<LabelMatch>,
     /// The composer opener in the bottom bar.
     composer_open: Option<LabelMatch>,
@@ -383,6 +566,12 @@ pub struct TikTokLabels {
     picker_tab_photos: Option<LabelMatch>,
     picker_multi_select: Option<LabelMatch>,
     picker_next: Option<LabelMatch>,
+    /// The author's profile link on the rail — see [`TikTokControl::AuthorProfileLink`].
+    /// `None` means this build has no second source for the author name and a followed post
+    /// still cannot be told apart from any other.
+    author_profile_link: Option<LabelMatch>,
+    /// The like control that states a total — see [`TikTokControl::LikeCount`].
+    like_count: Option<LabelMatch>,
     /// Our own profile tab. `Exact` when measured — see [`TikTokControl::ProfileTab`].
     profile_tab: Option<LabelMatch>,
     composer_next: Option<LabelMatch>,
@@ -410,6 +599,12 @@ impl TikTokLabels {
     fn translated(&self, control: TikTokControl) -> Option<LabelMatch> {
         match control {
             TikTokControl::FeedTab => self.feed_tab,
+            TikTokControl::HomeTab => self.home_tab,
+            TikTokControl::SoundLink => self.sound_link,
+            TikTokControl::DialogDismiss => self.dialog_dismiss,
+            TikTokControl::JourneySkip => self.journey_skip,
+            TikTokControl::JourneyDone => self.journey_done,
+            TikTokControl::FoldedComments => self.folded_comments,
             TikTokControl::PhotoBadge => self.photo_badge,
             TikTokControl::Like => self.like,
             TikTokControl::Liked => self.liked,
@@ -426,13 +621,16 @@ impl TikTokLabels {
             TikTokControl::PickerMultiSelect => self.picker_multi_select,
             TikTokControl::PickerNext => self.picker_next,
             TikTokControl::ProfileTab => self.profile_tab,
+            TikTokControl::AuthorProfileLink => self.author_profile_link,
+            TikTokControl::LikeCount => self.like_count,
             TikTokControl::ComposerNext => self.composer_next,
             TikTokControl::PostButton => self.post_button,
             TikTokControl::PostDeleteMenu => self.post_delete_menu,
             TikTokControl::PostDelete => self.post_delete,
             TikTokControl::PostDeleteConfirm => self.post_delete_confirm,
-            // Version-keyed, not language-keyed. See the module docs.
-            TikTokControl::CommentSend => None,
+            // Only for a build that renders it as text; the `@2131…` builds carry it in
+            // the version table and are resolved before this is ever reached.
+            TikTokControl::CommentSend => self.comment_send,
         }
     }
 }
@@ -462,6 +660,31 @@ impl TikTokResourceLabels {
 
 /// Every resource-id set that has been read off a device, by app version.
 pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
+    // The four `com.zhiliaoapp.musically` phones on this farm. Both versions here leave the
+    // Send button as an unresolved reference, the way 46.3.3 and 46.4.3 do — unlike
+    // `trill` 38.3.2, which renders it and is therefore described by language instead.
+    //
+    // Identified by the contract rather than by position: of the four `@2131…` controls in
+    // this drawer, `@2131823247` (`id/cx0`, [911,1305][1048,1389]) is the only one whose
+    // `enabled` is **false with the field empty and true once it holds text**. The other
+    // three stay enabled throughout, and the probe's own guess — the first thing to appear
+    // alongside the text — picked an emoji tile.
+    TikTokResourceLabels {
+        package: "com.zhiliaoapp.musically",
+        app_version: "46.2.1",
+        measured_on: "SM-G950F ce0517152c898c6f0d, Android 9, 18/08/2026 (probe --measure-comment)",
+        comment_send: Some(LabelMatch::Exact("@2131823247")),
+    },
+    TikTokResourceLabels {
+        package: "com.zhiliaoapp.musically",
+        app_version: "46.2.42",
+        measured_on: "SM-G950F ce0517155ab38c390d, Android 9, 18/08/2026 (probe --measure-comment)",
+        // The same id as 46.2.1, measured separately rather than assumed — and worth an
+        // entry of its own even so. The id moving between 46.3.3 and 46.4.3 is what this
+        // table exists for; the id *not* moving between two other versions is not evidence
+        // that it never does, and a lookup keyed by version cannot guess.
+        comment_send: Some(LabelMatch::Exact("@2131823247")),
+    },
     TikTokResourceLabels {
         package: "com.ss.android.ugc.trill",
         app_version: "46.3.3",
@@ -492,14 +715,75 @@ pub struct TikTokControls {
     resources: Option<&'static TikTokResourceLabels>,
 }
 
+/// A set with nothing measured, for the tests that check what a refusal does.
+///
+/// Exists because the refusal paths used to be exercised by pointing at a real catalogue
+/// entry that happened to be missing the control — and then the control got measured, and
+/// the test stopped testing anything it was named for. Measuring a label should never
+/// silently delete a refusal's only coverage.
+///
+/// `#[cfg(test)]`: nothing in the product may reach for a set that refuses everything.
+#[cfg(test)]
+pub(crate) fn nothing_measured() -> TikTokControls {
+    static NOTHING: TikTokLabels = TikTokLabels {
+        package: "com.example.unmeasured",
+        language: "zz",
+        measured_on: "nothing — this set exists to be refused",
+        measured_app_version: "",
+        feed_tab: None,
+        home_tab: None,
+        dialog_dismiss: None,
+        journey_skip: None,
+        journey_done: None,
+        // Never seen on this build. Absent means a folded parent is refused rather than
+        // replied to blind — measure it with `label_scout <serial> --no-launch` while the
+        // control is on screen; it is in `text`.
+        folded_comments: None,
+        sound_link: None,
+        photo_badge: None,
+        like: None,
+        liked: None,
+        comments: None,
+        share: None,
+        bookmark: None,
+        follow: None,
+        live_room: None,
+        comment_send: None,
+        comment_reply: None,
+        composer_open: None,
+        picker_album_menu: None,
+        picker_tab_all: None,
+        picker_tab_photos: None,
+        picker_multi_select: None,
+        picker_next: None,
+        author_profile_link: None,
+        like_count: None,
+        profile_tab: None,
+        composer_next: None,
+        post_button: None,
+        post_delete_menu: None,
+        post_delete: None,
+        post_delete_confirm: None,
+    };
+    TikTokControls {
+        translated: &NOTHING,
+        resources: None,
+    }
+}
+
 impl TikTokControls {
     /// The label for a control, or `None` when it was never measured for this
     /// device. `None` means refuse — do not substitute another language or version.
     pub fn label(&self, control: TikTokControl) -> Option<LabelMatch> {
         match control {
-            // Version-keyed controls come only from the resource table, so an
-            // unmeasured app version refuses *these* without refusing the rest.
-            TikTokControl::CommentSend => self.resources.and_then(|set| set.resource(control)),
+            // The resource id wins when this build has one: an id is language-proof, and a
+            // string is not. Falling through to the translation is what lets a build that
+            // *resolved* the reference — 38.3.2 renders `Post comment` — be described at all,
+            // rather than refusing every phone in the fleet because no `@2131…` was found.
+            TikTokControl::CommentSend => self
+                .resources
+                .and_then(|set| set.resource(control))
+                .or_else(|| self.translated.translated(control)),
             other => self.translated.translated(other),
         }
     }
@@ -523,24 +807,59 @@ impl TikTokControls {
         self.resources.map(|set| set.app_version)
     }
 
-    /// One line of provenance for a session log, naming both keys.
+    /// One line of provenance for a session log, naming what actually resolved.
+    ///
+    /// **This used to warn on exactly the phones that had nothing wrong.** The old version
+    /// branched on whether a *resource set matched*, not on whether anything was missing —
+    /// so it printed "CHƯA đo resource id cho phiên bản app này" whenever
+    /// [`TIKTOK_RESOURCE_SETS`] had no entry for the device's version, regardless of whether
+    /// that build needs a resource id at all.
+    ///
+    /// Measured on this farm, 23/08/2026, and the reading was inverted: the eleven
+    /// `trill` 38.3.2 phones got the alarming line, because that table has no 38.3.2 entry —
+    /// while `trill/en` carries `comment_send: Some("Post comment")` and therefore needs no
+    /// id, and [`Self::label`] resolves it from the translation. The three `musically` phones
+    /// got the reassuring version line, and they are the ones whose Send button is an
+    /// unresolved `@2131…` that *only* a matching resource set can name. The loudest warning
+    /// in the log was pointed at the healthy majority.
+    ///
+    /// So it now reports the Send button by **what resolved it**, which is the only
+    /// version-keyed control there is ([`TikTokResourceLabels::resource`] matches nothing
+    /// else). The genuine failure — no id and no translation — keeps a warning, and it is now
+    /// the only case that gets one.
+    ///
+    /// This is also the one reader of [`TikTokLabels::measured_app_version`]. Until now that
+    /// field was written for three label sets and read by no production code, while its own
+    /// doc called itself "a note for the next reader" — a note nobody was shown. It belongs
+    /// here: translations are applied to *any* version of a (package, language) pair, so the
+    /// version they were actually read on is a real caveat about every phone using them.
     pub fn provenance(&self) -> String {
-        match self.resources {
-            Some(resources) => format!(
-                "{} / {} ({}); resource id đo trên {} ({})",
-                self.package(),
-                self.language(),
-                self.measured_on(),
-                resources.app_version,
-                resources.measured_on
-            ),
-            None => format!(
-                "{} / {} ({}); CHƯA đo resource id cho phiên bản app này",
-                self.package(),
-                self.language(),
-                self.measured_on()
+        let mut line = format!(
+            "{} / {} ({})",
+            self.package(),
+            self.language(),
+            self.measured_on()
+        );
+        let measured_app_version = self.translated.measured_app_version;
+        if !measured_app_version.is_empty() {
+            line.push_str(&format!(", nhãn đo trên app {measured_app_version}"));
+        }
+        match (
+            self.resources,
+            self.translated.translated(TikTokControl::CommentSend),
+        ) {
+            (Some(resources), _) => line.push_str(&format!(
+                "; nút Gửi theo resource id, đo trên app {} ({})",
+                resources.app_version, resources.measured_on
+            )),
+            (None, Some(_)) => {
+                line.push_str("; nút Gửi đọc theo chữ — bản build này không cần resource id")
+            }
+            (None, None) => line.push_str(
+                "; CHƯA đo được nút Gửi cho bản app này — phiên sẽ bỏ bình luận cả phiên",
             ),
         }
+        line
     }
 }
 
@@ -582,6 +901,23 @@ pub fn parse_version_name(dumpsys: &str) -> Option<&str> {
     })
 }
 
+/// The build number out of `dumpsys package <pkg>`.
+///
+/// The Android counterpart of an iOS `CFBundleVersion`, and read for the same reason: a
+/// `DeviceCapabilitySnapshot` records a target app as name *and* build, because a
+/// hot-fixed build can ship under an unchanged `versionName`.
+///
+/// Unlike `versionName` this does not sit alone on its line — every phone on this fleet
+/// prints `versionCode=380302 minSdk=21 targetSdk=34` — so the value is taken up to the
+/// first space rather than to the end of the line.
+pub fn parse_version_code(dumpsys: &str) -> Option<&str> {
+    dumpsys.lines().find_map(|line| {
+        let at = line.find("versionCode=")? + "versionCode=".len();
+        let value = line[at..].split_whitespace().next()?;
+        (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())).then_some(value)
+    })
+}
+
 /// Every label set that has actually been read off a device.
 ///
 /// Keep this list honest: an entry means somebody dumped the accessibility tree on
@@ -596,19 +932,105 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // Not recorded at the time; that is the gap `measured_app_version` closes.
         measured_app_version: "",
         feed_tab: Some(LabelMatch::Exact("For You")),
-        // Never measured on this build; the S8+ fleet work never looked at a photo
-        // post. Absent means no sideways swipe, which is the safe direction.
-        photo_badge: None,
+        // Read off the bottom bar on an SM-G950F on 18/08/2026, on a phone parked on its
+        // Profile tab — the same `Home` the SEA build shows, which is why it is written
+        // down rather than assumed from it.
+        home_tab: Some(LabelMatch::Exact("Home")),
+        // `Sound: Drops of Light by everyoneyusuke`, read off ce0517155ab38c390d's feed on
+        // 18/08/2026. Matched on the prefix because the rest is the track and its author,
+        // which is exactly the part that has to differ between two cards for a swipe to be
+        // proved. Not the same string as the SEA build's `Original sound by`, which is why
+        // each set is measured rather than shared.
+        sound_link: Some(LabelMatch::Contains("Sound:")),
+        // `Not now`, read as `text` with no `content-desc`, off ce0717171c2a64d50d held
+        // behind "Turn on precise location" on 19/08/2026 — the same string and the same
+        // attribute the SEA build carries, now measured here rather than assumed from there.
+        //
+        // The earlier note said this build's dialog had "no decline worth tapping", and that
+        // was true of the dialog it happened to produce that day: "Get updates sent to your
+        // email?" labels only its *accept*. It was a statement about one dialog, and it read
+        // as a statement about the build. This one has a labelled decline, so the measured
+        // decline is available again and Back stays as the fallback for the dialogs that
+        // have none — which is exactly the split `await_feed` documents.
+        //
+        // Safe by construction: `Not now` declines. It cannot grant anything, which is the
+        // property that made the email dialog's labelled button unusable.
+        dialog_dismiss: Some(LabelMatch::Text("Not now")),
+        // Not measured on `musically`. The three phones on this build were on the feed and
+        // on splash when the journey was dumped on 23/08/2026, so there was nothing to
+        // read — and the four phones that met an unmeasured dialog on 19/08/2026 are the
+        // standing reminder that a string measured on one build is not a fact about
+        // another. Copy the `trill/en` values here only after seeing them on a
+        // `musically` phone's own journey page.
+        journey_skip: None,
+        journey_done: None,
+        // Never seen on this build. Absent means a folded parent is refused rather than
+        // replied to blind — measure it with `label_scout <serial> --no-launch` while the
+        // control is on screen; it is in `text`.
+        folded_comments: None,
+        // **`Photo`, in `text`, `resource-id` `…:id/tv_label`, `clickable=false`.**
+        //
+        // Measured 23/08/2026 across **two** phones on 46.2.1 — ce0717171c2a64d50d (4 of 14
+        // cards) and ce11171beb408a1501 (1 of 10) — by swiping the feed and dumping every
+        // card. Five photo posts, all with the same node immediately to the right of
+        // `…:id/title`, rendered as a `⧉ Photo` pill beside the author name and confirmed
+        // by eye on three of them. **Nineteen non-photo cards carried no `Photo` node
+        // anywhere**, including a LIVE shopping card and a video ad, so there were no false
+        // positives to weigh against it.
+        //
+        // Deliberately more evidence than the `trill/en` badge got: that one was enabled off
+        // a single screen on 18/08/2026 and had to be switched off the same day. Two phones
+        // and a set of negative controls is the bar this file should have been held to then.
+        //
+        // **The y position moves, so this must be located and never tapped at a fraction.**
+        // The five sightings sat at y 1332, 1566, 1698, 1704 and 1887 — the caption row
+        // shifts with how much caption is expanded, and cards 13 and 14 of one sweep were
+        // the *same post* at two different heights.
+        //
+        // **Measured on 46.2.1 only, and 46.2.42 is blocked on the network rather than on
+        // anything in this repo.** ce0517155ab38c390d is the only 46.2.42 phone on the farm
+        // (surveyed 23/08/2026: eleven `trill` 38.3.2, two `musically` 46.2.1, this one). Its
+        // feed will not advance because it has no internet — associated to `Riviu 3 Ruijie 5G`
+        // with an address and a 4 ms round trip to its own gateway, but 100% loss to 1.1.1.1
+        // and to 8.8.8.8, `unknown host www.tiktok.com`, and `everValidated{false}`. All three
+        // phones on that SSID fail the same way; all eleven on the other three SSIDs resolve
+        // and ping the internet. A force-stop and relaunch plus 22 swipes produced 22
+        // identical trees (123,827 bytes each) — the earlier guess that this was a stuck card
+        // needing a force-stop was wrong.
+        //
+        // To finish it once that AP has upstream:
+        // `.claude/skills/run-riviu-managers-phone/hunt_badge_4642.ps1 -ForceStop`
+        // — it dumps the tree per card and keeps a
+        // frame of any card carrying the badge, so the claim stays checkable by eye.
+        //
+        // This table is keyed by package and language, not version, so the label already
+        // applies there — and that is safe in the only direction that matters: if 46.2.42 does
+        // not render the badge, that phone simply keeps not paging carousels, exactly as it did
+        // before.
+        //
+        // Read on a video montage first and nearly written down as "this build has no badge
+        // at all": the card looped a ~10 s `SeekBar` and changed picture constantly, which
+        // looks like a carousel and is not one. A `SeekBar` is **not** a photo signal —
+        // measured on card 10 of the same sweep, a plain video with `Effect · 97` had one.
+        photo_badge: Some(LabelMatch::Text("Photo")),
         like: Some(LabelMatch::Exact("Like")),
         liked: Some(LabelMatch::Exact("Video liked")),
         comments: Some(LabelMatch::Contains("comments")),
-        share: None,
+        // `Share video.  shares` on the same 18/08/2026 feed dump — the count sits between
+        // the two words on a card with no shares yet, so only the prefix can be matched.
+        share: Some(LabelMatch::Contains("Share video")),
         bookmark: None,
         follow: Some(LabelMatch::Contains("Follow ")),
         live_room: Some(LabelMatch::Contains("Tap to watch LIVE")),
         // Never measured on this build: the S8+ fleet work stopped before the
         // comment drawer was dumped.
-        comment_reply: None,
+        comment_send: None,
+        // `Reply`, in `text`, one Button per comment row — measured on
+        // ce0717171c2a64d50d, 18/08/2026, three rows at [286,927], [349,1140] and
+        // [286,1763]. Same string as the SEA build in English, measured separately
+        // rather than assumed from it: the two builds disagree about the sound strip and
+        // about the Send button, so agreement here is a fact rather than a rule.
+        comment_reply: Some(LabelMatch::Text("Reply")),
         composer_open: None,
         // The S8+ fleet work never opened the composer on this build.
         picker_album_menu: None,
@@ -616,6 +1038,13 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         picker_tab_photos: None,
         picker_multi_select: None,
         picker_next: None,
+        // Measured 24/08/2026 on `ce11171beb408a1501` (musically, en) standing on
+        // `.../@.lt.gi.mang.v/photo/7668947001618320660`: the rail reads
+        // `Đà Lạt Gói Mang Về profile`, identical in shape to the `trill`/en build.
+        author_profile_link: Some(LabelMatch::Contains(" profile")),
+        // Measured 24/08/2026: `Like video. 22 likes`. `Contains("likes")` is unique on the
+        // rail — `Like` and `Video liked` do not contain it.
+        like_count: Some(LabelMatch::Contains("likes")),
         // Publish tail and the whole delete path: declared, not measured. `None` here is
         // the refusal — the composer stops before opening and the delete driver is not
         // offered at all, which is the only safe order for an action with no undo.
@@ -634,6 +1063,24 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         measured_on: "Redmi Note 12, Android 15, 10/08/2026",
         measured_app_version: "46.3.3",
         feed_tab: Some(LabelMatch::Exact("Đề xuất")),
+        // Not a new measurement: the `composer_open` note below already records this
+        // build's five bottom tabs as read off a real dump on 11/08/2026 —
+        // `Trang chủ`, `Cửa hàng`, `Quay`, `Hộp thư`, `Hồ sơ`. This is the first of them.
+        home_tab: Some(LabelMatch::Exact("Trang chủ")),
+        // Unmeasured on the vi build: the 10/08 dump was not kept for this strip.
+        sound_link: None,
+        dialog_dismiss: None,
+        // Unmeasured, and the language is the reason to be careful rather than to guess:
+        // the journey page renders in the UI language, so a Vietnamese build shows
+        // `Bỏ qua` / `Xong` rather than `Skip` / `Done`. Writing those two words down
+        // from the dictionary is exactly what this table forbids — the Redmi that
+        // produced this set is not part of the farm and has never shown the journey.
+        journey_skip: None,
+        journey_done: None,
+        // Never seen on this build. Absent means a folded parent is refused rather than
+        // replied to blind — measure it with `label_scout <serial> --no-launch` while the
+        // control is on screen; it is in `text`.
+        folded_comments: None,
         // Read off an SM-N950F on 12/08/2026, on photo cards in the For-You feed and
         // on a post page opened from a link — the same string on both.
         photo_badge: Some(LabelMatch::Text("Ảnh")),
@@ -654,6 +1101,7 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // `android.widget.Button` nodes with `text="Trả lời"`, `clickable=true` and an
         // **empty** `content-desc`, at x 315..419 — one per comment row, each sitting
         // below its own comment body and to the right of it.
+        comment_send: None,
         comment_reply: Some(LabelMatch::Text("Trả lời")),
         // Read off the bottom bar on 11/08/2026: an `android.widget.Button`,
         // clickable, at x 432..648 y 2135 on a 1080x2400 screen — the middle of five
@@ -677,10 +1125,177 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // `content-desc="Hồ sơ Ánh đây"` — the author's profile link on the action rail —
         // beside `content-desc="Hồ sơ"`. `Contains("Hồ sơ")` matches both, and picking the
         // wrong one walks the delete path onto a stranger's profile.
+        // The author's link on the action rail, the twin of the trap above: the same dump
+        // carried `Hồ sơ Ánh đây` beside the bare `Hồ sơ`. The trailing space keeps this off
+        // our own tab, which is what makes reading a name out of it safe.
+        author_profile_link: Some(LabelMatch::Contains("Hồ sơ ")),
+        // Not measured on a Vietnamese rail. `None` means a like threshold refuses on this
+        // build instead of parsing a string nobody has read.
+        like_count: None,
         profile_tab: Some(LabelMatch::Exact("Hồ sơ")),
         // The rest of the publish tail and the whole delete path: declared, not measured.
         // `None` is the refusal — the composer stops before opening and the delete driver
         // is not offered at all, which is the only safe order for an action with no undo.
+        composer_next: None,
+        post_button: None,
+        post_delete_menu: None,
+        post_delete: None,
+        post_delete_confirm: None,
+    },
+    // SEA build, **English** UI. Sixteen of the eighteen phones on this fleet, and a pair
+    // that had never been read — so every one of them refused to nurture with
+    // "chưa đo nhãn TikTok cho com.ss.android.ugc.trill + ngôn ngữ en".
+    //
+    // Read off an SM-G955F (Android 9, app 38.3.2) on 18/08/2026 with
+    // `cargo run -p riviu-android-driver --example label_scout`: once on the Profile tab
+    // the phone happened to be parked on, and once on the For-You feed after tapping Home.
+    // Everything below appeared in one of those two dumps; everything that did not is
+    // `None`, which is this table's whole contract.
+    TikTokLabels {
+        package: "com.ss.android.ugc.trill",
+        language: "en",
+        measured_on: "SM-G955F, Android 9, 18/08/2026 (example label_scout)",
+        measured_app_version: "38.3.2",
+        feed_tab: Some(LabelMatch::Exact("For You")),
+        // The bottom bar, read on the Profile screen: `Home`, `Shop`, `Create`, `Inbox`,
+        // `Profile`. This is the one that gets a parked session back to the feed.
+        home_tab: Some(LabelMatch::Exact("Home")),
+        // `Original sound by Jacketkat` and `Original sound by BapMidnight`, read off two
+        // different phones on 18/08/2026. Matched on the prefix and read for the whole
+        // value — the creator's name is what makes two cards distinguishable.
+
+        // **`Sound: <track> by <author>`** — 9 of 9 cards sampled on ce051715cb22c30403,
+        // 18/08/2026, including a photo post. Matched on the prefix because the rest is
+        // the track and its author, which is exactly the part that has to differ between
+        // two cards for a swipe to be proved.
+        //
+        // This replaces `Original sound by`, which was written down this morning off a
+        // single card and turned out to be the rare form: zero of the nine. It cost the
+        // sound component of the fingerprint on almost every card, which is survivable —
+        // comments and shares still differ — but it is exactly the case the sound was
+        // added for, a low-engagement feed where both of those read the same.
+        sound_link: Some(LabelMatch::Contains("Sound:")),
+        // `Not now`, read as `text` with no `content-desc`, off an SM-G955U1 held behind
+        // "Save login for next time?" on 18/08/2026.
+        dialog_dismiss: Some(LabelMatch::Text("Not now")),
+        // `Skip`, `android.widget.Button`, in `text` with no `content-desc`, read on
+        // **five phones at once** on 23/08/2026 — 9889db374744474635, 98895a3355424e484f,
+        // ce03171392f9390c01, ce031713dd735a1103 and ce051715ac247a3f01 — all sitting on
+        // `NewUserJourneyActivity` behind "TikTok is better with friends!". Identical on
+        // all five down to the resource id (`id/cxx`); only the bounds differed, which is
+        // why this is located rather than tapped at a fraction.
+        //
+        // Exact, never `TextContains`: the very next screen's *title* is "Skip finding
+        // Facebook friends?" and a substring match would return that `TextView` instead of
+        // the button beside `Find friends`. See [`TikTokControl::JourneySkip`] for the
+        // affirmative siblings this must never reach.
+        journey_skip: Some(LabelMatch::Text("Skip")),
+        // `Done`, `android.widget.Button` (`id/b9r`), in `text`, on the journey's
+        // suggested-follow page. Measured on 9889db374744474635 the same day, including
+        // the part that mattered: after tapping it the account still read **Following 1**
+        // against five suggestions offered, so it dismisses rather than accepting. Back
+        // does nothing on that page — the dump was byte-identical across one.
+        journey_done: Some(LabelMatch::Text("Done")),
+        // `View folded comments`, read as `text` with no `content-desc`, off
+        // ce0417145199e0490c on 19/08/2026 — the phone was holding the post where three
+        // farm accounts had just commented, and TikTok had folded the newest of them away.
+        //
+        // The fold is **progressive**, which is the part worth writing down: on the same
+        // post, earlier in the same hour, two replies found their parent in the open list
+        // without any of this. It is not a property of the post or of the build, it is what
+        // happens once these accounts have commented on a post a few times.
+        folded_comments: Some(LabelMatch::Text("View folded comments")),
+        // `Photo` appears in `text` on this card, and the card is a photo post — but the
+        // vi build's badge was confirmed on *two* devices and on a post page before being
+        // written down, and one screen is not that. Left unmeasured: the cost is that a
+        // carousel is never paged sideways, and the cost of being wrong is a sideways
+        // swipe on a video, which opens the author's profile and walks the session off
+        // the feed.
+        // **Measured, switched off for a day, and back on now that the traversal works.**
+        // The label was never in doubt: `Photo` in `text`, present on all three reads of a
+        // photo card and absent from ten video cards read twice each, on ce051715cb22c30403,
+        // 18/08/2026.
+        //
+        // What it switches on was. Enabling it the first time turned the carousel traversal
+        // on for this build, and across nine phones **both** sessions that met a photo post
+        // ended at zero videos while every session that met none watched normally. Same
+        // trail each time: `gặp bài ảnh — vuốt ngang`, `đã xem 2/10 ảnh`, an unproven
+        // vertical swipe, then a card with no action rail.
+        //
+        // The cause was the gesture, not this label and not the counter. TikTok's image
+        // pager acts on a thrown finger and ignores a dragged one, and `plan_swipe` sends a
+        // drag: bowed into the vertical axis, decelerating to a crawl, then held still
+        // before the lift. The page did not turn, the counter read the same number twice,
+        // and the loop concluded the post had ended. `swipe_slide` now sends
+        // `TouchPointPlanner::plan_flick`, measured at 19 turns out of 19 against the old
+        // gesture's 13 out of 40 — the numbers and the one-component-at-a-time method are
+        // written down there.
+        photo_badge: Some(LabelMatch::Text("Photo")),
+        like: Some(LabelMatch::Exact("Like")),
+        // Not seen: reading it needs a post to be liked and then unliked
+        // (`probe --measure-liked`). The engine confirms a like without it — the
+        // not-liked label is an exact match, so its disappearance is the proof.
+        // Measured on ce051715081fe20f03, 18/08/2026, by liking one card and reading it
+        // back: `Like video. 22 likes` became `Video liked` and the count went to 23.
+        //
+        // Absent, this build could not confirm a like *or* notice one. `Like` is on the
+        // rail in **both** states — it is a separate node from the one that toggles — so
+        // the fallback check, "the not-liked label went away", could never fire here and
+        // every attempt reported `NotConfirmed`. Worse than the miscount: the
+        // `AlreadyLiked` guard runs *before* the tap, so with nothing to recognise, the
+        // loop tapped Like on a post it had already liked — which removes the like.
+        liked: Some(LabelMatch::Exact("Video liked")),
+        comments: Some(LabelMatch::Contains("comments")),
+        share: Some(LabelMatch::Contains("Share video")),
+        bookmark: Some(LabelMatch::Contains("Favorites")),
+        // Absent from the measured screen, whose author was already followed. The vi
+        // build keeps the English `Follow ` and this build very likely does too — which
+        // is exactly the kind of "very likely" this table exists to refuse.
+        // `Follow <author>`, read off six consecutive cards on ce051715cb22c30403,
+        // 18/08/2026 — `Follow Cindy…`, `Follow University of Melbourne`, `Follow TM Su`.
+        // Only on cards whose author is not followed yet, which is why it took scrolling
+        // rather than one dump and why sixteen phones went without it: absent from the
+        // first card anyone looked at is not absent from the build.
+        //
+        // The trailing space is load-bearing — it is what keeps this off the `Following`
+        // tab, which is a different control on the same screen.
+        follow: Some(LabelMatch::Contains("Follow ")),
+        live_room: None,
+        // `android.widget.Button` at [927,1310][1048,1384], `clickable=true`, which
+        // appeared once the field held text — measured on ce051715cb22c30403,
+        // 18/08/2026, with `probe --measure-comment`.
+        //
+        // Every phone on this farm runs 38.3.2, and the only measured versions were
+        // 46.3.3 and 46.4.3 from two other handsets. So commenting could not work on any
+        // of the twenty — whatever the operator set `comment_prob` to, and whatever AI
+        // key was configured. The session said so each time, and the reason was this
+        // one absent label rather than anything about the key.
+        comment_send: Some(LabelMatch::Exact("Post comment")),
+        // `Reply`, in `text` — the same attribute the Vietnamese build puts `Trả lời` in,
+        // and one Button per comment row. Read off ce051715cb22c30403 on 18/08/2026 with
+        // `probe --measure-comment`: author at [155,819][480,861], body at
+        // [155,866][1048,933], and this at [242,944][334,986] — above/below exactly as
+        // `locate_parent_in_elements` requires, well inside `AUTHOR_REACH` and
+        // `REPLY_REACH`.
+        //
+        // Sixteen of the twenty phones on this farm run this build, and without this
+        // every reply refused with `reply_control_unmeasured`. Threading was unreachable
+        // on the whole fleet.
+        comment_reply: Some(LabelMatch::Text("Reply")),
+        composer_open: None,
+        picker_album_menu: None,
+        picker_tab_all: None,
+        picker_tab_photos: None,
+        picker_multi_select: None,
+        picker_next: None,
+        // Measured 24/08/2026 — `Đà Lạt Gói Mang Về profile`, and it survives following the
+        // creator while `Follow ` does not. English puts the name first, so the needle is a
+        // suffix; the leading space keeps it off the bare `Profile` tab.
+        author_profile_link: Some(LabelMatch::Contains(" profile")),
+        // Measured 24/08/2026: `Like video. 22 likes`. `Contains("likes")` is unique on the
+        // rail — `Like` and `Video liked` do not contain it.
+        like_count: Some(LabelMatch::Contains("likes")),
+        profile_tab: Some(LabelMatch::Exact("Profile")),
         composer_next: None,
         post_button: None,
         post_delete_menu: None,
@@ -741,12 +1356,23 @@ mod tests {
 
     #[test]
     fn a_build_with_no_measured_badge_pages_no_carousels() {
-        // The safe direction, and the reason this is a catalogued label rather than a
-        // heuristic: a sideways swipe on a video card opens the author's profile, so a
-        // build nobody has measured must not be swiped sideways at all.
-        let english =
-            controls_for("com.zhiliaoapp.musically", "en", "").expect("the English set exists");
-        assert_eq!(english.label(TikTokControl::PhotoBadge), None);
+        // The rule this test is really about — an unmeasured badge must not be swiped
+        // sideways, because a sideways swipe on a *video* card is TikTok's
+        // open-the-author's-profile gesture. It is stated against the set that refuses
+        // everything rather than against `musically/en`, which was measured on 23/08/2026
+        // and no longer serves as an example of an unmeasured build.
+        assert_eq!(nothing_measured().label(TikTokControl::PhotoBadge), None);
+        // And the shape that makes it a catalogued label rather than a heuristic: exact, in
+        // `text`, so it cannot half-match a caption.
+        let badge = controls_for("com.zhiliaoapp.musically", "en", "")
+            .expect("the English set exists")
+            .label(TikTokControl::PhotoBadge)
+            .expect("measured 23/08/2026 on two 46.2.1 phones");
+        assert_eq!(badge, LabelMatch::Text("Photo"));
+        assert!(
+            badge.is_exact(),
+            "the badge is the whole string, not a substring"
+        );
     }
 
     #[test]
@@ -786,13 +1412,20 @@ mod tests {
         // differ and neither may be a prefix of the other — `Đã thích video`
         // contains no `Thích` as an exact match, which is what makes the
         // exact-match state check sound.
+        // Every set that can *tap* a like must be able to *recognise* one. This used to
+        // `continue` past a set that had only half the pair, which is how the SEA build in
+        // English kept a `like` and no `liked` — and with it, a loop that could neither
+        // confirm a like nor tell it had already left one, on sixteen of eighteen phones.
         for set in TIKTOK_LABEL_SETS {
-            let (Some(like), Some(liked)) = (
-                set.translated(TikTokControl::Like),
-                set.translated(TikTokControl::Liked),
-            ) else {
+            let Some(like) = set.translated(TikTokControl::Like) else {
                 continue;
             };
+            let liked = set.translated(TikTokControl::Liked).unwrap_or_else(|| {
+                panic!(
+                    "{} / {} taps a like it cannot recognise: measure the liked state with                      `cargo run -p riviu-android-driver --example label_scout -- <serial>                      --no-launch --tap Like`",
+                    set.package, set.language
+                )
+            });
             assert_ne!(like.value(), liked.value(), "{}", set.package);
             assert!(like.is_exact() && liked.is_exact(), "{}", set.package);
         }
@@ -854,6 +1487,119 @@ mod tests {
     }
 
     #[test]
+    fn the_carousel_is_on_where_the_traversal_was_proved_and_nowhere_else() {
+        // This label decides whether a build is swiped sideways at all, and the two builds
+        // are in different positions, so it is asserted in both directions rather than as
+        // one rule.
+        //
+        // `trill/en` was measured on ce051715cb22c30403 on 18/08/2026, switched **off** the
+        // same day because turning it on ended both sessions that met a photo post at zero
+        // videos, and switched back on once the cause was found: the sideways gesture was a
+        // drag, and TikTok's image pager only acts on a fling. See the comment beside the
+        // field, and `TouchPointPlanner::plan_flick` for the measurement that separates the
+        // two gestures.
+        assert_eq!(
+            controls_for("com.ss.android.ugc.trill", "en", "")
+                .expect("set")
+                .label(TikTokControl::PhotoBadge),
+            Some(LabelMatch::Text("Photo")),
+            "the badge lives in `text` and has no content-desc; reading it as a description \
+             finds nothing"
+        );
+        // `musically/en` carries the same string, measured 23/08/2026 on two 46.2.1 phones
+        // — five photo cards against nineteen non-photo controls with no false positive. It
+        // was `None` before that, and the rule it stood for still holds for any build nobody
+        // has looked at: measure it on the build before switching it on for the build.
+        assert_eq!(
+            controls_for("com.zhiliaoapp.musically", "en", "")
+                .expect("set")
+                .label(TikTokControl::PhotoBadge),
+            Some(LabelMatch::Text("Photo")),
+            "measured on two phones; see the provenance beside the field"
+        );
+    }
+
+    #[test]
+    fn the_sound_strip_matches_the_form_the_feed_actually_uses() {
+        // Written down as `Original sound by` this morning off one card, and measured as
+        // the rare form the same day: nine of nine sampled cards say `Sound: <track> by
+        // <author>`. The cost of the wrong prefix is quiet — the fingerprint falls back
+        // to comments and shares, which is exactly what fails on the low-engagement feed
+        // this field was added for.
+        for (package, language) in [
+            ("com.ss.android.ugc.trill", "en"),
+            ("com.zhiliaoapp.musically", "en"),
+        ] {
+            assert_eq!(
+                controls_for(package, language, "")
+                    .expect("set")
+                    .label(TikTokControl::SoundLink),
+                Some(LabelMatch::Contains("Sound:")),
+                "{package} / {language}"
+            );
+        }
+    }
+    #[test]
+    fn every_build_on_the_farm_can_reach_the_send_button() {
+        // Read off all twenty phones on 18/08/2026 with `dumpsys package … versionName`.
+        // Before this, the only measured versions were 46.3.3 and 46.4.3 — two handsets
+        // that are not on this farm at all — so commenting was impossible on every one of
+        // the twenty, and the refusal blamed the AI key.
+        //
+        // A list of literal builds rather than a rule, because that is what it is: there
+        // is no deriving one version's Send control from another's, which is the whole
+        // reason for the table. When the farm updates, this test fails and the answer is
+        // to measure the new build, not to relax the assertion.
+        for (package, language, version, phones) in [
+            ("com.ss.android.ugc.trill", "en", "38.3.2", 16),
+            ("com.zhiliaoapp.musically", "en", "46.2.1", 3),
+            ("com.zhiliaoapp.musically", "en", "46.2.42", 1),
+        ] {
+            let controls = controls_for(package, language, version)
+                .unwrap_or_else(|| panic!("{package} {version} has no measured label set"));
+            assert!(
+                controls.label(TikTokControl::CommentSend).is_some(),
+                "{phones} phone(s) run {package} {version} and cannot post a comment: \
+                 measure the drawer with `RIVIU_TIKTOK_PACKAGE={package} probe <serial> \
+                 --measure-comment` and look for the control whose `enabled` goes false \
+                 -> true when the field holds text"
+            );
+            // **And can answer one.** A build that can comment but not reply cannot be in a
+            // thread at all — every reply refuses with `reply_control_unmeasured`, which is
+            // where all twenty phones stood until this was measured. The pair lives in one
+            // test because a campaign needs both, and half of it is no use.
+            assert!(
+                controls.label(TikTokControl::CommentReply).is_some(),
+                "{phones} phone(s) run {package} {version} and cannot reply to a comment: \
+                 the per-row control lives in `text`, not `content-desc` — open the drawer \
+                 with `probe --measure-comment` and look for one Button per comment row, \
+                 sitting just below each body"
+            );
+        }
+    }
+    #[test]
+    fn a_build_that_renders_the_send_button_is_described_by_its_language() {
+        // The version table holds `@2131…` references because those change on every
+        // rebuild. 38.3.2 does not leave one — it renders `Post comment` — and a string
+        // is language-keyed by nature, so it belongs with the translations. Writing it
+        // into the version table instead would tell a Vietnamese 38.3.2 phone to look
+        // for English, which is the failure this module exists to stop.
+        let fleet = controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("set");
+        assert_eq!(
+            fleet.label(TikTokControl::CommentSend),
+            Some(LabelMatch::Exact("Post comment")),
+            "every phone on the farm runs this build"
+        );
+
+        // And a build that *does* leave a reference keeps it: the id wins, because an id
+        // cannot be wrong about the language and a string can.
+        let referenced = controls_for("com.ss.android.ugc.trill", "vi", "46.4.3").expect("set");
+        assert_eq!(
+            referenced.label(TikTokControl::CommentSend),
+            Some(LabelMatch::Exact("@2131823293"))
+        );
+    }
+    #[test]
     fn the_send_button_is_keyed_by_app_version_not_by_language() {
         // The measurement this whole split exists for: two phones, same package, same
         // Vietnamese UI, different app version, **different Send id**. If this ever
@@ -904,7 +1650,13 @@ mod tests {
                 .label(TikTokControl::CommentSend),
             None
         );
-        assert!(updated.provenance().contains("CHƯA đo resource id"));
+        // `trill/vi` has no text for Send and, on an unread version, no resource set either
+        // — so this is the one shape that genuinely cannot comment, and the only one the
+        // provenance line still warns about. It used to warn whenever a resource set merely
+        // failed to match, which pointed the alarm at the healthy majority of this farm.
+        let line = updated.provenance();
+        assert!(line.contains("CHƯA đo được nút Gửi"), "{line}");
+        assert!(line.contains("bỏ bình luận"), "{line}");
     }
 
     #[test]
@@ -960,6 +1712,26 @@ mod tests {
     }
 
     #[test]
+    fn the_version_code_stops_at_the_field_that_follows_it() {
+        // Verbatim from `dumpsys package com.ss.android.ugc.trill` on SM-G955F,
+        // 17/08/2026. Unlike `versionName` this shares its line, so a parser that read to
+        // the end of the line would record the build as "380302 minSdk=21 targetSdk=34".
+        let dumpsys = "  Package [com.ss.android.ugc.trill] (a1b2):\n    \
+                       versionCode=380302 minSdk=21 targetSdk=34\n    versionName=38.3.2\n";
+        assert_eq!(parse_version_code(dumpsys), Some("380302"));
+        assert_eq!(
+            parse_version_code("    versionCode=274 minSdk=26\n"),
+            Some("274")
+        );
+        // Digits only: anything else means the line was not what we thought it was, and a
+        // build number is hashed into a device profile id -- nearly right is wrong.
+        assert_eq!(parse_version_code("    versionCode=unknown\n"), None);
+        assert_eq!(parse_version_code("    versionCode=\n"), None);
+        assert_eq!(parse_version_code("no such field"), None);
+        assert_eq!(parse_version_code(""), None);
+    }
+
+    #[test]
     fn locale_tags_reduce_to_the_language() {
         assert_eq!(normalise_language("vi-VN"), "vi");
         assert_eq!(normalise_language("vi_VN"), "vi");
@@ -1012,17 +1784,37 @@ mod tests {
                 "{} ProfileTab must be Exact; Contains would match the author's profile link",
                 set.package
             );
-            // The author link *starts with* the tab's text, which is exactly why a
-            // substring match cannot separate them.
-            assert!(
-                format!("{} Ánh đây", label.value()).starts_with(label.value()),
-                "{} the author link is a superstring of the tab label",
-                set.package
-            );
+            // The hazard has two measured shapes, and the tab text is a substring of both.
+            // vi (Redmi, 13/08/2026): `Hồ sơ` and the author link `Hồ sơ Ánh đây` — prefix.
+            // en (SM-G955F, 18/08/2026): `Profile` and the author link `Ngọc Lệ profile` —
+            // suffix, and lowercase, so it only collides once case is folded, which
+            // description matching does.
+            //
+            // This used to assert `format!("{X} …").starts_with(X)`, which is true of every
+            // string and therefore proved nothing. What matters is that `Exact` separates
+            // the two and `Contains` would not.
+            for author_link in [
+                format!("{} Ánh đây", label.value()),
+                format!("Ngọc Lệ {}", label.value().to_lowercase()),
+            ] {
+                assert!(
+                    author_link
+                        .to_lowercase()
+                        .contains(&label.value().to_lowercase()),
+                    "{}: the author link must be the collision this Exact label avoids",
+                    set.package
+                );
+                assert_ne!(
+                    author_link.as_str(),
+                    label.value(),
+                    "{}: Exact is what keeps the author link out",
+                    set.package
+                );
+            }
         }
         assert_eq!(
-            measured, 1,
-            "exactly one set has ProfileTab measured so far"
+            measured, 2,
+            "both measured sets carry ProfileTab; bump this when another is measured"
         );
     }
 
@@ -1046,6 +1838,32 @@ mod tests {
                     set.package
                 );
             }
+        }
+    }
+
+    /// A set that can *recognise* the feed must also be able to *reach* it.
+    ///
+    /// Not a tidiness rule — it is what the fleet measured. `feed_tab` is a tab **inside**
+    /// the feed, so a phone parked on Profile, Inbox or Shop shows none of it; the way back
+    /// is the Home tab on the bottom bar. On 18/08/2026 a whole-fleet run had the two
+    /// `com.zhiliaoapp.musically` phones fail with "chờ 30s mà chưa thấy tab feed" for
+    /// exactly this reason, while the sixteen `trill` phones — whose set had `home_tab` —
+    /// recovered and watched. A phone is left wherever the last session left it, so this is
+    /// the ordinary case rather than an edge one.
+    #[test]
+    fn every_set_that_knows_the_feed_also_knows_the_way_back_to_it() {
+        for set in TIKTOK_LABEL_SETS {
+            if set.translated(TikTokControl::FeedTab).is_none() {
+                continue;
+            }
+            assert!(
+                set.translated(TikTokControl::HomeTab).is_some(),
+                "{} / {} can tell it is on the feed but cannot get there: measure the \
+                 bottom bar's Home tab with `cargo run -p riviu-android-driver --example \
+                 label_scout`",
+                set.package,
+                set.language
+            );
         }
     }
 
@@ -1111,6 +1929,113 @@ mod tests {
                     set.app_version
                 );
             }
+        }
+    }
+
+    #[test]
+    fn every_english_build_on_the_farm_can_decline_a_dialog_it_understands() {
+        // A dialog holding the phone is the single most common way a session ends at zero
+        // videos, and `await_feed`'s ladder has two rungs for it: tap a *measured decline*
+        // when there is one, press Back when there is not. Back is the weaker rung — it did
+        // not clear "Turn on precise location" on 19/08/2026, and the session failed with
+        // `chờ 30s mà chưa thấy tab feed` while a button reading `Not now` was on screen.
+        //
+        // So the invariant is per build, not per fleet: both English builds run here, and a
+        // decline measured on one of them is not a decline on the other.
+        for package in ["com.ss.android.ugc.trill", "com.zhiliaoapp.musically"] {
+            assert_eq!(
+                controls_for(package, "en", "")
+                    .expect("set")
+                    .label(TikTokControl::DialogDismiss),
+                Some(LabelMatch::Text("Not now")),
+                "{package}: measure the decline with `label_scout <serial> --no-launch` while \
+                 the dialog is up — it is in `text`, not `content-desc`"
+            );
+        }
+    }
+}
+
+/// The provenance line, pinned against the reading that was inverted on the live farm.
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+
+    /// The eleven phones that were being warned at. `trill/en` renders the Send button as
+    /// text, so a missing resource set costs it nothing — and the line must not imply
+    /// otherwise.
+    #[test]
+    fn a_build_that_renders_the_send_button_is_not_warned_about_resource_ids() {
+        let set = controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("measured");
+        let line = set.provenance();
+        assert!(
+            set.label(TikTokControl::CommentSend).is_some(),
+            "sanity: this build resolves Send from the translation"
+        );
+        assert!(
+            !line.contains("CHƯA"),
+            "nothing is missing on this build, so nothing may shout: {line}"
+        );
+        assert!(
+            line.contains("không cần resource id"),
+            "it should say why no id is needed: {line}"
+        );
+        // The field that had no reader until this line existed.
+        assert!(
+            line.contains("nhãn đo trên app 38.3.2"),
+            "measured_app_version belongs here: {line}"
+        );
+    }
+
+    /// The three phones that were getting the reassuring line. Their Send button is an
+    /// unresolved `@2131…`, so the matching resource set is exactly what makes them work —
+    /// and naming its version is real information rather than false comfort.
+    #[test]
+    fn a_build_that_needs_a_resource_id_names_the_version_it_came_from() {
+        let set = controls_for("com.zhiliaoapp.musically", "en", "46.2.1").expect("measured");
+        assert_eq!(
+            set.translated.translated(TikTokControl::CommentSend),
+            None,
+            "sanity: this build has no text for Send"
+        );
+        assert!(set.label(TikTokControl::CommentSend).is_some());
+        let line = set.provenance();
+        assert!(line.contains("resource id"), "{line}");
+        assert!(line.contains("46.2.1"), "{line}");
+        assert!(!line.contains("CHƯA"), "{line}");
+    }
+
+    /// The only case that should carry a warning: no id **and** no translation, so the
+    /// session genuinely cannot comment. Same phones as above, on a version nobody measured.
+    #[test]
+    fn the_warning_now_fires_only_when_send_is_truly_unresolvable() {
+        let set = controls_for("com.zhiliaoapp.musically", "en", "99.9.9").expect("measured");
+        assert_eq!(set.label(TikTokControl::CommentSend), None);
+        let line = set.provenance();
+        assert!(
+            line.contains("CHƯA đo được nút Gửi"),
+            "the real gap must say so: {line}"
+        );
+        assert!(
+            line.contains("bỏ bình luận"),
+            "and say what it costs: {line}"
+        );
+    }
+
+    /// Whatever the branch, the line always names the two keys a reader needs to go and
+    /// re-measure: which package and which UI language these strings came from.
+    #[test]
+    fn every_branch_names_the_package_and_the_language() {
+        for (package, language, version) in [
+            ("com.ss.android.ugc.trill", "en", "38.3.2"),
+            ("com.ss.android.ugc.trill", "vi", "46.3.3"),
+            ("com.zhiliaoapp.musically", "en", "46.2.1"),
+            ("com.zhiliaoapp.musically", "en", ""),
+        ] {
+            let line = controls_for(package, language, version)
+                .expect("measured set")
+                .provenance();
+            assert!(line.contains(package), "{line}");
+            assert!(line.starts_with(package), "package comes first: {line}");
         }
     }
 }

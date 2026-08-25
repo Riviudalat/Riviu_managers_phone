@@ -29,6 +29,12 @@ use serde_json::{json, Value};
 /// W3C returns the element id under this key; older servers use `ELEMENT`.
 const W3C_ELEMENT_KEY: &str = "element-6066-11e4-a52e-4f735466cecf";
 
+/// How long one UiAutomator2 request may take before the driver gives up on it.
+///
+/// Thirty rather than `adb.rs`'s sixty because this is one HTTP call to a server already
+/// running on the phone, not a command that may have to start one. A request still pending
+/// after this is not slow, it is a server that stopped answering, and waiting longer only
+/// delays the restart that fixes it.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How an element is addressed on screen.
@@ -56,6 +62,11 @@ pub enum Locator {
     TextContains(String),
     /// Fully-qualified `resource-id`. Obfuscated in TikTok; use sparingly.
     ResourceId(String),
+    /// A Java regex over the fully-qualified `resource-id`.
+    ///
+    /// The way to reach a node whose *class* is obfuscated but whose id is not — see
+    /// [`riviu_core::ElementQuery::ResourceIdSuffix`] for the measurement that needs it.
+    ResourceIdMatches(String),
     /// Raw `UiSelector` expression, for the cases the above cannot express.
     UiSelector(String),
 }
@@ -93,6 +104,13 @@ impl Locator {
                 "strategy": "id",
                 "selector": value,
             }),
+            Self::ResourceIdMatches(pattern) => json!({
+                "strategy": "-android uiautomator",
+                "selector": format!(
+                    "new UiSelector().resourceIdMatches({})",
+                    quote_java(pattern)
+                ),
+            }),
             Self::UiSelector(expression) => json!({
                 "strategy": "-android uiautomator",
                 "selector": expression,
@@ -127,10 +145,35 @@ impl Locator {
             Self::ResourceId(value) => {
                 format!("new UiSelector().resourceId({})", quote_java(&value))
             }
+            Self::ResourceIdMatches(pattern) => {
+                format!(
+                    "new UiSelector().resourceIdMatches({})",
+                    quote_java(&pattern)
+                )
+            }
             Self::UiSelector(expression) => expression,
         };
         Self::UiSelector(format!("{inner}.focused(true)"))
     }
+}
+
+/// Escape the regex metacharacters in a literal, for `resourceIdMatches`.
+///
+/// Separate from [`quote_java`] because the two protect against different things: that one stops
+/// a quote from ending the Java string, this one stops a `.` from matching any character. A
+/// resource-id suffix like `:id/desc` needs neither today, and the next one will.
+pub(crate) fn escape_java_regex(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(
+            ch,
+            '.' | '\\' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|'
+        ) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// Quote a Java string literal for embedding in a `UiSelector` expression.
@@ -170,10 +213,23 @@ impl Rect {
 /// Matched as a substring because the message carries a varying millisecond count.
 const STALE_TREE_MARKER: &str = "waiting for the root AccessibilityNodeInfo";
 
+/// Past this, an operator gesture is something they can feel.
+///
+/// A tap is one `/actions` round trip and measures 130–280 ms on this fleet, and the slowest
+/// legitimate element query recorded is ~10 s. Half a second is comfortably above the first
+/// and far below the second, so it catches "control got sluggish" without printing a line for
+/// every hierarchy read.
+const SLOW_AGENT_CALL: Duration = Duration::from_millis(500);
+
 #[derive(Clone)]
 pub struct AgentClient {
     http: reqwest::Client,
     base: String,
+    /// Carried only so a slow or failing call can name the phone it was talking to.
+    ///
+    /// `base=http://127.0.0.1:6795` is technically the same fact and practically useless:
+    /// nobody holds the port-to-serial map in their head while reading a log.
+    serial: String,
     /// Shared and swappable, so recycling a degraded session fixes **every** clone —
     /// including the `AndroidUiSession` already handed to a running loop.
     session_id: Arc<Mutex<String>>,
@@ -181,7 +237,10 @@ pub struct AgentClient {
 
 impl AgentClient {
     /// Open a session against an agent already listening on `base`.
-    pub async fn connect(base: impl Into<String>) -> anyhow::Result<Self> {
+    pub async fn connect(
+        serial: impl Into<String>,
+        base: impl Into<String>,
+    ) -> anyhow::Result<Self> {
         let base = base.into().trim_end_matches('/').to_string();
         // 30 s, from measurements rather than from caution. The slowest *legitimate*
         // element query recorded against this server is 10,2–10,5 s (the S8+ fleet under a
@@ -216,6 +275,7 @@ impl AgentClient {
         let client = Self {
             http,
             base,
+            serial: serial.into(),
             session_id: Arc::new(Mutex::new(session_id)),
         };
         client.prime_session().await?;
@@ -283,6 +343,15 @@ impl AgentClient {
     /// wait out the server's hardcoded root-node timeout and make a healthy agent look
     /// broken. `find` maps a genuine absence to `Ok(None)`, which counts as alive: this
     /// asks whether the tree is readable, not what is in it.
+    /// What one element query costs against an agent that has lost `UiAutomation`.
+    ///
+    /// Not a timeout of ours — it is the server's own hardcoded root-`AccessibilityNodeInfo`
+    /// deadline, and there is no setting that reaches it. Measured twice on this fleet at
+    /// 10 116 ms and 10 132 ms; rounded up so a derivation built on it cannot come out
+    /// short. Callers use it to reason about how long a *failing* agent takes to admit it
+    /// is failing, which is the number that sizes recovery windows.
+    pub const BLIND_QUERY_COST: Duration = Duration::from_secs(11);
+
     pub async fn is_alive(&self) -> bool {
         self.find(&Locator::ClassName("android.widget.FrameLayout".into()))
             .await
@@ -385,10 +454,25 @@ impl AgentClient {
         if let Some(body) = body {
             request = request.json(&body);
         }
+        // Every operator gesture ends here, so this is where "control feels sluggish" either
+        // is or is not true — and until now nothing measured it. A tap is one `/actions`
+        // round trip over the adb forward; measured on this fleet it should be 130–280 ms,
+        // so anything past half a second is the thing the operator is complaining about and
+        // it should be in the log with the device and the route on it.
+        let started = std::time::Instant::now();
         let response = request
             .send()
             .await
             .with_context(|| format!("gọi agent {suffix}"))?;
+        let elapsed = started.elapsed();
+        if elapsed >= SLOW_AGENT_CALL {
+            tracing::warn!(
+                serial = %self.serial,
+                route = suffix,
+                ms = elapsed.as_millis() as u64,
+                "agent call was slow"
+            );
+        }
         let status = response.status();
         // Read as bytes and decode UTF-8 ourselves. The server answers without a
         // charset for some routes, and letting a client guess is exactly how

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   answerConfirm,
   requestConfirm,
+  requestPrompt,
   resetConfirms,
   useConfirmRequest,
 } from "./confirmStore";
@@ -66,5 +67,54 @@ describe("confirmStore", () => {
     await expect(first).resolves.toBe(false);
     await expect(second).resolves.toBe(false);
     expect(active()).toBeNull();
+  });
+
+  it("carries the typed value back from a prompt, trimmed", async () => {
+    const answer = requestPrompt({ title: "Đổi tên máy", initial: "SM-G955F" });
+    const request = active()!;
+    // Normalised by the store, so the host has one shape to render rather than three
+    // optional fields to defend against.
+    expect(request.prompt).toEqual({
+      initial: "SM-G955F",
+      placeholder: undefined,
+      numeric: false,
+    });
+
+    answerConfirm(request.id, true, "  Kệ trên · 3  ");
+    await expect(answer).resolves.toBe("Kệ trên · 3");
+  });
+
+  /**
+   * The distinction the rename row depends on: an emptied field means "clear the alias",
+   * cancelling means "leave it alone". Collapsing the two makes Escape erase the name.
+   */
+  it("tells an emptied field apart from a cancelled dialog", async () => {
+    const cleared = requestPrompt({ title: "Đổi tên máy", initial: "cũ" });
+    answerConfirm(active()!.id, true, "   ");
+    await expect(cleared).resolves.toBe("");
+
+    const abandoned = requestPrompt({ title: "Đổi tên máy", initial: "cũ" });
+    answerConfirm(active()!.id, false, "đã gõ rồi bỏ");
+    await expect(abandoned).resolves.toBeNull();
+  });
+
+  it("queues a prompt behind a confirm, on the one queue", async () => {
+    const confirmed = requestConfirm({ title: "Xoá?" });
+    const named = requestPrompt({ title: "Đổi tên máy" });
+
+    expect(active()?.title).toBe("Xoá?");
+    expect(active()?.prompt).toBeUndefined();
+    answerConfirm(active()!.id, true);
+    await expect(confirmed).resolves.toBe(true);
+
+    expect(active()?.prompt).toBeDefined();
+    answerConfirm(active()!.id, true, "tên mới");
+    await expect(named).resolves.toBe("tên mới");
+  });
+
+  it("declines a pending prompt as a cancel, not as an empty answer", async () => {
+    const pending = requestPrompt({ title: "Đổi số máy", initial: "21" });
+    resetConfirms();
+    await expect(pending).resolves.toBeNull();
   });
 });

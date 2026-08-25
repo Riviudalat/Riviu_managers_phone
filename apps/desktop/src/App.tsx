@@ -1,66 +1,57 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import {
   agentBulkRepair,
   agentListStatuses,
-  authSession,
-  androidUnavailableReason,
-  driverDegradedReason,
-  listenRiviuEvents,
-  installIpa,
-  listDevices,
-  listGroups,
-  listJobs,
-  rebootDevice,
   refreshDevices,
   saveGroup,
-  screenshot,
-  setScreenRotation,
-  startupError,
+  viewSetPreset,
 } from "./api";
 import { startDevicePreview, startFleetPreview } from "./startPreview";
 import { summarizeBulkRepair } from "./agentStatus";
 import { requestConfirm } from "./confirmStore";
-import { pushToast, toastError } from "./toastStore";
+import { describeError, pushToast, toastError } from "./toastStore";
 import { ConfirmHost } from "./components/ConfirmHost";
 import { ToastHost } from "./components/ToastHost";
 import { DeviceTile } from "./components/DeviceTile";
 import { FilterToolbar, type ViewMode } from "./components/FilterToolbar";
 import { GroupTabs } from "./components/GroupTabs";
-import { DeviceContextMenu, type DeviceMenuAction } from "./components/DeviceContextMenu";
+import { DeviceContextMenu } from "./components/DeviceContextMenu";
+import { DeviceFilesPopup } from "./components/DeviceFilesPopup";
+import type { DeviceMenuNode } from "./deviceMenu";
+import { buildDeviceActions } from "./deviceActions";
+import { useFleet } from "./useFleet";
+import { useBoxSelection } from "./useBoxSelection";
+import { metaByUdid, orderDevicesByNumber, tileName, tileNumber } from "./deviceNaming";
 import { AdbConsole } from "./components/AdbConsole";
 import { ALL_DEVICES_TAB, devicesInTab, groupTabs, withDeviceAdded } from "./deviceGroups";
 import { FocusStream } from "./components/FocusStream";
-import { IconPhone, IconRefresh, IconUser } from "./components/Icons";
+import { IconPhone, IconRefresh } from "./components/Icons";
 import { Banner, EmptyState, LoadingState } from "./components/States";
 import { InteractionPopup } from "./components/InteractionPopup";
 import { JobsPanel } from "./components/JobsPanel";
 import { NurturePopup } from "./components/NurturePopup";
+import { GroupManagerPopup } from "./components/GroupManagerPopup";
+import { GroupToolsPopup } from "./components/GroupToolsPopup";
 import { ProfileToolbar } from "./components/ProfileToolbar";
 import { ScriptsPanel } from "./components/ScriptsPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { Sidebar } from "./components/Sidebar";
-import { useViewClient } from "./viewStore";
-import {
-  AccountPage,
-  ApiPage,
-  AppsPage,
-  DataPage,
-  LoginPage,
-  MaterialPage,
-  PublishPage,
-  RegisterPage,
-  ScheduleBlock,
-  SyncPage,
-} from "./pages/FarmPages";
-import type {
-  DeviceGroup,
-  DeviceInfo,
-  JobRecord,
-  LocalUser,
-  PageId,
-} from "./types";
-import { deviceModelOsLabel, markDeviceFrameLive } from "./types";
-import { pickFile } from "./pickFile";
+import { forgetDepartedViews, useViewClient } from "./viewStore";
+import { ApiPage } from "./pages/ApiPage";
+import { AppsPage } from "./pages/AppsPage";
+import { DataPage } from "./pages/DataPage";
+import { MaterialPage } from "./pages/MaterialPage";
+import { PublishPage } from "./pages/PublishPage";
+import { ScheduleBlock } from "./pages/ScheduleBlock";
+import type { DeviceInfo, PageId } from "./types";
+import { deviceModelOsLabel } from "./types";
 import { loadZoom, stepZoom, storeZoom, TILE_ZOOM, wheelWantsZoom } from "./zoom";
 import "./App.css";
 
@@ -75,41 +66,50 @@ const PAGE_TITLE: Partial<Record<PageId, string>> = {
   apps: "Trung tâm ứng dụng",
   scripts: "Flow",
   jobs: "Tác vụ",
-  sync: "Đồng bộ cửa sổ",
   publish: "Đăng bài",
   data: "Dữ liệu",
-  account: "Tài khoản",
   api: "API",
   settings: "Cài đặt",
-  login: "Đăng nhập",
-  register: "Đăng ký",
 };
 
 function App() {
   const [page, setPage] = useState<PageId>("control");
+  const {
+    devices,
+    groups,
+    metas,
+    setMetas,
+    jobs,
+    reload,
+    startupIssue,
+    bootError,
+    driverIssue,
+    androidIssue,
+    retryingStartup,
+    retry: retryStartupAndResubscribe,
+  } = useFleet();
   const [asideCollapsed, setAsideCollapsed] = useState(false);
-  const [devices, setDevices] = useState<DeviceInfo[]>([]);
-  const [groups, setGroups] = useState<DeviceGroup[]>([]);
   const [groupTab, setGroupTab] = useState<string>(ALL_DEVICES_TAB);
   const [tileMenu, setTileMenu] = useState<{ udid: string; x: number; y: number } | null>(null);
   const [adbFor, setAdbFor] = useState<string | null>(null);
-  const [jobs, setJobs] = useState<JobRecord[]>([]);
-  const [selected, setSelected] = useState<string[]>([]);
+  /// Which phone's filesystem is open in the browser popup (xiaowei "Preview Mobile Files").
+  const [filesFor, setFilesFor] = useState<string | null>(null);
   const [groupMode, setGroupMode] = useState(false);
+  /// The phone the operator drives when Sync is on; every other selected phone follows it.
+  ///
+  /// This used to be `selected[0]` — whichever udid happened to land first in the selection
+  /// array — decided on a page of its own that did nothing else. Nothing showed which phone
+  /// it was and nothing let the operator choose, so "máy chính" was a label for an accident.
+  /// It is a property of the grid, set from the tile's own menu, and it lives here.
+  const [controlCenter, setControlCenter] = useState<string | null>(null);
   const [focusUdid, setFocusUdid] = useState<string | null>(null);
   const [jobsScriptSeed, setJobsScriptSeed] = useState<string | null>(null);
-  const [bootError, setBootError] = useState<string | null>(null);
-  const [driverIssue, setDriverIssue] = useState<string | null>(null);
-  const [androidIssue, setAndroidIssue] = useState<string | null>(null);
-  const [startupIssue, setStartupIssue] = useState<string | null | undefined>(undefined);
-  const [user, setUser] = useState<LocalUser | null>(null);
-  const [showAuthUi, setShowAuthUi] = useState(false);
-  const [authForced, setAuthForced] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("window");
   const [tileWidth, setTileWidth] = useState(() => loadZoom(TILE_ZOOM));
-  const canvasRef = useRef<HTMLDivElement | null>(null);
   const [nurtureOpen, setNurtureOpen] = useState(false);
   const [interactionOpen, setInteractionOpen] = useState(false);
+  const [groupToolsOpen, setGroupToolsOpen] = useState(false);
+  const [groupsOpen, setGroupsOpen] = useState(false);
   const [flowDirty, setFlowDirty] = useState(false);
   const [automationView, setAutomationView] = useState<"flow" | "legacy">("flow");
   useViewClient();
@@ -157,6 +157,26 @@ function App() {
     storeZoom(TILE_ZOOM, tileWidth);
   }, [tileWidth]);
 
+  const tabs = useMemo(() => groupTabs(devices, groups), [devices, groups]);
+  const metaMap = useMemo(() => metaByUdid(metas), [metas]);
+  // Numbered phones lead, in number order; an unnumbered fleet is left exactly as the
+  // driver listed it. That is the point of a number — a grid position moves when a phone
+  // drops off USB, a number does not.
+  const visibleDevices = useMemo(
+    () => orderDevicesByNumber(devicesInTab(devices, groups, groupTab), metaMap),
+    [devices, groups, groupTab, metaMap],
+  );
+
+  const {
+    selected,
+    setSelected,
+    selectedDevices,
+    onSelect,
+    canvasRef,
+    onCanvasMouseDown,
+    band,
+  } = useBoxSelection(devices, visibleDevices, page === "control" && viewMode === "window");
+
   // Wheel over the phone grid zooms the tiles. Registered by hand because
   // React's synthetic onWheel is passive and cannot preventDefault the page
   // scroll. Re-runs when the canvas mounts (control page, window view).
@@ -170,13 +190,9 @@ function App() {
     };
     canvas.addEventListener("wheel", onWheel, { passive: false });
     return () => canvas.removeEventListener("wheel", onWheel);
-  }, [page, viewMode]);
-
-  const tabs = useMemo(() => groupTabs(devices, groups), [devices, groups]);
-  const visibleDevices = useMemo(
-    () => devicesInTab(devices, groups, groupTab),
-    [devices, groups, groupTab],
-  );
+  // `canvasRef` is a ref object and never changes identity, but it now arrives through
+  // `useBoxSelection`'s return value where the rule cannot see that. Listing it is free.
+  }, [page, viewMode, canvasRef]);
   const menuAdbDevice = useMemo(
     () => (adbFor ? (devices.find((d) => d.udid === adbFor) ?? null) : null),
     [adbFor, devices],
@@ -185,220 +201,120 @@ function App() {
     () => (tileMenu ? (devices.find((d) => d.udid === tileMenu.udid) ?? null) : null),
     [tileMenu, devices],
   );
-
-  const reload = useCallback(async () => {
-    try {
-      const [d, j] = await Promise.all([listDevices(), listJobs()]);
-      setDevices(d);
-      setJobs(j);
-      // Groups are auxiliary and load separately, on purpose. Inside the Promise.all
-      // above, a group-listing failure rejected the whole reload and left the grid empty
-      // — the fleet blanked because a tab strip could not be drawn. Caught by e2e, which
-      // had no handler registered for it. Losing the tabs is a smaller loss than losing
-      // every phone, so this failure degrades to "no groups".
-      setGroups(await listGroups().catch(() => []));
-      setBootError(null);
-      // An empty list can mean "nothing plugged in" or "the device sidecar never
-      // started". Ask which, so the UI does not report the wrong one.
-      setDriverIssue(await driverDegradedReason().catch(() => null));
-      // Asked separately, because the two halves of the fleet fail for different
-      // reasons and an Android phone that never appears used to say nothing at all.
-      setAndroidIssue(await androidUnavailableReason().catch(() => null));
-    } catch (e) {
-      setBootError(String(e));
-    }
-  }, []);
+  const menuFilesDevice = useMemo(
+    () => (filesFor ? (devices.find((d) => d.udid === filesFor) ?? null) : null),
+    [filesFor, devices],
+  );
 
   /**
-   * Tile menu rows, and every one of them is a command this app already has.
+   * The per-phone function menu, and every row of it is a command this app already has.
    *
-   * The reference product also offers an adb command box, rotate, wallpaper, APK
-   * install and device deletion. They are absent on purpose: a row that calls a
-   * command we never wrote is a button that fails, which is worse than its absence.
+   * That rule stands and is the reason this list is long rather than aspirational: a row
+   * calling a command we never wrote is a button that fails. What the rule never justified
+   * was the *shortfall* — measured against the reference product's own phone menu on
+   * 21/08/2026 this had ten rows against its thirty-five, and the honest reading was not
+   * "we lay it out differently" but "eight of its rows have no command here". Those eight
+   * are the ones written that day: read the clipboard, the phone's Wi-Fi radio, reset
+   * DPI/resolution, power off, open the phone's Settings, wake the screen, screenshot into
+   * the phone's own gallery, and browse its filesystem.
+   *
+   * Three of its rows are still deliberately elsewhere rather than here, because they are
+   * fleet-shaped rather than phone-shaped and this app already had a better place for them:
+   * text/file distribution and the macro recorder live in the group Tools popup, task
+   * lists live in the Flow panel, and agent repair lives in Settings. One is genuinely not
+   * built: a gesture *recorder* per phone (xiaowei "Action Record"), as distinct from the
+   * macro replay that Tools already has.
    */
   const tileActions = useCallback(
-    (device: DeviceInfo): DeviceMenuAction[] => [
-      {
-        id: "open",
-        label: "Mở điều khiển",
-        run: () => setFocusUdid(device.udid),
-      },
-      {
-        id: "screenshot",
-        label: "Chụp màn hình",
-        run: () => {
-          void screenshot(device.udid)
-            .then((path) => pushToast("ok", "Đã lưu ảnh", path))
-            .catch((error) => toastError("Chụp màn hình thất bại", error));
-        },
-      },
-      {
-        id: "copy",
-        label: "Sao chép ID máy",
-        run: () => {
-          void navigator.clipboard
-            .writeText(device.udid)
-            .then(() => pushToast("ok", "Đã sao chép ID máy"))
-            .catch((error) => toastError("Sao chép thất bại", error));
-        },
-      },
-      {
-        id: "reload",
-        label: "Làm mới danh sách",
-        run: () => {
-          void refreshDevices().then(reload).catch((error) => toastError("Làm mới thất bại", error));
-        },
-      },
-      ...(device.platform === "android"
-        ? [
-            {
-              id: "rotate",
-              label: "Quay màn hình",
-              run: () => {
-                // The backend returns the rotation the phone actually settled at, which
-                // is often not the one asked for: a portrait-locked app wins, and on
-                // this farm that is TikTok. Saying "rotated" regardless would be the
-                // button that lies.
-                void setScreenRotation(device.udid, 1)
-                  .then((observed) => {
-                    if (observed === 1) {
-                      pushToast("ok", "Đã quay ngang");
-                    } else {
-                      pushToast(
-                        "warn",
-                        "Máy không quay",
-                        "App đang mở khoá hướng dọc nên hệ thống bỏ qua yêu cầu.",
-                      );
-                    }
-                  })
-                  .catch((error) => toastError("Quay màn hình thất bại", error));
-              },
-            },
-            {
-              id: "apk",
-              label: "Cài APK...",
-              run: () => {
-                void (async () => {
-                  const path = await pickFile({
-                    title: "Chọn APK",
-                    filters: [{ name: "APK", extensions: ["apk"] }],
-                  });
-                  if (!path) return;
-                  try {
-                    // Same command the iOS path uses; the driver behind it runs
-                    // `adb install -r -g` for an Android serial.
-                    await installIpa(device.udid, path);
-                    pushToast("ok", "Đã cài APK");
-                  } catch (error) {
-                    toastError("Cài APK thất bại", error);
-                  }
-                })();
-              },
-            },
-            {
-              id: "adb",
-              label: "Lệnh adb...",
-              run: () => setAdbFor(device.udid),
-            },
-          ]
-        : []),
-      {
-        id: "reboot",
-        label: "Khởi động lại máy",
-        danger: true,
-        run: () => {
-          void requestConfirm({
-            title: `Khởi động lại ${device.name}?`,
-            message: "Máy sẽ mất kết nối vài phút và mọi phiên đang chạy trên nó sẽ dừng.",
-            confirmLabel: "Khởi động lại",
-            danger: true,
-          }).then((ok) => {
-            if (!ok) return;
-            void rebootDevice(device.udid)
-              .then(() => pushToast("ok", "Đã gửi lệnh khởi động lại"))
-              .catch((error) => toastError("Khởi động lại thất bại", error));
-          });
-        },
-      },
-    ],
-    [reload],
+    (device: DeviceInfo): DeviceMenuNode[] =>
+      buildDeviceActions(device, {
+        reload,
+        metaMap,
+        metas,
+        setMetas,
+        controlCenter,
+        setControlCenter,
+        groupMode,
+        setFocusUdid,
+        setFilesFor,
+        setAdbFor,
+      }),
+    // Setters straight from `useState` are stable and stay out of the list. `setMetas` is
+    // in it because it now arrives through `useFleet`'s return object, where the rule cannot
+    // see that it is a setter — including it is free and cheaper than an exemption.
+    // The stale-closure note that used to sit here still applies and now lives with the
+    // catalog: a stale `metas` pre-fills the rename dialog with the value just replaced.
+    [reload, controlCenter, groupMode, metaMap, metas, setMetas],
   );
 
+  /// The phone the overlay actually drives.
+  ///
+  /// With Sync on and a control centre designated, that is the control centre whichever tile
+  /// was opened — which is what designating one means. Without Sync it is simply the tile the
+  /// operator opened, because a centre with nothing following it would be a surprise rather
+  /// than a feature.
+  const focusDevice = useMemo(() => {
+    const wanted =
+      groupMode && controlCenter && devices.some((d) => d.udid === controlCenter)
+        ? controlCenter
+        : focusUdid;
+    return devices.find((d) => d.udid === wanted) ?? null;
+  }, [devices, focusUdid, groupMode, controlCenter]);
 
+  /// A designated phone that has left the fleet is not a designation, it is a dangling udid
+  /// that would silently redirect the overlay to a device that is not there.
   useEffect(() => {
-    let cancelled = false;
-    let unlisten: (() => void) | undefined;
+    if (!controlCenter) return;
+    if (devices.length && !devices.some((d) => d.udid === controlCenter)) {
+      setControlCenter(null);
+    }
+  }, [devices, controlCenter]);
 
-    startupError()
-      .then((issue) => {
-        if (cancelled) return;
-        setStartupIssue(issue);
-        if (issue) return;
+  /// The view store keeps one entry per udid and never used to drop one.
+  ///
+  /// Two of those entries matter. `live` decides whether a tile says the stream is up, so a
+  /// phone that goes away while live and comes back is *already* live before a single
+  /// packet arrives — its tile shows a white canvas labelled as working. And the paint
+  /// counters are what the host's watchdog is handed every two seconds, so it kept
+  /// receiving evidence about devices that had left.
+  ///
+  /// Guarded on a non-empty roster: an empty `devices` is what this app looks like for the
+  /// first moment after boot and during a failed scan, and forgetting everything then would
+  /// blank every tile that is about to be listed again.
+  useEffect(() => {
+    if (!devices.length) return;
+    forgetDepartedViews(devices.map((device) => device.udid));
+  }, [devices]);
 
-        void authSession()
-          .then((s) => {
-            if (cancelled) return;
-            setShowAuthUi(s.showAuthUi);
-            setUser(s.user ?? null);
-            if (s.showAuthUi && !s.bypassed) {
-              setPage("login");
-            }
-          })
-          .catch(() => undefined);
-        void reload();
-        void listenRiviuEvents((payload) => {
-          const p = payload as Record<string, unknown>;
-          if (p.type === "devicesUpdated" && Array.isArray(p.devices)) {
-            setDevices(p.devices as DeviceInfo[]);
-          }
-          if (p.type === "deviceUpdated" && p.device) {
-            const device = p.device as DeviceInfo;
-            setDevices((prev) => {
-              const idx = prev.findIndex((d) => d.udid === device.udid);
-              if (idx === -1) return [...prev, device];
-              const next = [...prev];
-              next[idx] = device;
-              return next;
-            });
-          }
-          if (p.type === "jobUpdated" && p.job) {
-            const job = p.job as JobRecord;
-            setJobs((prev) => {
-              const idx = prev.findIndex((j) => j.id === job.id);
-              if (idx === -1) return [job, ...prev];
-              const next = [...prev];
-              next[idx] = job;
-              return next;
-            });
-          }
-          if (p.type === "streamFrame" && typeof p.udid === "string") {
-            setDevices((prev) => markDeviceFrameLive(prev, p.udid as string));
-          }
-        }).then((fn) => {
-          if (cancelled) {
-            fn();
-          } else {
-            unlisten = fn;
-          }
-        });
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        setStartupIssue(null);
-        setBootError(String(error));
-        void reload();
-      });
-
+  // Ask for the overlay's own encode while it is open, and give it back on close.
+  //
+  // The overlay CSS-scales one shared stream, so without this it displays the tile encode
+  // -- 216x480 on this fleet -- across 400 to 760 px, a 1.8x to 3.5x upscale. The call
+  // existed and had no caller, which is why raising the overlay's resolution in an earlier
+  // commit changed nothing on a real phone.
+  //
+  // Keyed on the udid rather than on focusDevice: the memo produces a new object on every
+  // device poll, and restarting the encoder a few times a second is worse than a soft
+  // picture. Failure is deliberately swallowed to a log -- the tile encode still plays, so
+  // a phone that refuses the larger one should look worse, not stop.
+  //
+  // `focusDevice`, not `focusUdid`: with Sync on and a control centre designated, the
+  // overlay drives the control centre whichever tile was opened — that is what designating
+  // one means — so keying on `focusUdid` asked a phone nobody is watching for the larger
+  // encode and left the phone on screen at the tile preset. Its `.udid` rather than the
+  // object, for the reason above: the memo is a new object on every poll.
+  const overlayUdid = focusDevice?.udid ?? null;
+  useEffect(() => {
+    if (!overlayUdid) return;
+    void viewSetPreset(overlayUdid, "overlay").catch((error) => {
+      console.warn("overlay preset refused", error);
+    });
     return () => {
-      cancelled = true;
-      unlisten?.();
+      void viewSetPreset(overlayUdid, "tile").catch(() => {
+        // The device may be gone -- that is often what closing the overlay means.
+      });
     };
-  }, [reload]);
-
-  const focusDevice = useMemo(
-    () => devices.find((d) => d.udid === focusUdid) ?? null,
-    [devices, focusUdid],
-  );
+  }, [overlayUdid]);
 
   const readyCount = useMemo(
     () => devices.filter((d) => d.wdaReady || d.status === "ready").length,
@@ -410,21 +326,6 @@ function App() {
     [jobs],
   );
 
-  const selectedDevices = useMemo(
-    () => devices.filter((d) => selected.includes(d.udid)),
-    [devices, selected],
-  );
-
-  const onSelect = (udid: string, additive: boolean) => {
-    setSelected((prev) => {
-      if (additive) {
-        return prev.includes(udid) ? prev.filter((x) => x !== udid) : [...prev, udid];
-      }
-      return prev.includes(udid) && prev.length === 1 ? [] : [udid];
-    });
-  };
-
-  const authBlocking = (showAuthUi || authForced) && (page === "login" || page === "register");
   const title = PAGE_TITLE[page] ?? page;
 
   if (startupIssue) {
@@ -439,36 +340,16 @@ function App() {
             app. Bản Full tự tạo credential cục bộ; bản production yêu cầu token
             RT-MMO được cấu hình một lần.
           </p>
-          <button type="button" className="primary" onClick={() => window.location.reload()}>
-            Thử lại
+          <button
+            type="button"
+            className="primary"
+            disabled={retryingStartup}
+            onClick={() => void retryStartupAndResubscribe()}
+          >
+            {retryingStartup ? "Đang thử lại…" : "Thử lại"}
           </button>
         </div>
       </main>
-    );
-  }
-
-  if (authBlocking && page === "login") {
-    return (
-      <LoginPage
-        onDone={(u) => {
-          setUser(u);
-          setAuthForced(false);
-          setPage("control");
-        }}
-        onRegister={() => setPage("register")}
-      />
-    );
-  }
-  if (authBlocking && page === "register") {
-    return (
-      <RegisterPage
-        onDone={(u) => {
-          setUser(u);
-          setAuthForced(false);
-          setPage("control");
-        }}
-        onLogin={() => setPage("login")}
-      />
     );
   }
 
@@ -487,7 +368,9 @@ function App() {
 
       <div className="main-col">
         <header className="topbar">
-          <div className="topbar-title">{title}</div>
+          <div className="topbar-title" data-testid="page-title">
+            {title}
+          </div>
           <div className="topbar-drag" />
           <div className="topbar-actions">
             {groupMode && <span className="chip primary">Sync</span>}
@@ -496,16 +379,20 @@ function App() {
             <button
               type="button"
               className="icon-btn"
-              title="Refresh"
+              title="Làm mới danh sách máy"
               onClick={async () => {
-                await refreshDevices();
-                await reload();
+                // Same missing failure path as the toolbar's copy. Both are guarded now;
+                // the titles differ so the two are distinguishable to a reader and to a
+                // test, which they were not when both said "Refresh".
+                try {
+                  await refreshDevices();
+                  await reload();
+                } catch (error) {
+                  toastError("Không làm mới được danh sách máy", error);
+                }
               }}
             >
               <IconRefresh size={16} />
-            </button>
-            <button type="button" className="icon-btn" title={user?.email ?? "guest"}>
-              <IconUser size={18} />
             </button>
           </div>
         </header>
@@ -553,12 +440,29 @@ function App() {
                 nurtureOpen={nurtureOpen}
                 onNurture={() => {
                   setInteractionOpen(false);
+                  setGroupToolsOpen(false);
                   setNurtureOpen((v) => !v);
                 }}
                 interactionOpen={interactionOpen}
                 onInteraction={() => {
                   setNurtureOpen(false);
+                  setGroupToolsOpen(false);
+                  setGroupsOpen(false);
                   setInteractionOpen((v) => !v);
+                }}
+                groupsOpen={groupsOpen}
+                onGroups={() => {
+                  setNurtureOpen(false);
+                  setInteractionOpen(false);
+                  setGroupToolsOpen(false);
+                  setGroupsOpen((v) => !v);
+                }}
+                groupToolsOpen={groupToolsOpen}
+                onGroupTools={() => {
+                  setNurtureOpen(false);
+                  setInteractionOpen(false);
+                  setGroupsOpen(false);
+                  setGroupToolsOpen((v) => !v);
                 }}
                 onStart={async () => {
                   const targets = selected.length
@@ -569,9 +473,22 @@ function App() {
                     return;
                   }
                   try {
-                    await startFleetPreview(targets);
+                    const failures = await startFleetPreview(targets);
                     await reload();
-                    pushToast("ok", "Đã khởi động", `Chuẩn bị ${targets.length} máy`);
+                    if (failures.length === 0) {
+                      pushToast("ok", "Đã khởi động", `Chuẩn bị ${targets.length} máy`);
+                    } else if (failures.length === targets.length) {
+                      toastError("Không máy nào khởi động được", failures[0].reason);
+                    } else {
+                      // The count first, the names second. On twenty phones the list is
+                      // what an operator acts on, and "Khởi động thất bại" with one
+                      // message used to be all they got — for a run where most succeeded.
+                      pushToast(
+                        "warn",
+                        `Khởi động ${targets.length - failures.length}/${targets.length} máy`,
+                        `${failures.map((failure) => failure.name).join(", ")} chưa khởi động được: ${describeError(failures[0].reason)}`,
+                      );
+                    }
                   } catch (error) {
                     toastError("Khởi động thất bại", error);
                   }
@@ -614,8 +531,15 @@ function App() {
                 }}
                 onSync={() => setGroupMode((v) => !v)}
                 onRefresh={async () => {
-                  await refreshDevices();
-                  await reload();
+                  // Refresh had no failure path at all: `onClick={() => void onRefresh()}`
+                  // dropped the rejection, so a device scan that failed left the fleet
+                  // unchanged and said nothing. Pressing it again did the same nothing.
+                  try {
+                    await refreshDevices();
+                    await reload();
+                  } catch (error) {
+                    toastError("Không làm mới được danh sách máy", error);
+                  }
                 }}
               />
 
@@ -624,12 +548,34 @@ function App() {
                   join it — otherwise the slider scrolls away with the tabs. */}
               <div className="device-toolrow">
                 <GroupTabs tabs={tabs} active={groupTab} onSelect={setGroupTab} />
-                <FilterToolbar
-                  viewMode={viewMode}
-                  onViewMode={setViewMode}
-                  tileWidth={tileWidth}
-                  onTileWidth={setTileWidth}
-                />
+                {/* **Selects what is on screen, and says how many.**
+                    `visibleDevices`, not `devices`: this sits beside the group tabs, so
+                    "tất cả" has to mean the tab the operator is looking at. Saying the
+                    number in the label is what keeps that honest — a bare "Chọn tất cả"
+                    next to a filtered tab is the kind of button that quietly picks eight
+                    when the operator meant twenty, and with Sync on, the next thing they
+                    press reaches every one of them. */}
+                <div className="device-selectall">
+                  <button
+                    type="button"
+                    className="ghost"
+                    disabled={!visibleDevices.length}
+                    onClick={() =>
+                      setSelected(visibleDevices.map((device) => device.udid))
+                    }
+                  >
+                    Chọn tất cả ({visibleDevices.length})
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost"
+                    disabled={!selected.length}
+                    onClick={() => setSelected([])}
+                  >
+                    Bỏ chọn
+                  </button>
+                </div>
+                <FilterToolbar viewMode={viewMode} onViewMode={setViewMode} />
               </div>
 
               {viewMode === "list" && (
@@ -693,22 +639,46 @@ function App() {
               )}
 
               {viewMode === "window" && (
-                <div className="window-canvas" ref={canvasRef}>
+                <div
+                  className="window-canvas"
+                  ref={canvasRef}
+                  title="Ctrl + lăn chuột để phóng to / thu nhỏ · kéo chuột để quét chọn máy"
+                  onMouseDown={onCanvasMouseDown}
+                >
+                  {band && (
+                    <div
+                      className="select-band"
+                      style={{
+                        left: band.left,
+                        top: band.top,
+                        width: band.right - band.left,
+                        height: band.bottom - band.top,
+                      }}
+                    />
+                  )}
                   {visibleDevices.map((device, i) => (
                     <DeviceTile
                       key={device.udid}
                       device={device}
                       width={tileWidth}
-                      index={i + 1}
+                      index={tileNumber(i + 1, metaMap.get(device.udid))}
+                      name={tileName(device, metaMap.get(device.udid))}
                       onContextMenu={(udid, x, y) => setTileMenu({ udid, x, y })}
                       selected={selected.includes(device.udid)}
                       focused={focusUdid === device.udid}
+                      controlCenter={controlCenter === device.udid}
                       onSelect={onSelect}
                       onOpen={setFocusUdid}
                       onPrepare={(udid) => {
                         const device = devices.find((item) => item.udid === udid);
                         if (!device) return;
-                        void startDevicePreview(device).then(reload);
+                        // `.catch` is the fix. This is the button on a tile that has
+                        // already failed once, so it is pressed at the exact moment the
+                        // operator is least able to tolerate silence -- and a rejection
+                        // here used to go nowhere but the console.
+                        startDevicePreview(device)
+                          .then(reload)
+                          .catch((error) => toastError(`Không mở lại được ${device.name}`, error));
                       }}
                     />
                   ))}
@@ -722,7 +692,7 @@ function App() {
                   x={tileMenu.x}
                   y={tileMenu.y}
                   onClose={() => setTileMenu(null)}
-                  actions={tileActions(menuDevice)}
+                  nodes={tileActions(menuDevice)}
                   onAddToGroup={async (groupId) => {
                     const next = withDeviceAdded(groups, groupId, menuDevice.udid);
                     // null means the device is already in that group, or the group is
@@ -743,6 +713,10 @@ function App() {
                 <AdbConsole device={menuAdbDevice} onClose={() => setAdbFor(null)} />
               )}
 
+              {filesFor && menuFilesDevice && (
+                <DeviceFilesPopup device={menuFilesDevice} onClose={() => setFilesFor(null)} />
+              )}
+
               {!devices.length && (
                 <EmptyState
                   icon={<IconPhone size={20} />}
@@ -753,8 +727,12 @@ function App() {
                       type="button"
                       className="primary"
                       onClick={async () => {
-                        await refreshDevices();
-                        await reload();
+                        try {
+                          await refreshDevices();
+                          await reload();
+                        } catch (error) {
+                          toastError("Không làm mới được danh sách máy", error);
+                        }
                       }}
                     >
                       Làm mới
@@ -840,16 +818,6 @@ function App() {
               initialScript={jobsScriptSeed}
             />
           )}
-          {page === "sync" && (
-            <SyncPage
-              devices={devices}
-              selected={selected}
-              groupMode={groupMode}
-              onToggleGroup={() => setGroupMode((v) => !v)}
-              onSelect={onSelect}
-              onSelectUdids={setSelected}
-            />
-          )}
           {page === "publish" && (
             <PublishPage
               devices={devices}
@@ -858,15 +826,6 @@ function App() {
             />
           )}
           {page === "data" && <DataPage />}
-          {page === "account" && (
-            <AccountPage
-              user={user}
-              onShowAuth={() => {
-                setAuthForced(true);
-                setPage("login");
-              }}
-            />
-          )}
           {page === "api" && <ApiPage />}
           {page === "settings" && <SettingsPanel devices={devices} />}
         </div>
@@ -879,6 +838,13 @@ function App() {
           onClose={() => setFocusUdid(null)}
           groupUdids={selected}
           groupMode={groupMode}
+          // The same array `index` above is computed from, so the picker's numbering and the
+          // header's cannot disagree about which phone is #3.
+          devices={devices}
+          onSelectDevice={setFocusUdid}
+          // The same catalog the tile's right-click menu gets. Zooming into a phone is a
+          // different *view* of it, not a smaller set of things you can do to it.
+          functions={tileActions(focusDevice)}
         />
       )}
 
@@ -894,7 +860,26 @@ function App() {
         <InteractionPopup
           devices={devices}
           selected={selected}
+          metas={metaMap}
           onClose={() => setInteractionOpen(false)}
+        />
+      )}
+
+      {page === "control" && groupsOpen && (
+        <GroupManagerPopup
+          devices={devices}
+          groups={groups}
+          metas={metaMap}
+          onChanged={reload}
+          onClose={() => setGroupsOpen(false)}
+        />
+      )}
+
+      {page === "control" && groupToolsOpen && (
+        <GroupToolsPopup
+          devices={devices}
+          selected={selected}
+          onClose={() => setGroupToolsOpen(false)}
         />
       )}
 

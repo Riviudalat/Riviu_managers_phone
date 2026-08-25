@@ -33,14 +33,14 @@ mod recovery;
 // history rather than its own: two touch planners on one device would produce a tap
 // distribution neither of them intended. `crate::interaction_hierarchy` is the second
 // caller.
-pub(crate) mod touch;
+pub mod touch;
 
 use actions::{CommentResult, LikeResult, SwipeOutcome};
 pub use hierarchy::{run_hierarchy_session, CommentTextSource, HierarchySession, PreparedComment};
 pub use live::LiveSettings;
 use live::{apply_live_settings, video_target};
-use recovery::Budget;
 pub use recovery::Outcome;
+use recovery::{session_verdict, Budget};
 
 use crate::db::Database;
 use crate::device_control::{DeviceControlPlane, UiWithStreamContext};
@@ -49,11 +49,13 @@ use crate::frame_source::FrameSource;
 use crate::frame_text::{FrameTextSource, NullFrameTextSource};
 use crate::human_behavior::{
     in_night_window, roll_bool, roll_feed_action_in_mood, roll_follow_in_mood, FeedAction,
-    HumanBehavior, HumanSessionPolicy, MoodCycle, PolicyAction,
+    HumanBehavior, HumanSessionPolicy, Mood, MoodCycle, PolicyAction,
 };
 use crate::screen::{self, ActionRail, ScreenKind};
 use crate::screen_watch::{ScreenWatcher, SessionHandle};
-use crate::types::{InteractionSessionKind, NurtureSessionStatus, NurtureSettings, TapPoint};
+use crate::types::{
+    InteractionSessionKind, NurturePhase, NurtureSessionStatus, NurtureSettings, TapPoint,
+};
 use crate::DeviceWorkOwner;
 use touch::TouchPointPlanner;
 
@@ -138,7 +140,7 @@ impl TextCommentHealth {
                     CommentRecoveryAction::None
                 }
             }
-            CommentResult::TextSent(_) => {
+            CommentResult::TextSent { .. } => {
                 self.text_not_armed_streak = 0;
                 CommentRecoveryAction::None
             }
@@ -171,6 +173,148 @@ pub struct NurtureEngine {
     pub frame_text: Arc<dyn FrameTextSource>,
     pub artifacts_dir: PathBuf,
     touch_points: Arc<Mutex<HashMap<String, TouchPointPlanner>>>,
+}
+
+/// What every phase of a session needs, and none of them changes.
+///
+/// Four values with one lifetime — the whole session. They were four parameters repeated on
+/// every phase lifted out of `run_session`; as one context they are one parameter, and the two
+/// ways a phase talks back to the caller become methods instead of a closure travelling beside
+/// them.
+///
+/// `handle` is deliberately not here: it is built from `device.session`, so it does not exist
+/// yet at the point the context does.
+struct SessionCtx<'a, F: Fn(NurtureSessionStatus) + Send + Sync> {
+    udid: &'a str,
+    /// Set when the operator ends the session; every wait in every phase checks it.
+    stop: &'a AtomicBool,
+    /// Held for the length of one gesture, so two phases never drive the screen at once.
+    gestures: &'a tokio::sync::Mutex<()>,
+    on_status: &'a F,
+}
+
+impl<F: Fn(NurtureSessionStatus) + Send + Sync> SessionCtx<'_, F> {
+    /// Log a line, make it the row's current message, and push the row to the caller.
+    fn report(&self, into: &mut NurtureSessionStatus, msg: String) {
+        let udid = self.udid;
+        tracing::info!("[nurture {udid}] {msg}");
+        into.last_message = msg;
+        Self::assert_terminal_rows_carry_a_verdict(into);
+        (self.on_status)(into.clone());
+    }
+
+    /// Push the row without changing its message — for the counters that move on their own.
+    fn push(&self, status: &NurtureSessionStatus) {
+        Self::assert_terminal_rows_carry_a_verdict(status);
+        (self.on_status)(status.clone());
+    }
+
+    /// A stopped row must say **why** it stopped.
+    ///
+    /// This is the guard for the shape that produced the bug: ten separate exits from
+    /// `run_session` each set `running = false` by hand, and the verdict lived only inside a
+    /// Vietnamese sentence, so the desktop could not tell a finished run from a failed one
+    /// and rendered both as the same grey row. They all go through
+    /// [`NurtureSessionStatus::finish`] now — and an eleventh exit that forgets trips here
+    /// in every test and debug build rather than shipping a row nobody can classify.
+    ///
+    /// `debug_assert` rather than a hard panic: a release build must not kill a live session
+    /// over a missing label, and every test run is a debug build.
+    fn assert_terminal_rows_carry_a_verdict(status: &NurtureSessionStatus) {
+        debug_assert!(
+            status.running || status.outcome.is_some(),
+            "a stopped nurture row must carry an Outcome — use \
+             NurtureSessionStatus::finish rather than setting `running = false`: {:?}",
+            status.last_message
+        );
+        debug_assert!(
+            status.running || status.phase.is_terminal(),
+            "a stopped nurture row must be in a terminal phase: {:?}",
+            status.phase
+        );
+    }
+}
+
+/// What a nurture session has done so far, and how it will be judged.
+///
+/// Six values every phase of the feed loop reads or writes, and that never travel apart.
+/// Bundled so a phase can leave `run_session` and still take a signature someone would want
+/// to read: one `&mut SessionProgress` rather than six separate `&mut`s.
+///
+/// Not one struct for all fourteen of the loop's locals. The other seven are the behaviour
+/// model — `human`, `policy`, `moods`, `budget` and friends — and they answer a different
+/// question. A fourteen-field blob would have moved the mess rather than removed it.
+struct SessionProgress {
+    status: NurtureSessionStatus,
+    /// Refined once at the end by `session_verdict`; set directly only when a phase gives up.
+    outcome: Outcome,
+    last_error: Option<String>,
+    /// False when the loop ended for a reason other than running out of videos. The verdict
+    /// rule needs it: a run that stopped on the clock is not a run that fell short.
+    hit_video_cap: bool,
+    /// Consecutive posts that found the phone somewhere other than the feed.
+    off_feed_streak: u32,
+    /// Consecutive swipes the current card refused to move for.
+    blocked_streak: u32,
+}
+
+impl SessionProgress {
+    /// Record why the session is stopping early, and judge it accordingly.
+    ///
+    /// Written out longhand in three places before this, identically each time: report the
+    /// message, keep it as the last error, and mark that the loop did *not* simply run out of
+    /// videos — which is what stops `session_verdict` from calling a healthy timed run short.
+    ///
+    /// `Failed` when nothing was watched at all, `Partial` otherwise: a session that did some
+    /// work and then hit a wall is not the same as one that never started.
+    fn give_up<F: Fn(NurtureSessionStatus) + Send + Sync>(
+        &mut self,
+        message: String,
+        ctx: &SessionCtx<'_, F>,
+    ) {
+        ctx.report(&mut self.status, message.clone());
+        self.last_error = Some(message);
+        self.hit_video_cap = false;
+        self.outcome = if self.status.videos_done == 0 {
+            Outcome::Failed
+        } else {
+            Outcome::Partial
+        };
+    }
+}
+
+/// What one phase of the feed loop decided should happen next.
+///
+/// The `'feed` loop's phases used to end with `break 'feed` or `continue` written inline,
+/// which is precisely why none of them could be moved out of `run_session`: an exit that
+/// names an enclosing loop cannot cross a function boundary. As a returned value it can, and
+/// the compiler then checks both halves — every path must produce one of these, and the
+/// caller must handle each variant.
+#[derive(Debug)]
+enum FeedStep {
+    /// Carry on with this post.
+    Proceed,
+    /// Nothing more to do here; take the next post.
+    NextVideo,
+    /// End the session. The phase has already called `SessionProgress::give_up`, so the
+    /// verdict and the message are recorded; the caller only has to leave the loop.
+    Stop,
+}
+
+/// A phone opened for a nurture session, and what was measured while opening it.
+///
+/// Five values, which is why `open_for_session` could be lifted out of `run_session` at all:
+/// everything else that phase touches dies with it.
+struct OpenedDevice {
+    ui_context: crate::UiWithStreamContext,
+    session: std::sync::Arc<dyn crate::UiSession>,
+    /// Measured, never assumed. See the refusals in `open_for_session`.
+    screen_size: (f64, f64),
+    bundle_id: String,
+    /// A fresh text session was required for this run and was opened.
+    fresh_text_session: bool,
+    /// Recovering a dropped stream has to ask for the same kind that was opened.
+    session_kind: crate::InteractionSessionKind,
 }
 
 impl NurtureEngine {
@@ -459,57 +603,44 @@ impl NurtureEngine {
         *settings = std::mem::take(settings).into_effective();
     }
 
-    pub async fn run_session(
+    /// Open one phone and measure it, or give up with the reason already reported.
+    ///
+    /// `Ok(None)` means the session is over before it started and `status` already carries
+    /// the message the operator will read; the caller returns it unchanged. Every refusal in
+    /// here is deliberate and none of them are caution:
+    ///
+    /// * a text-comment run on an agent with no text channel would tap Send into nothing;
+    /// * a screen size that cannot be read used to fall back to `(375.0, 667.0)`, so every
+    ///   tap afterwards was computed from a fabricated iPhone 8 — which is exactly what
+    ///   AGENTS.md 691-692 forbids.
+    ///
+    /// **The statement order is the content here, not the layout.** The control session is
+    /// created and primed *before* the stream is attached, because both live in the same
+    /// agent on the device: with frames already pumping, the first hierarchy-touching command
+    /// never returned and the runner stayed blocked for the whole run — the "tap dies / swipe
+    /// blocked" failure this project chased for a long time. Nothing here may be reordered.
+    async fn open_for_session<F: Fn(NurtureSessionStatus) + Send + Sync>(
         &self,
-        udid: &str,
-        settings: NurtureSettings,
-        stop: Arc<AtomicBool>,
-        max_duration: Option<Duration>,
-        on_status: impl Fn(NurtureSessionStatus) + Send + Sync,
-    ) -> anyhow::Result<NurtureSessionStatus> {
-        // Folded once here so the whole loop below reads effective values: a feature whose
-        // switch is off arrives as probability 0, and no call site has to remember the
-        // switch exists (`NurtureSettings::into_effective`). Refreshed the same way.
-        let mut settings = settings.into_effective();
-        let started = Instant::now();
-        let mut status = NurtureSessionStatus {
-            udid: udid.to_string(),
-            running: true,
-            videos_done: 0,
-            swipe_attempts: 0,
-            like_attempts: 0,
-            comment_attempts: 0,
-            follow_attempts: 0,
-            likes: 0,
-            comments: 0,
-            follows: 0,
-            last_message: "bắt đầu".into(),
-            session_usd: 0.0,
-        };
-        on_status(status.clone());
-
-        let report = |status: &mut NurtureSessionStatus, msg: String| {
-            tracing::info!("[nurture {udid}] {msg}");
-            status.last_message = msg;
-            on_status(status.clone());
-        };
-
-        if stop.load(Ordering::Acquire) {
-            status.running = false;
-            report(&mut status, "stopped before device start".to_string());
-            return Ok(status);
+        settings: &NurtureSettings,
+        status: &mut NurtureSessionStatus,
+        ctx: &SessionCtx<'_, F>,
+    ) -> anyhow::Result<Option<OpenedDevice>> {
+        if ctx.stop.load(Ordering::Acquire) {
+            status.finish(Outcome::Stopped);
+            ctx.report(status, "stopped before device start".to_string());
+            return Ok(None);
         }
 
-        if settings.comment_prob > 0 && !self.control.supports_text_comments(udid) {
-            report(
-                &mut status,
+        if settings.comment_prob > 0 && !self.control.supports_text_comments(ctx.udid) {
+            ctx.report(
+                status,
                 "failed — Riviu Agent chưa có kênh bình luận chữ; chạy Agent Repair".into(),
             );
-            status.running = false;
-            return Ok(status);
+            status.finish(Outcome::Failed);
+            return Ok(None);
         }
 
-        // Order matters: the WDA session is created and primed **before** the
+        // Order matters: the control session is created and primed **before** the
         // MJPEG stream is started.
         //
         // Both live inside the same agent on the device. With the stream
@@ -521,51 +652,58 @@ impl NurtureEngine {
         //
         // One session per device; the supervisor reuses a healthy relay and
         // runner rather than starting a second one.
-        let bundle_id = self.tiktok_bundle_for(udid, &settings).await;
+        let bundle_id = self.tiktok_bundle_for(ctx.udid, settings).await;
         let fresh_text_session =
-            settings.comment_prob > 0 && self.control.requires_fresh_text_session(udid);
+            settings.comment_prob > 0 && self.control.requires_fresh_text_session(ctx.udid);
         let session_kind = if fresh_text_session {
             InteractionSessionKind::FreshText
         } else {
             InteractionSessionKind::Ordinary
         };
         let cached = false;
-        report(
-            &mut status,
+        ctx.report(
+            status,
             if fresh_text_session {
                 "chuẩn bị RT-MMO text session mới".into()
             } else if cached {
-                "WDA đã có — reuse".into()
+                "phiên điều khiển đã có — dùng lại".into()
             } else {
-                "khởi động WDA mới".to_string()
+                "mở phiên điều khiển mới".to_string()
             },
         );
         // Session creation can transiently fail while the relay settles. Retry
         // by dropping only the cached session; startup probes are not evidence
         // that the transport itself is wedged.
-        let first_session = self.open_ui_context(udid, &bundle_id, session_kind).await;
-        let mut ui_context = match first_session {
+        let first_session = self
+            .open_ui_context(ctx.udid, &bundle_id, session_kind)
+            .await;
+        let ui_context = match first_session {
             Ok(context) => context,
             Err(first) => {
-                report(
-                    &mut status,
-                    format!("WDA chưa tạo được session ({first}) — thử session mới"),
+                ctx.report(
+                    status,
+                    format!("chưa mở được phiên điều khiển ({first}) — thử lần nữa"),
                 );
-                let second_session = self.open_ui_context(udid, &bundle_id, session_kind).await;
+                let second_session = self
+                    .open_ui_context(ctx.udid, &bundle_id, session_kind)
+                    .await;
                 match second_session {
                     Ok(context) => {
-                        report(&mut status, "WDA đã tạo session mới".into());
+                        ctx.report(status, "đã mở phiên điều khiển mới".into());
                         context
                     }
                     Err(e) => {
-                        report(&mut status, format!("failed — không mở được WDA: {e}"));
-                        status.running = false;
-                        return Ok(status);
+                        ctx.report(
+                            status,
+                            format!("failed — không mở được phiên điều khiển: {e}"),
+                        );
+                        status.finish(Outcome::Failed);
+                        return Ok(None);
                     }
                 }
             }
         };
-        let mut session = self.control.streaming_session(&ui_context)?;
+        let session = self.control.streaming_session(&ui_context)?;
 
         // Two refusals here, both closing holes rather than adding caution.
         //
@@ -582,22 +720,1030 @@ impl NurtureEngine {
         let screen_size = match session.window_size().await {
             Ok(size) if size.0 > 0.0 && size.1 > 0.0 => size,
             Ok(size) => {
-                report(
-                    &mut status,
+                ctx.report(
+                    status,
                     format!("failed — máy báo kích thước màn hình không dùng được {size:?}"),
                 );
-                status.running = false;
-                return Ok(status);
+                status.finish(Outcome::Failed);
+                return Ok(None);
             }
             Err(error) => {
-                report(
-                    &mut status,
+                ctx.report(
+                    status,
                     format!("failed — không đọc được kích thước màn hình: {error}"),
                 );
-                status.running = false;
-                return Ok(status);
+                status.finish(Outcome::Failed);
+                return Ok(None);
             }
         };
+        Ok(Some(OpenedDevice {
+            ui_context,
+            session,
+            screen_size,
+            bundle_id,
+            fresh_text_session,
+            session_kind,
+        }))
+    }
+
+    /// Get back to the For You feed, or decide the session cannot go on.
+    ///
+    /// Called once per post, and it is the phase that runs when the phone is *not* where the
+    /// loop expects it. `FeedStep` is how it reports back: the three exits it used to take out
+    /// of the `'feed` loop directly — one `break` and two `continue` — are now values the
+    /// caller matches on, which is what let this phase leave `run_session` at all.
+    ///
+    /// Backing out comes before relaunching, and that order is measured rather than tidy:
+    /// relaunching does not leave a detail page because iOS restores TikTok's navigation
+    /// stack, and a live run pressed Home and relaunched three times without moving off one
+    /// search-results page.
+    ///
+    /// Returns the streak alongside the step because the two `format!` messages capture it
+    /// inline, and `{*ptr}` is not something an inline capture accepts.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_off_feed<F: Fn(NurtureSessionStatus) + Send + Sync>(
+        &self,
+        settings: &NurtureSettings,
+        ui_context: &crate::UiWithStreamContext,
+        session: &std::sync::Arc<dyn crate::UiSession>,
+        screen_size: (f64, f64),
+        human: &mut HumanBehavior,
+        mut off_feed_streak: u32,
+        progress: &mut SessionProgress,
+        ctx: &SessionCtx<'_, F>,
+    ) -> anyhow::Result<(FeedStep, u32)> {
+        off_feed_streak += 1;
+        if off_feed_streak >= OFF_FEED_LIMIT {
+            ctx.report(
+                &mut progress.status,
+                format!("kẹt ngoài FYP {off_feed_streak} lượt — mở lại TikTok"),
+            );
+            // Back out first — that is what actually leaves a detail
+            // page. Relaunching does not: iOS restores TikTok's
+            // navigation stack, and a live run pressed Home and
+            // relaunched three times without moving off a search-results
+            // page.
+            let mut recovered = self
+                .escape_to_feed(
+                    ctx.udid,
+                    session.as_ref(),
+                    ctx.gestures,
+                    screen_size,
+                    OFF_FEED_BACK_ATTEMPTS,
+                    ctx.stop,
+                )
+                .await;
+            if !recovered {
+                ctx.report(
+                    &mut progress.status,
+                    "vuốt lùi không về được — mở lại TikTok".into(),
+                );
+                {
+                    let _guard = ctx.gestures.lock().await;
+                    if let Err(error) = session.home().await {
+                        ctx.report(
+                            &mut progress.status,
+                            format!("không bấm được Home: {error}"),
+                        );
+                    }
+                }
+                sleep_interruptible(Duration::from_millis(1_200), ctx.stop).await;
+                let _ = self
+                    .bring_tiktok_foreground(
+                        ctx.udid,
+                        ui_context,
+                        session.as_ref(),
+                        settings,
+                        screen_size.0,
+                        ctx.gestures,
+                        ctx.stop,
+                    )
+                    .await;
+                // Only the screen decides whether it worked.
+                // `bring_tiktok_foreground` returns Ok(true) from its
+                // fallback path without ever checking, and believing it
+                // is what let the streak reset and the loop run on
+                // forever.
+                recovered = self
+                    .wait_for_frame(ctx.udid, Duration::from_secs(8), ctx.stop, |img| {
+                        screen::feed_ready(img, Some(screen_size.0))
+                    })
+                    .await
+                    .is_some();
+            }
+            if recovered {
+                off_feed_streak = 0;
+                ctx.report(
+                    &mut progress.status,
+                    "đã về FYP sau khi mở lại TikTok".into(),
+                );
+            } else {
+                let message = format!(
+                    "không rời được màn hình ngoài FYP sau {off_feed_streak} lượt \
+                     (thường là phòng LIVE mà detector không nhận ra) — dừng phiên"
+                );
+                progress.give_up(message, ctx);
+                return Ok((FeedStep::Stop, off_feed_streak));
+            }
+        }
+        let observation = self
+            .latest_image(ctx.udid)
+            .map(|img| screen::classify(&img, Some(screen_size.0)));
+        let kind = observation.map(|obs| obs.kind);
+        // Two screens the watcher clears with a tap, and that a swipe
+        // cannot: a LIVE room scrolls its own content instead of
+        // leaving, and an iOS alert is not TikTok's to swipe at all.
+        let watcher_owned = matches!(
+            kind,
+            Some(ScreenKind::LiveRoom) | Some(ScreenKind::SystemAlert { .. })
+        ) || observation.is_some_and(|obs| obs.evidence.ad_feedback_notice);
+        if watcher_owned {
+            let note = if observation.is_some_and(|obs| obs.evidence.ad_feedback_notice) {
+                "thông báo quảng cáo đang hiện — chờ TikTok tự đóng"
+            } else if matches!(kind, Some(ScreenKind::SystemAlert { .. })) {
+                "hộp thoại hệ thống — chờ watcher bấm nút bỏ qua"
+            } else {
+                "đang ở phòng LIVE — chờ watcher bấm ✕"
+            };
+            ctx.report(&mut progress.status, note.into());
+            let back = self
+                .wait_for_frame(ctx.udid, Duration::from_secs(12), ctx.stop, |img| {
+                    screen::feed_ready(img, Some(screen_size.0))
+                })
+                .await;
+            if back.is_none() {
+                return Ok((FeedStep::NextVideo, off_feed_streak));
+            }
+            ctx.report(&mut progress.status, "đã về FYP".into());
+        } else {
+            ctx.report(&mut progress.status, "không ở FYP — vuốt để về feed".into());
+            progress.status.swipe_attempts += 1;
+            let _ = self
+                .do_swipe(
+                    ctx.udid,
+                    session.as_ref(),
+                    ctx.gestures,
+                    screen_size,
+                    human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
+                    ctx.stop,
+                )
+                .await;
+            sleep_interruptible(Duration::from_millis(1_200), ctx.stop).await;
+            if !self.on_feed(ctx.udid, screen_size.0) {
+                return Ok((FeedStep::NextVideo, off_feed_streak));
+            }
+            ctx.report(&mut progress.status, "đã về FYP".into());
+        }
+
+        Ok((FeedStep::Proceed, off_feed_streak))
+    }
+
+    /// Watch one card out, and report the action rail if this kind of card has one.
+    ///
+    /// The plan called this `watch_one_video`; it is really "deal with whatever kind of card
+    /// is on screen" — a LIVE room is entered or skipped by policy, a photo carousel is swiped
+    /// through slide by slide, and a plain video is simply watched. Only the carousel ends
+    /// with a rail worth reporting, which is why the rail comes back as an `Option` rather
+    /// than through a `&mut`.
+    ///
+    /// `FeedStep::NextVideo` covers the two places this used to `continue` the `'feed` loop
+    /// from the inside.
+    ///
+    /// `live_owned` is the watcher's flag: true while this run is deliberately inside a LIVE
+    /// room, so the watcher leaves it alone instead of escaping a screen we chose.
+    #[allow(clippy::too_many_arguments)]
+    async fn watch_one_card<F: Fn(NurtureSessionStatus) + Send + Sync>(
+        &self,
+        settings: &NurtureSettings,
+        card_kind: screen::FeedCardKind,
+        session: &std::sync::Arc<dyn crate::UiSession>,
+        screen_size: (f64, f64),
+        human: &mut HumanBehavior,
+        policy: &mut crate::human_behavior::HumanSessionPolicy,
+        live_owned: &AtomicBool,
+        progress: &mut SessionProgress,
+        ctx: &SessionCtx<'_, F>,
+    ) -> anyhow::Result<(FeedStep, Option<ActionRail>)> {
+        let mut rail: Option<ActionRail> = None;
+
+        match card_kind {
+            screen::FeedCardKind::LivePreview => {
+                if policy.should_enter_live() {
+                    ctx.report(
+                        &mut progress.status,
+                        "gặp LIVE — vào xem một lúc rồi thoát".into(),
+                    );
+                    live_owned.store(true, Ordering::Relaxed);
+                    let entered = {
+                        let _guard = ctx.gestures.lock().await;
+                        let point = self.next_touch_point(
+                            ctx.udid,
+                            screen_size,
+                            TapPoint {
+                                x: screen_size.0 * 0.50,
+                                y: screen_size.1 * 0.46,
+                            },
+                            (18.0, 20.0),
+                        );
+                        session.tap(point).await.is_ok()
+                    };
+                    if entered {
+                        let _ = self
+                            .wait_for_frame(ctx.udid, Duration::from_secs(8), ctx.stop, |img| {
+                                matches!(
+                                    screen::classify(img, Some(screen_size.0)).kind,
+                                    screen::ScreenKind::LiveRoom
+                                )
+                            })
+                            .await;
+                        let live_digest = self
+                            .frames
+                            .latest(ctx.udid)
+                            .map(|frame| frame_digest(&frame))
+                            .unwrap_or_default();
+                        let dwell = Duration::from_secs(20 + (live_digest % 71));
+                        sleep_interruptible(dwell, ctx.stop).await;
+                        {
+                            let _guard = ctx.gestures.lock().await;
+                            let point = self.next_touch_point(
+                                ctx.udid,
+                                screen_size,
+                                TapPoint {
+                                    x: screen_size.0 * screen::LIVE_EXIT.0,
+                                    y: screen_size.1 * screen::LIVE_EXIT.1,
+                                },
+                                (12.0, 10.0),
+                            );
+                            let _ = session.tap(point).await;
+                        }
+                        let _ = self
+                            .wait_for_frame(ctx.udid, Duration::from_secs(8), ctx.stop, |img| {
+                                screen::feed_ready(img, Some(screen_size.0))
+                            })
+                            .await;
+                    }
+                    live_owned.store(false, Ordering::Relaxed);
+                } else {
+                    ctx.report(
+                        &mut progress.status,
+                        "gặp thẻ LIVE — lướt qua thẻ xem trước".into(),
+                    );
+                    progress.status.swipe_attempts += 1;
+                    let _ = self
+                        .do_swipe(
+                            ctx.udid,
+                            session.as_ref(),
+                            ctx.gestures,
+                            screen_size,
+                            human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
+                            ctx.stop,
+                        )
+                        .await;
+                    sleep_interruptible(Duration::from_millis(1_200), ctx.stop).await;
+                }
+                return Ok((FeedStep::NextVideo, rail));
+            }
+            screen::FeedCardKind::TransitionOrUnknown => {
+                ctx.report(
+                    &mut progress.status,
+                    "khung đang chuyển — chờ frame ổn định".into(),
+                );
+                sleep_interruptible(Duration::from_millis(700), ctx.stop).await;
+            }
+            screen::FeedCardKind::Video if self.card_is_still(ctx.udid, ctx.stop).await => {
+                let card_digest = self
+                    .frames
+                    .latest(ctx.udid)
+                    .map(|frame| frame_digest(&frame))
+                    .unwrap_or_default();
+                // How far through the carousel to go, from the operator's settings.
+                //
+                // This used to be `1 + (card_digest % 3)` — one to three slides picked
+                // pseudo-randomly from the frame's own bytes, with no relation to how
+                // many slides the post actually has. A seven-image post got two or
+                // three of them.
+                //
+                // Now the end of the carousel is *observed*: `do_photo_swipe` already
+                // returns whether a new frame arrived, which is exactly "the page
+                // turned". So the traversal runs until a swipe changes nothing, and the
+                // budget is only a ceiling for a post that never stops changing — a
+                // video misread as a photo, or a card that animates.
+                let budget = settings.carousel_slide_budget();
+                if budget == 0 {
+                    ctx.report(
+                        &mut progress.status,
+                        "gặp bài ảnh — bỏ qua vuốt ngang (tính năng đang tắt)".into(),
+                    );
+                    sleep_interruptible(Duration::from_secs(2 + (card_digest % 6)), ctx.stop).await;
+                    return Ok((FeedStep::NextVideo, rail));
+                }
+                ctx.report(
+                    &mut progress.status,
+                    format!("gặp bài ảnh (khung đứng yên) — vuốt ngang tối đa {budget} ảnh"),
+                );
+                let mut slides_seen = 0u32;
+                for slide in 0..budget {
+                    // Varied per slide rather than one constant for the whole card: an
+                    // identical dwell on every image of every carousel is a tell.
+                    let dwell = Duration::from_secs(2 + ((card_digest + u64::from(slide)) % 6));
+                    sleep_interruptible(dwell, ctx.stop).await;
+                    let advanced = self
+                        .do_photo_swipe(
+                            ctx.udid,
+                            session.as_ref(),
+                            ctx.gestures,
+                            screen_size,
+                            human.photo_swipe_duration_ms(),
+                            ctx.stop,
+                        )
+                        .await
+                        // A swipe that could not be delivered at all is not evidence
+                        // that the carousel ended, but it is a reason to ctx.stop pushing:
+                        // treated as "did not advance", which ends the traversal
+                        // without claiming the post had exactly this many slides.
+                        .unwrap_or(false);
+                    // A horizontal swipe only turns a page while the card
+                    // really is a photo post; on anything else TikTok reads
+                    // it as navigation and leaves the feed. Both times a
+                    // live run wandered off the FYP it was immediately after
+                    // this branch. Stillness is strong evidence but not
+                    // proof, so the branch checks its own work and undoes
+                    // it — the back gesture is what leaves a detail page.
+                    if !self.on_feed(ctx.udid, screen_size.0) {
+                        ctx.report(
+                            &mut progress.status,
+                            "vuốt ngang đã rời feed — lùi lại".into(),
+                        );
+                        let back = self
+                            .escape_to_feed(
+                                ctx.udid,
+                                session.as_ref(),
+                                ctx.gestures,
+                                screen_size,
+                                OFF_FEED_BACK_ATTEMPTS,
+                                ctx.stop,
+                            )
+                            .await;
+                        ctx.report(
+                            &mut progress.status,
+                            if back {
+                                "đã lùi về FYP".into()
+                            } else {
+                                "lùi chưa về được FYP".to_string()
+                            },
+                        );
+                        break;
+                    }
+                    // The swipe delivered and the screen did not change: that is the
+                    // last slide. Stopping here is what makes "swipe to the end" mean
+                    // the end of *this* post rather than a fixed number of swipes — and
+                    // it also stops the loop pushing horizontal swipes at a card that
+                    // has run out of them, which is how TikTok gets navigated off the
+                    // feed.
+                    if !advanced {
+                        break;
+                    }
+                    slides_seen += 1;
+                }
+                if slides_seen > 0 {
+                    ctx.report(
+                        &mut progress.status,
+                        format!("bài ảnh: đã xem thêm {slides_seen} ảnh"),
+                    );
+                }
+                if let Some(img) = self.latest_image(ctx.udid) {
+                    if let Some(found) = screen::locate_action_rail(&img) {
+                        rail = Some(found);
+                    }
+                }
+            }
+            screen::FeedCardKind::Video => {}
+        }
+
+        Ok((FeedStep::Proceed, rail))
+    }
+
+    /// Roll one interaction for the card on screen, and carry it out.
+    ///
+    /// The largest phase of the feed loop, and the one that could not be lifted until
+    /// `SessionCtx` existed: measured against the loop it had fifteen free variables, and
+    /// cutting it per-arm did not help (14 for Like, 15 for Comment). The count came from how
+    /// much session state was loose in scope, not from the phase's size.
+    ///
+    /// Five ways out, three different verdicts — twice `Stopped` because the operator asked,
+    /// twice `Failed` because recovery did not take, and once `Failed` with its own message.
+    /// Each records that on `progress` before returning `FeedStep::Stop`; the caller only has
+    /// to leave the loop.
+    #[allow(clippy::too_many_arguments)]
+    async fn roll_and_execute_action<F: Fn(NurtureSessionStatus) + Send + Sync>(
+        &self,
+        ctx: &SessionCtx<'_, F>,
+        progress: &mut SessionProgress,
+        device: &mut OpenedDevice,
+        settings: &NurtureSettings,
+        policy: &mut crate::human_behavior::HumanSessionPolicy,
+        budget: &mut Budget,
+        rail: &ActionRail,
+        text_health: &mut TextCommentHealth,
+        last_interaction_at: &mut Option<Instant>,
+        mood: Mood,
+        handle: &SessionHandle,
+        // Raised around a comment so the watcher does not read the keyboard as a screen change.
+        suppress: &AtomicBool,
+        // Deliberately always empty — see the note where it is declared: an uncertain comment
+        // is not written at all rather than falling back to a generic line.
+        pool: &[String],
+    ) -> anyhow::Result<(FeedStep, CommentRecoveryAction)> {
+        let mut comment_recovery_action = CommentRecoveryAction::None;
+        match roll_feed_action_in_mood(settings.like_prob, settings.comment_prob, mood) {
+            FeedAction::Like
+                if !policy.can_interact_with_post() || !policy.can_attempt(PolicyAction::Like) =>
+            {
+                ctx.report(
+                    &mut progress.status,
+                    "bỏ qua tim: nhịp phiên hiện tại đã đủ".into(),
+                );
+            }
+            FeedAction::Like => {
+                if !wait_for_action_gap(last_interaction_at, policy.min_action_gap(), ctx.stop)
+                    .await
+                {
+                    progress.outcome = Outcome::Stopped;
+                    progress.hit_video_cap = false;
+                    return Ok((FeedStep::Stop, comment_recovery_action));
+                }
+                policy.record_attempt(PolicyAction::Like);
+                policy.mark_post_interacted();
+                progress.status.like_attempts += 1;
+                ctx.push(&progress.status);
+                ctx.report(&mut progress.status, "thả tim".into());
+                match self
+                    .do_like(
+                        ctx.udid,
+                        device.session.as_ref(),
+                        ctx.gestures,
+                        device.screen_size,
+                        ctx.stop,
+                    )
+                    .await
+                {
+                    Ok(LikeResult::Liked) => {
+                        progress.status.likes += 1;
+                        ctx.report(
+                            &mut progress.status,
+                            "tim thành công (xác nhận icon đỏ)".into(),
+                        );
+                    }
+                    Ok(LikeResult::AlreadyLiked) => ctx.report(
+                        &mut progress.status,
+                        "video đã tim từ trước — bỏ qua".into(),
+                    ),
+                    Ok(LikeResult::NotOnFeed) => ctx.report(
+                        &mut progress.status,
+                        "bỏ qua tim: khung hiện tại không phải thẻ feed có thanh hành động".into(),
+                    ),
+                    Ok(LikeResult::NotConfirmed { before, best }) => {
+                        ctx.report(
+                            &mut progress.status,
+                            format!(
+                            "tim: tap gửi được nhưng icon không đổi (đỏ {before:.0}→{best:.0}, \
+                             cần >{:.0}; rail layout {}{}, tim y={:.0}pt)",
+                            screen::LIKE_FILLED_REDNESS,
+                            rail.layout(),
+                            if rail.located { "" } else { ", dùng mặc định" },
+                            rail.like_y * 667.0
+                        ),
+                        )
+                    }
+                    Err(e) => {
+                        let msg = format!("tim thất bại: {}", describe(&e));
+                        ctx.report(&mut progress.status, msg.clone());
+                        progress.last_error = Some(msg);
+                        if !self
+                            .recover(
+                                ctx.udid,
+                                &device.bundle_id,
+                                device.fresh_text_session,
+                                &mut device.ui_context,
+                                &mut device.session,
+                                handle,
+                                budget,
+                                text_health,
+                                &e,
+                                &mut progress.status,
+                                ctx.on_status,
+                            )
+                            .await
+                        {
+                            progress.outcome = Outcome::Failed;
+                            return Ok((FeedStep::Stop, comment_recovery_action));
+                        }
+                    }
+                }
+            }
+            FeedAction::Comment
+                if !policy.can_interact_with_post()
+                    || !policy.can_attempt(PolicyAction::Comment) =>
+            {
+                ctx.report(
+                    &mut progress.status,
+                    "bỏ qua bình luận: nhịp phiên hiện tại đã đủ".into(),
+                );
+            }
+            FeedAction::Comment => {
+                if !wait_for_action_gap(last_interaction_at, policy.min_action_gap(), ctx.stop)
+                    .await
+                {
+                    progress.outcome = Outcome::Stopped;
+                    progress.hit_video_cap = false;
+                    return Ok((FeedStep::Stop, comment_recovery_action));
+                }
+                policy.record_attempt(PolicyAction::Comment);
+                policy.mark_post_interacted();
+                progress.status.comment_attempts += 1;
+                ctx.push(&progress.status);
+                ctx.report(&mut progress.status, "bình luận".into());
+                suppress.store(true, Ordering::Relaxed);
+                let res = self
+                    .do_comment(
+                        ctx.udid,
+                        device.session.as_ref(),
+                        ctx.gestures,
+                        rail,
+                        device.screen_size,
+                        settings,
+                        pool,
+                        ctx.stop,
+                    )
+                    .await;
+                suppress.store(false, Ordering::Relaxed);
+                match res {
+                    Ok(result) => {
+                        comment_recovery_action = text_health.observe(result);
+                        match result {
+                            CommentResult::TextSent {
+                                prompt_tokens,
+                                completion_tokens,
+                            } => {
+                                progress.status.comments += 1;
+                                progress.status.session_prompt_tokens += prompt_tokens;
+                                progress.status.session_completion_tokens += completion_tokens;
+                                ctx.report(
+                                    &mut progress.status,
+                                    "đã gửi bình luận chữ (xác nhận nút gửi tắt)".into(),
+                                );
+                            }
+                            CommentResult::TextNotSent => ctx.report(
+                                &mut progress.status,
+                                "bỏ qua bình luận: đã bấm Gửi nhưng chưa xác nhận được; không retry vì trạng thái giao nhận mơ hồ"
+                                    .into(),
+                            ),
+                            other => {
+                                let msg = format!("bỏ qua bình luận: {}", other.reason());
+                                ctx.report(&mut progress.status, msg);
+                            }
+                        }
+
+                        if comment_recovery_action == CommentRecoveryAction::RefreshFreshSession {
+                            ctx.report(
+                                &mut progress.status,
+                                "nút Gửi không sáng 2 lượt liên tiếp — làm mới text device.session"
+                                    .into(),
+                            );
+                            let error = anyhow::Error::new(UiError::new(
+                                UiErrorKind::Session,
+                                "comment.text_not_armed",
+                                "two consecutive frame-confirmed non-arming results",
+                            ));
+                            if !self
+                                .recover(
+                                    ctx.udid,
+                                    &device.bundle_id,
+                                    true,
+                                    &mut device.ui_context,
+                                    &mut device.session,
+                                    handle,
+                                    budget,
+                                    text_health,
+                                    &error,
+                                    &mut progress.status,
+                                    ctx.on_status,
+                                )
+                                .await
+                            {
+                                progress.last_error = Some(
+                                    "không làm mới được text device.session sau 2 lượt không armed"
+                                        .into(),
+                                );
+                                progress.outcome = Outcome::Failed;
+                                return Ok((FeedStep::Stop, comment_recovery_action));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let msg = format!("bình luận thất bại: {}", describe(&e));
+                        ctx.report(&mut progress.status, msg.clone());
+                        progress.last_error = Some(msg);
+                        if ui_error_kind(&e) != UiErrorKind::Other
+                            && !self
+                                .recover(
+                                    ctx.udid,
+                                    &device.bundle_id,
+                                    device.fresh_text_session,
+                                    &mut device.ui_context,
+                                    &mut device.session,
+                                    handle,
+                                    budget,
+                                    text_health,
+                                    &e,
+                                    &mut progress.status,
+                                    ctx.on_status,
+                                )
+                                .await
+                        {
+                            progress.outcome = Outcome::Failed;
+                            return Ok((FeedStep::Stop, comment_recovery_action));
+                        }
+                    }
+                }
+            }
+            FeedAction::None => {}
+        }
+        Ok((FeedStep::Proceed, comment_recovery_action))
+    }
+
+    /// Swipe to the next video, and deal with every way that can fail to take.
+    ///
+    /// The swipe itself is one line; the other hundred are what happens when the card does not
+    /// move — the stream is re-established, the app is checked, recovery runs. Whether the feed
+    /// actually advanced is the phase's real answer, so it comes back with the verdict.
+    #[allow(clippy::too_many_arguments)]
+    async fn swipe_to_next_video<F: Fn(NurtureSessionStatus) + Send + Sync>(
+        &self,
+        ctx: &SessionCtx<'_, F>,
+        progress: &mut SessionProgress,
+        device: &mut OpenedDevice,
+        settings: &NurtureSettings,
+        human: &mut HumanBehavior,
+        budget: &mut Budget,
+        text_health: &mut TextCommentHealth,
+        handle: &SessionHandle,
+    ) -> anyhow::Result<(FeedStep, bool)> {
+        ctx.report(&mut progress.status, "vuốt video tiếp".into());
+        let mut advanced_to_next_video = false;
+        progress.status.swipe_attempts += 1;
+        match self
+            .do_swipe(
+                ctx.udid,
+                device.session.as_ref(),
+                ctx.gestures,
+                device.screen_size,
+                human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
+                ctx.stop,
+            )
+            .await
+        {
+            Ok(SwipeOutcome::Advanced) => {
+                advanced_to_next_video = true;
+                progress.blocked_streak = 0;
+                progress.status.videos_done += 1;
+                ctx.push(&progress.status);
+            }
+            Ok(SwipeOutcome::Moved) => {
+                progress.blocked_streak = 0;
+                // The rail left, so the gesture landed and the card we were
+                // on is gone. Swiping again here would skip whatever came
+                // next; the loop re-reads the screen at the top instead.
+                // Not counted: nothing settled that could be counted.
+                advanced_to_next_video = true;
+                ctx.report(
+                    &mut progress.status,
+                    "đã rời thẻ cũ nhưng chưa thấy thẻ mới ổn định — đọc lại màn hình".into(),
+                );
+            }
+            Ok(SwipeOutcome::Blocked) => {
+                // The rail never left: the feed swallowed the gesture,
+                // usually under a popup. The watcher closes those on its
+                // own; give it a beat, then try once more.
+                ctx.report(
+                    &mut progress.status,
+                    "vuốt không ăn — chờ popup rồi thử lại".into(),
+                );
+                sleep_interruptible(Duration::from_millis(1_800), ctx.stop).await;
+                progress.status.swipe_attempts += 1;
+                match self
+                    .do_swipe(
+                        ctx.udid,
+                        device.session.as_ref(),
+                        ctx.gestures,
+                        device.screen_size,
+                        human.swipe_duration_ms(false),
+                        ctx.stop,
+                    )
+                    .await
+                {
+                    Ok(SwipeOutcome::Advanced) => {
+                        advanced_to_next_video = true;
+                        progress.blocked_streak = 0;
+                        progress.status.videos_done += 1;
+                        ctx.push(&progress.status);
+                    }
+                    Ok(SwipeOutcome::Moved) => {
+                        advanced_to_next_video = true;
+                        progress.blocked_streak = 0;
+                        ctx.report(
+                            &mut progress.status,
+                            "đã rời thẻ cũ, chưa xác nhận thẻ mới".into(),
+                        );
+                    }
+                    Ok(SwipeOutcome::Blocked) => {
+                        ctx.report(&mut progress.status, "vuốt vẫn không ăn".into());
+                        progress.last_error = Some("swipe không rời được thẻ hiện tại".into());
+                        progress.blocked_streak += 1;
+                    }
+                    Err(e) => {
+                        let msg = format!("vuốt lỗi: {}", describe(&e));
+                        ctx.report(&mut progress.status, msg.clone());
+                        progress.last_error = Some(msg);
+                        if !self
+                            .recover(
+                                ctx.udid,
+                                &device.bundle_id,
+                                device.fresh_text_session,
+                                &mut device.ui_context,
+                                &mut device.session,
+                                handle,
+                                budget,
+                                text_health,
+                                &e,
+                                &mut progress.status,
+                                ctx.on_status,
+                            )
+                            .await
+                        {
+                            progress.outcome = Outcome::Failed;
+                            return Ok((FeedStep::Stop, advanced_to_next_video));
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                let msg = format!("vuốt lỗi: {}", describe(&e));
+                ctx.report(&mut progress.status, msg.clone());
+                progress.last_error = Some(msg);
+                if !self
+                    .recover(
+                        ctx.udid,
+                        &device.bundle_id,
+                        device.fresh_text_session,
+                        &mut device.ui_context,
+                        &mut device.session,
+                        handle,
+                        budget,
+                        text_health,
+                        &e,
+                        &mut progress.status,
+                        ctx.on_status,
+                    )
+                    .await
+                {
+                    progress.outcome = Outcome::Failed;
+                    return Ok((FeedStep::Stop, advanced_to_next_video));
+                }
+            }
+        }
+        Ok((FeedStep::Proceed, advanced_to_next_video))
+    }
+
+    /// Settle after the feed moved on: the natural rest, and the checks that follow it.
+    ///
+    /// Kept behind its `if` at the call site rather than taking the flag: "only when the feed
+    /// actually advanced" is a fact about the loop, and reading it there is the point.
+    #[allow(clippy::too_many_arguments)]
+    async fn settle_after_advance<F: Fn(NurtureSessionStatus) + Send + Sync>(
+        &self,
+        ctx: &SessionCtx<'_, F>,
+        progress: &mut SessionProgress,
+        device: &mut OpenedDevice,
+        policy: &mut crate::human_behavior::HumanSessionPolicy,
+        handle: &SessionHandle,
+    ) -> anyhow::Result<FeedStep> {
+        if let Some(rest) = policy.rest_after_video() {
+            ctx.report(
+                &mut progress.status,
+                format!("nghỉ tự nhiên {}s", rest.as_secs()),
+            );
+            sleep_interruptible(rest, ctx.stop).await;
+        }
+        if policy.should_take_block_break() || policy.should_take_home_break() {
+            let break_for = policy.home_break_duration();
+            ctx.report(
+                &mut progress.status,
+                format!(
+                    "tạm về màn hình chính khoảng {}s rồi mở TikTok lại",
+                    break_for.as_secs()
+                ),
+            );
+            {
+                let _guard = ctx.gestures.lock().await;
+                let _ = device.session.home().await;
+            }
+            sleep_interruptible(break_for, ctx.stop).await;
+            if policy.should_cold_restart() {
+                ctx.report(
+                    &mut progress.status,
+                    "khởi động lại TikTok sau một quãng nghỉ".into(),
+                );
+                let _ = self
+                    .control
+                    .terminate_streaming_app(&device.ui_context, &device.bundle_id)
+                    .await;
+                sleep_interruptible(Duration::from_secs(2), ctx.stop).await;
+                match self
+                    .control
+                    .recover_streaming_session(
+                        &mut device.ui_context,
+                        &device.bundle_id,
+                        device.session_kind,
+                        false,
+                    )
+                    .await
+                {
+                    Ok(next) => {
+                        // Swap the watcher's device.session handle too, or the
+                        // popup watcher keeps tapping through the dead
+                        // pre-restart device.session for the rest of the run.
+                        device.session = next;
+                        handle.set(device.session.clone());
+                    }
+                    Err(error) => {
+                        ctx.report(
+                            &mut progress.status,
+                            format!("không mở lại được TikTok: {error}"),
+                        );
+                        progress.outcome = Outcome::Partial;
+                        return Ok(FeedStep::Stop);
+                    }
+                }
+            } else {
+                let _guard = ctx.gestures.lock().await;
+                let _ = device
+                    .session
+                    .launch_app_foreground(&device.bundle_id)
+                    .await;
+            }
+            sleep_interruptible(Duration::from_secs(4), ctx.stop).await;
+            policy.reset_block();
+        }
+        Ok(FeedStep::Proceed)
+    }
+
+    /// Follow the author of the card on screen.
+    ///
+    /// The roll stays at the call site with the other two — like, comment, follow read as one
+    /// decision there, and burying one of the three inside a phase would break that.
+    #[allow(clippy::too_many_arguments)]
+    async fn roll_and_execute_follow<F: Fn(NurtureSessionStatus) + Send + Sync>(
+        &self,
+        ctx: &SessionCtx<'_, F>,
+        progress: &mut SessionProgress,
+        device: &mut OpenedDevice,
+        policy: &mut crate::human_behavior::HumanSessionPolicy,
+        budget: &mut Budget,
+        rail: &ActionRail,
+        text_health: &mut TextCommentHealth,
+        last_interaction_at: &mut Option<Instant>,
+        handle: &SessionHandle,
+    ) -> anyhow::Result<FeedStep> {
+        if !policy.can_interact_with_post() || !policy.can_attempt(PolicyAction::Follow) {
+            ctx.report(
+                &mut progress.status,
+                "bỏ qua follow: nhịp phiên hiện tại đã đủ".into(),
+            );
+        } else if !wait_for_action_gap(last_interaction_at, policy.min_action_gap(), ctx.stop).await
+        {
+            progress.outcome = Outcome::Stopped;
+            progress.hit_video_cap = false;
+            return Ok(FeedStep::Stop);
+        } else {
+            policy.record_attempt(PolicyAction::Follow);
+            policy.mark_post_interacted();
+            progress.status.follow_attempts += 1;
+            ctx.push(&progress.status);
+            ctx.report(&mut progress.status, "follow".into());
+            match self
+                .do_follow(
+                    ctx.udid,
+                    device.session.as_ref(),
+                    ctx.gestures,
+                    rail,
+                    device.screen_size,
+                    ctx.stop,
+                )
+                .await
+            {
+                Ok(true) => {
+                    progress.status.follows += 1;
+                    ctx.report(&mut progress.status, "follow thành công".into());
+                }
+                Ok(false) => ctx.report(&mut progress.status, "follow không đổi trạng thái".into()),
+                Err(e) => {
+                    let msg = format!("follow thất bại: {}", describe(&e));
+                    ctx.report(&mut progress.status, msg.clone());
+                    progress.last_error = Some(msg);
+                    if !self
+                        .recover(
+                            ctx.udid,
+                            &device.bundle_id,
+                            device.fresh_text_session,
+                            &mut device.ui_context,
+                            &mut device.session,
+                            handle,
+                            budget,
+                            text_health,
+                            &e,
+                            &mut progress.status,
+                            ctx.on_status,
+                        )
+                        .await
+                    {
+                        progress.outcome = Outcome::Failed;
+                        return Ok(FeedStep::Stop);
+                    }
+                }
+            }
+        }
+        Ok(FeedStep::Proceed)
+    }
+
+    pub async fn run_session(
+        &self,
+        udid: &str,
+        settings: NurtureSettings,
+        stop: Arc<AtomicBool>,
+        max_duration: Option<Duration>,
+        on_status: impl Fn(NurtureSessionStatus) + Send + Sync,
+    ) -> anyhow::Result<NurtureSessionStatus> {
+        // Folded once here so the whole loop below reads effective values: a feature whose
+        // switch is off arrives as probability 0, and no call site has to remember the
+        // switch exists (`NurtureSettings::into_effective`). Refreshed the same way.
+        let mut settings = settings.into_effective();
+        let started = Instant::now();
+        // Hoisted above the first status push: `ctx.push` is the first thing the session
+        // does, so the context has to exist by then. The gesture lock came up with it — it
+        // is one of the four values every phase needs, and it depends on nothing.
+        let gestures = Arc::new(tokio::sync::Mutex::new(()));
+        let ctx = SessionCtx {
+            udid,
+            stop: &stop,
+            gestures: &gestures,
+            on_status: &on_status,
+        };
+        // The two bounds, stamped on the status the moment they are known.
+        //
+        // Both of these were locals that died with the function. The video target is a
+        // start-time snapshot — `num_videos` is deliberately not absorbed mid-run — so a
+        // frontend dividing by the live settings row would rescale the bar under a session
+        // that never changed. The deadline is worse: for a manual start it is a randomised
+        // 2–3 hour horizon that nothing outside this function had ever seen, so a progress
+        // bar drawn from the video count alone stalls at 40% on a run that is minutes from
+        // finishing on time and reads as hung.
+        let session_began = chrono::Utc::now();
+        let mut progress = SessionProgress {
+            status: NurtureSessionStatus {
+                running: true,
+                last_message: "bắt đầu".into(),
+                phase: NurturePhase::Opening,
+                video_target: live::video_target(&settings),
+                started_at: Some(session_began),
+                deadline_at: max_duration.and_then(|window| {
+                    chrono::Duration::from_std(window)
+                        .ok()
+                        .map(|window| session_began + window)
+                }),
+                ..NurtureSessionStatus::new(udid)
+            },
+            outcome: Outcome::Done,
+            last_error: None,
+            hit_video_cap: true,
+            off_feed_streak: 0,
+            blocked_streak: 0,
+        };
+        ctx.push(&progress.status);
+
+        let Some(mut device) = self
+            .open_for_session(&settings, &mut progress.status, &ctx)
+            .await?
+        else {
+            return Ok(progress.status);
+        };
+        // The session exists; from here to the first counted video the phone is being
+        // steered onto a usable feed — dialogs declined, the onboarding journey skipped,
+        // the action rail found. That can legitimately take a minute, and it is the window
+        // the two lock-screen phones died in on 23/08/2026, so it is worth being its own
+        // phase rather than a stretch of 0%.
+        progress.status.phase = NurturePhase::AwaitingFeed;
+        ctx.push(&progress.status);
         // A backend that can report *where* a control is does not need a
         // calibrated screen at all — it taps inside the rectangle the device
         // handed back instead of multiplying an iPhone 8 fraction. So try that
@@ -605,7 +1751,7 @@ impl NurtureEngine {
         // through to the pixel engine below, unchanged.
         //
         // This is what AGENTS.md §9 means by not porting `screen.rs` to Android:
-        // the same session policy, a different way of seeing.
+        // the same device.session policy, a different way of seeing.
         // The hierarchy loop gets its words from the engine's own grounded
         // generator, so a comment on Android is written from the same evidence, by
         // the same provider, into the same audit table as one on iOS.
@@ -613,32 +1759,33 @@ impl NurtureEngine {
             engine: self,
             udid,
             stop: &stop,
+            slides: parking_lot::Mutex::new(SlideEvidence::default()),
         };
         let live_source = EngineLiveSettings { engine: self };
         let attempt = hierarchy::run_hierarchy_session(
-            session.as_ref(),
-            screen_size,
+            device.session.as_ref(),
+            device.screen_size,
             &settings,
-            &bundle_id,
+            &device.bundle_id,
             started,
             max_duration,
             &stop,
-            &mut status,
-            &report,
+            &mut progress.status,
+            &|into: &mut NurtureSessionStatus, msg: String| ctx.report(into, msg),
             Some(&comment_source),
             Some(&live_source),
         )
         .await;
         match attempt {
-            hierarchy::HierarchySession::Ran(mut outcome) => {
-                // Same judgement the pixel path applies: a session that moved no
+            hierarchy::HierarchySession::Ran(mut ran_outcome) => {
+                // Same judgement the pixel path applies: a device.session that moved no
                 // videos did not work, whatever else it reported.
-                if outcome == Outcome::Done && status.videos_done == 0 {
-                    outcome = Outcome::Failed;
+                if ran_outcome == Outcome::Done && progress.status.videos_done == 0 {
+                    ran_outcome = Outcome::Failed;
                 }
                 let mut cleanup_error = None;
-                if let Err(error) = self.control.close_ui_context(ui_context).await {
-                    outcome = if status.videos_done == 0 {
+                if let Err(error) = self.control.close_ui_context(device.ui_context).await {
+                    ran_outcome = if progress.status.videos_done == 0 {
                         Outcome::Failed
                     } else {
                         Outcome::Partial
@@ -647,42 +1794,47 @@ impl NurtureEngine {
                 }
                 let summary = format!(
                     "{} — {}/{} video, {} tim, {} bình luận, {} follow, {:.0}s (hierarchy){}",
-                    outcome.as_str(),
-                    status.videos_done,
-                    status.swipe_attempts,
-                    status.likes,
-                    status.comments,
-                    status.follows,
+                    ran_outcome.as_str(),
+                    progress.status.videos_done,
+                    progress.status.swipe_attempts,
+                    progress.status.likes,
+                    progress.status.comments,
+                    progress.status.follows,
                     started.elapsed().as_secs_f64(),
                     cleanup_error
                         .as_ref()
                         .map(|error| format!(", lỗi cuối: {error}"))
                         .unwrap_or_default(),
                 );
-                status.running = false;
-                status.last_message = summary.clone();
-                on_status(status.clone());
+                progress.status.finish(ran_outcome);
+                progress.status.last_message = summary.clone();
+                ctx.push(&progress.status);
                 let _ = self.db.log_op(
                     "nurture.session",
-                    &format!("{udid} {summary} usd={:.4}", status.session_usd),
+                    &format!(
+                        "{udid} {summary} tokens={}/{}",
+                        progress.status.session_prompt_tokens,
+                        progress.status.session_completion_tokens
+                    ),
                 );
                 self.clear_touch_points(udid);
-                return Ok(status);
+                return Ok(progress.status);
             }
             // The ordinary iOS case: no geometry, so use pixels.
             hierarchy::HierarchySession::NotSupported => {}
             // Geometry works but something measured is missing. Stop, rather than
             // falling through to a pixel engine whose only calibrated layout is an
-            // iPhone 8. The reason is already in `status.last_message`.
+            // iPhone 8. The reason is already in `progress.status.last_message`.
             hierarchy::HierarchySession::Refused => {
-                status.running = false;
-                let _ = self.control.close_ui_context(ui_context).await;
-                on_status(status.clone());
-                return Ok(status);
+                progress.status.finish(Outcome::Failed);
+                let _ = self.control.close_ui_context(device.ui_context).await;
+                ctx.push(&progress.status);
+                return Ok(progress.status);
             }
         }
 
-        let Some(layout) = screen::calibrated_layout(screen_size.0, screen_size.1) else {
+        let Some(layout) = screen::calibrated_layout(device.screen_size.0, device.screen_size.1)
+        else {
             let known = screen::CALIBRATED_LAYOUTS
                 .iter()
                 .map(|entry| {
@@ -693,70 +1845,72 @@ impl NurtureEngine {
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            report(
-                &mut status,
+            ctx.report(
+                &mut progress.status,
                 format!(
                     "failed — chưa hiệu chỉnh bộ dò cho màn hình {}x{}; \
                      đã hiệu chỉnh: {known}. Chạy quy trình hiệu chỉnh (AGENTS.md mục 6) \
                      trước khi dùng máy này",
-                    screen_size.0, screen_size.1
+                    device.screen_size.0, device.screen_size.1
                 ),
             );
-            status.running = false;
-            return Ok(status);
+            progress.status.finish(Outcome::Failed);
+            return Ok(progress.status);
         };
         tracing::debug!("[nurture {udid}] layout đã hiệu chỉnh: {}", layout.id);
-        self.reset_touch_points(udid, screen_size);
+        self.reset_touch_points(udid, device.screen_size);
 
         // Now the agent is warm, attach the stream that the watcher reads.
-        report(&mut status, "mở stream màn hình".into());
+        ctx.report(&mut progress.status, "mở stream màn hình".into());
         if self
             .wait_for_frame(udid, Duration::from_secs(20), &stop, |_| true)
             .await
             .is_none()
         {
-            report(&mut status, "failed — stream không có frame".into());
-            status.running = false;
-            return Ok(status);
+            ctx.report(
+                &mut progress.status,
+                "failed — stream không có frame".into(),
+            );
+            progress.status.finish(Outcome::Failed);
+            return Ok(progress.status);
         }
 
         // What is on screen before we touch anything?
         let already_on_tiktok = self
             .latest_image(udid)
-            .map(|img| screen::feed_ready(&img, Some(screen_size.0)))
+            .map(|img| screen::feed_ready(&img, Some(device.screen_size.0)))
             .unwrap_or(false);
 
         let handle = SessionHandle::new();
-        handle.set(session.clone());
-        let gestures = Arc::new(tokio::sync::Mutex::new(()));
+        handle.set(device.session.clone());
         let suppress = Arc::new(AtomicBool::new(false));
 
         // TikTok forward only if the frame says we are not already there.
         if already_on_tiktok {
-            report(
-                &mut status,
+            ctx.report(
+                &mut progress.status,
                 "TikTok đã mở sẵn — reuse, không khởi động lại".into(),
             );
         } else {
-            report(
-                &mut status,
+            ctx.report(
+                &mut progress.status,
                 "TikTok chưa ở foreground — đưa lên trước".into(),
             );
             let brought = self
                 .bring_tiktok_foreground(
                     udid,
-                    &ui_context,
-                    session.as_ref(),
+                    &device.ui_context,
+                    device.session.as_ref(),
                     &settings,
-                    screen_size.0,
+                    device.screen_size.0,
                     &gestures,
                     &stop,
                 )
                 .await;
             match brought {
-                Ok(true) => report(&mut status, "đã bring TikTok foreground".into()),
-                Ok(false) => report(&mut status, "TikTok đã ở foreground".into()),
-                Err(e) => report(&mut status, format!("không mở được TikTok: {e}")),
+                Ok(true) => ctx.report(&mut progress.status, "đã bring TikTok foreground".into()),
+                Ok(false) => ctx.report(&mut progress.status, "TikTok đã ở foreground".into()),
+                Err(e) => ctx.report(&mut progress.status, format!("không mở được TikTok: {e}")),
             }
         }
 
@@ -767,7 +1921,7 @@ impl NurtureEngine {
             handle.clone(),
             gestures.clone(),
             stop.clone(),
-            screen_size,
+            device.screen_size,
             {
                 let logger = std::sync::Mutex::new(());
                 let _ = logger;
@@ -783,15 +1937,15 @@ impl NurtureEngine {
         // The watcher normally runs in parallel with nurture. At startup we
         // add one small gate so a notification/sheet that appeared during app
         // launch cannot receive the first like or swipe. The watcher keeps
-        // running after this gate for overlays that appear mid-session.
+        // running after this gate for overlays that appear mid-device.session.
         let popup_closed_before = watcher_stats.popups_closed.load(Ordering::Relaxed);
         let startup_ready = watcher_state
             .wait_until_feed(&stop, STARTUP_POPUP_DRAIN)
             .await;
         let popup_closed_after = watcher_stats.popups_closed.load(Ordering::Relaxed);
         if popup_closed_after > popup_closed_before {
-            report(
-                &mut status,
+            ctx.report(
+                &mut progress.status,
                 format!(
                     "đã tự tắt {} thông báo/popup đầu phiên",
                     popup_closed_after - popup_closed_before
@@ -799,8 +1953,8 @@ impl NurtureEngine {
             );
         }
         if !startup_ready && !stop.load(Ordering::Relaxed) {
-            report(
-                &mut status,
+            ctx.report(
+                &mut progress.status,
                 "chưa xác nhận frame TikTok sau khi dọn thông báo — tiếp tục theo dõi".into(),
             );
         }
@@ -840,8 +1994,6 @@ impl NurtureEngine {
             }
         };
         let mut rail = ActionRail::fallback();
-        let mut outcome = Outcome::Done;
-        let mut last_error: Option<String> = None;
         // The pixel loop's door back to the settings row. The same object the hierarchy
         // loop is handed, so "live" means one thing across both.
         let live_source = EngineLiveSettings { engine: self };
@@ -850,9 +2002,12 @@ impl NurtureEngine {
         // `live::video_target` for why the duration used to silently win.
         let total_videos = video_target(&settings);
         // True when the loop ran out of videos rather than out of time.
-        let mut hit_video_cap = true;
-        let mut off_feed_streak = 0u32;
-        let mut blocked_streak = 0u32;
+        // The feed loop proper. Set once outside the loop: a phase that flickered per post
+        // would be a worse signal than no phase at all.
+        if progress.status.phase != NurturePhase::Watching {
+            progress.status.phase = NurturePhase::Watching;
+            ctx.push(&progress.status);
+        }
         'feed: for _video in 0..total_videos {
             // Live tuning, once per post rather than per action. The UI writes one settings
             // row and this picks it up, so "save" means "applies to the run in progress"
@@ -867,41 +2022,47 @@ impl NurtureEngine {
                 &mut moods,
             );
             if stop.load(Ordering::Relaxed) {
-                outcome = Outcome::Stopped;
-                hit_video_cap = false;
+                progress.outcome = Outcome::Stopped;
+                progress.hit_video_cap = false;
                 break;
             }
             if max_duration.is_some_and(|max| started.elapsed() >= max) {
-                hit_video_cap = false;
+                progress.hit_video_cap = false;
                 break;
             }
             if in_night_window(settings.night_start, settings.night_end) {
-                report(&mut status, "giờ nghỉ đêm — dừng".into());
-                hit_video_cap = false;
+                ctx.report(&mut progress.status, "giờ nghỉ đêm — dừng".into());
+                progress.hit_video_cap = false;
                 break;
             }
             if budget.exhausted() {
-                outcome = Outcome::Failed;
-                last_error = Some("hết ngân sách recovery".into());
+                progress.outcome = Outcome::Failed;
+                progress.last_error = Some("hết ngân sách recovery".into());
                 break;
             }
             policy.begin_post();
 
-            // One mood runs for several videos, so a session looks like a
+            // One mood runs for several videos, so a device.session looks like a
             // person skimming, then liking a run, then chatting — not an
             // independent coin flip per clip.
             let (mood, mood_changed) = moods.next();
             if mood_changed {
-                report(&mut status, format!("chuyển nhịp: {}", mood.label()));
+                ctx.report(
+                    &mut progress.status,
+                    format!("chuyển nhịp: {}", mood.label()),
+                );
             }
 
             let watch =
                 human.watch_seconds(settings.watch_min, settings.watch_max) * mood.watch_mult();
-            report(&mut status, format!("xem {watch:.1}s ({})", mood.label()));
+            ctx.report(
+                &mut progress.status,
+                format!("xem {watch:.1}s ({})", mood.label()),
+            );
             sleep_interruptible(Duration::from_secs_f64(watch.max(0.5)), &stop).await;
             if stop.load(Ordering::Relaxed) {
-                outcome = Outcome::Stopped;
-                hit_video_cap = false;
+                progress.outcome = Outcome::Stopped;
+                progress.hit_video_cap = false;
                 break;
             }
 
@@ -910,132 +2071,31 @@ impl NurtureEngine {
             // different — a live run spent several videos tapping rail
             // positions that do not exist there and opening the LIVE chat
             // keyboard. A swipe leaves; blind taps do not.
-            if !self.on_feed(udid, screen_size.0) {
-                off_feed_streak += 1;
-                if off_feed_streak >= OFF_FEED_LIMIT {
-                    report(
-                        &mut status,
-                        format!("kẹt ngoài FYP {off_feed_streak} lượt — mở lại TikTok"),
-                    );
-                    // Back out first — that is what actually leaves a detail
-                    // page. Relaunching does not: iOS restores TikTok's
-                    // navigation stack, and a live run pressed Home and
-                    // relaunched three times without moving off a search-results
-                    // page.
-                    let mut recovered = self
-                        .escape_to_feed(
-                            udid,
-                            session.as_ref(),
-                            &gestures,
-                            screen_size,
-                            OFF_FEED_BACK_ATTEMPTS,
-                            &stop,
-                        )
-                        .await;
-                    if !recovered {
-                        report(&mut status, "vuốt lùi không về được — mở lại TikTok".into());
-                        {
-                            let _guard = gestures.lock().await;
-                            if let Err(error) = session.home().await {
-                                report(&mut status, format!("không bấm được Home: {error}"));
-                            }
-                        }
-                        sleep_interruptible(Duration::from_millis(1_200), &stop).await;
-                        let _ = self
-                            .bring_tiktok_foreground(
-                                udid,
-                                &ui_context,
-                                session.as_ref(),
-                                &settings,
-                                screen_size.0,
-                                &gestures,
-                                &stop,
-                            )
-                            .await;
-                        // Only the screen decides whether it worked.
-                        // `bring_tiktok_foreground` returns Ok(true) from its
-                        // fallback path without ever checking, and believing it
-                        // is what let the streak reset and the loop run on
-                        // forever.
-                        recovered = self
-                            .wait_for_frame(udid, Duration::from_secs(8), &stop, |img| {
-                                screen::feed_ready(img, Some(screen_size.0))
-                            })
-                            .await
-                            .is_some();
-                    }
-                    if recovered {
-                        off_feed_streak = 0;
-                        report(&mut status, "đã về FYP sau khi mở lại TikTok".into());
-                    } else {
-                        let message = format!(
-                            "không rời được màn hình ngoài FYP sau {off_feed_streak} lượt \
-                             (thường là phòng LIVE mà detector không nhận ra) — dừng phiên"
-                        );
-                        report(&mut status, message.clone());
-                        last_error = Some(message);
-                        hit_video_cap = false;
-                        outcome = if status.videos_done == 0 {
-                            Outcome::Failed
-                        } else {
-                            Outcome::Partial
-                        };
-                        break 'feed;
-                    }
+            match self
+                .handle_off_feed(
+                    &settings,
+                    &device.ui_context,
+                    &device.session,
+                    device.screen_size,
+                    &mut human,
+                    progress.off_feed_streak,
+                    &mut progress,
+                    &ctx,
+                )
+                .await?
+            {
+                // The streak is dropped on this path on purpose: the line just past this
+                // match zeroes it, because getting here means the phone is on the feed.
+                (FeedStep::Proceed, _) => {}
+                (FeedStep::NextVideo, streak) => {
+                    progress.off_feed_streak = streak;
+                    continue;
                 }
-                let observation = self
-                    .latest_image(udid)
-                    .map(|img| screen::classify(&img, Some(screen_size.0)));
-                let kind = observation.map(|obs| obs.kind);
-                // Two screens the watcher clears with a tap, and that a swipe
-                // cannot: a LIVE room scrolls its own content instead of
-                // leaving, and an iOS alert is not TikTok's to swipe at all.
-                let watcher_owned = matches!(
-                    kind,
-                    Some(ScreenKind::LiveRoom) | Some(ScreenKind::SystemAlert { .. })
-                ) || observation
-                    .is_some_and(|obs| obs.evidence.ad_feedback_notice);
-                if watcher_owned {
-                    let note = if observation.is_some_and(|obs| obs.evidence.ad_feedback_notice) {
-                        "thông báo quảng cáo đang hiện — chờ TikTok tự đóng"
-                    } else if matches!(kind, Some(ScreenKind::SystemAlert { .. })) {
-                        "hộp thoại hệ thống — chờ watcher bấm nút bỏ qua"
-                    } else {
-                        "đang ở phòng LIVE — chờ watcher bấm ✕"
-                    };
-                    report(&mut status, note.into());
-                    let back = self
-                        .wait_for_frame(udid, Duration::from_secs(12), &stop, |img| {
-                            screen::feed_ready(img, Some(screen_size.0))
-                        })
-                        .await;
-                    if back.is_none() {
-                        continue;
-                    }
-                    report(&mut status, "đã về FYP".into());
-                } else {
-                    report(&mut status, "không ở FYP — vuốt để về feed".into());
-                    status.swipe_attempts += 1;
-                    let _ = self
-                        .do_swipe(
-                            udid,
-                            session.as_ref(),
-                            &gestures,
-                            screen_size,
-                            human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
-                            &stop,
-                        )
-                        .await;
-                    sleep_interruptible(Duration::from_millis(1_200), &stop).await;
-                    if !self.on_feed(udid, screen_size.0) {
-                        continue;
-                    }
-                    report(&mut status, "đã về FYP".into());
-                }
+                (FeedStep::Stop, _) => break 'feed,
             }
             // Every path that gets here is on the feed: either it always was, or
             // one of the branches above got back to it.
-            off_feed_streak = 0;
+            progress.off_feed_streak = 0;
 
             // Re-read the rail after the watch and after any overlay drain.
             // The previous frame may belong to the card just left, so it is
@@ -1051,198 +2111,38 @@ impl NurtureEngine {
                 .latest_image(udid)
                 .map(|img| screen::feed_card_kind(&img))
                 .unwrap_or(screen::FeedCardKind::TransitionOrUnknown);
-            match card_kind {
-                screen::FeedCardKind::LivePreview => {
-                    if policy.should_enter_live() {
-                        report(&mut status, "gặp LIVE — vào xem một lúc rồi thoát".into());
-                        live_owned.store(true, Ordering::Relaxed);
-                        let entered = {
-                            let _guard = gestures.lock().await;
-                            let point = self.next_touch_point(
-                                udid,
-                                screen_size,
-                                TapPoint {
-                                    x: screen_size.0 * 0.50,
-                                    y: screen_size.1 * 0.46,
-                                },
-                                (18.0, 20.0),
-                            );
-                            session.tap(point).await.is_ok()
-                        };
-                        if entered {
-                            let _ = self
-                                .wait_for_frame(udid, Duration::from_secs(8), &stop, |img| {
-                                    matches!(
-                                        screen::classify(img, Some(screen_size.0)).kind,
-                                        screen::ScreenKind::LiveRoom
-                                    )
-                                })
-                                .await;
-                            let live_digest = self
-                                .frames
-                                .latest(udid)
-                                .map(|frame| frame_digest(&frame))
-                                .unwrap_or_default();
-                            let dwell = Duration::from_secs(20 + (live_digest % 71));
-                            sleep_interruptible(dwell, &stop).await;
-                            {
-                                let _guard = gestures.lock().await;
-                                let point = self.next_touch_point(
-                                    udid,
-                                    screen_size,
-                                    TapPoint {
-                                        x: screen_size.0 * screen::LIVE_EXIT.0,
-                                        y: screen_size.1 * screen::LIVE_EXIT.1,
-                                    },
-                                    (12.0, 10.0),
-                                );
-                                let _ = session.tap(point).await;
-                            }
-                            let _ = self
-                                .wait_for_frame(udid, Duration::from_secs(8), &stop, |img| {
-                                    screen::feed_ready(img, Some(screen_size.0))
-                                })
-                                .await;
-                        }
-                        live_owned.store(false, Ordering::Relaxed);
-                    } else {
-                        report(&mut status, "gặp thẻ LIVE — lướt qua thẻ xem trước".into());
-                        status.swipe_attempts += 1;
-                        let _ = self
-                            .do_swipe(
-                                udid,
-                                session.as_ref(),
-                                &gestures,
-                                screen_size,
-                                human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
-                                &stop,
-                            )
-                            .await;
-                        sleep_interruptible(Duration::from_millis(1_200), &stop).await;
-                    }
-                    continue;
-                }
-                screen::FeedCardKind::TransitionOrUnknown => {
-                    report(&mut status, "khung đang chuyển — chờ frame ổn định".into());
-                    sleep_interruptible(Duration::from_millis(700), &stop).await;
-                }
-                screen::FeedCardKind::Video if self.card_is_still(udid, &stop).await => {
-                    let card_digest = self
-                        .frames
-                        .latest(udid)
-                        .map(|frame| frame_digest(&frame))
-                        .unwrap_or_default();
-                    // How far through the carousel to go, from the operator's settings.
-                    //
-                    // This used to be `1 + (card_digest % 3)` — one to three slides picked
-                    // pseudo-randomly from the frame's own bytes, with no relation to how
-                    // many slides the post actually has. A seven-image post got two or
-                    // three of them.
-                    //
-                    // Now the end of the carousel is *observed*: `do_photo_swipe` already
-                    // returns whether a new frame arrived, which is exactly "the page
-                    // turned". So the traversal runs until a swipe changes nothing, and the
-                    // budget is only a ceiling for a post that never stops changing — a
-                    // video misread as a photo, or a card that animates.
-                    let budget = settings.carousel_slide_budget();
-                    if budget == 0 {
-                        report(
-                            &mut status,
-                            "gặp bài ảnh — bỏ qua vuốt ngang (tính năng đang tắt)".into(),
-                        );
-                        sleep_interruptible(Duration::from_secs(2 + (card_digest % 6)), &stop)
-                            .await;
-                        continue;
-                    }
-                    report(
-                        &mut status,
-                        format!("gặp bài ảnh (khung đứng yên) — vuốt ngang tối đa {budget} ảnh"),
-                    );
-                    let mut slides_seen = 0u32;
-                    for slide in 0..budget {
-                        // Varied per slide rather than one constant for the whole card: an
-                        // identical dwell on every image of every carousel is a tell.
-                        let dwell = Duration::from_secs(2 + ((card_digest + u64::from(slide)) % 6));
-                        sleep_interruptible(dwell, &stop).await;
-                        let advanced = self
-                            .do_photo_swipe(
-                                udid,
-                                session.as_ref(),
-                                &gestures,
-                                screen_size,
-                                human.photo_swipe_duration_ms(),
-                                &stop,
-                            )
-                            .await
-                            // A swipe that could not be delivered at all is not evidence
-                            // that the carousel ended, but it is a reason to stop pushing:
-                            // treated as "did not advance", which ends the traversal
-                            // without claiming the post had exactly this many slides.
-                            .unwrap_or(false);
-                        // A horizontal swipe only turns a page while the card
-                        // really is a photo post; on anything else TikTok reads
-                        // it as navigation and leaves the feed. Both times a
-                        // live run wandered off the FYP it was immediately after
-                        // this branch. Stillness is strong evidence but not
-                        // proof, so the branch checks its own work and undoes
-                        // it — the back gesture is what leaves a detail page.
-                        if !self.on_feed(udid, screen_size.0) {
-                            report(&mut status, "vuốt ngang đã rời feed — lùi lại".into());
-                            let back = self
-                                .escape_to_feed(
-                                    udid,
-                                    session.as_ref(),
-                                    &gestures,
-                                    screen_size,
-                                    OFF_FEED_BACK_ATTEMPTS,
-                                    &stop,
-                                )
-                                .await;
-                            report(
-                                &mut status,
-                                if back {
-                                    "đã lùi về FYP".into()
-                                } else {
-                                    "lùi chưa về được FYP".to_string()
-                                },
-                            );
-                            break;
-                        }
-                        // The swipe delivered and the screen did not change: that is the
-                        // last slide. Stopping here is what makes "swipe to the end" mean
-                        // the end of *this* post rather than a fixed number of swipes — and
-                        // it also stops the loop pushing horizontal swipes at a card that
-                        // has run out of them, which is how TikTok gets navigated off the
-                        // feed.
-                        if !advanced {
-                            break;
-                        }
-                        slides_seen += 1;
-                    }
-                    if slides_seen > 0 {
-                        report(
-                            &mut status,
-                            format!("bài ảnh: đã xem thêm {slides_seen} ảnh"),
-                        );
-                    }
-                    if let Some(img) = self.latest_image(udid) {
-                        if let Some(found) = screen::locate_action_rail(&img) {
-                            rail = found;
-                            rail_present = true;
-                        }
+            match self
+                .watch_one_card(
+                    &settings,
+                    card_kind,
+                    &device.session,
+                    device.screen_size,
+                    &mut human,
+                    &mut policy,
+                    &live_owned,
+                    &mut progress,
+                    &ctx,
+                )
+                .await?
+            {
+                (FeedStep::Proceed, found) => {
+                    if let Some(found) = found {
+                        rail = found;
+                        rail_present = true;
                     }
                 }
-                screen::FeedCardKind::Video => {}
+                (FeedStep::NextVideo, _) => continue,
+                (FeedStep::Stop, _) => break 'feed,
             }
 
             // No rail on this card: watch it out and move on rather than tap
             // where nothing is. Follow is skipped for the same reason.
             if !rail_present {
-                report(
-                    &mut status,
+                ctx.report(
+                    &mut progress.status,
                     "thẻ không có thanh hành động (LIVE / đang chuyển) — chỉ vuốt tiếp".into(),
                 );
-                status.swipe_attempts += 1;
+                progress.status.swipe_attempts += 1;
                 // Leaving a card that has no rail is still provable, from the
                 // other side: the rail *arriving* on a settled card is the
                 // card change. Landing on another rail-less card is not, and
@@ -1250,19 +2150,22 @@ impl NurtureEngine {
                 if self
                     .do_swipe(
                         udid,
-                        session.as_ref(),
+                        device.session.as_ref(),
                         &gestures,
-                        screen_size,
+                        device.screen_size,
                         human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
                         &stop,
                     )
                     .await
-                    .is_ok_and(|outcome| outcome == SwipeOutcome::Advanced)
+                    .is_ok_and(|swipe| swipe == SwipeOutcome::Advanced)
                 {
-                    status.videos_done += 1;
-                    on_status(status.clone());
+                    progress.status.videos_done += 1;
+                    ctx.push(&progress.status);
                     if let Some(rest) = policy.rest_after_video() {
-                        report(&mut status, format!("nghỉ tự nhiên {}s", rest.as_secs()));
+                        ctx.report(
+                            &mut progress.status,
+                            format!("nghỉ tự nhiên {}s", rest.as_secs()),
+                        );
                         sleep_interruptible(rest, &stop).await;
                     }
                 }
@@ -1270,410 +2173,78 @@ impl NurtureEngine {
             }
 
             human.note_action();
-            let mut comment_recovery_action = CommentRecoveryAction::None;
-            match roll_feed_action_in_mood(settings.like_prob, settings.comment_prob, mood) {
-                FeedAction::Like
-                    if !policy.can_interact_with_post()
-                        || !policy.can_attempt(PolicyAction::Like) =>
-                {
-                    report(&mut status, "bỏ qua tim: nhịp phiên hiện tại đã đủ".into());
-                }
-                FeedAction::Like => {
-                    if !wait_for_action_gap(
-                        &mut last_interaction_at,
-                        policy.min_action_gap(),
-                        &stop,
-                    )
-                    .await
-                    {
-                        outcome = Outcome::Stopped;
-                        hit_video_cap = false;
-                        break 'feed;
-                    }
-                    policy.record_attempt(PolicyAction::Like);
-                    policy.mark_post_interacted();
-                    status.like_attempts += 1;
-                    on_status(status.clone());
-                    report(&mut status, "thả tim".into());
-                    match self
-                        .do_like(udid, session.as_ref(), &gestures, screen_size, &stop)
-                        .await
-                    {
-                        Ok(LikeResult::Liked) => {
-                            status.likes += 1;
-                            report(&mut status, "tim thành công (xác nhận icon đỏ)".into());
-                        }
-                        Ok(LikeResult::AlreadyLiked) => {
-                            report(&mut status, "video đã tim từ trước — bỏ qua".into())
-                        }
-                        Ok(LikeResult::NotOnFeed) => report(
-                            &mut status,
-                            "bỏ qua tim: khung hiện tại không phải thẻ feed có thanh hành động"
-                                .into(),
-                        ),
-                        Ok(LikeResult::NotConfirmed { before, best }) => report(
-                            &mut status,
-                            format!(
-                                "tim: tap gửi được nhưng icon không đổi (đỏ {before:.0}→{best:.0}, \
-                                 cần >{:.0}; rail layout {}{}, tim y={:.0}pt)",
-                                screen::LIKE_FILLED_REDNESS,
-                                rail.layout(),
-                                if rail.located { "" } else { ", dùng mặc định" },
-                                rail.like_y * 667.0
-                            ),
-                        ),
-                        Err(e) => {
-                            let msg = format!("tim thất bại: {}", describe(&e));
-                            report(&mut status, msg.clone());
-                            last_error = Some(msg);
-                            if !self
-                                .recover(
-                                    udid,
-                                    &bundle_id,
-                                    fresh_text_session,
-                                    &mut ui_context,
-                                    &mut session,
-                                    &handle,
-                                    &mut budget,
-                                    &mut text_health,
-                                    &e,
-                                    &mut status,
-                                    &on_status,
-                                )
-                                .await
-                            {
-                                outcome = Outcome::Failed;
-                                break 'feed;
-                            }
-                        }
-                    }
-                }
-                FeedAction::Comment
-                    if !policy.can_interact_with_post()
-                        || !policy.can_attempt(PolicyAction::Comment) =>
-                {
-                    report(
-                        &mut status,
-                        "bỏ qua bình luận: nhịp phiên hiện tại đã đủ".into(),
-                    );
-                }
-                FeedAction::Comment => {
-                    if !wait_for_action_gap(
-                        &mut last_interaction_at,
-                        policy.min_action_gap(),
-                        &stop,
-                    )
-                    .await
-                    {
-                        outcome = Outcome::Stopped;
-                        hit_video_cap = false;
-                        break 'feed;
-                    }
-                    policy.record_attempt(PolicyAction::Comment);
-                    policy.mark_post_interacted();
-                    status.comment_attempts += 1;
-                    on_status(status.clone());
-                    report(&mut status, "bình luận".into());
-                    suppress.store(true, Ordering::Relaxed);
-                    let res = self
-                        .do_comment(
-                            udid,
-                            session.as_ref(),
-                            &gestures,
-                            &rail,
-                            screen_size,
-                            &settings,
-                            &pool,
-                            &stop,
-                        )
-                        .await;
-                    suppress.store(false, Ordering::Relaxed);
-                    match res {
-                        Ok(result) => {
-                            comment_recovery_action = text_health.observe(result);
-                            match result {
-                                CommentResult::TextSent(usd) => {
-                                    status.comments += 1;
-                                    status.session_usd += usd;
-                                    report(
-                                        &mut status,
-                                        "đã gửi bình luận chữ (xác nhận nút gửi tắt)".into(),
-                                    );
-                                }
-                                CommentResult::TextNotSent => report(
-                                    &mut status,
-                                    "bỏ qua bình luận: đã bấm Gửi nhưng chưa xác nhận được; không retry vì trạng thái giao nhận mơ hồ"
-                                        .into(),
-                                ),
-                                other => {
-                                    let msg = format!("bỏ qua bình luận: {}", other.reason());
-                                    report(&mut status, msg);
-                                }
-                            }
-
-                            if comment_recovery_action == CommentRecoveryAction::RefreshFreshSession
-                            {
-                                report(
-                                    &mut status,
-                                    "nút Gửi không sáng 2 lượt liên tiếp — làm mới text session"
-                                        .into(),
-                                );
-                                let error = anyhow::Error::new(UiError::new(
-                                    UiErrorKind::Session,
-                                    "comment.text_not_armed",
-                                    "two consecutive frame-confirmed non-arming results",
-                                ));
-                                if !self
-                                    .recover(
-                                        udid,
-                                        &bundle_id,
-                                        true,
-                                        &mut ui_context,
-                                        &mut session,
-                                        &handle,
-                                        &mut budget,
-                                        &mut text_health,
-                                        &error,
-                                        &mut status,
-                                        &on_status,
-                                    )
-                                    .await
-                                {
-                                    last_error = Some(
-                                        "không làm mới được text session sau 2 lượt không armed"
-                                            .into(),
-                                    );
-                                    outcome = Outcome::Failed;
-                                    break 'feed;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            let msg = format!("bình luận thất bại: {}", describe(&e));
-                            report(&mut status, msg.clone());
-                            last_error = Some(msg);
-                            if ui_error_kind(&e) != UiErrorKind::Other
-                                && !self
-                                    .recover(
-                                        udid,
-                                        &bundle_id,
-                                        fresh_text_session,
-                                        &mut ui_context,
-                                        &mut session,
-                                        &handle,
-                                        &mut budget,
-                                        &mut text_health,
-                                        &e,
-                                        &mut status,
-                                        &on_status,
-                                    )
-                                    .await
-                            {
-                                outcome = Outcome::Failed;
-                                break 'feed;
-                            }
-                        }
-                    }
-                }
-                FeedAction::None => {}
+            let (action_step, comment_recovery_action) = self
+                .roll_and_execute_action(
+                    &ctx,
+                    &mut progress,
+                    &mut device,
+                    &settings,
+                    &mut policy,
+                    &mut budget,
+                    &rail,
+                    &mut text_health,
+                    &mut last_interaction_at,
+                    mood,
+                    &handle,
+                    &suppress,
+                    &pool,
+                )
+                .await?;
+            match action_step {
+                FeedStep::Stop => break 'feed,
+                FeedStep::Proceed | FeedStep::NextVideo => {}
             }
 
             if roll_follow_in_mood(settings.follow_prob, mood) {
-                if !policy.can_interact_with_post() || !policy.can_attempt(PolicyAction::Follow) {
-                    report(
-                        &mut status,
-                        "bỏ qua follow: nhịp phiên hiện tại đã đủ".into(),
-                    );
-                } else if !wait_for_action_gap(
-                    &mut last_interaction_at,
-                    policy.min_action_gap(),
-                    &stop,
-                )
-                .await
+                match self
+                    .roll_and_execute_follow(
+                        &ctx,
+                        &mut progress,
+                        &mut device,
+                        &mut policy,
+                        &mut budget,
+                        &rail,
+                        &mut text_health,
+                        &mut last_interaction_at,
+                        &handle,
+                    )
+                    .await?
                 {
-                    outcome = Outcome::Stopped;
-                    hit_video_cap = false;
-                    break 'feed;
-                } else {
-                    policy.record_attempt(PolicyAction::Follow);
-                    policy.mark_post_interacted();
-                    status.follow_attempts += 1;
-                    on_status(status.clone());
-                    report(&mut status, "follow".into());
-                    match self
-                        .do_follow(udid, session.as_ref(), &gestures, &rail, screen_size, &stop)
-                        .await
-                    {
-                        Ok(true) => {
-                            status.follows += 1;
-                            report(&mut status, "follow thành công".into());
-                        }
-                        Ok(false) => report(&mut status, "follow không đổi trạng thái".into()),
-                        Err(e) => {
-                            let msg = format!("follow thất bại: {}", describe(&e));
-                            report(&mut status, msg.clone());
-                            last_error = Some(msg);
-                            if !self
-                                .recover(
-                                    udid,
-                                    &bundle_id,
-                                    fresh_text_session,
-                                    &mut ui_context,
-                                    &mut session,
-                                    &handle,
-                                    &mut budget,
-                                    &mut text_health,
-                                    &e,
-                                    &mut status,
-                                    &on_status,
-                                )
-                                .await
-                            {
-                                outcome = Outcome::Failed;
-                                break 'feed;
-                            }
-                        }
-                    }
+                    FeedStep::Stop => break 'feed,
+                    FeedStep::Proceed | FeedStep::NextVideo => {}
                 }
             }
 
             sleep_interruptible(Duration::from_millis(human.think_pause_ms()), &stop).await;
 
-            report(&mut status, "vuốt video tiếp".into());
-            let mut advanced_to_next_video = false;
-            status.swipe_attempts += 1;
-            match self
-                .do_swipe(
-                    udid,
-                    session.as_ref(),
-                    &gestures,
-                    screen_size,
-                    human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
-                    &stop,
+            let (swipe_step, advanced_to_next_video) = self
+                .swipe_to_next_video(
+                    &ctx,
+                    &mut progress,
+                    &mut device,
+                    &settings,
+                    &mut human,
+                    &mut budget,
+                    &mut text_health,
+                    &handle,
                 )
-                .await
-            {
-                Ok(SwipeOutcome::Advanced) => {
-                    advanced_to_next_video = true;
-                    blocked_streak = 0;
-                    status.videos_done += 1;
-                    on_status(status.clone());
-                }
-                Ok(SwipeOutcome::Moved) => {
-                    blocked_streak = 0;
-                    // The rail left, so the gesture landed and the card we were
-                    // on is gone. Swiping again here would skip whatever came
-                    // next; the loop re-reads the screen at the top instead.
-                    // Not counted: nothing settled that could be counted.
-                    advanced_to_next_video = true;
-                    report(
-                        &mut status,
-                        "đã rời thẻ cũ nhưng chưa thấy thẻ mới ổn định — đọc lại màn hình".into(),
-                    );
-                }
-                Ok(SwipeOutcome::Blocked) => {
-                    // The rail never left: the feed swallowed the gesture,
-                    // usually under a popup. The watcher closes those on its
-                    // own; give it a beat, then try once more.
-                    report(&mut status, "vuốt không ăn — chờ popup rồi thử lại".into());
-                    sleep_interruptible(Duration::from_millis(1_800), &stop).await;
-                    status.swipe_attempts += 1;
-                    match self
-                        .do_swipe(
-                            udid,
-                            session.as_ref(),
-                            &gestures,
-                            screen_size,
-                            human.swipe_duration_ms(false),
-                            &stop,
-                        )
-                        .await
-                    {
-                        Ok(SwipeOutcome::Advanced) => {
-                            advanced_to_next_video = true;
-                            blocked_streak = 0;
-                            status.videos_done += 1;
-                            on_status(status.clone());
-                        }
-                        Ok(SwipeOutcome::Moved) => {
-                            advanced_to_next_video = true;
-                            blocked_streak = 0;
-                            report(&mut status, "đã rời thẻ cũ, chưa xác nhận thẻ mới".into());
-                        }
-                        Ok(SwipeOutcome::Blocked) => {
-                            report(&mut status, "vuốt vẫn không ăn".into());
-                            last_error = Some("swipe không rời được thẻ hiện tại".into());
-                            blocked_streak += 1;
-                        }
-                        Err(e) => {
-                            let msg = format!("vuốt lỗi: {}", describe(&e));
-                            report(&mut status, msg.clone());
-                            last_error = Some(msg);
-                            if !self
-                                .recover(
-                                    udid,
-                                    &bundle_id,
-                                    fresh_text_session,
-                                    &mut ui_context,
-                                    &mut session,
-                                    &handle,
-                                    &mut budget,
-                                    &mut text_health,
-                                    &e,
-                                    &mut status,
-                                    &on_status,
-                                )
-                                .await
-                            {
-                                outcome = Outcome::Failed;
-                                break 'feed;
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    let msg = format!("vuốt lỗi: {}", describe(&e));
-                    report(&mut status, msg.clone());
-                    last_error = Some(msg);
-                    if !self
-                        .recover(
-                            udid,
-                            &bundle_id,
-                            fresh_text_session,
-                            &mut ui_context,
-                            &mut session,
-                            &handle,
-                            &mut budget,
-                            &mut text_health,
-                            &e,
-                            &mut status,
-                            &on_status,
-                        )
-                        .await
-                    {
-                        outcome = Outcome::Failed;
-                        break 'feed;
-                    }
-                }
+                .await?;
+            match swipe_step {
+                FeedStep::Stop => break 'feed,
+                FeedStep::Proceed | FeedStep::NextVideo => {}
             }
             // A card that swallows both the swipe and its retry, turn after
             // turn, is not going to start working. A live run spent 280 seconds
             // — 46 of its 53 swipes — on one photo post before the clock ran
-            // out. Ending the session says so; continuing just burns the budget
+            // out. Ending the device.session says so; continuing just burns the budget
             // in silence.
-            if blocked_streak >= BLOCKED_SWIPE_LIMIT {
+            if progress.blocked_streak >= BLOCKED_SWIPE_LIMIT {
+                let streak = progress.blocked_streak;
                 let message = format!(
-                    "thẻ hiện tại nuốt {blocked_streak} lượt vuốt liên tiếp — dừng phiên \
+                    "thẻ hiện tại nuốt {streak} lượt vuốt liên tiếp — dừng phiên \
                      thay vì vuốt tiếp vô ích"
                 );
-                report(&mut status, message.clone());
-                last_error = Some(message);
-                hit_video_cap = false;
-                outcome = if status.videos_done == 0 {
-                    Outcome::Failed
-                } else {
-                    Outcome::Partial
-                };
+                progress.give_up(message, &ctx);
                 break 'feed;
             }
             if must_stop_before_next_feed_iteration(comment_recovery_action, advanced_to_next_video)
@@ -1681,74 +2252,16 @@ impl NurtureEngine {
                 let message =
                     "dừng trước lượt feed kế tiếp: chưa xác nhận rời video có trạng thái gửi mơ hồ"
                         .to_string();
-                report(&mut status, message.clone());
-                last_error = Some(message);
-                hit_video_cap = false;
-                outcome = if status.videos_done == 0 {
-                    Outcome::Failed
-                } else {
-                    Outcome::Partial
-                };
+                progress.give_up(message, &ctx);
                 break 'feed;
             }
             if advanced_to_next_video {
-                if let Some(rest) = policy.rest_after_video() {
-                    report(&mut status, format!("nghỉ tự nhiên {}s", rest.as_secs()));
-                    sleep_interruptible(rest, &stop).await;
-                }
-                if policy.should_take_block_break() || policy.should_take_home_break() {
-                    let break_for = policy.home_break_duration();
-                    report(
-                        &mut status,
-                        format!(
-                            "tạm về màn hình chính khoảng {}s rồi mở TikTok lại",
-                            break_for.as_secs()
-                        ),
-                    );
-                    {
-                        let _guard = gestures.lock().await;
-                        let _ = session.home().await;
-                    }
-                    sleep_interruptible(break_for, &stop).await;
-                    if policy.should_cold_restart() {
-                        report(
-                            &mut status,
-                            "khởi động lại TikTok sau một quãng nghỉ".into(),
-                        );
-                        let _ = self
-                            .control
-                            .terminate_streaming_app(&ui_context, &bundle_id)
-                            .await;
-                        sleep_interruptible(Duration::from_secs(2), &stop).await;
-                        match self
-                            .control
-                            .recover_streaming_session(
-                                &mut ui_context,
-                                &bundle_id,
-                                session_kind,
-                                false,
-                            )
-                            .await
-                        {
-                            Ok(next) => {
-                                // Swap the watcher's session handle too, or the
-                                // popup watcher keeps tapping through the dead
-                                // pre-restart session for the rest of the run.
-                                session = next;
-                                handle.set(session.clone());
-                            }
-                            Err(error) => {
-                                report(&mut status, format!("không mở lại được TikTok: {error}"));
-                                outcome = Outcome::Partial;
-                                break 'feed;
-                            }
-                        }
-                    } else {
-                        let _guard = gestures.lock().await;
-                        let _ = session.launch_app_foreground(&bundle_id).await;
-                    }
-                    sleep_interruptible(Duration::from_secs(4), &stop).await;
-                    policy.reset_block();
+                match self
+                    .settle_after_advance(&ctx, &mut progress, &mut device, &mut policy, &handle)
+                    .await?
+                {
+                    FeedStep::Stop => break 'feed,
+                    FeedStep::Proceed | FeedStep::NextVideo => {}
                 }
             }
             sleep_interruptible(Duration::from_millis(human.after_swipe_pause_ms()), &stop).await;
@@ -1766,44 +2279,37 @@ impl NurtureEngine {
         let never = AtomicBool::new(false);
         let ended_on_tiktok = self
             .wait_for_frame(udid, Duration::from_millis(2_500), &never, |img| {
-                screen::feed_ready(img, Some(screen_size.0))
+                screen::feed_ready(img, Some(device.screen_size.0))
             })
             .await
             .is_some();
 
-        // `total_videos` is a ceiling, not a target: a timed run stops on the
-        // clock with the ceiling untouched, and calling that "partial" told the
-        // operator a healthy 47-video run had gone wrong. Judge on whether the
-        // session actually worked instead.
-        if outcome == Outcome::Done {
-            if status.videos_done == 0 {
-                outcome = Outcome::Failed;
-            } else if hit_video_cap && status.videos_done < total_videos / 2 {
-                // Stopped early without running out of time — something cut it short.
-                outcome = Outcome::Partial;
-            } else if status.videos_done < 3 && last_error.is_some() {
-                outcome = Outcome::Partial;
-            }
-        }
+        progress.outcome = session_verdict(
+            progress.outcome,
+            progress.status.videos_done,
+            progress.hit_video_cap,
+            total_videos,
+            progress.last_error.is_some(),
+        );
 
-        if let Err(error) = self.control.close_ui_context(ui_context).await {
-            outcome = if status.videos_done == 0 {
+        if let Err(error) = self.control.close_ui_context(device.ui_context).await {
+            progress.outcome = if progress.status.videos_done == 0 {
                 Outcome::Failed
             } else {
                 Outcome::Partial
             };
-            last_error = Some(format!("device cleanup failed: {error}"));
+            progress.last_error = Some(format!("device cleanup failed: {error}"));
         }
 
         let elapsed = started.elapsed();
         let summary = format!(
             "{} — {}/{} video, {} tim, {} bình luận, {} follow, {} popup đóng, {} recovery, {:.0}s{}{}",
-            outcome.as_str(),
-            status.videos_done,
-            status.swipe_attempts,
-            status.likes,
-            status.comments,
-            status.follows,
+            progress.outcome.as_str(),
+            progress.status.videos_done,
+            progress.status.swipe_attempts,
+            progress.status.likes,
+            progress.status.comments,
+            progress.status.follows,
             watch.popups_closed,
             budget.soft + budget.hard,
             elapsed.as_secs_f64(),
@@ -1812,21 +2318,24 @@ impl NurtureEngine {
             } else {
                 ", KHÔNG ở TikTok lúc kết thúc"
             },
-            last_error
+            progress.last_error
                 .as_ref()
                 .map(|e| format!(", lỗi cuối: {e}"))
                 .unwrap_or_default(),
         );
-        status.running = false;
-        status.last_message = summary.clone();
-        on_status(status.clone());
+        progress.status.finish(progress.outcome);
+        progress.status.last_message = summary.clone();
+        ctx.push(&progress.status);
 
         let _ = self.db.log_op(
             "nurture.session",
-            &format!("{udid} {summary} usd={:.4}", status.session_usd),
+            &format!(
+                "{udid} {summary} tokens={}/{}",
+                progress.status.session_prompt_tokens, progress.status.session_completion_tokens
+            ),
         );
         self.clear_touch_points(udid);
-        Ok(status)
+        Ok(progress.status)
     }
 
     /// Bring TikTok forward. Prefers WDA activate, which does not restart a
@@ -1864,21 +2373,36 @@ impl NurtureEngine {
     /// Is this card a still post rather than a playing video?
     ///
     /// This is what tells a photo carousel from a video, and it is the only
-    /// thing measured that does. A photo post publishes byte-identical frames
-    /// because nothing on screen moves; a video cannot, since the stream
-    /// re-encodes every frame at 24 FPS with no deduplication — the same fact
-    /// that made the old swipe check useless is what makes this reliable.
+    /// thing measured that does. A photo post publishes the same picture on
+    /// every sample because nothing on screen moves; a video cannot, since the
+    /// stream re-encodes every frame at 24 FPS with no deduplication — the same
+    /// fact that made the old swipe check useless is what makes this reliable.
     ///
     /// Measured over 40 real cards: 4 came back still, at least three of them
     /// confirmed photo posts by eye (page dots and the "Ảnh" badge), and none
     /// of the 36 videos did. The page-dot detector this replaces scored 1 true
     /// positive against 9 false ones on the same cards.
     ///
-    /// Only a video that holds a perfectly static frame for the whole window
+    /// **Compares the picture, not the screen, and the difference is measured.** This used to
+    /// hash the whole encoded frame, which the phone's own status bar is part of: on
+    /// ce0717171c2a64d50d three samples of a genuinely still photo post differed only inside
+    /// y 16..49, the animated network icon, and that survived minicap's half-scale JPEG — so a
+    /// still card read as moving and no photo post on that phone could ever pass. The 4-of-40
+    /// figure above is therefore a **floor**: it was taken on phones whose corner happened not
+    /// to change inside the sampling window.
+    ///
+    /// Costs [`STILL_CARD_SAMPLES`] + 1 decodes of a half-scale stream frame, which is the
+    /// price of asking the question that was actually meant.
+    ///
+    /// Only a video that holds a perfectly static picture for the whole window
     /// can pass, and the caller still has to survive being wrong — a horizontal
     /// swipe on a video navigates away from the feed.
     async fn card_is_still(&self, udid: &str, stop: &AtomicBool) -> bool {
-        let Some(first) = self.frames.latest(udid).map(|f| frame_digest(&f)) else {
+        let Some(first) = self
+            .frames
+            .latest(udid)
+            .and_then(|frame| picture_digest_of(&frame))
+        else {
             return false;
         };
         for _ in 0..STILL_CARD_SAMPLES {
@@ -1886,7 +2410,11 @@ impl NurtureEngine {
             if stop.load(Ordering::Relaxed) {
                 return false;
             }
-            match self.frames.latest(udid).map(|f| frame_digest(&f)) {
+            match self
+                .frames
+                .latest(udid)
+                .and_then(|frame| picture_digest_of(&frame))
+            {
                 Some(next) if next == first => {}
                 _ => return false,
             }
@@ -1967,6 +2495,69 @@ struct EngineCommentSource<'a> {
     engine: &'a NurtureEngine,
     udid: &'a str,
     stop: &'a AtomicBool,
+    /// Slides offered by the traversal since the last comment was written.
+    slides: parking_lot::Mutex<SlideEvidence>,
+}
+
+/// The frames a photo post's traversal offered, kept two at a time.
+///
+/// **Two, not one per slide, and the number is arithmetic rather than taste.** The contact
+/// sheet spends a fixed pixel budget (`openai_client::SHEET_PIXEL_BUDGET`, held at the old
+/// sheet's area so the token cost does not move), so every extra thumbnail shrinks all of
+/// them. On this fleet's 1080x2220 frames that is 589x1211 for one slide, 367x754 for two and
+/// 271x557 for three — and `visualFacts` and `evidenceSupport` are read off exactly the small
+/// text that disappears first. Two slides buys a second scene for a 2.6x per-slide cut; three
+/// costs 4.7x and hands 55% of the sheet to the caption strip.
+///
+/// **First and last, not the first two.** On a product post that is hero plus call-to-action,
+/// on a photo story beginning plus end, on a meme set setup plus punchline. The first two
+/// slides of a six-slide post are usually the same setup twice.
+#[derive(Default)]
+struct SlideEvidence {
+    /// The first slide offered, with its digest so a repeat can be recognised.
+    first: Option<(u64, Vec<u8>)>,
+    /// The most recent slide whose picture differed from the first.
+    last: Option<Vec<u8>>,
+    /// How many slides were offered, duplicates included.
+    ///
+    /// Kept separately from the frames because the pair is what can be read: `offered = 7`
+    /// with one distinct frame says the pager turned seven times and the stream handed back
+    /// the same picture every time — a parked stream — while `offered = 7` with two says the
+    /// change is working. Either number alone is ambiguous.
+    offered: u32,
+}
+
+impl SlideEvidence {
+    /// Take a frame, keeping at most two.
+    ///
+    /// De-duplication is inherent rather than bolted on: a post whose pager never turned —
+    /// or whose stream is parked, which is the ordinary state on a still card — leaves exactly
+    /// one frame here, and the sheet then says "one khung" instead of pasting it twice.
+    fn offer(&mut self, frame: Vec<u8>) {
+        self.offered = self.offered.saturating_add(1);
+        let digest = frame_digest(&frame);
+        match &self.first {
+            None => self.first = Some((digest, frame)),
+            Some((seen, _)) if *seen == digest => {}
+            Some(_) => self.last = Some(frame),
+        }
+    }
+
+    /// Hand over what was collected and reset, oldest first.
+    ///
+    /// Draining matters: the source lives for the whole session, so slides left behind would
+    /// ground post N+1 on post N's pictures — the exact failure `collect_grounding_frames`
+    /// refuses by design.
+    fn drain(&mut self) -> (Vec<Vec<u8>>, u32) {
+        let taken = std::mem::take(self);
+        let frames = taken
+            .first
+            .map(|(_, frame)| frame)
+            .into_iter()
+            .chain(taken.last)
+            .collect();
+        (frames, taken.offered)
+    }
 }
 
 /// The hierarchy loop's door back to the settings row.
@@ -1991,8 +2582,9 @@ impl hierarchy::CommentTextSource for EngineCommentSource<'_> {
         &self,
         settings: &NurtureSettings,
     ) -> Option<hierarchy::PreparedComment> {
+        let (slides, offered) = self.slides.lock().drain();
         self.engine
-            .prepare_hierarchy_comment(self.udid, settings, self.stop)
+            .prepare_hierarchy_comment(self.udid, settings, slides, offered, self.stop)
             .await
     }
 
@@ -2000,13 +2592,89 @@ impl hierarchy::CommentTextSource for EngineCommentSource<'_> {
         self.engine
             .finish_hierarchy_comment(prepared.attempt_id.as_deref(), outcome);
     }
+
+    fn note_slide(&self) {
+        // `latest` is documented as exactly this — a one-shot cache read for a caller that
+        // must not wait for the next frame — so a slide costs an `RwLock` read and an `Arc`
+        // clone on top of gestures it was already spending.
+        if let Some(frame) = self.engine.frames.latest(self.udid) {
+            self.slides.lock().offer((*frame).clone());
+        }
+    }
+
+    async fn record_skip(&self, settings: &NurtureSettings, reason: &str) {
+        // Drop the slides with the row: they belong to the post that was abandoned.
+        let (_, offered) = self.slides.lock().drain();
+        self.engine
+            .record_deferred_skip(self.udid, settings, reason, offered);
+    }
 }
 
 fn describe(err: &anyhow::Error) -> String {
     format!("{} ({})", err, ui_error_kind(err).as_str())
 }
 
+/// Rows the phone's own status bar owns, as a fraction of the frame height.
+///
+/// **This is the difference between "did the screen change" and "did the picture change".**
+/// Measured 23/08/2026 on ce0717171c2a64d50d (Galaxy S8, 1080x2220): three screencaps 600 ms
+/// apart of one photo post (`Hynxy ở Nha Trang · Photo`, 6 slides) differed by 185, 267 and 82
+/// sampled pixels, and an exhaustive comparison put **every one of them inside y 16..49** —
+/// the animated network icon. Below that line the three frames were pixel-identical.
+///
+/// It survives the stream, too, which is what makes it matter here rather than only in a
+/// screenshot: pushed through minicap's own pipeline — half of each edge, JPEG `-Q 70` — the
+/// three frames still encoded to 83,113 / 83,201 / 83,212 bytes and [`frame_digest`] differed
+/// on all three pairs. So a hash of the whole frame calls a perfectly still card "moving".
+///
+/// 0.04 is 88 px on these phones: clear of the icons at y=49, and still above TikTok's own
+/// `For You` tab row, measured at y=141 in the same capture.
+pub(crate) const STATUS_BAR_FRACTION: f64 = 0.04;
+
+/// A hash of the picture, ignoring the phone's status bar.
+///
+/// Walks decoded pixels on a fixed grid rather than encoded bytes, so it answers "is this the
+/// same picture" instead of "are these the same bytes" — two encodings of one picture are never
+/// byte-equal, and one animated icon in the corner is enough to separate two that are.
+///
+/// ~1024 samples, the same order as [`frame_digest`]'s 512 and for the same reason: a still
+/// card must hash identically every time, and a card that moved at all must not.
+pub(crate) fn picture_digest(image: &image::RgbImage) -> u64 {
+    let top = (f64::from(image.height()) * STATUS_BAR_FRACTION) as u32;
+    let (width, height) = (image.width(), image.height().max(top + 1));
+    let step_x = (width / 32).max(1);
+    let step_y = ((height - top) / 32).max(1);
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325 ^ u64::from(width) ^ (u64::from(height) << 20);
+    let mut y = top;
+    while y < height {
+        let mut x = 0;
+        while x < width {
+            for channel in image.get_pixel(x, y).0 {
+                hash ^= u64::from(channel);
+                hash = hash.wrapping_mul(0x100_0000_01b3);
+            }
+            x += step_x;
+        }
+        y += step_y;
+    }
+    hash
+}
+
+/// [`picture_digest`] for a caller holding an encoded frame.
+///
+/// `None` when the bytes will not decode, which the callers treat as "cannot say" rather than
+/// as "unchanged" — guessing either way here would be a claim about a screen nobody read.
+pub(crate) fn picture_digest_of(frame: &[u8]) -> Option<u64> {
+    image::load_from_memory(frame)
+        .ok()
+        .map(|image| picture_digest(&image.to_rgb8()))
+}
+
 /// Cheap content fingerprint for "did the screen change?".
+///
+/// Whole encoded bytes, which is the right question for a *screen* — and the wrong one for a
+/// picture. Use [`picture_digest_of`] when the question is whether the card itself moved; see
+/// [`STATUS_BAR_FRACTION`] for the capture that separated the two.
 pub(super) fn frame_digest(frame: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ frame.len() as u64;
     let step = (frame.len() / 512).max(1);
@@ -2297,7 +2965,10 @@ mod tests {
         );
 
         assert_eq!(
-            health.observe(CommentResult::TextSent(0.0)),
+            health.observe(CommentResult::TextSent {
+                prompt_tokens: 0,
+                completion_tokens: 0
+            }),
             CommentRecoveryAction::None
         );
         assert_eq!(
@@ -2333,5 +3004,71 @@ mod tests {
             CommentRecoveryAction::DoNotRetry,
             true
         ));
+    }
+}
+
+#[cfg(test)]
+mod slide_evidence_tests {
+    use super::SlideEvidence;
+
+    fn frame(byte: u8) -> Vec<u8> {
+        // Long enough that `frame_digest`'s 512-point stride actually samples the difference.
+        let mut bytes = vec![7u8; 4096];
+        bytes[2048] = byte;
+        bytes
+    }
+
+    /// First and last, and the reason it is two rather than one per slide is arithmetic: the
+    /// contact sheet spends a fixed pixel budget, so on this fleet's 1080x2220 frames one slide
+    /// gets a 589x1211 thumb, two get 367x754 and three get 271x557 — and `visualFacts` is read
+    /// off exactly the small text that goes first.
+    #[test]
+    fn the_buffer_keeps_the_first_slide_and_the_last_different_one() {
+        let mut evidence = SlideEvidence::default();
+        for byte in [1u8, 2, 3, 4] {
+            evidence.offer(frame(byte));
+        }
+        let (frames, offered) = evidence.drain();
+        assert_eq!(offered, 4, "all four slides were offered");
+        assert_eq!(frames.len(), 2, "and two of them were kept");
+        assert_eq!(frames[0], frame(1), "the first slide");
+        assert_eq!(
+            frames[1],
+            frame(4),
+            "and the last one that differed from it"
+        );
+    }
+
+    /// **The ordinary photo-post case.** A still card publishes the same picture on every
+    /// sample — measured on a live card, 0 of 2,170,800 picture pixels changed over 13 s
+    /// untouched — so a post the stream never repainted leaves exactly one frame here, and the
+    /// sheet says "one khung" instead of pasting it twice and calling it evidence.
+    #[test]
+    fn a_parked_stream_leaves_one_frame_and_still_counts_its_slides() {
+        let mut evidence = SlideEvidence::default();
+        for _ in 0..7 {
+            evidence.offer(frame(9));
+        }
+        let (frames, offered) = evidence.drain();
+        assert_eq!((frames.len(), offered), (1, 7), "seven slides, one picture");
+    }
+
+    /// Draining matters: the source lives for the whole session, so a slide left behind would
+    /// ground the next post's comment on this post's pictures.
+    #[test]
+    fn draining_leaves_nothing_for_the_next_post() {
+        let mut evidence = SlideEvidence::default();
+        evidence.offer(frame(1));
+        evidence.offer(frame(2));
+        assert_eq!(evidence.drain().0.len(), 2);
+        assert_eq!(evidence.drain(), (Vec::new(), 0));
+    }
+
+    /// A post that was never paged asks for nothing, and gets nothing — which is the signal
+    /// `prepare_hierarchy_comment` reads to sample the frames itself, exactly as before.
+    #[test]
+    fn a_post_that_was_never_paged_is_empty_rather_than_stale() {
+        let mut evidence = SlideEvidence::default();
+        assert_eq!(evidence.drain(), (Vec::new(), 0));
     }
 }

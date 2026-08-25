@@ -21,7 +21,7 @@ use crate::interaction::{PreparedThreadMessage, ThreadSendEvidence};
 use crate::openai_client::pick_from_pool;
 use crate::openai_client::{
     host_of, ocr_caption, prepare_caption_comment, prepare_grounded_comment,
-    provider_supports_vision,
+    provider_supports_vision, EvidenceKind,
 };
 use crate::screen::{self, ActionRail, CommentDrawer};
 use crate::types::{
@@ -56,7 +56,17 @@ fn context_source(settings: &NurtureSettings) -> &'static str {
 const SWIPE_FROM_Y: f64 = 0.62;
 const SWIPE_TO_Y: f64 = 0.20;
 
+/// Time for the comment drawer to finish opening and load its first screenful.
+///
+/// The drawer animates up and *then* fetches, so the window is not the animation — it is the
+/// network round trip behind it on a fleet of budget phones. Reading earlier finds an empty
+/// list and concludes the post has no comments.
 const COMMENT_DRAWER_SETTLE: Duration = Duration::from_millis(3_500);
+
+/// Time for the keyboard to come up and the input field to take focus after the tap.
+///
+/// Shorter than the drawer because nothing is fetched — it is one IME animation. Typing into
+/// a field that has not focused yet sends the text nowhere, silently.
 const COMMENT_INPUT_SETTLE: Duration = Duration::from_millis(1_200);
 
 /// What a swipe could be *proven* to have done.
@@ -106,8 +116,16 @@ pub(super) enum LikeResult {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(dead_code)] // Reserved for an explicitly selected emoji-reaction flow.
 pub(super) enum CommentResult {
-    /// Text was posted, with its vision-generation cost in USD.
-    TextSent(f64),
+    /// Text was posted, with what the API actually reported spending on it.
+    ///
+    /// Tokens, not a price. The USD this used to carry was two hand-typed numbers multiplied
+    /// by these very counts — three different pairs of them existed in the codebase at once,
+    /// none matching the configured model, and no UI could edit them. A number the app
+    /// cannot know is worse than no number.
+    TextSent {
+        prompt_tokens: u32,
+        completion_tokens: u32,
+    },
     /// The active session cannot inject trusted text into TikTok.
     TextChannelUnavailable,
     /// Contextual preparation was rejected before any drawer gesture.
@@ -125,7 +143,7 @@ pub(super) enum CommentResult {
 impl CommentResult {
     pub(super) fn reason(&self) -> &'static str {
         match self {
-            CommentResult::TextSent(_) => "đã gửi bình luận chữ",
+            CommentResult::TextSent { .. } => "đã gửi bình luận chữ",
             CommentResult::TextChannelUnavailable => {
                 "Riviu Agent chưa sẵn sàng cho bình luận chữ — chạy Agent Repair"
             }
@@ -144,13 +162,15 @@ struct PreparedTextComment {
     base_url_host: String,
     prompt_tokens: u32,
     completion_tokens: u32,
-    usd: f64,
+    /// What the gateway said this cost. `None` when it did not say, never a locally made guess.
+    cost_usd: Option<f64>,
     source: &'static str,
     frame_sha256: Option<String>,
     caption_preview: Option<String>,
     context_confidence: Option<u8>,
     relevance: Option<u8>,
     evidence_support: Option<u8>,
+    distinct_frames: Option<u8>,
     attempt_id: Option<String>,
 }
 
@@ -227,7 +247,15 @@ impl NurtureEngine {
                 .map_err(|e| anyhow!("focus_comment_input: {e}"))?;
             sleep_interruptible(COMMENT_INPUT_SETTLE, stop).await;
             session
-                .type_text(&prepared.text)
+                // The literal prefix, because this path cannot reach TikTok's suggestion list
+                // and so cannot make a real mention — see `append_mentions_by_picker`. Empty
+                // unless the campaign asked for tags, which keeps every other comment
+                // byte-identical to what it was.
+                .type_text(&format!(
+                    "{}{}",
+                    prepared.literal_mention_prefix(),
+                    prepared.text
+                ))
                 .await
                 .map_err(|e| anyhow!("type_comment: {e}"))?;
         }
@@ -346,7 +374,15 @@ impl NurtureEngine {
                 .map_err(|e| anyhow!("focus_reply_input: {e}"))?;
             sleep_interruptible(COMMENT_INPUT_SETTLE, stop).await;
             session
-                .type_text(&prepared.text)
+                // The literal prefix, because this path cannot reach TikTok's suggestion list
+                // and so cannot make a real mention — see `append_mentions_by_picker`. Empty
+                // unless the campaign asked for tags, which keeps every other comment
+                // byte-identical to what it was.
+                .type_text(&format!(
+                    "{}{}",
+                    prepared.literal_mention_prefix(),
+                    prepared.text
+                ))
                 .await
                 .map_err(|e| anyhow!("type_reply: {e}"))?;
         }
@@ -768,18 +804,19 @@ impl NurtureEngine {
             #[cfg(test)]
             {
                 pick_from_pool(_pool).map(|text| PreparedTextComment {
+                    cost_usd: None,
                     text,
                     model: settings.model.clone(),
                     base_url_host: host_of(&settings.base_url),
                     prompt_tokens: 0,
                     completion_tokens: 0,
-                    usd: 0.0,
                     source: "test-fixture",
                     frame_sha256: None,
                     caption_preview: None,
                     context_confidence: None,
                     relevance: None,
                     evidence_support: None,
+                    distinct_frames: None,
                     attempt_id: None,
                 })
             }
@@ -794,6 +831,8 @@ impl NurtureEngine {
                     settings,
                     context_source(settings),
                     "evidence_unavailable",
+                    0,
+                    None,
                 );
                 return Ok(CommentResult::ContextSkipped);
             };
@@ -805,7 +844,13 @@ impl NurtureEngine {
                     .unwrap_or_default(),
             );
             let prepared_result = if provider_supports_vision(settings) {
-                prepare_grounded_comment(settings, &frames, direction.as_deref()).await
+                prepare_grounded_comment(
+                    settings,
+                    &frames,
+                    EvidenceKind::Moments,
+                    direction.as_deref(),
+                )
+                .await
             } else {
                 // An OCR miss is a turn with nothing to say, not a device
                 // failure. Propagating it with `?` made `do_comment` return
@@ -819,6 +864,8 @@ impl NurtureEngine {
                         settings,
                         "ocr-caption",
                         "caption_ocr_empty",
+                        0,
+                        None,
                     );
                     return Ok(CommentResult::ContextSkipped);
                 };
@@ -831,12 +878,12 @@ impl NurtureEngine {
             };
             match prepared_result {
                 Ok(comment) => Some(PreparedTextComment {
+                    cost_usd: comment.cost_usd,
                     text: comment.text,
                     model: comment.model,
                     base_url_host: comment.base_url_host,
                     prompt_tokens: comment.prompt_tokens,
                     completion_tokens: comment.completion_tokens,
-                    usd: comment.usd,
                     source: context_source(settings),
                     frame_sha256: Some(comment.frame_sha256),
                     caption_preview: comment
@@ -846,6 +893,7 @@ impl NurtureEngine {
                     context_confidence: Some(comment.context_confidence),
                     relevance: Some(comment.relevance),
                     evidence_support: Some(comment.evidence_support),
+                    distinct_frames: Some(comment.distinct_frames),
                     attempt_id: None,
                 }),
                 Err(error) => {
@@ -863,6 +911,8 @@ impl NurtureEngine {
                 settings,
                 context_source(settings),
                 "context_skipped",
+                0,
+                None,
             );
             return Ok(CommentResult::ContextSkipped);
         };
@@ -876,13 +926,16 @@ impl NurtureEngine {
             base_url_host: prepared.base_url_host.clone(),
             prompt_tokens: prepared.prompt_tokens,
             completion_tokens: prepared.completion_tokens,
-            usd: prepared.usd,
+            cost_usd: prepared.cost_usd,
             preview: prepared.text.chars().take(160).collect(),
             caption_preview: prepared.caption_preview.clone().unwrap_or_default(),
             frame_sha256: prepared.frame_sha256.clone().unwrap_or_default(),
             context_confidence: prepared.context_confidence,
             relevance: prepared.relevance,
             evidence_support: prepared.evidence_support,
+            distinct_frames: prepared.distinct_frames,
+            // The pixel engine does not page carousels, so this path never has slides.
+            carousel_slides: None,
             created_at: Utc::now().to_rfc3339(),
         };
         if let Err(error) = self.db.add_nurture_comment_attempt(&attempt) {
@@ -1067,14 +1120,16 @@ impl NurtureEngine {
             base_url_host: prepared.base_url_host,
             prompt_tokens: prepared.prompt_tokens,
             completion_tokens: prepared.completion_tokens,
-            usd: prepared.usd,
             preview: prepared.text,
             created_at: Utc::now().to_rfc3339(),
         };
         if let Err(error) = self.db.add_nurture_comment_cost(&cost) {
             tracing::warn!("[nurture {udid}] không ghi được cost bình luận: {error}");
         }
-        Ok(CommentResult::TextSent(cost.usd))
+        Ok(CommentResult::TextSent {
+            prompt_tokens: cost.prompt_tokens,
+            completion_tokens: cost.completion_tokens,
+        })
     }
 
     /// Capture a short, same-post evidence window from the existing MJPEG
@@ -1142,29 +1197,71 @@ impl NurtureEngine {
         &self,
         udid: &str,
         settings: &NurtureSettings,
+        // Frames the carousel traversal already offered, oldest first. Empty on a post that
+        // was never paged — a video, or a build that cannot page — and then the frames are
+        // sampled here exactly as before. `slides_offered` counts the slides behind them,
+        // duplicates included, and is 0 when nothing was paged.
+        slides: Vec<Vec<u8>>,
+        slides_offered: u32,
         stop: &AtomicBool,
     ) -> Option<super::hierarchy::PreparedComment> {
         if settings.api_key.trim().is_empty() {
+            // **The one skip that used to leave no trace at all.** Every other reason a post
+            // goes uncommented writes a row, so the operator can read `nurture_comment_attempts`
+            // and see what happened; this one returned before the first of them. On screen it
+            // produced the identical line to "the frame had nothing worth saying", so a farm
+            // configured with no key looked like a farm that kept deciding to stay quiet.
+            self.record_context_skip_attempt(
+                udid,
+                settings,
+                context_source(settings),
+                "no_api_key",
+                slides_offered,
+                None,
+            );
             return None;
         }
-        let frames = match self.collect_grounding_frames(udid, stop).await {
-            Some(frames) => frames,
-            None => {
-                self.record_context_skip_attempt(
-                    udid,
-                    settings,
-                    context_source(settings),
-                    "evidence_unavailable",
-                );
-                return None;
+        // **Slides first, and they cost nothing extra.** The traversal was already paying for
+        // every flick, its 900 ms settle and a hierarchy dump per slide, and the comment never
+        // saw any of it: it was written before the first sideways gesture, from three samples
+        // taken 600 ms apart of image one. On a still card those three samples are one
+        // picture, so a six-image post was commented on from one sixth of itself.
+        //
+        // Falling back to sampling here is not a lesser path — it is what every video post
+        // still does, unchanged.
+        // Read before `slides` is moved: what the pictures *are* decides what the model may
+        // say about them, and once the two sources have been folded into one `frames` they are
+        // indistinguishable. Sampling produces moments of one card; the traversal produces
+        // pages of a post, and calling the second the first invites narrated motion.
+        let kind = if slides.is_empty() {
+            EvidenceKind::Moments
+        } else {
+            EvidenceKind::CarouselSlides
+        };
+        let frames = if slides.is_empty() {
+            match self.collect_grounding_frames(udid, stop).await {
+                Some(frames) => frames,
+                None => {
+                    self.record_context_skip_attempt(
+                        udid,
+                        settings,
+                        context_source(settings),
+                        "evidence_unavailable",
+                        slides_offered,
+                        None,
+                    );
+                    return None;
+                }
             }
+        } else {
+            slides
         };
         let direction = pick_direction_seeded(
             &settings.ai_directions,
             frames.first().map(|frame| frame_digest(frame)).unwrap_or(0),
         );
         let prepared = if provider_supports_vision(settings) {
-            prepare_grounded_comment(settings, &frames, direction.as_deref()).await
+            prepare_grounded_comment(settings, &frames, kind, direction.as_deref()).await
         } else {
             let Some(caption) = self.read_caption(frames.last()).await else {
                 self.record_context_skip_attempt(
@@ -1172,6 +1269,8 @@ impl NurtureEngine {
                     settings,
                     "ocr-caption",
                     "caption_ocr_empty",
+                    slides_offered,
+                    None,
                 );
                 return None;
             };
@@ -1184,12 +1283,25 @@ impl NurtureEngine {
         let comment = match prepared {
             Ok(comment) => comment,
             Err(error) => {
+                // **The reason has to survive the failure.** `context_skipped` on its own
+                // says a comment did not happen and refuses to say why, and the only copy of
+                // the why went to `tracing::warn!` — which no operator-facing surface reads,
+                // and which the command-line harness does not even install a subscriber for.
+                // A rejected API key, a model id that does not exist, a verifier that keeps
+                // scoring the draft as generic, and a network that is down all produced the
+                // same row, so the first real run of this feature could only say "it skipped".
+                //
+                // Bounded, because a transport error can carry a whole response body and this
+                // is a column an operator reads, not a log.
                 tracing::warn!("[nurture {udid}] không soạn được bình luận: {error}");
+                let reason: String = error.to_string().chars().take(160).collect();
                 self.record_context_skip_attempt(
                     udid,
                     settings,
                     context_source(settings),
-                    "context_skipped",
+                    &format!("context_skipped: {reason}"),
+                    slides_offered,
+                    crate::openai_client::spend_of_failure(&error),
                 );
                 return None;
             }
@@ -1203,7 +1315,7 @@ impl NurtureEngine {
             base_url_host: comment.base_url_host.clone(),
             prompt_tokens: comment.prompt_tokens,
             completion_tokens: comment.completion_tokens,
-            usd: comment.usd,
+            cost_usd: comment.cost_usd,
             preview: comment.text.chars().take(160).collect(),
             caption_preview: comment
                 .caption
@@ -1214,6 +1326,8 @@ impl NurtureEngine {
             context_confidence: Some(comment.context_confidence),
             relevance: Some(comment.relevance),
             evidence_support: Some(comment.evidence_support),
+            distinct_frames: Some(comment.distinct_frames),
+            carousel_slides: Some(slides_offered),
             created_at: Utc::now().to_rfc3339(),
         };
         let attempt_id = attempt.id.clone();
@@ -1222,7 +1336,8 @@ impl NurtureEngine {
         }
         Some(super::hierarchy::PreparedComment {
             text: comment.text,
-            usd: comment.usd,
+            prompt_tokens: comment.prompt_tokens,
+            completion_tokens: comment.completion_tokens,
             attempt_id: Some(attempt_id),
         })
     }
@@ -1250,12 +1365,49 @@ impl NurtureEngine {
         ocr_caption(&observations)
     }
 
+    /// One row for a comment the post's budget was charged for that never reached the drawer.
+    ///
+    /// The deferred path spends the action gap and `record_attempt` *before* the slides are
+    /// paged, so without this a card that changed underneath the traversal would leave a spent
+    /// attempt and no row at all — the exact hole `no_api_key` used to leave.
+    pub(super) fn record_deferred_skip(
+        &self,
+        udid: &str,
+        settings: &NurtureSettings,
+        reason: &str,
+        slides_offered: u32,
+    ) {
+        self.record_context_skip_attempt(
+            udid,
+            settings,
+            context_source(settings),
+            reason,
+            slides_offered,
+            None,
+        );
+    }
+
+    /// One row for a comment that never got written, so a quiet post is legible.
+    ///
+    /// `slides_offered` is what the carousel traversal paged, duplicates included, or 0 on a
+    /// path that never pages.
+    /// `spend` is what the attempt cost before it failed, and `None` means it cost nothing.
+    ///
+    /// **The distinction is the whole point.** Every one of these used to write
+    /// `prompt_tokens: 0`, so an attempt the verification gate rejected — a draft, a
+    /// verification, and a retry of both — was filed as free. Measured on the operator's own
+    /// database on 25/08/2026: thirteen of thirty-three attempts were stored as costing
+    /// nothing, and those thirteen were the expensive ones. A skip that really did happen
+    /// before the first call still passes `None`, because a zero written for a call that was
+    /// never made is as wrong as a zero written for one that was.
     fn record_context_skip_attempt(
         &self,
         udid: &str,
         settings: &NurtureSettings,
         source: &str,
         outcome: &str,
+        slides_offered: u32,
+        spend: Option<crate::openai_client::CommentSpend>,
     ) {
         let attempt = NurtureCommentAttempt {
             id: Uuid::new_v4().to_string(),
@@ -1264,15 +1416,17 @@ impl NurtureEngine {
             source: source.to_string(),
             model: settings.model.clone(),
             base_url_host: host_of(&settings.base_url),
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            usd: 0.0,
+            prompt_tokens: spend.map(|s| s.prompt_tokens).unwrap_or(0),
+            completion_tokens: spend.map(|s| s.completion_tokens).unwrap_or(0),
+            cost_usd: spend.and_then(|s| s.cost_usd),
             preview: String::new(),
             caption_preview: String::new(),
             frame_sha256: String::new(),
             context_confidence: None,
             relevance: None,
             evidence_support: None,
+            distinct_frames: None,
+            carousel_slides: Some(slides_offered),
             created_at: Utc::now().to_rfc3339(),
         };
         if let Err(error) = self.db.add_nurture_comment_attempt(&attempt) {
@@ -1429,6 +1583,25 @@ mod tests {
                 // Only a placeholder: the first `latest()` pops the same frame
                 // and overwrites it. Seeding from the front rather than popping
                 // is what keeps script[0] from being swallowed.
+                last: Mutex::new(first),
+                script: Mutex::new(queue),
+            }
+        }
+    }
+
+    impl ScriptedFrames {
+        /// The same script from frames a test *built*, rather than from fixtures on disk.
+        ///
+        /// Needed because [`Self::new`] takes `&'static [u8]`, which an `include_bytes!`
+        /// fixture satisfies and a freshly encoded image cannot.
+        fn from_frames(script: Vec<Vec<u8>>) -> Self {
+            let queue: std::collections::VecDeque<Frame> =
+                script.into_iter().map(Arc::new).collect();
+            let first = queue
+                .front()
+                .expect("scripted frames must not be empty")
+                .clone();
+            Self {
                 last: Mutex::new(first),
                 script: Mutex::new(queue),
             }
@@ -2037,6 +2210,84 @@ mod tests {
         let _ = std::fs::remove_file(db_path);
     }
 
+    /// **The bug that made this check useless on a real phone.**
+    ///
+    /// It used to hash the whole encoded frame, and the phone's own status bar is part of that.
+    /// Measured 23/08/2026 on ce0717171c2a64d50d: three samples of a genuinely still photo post
+    /// (`Hynxy ở Nha Trang · Photo`) differed by 185, 267 and 82 sampled pixels, and every one
+    /// of them sat inside y 16..49 — the animated network icon. Below that line the frames were
+    /// pixel-identical. Pushed through minicap's own pipeline (half of each edge, JPEG `-Q 70`)
+    /// the difference survived: 83,113 / 83,201 / 83,212 bytes, and `frame_digest` differed on
+    /// all three pairs. So on that phone no photo post could ever be recognised.
+    ///
+    /// The block below sits at y 8..32 of a 1334-tall frame, i.e. inside the top 4% the digest
+    /// ignores, and it moves between samples exactly as the icon does.
+    #[tokio::test]
+    async fn a_ticking_status_bar_does_not_make_a_still_card_move() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let corner = |y: u32| {
+            let mut image = image::load_from_memory(FEED).expect("fixture").to_rgb8();
+            for dy in 0..24 {
+                for dx in 0..120 {
+                    image.put_pixel(500 + dx, y + dy, Rgb([255, 255, 255]));
+                }
+            }
+            let mut out = Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgb8(image)
+                .write_to(&mut out, ImageFormat::Jpeg)
+                .expect("encode");
+            out.into_inner()
+        };
+        // 8, 16, 20 — all three blocks end at y=43 at the latest, inside the JPEG block row
+        // 40..47. **This alignment is the test, not decoration:** JPEG quantises in 8x8 blocks,
+        // so a block painted down to y=51 sits in the row 48..55 and its quantisation error
+        // lands on y=53..55 — below the 4% line — which made an earlier version of this test
+        // fail for a reason that had nothing to do with the status bar.
+        let (a, b, c) = (corner(8), corner(16), corner(20));
+        let frames = Arc::new(ScriptedFrames::from_frames(vec![a.clone(), b, c, a]));
+        let (engine, db_path) = test_engine_from(frames);
+
+        assert!(
+            engine.card_is_still(UDID, stop.as_ref()).await,
+            "only the status bar changed, so the card did not move"
+        );
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    /// And the other half: a change in the picture is still a change.
+    ///
+    /// Without this, "ignore the top 4%" could quietly become "ignore everything" and the
+    /// carousel traversal would start running on videos, where a horizontal swipe navigates
+    /// off the feed.
+    #[tokio::test]
+    async fn a_change_below_the_status_bar_is_still_a_moving_card() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let mid = |y: u32| {
+            let mut image = image::load_from_memory(FEED).expect("fixture").to_rgb8();
+            for dy in 0..24 {
+                for dx in 0..120 {
+                    image.put_pixel(500 + dx, y + dy, Rgb([255, 255, 255]));
+                }
+            }
+            let mut out = Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgb8(image)
+                .write_to(&mut out, ImageFormat::Jpeg)
+                .expect("encode");
+            out.into_inner()
+        };
+        let (a, b) = (mid(600), mid(900));
+        let frames = Arc::new(ScriptedFrames::from_frames(vec![
+            a.clone(),
+            b.clone(),
+            a,
+            b,
+        ]));
+        let (engine, db_path) = test_engine_from(frames);
+
+        assert!(!engine.card_is_still(UDID, stop.as_ref()).await);
+        let _ = std::fs::remove_file(db_path);
+    }
+
     #[tokio::test]
     async fn a_stopped_session_never_reports_a_still_card() {
         let stop = Arc::new(AtomicBool::new(true));
@@ -2130,7 +2381,11 @@ mod tests {
             .expect("comment costs");
         assert_eq!(costs.len(), 1);
         assert_eq!(costs[0].preview, COMMENT);
-        assert_eq!(costs[0].usd, 0.0, "pool text has no per-comment AI cost");
+        assert_eq!(
+            (costs[0].prompt_tokens, costs[0].completion_tokens),
+            (0, 0),
+            "pool text spends no AI tokens per comment"
+        );
         let attempts = engine
             .db
             .list_nurture_comment_attempts(10)
@@ -2231,6 +2486,7 @@ mod tests {
             text: COMMENT.to_string(),
             text_sha256: "deadbeef".into(),
             parent_ordinal: None,
+            mentions: Vec::new(),
         };
 
         let result = engine

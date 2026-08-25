@@ -146,7 +146,7 @@ pub fn agent_get_settings(state: State<'_, AppState>) -> AgentRuntimeView {
 pub fn agent_save_settings(
     state: State<'_, AppState>,
     settings: AgentSettings,
-) -> Result<AgentRuntimeView, String> {
+) -> Result<AgentRuntimeView, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     state.db.save_agent_settings(&settings).map_err(err)?;
     state.control.set_agent_settings(settings.clone());
@@ -192,13 +192,13 @@ pub async fn agent_repair(
 pub async fn agent_bulk_repair(
     state: State<'_, AppState>,
     udids: Vec<String>,
-) -> Result<Vec<AgentStatus>, String> {
+) -> Result<Vec<AgentStatus>, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     Ok(bulk_repair_with_control(&state.control, udids).await)
 }
 
-fn err(error: impl std::fmt::Display) -> String {
-    error.to_string()
+fn err(error: impl std::fmt::Display) -> CommandError {
+    CommandError::operation(error)
 }
 
 #[cfg(test)]

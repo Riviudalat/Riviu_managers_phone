@@ -53,6 +53,7 @@ import { FlowPalette } from "./FlowPalette";
 import { FlowRunDialog } from "./FlowRunDialog";
 import { FlowRunMonitor } from "./FlowRunMonitor";
 import { FlowToolbar } from "./FlowToolbar";
+import { describeError } from "../../describeError";
 
 export interface FlowWorkspaceProps {
   devices: DeviceInfo[];
@@ -61,14 +62,6 @@ export interface FlowWorkspaceProps {
 }
 
 type OpenDialog = "import" | "json" | "run" | null;
-
-function errorText(error: unknown): string {
-  if (typeof error === "object" && error !== null && "message" in error) {
-    const message = (error as { message?: unknown }).message;
-    if (typeof message === "string") return message;
-  }
-  return error instanceof Error ? error.message : String(error);
-}
 
 function savedSummary(document: FlowDocumentV2, createdAt: string): FlowSummary {
   return {
@@ -92,19 +85,6 @@ function downloadJson(name: string, body: string): void {
 
 function detailForRun(run: FlowRunRecord): FlowRunDetail {
   return { run, deviceRuns: [], attempts: [], artifacts: [] };
-}
-
-function flowDocumentEvent(value: unknown): { flowId: string; revision: number } | null {
-  if (typeof value !== "object" || value === null) return null;
-  const event = value as Record<string, unknown>;
-  return event.type === "flowUpdated" &&
-    typeof event.flowId === "string" &&
-    event.flowId.length > 0 &&
-    typeof event.revision === "number" &&
-    Number.isSafeInteger(event.revision) &&
-    event.revision > 0
-    ? { flowId: event.flowId, revision: event.revision }
-    : null;
 }
 
 export function FlowWorkspace({
@@ -178,7 +158,7 @@ export function FlowWorkspace({
           if (!disposed && record !== null) replaceFromRecord(record);
         }
       } catch (error) {
-        if (!disposed) setOperationError(errorText(error));
+        if (!disposed) setOperationError(describeError(error));
       } finally {
         if (!disposed) setLoading(false);
       }
@@ -204,6 +184,9 @@ export function FlowWorkspace({
       flowId: state.document.id,
       documentEpoch: state.documentEpoch,
     };
+    // Deliberate: the dependency array below records why this effect is keyed on the
+    // epoch and not on the document. exhaustive-deps is switched off for this file in
+    // .oxlintrc.json -- oxlint 1.x does not honour an inline disable for this rule.
     const snapshot = structuredClone(state.document);
     dispatch({ type: "validationStarted", identity });
     const timer = window.setTimeout(() => {
@@ -263,7 +246,7 @@ export function FlowWorkspace({
 
   const selectFlow = useCallback(async (id: string) => {
     if (!(await confirmDiscard())) return;
-    await openSavedFlow(id).catch((error) => setOperationError(errorText(error)));
+    await openSavedFlow(id).catch((error) => setOperationError(describeError(error)));
   }, [confirmDiscard, openSavedFlow]);
 
   const replaceWithNew = useCallback((document: FlowDocumentV2, source: "new" | "duplicate") => {
@@ -308,18 +291,19 @@ export function FlowWorkspace({
       replaceFromRecord(record);
     };
 
-    void listenRiviuEvents((payload) => {
-      const event = flowDocumentEvent(payload);
-      if (event) {
-        void invalidate(event.flowId, event.revision).catch((error) => {
-          if (!disposed) setOperationError(errorText(error));
-        });
-      }
+    void listenRiviuEvents((event) => {
+      // A blank id or a revision of 0 would mean the backend announced a projection it has
+      // not written yet; invalidating on that fetches nothing and drops the draft.
+      if (event.type !== "flowUpdated") return;
+      if (!event.flowId || !Number.isSafeInteger(event.revision) || event.revision <= 0) return;
+      void invalidate(event.flowId, event.revision).catch((error) => {
+        if (!disposed) setOperationError(describeError(error));
+      });
     }).then((unlisten) => {
       if (disposed) unlisten();
       else stop = unlisten;
     }, (error) => {
-      if (!disposed) setOperationError(errorText(error));
+      if (!disposed) setOperationError(describeError(error));
     });
 
     return () => {
@@ -345,7 +329,7 @@ export function FlowWorkspace({
       },
       (error) => {
         dispatch({ type: "saveFailed", identity });
-        setOperationError(errorText(error));
+        setOperationError(describeError(error));
       },
     );
   }, [state]);
@@ -368,7 +352,7 @@ export function FlowWorkspace({
         if (next.length > 0) await openSavedFlow(next[0].id);
         else replaceWithNew(newFlowDocument(), "new");
       } catch (error) {
-        setOperationError(errorText(error));
+        setOperationError(describeError(error));
       }
     })();
   }, [openSavedFlow, refreshFlows, replaceWithNew, saved, state.document.id, state.document.name]);
@@ -385,14 +369,14 @@ export function FlowWorkspace({
         const detail = await flowGetRun(run.id);
         if (detail) setActiveRun(detail);
       } catch (error) {
-        setOperationError(errorText(error));
+        setOperationError(describeError(error));
       }
     })();
   }, [compiled, saved, state.dirty, state.document.id, state.document.revision]);
 
   const selectRun = useCallback((runId: string) => {
     void flowGetRun(runId).then((detail) => setActiveRun(detail), (error) => {
-      setOperationError(errorText(error));
+      setOperationError(describeError(error));
     });
   }, []);
 
@@ -403,7 +387,7 @@ export function FlowWorkspace({
         const detail = await flowGetRun(runId);
         if (detail) setActiveRun(detail);
       } catch (error) {
-        setOperationError(errorText(error));
+        setOperationError(describeError(error));
       }
     })();
   }, []);
@@ -416,7 +400,7 @@ export function FlowWorkspace({
         const detail = await flowGetRun(activeRun.run.id);
         if (detail) setActiveRun(detail);
       } catch (error) {
-        setOperationError(errorText(error));
+        setOperationError(describeError(error));
       }
     })();
   }, [activeRun]);
@@ -424,7 +408,7 @@ export function FlowWorkspace({
   const openArtifact = useCallback((artifactId: string) => {
     setOperationError(null);
     void flowReadArtifact(artifactId).then(setArtifact, (error) => {
-      setOperationError(errorText(error));
+      setOperationError(describeError(error));
     });
   }, []);
 
@@ -462,7 +446,7 @@ export function FlowWorkspace({
           if (!saved) return;
           void flowExport(state.document.id, state.document.revision).then(
             (body) => downloadJson(state.document.name, body),
-            (error) => setOperationError(errorText(error)),
+            (error) => setOperationError(describeError(error)),
           );
         }}
         onJson={() => setDialog("json")}
@@ -536,7 +520,7 @@ export function FlowWorkspace({
           issues={state.validation}
           onSelectNode={(nodeId) => dispatch({ type: "selectNode", nodeId })}
         />
-        <div className="flow-run-history">
+        <div className="flow-run-history" data-testid="flow-run-history">
           <label>
             <span>Lượt chạy</span>
             <select
@@ -601,7 +585,12 @@ export function FlowWorkspace({
       )}
       {artifact && (
         <div className="flow-dialog-layer">
-          <section className="flow-dialog flow-artifact-dialog" role="dialog" aria-label="Tệp kết quả">
+          <section
+            className="flow-dialog flow-artifact-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Tệp kết quả"
+          >
             <header>
               <strong>{artifact.label}</strong>
               <button type="button" onClick={() => setArtifact(null)}>Đóng</button>

@@ -66,6 +66,17 @@ pub struct AndroidTools {
     pub scrcpy_server: Option<PathBuf>,
     /// The bundled Riviu helper APK, when a build has pinned one.
     pub riviu_agent_apk: Option<PathBuf>,
+    /// `appium-uiautomator2-server`, the instrumentation the control loop talks to.
+    ///
+    /// Bundled since 16/08/2026. Before that the app told the operator to "install both
+    /// appium-uiautomator2-server APKs" and shipped neither, so on a freshly plugged box
+    /// every device streamed video and refused every tap -- measured 0/20 on a Galaxy S8
+    /// farm. Video worked because `scrcpy-server` IS bundled and pushed; nothing pushed
+    /// these.
+    pub agent_server_apk: Option<PathBuf>,
+    /// The `androidTest` half. Both halves are required: the runner lives in this one and
+    /// `am instrument` names it, so installing only the server leaves the same refusal.
+    pub agent_test_apk: Option<PathBuf>,
     /// Everything that went wrong, in the operator's language.
     ///
     /// A list rather than a single `Option` because a bad checkout tends to damage
@@ -156,6 +167,8 @@ impl AndroidTools {
                 Some("minicapApk") => tools.minicap_apk = Some(path),
                 Some("scrcpyServer") => tools.scrcpy_server = Some(path),
                 Some("riviuAgentApk") => tools.riviu_agent_apk = Some(path),
+                Some("agentServerApk") => tools.agent_server_apk = Some(path),
+                Some("agentTestApk") => tools.agent_test_apk = Some(path),
                 // A role this build does not know is not an error. The bytes were still
                 // verified above; the manifest is simply describing something newer.
                 Some(_) | None => {}

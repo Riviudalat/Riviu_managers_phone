@@ -1,7 +1,6 @@
 /** Minimal inline SVG icons — no emoji. */
-import type { ReactElement } from "react";
 
-type IconProps = { size?: number; className?: string };
+export type IconProps = { size?: number; className?: string };
 
 export function IconPhone({ size = 18, className }: IconProps) {
   return (
@@ -185,15 +184,6 @@ export function IconLog({ size = 18, className }: IconProps) {
   );
 }
 
-export function IconUser({ size = 18, className }: IconProps) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
-      <circle cx="12" cy="8" r="3.25" stroke="currentColor" strokeWidth="1.75" />
-      <path d="M5 19c1-3.2 3.5-5 7-5s6 1.8 7 5" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
-    </svg>
-  );
-}
-
 export function IconApi({ size = 18, className }: IconProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
@@ -234,6 +224,37 @@ export function IconPower({ size = 18, className }: IconProps) {
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
       <path d="M12 3v9" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
       <path d="M7.5 6.5a7.5 7.5 0 108.9 0" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function IconBattery({ size = 18, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <rect x="2" y="7" width="17" height="10" rx="2.5" stroke="currentColor" strokeWidth="1.75" />
+      <path d="M21.5 10.5v3" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function IconKeyboard({ size = 18, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <rect x="2" y="6" width="20" height="12" rx="2.5" stroke="currentColor" strokeWidth="1.75" />
+      <path
+        d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+export function IconText({ size = 18, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <path d="M5 6h14M5 12h14M5 18h9" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
     </svg>
   );
 }
@@ -345,21 +366,3 @@ export function IconChat({ size = 18, className }: IconProps) {
   );
 }
 
-export const MENU_ICONS: Record<string, (p: IconProps) => ReactElement> = {
-  control: IconGrid,
-  groups: IconUsers,
-  proxy: IconProxy,
-  material: IconImage,
-  apps: IconApp,
-  scripts: IconScript,
-  nurture: IconHeart,
-  jobs: IconClock,
-  sync: IconSync,
-  publish: IconRocket,
-  data: IconChart,
-  team: IconTeam,
-  logs: IconLog,
-  account: IconUser,
-  api: IconApi,
-  settings: IconSettings,
-};

@@ -1,7 +1,7 @@
 {
   "name": "riviumanagersphone",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
   "engines": {
     "node": ">=20.19"
@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "lint": "oxlint",
+    "lint": "oxlint --deny-warnings",
     "test": "vitest run",
     "test:e2e": "playwright test",
     "preview": "vite preview",

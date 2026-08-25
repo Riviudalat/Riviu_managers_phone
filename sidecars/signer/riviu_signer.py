@@ -25,16 +25,22 @@ def main() -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("sign-install-wda")
     p.add_argument("--udid", required=True)
-    p.add_argument("--apple-id", required=True)
-    p.add_argument("--password", required=True)
     p.add_argument("--wda", required=False, default=str(DEFAULT_IPA))
     p.add_argument("--team-id", required=False, default=None)
     args = parser.parse_args()
 
-    # Password is stored for future anisette free-sign; Xcode Personal Team
-    # currently owns the certificate after user adds the same Apple ID in Xcode.
-    _ = args.password
-    _ = args.apple_id
+    # Apple ID and its app-specific password arrive in the **environment**, never in argv.
+    # On Windows a process command line is readable by any process running as the same user
+    # (and is routinely captured by EDR/Sysmon), so `--password <secret>` handed the value to
+    # every other process on the box — defeating the OS credential store the desktop went to
+    # the trouble of using. Same reason, same fix as `ios-driver/src/supervisor.rs`, which
+    # passes its fingerprint by environment with that reasoning written next to it.
+    #
+    # Both are read but unused: the certificate is currently owned by the Xcode Personal Team
+    # after the operator adds the same Apple ID in Xcode. They are kept for the anisette
+    # free-sign flow that would need them.
+    _ = os.environ.get("RIVIU_APPLE_ID", "")
+    _ = os.environ.get("RIVIU_APPLE_PASSWORD", "")
     _ = args.wda
 
     embedded_runtime = os.environ.get("RIVIU_EMBEDDED_PYTHON_RUNTIME")
@@ -52,6 +58,12 @@ def main() -> int:
         cmd.extend(["--team-id", args.team_id])
 
     child_environment = os.environ.copy()
+    # `build_and_install.py` drives Xcode and never needs the Apple credentials, so it does not
+    # get them. Repo precedent: the WDA build gate hands its subprocess a copy of the
+    # environment with `RIVIU_AGENT_TOKEN` removed for exactly this reason — a secret should
+    # reach one process, not every descendant of it.
+    child_environment.pop("RIVIU_APPLE_PASSWORD", None)
+    child_environment.pop("RIVIU_APPLE_ID", None)
     child_environment["PYTHONUTF8"] = "1"
     child_environment["PYTHONIOENCODING"] = "utf-8"
     options = {

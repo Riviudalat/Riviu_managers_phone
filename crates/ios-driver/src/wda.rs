@@ -1236,6 +1236,35 @@ impl WdaClient {
         Ok(())
     }
 
+    /// Lock the screen (WDA `/wda/lock`) — xiaowei "锁屏", batched over a fleet.
+    pub async fn lock(&self) -> Result<(), UiError> {
+        let url = format!("{}/wda/lock", self.base);
+        self.send(
+            Method::Post,
+            &url,
+            "lock",
+            Some(&json!({})),
+            Duration::from_secs(8),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Unlock the screen (WDA `/wda/unlock`). A device with a secure passcode wakes to its
+    /// own lock screen — WDA cannot type the code, and pretending otherwise would be a lie.
+    pub async fn unlock(&self) -> Result<(), UiError> {
+        let url = format!("{}/wda/unlock", self.base);
+        self.send(
+            Method::Post,
+            &url,
+            "unlock",
+            Some(&json!({})),
+            Duration::from_secs(8),
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn find_and_tap(&self, accessibility_id: &str) -> Result<(), UiError> {
         // Raw WebDriverAgent names this strategy "predicate string"; the
         // `-ios ` prefix is an Appium-ism and this agent rejects it outright

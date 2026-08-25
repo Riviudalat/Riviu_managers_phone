@@ -1,11 +1,20 @@
 [package]
 name = "riviu-managers-phone"
-version = "0.1.1"
+version = "0.2.0"
 description = "Riviu Manager — iPhone and Android device farm"
 authors = ["Riviu"]
 edition = "2021"
-rust-version = "1.77.2"
+# Not 1.77.2, which this claimed. `riviu-core` is a path dependency of this crate and
+# already uses `Option::is_none_or` (stable 1.82) in five modules, so 1.77.2 has been
+# unbuildable for a while -- the number simply went unread. Nothing consumes these crates
+# (`publish = false` throughout), so this is documentation, and it should say the version
+# the workspace is actually built and tested with: the one in rust-toolchain.toml.
+rust-version = "1.95"
 default-run = "riviu-managers-phone"
+# Never published: this is a private product, not a library. Marking it here also lets
+# `cargo deny` treat it as private, so the workspace's own path dependencies are not
+# reported as wildcard versions and the missing `license` field is not an error.
+publish = false
 
 [lib]
 name = "app_lib"
@@ -40,6 +49,10 @@ reqwest = { workspace = true }
 tauri-plugin-updater = "2"
 tokio-tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# USB relay control for the peripherals tier (xiaowei "外设" — power-cycle a wedged phone by
+# toggling its relay channel). Cross-platform, pure-Rust FFI (no C toolchain); the enumerate
+# path is what the desktop uses to list COM ports for the operator.
+serialport = "4"
 
 # Windows ships an OCR engine in the OS (Windows.Media.Ocr, Windows 10+). These
 # are Microsoft's own WinRT projections, pure bindings with no runtime of their
@@ -58,3 +71,6 @@ windows = { version = "0.58", features = [
 
 [features]
 default = []
+
+[lints]
+workspace = true

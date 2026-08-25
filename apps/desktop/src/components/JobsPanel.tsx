@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react";
 import type { DeviceInfo, JobRecord } from "../types";
 import { cancelJob, exampleScript, runScript } from "../api";
-import { SelectionStrip, flash, targetsOf } from "./SelectionStrip";
+import { SelectionStrip } from "./SelectionStrip";
+import { flash } from "../farmToast";
+import { targetsOf } from "../selectionTargets";
+import { describeError } from "../describeError";
 
 interface Props {
   jobs: JobRecord[];
@@ -75,7 +78,7 @@ export function JobsPanel({
                   onRefresh();
                   flash(`Job queued · ${targets.length} máy`);
                 } catch (e) {
-                  setError(String(e));
+                  setError(describeError(e));
                 } finally {
                   setBusy(false);
                 }

@@ -202,12 +202,13 @@ async fn main() -> anyhow::Result<()> {
 
     println!("---- RESULT ----");
     println!(
-        "videos={} likes={} comments={} follows={} usd={:.4} msg={} elapsed={:.1}s",
+        "videos={} likes={} comments={} follows={} tokens={}/{} msg={} elapsed={:.1}s",
         status.videos_done,
         status.likes,
         status.comments,
         status.follows,
-        status.session_usd,
+        status.session_prompt_tokens,
+        status.session_completion_tokens,
         status.last_message,
         started.elapsed().as_secs_f64()
     );

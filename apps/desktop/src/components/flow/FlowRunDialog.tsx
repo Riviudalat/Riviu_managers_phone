@@ -4,7 +4,7 @@ import type { DeviceInfo, FlowTargetSelection } from "../../types";
 
 type RunMode = FlowTargetSelection["mode"];
 
-export function targetSelection(
+function targetSelection(
   mode: RunMode,
   oneUdid: string,
   selectedUdids: string[],
@@ -33,7 +33,12 @@ export function FlowRunDialog({
   const selection = targetSelection(mode, oneUdid, selectedUdids);
 
   return (
-    <section role="dialog" aria-label="Chạy Flow" className="flow-dialog flow-run-dialog">
+    <section
+      role="dialog"
+      aria-modal="true"
+      aria-label="Chạy Flow"
+      className="flow-dialog flow-run-dialog"
+    >
       <header>
         <strong>Chạy Flow</strong>
         {onClose && (

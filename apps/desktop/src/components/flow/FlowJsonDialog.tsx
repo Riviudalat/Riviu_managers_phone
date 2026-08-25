@@ -1,10 +1,26 @@
 import { Check, Download, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { flowExport, flowValidate } from "../../api";
-import { isFlowDocumentV2 } from "../../flow/validation";
+import { describeError } from "../../describeError";
+import { isFlowDocumentV2, normalizeFlowIssues } from "../../flow/validation";
 import type { CompiledRevision, FlowDocumentV2 } from "../../types";
 
 const MAX_FLOW_JSON_BYTES = 1_048_576;
+
+/**
+ * One line for a rejected `flow_validate`.
+ *
+ * `flow_validate` is the only command in the app that rejects with a **`Vec<CommandError>`**
+ * (`flow_commands.rs:69`) — an *array* of objects. `String(...)` on that yields
+ * `"[object Object]"`, which is exactly what this dialog used to show instead of naming the node
+ * that failed to compile. `normalizeFlowIssues` already existed for this shape and handles all
+ * three cases (array, single, neither); the join is because this dialog has one error line.
+ */
+function describeValidationFailure(reason: unknown): string {
+  return normalizeFlowIssues(reason)
+    .map((issue) => (issue.code ? `${issue.code}: ${issue.message}` : issue.message))
+    .join(" · ");
+}
 
 function assertFlowDocumentShape(value: unknown): asserts value is FlowDocumentV2 {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -22,7 +38,13 @@ async function importFlowJson(
   }
   const document: unknown = JSON.parse(raw);
   assertFlowDocumentShape(document);
-  await validate(document);
+  // Translated here rather than in the caller's catch, because only this line knows the
+  // rejection is a `Vec<CommandError>`; everything else this function throws is a real `Error`.
+  try {
+    await validate(document);
+  } catch (reason) {
+    throw new Error(describeValidationFailure(reason));
+  }
   return structuredClone(document);
 }
 
@@ -57,7 +79,7 @@ export function FlowJsonDialog({
     try {
       onApply(await importFlowJson(raw, validate));
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(describeError(reason));
     } finally {
       setBusy(null);
     }
@@ -69,7 +91,7 @@ export function FlowJsonDialog({
     try {
       setRaw(await exportFlow(document.id, document.revision));
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setError(describeError(reason));
     } finally {
       setBusy(null);
     }

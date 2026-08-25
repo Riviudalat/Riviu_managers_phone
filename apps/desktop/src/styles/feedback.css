@@ -1,0 +1,193 @@
+.toast-icon {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--primary);
+}
+.toast-ok {
+  border-left-color: var(--ok);
+}
+.toast-ok .toast-icon {
+  color: var(--ok);
+}
+.toast-warn {
+  border-left-color: var(--warn);
+}
+.toast-warn .toast-icon {
+  color: var(--warn);
+}
+.toast-error {
+  border-left-color: var(--danger);
+}
+.toast-error .toast-icon {
+  color: var(--danger);
+}
+
+.toast-copy {
+  min-width: 0;
+  flex: 1;
+}
+.toast-copy strong {
+  display: block;
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--text-1);
+}
+.toast-copy p {
+  margin: 0.15rem 0 0;
+  max-height: 4.5rem;
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.toast-close {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-3);
+}
+.toast-close:hover {
+  background: var(--bg-muted);
+  color: var(--text-1);
+}
+
+/* ——— Confirm dialog · replace window.confirm ——— */
+.confirm-layer {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-confirm);
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+}
+
+.confirm-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgb(15 23 42 / 32%);
+}
+
+.confirm-card {
+  position: relative;
+  width: min(420px, 100%);
+  padding: 1.25rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  box-shadow: 0 20px 60px rgb(15 23 42 / 26%);
+}
+.confirm-card h3 {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 700;
+  color: var(--text-1);
+}
+.confirm-card p {
+  margin: 0.6rem 0 0;
+  color: var(--text-2);
+  font-size: var(--text-md);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* The field a prompt dialog adds (rename a phone, number it). Full width of the card, so a
+   long alias is readable while it is being typed. */
+.confirm-input {
+  width: 100%;
+  margin-top: 0.75rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  font-size: var(--text-md);
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1.15rem;
+}
+.confirm-actions button {
+  min-width: 88px;
+  padding: 0.5rem 0.9rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  color: var(--text-1);
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+.confirm-actions button:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.confirm-actions button.primary {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--text-inverse);
+}
+.confirm-actions button.primary:hover {
+  border-color: var(--primary-deep);
+  background: var(--primary-deep);
+  color: var(--text-inverse);
+}
+.confirm-actions button.danger {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: var(--text-inverse);
+}
+.confirm-actions button.danger:hover {
+  border-color: #d94a4a;
+  background: #d94a4a;
+  color: var(--text-inverse);
+}
+
+/* Evidence frame from a comment thread, shown inline under the assignment it
+   belongs to. Click anywhere on it to dismiss. */
+.interaction-shot {
+  display: block;
+  width: 100%;
+  padding: 0;
+  margin: 8px 0 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  /* Was `var(--surface-2)`, a token that has never been declared anywhere in this
+     app — so this surface had no background at all and a screenshot with
+     transparency sat straight on the panel. `--bg-muted` is the token that name
+     was reaching for. Found by the token test, not by looking. */
+  background: var(--bg-muted);
+  cursor: zoom-out;
+  overflow: hidden;
+}
+
+.interaction-shot img {
+  display: block;
+  width: 100%;
+  max-height: 420px;
+  object-fit: contain;
+}
+
+/* The refusal reason, wherever one exists. Wraps rather than truncates: these strings
+   name the cause ("bài đã bị xoá/riêng tư/chặn vùng", "không đọc được nhãn tác giả")
+   and a clipped one sends the reader to the wrong fix. */
+/* Selector carries the parent class on purpose: `.interaction-campaign small` already sets
+   `white-space: nowrap` + ellipsis and outranks a bare `.interaction-error`, so without
+   this the reason would be clipped to one line — which is the failure this whole change
+   exists to undo. */
+.interaction-campaign small.interaction-error,
+.interaction-assignment small.interaction-error {
+  color: var(--danger, #c0392b);
+  white-space: pre-wrap;
+  overflow: visible;
+  text-overflow: clip;
+  word-break: break-word;
+  line-height: 1.35;
+  margin-top: 0.15rem;
+}

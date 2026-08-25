@@ -36,6 +36,28 @@ pub struct AppProcessState {
     pub running: bool,
 }
 
+/// What a media export found on the phone, and what of it actually landed.
+///
+/// Both numbers, because one of them alone is a sentence with no meaning. `pull_media`
+/// used to return only the files that arrived, so a phone with five hundred photos of which
+/// twenty copied reported "20" — the same answer it gives for a phone that only has twenty.
+/// The operator has no way to tell those apart, and the second is the one where nothing is
+/// wrong.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MediaPullReport {
+    /// Files written on this host, verified to exist with a non-zero length.
+    pub fetched: Vec<std::path::PathBuf>,
+    /// How many media files the phone reported having.
+    pub found: usize,
+}
+
+impl MediaPullReport {
+    /// Found but did not arrive. Zero on a healthy export and on an empty gallery alike.
+    pub fn missed(&self) -> usize {
+        self.found.saturating_sub(self.fetched.len())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuardedClipboardOperation {
     Set {
@@ -411,6 +433,24 @@ pub trait DeviceDriver: Send + Sync {
     ) -> anyhow::Result<serde_json::Value> {
         unsupported("cleanupPublishMedia")
     }
+    /// Copy the phone's own photos and videos off it, into `dest_dir`.
+    ///
+    /// The other direction from the publish pipeline above, and deliberately not built on
+    /// it: that path exists to put a *campaign* on a phone and knows about manifests and
+    /// import ids. This one knows nothing about what it is fetching — it is the operator
+    /// asking for whatever the camera roll currently holds.
+    ///
+    /// Returns what was found and what arrived, so a caller can report a count rather
+    /// than a shrug -- and can tell a small gallery from a large one that mostly failed.
+    /// An empty gallery is an `Ok` report with both numbers zero, not an error: nothing
+    /// went wrong, there was simply nothing there.
+    ///
+    /// Defaults to a refusal that names itself rather than to an empty success, the same
+    /// rule as every capability above — "no media" and "this backend cannot fetch media"
+    /// must not look alike to a caller.
+    async fn pull_media(&self, _udid: &str, _dest_dir: &Path) -> anyhow::Result<MediaPullReport> {
+        unsupported("pullMedia")
+    }
     async fn uninstall_app(&self, udid: &str, bundle_id: &str) -> anyhow::Result<()>;
     async fn screenshot(&self, udid: &str, dest: &Path) -> anyhow::Result<PathBuf>;
     async fn syslog_tail(&self, udid: &str, lines: usize) -> anyhow::Result<String>;
@@ -490,6 +530,33 @@ pub trait UiSession: Send + Sync {
     async fn swipe_path(&self, path: SwipePath) -> anyhow::Result<()> {
         self.swipe(path.as_gesture()).await
     }
+    /// [`Self::swipe_path`] with the points in stream/screenshot pixel space.
+    ///
+    /// The overlay measures a drag in the encoded frame it is painting, not in device
+    /// pixels, so a path from the UI needs the same scaling [`Self::swipe_image`] does.
+    /// Kept as its own method rather than making the caller scale, because the scale
+    /// factor lives in the session (it knows the screen size) and a caller that guesses it
+    /// produces a gesture that is subtly the wrong shape rather than an error.
+    ///
+    /// The default collapses to first-point -> last-point, so a backend that cannot draw a
+    /// path keeps working and simply loses the curve.
+    async fn swipe_path_image(
+        &self,
+        path: SwipePath,
+        image_w: f64,
+        image_h: f64,
+    ) -> anyhow::Result<()> {
+        let gesture = path.as_gesture();
+        self.swipe_image(
+            gesture.from,
+            gesture.to,
+            image_w,
+            image_h,
+            gesture.duration_ms,
+        )
+        .await
+    }
+
     /// Tap using coordinates in stream/screenshot pixel space.
     async fn tap_image(&self, x: f64, y: f64, image_w: f64, image_h: f64) -> anyhow::Result<()> {
         let _ = (image_w, image_h);
@@ -513,6 +580,24 @@ pub trait UiSession: Send + Sync {
         .await
     }
     async fn type_text(&self, text: &str) -> anyhow::Result<()>;
+    /// Type **as real key events**, the way a keyboard would, appending at the cursor.
+    ///
+    /// [`Self::type_text`] writes through accessibility (`ACTION_SET_TEXT` on Android), which
+    /// replaces the whole field and — measured 24/08/2026 — is invisible to the app's own
+    /// input watchers: setting a comment box to `@name` never opened TikTok's mention picker,
+    /// while the same characters injected as key events opened it and filtered it to real
+    /// accounts. Anything that has to make the app *react to typing* needs this path.
+    ///
+    /// **ASCII only.** The Android implementation shells out to `input text`, which is killed
+    /// outright by diacritics — the reason `type_text` exists in the first place. Callers put
+    /// Vietnamese through `type_text` and use this only for things like an `@handle`.
+    ///
+    /// Unsupported by default: a session that cannot inject real keys must say so rather than
+    /// silently fall back to the accessibility path, because the caller is asking for the one
+    /// property that path does not have.
+    async fn type_keys(&self, _text: &str) -> anyhow::Result<()> {
+        unsupported("typeKeys")
+    }
     /// Whether this session's text injection is accepted by the foreground
     /// app. Stock XCTest WDA reports successful key requests that TikTok drops;
     /// the standalone RT-MMO backend supplies the trusted text channel.
@@ -536,6 +621,16 @@ pub trait UiSession: Send + Sync {
             | HardwareKey::Power
             | HardwareKey::Notification => unsupported("pressHardwareKey"),
         }
+    }
+    /// Lock (screen off) or unlock the device — xiaowei "锁屏 / 解锁", batched over a fleet.
+    ///
+    /// Default unsupported, so every mock and minimal backend inherits it untouched. iOS
+    /// maps this to WDA `/wda/lock` and `/wda/unlock`. Android sleeps with `KEYCODE_SLEEP`
+    /// and wakes with `KEYCODE_WAKEUP`, then best-effort dismisses a swipe-only keyguard; a
+    /// phone with a secure PIN stays at its lock screen, which is the honest outcome rather
+    /// than a pretended unlock.
+    async fn set_locked(&self, _locked: bool) -> anyhow::Result<()> {
+        unsupported("setLocked")
     }
     /// Go back one step, the way the platform's own back gesture would.
     ///
@@ -563,6 +658,19 @@ pub trait UiSession: Send + Sync {
     /// Bring app to foreground (WDA). Default: unsupported.
     async fn launch_app_foreground(&self, _bundle_id: &str) -> anyhow::Result<()> {
         anyhow::bail!("launch_app_foreground not supported")
+    }
+    /// Stop the app and start it again, so it comes back in a fresh state.
+    ///
+    /// Distinct from [`Self::launch_app_foreground`], which only raises what is already
+    /// running — measured 18/08/2026 on ce051715081fe20f03, whose TikTok would not leave
+    /// one card: launching it repeatedly showed the same card every time, and a
+    /// force-stop followed by a launch moved the feed on the first swipe afterwards.
+    ///
+    /// The default is that plain raise, because it is the most a backend without process
+    /// control can offer and it is never *worse* than doing nothing. A backend that can
+    /// stop a process should override this and say so.
+    async fn restart_app(&self, bundle_id: &str) -> anyhow::Result<()> {
+        self.launch_app_foreground(bundle_id).await
     }
     /// Bundle id of the frontmost app (`GET /wda/activeAppInfo`). Default: unsupported.
     async fn active_app_bundle(&self) -> anyhow::Result<String> {
@@ -716,6 +824,21 @@ pub enum ElementQuery<'a> {
     Description { value: &'a str, exact: bool },
     /// Match the widget class, e.g. `android.widget.EditText`.
     ClassName(&'a str),
+    /// Match the **suffix** of the fully-qualified `resource-id`.
+    ///
+    /// Measured 24/08/2026, and the measurement is the whole reason this exists. TikTok's caption
+    /// node is `com.bytedance.tux.input.TuxTextLayoutView` on `com.ss.android.ugc.trill` and
+    /// **`X.1BOr`** on `com.zhiliaoapp.musically` — the class name is obfuscated and changes with
+    /// the build — while *both* carry a `resource-id` ending `:id/desc`. Keying the caption on the
+    /// class therefore read it on one build and returned nothing on the other, which is what made
+    /// four of twenty phones unconfirmable during a pass and got recorded as "the deep link did
+    /// not navigate" when the post had been open the whole time.
+    ///
+    /// A suffix rather than the whole id because the id embeds the package, and the package is
+    /// exactly what differs between the two builds.
+    ///
+    /// **A literal, not a pattern** — the driver escapes it before building the match.
+    ResourceIdSuffix(&'a str),
     /// Match the node's rendered `text`, not its `content-desc`.
     ///
     /// Needed because the two are not interchangeable: TikTok's action rail is

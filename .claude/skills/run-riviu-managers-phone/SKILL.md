@@ -157,20 +157,48 @@ tile footer reads `● Live  USB  iPhone10,1 · 16.…` and **Settings** reports
 
 `.github/workflows/desktop-ci-cd.yml` runs exactly these on `windows-2025`:
 
+CI runs whole-workspace commands. **Do not copy them onto this machine** — run the
+per-crate list below instead, and see why underneath.
+
 ```powershell
 $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
-cargo fmt --all -- --check                                     # passes
-cargo test --workspace --locked -- --test-threads=1            # 676 passed, 1 ignored, ~3.5 min
-cargo clippy --workspace --all-targets --locked -- -D warnings # passes, ~1 min
+cargo fmt --all -- --check
+
+# Per crate, never --workspace. Counts as of 25/08/2026.
+cargo test -p riviu-core                                     # 718 lib + 27 + 1, ~100 s
+cargo test -p riviu-managers-phone                           # 179
+cargo test -p riviu-android-driver                           # 185
+cargo clippy -p riviu-core --all-targets -- -D warnings
+cargo clippy -p riviu-managers-phone --all-targets -- -D warnings
+cargo clippy -p riviu-android-driver --all-targets -- -D warnings
+
 cd apps\desktop
-npm run lint     # exit 0 (emits react/only-export-components warnings)
-npm test         # 15 files, 73 tests passed
-npm run build    # tsc -b && vite build, ~2.3s
+npm run lint
+npm test         # 682 tests
+npm run build    # tsc -b && vite build
 ```
 
-`cargo test -q -p riviu-managers-phone` alone is the fast inner loop (55 tests).
+**Why per crate.** A whole-workspace `cargo test` or `cargo clippy` on this host is
+killed by Smart App Control part way through and reports a link error that looks like a
+code fault. The per-crate list covers the same ground and finishes. Never turn Smart App
+Control off to make the workspace command work.
+
+**`npm` may not run at all here.** `npm ci` was refused by the OS on 25/08/2026 —
+`The operation was rejected by your operating system` — leaving `apps/desktop/node_modules`
+with 11 packages and no `.bin`, so `npm test`, `npm run lint` and `npm run build` all fail
+with `'vitest' is not recognized`. That is the machine, not the tree: the frontend gates run
+in CI on every pull request. A Rust test does cover the Rust↔TypeScript boundary
+(`the_frontend_types_describe_the_same_fields_the_backend_sends` reads `types.ts` as text),
+so a type added on one side and forgotten on the other is caught by `cargo test -p riviu-core`.
+
+`cargo test -q -p riviu-managers-phone` alone is the fast inner loop.
 **Stop the app first** — a running `riviu-managers-phone.exe` is locked and cargo
 cannot relink it.
+
+Three `flow::evidence` tests fail **under load** and pass when run alone: their deadlines
+are one second of real time and 700 sibling tests starve them. `cargo test -p riviu-core
+--lib flow::evidence` on its own is the check; a failure there while the rest of the suite
+is green is not a regression.
 
 `npm run test:e2e` is **not** in CI but passes locally (6 specs, ~14s) after
 `npx playwright install chromium`. It starts its own vite on `127.0.0.1:1421` with a

@@ -7,15 +7,42 @@ use uuid::Uuid;
 
 use crate::types::{JobRecord, JobStatus, JobStepRecord, StepStatus};
 
+mod fleet;
 mod flow_runs;
 mod flows;
+mod interaction;
+mod inventory;
+mod jobs;
 mod migrations;
+mod nurture;
+mod publish;
 
 pub use flow_runs::{AttemptTransitionPatch, FlowStateConflict};
 pub(crate) use flow_runs::{FlowAttemptExecutionContext, FlowRecoveryRunContext};
 
+/// Somewhere to keep a secret that is **not** the SQLite file.
+///
+/// The database is the app's SQLite file under `%APPDATA%`, opened with a plain
+/// `Connection::open` — no SQLCipher, no key, and nothing hardening its ACL. Anything written
+/// there is readable by any process running as the operator. That is fine for campaign rows and
+/// device aliases; it is not fine for an API key that can spend money.
+///
+/// A trait rather than a direct dependency on `riviu-signing`: `crates/core` deliberately does
+/// not know about the OS credential store, the same way it deliberately does not know about the
+/// driver crates. The desktop supplies the keyring-backed implementation; tests supply an
+/// in-memory one; a `Database` with no store at all keeps the old behaviour, which is what the
+/// 38 test constructors rely on.
+pub trait SecretStore: Send + Sync {
+    fn get_secret(&self, name: &str) -> anyhow::Result<Option<String>>;
+    fn set_secret(&self, name: &str, value: &str) -> anyhow::Result<()>;
+}
+
+/// Name under which the AI API key lives in the secret store.
+pub const SECRET_AI_API_KEY: &str = "nurture-ai-api-key";
+
 pub struct Database {
     path: PathBuf,
+    secrets: Option<std::sync::Arc<dyn SecretStore>>,
 }
 
 const NURTURE_SETTINGS_MIGRATION_V2: &str = "nurture.settings.migration.v2";
@@ -28,7 +55,10 @@ impl Database {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let db = Self { path };
+        let db = Self {
+            path,
+            secrets: None,
+        };
         db.migrate()?;
         Ok(db)
     }
@@ -36,6 +66,12 @@ impl Database {
     pub fn default_path() -> anyhow::Result<PathBuf> {
         let base = dirs::data_dir().context("no data dir")?;
         Ok(base.join("riviu-managers-phone").join("riviu.db"))
+    }
+
+    /// Attach the place secrets live. Without one, secrets stay in the SQLite blob as before.
+    pub fn with_secrets(mut self, store: std::sync::Arc<dyn SecretStore>) -> Self {
+        self.secrets = Some(store);
+        self
     }
 
     fn conn(&self) -> anyhow::Result<Connection> {
@@ -50,1411 +86,54 @@ impl Database {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         migrations::run(&mut conn)
     }
+}
 
-    pub fn save_job(&self, job: &JobRecord) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            r#"
-            INSERT INTO jobs (id, script_name, udids_json, status, created_at, updated_at, steps_json, error)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-            ON CONFLICT(id) DO UPDATE SET
-              status=excluded.status,
-              updated_at=excluded.updated_at,
-              steps_json=excluded.steps_json,
-              error=excluded.error
-            "#,
-            params![
-                job.id.to_string(),
-                job.script_name,
-                serde_json::to_string(&job.udids)?,
-                serde_json::to_string(&job.status)?,
-                job.created_at.to_rfc3339(),
-                job.updated_at.to_rfc3339(),
-                serde_json::to_string(&job.steps)?,
-                job.error,
-            ],
-        )?;
-        Ok(())
-    }
+/// A value in the database does not fit the type the row is read into.
+#[derive(Debug)]
+struct ColumnOutOfRange {
+    column: &'static str,
+    value: i64,
+    target: &'static str,
+}
 
-    pub fn list_jobs(&self, limit: usize) -> anyhow::Result<Vec<JobRecord>> {
-        let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, script_name, udids_json, status, created_at, updated_at, steps_json, error
-             FROM jobs ORDER BY created_at DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(params![limit as i64], |row| {
-            Ok(JobRow {
-                id: row.get(0)?,
-                script_name: row.get(1)?,
-                udids_json: row.get(2)?,
-                status: row.get(3)?,
-                created_at: row.get(4)?,
-                updated_at: row.get(5)?,
-                steps_json: row.get(6)?,
-                error: row.get(7)?,
-            })
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?.into_job()?);
-        }
-        Ok(out)
-    }
-
-    pub fn save_script(&self, name: &str, body_json: &str) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        let id = Uuid::new_v4().to_string();
-        let now = Utc::now().to_rfc3339();
-        conn.execute(
-            r#"
-            INSERT INTO scripts (id, name, body_json, updated_at)
-            VALUES (?1, ?2, ?3, ?4)
-            ON CONFLICT(name) DO UPDATE SET body_json=excluded.body_json, updated_at=excluded.updated_at
-            "#,
-            params![id, name, body_json, now],
-        )?;
-        Ok(())
-    }
-
-    pub fn list_scripts(&self) -> anyhow::Result<Vec<(String, String)>> {
-        let conn = self.conn()?;
-        let mut stmt = conn.prepare("SELECT name, body_json FROM scripts ORDER BY name")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
-        }
-        Ok(out)
-    }
-
-    pub fn get_script(&self, name: &str) -> anyhow::Result<Option<String>> {
-        let conn = self.conn()?;
-        let mut stmt = conn.prepare("SELECT body_json FROM scripts WHERE name = ?1")?;
-        let mut rows = stmt.query(params![name])?;
-        if let Some(row) = rows.next()? {
-            Ok(Some(row.get(0)?))
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub fn set_setting(&self, key: &str, value: &str) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            "INSERT INTO settings (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![key, value],
-        )?;
-        Ok(())
-    }
-
-    pub fn get_setting(&self, key: &str) -> anyhow::Result<Option<String>> {
-        let conn = self.conn()?;
-        let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
-        let mut rows = stmt.query(params![key])?;
-        if let Some(row) = rows.next()? {
-            Ok(Some(row.get(0)?))
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub fn log_op(&self, action: &str, detail: &str) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            "INSERT INTO op_logs (id, action, detail, created_at) VALUES (?1,?2,?3,?4)",
-            params![
-                Uuid::new_v4().to_string(),
-                action,
-                detail,
-                Utc::now().to_rfc3339()
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn list_op_logs(&self, limit: usize) -> anyhow::Result<Vec<crate::types::OpLog>> {
-        let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, action, detail, created_at FROM op_logs ORDER BY created_at DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(params![limit as i64], |row| {
-            Ok(crate::types::OpLog {
-                id: row.get(0)?,
-                action: row.get(1)?,
-                detail: row.get(2)?,
-                created_at: row.get(3)?,
-            })
-        })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
-    }
-
-    pub fn get_device_meta(&self, udid: &str) -> anyhow::Result<crate::types::DeviceMeta> {
-        let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT udid, notes, tags_json, group_id, proxy_id FROM device_meta WHERE udid = ?1",
-        )?;
-        let mut rows = stmt.query(params![udid])?;
-        if let Some(row) = rows.next()? {
-            let tags_json: String = row.get(2)?;
-            Ok(crate::types::DeviceMeta {
-                udid: row.get(0)?,
-                notes: row.get(1)?,
-                tags: serde_json::from_str(&tags_json).unwrap_or_default(),
-                group_id: row.get(3)?,
-                proxy_id: row.get(4)?,
-            })
-        } else {
-            Ok(crate::types::DeviceMeta {
-                udid: udid.to_string(),
-                notes: String::new(),
-                tags: vec![],
-                group_id: None,
-                proxy_id: None,
-            })
-        }
-    }
-
-    pub fn upsert_device_meta(&self, meta: &crate::types::DeviceMeta) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            r#"INSERT INTO device_meta (udid, notes, tags_json, group_id, proxy_id)
-               VALUES (?1,?2,?3,?4,?5)
-               ON CONFLICT(udid) DO UPDATE SET
-                 notes=excluded.notes, tags_json=excluded.tags_json,
-                 group_id=excluded.group_id, proxy_id=excluded.proxy_id"#,
-            params![
-                meta.udid,
-                meta.notes,
-                serde_json::to_string(&meta.tags)?,
-                meta.group_id,
-                meta.proxy_id
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn list_groups(&self) -> anyhow::Result<Vec<crate::types::DeviceGroup>> {
-        let conn = self.conn()?;
-        let mut stmt =
-            conn.prepare("SELECT id, name, color, created_at FROM groups ORDER BY name")?;
-        let groups: Vec<(String, String, String, String)> = stmt
-            .query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })?
-            .filter_map(|r| r.ok())
-            .collect();
-        let mut out = Vec::new();
-        for (id, name, color, created_at) in groups {
-            let mut mstmt = conn.prepare("SELECT udid FROM group_members WHERE group_id = ?1")?;
-            let udids: Vec<String> = mstmt
-                .query_map(params![id], |row| row.get(0))?
-                .filter_map(|r| r.ok())
-                .collect();
-            out.push(crate::types::DeviceGroup {
-                id,
-                name,
-                color,
-                udids,
-                created_at,
-            });
-        }
-        Ok(out)
-    }
-
-    pub fn upsert_group(&self, group: &crate::types::DeviceGroup) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            r#"INSERT INTO groups (id, name, color, created_at) VALUES (?1,?2,?3,?4)
-               ON CONFLICT(id) DO UPDATE SET name=excluded.name, color=excluded.color"#,
-            params![group.id, group.name, group.color, group.created_at],
-        )?;
-        conn.execute(
-            "DELETE FROM group_members WHERE group_id = ?1",
-            params![group.id],
-        )?;
-        for udid in &group.udids {
-            conn.execute(
-                "INSERT OR IGNORE INTO group_members (group_id, udid) VALUES (?1,?2)",
-                params![group.id, udid],
-            )?;
-        }
-        Ok(())
-    }
-
-    pub fn delete_group(&self, id: &str) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute("DELETE FROM group_members WHERE group_id = ?1", params![id])?;
-        conn.execute("DELETE FROM groups WHERE id = ?1", params![id])?;
-        Ok(())
-    }
-
-    pub fn list_proxies(&self) -> anyhow::Result<Vec<crate::types::ProxyConfig>> {
-        let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, name, proxy_type, host, port, username, password, notes FROM proxies ORDER BY name",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(crate::types::ProxyConfig {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                proxy_type: row.get(2)?,
-                host: row.get(3)?,
-                port: row.get::<_, i64>(4)? as u16,
-                username: row.get(5)?,
-                password: row.get(6)?,
-                notes: row.get(7)?,
-            })
-        })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
-    }
-
-    pub fn upsert_proxy(&self, p: &crate::types::ProxyConfig) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            r#"INSERT INTO proxies (id, name, proxy_type, host, port, username, password, notes)
-               VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
-               ON CONFLICT(id) DO UPDATE SET
-                 name=excluded.name, proxy_type=excluded.proxy_type, host=excluded.host,
-                 port=excluded.port, username=excluded.username, password=excluded.password,
-                 notes=excluded.notes"#,
-            params![
-                p.id,
-                p.name,
-                p.proxy_type,
-                p.host,
-                p.port as i64,
-                p.username,
-                p.password,
-                p.notes
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn delete_proxy(&self, id: &str) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute("DELETE FROM proxies WHERE id = ?1", params![id])?;
-        Ok(())
-    }
-
-    pub fn list_materials(&self) -> anyhow::Result<Vec<crate::types::MaterialItem>> {
-        let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, name, path, kind, size, created_at FROM materials ORDER BY created_at DESC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(crate::types::MaterialItem {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                path: row.get(2)?,
-                kind: row.get(3)?,
-                size: row.get::<_, i64>(4)? as u64,
-                created_at: row.get(5)?,
-            })
-        })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
-    }
-
-    pub fn add_material(&self, item: &crate::types::MaterialItem) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            "INSERT INTO materials (id, name, path, kind, size, created_at) VALUES (?1,?2,?3,?4,?5,?6)",
-            params![
-                item.id,
-                item.name,
-                item.path,
-                item.kind,
-                item.size as i64,
-                item.created_at
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn delete_material(&self, id: &str) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute("DELETE FROM materials WHERE id = ?1", params![id])?;
-        Ok(())
-    }
-
-    pub fn list_apps_library(&self) -> anyhow::Result<Vec<crate::types::AppLibraryItem>> {
-        let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, name, path, bundle_id, version, created_at FROM apps_library ORDER BY name",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(crate::types::AppLibraryItem {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                path: row.get(2)?,
-                bundle_id: row.get(3)?,
-                version: row.get(4)?,
-                created_at: row.get(5)?,
-            })
-        })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
-    }
-
-    pub fn add_app_library(&self, item: &crate::types::AppLibraryItem) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            "INSERT INTO apps_library (id, name, path, bundle_id, version, created_at) VALUES (?1,?2,?3,?4,?5,?6)",
-            params![
-                item.id,
-                item.name,
-                item.path,
-                item.bundle_id,
-                item.version,
-                item.created_at
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn delete_app_library(&self, id: &str) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute("DELETE FROM apps_library WHERE id = ?1", params![id])?;
-        Ok(())
-    }
-
-    pub fn list_schedules(&self) -> anyhow::Result<Vec<crate::types::ScheduleItem>> {
-        let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, name, script_name, udids_json, every_minutes, enabled, last_run_at, next_run_at FROM schedules ORDER BY name",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let udids_json: String = row.get(3)?;
-            Ok(crate::types::ScheduleItem {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                script_name: row.get(2)?,
-                udids: serde_json::from_str(&udids_json).unwrap_or_default(),
-                every_minutes: row.get::<_, i64>(4)? as u32,
-                enabled: row.get::<_, i64>(5)? != 0,
-                last_run_at: row.get(6)?,
-                next_run_at: row.get(7)?,
-            })
-        })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
-    }
-
-    pub fn upsert_schedule(&self, s: &crate::types::ScheduleItem) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            r#"INSERT INTO schedules (id, name, script_name, udids_json, every_minutes, enabled, last_run_at, next_run_at)
-               VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
-               ON CONFLICT(id) DO UPDATE SET
-                 name=excluded.name, script_name=excluded.script_name, udids_json=excluded.udids_json,
-                 every_minutes=excluded.every_minutes, enabled=excluded.enabled,
-                 last_run_at=excluded.last_run_at, next_run_at=excluded.next_run_at"#,
-            params![
-                s.id,
-                s.name,
-                s.script_name,
-                serde_json::to_string(&s.udids)?,
-                s.every_minutes as i64,
-                if s.enabled { 1 } else { 0 },
-                s.last_run_at,
-                s.next_run_at
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn delete_schedule(&self, id: &str) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute("DELETE FROM schedules WHERE id = ?1", params![id])?;
-        Ok(())
-    }
-
-    pub fn list_publish_tasks(&self) -> anyhow::Result<Vec<crate::types::PublishTask>> {
-        let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, name, script_name, material_ids_json, udids_json, status, created_at FROM publish_tasks ORDER BY created_at DESC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let mid: String = row.get(3)?;
-            let uid: String = row.get(4)?;
-            Ok(crate::types::PublishTask {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                script_name: row.get(2)?,
-                material_ids: serde_json::from_str(&mid).unwrap_or_default(),
-                udids: serde_json::from_str(&uid).unwrap_or_default(),
-                status: row.get(5)?,
-                created_at: row.get(6)?,
-            })
-        })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
-    }
-
-    pub fn add_publish_task(&self, t: &crate::types::PublishTask) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            "INSERT INTO publish_tasks (id, name, script_name, material_ids_json, udids_json, status, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",
-            params![
-                t.id,
-                t.name,
-                t.script_name,
-                serde_json::to_string(&t.material_ids)?,
-                serde_json::to_string(&t.udids)?,
-                t.status,
-                t.created_at
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn update_publish_status(&self, id: &str, status: &str) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            "UPDATE publish_tasks SET status = ?1 WHERE id = ?2",
-            params![status, id],
-        )?;
-        Ok(())
-    }
-
-    pub fn create_publish_campaign(
-        &self,
-        request: &crate::publish::PublishCampaignRequest,
-        bundles: &[crate::publish::PublishBundle],
-    ) -> anyhow::Result<crate::publish::PublishCampaignRecord> {
-        let assignments =
-            crate::publish::validate_publish_mapping(&request.bundle_ids, &request.udids)
-                .map_err(|error| anyhow::anyhow!(error))?;
-        if bundles.len() != request.bundle_ids.len()
-            || bundles
-                .iter()
-                .zip(&request.bundle_ids)
-                .any(|(bundle, id)| bundle.id != *id)
-        {
-            anyhow::bail!("selected bundle manifest does not match the campaign request");
-        }
-
-        let mut conn = self.conn()?;
-        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let campaign_id = Uuid::new_v4().to_string();
-        let now = Utc::now().to_rfc3339();
-        let state = if request.run_at.is_some() {
-            crate::publish::PublishCampaignState::Scheduled
-        } else {
-            crate::publish::PublishCampaignState::Queued
-        };
-        let request_json = serde_json::to_string(request)?;
-        transaction.execute(
-            "INSERT INTO publish_campaigns
-             (id, request_id, source_root, request_json, state, run_at, revision, error_code, created_at, updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,0,NULL,?7,?7)",
-            params![
-                campaign_id,
-                request.request_id,
-                request.source_root,
-                request_json,
-                state.as_str(),
-                request.run_at,
-                now,
-            ],
-        )?;
-
-        for (ordinal, bundle) in bundles.iter().enumerate() {
-            transaction.execute(
-                "INSERT INTO publish_bundles
-                 (id,campaign_id,ordinal,name,source_path,caption,caption_sha256,manifest_json,created_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-                params![
-                    bundle.id,
-                    campaign_id,
-                    ordinal as i64,
-                    bundle.name,
-                    bundle.source_path,
-                    bundle.caption,
-                    bundle.caption_sha256,
-                    serde_json::to_string(bundle)?,
-                    now,
-                ],
-            )?;
-        }
-
-        for plan in &assignments {
-            transaction.execute(
-                "INSERT INTO publish_assignments
-                 (id,campaign_id,bundle_id,ordinal,udid,state,effect_intent,evidence_json,error_code,revision,created_at,updated_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,NULL,NULL,NULL,0,?7,?7)",
-                params![
-                    Uuid::new_v4().to_string(),
-                    campaign_id,
-                    plan.bundle_id,
-                    plan.ordinal as i64,
-                    plan.udid,
-                    state.as_str(),
-                    now,
-                ],
-            )?;
-        }
-        transaction.execute(
-            "INSERT INTO publish_dispatch(campaign_id,state,owner,claimed_at,updated_at) VALUES (?1,?2,NULL,NULL,?3)",
-            params![campaign_id, state.as_str(), now],
-        )?;
-        transaction.execute(
-            "INSERT INTO publish_events(campaign_id,revision,kind,payload_json,created_at) VALUES (?1,1,'created',?2,?3)",
-            params![campaign_id, request_json, now],
-        )?;
-        transaction.execute(
-            "UPDATE publish_campaigns SET revision=1 WHERE id=?1",
-            params![campaign_id],
-        )?;
-        transaction.commit()?;
-
-        Ok(crate::publish::PublishCampaignRecord {
-            id: campaign_id,
-            request_id: request.request_id.clone(),
-            source_root: request.source_root.clone(),
-            state,
-            run_at: request.run_at.clone(),
-            visibility: request.visibility.clone(),
-            cleanup_policy: request.cleanup_policy.clone(),
-            assignments,
-            created_at: now.clone(),
-            updated_at: now,
-            error_code: None,
-        })
-    }
-
-    pub fn list_publish_campaigns(
-        &self,
-        limit: usize,
-    ) -> anyhow::Result<Vec<crate::publish::PublishCampaignRecord>> {
-        let conn = self.conn()?;
-        let ids = {
-            let mut stmt =
-                conn.prepare("SELECT id FROM publish_campaigns ORDER BY created_at DESC LIMIT ?1")?;
-            let rows = stmt.query_map(params![limit as i64], |row| row.get::<_, String>(0))?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
-        drop(conn);
-        let mut campaigns = Vec::with_capacity(ids.len());
-        for id in ids {
-            if let Some(detail) = self.get_publish_campaign(&id)? {
-                campaigns.push(detail.campaign);
-            }
-        }
-        Ok(campaigns)
-    }
-
-    pub fn get_publish_campaign(
-        &self,
-        id: &str,
-    ) -> anyhow::Result<Option<crate::publish::PublishCampaignDetail>> {
-        let conn = self.conn()?;
-        let Some((campaign, request)) = conn
-            .query_row(
-                "SELECT id,request_id,source_root,state,run_at,request_json,created_at,updated_at,error_code
-                 FROM publish_campaigns WHERE id=?1",
-                params![id],
-                |row| {
-                    let request_json: String = row.get(5)?;
-                    let request: crate::publish::PublishCampaignRequest =
-                        serde_json::from_str(&request_json).map_err(|error| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                5,
-                                rusqlite::types::Type::Text,
-                                Box::new(error),
-                            )
-                        })?;
-                    Ok((
-                        crate::publish::PublishCampaignRecord {
-                            id: row.get(0)?,
-                            request_id: row.get(1)?,
-                            source_root: row.get(2)?,
-                            state: publish_state_from_str(&row.get::<_, String>(3)?),
-                            run_at: row.get(4)?,
-                            visibility: request.visibility.clone(),
-                            cleanup_policy: request.cleanup_policy.clone(),
-                            assignments: Vec::new(),
-                            created_at: row.get(6)?,
-                            updated_at: row.get(7)?,
-                            error_code: row.get(8)?,
-                        },
-                        request,
-                    ))
-                },
-            )
-            .optional()?
-        else {
-            return Ok(None);
-        };
-
-        let mut bundle_stmt = conn.prepare(
-            "SELECT manifest_json FROM publish_bundles WHERE campaign_id=?1 ORDER BY ordinal",
-        )?;
-        let bundles = bundle_stmt
-            .query_map(params![id], |row| {
-                let json: String = row.get(0)?;
-                serde_json::from_str(&json).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        0,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })
-            })?
-            .collect::<Result<Vec<crate::publish::PublishBundle>, _>>()?;
-
-        let mut assignment_stmt = conn.prepare(
-            "SELECT id,bundle_id,ordinal,udid,state,effect_intent,evidence_json,error_code
-             FROM publish_assignments WHERE campaign_id=?1 ORDER BY ordinal",
-        )?;
-        let assignments = assignment_stmt
-            .query_map(params![id], |row| {
-                Ok(crate::publish::PublishAssignmentRecord {
-                    id: row.get(0)?,
-                    campaign_id: id.to_string(),
-                    bundle_id: row.get(1)?,
-                    ordinal: row.get::<_, i64>(2)? as u32,
-                    udid: row.get(3)?,
-                    state: publish_state_from_str(&row.get::<_, String>(4)?),
-                    effect_intent: row.get(5)?,
-                    evidence_json: row.get(6)?,
-                    error_code: row.get(7)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let mut event_stmt = conn.prepare(
-            "SELECT revision,kind,payload_json,created_at FROM publish_events WHERE campaign_id=?1 ORDER BY revision",
-        )?;
-        let events = event_stmt
-            .query_map(params![id], |row| {
-                Ok(crate::publish::PublishEventRecord {
-                    revision: row.get::<_, i64>(0)? as u64,
-                    kind: row.get(1)?,
-                    payload_json: row.get(2)?,
-                    created_at: row.get(3)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut campaign = campaign;
-        campaign.assignments = request
-            .bundle_ids
-            .iter()
-            .zip(&request.udids)
-            .enumerate()
-            .map(
-                |(ordinal, (bundle_id, udid))| crate::publish::PublishAssignmentPlan {
-                    bundle_id: bundle_id.clone(),
-                    udid: udid.clone(),
-                    ordinal: ordinal as u32,
-                },
-            )
-            .collect();
-        Ok(Some(crate::publish::PublishCampaignDetail {
-            campaign,
-            bundles,
-            assignments,
-            events,
-        }))
-    }
-
-    pub fn update_publish_campaign_state(
-        &self,
-        id: &str,
-        state: crate::publish::PublishCampaignState,
-        error_code: Option<&str>,
-    ) -> anyhow::Result<()> {
-        let mut conn = self.conn()?;
-        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current_revision: i64 = transaction.query_row(
-            "SELECT revision FROM publish_campaigns WHERE id=?1",
-            params![id],
-            |row| row.get(0),
-        )?;
-        let revision = current_revision + 1;
-        let now = Utc::now().to_rfc3339();
-        let payload = serde_json::json!({"state": state.as_str(), "errorCode": error_code});
-        transaction.execute(
-            "UPDATE publish_campaigns SET state=?1,error_code=?2,revision=?3,updated_at=?4 WHERE id=?5",
-            params![state.as_str(), error_code, revision, now, id],
-        )?;
-        transaction.execute(
-            "UPDATE publish_dispatch SET state=?1,updated_at=?2 WHERE campaign_id=?3",
-            params![state.as_str(), now, id],
-        )?;
-        transaction.execute(
-            "INSERT INTO publish_events(campaign_id,revision,kind,payload_json,created_at) VALUES (?1,?2,'state',?3,?4)",
-            params![id, revision, payload.to_string(), now],
-        )?;
-        transaction.commit()?;
-        Ok(())
-    }
-
-    pub fn update_publish_assignment_state(
-        &self,
-        assignment_id: &str,
-        state: crate::publish::PublishCampaignState,
-        error_code: Option<&str>,
-        evidence_json: Option<&str>,
-    ) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            "UPDATE publish_assignments SET state=?1,error_code=?2,evidence_json=?3,revision=revision+1,updated_at=?4 WHERE id=?5",
-            params![state.as_str(), error_code, evidence_json, Utc::now().to_rfc3339(), assignment_id],
-        )?;
-        Ok(())
-    }
-
-    pub fn cancel_publish_campaign(&self, id: &str) -> anyhow::Result<()> {
-        self.update_publish_campaign_state(
-            id,
-            crate::publish::PublishCampaignState::Cancelled,
-            None,
+impl std::fmt::Display for ColumnOutOfRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "column `{}` holds {}, which does not fit {}",
+            self.column, self.value, self.target
         )
     }
+}
 
-    pub fn list_users(&self) -> anyhow::Result<Vec<crate::types::LocalUser>> {
-        let conn = self.conn()?;
-        let mut stmt =
-            conn.prepare("SELECT id, email, role, created_at FROM users ORDER BY email")?;
-        let rows = stmt.query_map([], |row| {
-            Ok(crate::types::LocalUser {
-                id: row.get(0)?,
-                email: row.get(1)?,
-                role: row.get(2)?,
-                created_at: row.get(3)?,
-            })
-        })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
-    }
+impl std::error::Error for ColumnOutOfRange {}
 
-    pub fn register_user(
-        &self,
-        email: &str,
-        password: &str,
-        role: &str,
-    ) -> anyhow::Result<crate::types::LocalUser> {
-        let conn = self.conn()?;
-        let user = crate::types::LocalUser {
-            id: Uuid::new_v4().to_string(),
-            email: email.to_string(),
-            role: role.to_string(),
-            created_at: Utc::now().to_rfc3339(),
-        };
-        conn.execute(
-            "INSERT INTO users (id, email, password_hash, role, created_at) VALUES (?1,?2,?3,?4,?5)",
-            params![user.id, user.email, password, user.role, user.created_at],
-        )?;
-        Ok(user)
-    }
-
-    pub fn login_user(
-        &self,
-        email: &str,
-        password: &str,
-    ) -> anyhow::Result<Option<crate::types::LocalUser>> {
-        let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, email, role, created_at, password_hash FROM users WHERE email = ?1",
-        )?;
-        let mut rows = stmt.query(params![email])?;
-        if let Some(row) = rows.next()? {
-            let hash: String = row.get(4)?;
-            if hash != password {
-                return Ok(None);
-            }
-            Ok(Some(crate::types::LocalUser {
-                id: row.get(0)?,
-                email: row.get(1)?,
-                role: row.get(2)?,
-                created_at: row.get(3)?,
-            }))
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub fn guest_user(&self) -> anyhow::Result<crate::types::LocalUser> {
-        let users = self.list_users()?;
-        if let Some(u) = users.into_iter().find(|u| u.email == "guest@local") {
-            Ok(u)
-        } else {
-            self.register_user("guest@local", "guest", "admin")
-        }
-    }
-
-    pub fn analytics_summary(
-        &self,
-        device_total: usize,
-        device_ready: usize,
-    ) -> anyhow::Result<crate::types::AnalyticsSummary> {
-        let jobs = self.list_jobs(500)?;
-        let scripts = self.list_scripts()?;
-        let materials = self.list_materials()?;
-        let apps = self.list_apps_library()?;
-        let schedules = self.list_schedules()?;
-        Ok(crate::types::AnalyticsSummary {
-            device_total,
-            device_ready,
-            jobs_total: jobs.len(),
-            jobs_succeeded: jobs
-                .iter()
-                .filter(|j| matches!(j.status, JobStatus::Succeeded))
-                .count(),
-            jobs_failed: jobs
-                .iter()
-                .filter(|j| matches!(j.status, JobStatus::Failed))
-                .count(),
-            jobs_running: jobs
-                .iter()
-                .filter(|j| matches!(j.status, JobStatus::Running | JobStatus::Queued))
-                .count(),
-            scripts_total: scripts.len(),
-            materials_total: materials.len(),
-            apps_total: apps.len(),
-            schedules_enabled: schedules.iter().filter(|s| s.enabled).count(),
-            recent_logs: self.list_op_logs(20)?,
-        })
-    }
-
-    pub fn get_nurture_settings(&self) -> anyhow::Result<crate::types::NurtureSettings> {
-        match self.get_setting("nurture.settings")? {
-            Some(raw) => {
-                let mut settings: crate::types::NurtureSettings = serde_json::from_str(&raw)
-                    .context("invalid JSON in stored setting nurture.settings")?;
-                let need_v2 = self.get_setting(NURTURE_SETTINGS_MIGRATION_V2)?.is_none();
-                let need_v3 = self.get_setting(NURTURE_SETTINGS_MIGRATION_V3)?.is_none();
-                if need_v2 {
-                    settings.migrate_legacy_defaults();
-                }
-                if need_v3 {
-                    settings.adopt_openrouter_luna_if_still_shipped_deepseek();
-                }
-                if need_v2 || need_v3 {
-                    // Re-serializing also drops obsolete risk-guard keys that
-                    // were accepted by the old profile schema.
-                    self.save_nurture_settings(&settings)?;
-                }
-                Ok(settings)
-            }
-            None => Ok(crate::types::NurtureSettings::default()),
-        }
-    }
-
-    pub fn save_nurture_settings(
-        &self,
-        settings: &crate::types::NurtureSettings,
-    ) -> anyhow::Result<()> {
-        self.set_setting("nurture.settings", &serde_json::to_string(settings)?)?;
-        self.set_setting(NURTURE_SETTINGS_MIGRATION_V2, "2026-08-06-human-v2")?;
-        self.set_setting(
-            NURTURE_SETTINGS_MIGRATION_V3,
-            NURTURE_SETTINGS_MIGRATION_V3_VALUE,
+/// Read an `i64` column into a narrower integer, refusing rather than wrapping.
+///
+/// Every call site here used to be `as u8`, `as u16` or `as u32`. That is not a conversion,
+/// it is a truncation with no signal: a proxy port stored as 70000 came back as 4464 and the
+/// app then dialled 4464; a thread of 256 messages came back with `message_count` 0 and read
+/// as empty; an AI score above 255 wrapped into a plausible small number and was charted.
+///
+/// None of those can be caught downstream, because the wrapped value is a perfectly ordinary
+/// value of the target type. The only place the truth still exists is right here, so this is
+/// where it has to be checked — and a row that cannot be read honestly is an error, not a
+/// number someone invented.
+fn narrow<T>(value: i64, column: &'static str) -> rusqlite::Result<T>
+where
+    T: TryFrom<i64>,
+{
+    T::try_from(value).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Integer,
+            Box::new(ColumnOutOfRange {
+                column,
+                value,
+                target: std::any::type_name::<T>(),
+            }),
         )
-    }
-
-    pub fn get_agent_settings(&self) -> anyhow::Result<crate::types::AgentSettings> {
-        match self.get_setting("agent.settings.v1")? {
-            Some(raw) => serde_json::from_str(&raw)
-                .context("invalid JSON in stored setting agent.settings.v1"),
-            None => Ok(crate::types::AgentSettings::default()),
-        }
-    }
-
-    pub fn save_agent_settings(
-        &self,
-        settings: &crate::types::AgentSettings,
-    ) -> anyhow::Result<()> {
-        self.set_setting("agent.settings.v1", &serde_json::to_string(settings)?)
-    }
-
-    pub fn add_nurture_comment_cost(
-        &self,
-        cost: &crate::types::NurtureCommentCost,
-    ) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            r#"
-            INSERT INTO nurture_comment_costs
-              (id, udid, model, base_url_host, prompt_tokens, completion_tokens, usd, preview, created_at)
-            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
-            "#,
-            params![
-                cost.id,
-                cost.udid,
-                cost.model,
-                cost.base_url_host,
-                cost.prompt_tokens as i64,
-                cost.completion_tokens as i64,
-                cost.usd,
-                cost.preview,
-                cost.created_at,
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn add_nurture_comment_attempt(
-        &self,
-        attempt: &crate::types::NurtureCommentAttempt,
-    ) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            r#"
-            INSERT INTO nurture_comment_attempts
-              (id, udid, outcome, source, model, base_url_host, prompt_tokens,
-               completion_tokens, usd, preview, caption_preview, frame_sha256,
-               context_confidence, relevance, evidence_support, created_at)
-            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
-            "#,
-            params![
-                attempt.id,
-                attempt.udid,
-                attempt.outcome,
-                attempt.source,
-                attempt.model,
-                attempt.base_url_host,
-                attempt.prompt_tokens as i64,
-                attempt.completion_tokens as i64,
-                attempt.usd,
-                attempt.preview,
-                attempt.caption_preview,
-                attempt.frame_sha256,
-                attempt.context_confidence.map(i64::from),
-                attempt.relevance.map(i64::from),
-                attempt.evidence_support.map(i64::from),
-                attempt.created_at,
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn update_nurture_comment_attempt_outcome(
-        &self,
-        id: &str,
-        outcome: &str,
-    ) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            "UPDATE nurture_comment_attempts SET outcome=?2 WHERE id=?1",
-            params![id, outcome],
-        )?;
-        Ok(())
-    }
-
-    pub fn list_nurture_comment_attempts(
-        &self,
-        limit: usize,
-    ) -> anyhow::Result<Vec<crate::types::NurtureCommentAttempt>> {
-        let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT id,udid,outcome,source,model,base_url_host,prompt_tokens,
-                    completion_tokens,usd,preview,caption_preview,frame_sha256,
-                    context_confidence,relevance,evidence_support,created_at
-             FROM nurture_comment_attempts ORDER BY created_at DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(params![limit as i64], |row| {
-            Ok(crate::types::NurtureCommentAttempt {
-                id: row.get(0)?,
-                udid: row.get(1)?,
-                outcome: row.get(2)?,
-                source: row.get(3)?,
-                model: row.get(4)?,
-                base_url_host: row.get(5)?,
-                prompt_tokens: row.get::<_, i64>(6)? as u32,
-                completion_tokens: row.get::<_, i64>(7)? as u32,
-                usd: row.get(8)?,
-                preview: row.get(9)?,
-                caption_preview: row.get(10)?,
-                frame_sha256: row.get(11)?,
-                context_confidence: row.get::<_, Option<i64>>(12)?.map(|v| v as u8),
-                relevance: row.get::<_, Option<i64>>(13)?.map(|v| v as u8),
-                evidence_support: row.get::<_, Option<i64>>(14)?.map(|v| v as u8),
-                created_at: row.get(15)?,
-            })
-        })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
-    }
-
-    pub fn list_nurture_comment_costs(
-        &self,
-        limit: usize,
-    ) -> anyhow::Result<Vec<crate::types::NurtureCommentCost>> {
-        let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, udid, model, base_url_host, prompt_tokens, completion_tokens, usd, preview, created_at
-             FROM nurture_comment_costs ORDER BY created_at DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(params![limit as i64], |row| {
-            Ok(crate::types::NurtureCommentCost {
-                id: row.get(0)?,
-                udid: row.get(1)?,
-                model: row.get(2)?,
-                base_url_host: row.get(3)?,
-                prompt_tokens: row.get::<_, i64>(4)? as u32,
-                completion_tokens: row.get::<_, i64>(5)? as u32,
-                usd: row.get(6)?,
-                preview: row.get(7)?,
-                created_at: row.get(8)?,
-            })
-        })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
-    }
-
-    pub fn nurture_cost_summary(&self) -> anyhow::Result<crate::types::NurtureCostSummary> {
-        let conn = self.conn()?;
-        let today = Utc::now().format("%Y-%m-%d").to_string();
-        let total: (f64, i64) = conn.query_row(
-            "SELECT COALESCE(SUM(usd),0), COUNT(*) FROM nurture_comment_costs",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        let today_row: (f64, i64) = conn.query_row(
-            "SELECT COALESCE(SUM(usd),0), COUNT(*) FROM nurture_comment_costs WHERE created_at LIKE ?1",
-            params![format!("{today}%")],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        Ok(crate::types::NurtureCostSummary {
-            today_usd: today_row.0,
-            total_usd: total.0,
-            today_comments: today_row.1 as u32,
-            total_comments: total.1 as u32,
-        })
-    }
-
-    pub fn create_interaction_campaign(
-        &self,
-        request: &crate::interaction::ThreadCampaignRequest,
-        plan: &crate::interaction::ThreadPlan,
-    ) -> anyhow::Result<String> {
-        request.validate().map_err(|error| anyhow::anyhow!(error))?;
-        let mut conn = self.conn()?;
-        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let campaign_id = Uuid::new_v4().to_string();
-        let now = Utc::now().to_rfc3339();
-        transaction.execute(
-            "INSERT INTO interaction_campaigns
-             (id,request_id,request_json,state,message_count,revision,created_at,updated_at)
-             VALUES (?1,?2,?3,'queued',?4,0,?5,?5)",
-            params![
-                campaign_id,
-                request.request_id,
-                serde_json::to_string(request)?,
-                i64::from(request.message_count),
-                now,
-            ],
-        )?;
-        for (ordinal, udid) in request.actor_udids.iter().enumerate() {
-            transaction.execute(
-                "INSERT INTO interaction_campaign_actors
-                 (campaign_id,actor_ordinal,udid) VALUES (?1,?2,?3)",
-                params![campaign_id, ordinal as i64, udid],
-            )?;
-        }
-
-        let mut target_ids = std::collections::HashMap::new();
-        for (line_index, target) in request.targets.iter().enumerate() {
-            let target_id = Uuid::new_v4().to_string();
-            let kind = match target.kind {
-                crate::interaction::TikTokPostKind::Video => "video",
-                crate::interaction::TikTokPostKind::Photo => "photo",
-            };
-            transaction.execute(
-                "INSERT INTO interaction_targets
-                 (id,campaign_id,line_no,original_url,normalized_url,target_key,content_id,kind,created_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-                params![
-                    target_id,
-                    campaign_id,
-                    (line_index + 1) as i64,
-                    target.original_url,
-                    target.normalized_url,
-                    target.target_key,
-                    target.content_id,
-                    kind,
-                    now,
-                ],
-            )?;
-            target_ids.insert(target.target_key.clone(), target_id);
-        }
-
-        let mut assignment_ids = std::collections::HashMap::new();
-        for assignment in &plan.assignments {
-            let assignment_id = Uuid::new_v4().to_string();
-            let target_id = target_ids
-                .get(&assignment.target_key)
-                .ok_or_else(|| anyhow::anyhow!("plan target is missing from request"))?;
-            let parent_id = assignment.parent_ordinal.and_then(|ordinal| {
-                assignment_ids
-                    .get(&(assignment.target_key.clone(), ordinal))
-                    .cloned()
-            });
-            transaction.execute(
-                "INSERT INTO interaction_assignments
-                 (id,campaign_id,target_id,message_ordinal,actor_udid,parent_assignment_id,created_at,updated_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?7)",
-                params![
-                    assignment_id,
-                    campaign_id,
-                    target_id,
-                    i64::from(assignment.ordinal),
-                    assignment.actor_udid,
-                    parent_id,
-                    now,
-                ],
-            )?;
-            assignment_ids.insert(
-                (assignment.target_key.clone(), assignment.ordinal),
-                assignment_id,
-            );
-        }
-        transaction.execute(
-            "INSERT INTO interaction_dispatch(campaign_id,state,updated_at) VALUES(?1,'queued',?2)",
-            params![campaign_id, now],
-        )?;
-        transaction.commit()?;
-        Ok(campaign_id)
-    }
-
-    pub fn list_interaction_campaigns(
-        &self,
-        limit: usize,
-    ) -> anyhow::Result<Vec<crate::interaction::InteractionCampaignSummary>> {
-        let conn = self.conn()?;
-        let mut statement = conn.prepare(
-            "SELECT c.id,c.request_id,c.state,c.message_count,c.updated_at,c.error_code,
-                    (SELECT COUNT(*) FROM interaction_targets t WHERE t.campaign_id=c.id),
-                    (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state='succeeded'),
-                    (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state IN ('failed','uncertain','skipped_parent'))
-             FROM interaction_campaigns c ORDER BY c.updated_at DESC LIMIT ?1",
-        )?;
-        let rows = statement.query_map(params![limit as i64], interaction_summary_from_row)?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
-    }
-
-    pub fn get_interaction_campaign(
-        &self,
-        campaign_id: &str,
-    ) -> anyhow::Result<Option<crate::interaction::InteractionCampaignDetail>> {
-        let conn = self.conn()?;
-        let summary = conn
-            .query_row(
-                "SELECT c.id,c.request_id,c.state,c.message_count,c.updated_at,c.error_code,
-                        (SELECT COUNT(*) FROM interaction_targets t WHERE t.campaign_id=c.id),
-                        (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state='succeeded'),
-                        (SELECT COUNT(*) FROM interaction_assignments a WHERE a.campaign_id=c.id AND a.state IN ('failed','uncertain','skipped_parent'))
-                 FROM interaction_campaigns c WHERE c.id=?1",
-                params![campaign_id],
-                interaction_summary_from_row,
-            )
-            .optional()?;
-        let Some(summary) = summary else {
-            return Ok(None);
-        };
-        let mut statement = conn.prepare(
-            "SELECT a.id,t.target_key,a.message_ordinal,a.actor_udid,a.parent_assignment_id,
-                    a.state,a.prepared_json,a.error_code
-             FROM interaction_assignments a
-             JOIN interaction_targets t ON t.id=a.target_id
-             WHERE a.campaign_id=?1 ORDER BY t.line_no,a.message_ordinal",
-        )?;
-        let rows = statement.query_map(params![campaign_id], |row| {
-            let state: String = row.get(5)?;
-            let prepared_json: Option<String> = row.get(6)?;
-            let prepared_text = prepared_json
-                .as_deref()
-                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-                .and_then(|value| {
-                    value
-                        .get("text")
-                        .and_then(|text| text.as_str())
-                        .map(str::to_string)
-                });
-            Ok(crate::interaction::InteractionAssignmentRecord {
-                id: row.get(0)?,
-                target_key: row.get(1)?,
-                ordinal: row.get::<_, i64>(2)? as u8,
-                actor_udid: row.get(3)?,
-                parent_assignment_id: row.get(4)?,
-                state: interaction_message_state(&state),
-                prepared_text,
-                error_code: row.get(7)?,
-            })
-        })?;
-        Ok(Some(crate::interaction::InteractionCampaignDetail {
-            summary,
-            assignments: rows.collect::<Result<Vec<_>, _>>()?,
-        }))
-    }
-
-    pub fn get_interaction_campaign_request(
-        &self,
-        campaign_id: &str,
-    ) -> anyhow::Result<
-        Option<(
-            crate::interaction::ThreadCampaignRequest,
-            crate::interaction::ThreadPlan,
-        )>,
-    > {
-        let conn = self.conn()?;
-        let raw = conn
-            .query_row(
-                "SELECT request_json FROM interaction_campaigns WHERE id=?1",
-                params![campaign_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        let Some(raw) = raw else {
-            return Ok(None);
-        };
-        let request = serde_json::from_str::<crate::interaction::ThreadCampaignRequest>(&raw)?;
-        let plan = crate::interaction::plan_threads(&request)
-            .map_err(|error| anyhow::anyhow!("persisted interaction plan invalid: {error}"))?;
-        Ok(Some((request, plan)))
-    }
-
-    pub fn update_interaction_campaign_state(
-        &self,
-        campaign_id: &str,
-        state: crate::interaction::ThreadCampaignState,
-        error_code: Option<&str>,
-    ) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            "UPDATE interaction_campaigns SET state=?1,revision=revision+1,error_code=?2,updated_at=?3 WHERE id=?4",
-            params![interaction_campaign_state_label(state), error_code, Utc::now().to_rfc3339(), campaign_id],
-        )?;
-        Ok(())
-    }
-
-    pub fn prepare_interaction_assignment(
-        &self,
-        assignment_id: &str,
-        prepared: &crate::interaction::PreparedThreadMessage,
-    ) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            "UPDATE interaction_assignments
-             SET prepared_json=?1,state='ready',revision=revision+1,updated_at=?2
-             WHERE id=?3 AND effect_intent IS NULL",
-            params![
-                serde_json::to_string(prepared)?,
-                Utc::now().to_rfc3339(),
-                assignment_id
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn update_interaction_assignment_state(
-        &self,
-        assignment_id: &str,
-        state: crate::interaction::ThreadMessageState,
-        error_code: Option<&str>,
-        effect_intent: Option<&str>,
-        evidence_json: Option<&str>,
-    ) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            "UPDATE interaction_assignments SET state=?1,error_code=?2,effect_intent=COALESCE(?3,effect_intent),evidence_json=COALESCE(?4,evidence_json),revision=revision+1,updated_at=?5 WHERE id=?6",
-            params![
-                interaction_message_state_label(state),
-                error_code,
-                effect_intent,
-                evidence_json,
-                Utc::now().to_rfc3339(),
-                assignment_id,
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Saved frames for a campaign, newest first. Rows without a
-    /// `relative_path` predate evidence storage and have no file behind them.
-    pub fn list_interaction_artifacts(
-        &self,
-        campaign_id: &str,
-    ) -> anyhow::Result<Vec<crate::interaction::InteractionArtifactRecord>> {
-        let conn = self.conn()?;
-        let mut statement = conn.prepare(
-            "SELECT id,assignment_id,kind,relative_path,sha256,created_at
-             FROM interaction_artifacts WHERE campaign_id=?1 ORDER BY created_at DESC",
-        )?;
-        let rows = statement.query_map(params![campaign_id], |row| {
-            Ok(crate::interaction::InteractionArtifactRecord {
-                id: row.get(0)?,
-                assignment_id: row.get(1)?,
-                kind: row.get(2)?,
-                relative_path: row.get(3)?,
-                sha256: row.get(4)?,
-                created_at: row.get(5)?,
-            })
-        })?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
-    }
-
-    /// One saved frame by id, for reading its bytes back.
-    pub fn get_interaction_artifact(
-        &self,
-        artifact_id: &str,
-    ) -> anyhow::Result<Option<crate::interaction::InteractionArtifactRecord>> {
-        let conn = self.conn()?;
-        Ok(conn
-            .query_row(
-                "SELECT id,assignment_id,kind,relative_path,sha256,created_at
-                 FROM interaction_artifacts WHERE id=?1",
-                params![artifact_id],
-                |row| {
-                    Ok(crate::interaction::InteractionArtifactRecord {
-                        id: row.get(0)?,
-                        assignment_id: row.get(1)?,
-                        kind: row.get(2)?,
-                        relative_path: row.get(3)?,
-                        sha256: row.get(4)?,
-                        created_at: row.get(5)?,
-                    })
-                },
-            )
-            .optional()?)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn add_interaction_artifact(
-        &self,
-        campaign_id: &str,
-        target_key: &str,
-        assignment_id: Option<&str>,
-        kind: &str,
-        metadata_json: &str,
-        sha256: &str,
-        relative_path: Option<&str>,
-    ) -> anyhow::Result<String> {
-        let conn = self.conn()?;
-        let target_id: String = conn.query_row(
-            "SELECT id FROM interaction_targets WHERE campaign_id=?1 AND target_key=?2",
-            params![campaign_id, target_key],
-            |row| row.get(0),
-        )?;
-        let id = Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO interaction_artifacts
-             (id,campaign_id,target_id,assignment_id,kind,metadata_json,relative_path,sha256,created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-            params![
-                id,
-                campaign_id,
-                target_id,
-                assignment_id,
-                kind,
-                metadata_json,
-                relative_path,
-                sha256,
-                Utc::now().to_rfc3339(),
-            ],
-        )?;
-        Ok(id)
-    }
+    })
 }
 
 fn publish_state_from_str(value: &str) -> crate::publish::PublishCampaignState {
@@ -1474,6 +153,51 @@ fn publish_state_from_str(value: &str) -> crate::publish::PublishCampaignState {
         "missed" => crate::publish::PublishCampaignState::Missed,
         _ => crate::publish::PublishCampaignState::Uncertain,
     }
+}
+
+/// The group write itself, separated from the transaction that makes it atomic.
+///
+/// Split out so a test can hold the transaction open, drop it without committing, and prove
+/// the old membership is still there — which on the previous autocommit version it was not.
+fn write_group(
+    transaction: &rusqlite::Transaction<'_>,
+    group: &crate::types::DeviceGroup,
+) -> anyhow::Result<()> {
+    transaction.execute(
+        r#"INSERT INTO groups (id, name, color, created_at) VALUES (?1,?2,?3,?4)
+           ON CONFLICT(id) DO UPDATE SET name=excluded.name, color=excluded.color"#,
+        params![group.id, group.name, group.color, group.created_at],
+    )?;
+    transaction.execute(
+        "DELETE FROM group_members WHERE group_id = ?1",
+        params![group.id],
+    )?;
+    for udid in &group.udids {
+        // **A phone belongs to one group, and that is enforced here rather than asked for.**
+        //
+        // Groups are how the operator divides the fleet into shifts — "nhóm 1 chạy sáng, nhóm
+        // 2 chạy chiều" — so a phone in two of them is a phone running two campaigns at once,
+        // which is the thing the whole exclusive-lease layer exists to prevent. Doing the
+        // eviction in the caller would take two `save_group` round trips with a window in
+        // between where the phone is in neither group, or in both.
+        transaction.execute(
+            "DELETE FROM group_members WHERE udid = ?1 AND group_id <> ?2",
+            params![udid, group.id],
+        )?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO group_members (group_id, udid) VALUES (?1,?2)",
+            params![group.id, udid],
+        )?;
+    }
+    Ok(())
+}
+
+/// Both deletes, which genuinely both have to happen: `group_members` has no foreign key to
+/// `groups`, so removing the group alone would orphan its rows.
+fn erase_group(transaction: &rusqlite::Transaction<'_>, id: &str) -> anyhow::Result<()> {
+    transaction.execute("DELETE FROM group_members WHERE group_id = ?1", params![id])?;
+    transaction.execute("DELETE FROM groups WHERE id = ?1", params![id])?;
+    Ok(())
 }
 
 fn interaction_campaign_state_label(
@@ -1530,16 +254,26 @@ fn interaction_summary_from_row(
             "cancelled" => crate::interaction::ThreadCampaignState::Cancelled,
             _ => crate::interaction::ThreadCampaignState::Queued,
         },
-        message_count: row.get::<_, i64>(3)? as u8,
+        message_count: narrow(row.get::<_, i64>(3)?, "message_count")?,
         updated_at: row.get(4)?,
         // Index 5 is `c.error_code`, which sits between the plain columns and the three
         // counting subqueries in both SELECTs — so adding it shifted every index after it.
         // A test caught that; the shift was silent otherwise, because the counts and the
         // reason are all readable as the wrong type only sometimes.
         error_code: row.get(5)?,
-        target_count: row.get::<_, i64>(6)? as u32,
-        succeeded_messages: row.get::<_, i64>(7)? as u32,
-        failed_messages: row.get::<_, i64>(8)? as u32,
+        target_count: narrow(row.get::<_, i64>(6)?, "target_count")?,
+        succeeded_messages: narrow(row.get::<_, i64>(7)?, "succeeded_messages")?,
+        failed_messages: narrow(row.get::<_, i64>(8)?, "failed_messages")?,
+        // Index 9, appended last on purpose — see the note above about what inserting a
+        // column mid-list did the first time. Parsed leniently: a request blob this build
+        // cannot read is a row that shows without a name, never a list that refuses to load.
+        brief: row
+            .get::<_, String>(9)
+            .ok()
+            .and_then(|json| {
+                serde_json::from_str::<crate::interaction::ThreadCampaignRequest>(&json).ok()
+            })
+            .map(|request| crate::interaction::InteractionCampaignBrief::from_request(&request)),
     })
 }
 
@@ -1576,6 +310,383 @@ pub fn step_label(status: &StepStatus) -> &'static str {
         StepStatus::Succeeded => "succeeded",
         StepStatus::Failed => "failed",
         StepStatus::Skipped => "skipped",
+    }
+}
+
+#[cfg(test)]
+mod comment_attempt_tests {
+    use super::*;
+
+    fn attempt(id: &str, cost_usd: Option<f64>) -> crate::types::NurtureCommentAttempt {
+        crate::types::NurtureCommentAttempt {
+            id: id.into(),
+            udid: "phone-1".into(),
+            outcome: "prepared".into(),
+            source: "grounded-vision".into(),
+            model: "openai/gpt-5.6-luna".into(),
+            base_url_host: "openrouter.ai".into(),
+            prompt_tokens: 5565,
+            completion_tokens: 337,
+            cost_usd,
+            preview: "Lịch trình chi tiết thật".into(),
+            caption_preview: "The 72H schedule".into(),
+            frame_sha256: "a".repeat(64),
+            context_confidence: Some(92),
+            relevance: Some(98),
+            evidence_support: Some(95),
+            distinct_frames: Some(2),
+            carousel_slides: Some(2),
+            created_at: "2026-08-25T00:00:00Z".into(),
+        }
+    }
+
+    /// Every column of an attempt comes back as the column it went in as.
+    ///
+    /// **Written because adding one column silently rotated five others.** Inserting `cost_usd`
+    /// in the middle of the `SELECT` shifted `relevance`, `evidence_support`, `distinct_frames`,
+    /// `carousel_slides` and `created_at` by one, and the only reason it was caught was that one
+    /// of them happened to land on a differently-typed column and rusqlite complained. Two
+    /// integers swapping places would have passed every test in the tree, and the operator's
+    /// evidence panel would have shown a relevance score labelled as a confidence.
+    ///
+    /// So this asserts the *distinct* values back, not that the read succeeds.
+    #[test]
+    fn an_attempt_round_trips_every_column_including_its_price() {
+        let dir = std::env::temp_dir().join(format!("riviu-attempt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let db = Database::open(dir.join("riviu.db")).expect("open");
+
+        db.add_nurture_comment_attempt(&attempt("with-price", Some(0.001439)))
+            .expect("insert priced");
+        db.add_nurture_comment_attempt(&attempt("no-price", None))
+            .expect("insert unpriced");
+
+        let rows = db.list_nurture_comment_attempts(10).expect("list");
+        let priced = rows
+            .iter()
+            .find(|row| row.id == "with-price")
+            .expect("the priced row");
+        assert_eq!(priced.prompt_tokens, 5565);
+        assert_eq!(priced.completion_tokens, 337);
+        assert_eq!(priced.cost_usd, Some(0.001439));
+        assert_eq!(priced.context_confidence, Some(92));
+        assert_eq!(priced.relevance, Some(98));
+        assert_eq!(priced.evidence_support, Some(95));
+        assert_eq!(priced.distinct_frames, Some(2));
+        assert_eq!(priced.carousel_slides, Some(2));
+        assert_eq!(priced.created_at, "2026-08-25T00:00:00Z");
+        assert_eq!(priced.caption_preview, "The 72H schedule");
+
+        // **`None`, not `0.0`.** A gateway that does not report a price must stay
+        // distinguishable from one that reported nothing owed — the whole reason the column is
+        // nullable, and the reason migration 11 deleted the version that could not say it.
+        let unpriced = rows
+            .iter()
+            .find(|row| row.id == "no-price")
+            .expect("the unpriced row");
+        assert_eq!(unpriced.cost_usd, None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod narrowing_tests {
+    use super::*;
+
+    /// A stored value that does not fit is an error, not a different number.
+    ///
+    /// Every one of these columns used to be read with `as u16` / `as u8` / `as u32`. The
+    /// failure that produces is the worst kind available: the wrapped result is a perfectly
+    /// ordinary value of the target type, so nothing downstream can tell it apart from a real
+    /// one, and the only place the truth still exists is the row itself.
+    #[test]
+    fn a_value_too_large_for_its_column_type_is_refused_not_wrapped() {
+        // 70000 as u16 is 4464 — a real port number, and the wrong one. The app would have
+        // dialled it and reported a connection failure against a port nobody configured.
+        assert_eq!(70000_i64 as u16, 4464, "the wrap this replaces");
+        assert!(narrow::<u16>(70000, "port").is_err());
+        assert_eq!(narrow::<u16>(8080, "port").ok(), Some(8080_u16));
+
+        // 256 as u8 is 0 — a thread of 256 messages read back as an empty thread.
+        assert_eq!(256_i64 as u8, 0, "the wrap this replaces");
+        assert!(narrow::<u8>(256, "message_count").is_err());
+        assert_eq!(narrow::<u8>(255, "message_count").ok(), Some(255_u8));
+
+        // And negatives, which `as` turns into very large numbers rather than refusing.
+        assert!(narrow::<u32>(-1, "target_count").is_err());
+        assert!(narrow::<u16>(-1, "port").is_err());
+    }
+
+    #[test]
+    fn the_refusal_says_which_column_and_what_it_held() {
+        // A row that cannot be read is only actionable if the message names the column: the
+        // operator sees it as "could not load proxies", and the cause is one row's port.
+        let message = narrow::<u16>(70000, "port").unwrap_err().to_string();
+        assert!(message.contains("port"), "{message}");
+        assert!(message.contains("70000"), "{message}");
+    }
+
+    #[test]
+    fn a_proxy_row_with_an_impossible_port_fails_the_read_instead_of_inventing_one() {
+        let path = std::env::temp_dir().join(format!("riviu-narrow-test-{}.db", Uuid::new_v4()));
+        let db = Database::open(&path).expect("open fixture database");
+        db.conn()
+            .expect("connection")
+            .execute(
+                "INSERT INTO proxies (id,name,proxy_type,host,port,username,password,notes)
+                 VALUES ('p1','bad','http','127.0.0.1',70000,'','','')",
+                [],
+            )
+            .expect("insert a row no UI would produce but a migration or a hand edit could");
+
+        let read = db.list_proxies();
+        assert!(
+            read.is_err(),
+            "70000 came back as {:?}",
+            read.map(|v| v.len())
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::*;
+
+    fn fixture() -> (Database, PathBuf) {
+        let path = std::env::temp_dir().join(format!("riviu-group-test-{}.db", Uuid::new_v4()));
+        (Database::open(&path).expect("open fixture database"), path)
+    }
+
+    fn group(id: &str, udids: &[&str]) -> crate::types::DeviceGroup {
+        crate::types::DeviceGroup {
+            id: id.into(),
+            name: format!("nhóm {id}"),
+            color: "#ff6a00".into(),
+            udids: udids.iter().map(|udid| (*udid).to_string()).collect(),
+            created_at: "2026-08-17T00:00:00Z".into(),
+        }
+    }
+
+    /// **A phone belongs to one group, so saving a group takes it out of the others.**
+    ///
+    /// Groups are how the fleet is divided into shifts, and the interaction panel loads one
+    /// straight into its actor list. A phone in two groups is a phone two campaigns can pick
+    /// up at once — the exact collision the exclusive lease exists to refuse, arrived at by
+    /// configuration instead of by accident.
+    #[test]
+    fn joining_a_group_leaves_the_previous_one() {
+        let (db, path) = fixture();
+        db.upsert_group(&group("g1", &["a", "b", "c"]))
+            .expect("seed the first group");
+        db.upsert_group(&group("g2", &["b"]))
+            .expect("move b across");
+
+        let groups = db.list_groups().expect("list");
+        let first = groups.iter().find(|g| g.id == "g1").expect("g1 survives");
+        let second = groups.iter().find(|g| g.id == "g2").expect("g2 exists");
+        assert_eq!(first.udids, vec!["a".to_string(), "c".to_string()]);
+        assert_eq!(second.udids, vec!["b".to_string()]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Membership comes back in a stated order, not in whatever order the query plan picked.
+    ///
+    /// The order is load-bearing downstream: the interaction picker loads a group into the
+    /// actor list, and in a `Chain` the actor list *is* who replies to whom.
+    ///
+    /// **This one does not go red if the `ORDER BY` is deleted, and that is worth knowing.**
+    /// Tried it: the query reads through `sqlite_autoindex_group_members_1`, a covering index
+    /// on `(group_id, udid)`, so udid-ascending comes back either way and the test cannot tell
+    /// the two apart. What it pins is the *promise* — today's order is a side effect of a
+    /// query plan, and a plan changes when an index does. Keeping the clause and this test is
+    /// how the order stops being an accident; neither of them is evidence that anything was
+    /// caught.
+    #[test]
+    fn group_membership_comes_back_in_a_stated_order() {
+        let (db, path) = fixture();
+        db.upsert_group(&group("g3", &["zz", "mm", "aa"]))
+            .expect("seed out of order");
+
+        let groups = db.list_groups().expect("list");
+        let found = groups.iter().find(|g| g.id == "g3").expect("g3 exists");
+        assert_eq!(
+            found.udids,
+            vec!["aa".to_string(), "mm".to_string(), "zz".to_string()],
+            "the write order was zz, mm, aa -- what comes back has to be the stated order"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_membership_write_that_does_not_commit_leaves_the_group_as_it_was() {
+        // The defect: the membership rewrite is delete-everything-then-rebuild, and it ran
+        // in autocommit -- so the DELETE was durable the moment it returned and anything
+        // going wrong in the insert loop left the group saved as empty. Adding one phone to
+        // a group could erase it.
+        let (db, path) = fixture();
+        db.upsert_group(&group("g1", &["a", "b", "c"]))
+            .expect("seed the group");
+
+        {
+            let mut conn = db.conn().expect("connection");
+            let transaction = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .expect("begin");
+            write_group(&transaction, &group("g1", &["z"])).expect("write inside the txn");
+            // Dropped without committing -- the failure mid-loop, modelled exactly.
+        }
+
+        let groups = db.list_groups().expect("list");
+        let found = groups
+            .iter()
+            .find(|g| g.id == "g1")
+            .expect("group survives");
+        assert_eq!(found.udids.len(), 3, "membership must be untouched");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_delete_that_does_not_commit_leaves_both_the_group_and_its_members() {
+        let (db, path) = fixture();
+        db.upsert_group(&group("g2", &["a", "b"]))
+            .expect("seed the group");
+
+        {
+            let mut conn = db.conn().expect("connection");
+            let transaction = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .expect("begin");
+            erase_group(&transaction, "g2").expect("erase inside the txn");
+        }
+
+        let groups = db.list_groups().expect("list");
+        let found = groups
+            .iter()
+            .find(|g| g.id == "g2")
+            .expect("group survives");
+        assert_eq!(found.udids.len(), 2);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_saved_group_replaces_its_membership_exactly() {
+        // The happy path, so the refactor cannot quietly stop replacing.
+        let (db, path) = fixture();
+        db.upsert_group(&group("g3", &["a", "b", "c"]))
+            .expect("seed");
+        db.upsert_group(&group("g3", &["b", "d"])).expect("replace");
+
+        let groups = db.list_groups().expect("list");
+        let found = groups.iter().find(|g| g.id == "g3").expect("group");
+        let mut udids = found.udids.clone();
+        udids.sort();
+        assert_eq!(udids, vec!["b".to_string(), "d".to_string()]);
+
+        db.delete_group("g3").expect("delete");
+        assert!(db.list_groups().expect("list").iter().all(|g| g.id != "g3"));
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod device_meta_tests {
+    use super::*;
+
+    fn fixture() -> (Database, PathBuf) {
+        let path = std::env::temp_dir().join(format!("riviu-device-meta-{}.db", Uuid::new_v4()));
+        (Database::open(&path).expect("open fixture database"), path)
+    }
+
+    fn meta(udid: &str) -> crate::types::DeviceMeta {
+        crate::types::DeviceMeta {
+            udid: udid.into(),
+            notes: String::new(),
+            tags: vec![],
+            group_id: None,
+            proxy_id: None,
+            handle: String::new(),
+            alias: String::new(),
+            number: None,
+        }
+    }
+
+    #[test]
+    fn an_alias_and_a_number_survive_a_write_and_a_reopen() {
+        let (db, path) = fixture();
+        db.upsert_device_meta(&crate::types::DeviceMeta {
+            alias: "Máy kệ trên, cột 3".into(),
+            number: Some(21),
+            handle: "riviu.demo".into(),
+            ..meta("10969614")
+        })
+        .expect("write");
+
+        let read = db.get_device_meta("10969614").expect("read");
+        assert_eq!(read.alias, "Máy kệ trên, cột 3");
+        assert_eq!(read.number, Some(21));
+        // The neighbouring column, because the update statement lists every column by hand
+        // and the way that breaks is by overwriting the one nobody looked at.
+        assert_eq!(read.handle, "riviu.demo");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_unnumbered_phone_reads_back_as_unnumbered_rather_than_zero() {
+        // `None` and `Some(0)` are different facts: the grid falls back to a tile's position
+        // for the first and would print "0" for the second.
+        let (db, path) = fixture();
+        db.upsert_device_meta(&meta("ce0417145199e0490c"))
+            .expect("write");
+        assert_eq!(
+            db.get_device_meta("ce0417145199e0490c")
+                .expect("read")
+                .number,
+            None
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_phone_with_no_record_answers_with_an_empty_one_instead_of_failing() {
+        let (db, path) = fixture();
+        let read = db.get_device_meta("never-seen").expect("read");
+        assert_eq!(read.udid, "never-seen");
+        assert_eq!(read.alias, "");
+        assert_eq!(read.number, None);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn listing_returns_only_the_phones_that_have_a_record() {
+        // What the grid reads once per refresh. Rows exist only for edited phones, so a fleet
+        // nobody has renamed answers empty and every tile keeps the name the phone reports.
+        let (db, path) = fixture();
+        assert!(db.list_device_metas().expect("empty list").is_empty());
+        db.upsert_device_meta(&crate::types::DeviceMeta {
+            number: Some(2),
+            ..meta("b")
+        })
+        .expect("write b");
+        db.upsert_device_meta(&crate::types::DeviceMeta {
+            number: Some(1),
+            ..meta("a")
+        })
+        .expect("write a");
+
+        let listed = db.list_device_metas().expect("list");
+        assert_eq!(listed.len(), 2);
+        let mut numbered: Vec<(String, Option<u32>)> = listed
+            .into_iter()
+            .map(|row| (row.udid, row.number))
+            .collect();
+        numbered.sort();
+        assert_eq!(
+            numbered,
+            vec![("a".to_string(), Some(1)), ("b".to_string(), Some(2))]
+        );
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -1623,6 +734,87 @@ mod agent_settings_tests {
 }
 
 #[cfg(test)]
+mod stream_settings_tests {
+    use super::*;
+    use crate::types::{StreamQuality, StreamSettings};
+
+    fn fixture() -> (Database, PathBuf) {
+        let path =
+            std::env::temp_dir().join(format!("riviu-stream-settings-test-{}.db", Uuid::new_v4()));
+        (Database::open(&path).expect("open fixture database"), path)
+    }
+
+    #[test]
+    fn an_untouched_install_reads_the_defaults_rather_than_failing() {
+        let (db, path) = fixture();
+        assert_eq!(
+            db.get_stream_settings()
+                .expect("absent key is not an error"),
+            StreamSettings::default()
+        );
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    #[test]
+    fn stream_settings_survive_a_restart() {
+        // The whole point of the change: quality and frame rate used to live only in an
+        // `Arc<RwLock<_>>` built from `Default` at bootstrap, so every setting the operator
+        // chose was gone the next time the app opened.
+        let (db, path) = fixture();
+        let chosen = StreamSettings {
+            fps: 18,
+            grid_quality: StreamQuality::Extra,
+            focus_quality: StreamQuality::Low,
+        };
+
+        db.save_stream_settings(&chosen).expect("save");
+
+        assert_eq!(db.get_stream_settings().expect("load"), chosen);
+        let raw = db
+            .get_setting("stream.settings.v1")
+            .expect("read raw setting")
+            .expect("stored setting");
+        assert_eq!(
+            raw,
+            r#"{"fps":18,"gridQuality":"extra","focusQuality":"low"}"#
+        );
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    #[test]
+    fn a_blob_missing_a_field_still_loads() {
+        // `#[serde(default)]` earns its place here rather than in review: the load runs at
+        // startup, so without it the first field ever added to this struct would turn every
+        // existing install's stored row into a failure to boot.
+        let (db, path) = fixture();
+        db.set_setting("stream.settings.v1", r#"{"fps":12}"#)
+            .expect("store a blob from an older build");
+
+        let loaded = db
+            .get_stream_settings()
+            .expect("a partial blob still loads");
+
+        assert_eq!(loaded.fps, 12);
+        assert_eq!(loaded.grid_quality, StreamSettings::default().grid_quality);
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    #[test]
+    fn invalid_stream_settings_json_is_not_silently_defaulted() {
+        let (db, path) = fixture();
+        db.set_setting("stream.settings.v1", "{not-json")
+            .expect("store malformed fixture");
+
+        let error = db
+            .get_stream_settings()
+            .expect_err("malformed settings must fail");
+
+        assert!(error.to_string().contains("stream.settings.v1"));
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+}
+
+#[cfg(test)]
 mod nurture_settings_migration_tests {
     use super::*;
     use crate::types::NurtureSettings;
@@ -1642,6 +834,9 @@ mod nurture_settings_migration_tests {
             "baseUrl": "https://api.deepseek.com",
             "model": "custom-model",
             "apiKey": "fixture-key",
+            // Kept deliberately after the prices were removed from the struct: this is the
+            // proof that a blob stored by an older build still loads. `NurtureSettings` has
+            // no `deny_unknown_fields`, so serde drops them.
             "inputPricePer1m": 1.25,
             "outputPricePer1m": 10.0,
             "bundleId": "com.ss.iphone.ugc.Ame",
@@ -1741,8 +936,6 @@ mod nurture_settings_migration_tests {
             base_url: "https://api.deepseek.com".into(),
             model: "deepseek-v4-flash".into(),
             api_key: "replace-me".into(),
-            input_price_per_1m: 1.25,
-            output_price_per_1m: 10.0,
             ..Default::default()
         };
         db.set_setting(
@@ -1783,7 +976,7 @@ mod interaction_tests {
     use super::*;
     use crate::interaction::{
         plan_threads, PreparedThreadMessage, ResolvedTikTokTarget, ThreadCampaignRequest,
-        ThreadMessageState, ThreadMode, TikTokPostKind,
+        ThreadCampaignState, ThreadMessageState, ThreadMode, TikTokPostKind,
     };
 
     fn fixture() -> (Database, PathBuf) {
@@ -1813,7 +1006,326 @@ mod interaction_tests {
             like_target: false,
 
             mode: ThreadMode::Threaded,
+            shape: crate::interaction::ThreadShape::Chain,
+            cohort_size: None,
+            mentions: Vec::new(),
+            mention_parent: false,
         }
+    }
+
+    /// A failure reported after the fact never erases a verdict the engine already reached.
+    ///
+    /// `execute_thread_campaign` reads the campaign's own rows, writes `Partial` when some
+    /// messages really did post, and *then* returns `Err` for the first failure it saw. Both
+    /// desktop callers answered that `Err` with an unconditional `Failed`, so the scenario the
+    /// totals read was written for — "a campaign the operator could see five posted comments
+    /// under, filed as a total loss" — still happened on every path where a cohort task
+    /// errored rather than failing per-assignment. The state read here comes back out of the
+    /// database, not out of the call.
+    #[test]
+    fn a_late_failure_keeps_a_settled_verdict_and_still_records_why() {
+        let (db, path) = fixture();
+        let request = request();
+        let plan = plan_threads(&request).expect("plan");
+        let campaign = db
+            .create_interaction_campaign(&request, &plan)
+            .expect("create");
+
+        db.update_interaction_campaign_state(&campaign, ThreadCampaignState::Partial, None)
+            .expect("settle as partial");
+        db.fail_interaction_campaign_unless_settled(&campaign, "cohort task chết")
+            .expect("record the reason");
+
+        let settled = db
+            .get_interaction_campaign(&campaign)
+            .expect("read")
+            .expect("present");
+        assert_eq!(
+            settled.summary.state,
+            ThreadCampaignState::Partial,
+            "the posted comments are still posted"
+        );
+        assert_eq!(
+            settled.summary.error_code.as_deref(),
+            Some("cohort task chết"),
+            "and the operator is told what went wrong"
+        );
+
+        // The other direction: a campaign still running is exactly what this may move.
+        db.update_interaction_campaign_state(&campaign, ThreadCampaignState::Running, None)
+            .expect("back to running");
+        db.fail_interaction_campaign_unless_settled(&campaign, "worker chết")
+            .expect("fail it");
+        let failed = db
+            .get_interaction_campaign(&campaign)
+            .expect("read")
+            .expect("present");
+        assert_eq!(failed.summary.state, ThreadCampaignState::Failed);
+        assert_eq!(failed.summary.error_code.as_deref(), Some("worker chết"));
+
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    /// A thread across the whole farm has to fit the schema, and until migration 14 it did
+    /// not.
+    ///
+    /// Validation demands `message_count >= the largest cohort`, so one cohort over the
+    /// fourteen phones on this box needs fourteen messages — and the table carried
+    /// `CHECK (message_count BETWEEN 2 AND 6)`, so every whole-fleet campaign died in this
+    /// function as a CHECK violation the operator saw as `OperationFailed`. The engine and
+    /// the UI had allowed 2..=64 for months, which is why nothing above this layer caught it.
+    ///
+    /// Both the real fleet size and the engine's own ceiling are pinned: a bound that only
+    /// holds for the number of phones plugged in today is not a bound.
+    #[test]
+    fn a_whole_fleet_thread_fits_the_relaxed_schema() {
+        for actor_count in [14_usize, crate::interaction::MAX_ACTOR_COUNT] {
+            let (db, path) = fixture();
+            let mut request = request();
+            request.request_id = format!("fleet-{actor_count}");
+            request.actor_udids = (0..actor_count)
+                .map(|index| format!("udid-{index}"))
+                .collect();
+            request.message_count = u8::try_from(actor_count).expect("fleet fits a u8");
+            let plan = plan_threads(&request).expect("plan a single cohort over the fleet");
+
+            let campaign_id = db
+                .create_interaction_campaign(&request, &plan)
+                .unwrap_or_else(|error| panic!("{actor_count} actors must persist, got {error:#}"));
+            let detail = db
+                .get_interaction_campaign(&campaign_id)
+                .expect("read back")
+                .expect("campaign exists");
+            assert_eq!(detail.summary.message_count as usize, actor_count);
+            assert_eq!(detail.assignments.len(), actor_count);
+            // The last ordinal is the one the old `message_ordinal BETWEEN 0 AND 5` refused.
+            assert_eq!(
+                detail
+                    .assignments
+                    .iter()
+                    .map(|assignment| assignment.ordinal)
+                    .max(),
+                Some(u8::try_from(actor_count - 1).expect("fits a u8"))
+            );
+            drop(db);
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// A campaign row has to say what it was, on both read paths.
+    ///
+    /// The Monitor tab could name a campaign only by a slice of its UUID, so a list of runs
+    /// against three different posts read as three identical rows. Everything needed was in
+    /// `request_json` and no query selected it.
+    #[test]
+    fn the_list_row_names_the_campaign_it_summarises() {
+        let (db, path) = fixture();
+        let request = request();
+        let plan = plan_threads(&request).expect("plan");
+        let campaign_id = db
+            .create_interaction_campaign(&request, &plan)
+            .expect("create campaign");
+
+        for (source, summary) in [
+            (
+                "list",
+                db.list_interaction_campaigns(10)
+                    .expect("list")
+                    .into_iter()
+                    .next()
+                    .expect("one campaign"),
+            ),
+            (
+                "get",
+                db.get_interaction_campaign(&campaign_id)
+                    .expect("get")
+                    .expect("exists")
+                    .summary,
+            ),
+        ] {
+            let brief = summary
+                .brief
+                .unwrap_or_else(|| panic!("{source} must carry a brief"));
+            assert_eq!(brief.first_author.as_deref(), Some("creator"), "{source}");
+            assert_eq!(brief.first_content_id.as_deref(), Some("123"), "{source}");
+            assert_eq!(brief.actor_count, 2, "{source}");
+            assert_eq!(brief.mode, ThreadMode::Threaded, "{source}");
+            assert!(!brief.manual, "{source}");
+        }
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A request blob this build cannot read must cost the name, not the row.
+    ///
+    /// The brief is parsed at read time, so a payload from a future build — or a corrupted
+    /// one — reaches the same code path as a good one. Refusing there would make the whole
+    /// Monitor list fail to load over a single bad campaign.
+    #[test]
+    fn a_summary_with_unreadable_request_json_still_lists() {
+        let (db, path) = fixture();
+        let request = request();
+        let plan = plan_threads(&request).expect("plan");
+        let campaign_id = db
+            .create_interaction_campaign(&request, &plan)
+            .expect("create campaign");
+        db.conn()
+            .expect("connection")
+            .execute(
+                "UPDATE interaction_campaigns SET request_json='hỏng' WHERE id=?1",
+                params![campaign_id],
+            )
+            .expect("corrupt the stored request");
+
+        let listed = db.list_interaction_campaigns(10).expect("list");
+        assert_eq!(listed.len(), 1, "the row must still be listed");
+        assert!(
+            listed[0].brief.is_none(),
+            "an unreadable request has no name to show"
+        );
+        assert_eq!(listed[0].id, campaign_id);
+        assert_eq!(listed[0].message_count, 2, "the real columns still read");
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A campaign the app was killed in the middle of has to stop calling itself running.
+    ///
+    /// The worker is a `tokio::spawn` in the app process: once the app is gone there is
+    /// nothing to finish it, and the Monitor draws `running` with a Dừng button and no Retry.
+    /// Measured 24/08/2026 — a `tauri dev` rebuild restarted the app mid-campaign and left
+    /// exactly this: a row frozen at "Đang chạy", rows frozen at "Đang gửi".
+    #[test]
+    fn a_campaign_whose_worker_died_is_closed_out_and_stays_safe_to_retry() {
+        let (db, path) = fixture();
+        let request = request();
+        let plan = plan_threads(&request).expect("plan");
+        let campaign_id = db
+            .create_interaction_campaign(&request, &plan)
+            .expect("create campaign");
+        db.update_interaction_campaign_state(&campaign_id, ThreadCampaignState::Running, None)
+            .expect("start it");
+        let detail = db
+            .get_interaction_campaign(&campaign_id)
+            .expect("get")
+            .expect("exists");
+        let (sending, waiting) = (&detail.assignments[0], &detail.assignments[1]);
+        db.update_interaction_assignment_state(
+            &sending.id,
+            ThreadMessageState::Sending,
+            None,
+            Some("post_comment"),
+            None,
+        )
+        .expect("one message was in flight");
+
+        assert_eq!(
+            db.interrupt_orphaned_interaction_campaigns()
+                .expect("sweep"),
+            1
+        );
+
+        let after = db
+            .get_interaction_campaign(&campaign_id)
+            .expect("get")
+            .expect("exists");
+        assert_eq!(after.summary.state, ThreadCampaignState::Cancelled);
+        assert!(
+            after
+                .summary
+                .error_code
+                .as_deref()
+                .is_some_and(|reason| reason.contains("interaction_worker_lost")),
+            "the row has to say why it stopped, or it reads as an operator cancelling it"
+        );
+
+        let by_id = |id: &str| {
+            after
+                .assignments
+                .iter()
+                .find(|assignment| assignment.id == id)
+                .expect("assignment survives")
+                .state
+        };
+        // The safety-critical half: a message whose Send tap went out with no confirmation is
+        // `Uncertain`, and `Uncertain` is permanently excluded from retry — so a comment that
+        // may already be public can never be posted a second time.
+        assert_eq!(by_id(&sending.id), ThreadMessageState::Uncertain);
+        assert!(
+            !crate::interaction_campaign::retryable_assignments(&after.assignments, None)
+                .contains(&sending.id),
+            "an interrupted send must never become retryable"
+        );
+        // A message that never touched the device is untouched, and still repairable.
+        assert_eq!(by_id(&waiting.id), ThreadMessageState::Queued);
+        assert!(
+            crate::interaction_campaign::retryable_assignments(&after.assignments, None)
+                .contains(&waiting.id)
+        );
+
+        // Idempotent: a second start-up finds nothing left to close.
+        assert_eq!(
+            db.interrupt_orphaned_interaction_campaigns()
+                .expect("sweep again"),
+            0
+        );
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A campaign with live comments under it must never be filed as a total loss.
+    ///
+    /// The final state used to be decided from the counters of the pass that had just run,
+    /// and on a retry those count only the messages the retry touched. Measured 24/08/2026 on
+    /// the fleet: five comments were already public, the retry's eight all failed, so
+    /// `succeeded == 0` for the pass and the row was written `Failed`. The summary the row is
+    /// drawn from said `5/14` at the same moment.
+    ///
+    /// Pinned here rather than in the runner because the runner needs a device; what the
+    /// runner now reads is exactly this projection of the assignment states.
+    #[test]
+    fn a_retry_that_lands_nothing_still_reports_the_comments_that_are_live() {
+        let (db, path) = fixture();
+        let request = request();
+        let plan = plan_threads(&request).expect("plan");
+        let campaign_id = db
+            .create_interaction_campaign(&request, &plan)
+            .expect("create campaign");
+        let detail = db
+            .get_interaction_campaign(&campaign_id)
+            .expect("get")
+            .expect("exists");
+        db.update_interaction_assignment_state(
+            &detail.assignments[0].id,
+            ThreadMessageState::Succeeded,
+            None,
+            None,
+            None,
+        )
+        .expect("one comment is live");
+        db.update_interaction_assignment_state(
+            &detail.assignments[1].id,
+            ThreadMessageState::Failed,
+            Some("reply_parent_not_found: …"),
+            None,
+            None,
+        )
+        .expect("the other is not");
+
+        let after = db
+            .get_interaction_campaign(&campaign_id)
+            .expect("get")
+            .expect("exists");
+        assert_eq!(after.summary.succeeded_messages, 1);
+        assert_eq!(after.summary.failed_messages, 1);
+        // "Some of it worked" is the only honest reading of that pair, whichever pass
+        // produced it.
+        assert!(
+            after.summary.succeeded_messages > 0 && after.summary.failed_messages > 0,
+            "the projection the runner reads has to see both, or Partial is unreachable"
+        );
+        drop(db);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -2092,5 +1604,242 @@ mod publish_tests {
             .expect_err("duplicate UDID must be rejected");
         assert!(error.to_string().contains("duplicate UDID"));
         std::fs::remove_file(path).expect("remove fixture database");
+    }
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::*;
+
+    fn fixture() -> (Database, PathBuf) {
+        let path = std::env::temp_dir().join(format!("riviu-schedule-test-{}.db", Uuid::new_v4()));
+        (Database::open(&path).expect("open fixture database"), path)
+    }
+
+    fn schedule(script: &str) -> crate::types::ScheduleItem {
+        crate::types::ScheduleItem {
+            id: "sched-1".into(),
+            name: "hourly".into(),
+            script_name: script.into(),
+            udids: vec!["phone-a".into()],
+            every_minutes: 60,
+            enabled: true,
+            last_run_at: None,
+            next_run_at: None,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn a_schedule_can_record_why_it_did_not_run() {
+        // The runner used to advance `last_run_at` on every tick whether or not anything
+        // was enqueued, and a missing script produced no record anywhere -- both guards
+        // around the lookup and the parse fell through in silence. There was nowhere to
+        // write the reason even if someone had wanted to; migration 8 makes the column,
+        // and this is the round trip that keeps it wired.
+        let (db, path) = fixture();
+        let mut item = schedule("đã-bị-xoá");
+        item.last_error = Some("không còn kịch bản tên `đã-bị-xoá`".into());
+        db.upsert_schedule(&item).expect("save the failed schedule");
+
+        let stored = db.list_schedules().expect("list")[0].clone();
+        assert_eq!(
+            stored.last_error.as_deref(),
+            Some("không còn kịch bản tên `đã-bị-xoá`")
+        );
+        // And `last_run_at` stays empty, because nothing ran.
+        assert_eq!(stored.last_run_at, None);
+
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+
+    #[test]
+    fn a_schedule_that_runs_clears_the_reason_it_used_to_fail_for() {
+        // Otherwise a schedule fixed by restoring its script would keep explaining a
+        // failure that is over -- the same immortal-error shape as `merge_scanned_device`.
+        let (db, path) = fixture();
+        let mut item = schedule("có-thật");
+        item.last_error = Some("không còn kịch bản".into());
+        db.upsert_schedule(&item).expect("save the failed schedule");
+
+        item.last_error = None;
+        item.last_run_at = Some("2026-08-17T12:00:00Z".into());
+        db.upsert_schedule(&item)
+            .expect("save the recovered schedule");
+
+        let stored = db.list_schedules().expect("list")[0].clone();
+        assert_eq!(stored.last_error, None);
+        assert_eq!(stored.last_run_at.as_deref(), Some("2026-08-17T12:00:00Z"));
+
+        std::fs::remove_file(path).expect("remove fixture database");
+    }
+}
+
+#[cfg(test)]
+mod secret_store_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// In-memory stand-in for the OS credential store.
+    #[derive(Default)]
+    struct MemoryStore {
+        entries: Mutex<std::collections::HashMap<String, String>>,
+    }
+
+    impl SecretStore for MemoryStore {
+        fn get_secret(&self, name: &str) -> anyhow::Result<Option<String>> {
+            Ok(self.entries.lock().unwrap().get(name).cloned())
+        }
+        fn set_secret(&self, name: &str, value: &str) -> anyhow::Result<()> {
+            self.entries
+                .lock()
+                .unwrap()
+                .insert(name.to_string(), value.to_string());
+            Ok(())
+        }
+    }
+
+    fn fixture() -> (Database, Arc<MemoryStore>, PathBuf) {
+        let path = std::env::temp_dir().join(format!("riviu-secret-test-{}.db", Uuid::new_v4()));
+        let store = Arc::new(MemoryStore::default());
+        let db = Database::open(&path)
+            .expect("open fixture database")
+            .with_secrets(store.clone());
+        (db, store, path)
+    }
+
+    /// What the whole seam is for: the key must not be in the SQLite file.
+    #[test]
+    fn the_api_key_goes_to_the_store_and_not_into_the_settings_blob() {
+        let (db, store, path) = fixture();
+        let settings = crate::types::NurtureSettings {
+            api_key: "sk-secret-value".into(),
+            ..Default::default()
+        };
+        db.save_nurture_settings(&settings).expect("save");
+
+        let blob = db
+            .get_setting("nurture.settings")
+            .expect("read blob")
+            .expect("blob exists");
+        assert!(
+            !blob.contains("sk-secret-value"),
+            "the key is still in the SQLite blob: {blob}"
+        );
+        assert_eq!(
+            store.get_secret(SECRET_AI_API_KEY).unwrap().as_deref(),
+            Some("sk-secret-value")
+        );
+
+        // And it comes back on read, because the engine needs the real value.
+        let loaded = db.get_nurture_settings().expect("load");
+        assert_eq!(loaded.api_key, "sk-secret-value");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The engine re-reads settings mid-session; every read must carry the key.
+    ///
+    /// This is the failure a command-layer-only fix would have shipped: the first read looks
+    /// right, and the *second* one — the live refresh `nurture::run_session` does on every post
+    /// — comes back empty, so commenting stops part way through a run.
+    #[test]
+    fn every_read_carries_the_key_not_just_the_first() {
+        let (db, _store, path) = fixture();
+        let settings = crate::types::NurtureSettings {
+            api_key: "sk-live-refresh".into(),
+            ..Default::default()
+        };
+        db.save_nurture_settings(&settings).expect("save");
+
+        for read in 1..=3 {
+            let loaded = db.get_nurture_settings().expect("load");
+            assert_eq!(
+                loaded.api_key, "sk-live-refresh",
+                "read #{read} lost the key"
+            );
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A database written before the store existed still has the key in its blob.
+    #[test]
+    fn a_legacy_blob_is_migrated_into_the_store_and_blanked() {
+        let path = std::env::temp_dir().join(format!("riviu-secret-legacy-{}.db", Uuid::new_v4()));
+        // Written by a build with no secret store: the key lands in the blob.
+        {
+            let plain = Database::open(&path).expect("open plain");
+            let settings = crate::types::NurtureSettings {
+                api_key: "sk-legacy".into(),
+                ..Default::default()
+            };
+            plain.save_nurture_settings(&settings).expect("save plain");
+            let blob = plain.get_setting("nurture.settings").unwrap().unwrap();
+            assert!(
+                blob.contains("sk-legacy"),
+                "fixture must start in the old shape"
+            );
+        }
+
+        let store = Arc::new(MemoryStore::default());
+        let db = Database::open(&path)
+            .expect("reopen")
+            .with_secrets(store.clone());
+
+        // First read migrates and still answers with the key.
+        let loaded = db.get_nurture_settings().expect("load");
+        assert_eq!(loaded.api_key, "sk-legacy");
+        assert_eq!(
+            store.get_secret(SECRET_AI_API_KEY).unwrap().as_deref(),
+            Some("sk-legacy")
+        );
+        let blob = db.get_setting("nurture.settings").unwrap().unwrap();
+        assert!(
+            !blob.contains("sk-legacy"),
+            "the legacy key was left in the blob: {blob}"
+        );
+
+        // Second read is a plain store read, and still correct.
+        assert_eq!(db.get_nurture_settings().unwrap().api_key, "sk-legacy");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Clearing means clearing. The database layer is faithful; "leave it unchanged" is a
+    /// decision for whoever owns the form, not a rule hidden down here.
+    #[test]
+    fn an_empty_key_clears_the_stored_one() {
+        let (db, store, path) = fixture();
+        let mut settings = crate::types::NurtureSettings {
+            api_key: "sk-first".into(),
+            ..Default::default()
+        };
+        db.save_nurture_settings(&settings).expect("save");
+        settings.api_key = String::new();
+        db.save_nurture_settings(&settings).expect("clear");
+
+        assert_eq!(
+            store.get_secret(SECRET_AI_API_KEY).unwrap().as_deref(),
+            Some("")
+        );
+        assert_eq!(db.get_nurture_settings().unwrap().api_key, "");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// No store attached: unchanged behaviour, which is what the other test fixtures rely on.
+    #[test]
+    fn without_a_store_the_key_stays_in_the_blob_as_before() {
+        let path = std::env::temp_dir().join(format!("riviu-secret-none-{}.db", Uuid::new_v4()));
+        let db = Database::open(&path).expect("open");
+        let settings = crate::types::NurtureSettings {
+            api_key: "sk-plain".into(),
+            ..Default::default()
+        };
+        db.save_nurture_settings(&settings).expect("save");
+        assert!(db
+            .get_setting("nurture.settings")
+            .unwrap()
+            .unwrap()
+            .contains("sk-plain"));
+        assert_eq!(db.get_nurture_settings().unwrap().api_key, "sk-plain");
+        let _ = std::fs::remove_file(path);
     }
 }

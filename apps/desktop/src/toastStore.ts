@@ -1,5 +1,7 @@
 import { useSyncExternalStore } from "react";
 
+import { describeError } from "./describeError";
+
 export type ToastKind = "ok" | "warn" | "error" | "info";
 
 export interface ToastRecord {
@@ -79,25 +81,7 @@ export function toastError(title: string, cause: unknown) {
   pushToast("error", title, describeError(cause));
 }
 
-export function describeError(cause: unknown): string {
-  if (cause === null || cause === undefined) return "Lỗi không rõ nguyên nhân";
-  if (typeof cause === "string") return cause;
-  if (cause instanceof Error) return cause.message;
-  if (typeof cause === "object") {
-    const record = cause as Record<string, unknown>;
-    const message = record.message ?? record.error ?? record.detail;
-    if (typeof message === "string" && message.length > 0) {
-      const code = typeof record.code === "string" ? `${record.code}: ` : "";
-      return `${code}${message}`;
-    }
-    try {
-      return JSON.stringify(cause);
-    } catch {
-      return String(cause);
-    }
-  }
-  return String(cause);
-}
+export { describeError } from "./describeError";
 
 export function useToasts(): ToastRecord[] {
   return useSyncExternalStore(

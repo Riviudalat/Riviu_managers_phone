@@ -2,6 +2,10 @@
 name = "riviu-ios-driver"
 version.workspace = true
 edition.workspace = true
+# Never published: this is a private product, not a library. Marking it here also lets
+# `cargo deny` treat it as private, so the workspace's own path dependencies are not
+# reported as wildcard versions and the missing `license` field is not an error.
+publish = false
 
 [dependencies]
 riviu-core = { workspace = true }
@@ -28,3 +32,6 @@ windows-sys = { version = "0.61.2", features = [
   "Win32_System_JobObjects",
   "Win32_System_Threading",
 ] }
+
+[lints]
+workspace = true

@@ -255,6 +255,244 @@ pub fn parse_sha256sum(stdout: &str) -> Option<String> {
 /// adb round trip for an artifact this project owns; here the contract asks for the
 /// hash, and `sha256sum` on the device measured 83 ms for a 2 MB image, so a carousel
 /// of at most eleven files pays under a second.
+/// Where a phone keeps the pictures and videos a person would call "mine".
+///
+/// The camera roll and the general picture directory, in that order. Deliberately not a
+/// recursive sweep of `/sdcard`: that is full of app caches, thumbnails and downloads, and an
+/// Export that hands the operator ten thousand WhatsApp thumbnails has not exported anything.
+///
+/// `Movies` is included because that is where a phone puts video that did not come from the
+/// camera — the two together are what the gallery shows.
+const MEDIA_ROOTS: [&str; 4] = [
+    "/sdcard/DCIM/Camera",
+    "/sdcard/DCIM",
+    "/sdcard/Pictures",
+    "/sdcard/Movies",
+];
+
+/// Extensions a gallery would show. Anything else on those paths is not media.
+const MEDIA_EXTENSIONS: [&str; 8] = ["jpg", "jpeg", "png", "webp", "gif", "mp4", "mov", "3gp"];
+
+/// One media file on the phone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteMedia {
+    pub path: String,
+    pub name: String,
+}
+
+/// Pick the media files out of a `find` listing.
+///
+/// Pure so the filtering can be tested without a phone — which matters more than usual here,
+/// because the failure mode of getting it wrong is copying gigabytes of somebody's cache onto
+/// their desktop.
+///
+/// De-duplicated by path, because `MEDIA_ROOTS` deliberately contains both `/sdcard/DCIM` and
+/// `/sdcard/DCIM/Camera`: the second is where the camera writes and the first catches the
+/// screenshots and downloads a phone scatters beside it, so a file under Camera is listed
+/// twice and must be fetched once.
+pub fn parse_media_listing(stdout: &str) -> Vec<RemoteMedia> {
+    let mut seen = std::collections::HashSet::new();
+    let mut found = Vec::new();
+    for line in stdout.lines() {
+        let path = line.trim();
+        if path.is_empty() || !path.starts_with('/') {
+            continue;
+        }
+        // A hidden component ANYWHERE, not just a hidden file name. `/sdcard/DCIM/.thumbnails`
+        // is full of real `.jpg` files that are not the operator's photos, and the whole
+        // point of a dot-prefixed directory on Android is that the gallery does not show it
+        // — so neither should this. Checking only the file name let every thumbnail through.
+        if path.split('/').any(|part| part.starts_with('.')) {
+            continue;
+        }
+        let Some(name) = path.rsplit('/').next() else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        let Some((_, extension)) = name.rsplit_once('.') else {
+            continue;
+        };
+        let extension = extension.to_ascii_lowercase();
+        if !MEDIA_EXTENSIONS.contains(&extension.as_str()) {
+            continue;
+        }
+        if !seen.insert(path.to_string()) {
+            continue;
+        }
+        found.push(RemoteMedia {
+            path: path.to_string(),
+            name: name.to_string(),
+        });
+    }
+    found
+}
+
+/// A local name that cannot collide and cannot escape the destination directory.
+///
+/// Two phones both have `IMG_0001.jpg`, and so does the same phone in two directories. The
+/// index keeps them apart; stripping everything but the file name keeps a crafted remote path
+/// from writing outside where the operator pointed.
+pub fn local_media_name(index: usize, remote_name: &str) -> String {
+    let safe: String = remote_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe = safe.trim_matches('.').to_string();
+    if safe.is_empty() {
+        format!("{index:04}-media")
+    } else {
+        format!("{index:04}-{safe}")
+    }
+}
+
+/// Copy the phone's photos and videos into `dest_dir`.
+///
+/// Read back rather than trusted: `adb pull` exiting zero is not evidence a file arrived, the
+/// same rule the push side applies to its own transfers. A file that did not land is skipped
+/// with a warning instead of failing the whole export — one unreadable picture must not cost
+/// the operator the other four hundred.
+pub async fn pull_media(
+    adb: &AdbProgram,
+    serial: &str,
+    dest_dir: &Path,
+) -> anyhow::Result<riviu_core::MediaPullReport> {
+    std::fs::create_dir_all(dest_dir)
+        .with_context(|| format!("create the export directory {}", dest_dir.display()))?;
+
+    // `-maxdepth 2` keeps this to the gallery's own layout (a root and its dated
+    // subdirectories) rather than walking whatever an app has nested underneath. Missing
+    // directories are normal on a phone that has never used the camera, so their errors are
+    // discarded rather than treated as a failure.
+    let script = MEDIA_ROOTS
+        .iter()
+        .map(|root| format!("find {root} -maxdepth 2 -type f 2>/dev/null"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let listing = adb
+        .shell(serial, &script)
+        .await
+        .context("list the phone's media directories")?;
+    let media = parse_media_listing(&listing);
+
+    if media.is_empty() {
+        // A genuinely empty gallery. Not an error, and the caller must be able to say so
+        // rather than implying something went wrong.
+        return Ok(riviu_core::MediaPullReport::default());
+    }
+
+    let mut pulled = Vec::with_capacity(media.len());
+    for (index, item) in media.iter().enumerate() {
+        let dest = dest_dir.join(local_media_name(index, &item.name));
+        let dest_arg = dest.display().to_string();
+        if let Err(error) = adb
+            .device(
+                serial,
+                &["pull", item.path.as_str(), dest_arg.as_str()],
+                PULL_TIMEOUT,
+            )
+            .await
+        {
+            tracing::warn!(serial, path = %item.path, %error, "could not pull one media file");
+            continue;
+        }
+        match std::fs::metadata(&dest) {
+            Ok(meta) if meta.len() > 0 => pulled.push(dest),
+            // `adb pull` can exit zero having written nothing at all; the file on disk is
+            // the only evidence that counts.
+            _ => {
+                tracing::warn!(serial, path = %item.path, "adb pull reported success but no bytes landed");
+                let _ = std::fs::remove_file(&dest);
+            }
+        }
+    }
+    // Found media and fetched none of it is a failure, and it must not be reported as an
+    // empty gallery — those are the same number and opposite meanings. This is not
+    // hypothetical: AGENTS.md 9.12 records `adb` silently writing nothing when the
+    // destination path is mangled, and the read-back above turns exactly that into a count
+    // of zero.
+    anyhow::ensure!(
+        !pulled.is_empty(),
+        "found {} media files on {serial} and none of them arrived in {}; \
+         adb reported success but wrote no bytes",
+        media.len(),
+        dest_dir.display()
+    );
+    // Both numbers travel together from here on. Returning only `pulled` made a phone with
+    // five hundred photos of which twenty copied indistinguishable from a phone that has
+    // twenty photos: the per-file failures above went to the log, and the operator was
+    // handed a number that reads as a success. What was missing was any way for the count
+    // to admit them.
+    if pulled.len() < media.len() {
+        tracing::warn!(
+            serial,
+            found = media.len(),
+            fetched = pulled.len(),
+            "some media did not arrive"
+        );
+    }
+    Ok(riviu_core::MediaPullReport {
+        fetched: pulled,
+        found: media.len(),
+    })
+}
+
+/// A phone's camera roll can be large and USB 2.0 is not fast. Generous, because the failure
+/// this guards is a genuinely big video, not a hang.
+const PULL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// The images to stage, from the root and from one level under it.
+///
+/// **The managed layout is the reason for the second level.** The desktop stages a campaign
+/// as `<scratch>/<ordinal>/<bundle-name>/<images>`: the bundle keeps its own directory
+/// because the iOS sidecar walks subdirectories and names the phone's album after that
+/// directory. Android needs none of that — `import` builds the album from the campaign scope
+/// — but it is handed the same root, and reading only the top level found nothing there.
+///
+/// Measured 17/08/2026 on two phones: every Android transfer failed with "publish source
+/// root … has no files", which on an all-Android fleet is the entire publish path. Loud
+/// rather than silent, at least — the emptiness assertion in [`stage`] is what made it an
+/// error instead of an empty album.
+///
+/// One level, not a full walk: the layout has exactly one, and deeper recursion would start
+/// sweeping up whatever an operator happens to have nested inside a source folder. Dot
+/// entries stay skipped, which is the convention `publish_commands::stage_one_bundle` relies
+/// on to keep its `.transfer` scratch directory from ever being read as a bundle.
+fn collect_source_files(source_root: &Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    fn hidden(entry: &std::fs::DirEntry) -> bool {
+        entry.file_name().to_string_lossy().starts_with('.')
+    }
+
+    let mut entries: Vec<std::path::PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(source_root).context("read the publish source root")? {
+        let entry = entry?;
+        if hidden(&entry) {
+            continue;
+        }
+        let kind = entry.file_type()?;
+        if kind.is_file() {
+            entries.push(entry.path());
+        } else if kind.is_dir() {
+            for nested in std::fs::read_dir(entry.path())
+                .with_context(|| format!("read the bundle directory {}", entry.path().display()))?
+            {
+                let nested = nested?;
+                if !hidden(&nested) && nested.file_type()?.is_file() {
+                    entries.push(nested.path());
+                }
+            }
+        }
+    }
+    Ok(entries)
+}
+
 pub async fn stage(
     adb: &AdbProgram,
     serial: &str,
@@ -279,13 +517,7 @@ pub async fn stage(
     .await
     .context("prepare the staging directory")?;
 
-    let mut entries: Vec<std::path::PathBuf> = Vec::new();
-    for entry in std::fs::read_dir(source_root).context("read the publish source root")? {
-        let entry = entry?;
-        if entry.file_type()?.is_file() {
-            entries.push(entry.path());
-        }
-    }
+    let mut entries = collect_source_files(source_root)?;
     // Deterministic order, so the manifest hash does not depend on directory order.
     entries.sort();
 
@@ -769,6 +1001,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_managed_bundle_layout_is_what_gets_staged() {
+        // The desktop hands this path `<scratch>/<ordinal>/`, which holds one directory
+        // named after the bundle. Reading only the top level found nothing, so after the
+        // per-assignment staging fix every Android transfer failed with "has no files" --
+        // on an all-Android fleet, the entire publish path. Measured on two phones,
+        // 17/08/2026, and fixed by descending exactly one level.
+        let root = std::env::temp_dir().join(format!("riviu-stage-layout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("bundle-a")).expect("bundle directory");
+        std::fs::write(root.join("bundle-a").join("one.jpg"), b"1").expect("nested image");
+        std::fs::write(root.join("bundle-a").join("two.jpg"), b"2").expect("nested image");
+        // A file sitting directly in the root still counts: that is the shape a caller
+        // handing a plain folder produces, and it worked before this change.
+        std::fs::write(root.join("loose.jpg"), b"3").expect("loose image");
+        // Dot entries stay invisible, which is what keeps `.transfer` from being read as a
+        // bundle if a root ever contains one.
+        std::fs::create_dir_all(root.join(".transfer").join("0")).expect("dot directory");
+        std::fs::write(root.join(".transfer").join("skip.jpg"), b"4").expect("dot image");
+        std::fs::write(root.join(".hidden.jpg"), b"5").expect("dot file");
+
+        let mut found = collect_source_files(&root)
+            .expect("collect")
+            .into_iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        found.sort();
+
+        assert_eq!(found, ["loose.jpg", "one.jpg", "two.jpg"]);
+        std::fs::remove_dir_all(&root).expect("clean up");
+    }
+
+    #[test]
+    fn nothing_two_levels_down_is_swept_up() {
+        // One level, deliberately. A full walk would collect whatever an operator happens
+        // to have nested inside a source folder -- and every file collected here is pushed
+        // to a phone and offered to TikTok's picker.
+        let root = std::env::temp_dir().join(format!("riviu-stage-depth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("bundle-a").join("originals")).expect("deep directory");
+        std::fs::write(root.join("bundle-a").join("keep.jpg"), b"1").expect("kept image");
+        std::fs::write(
+            root.join("bundle-a").join("originals").join("raw.jpg"),
+            b"2",
+        )
+        .expect("deep image");
+
+        let found = collect_source_files(&root).expect("collect");
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].file_name().unwrap(), "keep.jpg");
+        std::fs::remove_dir_all(&root).expect("clean up");
+    }
+
+    #[test]
     fn a_namespaced_campaign_id_becomes_a_usable_directory_name() {
         // Campaign ids are `<request-id>:<bundle-id>`; `:` is not a filename character
         // and not something to hand a shell.
@@ -994,5 +1280,82 @@ mod tests {
             !visible.split('/').any(|part| part.starts_with('.')),
             "the import directory must be visible: {visible}"
         );
+    }
+
+    #[test]
+    fn the_export_listing_keeps_gallery_media_and_nothing_else() {
+        // What Export copies is decided entirely here, and the cost of getting it wrong is
+        // pouring somebody's app caches and thumbnails onto their desktop. Every line below
+        // is something a real `find` over these roots produces.
+        let listing = "/sdcard/DCIM/Camera/IMG_0001.jpg
+/sdcard/DCIM/Camera/VID_0002.mp4
+/sdcard/Pictures/Screenshots/Screenshot_1.png
+/sdcard/Movies/clip.MOV
+/sdcard/DCIM/.thumbnails/1234.jpg
+/sdcard/Pictures/.nomedia
+/sdcard/DCIM/Camera/notes.txt
+/sdcard/DCIM/Camera/archive.zip
+find: /sdcard/Movies: No such file or directory
+";
+        let media = parse_media_listing(listing);
+        let names: Vec<&str> = media.iter().map(|item| item.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "IMG_0001.jpg",
+                "VID_0002.mp4",
+                "Screenshot_1.png",
+                "clip.MOV"
+            ],
+            "only gallery media, and the extension match is case-insensitive"
+        );
+        // A `find` error line is not a path and must never become one.
+        assert!(media.iter().all(|item| item.path.starts_with('/')));
+    }
+
+    #[test]
+    fn a_file_under_two_roots_is_fetched_once() {
+        // MEDIA_ROOTS deliberately contains both /sdcard/DCIM and /sdcard/DCIM/Camera -- the
+        // second is where the camera writes, the first catches the screenshots and downloads
+        // a phone scatters beside it -- so everything under Camera is listed twice.
+        let listing = "/sdcard/DCIM/Camera/IMG_1.jpg
+/sdcard/DCIM/Camera/IMG_1.jpg
+";
+        assert_eq!(parse_media_listing(listing).len(), 1);
+    }
+
+    #[test]
+    fn a_local_name_cannot_collide_or_escape_the_export_directory() {
+        // Two phones both have IMG_0001.jpg, and so does one phone in two directories; the
+        // index is what keeps them apart. And the name reaches the host filesystem, so a
+        // crafted remote name must not be able to climb out of where the operator pointed.
+        assert_eq!(local_media_name(0, "IMG_0001.jpg"), "0000-IMG_0001.jpg");
+        assert_eq!(local_media_name(12, "IMG_0001.jpg"), "0012-IMG_0001.jpg");
+        for hostile in [
+            "../../etc/passwd",
+            "..",
+            "/absolute",
+            r"a\b.jpg",
+            "x;rm -rf y",
+        ] {
+            let name = local_media_name(1, hostile);
+            // The property that matters is that the result is one path COMPONENT: no
+            // separator of either kind, and never `.` or `..`, so joining it onto the
+            // export directory cannot leave it. `..` inside a longer name is an ordinary
+            // filename and banning it would be theatre.
+            assert!(!name.contains('/'), "{name}");
+            assert!(!name.contains('\\'), "{name}");
+            assert!(!name.contains(';'), "{name}");
+            assert_ne!(name, "..");
+            assert_ne!(name, ".");
+            let joined = std::path::Path::new("/tmp/export").join(&name);
+            assert_eq!(
+                joined.parent(),
+                Some(std::path::Path::new("/tmp/export")),
+                "{name} must stay directly inside the export directory"
+            );
+        }
+        // A name that sanitises to nothing still produces a usable file.
+        assert_eq!(local_media_name(3, "..."), "0003-media");
     }
 }

@@ -110,7 +110,8 @@ async fn main() -> anyhow::Result<()> {
         ) -> Option<PreparedComment> {
             Some(PreparedComment {
                 text: self.0.clone(),
-                usd: 0.0,
+                prompt_tokens: 0,
+                completion_tokens: 0,
                 attempt_id: None,
             })
         }
@@ -141,18 +142,9 @@ async fn main() -> anyhow::Result<()> {
 
     let stop = AtomicBool::new(false);
     let mut status = NurtureSessionStatus {
-        udid: serial.clone(),
         running: true,
-        videos_done: 0,
-        swipe_attempts: 0,
-        like_attempts: 0,
-        comment_attempts: 0,
-        follow_attempts: 0,
-        likes: 0,
-        comments: 0,
-        follows: 0,
         last_message: "bắt đầu".into(),
-        session_usd: 0.0,
+        ..NurtureSessionStatus::new(serial.clone())
     };
     let started = Instant::now();
     let report = move |status: &mut NurtureSessionStatus, message: String| {

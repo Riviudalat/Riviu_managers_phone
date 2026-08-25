@@ -398,7 +398,8 @@ fn write_jsonl(
             "comment_attempts": status.comment_attempts,
             "follows": status.follows,
             "follow_attempts": status.follow_attempts,
-            "usd": status.session_usd,
+            "prompt_tokens": status.session_prompt_tokens,
+            "completion_tokens": status.session_completion_tokens,
             "summary": status.last_message,
             "slowest_request_ms": slowest_ms,
         })

@@ -1,4 +1,8 @@
-/** Binary envelope the Rust ViewHub writes. Must stay byte-identical. */
+/**
+ * Binary envelope the Rust ViewHub writes. Must stay byte-identical — and now is:
+ * `the_worker_slices_the_envelope_this_file_writes` in `view_hub.rs` reads the five
+ * constants below out of this file and compares them to the ones the encoder uses.
+ */
 
 export const VIEW_MAGIC = 0x5256_5531;
 export const VIEW_KIND_H264 = 1;
@@ -140,6 +144,21 @@ export function shouldDecodeH264Sample(
 ): boolean {
   if (!hasDecoder) return isSync;
   return decodeQueueSize <= 2;
+}
+
+/// Whether this blob carries an SPS (NAL 7), i.e. whether it can say anything at all about
+/// which codec the stream is.
+///
+/// Callers MUST check this before trusting [`codecFromAnnexB`], which returns a hard-coded
+/// `avc1.42E01E` when no SPS is present. That default is a reasonable last resort for a first
+/// decoder, and a trap for anything comparing against a codec already in use: scrcpy sends
+/// config NALs separately and an IDR frequently arrives WITHOUT an SPS, so a sync sample is
+/// not evidence of an SPS. Measured on a 20-device Galaxy S8 fleet -- the real streams were
+/// `avc1.420015` (level 2.1), every SPS-less keyframe produced the fabricated
+/// `avc1.42E01E` list, the mismatch tore the decoder down and rebuilt it against a codec
+/// string the stream was not, and output stopped dead at ~50 frames per device.
+export function annexBHasSps(bytes: Uint8Array): boolean {
+  return annexBHasNal(bytes, 7);
 }
 
 /** Build `avc1.PPCCLL` from the first SPS NAL in an Annex-B blob. */

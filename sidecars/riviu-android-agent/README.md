@@ -8,29 +8,47 @@ Agent equivalent and it is **not** a replacement for
 |---|---|
 | Read/write clipboard while it is briefly the current IME | Stay the default keyboard |
 | Insert/delete one MediaStore row by `_id` | Drive taps, the tree, or typing |
-| Answer `GET /status` on loopback `:17980` | Bind `0.0.0.0` or replace scrcpy/minicap |
+| Set the wallpaper and inject a mock location | Replace scrcpy/minicap |
+| Answer app **names and icons** from `PackageManager` | Decide *which* apps exist — adb does |
+| Answer `GET /status` on loopback `:17980` | Bind `0.0.0.0` |
+
+`/status` advertises `features`, and the desktop reinstalls a helper that is missing
+one it needs (`REQUIRED_FEATURES` in `crates/android-driver/src/riviu_agent.rs`).
+That is the only thing standing between a fleet carrying an old APK and a new
+feature being silently dead on every phone — `pm path` says only whether
+*something* is installed.
 
 Typing stays `ACTION_SET_TEXT`. View stays scrcpy 3.3.4. Evidence stays minicap.
 See `AGENTS.md` §9.51 / §9.52.
 
-## Why there is no APK in `sidecars/android/noarch/`
+## The APK in `sidecars/android/noarch/` is pinned, and must stay pinned
 
 The manifest in `sidecars/android/` pins **bytes + SHA-256**. Inventing those
 numbers for a file that was never assembled — or pinning a debug APK from a
-local assemble — is a lie the CI gate exists to catch.
-
-Build on a machine with JDK 17 and Android SDK 34, then pin the output.
+local assemble without recording it — is a lie the CI gate exists to catch. The
+current pin is agent 0.3.0; see root `NOTICE` §2c.
 
 ## Build
 
 ```powershell
-# Requires JAVA_HOME (JDK 17+) and ANDROID_HOME or ANDROID_SDK_ROOT (platforms;android-34 + build-tools).
-# Gradle 8.7+ on PATH, or open this folder in Android Studio and Build > Build Bundle(s) / APK(s).
+# Requires JAVA_HOME (JDK 17+) and ANDROID_HOME or ANDROID_SDK_ROOT (platforms;android-34
+# + build-tools). Gradle 8.7+ on PATH is used when present; otherwise the same pipeline runs
+# straight out of build-tools, which is the only path on a machine with the SDK and no Gradle.
 .\build.ps1
 ```
 
 The script refuses when the SDK or JDK is missing. It does not download either.
-Output: `app/build/outputs/apk/debug/app-debug.apk`.
+Output: `app/build/outputs/apk/debug/app-debug.apk` (Gradle) or
+`build-tools-out/riviu-agent.apk` (aapt2 → javac → d8 → zipalign → apksigner,
+signed with the standard debug keystore). Both are gitignored; only the copy at
+`sidecars/android/noarch/riviu-agent.apk` ships.
+
+Two traps in the no-Gradle path, both handled by the script and both worth knowing
+before editing it: aapt2 requires `package` on the `<manifest>` tag while AGP 8
+**refuses** a manifest carrying both `package` and `namespace`, so the package is
+stamped onto a copy; and `javac --release 8` would pin the JDK's own class library
+and reject every `android.*` import, so it is `-source 8 -target 8` with
+`android.jar` on the classpath.
 
 To ship it:
 

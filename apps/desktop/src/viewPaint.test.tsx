@@ -9,9 +9,17 @@ vi.mock("./api", () => ({
   deviceControlBegin: vi.fn(async () => undefined),
   deviceControlEnd: vi.fn(async () => undefined),
   deviceKey: vi.fn(),
+  deviceShell: vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" })),
   deviceSwipe: vi.fn(),
+  deviceSwipePath: vi.fn(),
   deviceTap: vi.fn(),
+  deviceTypeText: vi.fn(),
+  exportMedia: vi.fn(async () => 0),
   groupInput: vi.fn(),
+  importMedia: vi.fn(async () => ""),
+  installIpa: vi.fn(),
+  setScreenRotation: vi.fn(async () => 0),
+  viewRequestKeyframe: vi.fn(async () => true),
   rebootDevice: vi.fn(),
   restoreDevice: vi.fn(),
   saveViewSnapshot: vi.fn(),
@@ -48,7 +56,7 @@ describe("tile and overlay paint path", () => {
     tile.unmount();
 
     const overlay = render(
-      <FocusStream device={fixture} index={1} onClose={() => undefined} groupUdids={[]} groupMode={false} />,
+      <FocusStream device={fixture} index={1} onClose={() => undefined} groupUdids={[]} groupMode={false} devices={[fixture]} onSelectDevice={() => undefined} />,
     );
     expect(overlay.container.innerHTML).not.toContain("data:image/jpeg;base64");
     expect(overlay.container.querySelector("canvas")).not.toBeNull();

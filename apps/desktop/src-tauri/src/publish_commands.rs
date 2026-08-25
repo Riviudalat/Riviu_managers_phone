@@ -1,3 +1,4 @@
+use crate::command_error::CommandError;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,16 +18,16 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
-fn err(error: impl std::fmt::Display) -> String {
-    error.to_string()
+fn err(error: impl std::fmt::Display) -> CommandError {
+    CommandError::operation(error)
 }
 
 #[tauri::command]
 pub fn publish_scan_folder(
     state: State<'_, AppState>,
     source_root: String,
-) -> Result<PublishFolderManifest, String> {
-    let _admission = state.ensure_accepting_work().map_err(String::from)?;
+) -> Result<PublishFolderManifest, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     scan_publish_folder(PathBuf::from(source_root), PublishScanOptions::default()).map_err(err)
 }
 
@@ -37,14 +38,14 @@ pub fn publish_create_campaign(
     bundle_ids: Vec<String>,
     udids: Vec<String>,
     run_at: Option<String>,
-) -> Result<PublishCampaignRecord, String> {
-    let _admission = state.ensure_accepting_work().map_err(String::from)?;
+) -> Result<PublishCampaignRecord, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     if let Some(raw) = run_at.as_deref() {
-        parse_run_at(raw).map_err(err)?;
+        parse_run_at(raw)?;
     }
     for udid in &udids {
         if state.registry.get(udid).is_none() {
-            return Err(format!("device is not connected: {udid}"));
+            return Err(err(format!("device is not connected: {udid}")));
         }
     }
 
@@ -107,7 +108,7 @@ pub fn publish_create_campaign(
 pub fn publish_list(
     state: State<'_, AppState>,
     limit: Option<usize>,
-) -> Result<Vec<PublishCampaignRecord>, String> {
+) -> Result<Vec<PublishCampaignRecord>, CommandError> {
     state
         .db
         .list_publish_campaigns(limit.unwrap_or(50).clamp(1, 200))
@@ -118,13 +119,13 @@ pub fn publish_list(
 pub fn publish_get(
     state: State<'_, AppState>,
     campaign_id: String,
-) -> Result<Option<PublishCampaignDetail>, String> {
+) -> Result<Option<PublishCampaignDetail>, CommandError> {
     state.db.get_publish_campaign(&campaign_id).map_err(err)
 }
 
 #[tauri::command]
-pub fn publish_cancel(state: State<'_, AppState>, campaign_id: String) -> Result<(), String> {
-    let _admission = state.ensure_accepting_work().map_err(String::from)?;
+pub fn publish_cancel(state: State<'_, AppState>, campaign_id: String) -> Result<(), CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     state.db.cancel_publish_campaign(&campaign_id).map_err(err)
 }
 
@@ -134,8 +135,8 @@ pub fn publish_cancel(state: State<'_, AppState>, campaign_id: String) -> Result
 pub fn publish_prepare(
     state: State<'_, AppState>,
     campaign_id: String,
-) -> Result<PublishCampaignDetail, String> {
-    let _admission = state.ensure_accepting_work().map_err(String::from)?;
+) -> Result<PublishCampaignDetail, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     let detail = state
         .db
         .get_publish_campaign(&campaign_id)
@@ -147,10 +148,10 @@ pub fn publish_prepare(
             | riviu_core::PublishCampaignState::Succeeded
             | riviu_core::PublishCampaignState::Uncertain
     ) {
-        return Err(format!(
+        return Err(err(format!(
             "campaign is already terminal: {:?}",
             detail.campaign.state
-        ));
+        )));
     }
     state
         .db
@@ -160,15 +161,15 @@ pub fn publish_prepare(
         .db
         .get_publish_campaign(&campaign_id)
         .map_err(err)?
-        .ok_or_else(|| "campaign disappeared after prepare".to_string())
+        .ok_or_else(|| err("campaign disappeared after prepare"))
 }
 
 #[tauri::command]
 pub async fn publish_transfer(
     state: State<'_, AppState>,
     campaign_id: String,
-) -> Result<PublishCampaignDetail, String> {
-    let _admission = state.ensure_accepting_work().map_err(String::from)?;
+) -> Result<PublishCampaignDetail, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     transfer_publish_campaign_inner(
         state.control.clone(),
         state.db.clone(),
@@ -200,10 +201,6 @@ pub(crate) async fn transfer_publish_campaign_inner(
             .map(|assignment| assignment.udid.as_str()),
         |udid| control.reports_element_bounds(udid),
     )?;
-    let source_root = Path::new(&detail.bundles[0].source_path)
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("managed publish root is missing"))?
-        .to_path_buf();
     db.update_publish_campaign_state(
         &campaign_id,
         riviu_core::PublishCampaignState::Transferring,
@@ -211,6 +208,26 @@ pub(crate) async fn transfer_publish_campaign_inner(
     )?;
 
     for assignment in &detail.assignments {
+        // **Each phone gets its own bundle, and only its own.**
+        //
+        // This used to take one `source_root` for the whole campaign —
+        // `bundles[0].source_path.parent()` — and stage it to every phone in the loop. The
+        // managed layout is `…/<request_id>/<bundle_id>/<images>`, so that parent is the
+        // directory *containing* the bundles: every assignment was handed the same tree,
+        // and the mapping UI that pairs N folders with N phones decided nothing at all.
+        //
+        // The rest of the path was already built for per-bundle work and only this input
+        // was wrong: `import_id` is `riviu-<campaign>-<manifest sha>`, and the id passed
+        // below is the bundle's own `"{request_id}:{bundle}"` — the exact shape
+        // `the_import_id_is_the_directory_and_changes_with_the_content` pins with
+        // `"req-7:bundle-3"`. Two bundles therefore land in two device directories and two
+        // albums, which is what the post step needs to pick the right one.
+        let bundle = bundle_for_assignment(&detail.bundles, assignment)?;
+        let staged = stage_one_bundle(bundle, assignment.ordinal)?;
+        let source_root = staged.path().to_path_buf();
+        let device_scope = device_campaign_id(&campaign_id, assignment.ordinal);
+        let device_scope = device_scope.as_str();
+
         let context = match control
             .acquire_exclusive(&assignment.udid, DeviceWorkOwner::Script)
             .await
@@ -233,7 +250,7 @@ pub(crate) async fn transfer_publish_campaign_inner(
             }
         };
         match control
-            .stage_publish_media(&context, &agent_bundle_id, &campaign_id, &source_root)
+            .stage_publish_media(&context, &agent_bundle_id, device_scope, &source_root)
             .await
         {
             Ok(evidence) => {
@@ -246,11 +263,11 @@ pub(crate) async fn transfer_publish_campaign_inner(
                                 anyhow::anyhow!("media-stage evidence has no manifestSha256")
                             })?;
                         let native_prepare = control
-                            .prepare_publish_media(&context, &campaign_id, manifest_sha256)
+                            .prepare_publish_media(&context, device_scope, manifest_sha256)
                             .await
                             .map_err(anyhow::Error::new)?;
                         let native_import = control
-                            .import_publish_media(&context, &campaign_id, manifest_sha256)
+                            .import_publish_media(&context, device_scope, manifest_sha256)
                             .await
                             .map_err(anyhow::Error::new)?;
                         Ok(serde_json::json!({
@@ -369,8 +386,8 @@ fn refuse_devices_this_path_cannot_drive<'a>(
 pub async fn publish_post(
     state: State<'_, AppState>,
     campaign_id: String,
-) -> Result<PublishCampaignDetail, String> {
-    let _admission = state.ensure_accepting_work().map_err(String::from)?;
+) -> Result<PublishCampaignDetail, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
     post_publish_campaign_inner(
         state.control.clone(),
         state.db.clone(),
@@ -896,6 +913,93 @@ fn frame_sha256(frame: &[u8]) -> String {
     format!("{:x}", digest.finalize())
 }
 
+/// Which bundle a phone is supposed to receive.
+///
+/// Pulled out as a function because getting it wrong is invisible from anywhere else in the
+/// system: the state machine, the evidence and the toast all look identical whether the phone
+/// was handed its own pictures or somebody else's. The only place that can tell is here.
+fn bundle_for_assignment<'a>(
+    bundles: &'a [riviu_core::PublishBundle],
+    assignment: &riviu_core::PublishAssignmentRecord,
+) -> anyhow::Result<&'a riviu_core::PublishBundle> {
+    bundles
+        .iter()
+        .find(|bundle| bundle.id == assignment.bundle_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "assignment {} names bundle {} which this campaign does not have",
+                assignment.id,
+                assignment.bundle_id
+            )
+        })
+}
+
+/// A directory holding exactly one bundle directory, for exactly one assignment.
+///
+/// **The shape matters and the two backends disagree about it.** The iOS sidecar's
+/// `_media_file_manifest` iterates `source_root.iterdir()`, skips anything that is not a
+/// directory, and only then reads the files inside — so `source_root` must be a directory of
+/// *bundle directories*. (Android's `publish::stage` reads files directly instead, but this
+/// whole path refuses Android at `refuse_devices_this_path_cannot_drive`, so the iOS shape is
+/// the only one that runs here.) Handing it the bundle directory itself would produce an
+/// empty manifest and stage nothing at all.
+///
+/// So a per-assignment root is built by copying, rather than by pointing at a bundle inside
+/// the shared campaign root. Copying also re-verifies every image hash and the caption hash
+/// immediately before the bytes leave for the phone, which the shared root never did.
+struct SingleBundleRoot(PathBuf);
+
+impl SingleBundleRoot {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for SingleBundleRoot {
+    /// Removed even when the transfer bails out mid-loop, which it does on the first phone
+    /// that fails.
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Build the one-bundle tree this assignment will be staged from.
+///
+/// The `.transfer` parent is dot-prefixed on purpose: both the iOS manifest walker and the
+/// Android stage skip dot entries, so a scratch directory sitting beside the real bundles can
+/// never be mistaken for one.
+fn stage_one_bundle(
+    bundle: &riviu_core::PublishBundle,
+    ordinal: u32,
+) -> anyhow::Result<SingleBundleRoot> {
+    let bundle_dir = PathBuf::from(&bundle.source_path);
+    let campaign_root = bundle_dir
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("managed bundle {} has no parent", bundle.id))?;
+    let name = bundle_dir
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("managed bundle {} has no directory name", bundle.id))?;
+    let root = campaign_root.join(".transfer").join(ordinal.to_string());
+    // A leftover from an interrupted run must not merge with this one.
+    let _ = fs::remove_dir_all(&root);
+    let guard = SingleBundleRoot(root);
+    // Reuse the copier the campaign was built with: it verifies every image SHA-256 and the
+    // caption hash as it writes.
+    riviu_core::copy_bundle_to_managed(bundle, &guard.path().join(name))?;
+    Ok(guard)
+}
+
+/// One assignment, one device-side identity.
+///
+/// Deliberately not the campaign id. That is one value for the whole campaign, so every phone
+/// shared one staging directory, one manifest hash and one album name — which is how the
+/// pairing the operator set up stopped meaning anything. `campaign_id` is a UUID and the
+/// ordinal is small, so this stays inside the 128-character `[A-Za-z0-9._-]` component that
+/// every backend validates.
+fn device_campaign_id(campaign_id: &str, ordinal: u32) -> String {
+    format!("{campaign_id}-{ordinal}")
+}
+
 fn import_id_from_evidence(raw: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(raw).ok()?;
     let native = value.get("nativeImport")?;
@@ -906,7 +1010,7 @@ fn import_id_from_evidence(raw: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn parse_run_at(raw: &str) -> Result<NaiveDateTime, String> {
+fn parse_run_at(raw: &str) -> Result<NaiveDateTime, CommandError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("runAt cannot be empty".into());
@@ -923,7 +1027,137 @@ fn parse_run_at(raw: &str) -> Result<NaiveDateTime, String> {
 #[cfg(test)]
 mod tests {
     use super::account_status_text_is_locked;
+    use super::bundle_for_assignment;
     use super::refuse_devices_this_path_cannot_drive;
+    use std::fs;
+    use uuid::Uuid;
+
+    fn test_bundle(id: &str) -> riviu_core::PublishBundle {
+        riviu_core::PublishBundle {
+            id: id.into(),
+            source_path: format!("/managed/req-7/{id}"),
+            name: id.into(),
+            media_kind: riviu_core::PublishMediaKind::Image,
+            images: Vec::new(),
+            caption_path: format!("/managed/req-7/{id}/caption.txt"),
+            caption: String::new(),
+            caption_sha256: String::new(),
+            total_bytes: 0,
+        }
+    }
+
+    fn test_assignment(
+        id: &str,
+        bundle_id: &str,
+        udid: &str,
+    ) -> riviu_core::PublishAssignmentRecord {
+        riviu_core::PublishAssignmentRecord {
+            id: id.into(),
+            campaign_id: "campaign-1".into(),
+            bundle_id: bundle_id.into(),
+            ordinal: 0,
+            udid: udid.into(),
+            state: riviu_core::PublishCampaignState::Ready,
+            effect_intent: None,
+            evidence_json: None,
+            error_code: None,
+        }
+    }
+
+    #[test]
+    fn every_phone_is_given_its_own_bundle_and_not_the_campaign_root() {
+        // The defect this pins: the transfer took ONE source root for the whole campaign --
+        // `bundles[0].source_path.parent()` -- and staged it to every phone, so the mapping
+        // that pairs N folders with N phones decided nothing and phones published each
+        // other's pictures under each other's captions, to live accounts.
+        let bundles = vec![test_bundle("req-7:bundle-a"), test_bundle("req-7:bundle-b")];
+        let first = test_assignment("assign-1", "req-7:bundle-a", "phone-1");
+        let second = test_assignment("assign-2", "req-7:bundle-b", "phone-2");
+
+        let for_first = bundle_for_assignment(&bundles, &first).expect("bundle a");
+        let for_second = bundle_for_assignment(&bundles, &second).expect("bundle b");
+
+        assert_eq!(for_first.id, "req-7:bundle-a");
+        assert_eq!(for_second.id, "req-7:bundle-b");
+        assert_ne!(for_first.source_path, for_second.source_path);
+    }
+
+    #[test]
+    fn a_staged_root_holds_exactly_one_bundle_and_is_removed_afterwards() {
+        // The shape is the whole point and it is easy to get wrong -- I got it wrong once
+        // already. The iOS sidecar's manifest walker iterates the root's *subdirectories*
+        // and only then reads files, so handing it the bundle directory itself yields an
+        // empty manifest and stages nothing. The root must contain one bundle DIRECTORY.
+        let temp = std::env::temp_dir().join(format!("riviu-stage-{}", Uuid::new_v4()));
+        let bundle_dir = temp.join("bundle-a");
+        fs::create_dir_all(&bundle_dir).expect("create the source bundle");
+        fs::write(bundle_dir.join("01.png"), b"png").expect("write an image");
+
+        let mut bundle = test_bundle("bundle-a");
+        bundle.source_path = bundle_dir.display().to_string();
+        bundle.caption = "xin chào".into();
+        bundle.caption_sha256 = riviu_core::frame_sha256("xin chào".as_bytes());
+        bundle.images = vec![riviu_core::PublishImage {
+            path: bundle_dir.join("01.png").display().to_string(),
+            file_name: "01.png".into(),
+            order: 1,
+            sha256: riviu_core::frame_sha256(b"png"),
+            byte_len: 3,
+            width: 1,
+            height: 1,
+        }];
+
+        let root_path;
+        {
+            let staged = super::stage_one_bundle(&bundle, 0).expect("stage one bundle");
+            root_path = staged.path().to_path_buf();
+            let children: Vec<_> = fs::read_dir(staged.path())
+                .expect("read the staged root")
+                .map(|entry| entry.expect("entry"))
+                .collect();
+            assert_eq!(children.len(), 1, "exactly one bundle directory");
+            assert!(children[0].file_type().expect("file type").is_dir());
+            assert!(children[0].path().join("01.png").is_file());
+            assert!(children[0].path().join("caption.txt").is_file());
+        }
+        // The guard drops with the scope, including on the error paths that bail out of the
+        // transfer loop.
+        assert!(!root_path.exists(), "the scratch root is removed");
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_device_scope_is_a_component_every_backend_accepts() {
+        // Two phones, two scopes -- which is what gives them two staging directories, two
+        // manifest hashes and two albums. And the string has to survive validators written
+        // in three languages: `[A-Za-z0-9._-]`, 1..=128.
+        let first = super::device_campaign_id("0f8f0e1e-1c4a-4b6f-9a2e-7c5d3b9a1f22", 0);
+        let second = super::device_campaign_id("0f8f0e1e-1c4a-4b6f-9a2e-7c5d3b9a1f22", 1);
+        assert_ne!(first, second);
+        for scope in [&first, &second] {
+            assert!(!scope.is_empty() && scope.len() <= 128, "{scope}");
+            assert!(
+                scope
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')),
+                "{scope}"
+            );
+            assert!(scope != "." && scope != "..", "{scope}");
+        }
+    }
+
+    #[test]
+    fn an_assignment_naming_a_bundle_the_campaign_lost_is_refused_not_guessed() {
+        // Falling back to "the first bundle" is exactly how this broke. A campaign whose
+        // rows disagree must stop, not publish something plausible.
+        let bundles = vec![test_bundle("req-7:bundle-a")];
+        let orphan = test_assignment("assign-9", "req-7:bundle-missing", "phone-9");
+        let error = bundle_for_assignment(&bundles, &orphan).expect_err("must refuse");
+        assert!(
+            error.to_string().contains("req-7:bundle-missing"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn a_campaign_holding_an_android_phone_is_refused_before_anything_is_touched() {

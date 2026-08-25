@@ -9,16 +9,6 @@ import type {
   JsonValue,
 } from "../../types";
 
-function flowRunEvent(value: unknown): { runId: string; revision: number } | null {
-  if (typeof value !== "object" || value === null) return null;
-  const event = value as Record<string, unknown>;
-  return event.type === "flowRunUpdated" &&
-    typeof event.runId === "string" &&
-    typeof event.revision === "number"
-    ? { runId: event.runId, revision: event.revision }
-    : null;
-}
-
 function attemptDurationMs(attempt: FlowNodeAttemptRecord): number {
   if (!attempt.startedAt || !attempt.finishedAt) return 0;
   const start = Date.parse(attempt.startedAt);
@@ -80,9 +70,9 @@ export function FlowRunMonitor({
       }
     };
 
-    void listenRiviuEvents((payload) => {
-      const event = flowRunEvent(payload);
-      if (event?.runId === detail.run.id) void refresh(event.revision);
+    void listenRiviuEvents((event) => {
+      if (event.type !== "flowRunUpdated") return;
+      if (event.runId === detail.run.id) void refresh(event.revision);
     }).then((unlisten) => {
       if (disposed) unlisten();
       else stop = unlisten;

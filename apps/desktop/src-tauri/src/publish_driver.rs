@@ -1,6 +1,6 @@
 //! Which backend composes a post, and which one can take it down again.
 //!
-//! Mirrors [`crate::interaction_target`] deliberately: same trait-per-backend shape, same
+//! Mirrors [`riviu_core::interaction_target`] deliberately: same trait-per-backend shape, same
 //! rule that a capability nobody measured **refuses by default** rather than doing nothing
 //! quietly. The reason to copy that shape rather than invent one is the same reason
 //! `tiktok_like` was extracted — two implementations of "what counts as proof" drift, and

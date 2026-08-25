@@ -2,11 +2,16 @@
 name = "riviu-android-driver"
 version.workspace = true
 edition.workspace = true
+# Never published: this is a private product, not a library. Marking it here also lets
+# `cargo deny` treat it as private, so the workspace's own path dependencies are not
+# reported as wildcard versions and the missing `license` field is not an error.
+publish = false
 
 [dependencies]
 riviu-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+uuid = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -16,3 +21,6 @@ async-trait = "0.1"
 # For the per-gesture variation in `agent.rs`: contact time and micro-drift. Same
 # version core already pins, so no second copy is built.
 rand = "0.8"
+
+[lints]
+workspace = true
