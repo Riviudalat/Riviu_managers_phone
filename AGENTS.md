@@ -9106,3 +9106,59 @@ nhất là **giá cũ**, không phải một máy im lặng.
 nó chấm. Sai ở đây là chép giá lượt nháp lên cả 20 câu, và sổ của người vận hành sẽ báo gấp hai
 mươi lần số thật — biến một tối ưu thành một hồi quy trên giấy. Có test khẳng định tổng cộng lại
 đúng bằng cái gateway thu.
+
+## 9.112 Fan-out Riêng lẻ đã giết chống trùng, và bốn bình luận giống nhau đã lên thật (25/08/2026)
+
+Chạy campaign thật, 5 máy có mạng, chế độ Riêng lẻ. **4/5 đăng được, và bốn câu giống hệt
+nhau** — `Lịch trình chi tiết thật, lưu lại thôi!` từ bốn tài khoản dưới cùng một bài. Không
+phải lỗi mới; là lỗi có sẵn chưa ai thấy vì chưa chạy thật ở chế độ đó.
+
+**Nguyên nhân.** §9.108 chia fan-out: mỗi assignment một task với `only_assignments` là **một
+dòng**, để 20 máy chạy song song thay vì xếp hàng. Nhưng chống trùng làm việc bằng cách đưa cho
+mỗi câu **văn bản câu trước nó**, và trong một task **không bao giờ có câu trước**. `previous`
+luôn là `None`. Hai hệ quả:
+
+- Không có chống trùng nào giữa các máy, kể từ `ab9500e`.
+- Bản gộp nháp ở §9.111 **không bao giờ chạy**: tôi đặt nó trong vòng chuẩn bị, mà ở đó luôn
+  chỉ có một assignment, và một batch của một câu không phải batch. Tôi đã scope nó vào đúng
+  chế độ mà hình dạng thực thi khiến nó không thể chạy — và chỉ phát hiện khi chạy thật.
+
+**Sửa.** `pre_prepare_standalone_texts` soạn text cho cả target **trước khi fan-out**, nơi mọi
+assignment còn nhìn thấy nhau: một lượt chụp ảnh, một lượt nháp gộp, rồi phát cho từng task câu
+của nó. Máy nào đã có text thì **bỏ luôn bước chụp bằng chứng** — trước đây cả 5 máy đều mở bài
+để chụp thứ không còn cần. Đường gộp trong vòng lặp đã bị xoá, không để lại code chết.
+
+Cùng 5 máy, cùng bài, sau khi sửa:
+
+```text
+ordinal 0  Succeeded  Lịch trình chi tiết thật, lưu lại đi Đà Lạt thôi
+ordinal 1  Succeeded  Có cả dự toán chi phí luôn
+ordinal 2  Succeeded  Đà Lạt đi ba ngày vừa đẹp
+ordinal 3  Failed     [minicap produced no decodable frame in 12s]
+ordinal 4  Succeeded  Lịch trình nhìn dễ theo ghê
+```
+
+Bốn câu, bốn nội dung. Máy trượt là `minicap` không lên khung — hạ tầng stream, và lần này nó
+**đã có text soạn sẵn**, nên lỗi nằm đúng chỗ nó thuộc về.
+
+Thời gian 149 s so với 109 s: phần AI giờ chạy **tuần tự trước** khi máy nào mở bài, thay vì
+mỗi máy tự làm song song. Đó là giá của việc các câu biết về nhau, và nói ra ở đây để không ai
+đọc con số đó thành hồi quy.
+
+### Chạy campaign thật headless
+
+`cargo run -p riviu-managers-phone --bin live_interaction_android -- --url <link> --devices
+<serial,…> --i-will-post`
+
+Nó **đăng bình luận công khai thật** và không có undo, nên đòi cờ `--i-will-post`. Đừng lái app
+bằng chuột để thử: một cú click mù đã từng đăng bình luận thật dưới bài sai.
+
+### Hai chỗ hướng dẫn sai khi làm theo, đã sửa
+
+- **`SKILL.md` bảo chạy `cargo test --workspace`.** Trên máy này cả workspace bị Smart App
+  Control giết giữa đường và báo lỗi link trông như lỗi code. Đã đổi sang danh sách per-crate
+  kèm số test hiện tại, và ghi rõ `npm ci` đang bị OS từ chối nên ba cổng FE chỉ chạy trên CI.
+- **`live_nurture_android` hứa kế thừa khoá AI bằng cách copy CSDL của app.** Khoá đã chuyển
+  sang credential store, nên bản copy mang mọi cài đặt **trừ** cái quyết định có viết được bình
+  luận hay không: harness viết theo hướng dẫn đó báo `khoá API TRỐNG` rồi từ chối. Đã gắn cùng
+  một keyring seam mà `AppState::bootstrap` dùng, và sửa lại đoạn doc.

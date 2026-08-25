@@ -628,22 +628,30 @@ pub async fn execute_thread_campaign(
         let detail = db
             .get_interaction_campaign(&campaign_id)?
             .context("campaign không tồn tại")?;
-        let rows: Vec<(String, String)> = detail
+        let in_scope: Vec<crate::InteractionAssignmentRecord> = detail
             .assignments
-            .iter()
+            .into_iter()
             .filter(|assignment| {
                 only_assignments
                     .as_ref()
                     .is_none_or(|only| only.contains(&assignment.id))
             })
+            .collect();
+        let rows: Vec<(String, String)> = in_scope
+            .iter()
             .map(|assignment| (assignment.id.clone(), assignment.target_key.clone()))
             .collect();
-        (!rows.is_empty()).then_some(rows)
+        (!rows.is_empty()).then_some((rows, in_scope))
     } else {
         None
     };
 
-    if let Some(rows) = per_assignment {
+    if let Some((rows, in_scope)) = per_assignment {
+        // Before anything is spawned, while every assignment of every target is still in one
+        // place. See `pre_prepare_standalone_texts` for why it cannot happen inside a task.
+        let pre_prepared = Arc::new(
+            pre_prepare_standalone_texts(&db, &control, &engine, &request, &in_scope).await,
+        );
         let mut running = Vec::with_capacity(rows.len());
         for (index, (assignment_id, target_key)) in rows.into_iter().enumerate() {
             running.push(tokio::spawn(staggered_cohort(
@@ -660,6 +668,7 @@ pub async fn execute_thread_campaign(
                 Some(std::collections::HashSet::from([assignment_id])),
                 artifacts.clone(),
                 frame_source.clone(),
+                pre_prepared.clone(),
             )));
         }
         return join_campaign(db, events, campaign_id, running).await;
@@ -685,6 +694,10 @@ pub async fn execute_thread_campaign(
             only_assignments.clone(),
             artifacts.clone(),
             frame_source.clone(),
+            // Threads write their own text one message at a time, because a reply's direction
+            // quotes the comment it answers and that text does not exist until the parent has
+            // posted. Nothing to hand down.
+            Arc::new(HashMap::new()),
         )));
     }
 
@@ -705,6 +718,133 @@ pub async fn execute_thread_campaign(
 /// instead would hide the contention rather than remove it, and that number was measured.
 const FAN_OUT_STAGGER: Duration = Duration::from_secs(2);
 
+/// Write one comment per phone for a `Standalone` target, before the fan-out starts.
+///
+/// **The fan-out is why this has to happen here.** A `Standalone` campaign gives every
+/// assignment its own task with a singleton `only_assignments`, which is what stops twenty
+/// phones queueing behind each other — and it also means that inside a task there is exactly
+/// one message to write, so nothing in there can see the other nineteen. Two consequences,
+/// both measured on a live five-phone run 25/08/2026:
+///
+/// * The anti-repetition chain went dead. It works by handing each message the text of the one
+///   before it, and with one message per task there is never one before it. **Four of the four
+///   phones that posted put out the identical sentence** — `Lịch trình chi tiết thật, lưu lại
+///   thôi!` — under one post, from four accounts.
+/// * Batching could not engage, for the same reason. It was written for exactly this shape and
+///   then skipped every time, because a batch of one is not a batch.
+///
+/// So the whole target's comments are drafted once, up here, where all of its assignments are
+/// still visible, and each task is handed the sentence meant for it. The picture is
+/// photographed once too, instead of once per phone.
+///
+/// Best-effort by design: anything this cannot write is left for the per-comment path inside
+/// the task, which is where it was before. A failure here must never be a phone that stays
+/// silent.
+#[allow(clippy::too_many_arguments)]
+async fn pre_prepare_standalone_texts(
+    db: &Arc<crate::db::Database>,
+    control: &Arc<DeviceControlPlane>,
+    engine: &crate::NurtureEngine,
+    request: &ThreadCampaignRequest,
+    rows: &[crate::InteractionAssignmentRecord],
+) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    if !request.needs_ai_evidence_frames() {
+        return out;
+    }
+    let mut by_target: std::collections::BTreeMap<
+        String,
+        Vec<&crate::InteractionAssignmentRecord>,
+    > = std::collections::BTreeMap::new();
+    for row in rows {
+        by_target
+            .entry(row.target_key.clone())
+            .or_default()
+            .push(row);
+    }
+    for (target_key, mut group) in by_target {
+        group.sort_by_key(|row| row.ordinal);
+        let Some((target_index, target)) = request
+            .targets
+            .iter()
+            .enumerate()
+            .find(|(_, target)| target.target_key == target_key)
+        else {
+            continue;
+        };
+        // The operator's own sentences are not the AI's business, and a target that is all
+        // manual needs no picture taken at all.
+        let wanted: Vec<&crate::InteractionAssignmentRecord> = group
+            .into_iter()
+            .filter(|row| {
+                request
+                    .manual_comment_for(target_index, row.ordinal)
+                    .is_none()
+            })
+            .collect();
+        if wanted.len() < 2 {
+            continue;
+        }
+        let photographer = &wanted[0].actor_udid;
+        let frames = match collect_target_evidence_frames(
+            control,
+            engine,
+            target,
+            photographer,
+            Duration::from_millis(500),
+        )
+        .await
+        {
+            Ok(frames) => frames,
+            Err(error) => {
+                // Left to the tasks: each one photographs on its own phone, which is what it
+                // did before this existed, and one of them may well succeed where this failed.
+                tracing::warn!(
+                    "interaction {target_key}: không chụp được bằng chứng để soạn gộp: {error}"
+                );
+                continue;
+            }
+        };
+        let evidence_kind = match target.kind {
+            crate::interaction::TikTokPostKind::Photo => {
+                crate::openai_client::EvidenceKind::CarouselSlides
+            }
+            crate::interaction::TikTokPostKind::Video => {
+                crate::openai_client::EvidenceKind::Moments
+            }
+        };
+        let mut scoped = match db.get_nurture_settings() {
+            Ok(settings) => settings,
+            Err(error) => {
+                tracing::warn!("interaction {target_key}: không đọc được cấu hình AI: {error}");
+                continue;
+            }
+        };
+        scoped.max_comment_words = u32::from(request.max_words);
+        let batched = crate::openai_client::prepare_grounded_comments_batch(
+            &scoped,
+            &frames,
+            evidence_kind,
+            Some(&request.instruction),
+            wanted.len(),
+        )
+        .await;
+        let from_batch = batched.accepted_from_batch();
+        let mut written = 0usize;
+        for (row, result) in wanted.iter().zip(batched.results) {
+            if let Ok(comment) = result {
+                out.insert(row.id.clone(), comment.text);
+                written += 1;
+            }
+        }
+        tracing::info!(
+            "interaction {target_key}: soạn trước {written}/{} câu, {from_batch} câu từ lượt nháp gộp",
+            wanted.len()
+        );
+    }
+    out
+}
+
 /// [`gated_cohort`], after waiting its turn to start.
 ///
 /// The wait is inside the task rather than in the loop that spawns them, so the spawn loop
@@ -724,6 +864,7 @@ async fn staggered_cohort(
     only_assignments: Option<std::collections::HashSet<String>>,
     artifacts: crate::FlowArtifactStore,
     frame_source: Arc<dyn crate::GenerationFrameSource>,
+    pre_prepared: Arc<HashMap<String, String>>,
 ) -> anyhow::Result<(usize, usize)> {
     if !delay.is_zero() {
         tokio::time::sleep(delay).await;
@@ -741,6 +882,7 @@ async fn staggered_cohort(
         only_assignments,
         artifacts,
         frame_source,
+        pre_prepared,
     )
     .await
 }
@@ -846,6 +988,7 @@ async fn gated_cohort(
     only_assignments: Option<std::collections::HashSet<String>>,
     artifacts: crate::FlowArtifactStore,
     frame_source: Arc<dyn crate::GenerationFrameSource>,
+    pre_prepared: Arc<HashMap<String, String>>,
 ) -> anyhow::Result<(usize, usize)> {
     // The semaphore is never closed, so this only fails if it is — treat that as "go", since
     // refusing a whole team over a bookkeeping error would lose more than it protects.
@@ -862,6 +1005,7 @@ async fn gated_cohort(
         only_assignments,
         artifacts,
         frame_source,
+        pre_prepared,
     )
     .await
 }
@@ -896,6 +1040,12 @@ async fn run_cohort(
     // Separate from `engine.frames`, which is an `Arc<dyn FrameSource>` and therefore has
     // no way to ask for a *generation*. Evidence needs that: see `evidence_frame_after`.
     frame_source: Arc<dyn crate::GenerationFrameSource>,
+    // Text already written for these assignments, by assignment id.
+    //
+    // Empty for a thread, and empty for a `Standalone` target whose pre-pass could not run —
+    // both of which mean "write it here, the way it was written before". See
+    // `pre_prepare_standalone_texts` for why a `Standalone` fan-out cannot write its own.
+    pre_prepared: Arc<HashMap<String, String>>,
 ) -> anyhow::Result<(usize, usize)> {
     let settings = db.get_nurture_settings().context("đọc cấu hình AI")?;
     if ai_key_missing(&request, &settings.api_key) {
@@ -1000,7 +1150,23 @@ async fn run_cohort(
             })
             .min_by_key(|assignment| assignment.ordinal)
             .map(|assignment| assignment.actor_udid.clone());
-        let frames = if request.needs_ai_evidence_frames() {
+        // **Nothing left to photograph when the text is already written.** The pre-pass took
+        // one picture for the whole target; without this every phone would open the post again
+        // to photograph something no longer needed, which is most of the wall clock of a run.
+        let every_text_ready = plan
+            .assignments
+            .iter()
+            .filter(|assignment| assignment.target_key == target.target_key)
+            .filter_map(|assignment| {
+                assignment_ids.get(&(assignment.target_key.clone(), assignment.ordinal))
+            })
+            .filter(|id| {
+                only_assignments
+                    .as_ref()
+                    .is_none_or(|scope| scope.contains(*id))
+            })
+            .all(|id| pre_prepared.contains_key(id));
+        let frames = if request.needs_ai_evidence_frames() && !every_text_ready {
             let Some(photographer) = photographer.as_deref() else {
                 continue;
             };
@@ -1043,65 +1209,6 @@ async fn run_cohort(
                 crate::openai_client::EvidenceKind::Moments
             }
         };
-
-        // **One draft call for the whole target, where the shape allows it.** Only `Standalone`:
-        // there every comment is independent, so the only thing the per-comment chain was doing
-        // was telling each phone to avoid the one before it. A thread is different — a reply's
-        // direction quotes the comment it answers, and that text is not known until the parent
-        // has actually posted — so threads keep the per-comment path unchanged.
-        //
-        // Measured 25/08/2026, twenty comments on one two-slide post: $0.000839 a comment
-        // against $0.001439, and **19 of 19 distinct** where the per-comment chain produced 13
-        // or 14 distinct out of 20. Both come from the same cause — the picture is nearly the
-        // whole prompt and it was being sent forty times, and each phone could only be told
-        // about its immediate predecessor.
-        //
-        // Skipped for a single comment: one draft is one draft either way, and the batch asks
-        // for a larger token budget it would not use.
-        let mut batched_ai = HashMap::new();
-        if request.mode == crate::interaction::ThreadMode::Standalone && !frames.is_empty() {
-            let ordinals: Vec<u8> = plan
-                .assignments
-                .iter()
-                .filter(|assignment| assignment.target_key == target.target_key)
-                .filter(|assignment| {
-                    assignment_ids
-                        .get(&(assignment.target_key.clone(), assignment.ordinal))
-                        .is_some_and(|id| {
-                            only_assignments
-                                .as_ref()
-                                .is_none_or(|scope| scope.contains(id))
-                        })
-                })
-                .filter(|assignment| {
-                    request
-                        .manual_comment_for(target_index, assignment.ordinal)
-                        .is_none()
-                })
-                .map(|assignment| assignment.ordinal)
-                .collect();
-            if ordinals.len() > 1 {
-                let mut scoped = settings.clone();
-                scoped.max_comment_words = u32::from(request.max_words);
-                let batched = crate::openai_client::prepare_grounded_comments_batch(
-                    &scoped,
-                    &frames,
-                    evidence_kind,
-                    Some(&request.instruction),
-                    ordinals.len(),
-                )
-                .await;
-                tracing::info!(
-                    "interaction {}: {}/{} câu lấy từ một lượt nháp gộp",
-                    target.target_key,
-                    batched.accepted_from_batch(),
-                    ordinals.len()
-                );
-                for (ordinal, result) in ordinals.into_iter().zip(batched.results) {
-                    batched_ai.insert(ordinal, result);
-                }
-            }
-        }
 
         let mut prepared_messages = Vec::with_capacity(request.message_count as usize);
         let mut previous = None::<String>;
@@ -1146,36 +1253,12 @@ async fn run_cohort(
             // what makes the stored evidence checkable.
             let text = match request.manual_comment_for(target_index, assignment.ordinal) {
                 Some(manual) => manual.to_string(),
-                // Already written by the batch above, when there was one. Failures are kept
-                // as failures rather than quietly retried here: the batch has its own
-                // per-comment fallback, so anything still failing has already had both goes.
-                None if batched_ai.contains_key(&assignment.ordinal) => {
-                    match batched_ai.remove(&assignment.ordinal) {
-                        Some(Ok(grounded)) => grounded.text,
-                        Some(Err(error)) => {
-                            let detail = format!("{error:#}");
-                            tracing::error!(
-                                "interaction {}: AI không viết được cho ordinal {}: {detail}",
-                                target.target_key,
-                                assignment.ordinal
-                            );
-                            db.update_interaction_assignment_state(
-                                id,
-                                ThreadMessageState::Failed,
-                                Some(&format!(
-                                    "ai_comment_unavailable: ordinal {} — {detail}",
-                                    assignment.ordinal
-                                )),
-                                None,
-                                None,
-                            )?;
-                            notify(&events, &campaign_id);
-                            failed += 1;
-                            continue;
-                        }
-                        None => unreachable!("checked by the guard above"),
-                    }
-                }
+                // Written by the pre-pass, before the fan-out. This is the only place a
+                // `Standalone` comment can have come from that is aware of its siblings.
+                None if pre_prepared.contains_key(id) => pre_prepared
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| unreachable!("checked by the guard")),
                 None => {
                     let mut scoped = settings.clone();
                     scoped.max_comment_words = u32::from(request.max_words);
