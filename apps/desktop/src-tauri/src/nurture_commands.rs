@@ -295,6 +295,9 @@ pub async fn nurture_test_api(
     let (result, evidence_mode) = riviu_core::openai_client::prepare_comment_for_frames(
         &settings,
         &frames,
+        // This command re-runs one nurture card's evidence by hand, and that evidence is
+        // sampled from a single card — the same moments the pixel engine collects.
+        riviu_core::openai_client::EvidenceKind::Moments,
         direction,
         &crate::interaction_ocr::DesktopFrameTextSource,
     )

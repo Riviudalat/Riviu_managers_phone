@@ -417,6 +417,7 @@ pub async fn generate_vision_comment(
 pub async fn prepare_grounded_comment(
     settings: &NurtureSettings,
     frames: &[Vec<u8>],
+    kind: EvidenceKind,
     direction: Option<&str>,
 ) -> anyhow::Result<GroundedCommentResult> {
     if settings.api_key.trim().is_empty() {
@@ -425,7 +426,7 @@ pub async fn prepare_grounded_comment(
     if frames.is_empty() {
         return Err(anyhow!("no_usable_evidence"));
     }
-    let sheet = make_contact_sheet(frames)?;
+    let sheet = make_contact_sheet(frames, kind)?;
     let frame_sha256 = sha256_hex(&sheet.jpeg);
     let max_words = settings.max_comment_words.clamp(4, 30) as usize;
     let lang = language_label(&settings.comment_lang);
@@ -960,12 +961,31 @@ fn language_label(raw: &str) -> String {
     }
 }
 
+/// What a set of evidence frames actually **is**.
+///
+/// The sheet cannot tell the two apart by looking — three pictures are three pictures — and
+/// the difference decides what the model is allowed to say about them. Frames sampled from a
+/// video are moments of one scene and reading them left to right is reading time; slides of a
+/// photo carousel are separate pages of the post and reading them left to right is turning
+/// pages. A model told the second is the first narrates motion nobody photographed, which is
+/// the `unsupported_claim` the verification gate spends a retry catching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceKind {
+    /// Samples of one scene over time — a video, or a still card sampled repeatedly.
+    Moments,
+    /// Separate slides of a photo carousel, in the order they are swiped through.
+    CarouselSlides,
+}
+
 /// One picture for the model, plus an honest count of how much evidence is really in it.
 pub struct ContactSheet {
     pub jpeg: Vec<u8>,
-    /// Frames that survived de-duplication. **`1` on a photo post**, because a still card
-    /// publishes byte-identical frames and the three samples are one image three times.
+    /// Frames that survived de-duplication. **`1` on a single-picture post**, because a
+    /// still card publishes byte-identical frames and the three samples are one image three
+    /// times. A carousel gets one per slide the walk reached.
     pub distinct_frames: u8,
+    /// What those frames are, which is the only thing that makes the count describable.
+    kind: EvidenceKind,
 }
 
 impl ContactSheet {
@@ -976,13 +996,26 @@ impl ContactSheet {
     /// the failure the verification gate exists to catch: a model told it is looking at three
     /// moments will narrate motion that no pixel supports.
     fn layout_note(&self) -> String {
-        let frames = match self.distinct_frames {
-            0 | 1 => "ĐÚNG MỘT khung của bài (chụp ba lần đều ra cùng một khung — bài ảnh \
-                      tĩnh hoặc video đang dừng, nên KHÔNG có chuyển động để mô tả; đừng nói \
-                      về hành động, diễn biến hay thứ tự xảy ra)"
+        let frames = match (self.kind, self.distinct_frames) {
+            (EvidenceKind::Moments, 0 | 1) => "ĐÚNG MỘT khung của bài (chụp ba lần đều ra cùng \
+                một khung — bài ảnh tĩnh hoặc video đang dừng, nên KHÔNG có chuyển động để mô \
+                tả; đừng nói về hành động, diễn biến hay thứ tự xảy ra)"
                 .to_string(),
-            n => format!(
+            // A carousel that yielded one picture did not "come out the same three times" — the
+            // walk stopped, and saying otherwise would claim the rest of the post was looked at.
+            (EvidenceKind::CarouselSlides, 0 | 1) => "ĐÚNG MỘT ảnh của một bài NHIỀU ẢNH, và là \
+                ảnh ĐẦU TIÊN (các ảnh sau chưa đọc được). Bài ảnh không tự chạy nên KHÔNG có \
+                chuyển động để mô tả, và nội dung chính của loại bài này thường nằm ở ảnh sau — \
+                nên chỉ nói về đúng những gì thấy trong ảnh này, đừng kết luận về cả bài"
+                .to_string(),
+            (EvidenceKind::Moments, n) => format!(
                 "{n} khung KHÁC NHAU của cùng một bài, xếp từ trái sang phải theo thời gian"
+            ),
+            (EvidenceKind::CarouselSlides, n) => format!(
+                "{n} ẢNH KHÁC NHAU của cùng một bài ảnh nhiều ảnh, xếp từ trái sang phải theo \
+                 đúng thứ tự lật của bài — KHÔNG phải các khoảnh khắc của một video, nên đừng \
+                 mô tả chuyển động hay diễn biến. Nội dung chính thường nằm ở ảnh thứ hai trở \
+                 đi, nên hãy viết dựa trên TOÀN BỘ các ảnh chứ không chỉ ảnh đầu"
             ),
         };
         format!("{frames}, và bên dưới là dải phóng to vùng caption/tên tài khoản")
@@ -996,6 +1029,44 @@ impl ContactSheet {
 /// (`deepseek-v4-flash-vision-exp`, 23/08/2026). Holding the area fixed means the layout below
 /// buys resolution and honesty without buying a bigger bill.
 const SHEET_PIXEL_BUDGET: f64 = 750.0 * 1334.0;
+
+/// The most pictures one sheet will carry.
+///
+/// Four, matching `interaction_hierarchy::CAROUSEL_SLIDE_CAP` — the walk that produces them
+/// stops at the same number, so raising one without the other buys nothing.
+const SHEET_MAX_FRAMES: usize = 4;
+
+/// The pixel budget for `count` distinct pictures.
+///
+/// Flat for [`EvidenceKind::Moments`]: three samples of one scene are three views of the same
+/// thing, and the fixed area is what holds the measured 475-token prompt cost still.
+///
+/// **Scaled for [`EvidenceKind::CarouselSlides`], because those are not views of one thing.**
+/// Each slide is a page nothing else shows, and a carousel's payload is very often text — the
+/// second slide of the post this was built for is a twenty-five-row costed itinerary, and a
+/// table either has enough pixels to read or it carries nothing at all.
+///
+/// Measured by `carousel_slide_widths_are_the_measured_ones`, on this fleet's 1080x2220 frames,
+/// as the width one slide gets:
+///
+/// ```text
+///   slides   scaled   flat
+///        1      589    589
+///        2      519    367
+///        4      431    216
+/// ```
+///
+/// Scaling keeps a slide near the size a lone frame gets and makes the bill proportional to how
+/// much distinct content the post actually has, instead of splitting one frame's worth of
+/// pixels across every page of it.
+fn sheet_pixel_budget(kind: EvidenceKind, count: usize) -> f64 {
+    match kind {
+        EvidenceKind::Moments => SHEET_PIXEL_BUDGET,
+        EvidenceKind::CarouselSlides => {
+            SHEET_PIXEL_BUDGET * count.clamp(1, SHEET_MAX_FRAMES) as f64
+        }
+    }
+}
 
 /// Where the caption and author row sit, as fractions of the frame.
 ///
@@ -1033,10 +1104,10 @@ const CAPTION_WIDTH: f64 = 0.84;
 ///    to be 375x667 — and [`ContactSheet::distinct_frames`] says how much evidence there
 ///    really was, so a low `evidenceSupport` score can be read as thin evidence rather than as
 ///    a bad model.
-fn make_contact_sheet(frames: &[Vec<u8>]) -> anyhow::Result<ContactSheet> {
+fn make_contact_sheet(frames: &[Vec<u8>], kind: EvidenceKind) -> anyhow::Result<ContactSheet> {
     let mut seen = Vec::new();
     let mut decoded: Vec<image::RgbImage> = Vec::new();
-    for bytes in frames.iter().take(3) {
+    for bytes in frames.iter().take(SHEET_MAX_FRAMES) {
         let frame = image::load_from_memory(bytes)
             .context("decode comment frames")?
             .to_rgb8();
@@ -1076,7 +1147,7 @@ fn make_contact_sheet(frames: &[Vec<u8>]) -> anyhow::Result<ContactSheet> {
     // aspect-correct thumbs plus a full-width caption strip lands on the pixel budget:
     //     area = W^2 / (count * frame_aspect)  +  W^2 / band_aspect
     let per_pixel = 1.0 / (count as f64 * frame_aspect) + 1.0 / band_aspect;
-    let sheet_w = (SHEET_PIXEL_BUDGET / per_pixel).sqrt();
+    let sheet_w = (sheet_pixel_budget(kind, count) / per_pixel).sqrt();
     // Derive everything from the *rounded* thumb width so `count * thumb_w` is the sheet width
     // exactly. A one-pixel rounding gap would be a black seam, which is what this rewrite is
     // removing.
@@ -1107,6 +1178,7 @@ fn make_contact_sheet(frames: &[Vec<u8>]) -> anyhow::Result<ContactSheet> {
     Ok(ContactSheet {
         jpeg: encoded.into_inner(),
         distinct_frames: count.min(u8::MAX as usize) as u8,
+        kind,
     })
 }
 
@@ -1463,11 +1535,12 @@ fn builtin_pool() -> Vec<String> {
 pub async fn prepare_comment_for_frames(
     settings: &crate::NurtureSettings,
     frames: &[Vec<u8>],
+    kind: EvidenceKind,
     direction: Option<&str>,
     frame_text: &dyn crate::FrameTextSource,
 ) -> anyhow::Result<(GroundedCommentResult, &'static str)> {
     if provider_supports_vision(settings) {
-        let result = prepare_grounded_comment(settings, frames, direction).await?;
+        let result = prepare_grounded_comment(settings, frames, kind, direction).await?;
         return Ok((result, "vision"));
     }
     let host = host_of(&settings.base_url);
@@ -1903,7 +1976,8 @@ mod tests {",
     #[test]
     fn the_contact_sheet_spends_its_whole_area_on_evidence_and_never_stretches() {
         let frame = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
-        let one = make_contact_sheet(std::slice::from_ref(&frame)).expect("one frame");
+        let one = make_contact_sheet(std::slice::from_ref(&frame), EvidenceKind::Moments)
+            .expect("one frame");
         let sheet = image::load_from_memory(&one.jpeg).expect("decode one-frame sheet");
         let (w, h) = sheet.dimensions();
         assert_eq!((w, h), (633, 1581));
@@ -1979,23 +2053,31 @@ mod tests {",
         let clean = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
         let png = frame_with_block_at(600);
 
-        let status_bar_only = make_contact_sheet(&[
-            frame_with_block_at(8),
-            frame_with_block_at(20),
-            frame_with_block_at(28),
-        ])
+        let status_bar_only = make_contact_sheet(
+            &[
+                frame_with_block_at(8),
+                frame_with_block_at(20),
+                frame_with_block_at(28),
+            ],
+            EvidenceKind::Moments,
+        )
         .unwrap();
         assert_eq!(status_bar_only.distinct_frames, 1);
 
         // A change in the picture is still a change, and one in the status bar next to it does
         // not hide it.
-        let moved = make_contact_sheet(&[frame_with_block_at(8), png.clone()]).unwrap();
+        let moved = make_contact_sheet(
+            &[frame_with_block_at(8), png.clone()],
+            EvidenceKind::Moments,
+        )
+        .unwrap();
         assert_eq!(moved.distinct_frames, 2);
 
         // And re-encoding alone does not invent a frame: the same picture through PNG and
         // through the original JPEG is one piece of evidence, which hashing bytes could never
         // have said.
-        let recoded = make_contact_sheet(&[clean.clone(), png_of(&clean)]).unwrap();
+        let recoded =
+            make_contact_sheet(&[clean.clone(), png_of(&clean)], EvidenceKind::Moments).unwrap();
         assert_eq!(recoded.distinct_frames, 1);
     }
 
@@ -2015,9 +2097,12 @@ mod tests {",
         // A photo post publishes byte-identical frames — measured on a live card, 0 of
         // 2,170,800 picture pixels changed over 13 seconds untouched. The old sheet pasted
         // that one image three times and told the model it was reading "ba frame".
-        let three_of_one =
-            make_contact_sheet(&[frame.clone(), frame.clone(), frame.clone()]).unwrap();
-        let one = make_contact_sheet(std::slice::from_ref(&frame)).unwrap();
+        let three_of_one = make_contact_sheet(
+            &[frame.clone(), frame.clone(), frame.clone()],
+            EvidenceKind::Moments,
+        )
+        .unwrap();
+        let one = make_contact_sheet(std::slice::from_ref(&frame), EvidenceKind::Moments).unwrap();
         assert_eq!(three_of_one.distinct_frames, 1);
         // Not merely the same count — the same picture, at the full single-frame size.
         assert_eq!(three_of_one.jpeg, one.jpeg);
@@ -2025,11 +2110,14 @@ mod tests {",
         assert!(one.layout_note().contains("KHÔNG có chuyển động"));
 
         // Three real samples of a moving card stay three.
-        let moving = make_contact_sheet(&[
-            include_bytes!("../tests/fixtures/feed-same-card-1.jpg").to_vec(),
-            include_bytes!("../tests/fixtures/feed-same-card-2.jpg").to_vec(),
-            include_bytes!("../tests/fixtures/feed-same-card-3.jpg").to_vec(),
-        ])
+        let moving = make_contact_sheet(
+            &[
+                include_bytes!("../tests/fixtures/feed-same-card-1.jpg").to_vec(),
+                include_bytes!("../tests/fixtures/feed-same-card-2.jpg").to_vec(),
+                include_bytes!("../tests/fixtures/feed-same-card-3.jpg").to_vec(),
+            ],
+            EvidenceKind::Moments,
+        )
         .unwrap();
         assert_eq!(moving.distinct_frames, 3);
         assert!(moving.layout_note().starts_with("3 khung KHÁC NHAU"));
@@ -2040,11 +2128,129 @@ mod tests {",
 
         // A middle duplicate collapses too, and the survivors share the budget as two.
         let other = include_bytes!("../tests/fixtures/feed-iphone8-b.jpg").to_vec();
-        let two = make_contact_sheet(&[frame.clone(), frame, other]).unwrap();
+        let two =
+            make_contact_sheet(&[frame.clone(), frame, other], EvidenceKind::Moments).unwrap();
         assert_eq!(two.distinct_frames, 2);
         assert!(two.layout_note().starts_with("2 khung KHÁC NHAU"));
 
-        assert!(make_contact_sheet(&[]).is_err());
+        assert!(make_contact_sheet(&[], EvidenceKind::Moments).is_err());
+    }
+
+    /// A slide that differs from its neighbours everywhere, not in one small block.
+    ///
+    /// `frame_with_block_at` was the obvious reach and it does not work here: `picture_digest`
+    /// samples a 32x32 grid, so on a 750x1334 frame it reads every 39th row, and a 24-row block
+    /// can fall between two sampled rows and hash identical to the frame without it. That is
+    /// correct for what that digest is for — it is a "did the screen change" probe, not a
+    /// checksum — but it makes a four-slide fixture built from small blocks quietly collapse to
+    /// three. Real slides differ across the whole picture, and so do these.
+    fn slide_shaded(level: u8) -> Vec<u8> {
+        let mut image =
+            image::load_from_memory(include_bytes!("../tests/fixtures/feed-iphone8.jpg"))
+                .unwrap()
+                .to_rgb8();
+        for pixel in image.pixels_mut() {
+            pixel.0 = [level, level.wrapping_add(40), level.wrapping_add(80)];
+        }
+        let mut out = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    }
+
+    /// Four slides survive the sheet, where the third used to be the last one in.
+    ///
+    /// Goes red against `take(3)`: the fourth picture is silently dropped and the count comes
+    /// back as 3, which is the shape that made a carousel look shorter than it is. The pictures
+    /// are synthetic on purpose — what is under test is how many distinct ones get through, and
+    /// a fixture set would only add a dependency on four real screenshots to say that.
+    #[test]
+    fn a_four_slide_carousel_keeps_all_four() {
+        let slides = vec![
+            slide_shaded(10),
+            slide_shaded(70),
+            slide_shaded(130),
+            slide_shaded(190),
+        ];
+        let sheet = make_contact_sheet(&slides, EvidenceKind::CarouselSlides).unwrap();
+        assert_eq!(sheet.distinct_frames, 4);
+    }
+
+    /// Slides are described as pages of a post, never as moments of one.
+    ///
+    /// The distinction is the whole reason [`EvidenceKind`] is threaded down here rather than
+    /// inferred from the frame count: three video samples and three carousel slides arrive as
+    /// the same three pictures, and only the caller knows which is which. Telling a model that
+    /// slides are "theo thời gian" is an invitation to narrate a sequence of events that no
+    /// pixel supports — the `unsupported_claim` the verification gate spends a retry on.
+    #[test]
+    fn a_carousel_sheet_is_not_described_as_a_sequence_in_time() {
+        let slides = vec![slide_shaded(10), slide_shaded(130)];
+        let note = make_contact_sheet(&slides, EvidenceKind::CarouselSlides)
+            .unwrap()
+            .layout_note();
+        assert!(note.contains("2 ẢNH KHÁC NHAU"), "{note}");
+        assert!(!note.contains("theo thời gian"), "{note}");
+        assert!(note.contains("thứ tự lật"), "{note}");
+
+        let moments = vec![slide_shaded(10), slide_shaded(130)];
+        let note = make_contact_sheet(&moments, EvidenceKind::Moments)
+            .unwrap()
+            .layout_note();
+        assert!(note.contains("2 khung KHÁC NHAU"), "{note}");
+        assert!(note.contains("theo thời gian"), "{note}");
+    }
+
+    /// One slide off a carousel must not claim the post was sampled three times.
+    ///
+    /// That is what the `Moments` wording says — "chụp ba lần đều ra cùng một khung" — and on a
+    /// walk that stopped after the first page it is simply false. The post has more pictures;
+    /// nothing looked at them. Saying so is the difference between a thin answer and a wrong
+    /// one, and it is the same rule that made `distinct_frames` exist in the first place.
+    #[test]
+    fn one_slide_of_a_carousel_says_the_rest_went_unread() {
+        let note = make_contact_sheet(&[slide_shaded(10)], EvidenceKind::CarouselSlides)
+            .unwrap()
+            .layout_note();
+        assert!(note.contains("ảnh ĐẦU TIÊN"), "{note}");
+        assert!(!note.contains("chụp ba lần"), "{note}");
+        assert!(note.contains("đừng kết luận về cả bài"), "{note}");
+    }
+
+    /// A slide keeps its pixels; three samples of one scene still share the flat budget.
+    ///
+    /// Without the scaling, two slides split the single-frame area and each comes out around
+    /// 367x754 — measured against the itinerary table this was built for, that is not enough
+    /// pixels to read a row of. The assertion is about *area per picture*, not an exact size,
+    /// so it survives a change in the caption band's proportions.
+    #[test]
+    fn carousel_slides_do_not_shrink_each_other() {
+        let two = vec![slide_shaded(10), slide_shaded(130)];
+        let slides = make_contact_sheet(&two, EvidenceKind::CarouselSlides).unwrap();
+        let moments = make_contact_sheet(&two, EvidenceKind::Moments).unwrap();
+
+        let area = |jpeg: &[u8]| {
+            let (w, h) = image::load_from_memory(jpeg).unwrap().dimensions();
+            u64::from(w) * u64::from(h)
+        };
+        assert!(
+            area(&slides.jpeg) > area(&moments.jpeg),
+            "two slides get more sheet than two samples of one card: {} vs {}",
+            area(&slides.jpeg),
+            area(&moments.jpeg)
+        );
+
+        let one = make_contact_sheet(&[slide_shaded(10)], EvidenceKind::CarouselSlides).unwrap();
+        // Each of the two slides lands within a quarter of the area a lone picture gets, which
+        // is what "the budget follows the slide" means once the shared caption strip is paid
+        // for out of the same total.
+        let per_slide = area(&slides.jpeg) / 2;
+        assert!(
+            per_slide * 4 > area(&one.jpeg) * 3,
+            "a slide should not lose most of its pixels to having a neighbour: {per_slide} vs {}",
+            area(&one.jpeg)
+        );
     }
 
     #[test]
@@ -2215,9 +2421,10 @@ mod tests {",
             ..NurtureSettings::default()
         };
         let frame = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
-        let result = prepare_grounded_comment(&settings, &[frame], Some("tự nhiên"))
-            .await
-            .expect("grounded comment");
+        let result =
+            prepare_grounded_comment(&settings, &[frame], EvidenceKind::Moments, Some("tự nhiên"))
+                .await
+                .expect("grounded comment");
         server.await.expect("mock gateway task");
 
         assert_eq!(result.text, "Trà cherry nhìn mê quá 😋");
@@ -2233,5 +2440,43 @@ mod tests {",
         // any more: the USD this used to assert on was two hand-typed numbers multiplied by
         // exactly these counts.
         assert!(result.prompt_tokens > 0 && result.completion_tokens > 0);
+    }
+
+    /// The widths the budget doc quotes, measured rather than reasoned about.
+    ///
+    /// Pinned because they are the whole argument for scaling: at 216 px a slide of a
+    /// four-image post is a thumbnail of a table, and the model is being asked to comment on
+    /// something it cannot read. If the caption band's proportions change these move, and then
+    /// the doc above is wrong and should be re-measured rather than quietly left behind.
+    #[test]
+    fn carousel_slide_widths_are_the_measured_ones() {
+        /// A frame the shape this fleet's phones actually send.
+        fn fleet_frame(level: u8) -> Vec<u8> {
+            let mut image = image::RgbImage::new(1080, 2220);
+            for pixel in image.pixels_mut() {
+                pixel.0 = [level, level.wrapping_add(40), level.wrapping_add(80)];
+            }
+            let mut out = Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgb8(image)
+                .write_to(&mut out, image::ImageFormat::Png)
+                .unwrap();
+            out.into_inner()
+        }
+        let slide_width = |count: usize, kind: EvidenceKind| {
+            let frames: Vec<Vec<u8>> = (0..count)
+                .map(|index| fleet_frame((index as u8) * 60 + 10))
+                .collect();
+            let sheet = make_contact_sheet(&frames, kind).unwrap();
+            image::load_from_memory(&sheet.jpeg).unwrap().dimensions().0 / count as u32
+        };
+
+        assert_eq!(slide_width(1, EvidenceKind::CarouselSlides), 589);
+        assert_eq!(slide_width(2, EvidenceKind::CarouselSlides), 519);
+        assert_eq!(slide_width(4, EvidenceKind::CarouselSlides), 431);
+
+        // The flat budget is unchanged for moments, which is what holds their cost still.
+        assert_eq!(slide_width(1, EvidenceKind::Moments), 589);
+        assert_eq!(slide_width(2, EvidenceKind::Moments), 367);
+        assert_eq!(slide_width(4, EvidenceKind::Moments), 216);
     }
 }

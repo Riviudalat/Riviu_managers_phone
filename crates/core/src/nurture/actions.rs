@@ -21,7 +21,7 @@ use crate::interaction::{PreparedThreadMessage, ThreadSendEvidence};
 use crate::openai_client::pick_from_pool;
 use crate::openai_client::{
     host_of, ocr_caption, prepare_caption_comment, prepare_grounded_comment,
-    provider_supports_vision,
+    provider_supports_vision, EvidenceKind,
 };
 use crate::screen::{self, ActionRail, CommentDrawer};
 use crate::types::{
@@ -840,7 +840,13 @@ impl NurtureEngine {
                     .unwrap_or_default(),
             );
             let prepared_result = if provider_supports_vision(settings) {
-                prepare_grounded_comment(settings, &frames, direction.as_deref()).await
+                prepare_grounded_comment(
+                    settings,
+                    &frames,
+                    EvidenceKind::Moments,
+                    direction.as_deref(),
+                )
+                .await
             } else {
                 // An OCR miss is a turn with nothing to say, not a device
                 // failure. Propagating it with `?` made `do_comment` return
@@ -1214,6 +1220,15 @@ impl NurtureEngine {
         //
         // Falling back to sampling here is not a lesser path — it is what every video post
         // still does, unchanged.
+        // Read before `slides` is moved: what the pictures *are* decides what the model may
+        // say about them, and once the two sources have been folded into one `frames` they are
+        // indistinguishable. Sampling produces moments of one card; the traversal produces
+        // pages of a post, and calling the second the first invites narrated motion.
+        let kind = if slides.is_empty() {
+            EvidenceKind::Moments
+        } else {
+            EvidenceKind::CarouselSlides
+        };
         let frames = if slides.is_empty() {
             match self.collect_grounding_frames(udid, stop).await {
                 Some(frames) => frames,
@@ -1236,7 +1251,7 @@ impl NurtureEngine {
             frames.first().map(|frame| frame_digest(frame)).unwrap_or(0),
         );
         let prepared = if provider_supports_vision(settings) {
-            prepare_grounded_comment(settings, &frames, direction.as_deref()).await
+            prepare_grounded_comment(settings, &frames, kind, direction.as_deref()).await
         } else {
             let Some(caption) = self.read_caption(frames.last()).await else {
                 self.record_context_skip_attempt(

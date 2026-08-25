@@ -166,6 +166,7 @@ mod tuned_constant_tests {
             "interaction_campaign.rs",
             include_str!("interaction_campaign.rs"),
         ),
+        ("openai_client.rs", include_str!("openai_client.rs")),
         ("screen.rs", include_str!("screen.rs")),
         ("tiktok_drawer.rs", include_str!("tiktok_drawer.rs")),
         ("tiktok_like.rs", include_str!("tiktok_like.rs")),
