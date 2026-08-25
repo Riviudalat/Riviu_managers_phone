@@ -1,6 +1,6 @@
 [package]
 name = "riviu-managers-phone"
-version = "0.1.1"
+version = "0.2.0"
 description = "Riviu Manager — iPhone and Android device farm"
 authors = ["Riviu"]
 edition = "2021"
