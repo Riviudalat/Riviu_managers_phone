@@ -1712,42 +1712,81 @@ impl AppState {
                 if !settings.schedule_enabled {
                     continue;
                 }
-                let every = settings.schedule_every_minutes.max(1) as i64;
-                let now = chrono::Utc::now();
-                let due = match db.get_setting("nurture.schedule.next_run_at") {
-                    Ok(Some(raw)) => chrono::DateTime::parse_from_rfc3339(&raw)
-                        .map(|t| t.with_timezone(&chrono::Utc) <= now)
-                        .unwrap_or(true),
-                    _ => true,
-                };
-                if !due {
-                    continue;
+                // **The decision is in `nurture_schedule::decide`, and the effects are here.**
+                // It used to be one inline block, which is why the only thing testable about
+                // this scheduler was the order of two calls in the text of the file. Arming,
+                // due-ness, a corrupt mark and the phone list are now measurable; what stays
+                // here is reading the row, writing the mark, and starting the sessions.
+                let connected: Vec<String> = registry
+                    .list()
+                    .into_iter()
+                    .filter(|d| {
+                        !matches!(
+                            d.status,
+                            riviu_core::DeviceStatus::Disconnected
+                                | riviu_core::DeviceStatus::Error
+                        )
+                    })
+                    .map(|d| d.udid)
+                    .collect();
+                // One mark per window, plus the legacy one for a schedule that has no
+                // windows. Read by name from the settings rather than by scanning the table:
+                // a window the operator deleted leaves its row behind, and a scan would hand
+                // stale keys to a decision that has no window to match them against.
+                let mut marks = std::collections::BTreeMap::new();
+                for key in std::iter::once(crate::nurture_schedule::LEGACY_MARK.to_string()).chain(
+                    settings
+                        .schedule_windows
+                        .iter()
+                        .map(|window| crate::nurture_schedule::window_mark(&window.id)),
+                ) {
+                    if let Ok(Some(value)) = db.get_setting(&key) {
+                        marks.insert(key, value);
+                    }
                 }
+                let now = chrono::Utc::now();
+                // The operator's own offset: windows are the wall-clock hours they typed.
+                let offset = *chrono::Local::now().offset();
+                let (mark_key, udids, next_run_at, duration_minutes, behaviour) =
+                    match crate::nurture_schedule::decide(
+                        &settings, &marks, &connected, now, offset,
+                    ) {
+                        crate::nurture_schedule::Tick::Wait => continue,
+                        crate::nurture_schedule::Tick::Rearm {
+                            mark_key,
+                            next_run_at,
+                        } => {
+                            let _ = db.set_setting(&mark_key, &next_run_at.to_rfc3339());
+                            continue;
+                        }
+                        crate::nurture_schedule::Tick::Run {
+                            mark_key,
+                            udids,
+                            next_run_at,
+                            duration_minutes,
+                            behaviour,
+                        } => (mark_key, udids, next_run_at, duration_minutes, behaviour),
+                    };
+                // **The window's behaviour replaces the panel's before the gate sees it, not
+                // after.** `preflight_comment_job` refuses a phone whose text agent cannot
+                // serve the comment rate it is about to be asked for — so handing it the
+                // panel's rate and the window's rate to the session would gate on one number
+                // and run on another. A window that turns comments off should not be blocked
+                // by a missing API key.
+                let settings = match &behaviour {
+                    None => settings,
+                    Some(over) => riviu_core::NurtureSettings {
+                        num_videos: over.num_videos,
+                        num_rounds: over.num_rounds,
+                        like_prob: over.like_prob,
+                        comment_prob: over.comment_prob,
+                        follow_prob: over.follow_prob,
+                        ..settings
+                    },
+                };
                 let Ok(_admission) = command_admission.ensure_accepting_work() else {
                     break;
                 };
-                let mut udids = settings.schedule_udids.clone();
-                if udids.is_empty() {
-                    udids = registry
-                        .list()
-                        .into_iter()
-                        .filter(|d| {
-                            !matches!(
-                                d.status,
-                                riviu_core::DeviceStatus::Disconnected
-                                    | riviu_core::DeviceStatus::Error
-                            )
-                        })
-                        .map(|d| d.udid)
-                        .collect();
-                }
-                if udids.is_empty() {
-                    let _ = db.set_setting(
-                        "nurture.schedule.next_run_at",
-                        &(now + chrono::Duration::minutes(every)).to_rfc3339(),
-                    );
-                    continue;
-                }
                 // **The same gate the manual start treats as mandatory.** This path went
                 // straight to `start_many`, so a scheduled run began on phones whose text
                 // agent was not ready and then failed every comment it tried, once an hour,
@@ -1772,14 +1811,12 @@ impl AppState {
                     // away and the reason is now written down, which is the difference
                     // between a schedule that is failing and one that looks idle.
                     let _ = db.log_op("nurture.schedule.blocked", &preflight.refusal());
-                    let _ = db.set_setting(
-                        "nurture.schedule.next_run_at",
-                        &(now + chrono::Duration::minutes(every)).to_rfc3339(),
-                    );
+                    let _ = db.set_setting(&mark_key, &next_run_at.to_rfc3339());
                     continue;
                 }
-                let duration =
-                    Duration::from_secs(settings.schedule_duration_minutes.max(1) as u64 * 60);
+                // The window's cap, or the panel's when there are no windows —
+                // `decide` already picked which, so this must not re-read the panel.
+                let duration = Duration::from_secs(duration_minutes as u64 * 60);
                 let started = nurture
                     .start_many(
                         app_nurture.clone(),
@@ -1792,10 +1829,7 @@ impl AppState {
                 if !started.is_empty() {
                     let _ = db.log_op("nurture.schedule", &format!("{} devices", started.len()));
                 }
-                let _ = db.set_setting(
-                    "nurture.schedule.next_run_at",
-                    &(now + chrono::Duration::minutes(every)).to_rfc3339(),
-                );
+                let _ = db.set_setting(&mark_key, &next_run_at.to_rfc3339());
             }
         });
     }

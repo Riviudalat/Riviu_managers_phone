@@ -767,6 +767,76 @@ pub struct AnalyticsSummary {
     pub recent_logs: Vec<OpLog>,
 }
 
+/// The part of a window that overrides how a session behaves, when it overrides it at all.
+///
+/// **All five or none**, rather than five independent `Option`s. A window that carries a
+/// half-set of rates would leave the other half inheriting a global the operator edited
+/// later, and the four rates here share one 100% budget (`nurtureBudget.ts`) — a budget
+/// assembled from two sources is a budget nobody can read off the screen. One switch, one
+/// complete block: either this window behaves like the panel above it, or it behaves like
+/// exactly what is written in it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NurtureWindowBehaviour {
+    pub num_videos: u32,
+    pub num_rounds: u32,
+    pub like_prob: u32,
+    pub comment_prob: u32,
+    pub follow_prob: u32,
+}
+
+impl Default for NurtureWindowBehaviour {
+    fn default() -> Self {
+        let base = NurtureSettings::default();
+        Self {
+            num_videos: base.num_videos,
+            num_rounds: base.num_rounds,
+            like_prob: base.like_prob,
+            comment_prob: base.comment_prob,
+            follow_prob: base.follow_prob,
+        }
+    }
+}
+
+/// One stretch of the local day the schedule may run in.
+///
+/// Times are **minutes from local midnight**, because that is the number the operator is
+/// thinking in when they type `08:00` — the mark that says when the next run is due stays a
+/// UTC instant. `end_minute <= start_minute` means the window wraps past midnight, which is
+/// how "22:00 tới 02:00" is written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NurtureWindow {
+    /// Stable across edits, so the mark for "when is this window next due" survives the
+    /// operator reordering the list or changing the hours.
+    pub id: String,
+    pub start_minute: u32,
+    pub end_minute: u32,
+    /// How often a run starts *inside* the window.
+    pub every_minutes: u32,
+    /// The cap handed to each session this window starts.
+    pub duration_minutes: u32,
+    /// Empty means every connected phone, and the editor says so in words rather than
+    /// leaving a blank that reads as "none".
+    pub udids: Vec<String>,
+    /// `None` means "behave like the panel above".
+    pub behaviour: Option<NurtureWindowBehaviour>,
+}
+
+impl Default for NurtureWindow {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            start_minute: 8 * 60,
+            end_minute: 11 * 60,
+            every_minutes: 60,
+            duration_minutes: 20,
+            udids: Vec::new(),
+            behaviour: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct NurtureSettings {
@@ -808,6 +878,14 @@ pub struct NurtureSettings {
     pub schedule_duration_minutes: u32,
     #[serde(default)]
     pub schedule_udids: Vec<String>,
+    /// Stretches of the day the schedule may run in, each with its own cadence.
+    ///
+    /// **Empty keeps the old single-cadence behaviour**, which is what every database written
+    /// before this field existed contains: run every `schedule_every_minutes`, all day, on
+    /// `schedule_udids`. That fallback is not a deprecation shim to be removed quietly — it is
+    /// what an operator who never opens the window editor still gets.
+    #[serde(default)]
+    pub schedule_windows: Vec<NurtureWindow>,
     /// Pin the behaviour cycle to one mood (`chatty` / `liking` / `skimming`).
     /// Empty means the normal varied cycle. Only for isolating a feature during
     /// a test — a real session should vary.
@@ -934,6 +1012,7 @@ impl Default for NurtureSettings {
             schedule_every_minutes: 240,
             schedule_duration_minutes: 150,
             schedule_udids: Vec::new(),
+            schedule_windows: Vec::new(),
             steady_mood: String::new(),
             like_enabled: true,
             comment_enabled: true,

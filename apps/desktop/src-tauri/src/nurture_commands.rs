@@ -78,6 +78,73 @@ fn validate_nurture_settings(settings: &NurtureSettings) -> Result<(), String> {
     if !(15..=360).contains(&settings.schedule_duration_minutes) {
         return Err("schedule_duration_minutes phải nằm trong khoảng 15..=360".into());
     }
+    // **A window is checked as hard as the panel, and its id is checked harder.**
+    //
+    // The id is not decoration: it becomes a settings key (`nurture.schedule.next_run_at.<id>`)
+    // holding the mark for when that window is next due. An empty id would make two windows
+    // share one mark and mute each other; a duplicate id does the same thing on purpose.
+    let mut seen: Vec<&str> = Vec::new();
+    for window in &settings.schedule_windows {
+        let id = window.id.trim();
+        if id.is_empty() {
+            return Err("mỗi khung giờ phải có id".into());
+        }
+        if !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(format!(
+                "id khung giờ {id:?} chỉ được gồm chữ, số, `-` và `_`"
+            ));
+        }
+        if seen.contains(&id) {
+            return Err(format!(
+                "hai khung giờ dùng chung id {id:?}, nên chúng sẽ khoá lẫn nhau"
+            ));
+        }
+        seen.push(id);
+        // 1439 is 23:59. A start or end at 1440 would be a minute that no clock shows and
+        // that `covers` could never match.
+        if window.start_minute > 1_439 || window.end_minute > 1_439 {
+            return Err("giờ bắt đầu và kết thúc của khung phải nằm trong một ngày".into());
+        }
+        if !(15..=1_440).contains(&window.every_minutes) {
+            return Err(format!(
+                "khung {id:?}: chu kỳ phải nằm trong khoảng 15..=1440 phút"
+            ));
+        }
+        if !(15..=360).contains(&window.duration_minutes) {
+            return Err(format!(
+                "khung {id:?}: thời lượng phải nằm trong khoảng 15..=360 phút"
+            ));
+        }
+        if let Some(behaviour) = &window.behaviour {
+            if behaviour.num_videos == 0 || behaviour.num_videos > 10_000 {
+                return Err(format!("khung {id:?}: số video phải trong 1..=10000"));
+            }
+            if behaviour.num_rounds == 0 || behaviour.num_rounds > 100 {
+                return Err(format!("khung {id:?}: số vòng phải trong 1..=100"));
+            }
+            // Each rate on its own, and their sum: the four rates share one 100% budget in
+            // the panel (`nurtureBudget.ts`), and a window that ignores that would be a way
+            // to smuggle past the ceiling the panel refuses to let anyone type.
+            for (label, value) in [
+                ("tỉ lệ tim", behaviour.like_prob),
+                ("tỉ lệ bình luận", behaviour.comment_prob),
+                ("tỉ lệ follow", behaviour.follow_prob),
+            ] {
+                if value > 100 {
+                    return Err(format!("khung {id:?}: {label} phải trong 0..=100"));
+                }
+            }
+            let total = behaviour.like_prob + behaviour.comment_prob + behaviour.follow_prob;
+            if total > 100 {
+                return Err(format!(
+                    "khung {id:?}: tổng tim + bình luận + follow là {total}%, vượt 100%"
+                ));
+            }
+        }
+    }
     Ok(())
 }
 

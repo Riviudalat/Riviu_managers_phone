@@ -26,7 +26,6 @@ import { NurtureCommentsTab } from "./nurture/NurtureCommentsTab";
 import { NurtureDeviceLog } from "./nurture/NurtureDeviceLog";
 import { NurtureDeviceProgress, NurtureRunProgress } from "./nurture/NurtureProgress";
 import { NurtureBehaviourTab } from "./nurture/NurtureBehaviourTab";
-import { NurtureScheduleTab } from "./nurture/NurtureScheduleTab";
 import { IconClose, IconHeart } from "./Icons";
 import { LoadingState } from "./States";
 import type {
@@ -282,7 +281,7 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
   // be folded away, so tuning two related numbers meant scrolling past a closed section —
   // and opening two at once pushed the live log off the bottom, which is the one thing the
   // panel is open to watch. One group at a time, full width, log pinned above.
-  const [tab, setTab] = useState<"behaviour" | "ai" | "schedule" | "comments">("behaviour");
+  const [tab, setTab] = useState<"behaviour" | "ai" | "comments">("behaviour");
   /**
    * Which device's history is open, or `null`.
    *
@@ -695,7 +694,6 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                   [
                     ["behaviour", "Hành vi"],
                     ["ai", "AI"],
-                    ["schedule", "Lịch"],
                     ["comments", "Bình luận"],
                   ] as const
                 ).map(([key, label]) => (
@@ -735,9 +733,10 @@ export function NurturePopup({ devices, selected, onClose }: Props) {
                   patchRate={patchRate}
                   setSettings={setSettings}
                   overBudget={overBudget}
+                  targets={targets}
                 />
               )}
-              {tab === "schedule" && <NurtureScheduleTab settings={settings} patch={patch} />}
+
               {tab === "comments" && <NurtureCommentsTab live={anyRunning} />}
             </>
           )}

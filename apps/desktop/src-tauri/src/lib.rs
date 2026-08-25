@@ -12,6 +12,7 @@ mod interaction_commands;
 pub mod interaction_ocr;
 mod local_api;
 mod nurture_commands;
+mod nurture_schedule;
 mod peripherals;
 mod publish_commands;
 mod publish_driver;

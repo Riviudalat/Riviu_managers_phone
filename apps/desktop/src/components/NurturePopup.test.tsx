@@ -203,9 +203,14 @@ describe("NurturePopup", () => {
   it("groups the settings into tabs and shows one group at a time", async () => {
     await open();
     // Three tabs, "Hành vi" selected first because it is what an operator tunes.
+    //
+    // The schedule used to be a fourth tab. It now lives at the bottom of Hành vi, because a
+    // window overrides the rates in that pane and the two were a tab apart — so this asserts
+    // the schedule is reachable *without* leaving the default pane.
     expect(screen.getByRole("tab", { name: "Hành vi" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("tab", { name: "AI" })).toHaveAttribute("aria-selected", "false");
-    expect(screen.getByRole("tab", { name: "Lịch" })).toHaveAttribute("aria-selected", "false");
+    expect(screen.queryByRole("tab", { name: "Lịch" })).toBeNull();
+    expect(screen.getByLabelText(/Lịch tự chạy/)).toBeVisible();
     // The AI group is not merely collapsed, it is not rendered — which is the point of
     // tabs over the three stacked collapsibles this replaced.
     expect(screen.queryByLabelText(/^Base URL/)).toBeNull();
@@ -218,8 +223,9 @@ describe("NurturePopup", () => {
     expect(screen.getByLabelText(/^Định hướng giọng điệu/)).toBeVisible();
     expect(screen.getByRole("button", { name: /Test API/ })).toBeVisible();
 
-    fireEvent.click(screen.getByRole("tab", { name: "Lịch" }));
-    expect(screen.getByLabelText(/Lịch tự chạy/)).toBeVisible();
+    // Back to Hành vi: the schedule's own fields are the empty-window fallback, which is
+    // still a real mode — no windows means one cadence, all day.
+    fireEvent.click(screen.getByRole("tab", { name: "Hành vi" }));
     expect(screen.getByLabelText(/^Mỗi \(phút\)/)).toBeVisible();
     expect(screen.getByLabelText(/^Thời lượng \(phút\)/)).toBeVisible();
   });
@@ -311,7 +317,7 @@ describe("NurturePopup", () => {
     }
     expect(screen.getByLabelText(/^Base URL/)).toBeVisible();
 
-    fireEvent.click(screen.getByRole("tab", { name: "Lịch" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Hành vi" }));
     for (const name of ["Lịch tự chạy", "Mỗi (phút)", "Thời lượng (phút)"]) {
       expect(info(name)).toBeVisible();
     }

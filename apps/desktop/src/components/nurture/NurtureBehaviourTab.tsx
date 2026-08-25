@@ -8,18 +8,28 @@ import {
 } from "../../nurtureBudget";
 import type { NurtureSettings } from "../../types";
 import { InfoDot as Info } from "../InfoDot";
+import { NurtureWindows } from "./NurtureWindows";
 import { Switch, FeatureRow, RestartBadge } from "../NurturePopup";
 
 /**
  * How the session behaves: the four rates that share one 100% budget, the watch window,
  * fatigue, night hours and the carousel.
  */
-export function NurtureBehaviourTab({ settings, patch, patchRate, setSettings, overBudget }: {
+export function NurtureBehaviourTab({
+  settings,
+  patch,
+  patchRate,
+  setSettings,
+  overBudget,
+  targets,
+}: {
   settings: NurtureSettings;
   patch: <K extends keyof NurtureSettings>(key: K, value: NurtureSettings[K]) => void;
   patchRate: (key: BudgetKey, value: number) => void;
   setSettings: React.Dispatch<React.SetStateAction<NurtureSettings | null>>;
   overBudget: boolean;
+  /** The phones selected on the grid, for a window that wants only some of them. */
+  targets: string[];
 }) {
   return (
     <div className="nurture-sect nu-pane" role="tabpanel">
@@ -271,6 +281,10 @@ export function NurtureBehaviourTab({ settings, patch, patchRate, setSettings, o
         </span>
         <input value={settings.bundleId} onChange={(e) => patch("bundleId", e.target.value)} />
       </label>
+
+      {/* The schedule sits at the bottom of this pane rather than in a tab of its own: a
+          window overrides the rates above it, and the two were a tab apart. */}
+      <NurtureWindows settings={settings} patch={patch} targets={targets} />
     </div>
   );
 }
