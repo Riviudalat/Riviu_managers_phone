@@ -9162,3 +9162,62 @@ bằng chuột để thử: một cú click mù đã từng đăng bình luận 
   sang credential store, nên bản copy mang mọi cài đặt **trừ** cái quyết định có viết được bình
   luận hay không: harness viết theo hướng dẫn đó báo `khoá API TRỐNG` rồi từ chối. Đã gắn cùng
   một keyring seam mà `AppState::bootstrap` dùng, và sửa lại đoạn doc.
+
+## 9.113 Gộp bị từ chối thì hỏi gộp lần nữa; và hai test đỏ vì CRLF (26/08/2026)
+
+### Lỗi trùng câu quay lại bằng đường khác
+
+Đo `--batch 20` ba lượt sau §9.111: **0, 13, 14 câu lấy được từ lượt nháp gộp**. Lượt `0/20` là
+lượt đáng sợ: cả bộ bị cổng từ chối, cả 20 câu rơi xuống đường viết-từng-câu, mà đường đó viết
+mỗi câu từ **cùng một chỉ thị** và không thấy các câu anh em. Kết quả **12/20 câu khác nhau** —
+đúng lỗi trùng câu §9.112 vừa sửa, tới bằng một con đường khác.
+
+**Sửa:** khi còn ≥2 câu bị từ chối thì **hỏi gộp thêm một lượt cho đúng số còn thiếu**, kèm ghi
+chú vì sao lượt trước bị chấm hỏng. Chỉ cái nào hỏng **hai lần** mới viết riêng — và lúc đó
+những câu đã nhận được đưa vào chỉ thị làm danh sách "đừng lặp lại".
+
+Ba lượt đo lại, cùng bài, cùng cỡ 20:
+
+| | trước | sau |
+|---|---|---|
+| câu từ gộp | 0 / 13 / 14 | **19 / 19 / 18** |
+| câu khác nhau | 12 / 18 / 19 | **20 / 20 / 20** |
+| thời gian | 423 / 146 / 111 s | **75,6 / 69,2 / 87,3 s** |
+
+Nhanh hơn vì một lượt gọi cứu gần hết chỗ bị từ chối, thay cho 4–7 lượt viết riêng.
+
+**Và một tối ưu bị chính phép đo bác bỏ, ghi lại để không ai làm lại:** cho *các lượt kiểm chứng*
+chạy song song **không giúp gì** (48→55 s ở cỡ 5, 176→190 s ở cỡ 20 — nhiễu). Thời gian nằm ở
+các câu bị từ chối phải làm lại, mỗi câu là một lượt nháp + kiểm chứng + thử lại. Chạy song song
+**đúng chỗ đó** mới có 189→147 s, rồi lượt gộp thứ hai đưa nốt về ~75 s.
+
+### Hai test đỏ mà không ai sửa gì
+
+Sau khi merge PR #2, `cargo test` báo đỏ ba test ở hai crate — trên một thay đổi không đụng file
+nào trong số đó:
+
+```text
+types::nurture_tuning_tests::the_form_promises_exactly_what_a_running_session_absorbs
+types::nurture_tuning_tests::a_field_needing_a_restart_is_never_also_promised_as_live
+tests::the_updater_releases_the_fleet_between_downloading_and_installing
+```
+
+**Nguyên nhân: CRLF.** Merge làm git ghi lại cây theo `core.autocrlf=true`, và cả ba test đều
+**quét văn bản nguồn**. `rustc` **chuẩn hoá CRLF thành LF bên trong string literal**, nên cái kim
+là `\n}\n`; còn `include_str!` trả về **nguyên bytes trên đĩa**, tức `\r\n}\r\n`. Hai bên
+thôi khớp, và thông báo đọc ra là *"update_install has a body"* / *"absorb_live_changes was
+renamed"* trên một cây chẳng ai đổi tên gì.
+
+**CI không bao giờ thấy.** Workflow checkout bằng `git config --global core.autocrlf false`, nên
+lỗi này chỉ nổ trên clone của người phát triển. Đã sửa bằng cách `.replace("\r\n", "\n")`
+trước khi quét, ở cả ba chỗ.
+
+Luật cho lần sau: **test quét nguồn phải chuẩn hoá line ending trước khi tìm**, vì cái kim luôn
+là LF còn cái đống rơm thì không.
+
+### Còn hỏng, đã đo, chưa sửa
+
+Máy `ce051715cb22c30403` trượt **3/3 lượt campaign thật**, cùng một lỗi
+`minicap produced no decodable frame in 12s`. Ba trên ba không phải flake — máy đó hỏng stream
+cố định, và lần chạy gần nhất nó **đã có text soạn sẵn**, nên lỗi nằm đúng ở tầng stream chứ
+không phải tầng bình luận.

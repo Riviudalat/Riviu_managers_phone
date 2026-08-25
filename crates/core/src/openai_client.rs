@@ -1005,17 +1005,34 @@ pub async fn prepare_grounded_comments_batch(
     // So the drafting is batched — one picture, twenty comments, and the model can see the whole
     // set while making them differ — and the judging is not. Twenty-one calls a link instead of
     // forty, with the gate behaving exactly as it always has.
-    let mut out = Vec::with_capacity(count);
+    // Judged concurrently, in bounded groups. The verdicts stay per candidate — see
+    // `VERIFY_CONCURRENCY` for what judging them *together* did — but nothing about one
+    // candidate's verdict depends on another's, so waiting for each in turn was pure latency.
+    let mut verdicts: Vec<anyhow::Result<GroundedVerification>> = Vec::with_capacity(count);
+    for group in candidates.chunks(VERIFY_CONCURRENCY) {
+        let pending = group
+            .iter()
+            .map(|candidate| grounded_verify(settings, &sheet, candidate, direction));
+        verdicts.extend(futures_util::future::join_all(pending).await);
+    }
+
+    // Decided first, sent for rewriting afterwards. Deciding and rewriting in one pass is what
+    // made the refusals serial: each `prepare_grounded_comment` is a draft, a verification and a
+    // retry, and awaiting them one at a time put the whole cost of the gate's strictness on the
+    // wall clock. Nothing about one refusal depends on another.
+    let mut out: Vec<Option<anyhow::Result<GroundedCommentResult>>> = Vec::with_capacity(count);
     let mut from_batch = Vec::with_capacity(count);
     let mut refusals = Vec::new();
-    for (index, candidate) in candidates.iter().enumerate() {
-        let verification = match grounded_verify(settings, &sheet, candidate, direction).await {
+    let mut needs_rewrite: Vec<usize> = Vec::new();
+    for ((index, candidate), verdict) in candidates.iter().enumerate().zip(verdicts) {
+        let verification = match verdict {
             Ok(verification) => verification,
             Err(error) => {
                 // A verification that could not be read is not a refusal: hand this one comment
                 // to the path that knows how to try again.
                 tracing::warn!("gộp: không kiểm chứng được câu #{index}: {error}");
-                out.push(prepare_grounded_comment(settings, frames, kind, direction).await);
+                out.push(None);
+                needs_rewrite.push(index);
                 from_batch.push(false);
                 continue;
             }
@@ -1045,7 +1062,8 @@ pub async fn prepare_grounded_comments_batch(
                 gate.genericity,
                 gate.blocking_flags()
             ));
-            out.push(prepare_grounded_comment(settings, frames, kind, direction).await);
+            out.push(None);
+            needs_rewrite.push(index);
             from_batch.push(false);
             continue;
         }
@@ -1054,7 +1072,7 @@ pub async fn prepare_grounded_comments_batch(
         // thing to each would report twenty times what was spent.
         let first = index == 0;
         from_batch.push(true);
-        out.push(Ok(GroundedCommentResult {
+        out.push(Some(Ok(GroundedCommentResult {
             text: candidate.clone(),
             caption: batch.caption.clone(),
             context_confidence: batch.context_confidence,
@@ -1084,8 +1102,161 @@ pub async fn prepare_grounded_comments_batch(
             },
             model: verification.model.clone(),
             base_url_host: host_of(&settings.base_url),
-        }));
+        })));
     }
+
+    // **A second batch for the refusals, before any of them is written alone.**
+    //
+    // Measured 26/08/2026 and this is the failure it closes: on one twenty-phone run the gate
+    // refused the *whole* draft — `0 of 20 from the batch` — and all twenty fell through to the
+    // per-comment path, which writes each one from the same instruction and knows nothing about
+    // its siblings. The result was **12 distinct comments out of 20**, which is the duplicate
+    // posting this whole path exists to prevent, arrived at by a different road.
+    //
+    // Asking once more, for exactly the number still missing, keeps the property that makes the
+    // batch work at all: the model sees the set it is writing. Only what fails twice is written
+    // alone, and by then there are accepted comments to name as things not to repeat.
+    if needs_rewrite.len() >= 2 {
+        let retry_note = format!(
+            "{}; lượt trước bị chấm là chung chung hoặc nói quá — bám sát chi tiết nhìn thấy",
+            direction.unwrap_or("tự nhiên")
+        );
+        if let Ok(second) = grounded_generate_batch(
+            settings,
+            &sheet,
+            &lang,
+            max_words,
+            Some(&retry_note),
+            needs_rewrite.len(),
+        )
+        .await
+        {
+            let retry_candidates: Vec<String> = second
+                .comments
+                .iter()
+                .map(|text| sanitize_comment(text, max_words).unwrap_or_default())
+                .collect();
+            let mut retry_verdicts = Vec::with_capacity(retry_candidates.len());
+            for group in retry_candidates.chunks(VERIFY_CONCURRENCY) {
+                let pending = group
+                    .iter()
+                    .map(|candidate| grounded_verify(settings, &sheet, candidate, direction));
+                retry_verdicts.extend(futures_util::future::join_all(pending).await);
+            }
+            let mut still_missing = Vec::new();
+            // The second draft is one call; it is charged to the first comment it rescues, and
+            // nothing if it rescues none. A flag rather than an index comparison, because the
+            // first *slot* is not the first *rescued* slot when the earlier ones fail again.
+            let mut second_charged = false;
+            for ((slot, candidate), verdict) in needs_rewrite
+                .iter()
+                .zip(retry_candidates.iter())
+                .zip(retry_verdicts)
+            {
+                let Ok(verification) = verdict else {
+                    still_missing.push(*slot);
+                    continue;
+                };
+                let gate = VerificationGate {
+                    overall: second
+                        .context_confidence
+                        .min(verification.relevance)
+                        .min(verification.evidence_support),
+                    instruction_fit: verification.instruction_fit,
+                    genericity: verification.genericity,
+                    contradiction: verification.contradiction,
+                    unsupported_claim: verification.unsupported_claim,
+                    ui_text_confusion: verification.ui_text_confusion,
+                    formal_style: sounds_like_report(candidate),
+                };
+                if candidate.is_empty() || !gate.accepts() {
+                    still_missing.push(*slot);
+                    continue;
+                }
+                from_batch[*slot] = true;
+                out[*slot] = Some(Ok(GroundedCommentResult {
+                    text: candidate.clone(),
+                    caption: second.caption.clone(),
+                    context_confidence: second.context_confidence,
+                    relevance: verification.relevance,
+                    evidence_support: verification.evidence_support,
+                    frame_sha256: frame_sha256.clone(),
+                    distinct_frames: sheet.distinct_frames,
+                    // The second draft is charged to the first comment it rescued, and each
+                    // verification to the comment it judged — the same rule as the first round,
+                    // so a sum over the target is still what the gateway billed.
+                    prompt_tokens: verification.prompt_tokens
+                        + if second_charged {
+                            0
+                        } else {
+                            second.prompt_tokens
+                        },
+                    completion_tokens: verification.completion_tokens
+                        + if second_charged {
+                            0
+                        } else {
+                            second.completion_tokens
+                        },
+                    cost_usd: match (
+                        if second_charged {
+                            None
+                        } else {
+                            second.cost_usd
+                        },
+                        verification.cost_usd,
+                    ) {
+                        (None, None) => None,
+                        (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
+                    },
+                    model: verification.model.clone(),
+                    base_url_host: host_of(&settings.base_url),
+                }));
+                second_charged = true;
+            }
+            needs_rewrite = still_missing;
+        }
+    }
+
+    // **What is written alone is told what already exists.** The per-comment path has no way to
+    // see its siblings — that is the whole reason the batch exists — so the comments already
+    // accepted are handed to it as text not to repeat. Without this, the last few comments of a
+    // post are the ones most likely to duplicate each other, because they are exactly the ones
+    // the batch could not write.
+    let decided: Vec<String> = out
+        .iter()
+        .filter_map(|slot| slot.as_ref())
+        .filter_map(|result| result.as_ref().ok())
+        .map(|comment| comment.text.clone())
+        .collect();
+    let avoid = (!decided.is_empty()).then(|| {
+        format!(
+            "{}; KHÔNG lặp lại và không viết gần giống các câu đã có: {}",
+            direction.unwrap_or("tự nhiên"),
+            decided
+                .iter()
+                .map(|text| format!("{text:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    });
+    let lone_direction = avoid.as_deref().or(direction);
+
+    // Every remaining refusal rewritten at once, in the same bounded groups the verifications use.
+    for group in needs_rewrite.chunks(VERIFY_CONCURRENCY) {
+        let pending = group
+            .iter()
+            .map(|_| prepare_grounded_comment(settings, frames, kind, lone_direction));
+        for (index, result) in group
+            .iter()
+            .zip(futures_util::future::join_all(pending).await)
+        {
+            out[*index] = Some(result);
+        }
+    }
+    let out: Vec<anyhow::Result<GroundedCommentResult>> = out
+        .into_iter()
+        .map(|slot| slot.unwrap_or_else(|| Err(anyhow!("no_usable_evidence"))))
+        .collect();
     if !refusals.is_empty() {
         tracing::info!(
             "gộp: {}/{} câu bị cổng từ chối và phải làm lại từng câu — {}",
@@ -1226,6 +1397,26 @@ struct GroundedDraftBatch {
 /// here would mean a phone with nothing to say. Above the ceiling the per-comment path runs
 /// instead — correct, merely more expensive, and already measured.
 const VERIFY_BATCH_MAX: usize = 20;
+
+/// How many verifications may be in flight at once.
+///
+/// **Measured, and the reason this constant exists at all.** The verifications used to run one
+/// after another, which put the whole AI pass in front of the phones: 48 s for five comments and
+/// **176 s for twenty** — three minutes before the first phone moved, on a twenty-phone run that
+/// used to finish in three and a half minutes altogether. Each verification is one call about one
+/// sentence and knows nothing about the others, so the serialisation bought nothing.
+///
+/// Six rather than all of them: a gateway answers a burst of twenty with rate limits, and this
+/// path already has a per-comment fallback that would turn a throttled batch into twenty slow
+/// retries — the expensive shape, reached by trying to be fast.
+///
+/// **It also bounds the fallbacks, and that is where the time actually was.** Parallelising the
+/// verifications alone changed nothing measurable — 48 s to 55 s at five comments, 176 s to
+/// 190 s at twenty, which is run-to-run noise in how many the gate accepted. The wall clock
+/// belongs to the comments the gate *refuses*: each one is a full draft plus verification plus
+/// its own retry, and seven of those in a row is most of a twenty-phone pass. Measured before
+/// guessing again.
+const VERIFY_CONCURRENCY: usize = 6;
 
 async fn grounded_verify(
     settings: &NurtureSettings,
@@ -3170,5 +3361,110 @@ mod tests {",
         for result in &batched.results {
             assert!(result.is_ok(), "the fallback path still wrote a comment");
         }
+    }
+
+    /// A refused batch is asked again as a batch, not written one comment at a time.
+    ///
+    /// **This is the duplicate-comment defect coming back by another road.** Measured on a real
+    /// twenty-phone run: the gate refused the whole first draft, all twenty fell through to the
+    /// per-comment path, and because that path writes each comment from the same instruction with
+    /// no sight of its siblings, only **12 of 20 were distinct**. Four identical comments under
+    /// one post from four accounts is exactly what the batch exists to prevent.
+    ///
+    /// The mock answers three drafts and three verdicts in order: a first batch the gate refuses
+    /// on genericity, then a second batch it accepts. If the second batch were not asked for, the
+    /// run would consume the per-comment responses instead and `accepted_from_batch` would be 0.
+    #[tokio::test]
+    async fn a_refused_batch_is_asked_again_as_a_batch() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock gateway bind");
+        let address = listener.local_addr().expect("mock gateway address");
+        let generic = serde_json::json!({
+            "choices": [{"message": {"content": "{\"caption\":\"x\",\"captionConfidence\":90,\"visualFacts\":[],\"contextConfidence\":95,\"comments\":[\"Hay quá\",\"Tuyệt vời\",\"Đỉnh thật\"]}"}}],
+            "usage": {"prompt_tokens": 2842, "completion_tokens": 90},
+            "model": "mock-draft"
+        });
+        let refuse = serde_json::json!({
+            "choices": [{"message": {"content": "{\"relevance\":30,\"evidenceSupport\":20,\"instructionFit\":40,\"genericity\":95,\"contradiction\":false,\"unsupportedClaim\":false,\"uiTextConfusion\":false}"}}],
+            "usage": {"prompt_tokens": 2725, "completion_tokens": 20},
+            "model": "mock-verifier"
+        });
+        let specific = serde_json::json!({
+            "choices": [{"message": {"content": "{\"caption\":\"x\",\"captionConfidence\":95,\"visualFacts\":[],\"contextConfidence\":95,\"comments\":[\"Có cả bảng chi phí luôn\",\"Ngày đầu lịch hơi dày\",\"Hai triệu ba nghe ổn áp\"]}"}}],
+            "usage": {"prompt_tokens": 2842, "completion_tokens": 110},
+            "model": "mock-draft-2"
+        });
+        let pass = serde_json::json!({
+            "choices": [{"message": {"content": "{\"relevance\":96,\"evidenceSupport\":95,\"instructionFit\":92,\"genericity\":15,\"contradiction\":false,\"unsupportedClaim\":false,\"uiTextConfusion\":false}"}}],
+            "usage": {"prompt_tokens": 2725, "completion_tokens": 44},
+            "model": "mock-verifier"
+        });
+        let server = serve_mock_gateway(
+            listener,
+            vec![
+                generic,
+                refuse.clone(),
+                refuse.clone(),
+                refuse,
+                specific,
+                pass.clone(),
+                pass.clone(),
+                pass,
+            ],
+        );
+
+        let settings = NurtureSettings {
+            api_key: "test-key".into(),
+            base_url: format!("http://{address}/v1"),
+            ..NurtureSettings::default()
+        };
+        let frame = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
+        let batched = prepare_grounded_comments_batch(
+            &settings,
+            &[frame],
+            EvidenceKind::CarouselSlides,
+            Some("tự nhiên"),
+            3,
+        )
+        .await;
+        server.await.expect("mock gateway task");
+
+        assert_eq!(
+            batched.accepted_from_batch(),
+            3,
+            "the second batch rescued every refusal: {:?}",
+            batched.refusals
+        );
+        let texts: Vec<&str> = batched
+            .results
+            .iter()
+            .map(|result| result.as_ref().expect("a comment").text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "Có cả bảng chi phí luôn",
+                "Ngày đầu lịch hơi dày",
+                "Hai triệu ba nghe ổn áp"
+            ],
+            "the accepted set is the second draft, in slot order"
+        );
+
+        // One second draft, charged once. Charging it to every comment it rescued would report
+        // three times what the gateway billed.
+        let drafts_charged: usize = batched
+            .results
+            .iter()
+            .filter(|result| {
+                result
+                    .as_ref()
+                    .is_ok_and(|comment| comment.completion_tokens > 44)
+            })
+            .count();
+        assert_eq!(
+            drafts_charged, 1,
+            "the second draft is charged to one comment"
+        );
     }
 }
