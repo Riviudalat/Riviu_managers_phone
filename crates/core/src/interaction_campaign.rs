@@ -255,6 +255,27 @@ fn publish_evidence_frame(
     }
 }
 
+/// The carousel walk's picture source in production: whatever the phone's live stream last sent.
+///
+/// A separate type only so the walk itself can live next to the counter it reads and still be
+/// callable from a gate that has no `NurtureEngine` — see `examples/carousel_gate`, which is the
+/// only way to prove on real hardware that the counter can be read through the driver's agent
+/// rather than through `uiautomator dump`.
+struct StreamCamera<'a> {
+    engine: &'a crate::NurtureEngine,
+    udid: &'a str,
+}
+
+#[async_trait::async_trait]
+impl crate::interaction_hierarchy::SlideCamera for StreamCamera<'_> {
+    async fn capture(&self) -> Option<Vec<u8>> {
+        self.engine
+            .frames
+            .latest(self.udid)
+            .map(|frame| (*frame).clone())
+    }
+}
+
 /// Photograph the target on its root actor, for the AI to write from.
 ///
 /// Extracted so the failure is a value the caller can attribute to one target instead of
@@ -301,6 +322,24 @@ async fn collect_target_evidence_frames(
             .open_target(session.as_ref(), target)
             .await?;
         drop(evidence_driver);
+        // A photo post is walked, not sampled: it does not move, so three samples of it are
+        // one picture three times, and every slide past the first is only reachable by swiping.
+        if target.kind == crate::interaction::TikTokPostKind::Photo {
+            return Ok::<_, anyhow::Error>(
+                crate::interaction_hierarchy::photograph_photo_post(
+                    session.as_ref(),
+                    &StreamCamera {
+                        engine,
+                        udid: photographer,
+                    },
+                    &target_package,
+                    &evidence_gestures,
+                    settle,
+                )
+                .await
+                .frames,
+            );
+        }
         let mut frames = Vec::with_capacity(3);
         for _ in 0..3 {
             if let Some(frame) = engine.frames.latest(photographer) {
@@ -992,6 +1031,18 @@ async fn run_cohort(
         } else {
             Vec::new()
         };
+        // Taken from the link, not guessed from the pictures. A carousel whose walk reached one
+        // slide and a video parked on one frame produce the same single image, and only the URL
+        // separates them -- which matters because the two get told opposite things about what
+        // they are looking at.
+        let evidence_kind = match target.kind {
+            crate::interaction::TikTokPostKind::Photo => {
+                crate::openai_client::EvidenceKind::CarouselSlides
+            }
+            crate::interaction::TikTokPostKind::Video => {
+                crate::openai_client::EvidenceKind::Moments
+            }
+        };
 
         let mut prepared_messages = Vec::with_capacity(request.message_count as usize);
         let mut previous = None::<String>;
@@ -1058,6 +1109,7 @@ async fn run_cohort(
                     let prepared_text = match crate::openai_client::prepare_comment_for_frames(
                         &scoped,
                         &frames,
+                        evidence_kind,
                         Some(&direction),
                         engine.frame_text.as_ref(),
                     )

@@ -2271,6 +2271,326 @@ pub async fn read_author_label(session: &dyn UiSession, labels: TikTokControls) 
     None
 }
 
+/// What one walk through a photo post saw.
+///
+/// The counters are carried out rather than only logged because a two-slide post makes the two
+/// endings indistinguishable from the outside: "read 2 of 2, so this is the last slide" and
+/// "could not read the counter, so stop rather than risk the profile page" both hand back two
+/// pictures. The first run of `examples/carousel_gate` on the second TikTok build in this fleet
+/// looked like a pass for exactly that reason, and was not evidence of anything.
+pub struct PhotoWalk {
+    /// One picture per slide reached, in slide order.
+    pub frames: Vec<Vec<u8>>,
+    /// What the slide counter said after each swipe, in order.
+    ///
+    /// `None` means it could not be read, and when it is the last entry it is also why the walk
+    /// stopped.
+    pub counters: Vec<Option<(u32, u32)>>,
+}
+
+/// Where the carousel walk gets its pictures.
+///
+/// Production hands it the phone's live stream; the on-device gate hands it a screenshot. The
+/// walk itself has to be the same code in both, because what it is really being asked to prove
+/// is the *order of operations* — swipe, read the counter before it fades, settle, check the
+/// post is still there, only then keep the picture — and a gate that re-implements that order
+/// proves its own copy works.
+#[async_trait::async_trait]
+pub trait SlideCamera: Send + Sync {
+    /// The picture currently on screen, or `None` if none can be had right now.
+    async fn capture(&self) -> Option<Vec<u8>>;
+}
+
+/// How many slides of a photo carousel are worth photographing.
+///
+/// The bound is about the **contact sheet**, not the phone. `openai_client` gives the sheet a
+/// pixel budget per distinct picture, so every extra slide is more image the model is billed
+/// for on every message the post gets. Four is where that stops being free; the post that
+/// started this had two.
+///
+/// When the counter says the post is longer than this, the walk stops here and says so — a
+/// short read that announces itself, rather than a sheet that quietly implies it saw all of it.
+const CAROUSEL_SLIDE_CAP: usize = 4;
+
+/// How long the page-turning drag takes.
+///
+/// Inside the range `human_behavior::photo_swipe_duration_ms` picks from for the nurture loop,
+/// because this gesture goes out from a real account on a real post and there is no reason for
+/// it to look different from the same account swiping a carousel any other day.
+const CAROUSEL_SWIPE_MS: u64 = 420;
+
+/// Photograph a photo post slide by slide.
+///
+/// **The defect this exists for**, measured 25/08/2026 on
+/// `.../@pht.th.h.slay/photo/7668948504827448583`: the evidence pass took three stream frames
+/// 500 ms apart and `make_contact_sheet` collapsed them, because a photo post does not move.
+/// Every comment on that post was therefore written from **slide 1 only** — a person lying by
+/// a lake — while the post is a two-slide carousel whose second slide carries the content, a
+/// costed three-day itinerary. A carousel does not advance on its own; it waits to be swiped,
+/// so no amount of extra sampling time would ever have reached the second slide.
+///
+/// **Why it stops the moment the counter is unreadable.** One swipe past the last slide does
+/// not stay put and does not wrap: measured on the same post, it leaves for the author's
+/// profile page, which has a Follow button on it. A follow from an operator's account is
+/// permanent and this function is meant to be read-only, so an unread counter is treated as
+/// *stop*, never as *probably one more*.
+///
+/// Frames are only kept while the comment rail is still on screen — the same structural proof
+/// `open_target_by_hierarchy` uses for arrival. A picture taken after the post was left is not
+/// evidence about the post, and it is worse than no picture because it looks like one.
+pub async fn photograph_photo_post(
+    session: &dyn UiSession,
+    camera: &dyn SlideCamera,
+    target_package: &str,
+    gestures: &tokio::sync::Mutex<()>,
+    settle: Duration,
+) -> PhotoWalk {
+    use rand::Rng;
+
+    let mut frames = Vec::with_capacity(CAROUSEL_SLIDE_CAP);
+    let mut counters = Vec::with_capacity(CAROUSEL_SLIDE_CAP);
+    if let Some(frame) = camera.capture().await {
+        frames.push(frame);
+    }
+
+    // Without a measured label set there is no way to ask "is this still the post?", and
+    // without that question there is no safe swipe. One slide is a thinner sheet than four;
+    // a follow on a stranger's account is not recoverable at all.
+    let language = session.ui_language().await.unwrap_or_default();
+    let app_version = session
+        .app_version(target_package)
+        .await
+        .unwrap_or_default();
+    let Some(labels) = crate::tiktok_labels::controls_for(target_package, &language, &app_version)
+    else {
+        return PhotoWalk { frames, counters };
+    };
+    let Some(comments) = labels.label(crate::tiktok_labels::TikTokControl::Comments) else {
+        return PhotoWalk { frames, counters };
+    };
+    let (width, height) = session.window_size().await.unwrap_or((1_080.0, 2_220.0));
+    let mut reported_total = None;
+
+    // Bounded by **swipes**, not by frames collected. A stream that stops delivering leaves
+    // `frames` empty, and a frame-counted loop would then keep flicking until the counter
+    // happened to say stop -- up to `CAROUSEL_MAX_SLIDES` gestures on a real post. Three is
+    // three whatever the stream does.
+    for _ in 1..CAROUSEL_SLIDE_CAP {
+        let gesture = {
+            let mut rng = rand::thread_rng();
+            let y = height * rng.gen_range(0.38..0.62);
+            crate::types::SwipeGesture {
+                from: crate::types::TapPoint {
+                    x: width * rng.gen_range(0.74..0.84),
+                    y,
+                },
+                to: crate::types::TapPoint {
+                    x: width * rng.gen_range(0.16..0.27),
+                    y: y + rng.gen_range(-4.0..4.0),
+                },
+                duration_ms: CAROUSEL_SWIPE_MS,
+            }
+        };
+        {
+            let _guard = gestures.lock().await;
+            if let Err(error) = session.swipe(gesture).await {
+                tracing::warn!("interaction: khong vuot duoc carousel: {error}");
+                break;
+            }
+        }
+
+        // Read the counter *before* settling. It is in the tree for about three seconds after
+        // the page turns and then leaves it entirely — measured, a dump three seconds later is
+        // byte-identical to the pre-swipe one — and the hierarchy round-trip is itself most of
+        // the settle this would otherwise sleep through.
+        let index = read_carousel_index(session).await;
+        counters.push(index);
+        tokio::time::sleep(settle).await;
+
+        let still_on_post = session
+            .locate(comments.to_query())
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        if !still_on_post {
+            tracing::warn!(
+                "interaction: vuot ngang da roi bai sau {} anh - lui lai, khong giu khung nay",
+                frames.len()
+            );
+            let _ = session.back().await;
+            break;
+        }
+        if let Some(frame) = camera.capture().await {
+            frames.push(frame);
+        }
+
+        let Some((current, total)) = index else {
+            tracing::warn!(
+                "interaction: khong doc duoc chi so slide - dung o {} anh thay vi vuot tiep",
+                frames.len()
+            );
+            break;
+        };
+        reported_total = Some(total);
+        if current >= total {
+            break;
+        }
+    }
+
+    if let Some(total) = reported_total {
+        if total as usize > frames.len() {
+            tracing::warn!(
+                "interaction: bai co {total} anh, bang chung chi gom {} anh dau",
+                frames.len()
+            );
+        }
+    }
+    PhotoWalk { frames, counters }
+}
+
+/// The most slides this will believe a post has.
+///
+/// Not a measured TikTok limit — a sanity bound. It is here so that a misread pair (a caption
+/// that happens to render `1 / 2000`, a digit node that drifted onto the counter row) cannot
+/// become a traversal that swipes two thousand times on a real account.
+const CAROUSEL_MAX_SLIDES: u32 = 64;
+
+/// How far out of line two nodes of the counter row may sit and still count as adjacent.
+///
+/// Measured **0 px** on the fleet build: the digit ends exactly where the separator begins
+/// (`976` and `976`, then `1006` and `1006`). The tolerance is for rounding at another
+/// density, not for joining up nodes that are visibly apart.
+const CAROUSEL_ROW_SLACK: f64 = 8.0;
+
+/// The class the counter's three nodes carry.
+///
+/// Only the *fallback* path needs it — see [`read_carousel_index`], which anchors on the
+/// separator's text first precisely because a class name is the kind of thing that differs
+/// between the two TikTok builds on this fleet.
+const CAROUSEL_COUNTER_CLASS: &str = "android.widget.TextView";
+
+/// Which slide of a photo carousel is on screen, as `(current, total)`.
+///
+/// **Measured 25/08/2026** on `com.ss.android.ugc.trill`, 1080x2220, opening
+/// `.../@pht.th.h.slay/photo/7668948504827448583` — a two-slide post. The counter is three
+/// sibling `android.widget.TextView`s laid out in one row at the top right:
+///
+/// ```text
+///   text="2"    bounds=[955,195][976,234]
+///   text=" / "  bounds=[976,195][1006,234]
+///   text="2"    bounds=[1006,195][1027,234]
+/// ```
+///
+/// Their parent is a `LinearLayout` whose resource-id ends `:id/llz`. **That id is deliberately
+/// not the anchor.** It is minified, and a minified id is exactly what made the caption node
+/// unreadable on the other build in this fleet — the story written up on
+/// [`ElementQuery::ResourceIdSuffix`]. What this reads instead is the separator's own text and
+/// the geometry of the row, neither of which is translated or obfuscated.
+///
+/// **The counter is transient, and that shapes the whole caller.** A dump taken immediately
+/// after the swipe carries all three nodes; one taken three seconds later is byte-identical to
+/// the pre-swipe dump — the counter has left the tree entirely. So it can only be read straight
+/// after the gesture that turned the page.
+///
+/// `None` means **"could not read"**, never "one slide". A traversal has to treat it as *stop
+/// here*, because the alternative was measured too: one swipe past the last slide leaves the
+/// post and opens the author's profile page, Follow button and all, and a follow from a real
+/// account does not expire.
+pub async fn read_carousel_index(session: &dyn UiSession) -> Option<(u32, u32)> {
+    let separators = session
+        .locate_all_described(ElementQuery::Text {
+            value: "/",
+            exact: false,
+        })
+        .await
+        .ok()?;
+    if separators.is_empty() {
+        return None;
+    }
+    // A build that renders the whole counter as one node answers here, without the row.
+    for found in &separators {
+        if let Some(pair) = parse_carousel_pair(found.description.as_deref().unwrap_or_default()) {
+            return Some(pair);
+        }
+    }
+    let texts = session
+        .locate_all_described(ElementQuery::ClassName(CAROUSEL_COUNTER_CLASS))
+        .await
+        .ok()?;
+    carousel_index_from(&separators, &texts)
+}
+
+/// Rebuild `current / total` from the separate nodes TikTok lays out around the separator.
+///
+/// Nearest-on-each-side rather than first-found, for the same reason the comment locator picks
+/// the nearest row below a body: a screen carries plenty of numbers, and the only thing that
+/// makes these two *the* pair is that they sit flush against the separator on its own row.
+fn carousel_index_from(separators: &[ElementBox], texts: &[ElementBox]) -> Option<(u32, u32)> {
+    for separator in separators {
+        let middle = separator.y + separator.height / 2.0;
+        let left_edge = separator.x;
+        let right_edge = separator.x + separator.width;
+        let mut current: Option<(f64, u32)> = None;
+        let mut total: Option<(f64, u32)> = None;
+        for candidate in texts {
+            if middle < candidate.y || middle > candidate.y + candidate.height {
+                continue;
+            }
+            let Some(value) = candidate
+                .description
+                .as_deref()
+                .and_then(parse_slide_number)
+            else {
+                continue;
+            };
+            let candidate_right = candidate.x + candidate.width;
+            if candidate_right <= left_edge + CAROUSEL_ROW_SLACK {
+                let gap = (left_edge - candidate_right).abs();
+                if current.is_none_or(|(best, _)| gap < best) {
+                    current = Some((gap, value));
+                }
+            } else if candidate.x + CAROUSEL_ROW_SLACK >= right_edge {
+                let gap = (candidate.x - right_edge).abs();
+                if total.is_none_or(|(best, _)| gap < best) {
+                    total = Some((gap, value));
+                }
+            }
+        }
+        let (Some((_, current)), Some((_, total))) = (current, total) else {
+            continue;
+        };
+        if let Some(pair) = sane_pair(current, total) {
+            return Some(pair);
+        }
+    }
+    None
+}
+
+/// `"2 / 2"` in one node, for a build that does not split it.
+fn parse_carousel_pair(text: &str) -> Option<(u32, u32)> {
+    let (left, right) = text.trim().split_once('/')?;
+    sane_pair(parse_slide_number(left)?, parse_slide_number(right)?)
+}
+
+/// One node of the counter: a short run of ASCII digits and nothing else.
+///
+/// Length-capped so that a stray node carrying a long number — a view count, a timestamp —
+/// cannot present itself as a slide index just because it sits on the right row.
+fn parse_slide_number(text: &str) -> Option<u32> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.len() > 3 || !trimmed.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    trimmed.parse().ok()
+}
+
+/// The one place the pair is judged, so both readers judge it the same way.
+fn sane_pair(current: u32, total: u32) -> Option<(u32, u32)> {
+    (current >= 1 && current <= total && total <= CAROUSEL_MAX_SLIDES).then_some((current, total))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4297,5 +4617,309 @@ mod tests {
             "Home has to be tapped, or a phone already on the target post can never prove it \
              arrived at the target post"
         );
+    }
+
+    /// The counter row exactly as the fleet build laid it out.
+    ///
+    /// Read off a dump taken immediately after one horizontal swipe on
+    /// `.../@pht.th.h.slay/photo/7668948504827448583`, 25/08/2026. Three nodes, flush against
+    /// each other, on one row at the top right.
+    fn measured_counter_row() -> Vec<ElementBox> {
+        vec![
+            node(955.0, 195.0, 21.0, 39.0, "2"),
+            node(976.0, 195.0, 30.0, 39.0, " / "),
+            node(1006.0, 195.0, 21.0, 39.0, "2"),
+        ]
+    }
+
+    #[test]
+    fn the_measured_counter_row_reads_as_slide_two_of_two() {
+        let row = measured_counter_row();
+        let separators = vec![row[1].clone()];
+        assert_eq!(carousel_index_from(&separators, &row), Some((2, 2)));
+    }
+
+    /// A digit that is nearer the separator but on another row must not be read as the index.
+    ///
+    /// Goes red the moment the row check is dropped: without it the only numeric node on the
+    /// left is the one 400 px down the screen, and the function answers `Some((1, 2))` for a
+    /// screen that never showed a first slide. This is the same rule the comment locator
+    /// needs and for the same reason — a screen is full of numbers, and only the row makes
+    /// two of them a pair.
+    ///
+    /// **The distractor is `1` on purpose.** It was `7` first, and that test passed with the
+    /// row check deleted: `7 / 2` is refused by [`sane_pair`] anyway, so the assertion was
+    /// proving the sanity bound rather than the geometry. A value the bound accepts is what
+    /// makes the row the only thing standing between this screen and a wrong answer.
+    #[test]
+    fn a_digit_on_another_row_is_not_the_slide_index() {
+        let row = measured_counter_row();
+        let separator = row[1].clone();
+        let elsewhere = vec![
+            node(958.0, 600.0, 18.0, 39.0, "1"),
+            separator.clone(),
+            row[2].clone(),
+        ];
+        assert_eq!(
+            carousel_index_from(&[separator], &elsewhere),
+            None,
+            "a counter with no left-hand digit on its own row is unread, not guessed"
+        );
+    }
+
+    /// The action rail's own numbers sit on the same screen and must stay out of it.
+    #[test]
+    fn the_rail_counters_do_not_become_a_slide_index() {
+        let mut screen = measured_counter_row();
+        // Real bounds from the same dump: the Friends tab badge and the like count.
+        screen.push(node(352.0, 97.0, 65.0, 39.0, "28"));
+        screen.push(node(980.0, 1259.0, 41.0, 37.0, "28"));
+        let separators = vec![screen[1].clone()];
+        assert_eq!(carousel_index_from(&separators, &screen), Some((2, 2)));
+    }
+
+    #[test]
+    fn a_one_node_counter_is_read_without_the_row() {
+        assert_eq!(parse_carousel_pair("2 / 2"), Some((2, 2)));
+        assert_eq!(parse_carousel_pair("3/8"), Some((3, 8)));
+    }
+
+    #[test]
+    fn an_impossible_pair_is_refused() {
+        assert_eq!(
+            parse_carousel_pair("5 / 2"),
+            None,
+            "past the end of the post"
+        );
+        assert_eq!(parse_carousel_pair("0 / 2"), None, "slides are one-based");
+        assert_eq!(
+            parse_carousel_pair("1 / 999"),
+            None,
+            "a total past the sanity bound is a misread, not a very long post"
+        );
+        assert_eq!(parse_carousel_pair("1 / 2 / 3"), None);
+        assert_eq!(parse_carousel_pair("Trả lời"), None);
+    }
+
+    #[tokio::test]
+    async fn read_carousel_index_reads_the_split_counter_off_a_session() {
+        let row = measured_counter_row();
+        let session = DrawerSession::default()
+            .with_many("/", vec![row[1].clone()])
+            .with_many(CAROUSEL_COUNTER_CLASS, row);
+        assert_eq!(read_carousel_index(&session).await, Some((2, 2)));
+    }
+
+    /// No counter on screen is `None`, and `None` is what stops a traversal.
+    ///
+    /// The alternative is what the measurement showed: one swipe past the last slide leaves
+    /// the post for the author's profile page, where the Follow button is.
+    #[tokio::test]
+    async fn a_screen_without_a_counter_reads_none() {
+        let session = DrawerSession::default();
+        assert_eq!(read_carousel_index(&session).await, None);
+    }
+
+    /// A phone whose carousel behaves however the test needs it to.
+    ///
+    /// Everything here is keyed off the **swipe count**, not off a call counter, because
+    /// `read_carousel_index` asks twice for one screen (the separator, then the row) and a
+    /// fixture that advanced per call would answer the two halves of one read from two
+    /// different slides.
+    struct CarouselSession {
+        /// What the counter says after swipe 1, 2, 3 ... `None` is an unreadable counter.
+        counters: Vec<Option<(u32, u32)>>,
+        /// Whether the comment rail is still findable after swipe 1, 2, 3 ...
+        on_post: Vec<bool>,
+        swipes: Mutex<usize>,
+        backs: Mutex<usize>,
+    }
+
+    impl CarouselSession {
+        fn new(counters: Vec<Option<(u32, u32)>>) -> Self {
+            let on_post = vec![true; counters.len().max(1)];
+            Self {
+                counters,
+                on_post,
+                swipes: Mutex::new(0),
+                backs: Mutex::new(0),
+            }
+        }
+
+        fn leaving_the_post_after(mut self, swipe: usize) -> Self {
+            self.on_post = (0..self.counters.len().max(swipe))
+                .map(|index| index + 1 < swipe)
+                .collect();
+            self
+        }
+
+        fn after_swipe<T: Clone>(&self, table: &[T]) -> Option<T> {
+            let index = self.swipes.lock().checked_sub(1)?;
+            table.get(index).or_else(|| table.last()).cloned()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for CarouselSession {
+        async fn tap(&self, _point: crate::types::TapPoint) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn swipe(&self, _gesture: crate::types::SwipeGesture) -> anyhow::Result<()> {
+            *self.swipes.lock() += 1;
+            Ok(())
+        }
+        async fn type_text(&self, _text: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn home(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn back(&self) -> anyhow::Result<()> {
+            *self.backs.lock() += 1;
+            Ok(())
+        }
+        async fn find_and_tap(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn assert_visible(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+        fn supports_element_bounds(&self) -> bool {
+            true
+        }
+        /// A measured pair, so `controls_for` answers and the walk is allowed to swipe at all.
+        async fn ui_language(&self) -> Option<String> {
+            Some("en".to_string())
+        }
+        async fn app_version(&self, _bundle_id: &str) -> Option<String> {
+            Some("38.3.2".to_string())
+        }
+        async fn window_size(&self) -> anyhow::Result<(f64, f64)> {
+            Ok((1080.0, 2220.0))
+        }
+        /// Stands in for the comment rail: present exactly while the walk is still on the post.
+        async fn locate(&self, _query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            Ok(self.after_swipe(&self.on_post).unwrap_or(true).then(|| {
+                node(
+                    922.0,
+                    1296.0,
+                    158.0,
+                    171.0,
+                    "Read or add comments. 152 comments",
+                )
+            }))
+        }
+        async fn locate_all(&self, query: ElementQuery<'_>) -> anyhow::Result<Vec<ElementBox>> {
+            let Some(Some((current, total))) = self.after_swipe(&self.counters) else {
+                return Ok(Vec::new());
+            };
+            // The measured three-node row, rebuilt at the measured coordinates.
+            let row = vec![
+                node(955.0, 195.0, 21.0, 39.0, &current.to_string()),
+                node(976.0, 195.0, 30.0, 39.0, " / "),
+                node(1006.0, 195.0, 21.0, 39.0, &total.to_string()),
+            ];
+            Ok(match query {
+                ElementQuery::Text { value: "/", .. } => vec![row[1].clone()],
+                ElementQuery::ClassName(CAROUSEL_COUNTER_CLASS) => row,
+                _ => Vec::new(),
+            })
+        }
+    }
+
+    /// A camera that hands back a different picture every time it is asked.
+    struct CountingCamera {
+        taken: Mutex<u8>,
+    }
+
+    #[async_trait::async_trait]
+    impl SlideCamera for CountingCamera {
+        async fn capture(&self) -> Option<Vec<u8>> {
+            let mut taken = self.taken.lock();
+            *taken += 1;
+            Some(vec![*taken])
+        }
+    }
+
+    async fn walk(session: &CarouselSession) -> (PhotoWalk, usize, usize) {
+        let camera = CountingCamera {
+            taken: Mutex::new(0),
+        };
+        let gestures = tokio::sync::Mutex::new(());
+        let result = photograph_photo_post(
+            session,
+            &camera,
+            "com.ss.android.ugc.trill",
+            &gestures,
+            Duration::from_millis(0),
+        )
+        .await;
+        let swipes = *session.swipes.lock();
+        let backs = *session.backs.lock();
+        (result, swipes, backs)
+    }
+
+    /// A three-slide post is walked to its end and no further.
+    ///
+    /// Two swipes, not three: the counter says `3 / 3` after the second one, and the swipe that
+    /// would follow is the one that leaves for the author's profile page.
+    #[tokio::test]
+    async fn a_three_slide_post_is_walked_to_its_last_slide() {
+        let session = CarouselSession::new(vec![Some((2, 3)), Some((3, 3))]);
+        let (result, swipes, backs) = walk(&session).await;
+        assert_eq!(result.frames.len(), 3);
+        assert_eq!(swipes, 2, "the last slide must not be swiped past");
+        assert_eq!(backs, 0);
+        assert_eq!(result.counters, vec![Some((2, 3)), Some((3, 3))]);
+    }
+
+    /// A post longer than the sheet can carry stops at the cap, and the cap is on gestures.
+    #[tokio::test]
+    async fn a_long_post_stops_at_the_slide_cap() {
+        let session = CarouselSession::new(vec![Some((2, 9)), Some((3, 9)), Some((4, 9))]);
+        let (result, swipes, _) = walk(&session).await;
+        assert_eq!(result.frames.len(), CAROUSEL_SLIDE_CAP);
+        assert_eq!(swipes, CAROUSEL_SLIDE_CAP - 1);
+    }
+
+    /// An unreadable counter ends the walk instead of guessing there is one more slide.
+    ///
+    /// This is the safety rule, not a nicety. The measurement that produced it: one swipe past
+    /// the last slide of a photo post does not wrap and does not stay put — it opens the
+    /// author's profile page, where the Follow button is, and a follow from an operator's
+    /// account does not expire.
+    #[tokio::test]
+    async fn an_unreadable_counter_stops_the_walk() {
+        let session = CarouselSession::new(vec![None]);
+        let (result, swipes, backs) = walk(&session).await;
+        assert_eq!(
+            result.frames.len(),
+            2,
+            "the slide it did reach is still evidence"
+        );
+        assert_eq!(swipes, 1);
+        assert_eq!(backs, 0, "still on the post, so nothing to undo");
+        assert_eq!(result.counters, vec![None]);
+    }
+
+    /// A swipe that left the post throws its picture away and goes back.
+    ///
+    /// Keeping it would be worse than keeping nothing: a screenshot of somewhere else looks
+    /// exactly like evidence about this post, and the comment written from it would be about
+    /// whatever page the phone wandered onto.
+    #[tokio::test]
+    async fn a_swipe_that_leaves_the_post_keeps_no_picture() {
+        let session = CarouselSession::new(vec![Some((2, 5))]).leaving_the_post_after(1);
+        let (result, swipes, backs) = walk(&session).await;
+        assert_eq!(
+            result.frames.len(),
+            1,
+            "only the slide taken before the swipe"
+        );
+        assert_eq!(swipes, 1);
+        assert_eq!(backs, 1, "the walk has to undo the navigation it caused");
     }
 }
