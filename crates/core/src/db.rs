@@ -314,6 +314,83 @@ pub fn step_label(status: &StepStatus) -> &'static str {
 }
 
 #[cfg(test)]
+mod comment_attempt_tests {
+    use super::*;
+
+    fn attempt(id: &str, cost_usd: Option<f64>) -> crate::types::NurtureCommentAttempt {
+        crate::types::NurtureCommentAttempt {
+            id: id.into(),
+            udid: "phone-1".into(),
+            outcome: "prepared".into(),
+            source: "grounded-vision".into(),
+            model: "openai/gpt-5.6-luna".into(),
+            base_url_host: "openrouter.ai".into(),
+            prompt_tokens: 5565,
+            completion_tokens: 337,
+            cost_usd,
+            preview: "Lịch trình chi tiết thật".into(),
+            caption_preview: "The 72H schedule".into(),
+            frame_sha256: "a".repeat(64),
+            context_confidence: Some(92),
+            relevance: Some(98),
+            evidence_support: Some(95),
+            distinct_frames: Some(2),
+            carousel_slides: Some(2),
+            created_at: "2026-08-25T00:00:00Z".into(),
+        }
+    }
+
+    /// Every column of an attempt comes back as the column it went in as.
+    ///
+    /// **Written because adding one column silently rotated five others.** Inserting `cost_usd`
+    /// in the middle of the `SELECT` shifted `relevance`, `evidence_support`, `distinct_frames`,
+    /// `carousel_slides` and `created_at` by one, and the only reason it was caught was that one
+    /// of them happened to land on a differently-typed column and rusqlite complained. Two
+    /// integers swapping places would have passed every test in the tree, and the operator's
+    /// evidence panel would have shown a relevance score labelled as a confidence.
+    ///
+    /// So this asserts the *distinct* values back, not that the read succeeds.
+    #[test]
+    fn an_attempt_round_trips_every_column_including_its_price() {
+        let dir = std::env::temp_dir().join(format!("riviu-attempt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let db = Database::open(dir.join("riviu.db")).expect("open");
+
+        db.add_nurture_comment_attempt(&attempt("with-price", Some(0.001439)))
+            .expect("insert priced");
+        db.add_nurture_comment_attempt(&attempt("no-price", None))
+            .expect("insert unpriced");
+
+        let rows = db.list_nurture_comment_attempts(10).expect("list");
+        let priced = rows
+            .iter()
+            .find(|row| row.id == "with-price")
+            .expect("the priced row");
+        assert_eq!(priced.prompt_tokens, 5565);
+        assert_eq!(priced.completion_tokens, 337);
+        assert_eq!(priced.cost_usd, Some(0.001439));
+        assert_eq!(priced.context_confidence, Some(92));
+        assert_eq!(priced.relevance, Some(98));
+        assert_eq!(priced.evidence_support, Some(95));
+        assert_eq!(priced.distinct_frames, Some(2));
+        assert_eq!(priced.carousel_slides, Some(2));
+        assert_eq!(priced.created_at, "2026-08-25T00:00:00Z");
+        assert_eq!(priced.caption_preview, "The 72H schedule");
+
+        // **`None`, not `0.0`.** A gateway that does not report a price must stay
+        // distinguishable from one that reported nothing owed — the whole reason the column is
+        // nullable, and the reason migration 11 deleted the version that could not say it.
+        let unpriced = rows
+            .iter()
+            .find(|row| row.id == "no-price")
+            .expect("the unpriced row");
+        assert_eq!(unpriced.cost_usd, None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
 mod narrowing_tests {
     use super::*;
 

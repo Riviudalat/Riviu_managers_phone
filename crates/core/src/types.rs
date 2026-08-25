@@ -1331,6 +1331,12 @@ pub struct NurtureCommentAttempt {
     pub base_url_host: String,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
+    /// What the gateway said this attempt cost, in USD, summed over every call it took.
+    ///
+    /// **`None` means the gateway did not say, and that is not the same as free.** The column
+    /// this feeds is nullable for exactly that reason — see `apply_migration_15`, and see
+    /// migration 11 for the fabricated column whose zeroes this must never become.
+    pub cost_usd: Option<f64>,
     pub preview: String,
     pub caption_preview: String,
     pub frame_sha256: String,

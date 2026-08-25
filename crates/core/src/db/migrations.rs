@@ -119,6 +119,12 @@ const MIGRATIONS: &[Migration] = &[
         apply: apply_migration_14,
         rebuilds_tables: true,
     },
+    Migration {
+        version: 15,
+        name: "comment-cost-reported-by-gateway",
+        apply: apply_migration_15,
+        rebuilds_tables: false,
+    },
 ];
 
 const LEDGER_SQL: &str = r#"
@@ -885,6 +891,29 @@ fn apply_migration_10(transaction: &Transaction<'_>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Put a money column back, and this time let it say "I do not know".
+///
+/// **Migration 11 was right to drop the old one, and its reasoning is why this column is
+/// nullable.** That `usd` was `tokens * a_price_table_typed_into_the_source`; three different
+/// pairs of numbers existed at once, no UI could edit any of them, and after any model change
+/// every figure was silently wrong. It was dropped rather than zeroed, because — in migration
+/// 11's own words — a column reading `0.0` beside a real token count reads as *this comment was
+/// free*, which is a worse lie than the one being removed.
+///
+/// That objection applies to a gateway that does not report a price, and it is answered by the
+/// type rather than by argument: `REAL` with no `NOT NULL`, so "the biller did not say" is
+/// `NULL` and is never confused with "it cost nothing". What goes in is
+/// `usage.cost` out of the response — measured 25/08/2026 on OpenRouter, which returns it when
+/// asked — so the number is a report, not a multiplication done here.
+///
+/// A new name as well as a new shape. `usd` is the name of the fabricated one, it is in old
+/// backups and in this file's history, and reusing it would make the two indistinguishable to
+/// anyone reading a database without reading these comments.
+fn apply_migration_15(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    transaction.execute_batch("ALTER TABLE nurture_comment_attempts ADD COLUMN cost_usd REAL;")?;
+    Ok(())
+}
+
 fn apply_migration_11(transaction: &Transaction<'_>) -> anyhow::Result<()> {
     // **Dropping a column that was always a guess.** The `usd` in both comment tables was
     // `prompt_tokens * input_price_per_1m + completion_tokens * output_price_per_1m`, over two
@@ -1213,7 +1242,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::super::Database;
-    use super::{apply_v1_schema, run, run_with_failpoint};
+    use super::{apply_v1_schema, run, run_with_failpoint, MIGRATIONS};
 
     type Blob = Vec<u8>;
     type ScriptRowBytes = (Blob, Blob, Blob, Blob);
@@ -1539,7 +1568,7 @@ mod tests {
                 .iter()
                 .map(|(version, _)| *version)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+            MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>()
         );
         assert!(!table_exists(&connection, "interaction_events"));
         assert!(!table_exists(&connection, "interaction_dispatch"));
@@ -1667,7 +1696,7 @@ mod tests {
                 .iter()
                 .map(|(version, _)| *version)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+            MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>()
         );
         assert!(table_exists(&connection, "flow_documents"));
         assert!(table_exists(&connection, "nurture_comment_attempts"));
@@ -1917,7 +1946,7 @@ mod tests {
                     .iter()
                     .map(|(version, _)| *version)
                     .collect::<Vec<_>>(),
-                vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+                MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>()
             );
             // The local login is gone and migration 7 takes its credentials with it. This
             // used to assert the seeded `guest@local` row existed; the point of the change
@@ -1957,7 +1986,7 @@ mod tests {
                 .iter()
                 .map(|(version, _)| *version)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+            MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>()
         );
         drop(connection);
         cleanup(&path);
@@ -2002,7 +2031,7 @@ mod tests {
                 .iter()
                 .map(|(version, _)| *version)
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+            MIGRATIONS.iter().map(|m| m.version).collect::<Vec<_>>()
         );
         drop(connection);
         cleanup(&path);
@@ -2050,8 +2079,11 @@ mod tests {
                                     // One past the highest real migration: the point is a
                                     // ledger from a NEWER build, so this has to move
                                     // whenever a migration is added.
-                                    "INSERT INTO schema_migrations(version,name,applied_at)
-                                     VALUES(15,'future','2026-07-30T00:00:02Z')",
+                                    &format!(
+                                        "INSERT INTO schema_migrations(version,name,applied_at)
+                                         VALUES({},'future','2026-07-30T00:00:02Z')",
+                                        MIGRATIONS.last().expect("a migration").version + 1
+                                    ),
                                     [],
                                 )
                                 .expect("future migration");

@@ -162,6 +162,8 @@ struct PreparedTextComment {
     base_url_host: String,
     prompt_tokens: u32,
     completion_tokens: u32,
+    /// What the gateway said this cost. `None` when it did not say, never a locally made guess.
+    cost_usd: Option<f64>,
     source: &'static str,
     frame_sha256: Option<String>,
     caption_preview: Option<String>,
@@ -802,6 +804,7 @@ impl NurtureEngine {
             #[cfg(test)]
             {
                 pick_from_pool(_pool).map(|text| PreparedTextComment {
+                    cost_usd: None,
                     text,
                     model: settings.model.clone(),
                     base_url_host: host_of(&settings.base_url),
@@ -875,6 +878,7 @@ impl NurtureEngine {
             };
             match prepared_result {
                 Ok(comment) => Some(PreparedTextComment {
+                    cost_usd: comment.cost_usd,
                     text: comment.text,
                     model: comment.model,
                     base_url_host: comment.base_url_host,
@@ -922,6 +926,7 @@ impl NurtureEngine {
             base_url_host: prepared.base_url_host.clone(),
             prompt_tokens: prepared.prompt_tokens,
             completion_tokens: prepared.completion_tokens,
+            cost_usd: prepared.cost_usd,
             preview: prepared.text.chars().take(160).collect(),
             caption_preview: prepared.caption_preview.clone().unwrap_or_default(),
             frame_sha256: prepared.frame_sha256.clone().unwrap_or_default(),
@@ -1310,6 +1315,7 @@ impl NurtureEngine {
             base_url_host: comment.base_url_host.clone(),
             prompt_tokens: comment.prompt_tokens,
             completion_tokens: comment.completion_tokens,
+            cost_usd: comment.cost_usd,
             preview: comment.text.chars().take(160).collect(),
             caption_preview: comment
                 .caption
@@ -1412,6 +1418,7 @@ impl NurtureEngine {
             base_url_host: host_of(&settings.base_url),
             prompt_tokens: spend.map(|s| s.prompt_tokens).unwrap_or(0),
             completion_tokens: spend.map(|s| s.completion_tokens).unwrap_or(0),
+            cost_usd: spend.and_then(|s| s.cost_usd),
             preview: String::new(),
             caption_preview: String::new(),
             frame_sha256: String::new(),

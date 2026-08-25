@@ -178,10 +178,10 @@ impl Database {
             r#"
             INSERT INTO nurture_comment_attempts
               (id, udid, outcome, source, model, base_url_host, prompt_tokens,
-               completion_tokens, preview, caption_preview, frame_sha256,
+               completion_tokens, cost_usd, preview, caption_preview, frame_sha256,
                context_confidence, relevance, evidence_support, distinct_frames,
                carousel_slides, created_at)
-            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
             "#,
             params![
                 attempt.id,
@@ -192,6 +192,7 @@ impl Database {
                 attempt.base_url_host,
                 attempt.prompt_tokens as i64,
                 attempt.completion_tokens as i64,
+                attempt.cost_usd,
                 attempt.preview,
                 attempt.caption_preview,
                 attempt.frame_sha256,
@@ -224,7 +225,7 @@ impl Database {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id,udid,outcome,source,model,base_url_host,prompt_tokens,
-                    completion_tokens,preview,caption_preview,frame_sha256,
+                    completion_tokens,cost_usd,preview,caption_preview,frame_sha256,
                     context_confidence,relevance,evidence_support,distinct_frames,
                     carousel_slides,created_at
              FROM nurture_comment_attempts ORDER BY created_at DESC LIMIT ?1",
@@ -239,30 +240,31 @@ impl Database {
                 base_url_host: row.get(5)?,
                 prompt_tokens: narrow(row.get::<_, i64>(6)?, "prompt_tokens")?,
                 completion_tokens: narrow(row.get::<_, i64>(7)?, "completion_tokens")?,
-                preview: row.get(8)?,
-                caption_preview: row.get(9)?,
-                frame_sha256: row.get(10)?,
+                cost_usd: row.get(8)?,
+                preview: row.get(9)?,
+                caption_preview: row.get(10)?,
+                frame_sha256: row.get(11)?,
                 context_confidence: row
-                    .get::<_, Option<i64>>(11)?
+                    .get::<_, Option<i64>>(12)?
                     .map(|v| narrow(v, "context_confidence"))
                     .transpose()?,
                 relevance: row
-                    .get::<_, Option<i64>>(12)?
+                    .get::<_, Option<i64>>(13)?
                     .map(|v| narrow(v, "relevance"))
                     .transpose()?,
                 evidence_support: row
-                    .get::<_, Option<i64>>(13)?
+                    .get::<_, Option<i64>>(14)?
                     .map(|v| narrow(v, "evidence_support"))
                     .transpose()?,
                 distinct_frames: row
-                    .get::<_, Option<i64>>(14)?
+                    .get::<_, Option<i64>>(15)?
                     .map(|v| narrow(v, "distinct_frames"))
                     .transpose()?,
                 carousel_slides: row
-                    .get::<_, Option<i64>>(15)?
+                    .get::<_, Option<i64>>(16)?
                     .map(|v| narrow(v, "carousel_slides"))
                     .transpose()?,
-                created_at: row.get(16)?,
+                created_at: row.get(17)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)

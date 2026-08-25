@@ -627,6 +627,11 @@ export interface NurtureCommentAttempt {
   baseUrlHost: string;
   promptTokens: number;
   completionTokens: number;
+  /**
+   * What the gateway said this attempt cost, in USD. `null` means it did not say, which
+   * is not the same as free -- the column is nullable so the two can never be confused.
+   */
+  costUsd?: number;
   preview: string;
   captionPreview: string;
   frameSha256: string;
