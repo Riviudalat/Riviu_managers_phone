@@ -82,6 +82,59 @@ impl VerificationGate {
             && !self.formal_style
     }
 
+    /// What to tell the model it got wrong, in its own terms.
+    ///
+    /// **The note used to be one fixed sentence** — "lượt trước nghe quá giống văn báo cáo" —
+    /// sent whatever the gate had actually objected to. Measured on a live run 25/08/2026: a
+    /// draft scored `overall=85 instruction=100 genericity=70` was rejected for being empty
+    /// praise and nothing else, and the retry then asked it to stop sounding like a report, a
+    /// fault it did not have. Both attempts came back generic and the campaign posted nothing.
+    /// A retry that is not told what was wrong is a second coin toss, not a correction.
+    ///
+    /// Ordered by which fault actually blocked it, most specific first.
+    /// The flags that blocked this draft, for a refusal that would otherwise list four
+    /// passing numbers.
+    ///
+    /// **Measured 25/08/2026 on a live run:** two comments were refused with
+    /// `context=86 overall=86 instruction=98 genericity=12` — every number inside its
+    /// threshold — because a boolean the message never printed was set. A refusal that shows
+    /// only the numbers that passed reads as a broken gate, and sends whoever is on the other
+    /// end looking at thresholds that were never the problem.
+    fn blocking_flags(self) -> String {
+        let mut flags = Vec::new();
+        if self.contradiction {
+            flags.push("mâu thuẫn với bài");
+        }
+        if self.unsupported_claim {
+            flags.push("nói điều không có bằng chứng");
+        }
+        if self.ui_text_confusion {
+            flags.push("nhầm chữ giao diện là nội dung");
+        }
+        if self.formal_style {
+            flags.push("giọng văn báo cáo");
+        }
+        if flags.is_empty() {
+            // Nothing boolean blocked it, so a number did — the caller prints those.
+            String::new()
+        } else {
+            format!(" [{}]", flags.join(", "))
+        }
+    }
+
+    fn retry_note(self) -> &'static str {
+        if self.formal_style {
+            return "Lượt trước nghe quá giống văn báo cáo. Viết lại như một phản ứng ngắn của người vừa xem xong, dùng từ đời thường và vẫn chỉ dựa trên bằng chứng nhìn thấy.";
+        }
+        if self.genericity > 30 {
+            return "Lượt trước bị chấm là khen rỗng — câu đó dán vào bài nào cũng đúng. Viết lại bám vào MỘT chi tiết cụ thể nhìn thấy trong ảnh (thứ đang có trong khung, chữ trên ảnh, việc đang xảy ra), và bỏ hết từ khen chung chung.";
+        }
+        if self.instruction_fit < 70 {
+            return "Lượt trước lệch khỏi định hướng giọng điệu. Giữ đúng giọng được yêu cầu, vẫn chỉ nói điều nhìn thấy.";
+        }
+        "Lượt trước chưa bám bằng chứng nhìn thấy. Chỉ nói thứ có thể chỉ ra trong ảnh, và nói ngắn."
+    }
+
     fn retryable(self) -> bool {
         self.overall >= 60
             && !self.contradiction
@@ -390,19 +443,28 @@ pub async fn prepare_grounded_comment(
     // on the posts that need it and nothing at all on the ones that do not.
     let mut last_error: Option<String> = None;
     for attempt in 0..2 {
-        let draft =
-            match grounded_generate(settings, &sheet, &lang, max_words, direction, attempt > 0)
-                .await
-            {
-                Ok(draft) => draft,
-                Err(error) => {
-                    last_error = Some(error.to_string());
-                    if attempt == 0 {
-                        continue;
-                    }
-                    break;
+        let draft = match grounded_generate(
+            settings,
+            &sheet,
+            &lang,
+            max_words,
+            direction,
+            // What the gate said last time, so the second attempt is a correction rather
+            // than another throw. `None` on the first, and on a retry that follows an
+            // unreadable draft — there was no verdict to carry.
+            last_gate.map(VerificationGate::retry_note),
+        )
+        .await
+        {
+            Ok(draft) => draft,
+            Err(error) => {
+                last_error = Some(error.to_string());
+                if attempt == 0 {
+                    continue;
                 }
-            };
+                break;
+            }
+        };
         total_prompt = total_prompt.saturating_add(draft.prompt_tokens);
         total_completion = total_completion.saturating_add(draft.completion_tokens);
         let Some(candidate) = sanitize_comment(&draft.comment, max_words) else {
@@ -453,11 +515,12 @@ pub async fn prepare_grounded_comment(
     // a rejection that never happened — which is what `no_gate` used to do.
     if let Some(gate) = last_gate {
         return Err(anyhow!(
-            "comment_context_rejected: context={} overall={} instruction={} genericity={}",
+            "comment_context_rejected: context={} overall={} instruction={} genericity={}{}",
             gate.overall,
             gate.overall,
             gate.instruction_fit,
-            gate.genericity
+            gate.genericity,
+            gate.blocking_flags()
         ));
     }
     Err(anyhow!(
@@ -587,8 +650,12 @@ pub async fn prepare_caption_comment(
     let detail = last_gate
         .map(|gate| {
             format!(
-                "context={} overall={} instruction={} genericity={}",
-                gate.overall, gate.overall, gate.instruction_fit, gate.genericity
+                "context={} overall={} instruction={} genericity={}{}",
+                gate.overall,
+                gate.overall,
+                gate.instruction_fit,
+                gate.genericity,
+                gate.blocking_flags()
             )
         })
         .unwrap_or_else(|| "no_gate".to_string());
@@ -690,14 +757,11 @@ async fn grounded_generate(
     lang: &str,
     max_words: usize,
     direction: Option<&str>,
-    retry: bool,
+    // What the previous attempt was rejected for; `None` on the first attempt.
+    retry_note: Option<&str>,
 ) -> anyhow::Result<GroundedDraft> {
     let direction = direction.unwrap_or("tự nhiên");
-    let retry_note = if retry {
-        "Lượt trước nghe quá giống văn báo cáo. Viết lại như một phản ứng ngắn của người vừa xem xong, dùng từ đời thường và vẫn chỉ dựa trên bằng chứng nhìn thấy."
-    } else {
-        ""
-    };
+    let retry_note = retry_note.unwrap_or("");
     let layout = sheet.layout_note();
     let prompt = format!(
         "Bạn phân tích một contact sheet của một bài TikTok: {layout}.\n\
@@ -1429,6 +1493,99 @@ pub async fn prepare_comment_for_frames(
 
 #[cfg(test)]
 mod tests {
+    use super::VerificationGate;
+
+    fn gate() -> VerificationGate {
+        VerificationGate {
+            overall: 85,
+            instruction_fit: 100,
+            genericity: 10,
+            contradiction: false,
+            unsupported_claim: false,
+            ui_text_confusion: false,
+            formal_style: false,
+        }
+    }
+
+    /// **The retry is told what it got wrong, not a fixed complaint.**
+    ///
+    /// Live run 25/08/2026: a draft scored `overall=85 instruction=100 genericity=70` — empty
+    /// praise, nothing else wrong — and the retry note said "nghe quá giống văn báo cáo",
+    /// which was not the fault. Both attempts came back generic and the post got nothing.
+    #[test]
+    fn the_retry_note_names_the_fault_that_blocked_the_draft() {
+        let generic = VerificationGate {
+            genericity: 70,
+            ..gate()
+        };
+        assert!(
+            generic.retry_note().contains("khen rỗng"),
+            "empty praise is what was wrong, so that is what the retry has to say: {}",
+            generic.retry_note()
+        );
+
+        let formal = VerificationGate {
+            formal_style: true,
+            ..gate()
+        };
+        assert!(formal.retry_note().contains("văn báo cáo"));
+
+        let off_brief = VerificationGate {
+            instruction_fit: 40,
+            ..gate()
+        };
+        assert!(off_brief.retry_note().contains("định hướng"));
+    }
+
+    /// **A refusal names the flag that blocked it, not only the numbers that passed.**
+    ///
+    /// Measured 25/08/2026: two comments were refused with
+    /// `context=86 overall=86 instruction=98 genericity=12`, every number inside its
+    /// threshold, because a boolean nobody printed was set. That message reads as a broken
+    /// gate.
+    #[test]
+    fn a_refusal_says_which_flag_blocked_it() {
+        let formal = VerificationGate {
+            formal_style: true,
+            ..gate()
+        };
+        assert!(formal.blocking_flags().contains("giọng văn báo cáo"));
+
+        let invented = VerificationGate {
+            unsupported_claim: true,
+            ..gate()
+        };
+        assert!(invented.blocking_flags().contains("không có bằng chứng"));
+
+        // Both, and both are named — the operator should not have to guess which mattered.
+        let two = VerificationGate {
+            contradiction: true,
+            ui_text_confusion: true,
+            ..gate()
+        };
+        let said = two.blocking_flags();
+        assert!(
+            said.contains("mâu thuẫn") && said.contains("chữ giao diện"),
+            "{said}"
+        );
+
+        // Nothing boolean set means a number blocked it, and the caller already prints those.
+        assert_eq!(gate().blocking_flags(), "");
+    }
+
+    /// A draft that is generic *and* formal is told about the style first — a sentence that
+    /// reads like a report is generic almost by construction, so fixing the style is what
+    /// moves both.
+    #[test]
+    fn a_formal_and_generic_draft_is_told_about_the_style_first() {
+        let both = VerificationGate {
+            genericity: 70,
+            formal_style: true,
+            ..gate()
+        };
+        assert!(both.retry_note().contains("văn báo cáo"));
+    }
+
     use image::GenericImageView;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

@@ -566,9 +566,15 @@ impl UiSession for AndroidUiSession {
                 // a thing anybody can act on; "on the lock screen" is.
                 Ok(stdout) => match crate::adb::parse_foreground_window(&stdout) {
                     crate::adb::ForegroundWindow::App(package) => return Ok(package),
+                    // Names the window and stops there. It used to add "the phone is most
+                    // likely on its lock screen", which is one possibility presented as the
+                    // answer: measured 25/08/2026, a phone reporting `Select input method`
+                    // was awake, unlocked, and holding Android's keyboard chooser over the
+                    // app. The caller can act on a name; it cannot act on a guess.
                     crate::adb::ForegroundWindow::System(window) => tried.push(format!(
-                        "`{source}` reported the system window {window}, not an app — the phone \
-                         is most likely on its lock screen"
+                        "`{source}` reported the system window {window}, not an app — a lock \
+                         screen does this, and so does any system dialog standing over the \
+                         app"
                     )),
                     crate::adb::ForegroundWindow::Unreadable => {
                         tried.push(format!("`{source}` had no readable mCurrentFocus line"))

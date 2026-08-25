@@ -164,6 +164,18 @@ impl IdleSweeper {
 
     /// One pass over the fleet.
     async fn sweep_once(&self) {
+        // **Rule 1, kept for work that is about to start as well as work already running.**
+        //
+        // Taking each lease without waiting yields to a phone somebody else holds *now*, and
+        // a campaign reaches its phones seconds apart — so the ones it has not got to yet
+        // look idle and this would take them. Measured 25/08/2026 across three twenty-phone
+        // runs: assignments failed with `device … is busy with IdleSweep`, a different phone
+        // each time, always one the campaign had not reached. Standing down for the length of
+        // a campaign costs a tick of background tidying; not standing down costs a comment the
+        // operator asked for.
+        if riviu_core::interaction_campaign::any_campaign_running() {
+            return;
+        }
         let candidates: Vec<String> = self
             .registry
             .list()

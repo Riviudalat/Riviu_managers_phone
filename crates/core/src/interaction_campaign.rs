@@ -30,7 +30,7 @@ use crate::ThreadMessageState;
 use crate::ThreadPlan;
 use anyhow::Context;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 /// The package travels with the context because every caller needs it again: the
@@ -109,6 +109,16 @@ pub fn retryable_assignments(
         .collect()
 }
 
+/// How many times, and how long apart, an interaction waits out the idle sweeper.
+///
+/// Six attempts at 1.5 s is nine seconds — longer than one ladder run on this fleet and far
+/// short of the forty-second foreground budget that follows, so a phone that is genuinely
+/// held by something else still fails fast. Only `IdleSweep` is waited out: a phone held by
+/// nurture, a script, a repair or the operator's own overlay is somebody's actual work, and
+/// taking it from them is the collision this refusal exists for.
+const SWEEP_YIELD_ATTEMPTS: u32 = 6;
+const SWEEP_YIELD_WAIT: std::time::Duration = std::time::Duration::from_millis(1_500);
+
 pub async fn open_interaction_context(
     control: &DeviceControlPlane,
     udid: &str,
@@ -116,9 +126,40 @@ pub async fn open_interaction_context(
     // Resolve before acquiring anything: a phone with no drivable TikTok build should
     // refuse without taking a lease or a capacity slot.
     let target_package = control.resolve_tiktok_package(udid).await?;
-    let exclusive = control
-        .try_acquire_exclusive(udid, DeviceWorkOwner::Interaction)
-        .await?;
+    // **A phone the idle sweeper is tidying is busy for a moment, not taken.**
+    //
+    // The lease refuses instead of queueing, on purpose: two owners on one phone is the
+    // failure this whole layer exists to prevent. But `IdleSweep` is background tidying with
+    // no deadline — it holds a phone for one ladder run and lets go — while an interaction is
+    // work an operator asked for and is waiting on. The sweeper already yields to work that
+    // is *running* (it takes the lease without waiting and skips a busy phone); nothing made
+    // it yield to work that *arrives*, so the campaign lost the phone outright.
+    //
+    // Measured 25/08/2026 on a twenty-phone run: six assignments failed with
+    // `device … is busy with IdleSweep`, all naming the same phone. Asking again for a few
+    // seconds rides out a sweep and changes nothing about who may hold the lease: this is a
+    // retry of the same refusal-based acquire, not a queue.
+    let mut attempt = 0;
+    let exclusive = loop {
+        match control
+            .try_acquire_exclusive(udid, DeviceWorkOwner::Interaction)
+            .await
+        {
+            Ok(exclusive) => break exclusive,
+            Err(error) => {
+                let sweeping = matches!(
+                    &error,
+                    DeviceControlError::Busy(busy)
+                        if busy.current_owner == DeviceWorkOwner::IdleSweep
+                );
+                if !sweeping || attempt >= SWEEP_YIELD_ATTEMPTS {
+                    return Err(error);
+                }
+                attempt += 1;
+                tokio::time::sleep(SWEEP_YIELD_WAIT).await;
+            }
+        }
+    };
     let (exclusive, capacity) = control.reserve_ui_capacity(exclusive).await?;
     let kind = if control.requires_fresh_text_session(udid) {
         InteractionSessionKind::FreshText
@@ -220,23 +261,27 @@ fn publish_evidence_frame(
 /// a `?` that ends the campaign. Every step in here is a step that can fail on a real
 /// phone — open the context, choose a driver, prove arrival, get frames — and none of
 /// them is a reason to abandon the targets that come after.
+/// `photographer` is the phone that opens the post and takes the contact sheet.
+///
+/// **Whoever is about to comment, not always ordinal 0.** It used to find the target's root
+/// assignment and use that phone whatever the caller was doing, which is right for a thread —
+/// the root opens the post first anyway — and wrong everywhere else. A `Standalone` run now
+/// gives each assignment its own task, and twenty tasks all reaching for ordinal 0's phone is
+/// twenty tasks fighting over one device: measured 25/08/2026, a twenty-phone run failed
+/// 20/20 in under two minutes with `device 98895a… is busy with Interaction`. A retry of one
+/// middle message had the same shape, quieter — it woke a phone that had nothing to do with
+/// the retry.
 async fn collect_target_evidence_frames(
     control: &Arc<DeviceControlPlane>,
     engine: &crate::NurtureEngine,
-    plan: &crate::ThreadPlan,
     target: &crate::ResolvedTikTokTarget,
+    photographer: &str,
     settle: Duration,
 ) -> anyhow::Result<Vec<Vec<u8>>> {
-    let target_root_actor = plan
-        .assignments
-        .iter()
-        .find(|assignment| assignment.target_key == target.target_key && assignment.ordinal == 0)
-        .map(|assignment| assignment.actor_udid.as_str())
-        .context("target root actor missing")?;
     let InteractionDevice {
         context,
         target_package,
-    } = open_interaction_context(control, target_root_actor)
+    } = open_interaction_context(control, photographer)
         .await
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     let session = control.streaming_session(&context)?;
@@ -246,7 +291,7 @@ async fn collect_target_evidence_frames(
     let frames = async {
         let evidence_driver = choose_target_driver(
             engine,
-            target_root_actor,
+            photographer,
             session.as_ref(),
             &target_package,
             &evidence_gestures,
@@ -258,7 +303,7 @@ async fn collect_target_evidence_frames(
         drop(evidence_driver);
         let mut frames = Vec::with_capacity(3);
         for _ in 0..3 {
-            if let Some(frame) = engine.frames.latest(target_root_actor) {
+            if let Some(frame) = engine.frames.latest(photographer) {
                 frames.push((*frame).clone());
             }
             tokio::time::sleep(settle).await;
@@ -402,6 +447,80 @@ fn settle_state(tally: CampaignTally, had_error: bool) -> ThreadCampaignState {
     }
 }
 
+/// The handles a message opens with, decided without a database in the room.
+///
+/// Two different tags and never both. The **opening** comment carries the accounts the
+/// operator typed into the panel. A **reply** carries the account it is answering, and only
+/// when `mention_parent` asks for it — that is the fleet talking to itself: `Chain` tags down
+/// the line, `Star` has every reply tag whoever opened.
+///
+/// **A missing handle is not tagged, and that is the whole point of this being a function.**
+/// A phone the operator never filled a handle in for has nothing to tag with, and an `@`
+/// aimed at a guess is a stranger pulled into a customer's post — it notifies a real person
+/// and it cannot be taken back. Empty in, empty out, checked by a test rather than by
+/// reading the loop it used to live in.
+fn mentions_for(
+    ordinal: u8,
+    request: &ThreadCampaignRequest,
+    parent_handle: Option<&str>,
+) -> Vec<String> {
+    let clean = |handle: &str| handle.trim().trim_start_matches('@').trim().to_string();
+    if ordinal == 0 {
+        return request
+            .mentions
+            .iter()
+            .map(|handle| clean(handle))
+            .filter(|handle| !handle.is_empty())
+            .collect();
+    }
+    if !request.mention_parent {
+        return Vec::new();
+    }
+    parent_handle
+        .map(clean)
+        .filter(|handle| !handle.is_empty())
+        .into_iter()
+        .collect()
+}
+
+/// Whether any interaction campaign is running in this process.
+///
+/// **For the idle sweeper, which promises not to compete and could only half keep it.** The
+/// sweeper takes each phone's lease without waiting and skips one that is already held, so it
+/// yields to work that is *running* — but a campaign reaches its phones a few seconds apart
+/// (`FAN_OUT_STAGGER`), and every phone that has not been reached yet looks idle. Measured
+/// 25/08/2026: assignments failed with `device … is busy with IdleSweep` on three separate
+/// runs, each time a different phone, each time one the campaign had not got to yet.
+///
+/// A count rather than a flag: two campaigns can overlap, and the second finishing must not
+/// clear the first's claim on the fleet.
+static CAMPAIGNS_RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// See [`CAMPAIGNS_RUNNING`].
+pub fn any_campaign_running() -> bool {
+    CAMPAIGNS_RUNNING.load(Ordering::Relaxed) > 0
+}
+
+/// Holds the claim for as long as it lives, and gives it back however the campaign ends.
+///
+/// A guard rather than a pair of calls: `execute_thread_campaign` has a dozen `?` in it, and
+/// a decrement that a `return` can skip would leave the sweeper switched off for the life of
+/// the process.
+struct RunningCampaign;
+
+impl RunningCampaign {
+    fn start() -> Self {
+        CAMPAIGNS_RUNNING.fetch_add(1, Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for RunningCampaign {
+    fn drop(&mut self) {
+        CAMPAIGNS_RUNNING.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Run a campaign's cohorts at the same time, then decide what the campaign was.
 ///
@@ -428,6 +547,8 @@ pub async fn execute_thread_campaign(
     artifacts: crate::FlowArtifactStore,
     frame_source: Arc<dyn crate::GenerationFrameSource>,
 ) -> anyhow::Result<()> {
+    // Held for the whole run: the idle sweeper reads this and stands down.
+    let _running = RunningCampaign::start();
     let mut by_cohort: std::collections::BTreeMap<u16, std::collections::HashSet<String>> =
         Default::default();
     for message in &plan.assignments {
@@ -451,6 +572,60 @@ pub async fn execute_thread_campaign(
     let gate = Arc::new(tokio::sync::Semaphore::new(
         control.stream_capacity().max(1),
     ));
+    // **`Standalone` fans out per assignment, because there is nothing to keep in order.**
+    //
+    // Every other shape is a thread: message N replies to N-1, so the messages of one target
+    // have to run one after another and a cohort is the smallest thing that can run alone.
+    // `Standalone` has no parents at all — each phone posts its own root and reads nobody —
+    // so the assignment is the unit, and running them one at a time is a queue nothing asked
+    // for. Measured 25/08/2026 on this fleet: twenty phones, one cohort, **six comments in
+    // thirteen minutes**, with nineteen phones idle at any moment.
+    //
+    // The split reuses `only_assignments`, which is the same scoping the retry path uses, so
+    // each task owns exactly one row and no two tasks can reach the same one. That is the
+    // property that keeps a double post impossible, and it is a property of the sets being
+    // disjoint rather than of anyone being careful.
+    let per_assignment = if request.mode == crate::interaction::ThreadMode::Standalone {
+        let detail = db
+            .get_interaction_campaign(&campaign_id)?
+            .context("campaign không tồn tại")?;
+        let rows: Vec<(String, String)> = detail
+            .assignments
+            .iter()
+            .filter(|assignment| {
+                only_assignments
+                    .as_ref()
+                    .is_none_or(|only| only.contains(&assignment.id))
+            })
+            .map(|assignment| (assignment.id.clone(), assignment.target_key.clone()))
+            .collect();
+        (!rows.is_empty()).then_some(rows)
+    } else {
+        None
+    };
+
+    if let Some(rows) = per_assignment {
+        let mut running = Vec::with_capacity(rows.len());
+        for (index, (assignment_id, target_key)) in rows.into_iter().enumerate() {
+            running.push(tokio::spawn(staggered_cohort(
+                FAN_OUT_STAGGER * index as u32,
+                gate.clone(),
+                Some(std::collections::HashSet::from([target_key])),
+                db.clone(),
+                control.clone(),
+                engine.clone(),
+                events.clone(),
+                campaign_id.clone(),
+                request.clone(),
+                plan.clone(),
+                Some(std::collections::HashSet::from([assignment_id])),
+                artifacts.clone(),
+                frame_source.clone(),
+            )));
+        }
+        return join_campaign(db, events, campaign_id, running).await;
+    }
+
     // `None` for a single cohort rather than a set holding every key: it is the same work
     // either way, and it keeps the ordinary one-team run on the path that has no filter to
     // get wrong.
@@ -474,6 +649,74 @@ pub async fn execute_thread_campaign(
         )));
     }
 
+    join_campaign(db, events, campaign_id, running).await
+}
+
+/// How far apart the fanned-out tasks start.
+///
+/// **Measured 25/08/2026, twenty phones, one link.** With no stagger, thirteen of twenty
+/// comments landed in 3.5 minutes and five of the seven failures were the same sentence:
+/// `com.ss.android.ugc.trill did not reach the foreground within 40s`. That window is not
+/// wrong — AGENTS.md §9.19 measured a cold start at 15.9/19.7/19.4 s, once 26.9 s — it is
+/// measured against a phone starting *alone*. Twenty cold starts at once share one USB bus
+/// and one host, and the tail runs past 40 s.
+///
+/// Two seconds apart puts the twentieth phone 38 s behind the first, which is inside the run
+/// rather than beside it, and it costs nothing on a small selection. Widening the 40 s window
+/// instead would hide the contention rather than remove it, and that number was measured.
+const FAN_OUT_STAGGER: Duration = Duration::from_secs(2);
+
+/// [`gated_cohort`], after waiting its turn to start.
+///
+/// The wait is inside the task rather than in the loop that spawns them, so the spawn loop
+/// finishes at once and the delay is the task's own.
+#[allow(clippy::too_many_arguments)]
+async fn staggered_cohort(
+    delay: Duration,
+    gate: Arc<tokio::sync::Semaphore>,
+    mine: Option<std::collections::HashSet<String>>,
+    db: Arc<crate::db::Database>,
+    control: Arc<DeviceControlPlane>,
+    engine: crate::NurtureEngine,
+    events: crate::EventBus,
+    campaign_id: String,
+    request: ThreadCampaignRequest,
+    plan: ThreadPlan,
+    only_assignments: Option<std::collections::HashSet<String>>,
+    artifacts: crate::FlowArtifactStore,
+    frame_source: Arc<dyn crate::GenerationFrameSource>,
+) -> anyhow::Result<(usize, usize)> {
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
+    gated_cohort(
+        gate,
+        mine,
+        db,
+        control,
+        engine,
+        events,
+        campaign_id,
+        request,
+        plan,
+        only_assignments,
+        artifacts,
+        frame_source,
+    )
+    .await
+}
+
+/// Wait for every spawned unit, then decide how the campaign ended.
+///
+/// Shared by the two ways work is split — one task per cohort for a thread, one per
+/// assignment for `Standalone` — because the verdict is about the campaign and does not
+/// care which of them ran.
+async fn join_campaign(
+    db: Arc<crate::db::Database>,
+    events: crate::EventBus,
+    campaign_id: String,
+    running: Vec<tokio::task::JoinHandle<anyhow::Result<(usize, usize)>>>,
+) -> anyhow::Result<()> {
     let mut succeeded = 0usize;
     let mut failed = 0usize;
     let mut first_error: Option<anyhow::Error> = None;
@@ -623,6 +866,20 @@ async fn run_cohort(
         .get_interaction_campaign(&campaign_id)?
         .context("campaign không tồn tại")?;
     let protected = protected_assignment_ids(&detail.assignments);
+    // Who posted each message, so a reply can tag the account it answers.
+    //
+    // `(target_key, ordinal)` is unique across the whole plan: `plan_threads` gives each
+    // target to exactly one cohort, which is the same key `assignment_ids` is built on.
+    let actor_by_ordinal: std::collections::HashMap<(String, u8), String> = plan
+        .assignments
+        .iter()
+        .map(|assignment| {
+            (
+                (assignment.target_key.clone(), assignment.ordinal),
+                assignment.actor_udid.clone(),
+            )
+        })
+        .collect();
     // **What already posted, so a retry knows what to reply to.**
     //
     // An identity is only ever produced by sending, and a message that already succeeded
@@ -686,12 +943,33 @@ async fn run_cohort(
         // could not be photographed ended the whole run: every later target was left in
         // `queued` with no error of its own, and the campaign carried one target's message.
         // Measured: a two-target run posted one comment and never touched target two.
+        // The phone that photographs the post is the first one this task will actually use.
+        // For a thread that is ordinal 0, unchanged; for a fanned-out `Standalone` task it is
+        // that task's own phone, which is the only one it is allowed to touch.
+        let photographer = plan
+            .assignments
+            .iter()
+            .filter(|assignment| assignment.target_key == target.target_key)
+            .filter(|assignment| {
+                assignment_ids
+                    .get(&(assignment.target_key.clone(), assignment.ordinal))
+                    .is_some_and(|id| {
+                        only_assignments
+                            .as_ref()
+                            .is_none_or(|only| only.contains(id))
+                    })
+            })
+            .min_by_key(|assignment| assignment.ordinal)
+            .map(|assignment| assignment.actor_udid.clone());
         let frames = if request.needs_ai_evidence_frames() {
+            let Some(photographer) = photographer.as_deref() else {
+                continue;
+            };
             match collect_target_evidence_frames(
                 &control,
                 &engine,
-                &plan,
                 target,
+                photographer,
                 Duration::from_millis(500),
             )
             .await
@@ -812,22 +1090,22 @@ async fn run_cohort(
                     grounded.text
                 }
             };
-            // Tag the mentioned accounts on the opening comment only — the replies do not
-            // re-tag. Carried beside the text rather than pasted into it: the hierarchy driver
-            // turns each handle into a **real** mention by picking it out of TikTok's own
-            // suggestion list, and a handle already sitting in the body would just be typed
-            // twice. The pixel driver, which cannot reach that list, prepends them as literal
-            // text itself — exactly what both used to do.
-            let mentions = if assignment.ordinal == 0 {
-                request
-                    .mentions
-                    .iter()
-                    .map(|handle| handle.trim().trim_start_matches('@').to_string())
-                    .filter(|handle| !handle.is_empty())
-                    .collect()
-            } else {
-                Vec::new()
-            };
+            // Carried beside the text rather than pasted into it: the hierarchy driver turns
+            // each handle into a **real** mention by picking it out of TikTok's own suggestion
+            // list, and a handle already sitting in the body would just be typed twice. The
+            // pixel driver, which cannot reach that list, prepends them as literal text
+            // itself.
+            //
+            // Two different tags, and only one of them at a time. The opening comment carries
+            // the accounts the operator typed. A reply carries the account it is answering,
+            // and only when `mention_parent` asks for it — which is the fleet talking to
+            // itself: `Chain` tags down the line, `Star` has every reply tag whoever opened.
+            let parent_handle = assignment
+                .parent_ordinal
+                .and_then(|parent| actor_by_ordinal.get(&(assignment.target_key.clone(), parent)))
+                .and_then(|udid| db.get_device_meta(udid).ok())
+                .map(|meta| meta.handle);
+            let mentions = mentions_for(assignment.ordinal, &request, parent_handle.as_deref());
             let prepared = PreparedThreadMessage::with_mentions(assignment, text, mentions);
             previous = Some(prepared.text.clone());
             db.prepare_interaction_assignment(id, &prepared)?;
@@ -1671,7 +1949,7 @@ impl TargetDriver for HierarchyTargetDriver<'_> {
         // on purpose (see `execute_thread_campaign`), so passing it would only add a
         // parameter that never changes.
         let never = AtomicBool::new(false);
-        match crate::interaction_hierarchy::open_target_by_hierarchy(
+        let mut arrival = crate::interaction_hierarchy::open_target_by_hierarchy(
             session,
             self.labels,
             self.target_package,
@@ -1679,8 +1957,37 @@ impl TargetDriver for HierarchyTargetDriver<'_> {
             &target.author,
             &never,
         )
-        .await
+        .await;
+        // **"The screen did not change" also happens when the phone was already there.**
+        //
+        // The gate compares the author label before and after the deep link, and refuses when
+        // it is the same — which catches the real failure (TikTok swallowing an intent for a
+        // deleted post) and also catches a phone standing on the target post already. Measured
+        // 25/08/2026 on a live retry: message #2 refused with `màn hình vẫn là bài cũ (Phượt
+        // Thủ Hệ Slay⚡)`, and that name is the target's own author — the phone had been left
+        // on the post by the run before it.
+        //
+        // Stepping off with Back and asking once more separates the two: from the feed the
+        // deep link has a change to make. The same two lines the Đo bài command already had;
+        // the campaign path never got them.
+        if arrival
+            .as_ref()
+            .err()
+            .is_some_and(|refusal| refusal.code() == "target_open_screen_unchanged")
+            && session.back().await.is_ok()
         {
+            tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+            arrival = crate::interaction_hierarchy::open_target_by_hierarchy(
+                session,
+                self.labels,
+                self.target_package,
+                &target.normalized_url,
+                &target.author,
+                &never,
+            )
+            .await;
+        }
+        match arrival {
             Ok(TargetArrival::Identified { .. }) => Ok(TargetProof::Identified),
             Ok(TargetArrival::Structural) => Ok(TargetProof::Structural),
             Err(refusal) => anyhow::bail!("{}: {}", refusal.code(), refusal.message()),
@@ -1962,6 +2269,7 @@ mod tests {
                 shape: crate::interaction::ThreadShape::Star,
                 cohort_size: None,
                 mentions: Vec::new(),
+                mention_parent: false,
             }
         }
 
@@ -2292,7 +2600,137 @@ mod tests {
 }
 
 #[cfg(test)]
+mod mention_tests {
+    use super::mentions_for;
+    use crate::interaction::{ThreadCampaignRequest, ThreadMode, ThreadShape};
+
+    fn request(mentions: &[&str], mention_parent: bool) -> ThreadCampaignRequest {
+        ThreadCampaignRequest {
+            request_id: "r".into(),
+            targets: Vec::new(),
+            actor_udids: Vec::new(),
+            mode: ThreadMode::Threaded,
+            shape: ThreadShape::Chain,
+            message_count: 2,
+            instruction: String::new(),
+            max_words: 12,
+            cohort_size: None,
+            manual_comments: Vec::new(),
+            like_target: false,
+            mentions: mentions.iter().map(|m| (*m).to_string()).collect(),
+            mention_parent,
+        }
+    }
+
+    /// The opening comment carries what the operator typed, and only it.
+    #[test]
+    fn the_opening_comment_carries_the_operators_tags() {
+        assert_eq!(
+            mentions_for(0, &request(&["@ann", " bob "], false), Some("carol")),
+            vec!["ann".to_string(), "bob".to_string()],
+            "the leading @ and the spaces are the operator's typing, not part of the handle"
+        );
+    }
+
+    /// A reply carries nothing unless asked, which is what every stored campaign reads as.
+    #[test]
+    fn a_reply_tags_nobody_unless_asked() {
+        assert!(mentions_for(1, &request(&["ann"], false), Some("carol")).is_empty());
+    }
+
+    /// Asked, a reply tags the account it is answering — not the operator's list again.
+    #[test]
+    fn a_reply_tags_the_account_it_answers() {
+        assert_eq!(
+            mentions_for(1, &request(&["ann"], true), Some("@carol")),
+            vec!["carol".to_string()]
+        );
+    }
+
+    /// **A phone with no handle is not tagged, and nothing is invented in its place.**
+    ///
+    /// The handle comes from `device_meta`, which an operator fills in by hand and often has
+    /// not. Tagging a guess would notify a real stranger under a customer's post, and there
+    /// is no undo for that.
+    #[test]
+    fn a_phone_without_a_handle_is_left_untagged() {
+        for missing in [None, Some(""), Some("   "), Some("@"), Some(" @ ")] {
+            assert!(
+                mentions_for(1, &request(&["ann"], true), missing).is_empty(),
+                "handle {missing:?} names nobody, so it must tag nobody"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod boundary_tests {
+    /// **Every `Standalone` task owns exactly one assignment, and no two own the same one.**
+    ///
+    /// The fan-out gives each spawned task a singleton `only_assignments`, which is the same
+    /// scoping the retry path uses to keep a rerun off rows it must not touch. Two tasks
+    /// holding the same id would be two phones preparing and sending the same message — the
+    /// double post this whole layer exists to make impossible — so the property that matters
+    /// is that the sets are *disjoint*, and that is a property of how they are built.
+    ///
+    /// A source scan because the split happens in `execute_thread_campaign`, which needs a
+    /// database, a control plane, a nurture engine, an event bus and a frame source to call.
+    #[test]
+    fn the_standalone_fan_out_gives_each_task_one_assignment() {
+        let source = include_str!("interaction_campaign.rs");
+        let split = {
+            let start = source
+                .find("let per_assignment = if request.mode")
+                .expect("the standalone fan-out still exists");
+            let rest = &source[start..];
+            let end = rest
+                .find("// `None` for a single cohort")
+                .unwrap_or(rest.len());
+            &rest[..end]
+        };
+        assert!(
+            split.contains("HashSet::from([assignment_id])"),
+            "each task has to be scoped to one assignment id, or two tasks can share a row"
+        );
+        assert!(
+            split.contains("HashSet::from([target_key])"),
+            "and to that assignment's own target, or it would walk every link"
+        );
+        // One row in, one task out. Asserted as "nothing batches the rows" rather than as the
+        // loop's exact spelling: the first version pinned the literal
+        // `for (assignment_id, target_key) in rows`, and adding the stagger renamed the
+        // binding — so it failed for a change that kept the property it was guarding. A test
+        // that breaks on rephrasing teaches the next person to edit the test.
+        assert!(
+            split.contains("in rows"),
+            "the spawn loop still has to walk the rows: {split}"
+        );
+        for batching in ["chunks(", "chunks_exact(", "windows(", "step_by("] {
+            assert!(
+                !split.contains(batching),
+                "`{batching}` would put more than one assignment in a task"
+            );
+        }
+    }
+
+    /// `Standalone` is the only shape that may fan out.
+    ///
+    /// `Chain` has message N reply to N-1 and `Star` has every reply answer ordinal 0, so both
+    /// need the root to have landed before the replies start. Running their assignments at once
+    /// would have replies looking for a parent that has not been posted.
+    #[test]
+    fn only_the_shape_without_parents_fans_out() {
+        let source = include_str!("interaction_campaign.rs");
+        let start = source
+            .find("let per_assignment = if request.mode")
+            .expect("the fan-out still exists");
+        let condition = &source[start..start + 200];
+        assert!(
+            condition.contains("ThreadMode::Standalone"),
+            "the fan-out must be gated on the shape that has no parents: {condition}"
+        );
+    }
+
     /// The body of one `#[tauri::command]` in the desktop wrapper, for the two tests below.
     ///
     /// They are source scans because what they pin is an *ordering* inside a function that

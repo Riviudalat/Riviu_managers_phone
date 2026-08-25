@@ -1124,6 +1124,49 @@ pub enum ForegroundWindow {
 /// the unfocused ones say `null`, so the first line is not the answer. An app anywhere in
 /// the list wins over a system window, because a phone with TikTok focused on one display
 /// and a shade open on another is a phone TikTok is running on.
+/// The activity half of the focused window, when there is one.
+///
+/// `parse_foreground_window` answers the package and drops the activity on the floor, which
+/// is the right shape for "is my app in front" and the wrong one for "is my app *ready*".
+/// TikTok's splash screen belongs to the same package as its feed, so a proof that only reads
+/// the package is satisfied by a phone that has started the app and shown nothing yet.
+///
+/// Measured 25/08/2026, twenty-phone run: eight phones sat on
+/// `com.ss.android.ugc.aweme.splash.SplashActivity` and five of them failed the interaction
+/// with `no_baseline` — "could not read an author label", which describes the symptom and
+/// sends the operator looking in the wrong place.
+pub fn parse_foreground_activity(stdout: &str) -> Option<String> {
+    for line in stdout.lines().filter(|line| line.contains("mCurrentFocus")) {
+        let Some(after) = line.split_once("mCurrentFocus=") else {
+            continue;
+        };
+        let inside = after
+            .1
+            .trim()
+            .trim_start_matches("Window{")
+            .trim_end_matches('}');
+        let Some(what) = inside.split_whitespace().nth(2) else {
+            continue;
+        };
+        if let Some((_package, activity)) = what.split_once('/') {
+            let activity = activity.trim_end_matches('}').trim();
+            if !activity.is_empty() {
+                return Some(activity.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Whether an activity name is a launch/splash screen rather than the app proper.
+///
+/// A name match, and deliberately narrow: the only thing it must catch is the state where the
+/// package is up and the app has not drawn itself yet. A build that names its splash something
+/// else simply behaves as before — the caller falls through to its own timeout.
+pub fn is_splash_activity(activity: &str) -> bool {
+    activity.to_ascii_lowercase().contains("splash")
+}
+
 pub fn parse_foreground_window(stdout: &str) -> ForegroundWindow {
     let mut system: Option<String> = None;
     for line in stdout.lines().filter(|line| line.contains("mCurrentFocus")) {
@@ -1985,6 +2028,44 @@ drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
         assert_eq!(
             parse_foreground_window("Window #0 mOwnerUid=1000\n"),
             ForegroundWindow::Unreadable
+        );
+    }
+
+    /// **A splash screen is the app's package and not the app.**
+    ///
+    /// Measured 25/08/2026: eight phones of twenty sat on
+    /// `com.ss.android.ugc.aweme.splash.SplashActivity` while the readiness proof — which
+    /// reads only the package — counted them as up. Everything downstream then read an empty
+    /// screen and refused with `no_baseline`, a sentence about the symptom.
+    #[test]
+    fn the_activity_half_is_readable_and_a_splash_is_recognised() {
+        let splash = "  mCurrentFocus=Window{abc123 u0                       com.ss.android.ugc.trill/com.ss.android.ugc.aweme.splash.SplashActivity}
+";
+        let activity = parse_foreground_activity(splash).expect("the line names an activity");
+        assert_eq!(activity, "com.ss.android.ugc.aweme.splash.SplashActivity");
+        assert!(is_splash_activity(&activity));
+
+        // The package is unchanged for both, which is exactly why the package cannot decide.
+        assert_eq!(
+            parse_foreground_window(splash),
+            ForegroundWindow::App("com.ss.android.ugc.trill".into())
+        );
+    }
+
+    /// The feed is not a splash, and a window with no activity answers `None` rather than
+    /// guessing — the caller then behaves as it did before this existed.
+    #[test]
+    fn the_feed_is_not_a_splash_and_a_system_window_names_no_activity() {
+        let main = "  mCurrentFocus=Window{abc123 u0                     com.ss.android.ugc.trill/com.ss.android.ugc.aweme.main.MainActivity}
+";
+        let activity = parse_foreground_activity(main).expect("the line names an activity");
+        assert!(!is_splash_activity(&activity));
+        assert_eq!(
+            parse_foreground_activity(
+                "  mCurrentFocus=Window{a u0 StatusBar}
+"
+            ),
+            None
         );
     }
 

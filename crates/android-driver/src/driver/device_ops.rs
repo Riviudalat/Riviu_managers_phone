@@ -636,6 +636,57 @@ impl AndroidDriver {
     ///
     /// `locked: None` means the dump carried none of the three keys — unknown, which
     /// [`adb::parse_keyguard_locked`] documents callers must not read as "unlocked".
+    /// Give a splash screen a bounded moment to get out of the way. Never fails.
+    ///
+    /// **Bounded and non-fatal, and the first version of this was neither.** TikTok's splash
+    /// carries the app's own package, so the readiness proof — which reads the package — is
+    /// satisfied by a phone that has drawn nothing yet, and the interaction then reads an
+    /// empty screen and refuses with `no_baseline`. Measured 25/08/2026 on a twenty-phone run:
+    /// eight phones sat on `…aweme.splash.SplashActivity` and five failed that way.
+    ///
+    /// The obvious fix — make the proof wait for a non-splash activity — was tried and made it
+    /// much worse: **7/20 with 13 failures**, every one of them `did not reach the foreground
+    /// within 40s`. On this fleet, twenty simultaneous cold starts hold the splash past the
+    /// whole forty-second budget, and phones that used to leave it a moment later and work
+    /// were failed outright. So the splash is worth *waiting on* and never worth *failing on*:
+    /// a phone that leaves it inside this window arrives with a rendered feed and a readable
+    /// baseline, and a phone that does not is exactly as well off as before this existed.
+    ///
+    /// Eight seconds: long enough to cover the gap between the process drawing and the feed
+    /// appearing on a phone that is loading normally, short enough that twenty of them are a
+    /// tail on a three-minute run rather than a second budget beside it.
+    pub async fn wait_out_splash(&self, serial: &str) {
+        const SPLASH_GRACE: std::time::Duration = std::time::Duration::from_secs(8);
+        const SPLASH_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+        let deadline = std::time::Instant::now() + SPLASH_GRACE;
+        loop {
+            match self.foreground_activity(serial).await {
+                Some(activity) if adb::is_splash_activity(&activity) => {}
+                // Off the splash, or the dump named no activity — either way there is nothing
+                // left to wait for.
+                _ => return,
+            }
+            if std::time::Instant::now() >= deadline {
+                return;
+            }
+            tokio::time::sleep(SPLASH_POLL).await;
+        }
+    }
+
+    /// The activity of the focused window, or `None` when the dump does not name one.
+    ///
+    /// Only used to tell "the app is up" from "the app is *ready*": the package alone cannot,
+    /// because a splash screen carries the package too. `None` is not a failure — the caller
+    /// falls back to the behaviour it had before this existed.
+    pub async fn foreground_activity(&self, serial: &str) -> Option<String> {
+        let dump = self
+            .adb
+            .shell(serial, "dumpsys window | grep mCurrentFocus")
+            .await
+            .ok()?;
+        adb::parse_foreground_activity(&dump)
+    }
+
     pub async fn screen_guard_state(&self, serial: &str) -> anyhow::Result<ScreenGuardState> {
         let dump = self
             .adb

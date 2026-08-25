@@ -79,13 +79,53 @@ const DIALOG_GRACE: Duration = Duration::from_secs(5);
 /// them: `com.android.packageinstaller` up to Android 9, `com.google.android.packageinstaller`
 /// on Google builds, `com.android.permissioncontroller` from Android 10.
 fn dialog_over_app(observed: &str) -> bool {
-    matches!(
+    if matches!(
         observed,
         "com.google.android.packageinstaller"
             | "com.android.packageinstaller"
             | "com.android.permissioncontroller"
-    )
+    ) {
+        return true;
+    }
+    // **The keyboard picker, which has no package and blocks the app completely.**
+    //
+    // Measured 25/08/2026: one phone failed every twenty-phone run with `did not reach the
+    // foreground within 40s`, and `dumpsys window` showed `mCurrentFocus=Window{… Select
+    // input method}` — Android's IME chooser, sitting over TikTok. Dismissing it by hand with
+    // one Back let that phone join the very next run, and it came back during the run after,
+    // so it is worth clearing automatically rather than once. Unlike a permission dialog this
+    // one grants nothing, and Back is measured to close it.
+    //
+    // The caller reads the window's name out of `ForegroundWindow::System` rather than out of
+    // an error message, so this compares against the name Android gives it.
+    observed == "Select input method"
 }
+#[cfg(test)]
+mod dialog_tests {
+    use super::dialog_over_app;
+
+    /// **The keyboard picker blocks the app and carries no package.**
+    ///
+    /// Measured 25/08/2026: one phone failed every twenty-phone run with `did not reach the
+    /// foreground within 40s` while `dumpsys window` showed `Select input method` over
+    /// TikTok. It reaches this predicate inside the *error text* of a foreground read, not as
+    /// a package, so the equality match against installer packages could never see it.
+    #[test]
+    fn the_keyboard_picker_counts_as_a_dialog_over_the_app() {
+        // The name as `ForegroundWindow::System` carries it — what the caller now passes.
+        assert!(dialog_over_app("Select input method"));
+        assert!(dialog_over_app("com.android.permissioncontroller"));
+    }
+
+    /// And an ordinary app in front is not a dialog — including one whose name merely
+    /// mentions input.
+    #[test]
+    fn an_app_in_the_foreground_is_not_a_dialog() {
+        assert!(!dialog_over_app("com.ss.android.ugc.trill"));
+        assert!(!dialog_over_app("com.example.inputmethod.keyboard"));
+    }
+}
+
 /// `pm install` of an 18 MB APK over USB, with room for a slow phone.
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(180);
 /// How long a killed minicap child gets to actually exit before we stop claiming
@@ -1478,9 +1518,28 @@ impl DeviceDriver for AndroidDriver {
         let mut keyguard_tried = false;
         loop {
             let observed = match riviu_core::driver::UiSession::active_app_bundle(&session).await {
-                Ok(package) if package == bundle_id => break,
+                // The package is in front. Give the splash a bounded moment to get out of the
+                // way, then proceed either way — see `wait_out_splash`.
+                Ok(package) if package == bundle_id => {
+                    self.wait_out_splash(udid).await;
+                    break;
+                }
                 Ok(package) => package,
-                Err(error) => format!("<unreadable: {error}>"),
+                // **Ask what the window *is*, rather than matching on the error text.**
+                //
+                // A system window has no `package/activity` pair, so a foreground read fails
+                // and its message is the only thing that names it. Matching that message was a
+                // guess about wording and it did not fire: measured 25/08/2026, a phone
+                // holding `Select input method` failed every run with the plain forty-second
+                // timeout, never with the dialog path. `screen_guard_state` already parses the
+                // same dump into a `ForegroundWindow`, so the name is available as data.
+                Err(error) => match self.screen_guard_state(udid).await {
+                    Ok(state) => match state.foreground {
+                        crate::adb::ForegroundWindow::System(window) => window,
+                        _ => format!("<unreadable: {error}>"),
+                    },
+                    Err(_) => format!("<unreadable: {error}>"),
+                },
             };
 
             if !keyguard_tried {

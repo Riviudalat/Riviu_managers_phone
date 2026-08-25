@@ -80,6 +80,37 @@ fn bottom(element: &ElementBox) -> f64 {
 /// language's: the author sweep is by widget class, so on a fleet running two UI languages
 /// the list can contain either string. Comparing case-insensitively because these are
 /// rendered strings, not identifiers.
+/// How far an author label's left edge may sit from its comment body's.
+///
+/// **Measured 25/08/2026 on `com.ss.android.ugc.trill`, en-US, with the drawer open**: every
+/// author button and every comment body starts at `x=178`. Nothing in a comment row is
+/// indented from that column, so the honest tolerance is a hair, not a horizon.
+///
+/// It used to be `body.width` — 866 px on that dump — which is not a "comparable left edge"
+/// at all, it reaches the whole screen. What lives out there is the *video's* right rail,
+/// still in the same tree while the drawer is open, and its counters are bare-number buttons
+/// (`28` at `x=966`, `3` at `x=978`, `14` at `x=969` — the post's 28 likes, 3 comments and 14
+/// shares). One of them was read as a comment's author on a live run and the reply refused
+/// itself with `wanted: "28"`, which is the good outcome of a bad read.
+const AUTHOR_LEFT_SLACK: f64 = 24.0;
+
+/// Whether a label is a bare count rather than somebody's name.
+///
+/// `AUTHOR_LEFT_SLACK` already puts the rail's counters out of reach; this is the second lock
+/// on the same door. Geometry is a measurement of one build, and "the author of this comment
+/// is `28`" is a wrong answer no distance threshold should be trusted alone to prevent — the
+/// same argument this file already makes for the reply control.
+///
+/// A nickname that is only digits would be refused by this. That costs a refusal, where the
+/// alternative costs a reply under a stranger's comment, and only one of those can be undone.
+fn is_count_label(label: &str) -> bool {
+    let trimmed = label.trim().trim_end_matches(['K', 'M', 'k', 'm']);
+    !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c == ',')
+}
+
 fn is_reply_label(label: &str) -> bool {
     let label = label.trim();
     crate::tiktok_labels::TIKTOK_LABEL_SETS.iter().any(|set| {
@@ -135,9 +166,10 @@ pub fn locate_parent_in_elements(
             let label = candidate.description.as_deref().unwrap_or_default().trim();
             !label.is_empty()
                 && !is_reply_label(label)
+                && !is_count_label(label)
                 && bottom(candidate) <= body.y + ABOVE_SLACK
                 && candidate.y >= body.y - AUTHOR_REACH
-                && (candidate.x - body.x).abs() <= body.width.max(1.0)
+                && (candidate.x - body.x).abs() <= AUTHOR_LEFT_SLACK
         })
         .min_by(|a, b| {
             (body.y - bottom(a))
@@ -220,9 +252,11 @@ pub fn discover_identity_in_elements(
         .filter(|candidate| {
             let label = candidate.description.as_deref().unwrap_or_default().trim();
             !label.is_empty()
+                && !is_reply_label(label)
+                && !is_count_label(label)
                 && bottom(candidate) <= body.y + ABOVE_SLACK
                 && candidate.y >= body.y - AUTHOR_REACH
-                && (candidate.x - body.x).abs() <= body.width.max(1.0)
+                && (candidate.x - body.x).abs() <= AUTHOR_LEFT_SLACK
         })
         .min_by(|a, b| {
             (body.y - bottom(a))
@@ -529,6 +563,36 @@ pub async fn open_target_by_hierarchy(
                             settled = settled.or(fresh);
                             break;
                         }
+                    }
+                }
+            }
+        }
+    }
+    // **Home lands on whichever feed tab was last used, and one of them has no author at all.**
+    //
+    // Measured 25/08/2026, screenshots of the phones that failed: four of twenty were parked
+    // on the **Friends** tab, whose cards carry a story rail and no author row — so there was
+    // nothing to read, the Home tap kept them there, and every run refused those same four
+    // with `no_baseline`. `FeedTab` is For You, which always names an author.
+    //
+    // Only when there is still nothing: a phone that already gave a baseline is left where it
+    // is, because moving it would be a navigation nobody asked for.
+    if settled.is_none() {
+        if let Some(feed) = labels.label(TikTokControl::FeedTab) {
+            if let Ok(Some(element)) = session.locate(feed.to_query()).await {
+                let _ = session.tap(element.centre()).await;
+                let deadline = Instant::now() + BASELINE_SETTLE;
+                loop {
+                    tokio::time::sleep(ARRIVAL_POLL).await;
+                    if stop.load(Ordering::Relaxed) {
+                        return Err(ArrivalRefusal::Cancelled);
+                    }
+                    if let Some(fresh) = read_author_label(session, labels).await {
+                        settled = Some(fresh);
+                        break;
+                    }
+                    if Instant::now() >= deadline {
+                        break;
                     }
                 }
             }
@@ -1504,8 +1568,16 @@ pub const PARENT_SCROLL_ATTEMPTS: u32 = 10;
 
 /// How long the feed gets to render an author label after the phone is sent Home.
 ///
-/// Bounded, and a miss is not a failure: the baseline read before the tap is kept, which is
-/// exactly as good as it was before any of this existed.
+/// Bounded, and a miss is usually not a failure: the baseline read before the tap is kept.
+/// It *is* a failure when there was nothing to keep — `ArrivalRefusal::NoBaseline`.
+///
+/// **Stays at four, and the experiment that says so is worth recording.** Five phones on a
+/// twenty-phone run refused with `no_baseline`, so this was widened to twelve on the theory
+/// that a cold-started feed needed longer. It did not help — the next run refused five again.
+/// The cause was upstream: those phones were still on TikTok's splash screen, which the
+/// foreground proof accepted because a splash carries the app's own package. Waiting longer
+/// for a label on a screen that has none buys nothing, and a number raised on a theory the
+/// measurement refuted is worse than the number it replaced.
 const BASELINE_SETTLE: Duration = Duration::from_secs(4);
 
 /// Tap `View folded comments`, if this build has it measured and it is on screen.
@@ -3288,6 +3360,120 @@ mod tests {
 
     /// A node at a measured position. `label` goes in `description` because that is
     /// where `locate_all`'s caller puts whichever attribute it matched on.
+    /// **The video's right rail is in the same tree as the comment rows.**
+    ///
+    /// Measured 25/08/2026, `com.ss.android.ugc.trill` en-US, drawer open over the post:
+    /// authors and bodies both start at `x=178`, while the rail's counters sit at `x≈966-978`
+    /// as bare-number buttons — `28` likes, `3` comments, `14` shares.
+    ///
+    /// The break needs the row's own author to be out of the list — scrolled past the drawer's
+    /// clip, which is ordinary — because an author that *is* there sits 6 px above its body and
+    /// wins on distance. With it gone, the old filter's left-edge tolerance of `body.width`
+    /// (866 px there) reached all the way to the rail and took a counter instead. It did, on a
+    /// live run: the reply refused itself with `ô reply ghi "Replying to Phùng Kiên", không
+    /// chứa tên tác giả cha "28"`. The refusal was right; the read that produced `"28"` was not.
+    ///
+    /// Refusing to find a parent is the correct answer here. A reply that cannot name who it
+    /// answers must not be typed.
+    #[test]
+    fn a_counter_from_the_videos_rail_is_not_a_comments_author() {
+        let body = node(
+            178.0,
+            1200.0,
+            866.0,
+            126.0,
+            "Giới trẻ giờ mê chill giữa thiên nhiên",
+        );
+        // `28` at x=966: within the old `body.width` tolerance, far outside a left edge.
+        let rail_count = node(966.0, 1122.0, 47.0, 42.0, "28");
+        let reply = node(333.0, 1338.0, 104.0, 48.0, "Reply");
+
+        assert!(
+            locate_parent_in_elements(
+                &[body],
+                &[reply],
+                &[rail_count],
+                &CommentLocatorIdentity {
+                    author_label: "Xuân".into(),
+                    text: "Giới trẻ giờ mê chill giữa thiên nhiên".into(),
+                    locator_version: "v1".into(),
+                    frame_sha256: "sha".into(),
+                },
+            )
+            .is_none(),
+            "with no author in reach, the answer is 'not found', never the rail's like count"
+        );
+    }
+
+    /// **And a rail control that is not a number is caught by the left edge alone.**
+    ///
+    /// `is_count_label` cannot see this one: `Add or remove this video from Favorites` is a
+    /// real button from the same dump, at `x=899`, with a perfectly name-like label. Only the
+    /// left edge separates it from the comment column at `x=178`. This is the case that says
+    /// the tightened tolerance is load-bearing rather than a second opinion.
+    #[test]
+    fn a_named_rail_control_is_not_a_comments_author_either() {
+        let body = node(178.0, 1200.0, 866.0, 126.0, "câu vừa gửi");
+        let rail_button = node(
+            899.0,
+            1122.0,
+            181.0,
+            42.0,
+            "Add or remove this video from Favorites.",
+        );
+
+        assert!(
+            discover_identity_in_elements(&[body], &[rail_button], "câu vừa gửi", "sha", "v1")
+                .is_none(),
+            "a control 721 px to the right of the comment column is not that comment's author"
+        );
+    }
+
+    /// The row's real author still wins when it is there — the tightening must not cost that.
+    #[test]
+    fn the_real_author_is_still_found_next_to_its_body() {
+        let author = node(178.0, 1146.0, 95.0, 48.0, "Xuân");
+        let body = node(
+            178.0,
+            1200.0,
+            866.0,
+            126.0,
+            "Giới trẻ giờ mê chill giữa thiên nhiên",
+        );
+        let rail_count = node(966.0, 1122.0, 47.0, 42.0, "28");
+        let reply = node(333.0, 1338.0, 104.0, 48.0, "Reply");
+
+        let found = locate_parent_in_elements(
+            &[body],
+            &[reply],
+            &[rail_count, author],
+            &CommentLocatorIdentity {
+                author_label: "Xuân".into(),
+                text: "Giới trẻ giờ mê chill giữa thiên nhiên".into(),
+                locator_version: "v1".into(),
+                frame_sha256: "sha".into(),
+            },
+        )
+        .expect("the row is there to be found");
+        assert_eq!(found.identity.author_label, "Xuân");
+    }
+
+    /// The same rail, on the path that *captures* an identity after sending.
+    ///
+    /// This is where the bad read originally happened: an identity stored with `"28"` as its
+    /// author makes every later reply to it refuse, which is what the live run did.
+    #[test]
+    fn discovering_an_identity_also_ignores_the_rail() {
+        let body = node(178.0, 1200.0, 866.0, 126.0, "câu vừa gửi");
+        let rail_count = node(966.0, 1122.0, 47.0, 42.0, "28");
+
+        assert!(
+            discover_identity_in_elements(&[body], &[rail_count], "câu vừa gửi", "sha", "v1")
+                .is_none(),
+            "an identity whose author is the rail's counter poisons every reply that follows"
+        );
+    }
+
     fn node(x: f64, y: f64, width: f64, height: f64, label: &str) -> ElementBox {
         ElementBox {
             x,
