@@ -1651,7 +1651,18 @@ mod nurture_tuning_tests {
 
     /// Rust field names `absorb_live_changes` copies, in the frontend's spelling.
     fn fields_absorbed_live() -> std::collections::BTreeSet<String> {
-        let source = include_str!("types.rs");
+        // **Normalised, because a CRLF checkout makes this scan silently unmatchable.**
+        //
+        // `rustc` folds CRLF to LF inside string literals, so the needle this splits on is
+        // LF-terminated whatever line endings this file has on disk — but `include_str!`
+        // hands back the bytes as they sit. On a machine with `core.autocrlf=true` the two
+        // stop agreeing, the split finds nothing, and the panic reads as
+        // *absorb_live_changes was renamed* on a tree where nothing was renamed.
+        //
+        // **CI never sees it.** The workflow checks out with `core.autocrlf false`, so this
+        // fails only on a developer's own clone — measured 26/08/2026, right after a merge
+        // rewrote the tree, on a change that touched neither this file nor the one it scans.
+        let source = &include_str!("types.rs").replace("\r\n", "\n");
         let body = source
             .split_once("pub fn absorb_live_changes(&mut self, fresh: &NurtureSettings) {")
             .expect("absorb_live_changes is still declared with that signature")
@@ -2060,7 +2071,9 @@ mod wire_shape_tests {
 
     #[test]
     fn the_frontend_types_describe_the_same_fields_the_backend_sends() {
-        let rust = rust_structs(include_str!("types.rs"));
+        // Same reason as `fields_absorbed_live`: a line-anchored scan against bytes that may
+        // carry CR sees a different shape than the pattern compiled from this source.
+        let rust = rust_structs(&include_str!("types.rs").replace("\r\n", "\n"));
         let ts = ts_interfaces(include_str!("../../../apps/desktop/src/types.ts"));
 
         let mut shared = 0;

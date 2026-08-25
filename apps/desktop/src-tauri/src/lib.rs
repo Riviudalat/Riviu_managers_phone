@@ -994,7 +994,15 @@ mod tests {
         //
         // Re-ordering any pair still compiles and still works on a farm with no phones
         // plugged in, which is exactly why this is pinned rather than left to review.
-        let source = include_str!("commands/system.rs");
+        // **Normalised first.** The needle below is `\n}\n`, and `rustc` folds CRLF to LF inside
+        // string literals whatever this file's own line endings are — while `include_str!`
+        // returns the scanned file's bytes as they sit on disk. On a checkout with
+        // `core.autocrlf=true` the file carries CR, the needle does not, and the search
+        // fails with *update_install has a body* on a tree where the body is right there.
+        //
+        // CI cannot catch this: the workflow checks out with `core.autocrlf false`. Measured
+        // 26/08/2026 on a clone where a merge had just rewritten the tree.
+        let source = &include_str!("commands/system.rs").replace("\r\n", "\n");
         let start = source
             .find("pub async fn update_install(")
             .expect("update_install present");
