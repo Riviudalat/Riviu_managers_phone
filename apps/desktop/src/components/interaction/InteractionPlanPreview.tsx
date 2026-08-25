@@ -51,7 +51,7 @@ export function InteractionPlanPreview({
         <Banner tone="warn">
           {running} cụm chạy song song nhưng máy này chỉ mở được{" "}
           {preview.streamCapacity} luồng màn hình cùng lúc — phần vượt sẽ bị từ chối chứ không
-          xếp hàng. Tăng số máy mỗi cụm để giảm số cụm.
+          xếp hàng. Bớt link lại, hoặc chạy làm nhiều lượt.
         </Banner>
       )}
       {cohorts.map((team) => (

@@ -13,6 +13,8 @@ export function InteractionActorPicker({
   pixelActors,
   hierarchyActors,
   deviceNumber,
+  deviceLabel,
+  threadsByGroup,
   actors,
   onToggle,
   onReplace,
@@ -26,7 +28,20 @@ export function InteractionActorPicker({
 }: {
   pixelActors: DeviceInfo[];
   hierarchyActors: DeviceInfo[];
+  /** The number the operator wrote on the phone — `tileNumber`, same as the wall. */
   deviceNumber: Map<string, number>;
+  /** What the operator calls it — `tileName`, so a rename lands here too. */
+  deviceLabel: Map<string, string>;
+  /**
+   * Whether loading a group means anything for the campaign being set up.
+   *
+   * A group is a set of phones that talk to *each other*: Toả has them all reply to one root
+   * comment, Nối tiếp has them reply down the list. `Riêng lẻ` has no thread at all — every
+   * phone posts its own root comment and never reads another's — so a group there names a
+   * set with nothing to do with the shape, and offering it invites the reading that it does
+   * something. Phones are still picked one by one.
+   */
+  threadsByGroup: boolean;
   actors: string[];
   onToggle: (udid: string) => void;
   onReplace: (udids: string[]) => void;
@@ -92,7 +107,7 @@ export function InteractionActorPicker({
             : "Chưa có máy nào trong fleet khớp @handle, nên không máy nào được kéo vào bài."}
         </p>
       )}
-      {groups.length > 0 && (
+      {threadsByGroup && groups.length > 0 && (
         <label className="nu-field">
           <span className="nu-label">Lấy từ nhóm</span>
           <select
@@ -103,10 +118,21 @@ export function InteractionActorPicker({
               // Intersected with what is actually here: a group remembers udids, and a phone
               // unplugged since would otherwise be selected and then refused at dispatch with
               // nothing on screen explaining why.
+              //
+              // **Sorted by the operator's number, because this list decides who replies to
+              // whom.** `partition_actors` slices it into cohorts in order and a `Chain` has
+              // message N reply to message N-1, so the actor order *is* the thread. Loading a
+              // group used to hand over whatever order SQLite produced — serial-number order,
+              // via a covering index — so "nhóm A gồm máy 1, 4, 2" ran in an order that
+              // matched nothing on screen and that nothing explained.
               onReplace(
-                group.udids.filter((udid) =>
-                  choices.some((device) => device.udid === udid),
-                ),
+                group.udids
+                  .filter((udid) => choices.some((device) => device.udid === udid))
+                  .sort(
+                    (a, b) =>
+                      (deviceNumber.get(a) ?? Number.MAX_SAFE_INTEGER) -
+                      (deviceNumber.get(b) ?? Number.MAX_SAFE_INTEGER),
+                  ),
               );
             }}
           >
@@ -128,9 +154,23 @@ export function InteractionActorPicker({
         .map((section) => (
           <div key={section.label} className="interaction-actor-group">
             <span className="hint">{section.label}</span>
-            {section.group.map((device) => {
+            {/* **Ordered by the operator's number, so a tile is findable.**
+                The list arrived in fleet order, which is USB enumeration order and moves when
+                a phone drops off. Numbers are the thing that does not move, and they are what
+                an operator says out loud — so they also decide the order they are shown in. */}
+            {[...section.group]
+              .sort(
+                (a, b) =>
+                  (deviceNumber.get(a.udid) ?? Number.MAX_SAFE_INTEGER) -
+                  (deviceNumber.get(b.udid) ?? Number.MAX_SAFE_INTEGER),
+              )
+              .map((device) => {
               const picked = actors.includes(device.udid);
-              const name = device.name || device.model || device.udid.slice(0, 8);
+              // **No model here.** Twenty phones on this fleet report `SM-G950F`, so the model
+              // told the operator nothing while taking the width that the name needed. What
+              // identifies a phone is the number written on it and whatever they renamed it
+              // to; the udid stays in the tooltip as the identity.
+              const name = deviceLabel.get(device.udid) || device.name || device.udid.slice(0, 8);
               return (
                 <div
                   key={device.udid}
@@ -140,7 +180,7 @@ export function InteractionActorPicker({
                       the "chosen" signal. The checkbox is still here, only moved off-screen —
                       it keeps the label clickable and lets the tests (and a screen reader)
                       read the picked state by the device name. */}
-                  <label className="tile-pick" title={device.model || device.udid}>
+                  <label className="tile-pick" title={device.udid}>
                     <input
                       type="checkbox"
                       className="tile-check"

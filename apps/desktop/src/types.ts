@@ -421,6 +421,38 @@ export interface AnalyticsSummary {
   recentLogs: OpLog[];
 }
 
+/**
+ * The part of a window that overrides how a session behaves, when it overrides it at all.
+ *
+ * All five or none: the three rates share the panel's one 100% budget, and a budget assembled
+ * from two sources is one nobody can read off the screen.
+ */
+export interface NurtureWindowBehaviour {
+  numVideos: number;
+  numRounds: number;
+  likeProb: number;
+  commentProb: number;
+  followProb: number;
+}
+
+/**
+ * One stretch of the local day the schedule may run in.
+ *
+ * Times are minutes from local midnight — the number the operator is thinking in when they
+ * type `08:00`. `endMinute <= startMinute` wraps past midnight, which is how `22:00 - 02:00`
+ * is written. `udids` empty means every connected phone, and the editor says so in words.
+ */
+export interface NurtureWindow {
+  id: string;
+  startMinute: number;
+  endMinute: number;
+  everyMinutes: number;
+  durationMinutes: number;
+  udids: string[];
+  /** `null` means "behave like the panel above". */
+  behaviour?: NurtureWindowBehaviour | null;
+}
+
 export interface NurtureSettings {
   baseUrl: string;
   model: string;
@@ -461,6 +493,15 @@ export interface NurtureSettings {
   scheduleEveryMinutes: number;
   scheduleDurationMinutes: number;
   scheduleUdids: string[];
+  /**
+   * Stretches of the local day the schedule may run in, each with its own cadence.
+   *
+   * Optional because a settings row written before windows existed has no key for it, and
+   * because **empty means the old all-day cadence** rather than "never runs" — see
+   * `decide_single_cadence` in `nurture_schedule.rs`. Anything reading this has to treat
+   * absent and empty the same way.
+   */
+  scheduleWindows?: NurtureWindow[];
   steadyMood?: string;
 
   // Per-feature switches. Separate from the probabilities so pausing a feature does not
@@ -793,6 +834,8 @@ export interface ThreadCampaignRequest {
    * no phone is tagged in text only. Optional/empty prepends nothing (Rust `#[serde(default)]`).
    */
   mentions?: string[];
+  /** Each reply tags the account it answers; ignored for `standalone`. */
+  mentionParent?: boolean;
 }
 
 export type ThreadMessageState =

@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { InteractionPopup } from "./InteractionPopup";
-import type { ThreadCampaignRequest, ThreadPlanAssignment } from "../types";
+import type { DeviceMeta, ThreadCampaignRequest, ThreadPlanAssignment } from "../types";
 
 const { parseLinks, startThread, previewThread, measurePost } = vi.hoisted(() => ({
   measurePost: vi.fn(async () => ({
@@ -126,6 +126,13 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+/**
+ * No operator records at all, which is the state a fresh install is in: every phone keeps the
+ * name it reports and gets its grid position as a number. Every case below uses this, so the
+ * one case that *does* pass records is unmistakably about them.
+ */
+const noMeta = new Map<string, DeviceMeta>();
+
 const devices = [
   {
     udid: "actor-a",
@@ -194,7 +201,7 @@ function openAdvanced() {
 
 describe("InteractionPopup", () => {
   it("parses multiline links and submits every selected actor", async () => {
-    render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} onClose={() => undefined} />);
     await pasteLink();
 
     await clickRun();
@@ -213,7 +220,7 @@ describe("InteractionPopup", () => {
     // `interactionStartThread` returns the campaign and the popup used to throw it away, so
     // finding your own run meant recognising a slice of its UUID among the others.
     const api = await import("../api");
-    render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} onClose={() => undefined} />);
     await pasteLink();
     await clickRun();
     await waitFor(() => expect(api.interactionGet).toHaveBeenCalledWith("campaign-1"));
@@ -224,7 +231,7 @@ describe("InteractionPopup", () => {
     // pixel-only. It now drives the drawer through the accessibility hierarchy, so
     // excluding it would hide working hardware. What replaces the filter is the grouping
     // plus the mixed-thread refusal below.
-    render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} onClose={() => undefined} />);
     expect(screen.getByLabelText("Phone C")).toBeVisible();
     expect(screen.getByText("iPhone (nhận dạng ảnh)")).toBeVisible();
     expect(screen.getByText("Android (đọc cây giao diện)")).toBeVisible();
@@ -237,6 +244,69 @@ describe("InteractionPopup", () => {
     // iPhones outnumber one Android here, so the iPhones win.
     expect(request.actorUdids).toEqual(["actor-a", "actor-b"]);
   });
+  /// **A group means nothing in `Riêng lẻ`, so it is not offered there.**
+  ///
+  /// A group is a set of phones that talk to each other: Toả has them all reply to one root
+  /// comment, Nối tiếp has them reply down the list in order. `Riêng lẻ` has no thread — every
+  /// phone posts its own root comment and reads nobody — so a group there names a set with
+  /// nothing to do with the shape, and a control that loads one invites the reading that it
+  /// does something.
+  it("offers the group loader for threaded shapes and hides it for Riêng lẻ", async () => {
+    // The shared mock answers with no groups — the control only exists when one does, so
+    // this case supplies one rather than changing what every other case sees.
+    const api = await import("../api");
+    vi.mocked(api.listGroups).mockResolvedValue([
+      { id: "g1", name: "Nhóm 1", color: "#f97316", udids: ["actor-a"], createdAt: "2026-08-25T00:00:00Z" },
+    ]);
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} onClose={() => undefined} />);
+    await waitFor(() => expect(screen.getByLabelText(/Lấy từ nhóm/)).toBeVisible());
+
+    fireEvent.click(screen.getByRole("radio", { name: /Riêng lẻ/ }));
+    await waitFor(() => expect(screen.queryByLabelText(/Lấy từ nhóm/)).toBeNull());
+
+    fireEvent.click(screen.getByRole("radio", { name: /^Toả/ }));
+    await waitFor(() => expect(screen.getByLabelText(/Lấy từ nhóm/)).toBeVisible());
+  });
+
+  /// **The number and the name are the operator's, and the model is gone.**
+  ///
+  /// This picker used to number phones by their index in the fleet list while a comment above
+  /// it claimed the numbers matched the wall. They did not: the wall stamps
+  /// `tileNumber(position, meta)`, so the first time anyone used Change Number the two
+  /// disagreed and "máy số 7" meant a different phone in each place. On twenty identical
+  /// SM-G950Fs the number is the only handle there is.
+  ///
+  /// The model came out for the same reason it was useless: every phone here reports the same
+  /// one, so it filled the row the name needed. The udid stays as the tooltip identity.
+  it("labels actors by the operator's number and name, not by model", async () => {
+    const metas = new Map<string, DeviceMeta>([
+      // Renamed and renumbered — deliberately out of fleet order, which is the case the old
+      // index-based numbering got wrong.
+      ["actor-android", { udid: "actor-android", notes: "", tags: [], alias: "Máy kho", number: 3 }],
+      ["actor-a", { udid: "actor-a", notes: "", tags: [], number: 11 }],
+    ]);
+    render(
+      <InteractionPopup metas={metas} devices={devices} selected={[]} onClose={() => undefined} />,
+    );
+
+    // The alias replaces the reported name wherever the phone is shown.
+    expect(screen.getByLabelText("Máy kho")).toBeVisible();
+    expect(screen.queryByLabelText("Phone C")).toBeNull();
+    // The stored numbers are what is drawn, not 1..3 by position. Read off each tile rather
+    // than off the panel: "3" also appears in the cohort and message fields.
+    const numberOn = (label: string) =>
+      screen
+        .getByLabelText(label)
+        .closest(".interaction-actor-tile")
+        ?.querySelector(".tile-num")?.textContent;
+    expect(numberOn("Máy kho")).toBe("3");
+    expect(numberOn("Phone A")).toBe("11");
+    // And no model string anywhere in the panel.
+    for (const model of ["iPhone 8", "Redmi Note 12"]) {
+      expect(screen.queryByText(model)).toBeNull();
+    }
+  });
+
 
   it("keeps the operator's actor selection across a fleet poll", async () => {
     // The seeding effect depended on the actor lists, which are memos over `devices` -- a
@@ -244,13 +314,14 @@ describe("InteractionPopup", () => {
     // tick and threw away whatever had just been chosen: selecting actors for a threaded
     // campaign was a race against the next poll, and nobody wins that.
     const { rerender } = render(
-      <InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />,
+      <InteractionPopup metas={noMeta} devices={devices} selected={[]} onClose={() => undefined} />,
     );
     fireEvent.click(screen.getByLabelText("Phone B"));
     expect(screen.getByLabelText("Phone B")).not.toBeChecked();
 
     rerender(
       <InteractionPopup
+        metas={noMeta}
         devices={devices.map((device) => ({ ...(device as object) })) as never[]}
         selected={[]}
         onClose={() => undefined}
@@ -263,13 +334,14 @@ describe("InteractionPopup", () => {
 
   it("drops an actor that left the fleet without touching the others", async () => {
     const { rerender } = render(
-      <InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />,
+      <InteractionPopup metas={noMeta} devices={devices} selected={[]} onClose={() => undefined} />,
     );
     expect(screen.getByLabelText("Phone A")).toBeChecked();
     expect(screen.getByLabelText("Phone B")).toBeChecked();
 
     rerender(
       <InteractionPopup
+        metas={noMeta}
         devices={devices.filter((device) => (device as { udid: string }).udid !== "actor-b")}
         selected={[]}
         onClose={() => undefined}
@@ -286,7 +358,7 @@ describe("InteractionPopup", () => {
     // different places and need not agree, which breaks the chain halfway with no
     // explanation. The server refuses this as well; this is the round trip saved and the
     // reason stated where the operator is looking.
-    render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} onClose={() => undefined} />);
     await pasteLink();
 
     // Add the Android device to the two already-selected iPhones.
@@ -299,7 +371,7 @@ describe("InteractionPopup", () => {
   });
 
   it("allows the same mixed selection in Riêng lẻ, which has no parent to find", async () => {
-    render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} onClose={() => undefined} />);
     await pasteLink();
     // One from each group, so the selection is genuinely mixed.
     fireEvent.click(screen.getByLabelText("Phone B"));
@@ -318,7 +390,7 @@ describe("InteractionPopup", () => {
   it("blocks a one-actor run before dispatch rather than after it", async () => {
     // This used to dispatch, fail, and write the reason into a shared error string. The
     // check has not moved to the server — it has moved *earlier*, onto the button.
-    render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} onClose={() => undefined} />);
     await pasteLink();
     fireEvent.click(screen.getByLabelText("Phone B"));
     await waitFor(() => expect(screen.getByText(/Chọn từ 2 đến 64 máy/)).toBeVisible());
@@ -329,7 +401,7 @@ describe("InteractionPopup", () => {
   it("sends the star shape by default, and the chain only when asked", async () => {
     // "Một máy bình luận gốc rồi các máy còn lại vào rep" — a star, and now the default:
     // a chain runs strictly one after another and one broken link stops the rest.
-    render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} onClose={() => undefined} />);
     await pasteLink();
     await clickRun();
     await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
@@ -350,7 +422,7 @@ describe("InteractionPopup", () => {
     // The popup used to reimplement `partition_actors` in TypeScript — remainder-spreading
     // and all — purely to draw this. Two implementations of one split are two chances to
     // show a plan that is not the plan.
-    render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} onClose={() => undefined} />);
     await pasteLink();
     await waitFor(() => expect(previewThread).toHaveBeenCalled());
     expect(await screen.findByText(/Cụm 1 · 2 máy/)).toBeVisible();
@@ -381,7 +453,7 @@ describe("InteractionPopup", () => {
         ],
       },
     } as never);
-    render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} onClose={() => undefined} />);
     await pasteLink();
     expect(await screen.findByText(/chỉ mở được 2 luồng màn hình/)).toBeVisible();
   });
@@ -410,7 +482,7 @@ describe("InteractionPopup", () => {
         ],
       },
     } as never);
-    render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} onClose={() => undefined} />);
     await pasteLink();
     await waitFor(() => expect(screen.getByText("Sẽ chạy như thế này")).toBeVisible());
     expect(screen.queryByText(/luồng màn hình/)).toBeNull();
@@ -423,6 +495,7 @@ describe("InteractionPopup", () => {
     // short device list did the same thing.
     const { rerender } = render(
       <InteractionPopup
+        metas={noMeta}
         devices={devices}
         selected={["actor-a", "actor-b"]}
         onClose={() => undefined}
@@ -433,13 +506,14 @@ describe("InteractionPopup", () => {
 
     // One tile on the wall, so one phone is in scope and two actors cannot be selected.
     rerender(
-      <InteractionPopup devices={devices} selected={["actor-a"]} onClose={() => undefined} />,
+      <InteractionPopup metas={noMeta} devices={devices} selected={["actor-a"]} onClose={() => undefined} />,
     );
     await waitFor(() => expect(screen.getByText(/đang chọn 1/)).toBeVisible());
 
     // Back to both. The selection has to come back with them.
     rerender(
       <InteractionPopup
+        metas={noMeta}
         devices={devices}
         selected={["actor-a", "actor-b"]}
         onClose={() => undefined}
@@ -454,7 +528,7 @@ describe("InteractionPopup", () => {
   it("keeps the manual pool rule it has always advertised", async () => {
     // The hint said "cần ≥ N" and nothing enforced it, so the campaign row was written and
     // the backend refused it afterwards.
-    render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} onClose={() => undefined} />);
     await pasteLink();
     fireEvent.change(screen.getByLabelText(/Nội dung bình luận/), {
       target: { value: "manual" },
@@ -492,7 +566,7 @@ describe("InteractionPopup", () => {
       status: "ready",
       wdaReady: true,
     })) as never[];
-    render(<InteractionPopup devices={fleet} selected={[]} onClose={() => undefined} />);
+    render(<InteractionPopup metas={noMeta} devices={fleet} selected={[]} onClose={() => undefined} />);
     await pasteLink();
     await waitFor(() => expect(screen.getByRole("button", { name: "Chạy ngay" })).toBeEnabled());
 
@@ -517,13 +591,14 @@ describe("InteractionPopup", () => {
     expect(request.messageCount).toBe(9);
   });
 
-  it("does not make the operator know the cohort size before pasting the comments", async () => {
-    // Nine phones in teams of three needs three comments, and three is what is pasted — a
-    // legal configuration the panel made unusable. The only channel that knows the cohort size
-    // is the preview, and the preview was refused for a comment count computed from the cohort
-    // size it was being asked to supply: the screen demanded "cần ≥ 9", a number that was never
-    // true, with no way out but typing 3 by hand.
-    const fleet = Array.from({ length: 9 }, (_, index) => ({
+  /// **The preview never carries the manual comments, and the run always does.**
+  ///
+  /// That split is what broke a loop the panel used to be stuck in: the preview was refused
+  /// for a comment count it was itself being asked to supply, so the number on screen could
+  /// never become true. The cohort field that made the loop reachable is gone now, but the
+  /// split is what keeps the preview answerable at all, so it stays pinned.
+  it("keeps the comment pool out of the preview and in the run", async () => {
+    const fleet = Array.from({ length: 3 }, (_, index) => ({
       udid: `android-${index}`,
       name: `Android ${index}`,
       model: "SM-G955F",
@@ -533,11 +608,9 @@ describe("InteractionPopup", () => {
       status: "ready",
       wdaReady: true,
     })) as never[];
-    render(<InteractionPopup devices={fleet} selected={[]} onClose={() => undefined} />);
+    render(<InteractionPopup metas={noMeta} devices={fleet} selected={[]} onClose={() => undefined} />);
     await pasteLink();
 
-    openAdvanced();
-    fireEvent.change(screen.getByLabelText("Số máy mỗi cụm"), { target: { value: "3" } });
     fireEvent.change(screen.getByLabelText(/Nội dung bình luận/), {
       target: { value: "manual" },
     });
@@ -548,45 +621,12 @@ describe("InteractionPopup", () => {
     await clickRun();
     await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
     const request = (startThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>)[0][0];
-    expect(request.cohortSize).toBe(3);
+    // One cohort, always: the actor list is the cohort, so three phones want three comments.
+    expect(request.cohortSize).toBeUndefined();
     expect(request.messageCount).toBe(3);
     expect(request.manualComments).toHaveLength(3);
-    // The run carries the comments; the preview never did — that is what broke the loop.
     const previews = previewThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>;
     expect(previews.at(-1)?.[0].manualComments).toEqual([]);
-  });
-
-  it("no longer refuses a fleet larger than six", async () => {
-    // The cap was 2..=6 on both sides, which is what made a twenty-phone run impossible
-    // before anything else could go wrong.
-    const fleet = Array.from({ length: 9 }, (_, index) => ({
-      udid: `android-${index}`,
-      name: `Android ${index}`,
-      model: "SM-G955F",
-      platform: "android",
-      osVersion: "9",
-      connection: "usb",
-      status: "ready",
-      wdaReady: true,
-    })) as never[];
-    render(<InteractionPopup devices={fleet} selected={[]} onClose={() => undefined} />);
-    await pasteLink();
-
-    openAdvanced();
-    fireEvent.change(screen.getByLabelText("Số máy mỗi cụm"), { target: { value: "3" } });
-    fireEvent.change(screen.getByLabelText(/Số bình luận mỗi link/), {
-      target: { value: "3" },
-    });
-    // The plan is re-asked for on a debounce, and until it answers the popup is still holding
-    // the previous split — one team of nine, which three messages would not cover. It blocks
-    // rather than guesses, so wait for the new plan the way the operator would.
-    await clickRun();
-
-    await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
-    const request = (startThread.mock.calls as unknown as Array<[ThreadCampaignRequest]>)[0][0];
-    expect(request.actorUdids).toHaveLength(9);
-    expect(request.cohortSize).toBe(3);
-    expect(request.messageCount).toBe(3);
   });
 
   it("lets a whole-fleet run start without the operator doing the arithmetic", async () => {
@@ -603,7 +643,7 @@ describe("InteractionPopup", () => {
       status: "ready",
       wdaReady: true,
     })) as never[];
-    render(<InteractionPopup devices={fleet} selected={[]} onClose={() => undefined} />);
+    render(<InteractionPopup metas={noMeta} devices={fleet} selected={[]} onClose={() => undefined} />);
     await pasteLink();
     await clickRun();
     await waitFor(() => expect(startThread).toHaveBeenCalledTimes(1));
@@ -613,7 +653,7 @@ describe("InteractionPopup", () => {
   });
 
   it("offers the number that would fix a too-small message count", async () => {
-    render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} onClose={() => undefined} />);
     await pasteLink();
     openAdvanced();
     fireEvent.change(screen.getByLabelText(/Số bình luận mỗi link/), {
@@ -632,7 +672,7 @@ describe("InteractionPopup", () => {
     // caption compared. Timed 24/08/2026 that took about four and a half minutes for a post near
     // the top of the grid, longer when it sits deeper, and it holds a phone for all of it —
     // which is why nothing here runs on a paste or a debounce.
-    render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} onClose={() => undefined} />);
     await pasteLink();
     expect(measurePost).not.toHaveBeenCalled();
 
@@ -665,7 +705,7 @@ describe("InteractionPopup", () => {
   });
 
   it("cannot read a post with no link to read", async () => {
-    render(<InteractionPopup devices={devices} selected={[]} onClose={() => undefined} />);
+    render(<InteractionPopup metas={noMeta} devices={devices} selected={[]} onClose={() => undefined} />);
     expect(screen.getByRole("button", { name: "Đo bài" })).toBeDisabled();
     await pasteLink();
     expect(screen.getByRole("button", { name: "Đo bài" })).toBeEnabled();

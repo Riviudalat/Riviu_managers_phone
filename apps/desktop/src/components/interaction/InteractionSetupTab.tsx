@@ -45,6 +45,7 @@ export function InteractionSetupTab({
   warnings,
   devices,
   deviceNumber,
+  deviceLabel,
   pixelActors,
   hierarchyActors,
   largestCohort,
@@ -72,6 +73,7 @@ export function InteractionSetupTab({
   warnings: string[];
   devices: DeviceInfo[];
   deviceNumber: Map<string, number>;
+  deviceLabel: Map<string, string>;
   pixelActors: DeviceInfo[];
   hierarchyActors: DeviceInfo[];
   largestCohort: number;
@@ -163,6 +165,27 @@ export function InteractionSetupTab({
           </label>
         ))}
       </div>
+      {/* Only for a shape that has replies. `Riêng lẻ` gives every phone its own root
+          comment and no parent, so there is nobody to tag and the switch would be a promise
+          the run cannot keep. */}
+      {draft.threadKind !== "standalone" && (
+        <label className="nu-switch">
+          <input
+            type="checkbox"
+            checked={draft.mentionParent}
+            onChange={(event) => patch("mentionParent", event.target.checked)}
+            aria-label="Các máy tag nhau khi trả lời"
+          />
+          <span className="nu-switch-track" aria-hidden="true" />
+          <span className="nu-switch-label">
+            Các máy tag nhau khi trả lời
+            <Info
+              of="Các máy tag nhau khi trả lời"
+              what="Mỗi rep mở đầu bằng @handle của máy nó đang trả lời — Nối tiếp thì tag lần lượt xuống, Toả thì mọi rep đều tag máy mở đầu. Handle lấy từ ô @handle của từng máy ở dưới; máy chưa điền thì không bị tag chứ không tag bừa. Android chọn từ danh sách gợi ý của TikTok nên ra tag thật; iPhone chỉ chèn được chữ."
+            />
+          </span>
+        </label>
+      )}
       <label className="nu-switch">
         <input
           type="checkbox"
@@ -229,6 +252,8 @@ export function InteractionSetupTab({
         pixelActors={pixelActors}
         hierarchyActors={hierarchyActors}
         deviceNumber={deviceNumber}
+        deviceLabel={deviceLabel}
+        threadsByGroup={draft.threadKind !== "standalone"}
         actors={draft.actors}
         onToggle={(udid) =>
           // The updater form, not a value computed from the rendered prop: see `patch`.
@@ -281,16 +306,6 @@ export function InteractionSetupTab({
             />
           </label>
           <label className="nu-field">
-            <span className="nu-label">Số máy mỗi cụm</span>
-            <input
-              type="number"
-              min={0}
-              max={64}
-              value={draft.cohortSize}
-              onChange={(event) => patch("cohortSize", wholeNumber(event.target.value))}
-            />
-          </label>
-          <label className="nu-field">
             <span className="nu-label">Số từ tối đa mỗi câu</span>
             <input
               type="number"
@@ -304,8 +319,7 @@ export function InteractionSetupTab({
       )}
       {advancedOpen && (
         <p className="hint">
-          Số máy mỗi cụm = 0 nghĩa là cả nhóm chung một cụm, lần lượt từng máy. Để trống số
-          bình luận là để app tự lấy bằng cụm lớn nhất.
+          Để trống số bình luận là để app tự lấy bằng số máy đã chọn.
         </p>
       )}
 

@@ -9,6 +9,7 @@ import {
   interactionMeasurePost,
 } from "../api";
 import { describeError } from "../describeError";
+import { orderDevicesByNumber, tileName, tileNumber } from "../deviceNaming";
 import { parseMentions, resolveMentionActors, unionActors } from "../interactionMentions";
 import {
   buildRequest,
@@ -21,6 +22,7 @@ import {
 } from "../interactionPlan";
 import type {
   DeviceInfo,
+  DeviceMeta,
   InteractionPostReading,
   PostTargets,
   ThreadPreview,
@@ -33,6 +35,13 @@ import { InteractionSetupTab } from "./interaction/InteractionSetupTab";
 type Props = {
   devices: DeviceInfo[];
   selected: string[];
+  /**
+   * The operator's own records for each phone — the name and the number they assigned.
+   *
+   * Passed in rather than fetched here so the panel labels phones exactly as the wall does:
+   * one source for `tileName`/`tileNumber`, and a rename shows up in both at once.
+   */
+  metas: Map<string, DeviceMeta>;
   onClose: () => void;
 };
 
@@ -59,19 +68,35 @@ function newRequestId() {
  */
 const DRAG_KEEP = 64;
 
-export function InteractionPopup({ devices, selected, onClose }: Props) {
+export function InteractionPopup({ devices, selected, metas, onClose }: Props) {
   const inScope = useMemo(
     () => devices.filter((device) => (selected.length ? selected.includes(device.udid) : true)),
     [devices, selected],
   );
-  // The same 1-based number the grid stamps on each tile, so "máy số 7" in the picker is the
-  // same phone as tile 7 on the wall — that is how an operator tells one anonymous
-  // "23021RAAEG" from the next.
+  // **The number the operator wrote on the phone, not this list's index.**
+  //
+  // The comment here used to claim this was "the same 1-based number the grid stamps", and it
+  // was not: it counted positions in `devices`, while the grid stamps
+  // `tileNumber(position, meta)` over `orderDevicesByNumber(...)`. So the moment anyone used
+  // Change Number — the whole point of which is that a number survives the list moving — the
+  // picker and the wall disagreed, and "máy số 7" meant two different phones depending on
+  // which one you were looking at. On a fleet of twenty identical SM-G950Fs that is the only
+  // handle an operator has.
   const deviceNumber = useMemo(() => {
     const map = new Map<string, number>();
-    devices.forEach((device, index) => map.set(device.udid, index + 1));
+    orderDevicesByNumber(devices, metas).forEach((device, index) =>
+      map.set(device.udid, tileNumber(index + 1, metas.get(device.udid))),
+    );
     return map;
-  }, [devices]);
+  }, [devices, metas]);
+  /// What the operator calls each phone, or what the phone reports if they never renamed it.
+  ///
+  /// Same `tileName` the grid uses, so renaming a phone renames it here too.
+  const deviceLabel = useMemo(() => {
+    const map = new Map<string, string>();
+    devices.forEach((device) => map.set(device.udid, tileName(device, metas.get(device.udid))));
+    return map;
+  }, [devices, metas]);
   // Android is a first-class actor: it drives the comment drawer through the accessibility
   // hierarchy instead of by pixel matching. The split is by *how each device reads the
   // screen*, because that is the property the thread rule depends on.
@@ -305,12 +330,8 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
   /// limit does not move the cohorts, so it must not disable the run button either.
   const previewKey = useMemo(
     () =>
-      JSON.stringify([
-        validTargets.map((target) => target.targetKey),
-        effectiveActors,
-        draft.cohortSize,
-      ]),
-    [validTargets, effectiveActors, draft.cohortSize],
+      JSON.stringify([validTargets.map((target) => target.targetKey), effectiveActors]),
+    [validTargets, effectiveActors],
   );
   const [previewFor, setPreviewFor] = useState<string | null>(null);
   const previewStale = previewFor !== previewKey;
@@ -585,6 +606,7 @@ export function InteractionPopup({ devices, selected, onClose }: Props) {
               warnings={warnings}
               devices={devices}
               deviceNumber={deviceNumber}
+              deviceLabel={deviceLabel}
               pixelActors={pixelActors}
               hierarchyActors={hierarchyActors}
               largestCohort={largestCohort}

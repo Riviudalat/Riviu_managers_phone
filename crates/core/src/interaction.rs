@@ -255,6 +255,21 @@ pub struct ThreadCampaignRequest {
     /// stored before this reads as) prepends nothing.
     #[serde(default)]
     pub mentions: Vec<String>,
+    /// Whether each reply tags the account it is replying to.
+    ///
+    /// The fleet talking to itself: with this on, a reply opens with the `@handle` of the
+    /// phone whose comment it answers, which is what a real thread between people looks like
+    /// and what makes the exchange visible to anyone reading the post. `Chain` therefore tags
+    /// down the line — máy 2 tags máy 1, máy 4 tags máy 2 — and `Star`, where every reply
+    /// answers ordinal 0, has them all tag the account that opened.
+    ///
+    /// The handle comes from each phone's own `device_meta.handle`, so a phone whose handle
+    /// the operator never filled in is simply not tagged rather than tagged with a guess.
+    /// `Standalone` has no parent to tag and is unaffected.
+    ///
+    /// Off by default, which is what every campaign stored before this reads as.
+    #[serde(default)]
+    pub mention_parent: bool,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -1100,6 +1115,7 @@ mod tests {
                 manual_comments: Vec::new(),
                 like_target: true,
                 mentions: Vec::new(),
+                mention_parent: false,
             };
             let brief = InteractionCampaignBrief::from_request(&request);
             assert_eq!(
@@ -1151,6 +1167,7 @@ mod tests {
                 manual_comments: pool.into_iter().map(str::to_string).collect(),
                 like_target: false,
                 mentions: Vec::new(),
+                mention_parent: false,
             }
         }
 
@@ -1285,6 +1302,7 @@ mod tests {
             shape: ThreadShape::Chain,
             cohort_size: None,
             mentions: Vec::new(),
+            mention_parent: false,
         }
     }
 

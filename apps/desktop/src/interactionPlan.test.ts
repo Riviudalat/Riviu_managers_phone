@@ -132,9 +132,15 @@ describe("validateDraft", () => {
     expect(issue.message).toBe("DuplicateActor");
   });
 
-  it("keeps zero meaning one cohort", () => {
-    expect(validateDraft(draft({ cohortSize: 0 }), context())).toEqual([]);
-    expect(validateDraft(draft({ cohortSize: 1 }), context())).toHaveLength(1);
+  /// **The actor list is always one cohort, so nothing can split a group behind the screen.**
+  ///
+  /// There used to be an advanced "Số máy mỗi cụm" field, and it outranked the shape shown
+  /// above it: a group of eight with a cohort size of three ran as `[3,3,2]` — three separate
+  /// root comments — while the panel still read "Toả: các máy cùng trả lời bình luận gốc".
+  /// Groups are how the fleet is divided now; a second, invisible divider is one too many.
+  it("never sends a cohort size, so a group is never split", () => {
+    const request = buildRequest(draft(), buildContext({ largestCohort: 2 }));
+    expect(request?.cohortSize).toBeUndefined();
   });
 });
 
@@ -175,6 +181,25 @@ describe("draftWarnings", () => {
 });
 
 describe("buildRequest", () => {
+  /// **`Riêng lẻ` cannot tag a parent, because it has none.**
+  ///
+  /// The switch is hidden for that shape, but a draft can still carry `true` from before the
+  /// operator changed shape — and a request that asks for parent tags on a shape with no
+  /// parents is a promise the run cannot keep.
+  it("never asks for parent tags on a shape with no parents", () => {
+    const threaded = buildRequest(
+      draft({ mentionParent: true, threadKind: "chain" }),
+      buildContext({ largestCohort: 2 }),
+    );
+    expect(threaded?.mentionParent).toBe(true);
+
+    const solo = buildRequest(
+      draft({ mentionParent: true, threadKind: "standalone" }),
+      buildContext({ largestCohort: 2 }),
+    );
+    expect(solo?.mentionParent).toBe(false);
+  });
+
   it("sends the shape, the resolved message count, and the trimmed manual pool", () => {
     const request = buildRequest(
       draft({ textSource: "manual", manualText: " một \n\n hai " }),

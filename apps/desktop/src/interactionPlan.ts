@@ -36,13 +36,14 @@ export interface InteractionDraft {
    * for a reason the operator never asked for.
    */
   messageCount: number | null;
-  cohortSize: number;
   maxWords: number;
   threadKind: ThreadKind;
   textSource: "ai" | "manual";
   instruction: string;
   manualText: string;
   likeTarget: boolean;
+  /** Each reply tags the account it answers — the fleet talking to itself. */
+  mentionParent: boolean;
   mentionText: string;
   actors: string[];
 }
@@ -50,7 +51,6 @@ export interface InteractionDraft {
 export const DEFAULT_DRAFT: InteractionDraft = {
   rawLinks: "",
   messageCount: null,
-  cohortSize: 0,
   maxWords: 12,
   // Star: the replies do not wait for each other, and one that fails costs only itself. The
   // chain default predated the star shape existing.
@@ -59,6 +59,7 @@ export const DEFAULT_DRAFT: InteractionDraft = {
   instruction: "tự nhiên, ngắn, nói như người vừa xem xong",
   manualText: "",
   likeTarget: false,
+  mentionParent: false,
   mentionText: "",
   actors: [],
 };
@@ -70,7 +71,6 @@ export interface DraftIssue {
     | "actors"
     | "manual"
     | "messageCount"
-    | "cohortSize"
     | "maxWords"
     | "plan";
   message: string;
@@ -87,15 +87,13 @@ export const MIXED_THREAD_REASON =
  * What a `<input type="number">` really hands back, read as a whole number.
  *
  * The box returns its raw text and a `step` violation does not blank `.value`, so `"2.5"`
- * arrives verbatim. `Number("2.5")` then passed every range check in this file — `2.5 !== 0`
- * and `!(2.5 < 2 || 2.5 > 64)` — and was serialised into a `cohortSize` the Rust side
- * deserialises as `Option<u8>`: a serde failure at dispatch, in English, with no field to hang
- * it on. Truncated rather than refused, because `2.5` typed into a box labelled "Số máy mỗi
- * cụm" means 2.
+ * arrives verbatim. `Number("2.5")` then passed every range check in this file and was
+ * serialised into a number the Rust side deserialises as an integer: a serde failure at
+ * dispatch, in English, with no field to hang it on. Truncated rather than refused, because
+ * `2.5` typed into a box counting whole things means 2.
  *
- * An empty box still reads as `0`, which for the cohort size is a real value — the hint says
- * `0 = một cụm`. Only `messageCount` treats empty as "automatic", and it checks for the empty
- * string before calling this.
+ * An empty box reads as `0`. Only `messageCount` treats empty as "automatic", and it checks
+ * for the empty string before calling this.
  */
 export function wholeNumber(value: string): number {
   const parsed = Number(value);
@@ -165,9 +163,18 @@ export function buildRequest(
     instruction: draft.instruction,
     maxWords: draft.maxWords,
     ...requestShapeOf(draft.threadKind),
-    cohortSize: draft.cohortSize >= 2 ? draft.cohortSize : undefined,
+    // **No cohort size is sent, so the actor list is always one cohort.**
+    //
+    // It used to be an advanced field, and it quietly outranked the thing above it: load a
+    // group of eight with a cohort size of three and the group became `[3,3,2]` — three
+    // separate root comments — while the screen still said "Toả: các máy cùng trả lời bình
+    // luận gốc". Groups are how a fleet is divided now, and two ways to divide it that
+    // disagree is one too many. `undefined` means `partition_actors(actors, None)`, which is
+    // a single cohort: the group, whole.
+    cohortSize: undefined,
     manualComments: context.purpose === "preview" ? [] : manualCommentsOf(draft),
     likeTarget: draft.likeTarget,
+    mentionParent: draft.threadKind === "standalone" ? false : draft.mentionParent,
     mentions: context.mentions,
   };
 }
@@ -283,13 +290,6 @@ export function validateDraft(
     }
   }
 
-  if (draft.cohortSize !== 0 && (draft.cohortSize < 2 || draft.cohortSize > 64)) {
-    issues.push({
-      field: "cohortSize",
-      message: "Số máy mỗi cụm phải là 0 (một cụm) hoặc từ 2 đến 64",
-    });
-  }
-
   if (draft.maxWords < 4 || draft.maxWords > 20) {
     issues.push({ field: "maxWords", message: "Số từ tối đa mỗi câu phải từ 4 đến 20" });
   }
@@ -333,8 +333,8 @@ export function draftWarnings(draft: InteractionDraft, context: ValidateContext)
   if (draft.textSource === "ai" && messages >= AI_COMMENTS_PER_LINK_ADVISORY) {
     warnings.push(
       `${messages} bình luận cho mỗi link là nhiều: AI phải nghĩ ra ${messages} câu khác nhau về cùng một bài, ` +
-        "và cổng chất lượng sẽ loại bớt những câu chung chung. Chia máy thành nhiều cụm, " +
-        "thêm link, hoặc dán sẵn danh sách bình luận nếu muốn đủ số.",
+        "và cổng chất lượng sẽ loại bớt những câu chung chung. Bớt máy, thêm link, " +
+        "hoặc dán sẵn danh sách bình luận nếu muốn đủ số.",
     );
   }
   return warnings;
