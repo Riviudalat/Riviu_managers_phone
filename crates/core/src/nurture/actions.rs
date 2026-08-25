@@ -829,6 +829,7 @@ impl NurtureEngine {
                     context_source(settings),
                     "evidence_unavailable",
                     0,
+                    None,
                 );
                 return Ok(CommentResult::ContextSkipped);
             };
@@ -861,6 +862,7 @@ impl NurtureEngine {
                         "ocr-caption",
                         "caption_ocr_empty",
                         0,
+                        None,
                     );
                     return Ok(CommentResult::ContextSkipped);
                 };
@@ -906,6 +908,7 @@ impl NurtureEngine {
                 context_source(settings),
                 "context_skipped",
                 0,
+                None,
             );
             return Ok(CommentResult::ContextSkipped);
         };
@@ -1209,6 +1212,7 @@ impl NurtureEngine {
                 context_source(settings),
                 "no_api_key",
                 slides_offered,
+                None,
             );
             return None;
         }
@@ -1239,6 +1243,7 @@ impl NurtureEngine {
                         context_source(settings),
                         "evidence_unavailable",
                         slides_offered,
+                        None,
                     );
                     return None;
                 }
@@ -1260,6 +1265,7 @@ impl NurtureEngine {
                     "ocr-caption",
                     "caption_ocr_empty",
                     slides_offered,
+                    None,
                 );
                 return None;
             };
@@ -1290,6 +1296,7 @@ impl NurtureEngine {
                     context_source(settings),
                     &format!("context_skipped: {reason}"),
                     slides_offered,
+                    crate::openai_client::spend_of_failure(&error),
                 );
                 return None;
             }
@@ -1370,6 +1377,7 @@ impl NurtureEngine {
             context_source(settings),
             reason,
             slides_offered,
+            None,
         );
     }
 
@@ -1377,6 +1385,15 @@ impl NurtureEngine {
     ///
     /// `slides_offered` is what the carousel traversal paged, duplicates included, or 0 on a
     /// path that never pages.
+    /// `spend` is what the attempt cost before it failed, and `None` means it cost nothing.
+    ///
+    /// **The distinction is the whole point.** Every one of these used to write
+    /// `prompt_tokens: 0`, so an attempt the verification gate rejected — a draft, a
+    /// verification, and a retry of both — was filed as free. Measured on the operator's own
+    /// database on 25/08/2026: thirteen of thirty-three attempts were stored as costing
+    /// nothing, and those thirteen were the expensive ones. A skip that really did happen
+    /// before the first call still passes `None`, because a zero written for a call that was
+    /// never made is as wrong as a zero written for one that was.
     fn record_context_skip_attempt(
         &self,
         udid: &str,
@@ -1384,6 +1401,7 @@ impl NurtureEngine {
         source: &str,
         outcome: &str,
         slides_offered: u32,
+        spend: Option<crate::openai_client::CommentSpend>,
     ) {
         let attempt = NurtureCommentAttempt {
             id: Uuid::new_v4().to_string(),
@@ -1392,8 +1410,8 @@ impl NurtureEngine {
             source: source.to_string(),
             model: settings.model.clone(),
             base_url_host: host_of(&settings.base_url),
-            prompt_tokens: 0,
-            completion_tokens: 0,
+            prompt_tokens: spend.map(|s| s.prompt_tokens).unwrap_or(0),
+            completion_tokens: spend.map(|s| s.completion_tokens).unwrap_or(0),
             preview: String::new(),
             caption_preview: String::new(),
             frame_sha256: String::new(),

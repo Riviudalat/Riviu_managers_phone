@@ -8971,3 +8971,70 @@ Dòng trên là **đúng nguyên văn** cái người vận hành báo là lệc
 - Bốn thứ chặn gate trước khi nó chạy được, không cái nào là lỗi code: màn hình khoá, thanh
   thông báo kéo xuống, **menu nguồn** (Power off / Restart) đè lên app, và launcher còn ở
   foreground khi vòng chờ chỉ hỏi "đã qua splash chưa".
+
+## 9.110 Tiền thật của một bình luận, và 6/10 token là chữ nghĩ thầm (25/08/2026)
+
+Giá lấy trực tiếp từ `https://openrouter.ai/api/v1/models` cho `openai/gpt-5.6-luna` — model
+trong hồ sơ đang chạy: **input $0,20/1M, output $1,20/1M, đọc cache $0,02/1M, ghi cache
+$0,25/1M**. Không lấy từ trí nhớ; §9.x cũ đã một lần ghi giá bịa và migration 11 phải xoá cả cột.
+
+**Output đắt gấp sáu lần input, và phần lớn output là rác.** Bật `usage: {include: true}` của
+OpenRouter thì thấy: một bản nháp `completion_tokens: 687` trong đó **`reasoning_tokens: 589`**;
+bước kiểm chứng `193` trong đó `147`. Tức khoảng **sáu token trong mười của giá một bình luận là
+chữ model nghĩ thầm rồi vứt**. Cờ `"thinking": {"type":"disabled"}` đã có trong code **không có
+tác dụng** với model này — nó được thêm cho `deepseek-v4-flash-vision-exp` và chỉ đúng ở đó.
+
+Ba arm, mỗi arm 8 lượt trên cùng bài 2 ảnh, tính cả retry:
+
+| reasoning | call | retry | $/bình luận | bị cổng từ chối |
+|---|---|---|---|---|
+| mặc định | 16 | 0 | 0,001369 | 0/8 |
+| `effort=minimal` | 16 | 0 | **0,001166** | 0/8 |
+| `enabled=false` | 22 | 3 | 0,000920 | 0/8 |
+
+**Chọn `minimal`.** `false` rẻ hơn trên giấy và đổi bằng **3 retry trong 8**; repo này đã một
+lần trả giá cho những bản nháp về không dùng được, và một lượt thử lại là cơ hội mà máy giữa
+một lượt chạy fleet có thể không có. Chất lượng không phân biệt được: cả ba arm 8/8 được nhận.
+
+Chỉ gửi cho **OpenRouter**, vì đó là gateway duy nhất được đo, và file này có sẵn một danh sách
+gateway từ chối field lạ. Gateway khác **không nhận key** chứ không nhận `null` — một `null` vẫn
+là field nó phải hiểu.
+
+### Cache đã chạy sẵn, nhưng chỉ cho bản nháp
+
+`cached_tokens: 2839/2842` ở bản nháp, `cached_tokens: 0` + `cache_write_tokens: 2725` ở **mọi**
+lượt kiểm chứng. Provider này cache theo **prompt nguyên vẹn**, không theo tiền tố: bản nháp
+trùng từng byte giữa các lượt nên hit; prompt kiểm chứng luôn chứa câu ứng viên khác nhau nên
+không bao giờ hit.
+
+Tôi đã thử **đẩy câu ứng viên xuống cuối prompt** để 20 máy dùng chung tiền tố. **Không giúp gì**
+— vẫn `cached_tokens: 0`. Đã trả lại thay đổi đó thay vì giữ một comment biện minh cho điều phép
+đo bác bỏ.
+
+Hệ quả cần biết: **câu lặp lại thì rẻ hơn.** Một lượt 10 mẫu ra $0,000547/bình luận chỉ vì 4 câu
+trùng nhau nên prompt kiểm chứng trùng và hit cache. Đừng đọc con số rẻ đó là thắng lợi.
+
+### Cột chi phí: 13/33 lượt ghi 0 token
+
+Trên DB thật của người vận hành: `nurture_comment_attempts` có 33 dòng, **13 dòng ghi
+`prompt_tokens = 0`** — tất cả đều là lượt bị cổng kiểm chứng từ chối. Mà đó chính là những lượt
+**đắt nhất**: một bản nháp, một lượt kiểm chứng, và một lần thử lại cả hai. Bốn call bị tính
+tiền, ghi sổ là miễn phí.
+
+Nguyên nhân: `record_context_skip_attempt` ghi cứng `prompt_tokens: 0`, và
+`prepare_grounded_comment` bỏ luôn số đã đếm khi trả `Err`. Sửa bằng một **lỗi có kiểu**
+(`FailedAttempt`) mang theo chi phí; `Display` in đúng chuỗi cũ nên mọi chỗ so `comment_context_rejected`
+không đổi, còn ai cần giá thì `spend_of_failure()`.
+
+**Cột `usd` thì chưa dựng lại.** Migration 11 xoá nó với lý do *"cột đọc ra 0.0 cạnh số token
+thật nghĩa là bình luận này miễn phí — một lời nói dối tệ hơn cái đang gỡ"*, và lý do đó vẫn
+đúng cho gateway không báo giá. Dựng lại đúng cách cần cột **nullable** + một migration mới; đó
+là quyết định của người vận hành, không phải việc làm kèm. Hiện `cost_usd` do provider báo được
+`bin/carousel_comment` in ra, nên đo tối ưu lần sau không phải chắp vá tạm như lần này.
+
+### Còn một đòn bẩy chưa dùng
+
+Kiểm chứng gửi lại **cùng một tấm ảnh 20 lần** cho 20 máy, mỗi lần trả giá ghi cache. Gộp 20 câu
+ứng viên vào **một** lượt kiểm chứng sẽ đưa phần đó từ ~$0,0147 xuống ~$0,0008 mỗi link — cả
+link từ ~$0,018 xuống ~$0,004, rẻ khoảng **4,5 lần**. Chưa làm: nó đổi cấu trúc vòng lặp
+per-assignment (chuỗi `previous`, đường retry) trên đúng đường đăng bình luận thật.

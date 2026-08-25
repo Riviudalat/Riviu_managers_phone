@@ -78,9 +78,15 @@ async fn main() -> anyhow::Result<()> {
 
     let ocr = app_lib::interaction_ocr::DesktopFrameTextSource;
 
+    // `--new-only` skips it, for the runs that are measuring cost rather than comparing
+    // evidence: the old path is a second API call whose numbers would land in the same
+    // aggregate and quietly halve whatever average is being computed.
+    let new_only = std::env::args().any(|arg| arg == "--new-only");
+
     // First, the old evidence, reproduced exactly: slide one on its own, described as moments.
-    println!("--- BẰNG CHỨNG CŨ: chỉ ảnh 1 ---");
-    match prepare_comment_for_frames(
+    if !new_only {
+        println!("--- BẰNG CHỨNG CŨ: chỉ ảnh 1 ---");
+        match prepare_comment_for_frames(
         &settings,
         std::slice::from_ref(&frames[0]),
         EvidenceKind::Moments,
@@ -92,10 +98,16 @@ async fn main() -> anyhow::Result<()> {
         Ok((result, mode)) => println!(
             "[{mode}] {}
          caption thấy: {:?}
-         evidence_support={} relevance={} prompt_tokens={} completion_tokens={} (ca hai request cua mot tin)",
-            result.text, result.caption, result.evidence_support, result.relevance, result.prompt_tokens, result.completion_tokens
+         evidence_support={} relevance={} prompt_tokens={} completion_tokens={} cost={} (gom ca hai request va ca retry)",
+            result.text, result.caption, result.evidence_support, result.relevance, result.prompt_tokens,
+            result.completion_tokens,
+            result
+                .cost_usd
+                .map(|usd| format!("${usd:.6}"))
+                .unwrap_or_else(|| "khong bao".into())
         ),
         Err(error) => println!("lỗi: {error:#}"),
+    }
     }
 
     println!("\n--- BẰNG CHỨNG MỚI: {} ảnh ---", frames.len());
@@ -105,8 +117,13 @@ async fn main() -> anyhow::Result<()> {
         Ok((result, mode)) => println!(
             "[{mode}] {}
          caption thấy: {:?}
-         evidence_support={} relevance={} prompt_tokens={} completion_tokens={} (ca hai request cua mot tin)",
-            result.text, result.caption, result.evidence_support, result.relevance, result.prompt_tokens, result.completion_tokens
+         evidence_support={} relevance={} prompt_tokens={} completion_tokens={} cost={} (gom ca hai request va ca retry)",
+            result.text, result.caption, result.evidence_support, result.relevance, result.prompt_tokens,
+            result.completion_tokens,
+            result
+                .cost_usd
+                .map(|usd| format!("${usd:.6}"))
+                .unwrap_or_else(|| "khong bao".into())
         ),
         Err(error) => println!("lỗi: {error:#}"),
     }

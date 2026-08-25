@@ -56,6 +56,15 @@ pub struct GroundedCommentResult {
     pub distinct_frames: u8,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
+    /// What the gateway said it charged, summed over every call this comment took — the draft,
+    /// its verification, and a retry of both when there was one.
+    ///
+    /// `None` on a gateway that does not report a price, and that is the only reason it is an
+    /// option. It is never computed here: the `usd` column this feeds used to hold
+    /// `tokens * a_price_table_in_the_source`, that table was invented, went stale in silence,
+    /// and the whole thing was removed rather than left to lie. A number the biller reports is
+    /// a measurement; a number this file multiplies is not.
+    pub cost_usd: Option<f64>,
     pub model: String,
     pub base_url_host: String,
 }
@@ -178,6 +187,63 @@ struct Message {
 struct Usage {
     prompt_tokens: Option<u32>,
     completion_tokens: Option<u32>,
+    /// What the gateway charged for this call, in USD. Absent on gateways that do not report.
+    cost: Option<f64>,
+}
+
+/// What one comment attempt actually cost, whichever way it ended.
+///
+/// **Carried out of the failure path on purpose.** Every attempt the verification gate rejected
+/// used to be recorded with `prompt_tokens: 0` — the calls were made and billed, and the row
+/// said they were free. Measured on the operator's own database, 25/08/2026: thirteen of
+/// thirty-three attempts were stored as costing nothing, and the thirteen were the *expensive*
+/// ones, because a rejection is a draft plus a verification plus a retry of both.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CommentSpend {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    /// `None` when the gateway does not report a price. Never a locally computed guess.
+    pub cost_usd: Option<f64>,
+}
+
+/// A comment attempt that produced no comment, and what it cost anyway.
+///
+/// **A typed error rather than a signature change**, so that every caller which only wants the
+/// message keeps working unchanged — `Display` renders exactly the string this used to return,
+/// and the outcome column, the operator's panel and the tests that match on
+/// `comment_context_rejected` all see what they saw before. A caller that wants the price asks
+/// for it with `downcast_ref::<FailedAttempt>()`.
+#[derive(Debug)]
+pub struct FailedAttempt {
+    pub detail: String,
+    pub spend: CommentSpend,
+}
+
+impl std::fmt::Display for FailedAttempt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for FailedAttempt {}
+
+/// What one failed attempt cost, if the failure came from a path that tracks it.
+///
+/// `None` means "this failure carries no price", which is honest: a transport error before the
+/// first call really did cost nothing, and a caller must not record a zero for a call that was
+/// made and billed.
+pub fn spend_of_failure(error: &anyhow::Error) -> Option<CommentSpend> {
+    error.downcast_ref::<FailedAttempt>().map(|f| f.spend)
+}
+
+impl CommentSpend {
+    fn add(&mut self, prompt: u32, completion: u32, cost: Option<f64>) {
+        self.prompt_tokens = self.prompt_tokens.saturating_add(prompt);
+        self.completion_tokens = self.completion_tokens.saturating_add(completion);
+        if let Some(cost) = cost {
+            *self.cost_usd.get_or_insert(0.0) += cost;
+        }
+    }
 }
 
 pub fn host_of(base_url: &str) -> String {
@@ -321,7 +387,7 @@ fn client() -> anyhow::Result<reqwest::Client> {
 async fn chat(
     settings: &NurtureSettings,
     body: serde_json::Value,
-) -> anyhow::Result<(String, u32, u32, String)> {
+) -> anyhow::Result<(String, u32, u32, Option<f64>, String)> {
     if settings.api_key.trim().is_empty() {
         return Err(anyhow!("API key trống — điền trong menu Nuôi TikTok"));
     }
@@ -366,8 +432,9 @@ async fn chat(
         .as_ref()
         .and_then(|u| u.completion_tokens)
         .unwrap_or(0);
+    let cost = parsed.usage.as_ref().and_then(|u| u.cost);
     let model = parsed.model.unwrap_or_else(|| settings.model.clone());
-    Ok((text, prompt_tokens, completion_tokens, model))
+    Ok((text, prompt_tokens, completion_tokens, cost, model))
 }
 
 /// One comment for the video currently on screen.
@@ -396,7 +463,7 @@ pub async fn generate_vision_comment(
         }]
     });
 
-    let (raw, prompt_tokens, completion_tokens, model) = chat(settings, body).await?;
+    let (raw, prompt_tokens, completion_tokens, _cost, model) = chat(settings, body).await?;
     let text = sanitize_comment(&raw, max_words)
         .ok_or_else(|| anyhow!("model trả comment không dùng được: {:.60}", raw))?;
     Ok(VisionCommentResult {
@@ -431,8 +498,7 @@ pub async fn prepare_grounded_comment(
     let max_words = settings.max_comment_words.clamp(4, 30) as usize;
     let lang = language_label(&settings.comment_lang);
     let direction = direction.map(str::trim).filter(|d| !d.is_empty());
-    let mut total_prompt = 0u32;
-    let mut total_completion = 0u32;
+    let mut spend = CommentSpend::default();
     let mut last_gate = None;
 
     // Two attempts, and **both failure kinds get to use the second one**. The retry existed
@@ -466,8 +532,7 @@ pub async fn prepare_grounded_comment(
                 break;
             }
         };
-        total_prompt = total_prompt.saturating_add(draft.prompt_tokens);
-        total_completion = total_completion.saturating_add(draft.completion_tokens);
+        spend.add(draft.prompt_tokens, draft.completion_tokens, draft.cost_usd);
         let Some(candidate) = sanitize_comment(&draft.comment, max_words) else {
             last_error = Some(format!("unusable_draft: {}", model_said(&draft.comment)));
             if attempt == 0 {
@@ -476,8 +541,11 @@ pub async fn prepare_grounded_comment(
             break;
         };
         let verification = grounded_verify(settings, &sheet, &candidate, direction).await?;
-        total_prompt = total_prompt.saturating_add(verification.prompt_tokens);
-        total_completion = total_completion.saturating_add(verification.completion_tokens);
+        spend.add(
+            verification.prompt_tokens,
+            verification.completion_tokens,
+            verification.cost_usd,
+        );
         let gate = VerificationGate {
             overall: draft
                 .context_confidence
@@ -499,8 +567,9 @@ pub async fn prepare_grounded_comment(
                 evidence_support: verification.evidence_support,
                 frame_sha256,
                 distinct_frames: sheet.distinct_frames,
-                prompt_tokens: total_prompt,
-                completion_tokens: total_completion,
+                prompt_tokens: spend.prompt_tokens,
+                completion_tokens: spend.completion_tokens,
+                cost_usd: spend.cost_usd,
                 model: verification.model,
                 base_url_host: host_of(&settings.base_url),
             });
@@ -515,19 +584,22 @@ pub async fn prepare_grounded_comment(
     // that never reached the gate has to say what actually stopped it, rather than reporting
     // a rejection that never happened — which is what `no_gate` used to do.
     if let Some(gate) = last_gate {
-        return Err(anyhow!(
-            "comment_context_rejected: context={} overall={} instruction={} genericity={}{}",
-            gate.overall,
-            gate.overall,
-            gate.instruction_fit,
-            gate.genericity,
-            gate.blocking_flags()
-        ));
+        return Err(anyhow!(FailedAttempt {
+            detail: format!(
+                "comment_context_rejected: context={} overall={} instruction={} genericity={}{}",
+                gate.overall,
+                gate.overall,
+                gate.instruction_fit,
+                gate.genericity,
+                gate.blocking_flags()
+            ),
+            spend,
+        }));
     }
-    Err(anyhow!(
-        "{}",
-        last_error.unwrap_or_else(|| "no_gate".to_string())
-    ))
+    Err(anyhow!(FailedAttempt {
+        detail: last_error.unwrap_or_else(|| "no_gate".to_string()),
+        spend,
+    }))
 }
 
 /// Prepare a grounded comment for a text-only provider from caption text
@@ -548,6 +620,7 @@ pub async fn prepare_caption_comment(
     let direction_text = direction.unwrap_or("tự nhiên");
     let mut total_prompt_tokens = 0u32;
     let mut total_completion_tokens = 0u32;
+    let mut total_cost_usd: Option<f64> = None;
     let mut last_gate = None;
 
     for attempt in 0..2 {
@@ -569,10 +642,13 @@ pub async fn prepare_caption_comment(
              ",
             lang = language_label(&settings.comment_lang),
         );
-        let (draft_raw, draft_prompt_tokens, draft_completion_tokens, _draft_model) =
+        let (draft_raw, draft_prompt_tokens, draft_completion_tokens, draft_cost, _draft_model) =
             chat(settings, text_body(settings, draft_prompt, 0.7, 300)).await?;
         total_prompt_tokens = total_prompt_tokens.saturating_add(draft_prompt_tokens);
         total_completion_tokens = total_completion_tokens.saturating_add(draft_completion_tokens);
+        if let Some(cost) = draft_cost {
+            *total_cost_usd.get_or_insert(0.0) += cost;
+        }
         let draft_value =
             json_object(&draft_raw).ok_or_else(|| anyhow!("malformed_model_output"))?;
         let candidate = sanitize_comment(
@@ -599,10 +675,13 @@ pub async fn prepare_caption_comment(
              Trả về JSON duy nhất: {{\"relevance\":0..100,\"evidenceSupport\":0..100,\"instructionFit\":0..100,\"genericity\":0..100,\"contradiction\":boolean,\"unsupportedClaim\":boolean,\"uiTextConfusion\":boolean}}.\
              relevance/evidenceSupport chỉ chấm điều có thể đối chiếu với caption; instructionFit thấp nếu câu nghe như báo cáo; genericity cao nếu khen rỗng.",
         );
-        let (verify_raw, verify_prompt_tokens, verify_completion_tokens, model) =
+        let (verify_raw, verify_prompt_tokens, verify_completion_tokens, verify_cost, model) =
             chat(settings, text_body(settings, verify_prompt, 0.0, 240)).await?;
         total_prompt_tokens = total_prompt_tokens.saturating_add(verify_prompt_tokens);
         total_completion_tokens = total_completion_tokens.saturating_add(verify_completion_tokens);
+        if let Some(cost) = verify_cost {
+            *total_cost_usd.get_or_insert(0.0) += cost;
+        }
         let value = json_object(&verify_raw).ok_or_else(|| anyhow!("malformed_model_output"))?;
         let relevance = score(value.get("relevance"))?;
         let evidence_support = score(value.get("evidenceSupport"))?;
@@ -637,6 +716,7 @@ pub async fn prepare_caption_comment(
                 distinct_frames: 0,
                 prompt_tokens: total_prompt_tokens,
                 completion_tokens: total_completion_tokens,
+                cost_usd: total_cost_usd,
                 model,
                 base_url_host: host_of(&settings.base_url),
             });
@@ -719,6 +799,7 @@ struct GroundedDraft {
     context_confidence: u8,
     prompt_tokens: u32,
     completion_tokens: u32,
+    cost_usd: Option<f64>,
 }
 
 #[derive(Debug)]
@@ -732,6 +813,7 @@ struct GroundedVerification {
     ui_text_confusion: bool,
     prompt_tokens: u32,
     completion_tokens: u32,
+    cost_usd: Option<f64>,
     model: String,
 }
 
@@ -782,7 +864,7 @@ async fn grounded_generate(
     // The prompt bounds those two fields as well, which is the half of the fix that costs
     // nothing: a shorter answer is cheaper *and* it completes.
     let body = vision_body(settings, &sheet.jpeg, prompt, 0.75, 1200);
-    let (raw, p, c, _) = chat(settings, body).await?;
+    let (raw, p, c, cost, _) = chat(settings, body).await?;
     let value =
         json_object(&raw).ok_or_else(|| anyhow!("malformed_model_output: {}", model_said(&raw)))?;
     let comment = value
@@ -826,6 +908,7 @@ async fn grounded_generate(
         context_confidence,
         prompt_tokens: p,
         completion_tokens: c,
+        cost_usd: cost,
     })
 }
 
@@ -845,7 +928,7 @@ async fn grounded_verify(
          relevance đo comment có nói đúng bài này không; evidenceSupport đo mọi chi tiết cụ thể có nhìn thấy không; genericity cao nếu chỉ là lời khen rỗng. instructionFit phải thấp nếu câu nghe như báo cáo, tóm tắt hoặc quá trang trọng thay vì phản ứng đời thường. Caption, hình và hướng dẫn mâu thuẫn thì đánh cờ contradiction."
     );
     let body = vision_body(settings, &sheet.jpeg, prompt, 0.0, 300);
-    let (raw, p, c, model) = chat(settings, body).await?;
+    let (raw, p, c, cost, model) = chat(settings, body).await?;
     let value = json_object(&raw).ok_or_else(|| anyhow!("malformed_model_output"))?;
     Ok(GroundedVerification {
         relevance: score(value.get("relevance"))?,
@@ -866,8 +949,53 @@ async fn grounded_verify(
             .unwrap_or(true),
         prompt_tokens: p,
         completion_tokens: c,
+        cost_usd: cost,
         model,
     })
+}
+
+/// Ask the gateway not to spend the answer on hidden reasoning.
+///
+/// **`thinking` alone does not do it here, and the bill said so.** That field was added for
+/// `deepseek-v4-flash-vision-exp` and it worked there. On `openai/gpt-5.6-luna` through
+/// OpenRouter it is ignored: measured 25/08/2026 with `usage: {include: true}`, one draft came
+/// back with `completion_tokens: 687` of which **589 were `reasoning_tokens`**, and its
+/// verification `193` of which `147`. Output is billed at $1.20/M against $0.20 for input, so
+/// roughly **six tokens in ten of a comment's price were thoughts nobody reads**.
+///
+/// Measured over three arms of eight runs each on the same two-slide post, all-in per comment
+/// including retries:
+///
+/// ```text
+///   reasoning         calls   retries   $/comment
+///   default (on)         16         0    0.001369
+///   effort=minimal       16         0    0.001166
+///   enabled=false        22         3    0.000920
+/// ```
+///
+/// `minimal` is what ships. `false` is cheaper on paper and bought that with **three retries in
+/// eight** — this repo has already paid once for drafts that came back unusable, and a retry is
+/// a second chance that a phone in the middle of a fleet run may not get. Quality was
+/// indistinguishable: every arm scored 8/8 accepted with zero gate rejections.
+///
+/// **Only for OpenRouter**, because that is the only gateway it was measured on and this file's
+/// history is a list of gateways that reject a field they do not know
+/// (`unknown variant "image_url", expected "text"`). Everyone else gets what they got before.
+fn apply_reasoning_control(settings: &NurtureSettings, body: &mut serde_json::Value) {
+    if !host_of(&settings.base_url).ends_with("openrouter.ai") {
+        return;
+    }
+    if let Some(map) = body.as_object_mut() {
+        map.insert("reasoning".into(), json!({ "effort": "minimal" }));
+        // **What the gateway says it charged, rather than what this repo guesses.** The `usd`
+        // column exists because a previous version multiplied tokens by a hard-coded price
+        // table; that table was invented, went stale silently, and was ripped out — leaving a
+        // column that is always `0` and an operator who cannot answer "how much did that
+        // cost?". OpenRouter answers it directly when asked, and a number the biller reports
+        // is not a guess. Asked for on the same host gate and for the same reason: it is one
+        // more field, and only this gateway was measured accepting it.
+        map.insert("usage".into(), json!({ "include": true }));
+    }
 }
 
 fn vision_body(
@@ -878,7 +1006,7 @@ fn vision_body(
     max_tokens: u32,
 ) -> serde_json::Value {
     let b64 = B64.encode(sheet);
-    json!({
+    let mut body = json!({
         "model": settings.model,
         "temperature": temperature,
         "max_tokens": max_tokens,
@@ -902,7 +1030,9 @@ fn vision_body(
                 { "type": "text", "text": prompt }
             ]
         }]
-    })
+    });
+    apply_reasoning_control(settings, &mut body);
+    body
 }
 
 fn text_body(
@@ -911,7 +1041,7 @@ fn text_body(
     temperature: f64,
     max_tokens: u32,
 ) -> serde_json::Value {
-    json!({
+    let mut body = json!({
         "model": settings.model,
         "temperature": temperature,
         "max_tokens": max_tokens,
@@ -922,7 +1052,9 @@ fn text_body(
             "role": "user",
             "content": prompt
         }]
-    })
+    });
+    apply_reasoning_control(settings, &mut body);
+    body
 }
 
 fn json_object(raw: &str) -> Option<serde_json::Value> {
@@ -1204,7 +1336,7 @@ pub async fn generate_comment_pool(settings: &NurtureSettings, count: usize) -> 
     });
 
     match chat(settings, body).await {
-        Ok((raw, _, _, _)) => {
+        Ok((raw, _, _, _, _)) => {
             let mut pool: Vec<String> = raw
                 .lines()
                 .filter_map(|line| sanitize_comment(line, max_words))
@@ -1305,7 +1437,7 @@ pub async fn choose_emoji_reaction(settings: &NurtureSettings, jpeg_bytes: &[u8]
         *EMOJI_MENU.choose(&mut rng).unwrap_or(&EMOJI_MENU[0])
     };
     match chat(settings, body).await {
-        Ok((raw, _, _, _)) => {
+        Ok((raw, _, _, _, _)) => {
             let pick = raw
                 .chars()
                 .find(|c| c.is_ascii_digit())
@@ -2374,46 +2506,7 @@ mod tests {",
             "usage": {"prompt_tokens": 27, "completion_tokens": 9},
             "model": "mock-verifier"
         });
-        let server = tokio::spawn(async move {
-            for response in [draft, verification] {
-                let (mut socket, _) = listener.accept().await.expect("mock request");
-                let mut request = Vec::new();
-                let mut chunk = [0u8; 8192];
-                loop {
-                    let count = socket.read(&mut chunk).await.expect("mock request body");
-                    if count == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&chunk[..count]);
-                    let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
-                        continue;
-                    };
-                    let content_length = std::str::from_utf8(&request[..header_end])
-                        .ok()
-                        .and_then(|headers| {
-                            headers.lines().find_map(|line| {
-                                let (name, value) = line.split_once(':')?;
-                                name.eq_ignore_ascii_case("content-length")
-                                    .then(|| value.trim().parse().ok())
-                                    .flatten()
-                            })
-                        })
-                        .unwrap_or(0usize);
-                    if request.len() >= header_end + 4 + content_length {
-                        break;
-                    }
-                }
-                let body = response.to_string();
-                let head = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                socket
-                    .write_all(format!("{head}{body}").as_bytes())
-                    .await
-                    .expect("mock response");
-            }
-        });
+        let server = serve_mock_gateway(listener, vec![draft, verification]);
 
         let settings = NurtureSettings {
             api_key: "test-key".into(),
@@ -2478,5 +2571,153 @@ mod tests {",
         assert_eq!(slide_width(1, EvidenceKind::Moments), 589);
         assert_eq!(slide_width(2, EvidenceKind::Moments), 367);
         assert_eq!(slide_width(4, EvidenceKind::Moments), 216);
+    }
+
+    /// The reasoning control reaches OpenRouter, and reaches nobody else at all.
+    ///
+    /// Both halves are load-bearing and both go red on their own. Dropping the insert loses
+    /// the measured saving — six output tokens in ten were hidden reasoning. Dropping the host
+    /// gate sends a field to gateways it was never measured against, and this file's history is
+    /// a list of gateways that answered `unknown variant` and failed the whole call.
+    ///
+    /// **Absent, not null.** A `null` is still a key the gateway has to accept and interpret;
+    /// the test asserts the key is missing so that "we did not ask" cannot regress into "we
+    /// asked for nothing".
+    #[test]
+    fn only_openrouter_is_asked_to_stop_reasoning() {
+        let openrouter = NurtureSettings {
+            base_url: "https://openrouter.ai/api/v1".into(),
+            model: "openai/gpt-5.6-luna".into(),
+            ..NurtureSettings::default()
+        };
+        let elsewhere = NurtureSettings {
+            base_url: "https://api.deepseek.com".into(),
+            model: "deepseek-v4-flash".into(),
+            ..NurtureSettings::default()
+        };
+
+        for body in [
+            vision_body(
+                &openrouter,
+                &[0xff, 0xd8, 0xff],
+                "xem ảnh".into(),
+                1.0,
+                1200,
+            ),
+            text_body(&openrouter, "trả JSON".into(), 0.0, 100),
+        ] {
+            assert_eq!(body["reasoning"]["effort"], "minimal", "{body}");
+        }
+        for body in [
+            vision_body(&elsewhere, &[0xff, 0xd8, 0xff], "xem ảnh".into(), 1.0, 1200),
+            text_body(&elsewhere, "trả JSON".into(), 0.0, 100),
+        ] {
+            assert!(
+                body.get("reasoning").is_none(),
+                "a gateway that was never measured must not be sent the field at all: {body}"
+            );
+        }
+    }
+    /// Answer `responses` in order on one socket each, then finish.
+    ///
+    /// Factored out when a second test needed it. A copy would have been the third place in
+    /// this file that hand-rolls HTTP framing, and the two would have drifted the first time
+    /// one of them learned something about `Content-Length`.
+    fn serve_mock_gateway(
+        listener: tokio::net::TcpListener,
+        responses: Vec<serde_json::Value>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            for response in responses {
+                let (mut socket, _) = listener.accept().await.expect("mock request");
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 8192];
+                loop {
+                    let count = socket.read(&mut chunk).await.expect("mock request body");
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                    let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let content_length = std::str::from_utf8(&request[..header_end])
+                        .ok()
+                        .and_then(|headers| {
+                            headers.lines().find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse().ok())
+                                    .flatten()
+                            })
+                        })
+                        .unwrap_or(0usize);
+                    if request.len() >= header_end + 4 + content_length {
+                        break;
+                    }
+                }
+                let body = response.to_string();
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                socket
+                    .write_all(format!("{head}{body}").as_bytes())
+                    .await
+                    .expect("mock response");
+            }
+        })
+    }
+
+    /// A comment the gate refuses still reports what it cost.
+    ///
+    /// **The hole this closes was real and it was the expensive half of the bill.** Every
+    /// rejected attempt was recorded with `prompt_tokens: 0` — measured on the operator's own
+    /// database, thirteen of thirty-three rows said an attempt was free, and a rejection is the
+    /// one outcome that is *never* free: it is a draft, a verification, and a retry of both.
+    /// Four calls charged, four calls filed as nothing.
+    #[tokio::test]
+    async fn a_rejected_comment_still_reports_what_it_cost() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock gateway bind");
+        let address = listener.local_addr().expect("mock gateway address");
+        let draft = serde_json::json!({
+            "choices": [{"message": {"content": "{\"caption\":\"x\",\"captionConfidence\":50,\"visualFacts\":[],\"contextConfidence\":50,\"comment\":\"Hay quá\"}"}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 10},
+            "model": "mock-draft"
+        });
+        // Empty praise: the gate is built to refuse exactly this.
+        let refusal = serde_json::json!({
+            "choices": [{"message": {"content": "{\"relevance\":30,\"evidenceSupport\":20,\"instructionFit\":40,\"genericity\":95,\"contradiction\":false,\"unsupportedClaim\":false,\"uiTextConfusion\":false}"}}],
+            "usage": {"prompt_tokens": 200, "completion_tokens": 20},
+            "model": "mock-verifier"
+        });
+        // Two, not four: this verdict is not retryable — `retryable()` wants `overall >= 60`
+        // and this one scores far below — so the attempt ends after one round. Queueing four
+        // responses made the mock wait for two requests that never came and hung the test.
+        let server = serve_mock_gateway(listener, vec![draft, refusal]);
+
+        let settings = NurtureSettings {
+            api_key: "test-key".into(),
+            base_url: format!("http://{address}/v1"),
+            ..NurtureSettings::default()
+        };
+        let frame = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
+        let error =
+            prepare_grounded_comment(&settings, &[frame], EvidenceKind::Moments, Some("tự nhiên"))
+                .await
+                .expect_err("the gate refuses empty praise");
+        server.await.expect("mock gateway task");
+
+        // The message is unchanged, so every outcome column and every caller that matches on
+        // this string keeps working.
+        assert!(
+            error.to_string().starts_with("comment_context_rejected"),
+            "{error}"
+        );
+        let spend = spend_of_failure(&error).expect("a rejection knows what it spent");
+        assert_eq!(spend.prompt_tokens, 300, "the draft and its verification");
+        assert_eq!(spend.completion_tokens, 30);
     }
 }
