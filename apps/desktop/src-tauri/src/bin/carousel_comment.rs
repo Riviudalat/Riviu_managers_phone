@@ -92,8 +92,8 @@ async fn main() -> anyhow::Result<()> {
         Ok((result, mode)) => println!(
             "[{mode}] {}
          caption thấy: {:?}
-         evidence_support={} relevance={}",
-            result.text, result.caption, result.evidence_support, result.relevance
+         evidence_support={} relevance={} prompt_tokens={} completion_tokens={} (ca hai request cua mot tin)",
+            result.text, result.caption, result.evidence_support, result.relevance, result.prompt_tokens, result.completion_tokens
         ),
         Err(error) => println!("lỗi: {error:#}"),
     }
@@ -105,8 +105,8 @@ async fn main() -> anyhow::Result<()> {
         Ok((result, mode)) => println!(
             "[{mode}] {}
          caption thấy: {:?}
-         evidence_support={} relevance={}",
-            result.text, result.caption, result.evidence_support, result.relevance
+         evidence_support={} relevance={} prompt_tokens={} completion_tokens={} (ca hai request cua mot tin)",
+            result.text, result.caption, result.evidence_support, result.relevance, result.prompt_tokens, result.completion_tokens
         ),
         Err(error) => println!("lỗi: {error:#}"),
     }
