@@ -14,11 +14,16 @@
 //! not be asked at all, which meant the feature could only ever be exercised by hand.
 //!
 //! The AI key is **never typed on the command line**. Settings are inherited from the
-//! desktop app's own database — key, model, base url, language, tone directions and word
-//! cap — by copying that file into the scratch directory and working on the copy, so a run
-//! here can never rewrite what the operator configured in the app. The copy carries the key
-//! in plaintext for the life of the run and is deleted at the end; a crash leaves it in
-//! `%TEMP%`, which is the same exposure the app's own database already has.
+//! desktop app's own database — model, base url, language, tone directions and word cap — by
+//! copying that file into the scratch directory and working on the copy, so a run here can
+//! never rewrite what the operator configured in the app.
+//!
+//! **The key itself is not in that file, and this paragraph used to claim it was.** It moved
+//! to the OS credential store, so a faithful copy of the operator's database reports
+//! `khoá API TRỐNG` and the run refuses to comment — which is exactly what happened on
+//! 25/08/2026 to a harness written from this instruction. The copy is opened *with* the same
+//! keyring seam `AppState::bootstrap` uses, so the key is read from where the app put it and
+//! never lands in a file. Following the old wording got an empty key and no explanation.
 //!
 //! What it exercises is everything underneath — an exclusive lease, a
 //! stream-budget slot, a UI session, TikTok in the foreground, watch and swipe and like —
@@ -34,13 +39,31 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use app_lib::interaction_ocr::DesktopFrameTextSource;
-use riviu_core::db::Database;
+use riviu_core::db::{Database, SecretStore};
 use riviu_core::driver::DeviceDriver;
 use riviu_core::{
     DeviceControlPlane, DeviceWorkCoordinator, NurtureEngine, NurtureSettings, StreamBudgetManager,
 };
 use riviu_ios_driver::StreamHub;
 use uuid::Uuid;
+
+/// The same seam `AppState::bootstrap` uses, so the key comes from where the app put it.
+///
+/// Copying the database is not enough: the AI key stopped living in the settings blob when it
+/// moved to the credential store, and a copy therefore carries every setting except the one
+/// that decides whether a comment can be written at all.
+struct KeyringSecrets {
+    credentials: riviu_signing::CredentialStore,
+}
+
+impl SecretStore for KeyringSecrets {
+    fn get_secret(&self, name: &str) -> anyhow::Result<Option<String>> {
+        self.credentials.app_secret(name)
+    }
+    fn set_secret(&self, name: &str, value: &str) -> anyhow::Result<()> {
+        self.credentials.set_app_secret(name, value)
+    }
+}
 
 /// Print and flush. Output is piped to a file here, where Rust block-buffers stdout — a run
 /// that is killed part way would otherwise report nothing at all about what it had learned.
@@ -180,7 +203,11 @@ async fn main() -> anyhow::Result<()> {
     } else {
         false
     };
-    let database = Arc::new(Database::open(scratch.join("riviu.db"))?);
+    let database = Arc::new(
+        Database::open(scratch.join("riviu.db"))?.with_secrets(Arc::new(KeyringSecrets {
+            credentials: riviu_signing::CredentialStore::system()?,
+        })),
+    );
     let control = Arc::new(DeviceControlPlane::new(
         android.clone(),
         Arc::new(DeviceWorkCoordinator::new()),
