@@ -8864,3 +8864,91 @@ và đã thấy trên thật: `genericity=12 [nói điều không có bằng ch�
 - **Lỗi `NoComposer` ở bước trả lời** (Toả / Nối tiếp) vẫn còn: bấm Trả lời xong không thấy ô nhập
   trong 6 giây, lặp lại hai lần liên tiếp nên có cấu trúc. Mọi phép đo ở trên chạy **Riêng lẻ** nên
   không đi qua bước đó.
+
+## 9.109 Bài nhiều ảnh: bình luận viết từ ảnh 1 (25/08/2026)
+
+Người vận hành báo bình luận **lệch nội dung** trên
+`https://www.tiktok.com/@pht.th.h.slay/photo/7668948504827448583`: ảnh 1 là người nằm bên hồ,
+nhưng ảnh 2 mới là nội dung — một bảng lịch trình Đà Lạt 3N2Đ 25 dòng, có giá từng mục, tổng
+~2.3tr.
+
+**Nguyên nhân, đọc từ source chứ không đoán.** `collect_target_evidence_frames` lấy **ba khung
+stream cách nhau 500 ms**, rồi `make_contact_sheet` gộp chúng — đúng, vì bài ảnh không đổi pixel.
+Nên tấm ghép chỉ còn **một ảnh, và luôn là ảnh 1**. Không có khoảng chờ nào cứu được: **carousel
+không tự lật**, nó đợi được vuốt. Doc của `make_contact_sheet` còn ghi "bài ảnh phát ra frame
+giống hệt nhau" như một sự thật đã đo — đúng với bài một ảnh, sai với carousel, và mọi thứ phía
+sau xây trên tiền đề đó.
+
+Nhánh nuôi TikTok đã sửa đúng lỗi này từ trước (`prepare_hierarchy_comment`: *"một bài sáu ảnh bị
+bình luận từ một phần sáu của nó"*). Đường Tương tác không dùng lại gì trong đó.
+
+**Chỉ số slide có trong cây, nhưng là ba node rời.** Đo bằng dump ngay sau một cú vuốt:
+
+```text
+  text="2"    bounds=[955,195][976,234]
+  text=" / "  bounds=[976,195][1006,234]
+  text="2"    bounds=[1006,195][1027,234]
+```
+
+Cha là `LinearLayout` id kết thúc `:id/llz` — **minified, nên không được lấy làm mỏ neo**, đúng
+loại đã từng gãy giữa hai bản TikTok ở chuyện node caption. `read_carousel_index` bám vào text
+`" / "` cộng hình học hàng ngang.
+
+Ba tính chất phải nhớ:
+
+- **Nó không có ở ảnh 1.** Dump lúc mới mở bài không có node nào; gate in `counter at slide 1:
+  None` trên cả hai bản. Nên không biết trước bài dài bao nhiêu, chỉ biết sau cú vuốt đầu.
+- **Nó biến mất sau ~3 giây.** Dump lấy sau 3 giây **byte-identical** với dump trước khi vuốt.
+  Vì vậy phải đọc counter **trước** khi ngủ settle.
+- **Vuốt quá ảnh cuối là rời bài.** Không dừng, không quay vòng: nó mở **trang hồ sơ tác giả**,
+  có nút Follow ngay đó. Nên counter không đọc được = **dừng**, không bao giờ = "chắc còn một
+  ảnh nữa".
+
+**"Có frame mới" không phải tín hiệu lật trang.** Bản dò thô của tôi đếm được **7 khung khác
+nhau trên một bài 2 ảnh**: khung 3 khác khung 2 chỉ vì cái badge `2 / 2` đã mờ đi, và khung 4–7
+là trang hồ sơ. `do_photo_swipe` bên nuôi dùng đúng tín hiệu này; nó đủ dùng trên feed nhưng
+không đủ ở đây.
+
+**Nghiệm thu trên máy thật** — `examples/carousel_gate`, gọi thẳng `photograph_photo_post`:
+
+| máy | package | bản | counter sau cú vuốt 1 | ảnh | thời gian |
+|---|---|---|---|---|---|
+| ce03171392f9390c01 | `com.ss.android.ugc.trill` | 38.3.2 | `2 / 2` | 2 khác nhau | 5,0 s |
+| ce0717171c2a64d50d | `com.zhiliaoapp.musically` | 46.2.1 | `2 / 2` | 2 khác nhau | 6,9 s |
+
+Gate **phải in counter**, không chỉ đếm ảnh: với bài 2 ảnh thì "đọc được 2/2 rồi dừng" và "không
+đọc được nên dừng" ra cùng một kết quả. Lần chạy đầu trên `musically` trông như đạt và **không
+chứng minh gì cả**.
+
+**Tấm ghép.** `SHEET_MAX_FRAMES = 4` (was 3), và ngân sách pixel **nhân theo số slide** — vì mỗi
+slide là một trang riêng, thường là chữ. Bề rộng một slide, đo trên khung 1080x2220:
+
+| slide | có nhân | ngân sách phẳng |
+|---|---|---|
+| 1 | 589 | 589 |
+| 2 | 519 | 367 |
+| 4 | 431 | 216 |
+
+216 px là ảnh thu nhỏ của một cái bảng. `EvidenceKind` được truyền xuống (`Moments` /
+`CarouselSlides`) vì ba khung video và ba slide tới nơi giống hệt nhau, chỉ caller biết cái nào
+là cái nào — nói slide là "theo thời gian" chính là mời model kể một diễn biến không pixel nào
+chứng minh.
+
+**Bốn nhánh không ép được an toàn trên máy thật** (bài dài, chạm trần, counter mù, vuốt rời bài)
+được phủ bằng test với fixture — vì ép chúng trên thật nghĩa là cố tình để máy nhảy vào trang hồ
+sơ người lạ.
+
+### Môi trường: đo được trong lúc làm
+
+- **15/20 máy không ra internet.** Mọi máy trên `Riviu 2 Ruijie` (2.4G lẫn 5G) ping 0/3; 5 máy
+  trên `VNPT Riviu Dalat` ping 3/3. §9.104 ghi là "Riviu 3" — **hôm nay là Riviu 2**, nên đây là
+  hạ tầng chập chờn chứ không phải một AP hỏng cố định.
+- **Máy tự roam giữa AP.** `ce021712b33054090c` đang ở `VNPT Riviu Dalat_5G` (3/3) rồi nhảy sang
+  `Riviu 3 Ruijie 5G` (0/3) giữa phiên, và app kẹt ở màn feed quay vòng.
+- **Phép kiểm ping của tôi sai lần đầu:** `"100% packet loss"` **chứa** chuỗi `"0% packet loss"`,
+  nên cả 20 máy đều báo OK. Đếm `N received` mới đúng.
+- **`SplashActivity` vẫn là resumed activity của `trill` 38.3.2 khi feed đã vẽ xong.** Gate chờ
+  hết 45 giây rồi đi tiếp vẫn chạy đúng. Tên activity không phải tín hiệu "đã sẵn sàng".
+- Bốn thứ chặn gate trước khi nó chạy được, không cái nào là lỗi code: màn hình khoá, thanh
+  thông báo kéo xuống, **menu nguồn** (Power off / Restart) đè lên app, và launcher còn ở
+  foreground khi vòng chờ chỉ hỏi "đã qua splash chưa".
