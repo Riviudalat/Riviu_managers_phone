@@ -9,7 +9,7 @@ import type {
   AppLibraryItem,
   AppleIdConfig,
   ClipboardRead,
-  DeviceFileEntry,
+  DeviceDirListing,
   DeviceGroup,
   DeviceInfo,
   GroupInputReport,
@@ -343,7 +343,7 @@ export async function rootShell(udid: string, command: string) {
 /// Read one directory on the phone, for the file browser (xiaowei "Preview Mobile Files").
 /// `path` must be absolute; the backend refuses anything a single quote could break out of.
 export async function deviceListDir(udid: string, path: string) {
-  return invoke<DeviceFileEntry[]>("device_list_dir", { udid, path });
+  return invoke<DeviceDirListing>("device_list_dir", { udid, path });
 }
 
 /// Copy one file or folder off the phone (xiaowei "Export File"). Returns the local path.

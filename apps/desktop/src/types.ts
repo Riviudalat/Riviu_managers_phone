@@ -1595,6 +1595,22 @@ export interface DeviceFileEntry {
   linkTarget: string | null;
 }
 
+/**
+ * One directory as the phone described it, including what it would not describe.
+ *
+ * `incomplete` is non-null when `ls -la` printed some rows and complained about the rest, or
+ * when a row was in a shape the parser could not read. The list is then **short**, and drawing
+ * it as complete is the defect this field exists to stop: an operator deletes from a folder,
+ * exports from it, and concludes things about it.
+ *
+ * A refusal never arrives here — the command rejects instead, because there is no listing to
+ * draw. So `entries: []` with `incomplete: null` means the directory really is empty.
+ */
+export interface DeviceDirListing {
+  entries: DeviceFileEntry[];
+  incomplete: string | null;
+}
+
 /** What the phone had on its clipboard (xiaowei "Export Clipboard"). */
 export interface ClipboardRead {
   /** The phone's own MIME description, e.g. `text/plain`. */

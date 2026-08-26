@@ -1279,10 +1279,19 @@ pub fn parse_wlan_ipv4(stdout: &str) -> Option<String> {
 ///
 /// So the rule is narrower and provable instead: every path this module sends is wrapped in
 /// **single quotes** by [`quote_device_path`], inside which `$`, `&`, `;`, `|`, `<`, `>` and
-/// backtick are all inert. The only characters that can escape single quotes are the single
-/// quote itself and a newline, and those two are what this rejects — plus control characters
-/// and anything not anchored at `/`, because a relative path resolves against a working
-/// directory the caller never chose.
+/// backtick are all inert.
+///
+/// **An apostrophe used to be rejected here, and that was the wrong half to fix.** A quote is
+/// the one character a single-quoted run cannot contain, so refusing it made the quoting
+/// provable — at the price of making `John's photo.jpg` impossible to list, export or delete
+/// from this app at all. A file an operator can see and cannot touch is not a safety property;
+/// it is a missing feature that reads as a bug. [`quote_device_path`] now emits the POSIX escape
+/// for it, so the guarantee is unchanged and the file is reachable.
+///
+/// Still refused: control characters — a newline would survive the quoting intact, but nothing
+/// on this fleet has one and a path containing one is far more likely to be a parse mistake
+/// upstream than a real name — and anything not anchored at `/`, because a relative path
+/// resolves against a working directory the caller never chose.
 pub fn validate_device_path(path: &str) -> anyhow::Result<&str> {
     if path.is_empty() {
         anyhow::bail!("đường dẫn rỗng");
@@ -1293,20 +1302,24 @@ pub fn validate_device_path(path: &str) -> anyhow::Result<&str> {
     if path.len() > 1024 {
         anyhow::bail!("đường dẫn dài quá 1024 ký tự");
     }
-    if path.contains('\'') {
-        anyhow::bail!("đường dẫn có dấu nháy đơn, không gửi được xuống shell máy: {path}");
-    }
     if let Some(bad) = path.chars().find(|c| c.is_control()) {
         anyhow::bail!("đường dẫn có ký tự điều khiển U+{:04X}", bad as u32);
     }
     Ok(path)
 }
 
-/// Wrap a validated path for a device shell command. Only ever call this on the output of
-/// [`validate_device_path`] — single quotes are safe *because* the quote character itself
-/// has already been ruled out.
+/// Wrap a validated path for a device shell command, apostrophes and all.
+///
+/// POSIX offers no escape *inside* a single-quoted run, so an apostrophe is emitted by leaving
+/// the run, passing a backslash-escaped quote, and opening a new one. The three pieces form one
+/// shell word because nothing separates them.
+///
+/// This replaced a ban: `validate_device_path` used to refuse any path containing an apostrophe,
+/// which made the quoting trivially safe and made `John's photo.jpg` unreachable from this app
+/// — no listing, no export, no delete. The round-trip test proves the escape by unquoting it the
+/// way a shell would, rather than by asserting a literal nobody can read.
 pub fn quote_device_path(path: &str) -> String {
-    format!("'{path}'")
+    format!("'{}'", path.replace('\'', "'\\''"))
 }
 
 /// Paths that must never be handed to `rm -rf`, whatever the operator clicked.
@@ -1389,6 +1402,69 @@ fn tokens_with_offsets(line: &str) -> Vec<(usize, &str)> {
     out
 }
 
+/// `Jul`, as a `ls -l` prints the month column when it is not printing an ISO date.
+///
+/// **Not measured on this fleet, and said plainly so nobody later reads it as measured.** Both
+/// ROMs that have been read here -- 23021RAAEG (Android 15) and SM-G955F (Android 9) -- print
+/// `YYYY-MM-DD HH:MM`. busybox and the BSD-derived `ls` in other vendor ROMs print
+/// `Mon DD HH:MM` for a recent file and `Mon DD  YYYY` for an older one.
+///
+/// It is handled anyway, and the reason is not the format: it is what the parser did when it
+/// met a format it did not know. The fallback took token 6 as the start of the name, so an
+/// unrecognised row came back **named after its own date columns** -- and that invented name is
+/// what the browser showed and what `rm -rf` and `pull` were handed. Recognising one more real
+/// format narrows the hole; `read_ls_listing` reporting the rest is what closes it.
+fn looks_like_ls_month(token: &str) -> bool {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    MONTHS.contains(&token)
+}
+
+/// A short run of digits: the day column, or the year that replaces the time on an older file.
+/// The caller decides which slot it is; this only says the token could be a number.
+fn looks_like_ls_number(token: &str, max_len: usize) -> bool {
+    !token.is_empty() && token.len() <= max_len && token.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Where the timestamp sits in a row, how many tokens it spans, and how it reads.
+///
+/// **The whole parse hangs off this.** Column widths are padded per listing and the *number* of
+/// columns differs between ROMs -- some print a link-count, some do not -- so nothing can be
+/// read at a fixed index. Locating the timestamp settles two things at once: the name is
+/// everything after it, and **the size is the token immediately before it**.
+///
+/// That second part was a live bug. The size used to be read from `tokens[4]` unconditionally,
+/// which is right only when the link-count column is present. Without it `tokens[4]` is the
+/// *date*, `parse::<u64>()` fails, and `unwrap_or(0)` turned every file in the browser into
+/// **0 B** -- silently, because a size of zero reads as a fact rather than as a failure.
+fn ls_timestamp(tokens: &[(usize, &str)]) -> Option<(usize, usize, String)> {
+    for index in 0..tokens.len() {
+        let token = tokens[index].1;
+        // `2026-07-26 20:29`
+        if looks_like_ls_date(token) {
+            if let Some((_, time)) = tokens.get(index + 1) {
+                if looks_like_ls_time(time) {
+                    return Some((index, 2, format!("{token} {time}")));
+                }
+            }
+        }
+        // `Jul 11 11:16`, or `Jul 11  2024` once the file is older than six months.
+        if looks_like_ls_month(token) {
+            let day = tokens.get(index + 1).map(|(_, day)| *day);
+            let third = tokens.get(index + 2).map(|(_, third)| *third);
+            if let (Some(day), Some(third)) = (day, third) {
+                if looks_like_ls_number(day, 2)
+                    && (looks_like_ls_time(third) || looks_like_ls_number(third, 4))
+                {
+                    return Some((index, 3, format!("{token} {day} {third}")));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Parse one phone's `ls -la` into rows a file browser can draw (xiaowei "Preview Mobile
 /// Files").
 ///
@@ -1411,7 +1487,25 @@ fn tokens_with_offsets(line: &str) -> Vec<(usize, &str)> {
 /// other row: keying off a field *count* drops it, so the name is found by locating the
 /// date-then-time pair and falling back to the seventh token only when there is none.
 pub fn parse_ls_listing(stdout: &str) -> Vec<riviu_core::DeviceFileEntry> {
+    read_ls_listing(stdout).0
+}
+
+/// Every row of a `ls -la`, and the lines that looked like rows but could not be read.
+///
+/// **The second half is the point.** The old parser had a single path for "no timestamp found":
+/// take token 6 as the start of the name. On the one row shape that genuinely has no timestamp
+/// -- the unstattable `l?????????  ? ?  ?  ? cache -> ?` -- that is right. On a row whose date
+/// format the parser did not know, it is a **fabricated filename**: given
+/// `-rw-r--r-- 1 root root 138078 Jul 11 11:16 photo.jpg`, token 6 is `11`, so the file was
+/// called `"11 11:16 photo.jpg"` -- and that invented name then went on into `ls`, `rm -rf` and
+/// `pull` as though the phone had said it.
+///
+/// The two cases are now told apart by what actually distinguishes them: an unstattable row
+/// prints `?` in its columns. A row with no timestamp *and* no `?` is a shape this parser does
+/// not understand, and it is reported instead of guessed at.
+pub fn read_ls_listing(stdout: &str) -> (Vec<riviu_core::DeviceFileEntry>, Vec<String>) {
     let mut entries = Vec::new();
+    let mut unreadable = Vec::new();
     for line in stdout.lines() {
         let line = line.trim_end_matches('\r');
         if line.trim().is_empty() || line.starts_with("total ") {
@@ -1426,26 +1520,27 @@ pub fn parse_ls_listing(stdout: &str) -> Vec<riviu_core::DeviceFileEntry> {
         if tokens.len() < 7 {
             continue;
         }
-        let dated = tokens.iter().enumerate().find_map(|(index, (_, token))| {
-            let next_is_time = tokens
-                .get(index + 1)
-                .is_some_and(|(_, next)| looks_like_ls_time(next));
-            (looks_like_ls_date(token) && next_is_time).then_some(index)
-        });
-        let (name_start, modified) = match dated {
-            Some(index) => {
-                let Some((offset, _)) = tokens.get(index + 2) else {
+        let (name_start, modified, size_at) = match ls_timestamp(&tokens) {
+            Some((index, width, stamp)) => {
+                let Some((offset, _)) = tokens.get(index + width) else {
+                    // A timestamp with nothing after it is not a row with an empty name; it is
+                    // a line this parser has misread. Say so rather than dropping it.
+                    unreadable.push(line.trim().to_string());
                     continue;
                 };
-                (
-                    *offset,
-                    Some(format!("{} {}", tokens[index].1, tokens[index + 1].1)),
-                )
+                (*offset, Some(stamp), index.checked_sub(1))
             }
-            None => (tokens[6].0, None),
+            None => {
+                if !tokens.iter().any(|(_, token)| token.contains('?')) {
+                    unreadable.push(line.trim().to_string());
+                    continue;
+                }
+                (tokens[6].0, None, Some(4))
+            }
         };
         let rest = line[name_start..].trim();
         if rest.is_empty() {
+            unreadable.push(line.trim().to_string());
             continue;
         }
         let mode = tokens[0].1;
@@ -1471,12 +1566,114 @@ pub fn parse_ls_listing(stdout: &str) -> Vec<riviu_core::DeviceFileEntry> {
         entries.push(riviu_core::DeviceFileEntry {
             name: name.to_string(),
             kind,
-            size: tokens[4].1.parse::<u64>().unwrap_or(0),
+            size: size_at
+                .and_then(|at| tokens.get(at))
+                .and_then(|(_, token)| token.parse::<u64>().ok())
+                .unwrap_or(0),
             modified,
             link_target,
         });
     }
-    entries
+    (entries, unreadable)
+}
+
+/// What a `ls -la` on a phone actually told us.
+///
+/// **The three-way split is the fix.** `list_device_dir` used to decide with one condition,
+/// `entries.is_empty() && exit_code != 0`, and that leaves three holes -- every one of which
+/// makes the browser state something false rather than fail:
+///
+/// 1. **exit 0 with a complaint on stderr.** Some ROMs refuse a directory and still exit 0.
+///    `is_empty()` is true, `exit_code != 0` is false, so an empty list came back and the
+///    browser drew **an empty folder** -- claiming the directory exists and holds nothing.
+/// 2. **Some rows plus a complaint.** `ls -la` on a directory whose children are partly
+///    unreadable prints what it can and complains about the rest. `is_empty()` is false, so the
+///    truncated list came back and the browser drew it as **complete**.
+/// 3. **A ROM that merges stderr into stdout.** Then `stderr` is empty and the exit code is 0,
+///    so neither half of the condition ever fires.
+///
+/// So: complaints are collected from **both** pipes, and "nothing to show" is separated from
+/// "nothing is here".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LsOutcome {
+    /// Everything the phone has here, and it said nothing else.
+    Complete(Vec<riviu_core::DeviceFileEntry>),
+    /// What could be read, and what the phone said about the rest. **Never draw as complete.**
+    Partial {
+        entries: Vec<riviu_core::DeviceFileEntry>,
+        reason: String,
+    },
+    /// Nothing could be read. **Not an empty folder** -- that is the distinction the single
+    /// condition lost.
+    Refused(String),
+}
+
+/// True for a line that is a complaint rather than a row, from either pipe.
+///
+/// Matched on shape rather than on an exact sentence: `ls` prefixes its own name, and the rest
+/// varies by ROM and by locale. The two bodies listed are the ones this fleet prints, kept so a
+/// ROM that drops the `ls:` prefix is still recognised.
+fn is_ls_complaint(line: &str) -> bool {
+    let line = line.trim();
+    if line.is_empty() {
+        return false;
+    }
+    line.starts_with("ls:")
+        || line.contains("Permission denied")
+        || line.contains("No such file or directory")
+        || line.contains("Not a directory")
+}
+
+/// Read one `ls -la` result the way the caller has to act on it.
+///
+/// Pure, and separate from the command that produces it, because the interesting cases are
+/// combinations of three inputs that are awkward to reach against a real phone -- and each one
+/// of them was, until now, drawn as a fact.
+pub fn classify_ls_output(stdout: &str, stderr: &str, exit_code: i32) -> LsOutcome {
+    let (entries, unreadable) = read_ls_listing(stdout);
+
+    let mut complaints: Vec<String> = stderr
+        .lines()
+        .chain(stdout.lines())
+        .map(|line| line.trim_end_matches('\r').trim())
+        .filter(|line| is_ls_complaint(line))
+        .map(|line| line.to_string())
+        .collect();
+    complaints.dedup();
+
+    // A row this parser could not read is exactly as much of a gap as a refused child, and the
+    // operator has the same right to know: the list in front of them is short.
+    if !unreadable.is_empty() {
+        complaints.push(format!(
+            "{} dòng không đọc được: {}",
+            unreadable.len(),
+            unreadable.join(" | ")
+        ));
+    }
+
+    if entries.is_empty() {
+        if !complaints.is_empty() {
+            return LsOutcome::Refused(complaints.join("; "));
+        }
+        if exit_code != 0 {
+            // No sentence anywhere, but the shell says it failed. Better to name the code than
+            // to present the silence as an empty directory.
+            return LsOutcome::Refused(format!("ls trả mã lỗi {exit_code}"));
+        }
+        // Genuinely nothing here. An empty directory is a real thing and has to stay sayable.
+        return LsOutcome::Complete(Vec::new());
+    }
+
+    if complaints.is_empty() && exit_code == 0 {
+        LsOutcome::Complete(entries)
+    } else {
+        let reason = if complaints.is_empty() {
+            format!("ls trả mã lỗi {exit_code}")
+        } else {
+            complaints.join("; ")
+        };
+        LsOutcome::Partial { entries, reason }
+    }
 }
 
 #[cfg(test)]
@@ -1615,6 +1812,166 @@ drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
         assert!(parse_ls_listing("ls: /sdcard/nope-nothing: No such file or directory").is_empty());
     }
 
+    /// **The fabricated-filename shape, as the row that produces it.**
+    ///
+    /// A row dated `Mon DD HH:MM` found no timestamp under the ISO-only parser, so it fell back
+    /// to "token 6 starts the name" -- and token 6 is the day. This row came back naming a file
+    /// `"11 11:16 photo.jpg"`, and that invented name is what the browser showed and what
+    /// `rm -rf` and `pull` were handed.
+    ///
+    /// Latent rather than live on today's fleet: both ROMs measured here print the ISO date. It
+    /// is pinned because the failure is silent and its blast radius is a delete.
+    #[test]
+    fn a_bsd_dated_row_is_read_instead_of_inventing_a_filename() {
+        let (rows, unreadable) =
+            read_ls_listing("-rw-r--r-- 1 root root 138078 Jul 11 11:16 photo.jpg");
+        assert!(unreadable.is_empty(), "{unreadable:?}");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "photo.jpg");
+        assert_eq!(rows[0].size, 138_078);
+        assert_eq!(rows[0].modified.as_deref(), Some("Jul 11 11:16"));
+    }
+
+    /// Older than six months and `ls` prints the year where the time goes. Same row, one
+    /// different column, and it must not fall back to the guessing path either.
+    #[test]
+    fn a_row_dated_with_a_year_reads_too() {
+        let (rows, unreadable) =
+            read_ls_listing("drwxr-xr-x 2 u0_a269 media_rw 3452 Mar 8  2024 Giao Trinh - HDH");
+        assert!(unreadable.is_empty(), "{unreadable:?}");
+        assert_eq!(rows[0].name, "Giao Trinh - HDH");
+        assert_eq!(rows[0].kind, riviu_core::DeviceFileKind::Directory);
+        assert_eq!(rows[0].size, 3_452);
+        assert_eq!(rows[0].modified.as_deref(), Some("Mar 8 2024"));
+    }
+
+    /// **Every file 0 B, and it would have looked like a fact.**
+    ///
+    /// Size used to be read from `tokens[4]`, which is the size column only when the ROM prints
+    /// a link-count. Without that column `tokens[4]` is the date, the parse fails, and
+    /// `unwrap_or(0)` reports zero bytes for everything -- a number an operator has no reason to
+    /// doubt. Reading the slot *before* the timestamp is right on both shapes.
+    ///
+    /// Also latent today (both measured ROMs print the link-count), and pinned for the same
+    /// reason: nothing about the wrong answer looks wrong.
+    #[test]
+    fn a_rom_without_a_link_count_column_still_reports_the_real_size() {
+        let (rows, unreadable) =
+            read_ls_listing("-rw-r--r-- root root 138078 2025-11-25 08:49 CV prototype.pdf");
+        assert!(unreadable.is_empty(), "{unreadable:?}");
+        assert_eq!(rows[0].name, "CV prototype.pdf");
+        assert_eq!(
+            rows[0].size, 138_078,
+            "the size column moves with the ROM; a fixed index finds the date"
+        );
+    }
+
+    /// A shape this parser does not understand must be **reported**, never named.
+    ///
+    /// This is the guard that keeps the fabricated-name class closed for the next unknown date
+    /// format: an unstattable row prints `?`, so a row with neither a timestamp nor a `?` is a
+    /// gap in the parser and says so.
+    #[test]
+    fn a_row_in_an_unknown_shape_is_reported_rather_than_named() {
+        let (rows, unreadable) =
+            read_ls_listing("-rw-r--r-- 1 root root 138078 vendredi 11 juillet photo.jpg");
+        assert!(
+            rows.is_empty(),
+            "no name may be invented from a row we cannot read: {rows:?}"
+        );
+        assert_eq!(unreadable.len(), 1);
+        assert!(unreadable[0].contains("photo.jpg"));
+    }
+
+    /// The measured rows keep working, including the one with no timestamp at all.
+    #[test]
+    fn the_measured_listing_reports_nothing_unreadable() {
+        let (rows, unreadable) = read_ls_listing(MEASURED_LS);
+        assert!(unreadable.is_empty(), "{unreadable:?}");
+        assert_eq!(rows.len(), 6);
+    }
+
+    /// **A refused directory is not an empty one, and this is the hole that made it look like
+    /// one.**
+    ///
+    /// Some ROMs refuse and still exit 0. The old condition was
+    /// `entries.is_empty() && exit_code != 0`, so nothing fired, an empty list came back, and
+    /// the browser drew an empty folder -- asserting the directory exists and holds nothing.
+    #[test]
+    fn a_refusal_that_exits_zero_is_still_a_refusal() {
+        let outcome = classify_ls_output("", "ls: /data: Permission denied", 0);
+        match outcome {
+            LsOutcome::Refused(reason) => assert!(reason.contains("Permission denied")),
+            other => panic!("a refusal read as {other:?}"),
+        }
+    }
+
+    /// The same refusal, from a ROM that merges its pipes: stderr empty, exit code 0.
+    #[test]
+    fn a_refusal_merged_into_stdout_is_still_a_refusal() {
+        let outcome = classify_ls_output("ls: /data: Permission denied\n", "", 0);
+        assert!(matches!(outcome, LsOutcome::Refused(_)), "{outcome:?}");
+    }
+
+    /// **A short list must not read as a whole one.**
+    ///
+    /// `ls -la` on a directory it can only partly read prints the rows it managed and complains
+    /// about the rest. `entries.is_empty()` is false there, so the old code returned the
+    /// truncated list with nothing to say it was truncated.
+    #[test]
+    fn a_partial_listing_never_reads_as_complete() {
+        let outcome = classify_ls_output(
+            "-rw-r--r-- 1 root root 108 2026-07-26 20:29 readable.txt\n",
+            "ls: /sdcard/Android/data/com.x: Permission denied\n",
+            1,
+        );
+        match outcome {
+            LsOutcome::Partial { entries, reason } => {
+                assert_eq!(entries.len(), 1);
+                assert!(reason.contains("Permission denied"));
+            }
+            other => panic!("a truncated listing read as {other:?}"),
+        }
+    }
+
+    /// An unreadable row makes the listing partial too: the operator is short either way.
+    #[test]
+    fn an_unreadable_row_makes_the_listing_partial() {
+        let outcome = classify_ls_output(
+            "-rw-r--r-- 1 root root 108 2026-07-26 20:29 readable.txt\n\
+             -rw-r--r-- 1 root root 200 vendredi 11 juillet other.txt\n",
+            "",
+            0,
+        );
+        match outcome {
+            LsOutcome::Partial { entries, reason } => {
+                assert_eq!(entries.len(), 1);
+                assert!(reason.contains("other.txt"), "{reason}");
+            }
+            other => panic!("expected a partial listing, got {other:?}"),
+        }
+    }
+
+    /// **An empty directory has to stay sayable.** Refusing everything would be the same defect
+    /// in the other direction.
+    #[test]
+    fn a_genuinely_empty_directory_is_complete_and_empty() {
+        assert_eq!(
+            classify_ls_output("total 0\n", "", 0),
+            LsOutcome::Complete(Vec::new())
+        );
+    }
+
+    /// Nothing to show, nothing said, and a non-zero exit: name the code rather than present
+    /// the silence as an empty folder.
+    #[test]
+    fn a_failing_exit_with_no_sentence_still_refuses() {
+        match classify_ls_output("", "", 2) {
+            LsOutcome::Refused(reason) => assert!(reason.contains('2'), "{reason}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
     #[test]
     fn validate_device_path_allows_the_names_this_fleet_really_has() {
         for path in [
@@ -1630,16 +1987,80 @@ drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
         }
     }
 
+    /// A model of how `sh` builds **one word** out of a quoted string.
+    ///
+    /// Written so the escaping can be proved by round-trip instead of by asserting a literal
+    /// that nobody can read: `'/sdcard/John'\\''s photo.jpg'` is unreadable as an
+    /// assertion, and an unreadable assertion is how a wrong one survives review.
+    fn shell_word(quoted: &str) -> String {
+        let mut out = String::new();
+        let mut chars = quoted.chars();
+        let mut in_single = false;
+        while let Some(c) = chars.next() {
+            if in_single {
+                if c == '\'' {
+                    in_single = false;
+                } else {
+                    out.push(c);
+                }
+            } else if c == '\'' {
+                in_single = true;
+            } else if c == '\\' {
+                // Outside quotes a backslash escapes the next character, whatever it is.
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// **The quoting survives every character a real filename can hold — apostrophes included.**
+    ///
+    /// The apostrophe row is the one that used to be refused outright. It is here as a
+    /// round-trip because that is the property that matters: whatever the shell does with the
+    /// quoted text, it must come back out as exactly the path that went in, as **one word**.
     #[test]
-    fn validate_device_path_refuses_what_single_quoting_cannot_contain() {
-        // A single quote closes the quoting this module wraps every path in, so it is the
-        // one character that turns a filename into a command.
-        assert!(validate_device_path("/sdcard/'; rm -rf /sdcard; echo '").is_err());
+    fn quoting_a_path_round_trips_through_a_shell() {
+        for path in [
+            "/sdcard/Download",
+            "/sdcard/Download/CV prototype.pdf",
+            "/sdcard/Download/Giao Trinh - Bai Giang - HDH",
+            "/sdcard/Download/John's photo.jpg",
+            "/sdcard/Download/a$b&c;d|e.txt",
+            "/sdcard/'''",
+            // The injection attempt. It is now *allowed* through the validator, and it has to
+            // come back out as a filename rather than as three commands.
+            "/sdcard/'; rm -rf /sdcard; echo '",
+        ] {
+            let quoted = quote_device_path(path);
+            assert_eq!(
+                shell_word(&quoted),
+                path,
+                "{path} did not survive quoting as {quoted}"
+            );
+        }
+    }
+
+    /// The validator still refuses what quoting cannot make safe, and now allows what it can.
+    #[test]
+    fn validate_device_path_refuses_only_what_quoting_cannot_fix() {
+        // A newline is refused for a different reason than an apostrophe was: quoting preserves
+        // it fine, but no name on this fleet has one and a path carrying one is much more
+        // likely to be an upstream parse mistake than a file somebody wants.
         assert!(validate_device_path("/sdcard/a\nrm -rf /sdcard").is_err());
         assert!(validate_device_path("sdcard/Download").is_err(), "relative");
         assert!(validate_device_path("").is_err());
         // Inert inside single quotes, and real filenames use them — so they stay allowed.
         assert!(validate_device_path("/sdcard/Download/a$b&c;d|e.txt").is_ok());
+        // **No longer refused.** The quoter escapes it; see the round-trip above.
+        assert!(
+            validate_device_path("/sdcard/Download/John's photo.jpg").is_ok(),
+            "a file the operator can see must be a file the operator can touch"
+        );
+        assert!(validate_device_path("/sdcard/'; rm -rf /sdcard; echo '").is_ok());
     }
 
     #[test]

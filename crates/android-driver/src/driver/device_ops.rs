@@ -344,7 +344,7 @@ impl AndroidDriver {
         &self,
         serial: &str,
         path: &str,
-    ) -> anyhow::Result<Vec<riviu_core::DeviceFileEntry>> {
+    ) -> anyhow::Result<riviu_core::DeviceDirListing> {
         let path = adb::validate_device_path(path)?;
         let listed = if path.ends_with('/') {
             path.to_string()
@@ -359,16 +359,22 @@ impl AndroidDriver {
                 Duration::from_secs(30),
             )
             .await?;
-        let entries = adb::parse_ls_listing(&out.stdout);
-        if entries.is_empty() && out.exit_code != 0 {
-            let reason = if out.stderr.trim().is_empty() {
-                out.stdout.trim().to_string()
-            } else {
-                out.stderr.trim().to_string()
-            };
-            anyhow::bail!("không đọc được {path}: {reason}");
+        // One condition used to decide this -- `entries.is_empty() && exit_code != 0` -- and it
+        // left three holes, each of which made the browser state something false instead of
+        // failing. `classify_ls_output` is where those three are reasoned about and tested.
+        match adb::classify_ls_output(&out.stdout, &out.stderr, out.exit_code) {
+            adb::LsOutcome::Complete(entries) => Ok(riviu_core::DeviceDirListing {
+                entries,
+                incomplete: None,
+            }),
+            adb::LsOutcome::Partial { entries, reason } => Ok(riviu_core::DeviceDirListing {
+                entries,
+                incomplete: Some(reason),
+            }),
+            adb::LsOutcome::Refused(reason) => {
+                anyhow::bail!("không đọc được {path}: {reason}")
+            }
         }
-        Ok(entries)
     }
     /// Copy one file or folder off the phone onto this machine (xiaowei "Export File").
     ///

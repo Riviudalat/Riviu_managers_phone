@@ -646,6 +646,25 @@ pub struct DeviceFileEntry {
     pub link_target: Option<String>,
 }
 
+/// One directory as the phone described it, including what it would not describe.
+///
+/// **`incomplete` exists because a short list used to read as a whole one.** `ls -la` on a
+/// directory it can only partly read prints the rows it managed and complains about the rest;
+/// the browser drew those rows with nothing to say more existed. A folder that looks complete
+/// and is not is worse than an error: an operator deletes from it, exports from it, and
+/// concludes things about it.
+///
+/// A refusal is not represented here at all -- it comes back as an `Err`, because there is no
+/// listing to draw. That distinction is the whole point: an empty `entries` with `incomplete:
+/// None` means the directory really is empty.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceDirListing {
+    pub entries: Vec<DeviceFileEntry>,
+    /// What the phone said that the rows do not show. `Some` means **incomplete**.
+    pub incomplete: Option<String>,
+}
+
 /// Whether an app came with the phone or was installed onto it.
 ///
 /// **Tagged, never inferred, and never used as a filter.** Listing only third-party

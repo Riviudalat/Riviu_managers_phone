@@ -5,7 +5,7 @@ import { DeviceFilesPopup } from "./DeviceFilesPopup";
 import { deviceDeletePath, deviceListDir, devicePullPath } from "../api";
 import { requestConfirm } from "../confirmStore";
 import { pickDirectory } from "../pickFile";
-import type { DeviceFileEntry, DeviceInfo } from "../types";
+import type { DeviceDirListing, DeviceFileEntry, DeviceInfo } from "../types";
 
 vi.mock("../api", () => ({
   deviceListDir: vi.fn(),
@@ -41,6 +41,11 @@ const REDMI: DeviceInfo = {
   tileStreamState: "sampling",
 };
 
+/** Wrap rows the way the command now answers: rows plus what it would not show. */
+function listing(entries: DeviceFileEntry[], incomplete: string | null = null): DeviceDirListing {
+  return { entries, incomplete };
+}
+
 /** The measured listing of `/sdcard/Download` on this fleet, trimmed to four rows. */
 const DOWNLOAD: DeviceFileEntry[] = [
   { name: "CV prototype.pdf", kind: "file", size: 138_078, modified: "2025-11-25 08:49", linkTarget: null },
@@ -63,7 +68,7 @@ afterEach(cleanup);
 // selection afterwards.
 describe("DeviceFilesPopup", () => {
   it("opens on the phone's own storage and lists it, folders first", async () => {
-    listMock.mockResolvedValue(DOWNLOAD);
+    listMock.mockResolvedValue(listing(DOWNLOAD));
     render(<DeviceFilesPopup device={REDMI} onClose={vi.fn()} />);
 
     await waitFor(() => expect(listMock).toHaveBeenCalledWith("10969614", "/sdcard"));
@@ -71,8 +76,79 @@ describe("DeviceFilesPopup", () => {
     expect(names).toEqual(["Chọn Browser", "Chọn .tistore", "Chọn CV prototype.pdf"]);
   });
 
+  /**
+   * **A short listing has to say it is short.**
+   *
+   * `ls -la` on a directory it can only partly read prints the rows it managed and complains
+   * about the rest. The browser used to draw just the rows, so the operator was looking at an
+   * incomplete folder with nothing to say so — and then deletes from it, exports from it, and
+   * concludes things about it.
+   */
+  it("says a listing is incomplete instead of drawing it as whole", async () => {
+    listMock.mockResolvedValue(
+      listing(DOWNLOAD, "ls: /sdcard/Android/data/com.x: Permission denied"),
+    );
+    render(<DeviceFilesPopup device={REDMI} onClose={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByText(/Browser/)).toBeTruthy());
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toContain("chưa đầy đủ");
+    expect(alert.textContent).toContain("Permission denied");
+    // The rows it did get are still shown: a partial answer is more use than none.
+    expect(screen.getByText(/CV prototype\.pdf/)).toBeTruthy();
+  });
+
+  /** A complete listing must not grow a warning it has no reason to show. */
+  it("says nothing extra when the listing is complete", async () => {
+    listMock.mockResolvedValue(listing(DOWNLOAD));
+    render(<DeviceFilesPopup device={REDMI} onClose={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByText(/Browser/)).toBeTruthy());
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  /**
+   * **A slow answer for a folder the operator has already left must not land.**
+   *
+   * `path` and `entries` used to be separate states with nothing keeping them in step, so two
+   * listings in flight — click a folder, click a crumb before it answers — meant the *slower*
+   * one won and its rows were drawn under the newer path. The names are the same in twenty
+   * folders on a phone, so a delete aimed at what was on screen could land somewhere else.
+   */
+  it("drops a listing for a path it has already navigated away from", async () => {
+    let releaseInner: ((value: DeviceDirListing) => void) | undefined;
+    const INNER: DeviceFileEntry[] = [
+      { name: "inner-only.txt", kind: "file", size: 12, modified: null, linkTarget: null },
+    ];
+    listMock.mockImplementation((_udid: string, path: string) => {
+      if (path === "/sdcard") return Promise.resolve(listing(DOWNLOAD));
+      return new Promise<DeviceDirListing>((resolve) => {
+        releaseInner = resolve;
+      });
+    });
+
+    render(<DeviceFilesPopup device={REDMI} onClose={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText(/Browser/)).toBeTruthy());
+
+    // Into the folder, whose answer is held back...
+    await userEvent.click(screen.getByRole("button", { name: /Browser/ }));
+    await waitFor(() => expect(listMock).toHaveBeenCalledWith("10969614", "/sdcard/Browser"));
+
+    // ...and back out again before it arrives.
+    await userEvent.click(screen.getByRole("button", { name: /Lên/ }));
+    await waitFor(() => expect(screen.getByText(/CV prototype\.pdf/)).toBeTruthy());
+
+    // Now let the stale answer in. It must be ignored.
+    releaseInner?.(listing(INNER));
+    await waitFor(() => expect(screen.getByText(/CV prototype\.pdf/)).toBeTruthy());
+    expect(
+      screen.queryByText(/inner-only\.txt/),
+      "the folder we left answered last and its rows were drawn under /sdcard",
+    ).toBeNull();
+  });
+
   it("steps into a folder by asking for that path", async () => {
-    listMock.mockResolvedValue(DOWNLOAD);
+    listMock.mockResolvedValue(listing(DOWNLOAD));
     render(<DeviceFilesPopup device={REDMI} onClose={vi.fn()} />);
     await waitFor(() => expect(screen.getByText(/Browser/)).toBeTruthy());
 
@@ -95,14 +171,14 @@ describe("DeviceFilesPopup", () => {
   });
 
   it("says a folder is empty when the phone answered with nothing", async () => {
-    listMock.mockResolvedValue([]);
+    listMock.mockResolvedValue(listing([]));
     render(<DeviceFilesPopup device={REDMI} onClose={vi.fn()} />);
 
     await waitFor(() => expect(screen.getByText("Thư mục này rỗng.")).toBeTruthy());
   });
 
   it("confirms a delete by naming the files, then re-reads the folder", async () => {
-    listMock.mockResolvedValue(DOWNLOAD);
+    listMock.mockResolvedValue(listing(DOWNLOAD));
     confirmMock.mockResolvedValue(true);
     deleteMock.mockResolvedValue(undefined);
     render(<DeviceFilesPopup device={REDMI} onClose={vi.fn()} />);
@@ -122,7 +198,7 @@ describe("DeviceFilesPopup", () => {
   });
 
   it("deletes nothing when the confirm is declined", async () => {
-    listMock.mockResolvedValue(DOWNLOAD);
+    listMock.mockResolvedValue(listing(DOWNLOAD));
     confirmMock.mockResolvedValue(false);
     render(<DeviceFilesPopup device={REDMI} onClose={vi.fn()} />);
     await waitFor(() => expect(screen.getByLabelText("Chọn .tistore")).toBeTruthy());
@@ -135,7 +211,7 @@ describe("DeviceFilesPopup", () => {
   });
 
   it("pulls every picked row and keeps going past one that fails", async () => {
-    listMock.mockResolvedValue(DOWNLOAD);
+    listMock.mockResolvedValue(listing(DOWNLOAD));
     dirMock.mockResolvedValue("D:\\export");
     pullMock
       .mockRejectedValueOnce(new Error("adb pull thất bại"))
@@ -156,7 +232,7 @@ describe("DeviceFilesPopup", () => {
   });
 
   it("drops the selection when the listing changes underneath it", async () => {
-    listMock.mockResolvedValue(DOWNLOAD);
+    listMock.mockResolvedValue(listing(DOWNLOAD));
     render(<DeviceFilesPopup device={REDMI} onClose={vi.fn()} />);
     await waitFor(() => expect(screen.getByLabelText("Chọn .tistore")).toBeTruthy());
     await userEvent.click(screen.getByLabelText("Chọn .tistore"));
@@ -174,7 +250,7 @@ describe("DeviceFilesPopup", () => {
    * operator gets to `/data/local/tmp` — the thing a file browser exists for.
    */
   it("goes to a typed path on Enter", async () => {
-    listMock.mockResolvedValue(DOWNLOAD);
+    listMock.mockResolvedValue(listing(DOWNLOAD));
     render(<DeviceFilesPopup device={REDMI} onClose={vi.fn()} />);
     await waitFor(() => expect(listMock).toHaveBeenCalledWith("10969614", "/sdcard"));
 
@@ -188,7 +264,7 @@ describe("DeviceFilesPopup", () => {
   });
 
   it("refuses a relative path with a reason instead of asking the phone", async () => {
-    listMock.mockResolvedValue(DOWNLOAD);
+    listMock.mockResolvedValue(listing(DOWNLOAD));
     render(<DeviceFilesPopup device={REDMI} onClose={vi.fn()} />);
     await waitFor(() => expect(listMock).toHaveBeenCalledTimes(1));
 
@@ -201,7 +277,7 @@ describe("DeviceFilesPopup", () => {
   });
 
   it("keeps the path box in step with where the browser actually is", async () => {
-    listMock.mockResolvedValue(DOWNLOAD);
+    listMock.mockResolvedValue(listing(DOWNLOAD));
     render(<DeviceFilesPopup device={REDMI} onClose={vi.fn()} />);
     await waitFor(() => expect(screen.getByText(/Browser/)).toBeTruthy());
 

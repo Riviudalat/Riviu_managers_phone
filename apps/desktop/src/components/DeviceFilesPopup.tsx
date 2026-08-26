@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { deviceDeletePath, deviceListDir, devicePullPath, devicePushFile } from "../api";
 import { requestConfirm } from "../confirmStore";
 import { describeError, pushToast, toastError } from "../toastStore";
@@ -57,8 +57,31 @@ const SHORTCUTS: { label: string; path: string }[] = [
  */
 export function DeviceFilesPopup({ device, onClose }: Props) {
   const [path, setPath] = useState(DEVICE_HOME);
-  const [entries, setEntries] = useState<DeviceFileEntry[] | null>(null);
-  const [failed, setFailed] = useState<string | null>(null);
+  /**
+   * **The listing and the path it belongs to, in one state.**
+   *
+   * These used to be two: `path` and `entries`. Nothing kept them in step, so the rows on
+   * screen could belong to a directory other than the one named above them — and the names in
+   * twenty folders are the same, so a delete aimed at what the operator saw could land
+   * somewhere else entirely. Holding them together, and rendering only when
+   * `listing.path === path`, makes that disagreement unrepresentable rather than unlikely.
+   */
+  const [listing, setListing] = useState<{
+    path: string;
+    /** `null` while the phone is still answering. */
+    entries: DeviceFileEntry[] | null;
+    /** What the phone said that the rows do not show. Non-null means **short**. */
+    incomplete: string | null;
+    failed: string | null;
+  }>({ path: DEVICE_HOME, entries: null, incomplete: null, failed: null });
+  /**
+   * The path most recently asked for.
+   *
+   * Two listings can be in flight — click a folder, click Up before it lands — and the slower
+   * one arrives last. Without this, the *older* answer wins and the browser shows the previous
+   * directory under the new path.
+   */
+  const requested = useRef(DEVICE_HOME);
   const [picked, setPicked] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   /// What is in the path box, which is not the same as where the browser *is*: the operator
@@ -67,19 +90,32 @@ export function DeviceFilesPopup({ device, onClose }: Props) {
   const [typed, setTyped] = useState(DEVICE_HOME);
 
   const load = useCallback(async (target: string) => {
-    setEntries(null);
-    setFailed(null);
+    requested.current = target;
+    setListing({ path: target, entries: null, incomplete: null, failed: null });
     // Cleared here rather than in the click handler, so every route into a new listing —
     // a crumb, a shortcut, Up, a refresh after a delete — drops the selection.
     setPicked([]);
     try {
-      setEntries(await deviceListDir(device.udid, target));
+      const answer = await deviceListDir(device.udid, target);
+      if (requested.current !== target) return;
+      setListing({
+        path: target,
+        entries: answer.entries,
+        incomplete: answer.incomplete,
+        failed: null,
+      });
     } catch (error) {
+      if (requested.current !== target) return;
       // `describeError` and not `String(error)`: a Tauri command rejects with a plain
       // object (`{code, message}`), and `String({})` is the literally useless
       // "[object Object]" — which is what this panel showed for a folder the phone
       // refused, and why "it cannot reach the phone's folders" was a fair reading.
-      setFailed(describeError(error));
+      setListing({
+        path: target,
+        entries: null,
+        incomplete: null,
+        failed: describeError(error),
+      });
     }
   }, [device.udid]);
 
@@ -95,7 +131,10 @@ export function DeviceFilesPopup({ device, onClose }: Props) {
     const target = typed.trim();
     if (!target) return;
     if (!target.startsWith("/")) {
-      setFailed("Đường dẫn phải bắt đầu bằng / — ví dụ /sdcard/Download.");
+      setListing((prev) => ({
+        ...prev,
+        failed: "Đường dẫn phải bắt đầu bằng / — ví dụ /sdcard/Download.",
+      }));
       return;
     }
     if (target === path) {
@@ -105,7 +144,10 @@ export function DeviceFilesPopup({ device, onClose }: Props) {
     setPath(target);
   };
 
-  const rows = useMemo(() => sortDeviceEntries(entries ?? []), [entries]);
+  // Only ever the listing for the path on screen. A listing for a path we have already left
+  // is not shown at all, rather than shown under the wrong heading.
+  const current = listing.path === path ? listing : null;
+  const rows = useMemo(() => sortDeviceEntries(current?.entries ?? []), [current]);
   const crumbs = deviceCrumbs(path);
   const up = parentDevicePath(path);
 
@@ -256,14 +298,27 @@ export function DeviceFilesPopup({ device, onClose }: Props) {
           </button>
         </div>
 
-        {entries === null && !failed && <p className="hint">Đang đọc {path} …</p>}
-        {failed && (
+        {current?.entries === null && !current?.failed && (
+          <p className="hint">Đang đọc {path} …</p>
+        )}
+        {current?.failed && (
           <p className="hint" role="alert">
-            {failed}
+            {current.failed}
           </p>
         )}
 
-        {entries !== null && rows.length === 0 && !failed && (
+        {/*
+          Said out loud, because the alternative is a folder that looks complete and is not.
+          `ls -la` prints what it can read and complains about the rest; drawing only the rows
+          told the operator this was everything.
+        */}
+        {current?.incomplete && (
+          <p className="hint" role="alert">
+            Danh sách chưa đầy đủ — {current.incomplete}
+          </p>
+        )}
+
+        {current?.entries !== null && rows.length === 0 && !current?.failed && (
           <p className="hint">Thư mục này rỗng.</p>
         )}
 

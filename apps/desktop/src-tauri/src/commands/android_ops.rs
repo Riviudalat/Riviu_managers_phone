@@ -208,7 +208,7 @@ pub async fn device_list_dir(
     state: State<'_, AppState>,
     udid: String,
     path: String,
-) -> Result<Vec<riviu_core::DeviceFileEntry>, CommandError> {
+) -> Result<riviu_core::DeviceDirListing, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let android = state.require_android()?;
     android
