@@ -11,6 +11,11 @@ vi.mock("../../api", () => ({
   interactionGet: vi.fn(async () => null),
   interactionList: vi.fn(async () => []),
   interactionListArtifacts: vi.fn(async () => []),
+  // Added with the web-lookup panel. Missing it here does not fail loudly: an unmocked export
+  // returns `undefined`, `.catch` on that throws synchronously inside `loadDetail`, and the
+  // whole detail view silently stays on "Đang mở chiến dịch…" — which is how six tests in this
+  // file went red at once.
+  interactionListTargetNotes: vi.fn(async () => []),
   interactionReadArtifact: vi.fn(async () => ({
     id: "art-1",
     kind: "comment-root-evidence",

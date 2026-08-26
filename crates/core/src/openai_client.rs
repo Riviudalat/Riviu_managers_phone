@@ -486,6 +486,7 @@ pub async fn prepare_grounded_comment(
     frames: &[Vec<u8>],
     kind: EvidenceKind,
     direction: Option<&str>,
+    brief: PostBrief<'_>,
 ) -> anyhow::Result<GroundedCommentResult> {
     if settings.api_key.trim().is_empty() {
         return Err(anyhow!("ai_unavailable"));
@@ -493,7 +494,7 @@ pub async fn prepare_grounded_comment(
     if frames.is_empty() {
         return Err(anyhow!("no_usable_evidence"));
     }
-    let sheet = make_contact_sheet(frames, kind)?;
+    let sheet = make_contact_sheet(frames, kind)?.with_coverage(brief.coverage);
     let frame_sha256 = sha256_hex(&sheet.jpeg);
     let max_words = settings.max_comment_words.clamp(4, 30) as usize;
     let lang = language_label(&settings.comment_lang);
@@ -520,6 +521,7 @@ pub async fn prepare_grounded_comment(
             // than another throw. `None` on the first, and on a retry that follows an
             // unreadable draft — there was no verdict to carry.
             last_gate.map(VerificationGate::retry_note),
+            brief,
         )
         .await
         {
@@ -540,7 +542,8 @@ pub async fn prepare_grounded_comment(
             }
             break;
         };
-        let verification = grounded_verify(settings, &sheet, &candidate, direction).await?;
+        let verification =
+            grounded_verify(settings, &sheet, &candidate, direction, brief).await?;
         spend.add(
             verification.prompt_tokens,
             verification.completion_tokens,
@@ -842,15 +845,18 @@ async fn grounded_generate(
     direction: Option<&str>,
     // What the previous attempt was rejected for; `None` on the first attempt.
     retry_note: Option<&str>,
+    // What is known about the post as text, rather than as pixels.
+    text: PostBrief<'_>,
 ) -> anyhow::Result<GroundedDraft> {
     let direction = direction.unwrap_or("tự nhiên");
     let retry_note = retry_note.unwrap_or("");
+    let priority = evidence_priority(text);
     let layout = sheet.layout_note();
     let prompt = format!(
         "Bạn phân tích một contact sheet của một bài TikTok: {layout}.\n\
          Trả về JSON duy nhất, không markdown, theo schema: {{\"caption\":string|null,\"captionConfidence\":0..100,\"visualFacts\":[string],\"contextConfidence\":0..100,\"comment\":string}}.\n\
          Caption chỉ là phần chữ caption/chữ trong video nhìn thấy; loại username, tên nhạc, nút UI. Nếu caption bị cắt, giữ phần nhìn thấy và giảm confidence. Giữ \"caption\" tối đa 100 ký tự và \"visualFacts\" tối đa 3 mục, mỗi mục dưới 8 từ — dài dòng ở hai trường này làm câu trả lời bị cắt trước khi tới \"comment\".\n\
-         Viết đúng một comment tiếng {lang}, tối đa {max_words} từ. Hãy viết như người vừa xem xong và phản ứng tự nhiên: thường 2–10 từ, thân mật, có thể là một mẩu câu hoặc câu hỏi ngắn; không cần đủ chủ-vị, không cố nhét emoji. Tránh giọng tổng kết, quảng cáo, giáo viên hoặc báo cáo; tuyệt đối không dùng kiểu “nội dung được trình bày”, “mang đến”, “người xem”, “chất lượng”. Nội dung nhìn thấy và caption là ưu tiên cao nhất. Định hướng chỉ chỉnh giọng điệu ({direction}), không được thêm địa điểm, sản phẩm, giá, người hay sự kiện chưa thấy. Nếu định hướng xung đột, bỏ định hướng và giữ comment bám bằng chứng.\n\
+         Viết đúng một comment tiếng {lang}, tối đa {max_words} từ. Hãy viết như người vừa xem xong và phản ứng tự nhiên: thường 2–10 từ, thân mật, có thể là một mẩu câu hoặc câu hỏi ngắn; không cần đủ chủ-vị, không cố nhét emoji. Tránh giọng tổng kết, quảng cáo, giáo viên hoặc báo cáo; tuyệt đối không dùng kiểu “nội dung được trình bày”, “mang đến”, “người xem”, “chất lượng”. {priority}. Định hướng chỉ chỉnh giọng điệu ({direction}), không được thêm địa điểm, sản phẩm, giá, người hay sự kiện chưa thấy. Nếu định hướng xung đột, bỏ định hướng và giữ comment bám bằng chứng.\n\
          {retry_note}"
     );
     // **1200, and the old 500 is why two of every five posts got nothing.** The schema asks
@@ -863,6 +869,7 @@ async fn grounded_generate(
     //
     // The prompt bounds those two fields as well, which is the half of the fix that costs
     // nothing: a shorter answer is cheaper *and* it completes.
+    let prompt = format!("{}{prompt}", post_text_note(text));
     let body = vision_body(settings, &sheet.jpeg, prompt, 0.75, 1200);
     let (raw, p, c, cost, _) = chat(settings, body).await?;
     let value =
@@ -875,12 +882,16 @@ async fn grounded_generate(
     if comment.trim().is_empty() {
         return Err(anyhow!("empty_comment_field: {}", model_said(&raw)));
     }
-    let caption = value
+    let model_caption = value
         .get("caption")
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
+    // A caption fetched from the post outranks the one the model read off the sheet: same
+    // field, read from the source instead of from a few hundred pixels of JPEG.
+    let known_caption = text.caption.map(str::trim).filter(|value| !value.is_empty());
+    let caption = known_caption.map(str::to_string).or(model_caption);
     let visual_facts = value
         .get("visualFacts")
         .and_then(|facts| facts.as_array())
@@ -897,7 +908,13 @@ async fn grounded_generate(
     }
     let context_confidence = score(value.get("contextConfidence"))?;
     let caption_confidence = score(value.get("captionConfidence"))?;
-    let context_confidence = context_confidence.min(if caption.is_some() {
+    // **The floor is about reading, not about the caption.** `captionConfidence` is the
+    // model's confidence that it made out the caption band; a caption handed to it was never
+    // read off the picture, so discounting the whole context by that number would punish the
+    // one case where the caption is certain.
+    let context_confidence = context_confidence.min(if known_caption.is_some() {
+        100
+    } else if caption.is_some() {
         caption_confidence
     } else {
         100
@@ -940,6 +957,7 @@ pub async fn prepare_grounded_comments_batch(
     kind: EvidenceKind,
     direction: Option<&str>,
     count: usize,
+    brief: PostBrief<'_>,
 ) -> BatchedComments {
     if count == 0 {
         return BatchedComments::default();
@@ -955,12 +973,12 @@ pub async fn prepare_grounded_comments_batch(
         // set of measurements nobody has taken.
         let mut out = Vec::with_capacity(count);
         for _ in 0..count {
-            out.push(prepare_grounded_comment(settings, frames, kind, direction).await);
+            out.push(prepare_grounded_comment(settings, frames, kind, direction, brief).await);
         }
         return BatchedComments::all_individual(out);
     }
 
-    let sheet = match make_contact_sheet(frames, kind) {
+    let sheet = match make_contact_sheet(frames, kind).map(|sheet| sheet.with_coverage(brief.coverage)) {
         Ok(sheet) => sheet,
         Err(error) => {
             let detail = error.to_string();
@@ -974,13 +992,23 @@ pub async fn prepare_grounded_comments_batch(
     let lang = language_label(&settings.comment_lang);
 
     let batch =
-        match grounded_generate_batch(settings, &sheet, &lang, max_words, direction, count).await {
+        match grounded_generate_batch(
+            settings,
+            &sheet,
+            &lang,
+            max_words,
+            direction,
+            count,
+            brief,
+        )
+        .await
+        {
             Ok(batch) => batch,
             Err(error) => {
                 tracing::warn!("gộp bản nháp thất bại, lùi về từng câu: {error}");
                 let mut out = Vec::with_capacity(count);
                 for _ in 0..count {
-                    out.push(prepare_grounded_comment(settings, frames, kind, direction).await);
+                    out.push(prepare_grounded_comment(settings, frames, kind, direction, brief).await);
                 }
                 return BatchedComments::all_individual(out);
             }
@@ -1012,7 +1040,7 @@ pub async fn prepare_grounded_comments_batch(
     for group in candidates.chunks(VERIFY_CONCURRENCY) {
         let pending = group
             .iter()
-            .map(|candidate| grounded_verify(settings, &sheet, candidate, direction));
+            .map(|candidate| grounded_verify(settings, &sheet, candidate, direction, brief));
         verdicts.extend(futures_util::future::join_all(pending).await);
     }
 
@@ -1128,6 +1156,7 @@ pub async fn prepare_grounded_comments_batch(
             max_words,
             Some(&retry_note),
             needs_rewrite.len(),
+            brief,
         )
         .await
         {
@@ -1140,7 +1169,7 @@ pub async fn prepare_grounded_comments_batch(
             for group in retry_candidates.chunks(VERIFY_CONCURRENCY) {
                 let pending = group
                     .iter()
-                    .map(|candidate| grounded_verify(settings, &sheet, candidate, direction));
+                    .map(|candidate| grounded_verify(settings, &sheet, candidate, direction, brief));
                 retry_verdicts.extend(futures_util::future::join_all(pending).await);
             }
             let mut still_missing = Vec::new();
@@ -1245,7 +1274,7 @@ pub async fn prepare_grounded_comments_batch(
     for group in needs_rewrite.chunks(VERIFY_CONCURRENCY) {
         let pending = group
             .iter()
-            .map(|_| prepare_grounded_comment(settings, frames, kind, lone_direction));
+            .map(|_| prepare_grounded_comment(settings, frames, kind, lone_direction, brief));
         for (index, result) in group
             .iter()
             .zip(futures_util::future::join_all(pending).await)
@@ -1326,20 +1355,23 @@ async fn grounded_generate_batch(
     max_words: usize,
     direction: Option<&str>,
     count: usize,
+    text: PostBrief<'_>,
 ) -> anyhow::Result<GroundedDraftBatch> {
     let direction = direction.unwrap_or("tự nhiên");
+    let priority = evidence_priority(text);
     let layout = sheet.layout_note();
     let prompt = format!(
         "Bạn phân tích một contact sheet của một bài TikTok: {layout}.\n\
          Trả về JSON duy nhất, không markdown, theo schema: {{\"caption\":string|null,\"captionConfidence\":0..100,\"visualFacts\":[string],\"contextConfidence\":0..100,\"comments\":[string]}}.\n\
          Caption chỉ là phần chữ caption/chữ trong video nhìn thấy; loại username, tên nhạc, nút UI. Nếu caption bị cắt, giữ phần nhìn thấy và giảm confidence. Giữ \"caption\" tối đa 100 ký tự và \"visualFacts\" tối đa 3 mục, mỗi mục dưới 8 từ.\n\
          \"comments\" phải có ĐÚNG {count} câu tiếng {lang}, mỗi câu tối đa {max_words} từ. Đây là {count} người KHÁC NHAU vừa xem cùng một bài và mỗi người tự phản ứng — nên {count} câu phải khác nhau rõ rệt: khác cách mở đầu, khác chi tiết được nhắc, khác độ dài. KHÔNG được là biến thể chữ nghĩa của cùng một câu.\n\
-         Viết như người vừa xem xong và phản ứng tự nhiên: thường 2–10 từ, thân mật, có thể là một mẩu câu hoặc câu hỏi ngắn; không cần đủ chủ-vị, không cố nhét emoji. Tránh giọng tổng kết, quảng cáo, giáo viên hoặc báo cáo; tuyệt đối không dùng kiểu “nội dung được trình bày”, “mang đến”, “người xem”, “chất lượng”. Nội dung nhìn thấy và caption là ưu tiên cao nhất. Định hướng chỉ chỉnh giọng điệu ({direction}), không được thêm địa điểm, sản phẩm, giá, người hay sự kiện chưa thấy."
+         Viết như người vừa xem xong và phản ứng tự nhiên: thường 2–10 từ, thân mật, có thể là một mẩu câu hoặc câu hỏi ngắn; không cần đủ chủ-vị, không cố nhét emoji. Tránh giọng tổng kết, quảng cáo, giáo viên hoặc báo cáo; tuyệt đối không dùng kiểu “nội dung được trình bày”, “mang đến”, “người xem”, “chất lượng”. {priority}. Định hướng chỉ chỉnh giọng điệu ({direction}), không được thêm địa điểm, sản phẩm, giá, người hay sự kiện chưa thấy."
     );
     // The draft budget that one comment needs, plus room per extra comment. `1200` for one is a
     // number this file paid for twice; the per-comment slack is deliberately generous because a
     // truncated array is the failure that loses every comment at once, not just the last.
     let budget = 1_200 + 90 * count as u32;
+    let prompt = format!("{}{prompt}", post_text_note(text));
     let body = vision_body(settings, &sheet.jpeg, prompt, 0.9, budget);
     let (raw, p, c, cost, _) = chat(settings, body).await?;
     let value =
@@ -1423,6 +1455,10 @@ async fn grounded_verify(
     sheet: &ContactSheet,
     candidate: &str,
     direction: Option<&str>,
+    // **The same text the drafter was given.** See `post_text_note`: a gate asked "is every
+    // detail visible?" about a comment written from a caption or a transcript it cannot see
+    // refuses good comments, and every refusal costs a full draft-and-verify pair.
+    text: PostBrief<'_>,
 ) -> anyhow::Result<GroundedVerification> {
     let direction = direction.unwrap_or("tự nhiên");
     let layout = sheet.layout_note();
@@ -1433,6 +1469,7 @@ async fn grounded_verify(
          Đọc lại trực tiếp các frame, không tin facts từ lượt trước. Trả về JSON duy nhất: {{\"relevance\":0..100,\"evidenceSupport\":0..100,\"instructionFit\":0..100,\"genericity\":0..100,\"contradiction\":boolean,\"unsupportedClaim\":boolean,\"uiTextConfusion\":boolean}}.\n\
          relevance đo comment có nói đúng bài này không; evidenceSupport đo mọi chi tiết cụ thể có nhìn thấy không; genericity cao nếu chỉ là lời khen rỗng. instructionFit phải thấp nếu câu nghe như báo cáo, tóm tắt hoặc quá trang trọng thay vì phản ứng đời thường. Caption, hình và hướng dẫn mâu thuẫn thì đánh cờ contradiction."
     );
+    let prompt = format!("{}{prompt}", post_text_note(text));
     let body = vision_body(settings, &sheet.jpeg, prompt, 0.0, 300);
     let (raw, p, c, cost, model) = chat(settings, body).await?;
     let value = json_object(&raw).ok_or_else(|| anyhow!("malformed_model_output"))?;
@@ -1615,6 +1652,56 @@ pub enum EvidenceKind {
     CarouselSlides,
 }
 
+/// What is known about a post from somewhere other than its pictures.
+///
+/// Threaded as one value because it travels as one: it is assembled once per link — today by
+/// `tiktok_web::fetch_post_context`, from the operator's own network — and then handed to
+/// every call that writes or judges a comment for that link. Adding a field here is how the
+/// transcript path reaches the prompt later without churning five callers' signatures again.
+///
+/// `Default` is the honest empty case, and it is what every non-Interaction caller passes:
+/// the nurture loop meets its posts by scrolling into them and has no link to look up.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PostBrief<'a> {
+    /// The caption, in full. See [`post_text_note`] for what it is worth and what it costs.
+    pub caption: Option<&'a str>,
+    /// What is said out loud in the video, flattened into one line.
+    ///
+    /// **The only field here that is not on the picture at all.** A photo post never has one,
+    /// and neither does a video whose audio is a music track — which on this farm is most of
+    /// them. When there is one it is the richest evidence available by a wide margin: the
+    /// measured 52-second vlog transcribes to 222 words naming six specific places, against a
+    /// contact sheet built from roughly its first second.
+    pub transcript: Option<&'a str>,
+    /// How much of the post the pictures actually cover, when that is known.
+    ///
+    /// See [`PostCoverage`]. `None` is the honest "nobody counted", which is what every
+    /// non-Interaction caller passes and what keeps their prompts byte-identical.
+    pub coverage: Option<PostCoverage>,
+}
+
+/// How much of a post the pictures on the sheet actually represent.
+///
+/// **One enum rather than two optional numbers, because a post is one shape or the other.** A
+/// carousel is measured in slides and a video in seconds, and a brief carrying a slide count
+/// for a video was a state that could be constructed and meant nothing.
+///
+/// Both variants exist for the same reason: measured 26/08/2026, the sheet holds four pictures
+/// while this farm's real carousels run to eight slides and its videos to fifty-two seconds. A
+/// sheet that describes itself without saying how much it is missing invites the model to
+/// narrate the part nobody photographed — and that narration is what the verification gate then
+/// spends a retry catching as an unsupported claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostCoverage {
+    /// A photo post of `total` slides.
+    Slides { total: usize },
+    /// A video: the sampled span, and the whole length when it is known.
+    Video {
+        seen_secs: u64,
+        total_secs: Option<u64>,
+    },
+}
+
 /// One picture for the model, plus an honest count of how much evidence is really in it.
 pub struct ContactSheet {
     pub jpeg: Vec<u8>,
@@ -1624,9 +1711,36 @@ pub struct ContactSheet {
     pub distinct_frames: u8,
     /// What those frames are, which is the only thing that makes the count describable.
     kind: EvidenceKind,
+    /// How much of the post these pictures cover, when that is known. `None` means nobody
+    /// counted, which is not the same as "they cover all of it" — see
+    /// [`ContactSheet::with_coverage`].
+    coverage: Option<PostCoverage>,
 }
 
 impl ContactSheet {
+    /// Record how much of the post these pictures cover, so the sheet can admit a short read.
+    ///
+    /// **A sheet holds four pictures; this farm's real carousels run to eight slides and its
+    /// videos to fifty-two seconds** (measured 26/08/2026 on the targets in `riviu.db`). Before
+    /// this, a four-picture sheet of an eight-slide post described itself as "4 ẢNH KHÁC NHAU
+    /// của cùng một bài" — true about the sheet, and read by the model as the whole post. That
+    /// is the same class of dishonesty `distinct_frames` was added to end, one level up.
+    ///
+    /// **A coverage that claims no gap is dropped rather than recorded.** For slides that means
+    /// a total at or below what is on the sheet: it would either agree with the count already
+    /// there or contradict it, and "4 trong 3 ảnh" is worse than saying nothing. For a video it
+    /// means a length the samples already span — there is nothing to warn about.
+    pub fn with_coverage(mut self, coverage: Option<PostCoverage>) -> Self {
+        self.coverage = coverage.filter(|coverage| match coverage {
+            PostCoverage::Slides { total } => *total > self.distinct_frames as usize,
+            PostCoverage::Video {
+                seen_secs,
+                total_secs,
+            } => total_secs.is_none_or(|total| total > *seen_secs),
+        });
+        self
+    }
+
     /// How to describe this sheet to the model, in the operator's language.
     ///
     /// Both prompts used to open with a flat "gồm ba frame" on every request. On a photo post
@@ -1635,28 +1749,182 @@ impl ContactSheet {
     /// moments will narrate motion that no pixel supports.
     fn layout_note(&self) -> String {
         let frames = match (self.kind, self.distinct_frames) {
-            (EvidenceKind::Moments, 0 | 1) => "ĐÚNG MỘT khung của bài (chụp ba lần đều ra cùng \
+            // A single frame of a video whose length is known is a much sharper warning than a
+            // single frame of "the post": one second of fifty-two is not a still card, it is a
+            // video nobody managed to watch.
+            (EvidenceKind::Moments, 0 | 1) => match self.coverage {
+                Some(PostCoverage::Video {
+                    total_secs: Some(total),
+                    ..
+                }) => format!(
+                    "ĐÚNG MỘT khung của một VIDEO dài {total} giây (lấy mẫu nhiều lần đều ra cùng \
+                     một khung — video đang dừng hoặc luồng hình bị kẹt). Gần như toàn bộ video \
+                     CHƯA đọc được, nên KHÔNG có chuyển động để mô tả và đừng kết luận gì về cả \
+                     video; chỉ nói về đúng khung này"
+                ),
+                _ => "ĐÚNG MỘT khung của bài (chụp ba lần đều ra cùng \
                 một khung — bài ảnh tĩnh hoặc video đang dừng, nên KHÔNG có chuyển động để mô \
                 tả; đừng nói về hành động, diễn biến hay thứ tự xảy ra)"
-                .to_string(),
+                    .to_string(),
+            },
             // A carousel that yielded one picture did not "come out the same three times" — the
             // walk stopped, and saying otherwise would claim the rest of the post was looked at.
-            (EvidenceKind::CarouselSlides, 0 | 1) => "ĐÚNG MỘT ảnh của một bài NHIỀU ẢNH, và là \
-                ảnh ĐẦU TIÊN (các ảnh sau chưa đọc được). Bài ảnh không tự chạy nên KHÔNG có \
-                chuyển động để mô tả, và nội dung chính của loại bài này thường nằm ở ảnh sau — \
-                nên chỉ nói về đúng những gì thấy trong ảnh này, đừng kết luận về cả bài"
-                .to_string(),
-            (EvidenceKind::Moments, n) => format!(
-                "{n} khung KHÁC NHAU của cùng một bài, xếp từ trái sang phải theo thời gian"
-            ),
-            (EvidenceKind::CarouselSlides, n) => format!(
-                "{n} ẢNH KHÁC NHAU của cùng một bài ảnh nhiều ảnh, xếp từ trái sang phải theo \
-                 đúng thứ tự lật của bài — KHÔNG phải các khoảnh khắc của một video, nên đừng \
-                 mô tả chuyển động hay diễn biến. Nội dung chính thường nằm ở ảnh thứ hai trở \
-                 đi, nên hãy viết dựa trên TOÀN BỘ các ảnh chứ không chỉ ảnh đầu"
-            ),
+            // When the post's own length is known, say it: "one of eight" is a sharper warning
+            // than "the later ones went unread", and it is the same number the sheet was cut to.
+            (EvidenceKind::CarouselSlides, 0 | 1) => {
+                let of_total = match self.coverage {
+                    Some(PostCoverage::Slides { total }) => {
+                        format!(" trong tổng số {total} ảnh")
+                    }
+                    _ => String::new(),
+                };
+                format!(
+                    "ĐÚNG MỘT ảnh{of_total} của một bài NHIỀU ẢNH, và là ảnh ĐẦU TIÊN (các ảnh \
+                     sau chưa đọc được). Bài ảnh không tự chạy nên KHÔNG có chuyển động để mô \
+                     tả, và nội dung chính của loại bài này thường nằm ở ảnh sau — nên chỉ nói \
+                     về đúng những gì thấy trong ảnh này, đừng kết luận về cả bài"
+                )
+            }
+            (EvidenceKind::Moments, n) => match self.coverage {
+                Some(PostCoverage::Video {
+                    seen_secs,
+                    total_secs,
+                }) => {
+                    let of_total = match total_secs {
+                        Some(total) => format!(
+                            " ĐẦU của một video dài {total} giây — phần còn lại CHƯA đọc được, \
+                             nên đừng kết luận về cả video"
+                        ),
+                        None => " đầu của video".to_string(),
+                    };
+                    format!(
+                        "{n} khung KHÁC NHAU trải trong khoảng {seen_secs} giây{of_total}, xếp từ \
+                         trái sang phải theo thời gian"
+                    )
+                }
+                _ => format!(
+                    "{n} khung KHÁC NHAU của cùng một bài, xếp từ trái sang phải theo thời gian"
+                ),
+            },
+            (EvidenceKind::CarouselSlides, n) => {
+                // A post longer than the sheet says so, and says *which* ones are missing:
+                // the picks always keep the first and the last, so the gap is the middle.
+                let scope = match self.coverage {
+                    Some(PostCoverage::Slides { total }) => format!(
+                        "{n} ảnh LẤY RẢI ĐỀU trong tổng số {total} ảnh của bài (có ảnh đầu và \
+                         ảnh cuối; một số ảnh ở giữa chưa đọc được, nên đừng kết luận về những \
+                         gì có thể nằm trong đó)"
+                    ),
+                    _ => format!("{n} ẢNH KHÁC NHAU của cùng một bài ảnh nhiều ảnh"),
+                };
+                format!(
+                    "{scope}, xếp từ trái sang phải theo đúng thứ tự lật của bài — KHÔNG phải \
+                     các khoảnh khắc của một video, nên đừng mô tả chuyển động hay diễn biến. \
+                     Nội dung chính thường nằm ở ảnh thứ hai trở đi, nên hãy viết dựa trên \
+                     TOÀN BỘ các ảnh chứ không chỉ ảnh đầu"
+                )
+            }
         };
         format!("{frames}, và bên dưới là dải phóng to vùng caption/tên tài khoản")
+    }
+}
+
+/// The most caption characters that travel into a prompt.
+///
+/// This farm's real captions measured 157–399 characters, so 600 clears them all with room.
+/// It is a cost bound, not a quality one: the caption goes into **both** the draft prompt and
+/// every verification prompt, and a verification prompt never hits the provider's cache
+/// (measured — it caches whole prompts, and each verification carries a different candidate),
+/// so a caption is paid for at cache-write rates once per comment.
+const KNOWN_CAPTION_MAX_CHARS: usize = 600;
+
+/// Hand the model the caption instead of making it squint at one.
+///
+/// **The caption was always the highest-value field in the prompt and always the worst-read.**
+/// It is what the schema asks for first and what anchors the comment, and until now it was
+/// recovered by asking a vision model to read a caption band rendered a few hundred pixels
+/// wide. Meanwhile the accessibility tree had it as text all along — truncated at ~116
+/// characters — and the operator's own network has it in full: 157, 171, 184, 216 and 399
+/// characters on the five real targets that answered on 26/08/2026.
+///
+/// **Both the drafter and the verifier get this string, and that is not optional.** The gate
+/// scores `unsupportedClaim` by re-reading the picture, so a comment grounded in a caption the
+/// gate was not given is exactly the shape of good comment it refuses. §9.111 measured what
+/// that costs in another form: a gate that rejects good comments costs more than whatever
+/// produced them saved.
+///
+/// **Empty when there is no caption, and that is load-bearing.** The block is prepended, so a
+/// run without one produces a byte-identical prompt to before — which is what keeps the
+/// provider's whole-prompt cache hitting on the nurture path, where no caption is fetched.
+fn post_text_note(brief: PostBrief<'_>) -> String {
+    let mut note = String::new();
+    if let Some(caption) = brief.caption.map(str::trim).filter(|text| !text.is_empty()) {
+        let caption: String = caption.chars().take(KNOWN_CAPTION_MAX_CHARS).collect();
+        note.push_str(&format!(
+            "Caption ĐẦY ĐỦ của bài, lấy nguyên văn từ nguồn (KHÔNG phải đoán từ ảnh, và \
+             thường dài hơn phần chữ nhìn thấy được trên ảnh): {caption:?}. Đây là caption \
+             đúng — hãy dùng nó, đừng đọc lại caption từ ảnh và đừng viết gì mâu thuẫn \
+             với nó.\n"
+        ));
+    }
+    if let Some(transcript) = brief
+        .transcript
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        // **Two clauses, and both were paid for by a measurement.**
+        //
+        // "Bằng chứng HỢP LỆ ngang với ảnh" is for the gate: it scores `evidenceSupport` by
+        // asking whether every specific detail can be *seen*, and a place that was said rather
+        // than shown fails that question unless the question is widened. Handing over the
+        // transcript without widening it produces the exact failure this thread exists to
+        // avoid, one step later.
+        //
+        // "NỘI DUNG CHÍNH" is for the drafter, and it is here because of what happened without
+        // it. Measured 26/08/2026 on a 52-second vlog whose transcript names six places
+        // (`Pink Valley`, `thuyền đụng`, `1/2 Circle Coffee`, `The End House`…): the model was
+        // handed all 222 words and wrote **"Áo hồng nhìn xinh quá!"** — about the shirt in the
+        // cover frame. The prompt below tells it "Nội dung nhìn thấy và caption là ưu tiên cao
+        // nhất", and that clause won. A transcript that is present but outranked is a
+        // transcript nobody is paying for on purpose.
+        note.push_str(&format!(
+            "LỜI THOẠI trong video, ghi lại từ âm thanh gốc: {transcript:?}. Đây là NỘI DUNG \
+             CHÍNH của bài, và là bằng chứng HỢP LỆ ngang với những gì nhìn thấy trong ảnh — \
+             một địa điểm, món ăn hay việc được NÓI tới thì coi như có thật dù không nhìn thấy \
+             trên ảnh. Ảnh chỉ là vài khung đầu của một video dài, nên hãy viết về những gì \
+             bài NÓI tới; đừng chỉ bình luận trang phục hay bối cảnh trong ảnh, và đừng kết \
+             luận rằng video chỉ có những gì trong ảnh.\n"
+        ));
+    }
+    note
+}
+
+/// Which source the comment must be built from, named inside the prompt itself.
+///
+/// **A separate knob because a prepended block cannot outrank the body.** The transcript note
+/// says a transcript is valid evidence and is the post's main content; the prompt body then
+/// said "Nội dung nhìn thấy và caption là ưu tiên cao nhất", and the body won. Measured
+/// 26/08/2026 on a 52-second vlog whose 222-word transcript names six places: two runs, both
+/// with the whole transcript in the prompt, both answered **"Áo hồng nhìn xinh quá"** — about
+/// the shirt in the cover frame.
+///
+/// So the sentence itself changes when there is a transcript, and is byte-identical when there
+/// is not. That second half matters: this provider caches whole prompts, so every comment the
+/// nurture loop has ever sent has to keep hashing the same.
+fn evidence_priority(brief: PostBrief<'_>) -> &'static str {
+    match brief
+        .transcript
+        .map(str::trim)
+        .is_some_and(|text| !text.is_empty())
+    {
+        // A talking-head video *is* its narration; the frames are whatever second the sampler
+        // happened to catch. Naming the transcript first is what makes the comment about the
+        // post rather than about the outfit.
+        true => "LỜI THOẠI là ưu tiên cao nhất — hãy bám vào một chi tiết CỤ THỂ được nói \
+                 trong đó (địa điểm, món, việc làm); nội dung nhìn thấy và caption là ưu tiên \
+                 sau đó. Đừng bình luận trang phục, ngoại hình hay bối cảnh trong ảnh nếu lời \
+                 thoại có chi tiết đáng nhắc hơn",
+        false => "Nội dung nhìn thấy và caption là ưu tiên cao nhất",
     }
 }
 
@@ -1672,7 +1940,7 @@ const SHEET_PIXEL_BUDGET: f64 = 750.0 * 1334.0;
 ///
 /// Four, matching `interaction_hierarchy::CAROUSEL_SLIDE_CAP` — the walk that produces them
 /// stops at the same number, so raising one without the other buys nothing.
-const SHEET_MAX_FRAMES: usize = 4;
+pub const SHEET_MAX_FRAMES: usize = 4;
 
 /// The pixel budget for `count` distinct pictures.
 ///
@@ -1817,6 +2085,7 @@ fn make_contact_sheet(frames: &[Vec<u8>], kind: EvidenceKind) -> anyhow::Result<
         jpeg: encoded.into_inner(),
         distinct_frames: count.min(u8::MAX as usize) as u8,
         kind,
+        coverage: None,
     })
 }
 
@@ -2176,22 +2445,32 @@ pub async fn prepare_comment_for_frames(
     kind: EvidenceKind,
     direction: Option<&str>,
     frame_text: &dyn crate::FrameTextSource,
+    brief: PostBrief<'_>,
 ) -> anyhow::Result<(GroundedCommentResult, &'static str)> {
     if provider_supports_vision(settings) {
-        let result = prepare_grounded_comment(settings, frames, kind, direction).await?;
+        let result = prepare_grounded_comment(settings, frames, kind, direction, brief).await?;
         return Ok((result, "vision"));
     }
     let host = host_of(&settings.base_url);
     let frame = frames
         .last()
         .ok_or_else(|| anyhow::anyhow!("no_usable_evidence"))?;
-    let observations = frame_text
-        .recognize(frame)
-        .await
-        .map_err(|error| anyhow::anyhow!("{host} chỉ nhận text và OCR caption lỗi: {error}"))?;
-    let caption = ocr_caption(&observations).ok_or_else(|| {
-        anyhow::anyhow!("{host} chỉ nhận text; chưa đọc được caption từ frame hiện tại")
-    })?;
+    // **A fetched caption skips OCR entirely, and on this fleet that is the difference
+    // between a caption and nothing.** Windows ships no `vi-VN` OCR pack, so the pinned
+    // `en-US` recogniser reads `mới` as `mdi` and `thư` as `thif` — measured. When the
+    // operator's own network already handed us the caption verbatim, running that recogniser
+    // over a JPEG to produce a worse copy of it would be strictly harmful.
+    let caption = match brief.caption.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(caption) => caption.to_string(),
+        None => {
+            let observations = frame_text.recognize(frame).await.map_err(|error| {
+                anyhow::anyhow!("{host} chỉ nhận text và OCR caption lỗi: {error}")
+            })?;
+            ocr_caption(&observations).ok_or_else(|| {
+                anyhow::anyhow!("{host} chỉ nhận text; chưa đọc được caption từ frame hiện tại")
+            })?
+        }
+    };
     let digest = {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -3021,7 +3300,13 @@ mod tests {",
         };
         let frame = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
         let result =
-            prepare_grounded_comment(&settings, &[frame], EvidenceKind::Moments, Some("tự nhiên"))
+            prepare_grounded_comment(
+                &settings,
+                &[frame],
+                EvidenceKind::Moments,
+                Some("tự nhiên"),
+                Default::default(),
+            )
                 .await
                 .expect("grounded comment");
         server.await.expect("mock gateway task");
@@ -3129,6 +3414,378 @@ mod tests {",
     /// Factored out when a second test needed it. A copy would have been the third place in
     /// this file that hand-rolls HTTP framing, and the two would have drifted the first time
     /// one of them learned something about `Content-Length`.
+    /// **A caption the campaign fetched has to reach the gate, not only the drafter.**
+    ///
+    /// This is the trap the whole `known_caption` thread exists to avoid. `grounded_verify`
+    /// scores `unsupportedClaim` by re-reading the picture, so a comment written from a
+    /// caption the gate cannot see reads to it as a claim about something invisible. §9.111
+    /// measured that shape of mistake in another form and the arithmetic is the same: every
+    /// refusal falls back to a full draft-and-verify pair, so a gate that rejects good
+    /// comments costs more than whatever produced them saved.
+    ///
+    /// Asserted on the wire rather than on a return value, because the defect is invisible in
+    /// one: both calls still succeed, and only the scores drift.
+    #[tokio::test]
+    async fn a_fetched_caption_reaches_both_the_drafter_and_the_gate() {
+        const CAPTION: &str = "Một lịch trình vừa đủ chậm để tận hưởng Đà Lạt #riviudalat";
+        const TRANSCRIPT: &str = "điểm dừng chân tiếp theo là Pink Valley, đặc biệt là thuyền đụng";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock gateway bind");
+        let address = listener.local_addr().expect("mock gateway address");
+        let draft = serde_json::json!({
+            "choices": [{"message": {"content": "{\"caption\":\"đoán từ ảnh\",\"captionConfidence\":20,\"visualFacts\":[\"hồ\"],\"contextConfidence\":90,\"comment\":\"Lịch trình này chill thật\"}"}}],
+            "usage": {"prompt_tokens": 31, "completion_tokens": 12},
+            "model": "mock-draft"
+        });
+        let verification = serde_json::json!({
+            "choices": [{"message": {"content": "{\"relevance\":94,\"evidenceSupport\":91,\"instructionFit\":88,\"genericity\":12,\"contradiction\":false,\"unsupportedClaim\":false,\"uiTextConfusion\":false}"}}],
+            "usage": {"prompt_tokens": 27, "completion_tokens": 9},
+            "model": "mock-verifier"
+        });
+        let server = serve_mock_gateway_capturing(listener, vec![draft, verification]);
+
+        let settings = NurtureSettings {
+            api_key: "test-key".into(),
+            base_url: format!("http://{address}/v1"),
+            ..NurtureSettings::default()
+        };
+        let frame = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
+        let result = prepare_grounded_comment(
+            &settings,
+            &[frame],
+            EvidenceKind::CarouselSlides,
+            Some("tự nhiên"),
+            PostBrief {
+                caption: Some(CAPTION),
+                transcript: Some(TRANSCRIPT),
+                coverage: Some(PostCoverage::Slides { total: 8 }),
+            },
+        )
+        .await
+        .expect("grounded comment");
+        let bodies = server.await.expect("mock gateway task");
+
+        assert_eq!(bodies.len(), 2, "one draft and one verification");
+        for (index, body) in bodies.iter().enumerate() {
+            assert!(
+                body.contains("riviudalat"),
+                "call {index} was not given the caption the other one was written from"
+            );
+            assert!(
+                body.contains("thuyền đụng"),
+                "call {index} was not given the transcript the other one was written from"
+            );
+            // Handing the gate a transcript is not enough on its own: it scores
+            // `evidenceSupport` by asking whether details are *visible*, so the question has
+            // to be widened in the same breath.
+            assert!(
+                body.contains("bằng chứng HỢP LỆ ngang với những gì nhìn thấy"),
+                "call {index} was given the transcript but not told it counts"
+            );
+            assert!(
+                body.contains("trong tổng số 8 ảnh"),
+                "call {index} was told a one-picture sheet is the whole eight-slide post"
+            );
+        }
+        // The fetched caption wins over the one the model squinted out of the JPEG, and the
+        // model's low confidence in *its* reading does not drag the context down with it.
+        assert_eq!(result.caption.as_deref(), Some(CAPTION));
+        assert_eq!(
+            result.context_confidence, 90,
+            "captionConfidence=20 is about a reading nobody used"
+        );
+    }
+
+    /// **No caption means the prompt is what it always was, byte for byte.**
+    ///
+    /// Load-bearing rather than tidy: this provider caches whole prompts, not prefixes
+    /// (measured), so an unconditional preamble here would miss the cache on every nurture
+    /// comment ever sent — that path meets its posts by scrolling, has no link to look a
+    /// caption up by, and passes an empty brief.
+    #[test]
+    fn an_empty_brief_adds_nothing_to_the_prompt() {
+        assert!(post_text_note(PostBrief::default()).is_empty());
+        assert!(post_text_note(PostBrief {
+            caption: Some("   "),
+            transcript: Some(""),
+            coverage: Some(PostCoverage::Slides { total: 4 }),
+        })
+        .is_empty());
+    }
+
+    /// **The priority sentence is exactly what it was when there is no transcript.**
+    ///
+    /// Pinned as a literal, not as a property: every comment the nurture loop sends passes an
+    /// empty brief, and this provider caches whole prompts. A wording change here that looks
+    /// harmless would miss the cache on all of them.
+    #[test]
+    fn without_a_transcript_the_priority_sentence_is_the_old_one() {
+        assert_eq!(
+            evidence_priority(PostBrief::default()),
+            "Nội dung nhìn thấy và caption là ưu tiên cao nhất"
+        );
+        assert_eq!(
+            evidence_priority(PostBrief {
+                caption: Some("có caption"),
+                transcript: Some("   "),
+                coverage: Some(PostCoverage::Slides { total: 8 }),
+            }),
+            "Nội dung nhìn thấy và caption là ưu tiên cao nhất"
+        );
+    }
+
+    /// **With a transcript, the sentence has to say the transcript comes first.**
+    ///
+    /// Measured 26/08/2026, and this is the test standing in for that measurement. On a
+    /// 52-second vlog whose 222-word transcript names `Pink Valley`, `thuyền đụng`,
+    /// `1/2 Circle Coffee` and `The End House`, two runs with the whole transcript in the
+    /// prompt both answered **"Áo hồng nhìn xinh quá"** — the shirt in the cover frame —
+    /// because the body of the prompt still said what is *seen* ranks highest. With this
+    /// sentence swapped, three consecutive runs answered about Pink Valley and the bumper
+    /// boats at `ev=95..100 rel=95..100`.
+    #[test]
+    fn with_a_transcript_the_spoken_content_is_named_first() {
+        let sentence = evidence_priority(PostBrief {
+            transcript: Some("điểm dừng chân tiếp theo là Pink Valley"),
+            ..PostBrief::default()
+        });
+        assert!(sentence.starts_with("LỜI THOẠI là ưu tiên cao nhất"), "{sentence}");
+        // The specific failure it exists to prevent, named in the prompt rather than hoped for.
+        assert!(sentence.contains("Đừng bình luận trang phục"), "{sentence}");
+    }
+
+    /// A transcript arrives on its own when a video has speech but no caption worth having.
+    #[test]
+    fn a_transcript_travels_without_a_caption() {
+        let note = post_text_note(PostBrief {
+            transcript: Some("mình ghé 1/2 Circle Coffee"),
+            ..PostBrief::default()
+        });
+        assert!(note.contains("LỜI THOẠI"), "{note}");
+        assert!(note.contains("1/2 Circle Coffee"), "{note}");
+        assert!(!note.contains("Caption ĐẦY ĐỦ"), "{note}");
+    }
+
+    /// **The pictures are a few seconds; the transcript is the whole video.**
+    ///
+    /// The note has to say so, or a model handed both reads the sheet as the post and the
+    /// transcript as commentary on it. Measured: the sheet for a video is three samples about
+    /// a second apart, and the measured video was 52 seconds long.
+    #[test]
+    fn a_transcript_warns_that_the_pictures_are_only_the_opening() {
+        let note = post_text_note(PostBrief {
+            transcript: Some("bái bai"),
+            ..PostBrief::default()
+        });
+        assert!(note.contains("vài khung đầu của một video dài"), "{note}");
+        // The clause that outranks the prompt's own "what is seen comes first".
+        assert!(note.contains("NỘI DUNG CHÍNH"), "{note}");
+    }
+
+    /// A caption is bounded, because the verify call pays for it once per comment.
+    #[test]
+    fn an_enormous_caption_is_trimmed_rather_than_sent_whole() {
+        // A character the surrounding sentence does not use, so the count is the caption's
+        // alone — the first version of this test counted `đ` and caught the prompt's own.
+        let huge = "x".repeat(5_000);
+        assert_eq!(
+            post_text_note(PostBrief {
+                caption: Some(&huge),
+                ..PostBrief::default()
+            })
+            .matches('x')
+            .count(),
+            KNOWN_CAPTION_MAX_CHARS
+        );
+    }
+
+    /// **A video sheet says how many seconds it covers, and how long the video is.**
+    ///
+    /// Four pictures of a fifty-two-second video are four pictures of ten seconds of it. Without
+    /// this the note said "4 khung KHÁC NHAU của cùng một bài", which is true about the sheet and
+    /// read by the model as the whole video — the same dishonesty the carousel note had.
+    #[test]
+    fn a_video_sheet_says_how_much_of_the_video_it_saw() {
+        let moments: Vec<Vec<u8>> = (0..3).map(|index| slide_shaded(index * 60)).collect();
+        let note = make_contact_sheet(&moments, EvidenceKind::Moments)
+            .unwrap()
+            .with_coverage(Some(PostCoverage::Video {
+                seen_secs: 9,
+                total_secs: Some(52),
+            }))
+            .layout_note();
+        assert!(note.contains("trải trong khoảng 9 giây"), "{note}");
+        assert!(note.contains("video dài 52 giây"), "{note}");
+        assert!(note.contains("phần còn lại CHƯA đọc được"), "{note}");
+    }
+
+    /// A watch that covered the whole video is not warned about.
+    ///
+    /// "3 khung trải 12 giây ĐẦU của một video dài 12 giây — phần còn lại chưa đọc được" is a
+    /// warning about nothing, and a warning about nothing teaches the model to discount the
+    /// real ones.
+    #[test]
+    fn a_video_seen_end_to_end_carries_no_warning() {
+        let moments: Vec<Vec<u8>> = (0..3).map(|index| slide_shaded(index * 60)).collect();
+        let note = make_contact_sheet(&moments, EvidenceKind::Moments)
+            .unwrap()
+            .with_coverage(Some(PostCoverage::Video {
+                seen_secs: 12,
+                total_secs: Some(12),
+            }))
+            .layout_note();
+        assert!(!note.contains("CHƯA đọc được"), "{note}");
+    }
+
+    /// **One frame of a fifty-two-second video is not a still card, and must not read like one.**
+    ///
+    /// The single-frame wording blames "bài ảnh tĩnh hoặc video đang dừng" and tells the model
+    /// there is no motion to describe — fine for a photo post, and a serious understatement for
+    /// a video nobody managed to watch. Measured cause on this fleet: a stuck stream, which
+    /// produced exactly this shape four assignments in a row.
+    #[test]
+    fn one_frame_of_a_long_video_says_the_video_went_unwatched() {
+        let note = make_contact_sheet(&[slide_shaded(10)], EvidenceKind::Moments)
+            .unwrap()
+            .with_coverage(Some(PostCoverage::Video {
+                seen_secs: 0,
+                total_secs: Some(52),
+            }))
+            .layout_note();
+        assert!(note.contains("VIDEO dài 52 giây"), "{note}");
+        assert!(note.contains("Gần như toàn bộ video CHƯA đọc được"), "{note}");
+    }
+
+    /// **With no coverage the Moments wording is exactly what it was.**
+    ///
+    /// The nurture loop passes an empty brief on every comment it has ever sent, and this
+    /// provider caches whole prompts. Pinned as literals for the same reason
+    /// `without_a_transcript_the_priority_sentence_is_the_old_one` is.
+    #[test]
+    fn without_coverage_the_moments_wording_is_unchanged() {
+        let moments: Vec<Vec<u8>> = (0..3).map(|index| slide_shaded(index * 60)).collect();
+        let many = make_contact_sheet(&moments, EvidenceKind::Moments)
+            .unwrap()
+            .layout_note();
+        assert!(
+            many.starts_with("3 khung KHÁC NHAU của cùng một bài, xếp từ trái sang phải theo thời gian"),
+            "{many}"
+        );
+        let one = make_contact_sheet(&[slide_shaded(10)], EvidenceKind::Moments)
+            .unwrap()
+            .layout_note();
+        assert!(one.starts_with("ĐÚNG MỘT khung của bài (chụp ba lần"), "{one}");
+    }
+
+    /// A slide count on a video, or seconds on a carousel, cannot be built — the enum forbids
+    /// it — but a sheet given the wrong *kind* of coverage still must not invent a warning.
+    #[test]
+    fn coverage_of_the_wrong_shape_is_ignored_rather_than_mixed_in() {
+        let slides: Vec<Vec<u8>> = (0..2).map(|index| slide_shaded(index * 60)).collect();
+        let note = make_contact_sheet(&slides, EvidenceKind::CarouselSlides)
+            .unwrap()
+            .with_coverage(Some(PostCoverage::Video {
+                seen_secs: 9,
+                total_secs: Some(52),
+            }))
+            .layout_note();
+        assert!(!note.contains("giây"), "{note}");
+        assert!(!note.contains("trong tổng số"), "{note}");
+    }
+
+    /// **A sheet shorter than the post says so.**
+    ///
+    /// Measured 26/08/2026: this farm's real carousels are 2, 5, 7 and 8 slides against a
+    /// four-picture sheet, so most of them are short reads. Describing four of eight as
+    /// "4 ẢNH KHÁC NHAU của cùng một bài" is the dishonesty `distinct_frames` exists to
+    /// prevent, one level up.
+    #[test]
+    fn a_sheet_shorter_than_the_post_admits_how_much_it_is_missing() {
+        let slides: Vec<Vec<u8>> = (0..4).map(|index| slide_shaded(index * 40)).collect();
+        let note = make_contact_sheet(&slides, EvidenceKind::CarouselSlides)
+            .unwrap()
+            .with_coverage(Some(PostCoverage::Slides { total: 8 }))
+            .layout_note();
+        assert!(note.contains("trong tổng số 8 ảnh"), "{note}");
+        assert!(note.contains("ảnh đầu và"), "the picks keep both ends: {note}");
+    }
+
+    /// A total the sheet already covers is dropped, not printed.
+    ///
+    /// "4 trong tổng số 4 ảnh" is noise, and "4 trong tổng số 3" is a contradiction the model
+    /// would have to resolve on its own.
+    #[test]
+    fn a_total_the_sheet_already_covers_is_not_announced() {
+        let slides: Vec<Vec<u8>> = (0..4).map(|index| slide_shaded(index * 40)).collect();
+        for total in [
+            None,
+            Some(PostCoverage::Slides { total: 1 }),
+            Some(PostCoverage::Slides { total: 4 }),
+        ] {
+            let note = make_contact_sheet(&slides, EvidenceKind::CarouselSlides)
+                .unwrap()
+                .with_coverage(total)
+                .layout_note();
+            assert!(
+                !note.contains("trong tổng số"),
+                "total {total:?} should not be announced: {note}"
+            );
+        }
+    }
+
+    /// Like [`serve_mock_gateway`], but hands back what each request actually said.
+    fn serve_mock_gateway_capturing(
+        listener: tokio::net::TcpListener,
+        responses: Vec<serde_json::Value>,
+    ) -> tokio::task::JoinHandle<Vec<String>> {
+        tokio::spawn(async move {
+            let mut bodies = Vec::new();
+            for response in responses {
+                let (mut socket, _) = listener.accept().await.expect("mock request");
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 8192];
+                loop {
+                    let count = socket.read(&mut chunk).await.expect("mock request body");
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                    let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let content_length = std::str::from_utf8(&request[..header_end])
+                        .ok()
+                        .and_then(|headers| {
+                            headers.lines().find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse().ok())
+                                    .flatten()
+                            })
+                        })
+                        .unwrap_or(0usize);
+                    if request.len() >= header_end + 4 + content_length {
+                        bodies
+                            .push(String::from_utf8_lossy(&request[header_end + 4..]).into_owned());
+                        break;
+                    }
+                }
+                let body = response.to_string();
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                socket
+                    .write_all(format!("{head}{body}").as_bytes())
+                    .await
+                    .expect("mock response");
+                let _ = socket.shutdown().await;
+            }
+            bodies
+        })
+    }
+
     fn serve_mock_gateway(
         listener: tokio::net::TcpListener,
         responses: Vec<serde_json::Value>,
@@ -3211,7 +3868,13 @@ mod tests {",
         };
         let frame = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
         let error =
-            prepare_grounded_comment(&settings, &[frame], EvidenceKind::Moments, Some("tự nhiên"))
+            prepare_grounded_comment(
+                &settings,
+                &[frame],
+                EvidenceKind::Moments,
+                Some("tự nhiên"),
+                Default::default(),
+            )
                 .await
                 .expect_err("the gate refuses empty praise");
         server.await.expect("mock gateway task");
@@ -3264,6 +3927,7 @@ mod tests {",
             EvidenceKind::CarouselSlides,
             Some("tự nhiên"),
             3,
+            Default::default(),
         )
         .await;
         server.await.expect("mock gateway task");
@@ -3352,6 +4016,7 @@ mod tests {",
             EvidenceKind::CarouselSlides,
             Some("tự nhiên"),
             3,
+            Default::default(),
         )
         .await;
         server.await.expect("mock gateway task");
@@ -3426,6 +4091,7 @@ mod tests {",
             EvidenceKind::CarouselSlides,
             Some("tự nhiên"),
             3,
+            Default::default(),
         )
         .await;
         server.await.expect("mock gateway task");

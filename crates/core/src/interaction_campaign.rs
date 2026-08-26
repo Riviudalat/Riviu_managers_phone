@@ -298,7 +298,10 @@ async fn collect_target_evidence_frames(
     target: &crate::ResolvedTikTokTarget,
     photographer: &str,
     settle: Duration,
-) -> anyhow::Result<Vec<Vec<u8>>> {
+    // How long the video is, when the web could say. `None` for a photo post, and for a video
+    // whose lookup failed — the watch then spends its whole budget and reports the span.
+    video_secs: Option<Duration>,
+) -> anyhow::Result<DeviceShot> {
     let InteractionDevice {
         context,
         target_package,
@@ -324,41 +327,266 @@ async fn collect_target_evidence_frames(
         drop(evidence_driver);
         // A photo post is walked, not sampled: it does not move, so three samples of it are
         // one picture three times, and every slide past the first is only reachable by swiping.
+        let camera = StreamCamera {
+            engine,
+            udid: photographer,
+        };
         if target.kind == crate::interaction::TikTokPostKind::Photo {
-            return Ok::<_, anyhow::Error>(
-                crate::interaction_hierarchy::photograph_photo_post(
+            return Ok::<_, anyhow::Error>(DeviceShot {
+                frames: crate::interaction_hierarchy::photograph_photo_post(
                     session.as_ref(),
-                    &StreamCamera {
-                        engine,
-                        udid: photographer,
-                    },
+                    &camera,
                     &target_package,
                     &evidence_gestures,
                     settle,
                 )
                 .await
                 .frames,
-            );
+                span_secs: 0,
+            });
         }
-        let mut frames = Vec::with_capacity(3);
-        for _ in 0..3 {
-            if let Some(frame) = engine.frames.latest(photographer) {
-                frames.push((*frame).clone());
-            }
-            tokio::time::sleep(settle).await;
-        }
-        Ok::<_, anyhow::Error>(frames)
+        // **A video is watched, not sampled where it stands.** Three frames 500 ms apart saw the
+        // first second of a post that can run a minute, and on a video parked on its cover they
+        // deduplicated to one — so every comment was written from a title card.
+        let watch = crate::interaction_hierarchy::photograph_video_post(
+            session.as_ref(),
+            &camera,
+            &target_package,
+            video_secs,
+        )
+        .await;
+        Ok::<_, anyhow::Error>(DeviceShot {
+            frames: watch.frames,
+            span_secs: watch.span_secs,
+        })
     }
     .await;
     // Closed on every path, including the failing ones: leaving the context open would
     // strand the lease and the stream for a target we are about to give up on.
     let closed = control.close_ui_context(context).await;
-    let frames = frames?;
+    let shot = frames?;
     closed?;
-    if frames.is_empty() {
+    if shot.frames.is_empty() {
         anyhow::bail!("không có frame stream");
     }
-    Ok(frames)
+    Ok(shot)
+}
+
+/// What one phone's evidence pass produced.
+///
+/// `span_secs` is `0` for a photo post — a carousel is measured in slides, not seconds — and for
+/// a video it is how much of it the watch actually covered.
+struct DeviceShot {
+    frames: Vec<Vec<u8>>,
+    span_secs: u64,
+}
+
+/// Everything one target's comments are written from: the pictures, and what is known as text.
+pub(crate) struct TargetEvidence {
+    /// The pictures that become the contact sheet, in reading order.
+    pub frames: Vec<Vec<u8>>,
+    /// The post's caption in full, when the operator's own network could fetch it.
+    ///
+    /// Worth more than it looks: the accessibility tree truncates a caption at ~116
+    /// characters, and this farm's real captions measured 157-399.
+    pub caption: Option<String>,
+    /// What is said out loud in the video, when TikTok generated captions for it.
+    ///
+    /// **This is the one field that carries the part of a video nobody photographed.** The
+    /// pictures for a video are still three samples taken about a second apart, so a
+    /// fifty-second post is seen for its first second; the transcript is all fifty seconds of
+    /// it. `None` on every photo post and on any video whose audio is a music track.
+    pub transcript: Option<String>,
+    /// How much of the post the pictures cover, measured rather than assumed.
+    ///
+    /// Kept even when the pictures came from a phone: the count is true either way, and it is
+    /// what lets a four-picture sheet of an eight-slide post — or a ten-second watch of a
+    /// fifty-two-second video — say so.
+    pub coverage: Option<crate::openai_client::PostCoverage>,
+    /// Where the pictures came from, for the log line and the filed context.
+    pub picture_source: &'static str,
+}
+
+impl TargetEvidence {
+    fn brief(&self) -> crate::openai_client::PostBrief<'_> {
+        crate::openai_client::PostBrief {
+            caption: self.caption.as_deref(),
+            transcript: self.transcript.as_deref(),
+            coverage: self.coverage,
+        }
+    }
+}
+
+/// Gather everything one target's comments need, cheapest source first.
+///
+/// **The order is the whole design.** The desktop's own network is asked first because what
+/// it returns is strictly better than what a phone can see and costs no device at all:
+///
+/// - the caption **in full**, where the accessibility tree truncates at ~116 characters;
+/// - **every** slide of a photo post at source resolution (1416x2008 measured), where the
+///   on-device walk caps at four and reaches them by swiping a real account — a swipe past
+///   the last slide leaves for the author's profile, which has a Follow button on it.
+///
+/// A phone is touched only when that fails, which on the real targets is often enough that
+/// the fallback is not decoration: two of seven answered `Your IP address is blocked from
+/// accessing this post` on three consecutive attempts, while the phones open those same posts
+/// fine. **Nothing here may ever be the reason a phone stays silent.**
+///
+/// Videos always fall through to the phone: the web has the caption for them but no pictures,
+/// and sampling the stream is what has always produced those.
+async fn gather_target_evidence(
+    db: &Arc<crate::db::Database>,
+    control: &Arc<DeviceControlPlane>,
+    engine: &crate::NurtureEngine,
+    campaign_id: &str,
+    target: &crate::ResolvedTikTokTarget,
+    // The phone that takes the pictures **if the web cannot**. Always assigned; often never
+    // touched.
+    photographer: &str,
+    settle: Duration,
+) -> anyhow::Result<TargetEvidence> {
+    let looked_up = crate::tiktok_web::fetch_post_context(&target.normalized_url).await;
+    let web = match &looked_up {
+        Ok(context) => Some(context),
+        Err(error) => {
+            // Info, not warn: on a farm where two of seven targets are IP-blocked by design,
+            // this is a normal outcome and the campaign is about to run without it.
+            tracing::info!(
+                "interaction {}: web không tra được ({}): {error}",
+                target.target_key,
+                error.code()
+            );
+            None
+        }
+    };
+    file_target_context(db, campaign_id, target, looked_up.as_ref());
+
+    let caption = web.and_then(|context| context.caption.clone());
+    let slide_total = web
+        .map(|context| context.slide_urls.len())
+        .filter(|total| *total > 0);
+    // How long the video is, when the web could say. It is what sizes the watch below and what
+    // lets the sheet admit how little of a long video it saw.
+    let video_secs = web.and_then(|context| context.duration_secs);
+
+    // **Gated twice before a request goes out.** `could_have_transcript` reads
+    // `hasOriginalAudio` and the offered tracks out of the page the lookup already fetched, so
+    // a post carrying a music track — which is most of them on this farm — costs nothing here.
+    let transcript = match web.filter(|context| context.could_have_transcript()) {
+        Some(context) => {
+            let track = context
+                .transcript_track()
+                .unwrap_or_else(|| unreachable!("could_have_transcript checked it"));
+            let fetched = crate::tiktok_web::fetch_transcript(track).await;
+            match &fetched {
+                Some(text) => tracing::info!(
+                    "interaction {}: lời thoại {} ({}) {} từ",
+                    target.target_key,
+                    track.lang,
+                    track.source,
+                    text.split_whitespace().count()
+                ),
+                None => tracing::warn!(
+                    "interaction {}: có phụ đề {} nhưng tải về không được",
+                    target.target_key,
+                    track.lang
+                ),
+            }
+            fetched
+        }
+        None => None,
+    };
+
+    if target.kind == crate::interaction::TikTokPostKind::Photo {
+        if let Some(urls) = web
+            .map(|context| context.slide_urls.as_slice())
+            .filter(|urls| !urls.is_empty())
+        {
+            let picks =
+                crate::tiktok_web::pick_slide_indices(urls.len(), crate::openai_client::SHEET_MAX_FRAMES);
+            let chosen: Vec<String> = picks.iter().filter_map(|index| urls.get(*index)).cloned().collect();
+            let frames = crate::tiktok_web::fetch_slides(&chosen).await;
+            if frames.is_empty() {
+                // The lookup worked and the CDN did not. Falling through to the phone is the
+                // right answer, and saying so is what keeps this distinguishable from a post
+                // that simply had no slides.
+                tracing::warn!(
+                    "interaction {}: tra được {} ảnh nhưng tải về không được tấm nào — lùi về chụp trên máy",
+                    target.target_key,
+                    urls.len()
+                );
+            } else {
+                tracing::info!(
+                    "interaction {}: lấy {}/{} ảnh từ web, không cần máy nào chụp",
+                    target.target_key,
+                    frames.len(),
+                    urls.len()
+                );
+                return Ok(TargetEvidence {
+                    frames,
+                    caption,
+                    transcript,
+                    coverage: slide_total
+                        .map(|total| crate::openai_client::PostCoverage::Slides { total }),
+                    picture_source: "web",
+                });
+            }
+        }
+    }
+
+    let shot = collect_target_evidence_frames(
+        control,
+        engine,
+        target,
+        photographer,
+        settle,
+        video_secs.map(Duration::from_secs),
+    )
+    .await?;
+    Ok(TargetEvidence {
+        frames: shot.frames,
+        caption,
+        transcript,
+        // A photo post walked on the phone is still measured in slides, and the web's count is
+        // true whether or not its pictures were the ones used. A video is measured in seconds,
+        // and only the walk knows how many it managed.
+        coverage: match target.kind {
+            crate::interaction::TikTokPostKind::Photo => {
+                slide_total.map(|total| crate::openai_client::PostCoverage::Slides { total })
+            }
+            crate::interaction::TikTokPostKind::Video => {
+                Some(crate::openai_client::PostCoverage::Video {
+                    seen_secs: shot.span_secs,
+                    total_secs: video_secs,
+                })
+            }
+        },
+        picture_source: "device",
+    })
+}
+
+/// Record what the lookup produced, including that it produced nothing.
+///
+/// **A failed lookup is filed too, and that is the point.** "This target has no caption
+/// because TikTok blocks this IP" and "this target has no caption because nobody looked" are
+/// the same empty column otherwise, and only one of them is worth an operator's attention.
+fn file_target_context(
+    db: &Arc<crate::db::Database>,
+    campaign_id: &str,
+    target: &crate::ResolvedTikTokTarget,
+    looked_up: Result<&crate::tiktok_web::PostWebContext, &crate::tiktok_web::WebLookupError>,
+) {
+    // Built by the type that reads it back, so the two halves of the column cannot drift.
+    let Some(json) = crate::InteractionTargetNote::context_json(looked_up) else {
+        return;
+    };
+    if let Err(error) = db.record_interaction_target_context(campaign_id, &target.target_key, &json)
+    {
+        tracing::warn!(
+            "interaction {}: không ghi được ghi chú web: {error}",
+            target.target_key
+        );
+    }
 }
 
 /// Mark every assignment of one target failed with the same reason.
@@ -650,7 +878,8 @@ pub async fn execute_thread_campaign(
         // Before anything is spawned, while every assignment of every target is still in one
         // place. See `pre_prepare_standalone_texts` for why it cannot happen inside a task.
         let pre_prepared = Arc::new(
-            pre_prepare_standalone_texts(&db, &control, &engine, &request, &in_scope).await,
+            pre_prepare_standalone_texts(&db, &control, &engine, &campaign_id, &request, &in_scope)
+                .await,
         );
         let mut running = Vec::with_capacity(rows.len());
         for (index, (assignment_id, target_key)) in rows.into_iter().enumerate() {
@@ -745,6 +974,7 @@ async fn pre_prepare_standalone_texts(
     db: &Arc<crate::db::Database>,
     control: &Arc<DeviceControlPlane>,
     engine: &crate::NurtureEngine,
+    campaign_id: &str,
     request: &ThreadCampaignRequest,
     rows: &[crate::InteractionAssignmentRecord],
 ) -> HashMap<String, String> {
@@ -786,21 +1016,23 @@ async fn pre_prepare_standalone_texts(
             continue;
         }
         let photographer = &wanted[0].actor_udid;
-        let frames = match collect_target_evidence_frames(
+        let evidence = match gather_target_evidence(
+            db,
             control,
             engine,
+            campaign_id,
             target,
             photographer,
             Duration::from_millis(500),
         )
         .await
         {
-            Ok(frames) => frames,
+            Ok(evidence) => evidence,
             Err(error) => {
                 // Left to the tasks: each one photographs on its own phone, which is what it
                 // did before this existed, and one of them may well succeed where this failed.
                 tracing::warn!(
-                    "interaction {target_key}: không chụp được bằng chứng để soạn gộp: {error}"
+                    "interaction {target_key}: không lấy được bằng chứng để soạn gộp: {error}"
                 );
                 continue;
             }
@@ -823,10 +1055,11 @@ async fn pre_prepare_standalone_texts(
         scoped.max_comment_words = u32::from(request.max_words);
         let batched = crate::openai_client::prepare_grounded_comments_batch(
             &scoped,
-            &frames,
+            &evidence.frames,
             evidence_kind,
             Some(&request.instruction),
             wanted.len(),
+            evidence.brief(),
         )
         .await;
         let from_batch = batched.accepted_from_batch();
@@ -838,9 +1071,21 @@ async fn pre_prepare_standalone_texts(
             }
         }
         tracing::info!(
-            "interaction {target_key}: soạn trước {written}/{} câu, {from_batch} câu từ lượt nháp gộp",
-            wanted.len()
+            "interaction {target_key}: soạn trước {written}/{} câu, {from_batch} câu từ lượt nháp gộp              (ảnh từ {}, {} khung, caption {})",
+            wanted.len(),
+            evidence.picture_source,
+            evidence.frames.len(),
+            match evidence.caption.as_deref() {
+                Some(caption) => format!("{} ký tự", caption.chars().count()),
+                None => "không có".to_string(),
+            }
         );
+        if let Some(transcript) = evidence.transcript.as_deref() {
+            tracing::info!(
+                "interaction {target_key}: có lời thoại {} từ",
+                transcript.split_whitespace().count()
+            );
+        }
     }
     out
 }
@@ -1166,20 +1411,27 @@ async fn run_cohort(
                     .is_none_or(|scope| scope.contains(*id))
             })
             .all(|id| pre_prepared.contains_key(id));
-        let frames = if request.needs_ai_evidence_frames() && !every_text_ready {
+        let evidence = if request.needs_ai_evidence_frames() && !every_text_ready {
+            // Unchanged, and deliberately so: `None` here means this task has no assignment of
+            // this target in scope, so there is no comment to write and nothing to photograph.
+            // Falling through would hand `fail_whole_target` a target whose assignments all
+            // belong to somebody else. The web path saves the phone from being *used*, not
+            // from being assigned.
             let Some(photographer) = photographer.as_deref() else {
                 continue;
             };
-            match collect_target_evidence_frames(
+            match gather_target_evidence(
+                &db,
                 &control,
                 &engine,
+                &campaign_id,
                 target,
                 photographer,
                 Duration::from_millis(500),
             )
             .await
             {
-                Ok(frames) => frames,
+                Ok(evidence) => evidence,
                 Err(error) => {
                     fail_whole_target(
                         &db,
@@ -1195,7 +1447,13 @@ async fn run_cohort(
                 }
             }
         } else {
-            Vec::new()
+            TargetEvidence {
+                frames: Vec::new(),
+                caption: None,
+                transcript: None,
+                coverage: None,
+                picture_source: "none",
+            }
         };
         // Taken from the link, not guessed from the pictures. A carousel whose walk reached one
         // slide and a video parked on one frame produce the same single image, and only the URL
@@ -1280,10 +1538,11 @@ async fn run_cohort(
                     // from the evidence it left.
                     let prepared_text = match crate::openai_client::prepare_comment_for_frames(
                         &scoped,
-                        &frames,
+                        &evidence.frames,
                         evidence_kind,
                         Some(&direction),
                         engine.frame_text.as_ref(),
+                        evidence.brief(),
                     )
                     .await
                     {

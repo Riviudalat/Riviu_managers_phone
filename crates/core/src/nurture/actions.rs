@@ -849,6 +849,9 @@ impl NurtureEngine {
                     &frames,
                     EvidenceKind::Moments,
                     direction.as_deref(),
+                    // Empty on purpose: this loop meets a post by scrolling onto it, so there
+                    // is no link to look the caption up by. See `openai_client::PostBrief`.
+                    Default::default(),
                 )
                 .await
             } else {
@@ -1261,7 +1264,14 @@ impl NurtureEngine {
             frames.first().map(|frame| frame_digest(frame)).unwrap_or(0),
         );
         let prepared = if provider_supports_vision(settings) {
-            prepare_grounded_comment(settings, &frames, kind, direction.as_deref()).await
+            prepare_grounded_comment(
+                settings,
+                &frames,
+                kind,
+                direction.as_deref(),
+                Default::default(),
+            )
+            .await
         } else {
             let Some(caption) = self.read_caption(frames.last()).await else {
                 self.record_context_skip_attempt(

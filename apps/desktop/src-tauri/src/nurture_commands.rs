@@ -300,6 +300,9 @@ pub async fn nurture_test_api(
         riviu_core::openai_client::EvidenceKind::Moments,
         direction,
         &crate::interaction_ocr::DesktopFrameTextSource,
+        // This re-runs one nurture card, and that card was met by scrolling: no link, so
+        // nothing to look a caption up by.
+        Default::default(),
     )
     .await
     .map_err(err)?;

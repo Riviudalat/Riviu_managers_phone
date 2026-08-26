@@ -627,6 +627,14 @@ impl AppState {
         // Verified bundled tools, offered at the **lowest** priority so an operator's
         // own adb or `RIVIU_MINICAP_APK` still wins. A corrupt bundle costs its own
         // tool and nothing else; see `android_tools`.
+        // **Told, not guessed.** `tiktok_web` can only search paths relative to the running
+        // executable or to a compile-time `CARGO_MANIFEST_DIR`, and in a packaged build the
+        // second one points at the build agent's checkout. Without this line the whole web
+        // enrichment path returns `NoBinary` on every operator's machine while staying green in
+        // every test and every `cargo run` — which is exactly how it shipped inert once.
+        riviu_core::tiktok_web::set_bundled_ytdlp(sidecar_root.join("yt-dlp").join(
+            if cfg!(windows) { "yt-dlp.exe" } else { "yt-dlp" },
+        ));
         let android_tools = crate::android_tools::AndroidTools::load(&sidecar_root);
         for problem in &android_tools.problems {
             log::warn!("bundled Android tools: {problem}");
@@ -2708,6 +2716,58 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
+
+    /// **The three-part gate for the bug that shipped this feature inert.**
+    ///
+    /// `tiktok_web` searches only paths relative to the running executable or derived from
+    /// `CARGO_MANIFEST_DIR` — a compile-time path that on an operator's machine points at the
+    /// build agent's checkout. So a packaged build found no yt-dlp, every lookup returned
+    /// `NoBinary`, the campaign quietly wrote its comments from what the phones could see, and
+    /// **every test and every `cargo run` stayed green** because the repo's own sidecar tree was
+    /// right there.
+    ///
+    /// Three things have to hold together, and any one of them alone is worthless:
+    ///
+    /// 1. CI **fetches** the binary, or there is nothing to bundle;
+    /// 2. the bundle **carries** it, or there is nothing to find;
+    /// 3. bootstrap **points at it**, or nothing looks in the right place.
+    ///
+    /// Asserted as text because that is the only thing these three files have in common. A
+    /// property test would be nicer and there is no property here — it is three unrelated
+    /// mechanisms that must agree on one path.
+    #[test]
+    fn the_ytdlp_sidecar_is_fetched_bundled_and_pointed_at() {
+        let workflow = include_str!("../../../../.github/workflows/desktop-ci-cd.yml");
+        assert!(
+            workflow.contains("Fetch yt-dlp sidecar"),
+            "CI must download yt-dlp before the bundle is built; without it the installer ships \
+             without one and the web lookup does nothing on every operator's machine"
+        );
+        assert!(
+            workflow.contains("yt-dlp/releases/latest/download"),
+            "the fetch must take the latest release, not a pinned one: TikTok breaks extractors \
+             on its own schedule and a pinned copy is a pinned failure"
+        );
+
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("valid Tauri config");
+        assert_eq!(
+            config["bundle"]["resources"]["../../../sidecars/yt-dlp/"].as_str(),
+            Some("sidecars/yt-dlp/"),
+            "the bundle must carry the yt-dlp sidecar"
+        );
+
+        // And the path bootstrap hands over has to be the one the bundle maps to. Read out of
+        // this file's own source: the alternative is duplicating the join here and calling the
+        // duplicate a check.
+        let source = include_str!("state.rs");
+        assert!(
+            source.contains(r#"set_bundled_ytdlp(sidecar_root.join("yt-dlp")"#),
+            "bootstrap must tell tiktok_web where the bundled yt-dlp is, under the same \
+             `yt-dlp` directory the bundle maps to"
+        );
+    }
+
     #[test]
     fn tauri_resources_map_to_clean_sidecar_layout() {
         let config: serde_json::Value =
@@ -2799,6 +2859,12 @@ mod tests {
             // sixth bundled tool cannot appear unchecked. Five separate file entries would
             // give five assertions and no such property.
             ("../../../sidecars/android/", "sidecars/android/"),
+            // A directory, and the directory is committed even though the binary inside it is
+            // not: `sidecars/yt-dlp/README.md` keeps this mapping resolvable on a fresh clone,
+            // so a build without the fetch step still bundles *something* rather than failing
+            // at the bundler. What stops it shipping empty is
+            // `the_ytdlp_sidecar_is_fetched_bundled_and_pointed_at`.
+            ("../../../sidecars/yt-dlp/", "sidecars/yt-dlp/"),
         ];
 
         assert_eq!(resources.len(), expected.len());

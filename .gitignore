@@ -35,3 +35,13 @@ sidecars/riviu-android-agent/local.properties
 *.xml
 !apps/desktop/**/*.xml
 !sidecars/**/*.xml
+# yt-dlp sidecar. 17 MB of third-party binary that goes stale on TikTok's schedule, not
+# ours -- fetched per machine and per release build instead of carried in history. See
+# sidecars/yt-dlp/README.md for the one-line curl and for why the lookup is optional.
+sidecars/yt-dlp/*.exe
+sidecars/yt-dlp/yt-dlp
+# Agent tooling's own copy of the skills tree, written per session. `.claude/skills/` is the
+# versioned one (see the `!.claude/skills/` rule above); this is a rewritten duplicate of it,
+# and committing an agent's scratch copy beside the real one is how two skill files with the
+# same name come to disagree.
+.agents/

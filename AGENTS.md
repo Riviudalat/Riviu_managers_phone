@@ -4,7 +4,7 @@
 > hay danh sách "đừng làm lại" thì cập nhật ngay trong cùng lần thay đổi đó.
 > File này là thứ đầu tiên agent sau đọc.
 >
-> **Cập nhật lần cuối:** 14/08/2026.
+> **Cập nhật lần cuối:** 26/08/2026.
 
 ---
 
@@ -9274,3 +9274,497 @@ thử**; `OK` nghĩa là lỗi nằm ở đường của app chứ không ở mi
 
 `stream.rs` **không có đường dự phòng** — chỉ minicap, nên minicap chết là cả assignment chết ở
 tầng stream sau khi đã tốn công mở TikTok.
+
+## 9.115 Bằng chứng lấy từ web, không lấy từ máy — và ảnh cuối là ảnh quan trọng nhất (26/08/2026)
+
+Tương tác viết bình luận từ hai nguồn: caption đọc trong cây a11y, và ảnh chụp từ stream của
+một máy. Cả hai đều mất mát, và **đo được mất bao nhiêu**.
+
+### Đo trên 7 target thật trong `riviu.db`
+
+| | |
+|---|---|
+| caption từ web (`description`) | **157, 171, 184, 216, 399 ký tự** |
+| caption từ cây a11y | cắt ở **~116 ký tự** (9.40 / `PLAN_STATUS_2026-08-13.md`) |
+| ảnh carousel từ web (`imagePost.images`) | **2, 5, 7, 8 ảnh** ở 1416x2008 |
+| ảnh carousel từ máy | `CAROUSEL_SLIDE_CAP` = **4**, và tới được bằng cách vuốt tài khoản thật |
+| bài có phụ đề ASR | **0/7** |
+| bị từ chối hẳn | **2/7** — `Your IP address is blocked from accessing this post` |
+
+Hai kết luận ngược với trực giác:
+
+**Phụ đề không đáng giá trên fleet này.** 6/7 target là bài ảnh (không có tiếng), và video duy
+nhất báo `"hasOriginalAudio": false, "captionInfos": [], "noCaptionReason": 3` — nhạc nền,
+không có lời. Link vlog có thuyết minh thì có transcript thật (đo được 222 từ, `vie-VN` nguồn
+`ASR` + `eng-US` nguồn `MT`), nhưng đó là một *loại* video, không phải việc hằng ngày. Nên
+`hasOriginalAudio` là cổng chặn miễn phí, và đường phụ đề **chỉ chạy khi cổng đó mở** — xem
+mục "§9.115 tiếp" ở dưới.
+
+**Caption và ảnh mới là phần thưởng.** Cả hai đều lấy được từ máy của người vận hành, không
+đụng máy nào trong fleet.
+
+### Tại sao phải qua yt-dlp chứ không phải `reqwest`
+
+GET trần trang bài, có user-agent trình duyệt: **HTTP 200 và 1462 byte, không có dữ liệu bài
+nào**. TikTok trả về vỏ trang cho request trần. yt-dlp qua được vì nó giải JS challenge rồi
+gọi lại bằng cookie thu được. Tự viết lại đoạn đó là giải lại bài toán một dự án đang được bảo
+trì đã giải, trên một mục tiêu đổi luật theo lịch của họ.
+
+Binary nằm ở `sidecars/yt-dlp/`, **không commit** (17 MB, mục theo thời gian). Đọc README ở đó.
+Không có nó thì mọi lượt tra trả `NoBinary` và campaign chạy y như trước.
+
+Hai luật đã trả học phí, giữ nguyên trong `normalize_for_ytdlp`:
+
+- URL `/photo/` bị `ERROR: Unsupported URL`; **cùng bài đó dưới `/video/` thì chạy**.
+- Handle bắt đầu bằng `.` (fleet này có thật: `@.lt.gi.mang.v`) làm hỏng chính bộ phân tích
+  URL của extractor. Id số mới là thứ chọn bài, nên handle bị thay bằng `x`.
+
+### Lỗi nào retry được, lỗi nào không
+
+`Unable to extract universal data for rehydration` — **4/5 lượt xanh, lượt đỏ retry là qua**.
+`Your IP address is blocked from accessing this post` — **giống hệt nhau cả 3 lượt**. Retry cái
+thứ hai chỉ là độ trễ cộng thêm vào một campaign đang giữ lease. `classify_lookup_error` chia
+hai loại đó, và lỗi lạ được xếp vào loại *retry được* — một câu chưa ai gặp thì cho nó lượt thứ
+hai, đừng gạch đi.
+
+### Ảnh cuối là ảnh quan trọng nhất, và đã chứng minh
+
+`pick_slide_indices` **không lấy 4 ảnh đầu**. Nó rải đều và **luôn giữ ảnh đầu + ảnh cuối**.
+Nghiệm thu headless trên `@tuyt.hoa7225/photo/7668985481056587029` (8 ảnh) qua
+`carousel_comment --link`, tức đúng hàm mà campaign gọi:
+
+```
+số ảnh   8
+lấy ảnh  [1, 4, 6, 8] trong 8 ảnh
+[vision] Săn mây Cầu Đất, nghe là muốn đi!
+         evidence_support=98 relevance=98
+```
+
+Rồi mở từng ảnh ra xem: ảnh 1 là **bìa** (`ĐÀ LẠT TRONG TẦM TAY`), ảnh 4 là *địa điểm
+check-in*, ảnh 6 là *dịch vụ*, và **`Camping và săn mây Cầu Đất` nằm ở ảnh 8** — ảnh cuối.
+Cách cũ (4 ảnh đầu, và trần 4) **không bao giờ tới được câu đó**.
+
+### Ba chốt trong code, đừng gỡ
+
+1. **Verifier phải thấy đúng caption mà drafter thấy.** `grounded_verify` chấm
+   `unsupportedClaim` bằng cách đọc lại ảnh; câu viết từ caption mà cổng không được đưa thì
+   đúng là hình dạng câu tốt bị cổng giết — và mỗi lần bị giết là một cặp draft+verify đầy đủ
+   (9.111). Có test bắn vào **thân request thật**, không phải vào giá trị trả về, vì nếu sai
+   thì cả hai lượt gọi vẫn thành công, chỉ có điểm số trôi.
+
+   *Lỗi đã mắc trong chính đợt này:* `retry_note` và `known_caption` đều là `Option<&str>`, nên
+   chèn tham số mới sai chỗ **vẫn biên dịch được** và caption lặng lẽ đi vào ô retry note. Test
+   trên là thứ duy nhất bắt được.
+
+2. **Không có caption thì prompt phải giống hệt trước, từng byte.** Khối caption được *chèn
+   lên đầu* và rỗng khi không có gì. Provider này cache theo prompt nguyên vẹn chứ không theo
+   tiền tố (9.110), nên một lời mở đầu vô điều kiện sẽ làm trượt cache mọi bình luận của
+   đường nuôi — đường đó gặp bài bằng cách lướt, không có link để tra.
+
+3. **Một link một lượt tra, dù 20 máy cùng bình luận.** Fan-out `Standalone` cho mỗi assignment
+   một task (9.108), nên không có memo thì 20 request giống hệt nhau bắn ra trong vài giây từ
+   một địa chỉ — đúng cái hành vi dễ ăn khoá IP nhất, mà khoá IP đã tốn của fleet này 2/7
+   target. `LOOKUP_MEMO` giữ khoá qua cả lượt tra: người thứ hai chờ kết quả của người thứ
+   nhất. TTL 5 phút vì URL ảnh ký `x-expires` chỉ sống vài giờ.
+
+### Tấm ghép giờ tự khai đọc thiếu
+
+`ContactSheet::with_reported_total` làm tấm 4 ảnh của bài 8 ảnh nói `4 ảnh LẤY RẢI ĐỀU trong
+tổng số 8 ảnh`, thay vì `4 ẢNH KHÁC NHAU của cùng một bài` — câu sau đúng về *tấm ghép* và bị
+model đọc thành *cả bài*. Cùng loại thành thật mà `distinct_frames` sinh ra để giữ, chỉ ở một
+tầng cao hơn. Tổng số **không lớn hơn** số ảnh trên tấm thì bị bỏ, vì `4 trong tổng số 4` là
+tiếng ồn còn `4 trong tổng số 3` là mâu thuẫn model phải tự gỡ.
+
+### Còn hở, đã biết, chưa làm
+
+- ~~**Video vẫn lấy khung như cũ**~~ — **đã sửa**, xem mục "video giờ được *xem*" ở dưới.
+- ~~**Không có UI**~~ — **đã làm**, xem mục "cột `context_json` giờ có người đọc" ở dưới.
+- **Đường phụ đề**: ~~chưa dùng~~ — **đã làm**, xem mục tiếp ngay dưới.
+
+### §9.115 tiếp — lời thoại: có rồi, và cái prompt cũ đã ăn mất nó hai lần (26/08/2026)
+
+Mục trên viết "đường phụ đề cố ý chưa làm" vì 0/7 target thật có phụ đề. **Đã làm**, sau khi thử
+đúng một link có: `@tungtangkhapnoi.riviu/video/7668616467855723783`, 52 giây, có thuyết minh.
+
+Lượt tra đầu tiên đã nói đủ để biết nên làm:
+
+```
+caption  105 ký tự | thời lượng 52s | số ảnh 0
+phụ đề   ["eng-US", "vie-VN"]  (có tiếng gốc: Some(true))
+```
+
+**Đọc thẳng từ CDN, không qua yt-dlp lần hai.** URL của track nằm ngay trong trang mà lượt tra
+đầu đã tải; nó trả lời một request thường có user-agent trình duyệt + referer tiktok.com — đo
+được 1749 byte WebVTT. Quay lại qua extractor là thêm một JS challenge và thêm một lần đối mặt
+với cái lỗi tạm thời ~1/5, để lấy đúng những byte đó.
+
+**Chọn track theo `Source`, KHÔNG theo mã ngôn ngữ.** Trang liệt kê `eng-US` (`Source: MT`)
+**trước** `vie-VN` (`Source: ASR`). Lấy phần tử đầu là lấy bản dịch máy của lời nói thay vì lời
+nói — xa âm thanh thêm một tầng, và có quyền làm rơi một tên riêng trên đường đi.
+
+**`hasOriginalAudio` là cổng miễn phí.** `false` = nhạc nền, không có gì để ghi lại. Đọc từ
+trang đã tải rồi, nên bài ảnh và video nhạc nền **không tốn request nào**.
+
+### Và đây là phần đắt nhất của mục này: đưa transcript vào prompt là chưa đủ
+
+Ba lượt chạy trên cùng một link, cùng một direction, transcript **222 từ nằm nguyên trong
+prompt cả ba lần**:
+
+| | câu AI viết | điểm |
+|---|---|---|
+| chỉ đưa transcript vào prompt | **"Áo hồng nhìn xinh quá!"** | ev=100 rel=98 |
+| + nói rõ "là bằng chứng hợp lệ, là nội dung chính" | **"Áo hồng nhìn xinh quá"** | ev=95 rel=82 |
+| + đổi luôn câu ưu tiên trong thân prompt | **"Pink Valley có thuyền đụng vui quá!"** | ev=100 rel=100 |
+
+Hai lượt đầu bình luận **cái áo trong ảnh bìa**. Nguyên nhân nằm ở một câu có sẵn trong thân
+prompt từ lâu:
+
+> Nội dung **nhìn thấy** và caption là ưu tiên cao nhất.
+
+Khối transcript được **chèn lên đầu**, nên nó không đè được thân prompt. Bài học: *một khối
+thêm vào đầu prompt không thắng được một câu chỉ thị trong thân*. Sửa bằng
+`evidence_priority(brief)` — chính **câu đó** đổi khi có transcript, và **giống hệt từng byte**
+khi không có (cache theo prompt nguyên vẹn, mọi bình luận của đường nuôi phải băm ra như cũ).
+
+Sau khi sửa, ba lượt liên tiếp đều viết về nội dung được **nói**: `Pink Valley có thuyền đụng
+vui quá!` / `Pink Valley chắc vui lắm!` / `Pink Valley nghe vui quá, muốn thử thuyền đụng ghê!`
+ở `ev=95..100 rel=95..100`. `Pink Valley` và `thuyền đụng` **không có ở đâu trong ảnh bìa** —
+chúng chỉ có trong lời thoại. Giá: **$0,0013–0,0019/câu**, rẻ hơn đường bài ảnh ($0,0034–0,0067)
+vì tấm ghép chỉ có một khung.
+
+**Chốt thứ hai, cũng phải nói ra:** cổng chấm `evidenceSupport` bằng câu hỏi "chi tiết cụ thể
+có **nhìn thấy** không". Một địa điểm được *nói* mà không được *chiếu* sẽ trượt câu hỏi đó, nên
+khối transcript phải nói thẳng rằng lời thoại là bằng chứng ngang với ảnh. Đưa transcript cho
+drafter mà không nới câu hỏi của cổng thì chỉ dời đúng cái lỗi ở 9.111 xuống một bước.
+
+Có test bắn vào **thân request thật** cho cả hai: caption và transcript phải xuất hiện trong
+**cả** lượt nháp và lượt kiểm chứng, cộng câu "bằng chứng HỢP LỆ ngang với những gì nhìn thấy".
+Và một test ghim **nguyên văn** câu ưu tiên khi không có transcript.
+
+### Ảnh cho video: `--link` chỉ dùng ảnh bìa, và đó là cố ý
+
+`carousel_comment --link` trên một video dùng **ảnh bìa** làm khung duy nhất, gắn nhãn `Moments`,
+khai `seen_secs: 0`, và in ra một dòng nói rõ đó là ảnh bìa chứ không phải đường production. Nó
+đủ để nghiệm thu đường transcript mà không cần máy nào; đường khung thật thì phải có máy, và nó
+ở mục dưới.
+
+ffmpeg **không còn cần** cho fleet này — video được *xem* trên máy, rải theo `duration` mà web
+trả về. Xem mục ngay dưới.
+
+### §9.115 tiếp — video giờ được *xem*, và tấm ghép nói ra nó xem được mấy giây (26/08/2026)
+
+Hai mục trên vẫn để hở một chỗ: **khung hình cho video**. Đường cũ lấy 3 mẫu cách nhau 500 ms,
+tức thấy ~1 giây đầu của một bài có thể dài 52 giây — và vì `make_contact_sheet` gộp khung
+trùng, một video còn đứng ở ảnh bìa ra **một** khung, rồi tấm ghép tự khai
+"ĐÚNG MỘT khung… KHÔNG có chuyển động để mô tả". Mọi bình luận cho bài đó viết từ tấm bìa.
+
+### Đã loại đường không cần ffmpeg trước khi chọn đường phải chờ
+
+`dynamicCover` trong trang bài **không** phải chuỗi khung: URL của nó kết thúc bằng
+`~tplv-tiktokx-origin.image` và trả về **một JPEG tĩnh 1186x1701**. Nên không có cách nào lấy
+khung rải theo thời gian mà không giải mã video — tức là phải có ffmpeg, hoặc phải **xem** video
+trên máy.
+
+Chọn xem trên máy, và với fleet này đó là lựa chọn đúng chứ không phải lựa chọn rẻ: video thật
+duy nhất trong `riviu.db` dài **12 giây**. Một cửa sổ 10 giây phủ gần hết nó. Đổi lại là ~10
+giây giữ máy, **trả một lần cho mỗi link** (pre-pass chụp cho cả fan-out), không phải mỗi máy.
+
+### `photograph_video_post`: không cử chỉ nào, và hai cửa chặn
+
+Không tap, không vuốt — video tự chạy. Nên **mọi hiểm hoạ của vòng vuốt carousel không tồn tại
+ở đây** (một cú vuốt quá ảnh cuối là rơi sang trang hồ sơ tác giả, nơi có nút Follow). Thứ duy
+nhất có thể sai là **giữ ảnh của bài khác**.
+
+1. `Comments` rail còn trên màn hình — chứng minh *một* trang bài đang mở.
+2. **Caption còn khớp mốc đọc lúc mới tới** — chứng minh đó vẫn là **bài này**. Cửa 1 một mình
+   **không đủ**: TikTok tự nhảy sang video kế khi video hiện tại hết, và màn hình đó cũng có
+   comment rail.
+
+Caption không đọc được thì **không có mốc**, và vòng xem lùi về chỉ dùng cửa 1 — đúng mức chứng
+minh mà đường cũ có, chứ không phải từ chối chụp gì cả. Một build đổi tên node caption mà làm
+campaign không bình luận được gì nữa thì tệ hơn.
+
+Còn hai chốt nữa:
+
+- **Băm bằng `picture_digest_of`, không băm byte.** Luồng JPEG mã hoá lại một màn hình không đổi
+  thành byte khác mỗi lần, và icon động trên status bar bị loại khỏi phép băm này. Băm byte là
+  lý do bản gộp carousel đầu tiên **chưa bao giờ chạy** trên máy thật (9.104).
+- **Hai khung giống nhau liên tiếp là dừng.** Video đang dừng, thẻ tĩnh, hoặc stream kẹt — cả ba
+  đều không có gì thêm để xem. `ce051715cb22c30403` từng hỏng bốn assignment liền vì stream kẹt,
+  và từ đây nó không phân biệt được với một video đang dừng; cả hai nên kết thúc như nhau.
+
+Khoảng cách giữa các mẫu suy từ `duration` mà web trả về: **4 khung cần 3 khoảng**, nên chia
+`reach` cho 4 là vượt ngân sách ở mọi video. Có test ghim đúng phép tính đó, cộng cả sàn (clip 2
+giây không được lấy mẫu nhanh hơn tốc độ stream đẩy khung khác nhau) và trần.
+
+### Tấm ghép cho video cũng phải tự khai — và đó là một enum, không phải hai số
+
+`slide_total: Option<usize>` đổi thành `coverage: Option<PostCoverage>` với hai nhánh
+`Slides { total }` và `Video { seen_secs, total_secs }`. **Một bài là một hình, không phải cả
+hai** — brief mang số ảnh cho một video là một trạng thái dựng được mà vô nghĩa.
+
+| tấm ghép | nói gì |
+|---|---|
+| 3 khung, `Video { seen: 9, total: 52 }` | `3 khung KHÁC NHAU trải trong khoảng 9 giây ĐẦU của một video dài 52 giây — phần còn lại CHƯA đọc được` |
+| 3 khung, `Video { seen: 12, total: 12 }` | không cảnh báo gì (xem hết rồi) |
+| 1 khung, `Video { total: 52 }` | `ĐÚNG MỘT khung của một VIDEO dài 52 giây… Gần như toàn bộ video CHƯA đọc được` |
+| không có coverage | **y nguyên câu cũ, từng byte** |
+
+Dòng cuối là dòng load-bearing: đường nuôi gửi brief rỗng ở **mọi** bình luận nó từng gửi, và
+provider cache theo prompt nguyên vẹn. Có test ghim **nguyên văn** cả hai câu Moments cũ.
+
+Dòng thứ ba cũng đáng nói: câu một-khung cũ quy cho "bài ảnh tĩnh hoặc video đang dừng" và bảo
+model là không có chuyển động để mô tả. Đúng cho bài ảnh, và là lời nói giảm nghiêm trọng cho
+một video 52 giây mà không ai xem được — đúng hình dạng mà stream kẹt tạo ra bốn lần liền.
+
+### Cổng
+
+`riviu-core` **765 test** xanh (thêm 11 cho vòng xem video và câu coverage), clippy sạch; desktop
+clippy sạch + build. Sáu test cho `photograph_video_post` chạy dưới `start_paused = true` nên 10
+giây ngân sách là 10 giây ảo, và `swipe`/`back` trong fake session là `unreachable!()` — nếu ai
+thêm cử chỉ vào đường này thì test nổ chứ không âm thầm follow một tài khoản khách.
+
+### Nghiệm thu: `video_gate`, và cái chưa chạy được
+
+`crates/android-driver/examples/video_gate.rs` là cổng cho vòng xem video, dựng theo đúng khuôn
+`carousel_gate` (dừng app → mở lại → chờ splash → `open_target_by_hierarchy` → gọi thẳng
+`photograph_video_post`). **Chỉ đọc tuyệt đối**: đường này không tap, không vuốt, nên trong fake
+session của unit test `swipe` và `back` là `unreachable!()`.
+
+```text
+cargo run -p riviu-android-driver --example video_gate -- <serial> <url> [out-dir] [--secs N]
+```
+
+Nó in ra ba thứ mà số khung một mình không nói được: caption có đọc được trên **trang video**
+không (cửa chặn thứ hai dựa vào đó), `span` khai báo được bao nhiêu giây, và **lúc kết thúc còn
+đúng bài hay không** — vì "chốt caption đã chặn" và "hết mẫu" đều ra ít hơn bốn ảnh.
+
+**ĐÃ chạy máy thật** — xem mục cuối. Câu "máy không có TikTok" ở bản đầu của mục này là **sai**,
+và cái sai đó là một trong hai lỗi mà lượt chạy lôi ra.
+
+Trong lúc đó, hai thứ **đã** đo được qua chính example đó:
+
+1. **Thứ tự track phụ đề KHÔNG ổn định.** Sáu lượt trả `["eng-US","vie-VN"]`, một lượt trả
+   `["vie-VN","eng-US"]` — cùng một bài, cùng một hàm. Nên "chọn theo `Source` chứ không theo vị
+   trí" là **yêu cầu đúng đắn**, không phải sự tinh tế: lấy phần tử đầu là thỉnh thoảng lấy bản
+   dịch máy thay vì lời nói gốc, và lỗi đó không lặp lại được theo ý muốn.
+2. **`classify_lookup_error` xếp đúng lỗi mạng.** Giữa đợt, hai lượt `carousel_comment --link`
+   liên tiếp đổ với `HTTP Error 504` rồi `curl: (28) Operation too slow`. Đo ngay: `github 200`,
+   `openrouter 200`, **`tiktok 000` sau 30 giây** — mạng tới TikTok, không phải code. Cả hai vào
+   nhóm **tạm thời** (khác `ip_blocked`, thứ không được retry), và lượt chạy lại sau khi TikTok
+   trả `200` thì xanh ngay.
+
+### §9.115 tiếp — `video_gate` đã chạy máy thật, và nó lôi ra hai lỗi (26/08/2026)
+
+Mục trên viết "chưa chạy được máy thật, máy đang cắm không có TikTok". **Sai, và cái sai đó
+chính là lỗi thứ nhất.**
+
+### Lỗi 1: driver không tìm được adb, nhưng báo là "không có TikTok"
+
+Máy `10969614` (Redmi `23021RAAEG`) **có** `com.ss.android.ugc.trill`. `pm list packages` qua
+adb bundled trả về đúng dòng đó. Nhưng gate đổ với:
+
+```
+no TikTok build with measured labels is installed; expected one of: com.zhiliaoapp.musically, com.ss.android.ugc.trill
+```
+
+Nguyên nhân: host này **không có adb trên `PATH`**, không `ANDROID_HOME`, không
+`ANDROID_SDK_ROOT` — và `AndroidDriverConfig::default()` để `bundled_adb_path` là `None`. Nên
+driver không có adb nào để chạy, `list_devices()` trả **`0 device(s)`**, mọi
+`pm list packages` **thất bại im lặng** (`if let Ok(stdout)`), và `resolve_installed_android_tiktok`
+thấy chuỗi rỗng → `NoneInstalled` → câu báo lỗi nói về TikTok.
+
+**Cách phân biệt nhanh cho lần sau:** `cargo run -p riviu-android-driver --example fleet_list`.
+Ra `0 device(s)` trong khi `adb devices` thấy máy ⇒ là adb, không phải TikTok.
+
+Đã sửa trong `video_gate`: nếu cả `adb_path` và `bundled_adb_path` đều rỗng thì trỏ
+`bundled_adb_path` vào `sidecars/android/win-x86_64/adb.exe` của repo. **`bundled_adb_path` chứ
+không phải `adb_path`** — trường đó là mức ưu tiên thấp nhất theo thiết kế, nên
+`RIVIU_ADB_PATH` của người vận hành vẫn thắng. Và gate giờ **hỏi `list_devices()` trước** rồi
+mới hỏi package, nên "không thấy máy" và "không có TikTok" không còn là cùng một sự im lặng.
+
+**Các example khác vẫn còn bẫy này** (`carousel_gate`, `mention_gate`, `threaded_gate`,
+`probe`, `threshold_gate`, `target_check`): chúng dùng `AndroidDriverConfig::default()`. Trên
+host không có adb trên `PATH` thì phải đặt `RIVIU_ADB_PATH`. Chưa sửa hàng loạt.
+
+### Lỗi 2: `span_secs` suy từ lịch lấy mẫu, và lịch không phải sự thật
+
+Lượt chạy thật đầu tiên báo **`span 9 giây`**, nhưng bốn khung lưu ra là:
+
+| khung | thấy gì | ~giây trong video |
+|---|---|---|
+| 1 | pin `Phở Hương`, phụ đề cháy `để bắt đầu hà_` | ~6 |
+| 4 | pin `1/2 Circle Coffee`, phụ đề `Buổi chiều mình ghé 1/2 Circle Coffee` | ~28,5 |
+
+Tức trải **~22 giây**, không phải 9. Bản đầu tính `gap * (kept - 1)` — và **việc chụp không
+miễn phí**: một `screencap` màn 1080x2400 là PNG **2,4–3,7 MB** qua USB, mất vài giây, và video
+vẫn chạy suốt từng cú chụp đó. Giờ `span_secs` đo bằng đồng hồ, đóng dấu lúc **giữ** khung — nên
+nó vẫn đúng khi vòng xem dừng sớm, và đúng cả khi camera chậm.
+
+Hai lượt trên **cùng một bài, cùng một máy**, nên đây là phép so sánh có kiểm soát chứ không
+phải hai quan sát rời:
+
+| | thời gian xem thật | `span` khai báo |
+|---|---|---|
+| suy từ lịch lấy mẫu | 27,9 s | **9 giây** |
+| đo bằng đồng hồ | 27,4 s | **21 giây** |
+
+Con số cũ sai theo hướng **nói giảm** — nó khai ít bằng chứng hơn thực có, tức hướng an toàn
+nhưng vẫn sai, và nó là con số được đưa thẳng vào prompt.
+
+Production dùng luồng scrcpy (khung đã nằm trong bộ nhớ) nên hai con số gần trùng ở đó. Nhưng
+một con số chỉ đúng ở đường nhanh thì không phải con số để đưa cho model.
+
+### Lượt chạy đạt, sau khi sửa cả hai
+
+```
+web      caption 105 ký tự | thời lượng Some(52)s | phụ đề ["eng-US", "vie-VN"]
+package  com.ss.android.ugc.trill    version "46.4.3"    language "vi-VN"
+arrival  Structural
+caption  đọc được, 76 ký tự: "Cùng tớ khám phá lịch trình 1 ngày trải nghiệm Đ"
+xem 4 khung trong 27.4s thật, span khai báo 21 giây
+còn đúng bài lúc kết thúc: CÓ
+ảnh khác nhau: 4 trên 4 khung
+```
+
+Bốn điều được chứng minh trên phần cứng, không phải trên fixture:
+
+1. **Luồng thật cho ra bốn ảnh khác nhau** ở khoảng cách 3 giây trên fleet này — không repeat,
+   nên chốt "hai khung giống nhau là dừng" không bắn oan.
+2. **Caption đọc được trên trang video**, và đọc lại được nhiều lần — cửa chặn thứ hai có thật.
+3. **Vòng xem kết thúc trên đúng bài nó bắt đầu.**
+4. **Caption trên máy vẫn ngắn hơn caption web ở video**: 76 so với 105 ký tự. Mục đầu đo cắt ở
+   ~116 trên bài ảnh; ở đây mất 29 ký tự dù chưa tới 116 — nên **đừng đọc ~116 như một ngưỡng**,
+   nó là một quan sát chứ không phải một luật.
+
+Một chi tiết nữa đáng ghi: `still on the splash after 45s - going ahead anyway`, mà arrival vẫn
+`Structural` và vòng xem vẫn đúng bài. Máy này khởi động TikTok chậm hơn cả trần 45 giây của
+gate; đừng đọc dòng đó là thất bại.
+
+### §9.115 tiếp — cột `context_json` giờ có người đọc (26/08/2026)
+
+Ba mục trên đều để hở cùng một chỗ: những gì lượt tra học được ghi vào
+`interaction_targets.context_json` và **không có màn hình nào đọc**. Đó đúng là cái bẫy 9.103 §4
+— `nurture_list_comment_attempts` đã đăng ký, đã allowlist, và `api.ts` **chưa bao giờ gọi**,
+nên suốt nhiều tháng cách duy nhất để soi một bình luận là bản dump của binary. Cột này đang đi
+đúng con đường đó.
+
+Giờ có bảng **Tra từ web** ngay trên các thread trong màn chi tiết chiến dịch — trên chúng có
+chủ ý: nó là thứ những câu bình luận bên dưới được viết ra từ, nên đọc nó trước là đọc bằng
+chứng trước khi đọc phán quyết.
+
+### Ba trạng thái, và không cái nào là "rỗng"
+
+Đây là toàn bộ lý do bảng này tồn tại. Ba thứ dưới đây nhìn giống nhau nếu chỉ để cột trống:
+
+| trạng thái | bảng nói | trên fleet này |
+|---|---|---|
+| tra được | `105 ký tự` + preview, số ảnh, thời lượng, track lời thoại | 5/7 target |
+| **bị từ chối** | `TikTok chặn IP máy này với bài đó — máy trong fleet vẫn xem được` | **2/7 target** |
+| chưa tra | `chưa tra` | chiến dịch chạy trước khi có tính năng này |
+
+Cộng hai chỗ nữa cố ý không in số:
+
+- **Video ghi `—` chứ không ghi `0 ảnh`.** `slideCount` là `0` cho mọi video, và một bảng đầy số
+  không có nghĩa là một bảng không ai đọc.
+- **`nhạc nền` chứ không phải dấu gạch** khi `hasOriginalAudio == false`. Đó là *lý do đã đo* vì
+  sao không tốn request nào cho phụ đề, không phải một cái nhún vai.
+
+Số ở tiêu đề (`2/3 bài tra được`) tính bài **bị từ chối là đã tra được** — nó trả về một lý do,
+và lý do là một phát hiện. Chỉ dòng trống mới là bài không biết gì.
+
+### Cột có hai nửa, và giờ chúng ở cạnh nhau
+
+`InteractionTargetNote::context_json` (ghi) và `::from_row` (đọc) nằm sát nhau trong
+`interaction.rs`, và `interaction_campaign::file_target_context` gọi cái thứ nhất thay vì giữ
+bản sao riêng của hình dạng JSON. **Không có gì kiểm một khoá JSON với đoạn code đọc nó** — đổi
+tên khoá thì biên dịch được, campaign vẫn ghi note, và panel âm thầm hiện dòng trống cho mọi
+target. Test round-trip đi qua cả hai nửa là thứ duy nhất chặn được chuyện đó.
+
+### Và một cổng mà repo này chưa có
+
+Test wire-parity (`types.rs` ↔ `types.ts`) **chỉ quét `types.rs`**. Mọi type Interaction sống ở
+`interaction.rs`, nên chúng **không có cổng nào cả** — thêm một field ở một bên là bên kia render
+ra `undefined` mà không ai biết. `target_note_tests::the_frontend_mirrors_this_note_field_for_field`
+ghim đúng type này theo hai chiều: danh sách tên camelCase phải khớp interface TypeScript, **và**
+phải khớp đúng những gì `serde` thực sự gửi (kiểm bằng `serde_json::to_value`), nên danh sách
+không thể tự trôi. Các type Interaction khác vẫn chưa có cổng — chưa làm.
+
+### Một cái bẫy của test frontend, ghi lại vì nó im lặng
+
+Thêm lời gọi `interactionListTargetNotes` vào `loadDetail` làm **6 test trong
+`InteractionMonitorTab.test.tsx` đỏ cùng lúc**, và không phải vì logic: file đó mock cả module
+`../../api` bằng một object literal, nên một export **không có trong mock trả về `undefined`**,
+`.catch` trên `undefined` **ném đồng bộ** ngay trong `loadDetail`, và cả màn chi tiết đứng ở
+`Đang mở chiến dịch…`. Thêm một lời gọi api vào component ⇒ phải thêm nó vào mock đó.
+
+Cái thứ hai: **project này không tự cleanup giữa các test**. Một render bị rò làm
+`queryByText` lần sau ném "multiple elements found" — tức là đúng ngược lại với sự *vắng mặt* mà
+nó đang khẳng định. `afterEach(cleanup)` là bắt buộc, không phải trang trí.
+
+### Cổng
+
+`riviu-core` **772 test** (thêm 7), `riviu-managers-phone` **179 test**, clippy 0 trên cả ba
+crate. Frontend: `tsc -b` sạch, `oxlint --deny-warnings` sạch, **689 test / 80 file** xanh.
+
+`tsc` bắt một lỗi mà vitest không thấy: fixture của test mới đặt `createdAt` và `revision` vào
+`InteractionCampaignSummary`, vốn không có hai field đó. Vitest bỏ type nên xanh; `tsc -b` mới
+đỏ. Đừng coi vitest xanh là frontend đã kiểm.
+
+**Chưa kiểm:** *hình dạng* CSS của bảng (7 test kiểm chữ và cấu trúc DOM, không kiểm pixel). Cố
+ý không mở app lái chuột để xem: màn Tương tác có nút **Chạy ngay** ngay đó, và chuyện đó đã một
+lần đăng bình luận thật lên bài của khách. Ai mở app xem thì đọc lại ghi chú đó trước.
+
+### §9.115 tiếp — tính năng này đã "xong" mà **không chạy** trên bản cài (26/08/2026)
+
+Tất cả các mục trên đều đạt: 772 test, clippy sạch, nghiệm thu máy thật, có UI đọc. Và tính năng
+**không hoạt động trên máy của người vận hành**. Không có test nào thấy, không có lượt dev nào
+thấy.
+
+### Ba thứ thiếu, và mỗi thứ một mình là vô nghĩa
+
+`tiktok_web::resolve_ytdlp` chỉ tìm được hai loại đường: cạnh executable đang chạy, và
+`CARGO_MANIFEST_DIR` — **đường lúc biên dịch**, tức trên máy khách nó trỏ vào checkout của
+build agent. Nên:
+
+| | thiếu gì | hệ quả |
+|---|---|---|
+| 1 | CI **không tải** yt-dlp | không có gì để đóng gói |
+| 2 | `tauri.conf.json` **không bundle** `sidecars/yt-dlp/` | không có gì để tìm |
+| 3 | bootstrap **không chỉ đường** | không ai tìm đúng chỗ |
+
+Kết quả: mọi lượt tra trả `NoBinary`, campaign lặng lẽ viết bình luận từ những gì máy thấy được
+— **đúng đường degrade tôi thiết kế**, nên không có lỗi nào, không có banner nào, không có gì
+trong app nói rằng nửa tính năng đang không chạy. Và trên máy dev nó chạy hoàn hảo vì
+`sidecars/yt-dlp/` của repo nằm ngay đó.
+
+**Đây là mặt tối của "hỏng thì im lặng lùi về đường cũ".** Cùng một thiết kế vừa là thứ giữ cho
+một target bị khoá IP không giết campaign, vừa là thứ khiến một bản cài thiếu binary trông y như
+một bản cài đủ.
+
+### Đã sửa cả ba, và có cổng ghép chúng lại
+
+- **CI**: bước `Fetch yt-dlp sidecar` tải bản `latest` (Windows `yt-dlp.exe`, macOS
+  `yt-dlp_macos` → `yt-dlp`), `chmod +x`, rồi chạy `--version`. **Cố ý không ghim hash** — mọi
+  thứ khác trong bundle đều byte-pinned, cái này là ngoại lệ có ghi chép: TikTok làm gãy
+  extractor theo lịch của họ và bản ghim là một thất bại được ghim. Bước này **làm đổ build** khi
+  tải không được, vì app degrade âm thầm nên thiếu binary phải ồn ở đây.
+- **Bundle**: `"../../../sidecars/yt-dlp/": "sidecars/yt-dlp/"`. Là một **thư mục**, và thư mục
+  đó có `README.md` được commit — nên mapping vẫn giải được trên clone sạch và build không đổ ở
+  bundler khi chưa có binary.
+- **Bootstrap**: `state.rs` gọi `tiktok_web::set_bundled_ytdlp(sidecar_root.join("yt-dlp")/…)`.
+  Đường đi qua `resolve_sidecar_root`, thứ đã xử lý cả layout đóng gói lẫn layout dev. Ưu tiên
+  **dưới** `RIVIU_YTDLP_PATH`, theo đúng lý lẽ của `bundled_adb_path`: một đường mà người vận
+  hành không đè được thì không phải lưới an toàn.
+
+Cổng là `state::tests::the_ytdlp_sidecar_is_fetched_bundled_and_pointed_at` — nó khẳng định cả ba
+cùng lúc, bằng text, vì đó là thứ duy nhất ba file đó có chung. Một cái đúng mà hai cái kia sai
+thì vẫn là tính năng không chạy.
+
+### Bài học đáng mang sang chỗ khác
+
+**"Test xanh + nghiệm thu máy thật + có UI" vẫn không trả lời được câu "bản cài có chạy không".**
+Cả ba đều chạy trên cây source. Câu hỏi cần hỏi riêng là: *thứ này tìm file của nó bằng đường
+nào, và đường đó còn tồn tại sau khi đóng gói không?* Mọi sidecar khác của repo này trả lời câu
+đó bằng một field `bundled_*` mà host truyền vào — tôi đi chệch khỏi khuôn đó và trả giá đúng
+bằng cách mà khuôn đó được dựng để tránh.

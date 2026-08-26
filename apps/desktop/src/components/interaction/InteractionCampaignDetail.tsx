@@ -8,7 +8,11 @@ import {
 } from "../../interactionErrors";
 import { timeAgoVi } from "../../timeAgo";
 import type { InteractionArtifactRecord } from "../../api";
-import type { DeviceInfo, InteractionCampaignDetail } from "../../types";
+import type {
+  DeviceInfo,
+  InteractionCampaignDetail,
+  InteractionTargetNote,
+} from "../../types";
 
 /** One recorded reason, in Vietnamese, with the code kept for whoever needs it. */
 function Reason({ code }: { code: string }) {
@@ -29,9 +33,111 @@ function Reason({ code }: { code: string }) {
   );
 }
 
+/** Why a lookup produced nothing, in the operator's language. */
+function lookupReasonVi(code: string): string {
+  switch (code) {
+    case "ip_blocked":
+      return "TikTok chặn IP máy này với bài đó — máy trong fleet vẫn xem được";
+    case "post_unavailable":
+      return "bài không truy cập được (đã xoá, riêng tư, hoặc không phải bài)";
+    case "no_ytdlp":
+      return "máy này chưa có yt-dlp — xem sidecars/yt-dlp/README.md";
+    case "transient":
+      return "lỗi tạm thời, đã thử lại 3 lượt";
+    default:
+      return code;
+  }
+}
+
+/**
+ * What the desktop learned about each target before any phone was touched.
+ *
+ * **This panel is the point of the column.** AGENTS.md 9.103 §4: the comment audit sat in the
+ * database for months because nothing rendered it, so the numbers that made a run legible were
+ * unreadable in the app that produced them. `interaction_targets.context_json` would have gone
+ * the same way.
+ *
+ * The three states it has to keep apart, and none of them is "empty":
+ *
+ * - **enriched** — a caption length, a slide count, maybe a transcript track;
+ * - **refused** — `errorCode`, which on this farm is two targets in seven (`ip_blocked`);
+ * - **not looked up** — a campaign that ran before this existed, or one that is all manual.
+ */
+function TargetNotesPanel({ notes }: { notes: InteractionTargetNote[] }) {
+  if (notes.length === 0) return null;
+  const looked = notes.filter((note) => !isBlankNote(note)).length;
+  return (
+    <section className="interaction-notes">
+      <h4>
+        Tra từ web <small>{looked}/{notes.length} bài tra được</small>
+      </h4>
+      <table className="interaction-notes-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Loại</th>
+            <th>Caption</th>
+            <th>Ảnh</th>
+            <th>Dài</th>
+            <th>Lời thoại</th>
+          </tr>
+        </thead>
+        <tbody>
+          {notes.map((note) => (
+            <tr key={note.targetKey} className={note.errorCode ? "is-refused" : undefined}>
+              <td>{note.lineNo}</td>
+              <td>{note.kind === "photo" ? "ảnh" : "video"}</td>
+              <td>
+                {note.errorCode ? (
+                  <span className="interaction-note-refused">
+                    {lookupReasonVi(note.errorCode)}
+                  </span>
+                ) : note.captionChars === null ? (
+                  <span className="interaction-note-blank">chưa tra</span>
+                ) : (
+                  <>
+                    <strong>{note.captionChars} ký tự</strong>
+                    {note.captionPreview && <small>{note.captionPreview}…</small>}
+                  </>
+                )}
+              </td>
+              {/* A dash, not a zero. `slideCount` is null for every video, and "0 ảnh" beside
+                  each of them is a number that means nothing. */}
+              <td>{note.slideCount === null ? "—" : `${note.slideCount} ảnh`}</td>
+              <td>{note.durationSecs === null ? "—" : `${note.durationSecs}s`}</td>
+              <td>
+                {note.transcriptTrack ? (
+                  <strong>{note.transcriptTrack}</strong>
+                ) : note.hasOriginalAudio === false ? (
+                  /* The measured reason, not a shrug: the post carries music, so there is no
+                     speech to transcribe and no request was spent asking. */
+                  <span className="interaction-note-blank">nhạc nền</span>
+                ) : (
+                  "—"
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
+  );
+}
+
+/** Mirrors `InteractionTargetNote::is_blank` — the three states above turn on it. */
+function isBlankNote(note: InteractionTargetNote): boolean {
+  return (
+    note.captionChars === null &&
+    note.slideCount === null &&
+    note.errorCode === null &&
+    note.subtitleLangs.length === 0
+  );
+}
+
 export function InteractionCampaignDetailView({
   detail,
   artifacts,
+  notes,
   devices,
   deviceNumber,
   handles,
@@ -46,6 +152,7 @@ export function InteractionCampaignDetailView({
 }: {
   detail: InteractionCampaignDetail;
   artifacts: InteractionArtifactRecord[];
+  notes: InteractionTargetNote[];
   devices: DeviceInfo[];
   deviceNumber: Map<string, number>;
   handles: Record<string, string>;
@@ -125,6 +232,10 @@ export function InteractionCampaignDetailView({
         label={`Tiến trình chiến dịch ${summary.id}`}
       />
       {summary.errorCode && <Reason code={summary.errorCode} />}
+
+      {/* Above the threads on purpose: it is what the comments below were written from, so
+          reading it first is reading the evidence before the verdict. */}
+      <TargetNotesPanel notes={notes} />
 
       {/* Grouped by link, which is also grouped by team: `plan_threads` gives each cohort its
           own links, so one heading is one conversation on one post. A flat list of sixty rows

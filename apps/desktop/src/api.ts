@@ -44,6 +44,7 @@ import type {
   NurtureSettings,
   InteractionCampaignDetail,
   InteractionCampaignSummary,
+  InteractionTargetNote,
   ThreadCampaignRequest,
   ThreadPreview,
   InteractionPostReading,
@@ -979,6 +980,16 @@ export interface InteractionArtifactPayload {
   kind: string;
   mimeType: string;
   base64: string;
+}
+
+/**
+ * What the web lookup learned about every target of one campaign.
+ *
+ * **The call that stops this being another dead column.** AGENTS.md 9.103 §4: a command can be
+ * registered and allowlisted for weeks and still be unreadable, because nothing here invokes it.
+ */
+export async function interactionListTargetNotes(campaignId: string) {
+  return invoke<InteractionTargetNote[]>("interaction_list_target_notes", { campaignId });
 }
 
 export async function interactionListArtifacts(campaignId: string) {

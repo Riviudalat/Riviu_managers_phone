@@ -340,6 +340,7 @@ pub fn run() {
             interaction_commands::interaction_cancel,
             interaction_commands::interaction_retry,
             interaction_commands::interaction_open_on_device,
+            interaction_commands::interaction_list_target_notes,
             interaction_commands::interaction_list_artifacts,
             interaction_commands::interaction_read_artifact,
             nurture_commands::nurture_get_settings,
@@ -613,6 +614,7 @@ mod tests {
         ),
         ("interaction_list", "read: DB"),
         ("interaction_get", "read: DB"),
+        ("interaction_list_target_notes", "read: DB"),
         ("interaction_list_artifacts", "read: DB"),
         (
             "interaction_read_artifact",

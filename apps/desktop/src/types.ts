@@ -973,6 +973,38 @@ export interface InteractionCampaignDetail {
   assignments: InteractionAssignmentRecord[];
 }
 
+/**
+ * What the desktop learned about one Interaction target from outside the phones.
+ *
+ * Read by `InteractionTargetNotesTab`. It exists because of the trap in AGENTS.md 9.103 §4:
+ * `nurture_list_comment_attempts` was registered and allowlisted for weeks while nothing here
+ * ever called it, so the numbers it produced could not be checked by anyone. The web lookup
+ * files its findings against every target; without this they were the same dead end.
+ *
+ * Mirrored field for field by `interaction::target_note_tests::the_frontend_mirrors_this_note_field_for_field`
+ * — the repo's wire-parity test only scans `types.rs`, so this one is pinned by its own test.
+ */
+export interface InteractionTargetNote {
+  targetKey: string;
+  lineNo: number;
+  normalizedUrl: string;
+  kind: TikTokPostKind;
+  /** Characters of caption fetched. The measurement: the phone's tree truncates, the web does not. */
+  captionChars: number | null;
+  captionPreview: string | null;
+  durationSecs: number | null;
+  /** Slides the post has. `null` for a video, and for a lookup that produced nothing. */
+  slideCount: number | null;
+  /** `false` is why no transcript was asked for: the post carries music, not speech. */
+  hasOriginalAudio: boolean | null;
+  subtitleLangs: string[];
+  /** `vie-VN/ASR` is the original speech; `eng-US/MT` a machine translation of it. */
+  transcriptTrack: string | null;
+  /** `ip_blocked` | `post_unavailable` | `transient` | `no_ytdlp`, when the lookup was refused. */
+  errorCode: string | null;
+  errorDetail: string | null;
+}
+
 export interface ThreadPlanAssignment {
   targetKey: string;
   ordinal: number;

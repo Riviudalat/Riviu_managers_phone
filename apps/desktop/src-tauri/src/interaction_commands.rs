@@ -566,6 +566,22 @@ pub struct InteractionArtifactPayload {
 
 /// List the frames saved for a campaign so the operator can see what the phone
 /// actually showed. Rows written before evidence storage have no file.
+/// What the web lookup learned about every target of one campaign.
+///
+/// Read-only, DB-only. Registered, allowlisted **and called from `api.ts`** — the third of
+/// those is the one AGENTS.md 9.103 §4 is about, and a command that skips it is a column
+/// nobody can audit.
+#[tauri::command]
+pub fn interaction_list_target_notes(
+    state: State<'_, AppState>,
+    campaign_id: String,
+) -> Result<Vec<riviu_core::InteractionTargetNote>, CommandError> {
+    state
+        .db
+        .list_interaction_target_notes(&campaign_id)
+        .map_err(CommandError::operation)
+}
+
 #[tauri::command]
 pub fn interaction_list_artifacts(
     state: State<'_, AppState>,

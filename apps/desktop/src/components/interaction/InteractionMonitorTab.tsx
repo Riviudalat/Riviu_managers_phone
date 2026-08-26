@@ -4,6 +4,7 @@ import {
   interactionGet,
   interactionList,
   interactionListArtifacts,
+  interactionListTargetNotes,
   interactionReadArtifact,
   interactionRetry,
   listenRiviuEvents,
@@ -20,6 +21,7 @@ import type {
   DeviceInfo,
   InteractionCampaignDetail,
   InteractionCampaignSummary,
+  InteractionTargetNote,
 } from "../../types";
 
 /**
@@ -55,6 +57,7 @@ export function InteractionMonitorTab({
   const [campaigns, setCampaigns] = useState<InteractionCampaignSummary[]>([]);
   const [detail, setDetail] = useState<InteractionCampaignDetail | null>(null);
   const [artifacts, setArtifacts] = useState<InteractionArtifactRecord[]>([]);
+  const [notes, setNotes] = useState<InteractionTargetNote[]>([]);
   const [shot, setShot] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -88,6 +91,9 @@ export function InteractionMonitorTab({
       // Saved frames are what makes a campaign result checkable rather than just asserted; a
       // campaign that has none still opens.
       const frames = await interactionListArtifacts(campaignId).catch(() => []);
+      // Same treatment as the frames: a campaign whose targets were never looked up still
+      // opens, and the panel says "chưa tra" rather than showing nothing at all.
+      const targetNotes = await interactionListTargetNotes(campaignId).catch(() => []);
       // **Dropped if the operator has moved on.** Two clicks — a slow campaign then a fast one
       // — used to settle out of order and leave B open while A was on screen, and then Dừng
       // cancelled A. Cancelling the wrong live campaign is not recoverable, and the same hole
@@ -95,6 +101,7 @@ export function InteractionMonitorTab({
       if (openRef.current !== campaignId) return;
       setDetail(loaded);
       setArtifacts(frames);
+      setNotes(targetNotes);
       setError(null);
     } catch (e) {
       if (openRef.current !== campaignId) return;
@@ -199,6 +206,7 @@ export function InteractionMonitorTab({
         <InteractionCampaignDetailView
           detail={detail}
           artifacts={artifacts}
+          notes={notes}
           devices={devices}
           deviceNumber={deviceNumber}
           handles={handles}

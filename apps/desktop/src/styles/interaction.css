@@ -304,3 +304,38 @@ span.interaction-error > small { color: var(--text-2); white-space: pre-wrap; ov
 .interaction-threshold-read { display: flex; flex-direction: column; gap: 0.15rem; margin-top: 0.2rem; }
 .interaction-threshold-read small { color: var(--text-2); font-size: var(--text-xs); }
 .interaction-threshold-read small.hint { color: var(--text-3); }
+
+/* What the web lookup learned, above the threads it fed. Compact on purpose: it is a table of
+   measurements, not a report — the counts are what the operator compares against a run. */
+.interaction-notes { display: flex; flex-direction: column; gap: 0.2rem; margin-top: 0.5rem; }
+.interaction-notes h4 {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  margin: 0;
+  padding-bottom: 0.15rem;
+  font-size: var(--text-sm);
+  color: var(--text-1);
+  border-bottom: 1px solid var(--line-strong);
+}
+.interaction-notes h4 small { margin-left: auto; color: var(--text-3); font-size: var(--text-xs); }
+.interaction-notes-table { width: 100%; border-collapse: collapse; font-size: var(--text-xs); }
+.interaction-notes-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-3);
+  padding: 0.15rem 0.35rem 0.15rem 0;
+}
+.interaction-notes-table td {
+  padding: 0.2rem 0.35rem 0.2rem 0;
+  border-top: 1px solid var(--line);
+  color: var(--text-2);
+  vertical-align: top;
+}
+.interaction-notes-table td strong { color: var(--text-1); font-weight: 600; }
+/* The caption preview sits under its length, so the number stays the thing being read. */
+.interaction-notes-table td small { display: block; color: var(--text-3); }
+.interaction-notes-table tr.is-refused td { background: var(--bg-muted); }
+.interaction-note-refused { color: var(--danger-deep); }
+/* "chưa tra" and "nhạc nền" are answers, not absences — dimmed, but not hidden. */
+.interaction-note-blank { color: var(--text-3); font-style: italic; }

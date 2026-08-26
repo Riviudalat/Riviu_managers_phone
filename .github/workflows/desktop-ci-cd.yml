@@ -257,6 +257,34 @@ jobs:
           python -m pip check
           npm ci --prefix apps/desktop
 
+      - name: Fetch yt-dlp sidecar
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Downloaded at build time and deliberately NOT pinned by hash. TikTok breaks
+          # extractors on its own schedule and the only fix is a newer yt-dlp, so a pinned copy
+          # is a pinned failure -- see sidecars/yt-dlp/README.md. Everything else bundled here
+          # is byte-pinned; this one is the documented exception.
+          #
+          # Failing the build is on purpose. The app degrades quietly without yt-dlp (every
+          # lookup returns NoBinary and the campaign writes comments from what the phones can
+          # see), which is exactly why a missing binary must be loud here: it shipped inert once
+          # already, and nothing in the app said so.
+          mkdir -p sidecars/yt-dlp
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            asset=yt-dlp.exe
+            out=sidecars/yt-dlp/yt-dlp.exe
+          else
+            asset=yt-dlp_macos
+            out=sidecars/yt-dlp/yt-dlp
+          fi
+          curl -fsSL --retry 3 --retry-delay 5 \
+            -o "$out" \
+            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/$asset"
+          chmod +x "$out"
+          test -s "$out"
+          "$out" --version
+
       - name: Snapshot production WDA inputs
         shell: bash
         run: |
@@ -275,6 +303,14 @@ jobs:
           # machine and nowhere in this pipeline.
           test -f sidecars/android/win-x86_64/AdbWinApi.dll
           test -f sidecars/android/win-x86_64/AdbWinUsbApi.dll
+          # The step above fetched it. Asserted here too, beside the other bundled tools,
+          # because "the bundle built fine without it" is the failure this whole file exists to
+          # make impossible.
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            test -f sidecars/yt-dlp/yt-dlp.exe
+          else
+            test -f sidecars/yt-dlp/yt-dlp
+          fi
           python scripts/collect_desktop_ci_artifacts.py snapshot-production \
             --output target/production-wda-inputs.json \
             --require-canonical-production

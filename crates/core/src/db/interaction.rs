@@ -317,6 +317,68 @@ impl Database {
         )?;
         Ok(())
     }
+    /// Read back what the web lookup filed against each target of one campaign.
+    ///
+    /// Ordered by `line_no`, so the panel lists targets in the order the operator pasted them.
+    ///
+    /// **Every column named, and none read by position.** Inserting a column into the middle of
+    /// a `SELECT *` shifts every one after it silently, and the two `TEXT` columns here
+    /// (`normalized_url`, `context_json`) would swap without any type error to catch it.
+    pub fn list_interaction_target_notes(
+        &self,
+        campaign_id: &str,
+    ) -> anyhow::Result<Vec<crate::interaction::InteractionTargetNote>> {
+        let conn = self.conn()?;
+        let mut statement = conn.prepare(
+            "SELECT target_key,line_no,normalized_url,kind,context_json
+             FROM interaction_targets WHERE campaign_id=?1 ORDER BY line_no",
+        )?;
+        let rows = statement.query_map(params![campaign_id], |row| {
+            let target_key: String = row.get(0)?;
+            let line_no: i64 = row.get(1)?;
+            let normalized_url: String = row.get(2)?;
+            let kind: String = row.get(3)?;
+            let context_json: Option<String> = row.get(4)?;
+            Ok(crate::interaction::InteractionTargetNote::from_row(
+                target_key,
+                line_no.max(0) as u32,
+                normalized_url,
+                match kind.as_str() {
+                    "photo" => crate::interaction::TikTokPostKind::Photo,
+                    _ => crate::interaction::TikTokPostKind::Video,
+                },
+                context_json.as_deref(),
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// File what the desktop learned about one target from outside the phones.
+    ///
+    /// **Written to `context_json`, a column that has been in the schema and unused since it
+    /// was created** — so this needs no migration, and it lands in the one place an operator
+    /// auditing a campaign would already be looking.
+    ///
+    /// Best-effort by contract, like everything on this path: a campaign that could not file
+    /// its note still has to send its comments. The caller logs and carries on.
+    pub fn record_interaction_target_context(
+        &self,
+        campaign_id: &str,
+        target_key: &str,
+        context_json: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE interaction_targets SET context_json=?1 WHERE campaign_id=?2 AND target_key=?3",
+            params![context_json, campaign_id, target_key],
+        )?;
+        Ok(())
+    }
+
     pub fn update_interaction_assignment_state(
         &self,
         assignment_id: &str,

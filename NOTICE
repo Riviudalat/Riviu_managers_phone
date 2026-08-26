@@ -185,7 +185,32 @@ operator**. It is deliberately not redistributed, and nothing in this project
 bundles it.
 
 
-5. What is missing from this repository
+5. yt-dlp — Unlicense (public domain dedication)
+------------------------------------------------
+
+    yt-dlp    https://github.com/yt-dlp/yt-dlp
+
+Shipped beside the app so the desktop can ask TikTok what a post says and what
+pictures it has, without driving a phone to find out. `crates/core/src/
+tiktok_web.rs` is the only caller; `sidecars/yt-dlp/README.md` says why an
+extractor is needed for what looks like one HTTP request.
+
+yt-dlp is released into the public domain under the Unlicense, which imposes no
+attribution requirement. It is listed here anyway, because this file is a record
+of what ships and not only of what must be credited.
+
+**Not committed to this repository, and deliberately not pinned by hash.** The
+binary is fetched per machine and per release build. TikTok breaks extractors on
+its own schedule and the fix is always a newer yt-dlp, so a pinned copy would be
+a pinned failure. `RIVIU_YTDLP_PATH` points a run at any other copy. With no
+yt-dlp present, every lookup fails as `NoBinary` and the product behaves as it
+did before the sidecar existed.
+
+yt-dlp bundles its own dependencies in the published `.exe`, each under its own
+licence. Freezing them into one executable does not change any of them.
+
+
+6. What is missing from this repository
 ---------------------------------------
 
 There is no `LICENSE` file at the repository root. `Cargo.toml` says `MIT`, so

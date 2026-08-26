@@ -2301,6 +2301,229 @@ pub trait SlideCamera: Send + Sync {
     async fn capture(&self) -> Option<Vec<u8>>;
 }
 
+/// How long to let a video play before the first sample.
+///
+/// A post that has just opened is showing a loading frame, a fade-in, or the first frame of a
+/// title card. Measured on this fleet's own arrival path: the pictures the old sampler kept
+/// were three copies of whatever was on screen in the first second, which on a video is
+/// usually its cover.
+const VIDEO_FIRST_SAMPLE: Duration = Duration::from_millis(1_200);
+
+/// The longest a video may be watched for evidence.
+///
+/// **Bounded because a phone is held for all of it.** The sampling happens once per link — the
+/// pre-pass photographs for every phone that will comment — so ten seconds is amortised across
+/// the whole fan-out rather than paid per phone. It is still ten seconds of a device lease, and
+/// a fifty-second video is not worth fifty.
+const VIDEO_WATCH_BUDGET: Duration = Duration::from_secs(10);
+
+/// The narrowest and widest gap between samples.
+///
+/// The floor keeps a very short video from being sampled faster than the stream produces
+/// distinct frames; the ceiling keeps a long one from spending the whole budget on two
+/// pictures.
+const VIDEO_GAP_RANGE: (Duration, Duration) = (Duration::from_millis(1_200), Duration::from_secs(3));
+
+/// How many identical samples in a row mean the video is not playing.
+///
+/// Two. One repeat is a stream that has not pushed a new frame yet; two is a paused video, a
+/// still card, or a dead stream — and in all three cases waiting longer buys nothing. Measured
+/// as a real state on this fleet: `ce051715cb22c30403` failed four assignments in a row with a
+/// stuck stream, which from here is indistinguishable from a paused video and should end the
+/// same way.
+const VIDEO_STILL_STRIKES: usize = 2;
+
+/// What a video walk saw, and how much of the video it actually spans.
+pub struct VideoWatch {
+    /// Samples in time order, oldest first.
+    pub frames: Vec<Vec<u8>>,
+    /// Seconds of video between the first kept sample and the last, rounded.
+    ///
+    /// **The honest half of this type.** Four pictures of a fifty-second video is four pictures
+    /// of part of it, and a contact sheet that does not say so invites the model to narrate a
+    /// video it saw a fraction of — the same dishonesty a short carousel sheet had.
+    ///
+    /// **Measured off a clock, not derived from the sample schedule** — and that distinction was
+    /// paid for. The first version computed `gap * (kept - 1)` and reported **9 seconds** for a
+    /// watch whose frames were the phở scene at ~6 s and `1/2 Circle Coffee` at ~28.5 s of the
+    /// same video (`video_gate`, 26/08/2026). The schedule is not the truth because *taking* a
+    /// picture is not free: a `screencap` of this fleet's 1080x2400 screen is a 2-4 MB PNG over
+    /// USB and costs seconds of its own, and the video keeps playing through every one of them.
+    /// Production's scrcpy stream is far cheaper, so there the two numbers nearly agree — but a
+    /// number that is only right on the fast path is not a number to hand a model.
+    pub span_secs: u64,
+}
+
+/// Photograph a video by watching it, not by sampling the instant it opens.
+///
+/// **What this replaces, and why it was wrong.** The old evidence pass took three stream frames
+/// 500 ms apart, so it saw the first ~1.0 second of a post that can run a minute — and because
+/// `make_contact_sheet` collapses identical pictures, a video still on its cover produced *one*
+/// frame and the sheet honestly reported "ĐÚNG MỘT khung… KHÔNG có chuyển động để mô tả". Every
+/// comment on such a post was written from its title card.
+///
+/// **It taps nothing and swipes nothing.** A video plays on its own, so unlike
+/// [`photograph_photo_post`] there is no gesture here at all — which also means none of the
+/// carousel walk's hazards (a swipe past the last slide leaving for the author's profile) exist
+/// on this path. The only thing that can go wrong is keeping a picture of the wrong post.
+///
+/// **Two guards, and the second is the one that matters.** The comment rail still being on
+/// screen proves *a* post page is up; it does not prove it is still **this** post, because
+/// TikTok advances to the next video when one ends. So the caption is read once at the start
+/// and compared before every sample is kept. When the caption cannot be read at all there is no
+/// baseline, and the walk falls back to the rail check alone — the same level of proof the old
+/// sampler had, rather than refusing to photograph anything.
+///
+/// `duration` sizes the gaps: a twelve-second video is covered end to end, a fifty-second one
+/// gets its first ten seconds and [`VideoWatch::span_secs`] says so.
+pub async fn photograph_video_post(
+    session: &dyn UiSession,
+    camera: &dyn SlideCamera,
+    target_package: &str,
+    duration: Option<Duration>,
+) -> VideoWatch {
+    let wanted = crate::openai_client::SHEET_MAX_FRAMES;
+    let gap = video_sample_gap(duration, wanted);
+
+    // Read before the first sample so the baseline is the post as it was on arrival.
+    let baseline = read_post_caption(session).await;
+    if baseline.is_none() {
+        tracing::warn!(
+            "interaction: khong doc duoc caption de lam moc — chi kiem bang thanh rail, \
+             giong duong cu"
+        );
+    }
+    let rail = post_page_rail(session, target_package).await;
+
+    let mut frames: Vec<Vec<u8>> = Vec::with_capacity(wanted);
+    let mut digests: Vec<u64> = Vec::with_capacity(wanted);
+    let mut still = 0usize;
+    // Stamped when a picture is *kept*, so the span covers exactly the frames on the sheet.
+    let mut first_kept: Option<tokio::time::Instant> = None;
+    let mut last_kept: Option<tokio::time::Instant> = None;
+    tokio::time::sleep(VIDEO_FIRST_SAMPLE).await;
+
+    for index in 0..wanted {
+        if index > 0 {
+            tokio::time::sleep(gap).await;
+        }
+        // Both checks before the picture is kept, in the cheap-first order: a rail lookup is one
+        // query, a caption is a whole described sweep.
+        if let Some(rail) = &rail {
+            let on_post = session
+                .locate(rail.to_query())
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+            if !on_post {
+                tracing::warn!(
+                    "interaction: roi khoi trang bai sau {} khung — dung, khong giu them",
+                    frames.len()
+                );
+                break;
+            }
+        }
+        if let Some(baseline) = &baseline {
+            match read_post_caption(session).await {
+                Some(now) if &now == baseline => {}
+                other => {
+                    // Measured hazard, not a hypothetical: a video that ends advances to the
+                    // next one, and that screen has a comment rail on it too.
+                    tracing::warn!(
+                        "interaction: bai da doi sau {} khung (caption {:?}) — dung",
+                        frames.len(),
+                        other.as_deref().map(|text| text.chars().take(24).collect::<String>())
+                    );
+                    break;
+                }
+            }
+        }
+
+        let Some(frame) = camera.capture().await else {
+            continue;
+        };
+        // Deduplicated here as well as in the sheet, because here it can also *stop* the walk:
+        // the sheet only learns a video was frozen after paying for the whole watch.
+        // `picture_digest_of` and not a hash of the bytes: a JPEG stream re-encodes an
+        // unchanged screen into different bytes every time, and the status bar's own animated
+        // icons are excluded by it. Hashing the bytes is why the first version of the carousel
+        // dedupe never fired on a real phone (9.104).
+        if let Some(digest) = crate::nurture::picture_digest_of(&frame) {
+            if digests.last() == Some(&digest) {
+                still += 1;
+                if still >= VIDEO_STILL_STRIKES {
+                    tracing::info!(
+                        "interaction: {} khung lien tiep giong nhau — video dung hoac stream \
+                         ket, dung o {} khung",
+                        still + 1,
+                        frames.len()
+                    );
+                    break;
+                }
+                continue;
+            }
+            still = 0;
+            digests.push(digest);
+        }
+        let now = tokio::time::Instant::now();
+        first_kept = first_kept.or(Some(now));
+        last_kept = Some(now);
+        frames.push(frame);
+    }
+
+    // Clock, not schedule — see `VideoWatch::span_secs`. Stamping on *keep* also means an early
+    // stop reports the span it really has rather than the one it planned for.
+    let span_secs = match (first_kept, last_kept) {
+        (Some(first), Some(last)) => {
+            let span = last.saturating_duration_since(first);
+            // Rounded to the nearest second: the prompt says "khoảng N giây", and a video cannot
+            // usefully be described to a tenth.
+            (span.as_millis() as u64 + 500) / 1_000
+        }
+        _ => 0,
+    };
+    VideoWatch { frames, span_secs }
+}
+
+/// How far apart to sample, given how long the video is.
+///
+/// Solves for covering the whole video when that fits the budget, and for spreading the budget
+/// evenly when it does not. Clamped at both ends by [`VIDEO_GAP_RANGE`].
+///
+/// The arithmetic is on the gaps between samples, so `wanted` pictures need `wanted - 1` of
+/// them — an off-by-one here would sample past the budget on every video.
+fn video_sample_gap(duration: Option<Duration>, wanted: usize) -> Duration {
+    let gaps = wanted.saturating_sub(1).max(1) as u32;
+    let reach = match duration {
+        // Cover the video itself when it is short enough to fit, minus the run-up already spent.
+        Some(length) if length <= VIDEO_WATCH_BUDGET + VIDEO_FIRST_SAMPLE => {
+            length.saturating_sub(VIDEO_FIRST_SAMPLE)
+        }
+        // Long, or unknown: spend the budget and admit the span.
+        _ => VIDEO_WATCH_BUDGET,
+    };
+    (reach / gaps).clamp(VIDEO_GAP_RANGE.0, VIDEO_GAP_RANGE.1)
+}
+
+/// The control that says "a post page is up", or `None` when this build has no measured label.
+///
+/// Split out because both walks need it and the failure is the same in both: with no label set
+/// there is no way to ask the question, and a walk that cannot ask it must not keep pictures on
+/// the strength of a guess.
+async fn post_page_rail(
+    session: &dyn UiSession,
+    target_package: &str,
+) -> Option<crate::tiktok_labels::LabelMatch> {
+    let language = session.ui_language().await.unwrap_or_default();
+    let app_version = session
+        .app_version(target_package)
+        .await
+        .unwrap_or_default();
+    let labels = crate::tiktok_labels::controls_for(target_package, &language, &app_version)?;
+    labels.label(crate::tiktok_labels::TikTokControl::Comments)
+}
+
 /// How many slides of a photo carousel are worth photographing.
 ///
 /// The bound is about the **contact sheet**, not the phone. `openai_client` gives the sheet a
@@ -4828,6 +5051,277 @@ mod tests {
                 _ => Vec::new(),
             })
         }
+    }
+
+    /// A post page whose caption can change under the walk, standing in for TikTok advancing
+    /// to the next video when this one ends.
+    struct VideoSession {
+        /// The caption reported on read 1, 2, 3 ... the last entry repeats.
+        captions: Vec<Option<String>>,
+        /// Whether the comment rail is findable on check 1, 2, 3 ... the last entry repeats.
+        rail: Vec<bool>,
+        caption_reads: Mutex<usize>,
+        rail_checks: Mutex<usize>,
+    }
+
+    impl VideoSession {
+        /// A video that stays put for as long as anyone looks.
+        fn playing() -> Self {
+            Self {
+                captions: vec![Some(VIDEO_CAPTION.to_string())],
+                rail: vec![true],
+                caption_reads: Mutex::new(0),
+                rail_checks: Mutex::new(0),
+            }
+        }
+
+        /// The caption becomes a different post just before sample `sample` is taken.
+        ///
+        /// Counted in samples rather than in reads because the walk reads the caption **once
+        /// before the first sample** to establish its baseline, and an off-by-one here would
+        /// silently test the wrong boundary.
+        fn caption_changes_before_sample(mut self, sample: usize) -> Self {
+            let read = sample + 1;
+            self.captions = (1..=read)
+                .map(|index| {
+                    Some(if index < read {
+                        VIDEO_CAPTION.to_string()
+                    } else {
+                        OTHER_CAPTION.to_string()
+                    })
+                })
+                .collect();
+            self
+        }
+
+        fn without_a_readable_caption(mut self) -> Self {
+            self.captions = vec![None];
+            self
+        }
+
+        fn leaves_the_post_on_check(mut self, check: usize) -> Self {
+            self.rail = (1..=check).map(|index| index < check).collect();
+            self
+        }
+    }
+
+    /// Forty characters or more, or `read_post_caption` will not believe it is a caption.
+    const VIDEO_CAPTION: &str = "một ngày ở Đà Lạt của mình, đi đâu ăn gì cho đủ";
+    const OTHER_CAPTION: &str = "một bài hoàn toàn khác, cũng đủ dài để là một caption";
+
+    #[async_trait::async_trait]
+    impl UiSession for VideoSession {
+        async fn tap(&self, _point: crate::types::TapPoint) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn swipe(&self, _gesture: crate::types::SwipeGesture) -> anyhow::Result<()> {
+            unreachable!("a video walk must never gesture");
+        }
+        async fn type_text(&self, _text: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn home(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn back(&self) -> anyhow::Result<()> {
+            unreachable!("a video walk must never navigate");
+        }
+        async fn find_and_tap(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn assert_visible(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+        fn supports_element_bounds(&self) -> bool {
+            true
+        }
+        async fn ui_language(&self) -> Option<String> {
+            Some("en".to_string())
+        }
+        async fn app_version(&self, _bundle_id: &str) -> Option<String> {
+            Some("38.3.2".to_string())
+        }
+        async fn window_size(&self) -> anyhow::Result<(f64, f64)> {
+            Ok((1080.0, 2220.0))
+        }
+        async fn locate(&self, _query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            let mut checks = self.rail_checks.lock();
+            *checks += 1;
+            let present = self
+                .rail
+                .get(*checks - 1)
+                .or_else(|| self.rail.last())
+                .copied()
+                .unwrap_or(true);
+            Ok(present.then(|| node(922.0, 1296.0, 158.0, 171.0, "Read or add comments. 9")))
+        }
+        async fn locate_all(&self, query: ElementQuery<'_>) -> anyhow::Result<Vec<ElementBox>> {
+            if !matches!(query, ElementQuery::ResourceIdSuffix(_)) {
+                return Ok(Vec::new());
+            }
+            let mut reads = self.caption_reads.lock();
+            *reads += 1;
+            let caption = self
+                .captions
+                .get(*reads - 1)
+                .or_else(|| self.captions.last())
+                .cloned()
+                .flatten();
+            Ok(caption
+                .map(|text| vec![node(44.0, 1700.0, 800.0, 120.0, &text)])
+                .unwrap_or_default())
+        }
+    }
+
+    /// A camera driven by a script of picture *identities*, so a frozen stream can be expressed.
+    ///
+    /// Real encoded PNGs rather than sentinel bytes: the walk deduplicates with
+    /// `picture_digest_of`, which decodes, and a byte that is not an image would silently skip
+    /// the very check being tested.
+    struct ScriptedCamera {
+        shades: Vec<u8>,
+        taken: Mutex<usize>,
+    }
+
+    #[async_trait::async_trait]
+    impl SlideCamera for ScriptedCamera {
+        async fn capture(&self) -> Option<Vec<u8>> {
+            let mut taken = self.taken.lock();
+            let shade = *self.shades.get(*taken).or_else(|| self.shades.last())?;
+            *taken += 1;
+            let mut image = image::RgbImage::new(64, 128);
+            for pixel in image.pixels_mut() {
+                pixel.0 = [shade, shade, shade];
+            }
+            let mut out = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgb8(image)
+                .write_to(&mut out, image::ImageFormat::Png)
+                .ok()?;
+            Some(out.into_inner())
+        }
+    }
+
+    async fn watch(
+        session: &VideoSession,
+        shades: Vec<u8>,
+        duration: Option<Duration>,
+    ) -> VideoWatch {
+        photograph_video_post(
+            session,
+            &ScriptedCamera {
+                shades,
+                taken: Mutex::new(0),
+            },
+            "com.ss.android.ugc.trill",
+            duration,
+        )
+        .await
+    }
+
+    /// **A playing video is sampled across itself, not at the instant it opened.**
+    ///
+    /// Four distinct pictures, and a span that says how much of the video they cover. The old
+    /// pass took three samples 500 ms apart and saw the first second of whatever the post was.
+    #[tokio::test(start_paused = true)]
+    async fn a_playing_video_is_sampled_across_its_length() {
+        let session = VideoSession::playing();
+        let result = watch(&session, vec![10, 60, 110, 160], Some(Duration::from_secs(12))).await;
+        assert_eq!(result.frames.len(), 4);
+        // Exactly nine: a 12 s video gives `(12 - 1.2) / 3` = 3.6 s clamped to the 3 s ceiling,
+        // and four keeps have three gaps between them. Pinned because the span is now read off
+        // a clock — under a paused clock a free camera makes schedule and clock agree, which is
+        // the fast path production actually runs (a scrcpy frame is already in memory). On real
+        // hardware with `screencap` they do **not** agree, and that is the whole reason the
+        // number stopped being derived from the schedule.
+        assert_eq!(result.span_secs, 9);
+    }
+
+    /// **The post changing under the walk stops it, and the pictures already taken are kept.**
+    ///
+    /// This is the guard that matters: TikTok advances to the next video when one ends, and that
+    /// screen has a comment rail on it too — so the rail alone cannot tell the difference. A
+    /// picture of the next video filed as evidence for this one is worse than a short sheet,
+    /// because it looks like evidence.
+    #[tokio::test(start_paused = true)]
+    async fn a_post_that_changes_under_the_walk_stops_it() {
+        let session = VideoSession::playing().caption_changes_before_sample(3);
+        let result = watch(&session, vec![10, 60, 110, 160], Some(Duration::from_secs(60))).await;
+        assert_eq!(
+            result.frames.len(),
+            2,
+            "the third sample was of a different post"
+        );
+    }
+
+    /// Losing the post page stops the walk too, on the cheaper of the two checks.
+    #[tokio::test(start_paused = true)]
+    async fn leaving_the_post_page_stops_the_walk() {
+        let session = VideoSession::playing().leaves_the_post_on_check(2);
+        let result = watch(&session, vec![10, 60, 110, 160], None).await;
+        assert_eq!(result.frames.len(), 1);
+    }
+
+    /// **A frozen stream ends the watch instead of running out the budget.**
+    ///
+    /// Measured as a real state on this fleet: one phone failed four assignments in a row with a
+    /// stuck stream. From here that is indistinguishable from a paused video, and both should
+    /// stop rather than spend ten seconds collecting the same picture.
+    #[tokio::test(start_paused = true)]
+    async fn a_frozen_stream_ends_the_watch_early() {
+        let session = VideoSession::playing();
+        let result = watch(&session, vec![10, 10, 10, 10], Some(Duration::from_secs(60))).await;
+        assert_eq!(result.frames.len(), 1, "one picture, however often it repeats");
+        assert_eq!(result.span_secs, 0, "one picture spans nothing");
+    }
+
+    /// **No readable caption is a thinner guard, not a refusal to photograph.**
+    ///
+    /// Falling back to the rail check alone is exactly the proof the old sampler had. Refusing
+    /// instead would turn a build that renames the caption node into a campaign that comments
+    /// on nothing.
+    #[tokio::test(start_paused = true)]
+    async fn an_unreadable_caption_still_allows_the_watch() {
+        let session = VideoSession::playing().without_a_readable_caption();
+        let result = watch(&session, vec![10, 60, 110, 160], None).await;
+        assert_eq!(result.frames.len(), 4);
+    }
+
+    /// **The gap arithmetic, which has an off-by-one in it waiting to happen.**
+    ///
+    /// Four pictures need three gaps, so dividing the reach by four would sample past the
+    /// budget on every video. The bounds are what keep a two-second clip from being sampled
+    /// faster than the stream produces distinct frames, and a ten-minute one from spending the
+    /// whole budget on two pictures.
+    #[test]
+    fn the_sample_gap_covers_a_short_video_and_caps_a_long_one() {
+        // 12s: reach is 12 - 1.2 = 10.8s over three gaps = 3.6s, clamped to the 3s ceiling.
+        assert_eq!(
+            video_sample_gap(Some(Duration::from_secs(12)), 4),
+            VIDEO_GAP_RANGE.1
+        );
+        // 6s: reach 4.8s over three gaps = 1.6s, inside the range and the whole clip is covered.
+        assert_eq!(
+            video_sample_gap(Some(Duration::from_secs(6)), 4),
+            Duration::from_millis(1_600)
+        );
+        // A two-second clip cannot be sampled faster than the floor.
+        assert_eq!(
+            video_sample_gap(Some(Duration::from_secs(2)), 4),
+            VIDEO_GAP_RANGE.0
+        );
+        // Long, and unknown, both spend the budget: 10s over three gaps, capped at 3s.
+        for duration in [Some(Duration::from_secs(600)), None] {
+            assert_eq!(video_sample_gap(duration, 4), VIDEO_GAP_RANGE.1);
+        }
+        // Three gaps, never four: the whole schedule has to fit the budget.
+        let gap = video_sample_gap(None, 4);
+        assert!(
+            VIDEO_FIRST_SAMPLE + gap * 3 <= VIDEO_FIRST_SAMPLE + VIDEO_WATCH_BUDGET,
+            "the schedule overruns the budget: {gap:?}"
+        );
     }
 
     /// A camera that hands back a different picture every time it is asked.

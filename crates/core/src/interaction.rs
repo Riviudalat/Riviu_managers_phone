@@ -1016,6 +1016,176 @@ pub struct InteractionArtifactRecord {
     pub created_at: String,
 }
 
+/// What the desktop learned about one target from outside the phones, ready to be read.
+///
+/// **This type exists because of §9.103 §4.** `nurture_list_comment_attempts` was registered
+/// and allowlisted for weeks while `api.ts` never called it, so the only way to audit a
+/// comment was a log dump — and a number nobody reads cannot be checked. The web lookup writes
+/// its findings to `interaction_targets.context_json`; without something like this that column
+/// is the same dead end.
+///
+/// It is a **projection**, not the stored row: the column holds the caption in full and this
+/// carries its length and a preview. The length is the measurement (the accessibility tree
+/// truncates, so "105 fetched" against "76 on screen" is the whole point), and the caption
+/// itself is already on TikTok.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InteractionTargetNote {
+    pub target_key: String,
+    pub line_no: u32,
+    pub normalized_url: String,
+    pub kind: TikTokPostKind,
+    /// Characters of caption the lookup returned. `None` means no caption came back.
+    pub caption_chars: Option<u32>,
+    /// The opening of it, bounded — enough to recognise which post this is.
+    pub caption_preview: Option<String>,
+    pub duration_secs: Option<u64>,
+    /// Slides the post has, per the web. `None` for a video, and for a lookup that failed.
+    pub slide_count: Option<u32>,
+    /// Whether the post carries speech. `Some(false)` is why no transcript was even asked for.
+    pub has_original_audio: Option<bool>,
+    pub subtitle_langs: Vec<String>,
+    /// The track a transcript would come from, as `lang/source` — `vie-VN/ASR` is the original
+    /// speech, `eng-US/MT` a machine translation of it.
+    pub transcript_track: Option<String>,
+    /// The lookup's failure code, when it produced nothing: `ip_blocked`, `post_unavailable`,
+    /// `transient`, `no_ytdlp`. **`None` here with everything else empty means nobody looked**,
+    /// which is a different thing and the reason this field exists.
+    pub error_code: Option<String>,
+    pub error_detail: Option<String>,
+}
+
+/// How much caption travels to the panel.
+const NOTE_CAPTION_PREVIEW_CHARS: usize = 64;
+
+impl InteractionTargetNote {
+    /// The JSON that `interaction_targets.context_json` stores for one lookup outcome.
+    ///
+    /// **Deliberately the sibling of [`Self::from_row`].** These are the write and the read half
+    /// of one column, and halves that live in different modules drift — nothing type-checks a
+    /// JSON key against the code that reads it. Keeping them adjacent is what makes the
+    /// round-trip test below possible, and that test is the only thing standing between a
+    /// renamed key and a panel that silently shows nothing.
+    ///
+    /// **A refused lookup is filed too.** "No caption because TikTok blocks this address" and
+    /// "no caption because nobody looked" are the same empty column otherwise, and only one of
+    /// them is worth an operator's attention.
+    pub fn context_json(
+        outcome: Result<&crate::tiktok_web::PostWebContext, &crate::tiktok_web::WebLookupError>,
+    ) -> Option<String> {
+        let note = match outcome {
+            Ok(context) => serde_json::json!({
+                "web": {
+                    "captionChars": context.caption.as_ref().map(|caption| caption.chars().count()),
+                    "caption": context.caption,
+                    "durationSecs": context.duration_secs,
+                    "slideCount": context.slide_urls.len(),
+                    "hasOriginalAudio": context.has_original_audio,
+                    "subtitleLangs": context.subtitle_langs(),
+                    "transcriptTrack": context.transcript_track().map(|track| {
+                        serde_json::json!({ "lang": track.lang, "source": track.source })
+                    }),
+                }
+            }),
+            Err(error) => serde_json::json!({
+                "web": { "error": error.code(), "detail": error.to_string() }
+            }),
+        };
+        serde_json::to_string(&note).ok()
+    }
+
+    /// Build a note from one `interaction_targets` row.
+    ///
+    /// Pure, and separate from the query, so the shape of `context_json` can be tested against
+    /// captured JSON instead of against a database. That column is written by
+    /// `interaction_campaign::file_target_context` and read only here, so the two have to be
+    /// checked against each other somewhere.
+    pub fn from_row(
+        target_key: String,
+        line_no: u32,
+        normalized_url: String,
+        kind: TikTokPostKind,
+        context_json: Option<&str>,
+    ) -> Self {
+        let mut note = Self {
+            target_key,
+            line_no,
+            normalized_url,
+            kind,
+            caption_chars: None,
+            caption_preview: None,
+            duration_secs: None,
+            slide_count: None,
+            has_original_audio: None,
+            subtitle_langs: Vec::new(),
+            transcript_track: None,
+            error_code: None,
+            error_detail: None,
+        };
+        let Some(web) = context_json
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|value| value.get("web").cloned())
+        else {
+            return note;
+        };
+        note.error_code = web
+            .get("error")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        note.error_detail = web
+            .get("detail")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        note.caption_chars = web
+            .get("captionChars")
+            .and_then(|value| value.as_u64())
+            .map(|chars| chars as u32);
+        note.caption_preview = web
+            .get("caption")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|caption| !caption.is_empty())
+            .map(|caption| caption.chars().take(NOTE_CAPTION_PREVIEW_CHARS).collect());
+        note.duration_secs = web.get("durationSecs").and_then(|value| value.as_u64());
+        // Zero slides is a video, not "a carousel with none" — reporting `0` would put a
+        // meaningless number in the panel next to every video.
+        note.slide_count = web
+            .get("slideCount")
+            .and_then(|value| value.as_u64())
+            .filter(|count| *count > 0)
+            .map(|count| count as u32);
+        note.has_original_audio = web.get("hasOriginalAudio").and_then(|value| value.as_bool());
+        note.subtitle_langs = web
+            .get("subtitleLangs")
+            .and_then(|value| value.as_array())
+            .map(|langs| {
+                langs
+                    .iter()
+                    .filter_map(|lang| lang.as_str())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        note.transcript_track = web.get("transcriptTrack").and_then(|track| {
+            let lang = track.get("lang").and_then(|value| value.as_str())?;
+            let source = track.get("source").and_then(|value| value.as_str())?;
+            Some(format!("{lang}/{source}"))
+        });
+        note
+    }
+
+    /// Whether the lookup told us anything at all.
+    ///
+    /// Read by the panel to distinguish the three states an operator cares about: a target that
+    /// was enriched, one whose lookup was refused (`error_code`), and one nobody looked up.
+    pub fn is_blank(&self) -> bool {
+        self.caption_chars.is_none()
+            && self.slide_count.is_none()
+            && self.error_code.is_none()
+            && self.subtitle_langs.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractionCampaignDetail {
@@ -1957,5 +2127,213 @@ mod tests {
             None,
             "a run with likeTarget off must not grow a note about likes"
         );
+    }
+}
+
+/// The write and read halves of `interaction_targets.context_json`, checked against each other.
+///
+/// Nothing else can check them: a JSON key is a string on both sides, so a rename compiles, the
+/// campaign keeps filing notes, and the panel quietly shows an empty row for every target.
+#[cfg(test)]
+mod target_note_tests {
+    use super::*;
+    use crate::tiktok_web::{PostWebContext, SubtitleTrack, WebLookupError};
+
+    fn note_of(context: &PostWebContext) -> InteractionTargetNote {
+        let json = InteractionTargetNote::context_json(Ok(context)).expect("json");
+        InteractionTargetNote::from_row(
+            "video:1".into(),
+            1,
+            "https://www.tiktok.com/@a/video/1".into(),
+            TikTokPostKind::Video,
+            Some(&json),
+        )
+    }
+
+    /// **Every field a lookup can produce survives the column.**
+    ///
+    /// The numbers are the measured ones from 26/08/2026 so the test reads as the case it is
+    /// really about: a 52-second vlog with a 105-character caption and an ASR track.
+    #[test]
+    fn a_full_lookup_round_trips_through_the_column() {
+        let context = PostWebContext {
+            caption: Some("Cùng tớ khám phá lịch trình 1 ngày trải nghiệm Đà Lạt nha".into()),
+            duration_secs: Some(52),
+            slide_urls: Vec::new(),
+            has_original_audio: Some(true),
+            subtitles: vec![
+                SubtitleTrack {
+                    lang: "eng-US".into(),
+                    source: "MT".into(),
+                    url: "https://cdn/en.vtt".into(),
+                },
+                SubtitleTrack {
+                    lang: "vie-VN".into(),
+                    source: "ASR".into(),
+                    url: "https://cdn/vi.vtt".into(),
+                },
+            ],
+            cover_url: None,
+        };
+        let note = note_of(&context);
+        assert_eq!(note.caption_chars, Some(57));
+        assert!(note
+            .caption_preview
+            .as_deref()
+            .is_some_and(|preview| preview.starts_with("Cùng tớ khám phá")));
+        assert_eq!(note.duration_secs, Some(52));
+        assert_eq!(note.has_original_audio, Some(true));
+        assert_eq!(note.subtitle_langs, vec!["eng-US", "vie-VN"]);
+        // The ASR track, not the first one listed — the same rule `transcript_track` applies.
+        assert_eq!(note.transcript_track.as_deref(), Some("vie-VN/ASR"));
+        assert_eq!(note.error_code, None);
+        assert!(!note.is_blank());
+    }
+
+    /// A carousel reports its slide count; a video reports none rather than zero.
+    ///
+    /// `slideCount: 0` is what the writer stores for every video, and rendering "0 ảnh" next to
+    /// each of them is a number that means nothing.
+    #[test]
+    fn a_video_reports_no_slide_count_while_a_carousel_reports_its_own() {
+        let mut context = PostWebContext::default();
+        assert_eq!(note_of(&context).slide_count, None);
+        context.slide_urls = (0..8).map(|index| format!("https://cdn/{index}.jpg")).collect();
+        assert_eq!(note_of(&context).slide_count, Some(8));
+    }
+
+    /// **A refused lookup is filed, and reads back as refused rather than as empty.**
+    ///
+    /// This is the distinction the whole column exists for: two of seven real targets answer
+    /// `Your IP address is blocked from accessing this post`, and an operator seeing a blank row
+    /// has no way to tell that from a target nobody looked up.
+    #[test]
+    fn a_refusal_reads_back_with_its_reason() {
+        let json = InteractionTargetNote::context_json(Err(&WebLookupError::Blocked)).expect("json");
+        let note = InteractionTargetNote::from_row(
+            "photo:2".into(),
+            2,
+            "https://www.tiktok.com/@a/photo/2".into(),
+            TikTokPostKind::Photo,
+            Some(&json),
+        );
+        assert_eq!(note.error_code.as_deref(), Some("ip_blocked"));
+        assert!(note
+            .error_detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("chặn IP")));
+        assert!(!note.is_blank(), "a refusal is something to show, not nothing");
+    }
+
+    /// **No column at all is blank, and blank is its own state.**
+    ///
+    /// A campaign that ran before this existed, or one whose targets were all manual, has
+    /// nothing filed. Reporting that as a failure would invent a problem.
+    #[test]
+    fn a_target_nobody_looked_up_is_blank_and_not_an_error() {
+        let note = InteractionTargetNote::from_row(
+            "video:3".into(),
+            3,
+            "https://www.tiktok.com/@a/video/3".into(),
+            TikTokPostKind::Video,
+            None,
+        );
+        assert!(note.is_blank());
+        assert_eq!(note.error_code, None);
+    }
+
+    /// Junk in the column degrades to blank rather than to a panic.
+    #[test]
+    fn unreadable_json_reads_back_as_blank() {
+        for stored in ["", "not json", "{}", r#"{"web":null}"#] {
+            let note = InteractionTargetNote::from_row(
+                "video:4".into(),
+                4,
+                "https://www.tiktok.com/@a/video/4".into(),
+                TikTokPostKind::Video,
+                Some(stored),
+            );
+            assert!(note.is_blank(), "stored {stored:?}");
+        }
+    }
+
+    /// The preview is bounded, because a 399-character caption in a table cell is a wall.
+    #[test]
+    fn a_long_caption_is_previewed_not_pasted() {
+        let context = PostWebContext {
+            caption: Some("x".repeat(400)),
+            ..PostWebContext::default()
+        };
+        let note = note_of(&context);
+        assert_eq!(note.caption_chars, Some(400), "the full length is still reported");
+        assert_eq!(
+            note.caption_preview.as_deref().map(str::len),
+            Some(NOTE_CAPTION_PREVIEW_CHARS)
+        );
+    }
+
+    /// **The panel's own field names, pinned against the frontend interface.**
+    ///
+    /// The repo's wire-parity test only scans `types.rs`, so an interaction type mirrored in
+    /// `types.ts` has no gate at all — which is how a field could be added on one side and
+    /// rendered as `undefined` on the other. This checks the one type this change adds.
+    #[test]
+    fn the_frontend_mirrors_this_note_field_for_field() {
+        let ts = include_str!("../../../apps/desktop/src/types.ts").replace("\r\n", "\n");
+        let block = ts
+            .split("export interface InteractionTargetNote {")
+            .nth(1)
+            .expect("the frontend must declare InteractionTargetNote")
+            .split("\n}")
+            .next()
+            .expect("a closing brace");
+        let declared: std::collections::BTreeSet<String> = block
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//") && !line.starts_with('*') && !line.starts_with("/*"))
+            .filter_map(|line| line.split_once(':'))
+            .map(|(field, _)| field.trim().trim_end_matches('?').to_string())
+            .filter(|field| !field.is_empty() && field.chars().all(|c| c.is_alphanumeric()))
+            .collect();
+        // The camelCase names `serde(rename_all)` actually sends.
+        let expected: std::collections::BTreeSet<String> = [
+            "targetKey",
+            "lineNo",
+            "normalizedUrl",
+            "kind",
+            "captionChars",
+            "captionPreview",
+            "durationSecs",
+            "slideCount",
+            "hasOriginalAudio",
+            "subtitleLangs",
+            "transcriptTrack",
+            "errorCode",
+            "errorDetail",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        assert_eq!(
+            declared, expected,
+            "the frontend interface and this struct disagree"
+        );
+
+        // And the struct really does send those names, rather than the list drifting on its own.
+        let sent = serde_json::to_value(InteractionTargetNote::from_row(
+            "video:1".into(),
+            1,
+            "u".into(),
+            TikTokPostKind::Video,
+            None,
+        ))
+        .expect("serialise");
+        let sent: std::collections::BTreeSet<String> = sent
+            .as_object()
+            .expect("an object")
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(sent, expected, "serde sends different names than the list above");
     }
 }
