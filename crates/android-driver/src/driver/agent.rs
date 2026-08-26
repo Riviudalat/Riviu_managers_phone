@@ -164,6 +164,66 @@ impl AndroidDriver {
             )
         })
     }
+    /// Instrumentation packages on the phone that are not ours.
+    ///
+    /// **Android lets exactly one UiAutomator instrumentation hold the accessibility connection**,
+    /// so a leftover automation tool from another product does not merely coexist: it makes every
+    /// tap and every tree read fail, on that phone, permanently, with no error that names a cause.
+    /// GenFarmer's own survey warns about this from the other side -- its test bench carried
+    /// `com.genfarmer.uiautomator{,.test}` and the note says plainly that one of the two tools has
+    /// to be stopped before the other runs.
+    ///
+    /// Pure, because the value is the *parsing*: `pm list instrumentation` prints
+    /// `instrumentation:<pkg>/<runner> (target=<pkg>)`, and a listing read wrongly would either
+    /// accuse an innocent phone or clear a guilty one.
+    pub(super) fn foreign_instrumentations(listing: &str, ours: &[&str]) -> Vec<String> {
+        let mut found = Vec::new();
+        for line in listing.lines() {
+            let line = line.trim();
+            let Some(rest) = line.strip_prefix("instrumentation:") else {
+                continue;
+            };
+            // `<pkg>/<runner>` up to the first space; the `(target=..)` suffix is not part of it.
+            let component = rest.split_whitespace().next().unwrap_or(rest);
+            let package = component.split('/').next().unwrap_or(component);
+            if package.is_empty() || ours.contains(&package) {
+                continue;
+            }
+            if !found.iter().any(|seen: &String| seen == component) {
+                found.push(component.to_string());
+            }
+        }
+        found
+    }
+
+    /// Turn "something else may be holding UiAutomation" into the name of that something.
+    ///
+    /// The two messages below already carried the right hypothesis and never checked it, so an
+    /// operator was told to go looking for an unnamed automation tool. One `pm list
+    /// instrumentation` settles it.
+    ///
+    /// Best-effort by design: this runs on a path that is already failing, and a phone that
+    /// cannot answer this question must not turn a useful error into a different error. No
+    /// answer means the sentence simply keeps its old, weaker form.
+    async fn foreign_instrumentation_note(&self, serial: &str) -> String {
+        let Ok(listing) = self.adb.shell(serial, "pm list instrumentation").await else {
+            return String::new();
+        };
+        let foreign =
+            Self::foreign_instrumentations(&listing, &[AGENT_PACKAGE, AGENT_TEST_PACKAGE]);
+        if foreign.is_empty() {
+            // Worth saying too: it rules out the most likely cause, which is what stops the
+            // next hour being spent on it.
+            return " Không có instrumentation lạ nào trên máy này, nên nguyên nhân nằm ở chỗ khác."
+                .to_string();
+        }
+        format!(
+            " Máy này còn instrumentation của tool khác: {}. Android chỉ cho MỘT UiAutomator giữ \
+             accessibility, nên phải xoá hoặc dừng nó trước.",
+            foreign.join(", ")
+        )
+    }
+
     /// The instrumentation component this driver starts to bring the agent up.
     pub(super) fn agent_runner() -> String {
         format!("{AGENT_TEST_PACKAGE}/{AGENT_RUNNER}")
@@ -397,22 +457,21 @@ impl AndroidDriver {
                         quiet_for_s = quiet_for.as_secs(),
                         "refusing to restart the instrumentation again inside its cooldown"
                     );
+                    let note = self.foreign_instrumentation_note(serial).await;
                     anyhow::bail!(
                         "the agent on {serial} is listening but cannot read the accessibility \
                          tree, and its instrumentation was already restarted {:.0}s ago \
-                         without fixing it. Something else on the phone is holding \
-                         UiAutomation — an `adb shell uiautomator dump` or another automation \
-                         tool. Not restarting again for another {:.0}s.",
+                         without fixing it.{note} Not restarting again for another {:.0}s.",
                         since.as_secs_f64(),
                         quiet_for.as_secs_f64()
                     );
                 }
             }
+            let note = self.foreign_instrumentation_note(serial).await;
             tracing::warn!(
                 serial,
                 "the agent answers /status but cannot read the accessibility tree — \
-                 restarting the instrumentation. Something else may be holding \
-                 UiAutomation (an `adb shell uiautomator dump` does this)"
+                 restarting the instrumentation.{note}"
             );
             self.note_instrumentation_restart(serial);
             let started = std::time::Instant::now();
@@ -592,5 +651,80 @@ impl AndroidDriver {
             .spawn()
             .with_context(|| format!("start the agent on {serial}"))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod instrumentation_tests {
+    use super::super::AndroidDriver;
+
+    /// The real shape of `pm list instrumentation`, and the one line that matters in it.
+    ///
+    /// **Android lets exactly one UiAutomator instrumentation hold the accessibility
+    /// connection.** A leftover from another automation product does not coexist -- it makes
+    /// every tap and every tree read fail on that phone, permanently, and the error that surfaced
+    /// used to say only that "something else may be holding UiAutomation". This is what turns
+    /// that into a package name.
+    #[test]
+    fn a_foreign_instrumentation_is_named_and_ours_is_not() {
+        let listing = "instrumentation:io.appium.uiautomator2.server.test/androidx.test.runner.AndroidJUnitRunner (target=io.appium.uiautomator2.server)\n\
+             instrumentation:com.genfarmer.uiautomator.test/androidx.test.runner.AndroidJUnitRunner (target=com.genfarmer.uiautomator)\n";
+
+        let foreign = AndroidDriver::foreign_instrumentations(
+            listing,
+            &[
+                "io.appium.uiautomator2.server",
+                "io.appium.uiautomator2.server.test",
+            ],
+        );
+        assert_eq!(
+            foreign,
+            vec![
+                "com.genfarmer.uiautomator.test/androidx.test.runner.AndroidJUnitRunner"
+                    .to_string()
+            ],
+            "ours must not be reported, and theirs must be named with its runner"
+        );
+    }
+
+    /// A clean phone reports nothing, so the message can rule the cause out rather than repeat it.
+    #[test]
+    fn a_phone_carrying_only_our_agent_is_clean() {
+        let listing = "instrumentation:io.appium.uiautomator2.server.test/androidx.test.runner.AndroidJUnitRunner (target=io.appium.uiautomator2.server)\n";
+        assert!(AndroidDriver::foreign_instrumentations(
+            listing,
+            &["io.appium.uiautomator2.server.test"]
+        )
+        .is_empty());
+    }
+
+    /// **Parsing is the whole value here, so the awkward inputs are pinned.**
+    ///
+    /// A listing read wrongly either accuses an innocent phone or clears a guilty one, and both
+    /// send somebody to the wrong place for an hour.
+    #[test]
+    fn the_listing_is_parsed_rather_than_pattern_matched_loosely() {
+        // No trailing `(target=..)`, which some ROMs omit.
+        assert_eq!(
+            AndroidDriver::foreign_instrumentations("instrumentation:a.b/c.Runner", &[]),
+            vec!["a.b/c.Runner".to_string()]
+        );
+        // Lines that are not instrumentation entries at all.
+        assert!(AndroidDriver::foreign_instrumentations(
+            "package:com.something\nSecurity exception\n\n",
+            &[]
+        )
+        .is_empty());
+        // The same component twice is one finding.
+        assert_eq!(
+            AndroidDriver::foreign_instrumentations(
+                "instrumentation:a.b/c.R (target=a.b)\ninstrumentation:a.b/c.R (target=a.b)",
+                &[]
+            )
+            .len(),
+            1
+        );
+        // Empty output from a phone that refused the question is not an accusation.
+        assert!(AndroidDriver::foreign_instrumentations("", &[]).is_empty());
     }
 }

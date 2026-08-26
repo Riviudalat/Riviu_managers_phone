@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { factoryReset, isRooted, rootShell, setDeviceIdentity } from "../../api";
 import { requestConfirm } from "../../confirmStore";
-import { pushToast } from "../../toastStore";
+import { describeError, pushToast } from "../../toastStore";
+import { fanOutReasons } from "../../fanout";
 import { randomAndroidId, randomMac, randomSerial } from "./randomIdentity";
 
 /**
@@ -34,6 +35,13 @@ export function RootTool({ targets, scopeLabel }: { targets: string[]; scopeLabe
     setBusy(null);
     setRootedCount(results.filter((r) => r.status === "fulfilled" && r.value).length);
     setRootStatus("done");
+    // **A phone that could not be asked is not a phone that answered no.** The count above
+    // treated both the same, so "3/20 đã root" could equally have meant seventeen unrooted
+    // phones or seventeen that failed to answer -- and those have completely different fixes.
+    const unreachable = fanOutReasons(targets, results);
+    if (unreachable) {
+      pushToast("warn", "Có máy không trả lời được", unreachable);
+    }
   };
 
   const applyIdentity = async () => {
@@ -56,7 +64,7 @@ export function RootTool({ targets, scopeLabel }: { targets: string[]; scopeLabe
     setLogText(
       results
         .map((r, i) =>
-          r.status === "fulfilled" ? `${targets[i]}: ${r.value}` : `${targets[i]}: ✗ ${String(r.reason)}`,
+          r.status === "fulfilled" ? `${targets[i]}: ${r.value}` : `${targets[i]}: ✗ ${describeError(r.reason)}`,
         )
         .join("\n"),
     );
@@ -82,13 +90,20 @@ export function RootTool({ targets, scopeLabel }: { targets: string[]; scopeLabe
         .map((r, i) =>
           r.status === "fulfilled"
             ? `${targets[i]}: đã gửi lệnh khôi phục`
-            : `${targets[i]}: ✗ ${String(r.reason)}`,
+            : `${targets[i]}: ✗ ${describeError(r.reason)}`,
         )
         .join("\n"),
     );
     const ok = results.filter((r) => r.status === "fulfilled").length;
     if (ok === targets.length) pushToast("ok", "Đã gửi lệnh khôi phục gốc", `${ok} máy`);
-    else pushToast("warn", `Khôi phục ${ok}/${targets.length} máy`, "Máy còn lại chưa root.");
+    else
+      // Was "Máy còn lại chưa root." — a guess standing in for what the phone said. A factory
+      // reset can fail for several reasons and the operator is entitled to the real one.
+      pushToast(
+        "warn",
+        `Khôi phục ${ok}/${targets.length} máy`,
+        fanOutReasons(targets, results) ?? "Máy còn lại chưa root.",
+      );
   };
 
   const runShell = async () => {
@@ -106,7 +121,7 @@ export function RootTool({ targets, scopeLabel }: { targets: string[]; scopeLabe
         .map((r, i) =>
           r.status === "fulfilled"
             ? `${targets[i]}:\n${r.value.trim() || "(trống)"}`
-            : `${targets[i]}: ✗ ${String(r.reason)}`,
+            : `${targets[i]}: ✗ ${describeError(r.reason)}`,
         )
         .join("\n\n"),
     );

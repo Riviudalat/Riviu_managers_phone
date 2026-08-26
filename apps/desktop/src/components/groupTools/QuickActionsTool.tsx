@@ -5,6 +5,7 @@ import { pickFiles } from "../../pickFile";
 import { groupInputOutcome } from "../../groupInput";
 import { getGroupSync } from "../../groupSync";
 import { pushToast, toastError } from "../../toastStore";
+import { fanOutReached, fanOutReasons } from "../../fanout";
 
 /** Render a tall PNG with a big number centred, for "set number as wallpaper" (A3). */
 async function numberWallpaperPng(label: string): Promise<Uint8Array> {
@@ -71,13 +72,15 @@ export function QuickActionsTool({ targets, scopeLabel }: { targets: string[]; s
       }),
     );
     setBusy(null);
-    const ok = results.filter((r) => r.status === "fulfilled").length;
+    const ok = fanOutReached(results);
     if (ok === targets.length) pushToast("ok", "Đã đặt số làm hình nền", `${ok} máy`);
     else
       pushToast(
         "warn",
         `Đặt hình nền ${ok}/${targets.length} máy`,
-        "Máy còn lại cần Riviu helper.",
+        // Was a fixed guess about the helper. Often right, and when wrong it hid the sentence
+        // the phone actually returned.
+        fanOutReasons(targets, results) ?? "Máy còn lại cần Riviu helper.",
       );
   };
 
@@ -89,11 +92,15 @@ export function QuickActionsTool({ targets, scopeLabel }: { targets: string[]; s
     setBusy(locked ? "lock" : "unlock");
     const results = await Promise.allSettled(targets.map((u) => setScreenLocked(u, locked)));
     setBusy(null);
-    const ok = results.filter((r) => r.status === "fulfilled").length;
+    const ok = fanOutReached(results);
     const label = locked ? "Đã khoá màn hình" : "Đã mở khoá";
     if (ok === targets.length) pushToast("ok", label, `${ok} máy`);
     else
-      pushToast("warn", `${label} ${ok}/${targets.length} máy`, "Máy còn lại không hỗ trợ hoặc bận.");
+      pushToast(
+        "warn",
+        `${label} ${ok}/${targets.length} máy`,
+        fanOutReasons(targets, results) ?? "Máy còn lại không hỗ trợ hoặc bận.",
+      );
   };
 
   const customWallpaper = async () => {
@@ -110,9 +117,14 @@ export function QuickActionsTool({ targets, scopeLabel }: { targets: string[]; s
     setBusy("wall-img");
     const results = await Promise.allSettled(targets.map((udid) => setWallpaper(udid, path)));
     setBusy(null);
-    const ok = results.filter((r) => r.status === "fulfilled").length;
+    const ok = fanOutReached(results);
     if (ok === targets.length) pushToast("ok", "Đã đặt ảnh nền", `${ok} máy`);
-    else pushToast("warn", `Đặt ảnh nền ${ok}/${targets.length} máy`, "Máy còn lại cần Riviu helper.");
+    else
+      pushToast(
+        "warn",
+        `Đặt ảnh nền ${ok}/${targets.length} máy`,
+        fanOutReasons(targets, results) ?? "Máy còn lại cần Riviu helper.",
+      );
   };
 
   return (

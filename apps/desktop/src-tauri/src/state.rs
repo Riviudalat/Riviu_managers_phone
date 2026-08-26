@@ -19,6 +19,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 use crate::agent_runtime::{resolve_desktop_agent_runtime_with_candidate, ResolvedAgentRuntime};
+use crate::android_tools::SidecarOrigin;
 use crate::command_error::CommandError;
 use crate::nurture_commands::NurtureRuntime;
 
@@ -587,7 +588,7 @@ impl AppState {
         let artifacts_dir = data.join("artifacts");
         std::fs::create_dir_all(&artifacts_dir)?;
 
-        let sidecar_root = resolve_sidecar_root(resource_dir.as_deref());
+        let (sidecar_root, sidecar_origin) = resolve_sidecar_root(resource_dir.as_deref());
         let credentials = CredentialStore::system()?;
         // The database gets somewhere to put secrets that is not the SQLite file. Opened after
         // the credential store precisely so it can be handed one: the AI API key used to sit in
@@ -652,7 +653,8 @@ impl AppState {
                 "yt-dlp"
             },
         ));
-        let android_tools = crate::android_tools::AndroidTools::load(&sidecar_root);
+        let android_tools =
+            crate::android_tools::AndroidTools::load_from(&sidecar_root, sidecar_origin);
         for problem in &android_tools.problems {
             log::warn!("bundled Android tools: {problem}");
         }
@@ -2038,7 +2040,7 @@ fn set_stream_state(
     }
 }
 
-fn resolve_sidecar_root(resource_dir: Option<&Path>) -> PathBuf {
+fn resolve_sidecar_root(resource_dir: Option<&Path>) -> (PathBuf, SidecarOrigin) {
     let configured = std::env::var_os("RIVIU_SIDECAR_ROOT").map(PathBuf::from);
     resolve_sidecar_root_from(
         configured,
@@ -2047,13 +2049,18 @@ fn resolve_sidecar_root(resource_dir: Option<&Path>) -> PathBuf {
     )
 }
 
+/// Where the sidecars are, **and which of the three worlds we are in.**
+///
+/// The origin used to be computed here and discarded, which is why a packaged build with an
+/// empty bundle looked exactly like a developer checkout to everything downstream. See
+/// [`SidecarOrigin`].
 fn resolve_sidecar_root_from(
     configured: Option<PathBuf>,
     resource_dir: Option<&Path>,
     manifest_dir: &Path,
-) -> PathBuf {
+) -> (PathBuf, SidecarOrigin) {
     if let Some(configured) = configured {
-        return configured;
+        return (configured, SidecarOrigin::Configured);
     }
     if let Some(resource_dir) = resource_dir {
         let packaged = resource_dir.join("sidecars");
@@ -2062,15 +2069,16 @@ fn resolve_sidecar_root_from(
             .join("riviu_pmd.py")
             .is_file()
         {
-            return packaged;
+            return (packaged, SidecarOrigin::Packaged);
         }
     }
     // Dev: repo sidecars/ relative to CARGO_MANIFEST_DIR (apps/desktop/src-tauri)
-    manifest_dir
+    let repo = manifest_dir
         .join("../../..")
         .join("sidecars")
         .canonicalize()
-        .unwrap_or_else(|_| manifest_dir.join("../../../sidecars"))
+        .unwrap_or_else(|_| manifest_dir.join("../../../sidecars"));
+    (repo, SidecarOrigin::RepoCheckout)
 }
 
 #[cfg(test)]
@@ -2706,7 +2714,7 @@ mod tests {
         std::fs::write(pmd_dir.join("riviu_pmd.py"), b"# fixture\n")
             .expect("write packaged sidecar fixture");
 
-        let actual = resolve_sidecar_root_from(
+        let (actual, origin) = resolve_sidecar_root_from(
             None,
             Some(&resource_dir),
             Path::new(env!("CARGO_MANIFEST_DIR")),
@@ -2714,6 +2722,12 @@ mod tests {
         std::fs::remove_dir_all(&resource_dir).expect("remove packaged sidecar fixture");
 
         assert_eq!(actual, packaged_sidecars);
+        // **The origin, not just the path.** This is the fact that decides whether a missing
+        // file is a broken installation or an ordinary checkout, and it used to be computed
+        // here and thrown away -- so a shipped bundle with nothing in it looked exactly like a
+        // developer machine to everything downstream, and the banner meant to report it had
+        // nothing to report.
+        assert_eq!(origin, SidecarOrigin::Packaged);
     }
 
     #[test]
@@ -2729,9 +2743,30 @@ mod tests {
             .canonicalize()
             .expect("repo sidecars directory");
 
-        let actual = resolve_sidecar_root_from(None, Some(&missing_resource_dir), manifest_dir);
+        let (actual, origin) =
+            resolve_sidecar_root_from(None, Some(&missing_resource_dir), manifest_dir);
 
         assert_eq!(actual, expected);
+        assert_eq!(
+            origin,
+            SidecarOrigin::RepoCheckout,
+            "a checkout must stay quiet about binaries it was never asked to fetch"
+        );
+    }
+
+    /// `RIVIU_SIDECAR_ROOT` is somebody pointing at a tree on purpose, so it is held to the
+    /// same standard as a packaged one: what is missing there is worth saying.
+    #[test]
+    fn an_explicitly_configured_root_is_expected_to_be_complete() {
+        let (actual, origin) = resolve_sidecar_root_from(
+            Some(PathBuf::from("/somewhere/on/purpose")),
+            None,
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+        );
+        assert_eq!(actual, PathBuf::from("/somewhere/on/purpose"));
+        assert_eq!(origin, SidecarOrigin::Configured);
+        assert!(origin.expects_a_complete_bundle());
+        assert!(!SidecarOrigin::RepoCheckout.expects_a_complete_bundle());
     }
 
     /// **The three-part gate for the bug that shipped this feature inert.**

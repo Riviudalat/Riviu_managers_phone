@@ -68,6 +68,36 @@ describe("error reporting", () => {
     ).toEqual([]);
   });
 
+  /**
+   * **A rejection reached by `.reason` is a caught value too, and this gate could not see it.**
+   *
+   * `Promise.allSettled` hands failures back as `{ status: "rejected", reason }` — never through
+   * a `catch` binding, so `caughtBindings` finds nothing and `String(r.reason)` sailed past. Four
+   * live instances were sitting in `RootTool.tsx` the whole time this gate was green: the log
+   * panel an operator reads after a factory reset, an identity change or a root shell across
+   * twenty phones printed `[object Object]` for every phone that failed.
+   *
+   * `.reason` only exists on a settled result, so the shape needs no binding analysis at all:
+   * `String(anything.reason)` is this bug, always. That makes it the *third* form this class has
+   * taken — first a variable name, then a name the sweep did not think of, now a property
+   * access — and each time the lesson has been the same: **match the shape, and widen what the
+   * scan can see.**
+   */
+  it("never stringifies a settled rejection either", () => {
+    const offenders: string[] = [];
+    for (const [path, raw] of Object.entries(sources)) {
+      if (EXEMPT.has(path)) continue;
+      for (const match of code(raw).matchAll(/String\(\s*([A-Za-z_$][\w$.]*)\.reason\s*\)/g)) {
+        offenders.push(`${path}: String(${match[1]}.reason)`);
+      }
+    }
+    expect(
+      offenders,
+      `use describeError() — a rejection is an object, and String() on it prints ` +
+        `[object Object]:\n${offenders.join("\n")}`,
+    ).toEqual([]);
+  });
+
   it("scanned a believable number of files", () => {
     // A glob that silently matches nothing would make the assertion above vacuous — the failure
     // mode of every source-scanning test.

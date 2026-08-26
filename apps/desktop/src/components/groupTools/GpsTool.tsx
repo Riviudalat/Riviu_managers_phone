@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { setMockLocation, stopMockLocation } from "../../api";
 import { pushToast } from "../../toastStore";
+import { fanOutReached, fanOutReasons } from "../../fanout";
 
 export function GpsTool({ targets, scopeLabel }: { targets: string[]; scopeLabel: string }) {
   const [coords, setCoords] = useState("");
@@ -30,22 +31,38 @@ export function GpsTool({ targets, scopeLabel }: { targets: string[]; scopeLabel
     setBusy(true);
     const results = await Promise.allSettled(targets.map((u) => setMockLocation(u, c.lat, c.lng)));
     setBusy(false);
-    const ok = results.filter((r) => r.status === "fulfilled").length;
+    const ok = fanOutReached(results);
     if (ok === targets.length) pushToast("ok", "Đã đặt vị trí", `${ok} máy`);
     else
       pushToast(
         "warn",
         `Đặt vị trí ${ok}/${targets.length} máy`,
-        "Máy còn lại cần Riviu helper + quyền mock-location.",
+        // Was a fixed guess about the helper and mock-location permission. Often right, and
+        // when it was wrong it hid the sentence the phone actually sent back.
+        fanOutReasons(targets, results) ??
+          "Máy còn lại cần Riviu helper + quyền mock-location.",
       );
   };
 
   const stop = async () => {
     if (!targets.length) return;
     setBusy(true);
-    await Promise.allSettled(targets.map((u) => stopMockLocation(u)));
+    const results = await Promise.allSettled(targets.map((u) => stopMockLocation(u)));
     setBusy(false);
-    pushToast("ok", "Đã tắt giả lập vị trí", `${targets.length} máy`);
+    // **This used to claim every phone, unconditionally.** The results were discarded and the
+    // toast said "Đã tắt giả lập vị trí — N máy" whether any of them had answered or not, which
+    // leaves an operator believing they have taken a fake location off phones that still carry
+    // one. That is the one shape of report worse than no report.
+    const ok = fanOutReached(results);
+    if (ok === targets.length) {
+      pushToast("ok", "Đã tắt giả lập vị trí", `${ok} máy`);
+    } else {
+      pushToast(
+        "warn",
+        `Tắt giả lập vị trí ${ok}/${targets.length} máy`,
+        fanOutReasons(targets, results) ?? "Máy còn lại không trả lời.",
+      );
+    }
   };
 
   return (

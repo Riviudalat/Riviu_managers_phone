@@ -55,6 +55,36 @@ struct ManifestFile {
     role: Option<String>,
 }
 
+/// Where the sidecar tree came from, which is what decides whether a missing file is a fault.
+///
+/// **The same absence means opposite things in the two cases, and the loader used to treat them
+/// alike.** A source checkout that has not fetched the binaries is an ordinary developer state:
+/// putting a red banner in front of it would train everyone to ignore the banner. An *installed*
+/// build whose bundle has no manifest is broken -- the installer shipped without the files it is
+/// supposed to carry -- and that is exactly the state that produces "the app sees my phone but
+/// nothing works", with nothing anywhere saying why.
+///
+/// The signal already existed and was thrown away: `resolve_sidecar_root_from` returns the
+/// packaged path only when it can see a real sidecar inside the resource directory, and falls
+/// back to the repo tree otherwise. It knew which world it was in and did not pass it on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidecarOrigin {
+    /// `RIVIU_SIDECAR_ROOT` named it. Someone pointed us here deliberately, so what is missing
+    /// is worth saying.
+    Configured,
+    /// Inside the installed bundle. Anything absent here is a broken installation.
+    Packaged,
+    /// The repository's own `sidecars/`, running from source. Absent binaries are normal.
+    RepoCheckout,
+}
+
+impl SidecarOrigin {
+    /// Whether this tree is one that is *supposed* to be complete.
+    pub fn expects_a_complete_bundle(self) -> bool {
+        matches!(self, Self::Configured | Self::Packaged)
+    }
+}
+
 /// What the installer actually provided, after checking.
 #[derive(Debug, Default, Clone)]
 pub struct AndroidTools {
@@ -96,9 +126,10 @@ const MANIFEST_NAME: &str = "android-tools-manifest.json";
 impl AndroidTools {
     /// Load and verify the tools under `<sidecar_root>/android`.
     ///
-    /// Never returns an error. Absent is a normal state: a source checkout that has
-    /// not fetched the binaries, or any non-Windows host for `adb`.
-    pub fn load(sidecar_root: &Path) -> Self {
+    /// Never returns an error, and **what counts as an error depends on `origin`**: a checkout
+    /// that has not fetched the binaries is an ordinary state, an installed bundle missing them
+    /// is a fault. See [`SidecarOrigin`].
+    pub fn load_from(sidecar_root: &Path, origin: SidecarOrigin) -> Self {
         let dir = sidecar_root.join("android");
         let manifest_path = dir.join(MANIFEST_NAME);
         let mut tools = Self::default();
@@ -106,14 +137,27 @@ impl AndroidTools {
         let bytes = match std::fs::read(&manifest_path) {
             Ok(bytes) => bytes,
             Err(error) => {
-                // Not a problem worth surfacing on its own: a source checkout without
-                // the bundled tools is a normal developer state, and the operator-facing
-                // consequence (no adb, no stream) is reported by the code that needs
-                // them. Recording it would put a red line in front of every developer.
-                log::debug!(
-                    "no bundled Android tools at {}: {error}",
-                    manifest_path.display()
-                );
+                if origin.expects_a_complete_bundle() {
+                    // **An installed build with no manifest is the loudest case, and it used to
+                    // be the quietest.** `problems` stayed empty, so the banner that exists to
+                    // report exactly this had nothing to show, and the operator got a phone
+                    // that listed and would not drive -- with no line anywhere naming a cause.
+                    tools.problems.push(format!(
+                        "bản cài thiếu {MANIFEST_NAME} ở {} ({error}) — không có adb, minicap, \
+                         scrcpy hay helper nào được đóng gói, nên nhận được máy mà không điều \
+                         khiển được. Cài lại bản dựng.",
+                        manifest_path.display()
+                    ));
+                } else {
+                    // A source checkout without the bundled tools is a normal developer state,
+                    // and the operator-facing consequence (no adb, no stream) is reported by the
+                    // code that needs them. Recording it would put a red line in front of every
+                    // developer, every run.
+                    log::debug!(
+                        "no bundled Android tools at {}: {error}",
+                        manifest_path.display()
+                    );
+                }
                 return tools;
             }
         };
@@ -175,9 +219,71 @@ impl AndroidTools {
             }
         }
 
+        // **And then say what did not arrive.** Every field above is an `Option`, and a role
+        // whose entry is missing from the manifest -- or whose file failed verification -- simply
+        // left its field `None`. The app then behaved as though that capability did not exist:
+        // no tap, or no stream, or no clipboard, silently and per-capability. A bundle that is
+        // supposed to be complete has to be told it is not.
+        if origin.expects_a_complete_bundle() {
+            for (role, what) in REQUIRED_ROLES {
+                if tools.resolved(role) {
+                    continue;
+                }
+                tools.problems.push(format!(
+                    "bản cài thiếu `{role}` — mất {what}. Cài lại bản dựng."
+                ));
+            }
+            #[cfg(windows)]
+            if tools.adb_path.is_none() {
+                tools.problems.push(
+                    "bản cài thiếu `adbExe` — không nhận được máy nào qua USB. Cài lại bản dựng."
+                        .to_string(),
+                );
+            }
+        }
+
         tools
     }
+
+    /// Whether one manifest role ended up with a usable file.
+    ///
+    /// Keyed by the manifest's own role name so [`REQUIRED_ROLES`] reads as one table rather
+    /// than as a list that has to be kept in step with a match arm somewhere else.
+    fn resolved(&self, role: &str) -> bool {
+        match role {
+            "adbExe" => self.adb_path.is_some(),
+            "minicapApk" => self.minicap_apk.is_some(),
+            "scrcpyServer" => self.scrcpy_server.is_some(),
+            "riviuAgentApk" => self.riviu_agent_apk.is_some(),
+            "agentServerApk" => self.agent_server_apk.is_some(),
+            "agentTestApk" => self.agent_test_apk.is_some(),
+            // An unknown role cannot be missing: this build does not use it.
+            _ => true,
+        }
+    }
 }
+
+/// Every role a complete bundle carries, with the field it fills and why it matters.
+///
+/// `adbExe` is deliberately absent: it is Windows-only by construction (`win-x86_64/adb.exe`),
+/// and the loader already skips it elsewhere. Everything here is `noarch/`, so on any platform a
+/// complete bundle has all five.
+const REQUIRED_ROLES: &[(&str, &str)] = &[
+    ("minicapApk", "ảnh tile (minicap)"),
+    ("scrcpyServer", "phát hình H.264 (scrcpy-server)"),
+    (
+        "riviuAgentApk",
+        "clipboard, ảnh, hình nền, GPS (helper Riviu)",
+    ),
+    (
+        "agentServerApk",
+        "điều khiển: chạm, gõ chữ, đọc cây (uiautomator2 server)",
+    ),
+    (
+        "agentTestApk",
+        "nửa androidTest của uiautomator2 — thiếu nó là mọi cú chạm bị từ chối",
+    ),
+];
 
 /// Join a manifest-declared relative path onto the bundle directory, or refuse.
 ///
@@ -291,6 +397,12 @@ mod tests {
         dir.to_path_buf()
     }
 
+    /// `load_from` with the origin these tests are all about: a source checkout, where an
+    /// absent binary is a normal state rather than a broken install.
+    fn load_checkout(root: &Path) -> AndroidTools {
+        AndroidTools::load_from(root, SidecarOrigin::RepoCheckout)
+    }
+
     fn sha_of(bytes: &[u8]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(bytes);
@@ -304,10 +416,172 @@ mod tests {
         dir
     }
 
+    /// **An installed build with no bundle at all was the loudest case and the quietest code.**
+    ///
+    /// The same absence in a checkout is normal, so the loader treated both alike: `problems`
+    /// stayed empty, and the banner written to report exactly this had nothing to show. What the
+    /// operator got instead was a phone that listed and would not drive, with no line anywhere
+    /// naming a cause -- which is the report this whole pass came from.
+    #[test]
+    fn an_installed_build_with_no_bundle_says_so() {
+        let root = scratch("packaged-absent");
+        let tools = AndroidTools::load_from(&root, SidecarOrigin::Packaged);
+
+        assert!(
+            !tools.problems.is_empty(),
+            "a packaged build with no manifest has to report it"
+        );
+        let said = tools.problems.join(" ");
+        assert!(said.contains(MANIFEST_NAME), "{said}");
+        assert!(
+            said.contains("Cài lại"),
+            "and it has to say what to do about it: {said}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The same tree, read as a checkout, stays silent. Both halves of the distinction matter:
+    /// a banner in front of every developer, every run, is a banner nobody reads.
+    #[test]
+    fn the_same_absence_in_a_checkout_stays_silent() {
+        let root = scratch("checkout-absent");
+        let tools = AndroidTools::load_from(&root, SidecarOrigin::RepoCheckout);
+        assert!(tools.problems.is_empty(), "{:?}", tools.problems);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// **A role that never resolved has to be named, per role.**
+    ///
+    /// Every tool is an `Option`, and a role missing from the manifest -- or one whose file
+    /// failed verification -- simply left its field `None`. The app then behaved as though that
+    /// capability did not exist: no tap, or no stream, or no clipboard, silently and one
+    /// capability at a time. `good_bundle` pins only three of the six roles, so this fixture is
+    /// exactly the shape of a bundle that shipped short.
+    #[test]
+    fn an_installed_build_missing_a_role_names_that_role_and_what_it_costs() {
+        let root = scratch("packaged-short");
+        let tools = AndroidTools::load_from(&good_bundle(&root), SidecarOrigin::Packaged);
+
+        let said = tools.problems.join(" | ");
+        // The three `good_bundle` does carry must not be complained about.
+        assert!(!said.contains("minicapApk"), "{said}");
+        assert!(!said.contains("scrcpyServer"), "{said}");
+        // The three it does not carry must each be named.
+        for role in ["riviuAgentApk", "agentServerApk", "agentTestApk"] {
+            assert!(
+                said.contains(role),
+                "{role} was missing and unreported: {said}"
+            );
+        }
+        // And the report says what the operator loses, not just a role name.
+        assert!(
+            said.contains("chạm") || said.contains("điều khiển"),
+            "a role name alone does not tell an operator anything: {said}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A complete bundle read as packaged reports nothing.
+    ///
+    /// The guard against the opposite failure: a completeness check that always complains is a
+    /// check nobody can act on. `REQUIRED_ROLES` is five `noarch/` entries, so a fixture that
+    /// pins all five is clean on every platform.
+    #[test]
+    fn a_complete_installed_bundle_reports_nothing() {
+        let root = scratch("packaged-complete");
+        let tools = AndroidTools::load_from(&complete_bundle(&root), SidecarOrigin::Packaged);
+        assert!(
+            tools.problems.is_empty(),
+            "a complete bundle must be silent, got {:?}",
+            tools.problems
+        );
+        assert!(tools.agent_server_apk.is_some());
+        assert!(tools.agent_test_apk.is_some());
+        assert!(tools.riviu_agent_apk.is_some());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Every role this build requires, as a fixture. Written from `REQUIRED_ROLES` so the two
+    /// cannot drift apart without a compile error somewhere.
+    fn complete_bundle(dir: &Path) -> PathBuf {
+        let android = dir.join("android");
+        std::fs::create_dir_all(android.join("noarch")).expect("noarch");
+        std::fs::create_dir_all(android.join("win-x86_64")).expect("win dir");
+
+        let mut files = Vec::new();
+        for (role, name) in [
+            ("minicapApk", "noarch/minicap.apk"),
+            ("scrcpyServer", "noarch/scrcpy-server"),
+            ("riviuAgentApk", "noarch/riviu-agent.apk"),
+            ("agentServerApk", "noarch/appium-uiautomator2-server.apk"),
+            ("agentTestApk", "noarch/appium-uiautomator2-server-test.apk"),
+            ("adbExe", "win-x86_64/adb.exe"),
+        ] {
+            // Distinct bytes per file, so a digest mix-up between two of them would fail rather
+            // than pass by coincidence.
+            let bytes = role.as_bytes().to_vec();
+            std::fs::write(android.join(name), &bytes).expect("fixture file");
+            files.push(serde_json::json!({
+                "path": name,
+                "bytes": bytes.len(),
+                "sha256": sha_of(&bytes),
+                "role": role
+            }));
+        }
+
+        std::fs::write(
+            android.join(MANIFEST_NAME),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "manifestVersion": 1,
+                "files": files
+            }))
+            .expect("manifest json"),
+        )
+        .expect("manifest");
+        dir.to_path_buf()
+    }
+
+    /// **The required-role table has to cover what the app actually reads.**
+    ///
+    /// A completeness check is only as complete as its own list: a seventh tool added to
+    /// `AndroidTools` and left out of `REQUIRED_ROLES` would go missing exactly as silently as
+    /// before. Counted here against the struct's own fields.
+    #[test]
+    fn every_bundled_tool_is_either_required_or_windows_only() {
+        // adb is the one deliberate exclusion, because it is `win-x86_64/` by construction.
+        let expected = [
+            "minicapApk",
+            "scrcpyServer",
+            "riviuAgentApk",
+            "agentServerApk",
+            "agentTestApk",
+        ];
+        let listed: Vec<&str> = REQUIRED_ROLES.iter().map(|(role, _)| *role).collect();
+        assert_eq!(listed, expected);
+
+        let source = include_str!("android_tools.rs");
+        let fields = source
+            .split("pub struct AndroidTools {")
+            .nth(1)
+            .expect("the struct is here")
+            .split("pub problems")
+            .next()
+            .expect("problems ends the tool list")
+            .matches("pub ")
+            .count();
+        assert_eq!(
+            fields,
+            expected.len() + 1,
+            "AndroidTools holds {fields} tools but REQUIRED_ROLES lists {} plus adb; a tool \
+             left out of that table goes missing as silently as before",
+            expected.len()
+        );
+    }
+
     #[test]
     fn a_matching_bundle_resolves_both_tools_and_reports_nothing() {
         let root = scratch("good");
-        let tools = AndroidTools::load(&good_bundle(&root));
+        let tools = load_checkout(&good_bundle(&root));
         assert!(
             tools.problems.is_empty(),
             "expected no problems, got {:?}",
@@ -327,7 +601,7 @@ mod tests {
     #[test]
     fn no_bundle_at_all_is_silent_because_a_source_checkout_is_normal() {
         let root = scratch("absent");
-        let tools = AndroidTools::load(&root);
+        let tools = load_checkout(&root);
         assert!(tools.problems.is_empty());
         assert!(tools.adb_path.is_none());
         assert!(tools.minicap_apk.is_none());
@@ -344,7 +618,7 @@ mod tests {
         let bundle = good_bundle(&root);
         std::fs::write(bundle.join("android/noarch/minicap.apk"), b"apk bytez").expect("rewrite");
 
-        let tools = AndroidTools::load(&bundle);
+        let tools = load_checkout(&bundle);
         assert!(
             tools.minicap_apk.is_none(),
             "a corrupt APK must not be used"
@@ -365,7 +639,7 @@ mod tests {
         let bundle = good_bundle(&root);
         std::fs::write(bundle.join("android/noarch/minicap.apk"), b"much longer").expect("rewrite");
 
-        let tools = AndroidTools::load(&bundle);
+        let tools = load_checkout(&bundle);
         assert!(tools.minicap_apk.is_none());
         let problem = &tools.problems[0];
         assert!(problem.contains("kích thước"), "{problem}");
@@ -381,7 +655,7 @@ mod tests {
         let bundle = good_bundle(&root);
         std::fs::write(bundle.join("android/noarch/minicap.apk"), b"corrupted").expect("rewrite");
 
-        let tools = AndroidTools::load(&bundle);
+        let tools = load_checkout(&bundle);
         assert!(tools.minicap_apk.is_none());
         assert_eq!(tools.problems.len(), 1);
         #[cfg(windows)]
@@ -412,7 +686,7 @@ mod tests {
         )
         .expect("manifest");
 
-        let tools = AndroidTools::load(&root);
+        let tools = load_checkout(&root);
         assert!(tools.minicap_apk.is_none());
         assert!(
             tools.problems[0].contains("thoát ra ngoài"),
@@ -433,7 +707,7 @@ mod tests {
         )
         .expect("manifest");
 
-        let tools = AndroidTools::load(&root);
+        let tools = load_checkout(&root);
         assert!(
             tools.adb_path.is_none()
                 && tools.minicap_apk.is_none()
@@ -461,7 +735,7 @@ mod tests {
             eprintln!("sidecars/android not present, skipping");
             return;
         }
-        let tools = AndroidTools::load(&repo);
+        let tools = load_checkout(&repo);
         assert!(
             tools.problems.is_empty(),
             "the committed bundle disagrees with its manifest: {:?}",
@@ -519,7 +793,7 @@ mod tests {
         )
         .expect("manifest");
 
-        let tools = AndroidTools::load(&bundle);
+        let tools = load_checkout(&bundle);
         assert!(tools.problems.is_empty(), "{:?}", tools.problems);
         assert!(tools.minicap_apk.is_some());
         assert!(tools.scrcpy_server.is_some());
@@ -567,7 +841,7 @@ mod tests {
         )
         .expect("manifest");
 
-        let tools = AndroidTools::load(&bundle);
+        let tools = load_checkout(&bundle);
         assert!(tools.problems.is_empty(), "{:?}", tools.problems);
         assert_eq!(
             tools.riviu_agent_apk.as_deref(),
@@ -582,7 +856,7 @@ mod tests {
         let bundle = good_bundle(&root);
         std::fs::write(bundle.join("android/noarch/scrcpy-server"), b"corrupted").expect("rewrite");
 
-        let tools = AndroidTools::load(&bundle);
+        let tools = load_checkout(&bundle);
         assert!(tools.scrcpy_server.is_none());
         assert!(tools.minicap_apk.is_some());
         assert_eq!(tools.problems.len(), 1);

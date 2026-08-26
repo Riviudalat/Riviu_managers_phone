@@ -10116,3 +10116,201 @@ fmt 0 diff; `riviu-core` **773**, `riviu-android-driver` **191**, app-lib **191*
 Frontend `tsc -b` + `oxlint --deny-warnings` sạch, `vite build` sạch, **716 test / 84 file** (+13 /
 +3). `tsc -b` lại bắt đúng thứ vitest bỏ qua: một tuple khai `string | undefined` ở chỗ callback nhận
 tham số **tuỳ chọn**.
+
+## §9.119 Pha 1: hết lỗi đã biết — và bốn chỗ tôi nói quá, ghi lại cho đúng (26–27/08/2026)
+
+Pha 1 của đợt rà soát. Đặc điểm chung của gần như mọi lỗi ở đây: **app biết một điều và không nói,
+hoặc nói một điều nó không biết.** Không phải app báo lỗi — app khẳng định sai.
+
+### Trình quản lý tệp: một điều kiện quyết định ba tình huống
+
+`list_device_dir` quyết bằng `entries.is_empty() && out.exit_code != 0`. Ba lỗ:
+
+1. **ROM từ chối mà vẫn exit 0** → `is_empty()` đúng, `exit_code != 0` sai → trả danh sách rỗng →
+   trình quản lý vẽ **một thư mục rỗng**, tức khẳng định thư mục tồn tại và không có gì trong đó.
+2. **`ls -la` đọc được một phần** thì in phần đọc được rồi phàn nàn phần còn lại → `is_empty()` sai
+   → trả danh sách **bị cắt**, không gì nói là bị cắt.
+3. **ROM gộp stderr vào stdout** → `stderr` rỗng và exit 0, không nửa nào của điều kiện nổ.
+
+`classify_ls_output` thuần trả ba nhánh `Complete` / `Partial` / `Refused`, gom phàn nàn từ **cả
+hai** pipe. `Partial` lên UI qua `DeviceDirListing { entries, incomplete }` và popup hiện băng "Danh
+sách chưa đầy đủ — <máy nói gì>" mà **vẫn giữ các dòng đọc được**: một câu trả lời thiếu vẫn hơn
+không có gì. Và "không có gì để hiện" tách khỏi "ở đây không có gì" — thư mục rỗng thật vẫn nói được.
+
+### Bộ parse `ls`: hai lỗi TIỀM ẨN, và tôi đã viết như thể chúng đang xảy ra
+
+Khi không tìm được timestamp, bộ parse cũ lấy `tokens[6]` làm đầu của tên. Trên đúng một hình dạng
+dòng thì đúng — dòng không stat được, in `?` mọi cột. Trên một dòng có định dạng ngày nó không biết
+thì đó là **một cái tên bịa**: `-rw-r--r-- 1 root root 138078 Jul 11 11:16 photo.jpg` cho ra tên
+`"11 11:16 photo.jpg"`, và cái tên bịa đó đi tiếp vào `ls`, `rm -rf`, `pull`. Cùng họ: `size` đọc từ
+`tokens[4]`, đúng chỉ khi ROM in cột link-count; không có cột đó thì `tokens[4]` là **ngày**, parse
+thất bại, `unwrap_or(0)` biến mọi tệp thành **0 B**.
+
+**Cả hai đều tiềm ẩn trên fleet hôm nay.** Doc của `DeviceFileEntry` ghi rõ: hai ROM đã đo
+(23021RAAEG Android 15, SM-G955F Android 9) đều in ngày ISO và đều có cột link-count. Kế hoạch của
+tôi viết như thể chúng đang xảy ra — **sai**, và ghi lại. Sửa vẫn đáng vì cả hai **thất bại im lặng**
+và một cái có bán kính là `rm -rf`.
+
+`ls_timestamp` định vị timestamp (thêm `Mon DD HH:MM`, `Mon DD YYYY`) rồi **size lấy ở ô ngay trước
+nó** — đúng trên cả hai hình dạng cột. Và `read_ls_listing` trả thêm **dòng không đọc được**: dòng
+không có timestamp *và* không có `?` là hình dạng bộ parse không hiểu, nên nó **báo ra** chứ không
+đoán. Đó là phần thật sự đóng lớp lỗi, không phải việc thêm một định dạng ngày.
+
+### `'` trong tên tệp: sửa cái bọc nháy, không phải cái validator
+
+`validate_device_path` **cấm** mọi đường dẫn có dấu nháy đơn. Điều đó làm việc bọc nháy hiển nhiên an
+toàn, và làm `John's photo.jpg` **không thể** liệt kê, xuất hay xoá từ app. **Một tệp người vận hành
+thấy mà không chạm được không phải là một tính chất an toàn; đó là một tính năng thiếu, và nó đọc ra
+như một lỗi.**
+
+`quote_device_path` nay phát escape POSIX (`'` → `'\''`). Kiểm trước khi bỏ lệnh cấm: cả 4 chỗ dựng
+lệnh shell đều đi qua bộ bọc nháy; 2 chỗ còn lại là `pull`/`push` dùng argv nên không qua shell.
+
+Chứng minh bằng **vòng tròn**: test tự viết một bộ **gỡ** nháy mô phỏng cách `sh` dựng MỘT từ, rồi
+khẳng định mọi đường dẫn quay ra đúng như đi vào — kể cả `/sdcard/'; rm -rf /sdcard; echo '`, nay
+được validator cho qua và phải trở lại đúng là **một tên tệp**. **Lý do không assert literal:**
+`'/sdcard/John'\''s photo.jpg'` là một khẳng định không ai đọc được, và một khẳng định không đọc được
+là cách một khẳng định sai sống sót qua review.
+
+### Đua phản hồi cũ: hai state không ai giữ cho khớp
+
+`DeviceFilesPopup` giữ `path` và `entries` riêng. Hai lượt listing cùng bay — bấm vào thư mục rồi bấm
+Lên trước khi nó trả về — thì lượt **chậm hơn** về sau và các dòng của nó được vẽ dưới đường dẫn mới.
+Tên tệp trong hai mươi thư mục trên một máy là giống nhau, nên một lệnh xoá nhắm vào thứ đang thấy có
+thể rơi vào chỗ khác. Gộp thành **một** state mang theo đường dẫn của chính nó, render chỉ khi
+`listing.path === path`, cộng một ref giữ đường dẫn được hỏi gần nhất. Tình trạng lệch giờ **không
+biểu đạt được** chứ không phải "khó xảy ra".
+
+### adb chỉ có MỘT tầng hàng đợi — và khảo sát trong repo đã chỉ đúng tên
+
+`adb.rs` có duy nhất một `Semaphore(12)` toàn cục. Hai hệ quả khác loại nhau:
+
+- `pull`/`push` truyền timeout **300 s**, permit giữ suốt cả lệnh → **12 lượt export giữ cả 12 suất
+  tới năm phút**, và mọi lời gọi adb khác xếp hàng sau: probe, screenshot, `ensure_stream`, mọi hành
+  động nuôi và tương tác, cả lượt quét roster lúc khởi động. **Trại máy trông như đứng khi chẳng có
+  gì hỏng.** Comment của chính `adb.rs` đã lập luận đúng chuyện này cho scrcpy rồi **bỏ sót
+  transfer** — cùng lập luận, 300 s thay vì ∞.
+- Không tuần tự theo máy nghĩa là **hai lệnh adb tới cùng một điện thoại xen được nhau**. Không phải
+  chuyện thông lượng — chuyện đúng/sai.
+
+`docs/re/genfarmer/README.md` §12.1 mô tả đúng hình dạng cần có (mỗi serial một hàng đợi tuần tự ×1
+rồi mới vào trần toàn cục) và **viết thẳng rằng Riviu thiếu nửa đầu**. Khảo sát đó đã ở trong repo từ
+17/08. **Bài học: một khảo sát không ai đọc lại thì bằng không** — nó đã nêu tên lỗi này mười ngày
+trước khi tôi đo lại nó từ đầu.
+
+Nay ba tầng, thứ tự cố định: **máy → trần con transfer → trần chung**. Cụ thể nhất trước; lấy suất
+chung trước rồi mới chờ hàng đợi của máy sẽ khiến nhiều lời gọi đứng sau một máy bận **ngồi trên các
+suất chung mà không làm gì** — đúng cái nghẽn nó phải chặn. Thứ tự cố định cũng là điều làm ba tầng
+không deadlock được. `ADB_MAX_TRANSFERS = 4` là **trần con TRONG trần chung, không phải làn thứ hai
+bên cạnh**: bảng số đo nói fleet ngừng nhanh thêm sau 12 process, nên một làn song song sẽ đẩy tổng
+vượt con số đã đo.
+
+### Không có chỗ nào chờ vô hạn (genfarmer §12.3, và nó là nguyên tắc tôi thiếu)
+
+- `wda.rs:370` `.build().unwrap_or_else(|_| Client::new())`. Audit đọc nó là "lặng lẽ bỏ mọi timeout".
+  **Nói quá.** `Client::new()` chính là `builder().build().expect(..)`, nên trong đúng những điều kiện
+  làm `build()` của ta thất bại — TLS không khởi tạo được, `HTTP_PROXY` méo trong môi trường, mà
+  builder mặc định cũng đọc — thì nhánh dự phòng **panic**, với thông báo của reqwest không nhắc gì
+  tới WDA. Với `panic = "abort"` thì nó giết cả app, lúc dựng driver. Nó **không** phải một suy giảm
+  êm ái như nó trông; nó là một cú sập khoác áo dự phòng. Kết luận không đổi: giữ deadline, vì
+  deadline mới là thứ tính khả dụng của một máy phụ thuộc vào — một request WDA treo giữ lease + suất
+  stream + một suất capacity tới khi restart app. Cộng một cổng **cấm `Client::new()`** (constructor
+  duy nhất trong cả workspace không có timeout request); cổng đó lúc đầu **tự đỏ vì đọc chính mình**,
+  nên nó cắt ở `#[cfg(test)]` như `lib.rs` đã làm.
+- `serve_client` **không đọc từ WebSocket bao giờ** — nó chạy hoàn toàn theo các kênh thiết bị và
+  roster — nên timeout *đọc* là sai chỗ. Cái treo thật là backpressure: một client thôi rút dữ liệu
+  làm buffer gửi đầy, `flush` chặn, task chờ mãi trong khi vẫn giữ các receiver broadcast, các
+  forwarder và chỗ của nó trong hub. `CLIENT_WRITE_STALL = 30s`, có test ghim rằng nó phải **cách
+  xa** `VIEW_PAINT_STALL` (12 s): hai số gần nhau thì socket bị bỏ vì đúng cái tình trạng watchdog
+  đang sửa.
+- Hai vòng accept trả lời lỗi bằng một `continue` trơn — đúng cho lỗi thoáng qua, **thảm hoạ cho lỗi
+  dai dẳng**: `EMFILE` lỗi y như vậy ngay lập tức, nên vòng lặp thành cú quay chặt đốt một core và
+  ghi một dòng mỗi vòng. `accept_loop.rs` thuần: lần đầu retry **ngay** (bắt một máy khách thật chờ
+  10 ms vì một peer đã biến mất là trả giá cho không gì cả), rồi nhân đôi tới trần 1 s; log thưa dần
+  ba-lần-đầu-rồi-mỗi-100. Một nghìn lần lỗi cho dưới 20 dòng.
+
+### `registry.rs` — nguồn sự thật của danh sách fleet, 69 dòng, 0 test
+
+`set_status` cho một udid không có trong roster **không làm gì: không `else`, không log, không giá
+trị trả về.** Cả đó với tay: `upsert_many` thay **cả** roster mỗi lần quét, nên một task driver kết
+thúc ngay sau một luợt quét đang giữ udid mà roster vừa bỏ. Cập nhật biến mất, máy giữ nguyên trạng
+thái cũ — `ready` sau khi đã lỗi, hoặc `error` sau khi đã hồi phục. **Đó đúng là hình dạng "app nhận
+máy mà điều khiển không được", đọc từ đầu kia.** Và phép đọc-sửa-ghi **không nguyên tử**: `get()` lấy
+read lock rồi nhả, sửa bản clone, rồi `upsert()` lấy write lock.
+
+### Bản cài thiếu file: trường hợp ồn ào nhất, đoạn code im lặng nhất
+
+`AndroidTools::load` coi "không có manifest" là chuyện thường. Với source checkout thì đúng — banner
+đỏ trước mặt mọi developer mỗi lần chạy là cách chắc chắn nhất để banner đó không ai đọc. Nhưng **một
+bản đã cài mà bundle không có manifest thì hỏng**, và cả hai đi cùng một nhánh nên `problems` rỗng và
+cái banner viết ra để báo đúng chuyện này **không có gì để báo**.
+
+Tín hiệu **đã có sẵn và bị vứt đi**: `resolve_sidecar_root_from` chỉ trả đường packaged khi thấy
+sidecar thật trong resource dir. Nay có `SidecarOrigin`. Kèm nửa thứ hai: `load` **chưa bao giờ kiểm
+sáu vai có phân giải đủ** — mỗi tool là một `Option`, nên một vai thiếu chỉ để lại `None` và app hành
+xử như thể năng lực đó không tồn tại, **im lặng và từng năng lực một**. `REQUIRED_ROLES` nêu tên từng
+vai kèm cái người vận hành mất, và một test đếm nó **so với chính các field của struct**.
+
+### `String(r.reason)`: lớp lỗi này quay lại lần thứ BA, ở hình dạng cổng không thấy
+
+Cổng `errorReporting.test.ts` soi binding của `catch`/`.catch`. `Promise.allSettled` **không bao giờ**
+tạo binding như thế — nó trả `{ status: "rejected", reason }`. **Ba chỗ sống** trong `RootTool.tsx`
+suốt thời gian cổng đó xanh: bảng log người vận hành đọc sau một lượt khôi phục gốc, đổi định danh
+hay root shell trên hai mươi máy in `[object Object]` cho mọi máy thất bại.
+
+Mở rộng cổng **trước**, để nó tự đỏ và tự chứng minh — nó bắt đúng ba chỗ ngay lần chạy đầu. `.reason`
+chỉ tồn tại trên settled result, nên không cần phân tích binding: `String(<gì đó>.reason)` **luôn** là
+lỗi này.
+
+Hình dạng thứ nhất là tên biến (§9.91), thứ hai là một tên đợt quét không nghĩ tới (§9.96), thứ ba là
+một property access. **Ba lần, một bài học: quét theo hình dạng, và mở rộng cái mà đợt quét thấy
+được.** Phạm vi quét cũng là một phần của cổng — §9.118 đã gặp đúng chuyện đó với `index.html`.
+
+### Đoán hộ điện thoại — và ở đây tôi nói quá lần thứ tư
+
+Kế hoạch tôi viết: "11 chỗ hành động fleet chạm zero máy mà không nói gì". Đọc từng chỗ thì **sai**:
+hầu hết **có** báo `ok/total`. Lỗi thật hẹp hơn nhưng cụ thể hơn:
+
+- Dòng chi tiết là một **phỏng đoán** ("Máy còn lại cần Riviu helper", "chưa root") **chiếm chỗ của
+  câu backend thật sự trả về**. Nói "3/20, máy còn lại chưa root" là họ đi kiểm Magisk; nói "máy 4,
+  11, 19 — DeviceBusy: đang nuôi" là họ đi dừng chiến dịch.
+- `GpsTool.stop` toast "Đã tắt giả lập vị trí — N máy" **vô điều kiện**, kết quả bị vứt. Nó để người
+  vận hành tin rằng mình đã bỏ vị trí giả khỏi những máy vẫn đang mang nó. **Hình dạng báo cáo duy
+  nhất tệ hơn không báo cáo.**
+- `RootTool.probe` đếm `fulfilled && value`, nên **một máy không trả lời được đếm giống một máy trả
+  lời "chưa root"** — "3/20 đã root" có thể là 17 chưa root hoặc 17 lỗi, và hai cái đó sửa khác nhau
+  hoàn toàn.
+
+`fanout.ts` làm đúng việc `groupInputOutcome` đã làm cho `group_input` — cùng cách gom, cùng cách gọi
+tên máy bằng **sáu ký tự cuối** (đúng cái tile hiện) — nhưng đọc được `Promise.allSettled`. Trả
+`null` khi không có gì thất bại, để caller giữ lời của chính nó bằng `??`.
+
+### "Something else may be holding UiAutomation" — giả thuyết đúng, chưa bao giờ kiểm
+
+Đường hồi phục khi agent trả lời `/status` mà không đọc được cây đã nêu đúng nghi phạm và để người
+vận hành đi tìm một tool tự động **không tên**. Một `pm list instrumentation` là đủ để chốt.
+`foreign_instrumentations` thuần (4 test: ROM không in `(target=..)`, dòng không phải entry, trùng
+lặp, output rỗng vì máy từ chối). Nay nêu **tên gói**, và khi máy sạch thì **nói ra điều đó** — loại
+trừ nguyên nhân khả dĩ nhất cũng là thông tin, và đó là thứ giữ người ta khỏi mất một giờ vào nó.
+
+Android chỉ cho **một** UiAutomator giữ accessibility, nên đây không phải chuyện chung sống: nó làm
+mọi cú chạm và mọi lượt đọc cây thất bại trên máy đó, vĩnh viễn. genfarmer §9 cảnh báo đúng chuyện
+này từ phía bên kia.
+
+### Hai lần tôi làm CI đỏ, cùng một hình dạng
+
+1. `crashPath.test.ts` dùng `node:fs`, mà `tsconfig.app.json` đặt `types: ["vite/client"]` và
+   `@types/node` không được cài. Tôi chạy vitest sau khi tạo file đó nhưng **không chạy lại `tsc -b`**.
+2. Tôi chạy `cargo fmt` rồi commit một đợt, sau đó sửa tay `registry.rs` và commit **mà không chạy
+   lại fmt**.
+
+**Cả hai là "đã chạy cổng, rồi sửa thêm một file".** Cổng phải chạy trước **mỗi** commit, không phải
+mỗi đợt — và cách duy nhất để điều đó xảy ra là một lệnh chứ không phải một thói quen. Ba cổng CI
+chưa bao giờ chạy được ở máy này (clippy/test toàn workspace `--locked`) đều **xanh** ở lần CI đầu,
+nên Smart App Control không che giấu gì cả.
+
+### Cổng
+
+`riviu-core` **778**, `riviu-android-driver` **212**, `riviu-ios-driver` **145**, app-lib **203**,
+`riviu-script-engine` 29, `riviu-signing` 8; clippy 0 sáu crate; fmt 0 diff. Frontend `tsc -b` +
+`oxlint --deny-warnings` sạch, **733 test / 86 file**, `vite build` sạch.
