@@ -318,7 +318,11 @@ pub fn set_bundled_ytdlp(path: PathBuf) {
 /// rebuild — which matters more here than for the other sidecars, because TikTok breaks
 /// extractors on its own schedule and the fix is always "get a newer yt-dlp".
 pub fn resolve_ytdlp() -> Result<PathBuf, WebLookupError> {
-    let exe_name = if cfg!(windows) { "yt-dlp.exe" } else { "yt-dlp" };
+    let exe_name = if cfg!(windows) {
+        "yt-dlp.exe"
+    } else {
+        "yt-dlp"
+    };
 
     if let Ok(custom) = std::env::var("RIVIU_YTDLP_PATH") {
         let path = PathBuf::from(&custom);
@@ -423,8 +427,9 @@ struct MemoEntry {
 /// inside any measured expiry.
 const LOOKUP_MEMO_TTL: Duration = Duration::from_secs(300);
 
-static LOOKUP_MEMO: std::sync::LazyLock<tokio::sync::Mutex<std::collections::HashMap<String, MemoEntry>>> =
-    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
+static LOOKUP_MEMO: std::sync::LazyLock<
+    tokio::sync::Mutex<std::collections::HashMap<String, MemoEntry>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
 
 async fn fetch_post_context_uncached(normalized: &str) -> Result<PostWebContext, WebLookupError> {
     let binary = resolve_ytdlp()?;
@@ -455,9 +460,9 @@ async fn fetch_post_context_uncached(normalized: &str) -> Result<PostWebContext,
 /// files wherever the app happened to be launched from.
 async fn run_lookup(binary: &PathBuf, normalized: &str) -> Result<PostWebContext, WebLookupError> {
     let scratch = std::env::temp_dir().join(format!("riviu-tiktok-web-{}", uuid::Uuid::new_v4()));
-    tokio::fs::create_dir_all(&scratch)
-        .await
-        .map_err(|error| WebLookupError::Transient(format!("không tạo được thư mục tạm: {error}")))?;
+    tokio::fs::create_dir_all(&scratch).await.map_err(|error| {
+        WebLookupError::Transient(format!("không tạo được thư mục tạm: {error}"))
+    })?;
 
     let result = run_lookup_in(binary, normalized, &scratch).await;
     // Best-effort: a scratch directory that survives is litter, not a failure to report.
@@ -547,7 +552,8 @@ async fn read_page_dump(scratch: &std::path::Path) -> Option<String> {
 /// than against TikTok — the page shape is the part that changes, and a change in it must
 /// show up as a failing test here rather than as thinner comments in production.
 pub fn parse_post_context(info_json: &str, page_dump: &str) -> PostWebContext {
-    let info: serde_json::Value = serde_json::from_str(info_json).unwrap_or(serde_json::Value::Null);
+    let info: serde_json::Value =
+        serde_json::from_str(info_json).unwrap_or(serde_json::Value::Null);
 
     let caption = info
         .get("description")
@@ -885,8 +891,10 @@ mod tests {
     #[test]
     fn a_photo_url_is_rewritten_to_the_form_that_resolves() {
         assert_eq!(
-            normalize_for_ytdlp("https://www.tiktok.com/@mongquynh.dalat/photo/7668954054680136967")
-                .as_deref(),
+            normalize_for_ytdlp(
+                "https://www.tiktok.com/@mongquynh.dalat/photo/7668954054680136967"
+            )
+            .as_deref(),
             Some("https://www.tiktok.com/@mongquynh.dalat/video/7668954054680136967")
         );
     }
@@ -918,7 +926,10 @@ mod tests {
     #[test]
     fn a_url_without_a_post_id_normalizes_to_nothing() {
         assert_eq!(normalize_for_ytdlp("https://www.tiktok.com/@someone"), None);
-        assert_eq!(normalize_for_ytdlp("https://www.tiktok.com/@a/video/12"), None);
+        assert_eq!(
+            normalize_for_ytdlp("https://www.tiktok.com/@a/video/12"),
+            None
+        );
     }
 
     /// **The retry decision, which is the whole reason this error type exists.**
@@ -931,7 +942,10 @@ mod tests {
             "ERROR: [TikTok] 7668980232241728776: Your IP address is blocked from accessing this post",
         );
         assert_eq!(blocked, WebLookupError::Blocked);
-        assert!(!blocked.is_retryable(), "retrying an IP block is pure latency");
+        assert!(
+            !blocked.is_retryable(),
+            "retrying an IP block is pure latency"
+        );
 
         let transient = classify_lookup_error(
             "ERROR: [TikTok] 7668616467855723783: Unable to extract universal data for rehydration",
@@ -945,7 +959,8 @@ mod tests {
     /// An unsupported URL is the post's problem, not the network's.
     #[test]
     fn an_unsupported_url_is_not_retried() {
-        let error = classify_lookup_error("ERROR: Unsupported URL: https://www.tiktok.com/@a/photo/1");
+        let error =
+            classify_lookup_error("ERROR: Unsupported URL: https://www.tiktok.com/@a/photo/1");
         assert!(matches!(error, WebLookupError::Unavailable(_)));
         assert!(!error.is_retryable());
     }
@@ -965,7 +980,10 @@ mod tests {
         let raw = r#"junk{"imagePost":{"title":"a } b \" c {","images":[]},"after":1}"#;
         let extracted = json_value_after(raw, "\"imagePost\"").expect("found");
         let value: serde_json::Value = serde_json::from_str(&extracted).expect("valid json");
-        assert_eq!(value.get("title").and_then(|v| v.as_str()), Some("a } b \" c {"));
+        assert_eq!(
+            value.get("title").and_then(|v| v.as_str()),
+            Some("a } b \" c {")
+        );
     }
 
     /// Slides come out in flip order, one per slide, with CDN alternates collapsed.
@@ -980,14 +998,18 @@ mod tests {
         ]}"#;
         assert_eq!(
             parse_slide_urls(page),
-            vec!["https://p16/a.jpeg".to_string(), "https://p16/b.jpeg".to_string()]
+            vec![
+                "https://p16/a.jpeg".to_string(),
+                "https://p16/b.jpeg".to_string()
+            ]
         );
     }
 
     /// `/` is how the page writes every `/`, and it has to survive into the URL.
     #[test]
     fn escaped_solidus_in_the_page_decodes_into_a_usable_url() {
-        let page = r#"x"imagePost":{"images":[{"imageURL":{"urlList":["https://p16.example/a.jpeg"]}}]}"#;
+        let page =
+            r#"x"imagePost":{"images":[{"imageURL":{"urlList":["https://p16.example/a.jpeg"]}}]}"#;
         assert_eq!(parse_slide_urls(page), vec!["https://p16.example/a.jpeg"]);
     }
 
@@ -1081,10 +1103,17 @@ mod tests {
     /// its own length.
     #[test]
     fn a_transcript_past_the_cap_admits_it_was_cut() {
-        let vtt = format!("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n{}\n", "từ ".repeat(50));
+        let vtt = format!(
+            "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n{}\n",
+            "từ ".repeat(50)
+        );
         let text = transcript_from_vtt(&vtt, 10).expect("a transcript");
         let (said, marker) = text.split_once(" […").expect("the marker is appended");
-        assert_eq!(said.split_whitespace().count(), 10, "the cap is on words said");
+        assert_eq!(
+            said.split_whitespace().count(),
+            10,
+            "the cap is on words said"
+        );
         assert!(marker.contains("phần sau chưa đọc"), "{text}");
     }
 
@@ -1103,7 +1132,10 @@ mod tests {
     fn caption_and_duration_come_from_the_extractor_json() {
         let info = r#"{"description":"  Một lịch trình vừa đủ chậm  ","duration":37.0}"#;
         let context = parse_post_context(info, "");
-        assert_eq!(context.caption.as_deref(), Some("Một lịch trình vừa đủ chậm"));
+        assert_eq!(
+            context.caption.as_deref(),
+            Some("Một lịch trình vừa đủ chậm")
+        );
         assert_eq!(context.duration_secs, Some(37));
         assert!(!context.is_empty());
     }
@@ -1123,7 +1155,10 @@ mod tests {
     /// Unreadable output degrades to an empty context rather than to a panic.
     #[test]
     fn garbage_output_produces_an_empty_context() {
-        assert_eq!(parse_post_context("not json", "not a page"), PostWebContext::default());
+        assert_eq!(
+            parse_post_context("not json", "not a page"),
+            PostWebContext::default()
+        );
     }
 
     /// **Everything fits: take everything, in order.**

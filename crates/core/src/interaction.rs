@@ -1154,7 +1154,9 @@ impl InteractionTargetNote {
             .and_then(|value| value.as_u64())
             .filter(|count| *count > 0)
             .map(|count| count as u32);
-        note.has_original_audio = web.get("hasOriginalAudio").and_then(|value| value.as_bool());
+        note.has_original_audio = web
+            .get("hasOriginalAudio")
+            .and_then(|value| value.as_bool());
         note.subtitle_langs = web
             .get("subtitleLangs")
             .and_then(|value| value.as_array())
@@ -2198,7 +2200,9 @@ mod target_note_tests {
     fn a_video_reports_no_slide_count_while_a_carousel_reports_its_own() {
         let mut context = PostWebContext::default();
         assert_eq!(note_of(&context).slide_count, None);
-        context.slide_urls = (0..8).map(|index| format!("https://cdn/{index}.jpg")).collect();
+        context.slide_urls = (0..8)
+            .map(|index| format!("https://cdn/{index}.jpg"))
+            .collect();
         assert_eq!(note_of(&context).slide_count, Some(8));
     }
 
@@ -2209,7 +2213,8 @@ mod target_note_tests {
     /// has no way to tell that from a target nobody looked up.
     #[test]
     fn a_refusal_reads_back_with_its_reason() {
-        let json = InteractionTargetNote::context_json(Err(&WebLookupError::Blocked)).expect("json");
+        let json =
+            InteractionTargetNote::context_json(Err(&WebLookupError::Blocked)).expect("json");
         let note = InteractionTargetNote::from_row(
             "photo:2".into(),
             2,
@@ -2222,7 +2227,10 @@ mod target_note_tests {
             .error_detail
             .as_deref()
             .is_some_and(|detail| detail.contains("chặn IP")));
-        assert!(!note.is_blank(), "a refusal is something to show, not nothing");
+        assert!(
+            !note.is_blank(),
+            "a refusal is something to show, not nothing"
+        );
     }
 
     /// **No column at all is blank, and blank is its own state.**
@@ -2265,7 +2273,11 @@ mod target_note_tests {
             ..PostWebContext::default()
         };
         let note = note_of(&context);
-        assert_eq!(note.caption_chars, Some(400), "the full length is still reported");
+        assert_eq!(
+            note.caption_chars,
+            Some(400),
+            "the full length is still reported"
+        );
         assert_eq!(
             note.caption_preview.as_deref().map(str::len),
             Some(NOTE_CAPTION_PREVIEW_CHARS)
@@ -2290,7 +2302,9 @@ mod target_note_tests {
         let declared: std::collections::BTreeSet<String> = block
             .lines()
             .map(str::trim)
-            .filter(|line| !line.starts_with("//") && !line.starts_with('*') && !line.starts_with("/*"))
+            .filter(|line| {
+                !line.starts_with("//") && !line.starts_with('*') && !line.starts_with("/*")
+            })
             .filter_map(|line| line.split_once(':'))
             .map(|(field, _)| field.trim().trim_end_matches('?').to_string())
             .filter(|field| !field.is_empty() && field.chars().all(|c| c.is_alphanumeric()))
@@ -2334,6 +2348,9 @@ mod target_note_tests {
             .keys()
             .cloned()
             .collect();
-        assert_eq!(sent, expected, "serde sends different names than the list above");
+        assert_eq!(
+            sent, expected,
+            "serde sends different names than the list above"
+        );
     }
 }

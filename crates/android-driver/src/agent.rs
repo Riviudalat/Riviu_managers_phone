@@ -963,7 +963,11 @@ mod slow_call_budget_tests {
     #[test]
     fn a_gesture_keeps_the_gesture_budget() {
         for route in ["/actions", "", "/window/current/size", "/session"] {
-            assert_eq!(slow_call_budget(route), SLOW_AGENT_CALL, "{route} is not a tree read");
+            assert_eq!(
+                slow_call_budget(route),
+                SLOW_AGENT_CALL,
+                "{route} is not a tree read"
+            );
         }
     }
 

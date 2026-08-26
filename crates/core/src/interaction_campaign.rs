@@ -502,9 +502,15 @@ async fn gather_target_evidence(
             .map(|context| context.slide_urls.as_slice())
             .filter(|urls| !urls.is_empty())
         {
-            let picks =
-                crate::tiktok_web::pick_slide_indices(urls.len(), crate::openai_client::SHEET_MAX_FRAMES);
-            let chosen: Vec<String> = picks.iter().filter_map(|index| urls.get(*index)).cloned().collect();
+            let picks = crate::tiktok_web::pick_slide_indices(
+                urls.len(),
+                crate::openai_client::SHEET_MAX_FRAMES,
+            );
+            let chosen: Vec<String> = picks
+                .iter()
+                .filter_map(|index| urls.get(*index))
+                .cloned()
+                .collect();
             let frames = crate::tiktok_web::fetch_slides(&chosen).await;
             if frames.is_empty() {
                 // The lookup worked and the CDN did not. Falling through to the phone is the

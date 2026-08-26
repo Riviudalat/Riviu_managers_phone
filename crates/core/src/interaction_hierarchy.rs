@@ -2322,7 +2322,8 @@ const VIDEO_WATCH_BUDGET: Duration = Duration::from_secs(10);
 /// The floor keeps a very short video from being sampled faster than the stream produces
 /// distinct frames; the ceiling keeps a long one from spending the whole budget on two
 /// pictures.
-const VIDEO_GAP_RANGE: (Duration, Duration) = (Duration::from_millis(1_200), Duration::from_secs(3));
+const VIDEO_GAP_RANGE: (Duration, Duration) =
+    (Duration::from_millis(1_200), Duration::from_secs(3));
 
 /// How many identical samples in a row mean the video is not playing.
 ///
@@ -2433,7 +2434,9 @@ pub async fn photograph_video_post(
                     tracing::warn!(
                         "interaction: bai da doi sau {} khung (caption {:?}) — dung",
                         frames.len(),
-                        other.as_deref().map(|text| text.chars().take(24).collect::<String>())
+                        other
+                            .as_deref()
+                            .map(|text| text.chars().take(24).collect::<String>())
                     );
                     break;
                 }
@@ -5228,7 +5231,12 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_playing_video_is_sampled_across_its_length() {
         let session = VideoSession::playing();
-        let result = watch(&session, vec![10, 60, 110, 160], Some(Duration::from_secs(12))).await;
+        let result = watch(
+            &session,
+            vec![10, 60, 110, 160],
+            Some(Duration::from_secs(12)),
+        )
+        .await;
         assert_eq!(result.frames.len(), 4);
         // Exactly nine: a 12 s video gives `(12 - 1.2) / 3` = 3.6 s clamped to the 3 s ceiling,
         // and four keeps have three gaps between them. Pinned because the span is now read off
@@ -5248,7 +5256,12 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_post_that_changes_under_the_walk_stops_it() {
         let session = VideoSession::playing().caption_changes_before_sample(3);
-        let result = watch(&session, vec![10, 60, 110, 160], Some(Duration::from_secs(60))).await;
+        let result = watch(
+            &session,
+            vec![10, 60, 110, 160],
+            Some(Duration::from_secs(60)),
+        )
+        .await;
         assert_eq!(
             result.frames.len(),
             2,
@@ -5272,8 +5285,17 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_frozen_stream_ends_the_watch_early() {
         let session = VideoSession::playing();
-        let result = watch(&session, vec![10, 10, 10, 10], Some(Duration::from_secs(60))).await;
-        assert_eq!(result.frames.len(), 1, "one picture, however often it repeats");
+        let result = watch(
+            &session,
+            vec![10, 10, 10, 10],
+            Some(Duration::from_secs(60)),
+        )
+        .await;
+        assert_eq!(
+            result.frames.len(),
+            1,
+            "one picture, however often it repeats"
+        );
         assert_eq!(result.span_secs, 0, "one picture spans nothing");
     }
 

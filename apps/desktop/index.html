@@ -15,13 +15,36 @@
     </div>
     <div id="root"></div>
     <script>
-      window.addEventListener("error", (event) => {
-        const marker = document.getElementById("boot-marker");
-        if (marker) marker.textContent = `UI load error: ${event.message || "unknown error"}`;
+      // The boot window only. These two handlers cover the gap before `main.tsx` runs, and
+      // stop mattering the moment it does: `installCrashReporting` there takes over, and this
+      // marker is removed. They are kept because a failure to load the module bundle at all
+      // is precisely the failure nothing inside the bundle can report.
+      //
+      // `describeError` cannot be imported here -- this runs before any module -- so the one
+      // rule that matters is restated inline: a Tauri command rejects with `{ code, message }`
+      // and `String` on that yields `[object Object]`. This file was the last place in the app
+      // still making that mistake, missed by the sweep that fixed 47 others because the scan
+      // only read `src/`.
+      var bootMessage = function (cause) {
+        if (cause === null || cause === undefined) return "lỗi không rõ nguyên nhân";
+        if (typeof cause === "string") return cause;
+        if (typeof cause === "object" && typeof cause.message === "string" && cause.message)
+          return cause.message;
+        try {
+          return typeof cause === "object" ? JSON.stringify(cause) : String(cause);
+        } catch (ignored) {
+          return String(cause);
+        }
+      };
+      var showBootFailure = function (text) {
+        var marker = document.getElementById("boot-marker");
+        if (marker) marker.textContent = "Không tải được giao diện: " + text;
+      };
+      window.addEventListener("error", function (event) {
+        showBootFailure(bootMessage(event.error || event.message));
       });
-      window.addEventListener("unhandledrejection", (event) => {
-        const marker = document.getElementById("boot-marker");
-        if (marker) marker.textContent = `UI load error: ${String(event.reason || "unknown rejection")}`;
+      window.addEventListener("unhandledrejection", function (event) {
+        showBootFailure(bootMessage(event.reason));
       });
     </script>
     <script type="module" src="/src/main.tsx"></script>

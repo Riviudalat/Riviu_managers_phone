@@ -620,6 +620,26 @@ export async function driverDegradedReason() {
  * the fleet, this one means they join and then cannot be driven — which is the shape of the bug
  * reported from a real install ("nhận điện thoại rồi, nhưng điều khiển không được").
  */
+/**
+ * Write a frontend failure into the app log.
+ *
+ * **Never rejects, on purpose.** This is called from the unhandled-rejection handler, so a
+ * rejecting promise here would raise a new unhandled rejection and report itself forever. If
+ * the bridge is unavailable there is nowhere better to send the failure than nowhere, and a
+ * silent drop is strictly better than a loop.
+ */
+export async function logFrontendError(
+  kind: string,
+  message: string,
+  source?: string,
+): Promise<void> {
+  try {
+    await invoke<void>("log_frontend_error", { kind, message, source: source ?? null });
+  } catch {
+    // Deliberately empty: see above.
+  }
+}
+
 export async function androidToolProblems() {
   return invoke<string[]>("android_tool_problems");
 }

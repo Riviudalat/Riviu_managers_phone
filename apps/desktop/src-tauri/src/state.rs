@@ -646,7 +646,11 @@ impl AppState {
         // enrichment path returns `NoBinary` on every operator's machine while staying green in
         // every test and every `cargo run` — which is exactly how it shipped inert once.
         riviu_core::tiktok_web::set_bundled_ytdlp(sidecar_root.join("yt-dlp").join(
-            if cfg!(windows) { "yt-dlp.exe" } else { "yt-dlp" },
+            if cfg!(windows) {
+                "yt-dlp.exe"
+            } else {
+                "yt-dlp"
+            },
         ));
         let android_tools = crate::android_tools::AndroidTools::load(&sidecar_root);
         for problem in &android_tools.problems {
@@ -2729,7 +2733,6 @@ mod tests {
 
         assert_eq!(actual, expected);
     }
-
 
     /// **The three-part gate for the bug that shipped this feature inert.**
     ///

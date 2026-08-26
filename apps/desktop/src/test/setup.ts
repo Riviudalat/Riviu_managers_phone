@@ -1,5 +1,29 @@
 import "@testing-library/jest-dom/vitest";
 import { configure } from "@testing-library/dom";
+import { cleanup } from "@testing-library/react";
+import { afterEach } from "vitest";
+
+/**
+ * **Unmount what a test rendered, because nothing else does.**
+ *
+ * `@testing-library/react` registers its own `afterEach(cleanup)` only when `afterEach` exists
+ * as a *global*, and this project runs vitest without `globals: true`. So auto-cleanup never
+ * armed, and the convention became "every file calls `cleanup()` itself" -- which 13 files do
+ * and **14 files with `render()` do not**, several of them with a dozen tests each
+ * (`DeviceContextMenu`, `DeviceFilesPopup`, `FlowInspector`, `GroupManagerPopup`,
+ * `NurtureWindows`, `SettingsPanel`...).
+ *
+ * Those 14 pass today by luck: each test happens to query text specific enough that the
+ * previous test's leftovers do not collide. The moment two tests in one file look for the same
+ * role or label, the second gets `getMultipleElementsFoundError` -- found exactly that way, by
+ * a new file whose fourth test asserted `queryByRole("alert")` was absent and was handed three
+ * alerts from the tests above it.
+ *
+ * Registering it here rather than in fourteen files is the difference between a convention and
+ * a guarantee: a file added tomorrow inherits it. The files that already call `cleanup()` keep
+ * working -- a second call has nothing left to unmount.
+ */
+afterEach(cleanup);
 
 /**
  * `waitFor`'s default is 1000 ms, and that is a **load** threshold rather than a behaviour

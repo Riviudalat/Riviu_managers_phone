@@ -111,7 +111,11 @@ async fn main() -> anyhow::Result<()> {
             Ok(context) => {
                 println!(
                     "web      caption {} ký tự | thời lượng {:?}s | phụ đề {:?}",
-                    context.caption.as_deref().map(|c| c.chars().count()).unwrap_or(0),
+                    context
+                        .caption
+                        .as_deref()
+                        .map(|c| c.chars().count())
+                        .unwrap_or(0),
                     context.duration_secs,
                     context.subtitle_langs()
                 );

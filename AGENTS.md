@@ -10015,3 +10015,104 @@ về, không cần bấm gì. Đó mới là tính chất đúng, và giờ nó 
 
 `riviu-android-driver` **191 test** (thêm 4), clippy 0. Frontend `tsc -b` + `oxlint
 --deny-warnings` sạch, **703 test / 82 file** (thêm 7).
+
+## §9.118 Một lần sập giờ để lại một dòng — hai nửa, và cả hai đang trống (26/08/2026)
+
+Pha 0 của đợt rà soát toàn hệ thống. Yêu cầu: *"tôi cần mọi thứ ổn định hoạt động tốt không lỗi.
+chứ không phải là cứ kêu bị lỗi ở trên."* Pha này không sửa một lỗi cụ thể nào — nó làm cho mọi lỗi
+**sau này** đọc được, kể cả những lỗi chưa ai biết.
+
+### Nửa Rust: `panic = "abort"` + không có hook nào trong cả cây
+
+`std::panic::set_hook` không xuất hiện ở đâu, và `Cargo.toml:57-62` đặt `panic = "abort"` +
+`strip = "symbols"`. Hệ quả dễ bỏ qua: **tokio KHÔNG còn cô lập panic theo task.** Một panic trong
+task đọc scrcpy, worker dọn dẹp, job queue, flow runtime, hay vòng accept view-hub **giết cả app,
+giữa chiến dịch, trên mọi máy cùng lúc** — người vận hành thấy một cửa sổ biến mất, log không nói
+gì, và không có backtrace. Riêng đường device-control có **hơn 30 `expect()`** khẳng định bất biến
+ngồi trên nền đó.
+
+`install_panic_logging()` gọi **đầu tiên** trong `run()`, trước cả `install_process_tree_guard()` —
+vì chính dòng đó `expect()`, nên hook cài sau nó không che được nó. Hai hàm **thuần**
+(`panic_message`, `panic_report`) tách riêng vì bản thân hook chỉ chạy khi tiến trình đang chết, test
+không gọi được. `panic_message` xử cả ba dạng payload: `&'static str`, `String`, và `panic_any` —
+**dạng thứ ba trước đây sẽ thành một dòng log rỗng**, tức một bản ghi nói rằng có panic và không nói
+gì về nó.
+
+`log::error!` sống sót qua `abort` vì `std::fs::File` ghi bằng syscall không đệm — không có flush nào
+để bỏ sót. Nhưng plugin log đăng ký **trong `.setup()`**, nên panic *trước* điểm đó không có chỗ ghi;
+cửa sổ đó chỉ là lúc khởi động và hook mặc định vẫn phủ stderr.
+
+Cổng ghim **thứ tự**, không phải sự hiện diện. Cộng một test ghim `panic = "abort"` và
+`strip = "symbols"` còn đó, vì đó là **lý do** cái hook chịu lực — đổi một trong hai thì phải đọc lại
+lập luận chứ không thừa hưởng nó.
+
+### Nửa frontend — và tôi đã báo sai về nó
+
+Tôi báo *"không có handler lỗi toàn cục nào"*. **Sai.** `index.html:17-26` có cả `error` lẫn
+`unhandledrejection`; grep của tôi chỉ quét `apps/desktop/src`.
+
+Nhưng đọc kỹ thì **tệ hơn là không có**: cả hai chỉ ghi vào `#boot-marker`, và `main.tsx` **xoá** phần
+tử đó ngay khi React mount. Nên app có xử lý lỗi toàn cục trong **khoảng một giây đầu đời** và
+**không có gì suốt phần còn lại** — sau mount `getElementById` trả `null` và handler không làm gì.
+Một throw lúc render là React unmount cả cây → **màn hình trắng**, không log, không toast.
+
+Và nó dùng `String(event.reason)`. Lệnh Tauri reject bằng object `{code, message}` → **đúng lớp
+`[object Object]`** mà §9.96 đã sửa 47 chỗ và **bỏ sót chỗ này, vì đợt quét chỉ đọc `src/`**. Cùng
+một bài học lần thứ ba: quét theo *hình dạng* thì đúng, nhưng **phạm vi quét cũng là một phần của
+cổng**.
+
+Bốn liên kết, cả bốn nay có test (`crashPath.test.ts` đọc từ **đĩa** chứ không qua
+`import.meta.glob`, đúng vì hai file nó phải thấy nằm ngoài `src/`):
+
+1. `ErrorBoundary` bọc `<App />` — thông báo + nút tải lại thay vì trang trắng, qua `describeError`.
+2. `crashReport.ts` `installCrashReporting` cho cả hai event. **Chốt quan trọng nhất: nó được gọi TỪ
+   handler unhandledrejection, nên một bộ báo cáo tự ném sẽ tự báo cáo chính nó mãi mãi.** Đó là kiểu
+   duy nhất biến một công cụ chẩn đoán thành sự cố — nên `report` được bọc `try` và
+   `logFrontendError` **không bao giờ reject**.
+3. `log_frontend_error` — cầu frontend→backend, trước đây **không tồn tại**. Cố ý **không** nhận
+   `State<AppState>`: những lúc đáng ghi nhất bao gồm lúc `AppState::bootstrap` **chính là** thứ
+   hỏng, và một lệnh cần state sẽ vắng mặt đúng những lúc đó. Miễn admission cùng lý do. Hạn tần 10 s
+   **theo dấu vân của lỗi** kèm số bị nén (nén im lặng còn tệ hơn in hết: nó báo một cơn bão thành
+   một cái hắt hơi), và bảng theo dõi **có trần 64** — message chứa số đếm sinh vân tay mới mỗi lần,
+   và một map không trần ở đây là chỗ rò **chỉ xuất hiện khi app đang hỏng**, tức lúc tệ nhất.
+4. `bootMarkerVerdict` — vòng `requestAnimationFrame` cũ chờ `childElementCount > 0` **không có hạn**,
+   nên render đầu mà throw là app ngồi mãi ở "Loading Riviu Manager..." và vòng đó quay mãi.
+
+### Lỗi thật thứ ba, lộ ra trong lúc viết test: 14 file test không dọn DOM
+
+`@testing-library/react` chỉ tự đăng ký `afterEach(cleanup)` khi `afterEach` là **biến toàn cục**, mà
+`vite.config.ts` không bật `globals`. Nên auto-cleanup **chưa bao giờ lên**, và quy ước thành "mỗi
+file tự gọi `cleanup()`" — **13 file làm, 14 file có `render()` thì không**, vài file 11–12 test
+(`DeviceContextMenu`, `DeviceFilesPopup`, `FlowInspector`, `GroupManagerPopup`, `NurtureWindows`,
+`SettingsPanel`…). Chúng xanh **nhờ may**: mỗi test tình cờ tìm chữ đủ riêng để không đụng DOM rơi
+lại. Tìm ra đúng cách — một file mới có test thứ tư khẳng định `queryByRole("alert")` vắng mặt và
+nhận về **ba** alert của ba test phía trên.
+
+Đăng ký ở `src/test/setup.ts` thay vì sửa 14 file: **khác biệt giữa một quy ước và một bảo đảm** —
+file thêm ngày mai được thừa hưởng. 716/716 xanh sau khi bật, nên không test nào đang dựa vào DOM rơi
+lại.
+
+### Tám cổng CI chưa từng chạy ở máy này
+
+Job chất lượng của CI có **14 cổng**; các đợt trước chạy **5**. Đo hết phần chạy được:
+
+| cổng | kết quả |
+|---|---|
+| `cargo fmt --all -- --check` | **đang ĐỎ 52 chỗ** (dồn từ 5 commit, và `fmt` chưa bao giờ trong bộ gate) → 0 |
+| `cargo deny check` | advisories/bans/licenses/sources **ok**, 567 crate |
+| `npm audit --audit-level=high` | 0 |
+| Playwright e2e | **21 passed** |
+| `verify-android-tools` | `ok: true`, 9 file — và **xác nhận docs nói sai**: hai APK uiautomator2 **có** ghim |
+| `python -m py_compile` | sạch |
+| `python -m unittest` | **101 test OK — nhưng phải chạy bằng `python3`** (3.12.10, khớp CI), không phải `python` (3.14.7, thiếu `tidevice`) |
+| `cargo test -p riviu-core -- --test-threads=1` | **773/773**, 431 s — đơn luồng không làm đỏ gì |
+
+**Còn không chạy được tại đây:** clippy/test toàn workspace với `--locked` (Smart App Control chặn
+binary vừa link). Ba cổng đó **chỉ CI chạy**, và chúng đúng là các cổng **liên-crate** — xem §9.113.
+
+### Cổng
+
+fmt 0 diff; `riviu-core` **773**, `riviu-android-driver` **191**, app-lib **191** (+11), clippy 0.
+Frontend `tsc -b` + `oxlint --deny-warnings` sạch, `vite build` sạch, **716 test / 84 file** (+13 /
++3). `tsc -b` lại bắt đúng thứ vitest bỏ qua: một tuple khai `string | undefined` ở chỗ callback nhận
+tham số **tuỳ chọn**.

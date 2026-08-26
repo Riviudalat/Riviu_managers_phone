@@ -43,9 +43,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use riviu_android_driver::{
-    AndroidDriver, ViewKind, ViewPacket, ViewPreset, ViewSink,
-};
+use riviu_android_driver::{AndroidDriver, ViewKind, ViewPacket, ViewPreset, ViewSink};
 use riviu_core::driver::DeviceDriver;
 
 #[path = "common/mod.rs"]

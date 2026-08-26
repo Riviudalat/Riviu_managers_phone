@@ -115,8 +115,79 @@ async fn retry_startup(
     }
 }
 
+/// The message a panic payload carries, whatever shape it was thrown in.
+///
+/// `panic!("text")` yields `&'static str`, `panic!("{x}")` yields `String`, and `panic_any`
+/// yields anything at all. The third shape is the one that would otherwise read as an empty
+/// log line -- a record that says a panic happened and nothing about it.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(text) = payload.downcast_ref::<&'static str>() {
+        return text;
+    }
+    if let Some(text) = payload.downcast_ref::<String>() {
+        return text.as_str();
+    }
+    "a panic payload that is neither &str nor String"
+}
+
+/// What a panic leaves behind, as one line.
+///
+/// **Pure, and deliberately separate from the hook that uses it.** The hook itself runs while
+/// the process is already dying and cannot be exercised by a test without taking the test
+/// runner with it, so the part worth pinning -- that the message, the location and the thread
+/// all reach the text -- lives here where a test can read it.
+fn panic_report(message: &str, location: Option<&str>, thread: &str) -> String {
+    format!(
+        "PANIC in thread '{thread}' at {}: {message} (the process aborts here, so this line is          the whole record)",
+        location.unwrap_or("an unknown location"),
+    )
+}
+
+/// **Write the panic down before the process dies, because it dies immediately.**
+///
+/// The release profile sets `panic = "abort"`, and that has a consequence which is easy to
+/// miss: **tokio's per-task panic isolation does not apply.** A panic inside a spawned task
+/// never becomes a `JoinError` for anyone to handle -- it takes the whole process with it. The
+/// tasks in question are the ones every phone depends on: the scrcpy reader, the device cleanup
+/// worker, the job queue, the Flow runtime, the view-hub accept loop. One panic in any of them
+/// ends the work on *every* phone at once, mid-campaign.
+///
+/// The profile also sets `strip = "symbols"`, so there is no usable backtrace to recover
+/// afterwards. Before this hook existed the entire operator-visible record of a panic was **a
+/// window that vanished** -- which is the report that started this work. The device-control path
+/// alone rests on more than thirty `expect()` calls asserting lease and reservation invariants;
+/// every one of them is a candidate, and each was silent.
+///
+/// Two details that make the line actually survive:
+///
+/// * It is installed **first** in `run()`, ahead of `install_process_tree_guard`, which itself
+///   `expect()`s. A hook installed after the first thing that can panic does not cover it.
+/// * `log::error!` reaches the rotating file the log plugin owns, and `std::fs::File` writes are
+///   unbuffered syscalls rather than buffered ones -- so the record is already on disk when the
+///   abort follows, with no flush to miss. The default hook still runs afterwards, which keeps
+///   the familiar stderr message for anyone running from a terminal.
+///
+/// Note the log plugin is registered inside `.setup()`, so a panic *before* that point has
+/// nowhere to write. That window is startup only, and the default hook still covers stderr.
+fn install_panic_logging() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let location = info.location().map(|location| location.to_string());
+        let report = panic_report(
+            panic_message(info.payload()),
+            location.as_deref(),
+            thread.name().unwrap_or("unnamed"),
+        );
+        log::error!("{report}");
+        default_hook(info);
+    }));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // First, before anything that can panic -- including the `expect` on the next line.
+    install_panic_logging();
     riviu_ios_driver::install_process_tree_guard()
         .expect("failed to establish process-tree ownership");
     let app = tauri::Builder::default()
@@ -288,6 +359,7 @@ pub fn run() {
             commands::driver_degraded_reason,
             commands::android_unavailable_reason,
             commands::android_tool_problems,
+            commands::log_frontend_error,
             commands::update_check,
             commands::update_install,
             farm_commands::get_device_meta,
@@ -577,6 +649,10 @@ mod tests {
         ("driver_degraded_reason", "read: health probe"),
         ("android_unavailable_reason", "read: health probe"),
         ("android_tool_problems", "read: boot snapshot"),
+        (
+            "log_frontend_error",
+            "the frontend's only path to the log; refusing it during drain would silence              exactly the errors that explain the drain",
+        ),
         ("update_check", "read: asks GitHub, touches no device"),
         ("get_device_meta", "read: DB"),
         ("list_device_metas", "read: DB"),
@@ -707,10 +783,7 @@ mod tests {
     const INFALLIBLE_COMMANDS: &[(&str, &str)] = &[
         ("agent_get_settings", "returns settings held in memory"),
         ("agent_list_statuses", "returns the cached status map"),
-        (
-            "android_tool_problems",
-            "returns a stored Vec<String>",
-        ),
+        ("android_tool_problems", "returns a stored Vec<String>"),
         (
             "android_unavailable_reason",
             "returns a stored Option<String>",
@@ -725,6 +798,10 @@ mod tests {
             "returns the in-memory copy of the KV row",
         ),
         ("interaction_parse_links", "pure text parsing, cannot fail"),
+        (
+            "log_frontend_error",
+            "writes a log line and returns nothing; a reporting path that can fail has              nowhere to report the failure",
+        ),
         ("startup_error", "returns a stored Option<String>"),
         ("view_report_paint", "records a paint and returns nothing"),
     ];
@@ -1061,5 +1138,108 @@ mod tests {
                 "{forbidden} bypasses graceful_shutdown; route that exit through it instead"
             );
         }
+    }
+
+    // Named rather than glob-imported: this module has no `use super::*` on purpose, because
+    // its own scans read the file as text and a wildcard would quietly widen what they see.
+    use super::{panic_message, panic_report};
+
+    /// A panic line has to answer three questions, or it is not worth the abort it records.
+    #[test]
+    fn a_panic_report_names_the_message_the_place_and_the_thread() {
+        let line = panic_report(
+            "context activity count cannot underflow",
+            Some("crates/core/src/device_control/mod.rs:930:9"),
+            "tokio-runtime-worker",
+        );
+        assert!(line.contains("context activity count cannot underflow"));
+        assert!(line.contains("crates/core/src/device_control/mod.rs:930:9"));
+        assert!(line.contains("tokio-runtime-worker"));
+    }
+
+    /// **A missing location must not silently shorten the line.**
+    ///
+    /// `PanicHookInfo::location()` is an `Option`, and the tempting shape is
+    /// `if let Some(location)` around the whole report -- which drops the record entirely in
+    /// the one case where the reader has least to go on.
+    #[test]
+    fn a_panic_with_no_location_still_reports_the_message() {
+        let line = panic_report("the cleanup worker channel closed", None, "unnamed");
+        assert!(line.contains("the cleanup worker channel closed"));
+        assert!(line.contains("unnamed"));
+        assert!(
+            line.contains("unknown location"),
+            "say the location is unknown rather than leaving a gap: {line}"
+        );
+    }
+
+    /// All three payload shapes have to arrive as readable text.
+    ///
+    /// `panic!("literal")` is `&'static str`, `panic!("{}", x)` is `String`, and `panic_any`
+    /// can carry a type neither branch knows. The third is why there is a fallback string at
+    /// all: without it the log line would name a thread and a file and say nothing happened.
+    #[test]
+    fn every_panic_payload_shape_reaches_the_log() {
+        let as_str: Box<dyn std::any::Any + Send> = Box::new("a &str payload");
+        assert_eq!(panic_message(as_str.as_ref()), "a &str payload");
+
+        let as_string: Box<dyn std::any::Any + Send> = Box::new(String::from("a String payload"));
+        assert_eq!(panic_message(as_string.as_ref()), "a String payload");
+
+        let as_other: Box<dyn std::any::Any + Send> = Box::new(42_u32);
+        let described = panic_message(as_other.as_ref());
+        assert!(
+            !described.is_empty() && described.contains("neither"),
+            "an odd payload must still describe itself, got {described:?}"
+        );
+    }
+
+    /// **The hook has to be installed before the first thing that can panic, and the first
+    /// thing that can panic is on the very next line.**
+    ///
+    /// `run()` opens with `install_process_tree_guard().expect(...)`. A hook registered after
+    /// it would leave the one startup failure an operator actually hits -- another copy of the
+    /// app already owning the process tree -- as the silent vanishing window this whole change
+    /// is about. Ordering, not presence, is the property; so the test reads the order.
+    #[test]
+    fn the_panic_hook_is_installed_before_the_first_thing_that_can_panic() {
+        let source = include_str!("lib.rs");
+        let at = source
+            .find("pub fn run() {")
+            .expect("lib.rs defines the run() entrypoint");
+        let body = &source[at..];
+        let hook = body
+            .find("install_panic_logging();")
+            .expect("run() installs the panic hook");
+        let guard = body
+            .find("install_process_tree_guard()")
+            .expect("run() claims the process tree");
+        assert!(
+            hook < guard,
+            "the panic hook is installed after the first expect() in run(), so that expect()              still dies silently"
+        );
+    }
+
+    /// The hook is load-bearing *because* of the release profile, so pin the reason.
+    ///
+    /// With `panic = "abort"` a panic in any spawned task ends the process rather than becoming
+    /// a `JoinError`, and `strip = "symbols"` removes the backtrace that would otherwise let
+    /// someone reconstruct it afterwards. If either ever changes, the reasoning in
+    /// `install_panic_logging` needs re-reading rather than inheriting.
+    #[test]
+    fn the_release_profile_still_makes_a_panic_fatal_and_unsymbolised() {
+        let manifest = include_str!("../../../../Cargo.toml");
+        let profile = manifest
+            .split("[profile.release]")
+            .nth(1)
+            .expect("the workspace manifest carries a release profile");
+        assert!(
+            profile.contains("panic = \"abort\""),
+            "panic = abort is why a task panic kills the app; re-read install_panic_logging              if this changed"
+        );
+        assert!(
+            profile.contains("strip = \"symbols\""),
+            "strip = symbols is why the hook must say enough on its own"
+        );
     }
 }

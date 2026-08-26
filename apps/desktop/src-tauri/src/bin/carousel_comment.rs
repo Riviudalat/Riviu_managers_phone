@@ -69,7 +69,11 @@ async fn main() -> anyhow::Result<()> {
         println!(
             "link     {link}\ncaption  {} ký tự\nthời lượng {:?}s\n\
              số ảnh   {}\nphụ đề   {:?} (có tiếng gốc: {:?})\n",
-            context.caption.as_deref().map(|c| c.chars().count()).unwrap_or(0),
+            context
+                .caption
+                .as_deref()
+                .map(|c| c.chars().count())
+                .unwrap_or(0),
             context.duration_secs,
             context.slide_urls.len(),
             context.subtitle_langs(),
@@ -153,9 +157,11 @@ async fn main() -> anyhow::Result<()> {
             )
         }
     } else {
-        let Some(dir) = std::env::args().nth(1).map(PathBuf::from).filter(|arg| {
-            !arg.to_string_lossy().starts_with("--")
-        }) else {
+        let Some(dir) = std::env::args()
+            .nth(1)
+            .map(PathBuf::from)
+            .filter(|arg| !arg.to_string_lossy().starts_with("--"))
+        else {
             println!("usage: carousel_comment <dir-of-slide-pngs> | --link <url>");
             return Ok(());
         };

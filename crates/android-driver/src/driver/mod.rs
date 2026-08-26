@@ -2436,13 +2436,19 @@ mod example_wiring_tests {
             }
         }
         // A scanner that reads nothing passes every assertion below it.
-        assert!(seen >= 15, "only {seen} examples scanned; the read is broken");
+        assert!(
+            seen >= 15,
+            "only {seen} examples scanned; the read is broken"
+        );
         assert!(
             bare.is_empty(),
             "these examples build a driver that cannot find the repo's adb: {bare:?}\n\
              use `common::repo_config()` — see examples/common/mod.rs"
         );
-        assert!(undeclared.is_empty(), "missing `mod common;`: {undeclared:?}");
+        assert!(
+            undeclared.is_empty(),
+            "missing `mod common;`: {undeclared:?}"
+        );
     }
 
     /// The shared helper fills the fields the app fills, and only the low-priority ones.

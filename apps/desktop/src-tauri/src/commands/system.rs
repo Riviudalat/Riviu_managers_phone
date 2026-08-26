@@ -146,6 +146,137 @@ pub fn android_tool_problems(state: State<'_, AppState>) -> Vec<String> {
     state.android_tool_problems.clone()
 }
 
+/// How long one repeating frontend error stays quiet after it has reached the log once.
+///
+/// A throw inside a React render, or a rejected promise inside an effect, can repeat on every
+/// frame. Unthrottled that is thousands of identical lines a minute, which is the log-noise
+/// failure this project already measured once from the other direction: 83% of one release log
+/// was a single sentence about a normal thing, and the real signal underneath was unreadable.
+/// Ten seconds is short enough that a burst is still visibly a burst and long enough that a
+/// render loop costs six lines a minute instead of sixty thousand.
+const FRONTEND_ERROR_QUIET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The longest frontend message that gets written down.
+///
+/// A rejected `fetch` can carry a whole response body, and a React error can carry a component
+/// stack hundreds of lines deep. The log is for recognising what broke, not for holding the
+/// payload.
+const FRONTEND_MESSAGE_MAX: usize = 2_000;
+
+/// How many distinct frontend errors are tracked for throttling before the oldest is forgotten.
+///
+/// Bounded on purpose: a message containing a counter or a timestamp produces a new fingerprint
+/// every time, and an unbounded map here would be a leak that only appears while the app is
+/// already misbehaving -- the worst possible time to add one.
+const FRONTEND_ERROR_TRACKED: usize = 64;
+
+struct RepeatedFrontendError {
+    last_logged: std::time::Instant,
+    suppressed: u32,
+}
+
+/// Rate limiter for frontend error reports, keyed by what the error *is*.
+///
+/// Kept pure of Tauri and of `AppState` so a test can drive it with an explicit clock, and so
+/// the command below works even when `AppState::bootstrap` is the thing that failed.
+#[derive(Default)]
+struct FrontendErrorRate {
+    seen: std::collections::HashMap<String, RepeatedFrontendError>,
+}
+
+impl FrontendErrorRate {
+    /// `Some(n)` means write this one down, and `n` identical ones were dropped since the last.
+    /// `None` means stay quiet.
+    fn admit(&mut self, fingerprint: &str, now: std::time::Instant) -> Option<u32> {
+        if let Some(entry) = self.seen.get_mut(fingerprint) {
+            if now.duration_since(entry.last_logged) < FRONTEND_ERROR_QUIET {
+                entry.suppressed = entry.suppressed.saturating_add(1);
+                return None;
+            }
+            let suppressed = entry.suppressed;
+            entry.last_logged = now;
+            entry.suppressed = 0;
+            return Some(suppressed);
+        }
+        if self.seen.len() >= FRONTEND_ERROR_TRACKED {
+            // Forget the least recently logged rather than refusing to track anything new: a
+            // fresh error is the interesting one, and the evicted entry only loses its
+            // throttling, not its right to be logged.
+            if let Some(stalest) = self
+                .seen
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_logged)
+                .map(|(key, _)| key.clone())
+            {
+                self.seen.remove(&stalest);
+            }
+        }
+        self.seen.insert(
+            fingerprint.to_string(),
+            RepeatedFrontendError {
+                last_logged: now,
+                suppressed: 0,
+            },
+        );
+        Some(0)
+    }
+}
+
+fn frontend_error_rate() -> &'static parking_lot::Mutex<FrontendErrorRate> {
+    static RATE: std::sync::OnceLock<parking_lot::Mutex<FrontendErrorRate>> =
+        std::sync::OnceLock::new();
+    RATE.get_or_init(|| parking_lot::Mutex::new(FrontendErrorRate::default()))
+}
+
+/// One frontend error report, as the line it becomes.
+///
+/// Pure so the shape can be pinned by a test: the kind, the message and the source all have to
+/// survive, and a suppressed count has to say so rather than being folded into the text.
+fn frontend_error_line(kind: &str, message: &str, source: Option<&str>, suppressed: u32) -> String {
+    let mut line = format!("frontend {kind}: {message}");
+    if let Some(source) = source {
+        line.push_str(&format!(" (at {source})"));
+    }
+    if suppressed > 0 {
+        line.push_str(&format!(" [+{suppressed} identical suppressed]"));
+    }
+    line
+}
+
+/// **Write a frontend failure into the app log, because nothing else did.**
+///
+/// Before this existed there was no path at all from a frontend error to any record: a grep of
+/// `apps/desktop/src` found no `window.onerror`, no `unhandledrejection` listener and no error
+/// boundary, and a grep of `src-tauri` found nothing that accepted one. So a throw during render
+/// unmounted the React tree and left **a blank window and an empty log** -- the report that
+/// started this work. This is the receiving end; `main.tsx` is the sending end.
+///
+/// Deliberately takes **no `State<AppState>`**. The moments worth recording include the ones
+/// where `AppState::bootstrap` is what failed, and a command that needs the state would be
+/// unavailable in exactly those. It is also exempt from admission for the same reason: refusing
+/// it during shutdown drain would silence the errors most likely to explain the shutdown.
+///
+/// Returns nothing, and cannot fail. A reporting path that can itself fail invites a caller to
+/// handle that failure, and on this side of the wire there is nowhere for that to go.
+#[tauri::command]
+pub fn log_frontend_error(kind: String, message: String, source: Option<String>) {
+    let mut message = message;
+    message.truncate(FRONTEND_MESSAGE_MAX);
+    let source = source.map(|mut source| {
+        source.truncate(FRONTEND_MESSAGE_MAX);
+        source
+    });
+    let fingerprint = format!("{kind}|{message}|{}", source.as_deref().unwrap_or(""));
+    let now = std::time::Instant::now();
+    let Some(suppressed) = frontend_error_rate().lock().admit(&fingerprint, now) else {
+        return;
+    };
+    log::error!(
+        "{}",
+        frontend_error_line(&kind, &message, source.as_deref(), suppressed)
+    );
+}
+
 /// Whether a newer release is published, and whether now is a safe moment to take it.
 ///
 /// Two answers in one call, and deliberately so. An updater that reports "an update is
@@ -271,4 +402,117 @@ pub struct UpdateStatus {
     /// The frontend must refuse to offer the install while this is `Some`. Carried as a
     /// sentence rather than a bool so the operator is told *what* is running.
     pub busy_reason: Option<String>,
+}
+
+#[cfg(test)]
+mod frontend_error_tests {
+    use super::{
+        frontend_error_line, FrontendErrorRate, FRONTEND_ERROR_QUIET, FRONTEND_ERROR_TRACKED,
+    };
+    use std::time::Instant;
+
+    /// **The first one speaks, the repeats are counted, and the count is not lost.**
+    ///
+    /// This is the whole reason the throttle exists: a throw inside a render repeats every
+    /// frame, and a log that prints all of them is a log nobody reads. But a log that *drops*
+    /// them silently is worse than either -- it under-reports a storm as a hiccup. So the
+    /// suppressed ones come back as a number on the next line that gets through.
+    #[test]
+    fn a_repeating_frontend_error_is_logged_once_then_counted() {
+        let mut rate = FrontendErrorRate::default();
+        let start = Instant::now();
+
+        assert_eq!(rate.admit("render|boom|App.tsx", start), Some(0));
+        assert_eq!(rate.admit("render|boom|App.tsx", start), None);
+        assert_eq!(rate.admit("render|boom|App.tsx", start), None);
+
+        let later = start + FRONTEND_ERROR_QUIET;
+        assert_eq!(
+            rate.admit("render|boom|App.tsx", later),
+            Some(2),
+            "the two dropped repeats have to be reported, not forgotten"
+        );
+        assert_eq!(
+            rate.admit("render|boom|App.tsx", later),
+            None,
+            "and the window restarts from the line that just went out"
+        );
+    }
+
+    /// One noisy error must not silence a different one.
+    ///
+    /// The throttle is keyed on what the error *is*, so a render loop screaming once a frame
+    /// cannot hide the single unhandled rejection that actually explains the failure.
+    #[test]
+    fn two_different_errors_do_not_throttle_each_other() {
+        let mut rate = FrontendErrorRate::default();
+        let now = Instant::now();
+        assert_eq!(rate.admit("render|boom|App.tsx", now), Some(0));
+        assert_eq!(rate.admit("rejection|no such command|api.ts", now), Some(0));
+    }
+
+    /// **The tracking map is bounded, because this code runs while things are already wrong.**
+    ///
+    /// A message carrying a counter or a timestamp is a fresh fingerprint every time. Unbounded,
+    /// that is a leak that only appears during an incident -- the worst moment to add one.
+    #[test]
+    fn the_tracked_set_cannot_grow_without_bound() {
+        let mut rate = FrontendErrorRate::default();
+        let now = Instant::now();
+        for index in 0..(FRONTEND_ERROR_TRACKED * 4) {
+            rate.admit(&format!("rejection|attempt {index} failed|api.ts"), now);
+        }
+        assert!(
+            rate.seen.len() <= FRONTEND_ERROR_TRACKED,
+            "tracked {} distinct errors, cap is {FRONTEND_ERROR_TRACKED}",
+            rate.seen.len()
+        );
+    }
+
+    /// A never-before-seen error is logged even once the map is full.
+    ///
+    /// Eviction has to give up *throttling*, not give up *reporting*. Returning `None` when the
+    /// map is full would mean a fresh error goes unrecorded precisely because other errors were
+    /// noisy first.
+    #[test]
+    fn a_new_error_is_still_reported_once_the_map_is_full() {
+        let mut rate = FrontendErrorRate::default();
+        let now = Instant::now();
+        for index in 0..(FRONTEND_ERROR_TRACKED * 2) {
+            rate.admit(&format!("rejection|filler {index}|api.ts"), now);
+        }
+        assert_eq!(
+            rate.admit("render|the one that matters|Focus.tsx", now),
+            Some(0)
+        );
+    }
+
+    /// The line has to name the kind, the message and the place.
+    #[test]
+    fn a_frontend_line_carries_the_kind_the_message_and_the_place() {
+        let line = frontend_error_line(
+            "unhandledrejection",
+            "deviceControlBegin is not a function",
+            Some("App.tsx:412"),
+            0,
+        );
+        assert!(line.contains("unhandledrejection"));
+        assert!(line.contains("deviceControlBegin is not a function"));
+        assert!(line.contains("App.tsx:412"));
+        assert!(
+            !line.contains("suppressed"),
+            "a first occurrence must not claim anything was suppressed: {line}"
+        );
+    }
+
+    /// A suppressed count is stated as a count, not folded into the prose.
+    #[test]
+    fn a_suppressed_count_is_stated_plainly() {
+        let line = frontend_error_line("render", "boom", None, 431);
+        assert!(line.contains("431"), "{line}");
+        assert!(
+            !line.contains("(at "),
+            "no source means no empty location clause: {line}"
+        );
+    }
 }

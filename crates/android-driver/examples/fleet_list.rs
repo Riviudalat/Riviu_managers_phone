@@ -17,9 +17,7 @@ mod common;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let driver = riviu_android_driver::AndroidDriver::new(
-        &common::repo_config(),
-    )?;
+    let driver = riviu_android_driver::AndroidDriver::new(&common::repo_config())?;
     // Printed before the count, and that order is the point: `0 device(s)` on its own has been
     // read as "no phone", as "no TikTok", and as everything except "no adb" — see
     // `common::describe_adb`.

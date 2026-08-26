@@ -542,8 +542,7 @@ pub async fn prepare_grounded_comment(
             }
             break;
         };
-        let verification =
-            grounded_verify(settings, &sheet, &candidate, direction, brief).await?;
+        let verification = grounded_verify(settings, &sheet, &candidate, direction, brief).await?;
         spend.add(
             verification.prompt_tokens,
             verification.completion_tokens,
@@ -890,7 +889,10 @@ async fn grounded_generate(
         .map(str::to_string);
     // A caption fetched from the post outranks the one the model read off the sheet: same
     // field, read from the source instead of from a few hundred pixels of JPEG.
-    let known_caption = text.caption.map(str::trim).filter(|value| !value.is_empty());
+    let known_caption = text
+        .caption
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let caption = known_caption.map(str::to_string).or(model_caption);
     let visual_facts = value
         .get("visualFacts")
@@ -978,37 +980,32 @@ pub async fn prepare_grounded_comments_batch(
         return BatchedComments::all_individual(out);
     }
 
-    let sheet = match make_contact_sheet(frames, kind).map(|sheet| sheet.with_coverage(brief.coverage)) {
-        Ok(sheet) => sheet,
-        Err(error) => {
-            let detail = error.to_string();
-            return BatchedComments::all_individual(
-                (0..count).map(|_| Err(anyhow!("{detail}"))).collect(),
-            );
-        }
-    };
+    let sheet =
+        match make_contact_sheet(frames, kind).map(|sheet| sheet.with_coverage(brief.coverage)) {
+            Ok(sheet) => sheet,
+            Err(error) => {
+                let detail = error.to_string();
+                return BatchedComments::all_individual(
+                    (0..count).map(|_| Err(anyhow!("{detail}"))).collect(),
+                );
+            }
+        };
     let frame_sha256 = sha256_hex(&sheet.jpeg);
     let max_words = settings.max_comment_words.clamp(4, 30) as usize;
     let lang = language_label(&settings.comment_lang);
 
     let batch =
-        match grounded_generate_batch(
-            settings,
-            &sheet,
-            &lang,
-            max_words,
-            direction,
-            count,
-            brief,
-        )
-        .await
+        match grounded_generate_batch(settings, &sheet, &lang, max_words, direction, count, brief)
+            .await
         {
             Ok(batch) => batch,
             Err(error) => {
                 tracing::warn!("gộp bản nháp thất bại, lùi về từng câu: {error}");
                 let mut out = Vec::with_capacity(count);
                 for _ in 0..count {
-                    out.push(prepare_grounded_comment(settings, frames, kind, direction, brief).await);
+                    out.push(
+                        prepare_grounded_comment(settings, frames, kind, direction, brief).await,
+                    );
                 }
                 return BatchedComments::all_individual(out);
             }
@@ -1167,9 +1164,9 @@ pub async fn prepare_grounded_comments_batch(
                 .collect();
             let mut retry_verdicts = Vec::with_capacity(retry_candidates.len());
             for group in retry_candidates.chunks(VERIFY_CONCURRENCY) {
-                let pending = group
-                    .iter()
-                    .map(|candidate| grounded_verify(settings, &sheet, candidate, direction, brief));
+                let pending = group.iter().map(|candidate| {
+                    grounded_verify(settings, &sheet, candidate, direction, brief)
+                });
                 retry_verdicts.extend(futures_util::future::join_all(pending).await);
             }
             let mut still_missing = Vec::new();
@@ -1920,10 +1917,12 @@ fn evidence_priority(brief: PostBrief<'_>) -> &'static str {
         // A talking-head video *is* its narration; the frames are whatever second the sampler
         // happened to catch. Naming the transcript first is what makes the comment about the
         // post rather than about the outfit.
-        true => "LỜI THOẠI là ưu tiên cao nhất — hãy bám vào một chi tiết CỤ THỂ được nói \
+        true => {
+            "LỜI THOẠI là ưu tiên cao nhất — hãy bám vào một chi tiết CỤ THỂ được nói \
                  trong đó (địa điểm, món, việc làm); nội dung nhìn thấy và caption là ưu tiên \
                  sau đó. Đừng bình luận trang phục, ngoại hình hay bối cảnh trong ảnh nếu lời \
-                 thoại có chi tiết đáng nhắc hơn",
+                 thoại có chi tiết đáng nhắc hơn"
+        }
         false => "Nội dung nhìn thấy và caption là ưu tiên cao nhất",
     }
 }
@@ -3299,16 +3298,15 @@ mod tests {",
             ..NurtureSettings::default()
         };
         let frame = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
-        let result =
-            prepare_grounded_comment(
-                &settings,
-                &[frame],
-                EvidenceKind::Moments,
-                Some("tự nhiên"),
-                Default::default(),
-            )
-                .await
-                .expect("grounded comment");
+        let result = prepare_grounded_comment(
+            &settings,
+            &[frame],
+            EvidenceKind::Moments,
+            Some("tự nhiên"),
+            Default::default(),
+        )
+        .await
+        .expect("grounded comment");
         server.await.expect("mock gateway task");
 
         assert_eq!(result.text, "Trà cherry nhìn mê quá 😋");
@@ -3550,7 +3548,10 @@ mod tests {",
             transcript: Some("điểm dừng chân tiếp theo là Pink Valley"),
             ..PostBrief::default()
         });
-        assert!(sentence.starts_with("LỜI THOẠI là ưu tiên cao nhất"), "{sentence}");
+        assert!(
+            sentence.starts_with("LỜI THOẠI là ưu tiên cao nhất"),
+            "{sentence}"
+        );
         // The specific failure it exists to prevent, named in the prompt rather than hoped for.
         assert!(sentence.contains("Đừng bình luận trang phục"), "{sentence}");
     }
@@ -3654,7 +3655,10 @@ mod tests {",
             }))
             .layout_note();
         assert!(note.contains("VIDEO dài 52 giây"), "{note}");
-        assert!(note.contains("Gần như toàn bộ video CHƯA đọc được"), "{note}");
+        assert!(
+            note.contains("Gần như toàn bộ video CHƯA đọc được"),
+            "{note}"
+        );
     }
 
     /// **With no coverage the Moments wording is exactly what it was.**
@@ -3669,13 +3673,18 @@ mod tests {",
             .unwrap()
             .layout_note();
         assert!(
-            many.starts_with("3 khung KHÁC NHAU của cùng một bài, xếp từ trái sang phải theo thời gian"),
+            many.starts_with(
+                "3 khung KHÁC NHAU của cùng một bài, xếp từ trái sang phải theo thời gian"
+            ),
             "{many}"
         );
         let one = make_contact_sheet(&[slide_shaded(10)], EvidenceKind::Moments)
             .unwrap()
             .layout_note();
-        assert!(one.starts_with("ĐÚNG MỘT khung của bài (chụp ba lần"), "{one}");
+        assert!(
+            one.starts_with("ĐÚNG MỘT khung của bài (chụp ba lần"),
+            "{one}"
+        );
     }
 
     /// A slide count on a video, or seconds on a carousel, cannot be built — the enum forbids
@@ -3708,7 +3717,10 @@ mod tests {",
             .with_coverage(Some(PostCoverage::Slides { total: 8 }))
             .layout_note();
         assert!(note.contains("trong tổng số 8 ảnh"), "{note}");
-        assert!(note.contains("ảnh đầu và"), "the picks keep both ends: {note}");
+        assert!(
+            note.contains("ảnh đầu và"),
+            "the picks keep both ends: {note}"
+        );
     }
 
     /// A total the sheet already covers is dropped, not printed.
@@ -3867,16 +3879,15 @@ mod tests {",
             ..NurtureSettings::default()
         };
         let frame = include_bytes!("../tests/fixtures/feed-iphone8.jpg").to_vec();
-        let error =
-            prepare_grounded_comment(
-                &settings,
-                &[frame],
-                EvidenceKind::Moments,
-                Some("tự nhiên"),
-                Default::default(),
-            )
-                .await
-                .expect_err("the gate refuses empty praise");
+        let error = prepare_grounded_comment(
+            &settings,
+            &[frame],
+            EvidenceKind::Moments,
+            Some("tự nhiên"),
+            Default::default(),
+        )
+        .await
+        .expect_err("the gate refuses empty praise");
         server.await.expect("mock gateway task");
 
         // The message is unchanged, so every outcome column and every caller that matches on
