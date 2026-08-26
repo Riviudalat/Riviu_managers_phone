@@ -31,12 +31,15 @@ use std::sync::atomic::AtomicBool;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use riviu_android_driver::{AndroidDriver, AndroidDriverConfig};
+use riviu_android_driver::AndroidDriver;
 use riviu_core::driver::DeviceDriver;
 use riviu_core::nurture::{
     run_hierarchy_session, CommentTextSource, HierarchySession, PreparedComment,
 };
 use riviu_core::types::{NurtureSessionStatus, NurtureSettings};
+
+#[path = "common/mod.rs"]
+mod common;
 
 static TIKTOK: LazyLock<String> = LazyLock::new(|| {
     std::env::var("RIVIU_TIKTOK_PACKAGE")
@@ -83,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
         })
         .cloned();
 
-    let driver = AndroidDriver::new(&AndroidDriverConfig::default())?;
+    let driver = AndroidDriver::new(&common::repo_config())?;
     let devices = driver.list_devices().await?;
     let serial = match serial {
         Some(serial) => serial,

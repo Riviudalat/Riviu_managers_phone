@@ -16,8 +16,11 @@
 use std::collections::BTreeSet;
 use std::io::Write;
 
-use riviu_android_driver::{AndroidDriver, AndroidDriverConfig};
+use riviu_android_driver::AndroidDriver;
 use riviu_core::driver::{DeviceDriver, UiSession};
+
+#[path = "common/mod.rs"]
+mod common;
 
 /// Pull every `content-desc` and `text` out of a uiautomator XML dump.
 ///
@@ -61,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     };
 
-    let driver = AndroidDriver::new(&AndroidDriverConfig::default())?;
+    let driver = AndroidDriver::new(&common::repo_config())?;
     let package = driver.resolve_tiktok_package(serial).await?;
     let locale = driver
         .device_shell(

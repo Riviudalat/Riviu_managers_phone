@@ -21,8 +21,10 @@
 
 use std::path::PathBuf;
 
-use riviu_android_driver::AndroidDriverConfig;
 use riviu_core::driver::DeviceDriver;
+
+#[path = "common/mod.rs"]
+mod common;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -35,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(std::env::temp_dir)
         .join(format!("riviu-export-{serial}"));
 
-    let driver = riviu_android_driver::detect_driver(&AndroidDriverConfig::default())
+    let driver = riviu_android_driver::detect_driver(&common::repo_config())
         .await
         .map_err(|reason| anyhow::anyhow!("no usable adb on this host: {reason}"))?;
 

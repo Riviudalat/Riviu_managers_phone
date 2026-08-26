@@ -44,9 +44,12 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use riviu_android_driver::{
-    AndroidDriver, AndroidDriverConfig, ViewKind, ViewPacket, ViewPreset, ViewSink,
+    AndroidDriver, ViewKind, ViewPacket, ViewPreset, ViewSink,
 };
 use riviu_core::driver::DeviceDriver;
+
+#[path = "common/mod.rs"]
+mod common;
 
 /// Longest a single start is waited for before it is called a failure.
 ///
@@ -211,7 +214,7 @@ async fn main() -> anyhow::Result<()> {
     // this every start fails with "no scrcpy server configured" and the bench reports a
     // configuration mistake as if it were a measurement.
     let sidecars = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sidecars");
-    let mut config = AndroidDriverConfig::default();
+    let mut config = common::repo_config();
     if std::env::var_os("RIVIU_SCRCPY_SERVER").is_none() {
         let server = sidecars.join("android/noarch/scrcpy-server");
         anyhow::ensure!(

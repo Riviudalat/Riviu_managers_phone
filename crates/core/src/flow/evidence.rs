@@ -1165,6 +1165,19 @@ mod tests {
         }
     }
 
+    /// A deadline one second out, on the **virtual** clock.
+    ///
+    /// Every test in this module runs `start_paused = true`, and that is not a detail. On the
+    /// real clock this second was a race against the machine: these tests decode JPEGs and
+    /// compare image regions, so under load the deadline expired mid-work and 4-7 of them went
+    /// red with `Timeout` — green again when run alone, which is the signature of a flake and
+    /// not of a regression (AGENTS.md, `flow::evidence` notes). A gate that goes red for
+    /// reasons unrelated to the code is a gate people learn to re-run instead of read.
+    ///
+    /// Paused, CPU work costs zero virtual time, so the deadline can only be reached by an
+    /// actual `sleep` past it — which is exactly the thing these tests mean to model. The
+    /// module has no `elapsed()`, no `spawn_blocking` and no `std::thread`, so nothing here
+    /// depends on wall time.
     fn deadline() -> tokio::time::Instant {
         tokio::time::Instant::now() + Duration::from_secs(1)
     }
@@ -1179,7 +1192,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn repository_frames_produce_qualified_region_evidence() {
         let frames = TestGenerationFrames::single_generation(7, BASELINE_JPEG);
         let cancellation = FlowCancellation::default();
@@ -1212,7 +1225,7 @@ mod tests {
         assert_eq!(result.measurement["generation"], 7);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn full_frame_digest_uses_the_same_generation_bound_baseline() {
         let frames = TestGenerationFrames::single_generation(7, BASELINE_JPEG);
         let cancellation = FlowCancellation::default();
@@ -1241,7 +1254,7 @@ mod tests {
         assert!(result.measurement["distance"].as_u64().unwrap() >= 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn gesture_ack_without_matching_frame_evidence_is_not_success() {
         let frames = TestGenerationFrames::single_generation(7, BASELINE_JPEG);
         let cancellation = FlowCancellation::default();
@@ -1282,7 +1295,7 @@ mod tests {
         assert_eq!(error.code(), "EvidenceMismatch");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn frame_published_before_verification_is_not_post_dispatch_evidence() {
         let frames = TestGenerationFrames::single_generation(7, BASELINE_JPEG);
         let cancellation = FlowCancellation::default();
@@ -1317,7 +1330,7 @@ mod tests {
         assert_eq!(error.code(), "EvidenceTimeout");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn baseline_rejects_generation_advance_after_cached_frame_read() {
         let frames = TestGenerationFrames::single_generation(7, BASELINE_JPEG);
         frames.advance_after_latest(8);
@@ -1334,7 +1347,7 @@ mod tests {
         assert_eq!(error.code(), "StaleGeneration");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn postcondition_waits_map_generation_close_deadline_and_cancel_exactly() {
         for case in ["advanced", "closed", "deadline", "cancelled"] {
             let frames = TestGenerationFrames::single_generation(7, BASELINE_JPEG);
@@ -1387,7 +1400,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn frame_waits_fail_deterministically_on_generation_close_deadline_and_cancel() {
         let cases = ["advanced", "closed", "deadline", "cancelled"];
         for case in cases {
@@ -1429,7 +1442,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn active_app_accessibility_and_unicode_readback_are_exact() {
         let frames = TestGenerationFrames::single_generation(7, BASELINE_JPEG);
         let cancellation = FlowCancellation::default();
@@ -1497,7 +1510,7 @@ mod tests {
         assert_eq!(text.measurement["value"], "Tiếng Việt chính xác");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn readback_is_rejected_without_the_live_session_capability() {
         let frames = TestGenerationFrames::single_generation(7, BASELINE_JPEG);
         let cancellation = FlowCancellation::default();
@@ -1524,7 +1537,7 @@ mod tests {
         assert_eq!(error.code(), "EvidenceUnsupported");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn request_errors_do_not_hide_cancellation_or_deadline() {
         let frames = TestGenerationFrames::single_generation(7, BASELINE_JPEG);
 
@@ -1591,7 +1604,7 @@ mod tests {
         assert_eq!(error.code(), "EvidenceTimeout");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn successful_reads_with_wrong_values_are_evidence_mismatches() {
         let frames = TestGenerationFrames::single_generation(7, BASELINE_JPEG);
         let cancellation = FlowCancellation::default();

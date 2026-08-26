@@ -13,9 +13,12 @@
 //! refused at preflight on every Android phone. A test with a fixed set of facts proves the
 //! snapshot is *assembled* right; only a phone proves the facts can be *read*.
 
-use riviu_android_driver::{AndroidDriver, AndroidDriverConfig};
+use riviu_android_driver::AndroidDriver;
 use riviu_core::driver::DeviceDriver;
 use riviu_core::qualified_geometry_profile_id;
+
+#[path = "common/mod.rs"]
+mod common;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -25,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     };
 
-    let driver = AndroidDriver::new(&AndroidDriverConfig::default())?;
+    let driver = AndroidDriver::new(&common::repo_config())?;
     let target = match args.get(1) {
         Some(package) => package.clone(),
         None => driver.resolve_tiktok_package(serial).await?,

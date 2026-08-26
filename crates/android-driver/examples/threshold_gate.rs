@@ -34,7 +34,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use riviu_android_driver::{AndroidDriver, AndroidDriverConfig};
+use riviu_android_driver::AndroidDriver;
 use riviu_core::driver::{DeviceDriver, UiSession};
 use riviu_core::interaction_hierarchy::{
     open_target_by_hierarchy, read_author_label, read_post_caption, read_post_counters,
@@ -42,6 +42,9 @@ use riviu_core::interaction_hierarchy::{
 };
 use riviu_core::interaction_threshold::{plan_thresholds, PostNow, PostTargets};
 use riviu_core::tiktok_labels;
+
+#[path = "common/mod.rs"]
+mod common;
 
 /// Fallback only. **Not** the package for the fleet — see [`package_for`].
 static TIKTOK_FALLBACK: LazyLock<String> = LazyLock::new(|| {
@@ -178,7 +181,7 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(70);
 
-    let driver = AndroidDriver::new(&AndroidDriverConfig::default())?;
+    let driver = AndroidDriver::new(&common::repo_config())?;
     let handle = url
         .split('@')
         .nth(1)

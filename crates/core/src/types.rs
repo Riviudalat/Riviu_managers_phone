@@ -2069,6 +2069,54 @@ mod wire_shape_tests {
         out
     }
 
+    /// **The same gate, for the Interaction types — which had none at all.**
+    ///
+    /// `the_frontend_types_describe_the_same_fields_the_backend_sends` scans only this file, and
+    /// every Interaction wire type lives in `interaction.rs`. So a field added on one side and
+    /// forgotten on the other rendered as `undefined` with nothing to catch it: the campaign
+    /// summary, the assignment record, the plan, the previews and the target note are all on
+    /// that side of the line.
+    ///
+    /// Split from the test below rather than folded into it, because the two read different
+    /// files and one test reading both would report drift without saying which half is ungated.
+    #[test]
+    fn the_frontend_types_match_the_interaction_types_too() {
+        let rust = rust_structs(&include_str!("interaction.rs").replace("\r\n", "\n"));
+        let ts = ts_interfaces(
+            &include_str!("../../../apps/desktop/src/types.ts").replace("\r\n", "\n"),
+        );
+
+        let mut shared = 0;
+        let mut drift = Vec::new();
+        for (name, rust_fields) in &rust {
+            let Some((_, ts_fields)) = ts.iter().find(|(n, _)| n == name) else {
+                continue;
+            };
+            shared += 1;
+            let only_rust: Vec<_> = rust_fields.difference(ts_fields).cloned().collect();
+            let only_ts: Vec<_> = ts_fields.difference(rust_fields).cloned().collect();
+            if !only_rust.is_empty() || !only_ts.is_empty() {
+                drift.push(format!(
+                    "{name}: only in Rust {only_rust:?}, only in TypeScript {only_ts:?}"
+                ));
+            }
+        }
+
+        // A scanner that reads nothing passes every assertion below it.
+        assert!(
+            shared >= 6,
+            "only {shared} interaction types matched by name; the scanner has stopped reading one \
+             of the two files (Rust structs seen: {}, TS interfaces seen: {})",
+            rust.len(),
+            ts.len()
+        );
+        assert!(
+            drift.is_empty(),
+            "the two halves of the Interaction wire disagree:\n  {}",
+            drift.join("\n  ")
+        );
+    }
+
     #[test]
     fn the_frontend_types_describe_the_same_fields_the_backend_sends() {
         // Same reason as `fields_absorbed_live`: a line-anchored scan against bytes that may

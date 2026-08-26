@@ -12,11 +12,18 @@
 
 use riviu_core::driver::DeviceDriver;
 
+#[path = "common/mod.rs"]
+mod common;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let driver = riviu_android_driver::AndroidDriver::new(
-        &riviu_android_driver::AndroidDriverConfig::default(),
+        &common::repo_config(),
     )?;
+    // Printed before the count, and that order is the point: `0 device(s)` on its own has been
+    // read as "no phone", as "no TikTok", and as everything except "no adb" — see
+    // `common::describe_adb`.
+    println!("{}", common::describe_adb(&common::repo_config()));
     let devices = driver.list_devices().await?;
     println!("{} device(s)", devices.len());
     for device in devices {

@@ -28,8 +28,11 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use riviu_android_driver::{AndroidDriver, AndroidDriverConfig};
+use riviu_android_driver::AndroidDriver;
 use riviu_core::{DeviceControlPlane, DeviceWorkCoordinator, DeviceWorkOwner, StreamBudgetManager};
+
+#[path = "common/mod.rs"]
+mod common;
 
 /// A minimal hub.
 ///
@@ -117,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let wanted = args.iter().find(|arg| !arg.starts_with("--")).cloned();
 
-    let driver = Arc::new(AndroidDriver::new(&AndroidDriverConfig::default())?);
+    let driver = Arc::new(AndroidDriver::new(&common::repo_config())?);
     let adb_path = riviu_android_driver::AdbProgram::resolve(None, None)?
         .path()
         .to_path_buf();

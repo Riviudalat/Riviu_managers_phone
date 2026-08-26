@@ -19,8 +19,11 @@
 
 use std::path::{Path, PathBuf};
 
-use riviu_android_driver::{AndroidDriver, AndroidDriverConfig};
+use riviu_android_driver::AndroidDriver;
 use riviu_core::driver::DeviceDriver;
+
+#[path = "common/mod.rs"]
+mod common;
 
 const CAMPAIGN: &str = "a1-live-check";
 
@@ -75,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
         &[("b-one.jpg", b"BBBB-one"), ("b-two.jpg", b"BBBB-two")],
     );
 
-    let driver = AndroidDriver::new(&AndroidDriverConfig::default())?;
+    let driver = AndroidDriver::new(&common::repo_config())?;
     let scope_a = format!("{CAMPAIGN}-0");
     let scope_b = format!("{CAMPAIGN}-1");
 

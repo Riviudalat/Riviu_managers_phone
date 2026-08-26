@@ -39,12 +39,15 @@
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use riviu_android_driver::{AndroidDriver, AndroidDriverConfig};
+use riviu_android_driver::AndroidDriver;
 use riviu_core::driver::{DeviceDriver, UiSession};
 use riviu_core::interaction_hierarchy::{
     open_target_by_hierarchy, photograph_video_post, read_post_caption, SlideCamera, TargetArrival,
 };
 use riviu_core::tiktok_labels;
+
+#[path = "common/mod.rs"]
+mod common;
 
 /// Screenshots, because the walk's own pictures are the thing under test.
 ///
@@ -54,12 +57,26 @@ use riviu_core::tiktok_labels;
 /// same choice `carousel_gate` makes, for the same reason.
 struct ScreencapCamera<'a> {
     session: &'a dyn UiSession,
+    /// How long the captures themselves cost, and how many there were.
+    ///
+    /// **Measured, because the span depends on it.** `span_secs` is the wall time between the
+    /// first kept frame and the last, so it includes every capture in between — and a `screencap`
+    /// here is a 2-4 MB PNG over USB. Production reads a scrcpy frame that is already in memory,
+    /// so its span is the sleep schedule and little else. Printing both halves is what turns
+    /// "on the stream it would be about nine seconds" from arithmetic into a measurement.
+    cost: std::sync::Mutex<(std::time::Duration, u32)>,
 }
 
 #[async_trait::async_trait]
 impl SlideCamera for ScreencapCamera<'_> {
     async fn capture(&self) -> Option<Vec<u8>> {
-        self.session.screenshot_png().await.ok()
+        let started = std::time::Instant::now();
+        let shot = self.session.screenshot_png().await.ok();
+        if let Ok(mut cost) = self.cost.lock() {
+            cost.0 += started.elapsed();
+            cost.1 += 1;
+        }
+        shot
     }
 }
 
@@ -110,7 +127,7 @@ async fn main() -> anyhow::Result<()> {
     // **Point the driver at the repo's own adb, and do it through `bundled_adb_path`.**
     //
     // This host has no adb on `PATH` and no `ANDROID_HOME`, so a bare
-    // `AndroidDriverConfig::default()` finds no adb at all — and the way that surfaces is the
+    // `common::repo_config()` finds no adb at all — and the way that surfaces is the
     // trap: `list_devices` comes back empty, every `pm list packages` call fails silently, and
     // `resolve_tiktok_package` reports **`no TikTok build with measured labels is installed`**
     // on a phone that has one. Measured here on 26/08/2026: that message cost a whole wrong
@@ -119,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
     // `bundled_adb_path` and not `adb_path`, because that field is the documented lowest
     // priority: an operator's `RIVIU_ADB_PATH` still wins, which is the whole reason the two
     // fields are separate.
-    let mut config = AndroidDriverConfig::default();
+    let mut config = common::repo_config();
     if config.adb_path.is_none() && config.bundled_adb_path.is_none() {
         let bundled = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../sidecars/android/win-x86_64")
@@ -132,13 +149,7 @@ async fn main() -> anyhow::Result<()> {
     // Asked before anything else, because "no devices" and "no TikTok" are the same silence
     // otherwise. A gate that cannot tell the operator which one it hit is a gate that sends
     // them looking in the wrong place.
-    let visible = driver.list_devices().await?;
-    anyhow::ensure!(
-        visible.iter().any(|device| device.udid == *serial),
-        "adb does not see {serial} (thấy {} máy: {:?}) — kiểm cáp, hoặc đặt RIVIU_ADB_PATH",
-        visible.len(),
-        visible.iter().map(|device| &device.udid).collect::<Vec<_>>()
-    );
+    common::require_device(&driver, serial).await?;
     let package = driver.resolve_tiktok_package(serial).await?;
     let session = driver.open_session(serial).await?;
     let language = session.ui_language().await.unwrap_or_default();
@@ -208,14 +219,38 @@ async fn main() -> anyhow::Result<()> {
         None => println!("caption  KHÔNG đọc được — vòng xem sẽ chỉ dựa vào thanh rail"),
     }
 
-    let camera = ScreencapCamera { session: &session };
+    let camera = ScreencapCamera {
+        session: &session,
+        cost: std::sync::Mutex::new((std::time::Duration::ZERO, 0)),
+    };
     let started = std::time::Instant::now();
     let watch = photograph_video_post(&session, &camera, &package, duration).await;
+    let elapsed = started.elapsed();
+    let (capture_cost, captures) = camera
+        .cost
+        .lock()
+        .map(|cost| *cost)
+        .unwrap_or((std::time::Duration::ZERO, 0));
     println!(
         "\nxem {} khung trong {:.1}s thật, span khai báo {} giây",
         watch.frames.len(),
-        started.elapsed().as_secs_f64(),
+        elapsed.as_secs_f64(),
         watch.span_secs
+    );
+    // The split that answers "what would this be on the production path?". Take the capture cost
+    // out and what remains is the sleep schedule, which is all a scrcpy frame read would add.
+    println!(
+        "  chụp    {captures} lần, tổng {:.1}s ({:.1}s mỗi lần) — trên luồng scrcpy phần này ~0",
+        capture_cost.as_secs_f64(),
+        if captures > 0 {
+            capture_cost.as_secs_f64() / f64::from(captures)
+        } else {
+            0.0
+        }
+    );
+    println!(
+        "  suy ra  span trên đường production vào khoảng {:.1}s",
+        elapsed.saturating_sub(capture_cost).as_secs_f64()
     );
 
     // Byte digests, with the caveat stated: a PNG screencap of an unchanged screen still encodes

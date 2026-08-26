@@ -9583,9 +9583,7 @@ không phải `adb_path`** — trường đó là mức ưu tiên thấp nhất 
 `RIVIU_ADB_PATH` của người vận hành vẫn thắng. Và gate giờ **hỏi `list_devices()` trước** rồi
 mới hỏi package, nên "không thấy máy" và "không có TikTok" không còn là cùng một sự im lặng.
 
-**Các example khác vẫn còn bẫy này** (`carousel_gate`, `mention_gate`, `threaded_gate`,
-`probe`, `threshold_gate`, `target_check`): chúng dùng `AndroidDriverConfig::default()`. Trên
-host không có adb trên `PATH` thì phải đặt `RIVIU_ADB_PATH`. Chưa sửa hàng loạt.
+**~~Các example khác vẫn còn bẫy này~~ — đã sửa cả 16**, xem mục "dọn bốn việc treo" ở dưới.
 
 ### Lỗi 2: `span_secs` suy từ lịch lấy mẫu, và lịch không phải sự thật
 
@@ -9688,7 +9686,7 @@ Test wire-parity (`types.rs` ↔ `types.ts`) **chỉ quét `types.rs`**. Mọi t
 ra `undefined` mà không ai biết. `target_note_tests::the_frontend_mirrors_this_note_field_for_field`
 ghim đúng type này theo hai chiều: danh sách tên camelCase phải khớp interface TypeScript, **và**
 phải khớp đúng những gì `serde` thực sự gửi (kiểm bằng `serde_json::to_value`), nên danh sách
-không thể tự trôi. Các type Interaction khác vẫn chưa có cổng — chưa làm.
+không thể tự trôi. ~~Các type Interaction khác vẫn chưa có cổng~~ — **giờ có**, xem mục dưới.
 
 ### Một cái bẫy của test frontend, ghi lại vì nó im lặng
 
@@ -9768,3 +9766,88 @@ Cả ba đều chạy trên cây source. Câu hỏi cần hỏi riêng là: *th�
 nào, và đường đó còn tồn tại sau khi đóng gói không?* Mọi sidecar khác của repo này trả lời câu
 đó bằng một field `bundled_*` mà host truyền vào — tôi đi chệch khỏi khuôn đó và trả giá đúng
 bằng cách mà khuôn đó được dựng để tránh.
+
+### §9.115 tiếp — dọn bốn việc treo, và cái nào cũng có cổng (26/08/2026)
+
+Bốn mục "chưa làm" ở các phần trên đã làm. Ghi lại vì ba trong bốn cái đều lôi ra một thứ không
+đọc được từ code.
+
+### 1. `AndroidDriverConfig::default()` ở **16** example, không phải 6
+
+Đếm lại thì không phải 6 mà **16** example dựng driver từ config rỗng — tức 16 chỗ có thể báo
+"máy không có TikTok" về một máy có TikTok, trên bất kỳ host nào không có adb trên `PATH`.
+
+Sửa bằng `crates/android-driver/examples/common/mod.rs`, và **chỗ đặt file là một quyết định**:
+nó nằm trong `examples/` chứ **không** trong `src/`. Cách duy nhất để tìm `sidecars/` của repo từ
+code là `CARGO_MANIFEST_DIR` — đường **lúc biên dịch**. Một helper trong library sẽ được biên
+dịch vào app đã đóng gói, mang theo đường của build agent: **đúng cái lỗi vừa làm yt-dlp chết
+lặng**. Để trong `examples/` thì nó không thể chạm tới production. (Cargo không build
+`examples/common/mod.rs` thành example riêng — example là `examples/*.rs` hoặc
+`examples/*/main.rs` — nên mỗi example gọi nó bằng `#[path = "common/mod.rs"] mod common;`.)
+
+Helper chỉ điền các field **`bundled_*`**, không bao giờ field trơn: `RIVIU_ADB_PATH` và các biến
+SDK của người vận hành vẫn phải thắng.
+
+**Và cái sửa quan trọng nhất không phải cái đó.** Lỗi gốc là `0 device(s)` **không phân biệt được
+"không có máy" với "không có adb"** — nó đã bị đọc thành "không có máy", rồi thành "máy không có
+TikTok". Nên `fleet_list` giờ in ra adb nó giải được, kèm nguồn:
+
+```
+adb      …/sidecars/android/win-x86_64/adb.exe [Bundled]
+0 device(s)
+```
+
+Một dòng, và sự nhập nhằng biến mất vĩnh viễn. Nếu đường đó không phải file, nó nói thẳng
+`KHÔNG PHẢI FILE: mọi lệnh adb sẽ thất bại im lặng`.
+
+Cổng: `driver::example_wiring_tests` — không example nào được chứa
+`AndroidDriverConfig::default()`, và helper không được đặt field trơn. *Bẫy trong chính test đó:*
+phép kiểm đầu tiên dùng `contains("adb_path:")` và đỏ, vì **`bundled_adb_path:` chứa
+`adb_path:`** — tức nó đánh helper vì làm đúng. Giờ so theo biên từ.
+
+### 2. Type Interaction không có cổng parity — giờ có
+
+Test wire-parity chỉ quét `types.rs`, và **mọi** type Interaction sống ở `interaction.rs`:
+campaign summary, assignment record, plan, preview, target note. Thêm
+`the_frontend_types_match_the_interaction_types_too`, dùng lại đúng hai scanner đã có.
+
+Chạy lần đầu: **không có lệch nào**. Nên cái này không sửa lỗi gì — nó khoá một cửa đang mở.
+
+*Bẫy khi thêm:* `types.rs` là CRLF, và script vá của tôi chuyển `\n` → `\r\n` **hai lần**, ra
+`\r\r\n` và 12 lỗi `bare CR not allowed in doc-comment`. Không phải lỗi Rust, là lỗi công cụ.
+
+### 3. `flow::evidence` flake — đã sửa, không còn "chạy lại là xanh"
+
+11 test trong họ đó dùng `#[tokio::test]` với deadline `Instant::now() + 1s` **đồng hồ thật**,
+trong khi phải decode JPEG và so vùng ảnh. Máy tải nặng thì quá hạn: 4–7 test đỏ khi chạy cùng
+700 test khác, xanh khi chạy riêng.
+
+Chuyển cả 11 sang `start_paused = true`. Kiểm trước khi chuyển: module **không** có `elapsed()`,
+`spawn_blocking` hay `std::thread` — chỉ `tokio::time::sleep`, thứ mà đồng hồ ảo xử lý đúng. Nên
+việc chụp/decode tốn **0 thời gian ảo**, và deadline chỉ có thể tới bằng một `sleep` thật vượt
+qua nó — đúng điều các test đó muốn mô tả.
+
+Kết quả: 15/15 trong 0,9 s, xanh 3 lượt liền, và toàn suite 773 test xanh. Một cổng đỏ vì lý do
+không liên quan tới code là cổng mà người ta học cách chạy lại thay vì đọc.
+
+### 4. Hai thứ tôi **không** làm theo cách dễ
+
+**`span` trên đường production**: chưa đo được (máy đã rút), nhưng `video_gate` giờ tách chi phí
+chụp ra khỏi lịch nghỉ và in cả hai, cộng một dòng suy ra span mà luồng scrcpy sẽ cho. Lần sau
+cắm máy là có số thật thay vì phép nhân.
+
+**CSS**: e2e cho màn này phải sửa `e2e/fixtures/tauriMock.ts` — fixture dùng chung của 4 spec —
+để đổi lấy một ảnh chụp bảng. Không đáng, và tôi cũng không mở app lái chuột (§ ghi chú "Chạy
+ngay"). Thay vào đó kiểm **cái đáng kiểm**: `InteractionTargetNotes.styles.test.ts` khẳng định
+mọi class trong markup **có luật CSS đứng sau** (jsdom không áp CSS tác giả, nên một class không
+có luật vẫn khiến 7 test kia xanh trong lúc bảng hiện ra như một khối chữ không viền), không có
+luật mồ côi theo chiều ngược lại, `is-refused` được **scope** vào đúng bảng chứ không toàn app,
+và panel dùng token chứ không mã màu cứng.
+
+Nó **không** kiểm là trông đẹp. Cái đó cần mắt người, và giả vờ một snapshot không ai mở là
+tương đương thì tệ hơn là nói thẳng.
+
+### Cổng sau cả bốn
+
+`riviu-core` **773**, `riviu-android-driver` **187**, `riviu-managers-phone` **180**, clippy **0**
+cả ba; frontend `tsc -b` + `oxlint --deny-warnings` sạch, **694 test / 81 file**.

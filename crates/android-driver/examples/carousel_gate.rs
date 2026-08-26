@@ -35,13 +35,16 @@
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use riviu_android_driver::{AndroidDriver, AndroidDriverConfig};
+use riviu_android_driver::AndroidDriver;
 use riviu_core::driver::{DeviceDriver, UiSession};
 use riviu_core::interaction_hierarchy::{
     open_target_by_hierarchy, photograph_photo_post, read_carousel_index, SlideCamera,
     TargetArrival,
 };
 use riviu_core::tiktok_labels;
+
+#[path = "common/mod.rs"]
+mod common;
 
 /// Screenshots, because the walk's own pictures are the thing under test.
 ///
@@ -72,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| "target/carousel-gate".to_string());
     std::fs::create_dir_all(&out_dir)?;
 
-    let driver = AndroidDriver::new(&AndroidDriverConfig::default())?;
+    let driver = AndroidDriver::new(&common::repo_config())?;
     let package = driver.resolve_tiktok_package(serial).await?;
     let session = driver.open_session(serial).await?;
     let language = session.ui_language().await.unwrap_or_default();

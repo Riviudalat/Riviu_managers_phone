@@ -18,10 +18,13 @@
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use riviu_android_driver::{AndroidDriver, AndroidDriverConfig, Locator};
+use riviu_android_driver::{AndroidDriver, Locator};
 use riviu_core::driver::{DeviceDriver, UiSession};
 use riviu_core::nurture::touch::TouchPointPlanner;
 use riviu_core::tiktok_labels::{self, LabelMatch, TikTokControl, TikTokControls};
+
+#[path = "common/mod.rs"]
+mod common;
 
 /// A catalogued label becomes the driver's own locator, keeping exact vs substring
 /// as measured — the comment button's label embeds a count, so exact never hits.
@@ -68,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
     let terminate = args.iter().any(|arg| arg == "--terminate");
     let wanted = args.iter().find(|arg| !arg.starts_with("--")).cloned();
 
-    let driver = AndroidDriver::new(&AndroidDriverConfig::default())?;
+    let driver = AndroidDriver::new(&common::repo_config())?;
 
     println!("== list_devices ==");
     let devices = timed!("list_devices", driver.list_devices().await)?;

@@ -21,10 +21,13 @@ use std::sync::atomic::AtomicBool;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use riviu_android_driver::{AndroidDriver, AndroidDriverConfig};
+use riviu_android_driver::AndroidDriver;
 use riviu_core::driver::{DeviceDriver, UiSession};
 use riviu_core::interaction_hierarchy::{open_target_by_hierarchy, TargetArrival};
 use riviu_core::tiktok_labels;
+
+#[path = "common/mod.rs"]
+mod common;
 
 static TIKTOK: LazyLock<String> = LazyLock::new(|| {
     std::env::var("RIVIU_TIKTOK_PACKAGE")
@@ -53,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let driver = AndroidDriver::new(&AndroidDriverConfig::default())?;
+    let driver = AndroidDriver::new(&common::repo_config())?;
     driver.launch_app(serial, TIKTOK.as_str()).await?;
     tokio::time::sleep(Duration::from_secs(10)).await;
     let session = driver.open_session(serial).await?;

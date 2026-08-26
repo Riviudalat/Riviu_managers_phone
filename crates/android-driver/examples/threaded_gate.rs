@@ -41,13 +41,16 @@ use std::sync::atomic::AtomicBool;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use riviu_android_driver::{AndroidDriver, AndroidDriverConfig};
+use riviu_android_driver::AndroidDriver;
 use riviu_core::driver::{DeviceDriver, UiSession};
 use riviu_core::interaction::CommentLocatorIdentity;
 use riviu_core::interaction_hierarchy::{
     open_target_by_hierarchy, send_reply_by_hierarchy, send_root_by_hierarchy, TargetArrival,
 };
 use riviu_core::tiktok_labels::{self, TikTokControl, TikTokControls};
+
+#[path = "common/mod.rs"]
+mod common;
 
 static TIKTOK: LazyLock<String> = LazyLock::new(|| {
     std::env::var("RIVIU_TIKTOK_PACKAGE")
@@ -196,7 +199,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_default()
         .to_string();
 
-    let driver = AndroidDriver::new(&AndroidDriverConfig::default())?;
+    let driver = AndroidDriver::new(&common::repo_config())?;
     println!("== opening both actors ==");
     let actor_a = open_actor(&driver, serial_a).await?;
     let actor_b = open_actor(&driver, serial_b).await?;

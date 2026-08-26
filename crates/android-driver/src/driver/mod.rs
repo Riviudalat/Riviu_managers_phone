@@ -2391,3 +2391,100 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod example_wiring_tests {
+    /// **No example may build its driver from a bare `default()`.**
+    ///
+    /// `AndroidDriverConfig::default()` fills none of the `bundled_*` fields, so on a host with
+    /// no `adb` on `PATH` and no `ANDROID_HOME` it finds no adb at all — and the failure is
+    /// silent all the way down: `list_devices()` returns nothing, every `pm list packages` call
+    /// fails inside an `if let Ok(..)`, and `resolve_tiktok_package` reports
+    /// **`no TikTok build with measured labels is installed`** about a phone that has one.
+    ///
+    /// Measured 26/08/2026: that message was believed, written into AGENTS.md as
+    /// "the attached phone has no TikTok", and only `fleet_list` printing `0 device(s)` gave it
+    /// away. Sixteen examples had the same hole.
+    ///
+    /// Asserted by scanning the sources because there is nothing else these files share — they
+    /// are sixteen independent binaries, and the next one written will not know about this
+    /// unless something says so.
+    #[test]
+    fn every_example_wires_itself_to_the_repo_sidecars() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let mut bare = Vec::new();
+        let mut undeclared = Vec::new();
+        let mut seen = 0usize;
+        for entry in std::fs::read_dir(&dir).expect("examples/ is readable") {
+            let path = entry.expect("a directory entry").path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let source = std::fs::read_to_string(&path).expect("an example is readable");
+            seen += 1;
+            if source.contains("AndroidDriverConfig::default()") {
+                bare.push(name.clone());
+            }
+            // Only the ones that actually build a driver need the shared module.
+            if source.contains("common::repo_config()") && !source.contains("mod common;") {
+                undeclared.push(name);
+            }
+        }
+        // A scanner that reads nothing passes every assertion below it.
+        assert!(seen >= 15, "only {seen} examples scanned; the read is broken");
+        assert!(
+            bare.is_empty(),
+            "these examples build a driver that cannot find the repo's adb: {bare:?}\n\
+             use `common::repo_config()` — see examples/common/mod.rs"
+        );
+        assert!(undeclared.is_empty(), "missing `mod common;`: {undeclared:?}");
+    }
+
+    /// The shared helper fills the fields the app fills, and only the low-priority ones.
+    ///
+    /// `bundled_*` and never the plain fields: an operator's `RIVIU_ADB_PATH` has to keep
+    /// winning. A bundled path that outranks the override is not a safety net, it is a hijack —
+    /// which is the reason the two sets of fields exist separately at all.
+    #[test]
+    fn the_shared_helper_only_fills_the_overridable_fields() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/common/mod.rs"),
+        )
+        .expect("examples/common/mod.rs is readable");
+        for field in [
+            "bundled_adb_path",
+            "bundled_minicap_apk",
+            "bundled_scrcpy_server",
+            "bundled_riviu_agent_apk",
+            "bundled_agent_server_apk",
+            "bundled_agent_test_apk",
+        ] {
+            assert!(source.contains(field), "the helper does not fill {field}");
+        }
+        for plain in [
+            "adb_path:",
+            "minicap_apk:",
+            "scrcpy_server:",
+            "riviu_agent_apk:",
+        ] {
+            // Matched on a word boundary, not as a substring: `bundled_adb_path:` ends with
+            // `adb_path:`, so a plain `contains` fails the helper for doing exactly the right
+            // thing. That is not a hypothetical — it is what the first version of this test did.
+            let sets_plain = source.match_indices(plain).any(|(at, _)| {
+                source[..at]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|prev| !prev.is_alphanumeric() && prev != '_')
+            });
+            assert!(
+                !sets_plain,
+                "the helper sets `{plain}`, which outranks RIVIU_ADB_PATH and the SDK variables"
+            );
+        }
+    }
+}
