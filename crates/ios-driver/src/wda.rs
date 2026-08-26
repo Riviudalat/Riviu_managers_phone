@@ -349,6 +349,65 @@ pub struct WdaClient {
     profile: WdaProfile,
 }
 
+/// How long a WDA request may take before it is a failure rather than a slow answer.
+///
+/// **A WDA request with no deadline is not a slow request; it is a lost phone.** The call holds
+/// the device lease, the stream reservation and one of the fleet's capacity slots for as long as
+/// it runs, and nothing else reclaims them -- so an unbounded request takes a phone out of the
+/// fleet until the app restarts. Every path to this client goes through
+/// [`wda_http_client`] so that the deadline cannot be omitted by construction.
+const WDA_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long the TCP connect may take. Short, because the relay is on loopback: either it is
+/// listening or it is not.
+const WDA_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The screenshot path gets its own, because its body is megabytes rather than a JSON object.
+/// Measured at ~0.3 s over keep-alive; 25 s is the point past which the relay has wedged.
+const WDA_SCREENSHOT_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// Build the shared WDA client, **and never hand back one without a deadline.**
+///
+/// What this replaces was `.build().unwrap_or_else(|_| Client::new())`, and the interesting
+/// part is what that actually did rather than what it looked like. `Client::new()` is itself
+/// `builder().build().expect(..)`, so in the conditions that make our `build()` fail -- an
+/// uninitialisable TLS backend, or a malformed `HTTP_PROXY` in the environment, both of which
+/// the default builder reads too -- the fallback **panicked**, with a reqwest message that says
+/// nothing about WDA. And with `panic = "abort"` in the release profile that panic ends the
+/// whole app, on every phone at once, at driver-construction time.
+///
+/// So it was not, as it reads, a quiet degradation to a client with no timeout. It was a crash
+/// wearing the clothes of a fallback. Either way the answer is the same: say what failed, and
+/// keep the deadline, because the deadline is the part a phone's availability depends on.
+fn wda_http_client(headers: HeaderMap) -> Client {
+    match Client::builder()
+        .connect_timeout(WDA_CONNECT_TIMEOUT)
+        .default_headers(headers)
+        // tidevice relay is unreliable when reqwest reuses a keep-alive
+        // socket across session/window/gesture requests. Python probes
+        // that open a fresh TCP connection per request stay stable.
+        .pool_max_idle_per_host(0)
+        .timeout(WDA_REQUEST_TIMEOUT)
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::error!(
+                "the configured WDA http client would not build ({error}); falling back to a \
+                 plain one that still carries the {}s request deadline",
+                WDA_REQUEST_TIMEOUT.as_secs()
+            );
+            Client::builder()
+                .timeout(WDA_REQUEST_TIMEOUT)
+                .build()
+                // Reached only if a client with nothing but a timeout also fails, which means
+                // the process has no working HTTP at all. Naming WDA here is the whole point:
+                // reqwest's own message would leave an operator with no idea what died.
+                .expect("no WDA http client can be built on this machine")
+        }
+    }
+}
+
 impl WdaClient {
     pub fn new(host: &str, port: u16, udid: &str) -> Self {
         Self::new_with_profile(host, port, udid, WdaProfile::stock())
@@ -358,16 +417,7 @@ impl WdaClient {
         let mut headers = HeaderMap::new();
         headers.insert(CONNECTION, HeaderValue::from_static("close"));
         Self {
-            http: Client::builder()
-                .connect_timeout(Duration::from_secs(2))
-                .default_headers(headers)
-                // tidevice relay is unreliable when reqwest reuses a keep-alive
-                // socket across session/window/gesture requests. Python probes
-                // that open a fresh TCP connection per request stay stable.
-                .pool_max_idle_per_host(0)
-                .timeout(Duration::from_secs(20))
-                .build()
-                .unwrap_or_else(|_| Client::new()),
+            http: wda_http_client(headers),
             base: format!("http://{host}:{port}"),
             port,
             udid: udid.to_string(),
@@ -895,8 +945,8 @@ impl WdaClient {
         // the relay. Plain keep-alive (what curl does) returns in ~0.3 s.
         let outcome = async {
             let client = Client::builder()
-                .connect_timeout(Duration::from_secs(2))
-                .timeout(Duration::from_secs(25))
+                .connect_timeout(WDA_CONNECT_TIMEOUT)
+                .timeout(WDA_SCREENSHOT_TIMEOUT)
                 .build()
                 .map_err(|e| UiError::new(UiErrorKind::Other, "screenshot", e.to_string()))?;
             let mut request = client.get(&url);
@@ -3137,5 +3187,67 @@ mod tests {
         // Soft recovery is budgeted at 15 s; one gesture plus one retry has to
         // fit inside it or the budget is a lie.
         assert!(GESTURE_TIMEOUT.as_secs() * 2 <= 20);
+    }
+}
+
+#[cfg(test)]
+mod http_client_tests {
+    use super::{WDA_CONNECT_TIMEOUT, WDA_REQUEST_TIMEOUT, WDA_SCREENSHOT_TIMEOUT};
+
+    /// **No path in this file may produce an HTTP client without a deadline.**
+    ///
+    /// `Client::new()` is the one constructor that does: reqwest's default config has no
+    /// request timeout at all. It appeared here once, as the fallback arm of
+    /// `build().unwrap_or_else(..)`, where it read as a graceful degradation and was in fact
+    /// either a panic (in the conditions that make the configured build fail, the default one
+    /// fails too, and `Client::new()` unwraps it) or a client that hangs forever -- and a WDA
+    /// request that hangs holds a device lease, a stream reservation and a capacity slot until
+    /// the app restarts.
+    ///
+    /// A source scan rather than a type: the danger is a constructor that exists and is easy to
+    /// reach for, not a shape the compiler can rule out.
+    #[test]
+    fn nothing_here_builds_an_http_client_without_a_deadline() {
+        // Cut at the first test module, exactly as `lib.rs`'s command scan does and for the
+        // same reason: this file's own tests quote the forbidden call, so a scan of the whole
+        // text reads itself and fails -- which is how this gate first went red. The cut is a
+        // blind spot: a `Client::new()` written *below* here would be invisible. Production
+        // code does not live below the tests, and the alternative is a gate that can never be
+        // green.
+        let whole = include_str!("wda.rs");
+        let source = whole.split("#[cfg(test)]").next().unwrap_or(whole);
+        let uses: Vec<&str> = source
+            .lines()
+            .filter(|line| line.contains("Client::new()"))
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .filter(|line| !line.trim_start().starts_with("///"))
+            .collect();
+        assert!(
+            uses.is_empty(),
+            "Client::new() has no request timeout; go through wda_http_client instead: {uses:?}"
+        );
+
+        // And every `Client::builder()` here reaches a `.timeout(`, so the deadline is not
+        // merely available but taken.
+        let builders = source.matches("Client::builder()").count();
+        let timeouts = source.matches(".timeout(WDA_").count();
+        assert!(
+            builders <= timeouts,
+            "{builders} client builders but only {timeouts} named timeouts"
+        );
+    }
+
+    /// The three deadlines have to stay ordered and non-zero, or the split is decoration.
+    ///
+    /// Connect is on loopback -- the relay is listening or it is not -- so it is the shortest.
+    /// Screenshot carries megabytes rather than a JSON object, so it is the longest.
+    #[test]
+    fn the_deadlines_are_ordered_the_way_the_work_is() {
+        assert!(WDA_CONNECT_TIMEOUT < WDA_REQUEST_TIMEOUT);
+        assert!(WDA_REQUEST_TIMEOUT < WDA_SCREENSHOT_TIMEOUT);
+        assert!(
+            !WDA_CONNECT_TIMEOUT.is_zero(),
+            "a zero timeout is no timeout"
+        );
     }
 }

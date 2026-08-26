@@ -1,3 +1,4 @@
+mod accept_loop;
 mod agent_commands;
 /// Public so the live harness binaries resolve the agent exactly as the app
 /// does. Duplicating the token/manifest choice is how the two drift apart.

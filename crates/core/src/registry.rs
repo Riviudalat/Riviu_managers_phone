@@ -114,9 +114,7 @@ impl DeviceRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{
-        ConnectionKind, DeviceInfo, DevicePlatform, DeviceStatus, TileStreamState,
-    };
+    use crate::types::{ConnectionKind, DeviceInfo, DevicePlatform, DeviceStatus, TileStreamState};
 
     fn phone(udid: &str) -> DeviceInfo {
         DeviceInfo {

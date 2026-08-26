@@ -9,9 +9,10 @@
 //! call this layer is fine for setup and wrong for everything else.
 //! See `docs/ANDROID_PROBE_REPORT_2026-08-09.md`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context};
@@ -58,6 +59,55 @@ const ADB_MAX_CONCURRENT: usize = 12;
 /// genuinely backed up rather than merely busy.
 const ADB_SLOW_WAIT: Duration = Duration::from_millis(500);
 
+/// At most this many of the slots above may be held by a **file transfer** at once.
+///
+/// A sub-cap inside the global cap, not a second lane beside it: the table above says the fleet
+/// stops getting faster past twelve concurrent adb processes, so adding a parallel lane would
+/// push the total past the number that was measured. A transfer takes one of the twelve *and*
+/// one of these four.
+///
+/// **Why transfers need their own number at all.** `pull_device_path` and `push_device_file`
+/// pass a 300-second timeout, and the permit is held for the whole command. With one cap,
+/// twelve simultaneous exports hold every slot for up to five minutes, and during that window
+/// every other adb call in the process queues behind them: device probes, screenshots,
+/// `ensure_stream`, every nurture and interaction action, the boot roster scan. The farm looks
+/// frozen while nothing is wrong with it. Four leaves eight slots for work that answers in
+/// milliseconds.
+const ADB_MAX_TRANSFERS: usize = 4;
+
+/// Which lane a call belongs to: work that answers in milliseconds, or work that moves bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdbLane {
+    Interactive,
+    Transfer,
+}
+
+/// The serial a call is aimed at and the verb it invokes, read off the argv.
+///
+/// `-s <serial>` is prepended by [`AdbProgram::device`] and absent otherwise, so neither can be
+/// read at a fixed index. Pure, and separate from the slot machinery, because "which phone is
+/// this for" is the fact the per-serial queue depends on and getting it wrong would silently
+/// serialise nothing.
+fn adb_target<'a>(args: &[&'a str]) -> (Option<&'a str>, Option<&'a str>) {
+    let mut rest = args;
+    let mut serial = None;
+    if let [flag, value, tail @ ..] = rest {
+        if *flag == "-s" {
+            serial = Some(*value);
+            rest = tail;
+        }
+    }
+    (serial, rest.first().copied())
+}
+
+/// `pull` and `push` move bytes; everything else answers a question.
+fn adb_lane(verb: Option<&str>) -> AdbLane {
+    match verb {
+        Some("pull") | Some("push") => AdbLane::Transfer,
+        _ => AdbLane::Interactive,
+    }
+}
+
 /// The cap is **global**, because the thing it rations is global: one adb server per host.
 ///
 /// Two `AdbProgram` values are two handles onto the same server, so a per-instance limit
@@ -68,16 +118,80 @@ fn adb_slots() -> &'static Semaphore {
     SLOTS.get_or_init(|| Semaphore::new(ADB_MAX_CONCURRENT))
 }
 
-/// Wait for a slot, and say so if the wait was long.
+fn adb_transfer_slots() -> &'static Semaphore {
+    static SLOTS: OnceLock<Semaphore> = OnceLock::new();
+    SLOTS.get_or_init(|| Semaphore::new(ADB_MAX_TRANSFERS))
+}
+
+/// One queue per phone, each one deep enough for exactly one call.
 ///
-/// Returns the permit; dropping it releases the slot. Held only around the child process, so
-/// a slow *device* does not hold a slot longer than its own command takes.
-async fn enter_adb_slot(what: &str) -> tokio::sync::SemaphorePermit<'static> {
+/// **The global cap alone let two calls reach the same phone at once, and that is a
+/// correctness problem rather than a throughput one.** Two `adb shell` scripts interleaving on
+/// one device is not slower, it is a different thing happening. GenFarmer's own adb layer is
+/// two-tier for this reason -- a sequential queue per serial, then a global cap -- and the
+/// survey of it in this repo says plainly that Riviu was missing the first half.
+///
+/// Never evicted. The key space is serials, so it is bounded by the hardware on the bench
+/// (twenty phones, plus a wifi-adb address each at most), every value is a one-permit
+/// semaphore, and removing an entry while a permit is outstanding would break the mutual
+/// exclusion it exists to provide.
+fn adb_device_queues() -> &'static parking_lot::Mutex<HashMap<String, Arc<Semaphore>>> {
+    static QUEUES: OnceLock<parking_lot::Mutex<HashMap<String, Arc<Semaphore>>>> = OnceLock::new();
+    QUEUES.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
+}
+
+/// Everything one adb call holds while it runs. Dropping it releases all of them.
+struct AdbSlot {
+    _device: Option<tokio::sync::OwnedSemaphorePermit>,
+    _transfer: Option<tokio::sync::SemaphorePermit<'static>>,
+    _global: tokio::sync::SemaphorePermit<'static>,
+}
+
+/// Wait for everything this call needs, and say so if the wait was long.
+///
+/// **Acquisition order is fixed and load-bearing: phone, then transfer sub-cap, then global.**
+/// Most specific first. Taking the global slot before waiting on a phone's own queue would let
+/// several calls queued behind one busy phone sit on global slots doing nothing, which is the
+/// starvation this is meant to prevent rather than cause. A fixed order is also what makes the
+/// three levels deadlock-free.
+async fn enter_adb_slot(serial: Option<&str>, what: &str, lane: AdbLane) -> AdbSlot {
     let waiting_since = Instant::now();
-    let permit = adb_slots()
+
+    let device = match serial {
+        Some(serial) => {
+            let queue = {
+                let mut queues = adb_device_queues().lock();
+                Arc::clone(
+                    queues
+                        .entry(serial.to_string())
+                        .or_insert_with(|| Arc::new(Semaphore::new(1))),
+                )
+            };
+            Some(
+                queue
+                    .acquire_owned()
+                    .await
+                    .expect("a per-device adb queue is never closed"),
+            )
+        }
+        None => None,
+    };
+
+    let transfer = match lane {
+        AdbLane::Transfer => Some(
+            adb_transfer_slots()
+                .acquire()
+                .await
+                .expect("the adb transfer semaphore is never closed"),
+        ),
+        AdbLane::Interactive => None,
+    };
+
+    let global = adb_slots()
         .acquire()
         .await
         .expect("the adb slot semaphore is never closed");
+
     let waited = waiting_since.elapsed();
     if waited >= ADB_SLOW_WAIT {
         // Printed rather than merely endured. A queue nobody can see is indistinguishable
@@ -85,11 +199,18 @@ async fn enter_adb_slot(what: &str) -> tokio::sync::SemaphorePermit<'static> {
         tracing::warn!(
             waited_ms = waited.as_millis() as u64,
             limit = ADB_MAX_CONCURRENT,
+            transfers = ADB_MAX_TRANSFERS,
             command = what,
+            serial = serial.unwrap_or("-"),
             "waited for an adb slot; the host is running its cap of concurrent adb calls"
         );
     }
-    permit
+
+    AdbSlot {
+        _device: device,
+        _transfer: transfer,
+        _global: global,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -280,7 +401,8 @@ impl AdbProgram {
         // The timeout starts AFTER the slot is acquired, deliberately. Counting queue time
         // against a command's own deadline would make a busy host look like a broken phone,
         // and the caller's timeouts are sized on what the device takes to answer.
-        let _slot = enter_adb_slot(args.first().copied().unwrap_or("adb")).await;
+        let (serial, verb) = adb_target(args);
+        let _slot = enter_adb_slot(serial, verb.unwrap_or("adb"), adb_lane(verb)).await;
         let output = tokio::time::timeout(timeout, command.output())
             .await
             .map_err(|_| anyhow!("adb {} timed out after {:?}", args.join(" "), timeout))?
@@ -316,7 +438,7 @@ impl AdbProgram {
     ) -> anyhow::Result<ShellOutput> {
         let mut command = self.command();
         command.args(["-s", serial, "shell", script]);
-        let _slot = enter_adb_slot("shell").await;
+        let _slot = enter_adb_slot(Some(serial), "shell", AdbLane::Interactive).await;
         let output = tokio::time::timeout(timeout, command.output())
             .await
             .map_err(|_| anyhow!("adb shell timed out after {timeout:?}"))?
@@ -2015,6 +2137,129 @@ drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
             }
         }
         out
+    }
+
+    /// The serial and the verb are read off the argv, whichever shape it has.
+    ///
+    /// `AdbProgram::device` prepends `-s <serial>`; `run_bytes` is also called directly with a
+    /// bare verb. Reading either at a fixed index gets one of the two wrong, and getting it
+    /// wrong is silent: the per-serial queue would key on `"-s"` and serialise nothing.
+    #[test]
+    fn the_serial_and_the_verb_are_found_in_both_argv_shapes() {
+        assert_eq!(
+            adb_target(&["-s", "10969614", "pull", "/sdcard/a", "."]),
+            (Some("10969614"), Some("pull"))
+        );
+        assert_eq!(
+            adb_target(&["pull", "/sdcard/a", "."]),
+            (None, Some("pull"))
+        );
+        assert_eq!(adb_target(&["devices"]), (None, Some("devices")));
+        assert_eq!(adb_target(&[]), (None, None));
+        // `-s` as the *last* token is malformed rather than a serial, and must not be read as
+        // one -- the slice pattern needs two elements, so it falls through.
+        assert_eq!(adb_target(&["-s"]), (None, Some("-s")));
+    }
+
+    /// Only the two verbs that move bytes get the transfer lane.
+    #[test]
+    fn only_pull_and_push_count_as_transfers() {
+        assert_eq!(adb_lane(Some("pull")), AdbLane::Transfer);
+        assert_eq!(adb_lane(Some("push")), AdbLane::Transfer);
+        for verb in ["shell", "devices", "install", "reboot", "exec-out"] {
+            assert_eq!(adb_lane(Some(verb)), AdbLane::Interactive, "{verb}");
+        }
+        assert_eq!(adb_lane(None), AdbLane::Interactive);
+    }
+
+    /// **A transfer can never take every slot, and that is the whole point of the sub-cap.**
+    ///
+    /// Checked at **compile time** rather than in a test body: these are constants, so the
+    /// strongest available form is a build that refuses rather than a test that reports. It is
+    /// the shape `view_hub` already uses for `DEVICE_BROADCAST_CAP`, and clippy asks for it by
+    /// name.
+    const _: () = assert!(
+        ADB_MAX_TRANSFERS < ADB_MAX_CONCURRENT,
+        "transfers hold a permit for up to 300 s; if they can take every slot then each probe, \
+         screenshot and nurture action queues behind an export for five minutes"
+    );
+    const _: () = assert!(
+        ADB_MAX_CONCURRENT - ADB_MAX_TRANSFERS >= 8,
+        "leave enough slots that work answering in milliseconds still flows"
+    );
+    const _: () = assert!(
+        ADB_MAX_TRANSFERS >= 1,
+        "a fleet still has to be able to export a file"
+    );
+
+    /// One phone, one call at a time.
+    ///
+    /// Asserts on the phone's own queue rather than on timing: the permit count is the
+    /// mechanism, and reading it is deterministic where racing two tasks is not.
+    #[tokio::test]
+    async fn a_second_call_to_one_phone_waits_for_the_first() {
+        let serial = "queue-test-one-phone";
+        let held = enter_adb_slot(Some(serial), "shell", AdbLane::Interactive).await;
+
+        let queue = adb_device_queues()
+            .lock()
+            .get(serial)
+            .cloned()
+            .expect("the phone got a queue");
+        assert_eq!(
+            queue.available_permits(),
+            0,
+            "while one call runs, the phone's queue must be closed"
+        );
+
+        drop(held);
+        assert_eq!(
+            queue.available_permits(),
+            1,
+            "and open again the moment it finishes"
+        );
+    }
+
+    /// Two phones do not queue behind each other. Serialising the fleet would be a far worse
+    /// bug than the one this fixed; if the queues were shared this test would hang.
+    #[tokio::test]
+    async fn two_different_phones_run_at_the_same_time() {
+        let first = enter_adb_slot(Some("queue-test-a"), "shell", AdbLane::Interactive).await;
+        let second = enter_adb_slot(Some("queue-test-b"), "shell", AdbLane::Interactive).await;
+        drop((first, second));
+    }
+
+    /// A transfer takes one of the four **and** one of the twelve, because the sub-cap sits
+    /// inside the global cap rather than beside it -- twelve is the number that was measured.
+    #[tokio::test]
+    async fn a_transfer_takes_a_transfer_slot_and_a_global_one() {
+        let transfers_before = adb_transfer_slots().available_permits();
+        let global_before = adb_slots().available_permits();
+
+        let held = enter_adb_slot(Some("queue-test-transfer"), "pull", AdbLane::Transfer).await;
+        assert_eq!(
+            adb_transfer_slots().available_permits(),
+            transfers_before - 1
+        );
+        assert_eq!(adb_slots().available_permits(), global_before - 1);
+
+        drop(held);
+        assert_eq!(adb_transfer_slots().available_permits(), transfers_before);
+        assert_eq!(adb_slots().available_permits(), global_before);
+    }
+
+    /// And an interactive call leaves the transfer sub-cap alone.
+    #[tokio::test]
+    async fn an_interactive_call_does_not_consume_the_transfer_sub_cap() {
+        let before = adb_transfer_slots().available_permits();
+        let held = enter_adb_slot(
+            Some("queue-test-interactive"),
+            "shell",
+            AdbLane::Interactive,
+        )
+        .await;
+        assert_eq!(adb_transfer_slots().available_permits(), before);
+        drop(held);
     }
 
     /// **The quoting survives every character a real filename can hold — apostrophes included.**

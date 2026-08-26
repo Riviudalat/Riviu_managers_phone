@@ -390,11 +390,27 @@ pub async fn serve(app: AppHandle, port: u16, token: String) -> anyhow::Result<(
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
     log::info!("local API listening on 127.0.0.1:{port}");
     let slots = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    // The semaphore below bounds how many connections are *handled* at once; it does nothing
+    // about an `accept` that fails before there is a connection to handle. See
+    // `crate::accept_loop`.
+    let mut failures = crate::accept_loop::AcceptFailures::default();
     loop {
         let (stream, _peer) = match listener.accept().await {
-            Ok(pair) => pair,
+            Ok(pair) => {
+                failures.succeeded();
+                pair
+            }
             Err(error) => {
-                log::warn!("local API accept failed: {error}");
+                let retry = failures.failed();
+                if retry.report {
+                    log::warn!(
+                        "local API accept failed ({} in a row): {error}",
+                        failures.consecutive()
+                    );
+                }
+                if !retry.delay.is_zero() {
+                    tokio::time::sleep(retry.delay).await;
+                }
                 continue;
             }
         };

@@ -74,6 +74,21 @@ const DEVICE_BROADCAST_CAP: usize = 128;
 /// is exactly the property the per-device split exists for. Delay is shared, capacity loss
 /// is not. 256 is a little over five devices' worth of a 48-frame burst — deep enough that
 /// an ordinary WebView2 hitch never reaches the rings at all.
+/// How long a write to one client may stall before that client is treated as gone.
+///
+/// **Not a read timeout, because this loop never reads.** It is driven entirely by the device
+/// channels and the roster; the socket is write-only from here. So the way a wedged viewer used
+/// to hold everything was backpressure: a client that stops draining its TCP window fills the
+/// send buffer, `flush` blocks, and this task waits forever — holding its broadcast receivers,
+/// its forwarder tasks and its place in the hub, with no error for anything to react to.
+///
+/// Thirty seconds, measured against the thing that would already have acted: `VIEW_PAINT_STALL`
+/// is 12 s, so a viewer that has not painted is restarted by the watchdog long before this
+/// fires. Anything still stuck at thirty seconds is not a slow client, it is one that has
+/// stopped reading — and the honest response is to drop the socket so it can reconnect, which
+/// re-subscribes it to everything from scratch.
+const CLIENT_WRITE_STALL: Duration = Duration::from_secs(30);
+
 const CLIENT_QUEUE_CAP: usize = 256;
 
 /// Everything the hub knows about one device, including its own channel.
@@ -170,11 +185,27 @@ impl ViewHub {
         self.port.store(port, Ordering::Release);
         let hub = Arc::clone(&self);
         tokio::spawn(async move {
+            // A bare `continue` here was a tight spin whenever the failure was persistent
+            // rather than per-connection -- `EMFILE` on a host running twenty phones' forwards,
+            // sockets and tiles. See `crate::accept_loop`.
+            let mut failures = crate::accept_loop::AcceptFailures::default();
             loop {
                 let (stream, _) = match listener.accept().await {
-                    Ok(pair) => pair,
+                    Ok(pair) => {
+                        failures.succeeded();
+                        pair
+                    }
                     Err(error) => {
-                        log::warn!("view websocket accept failed: {error}");
+                        let retry = failures.failed();
+                        if retry.report {
+                            log::warn!(
+                                "view websocket accept failed ({} in a row): {error}",
+                                failures.consecutive()
+                            );
+                        }
+                        if !retry.delay.is_zero() {
+                            tokio::time::sleep(retry.delay).await;
+                        }
                         continue;
                     }
                 };
@@ -658,7 +689,19 @@ async fn serve_client(hub: Arc<ViewHub>, stream: tokio::net::TcpStream) -> anyho
         for (udid, _) in lagged {
             replay_device(&hub, &mut ws, &udid).await?;
         }
-        ws.flush().await?;
+        // `feed` buffers; `flush` is where backpressure from a client that has stopped reading
+        // actually lands. Bounded so that client cannot hold this task, its forwarders and its
+        // broadcast receivers open indefinitely.
+        match tokio::time::timeout(CLIENT_WRITE_STALL, ws.flush()).await {
+            Ok(result) => result?,
+            Err(_) => {
+                log::warn!(
+                    "a view client stopped reading for {}s; dropping it so it can reconnect",
+                    CLIENT_WRITE_STALL.as_secs()
+                );
+                break;
+            }
+        }
     }
     Ok(())
 }
@@ -831,6 +874,25 @@ pub fn encode_packet(packet: &ViewPacket) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+
+    /// **The write stall has to sit well above the paint stall, or it fires on healthy clients.**
+    ///
+    /// `VIEW_PAINT_STALL` (12 s) is the rule that already acts on a viewer that is not painting:
+    /// the watchdog restarts its producer. If the write timeout were near it, the two would
+    /// fight — the socket would be dropped for a condition the watchdog was in the middle of
+    /// fixing, and a tile that was about to recover would instead lose its whole subscription.
+    /// Anything still stuck at thirty seconds has stopped reading, which is a different fact.
+    #[test]
+    fn the_write_stall_is_far_above_the_paint_stall_it_must_not_race() {
+        assert!(
+            CLIENT_WRITE_STALL >= crate::view_watchdog::VIEW_PAINT_STALL * 2,
+            "a write timeout near the paint stall drops clients the watchdog is already fixing"
+        );
+        assert!(
+            CLIENT_WRITE_STALL <= Duration::from_secs(120),
+            "and a client that has read nothing for two minutes is not coming back"
+        );
+    }
     use super::*;
 
     /// Pull `export const NAME = <number>;` out of a TypeScript source.
