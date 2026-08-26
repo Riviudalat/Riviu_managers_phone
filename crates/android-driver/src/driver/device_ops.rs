@@ -43,6 +43,39 @@ impl ScreenGuardState {
     }
 }
 
+/// The name a pulled path keeps once it is on this host.
+///
+/// `adb pull` is given the destination **directory**, so the phone's own name for the file is
+/// what it lands as -- keeping the phone's name is what stops an export of twenty phones from
+/// becoming twenty files whose origin is only in the log. This works out the name the same way,
+/// because the caller then has to check that exact path exists: `adb pull` has been seen to
+/// report success for a directory it produced nothing from.
+///
+/// Pure and extracted so the awkward inputs can be pinned. `"/sdcard/"` and `"/"` both trim to
+/// nothing, and a `rsplit` on the result yields an empty string rather than `None` -- which is
+/// why the filter is there. Without it the landed path would be the destination directory
+/// itself, and the existence check would pass for the wrong reason: the directory always exists.
+pub(super) fn pulled_name(remote: &str) -> &str {
+    remote
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|part| !part.is_empty())
+        .unwrap_or("pulled")
+}
+
+/// Where a pushed file lands on the phone.
+///
+/// Pure and extracted for the same reason as [`pulled_name`]: this string is what `adb push`
+/// writes to and what the read-back then looks for, so a wrong one either writes somewhere
+/// unexpected or reports a success that did not happen. The trailing-slash case is the one worth
+/// pinning -- the file manager's path box and its breadcrumbs disagree about whether a directory
+/// ends in `/`, so both forms reach here, and `//` in a device path is not something to hand to
+/// a shell.
+pub(super) fn pushed_target(remote_dir: &str, file_name: &str) -> String {
+    format!("{}/{file_name}", remote_dir.trim_end_matches('/'))
+}
+
 impl AndroidDriver {
     /// Put a USB-attached phone into TCP/IP adb mode, discover its Wi-Fi address, and
     /// `adb connect` to it — so it can be driven over the LAN without the cable (feature A4,
@@ -390,12 +423,7 @@ impl AndroidDriver {
         let remote = adb::validate_device_path(remote)?;
         std::fs::create_dir_all(dest_dir)
             .with_context(|| format!("tạo thư mục {}", dest_dir.display()))?;
-        let name = remote
-            .trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .filter(|part| !part.is_empty())
-            .unwrap_or("pulled");
+        let name = pulled_name(remote);
         // Not `shell`: `adb pull` is a client subcommand, so the path never reaches a device
         // shell and needs no quoting — it is one argv element.
         self.adb
@@ -435,7 +463,7 @@ impl AndroidDriver {
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
             .ok_or_else(|| anyhow!("đường dẫn nguồn không có tên file"))?;
-        let target = format!("{}/{name}", remote_dir.trim_end_matches('/'));
+        let target = pushed_target(remote_dir, &name);
         adb::validate_device_path(&target)?;
         self.adb
             .device(
@@ -876,5 +904,67 @@ impl AndroidDriver {
             )
             .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::{pulled_name, pushed_target};
+
+    /// The ordinary case, and the two shapes of trailing slash the UI produces.
+    #[test]
+    fn a_pulled_file_keeps_the_name_the_phone_gave_it() {
+        assert_eq!(
+            pulled_name("/sdcard/Download/CV prototype.pdf"),
+            "CV prototype.pdf"
+        );
+        assert_eq!(pulled_name("/sdcard/Download"), "Download");
+        assert_eq!(pulled_name("/sdcard/Download/"), "Download");
+        assert_eq!(
+            pulled_name("/sdcard/Download/Giao Trinh - Bai Giang - HDH"),
+            "Giao Trinh - Bai Giang - HDH"
+        );
+        assert_eq!(
+            pulled_name("/sdcard/Download/John's photo.jpg"),
+            "John's photo.jpg"
+        );
+    }
+
+    /// **A path that trims to nothing must not name the destination directory itself.**
+    ///
+    /// `"/"` trims to `""`, and `rsplit(`/`)` on an empty string yields `Some("")` rather than
+    /// `None` -- so without the filter the landed path would be the destination *directory*, and
+    /// the caller's existence check would pass because a directory it just created always
+    /// exists. A pull that produced nothing would report success.
+    #[test]
+    fn a_root_path_falls_back_to_a_name_rather_than_to_nothing() {
+        assert_eq!(pulled_name("/"), "pulled");
+        assert_eq!(pulled_name("///"), "pulled");
+        assert_eq!(pulled_name(""), "pulled");
+    }
+
+    /// One slash between the directory and the name, whichever form the directory arrived in.
+    ///
+    /// Both reach here: the file manager's breadcrumbs produce `/sdcard/Download` and its typed
+    /// path box produces `/sdcard/Download/`. `//` inside a device path is not something to hand
+    /// to a shell, and it also makes the read-back look for a path that is not the one written.
+    #[test]
+    fn a_pushed_file_gets_exactly_one_slash_before_its_name() {
+        assert_eq!(
+            pushed_target("/sdcard/Download", "photo.jpg"),
+            "/sdcard/Download/photo.jpg"
+        );
+        assert_eq!(
+            pushed_target("/sdcard/Download/", "photo.jpg"),
+            "/sdcard/Download/photo.jpg"
+        );
+        assert_eq!(pushed_target("/sdcard", "a b.txt"), "/sdcard/a b.txt");
+    }
+
+    /// The phone's storage root, written either way, still yields an absolute path.
+    #[test]
+    fn pushing_into_the_root_still_produces_an_absolute_path() {
+        assert_eq!(pushed_target("/", "photo.jpg"), "/photo.jpg");
+        assert!(pushed_target("/", "photo.jpg").starts_with('/'));
     }
 }

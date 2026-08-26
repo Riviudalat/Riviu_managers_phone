@@ -1026,6 +1026,100 @@ mod tests {
         );
     }
 
+    /// Commands in `android_ops.rs` that reach a phone **without** holding it, and why.
+    ///
+    /// Inverted like `ADMISSION_EXEMPT`, and for the same reason: the safe answer is the default,
+    /// and skipping it costs somebody a written sentence. Before this list existed, all
+    /// twenty-four commands in that file were in it implicitly and none of them said so.
+    const LEASE_EXEMPT: &[(&str, &str)] = &[
+        (
+            "arp_scan",
+            "no udid at all: reads this host's ARP table, touches no phone",
+        ),
+        (
+            "is_rooted",
+            "read-only: asks the phone `su -c id` and reports the answer",
+        ),
+        (
+            "device_list_dir",
+            "read-only: one `ls -la`, changes nothing",
+        ),
+        (
+            "device_pull_path",
+            "reads the phone and writes this host. Leasing it would block a running session \
+             for up to the 300 s transfer timeout, which is worse than the interleaving it \
+             would prevent; the adb transfer sub-cap is what bounds its cost",
+        ),
+        (
+            "wifi_adb_connect",
+            "takes a host:port rather than a udid, so there is no phone to lease yet",
+        ),
+        (
+            "wifi_adb_disconnect",
+            "same: a host:port, and the phone may already be gone",
+        ),
+    ];
+
+    /// **Every Android-only command holds the phone, or names itself and says why not.**
+    ///
+    /// The hole this closes: `commands/android_ops.rs` held admission on all twenty-four of its
+    /// commands and a **device lease on none of them**, so `factory_reset`, `root_shell`,
+    /// `power_off_device`, `device_delete_path`, `set_input_method` and `open_system_settings`
+    /// could all fire at a phone another piece of work was holding. The failure was not the
+    /// action failing; it was the action *succeeding* while a nurture session went on tapping
+    /// coordinates into whatever was now in front and **reported the work done**.
+    ///
+    /// Scoped to this one file on purpose. The same measurement across the rest is
+    /// `commands/device.rs` 25 of 32, `farm_commands.rs` 3 of 26, `commands/view.rs` 0 of 10,
+    /// `interaction_commands.rs` 4 of 13 — mostly reads that are fine, but fifty-odd written
+    /// reasons is its own piece of work, and a half-filled allowlist is a gate that reads as
+    /// stronger than it is.
+    #[test]
+    fn every_android_only_command_holds_the_phone_or_says_why_not() {
+        let source = include_str!("commands/android_ops.rs");
+        let exempt: std::collections::HashMap<&str, &str> = LEASE_EXEMPT.iter().copied().collect();
+        let scanned = commands_in(source);
+
+        let mut offenders = Vec::new();
+        for (name, body) in &scanned {
+            if body.contains("hold_this_phone(") || exempt.contains_key(name) {
+                continue;
+            }
+            offenders.push(*name);
+        }
+        assert!(
+            offenders.is_empty(),
+            "these reach a phone without holding it and are not in LEASE_EXEMPT with a reason: \
+             {}",
+            offenders.join(", ")
+        );
+
+        // Anti-rot: a scan that silently matched nothing would make the assertion above pass
+        // for the worst possible reason.
+        assert!(
+            scanned.len() >= 20,
+            "the scan found only {} commands in android_ops.rs; it used to hold 24",
+            scanned.len()
+        );
+
+        // And no exemption outlives its command, or the list slowly becomes a wish.
+        let names: std::collections::HashSet<&str> =
+            scanned.iter().map(|(name, _)| *name).collect();
+        for (name, _) in LEASE_EXEMPT {
+            assert!(
+                names.contains(name),
+                "LEASE_EXEMPT names `{name}`, which no longer exists in android_ops.rs"
+            );
+        }
+
+        // An exemption that has since grown a lease is also stale, in the other direction.
+        for (name, body) in &scanned {
+            if exempt.contains_key(name) && body.contains("hold_this_phone(") {
+                panic!("`{name}` now holds the phone; drop it from LEASE_EXEMPT");
+            }
+        }
+    }
+
     #[test]
     fn exit_order_cancels_workers_then_drains_commands_before_cleanup() {
         // Scope the search to the app.run(...) exit closure. Searching the whole

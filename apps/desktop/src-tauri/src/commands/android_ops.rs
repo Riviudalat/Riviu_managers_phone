@@ -6,6 +6,45 @@
 //! Android — root, Magisk, `appops`, adb over Wi-Fi, `wm density`.
 
 use super::*;
+use crate::state::{DeviceLease, LeaseStream};
+
+/// Hold this phone for the duration of one operator action, or refuse and say who has it.
+///
+/// **Every command in this file used to reach the driver with no lease at all.** Twenty-four of
+/// them, `factory_reset` and `root_shell` among them, and the consequence was not that the
+/// action failed -- it was that it *succeeded* while a nurture session or an interaction
+/// campaign still believed it owned the phone. That session kept its stream reservation, kept
+/// tapping coordinates, and **reported the work done**. `open_system_settings` is the clearest
+/// case: it changes the foreground app, so a session driving TikTok goes on tapping into
+/// Settings and calls it a success.
+///
+/// `device_control/apps.rs` had already written the rule down, for the same capabilities:
+/// *"An arbitrary script can reboot the phone, kill the app a session is driving, or change a
+/// setting under it -- so it must not be possible to fire one at a device another piece of work
+/// is holding."* This file simply never followed it.
+///
+/// **Goes through `AppState::device_lease`, and that is not a detail.** Taking a fresh exclusive
+/// lease here would have refused every one of these commands whenever the operator had that
+/// phone's overlay open -- which is where most of them are invoked from. AGENTS.md 9.83 records
+/// exactly that bug, in ten other rows, and `device_lease` is the fix that already exists: it
+/// lends the overlay's own lease when the overlay has one, and takes its own otherwise. A lease
+/// is only ever lent by the UI that opened it, never taken from someone else.
+///
+/// `LeaseStream::Keep` because `try_acquire_exclusive` parks the live producer, which for a
+/// one-shot action like `wake_screen` would black the tile and then take ~40 s to come back.
+///
+/// **A refusal, not a preemption -- and that is a decision, not an omission.** The control plane
+/// has no revocation: nothing can take a lease from its holder in a way the holder learns
+/// about. So overriding would mean either inventing a preemption protocol here -- a worse risk
+/// to a running campaign than the bug being fixed -- or dropping the lease silently, which is
+/// the thing this is for. Refusing is honest, and it traps nobody: the error names the work that
+/// holds the phone, which is what makes stopping that work possible. A real override needs
+/// preemption designed in `DeviceControlPlane`, and that is its own piece of work.
+async fn hold_this_phone(state: &AppState, udid: &str) -> Result<DeviceLease, CommandError> {
+    state
+        .device_lease(udid, DeviceWorkOwner::ManualControl, LeaseStream::Keep)
+        .await
+}
 
 /// Put a USB Android phone into wireless adb and connect to it (A4). Returns `host:port`.
 #[tauri::command]
@@ -14,6 +53,7 @@ pub async fn enable_wifi_adb(
     udid: String,
 ) -> Result<String, CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    let _hold = hold_this_phone(&state, &udid).await?;
     let android = state.require_android()?;
     // On Android the udid is the adb serial.
     android
@@ -32,6 +72,7 @@ pub async fn disable_wifi_adb(
     udid: String,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    let _hold = hold_this_phone(&state, &udid).await?;
     let android = state.require_android()?;
     android
         .disable_wifi_adb(&udid)
@@ -75,6 +116,7 @@ pub async fn set_wallpaper(
     path: String,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    let _hold = hold_this_phone(&state, &udid).await?;
     let android = state.require_android()?;
     android
         .set_wallpaper(&udid, &path)
@@ -91,6 +133,7 @@ pub async fn set_mock_location(
     lng: f64,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    let _hold = hold_this_phone(&state, &udid).await?;
     let android = state.require_android()?;
     android
         .set_mock_location(&udid, lat, lng)
@@ -105,6 +148,7 @@ pub async fn stop_mock_location(
     udid: String,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    let _hold = hold_this_phone(&state, &udid).await?;
     let android = state.require_android()?;
     android
         .stop_mock_location(&udid)
@@ -122,6 +166,7 @@ pub async fn set_wallpaper_bytes(
     png: Vec<u8>,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    let _hold = hold_this_phone(&state, &udid).await?;
     let android = state.require_android()?;
     let dir = state.artifacts_dir.join("wallpaper");
     std::fs::create_dir_all(&dir).map_err(CommandError::operation)?;
@@ -154,6 +199,7 @@ pub async fn set_device_identity(
     mac: Option<String>,
 ) -> Result<String, CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    let _hold = hold_this_phone(&state, &udid).await?;
     let android = state.require_android()?;
     android
         .set_device_identity(
@@ -170,6 +216,7 @@ pub async fn set_device_identity(
 #[tauri::command]
 pub async fn factory_reset(state: State<'_, AppState>, udid: String) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    let _hold = hold_this_phone(&state, &udid).await?;
     let android = state.require_android()?;
     android
         .factory_reset(&udid)
@@ -185,6 +232,7 @@ pub async fn root_shell(
     command: String,
 ) -> Result<String, CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    let _hold = hold_this_phone(&state, &udid).await?;
     let android = state.require_android()?;
     android
         .root_shell(&udid, &command)
@@ -250,6 +298,7 @@ pub async fn device_push_file(
     remote_dir: String,
 ) -> Result<String, CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    let _hold = hold_this_phone(&state, &udid).await?;
     let android = state.require_android()?;
     android
         .push_device_file(&udid, Path::new(&local), &remote_dir)
@@ -265,6 +314,7 @@ pub async fn device_delete_path(
     path: String,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    let _hold = hold_this_phone(&state, &udid).await?;
     let android = state.require_android()?;
     android
         .delete_device_path(&udid, &path)
@@ -282,6 +332,7 @@ pub async fn set_wifi_radio(
     on: bool,
 ) -> Result<bool, CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    let _hold = hold_this_phone(&state, &udid).await?;
     let android = state.require_android()?;
     android
         .set_wifi_radio(&udid, on)
@@ -299,6 +350,7 @@ pub async fn reset_display_metrics(
     size: bool,
 ) -> Result<String, CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    let _hold = hold_this_phone(&state, &udid).await?;
     let android = state.require_android()?;
     android
         .reset_display_metrics(&udid, density, size)
@@ -314,6 +366,7 @@ pub async fn power_off_device(
     udid: String,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    let _hold = hold_this_phone(&state, &udid).await?;
     let android = state.require_android()?;
     android
         .power_off(&udid)
@@ -328,6 +381,7 @@ pub async fn open_system_settings(
     udid: String,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    let _hold = hold_this_phone(&state, &udid).await?;
     let android = state.require_android()?;
     android
         .open_system_settings(&udid)
@@ -340,6 +394,7 @@ pub async fn open_system_settings(
 #[tauri::command]
 pub async fn wake_screen(state: State<'_, AppState>, udid: String) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    let _hold = hold_this_phone(&state, &udid).await?;
     let android = state.require_android()?;
     android
         .wake_screen(&udid)
@@ -355,6 +410,7 @@ pub async fn screenshot_to_device(
     udid: String,
 ) -> Result<String, CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    let _hold = hold_this_phone(&state, &udid).await?;
     let android = state.require_android()?;
     android
         .screenshot_to_device(&udid)
@@ -371,6 +427,7 @@ pub async fn set_input_method(
     ime_id: String,
 ) -> Result<(), CommandError> {
     let _admission = state.ensure_accepting_work()?;
+    let _hold = hold_this_phone(&state, &udid).await?;
     let android = state.require_android()?;
     android
         .set_input_method(&udid, &ime_id)
