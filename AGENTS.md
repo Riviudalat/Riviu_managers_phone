@@ -9922,3 +9922,96 @@ Banner này làm lỗi **tự báo**, không sửa lỗi. Ba thứ cần từ m�
 3. Trên tile của máy đó, chip trạng thái và dòng lỗi ghi gì.
 
 Cổng: `riviu-managers-phone` 180 test, clippy 0; frontend `tsc -b` + `oxlint` sạch, **696 test**.
+
+## §9.117 "Mở thư mục máy còn mở không được" — hai lỗi, và cái log chôn cả hai (26/08/2026)
+
+Người vận hành: *"Lỗi nhiều quá mệt ghê á, làm cho nó đàng hoàng coi. Chẳng hạn mở thư mục máy
+điện thoại còn mở không được, lỗi rất nhiều."* Và xác nhận **cả hai máy đều lỗi**, nên là lỗi code.
+
+Đây là Pha 1 của kế hoạch ba pha. Pha 2 (Kiểm tra máy) và Pha 3 (bốn lỗi còn lại + ba cổng) chưa
+làm.
+
+### Lỗi 1: udid treo, và nó không riêng gì trình quản lý tệp
+
+`App.tsx` giữ **ba** state "surface này đang mở cho máy nào" — `adbFor`, `filesFor`, `focusUdid` —
+mỗi cái phân giải qua `devices.find(...) ?? null` vào một render gated theo kết quả, và **không
+cái nào** dọn udid khi máy rời fleet. Hệ quả không phải "panel đóng lại". Nó là:
+
+1. roster xáo trộn (`useFleet` thay **cả** roster mỗi `devicesUpdated`, nên một lần quét ra 0 máy
+   là đủ);
+2. resolver trả `null`, panel **biến mất không một lời**;
+3. udid **vẫn nằm trong state**, nên bấm lại đúng hàng đó là `setState` cùng giá trị, React bỏ
+   qua re-render, và **hàng đó không làm gì cả** — cho máy đó, **vĩnh viễn**, tới khi bấm máy
+   khác hoặc restart app.
+
+Bước 3 mới là câu người dùng nói. Và `controlCenter` **đã có** đúng effect này, kèm doc comment
+lập luận đúng hiểm hoạ đó, **470 dòng bên dưới** cái surface cần nó nhất.
+
+Sửa: `deviceSurface.ts` (`surfaceDeparted`, thuần) + `useDeviceSurface` trong `App.tsx` cho cả ba
+state. **Chốt quan trọng nhất: roster rỗng KHÔNG phải là máy rời đi.** `list_devices` đọc tới khi
+hai lượt `adb devices` khớp nhau, và một adb server đang khởi động lại trả về một lượt rỗng —
+đóng mọi panel vì chuyện đó là app tự tắt cửa sổ của mình trong một cái blip nó tự hồi phục một
+giây sau. Đó là lý do nó là **một hàm** chứ không phải một `&&` viết thẳng.
+
+Khác `controlCenter` một điểm có chủ ý: nó dọn **im lặng**, còn cái này **nói ra** (toast nêu tên
+máy + tên panel vừa đóng). Một designation biến mất thì vô hình; một panel đóng dưới tay người
+đang dùng thì không.
+
+Có test cho *cả ba* phần, và **phần 3 là phần trước đây sẽ đỏ**: máy rời → panel đóng + toast nêu
+tên → máy về → **bấm lại mở được**.
+
+### Lỗi 2: nút bấm ở trang này, panel render ở trang khác
+
+`FocusStream` (overlay phóng to) mount **ngoài** `{page === "control" && (`, và
+`withoutMenuIds` không bỏ `"files"`. Panel thì render **trong** khối đó. Nên: mở overlay, sang
+trang khác, bấm "Tệp trên máy…" → set udid, render rỗng, rồi lỗi 1 khoá luôn hàng đó.
+
+Sửa: chuyển **cả hai** popup (`AdbConsole`, `DeviceFilesPopup`) ra cạnh `FocusStream` — chỗ mở
+chúng. **Không** bỏ `"files"` khỏi `withoutMenuIds`, vì cách đó **mất tính năng** ở overlay.
+Các popup còn lại (nuôi/tương tác/nhóm/công cụ) **giữ nguyên** page-gate: chúng tác động lên
+`selected`, là khái niệm của lưới Control.
+
+### Log: 83% của nó là một câu, và câu đó nói về chuyện bình thường
+
+Đo trên log release thật (`%LOCALAPPDATA%\com.riviu.manager\logs\Riviu Manager.log`), 13.221 dòng
+WARN, trong đó **10.914 là `agent call was slow`**:
+
+| route | dòng | p50 | p90 | tệ nhất | ≥5 s |
+|---|---|---|---|---|---|
+| `/element` | **9.059** | 888 ms | 2.520 ms | 19.938 ms | 545 |
+| `/elements` | 323 | 1.494 ms | 4.403 ms | 11.682 ms | 18 |
+| `/actions` | 227 | 624 ms | 901 ms | 1.539 ms | 0 |
+
+`SLOW_AGENT_CALL = 500ms` được đặt cho **một cú tap** — comment của chính nó nói nó "không in một
+dòng cho mỗi lần đọc hierarchy". Số đo nói ngược lại: đọc cây trên fleet này **thường xuyên** mất
+~900 ms; đó không phải chậm, đó là giá của phép toán. Nên 83% log là một câu về chuyện bình
+thường, và cái thật nằm dưới — 475 lần mất accessibility tree, 223 lần nghẽn adb slot, 143 lần
+token view bị từ chối, 60 lần đẩy scrcpy đổ — **không đọc được**.
+
+Sửa: `slow_call_budget(route)` thuần — mọi route đi qua cây (`/element*`, `/source`) lấy
+`SLOW_TREE_READ = 5s`, còn lại giữ 500 ms. Còn lại ~800 dòng thay vì 10.914, và cái còn lại là
+cái đuôi thật sự đau. Có test ghim p90 đã đo, **và** ghim rằng hai ngân sách **không được** hội
+tụ — nếu ai "dọn dẹp" một trong hai hằng số thì 9.059 dòng quay lại ngay.
+
+Bộ gộp theo cửa sổ thời gian **chưa làm**: 800 dòng đã đọc được, và thêm máy móc cho phần đuôi đó
+là việc chưa cần.
+
+### Ba cái bẫy trong lúc làm, cả ba im lặng
+
+1. **`vi.clearAllMocks()` xoá lời gọi, KHÔNG xoá implementation.** Một `mockResolvedValue` đặt
+   trong test này sống sang test sau — và 18 test trong `App.test.tsx` với tay lấy "Redmi" mà
+   không tự đặt mock. Để lại `[Note 8]` là một test **không liên quan** đỏ. Phải trả roster về.
+2. **Overlay gọi `deviceControlBegin`**, không có trong mock → export là `undefined`, gọi nó ném
+   đồng bộ. Đúng cái bẫy file đó đã ghi ba lần rồi.
+3. **`oxlint --deny-warnings` bắt đúng một thứ `tsc` không thấy**: ba setter giờ là `useCallback`
+   chứ không phải setter của `useState`, nên rule hooks không biết chúng ổn định. Chúng ổn định
+   (`useCallback` với deps rỗng), nhưng phải liệt kê vào deps.
+
+Và một khẳng định của test tôi viết **sai**, số đo sửa lại: với roster rỗng panel **vẫn ẩn** (vì
+render còn phân giải máy khỏi roster), nhưng udid được **giữ** — nên nó **tự hiện lại** khi roster
+về, không cần bấm gì. Đó mới là tính chất đúng, và giờ nó là tên của test.
+
+### Cổng
+
+`riviu-android-driver` **191 test** (thêm 4), clippy 0. Frontend `tsc -b` + `oxlint
+--deny-warnings` sạch, **703 test / 82 file** (thêm 7).

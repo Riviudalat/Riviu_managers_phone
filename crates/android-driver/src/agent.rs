@@ -213,13 +213,50 @@ impl Rect {
 /// Matched as a substring because the message carries a varying millisecond count.
 const STALE_TREE_MARKER: &str = "waiting for the root AccessibilityNodeInfo";
 
-/// Past this, an operator gesture is something they can feel.
+/// Past this, an **operator gesture** is something they can feel.
 ///
-/// A tap is one `/actions` round trip and measures 130–280 ms on this fleet, and the slowest
-/// legitimate element query recorded is ~10 s. Half a second is comfortably above the first
-/// and far below the second, so it catches "control got sluggish" without printing a line for
-/// every hierarchy read.
+/// A tap is one `/actions` round trip. Measured on this fleet's own release log: 227 `/actions`
+/// calls crossed this line, p50 624 ms, worst 1 539 ms, and **none** reached 5 s — so at this
+/// budget the route reports real sluggishness and nothing else.
 const SLOW_AGENT_CALL: Duration = Duration::from_millis(500);
+
+/// Past this, reading the **accessibility tree** is something worth a line.
+///
+/// **The number this replaces was measured against the wrong operation, and the log proves it.**
+/// `SLOW_AGENT_CALL`'s own comment used to claim it "catches control got sluggish without
+/// printing a line for every hierarchy read". Counted over one release log — 13 221 warnings in
+/// total — it printed a line for almost exactly that:
+///
+/// | route | lines | p50 | p90 | worst | ≥ 5 s |
+/// |---|---|---|---|---|---|
+/// | `/element` | **9 059** | 888 ms | 2 520 ms | 19 938 ms | 545 |
+/// | `/elements` | 323 | 1 494 ms | 4 403 ms | 11 682 ms | 18 |
+/// | `/actions` | 227 | 624 ms | 901 ms | 1 539 ms | 0 |
+///
+/// A tree read on this fleet **routinely** takes ~900 ms; it is not sluggish, it is the cost of
+/// the operation. So 10 914 of 13 221 warning lines — 83% of the log — were one sentence about
+/// a normal thing, and the real signal underneath (475 lost-accessibility-tree restarts, 223 adb
+/// slot starvations, 143 refused view tokens, 60 failed scrcpy pushes) was unreadable. A log
+/// nobody can read is why every incident on this project starts by guessing.
+///
+/// Five seconds is above the p90 of both tree routes and far below their worst cases, so what
+/// remains is the tail that actually hurts: ~563 lines instead of 9 382. **Re-measure before
+/// moving it** — the table above is how, and the same script prints it.
+const SLOW_TREE_READ: Duration = Duration::from_secs(5);
+
+/// How long this route is allowed to take before it is worth a warning.
+///
+/// Pure and keyed on the route rather than the caller, because the suffix is the only thing the
+/// logging site knows — and because a table of shapes is checkable, where a threshold passed in
+/// by every caller is a thing to get wrong at each one.
+fn slow_call_budget(route: &str) -> Duration {
+    // `/element`, `/elements`, and every `/element/<uuid>/…` attribute and rect read: all of
+    // them walk the accessibility tree, and all of them were being held to a tap's budget.
+    if route.starts_with("/element") || route.starts_with("/source") {
+        return SLOW_TREE_READ;
+    }
+    SLOW_AGENT_CALL
+}
 
 #[derive(Clone)]
 pub struct AgentClient {
@@ -465,7 +502,7 @@ impl AgentClient {
             .await
             .with_context(|| format!("gọi agent {suffix}"))?;
         let elapsed = started.elapsed();
-        if elapsed >= SLOW_AGENT_CALL {
+        if elapsed >= slow_call_budget(suffix) {
             tracing::warn!(
                 serial = %self.serial,
                 route = suffix,
@@ -892,5 +929,69 @@ mod tests {
             height: 137.0,
         };
         assert_eq!(rect.centre(), (600.0, 987.5));
+    }
+}
+
+#[cfg(test)]
+mod slow_call_budget_tests {
+    use super::*;
+
+    /// **A tree read is not a sluggish tap, and the log paid for confusing them.**
+    ///
+    /// Measured over one release log: `/element` produced **9 059** warning lines at p50 888 ms
+    /// against a 500 ms budget set for a tap. Every route that walks the accessibility tree gets
+    /// the tree's budget — including the `/element/<uuid>/…` attribute and rect reads, which are
+    /// the same walk with a longer path and were the easiest ones to miss.
+    #[test]
+    fn every_tree_route_gets_the_tree_budget() {
+        for route in [
+            "/element",
+            "/elements",
+            "/source",
+            "/element/00000000-0000-0114-ffff-ffff00000000/rect",
+            "/element/00000000-0000-014c-ffff-ffff00000000/attribute/content-desc",
+        ] {
+            assert_eq!(
+                slow_call_budget(route),
+                SLOW_TREE_READ,
+                "{route} walks the accessibility tree"
+            );
+        }
+    }
+
+    /// A gesture keeps the tight budget, because that is the one the number was measured for.
+    #[test]
+    fn a_gesture_keeps_the_gesture_budget() {
+        for route in ["/actions", "", "/window/current/size", "/session"] {
+            assert_eq!(slow_call_budget(route), SLOW_AGENT_CALL, "{route} is not a tree read");
+        }
+    }
+
+    /// **The budgets must not converge**, or the split above is decoration and the 9 059 lines
+    /// come straight back the next time somebody "tidies" one of the two constants.
+    #[test]
+    fn the_tree_budget_is_far_above_the_gesture_budget() {
+        assert!(
+            SLOW_TREE_READ >= SLOW_AGENT_CALL * 4,
+            "a tree read routinely costs ~900 ms on this fleet; a budget near the gesture's \
+             prints a line for normal work"
+        );
+    }
+
+    /// The measured p90s, as a line-count budget rather than a hope.
+    ///
+    /// Replays the distribution the release log actually held — `/element` p50 888 ms and p90
+    /// 2 520 ms, `/actions` p50 624 ms — and asserts the new budgets keep the tree routes quiet
+    /// at their p90 while still reporting the tail that hurts.
+    #[test]
+    fn the_measured_p90_of_a_tree_read_no_longer_prints() {
+        let element_p90 = Duration::from_millis(2_520);
+        let elements_p90 = Duration::from_millis(4_403);
+        assert!(element_p90 < slow_call_budget("/element"));
+        assert!(elements_p90 < slow_call_budget("/elements"));
+        // The tail still does.
+        assert!(Duration::from_millis(19_938) >= slow_call_budget("/element"));
+        // And a tap that got slow still does.
+        assert!(Duration::from_millis(624) >= slow_call_budget("/actions"));
     }
 }

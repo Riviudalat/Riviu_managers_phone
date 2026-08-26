@@ -18,6 +18,10 @@ vi.mock("./api", () => ({
   // took six interaction tests down at once.
   androidToolProblems: vi.fn(async () => [] as string[]),
   androidUnavailableReason: vi.fn(async () => null),
+  // The zoom overlay takes a control lease as it mounts. Missing from this mock, the import is
+  // `undefined` and calling it throws — the trap this file already documents three times.
+  deviceControlBegin: vi.fn(async () => undefined),
+  deviceControlEnd: vi.fn(async () => undefined),
   driverDegradedReason: vi.fn(async () => null),
   exampleScript: vi.fn(async () => "{}"),
   getStreamSettings: vi.fn(async () => ({
@@ -149,6 +153,138 @@ describe("the removed local login", () => {
     render(<App />);
     await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
     expect(screen.queryByLabelText(/mật khẩu/i)).toBeNull();
+  });
+});
+
+describe("a per-phone panel whose phone leaves the fleet", () => {
+  /** The second phone matters: an empty roster is a failed scan, not a departure. */
+  const other: DeviceInfo = { ...androidPhone, udid: "ce0617", name: "Note 8" };
+
+  /** Right-click the Redmi tile and click a row of its menu. */
+  async function openFromTileMenu(row: string) {
+    const tile = await waitFor(() => {
+      const found = document.querySelector('[data-udid="10969614"]');
+      if (!found) throw new Error("no tile yet");
+      return found;
+    });
+    fireEvent.contextMenu(tile);
+    // The rows carry , not  —  sets menu
+    // semantics for the context menu ().
+    await userEvent.click(await screen.findByRole("menuitem", { name: row }));
+  }
+
+  afterEach(async () => {
+    // **Put the roster back.** `vi.clearAllMocks()` in the file's `beforeEach` clears calls but
+    // **not** implementations, so a `mockResolvedValue` set here survives into the next test —
+    // and eighteen tests in this file reach for "Redmi" without setting the mock themselves.
+    // Leaving `[Note 8]` behind failed one of them, in a test that had not changed.
+    const api = await import("./api");
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
+  });
+
+  /** Swap the roster and press the header's refresh, which reloads it. */
+  async function rosterBecomes(devices: DeviceInfo[]) {
+    const api = await import("./api");
+    vi.mocked(api.listDevices).mockResolvedValue(devices);
+    await userEvent.click(screen.getByTitle("Làm mới danh sách máy"));
+  }
+
+  /**
+   * **The operator's bug, as a test.** Before this, the panel unmounted silently when the
+   * roster churned and the stale udid stayed in state — so clicking the same phone's row was a
+   * `setState` with the value already there, React bailed out, and the row did nothing at all,
+   * for that phone, until the app restarted. "Mở thư mục máy điện thoại còn mở không được."
+   *
+   * Part 3 is the assertion that would have failed.
+   */
+  it("closes the file browser out loud and lets it be reopened", async () => {
+    const row = "Tệp trên máy…";
+    const dialog = "Tệp trên Redmi";
+    const label = "trình quản lý tệp";
+    const api = await import("./api");
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone, other]);
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
+
+    await openFromTileMenu(row);
+    expect(await screen.findByRole("dialog", { name: dialog })).toBeInTheDocument();
+
+    // 1. the phone goes away and the panel closes
+    await rosterBecomes([other]);
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: dialog })).toBeNull(),
+    );
+    // 2. and it says which phone, and what it closed — silence is what made this a bug report
+    expect(await screen.findByText(new RegExp(`Redmi.*${label}`))).toBeInTheDocument();
+
+    // 3. and the row works again when the phone comes back
+    await rosterBecomes([androidPhone, other]);
+    await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
+    await openFromTileMenu(row);
+    expect(await screen.findByRole("dialog", { name: dialog })).toBeInTheDocument();
+  });
+
+  /**
+   * **A roster that reads empty is a failed scan, not a departure — and it recovers by itself.**
+   *
+   * `list_devices` reads until two consecutive `adb devices` agree, and a restarting adb server
+   * can answer once with nothing. The panel does hide while the roster is empty, because the
+   * render still resolves the phone out of it — but the udid is **kept**, so the panel comes
+   * back on its own when the scan recovers, with no click and no toast. That is the whole
+   * difference between a blip and a departure, and the guard in `surfaceDeparted` is what
+   * draws it.
+   */
+  it("treats an empty roster as a blip and restores the panel by itself", async () => {
+    const api = await import("./api");
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
+
+    await openFromTileMenu("Tệp trên máy…");
+    expect(await screen.findByRole("dialog", { name: "Tệp trên Redmi" })).toBeInTheDocument();
+
+    await rosterBecomes([]);
+    // Nobody was told a phone left, because none did.
+    expect(screen.queryByText(/không còn kết nối/)).toBeNull();
+
+    // And the panel returns without the operator touching anything.
+    await rosterBecomes([androidPhone]);
+    expect(await screen.findByRole("dialog", { name: "Tệp trên Redmi" })).toBeInTheDocument();
+  });
+});
+
+describe("the zoom overlay per-phone rows", () => {
+  /**
+   * **The second half of "mở không được": the trigger lived on a page the panel did not.**
+   *
+   * `FocusStream` — the zoom overlay — is mounted outside `{page === "control"}`, and its
+   * function list offers "Tệp trên máy…". While the panel itself was rendered *inside* that
+   * block, clicking the row from the overlay on any other page set the udid, rendered nothing,
+   * and then the stale udid made the row dead for that phone. Both popups now live beside
+   * `FocusStream`, which is the surface that opens them.
+   */
+  /// One page, not every page, and that is enough: the defect was a single render sitting
+  /// inside `{page === "control" && (`, so any page that is not "control" exercises it. "Tác
+  /// vụ" is the cheapest — it reads `listJobs`, which this file already mocks, where the
+  /// content and app pages would each drag in their own api surface for no extra coverage.
+  it("opens the file browser from the zoom overlay while on another page", async () => {
+    const api = await import("./api");
+    vi.mocked(api.listDevices).mockResolvedValue([androidPhone]);
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
+
+    // Double-click the tile to zoom into it, then leave the control page.
+    const tile = document.querySelector('[data-udid="10969614"]');
+    if (!tile) throw new Error("no tile");
+    fireEvent.doubleClick(tile);
+    await userEvent.click(screen.getByRole("button", { name: "Tác vụ" }));
+
+    // The overlay's rows are plain buttons there rather than menu items, so reach for the
+    // `title` both renderings share.
+    await userEvent.click(await screen.findByTitle("Tệp trên máy…"));
+    expect(
+      await screen.findByRole("dialog", { name: "Tệp trên Redmi" }),
+    ).toBeInTheDocument();
   });
 });
 

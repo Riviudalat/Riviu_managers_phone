@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import {
@@ -16,6 +17,7 @@ import {
 import { startDevicePreview, startFleetPreview } from "./startPreview";
 import { summarizeBulkRepair } from "./agentStatus";
 import { requestConfirm } from "./confirmStore";
+import { surfaceDeparted } from "./deviceSurface";
 import { describeError, pushToast, toastError } from "./toastStore";
 import { ConfirmHost } from "./components/ConfirmHost";
 import { ToastHost } from "./components/ToastHost";
@@ -72,6 +74,65 @@ const PAGE_TITLE: Partial<Record<PageId, string>> = {
   settings: "Cài đặt",
 };
 
+/**
+ * State for a surface opened against **one phone**, that closes itself — out loud — when that
+ * phone leaves the fleet.
+ *
+ * **Why this is a hook and not three `useState`s.** `App` held three of these — the adb console,
+ * the file browser, and the focus overlay — each resolved through `devices.find(...) ?? null`
+ * into a render gated on the result, and none of them cleared the udid when the phone went away.
+ * The consequence is not that the panel closes; it is that it closes **silently and then refuses
+ * to reopen**: the stale udid is still in state, so clicking the same phone's row is a `setState`
+ * with the value already there, React bails out, and the row does nothing at all. Permanently,
+ * for that phone, until another phone is clicked or the app restarts.
+ *
+ * That is the reported bug — *"mở thư mục máy điện thoại còn mở không được"* — and `controlCenter`
+ * had the fix for it 470 lines below, with a doc comment making the argument, while the surface
+ * that needed it most did not. Extracted so the next per-phone surface cannot be written without
+ * it. See `deviceSurface.ts` for why an empty roster is not a departure.
+ */
+function useDeviceSurface(
+  devices: DeviceInfo[],
+  /// Names the thing in the message — "đã đóng trình quản lý tệp". Not the component name.
+  label: string,
+): [string | null, (udid: string | null) => void] {
+  const [openFor, setOpenFor] = useState<string | null>(null);
+  /// The phone's display name, captured **when the surface opened**. At clear time the device is
+  /// already out of the roster, so its name is unreachable then — and "một máy đã rời" is a
+  /// worse message than naming it.
+  const nameRef = useRef<string>("");
+  /// A ref rather than a dependency, so `open` keeps a stable identity across roster updates:
+  /// it is handed to `tileActions`, and a new function on every scan would churn every consumer.
+  const devicesRef = useRef(devices);
+  useEffect(() => {
+    devicesRef.current = devices;
+  }, [devices]);
+
+  const open = useCallback((udid: string | null) => {
+    if (udid) {
+      nameRef.current =
+        devicesRef.current.find((device) => device.udid === udid)?.name ?? udid;
+    }
+    setOpenFor(udid);
+  }, []);
+
+  useEffect(() => {
+    if (!surfaceDeparted(devices, openFor)) return;
+    setOpenFor(null);
+    // Silence is what made this a bug report rather than an annoyance: an operator three
+    // folders deep watched the panel evaporate with no word. `controlCenter` clears quietly
+    // because a designation vanishing is invisible anyway; a panel closing under someone's
+    // hands is not.
+    pushToast(
+      "warn",
+      "Máy đã rời khỏi danh sách",
+      `${nameRef.current} không còn kết nối — đã đóng ${label}.`,
+    );
+  }, [devices, openFor, label]);
+
+  return [openFor, open];
+}
+
 function App() {
   const [page, setPage] = useState<PageId>("control");
   const {
@@ -92,9 +153,9 @@ function App() {
   const [asideCollapsed, setAsideCollapsed] = useState(false);
   const [groupTab, setGroupTab] = useState<string>(ALL_DEVICES_TAB);
   const [tileMenu, setTileMenu] = useState<{ udid: string; x: number; y: number } | null>(null);
-  const [adbFor, setAdbFor] = useState<string | null>(null);
+  const [adbFor, setAdbFor] = useDeviceSurface(devices, "bảng lệnh adb");
   /// Which phone's filesystem is open in the browser popup (xiaowei "Preview Mobile Files").
-  const [filesFor, setFilesFor] = useState<string | null>(null);
+  const [filesFor, setFilesFor] = useDeviceSurface(devices, "trình quản lý tệp");
   const [groupMode, setGroupMode] = useState(false);
   /// The phone the operator drives when Sync is on; every other selected phone follows it.
   ///
@@ -103,7 +164,7 @@ function App() {
   /// it was and nothing let the operator choose, so "máy chính" was a label for an accident.
   /// It is a property of the grid, set from the tile's own menu, and it lives here.
   const [controlCenter, setControlCenter] = useState<string | null>(null);
-  const [focusUdid, setFocusUdid] = useState<string | null>(null);
+  const [focusUdid, setFocusUdid] = useDeviceSurface(devices, "màn phóng to");
   const [jobsScriptSeed, setJobsScriptSeed] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("window");
   const [tileWidth, setTileWidth] = useState(() => loadZoom(TILE_ZOOM));
@@ -245,7 +306,20 @@ function App() {
     // see that it is a setter — including it is free and cheaper than an exemption.
     // The stale-closure note that used to sit here still applies and now lives with the
     // catalog: a stale `metas` pre-fills the rename dialog with the value just replaced.
-    [reload, controlCenter, groupMode, metaMap, metas, setMetas],
+    // The three surface openers come from `useDeviceSurface` now, not from `useState`, so the
+    // hooks lint cannot see that they are stable. They are — each is a `useCallback` with an
+    // empty dependency list — but listing them is free and keeps the gate honest.
+    [
+      reload,
+      controlCenter,
+      groupMode,
+      metaMap,
+      metas,
+      setMetas,
+      setAdbFor,
+      setFilesFor,
+      setFocusUdid,
+    ],
   );
 
   /// The phone the overlay actually drives.
@@ -728,14 +802,6 @@ function App() {
                 />
               )}
 
-              {adbFor && menuAdbDevice && (
-                <AdbConsole device={menuAdbDevice} onClose={() => setAdbFor(null)} />
-              )}
-
-              {filesFor && menuFilesDevice && (
-                <DeviceFilesPopup device={menuFilesDevice} onClose={() => setFilesFor(null)} />
-              )}
-
               {!devices.length && (
                 <EmptyState
                   icon={<IconPhone size={20} />}
@@ -849,6 +915,24 @@ function App() {
           {page === "settings" && <SettingsPanel devices={devices} />}
         </div>
       </div>
+
+      {/* **Outside the control-page block, and that placement is the fix.** Both of these are
+          opened from `tileActions`, which `FocusStream` renders — and `FocusStream` is mounted
+          here, not inside `{page === "control"}`. While they lived in that block, opening the
+          zoom overlay on any other page and clicking "Tệp trên máy…" or "Lệnh adb" set the udid,
+          rendered nothing, and then `useDeviceSurface`'s stale-udid trap made the row dead for
+          that phone.
+
+          The sibling popups below (nurture, interaction, groups, tools) stay page-gated on
+          purpose: they act on `selected`, which is a control-grid concept. These two act on one
+          phone and read nothing but its udid and name. */}
+      {adbFor && menuAdbDevice && (
+        <AdbConsole device={menuAdbDevice} onClose={() => setAdbFor(null)} />
+      )}
+
+      {filesFor && menuFilesDevice && (
+        <DeviceFilesPopup device={menuFilesDevice} onClose={() => setFilesFor(null)} />
+      )}
 
       {focusDevice && (
         <FocusStream
