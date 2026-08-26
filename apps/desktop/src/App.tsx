@@ -85,6 +85,7 @@ function App() {
     bootError,
     driverIssue,
     androidIssue,
+    androidToolProblems,
     retryingStartup,
     retry: retryStartupAndResubscribe,
   } = useFleet();
@@ -429,6 +430,24 @@ function App() {
             <Banner tone="warn">
               Máy Android không tham gia fleet (kiểm lúc mở app — cài adb xong phải
               khởi động lại app). Nguyên nhân: {androidIssue}
+            </Banner>
+          )}
+
+          {/* **The bundle is there and broken, which is not the same as absent.** Nine files
+              are verified against `android-tools-manifest.json` at boot; adb is one of them, so
+              a bundle that lost the agent APKs still resolves adb — the fleet lists phones and
+              every attempt to drive one fails. Reported from a real install as "lên app rồi,
+              nhận điện thoại rồi, nhưng điều khiển không được", with nothing on screen and the
+              only record a `log::warn!` in a file nobody knew about.
+
+              `warn` and not `error`: the app is still usable for everything that does not drive
+              an Android phone, and the remedy is reinstalling rather than anything in here. */}
+          {androidToolProblems.length > 0 && (
+            <Banner tone="warn">
+              Bộ công cụ Android trong bản cài không khớp bản kê — máy vẫn hiện trong
+              danh sách nhưng <strong>điều khiển sẽ không chạy</strong>. Cài lại app;
+              nếu vẫn vậy, gửi file log ở <code>%LOCALAPPDATA%\com.riviu.manager\logs</code>.
+              Nguyên nhân: {androidToolProblems.join("; ")}
             </Banner>
           )}
 

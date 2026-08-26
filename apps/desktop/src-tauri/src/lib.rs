@@ -287,6 +287,7 @@ pub fn run() {
             commands::driver_mode,
             commands::driver_degraded_reason,
             commands::android_unavailable_reason,
+            commands::android_tool_problems,
             commands::update_check,
             commands::update_install,
             farm_commands::get_device_meta,
@@ -575,6 +576,7 @@ mod tests {
         ("driver_mode", "read: which backend is live"),
         ("driver_degraded_reason", "read: health probe"),
         ("android_unavailable_reason", "read: health probe"),
+        ("android_tool_problems", "read: boot snapshot"),
         ("update_check", "read: asks GitHub, touches no device"),
         ("get_device_meta", "read: DB"),
         ("list_device_metas", "read: DB"),
@@ -705,6 +707,10 @@ mod tests {
     const INFALLIBLE_COMMANDS: &[(&str, &str)] = &[
         ("agent_get_settings", "returns settings held in memory"),
         ("agent_list_statuses", "returns the cached status map"),
+        (
+            "android_tool_problems",
+            "returns a stored Vec<String>",
+        ),
         (
             "android_unavailable_reason",
             "returns a stored Option<String>",

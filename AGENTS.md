@@ -9851,3 +9851,74 @@ tương đương thì tệ hơn là nói thẳng.
 
 `riviu-core` **773**, `riviu-android-driver` **187**, `riviu-managers-phone` **180**, clippy **0**
 cả ba; frontend `tsc -b` + `oxlint --deny-warnings` sạch, **694 test / 81 file**.
+
+## §9.116 "Nhận điện thoại rồi mà điều khiển không được" — và cái app đã không nói (26/08/2026)
+
+Báo cáo từ một bản cài trên máy khác: app lên, **nhận điện thoại**, nhưng thao tác/điều khiển
+không chạy, và **không có feedback gì**.
+
+**Nguyên nhân gốc vẫn chưa biết** — cần log của máy đó. Nhưng lần theo đường điều khiển thì lộ ra
+một khoảng trống thật, và nó đủ để giải thích phần "không có feedback".
+
+### Chín file, một cái hỏng, và app vẫn báo khoẻ
+
+`AndroidTools::load` xác thực `sidecars/android/` theo `android-tools-manifest.json`: chín file,
+mỗi file một SHA-256. File nào thiếu hoặc lệch băm thì **bị bỏ**, và driver nhận `None` cho nó.
+
+`adb.exe` chỉ là **một** trong chín. Nên một bundle mất hai APK agent vẫn giải được adb — tức là:
+
+- `list_devices()` chạy bình thường, **fleet hiện đủ máy**;
+- mọi lần mở session để điều khiển thì `install_agent_apks` trả lỗi "this build has no agent APK";
+- và trước bản này, dấu vết duy nhất là một `log::warn!` trong file mà người vận hành **không
+  biết là có**.
+
+`AndroidTools.problems` được `state.rs` ghi ra `log::warn!` rồi bootstrap **đi tiếp bình thường**.
+Không banner, không lỗi khởi động, không gì. Đúng câu người dùng nói.
+
+### Banner mới, và tại sao nó không phải hai banner đã có
+
+Có sẵn `driverIssue` ("không đọc được thiết bị thật") và `androidIssue` ("máy Android không tham
+gia fleet"). **Cả hai đều là câu trả lời sai cho ca này**, vì driver *dựng được* và máy *có* trong
+fleet. Nói "không có máy Android" sẽ đẩy người vận hành đi kiểm adb — đúng cái file duy nhất đã
+chạy được.
+
+Nên: `AppState.android_tool_problems` → command `android_tool_problems` → `api.ts` →
+`useFleet` → một banner `warn` nói đúng ba thứ người vận hành cần:
+
+> Bộ công cụ Android trong bản cài không khớp bản kê — máy vẫn hiện trong danh sách nhưng
+> **điều khiển sẽ không chạy**. Cài lại app; nếu vẫn vậy, gửi file log ở
+> `%LOCALAPPDATA%\com.riviu.manager\logs`. Nguyên nhân: …
+
+`warn` chứ không `error`: app vẫn dùng được cho mọi thứ không lái máy Android, và cách sửa là cài
+lại chứ không phải thao tác gì trong app.
+
+**Và đường gọi có đủ ba khúc** — đăng ký, allowlist, **và `api.ts` thật sự gọi**. Khúc thứ ba là
+khúc mà 9.103 §4 nói tới; một command thiếu nó là một cột không ai đọc được.
+
+### Chỗ log, viết ra vì không ai biết
+
+`%LOCALAPPDATA%\com.riviu.manager\logs\Riviu Manager.log` — mức `Warn` ở bản release, 5 file x
+8 MB, `KeepSome` nên file cũ còn nguyên. Câu cần tìm: `bundled Android tools`.
+
+### Bẫy khi làm, cả hai đều im lặng
+
+1. **Biến state trùng tên hàm import.** `const [androidToolProblems, …] = useState` che mất
+   `import { androidToolProblems }`, nên `await androidToolProblems()` gọi một **mảng**. `tsc`
+   bắt được (`Type 'string[]' has no call signatures`); vitest thì không, vì nó bỏ type.
+2. **Hai file test mock cả module `api` bằng object literal** (`App.test.tsx`,
+   `useFleet.test.ts`). Export không có trong mock trả `undefined`, `.catch` trên đó **ném đồng
+   bộ**, và cả màn đứng im. Đúng cái bẫy đã ghi ở §9.115 cho `InteractionMonitorTab.test.tsx` —
+   **lần thứ hai trong một ngày**. Thêm lời gọi api vào component ⇒ thêm vào mọi mock của module
+   đó.
+
+### Còn phải làm: tìm nguyên nhân gốc
+
+Banner này làm lỗi **tự báo**, không sửa lỗi. Ba thứ cần từ máy kia, theo thứ tự:
+
+1. `Riviu Manager.log` — có dòng `bundled Android tools` không. Trả lời dứt điểm chuyện bundle.
+2. `<thư mục cài>\sidecars\android\win-x86_64\adb.exe devices` — nếu máy hiện `unauthorized`
+   hoặc `offline` thì là phía điện thoại (máy mới ⇒ khoá adb mới ⇒ phải bấm cho phép trên máy).
+   Ca này **đã có** feedback: tile hiện `lastError` (có test cho `adb: device unauthorized`).
+3. Trên tile của máy đó, chip trạng thái và dòng lỗi ghi gì.
+
+Cổng: `riviu-managers-phone` 180 test, clippy 0; frontend `tsc -b` + `oxlint` sạch, **696 test**.

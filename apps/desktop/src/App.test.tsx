@@ -13,6 +13,10 @@ vi.mock("./api", () => ({
   // and survived only because the call site wraps it in `.catch` — an unmocked export is
   // `undefined`, so calling it throws synchronously and would have surfaced as a boot
   // error rather than as the missing mock it is.
+  // Added with the bundled-tools banner. An export missing from this mock returns `undefined`,
+  // and `.catch` on that throws synchronously inside the boot effect — the same silence that
+  // took six interaction tests down at once.
+  androidToolProblems: vi.fn(async () => [] as string[]),
   androidUnavailableReason: vi.fn(async () => null),
   driverDegradedReason: vi.fn(async () => null),
   exampleScript: vi.fn(async () => "{}"),
@@ -164,6 +168,35 @@ describe("fleet health banners", () => {
     // Says out loud that it is a boot snapshot: `MultiplexDriver::new` fixes the backend
     // list at construction, so installing adb now needs a restart to take effect.
     expect(screen.getByText(/khởi động lại app/)).toBeInTheDocument();
+  });
+
+  it("says the phones will list and still not be drivable when the bundle is broken", async () => {
+    // **Reported from a real install:** "lên app rồi, nhận điện thoại rồi, nhưng điều khiển
+    // không được", with nothing on screen. Nine files are verified against
+    // `android-tools-manifest.json` at boot and adb is only one of them, so a bundle that lost
+    // the agent APKs still resolves adb — the fleet lists phones and every attempt to drive one
+    // fails. The only record was a `log::warn!` in a file the operator did not know existed.
+    const api = await import("./api");
+    vi.mocked(api.androidToolProblems).mockResolvedValueOnce([
+      "noarch/appium-uiautomator2-server.apk: sha256 mismatch",
+    ]);
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByText(/sha256 mismatch/)).toBeInTheDocument(),
+    );
+    // The sentence that matters: not "no phones", which is the other banner and the wrong
+    // answer — it sends the operator to look at adb, the one file that did work.
+    expect(screen.getByText(/điều khiển sẽ không chạy/)).toBeInTheDocument();
+    // And where to send the evidence from, since the whole failure was invisible before.
+    expect(screen.getByText(/com\.riviu\.manager/)).toBeInTheDocument();
+  });
+
+  it("shows no bundled-tools banner when the bundle verifies", async () => {
+    // The healthy answer is an empty list, and a banner that is always on is a banner nobody
+    // reads — the same reason the Android-absent banner is `warn` and not `error`.
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Redmi")).toBeInTheDocument());
+    expect(screen.queryByText(/điều khiển sẽ không chạy/)).toBeNull();
   });
 
   it("shows no Android banner on a farm whose Android half is fine", async () => {

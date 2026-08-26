@@ -136,6 +136,16 @@ pub fn android_unavailable_reason(state: State<'_, AppState>) -> Option<String> 
     state.android_unavailable_reason.clone()
 }
 
+/// What went wrong verifying the bundled Android tools at boot. Empty is the healthy answer.
+///
+/// Separate from [`android_unavailable_reason`] on purpose: that one means "no Android phone can
+/// join the fleet", and this one means "they join and then cannot be driven". Reporting the
+/// second as the first sends the operator to look at adb, which is the one file that *did* work.
+#[tauri::command]
+pub fn android_tool_problems(state: State<'_, AppState>) -> Vec<String> {
+    state.android_tool_problems.clone()
+}
+
 /// Whether a newer release is published, and whether now is a safe moment to take it.
 ///
 /// Two answers in one call, and deliberately so. An updater that reports "an update is

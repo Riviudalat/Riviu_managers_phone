@@ -613,6 +613,17 @@ export async function driverDegradedReason() {
  * and was registered from the start; nothing on this side ever called it, so an Android
  * phone simply did not appear and said nothing about why.
  */
+/**
+ * What went wrong verifying the bundled Android tools at boot. Empty means healthy.
+ *
+ * Distinct from `androidUnavailableReason` on purpose: that one means no Android phone can join
+ * the fleet, this one means they join and then cannot be driven — which is the shape of the bug
+ * reported from a real install ("nhận điện thoại rồi, nhưng điều khiển không được").
+ */
+export async function androidToolProblems() {
+  return invoke<string[]>("android_tool_problems");
+}
+
 export async function androidUnavailableReason() {
   return invoke<string | null>("android_unavailable_reason");
 }

@@ -154,6 +154,19 @@ pub struct AppState {
     /// the iOS sidecar: "no adb on this machine" and "the iOS sidecar died"
     /// are different facts and must not be reported as one.
     pub android_unavailable_reason: Option<String>,
+    /// What went wrong verifying the bundled Android tools, if anything.
+    ///
+    /// **The gap this closes, reported from a real install.** The bundle is verified against
+    /// `android-tools-manifest.json` at boot; a file that is missing or whose SHA-256 does not
+    /// match is dropped, and the driver is handed `None` for it. adb is only one of nine files,
+    /// so a bundle that lost the agent APKs still resolves adb — which means **the fleet lists
+    /// phones normally and every attempt to drive one fails**. Until now the only record was a
+    /// `log::warn!` in a file the operator does not know exists, and the whole app reported
+    /// nothing: "lên app rồi, nhận điện thoại rồi, nhưng điều khiển không được".
+    ///
+    /// Not fatal, and not `android_unavailable_reason` either: the phones really are there and
+    /// the existing banner says they are not in the fleet, which would be a second wrong answer.
+    pub android_tool_problems: Vec<String>,
     /// Concrete Android backend, kept so view start/stop/retune do not go
     /// through `DeviceDriver` or `StreamBudgetManager`.
     pub android: Option<Arc<riviu_android_driver::AndroidDriver>>,
@@ -801,6 +814,7 @@ impl AppState {
             driver_degraded_reason: bundle.degraded_reason,
             driver_list_error: bundle.list_error,
             android_unavailable_reason: android_unavailable,
+            android_tool_problems: android_tools.problems.clone(),
             android,
             view_hub,
             view_paint: crate::view_watchdog::ViewPaintLedger::new(),

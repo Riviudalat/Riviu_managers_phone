@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import {
+  androidToolProblems,
   androidUnavailableReason,
   driverDegradedReason,
   listDeviceMetas,
@@ -51,6 +52,7 @@ export interface Fleet {
   driverIssue: string | null;
   /// Android specifically is unavailable; asked apart because the two halves fail apart.
   androidIssue: string | null;
+  androidToolProblems: string[];
   retryingStartup: boolean;
   /// Ask the backend to start again, and resubscribe if it does.
   retry: () => Promise<void>;
@@ -64,6 +66,9 @@ export function useFleet(): Fleet {
   const [bootError, setBootError] = useState<string | null>(null);
   const [driverIssue, setDriverIssue] = useState<string | null>(null);
   const [androidIssue, setAndroidIssue] = useState<string | null>(null);
+  // Named apart from the imported command on purpose: calling the state variable the same
+  // thing shadows it, and `await androidToolProblems()` then calls an array instead.
+  const [toolProblems, setToolProblems] = useState<string[]>([]);
   const [startupIssue, setStartupIssue] = useState<string | null | undefined>(undefined);
   const [retryingStartup, setRetryingStartup] = useState(false);
   /// Bumped by the retry button, and read by the boot effect below as a reason to run
@@ -94,6 +99,9 @@ export function useFleet(): Fleet {
       // Asked separately, because the two halves of the fleet fail for different
       // reasons and an Android phone that never appears used to say nothing at all.
       setAndroidIssue(await androidUnavailableReason().catch(() => null));
+      // Asked here too, because a bundle that lost a file lists phones normally and only
+      // fails when one is driven — so nothing else in this hook would ever notice.
+      setToolProblems(await androidToolProblems().catch(() => []));
     } catch (e) {
       setBootError(describeError(e));
     }
@@ -197,6 +205,7 @@ export function useFleet(): Fleet {
     bootError,
     driverIssue,
     androidIssue,
+    androidToolProblems: toolProblems,
     retryingStartup,
     retry,
   };

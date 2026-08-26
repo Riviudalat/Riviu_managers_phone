@@ -11,6 +11,10 @@ vi.mock("./api", () => ({
   listGroups: vi.fn(async () => []),
   listDeviceMetas: vi.fn(async () => []),
   driverDegradedReason: vi.fn(async () => null),
+  // Added with the bundled-tools banner. An export missing from this mock returns `undefined`,
+  // and `.catch` on that throws synchronously inside the boot effect — the same silence that
+  // took six interaction tests down at once.
+  androidToolProblems: vi.fn(async () => [] as string[]),
   androidUnavailableReason: vi.fn(async () => null),
   startupError: vi.fn(async () => null),
   retryStartup: vi.fn(async () => null),
