@@ -153,6 +153,23 @@ pub enum PublishPlanError {
     EmptyUdid,
 }
 
+/// Pair each bundle with the phone that will post it, or refuse.
+///
+/// **This is the only thing standing between bundle *i* and phone *j*, and it had no tests.**
+/// The frontend test for the same pairing states the cost plainly: one account posting another
+/// account's photographs under another account's caption, with no discrepancy to notice
+/// afterwards and no delete path to undo it. That is the failure this function exists to
+/// prevent, so the property worth pinning is not "it returns a Vec" but that **position is
+/// identity**: the nth bundle goes to the nth phone, and `ordinal` records that n.
+///
+/// Everything it refuses, it refuses for the same reason: each one is a way for the mapping to
+/// stop being a bijection between two lists read in parallel. Different lengths, an empty entry
+/// on either side, or a repeat on either side all mean the operator's intent cannot be read off
+/// the two lists with confidence -- and a publish is not the place to guess.
+///
+/// Empty is refused rather than treated as "nothing to do", because reaching here with no
+/// selection means a caller lost the selection somewhere, and returning `Ok(vec![])` would turn
+/// that into a campaign that silently posts nothing.
 pub fn validate_publish_mapping(
     bundle_ids: &[String],
     udids: &[String],
@@ -160,21 +177,30 @@ pub fn validate_publish_mapping(
     if bundle_ids.is_empty() || bundle_ids.len() != udids.len() {
         return Err(PublishPlanError::MappingLength);
     }
+    // **Deduplicated on the trimmed form, because that is what the emptiness check already
+    // treats as the identity.** Rejecting `"   "` as empty says the surrounding whitespace is
+    // not part of the id; deduplicating on the raw string then said the opposite, so
+    // `"bundle-1"` and `"bundle-1 "` both passed as distinct bundles -- two phones posting one
+    // bundle, which is the exact class of mis-pairing this function exists to refuse. Two
+    // adjacent lines disagreeing about what a value *is* is a bug even when neither line is
+    // wrong on its own.
     let mut seen_bundles = std::collections::BTreeSet::new();
     let mut seen_udids = std::collections::BTreeSet::new();
     for bundle_id in bundle_ids {
-        if bundle_id.trim().is_empty() {
+        let key = bundle_id.trim();
+        if key.is_empty() {
             return Err(PublishPlanError::EmptyBundleId);
         }
-        if !seen_bundles.insert(bundle_id) {
+        if !seen_bundles.insert(key) {
             return Err(PublishPlanError::DuplicateBundle(bundle_id.clone()));
         }
     }
     for udid in udids {
-        if udid.trim().is_empty() {
+        let key = udid.trim();
+        if key.is_empty() {
             return Err(PublishPlanError::EmptyUdid);
         }
-        if !seen_udids.insert(udid) {
+        if !seen_udids.insert(key) {
             return Err(PublishPlanError::DuplicateUdid(udid.clone()));
         }
     }
@@ -808,5 +834,148 @@ mod tests {
         );
         assert_eq!(managed.caption_sha256, manifest.bundles[0].caption_sha256);
         assert!(Path::new(&managed.images[0].path).is_file());
+    }
+}
+
+#[cfg(test)]
+mod mapping_tests {
+    use super::{validate_publish_mapping, PublishPlanError};
+
+    fn ids(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    /// **Position is identity, and this is the assertion the whole function exists for.**
+    ///
+    /// The nth bundle goes to the nth phone, and `ordinal` records that n. Get this wrong and one
+    /// account posts another account's photographs under another account's caption -- with
+    /// nothing to notice afterwards, because every phone did post *something*, and no delete
+    /// path to undo it.
+    #[test]
+    fn the_nth_bundle_goes_to_the_nth_phone() {
+        let plan = validate_publish_mapping(
+            &ids(&["quan-an-1", "quan-an-2", "quan-an-3"]),
+            &ids(&["10969614", "23021RAAEG", "a99f1234"]),
+        )
+        .expect("a clean mapping");
+
+        assert_eq!(plan.len(), 3);
+        assert_eq!(plan[0].bundle_id, "quan-an-1");
+        assert_eq!(plan[0].udid, "10969614");
+        assert_eq!(plan[1].bundle_id, "quan-an-2");
+        assert_eq!(plan[1].udid, "23021RAAEG");
+        assert_eq!(plan[2].bundle_id, "quan-an-3");
+        assert_eq!(plan[2].udid, "a99f1234");
+        // Ordinals are the position, in order, from zero -- not a re-derived index.
+        assert_eq!(
+            plan.iter().map(|entry| entry.ordinal).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+    }
+
+    /// A single pair is the ordinary one-phone case and must work.
+    #[test]
+    fn one_bundle_and_one_phone_is_a_valid_plan() {
+        let plan = validate_publish_mapping(&ids(&["b"]), &ids(&["u"])).expect("one pair");
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].ordinal, 0);
+    }
+
+    /// **Different lengths cannot be read as an intent, so they are refused rather than zipped.**
+    ///
+    /// `zip` would silently truncate to the shorter list: three bundles and two phones would
+    /// publish two and drop one, or two bundles and three phones would leave a phone out. Both
+    /// look like success.
+    #[test]
+    fn a_length_mismatch_is_refused_in_both_directions() {
+        assert!(matches!(
+            validate_publish_mapping(&ids(&["a", "b", "c"]), &ids(&["u", "v"])),
+            Err(PublishPlanError::MappingLength)
+        ));
+        assert!(matches!(
+            validate_publish_mapping(&ids(&["a", "b"]), &ids(&["u", "v", "w"])),
+            Err(PublishPlanError::MappingLength)
+        ));
+    }
+
+    /// **Nothing selected is a lost selection, not a no-op.**
+    ///
+    /// `Ok(vec![])` here would become a campaign that runs and posts nothing, which reads to the
+    /// operator as the phones having refused.
+    #[test]
+    fn an_empty_selection_is_refused_rather_than_treated_as_nothing_to_do() {
+        assert!(matches!(
+            validate_publish_mapping(&[], &[]),
+            Err(PublishPlanError::MappingLength)
+        ));
+    }
+
+    /// An empty entry on either side, including one that is only whitespace.
+    #[test]
+    fn an_empty_entry_on_either_side_is_refused() {
+        assert!(matches!(
+            validate_publish_mapping(&ids(&["a", ""]), &ids(&["u", "v"])),
+            Err(PublishPlanError::EmptyBundleId)
+        ));
+        assert!(matches!(
+            validate_publish_mapping(&ids(&["a", "   "]), &ids(&["u", "v"])),
+            Err(PublishPlanError::EmptyBundleId)
+        ));
+        assert!(matches!(
+            validate_publish_mapping(&ids(&["a", "b"]), &ids(&["u", ""])),
+            Err(PublishPlanError::EmptyUdid)
+        ));
+        assert!(matches!(
+            validate_publish_mapping(&ids(&["a", "b"]), &ids(&["u", "  "])),
+            Err(PublishPlanError::EmptyUdid)
+        ));
+    }
+
+    /// A repeat on either side, and the error **names which one** -- because "duplicate udid" with
+    /// twenty phones selected is not something an operator can act on.
+    #[test]
+    fn a_repeat_on_either_side_is_refused_and_named() {
+        match validate_publish_mapping(&ids(&["a", "a"]), &ids(&["u", "v"])) {
+            Err(PublishPlanError::DuplicateBundle(named)) => assert_eq!(named, "a"),
+            other => panic!("expected a named duplicate bundle, got {other:?}"),
+        }
+        match validate_publish_mapping(&ids(&["a", "b"]), &ids(&["u", "u"])) {
+            Err(PublishPlanError::DuplicateUdid(named)) => assert_eq!(named, "u"),
+            other => panic!("expected a named duplicate udid, got {other:?}"),
+        }
+    }
+
+    /// **Two lines that disagreed about what an id *is*.**
+    ///
+    /// The emptiness check treats surrounding whitespace as not part of the id (`"   "` is
+    /// empty). Deduplication used to run on the raw string, which says the opposite -- so
+    /// `"bundle-1"` and `"bundle-1 "` both passed as distinct bundles, and two phones posted one
+    /// bundle. Neither line was wrong on its own; the disagreement was the bug.
+    #[test]
+    fn a_trailing_space_does_not_smuggle_a_duplicate_past_the_check() {
+        match validate_publish_mapping(&ids(&["bundle-1", "bundle-1 "]), &ids(&["u", "v"])) {
+            Err(PublishPlanError::DuplicateBundle(_)) => {}
+            other => panic!("a trailing space made one bundle look like two: {other:?}"),
+        }
+        match validate_publish_mapping(&ids(&["a", "b"]), &ids(&[" 10969614", "10969614"])) {
+            Err(PublishPlanError::DuplicateUdid(_)) => {}
+            other => panic!("a leading space made one phone look like two: {other:?}"),
+        }
+    }
+
+    /// Twenty phones, which is the fleet this runs on. Guards against anything O(n) that only
+    /// works for two, and against an ordinal that resets or repeats at scale.
+    #[test]
+    fn a_full_fleet_maps_cleanly_and_keeps_its_order() {
+        let bundles: Vec<String> = (0..20).map(|index| format!("bundle-{index}")).collect();
+        let phones: Vec<String> = (0..20).map(|index| format!("phone-{index}")).collect();
+
+        let plan = validate_publish_mapping(&bundles, &phones).expect("twenty clean pairs");
+        assert_eq!(plan.len(), 20);
+        for (index, entry) in plan.iter().enumerate() {
+            assert_eq!(entry.bundle_id, format!("bundle-{index}"));
+            assert_eq!(entry.udid, format!("phone-{index}"));
+            assert_eq!(entry.ordinal, index as u32);
+        }
     }
 }

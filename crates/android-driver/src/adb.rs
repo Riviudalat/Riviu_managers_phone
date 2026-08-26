@@ -2192,12 +2192,29 @@ drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
         "a fleet still has to be able to export a file"
     );
 
+    /// Serialises the tests below, because the thing they inspect is **global**.
+    ///
+    /// The semaphores are process-wide `OnceLock` statics -- deliberately, since what they ration
+    /// is one adb server per host -- so two of these tests running at once perturb each other's
+    /// permit counts. That is not hypothetical: `a_transfer_takes_a_transfer_slot_and_a_global_one`
+    /// passed alone and failed in the full crate run, which is exactly the flake shape this whole
+    /// pass is supposed to be removing rather than adding.
+    ///
+    /// `tokio::sync::Mutex` rather than `std::sync::Mutex` because these tests hold the guard
+    /// across `.await`. Under CI's `--test-threads=1` this is already serial and the lock costs
+    /// nothing; locally it is what makes them deterministic.
+    fn slot_tests_run_one_at_a_time() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
     /// One phone, one call at a time.
     ///
     /// Asserts on the phone's own queue rather than on timing: the permit count is the
     /// mechanism, and reading it is deterministic where racing two tasks is not.
     #[tokio::test]
     async fn a_second_call_to_one_phone_waits_for_the_first() {
+        let _serial = slot_tests_run_one_at_a_time().lock().await;
         let serial = "queue-test-one-phone";
         let held = enter_adb_slot(Some(serial), "shell", AdbLane::Interactive).await;
 
@@ -2224,6 +2241,7 @@ drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
     /// bug than the one this fixed; if the queues were shared this test would hang.
     #[tokio::test]
     async fn two_different_phones_run_at_the_same_time() {
+        let _serial = slot_tests_run_one_at_a_time().lock().await;
         let first = enter_adb_slot(Some("queue-test-a"), "shell", AdbLane::Interactive).await;
         let second = enter_adb_slot(Some("queue-test-b"), "shell", AdbLane::Interactive).await;
         drop((first, second));
@@ -2233,6 +2251,7 @@ drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
     /// inside the global cap rather than beside it -- twelve is the number that was measured.
     #[tokio::test]
     async fn a_transfer_takes_a_transfer_slot_and_a_global_one() {
+        let _serial = slot_tests_run_one_at_a_time().lock().await;
         let transfers_before = adb_transfer_slots().available_permits();
         let global_before = adb_slots().available_permits();
 
@@ -2251,6 +2270,7 @@ drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
     /// And an interactive call leaves the transfer sub-cap alone.
     #[tokio::test]
     async fn an_interactive_call_does_not_consume_the_transfer_sub_cap() {
+        let _serial = slot_tests_run_one_at_a_time().lock().await;
         let before = adb_transfer_slots().available_permits();
         let held = enter_adb_slot(
             Some("queue-test-interactive"),

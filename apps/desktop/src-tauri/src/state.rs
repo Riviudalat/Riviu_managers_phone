@@ -2086,6 +2086,26 @@ mod tests {
 
     use super::*;
 
+    /// How far past the five-second bookkeeping deadline these tests step.
+    ///
+    /// **A virtual clock does not work here, and that was worth finding out rather than
+    /// assuming.** `#[tokio::test(start_paused = true)]` is the right answer for
+    /// `flow::evidence`, whose deadlines are tokio timers it owns end to end. These three tests
+    /// are a different shape: `tick()` asks `control.background_turn_due(..)`, and that lives in
+    /// `riviu-core`'s control plane on its own clock. Pausing tokio's timers advances the
+    /// `sleep` and not the turn, so the sampler reports `Sampling` where the test expects
+    /// `Stale` -- measured, one test red. And the pipeline waits on real work either way:
+    /// converted, `keeps_both_desktop_tiles_live` ran for **over sixty seconds** instead of six.
+    /// Making it work would mean moving the whole control plane onto tokio's clock, which is a
+    /// change to production timing for every phone, not a test fix.
+    ///
+    /// So the flake is addressed the plain way instead: the margin was **25 ms**, which is a bet
+    /// against scheduler jitter on a Windows CI runner that is running the rest of a 778-test
+    /// crate single-threaded alongside. 250 ms is still far below any interval that would make
+    /// the assertion vacuous -- the deadline it steps past is five seconds -- and costs 225 ms
+    /// per test.
+    const PAST_THE_TURN_DEADLINE: Duration = Duration::from_millis(250);
+
     #[test]
     fn the_stream_budget_follows_the_fleet_that_is_plugged_in() {
         // The constant this replaced was 2, described as "the desktop shows at most two
@@ -2324,7 +2344,7 @@ mod tests {
         // Move beyond the five-second bookkeeping deadline, then model a
         // frame observed just before the sampler tick. The producer is quiet
         // at this exact instant, but it is not stalled and must remain live.
-        tokio::time::sleep(Duration::from_secs(5) + Duration::from_millis(25)).await;
+        tokio::time::sleep(Duration::from_secs(5) + PAST_THE_TURN_DEADLINE).await;
         for sample in &mut sampler.active {
             sample.last_frame_at = Instant::now();
         }
@@ -2412,7 +2432,7 @@ mod tests {
         // The bounded turn starts when the producer is marked running, not
         // when its reservation is created; include a full turn after the
         // first frame so slow bootstrap cannot make this assertion early.
-        tokio::time::sleep(Duration::from_secs(5) + Duration::from_millis(25)).await;
+        tokio::time::sleep(Duration::from_secs(5) + PAST_THE_TURN_DEADLINE).await;
 
         assert_eq!(
             sampler.tick().await,
