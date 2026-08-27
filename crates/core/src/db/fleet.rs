@@ -9,7 +9,7 @@ impl Database {
     /// which is how `handle` came to be selected by the single-row read and not by anything
     /// else for a while.
     const DEVICE_META_COLUMNS: &'static str =
-        "udid, notes, tags_json, group_id, proxy_id, handle, alias, number";
+        "udid, notes, tags_json, group_id, handle, alias, number";
 
     fn device_meta_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::types::DeviceMeta> {
         let tags_json: String = row.get(2)?;
@@ -18,10 +18,9 @@ impl Database {
             notes: row.get(1)?,
             tags: serde_json::from_str(&tags_json).unwrap_or_default(),
             group_id: row.get(3)?,
-            proxy_id: row.get(4)?,
-            handle: row.get(5)?,
-            alias: row.get(6)?,
-            number: row.get(7)?,
+            handle: row.get(4)?,
+            alias: row.get(5)?,
+            number: row.get(6)?,
         })
     }
     pub fn get_device_meta(&self, udid: &str) -> anyhow::Result<crate::types::DeviceMeta> {
@@ -39,7 +38,6 @@ impl Database {
                 notes: String::new(),
                 tags: vec![],
                 group_id: None,
-                proxy_id: None,
                 handle: String::new(),
                 alias: String::new(),
                 number: None,
@@ -64,11 +62,11 @@ impl Database {
     pub fn upsert_device_meta(&self, meta: &crate::types::DeviceMeta) -> anyhow::Result<()> {
         let conn = self.conn()?;
         conn.execute(
-            r#"INSERT INTO device_meta (udid, notes, tags_json, group_id, proxy_id, handle, alias, number)
-               VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+            r#"INSERT INTO device_meta (udid, notes, tags_json, group_id, handle, alias, number)
+               VALUES (?1,?2,?3,?4,?5,?6,?7)
                ON CONFLICT(udid) DO UPDATE SET
                  notes=excluded.notes, tags_json=excluded.tags_json,
-                 group_id=excluded.group_id, proxy_id=excluded.proxy_id,
+                 group_id=excluded.group_id,
                  handle=excluded.handle, alias=excluded.alias,
                  number=excluded.number"#,
             params![
@@ -76,7 +74,6 @@ impl Database {
                 meta.notes,
                 serde_json::to_string(&meta.tags)?,
                 meta.group_id,
-                meta.proxy_id,
                 meta.handle,
                 meta.alias,
                 meta.number

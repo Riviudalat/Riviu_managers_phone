@@ -3235,7 +3235,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "thiserror 2.0.19",
  "tokio",
  "tracing",
  "windows-sys 0.61.2",
@@ -3279,16 +3278,10 @@ dependencies = [
 name = "riviu-script-engine"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
  "riviu-core",
  "serde",
  "serde_json",
- "sha2",
  "thiserror 2.0.19",
- "tokio",
- "tracing",
  "uuid",
 ]
 
@@ -3297,15 +3290,12 @@ name = "riviu-signing"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "chrono",
  "keyring",
  "riviu-core",
  "serde",
  "serde_json",
- "thiserror 2.0.19",
  "tokio",
- "tracing",
  "uuid",
  "windows-sys 0.61.2",
 ]

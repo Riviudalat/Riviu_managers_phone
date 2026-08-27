@@ -2024,10 +2024,28 @@ RT-MMO enterprise-signed `com.mrph.svc`, chạy standalone trên iOS 16.7.15 và
 gửi comment chữ như live proof ở đầu mục. Không quay lại hướng TrollStore hay tự
 build WDA vá.
 
-### ĐÃ SHIP: bình luận bằng emoji do AI chọn ✅
+### ĐÃ BỎ: bình luận bằng emoji do AI chọn ❌ (bỏ 27/08/2026)
 
-Đây là tính năng bình luận **đang chạy được** trong engine
-(`nurture/actions.rs::do_comment`). Luồng:
+> **STATUS: không còn chạy, và mục này từng nói ngược lại trong nhiều tuần.**
+> Tiêu đề cũ là "ĐÃ SHIP ✅ … đang chạy được trong engine", nhưng `do_comment` có
+> doc của chính nó nói *"A failed text attempt is closed and classified **without trying
+> an emoji** in the same field, which avoids accidentally posting mixed content"*, và một
+> test **ghim** điều đó: `text_channel_unavailable_does_not_fall_back_to_emoji`. Tức luồng
+> emoji đã bị bỏ **có chủ đích** — lý do: tránh vô tình đăng nội dung lẫn khi một lần
+> gõ chữ thất bại. `choose_emoji_reaction`, `EmojiReaction`, `EMOJI_MENU` và
+> `COMPOSER_EMOJI_TAB` đã xoá khỏi mã (110 dòng, 0 caller).
+>
+> **Số đo giữ lại ở đây vì chúng đắt để đo lại**, không phải vì chúng còn hiệu lực:
+> `COMPOSER_EMOJI_TAB` là `(174/375, 359/667)` đo trên TikTok 45.8.0, và lý do nó tền tại là
+> các tab bên phải nó là **sticker** — bỏng vàng xếp hàng, nên bộ dò lưới emoji khớp chúng
+> vui vẻ, mà tap vào thì chèn **không gì** và nút gửi ở nguyên tắt. Nếu ai dựng lại luồng
+> này, đó là cái bẫy đầu tiên.
+>
+> **Bài học đắt hơn cả tính năng:** một mục tự gắn "ĐÃ SHIP ✅" không bao giờ tự đục
+> — nó chỉ đứng đó, và người đọc sau tin nó. Cái phát hiện ra nó là một lượt đếm
+> caller, không phải một lượt đọc tài liệu.
+
+Luồng **cũ**, giữ làm hồ sơ:
 
 1. tap icon bình luận trên rail (vị trí dò theo frame)
 2. tap **icon emoji ở thanh dưới drawer** `(0.797, 0.958)` → composer mở

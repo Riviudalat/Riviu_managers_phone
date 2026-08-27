@@ -4,9 +4,8 @@ use std::path::PathBuf;
 use chrono::{Duration, Utc};
 use riviu_core::{
     AnalyticsSummary, AppLibraryItem, DeviceGroup, DeviceMeta, DeviceWorkOwner, MaterialItem,
-    OpLog, ProxyConfig, PublishTask, ScheduleItem,
+    OpLog, ScheduleItem,
 };
-use riviu_script_engine::parse_script;
 use tauri::State;
 use uuid::Uuid;
 
@@ -76,48 +75,6 @@ pub fn delete_group(state: State<'_, AppState>, id: String) -> Result<(), Comman
     state.db.delete_group(&id).map_err(err)?;
     log(&state, "group.delete", &id);
     Ok(())
-}
-
-#[tauri::command]
-pub fn list_proxies(state: State<'_, AppState>) -> Result<Vec<ProxyConfig>, CommandError> {
-    state.db.list_proxies().map_err(err)
-}
-
-#[tauri::command]
-pub fn save_proxy(
-    state: State<'_, AppState>,
-    proxy: ProxyConfig,
-) -> Result<ProxyConfig, CommandError> {
-    let _admission = state.ensure_accepting_work()?;
-    let mut p = proxy;
-    if p.id.is_empty() {
-        p.id = Uuid::new_v4().to_string();
-    }
-    state.db.upsert_proxy(&p).map_err(err)?;
-    log(&state, "proxy.save", &p.name);
-    Ok(p)
-}
-
-#[tauri::command]
-pub fn delete_proxy(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
-    let _admission = state.ensure_accepting_work()?;
-    state.db.delete_proxy(&id).map_err(err)?;
-    log(&state, "proxy.delete", &id);
-    Ok(())
-}
-
-#[tauri::command]
-pub fn export_proxy_config(state: State<'_, AppState>, id: String) -> Result<String, CommandError> {
-    let proxies = state.db.list_proxies().map_err(err)?;
-    let p = proxies
-        .into_iter()
-        .find(|x| x.id == id)
-        .ok_or_else(|| "proxy not found".to_string())?;
-    let text = format!(
-        "type={}\nhost={}\nport={}\nusername={}\npassword={}\n# Apply manually on device Wi‑Fi / VPN\n",
-        p.proxy_type, p.host, p.port, p.username, p.password
-    );
-    Ok(text)
 }
 
 #[tauri::command]
@@ -359,47 +316,6 @@ pub fn delete_schedule(state: State<'_, AppState>, id: String) -> Result<(), Com
 }
 
 #[tauri::command]
-pub fn list_publish_tasks(state: State<'_, AppState>) -> Result<Vec<PublishTask>, CommandError> {
-    state.db.list_publish_tasks().map_err(err)
-}
-
-#[tauri::command]
-pub async fn create_publish_task(
-    state: State<'_, AppState>,
-    name: String,
-    script_name: String,
-    material_ids: Vec<String>,
-    udids: Vec<String>,
-) -> Result<PublishTask, CommandError> {
-    let _admission = state.ensure_accepting_work()?;
-    let task = PublishTask {
-        id: Uuid::new_v4().to_string(),
-        name,
-        script_name: script_name.clone(),
-        material_ids,
-        udids: udids.clone(),
-        status: "queued".into(),
-        created_at: Utc::now().to_rfc3339(),
-    };
-    state.db.add_publish_task(&task).map_err(err)?;
-    if let Some(body) = state.db.get_script(&script_name).map_err(err)? {
-        let script = parse_script(&body).map_err(err)?;
-        let _ = state.jobs.enqueue(script, udids).await.map_err(err)?;
-        state
-            .db
-            .update_publish_status(&task.id, "running")
-            .map_err(err)?;
-    } else {
-        state
-            .db
-            .update_publish_status(&task.id, "missing_script")
-            .map_err(err)?;
-    }
-    log(&state, "publish.create", &task.name);
-    Ok(task)
-}
-
-#[tauri::command]
 pub fn list_op_logs(
     state: State<'_, AppState>,
     limit: Option<usize>,
@@ -431,16 +347,12 @@ pub fn api_docs() -> String {
 
 ## Farm data
 - list_groups / save_group / delete_group
-- list_proxies / save_proxy / delete_proxy / export_proxy_config
 - list_materials / add_material / delete_material / push_material
 - list_apps_library / add_app_library / delete_app_library / install_library_app / uninstall_app
 - list_schedules / save_schedule / delete_schedule
 - publish_scan_folder / publish_create_campaign / publish_list / publish_get
 - publish_prepare / publish_transfer / publish_post / publish_cancel
-- list_publish_tasks / create_publish_task (legacy script compatibility)
 - list_op_logs / analytics_summary
-
-## Auth (hidden by default)
 
 ## Sidecar
 - python riviu_pmd.py list|install|uninstall|media-stage|stream|start-wda|...

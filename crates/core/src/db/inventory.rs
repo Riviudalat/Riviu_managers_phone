@@ -1,4 +1,4 @@
-//! The lists the farm pages edit: proxies, media, the app library and the schedule.
+//! The lists the farm pages edit: media, the app library and the schedule.
 //!
 //! All the same shape — list, upsert, delete against one table — which is why they sit
 //! together rather than in four files of thirty lines.
@@ -6,52 +6,6 @@
 use super::*;
 
 impl Database {
-    pub fn list_proxies(&self) -> anyhow::Result<Vec<crate::types::ProxyConfig>> {
-        let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, name, proxy_type, host, port, username, password, notes FROM proxies ORDER BY name",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(crate::types::ProxyConfig {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                proxy_type: row.get(2)?,
-                host: row.get(3)?,
-                port: narrow(row.get::<_, i64>(4)?, "port")?,
-                username: row.get(5)?,
-                password: row.get(6)?,
-                notes: row.get(7)?,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-    }
-    pub fn upsert_proxy(&self, p: &crate::types::ProxyConfig) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            r#"INSERT INTO proxies (id, name, proxy_type, host, port, username, password, notes)
-               VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
-               ON CONFLICT(id) DO UPDATE SET
-                 name=excluded.name, proxy_type=excluded.proxy_type, host=excluded.host,
-                 port=excluded.port, username=excluded.username, password=excluded.password,
-                 notes=excluded.notes"#,
-            params![
-                p.id,
-                p.name,
-                p.proxy_type,
-                p.host,
-                p.port as i64,
-                p.username,
-                p.password,
-                p.notes
-            ],
-        )?;
-        Ok(())
-    }
-    pub fn delete_proxy(&self, id: &str) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute("DELETE FROM proxies WHERE id = ?1", params![id])?;
-        Ok(())
-    }
     pub fn list_materials(&self) -> anyhow::Result<Vec<crate::types::MaterialItem>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(

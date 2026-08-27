@@ -530,7 +530,6 @@ pub struct DeviceMeta {
     pub notes: String,
     pub tags: Vec<String>,
     pub group_id: Option<String>,
-    pub proxy_id: Option<String>,
     /// The TikTok @handle this phone is logged into, without the leading `@`.
     ///
     /// Entered by the operator (there is no reliable on-device read for it). Empty when
@@ -565,19 +564,6 @@ pub struct DeviceGroup {
     pub color: String,
     pub udids: Vec<String>,
     pub created_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProxyConfig {
-    pub id: String,
-    pub name: String,
-    pub proxy_type: String,
-    pub host: String,
-    pub port: u16,
-    pub username: String,
-    pub password: String,
-    pub notes: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -747,18 +733,6 @@ pub struct ScheduleItem {
     /// nothing, so the page showed a healthy job that had never run.
     #[serde(default)]
     pub last_error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PublishTask {
-    pub id: String,
-    pub name: String,
-    pub script_name: String,
-    pub material_ids: Vec<String>,
-    pub udids: Vec<String>,
-    pub status: String,
-    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1324,19 +1298,6 @@ mod nurture_settings_tests {
         assert_eq!(settings.model, "deepseek-v4-pro");
         assert_eq!(settings.api_key, "ds-key");
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NurtureCommentCost {
-    pub id: String,
-    pub udid: String,
-    pub model: String,
-    pub base_url_host: String,
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
-    pub preview: String,
-    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

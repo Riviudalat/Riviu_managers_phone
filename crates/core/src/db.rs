@@ -427,24 +427,39 @@ mod narrowing_tests {
         assert!(message.contains("70000"), "{message}");
     }
 
+    /// **The reader has `narrow` wired in, proved end to end rather than in the pure function.**
+    ///
+    /// The two tests above pin `narrow` itself. This one pins that a real read path goes
+    /// through it: a row is inserted by raw SQL the way a migration or a hand edit could
+    /// produce one, and the typed read has to refuse it.
+    ///
+    /// It used to do this through `proxies.port` — 70000 in a `u16` came back as 4464 and the
+    /// app dialled 4464. That table went in migration 16 with the rest of the dead proxy
+    /// slice, so the same property is proved on `schedules.every_minutes`, which is live:
+    /// `list_schedules` is read by the analytics rollup and by `api.ts`.
+    ///
+    /// `4294967296` is 2^32, and `as u32` turns it into **0** — a schedule that runs "every 0
+    /// minutes", which is a tight loop rather than a schedule. That is the same class of harm
+    /// as the port: a wrapped value is a perfectly ordinary value of the target type, so
+    /// nothing downstream can tell.
     #[test]
-    fn a_proxy_row_with_an_impossible_port_fails_the_read_instead_of_inventing_one() {
+    fn a_schedule_row_with_an_impossible_interval_fails_the_read_instead_of_inventing_one() {
         let path = std::env::temp_dir().join(format!("riviu-narrow-test-{}.db", Uuid::new_v4()));
         let db = Database::open(&path).expect("open fixture database");
         db.conn()
             .expect("connection")
             .execute(
-                "INSERT INTO proxies (id,name,proxy_type,host,port,username,password,notes)
-                 VALUES ('p1','bad','http','127.0.0.1',70000,'','','')",
+                "INSERT INTO schedules (id,name,script_name,udids_json,every_minutes,enabled)
+                 VALUES ('s1','bad','noop','[]',4294967296,1)",
                 [],
             )
             .expect("insert a row no UI would produce but a migration or a hand edit could");
 
-        let read = db.list_proxies();
+        let read = db.list_schedules();
         assert!(
             read.is_err(),
-            "70000 came back as {:?}",
-            read.map(|v| v.len())
+            "2^32 came back as {:?} rather than refusing",
+            read.map(|v| v.first().map(|s| s.every_minutes))
         );
         let _ = std::fs::remove_file(&path);
     }
@@ -605,7 +620,6 @@ mod device_meta_tests {
             notes: String::new(),
             tags: vec![],
             group_id: None,
-            proxy_id: None,
             handle: String::new(),
             alias: String::new(),
             number: None,

@@ -16,7 +16,6 @@ mod nurture_commands;
 mod nurture_schedule;
 mod peripherals;
 mod publish_commands;
-mod publish_driver;
 mod state;
 mod view_hub;
 mod view_watchdog;
@@ -369,10 +368,6 @@ pub fn run() {
             farm_commands::list_groups,
             farm_commands::save_group,
             farm_commands::delete_group,
-            farm_commands::list_proxies,
-            farm_commands::save_proxy,
-            farm_commands::delete_proxy,
-            farm_commands::export_proxy_config,
             farm_commands::list_materials,
             farm_commands::add_material,
             farm_commands::delete_material,
@@ -384,8 +379,6 @@ pub fn run() {
             farm_commands::list_schedules,
             farm_commands::save_schedule,
             farm_commands::delete_schedule,
-            farm_commands::list_publish_tasks,
-            farm_commands::create_publish_task,
             farm_commands::list_op_logs,
             farm_commands::analytics_summary,
             farm_commands::api_docs,
@@ -420,7 +413,6 @@ pub fn run() {
             nurture_commands::nurture_get_settings,
             nurture_commands::nurture_save_settings,
             nurture_commands::nurture_test_api,
-            nurture_commands::nurture_list_costs,
             nurture_commands::nurture_list_comment_attempts,
             nurture_commands::nurture_cost_summary,
             nurture_commands::nurture_session_status,
@@ -528,19 +520,23 @@ mod tests {
     /// verbatim in a column called `password_hash` and compared it as plaintext, and the next
     /// attempt would not have to be called `auth_login` to repeat that.
     ///
-    /// Two commands legitimately touch a password and are named here rather than skipped,
-    /// because each one is a decision someone made and can be re-read:
+    /// **One** command legitimately touches a password, and it is named here rather than
+    /// skipped, because that is a decision someone made and can be re-read:
     ///
     /// - `set_apple_id` takes the Apple ID app-specific password needed to resign WDA. It
     ///   hands it to the OS credential store, never to `state.db`, and `get_apple_id` reads
     ///   back only `has_password` — asserted below.
-    /// - `export_proxy_config` prints a proxy password the operator typed in. A proxy
-    ///   password has to survive round-trip to be usable at all, so it cannot be hashed;
-    ///   it is stored readable in `proxies` by design, not by the oversight this test is
-    ///   about.
     ///
-    /// A third entry appearing here means a new password surface arrived without that
-    /// decision being made. Before the removal this failed on `farm_commands.rs::auth_login`.
+    /// It used to be two. `export_proxy_config` printed a proxy password the operator had
+    /// typed in, and the entry argued -- correctly -- that a proxy password cannot be hashed
+    /// because it has to survive round-trip. What the entry did not say is that **no UI could
+    /// reach any of it**: the proxy feature had been removed from the interface, so the app was
+    /// keeping a table with a readable password column for a feature that did not exist. The
+    /// whole slice went in migration 16, and this list got shorter as a result -- which is the
+    /// better way for a security exemption to end than a better-argued paragraph.
+    ///
+    /// A second entry appearing here means a new password surface arrived without that decision
+    /// being made. Before the login was removed this failed on `farm_commands.rs::auth_login`.
     #[test]
     fn no_command_stores_a_login_password() {
         let surfaces = [
@@ -576,13 +572,7 @@ mod tests {
             .map(|(file, name, _)| format!("{file}::{name}"))
             .collect::<Vec<_>>();
         named.sort();
-        assert_eq!(
-            named,
-            vec![
-                "commands/system.rs::set_apple_id".to_string(),
-                "farm_commands.rs::export_proxy_config".to_string(),
-            ],
-        );
+        assert_eq!(named, vec!["commands/system.rs::set_apple_id".to_string()],);
         let (_, _, apple) = holders
             .iter()
             .find(|(_, name, _)| *name == "set_apple_id")
@@ -658,15 +648,9 @@ mod tests {
         ("get_device_meta", "read: DB"),
         ("list_device_metas", "read: DB"),
         ("list_groups", "read: DB"),
-        ("list_proxies", "read: DB"),
-        (
-            "export_proxy_config",
-            "read: renders proxies the operator already stored",
-        ),
         ("list_materials", "read: DB"),
         ("list_apps_library", "read: DB"),
         ("list_schedules", "read: DB"),
-        ("list_publish_tasks", "read: DB"),
         ("list_op_logs", "read: DB"),
         ("analytics_summary", "read: DB aggregate"),
         ("api_docs", "read: static text"),
@@ -701,7 +685,6 @@ mod tests {
         ),
         ("local_api_get_config", "read: KV config"),
         ("nurture_get_settings", "read: DB"),
-        ("nurture_list_costs", "read: DB"),
         ("nurture_list_comment_attempts", "read: DB"),
         ("nurture_cost_summary", "read: DB aggregate"),
         ("nurture_session_status", "read: in-memory session state"),

@@ -125,6 +125,12 @@ const MIGRATIONS: &[Migration] = &[
         apply: apply_migration_15,
         rebuilds_tables: false,
     },
+    Migration {
+        version: 16,
+        name: "drop-tables-nothing-reads",
+        apply: apply_migration_16,
+        rebuilds_tables: false,
+    },
 ];
 
 const LEDGER_SQL: &str = r#"
@@ -914,6 +920,64 @@ fn apply_migration_15(transaction: &Transaction<'_>) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn apply_migration_16(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    // **Five tables and one column that no code reads, and two of them are worse than absent.**
+    //
+    // `rebuilds_tables: false` deliberately, and the reason is checked rather than assumed:
+    // **not one of these tables is the parent of a cascade.** `proxies` is referenced by
+    // nothing -- `device_meta.proxy_id` is a plain `TEXT` column with no `FOREIGN KEY` clause at
+    // all. `tiktok_accounts`, `publish_tasks` and `nurture_comment_costs` have no foreign keys
+    // in either direction. `publish_dispatch` has one, and it points *outward*
+    // (`campaign_id REFERENCES publish_campaigns(id) ON DELETE CASCADE`), so it is a child:
+    // cascades run parent to child, never back. So dropping these with enforcement **on** is
+    // safe, and leaving it on is stricter than the window `rebuilds_tables` would open.
+    //
+    // Table by table:
+    //
+    // * **`proxies`** -- a whole dead vertical slice: four commands, three DB methods, a type on
+    //   both sides of the wire and an icon, none of them reachable from any UI (`Sidebar.tsx`
+    //   records the removal: "groups/proxy/team removed"). It also held a **plaintext password
+    //   column** for a feature that does not exist, which is a live risk rather than harmless
+    //   clutter. Confirmed with the operator before dropping.
+    //
+    // * **`publish_dispatch`** -- INSERT and UPDATE only, **no `SELECT` anywhere**, with `owner`
+    //   and `claimed_at` written as hard-coded `NULL`. That is byte for byte the shape migration
+    //   14 removed `interaction_dispatch` for, in its own words: *"shaped like a single-owner
+    //   lease nothing ever claims, which is worse than absent -- a future reader could mistake
+    //   the row for proof of an owner."* Same hazard, same argument, missed table.
+    //
+    // * **`tiktok_accounts`** -- never written, never read, and it survived migration 14 only
+    //   because it was not named in the comment that swept its three siblings.
+    //
+    // * **`publish_tasks`** -- the legacy publish path, labelled "(legacy script compatibility)"
+    //   at its commands and superseded by `publish_campaigns` / `publish_bundles` /
+    //   `publish_assignments`.
+    //
+    // * **`nurture_comment_costs`** -- write-only in production: the app paid one INSERT per
+    //   comment for rows whose only reader was a command the frontend never called. The number
+    //   an operator actually wants comes from `nurture_comment_attempts`, which stays, and
+    //   `nurture_cost_summary` reads it.
+    //
+    // * **`device_meta.proxy_id`** -- always `None`, because nothing could ever set it once the
+    //   proxy UI was removed. `DROP COLUMN` needs SQLite 3.35+; migration 11 already relies on
+    //   that and rusqlite 0.32 bundles well past it. The column is neither a key nor indexed,
+    //   which is the other restriction `DROP COLUMN` has.
+    //
+    // Nothing readable is lost. Every one of these had no read path, so there is no view an
+    // operator could open today that shows less tomorrow.
+    transaction.execute_batch(
+        r#"
+DROP TABLE proxies;
+DROP TABLE tiktok_accounts;
+DROP TABLE publish_dispatch;
+DROP TABLE publish_tasks;
+DROP TABLE nurture_comment_costs;
+ALTER TABLE device_meta DROP COLUMN proxy_id;
+"#,
+    )?;
+    Ok(())
+}
+
 fn apply_migration_11(transaction: &Transaction<'_>) -> anyhow::Result<()> {
     // **Dropping a column that was always a guess.** The `usd` in both comment tables was
     // `prompt_tokens * input_price_per_1m + completion_tokens * output_price_per_1m`, over two
@@ -1248,7 +1312,10 @@ mod tests {
     type ScriptRowBytes = (Blob, Blob, Blob, Blob);
     type JobRowBytes = (Blob, Blob, Blob, Blob, Blob, Blob, Blob, Option<Blob>);
     type SettingRowBytes = (Blob, Blob);
-    type DeviceRowBytes = (Blob, Blob, Blob, Option<Blob>, Option<Blob>);
+    /// Four columns since migration 16 dropped `proxy_id`, which was always `None` because
+    /// nothing could set it once the proxy UI was removed. The property is unchanged -- an
+    /// upgrade must not rewrite a surviving row -- and the surviving columns still prove it.
+    type DeviceRowBytes = (Blob, Blob, Blob, Option<Blob>);
     type SchemaDriftArrange = fn(&Connection);
 
     #[derive(Debug, PartialEq, Eq)]
@@ -1357,18 +1424,10 @@ mod tests {
             device: connection
                 .query_row(
                     "SELECT CAST(udid AS BLOB), CAST(notes AS BLOB), CAST(tags_json AS BLOB),
-                            CAST(group_id AS BLOB), CAST(proxy_id AS BLOB)
+                            CAST(group_id AS BLOB)
                      FROM device_meta WHERE udid='MOCK-IPHONE-01'",
                     [],
-                    |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                            row.get(4)?,
-                        ))
-                    },
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
                 .expect("legacy device bytes"),
         }
@@ -1447,10 +1506,20 @@ mod tests {
     /// skipping the window.
     #[test]
     fn a_migration_that_drops_or_renames_a_table_declares_it() {
-        const EXEMPT: &[(i64, &str)] = &[(
-            7,
-            "drops `users`, which no table references — no cascade, so nothing to lose",
-        )];
+        const EXEMPT: &[(i64, &str)] = &[
+            (
+                7,
+                "drops `users`, which no table references — no cascade, so nothing to lose",
+            ),
+            (
+                16,
+                "drops five tables none of which is a cascade parent: `proxies` is referenced \
+                 by nothing (`device_meta.proxy_id` has no FOREIGN KEY clause), \
+                 `tiktok_accounts`/`publish_tasks`/`nurture_comment_costs` have no foreign keys \
+                 at all, and `publish_dispatch`'s only key points outward at \
+                 `publish_campaigns` — so it is a child, and cascades never run child to parent",
+            ),
+        ];
 
         let source = include_str!("migrations.rs");
         // What the array says.

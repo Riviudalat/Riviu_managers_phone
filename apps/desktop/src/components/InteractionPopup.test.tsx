@@ -109,7 +109,6 @@ vi.mock("../api", () => ({
     notes: "",
     tags: [],
     groupId: null,
-    proxyId: null,
     handle: "",
   })),
   saveDeviceMeta: vi.fn(async () => undefined),

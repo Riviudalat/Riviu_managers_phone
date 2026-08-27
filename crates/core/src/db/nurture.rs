@@ -145,30 +145,6 @@ impl Database {
     ) -> anyhow::Result<()> {
         self.set_setting("stream.settings.v1", &serde_json::to_string(settings)?)
     }
-    pub fn add_nurture_comment_cost(
-        &self,
-        cost: &crate::types::NurtureCommentCost,
-    ) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            r#"
-            INSERT INTO nurture_comment_costs
-              (id, udid, model, base_url_host, prompt_tokens, completion_tokens, preview, created_at)
-            VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
-            "#,
-            params![
-                cost.id,
-                cost.udid,
-                cost.model,
-                cost.base_url_host,
-                cost.prompt_tokens as i64,
-                cost.completion_tokens as i64,
-                cost.preview,
-                cost.created_at,
-            ],
-        )?;
-        Ok(())
-    }
     pub fn add_nurture_comment_attempt(
         &self,
         attempt: &crate::types::NurtureCommentAttempt,
@@ -265,29 +241,6 @@ impl Database {
                     .map(|v| narrow(v, "carousel_slides"))
                     .transpose()?,
                 created_at: row.get(17)?,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-    }
-    pub fn list_nurture_comment_costs(
-        &self,
-        limit: usize,
-    ) -> anyhow::Result<Vec<crate::types::NurtureCommentCost>> {
-        let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, udid, model, base_url_host, prompt_tokens, completion_tokens, preview, created_at
-             FROM nurture_comment_costs ORDER BY created_at DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(params![limit as i64], |row| {
-            Ok(crate::types::NurtureCommentCost {
-                id: row.get(0)?,
-                udid: row.get(1)?,
-                model: row.get(2)?,
-                base_url_host: row.get(3)?,
-                prompt_tokens: narrow(row.get::<_, i64>(4)?, "prompt_tokens")?,
-                completion_tokens: narrow(row.get::<_, i64>(5)?, "completion_tokens")?,
-                preview: row.get(6)?,
-                created_at: row.get(7)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)

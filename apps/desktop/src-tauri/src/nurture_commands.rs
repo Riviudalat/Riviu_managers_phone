@@ -327,17 +327,6 @@ pub async fn nurture_test_api(
 }
 
 #[tauri::command]
-pub fn nurture_list_costs(
-    state: State<'_, AppState>,
-    limit: Option<usize>,
-) -> Result<Vec<riviu_core::NurtureCommentCost>, CommandError> {
-    state
-        .db
-        .list_nurture_comment_costs(limit.unwrap_or(100))
-        .map_err(err)
-}
-
-#[tauri::command]
 pub fn nurture_list_comment_attempts(
     state: State<'_, AppState>,
     limit: Option<usize>,

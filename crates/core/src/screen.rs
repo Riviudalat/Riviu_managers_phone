@@ -1439,16 +1439,6 @@ pub const DRAWER_EMOJI_ICON: (f64, f64) = (299.0 / 375.0, 639.0 / 667.0);
 /// field is empty, solid TikTok red once there is something to post.
 pub const COMPOSER_SEND: (f64, f64) = (337.0 / 375.0, 307.0 / 667.0);
 
-/// The ☺ tab in the composer's panel selector (174, 359 logical).
-///
-/// The panel remembers whichever tab was last used, and the tabs to its right
-/// are *sticker* packs. Stickers are yellow blobs in rows, so the emoji grid
-/// detector matches them happily — and tapping one inserts nothing, leaving the
-/// send arrow disabled. A live run on TikTok 45.8.0 lost every attempt this way
-/// until the flow started selecting this tab first. Tapping it when the emoji
-/// grid is already showing is a no-op, so it is unconditional.
-pub const COMPOSER_EMOJI_TAB: (f64, f64) = (174.0 / 375.0, 359.0 / 667.0);
-
 /// Redness at [`COMPOSER_SEND`] separating "armed" from "disabled".
 /// Measured on this device: disabled 62.8, armed 156.2.
 pub const SEND_ARMED_REDNESS: f64 = 100.0;

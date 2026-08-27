@@ -24,9 +24,7 @@ use crate::openai_client::{
     provider_supports_vision, EvidenceKind,
 };
 use crate::screen::{self, ActionRail, CommentDrawer};
-use crate::types::{
-    NurtureCommentAttempt, NurtureCommentCost, NurtureSettings, SwipeGesture, TapPoint,
-};
+use crate::types::{NurtureCommentAttempt, NurtureSettings, SwipeGesture, TapPoint};
 
 use super::{frame_digest, sleep_interruptible, NurtureEngine, SWIPE_SETTLE};
 
@@ -114,7 +112,6 @@ pub(super) enum LikeResult {
 /// success: TikTok may accept the request without putting anything in the field,
 /// so arming and disarming Send remain separate, frame-confirmed outcomes.
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)] // Reserved for an explicitly selected emoji-reaction flow.
 pub(super) enum CommentResult {
     /// Text was posted, with what the API actually reported spending on it.
     ///
@@ -1116,22 +1113,14 @@ impl NurtureEngine {
             prepared.evidence_support
         );
 
-        let cost = NurtureCommentCost {
-            id: Uuid::new_v4().to_string(),
-            udid: udid.to_string(),
-            model: prepared.model,
-            base_url_host: prepared.base_url_host,
+        // The `nurture_comment_costs` write that used to sit here is gone with the table
+        // (migration 16). It was a strict subset of the row `update_comment_attempt` has
+        // already written above -- same model, same host, same tokens, same preview -- into a
+        // table whose only reader was a command the frontend never called. One DB write per
+        // comment, for data nobody could open.
+        Ok(CommentResult::TextSent {
             prompt_tokens: prepared.prompt_tokens,
             completion_tokens: prepared.completion_tokens,
-            preview: prepared.text,
-            created_at: Utc::now().to_rfc3339(),
-        };
-        if let Err(error) = self.db.add_nurture_comment_cost(&cost) {
-            tracing::warn!("[nurture {udid}] không ghi được cost bình luận: {error}");
-        }
-        Ok(CommentResult::TextSent {
-            prompt_tokens: cost.prompt_tokens,
-            completion_tokens: cost.completion_tokens,
         })
     }
 
@@ -2385,17 +2374,8 @@ mod tests {
         assert_eq!(session.send_taps.load(Ordering::Relaxed), 1);
         assert_eq!(result.reason(), "đã gửi bình luận chữ");
 
-        let costs = engine
-            .db
-            .list_nurture_comment_costs(10)
-            .expect("comment costs");
-        assert_eq!(costs.len(), 1);
-        assert_eq!(costs[0].preview, COMMENT);
-        assert_eq!(
-            (costs[0].prompt_tokens, costs[0].completion_tokens),
-            (0, 0),
-            "pool text spends no AI tokens per comment"
-        );
+        // Asserted on `nurture_comment_attempts` rather than on the costs table migration 16
+        // dropped. Nothing is lost: the attempt row carried every field the cost row did.
         let attempts = engine
             .db
             .list_nurture_comment_attempts(10)
@@ -2404,6 +2384,11 @@ mod tests {
         assert_eq!(attempts[0].outcome, "sent");
         assert_eq!(attempts[0].preview, COMMENT);
         assert_eq!(attempts[0].source, "test-fixture");
+        assert_eq!(
+            (attempts[0].prompt_tokens, attempts[0].completion_tokens),
+            (0, 0),
+            "pool text spends no AI tokens per comment"
+        );
 
         drop(engine);
         let _ = std::fs::remove_file(db_path);
@@ -2458,13 +2443,12 @@ mod tests {
             .expect("comment attempts");
         assert_eq!(attempts.len(), 1);
         assert_eq!(attempts[0].outcome, "text_uncertain");
-        assert!(
-            engine
-                .db
-                .list_nurture_comment_costs(10)
-                .expect("comment costs")
-                .is_empty(),
-            "an unconfirmed send must not be billed as a posted comment"
+        // The costs table this used to read was written on the `"sent"` path only, so
+        // "nothing was billed" is exactly "no attempt reports `sent`" -- which the assertion
+        // above already states more precisely.
+        assert_ne!(
+            attempts[0].outcome, "sent",
+            "an unconfirmed send must not be recorded as a posted comment"
         );
 
         drop(engine);
@@ -2597,11 +2581,15 @@ mod tests {
             result.reason(),
             "đã gõ bình luận chữ nhưng nút gửi không sáng"
         );
-        assert!(engine
-            .db
-            .list_nurture_comment_costs(10)
-            .expect("comment costs")
-            .is_empty());
+        assert!(
+            !engine
+                .db
+                .list_nurture_comment_attempts(10)
+                .expect("comment attempts")
+                .iter()
+                .any(|attempt| attempt.outcome == "sent"),
+            "a draft that never armed Send must not be recorded as sent"
+        );
 
         drop(engine);
         let _ = std::fs::remove_file(db_path);
@@ -2635,11 +2623,15 @@ mod tests {
         );
         assert_eq!(session.send_taps.load(Ordering::Relaxed), 0);
         assert_eq!(result, CommentResult::ExistingDraft);
-        assert!(engine
-            .db
-            .list_nurture_comment_costs(10)
-            .expect("comment costs")
-            .is_empty());
+        assert!(
+            !engine
+                .db
+                .list_nurture_comment_attempts(10)
+                .expect("comment attempts")
+                .iter()
+                .any(|attempt| attempt.outcome == "sent"),
+            "finding an existing draft must not be recorded as sending one"
+        );
         assert!(frames.is_feed(), "the existing draft must be closed");
 
         drop(engine);

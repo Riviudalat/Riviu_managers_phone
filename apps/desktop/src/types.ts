@@ -220,7 +220,6 @@ export interface DeviceMeta {
   notes: string;
   tags: string[];
   groupId?: string | null;
-  proxyId?: string | null;
   /** TikTok @handle this phone is logged into, without the leading `@`. Empty if unknown. */
   handle?: string;
   /**
@@ -248,17 +247,6 @@ export interface GroupInstallResult {
   udid: string;
   ok: boolean;
   error?: string;
-}
-
-export interface ProxyConfig {
-  id: string;
-  name: string;
-  proxyType: string;
-  host: string;
-  port: number;
-  username: string;
-  password: string;
-  notes: string;
 }
 
 export interface MaterialItem {
@@ -290,16 +278,6 @@ export interface ScheduleItem {
   nextRunAt?: string | null;
   /// Why the last due tick enqueued nothing, or absent if it enqueued something.
   lastError?: string | null;
-}
-
-export interface PublishTask {
-  id: string;
-  name: string;
-  scriptName: string;
-  materialIds: string[];
-  udids: string[];
-  status: string;
-  createdAt: string;
 }
 
 export type PublishCampaignState =
@@ -605,17 +583,6 @@ export interface NurtureApiTestResult {
   distinctFrames: number;
   promptTokens: number;
   completionTokens: number;
-}
-
-export interface NurtureCommentCost {
-  id: string;
-  udid: string;
-  model: string;
-  baseUrlHost: string;
-  promptTokens: number;
-  completionTokens: number;
-  preview: string;
-  createdAt: string;
 }
 
 export interface NurtureCommentAttempt {

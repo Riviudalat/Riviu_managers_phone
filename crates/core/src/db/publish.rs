@@ -3,50 +3,6 @@
 use super::*;
 
 impl Database {
-    pub fn list_publish_tasks(&self) -> anyhow::Result<Vec<crate::types::PublishTask>> {
-        let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, name, script_name, material_ids_json, udids_json, status, created_at FROM publish_tasks ORDER BY created_at DESC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let mid: String = row.get(3)?;
-            let uid: String = row.get(4)?;
-            Ok(crate::types::PublishTask {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                script_name: row.get(2)?,
-                material_ids: serde_json::from_str(&mid).unwrap_or_default(),
-                udids: serde_json::from_str(&uid).unwrap_or_default(),
-                status: row.get(5)?,
-                created_at: row.get(6)?,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-    }
-    pub fn add_publish_task(&self, t: &crate::types::PublishTask) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            "INSERT INTO publish_tasks (id, name, script_name, material_ids_json, udids_json, status, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",
-            params![
-                t.id,
-                t.name,
-                t.script_name,
-                serde_json::to_string(&t.material_ids)?,
-                serde_json::to_string(&t.udids)?,
-                t.status,
-                t.created_at
-            ],
-        )?;
-        Ok(())
-    }
-    pub fn update_publish_status(&self, id: &str, status: &str) -> anyhow::Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            "UPDATE publish_tasks SET status = ?1 WHERE id = ?2",
-            params![status, id],
-        )?;
-        Ok(())
-    }
     pub fn create_publish_campaign(
         &self,
         request: &crate::publish::PublishCampaignRequest,
@@ -124,10 +80,6 @@ impl Database {
                 ],
             )?;
         }
-        transaction.execute(
-            "INSERT INTO publish_dispatch(campaign_id,state,owner,claimed_at,updated_at) VALUES (?1,?2,NULL,NULL,?3)",
-            params![campaign_id, state.as_str(), now],
-        )?;
         transaction.execute(
             "INSERT INTO publish_events(campaign_id,revision,kind,payload_json,created_at) VALUES (?1,1,'created',?2,?3)",
             params![campaign_id, request_json, now],
@@ -307,10 +259,6 @@ impl Database {
         transaction.execute(
             "UPDATE publish_campaigns SET state=?1,error_code=?2,revision=?3,updated_at=?4 WHERE id=?5",
             params![state.as_str(), error_code, revision, now, id],
-        )?;
-        transaction.execute(
-            "UPDATE publish_dispatch SET state=?1,updated_at=?2 WHERE campaign_id=?3",
-            params![state.as_str(), now, id],
         )?;
         transaction.execute(
             "INSERT INTO publish_events(campaign_id,revision,kind,payload_json,created_at) VALUES (?1,?2,'state',?3,?4)",
