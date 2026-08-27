@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { nurtureListCommentAttempts } from "../../api";
+import { nurtureCostSummary, nurtureListCommentAttempts } from "../../api";
 import { evidenceLabel } from "../../commentEvidence";
 import { describeError } from "../../describeError";
-import type { NurtureCommentAttempt } from "../../types";
+import type { NurtureCommentAttempt, NurtureCostSummary } from "../../types";
 
 /** How many rows to keep on screen. Beyond this the list stops being readable. */
 const LIMIT = 60;
@@ -23,11 +23,54 @@ const POLL_MS = 4_000;
  * The column that forced the issue is `distinctFrames`. It is the number that makes
  * `evidenceSupport` legible, and a number no screen reads cannot be checked against a run.
  */
+/**
+ * Tokens and comments, today and in total.
+ *
+ * **Deliberately does not multiply by a price.** The app had a `usd` column once, computed from
+ * two rates typed into settings by hand and never sent to the API; three different pairs of them
+ * existed in the codebase at once, and after any model change every figure was silently wrong.
+ * Migration 11 dropped it. Tokens come from the provider's own `usage` object and are true of
+ * whatever model is configured, so they are what this shows -- multiply by the real rate outside
+ * the app.
+ *
+ * Counts **every** attempt, sent or rejected: a comment the verification gate threw away still
+ * burned up to four API calls, and reporting that as free is how the most expensive failure mode
+ * became invisible.
+ */
+function CostStrip({ totals }: { totals: NurtureCostSummary }) {
+  const tokens = (prompt: number, completion: number) =>
+    `${(prompt + completion).toLocaleString("vi-VN")} token`;
+  return (
+    <dl className="nurture-attempt-totals">
+      <div>
+        <dt>Hôm nay</dt>
+        <dd>
+          {totals.todayComments} bình luận · {tokens(totals.todayPromptTokens, totals.todayCompletionTokens)}
+        </dd>
+      </div>
+      <div>
+        <dt>Tổng</dt>
+        <dd>
+          {totals.totalComments} bình luận · {tokens(totals.totalPromptTokens, totals.totalCompletionTokens)}
+        </dd>
+      </div>
+    </dl>
+  );
+}
+
 export function NurtureCommentsTab({ live }: {
   /// Poll only while something is running: a finished table does not change on its own.
   live: boolean;
 }) {
   const [rows, setRows] = useState<NurtureCommentAttempt[] | null>(null);
+  /**
+   * The aggregate over the same table the rows come from.
+   *
+   * Its own state, and a failure here does **not** take the table down with it: the rows are
+   * what an operator is reading, and a broken total is a missing strip rather than a blank
+   * panel. Kept `null` on error for that reason.
+   */
+  const [totals, setTotals] = useState<NurtureCostSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => {
@@ -37,6 +80,9 @@ export function NurtureCommentsTab({ live }: {
         setError(null);
       })
       .catch((cause) => setError(describeError(cause)));
+    void nurtureCostSummary()
+      .then(setTotals)
+      .catch(() => setTotals(null));
   }, []);
 
   useEffect(load, [load]);
@@ -56,15 +102,19 @@ export function NurtureCommentsTab({ live }: {
   }
   if (!rows.length) {
     return (
-      <p className="hint">
-        Chưa có lượt bình luận nào được ghi. Bảng này ghi cả lượt bị bỏ, nên một phiên đã chạy
-        mà vẫn trống nghĩa là chưa lần nào tới bước soạn bình luận.
-      </p>
+      <div className="nurture-attempts">
+        {totals && <CostStrip totals={totals} />}
+        <p className="hint">
+          Chưa có lượt bình luận nào được ghi. Bảng này ghi cả lượt bị bỏ, nên một phiên đã chạy
+          mà vẫn trống nghĩa là chưa lần nào tới bước soạn bình luận.
+        </p>
+      </div>
     );
   }
 
   return (
     <div className="nurture-attempts">
+      {totals && <CostStrip totals={totals} />}
       <p className="hint">
         {rows.length} lượt gần nhất · gồm cả lượt bị gate chặn và lượt bỏ qua
       </p>

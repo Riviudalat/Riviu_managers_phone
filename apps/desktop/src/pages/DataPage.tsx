@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { analyticsSummary } from "../api";
+import { OperationLog } from "../components/OperationLog";
 import type { AnalyticsSummary } from "../types";
 import { describeError } from "../describeError";
 
@@ -46,6 +47,9 @@ export function DataPage() {
           </article>
         ))}
       </div>
+      {/* The eight tiles above are counts. This is what actually happened, which is the half
+          that answers "what did it do before it broke". */}
+      <OperationLog />
     </div>
   );
 }

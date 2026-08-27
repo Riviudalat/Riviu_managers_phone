@@ -520,3 +520,27 @@
   font-size: var(--text-sm);
   opacity: 0.8;
 }
+
+/* The phone's own log. Wide and tall, because a log line is long and the reason is usually a
+   few lines above the line you went looking for. */
+.modal.device-syslog {
+  width: min(94vw, 1100px);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.device-syslog-body {
+  margin: var(--space-1) 0 0;
+  padding: var(--space-2);
+  overflow: auto;
+  max-height: 62vh;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--primary-50);
+  font-size: var(--text-xs);
+  /* Wrapped rather than clipped: a logcat line runs past any width, and horizontal scrolling
+     through a log is how you miss the line next to the one you were reading. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+}

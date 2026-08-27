@@ -5,9 +5,16 @@ import { NurtureCommentsTab } from "./NurtureCommentsTab";
 import type { NurtureCommentAttempt } from "../../types";
 
 const listCommentAttempts = vi.hoisted(() => vi.fn());
+const costSummary = vi.hoisted(() => vi.fn());
 
+// **Every export this component reaches for, named here.** An object-literal `vi.mock` returns
+// `undefined` for anything it omits, and calling `undefined()` throws synchronously during
+// render -- so one missing entry fails every test in the file at once, with a React stack
+// instead of a message about the mock. That has now happened four times in this repo; adding
+// `nurtureCostSummary` to the component without adding it here reddened all nine of these.
 vi.mock("../../api", () => ({
   nurtureListCommentAttempts: listCommentAttempts,
+  nurtureCostSummary: costSummary,
 }));
 
 function row(over: Partial<NurtureCommentAttempt>): NurtureCommentAttempt {
@@ -34,6 +41,17 @@ function row(over: Partial<NurtureCommentAttempt>): NurtureCommentAttempt {
 }
 
 beforeEach(() => {
+  // Default for the tests that are not about the totals: resolve with zeroes so the strip
+  // renders and nothing throws.
+  costSummary.mockReset();
+  costSummary.mockResolvedValue({
+    todayPromptTokens: 0,
+    todayCompletionTokens: 0,
+    totalPromptTokens: 0,
+    totalCompletionTokens: 0,
+    todayComments: 0,
+    totalComments: 0,
+  });
   // This project does not enable Testing Library's globals, so nothing unmounts between
   // cases on its own — and a leftover row from the previous case is exactly the kind of
   // pollution that makes a `queryByText(...).not` assertion here fail for the wrong reason.
@@ -142,5 +160,69 @@ describe("the comment audit", () => {
     listCommentAttempts.mockRejectedValue(new Error("database is locked"));
     render(<NurtureCommentsTab live={false} />);
     await waitFor(() => expect(screen.getByText(/database is locked/)).toBeInTheDocument());
+  });
+
+  /**
+   * **The totals were registered, typed, allowlisted and rendered by nobody for months.**
+   *
+   * `nurture_cost_summary` reads the same table these rows come from and answers the one
+   * question the rows cannot: how much has this cost. The repo had already written the lesson
+   * down for its sibling command -- *"a number nobody reads cannot be checked"* -- and then left
+   * this one in the same state.
+   */
+  it("shows tokens and comment counts for today and in total", async () => {
+    listCommentAttempts.mockResolvedValue([row({})]);
+    costSummary.mockResolvedValue({
+      todayPromptTokens: 475,
+      todayCompletionTokens: 135,
+      totalPromptTokens: 12_000,
+      totalCompletionTokens: 3_400,
+      todayComments: 1,
+      totalComments: 42,
+    });
+
+    render(<NurtureCommentsTab live={false} />);
+
+    await waitFor(() => expect(screen.getByText("Hôm nay")).toBeInTheDocument());
+    // 475 + 135, grouped the way vi-VN groups it.
+    expect(screen.getByText(/610 token/)).toBeInTheDocument();
+    expect(screen.getByText(/42 bình luận/)).toBeInTheDocument();
+  });
+
+  /**
+   * **A broken total must not take the table down with it.**
+   *
+   * The rows are what an operator is reading. Failing the whole panel because an aggregate
+   * query errored would trade the useful half for the decorative one.
+   */
+  it("still lists the rows when the totals fail", async () => {
+    listCommentAttempts.mockResolvedValue([row({ preview: "quán này ngon" })]);
+    costSummary.mockRejectedValue(new Error("aggregate failed"));
+
+    render(<NurtureCommentsTab live={false} />);
+
+    await waitFor(() => expect(screen.getByText(/quán này ngon/)).toBeInTheDocument());
+    expect(screen.queryByText("Hôm nay")).toBeNull();
+  });
+
+  /**
+   * An empty recent list still shows the totals, because "nothing lately" and "nothing ever"
+   * are different facts and only the second one means the feature has never worked.
+   */
+  it("shows the totals even when no recent attempt was recorded", async () => {
+    listCommentAttempts.mockResolvedValue([]);
+    costSummary.mockResolvedValue({
+      todayPromptTokens: 0,
+      todayCompletionTokens: 0,
+      totalPromptTokens: 12_000,
+      totalCompletionTokens: 3_400,
+      todayComments: 0,
+      totalComments: 42,
+    });
+
+    render(<NurtureCommentsTab live={false} />);
+
+    await waitFor(() => expect(screen.getByText(/42 bình luận/)).toBeInTheDocument());
+    expect(screen.getByText(/Chưa có lượt bình luận nào/)).toBeInTheDocument();
   });
 });

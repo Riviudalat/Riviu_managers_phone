@@ -201,15 +201,6 @@ pub struct GroupInstallResult {
     pub error: Option<String>,
 }
 
-/// Spike gate for restore-based unsigned installs (TrollRestore). Returns false
-/// until the hardware feasibility pass in `docs/re/unsigned-install-spike.md`
-/// completes. Deliberately a plain fn, not a `const` — a `const false` would make
-/// the safety gates below unreachable dead code; keeping them reachable documents
-/// the intended order and lets tests exercise them.
-fn unsigned_install_enabled() -> bool {
-    false
-}
-
 /// Push one local media file into a device's gallery via stage → prepare → import. Shared by
 /// `import_media` (one device) and `distribute_files` (a different file per device), so the
 /// two agree byte-for-byte on the staging/manifest pipeline.

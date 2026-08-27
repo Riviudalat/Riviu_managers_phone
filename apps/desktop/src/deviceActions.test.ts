@@ -44,6 +44,7 @@ function deps(over: Partial<DeviceActionDeps> = {}): DeviceActionDeps {
     setFocusUdid: vi.fn(),
     setFilesFor: vi.fn(),
     setAdbFor: vi.fn(),
+    setSyslogFor: vi.fn(),
     ...over,
   };
 }

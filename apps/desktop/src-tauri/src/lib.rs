@@ -277,7 +277,6 @@ pub fn run() {
             commands::prepare_device,
             commands::install_ipa,
             commands::install_ipa_to_group,
-            commands::install_unsigned_ipa,
             commands::uninstall_app,
             commands::list_installed_apps,
             commands::device_shell,
@@ -1042,6 +1041,122 @@ mod tests {
             "same: a host:port, and the phone may already be gone",
         ),
     ];
+
+    /// Commands the frontend does not call, and why each one is still registered.
+    ///
+    /// **This list is the whole point of the gate below, and it is the list nobody wrote.**
+    /// `interaction.rs` recorded the failure mode in the repo's own words:
+    /// *"`nurture_list_comment_attempts` was registered and allowlisted for weeks while
+    /// `api.ts` never called it, so the only way to audit a comment was a log dump -- and a
+    /// number nobody reads cannot be checked."* The lesson was written down and the gate was
+    /// not built, so it happened again: at the start of this pass **nineteen** registered
+    /// commands were unreachable from `api.ts`, including the two that fix a fleet-wide iOS
+    /// outage the app already detects.
+    const UNREACHABLE_EXEMPT: &[(&str, &str)] = &[
+        (
+            "resign_wda",
+            "iOS, deliberately not wired this pass. The cost is written down: WDA signing \
+             expires roughly weekly, the app raises AppEvent::WdaExpiryWarning, nothing \
+             handles it, and this is the command that would fix it",
+        ),
+        (
+            "bulk_resign_wda",
+            "the fleet-wide half of resign_wda; same decision, same cost",
+        ),
+        (
+            "uninstall_app",
+            "the app list renders and `confirmStore` already carries the destructive-confirm \
+             vocabulary for it, so this is an unfinished feature rather than a dead one. \
+             Wiring it is a UI change, not a deletion",
+        ),
+        (
+            "device_home",
+            "per-device Home. `group_input` already presses Home for a selection of one, so \
+             this is redundant rather than missing -- kept until somebody decides which of the \
+             two paths is the one",
+        ),
+        (
+            "latest_frame",
+            "the last frame held in memory. The view hub superseded it; kept as the only \
+             non-WebSocket way to get a frame out, which is worth having while the WebSocket \
+             path is the one being changed",
+        ),
+        (
+            "publish_get",
+            "one campaign by id. `publish_list` carries every field the UI reads, so this is \
+             a narrower read nothing needs yet",
+        ),
+        (
+            "interaction_open_on_device",
+            "opens one link on one phone. The campaign runner does this internally; kept as a \
+             single-step diagnostic for when a campaign will not start",
+        ),
+    ];
+
+    /// **Every registered command is reachable from `api.ts`, or says why not.**
+    ///
+    /// A command Tauri exposes and the frontend never calls is not harmless. It is a surface
+    /// that passes every other gate in this file -- admission, error shape, lease -- while doing
+    /// nothing, and it reads to the next person as a feature that exists. Three of them turned
+    /// out to be diagnostics the operator had asked for and could not reach:
+    /// `nurture_cost_summary` (the cost question), `list_op_logs` (a table with fifteen writers
+    /// and no reader) and `syslog` (the phone's own log, on a fleet whose complaint was phones
+    /// that list and will not drive).
+    ///
+    /// Matched on the invoke string rather than on the wrapper's name, because the wrapper is
+    /// free to be called anything: `api.ts` is checked for `"<command>"` as a literal, which is
+    /// what `invoke` actually takes.
+    #[test]
+    fn every_registered_command_is_reachable_from_the_frontend() {
+        let lib = include_str!("lib.rs");
+        let at = lib
+            .find("generate_handler!")
+            .expect("lib.rs registers its commands with generate_handler!");
+        let tail = &lib[at..];
+        let open = tail.find('[').expect("generate_handler![ ... ]");
+        let close = tail.find(']').expect("generate_handler![ ... ]");
+        let registered: Vec<&str> = tail[open + 1..close]
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty() && !entry.starts_with("//"))
+            .map(|entry| entry.rsplit("::").next().unwrap_or(entry))
+            .collect();
+        assert!(
+            registered.len() > 120,
+            "the scan found only {} registered commands, so it proves nothing",
+            registered.len()
+        );
+
+        let api = include_str!("../../src/api.ts");
+        let exempt: std::collections::HashMap<&str, &str> =
+            UNREACHABLE_EXEMPT.iter().copied().collect();
+
+        let unreachable: Vec<&str> = registered
+            .iter()
+            .copied()
+            .filter(|name| !api.contains(&format!("\"{name}\"")))
+            .filter(|name| !exempt.contains_key(name))
+            .collect();
+        assert!(
+            unreachable.is_empty(),
+            "these are registered and unreachable from api.ts, and not in UNREACHABLE_EXEMPT \
+             with a reason: {}",
+            unreachable.join(", ")
+        );
+
+        // And an exemption that has since been wired, or whose command is gone, is a stale
+        // reason -- which is how a list like this turns into a wish.
+        for (name, _) in UNREACHABLE_EXEMPT {
+            assert!(
+                registered.contains(name),
+                "UNREACHABLE_EXEMPT names `{name}`, which is no longer registered"
+            );
+            assert!(
+                !api.contains(&format!("\"{name}\"")),
+                "`{name}` is called from api.ts now; drop it from UNREACHABLE_EXEMPT"
+            );
+        }
+    }
 
     /// **Every Android-only command holds the phone, or names itself and says why not.**
     ///

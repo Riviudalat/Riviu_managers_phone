@@ -38,6 +38,8 @@ import type {
   StreamSettings,
   NurtureApiTestResult,
   NurtureCommentAttempt,
+  NurtureCostSummary,
+  OpLog,
   NurtureSessionStatus,
   SessionLogEntry,
   SessionLogSummary,
@@ -853,6 +855,27 @@ export async function publishPost(campaignId: string) {
   return invoke<PublishCampaignDetail>("publish_post", { campaignId });
 }
 
+/**
+ * The operation log, deeper than the twenty rows `analytics_summary` bundles in.
+ *
+ * Registered and allowlisted since the farm pages landed, and called by nothing — while
+ * `log_op` wrote to the table from fifteen places. See `OperationLog`.
+ */
+/**
+ * The last `lines` of the phone's own log.
+ *
+ * Registered with `Driver::syslog_tail` behind it and seven test mocks stubbing it, and called
+ * by nothing — so the app that drives the phone could not read the phone's log. Takes the lease
+ * with `LeaseStream::Park`, which is why `DeviceSyslogPopup` warns that the tile goes quiet.
+ */
+export async function syslog(udid: string, lines?: number) {
+  return invoke<string>("syslog", { udid, lines });
+}
+
+export async function listOpLogs(limit?: number) {
+  return invoke<OpLog[]>("list_op_logs", { limit });
+}
+
 export async function analyticsSummary() {
   return invoke<AnalyticsSummary>("analytics_summary");
 }
@@ -905,6 +928,16 @@ export async function nurtureSessionLogSummary() {
 /// whole record was visible only from the `live_nurture_android` binary's final dump. That is
 /// why `distinctFrames` had to come with a panel: a column no screen reads cannot be checked
 /// against a run, and this table is where a run explains why a post got no comment.
+/**
+ * Tokens and comment counts over the whole attempts table, today and in total.
+ *
+ * Registered, typed and allowlisted since the cost work, and called by nothing until now — the
+ * exact shape the repo already recorded once: *"a number nobody reads cannot be checked."*
+ */
+export async function nurtureCostSummary() {
+  return invoke<NurtureCostSummary>("nurture_cost_summary");
+}
+
 export async function nurtureListCommentAttempts(limit?: number) {
   return invoke<NurtureCommentAttempt[]>("nurture_list_comment_attempts", { limit });
 }

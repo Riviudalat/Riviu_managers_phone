@@ -932,6 +932,28 @@
   flex-direction: column;
   min-height: 0;
 }
+/* Tokens and comment counts, above the list they aggregate.
+   A `<dl>` because that is what it is -- two labelled figures, not a table -- and the browser
+   default for `dl`/`dd` carries indentation this layout does not want. */
+.nurture-attempt-totals {
+  display: flex;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--primary-50);
+}
+.nurture-attempt-totals dt {
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+.nurture-attempt-totals dd {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
 .nurture-attempt-list {
   list-style: none;
   margin: var(--space-1) 0 0;

@@ -75,6 +75,7 @@ export interface DeviceActionDeps {
   setFocusUdid: (udid: string | null) => void;
   setFilesFor: (udid: string | null) => void;
   setAdbFor: (udid: string | null) => void;
+  setSyslogFor: (udid: string | null) => void;
 }
 
 /**
@@ -99,6 +100,7 @@ export function buildDeviceActions(
     setFocusUdid,
     setFilesFor,
     setAdbFor,
+    setSyslogFor,
   } = deps;
 
   const notifyRotation = (asked: number) => (observed: number) => {
@@ -587,6 +589,14 @@ export function buildDeviceActions(
           androidOnly: true,
           keywords: "shell command",
           run: () => setAdbFor(device.udid),
+        },
+        {
+          id: "device-syslog",
+          label: "Log của máy…",
+          // Not `androidOnly`: `syslog_tail` is on the driver trait and both backends
+          // implement it, which is the whole reason it is worth reading from here.
+          keywords: "syslog logcat log nhat ky",
+          run: () => setSyslogFor(device.udid),
         },
         {
           id: "wifi-on",

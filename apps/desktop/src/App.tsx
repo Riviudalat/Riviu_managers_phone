@@ -33,6 +33,7 @@ import { useFleet } from "./useFleet";
 import { useBoxSelection } from "./useBoxSelection";
 import { metaByUdid, orderDevicesByNumber, tileName, tileNumber } from "./deviceNaming";
 import { AdbConsole } from "./components/AdbConsole";
+import { DeviceSyslogPopup } from "./components/DeviceSyslogPopup";
 import { ALL_DEVICES_TAB, devicesInTab, groupTabs, withDeviceAdded } from "./deviceGroups";
 import { FocusStream } from "./components/FocusStream";
 import { IconPhone, IconRefresh } from "./components/Icons";
@@ -155,6 +156,7 @@ function App() {
   const [groupTab, setGroupTab] = useState<string>(ALL_DEVICES_TAB);
   const [tileMenu, setTileMenu] = useState<{ udid: string; x: number; y: number } | null>(null);
   const [adbFor, setAdbFor] = useDeviceSurface(devices, "bảng lệnh adb");
+  const [syslogFor, setSyslogFor] = useDeviceSurface(devices, "log của máy");
   /// Which phone's filesystem is open in the browser popup (xiaowei "Preview Mobile Files").
   const [filesFor, setFilesFor] = useDeviceSurface(devices, "trình quản lý tệp");
   const [groupMode, setGroupMode] = useState(false);
@@ -260,6 +262,10 @@ function App() {
     () => (adbFor ? (devices.find((d) => d.udid === adbFor) ?? null) : null),
     [adbFor, devices],
   );
+  const menuSyslogDevice = useMemo(
+    () => (syslogFor ? (devices.find((d) => d.udid === syslogFor) ?? null) : null),
+    [syslogFor, devices],
+  );
   const menuDevice = useMemo(
     () => (tileMenu ? (devices.find((d) => d.udid === tileMenu.udid) ?? null) : null),
     [tileMenu, devices],
@@ -301,6 +307,7 @@ function App() {
         setFocusUdid,
         setFilesFor,
         setAdbFor,
+        setSyslogFor,
       }),
     // Setters straight from `useState` are stable and stay out of the list. `setMetas` is
     // in it because it now arrives through `useFleet`'s return object, where the rule cannot
@@ -318,6 +325,7 @@ function App() {
       metas,
       setMetas,
       setAdbFor,
+      setSyslogFor,
       setFilesFor,
       setFocusUdid,
     ],
@@ -927,6 +935,9 @@ function App() {
           The sibling popups below (nurture, interaction, groups, tools) stay page-gated on
           purpose: they act on `selected`, which is a control-grid concept. These two act on one
           phone and read nothing but its udid and name. */}
+      {syslogFor && menuSyslogDevice && (
+        <DeviceSyslogPopup device={menuSyslogDevice} onClose={() => setSyslogFor(null)} />
+      )}
       {adbFor && menuAdbDevice && (
         <AdbConsole device={menuAdbDevice} onClose={() => setAdbFor(null)} />
       )}

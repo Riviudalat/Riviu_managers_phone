@@ -1,3 +1,14 @@
+> **STATUS: xoá khỏi mã 27/08/2026.** Lệnh `install_unsigned_ipa` và cổng
+> `unsigned_install_enabled()` đã bị bỏ. Lý do: nó **không thể thành công** — validate ba
+> cổng rồi trả `Err(UnsignedInstallSpike)` vô điều kiện, và frontend không bao giờ gọi nó.
+> Một lệnh chỉ có thể trả lỗi là một đường đi không tồn tại, được đăng ký như thể có.
+>
+> Phần khảo sát dưới đây **giữ nguyên làm hồ sơ**. Một điểm trong nó đã sai từ trước:
+> nó gọi cổng an toàn là **hằng số biên dịch** `UNSIGNED_INSTALL_ENABLED = false`, nhưng nó
+> là một `fn` — có chủ đích, vì một `const false` sẽ làm mọi cổng phía sau thành mã chết
+> không đợc biên dịch. **Một tài liệu an ninh nêu tên một symbol không tồn tại thì không
+> ai xác minh được bằng grep.**
+
 # Spike: cài IPA chưa-ký (TrollRestore) — feasibility & thiết kế an toàn
 
 > **Trạng thái: SPIKE / FEASIBILITY.** Không có đường chạy nào chạm thiết bị thật.

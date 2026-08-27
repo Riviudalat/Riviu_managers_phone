@@ -413,3 +413,59 @@ button.linkish,
   background: var(--danger-soft);
   color: var(--danger-strong);
 }
+
+/* The operation log on the data page. Sits under the stat tiles, which is why it lives here
+   beside `.stats-grid` rather than in its own stylesheet. */
+.op-log {
+  margin-top: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.op-log header {
+  align-items: center;
+  gap: var(--space-2);
+}
+.op-log header h3 {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+.op-log header input[type="search"] {
+  flex: 1;
+  min-width: 12ch;
+}
+.op-log-list {
+  list-style: none;
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  max-height: 52vh;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.op-log-list li {
+  display: grid;
+  /* Action, then detail taking the slack, then a fixed-width timestamp. Tabular figures so the
+     times line up into a column an eye can scan. */
+  grid-template-columns: minmax(10ch, max-content) 1fr max-content;
+  gap: var(--space-2);
+  align-items: baseline;
+  padding: var(--space-1) var(--space-2);
+}
+.op-log-list li:nth-child(odd) {
+  background: var(--primary-50);
+}
+.op-log-action {
+  font-size: var(--text-xs);
+}
+.op-log-detail {
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+.op-log-when {
+  font-size: var(--text-xs);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
