@@ -144,7 +144,8 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     let context = control.start_reserved_stream(session, capacity).await?;
     let ui = control.streaming_session(&context)?;
-    let size = ui.window_size().await.unwrap_or((375.0, 667.0));
+    // This probe swipes the real feed. Refuse rather than swipe from a guessed origin.
+    let size = riviu_core::screen::measured_screen_size(ui.as_ref()).await?;
     println!("màn hình = {:.0}x{:.0}pt", size.0, size.1);
 
     println!("đưa máy về FYP, còn {delay}s");

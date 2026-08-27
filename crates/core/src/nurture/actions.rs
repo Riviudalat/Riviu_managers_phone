@@ -193,7 +193,9 @@ impl NurtureEngine {
         let open_image = image::load_from_memory(&open_bytes)
             .map_err(|_| anyhow!("frame_decode_failed"))?
             .to_rgb8();
-        let screen_size = session.window_size().await.unwrap_or((375.0, 667.0));
+        // Refuse rather than fabricate: this path taps composer and Send, so a wrong
+        // multiplier publishes a comment somewhere nobody chose.
+        let screen_size = crate::screen::measured_screen_size(session).await?;
         // Locate the rail per frame (handles already-followed cards where the
         // red badge is hidden). Fail the attempt rather than tapping the
         // layout-2 fallback constants blind — on a layout-1 card that lands on
@@ -333,7 +335,9 @@ impl NurtureEngine {
         if !session.supports_text_input() {
             return Err(anyhow!("text_channel_unavailable"));
         }
-        let screen_size = session.window_size().await.unwrap_or((375.0, 667.0));
+        // Refuse rather than fabricate — the reply point, composer and Send are all
+        // derived from this.
+        let screen_size = crate::screen::measured_screen_size(session).await?;
         let reply_point = self.next_touch_point(udid, screen_size, reply_point, (8.0, 8.0));
         {
             let _guard = gestures.lock().await;
@@ -1706,6 +1710,20 @@ mod tests {
         Arc::new(out.into_inner())
     }
 
+    /// The screen class this fixture is built for.
+    ///
+    /// iPhone 8, because that is the only entry in `screen::CALIBRATED_LAYOUTS` and every
+    /// geometry constant these tests hit-test against was measured on it. **Declared here
+    /// rather than left to a fallback**: the mock did not implement `window_size` at all, so
+    /// the production code's `unwrap_or((375.0, 667.0))` was silently supplying it. Replacing
+    /// that fallback with a refusal turned both thread-comment tests red, which is how anyone
+    /// learned they had been running against fabricated geometry.
+    ///
+    /// A mock that states its screen is a mock whose taps mean something. Changing this to an
+    /// Android size would need every constant in `screen.rs` re-measured for that class first
+    /// -- which is exactly what `calibrated_layout` returning `None` is there to insist on.
+    const MOCK_SCREEN: (f64, f64) = (375.0, 667.0);
+
     struct RecordingSession {
         frames: Arc<TestFrames>,
         stop: Arc<AtomicBool>,
@@ -1768,13 +1786,33 @@ mod tests {
             // Production taps are deliberately sampled inside the control's
             // safe hitbox, so the fixture must model a hit area rather than
             // requiring the old single-pixel center.
-            (point.x - 375.0 * expected.0).abs() < 20.0
-                && (point.y - 667.0 * expected.1).abs() < 20.0
+            //
+            // Anchored to `MOCK_SCREEN` rather than to bare literals, so the fixture and the
+            // size the mock reports cannot drift apart. They used to: the literals were here
+            // and `window_size()` was not implemented at all, which is why these tests were
+            // silently exercising the production fallback.
+            (point.x - MOCK_SCREEN.0 * expected.0).abs() < 20.0
+                && (point.y - MOCK_SCREEN.1 * expected.1).abs() < 20.0
         }
     }
 
     #[async_trait]
     impl UiSession for RecordingSession {
+        /// Report a measured size, because the subject of these tests is evidence, not geometry.
+        ///
+        /// **These two tests used to pass because of a bug.** `UiSession::window_size` has a
+        /// default impl that bails, this mock did not override it, and the send paths wrote
+        /// `unwrap_or((375.0, 667.0))` -- so every assertion below ran against fabricated
+        /// iPhone 8 geometry. When the fabrication was replaced with a refusal (27/08/2026)
+        /// both tests went red, which is the only reason anyone found out they had been
+        /// exercising the fallback rather than the path a real phone takes.
+        ///
+        /// The value is `MOCK_SCREEN` -- the same constant the hit tests use, so the fixture
+        /// cannot disagree with itself about what screen it is modelling.
+        async fn window_size(&self) -> anyhow::Result<(f64, f64)> {
+            Ok(MOCK_SCREEN)
+        }
+
         async fn tap(&self, point: TapPoint) -> anyhow::Result<()> {
             if !self.supports_text_input && Self::near(&point, screen::DRAWER_EMOJI_ICON) {
                 anyhow::bail!("emoji fallback reached");

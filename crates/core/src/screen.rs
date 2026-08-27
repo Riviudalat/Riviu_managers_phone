@@ -37,6 +37,44 @@ pub const CALIBRATED_LAYOUTS: &[CalibratedLayout] = &[CalibratedLayout {
     logical_height: 667.0,
 }];
 
+/// The device's own logical screen size, or a refusal that says why.
+///
+/// **Never substitute a default.** Every geometry constant in this file is a *fraction*, so
+/// the screen size is the multiplier that turns a fraction into a tap. Get the multiplier
+/// wrong and the fraction is still perfectly valid — it just points somewhere else on the
+/// glass, and nothing downstream can tell.
+///
+/// Four call sites used to write `window_size().await.unwrap_or((375.0, 667.0))`. That
+/// fallback is the one calibrated layout this file has, an iPhone 8; the Android fleet this
+/// project drives reports **1080x2220**. So a single failed `window_size()` moved every
+/// derived point into the top-left corner: `x * 375/1080` and `y * 667/2220`, about 35% and
+/// 30% of the way in. Two of those call sites then tapped composer and Send, which is a
+/// comment published against whatever control happened to be under the fabricated point.
+///
+/// `run_session` already refuses unknown geometry (see `nurture/mod.rs`, the
+/// `calibrated_layout(..) else` arm) and `docs/agents/10-thiet-bi-moi.md` records that
+/// refusal as covering both paths. It did not: the Interaction entry points acquire their
+/// own geometry *after* that protection, and kept the fallback. Found by an independent
+/// review on 27/08/2026.
+///
+/// A refusal costs one attempt. A fabricated tap costs an action on a real account that
+/// nobody can take back.
+pub async fn measured_screen_size(session: &dyn crate::UiSession) -> anyhow::Result<(f64, f64)> {
+    let size = session
+        .window_size()
+        .await
+        .map_err(|error| anyhow::anyhow!("screen_size_unavailable: {error}"))?;
+    // A zero or negative dimension multiplies every fraction to zero, which lands on the
+    // top-left pixel rather than failing — the same class of wrong as the old fallback.
+    anyhow::ensure!(
+        size.0 > 0.0 && size.1 > 0.0,
+        "screen_size_unavailable: máy báo kích thước {}x{}",
+        size.0,
+        size.1
+    );
+    Ok(size)
+}
+
 /// Half a point of slack, because the size arrives as a float over the wire.
 const LAYOUT_MATCH_SLACK: f64 = 0.5;
 
@@ -1812,5 +1850,104 @@ mod tests {
         });
         let obs = classify(&img, Some(375.0));
         assert_eq!(obs.kind, ScreenKind::Unknown, "{}", obs.debug_line());
+    }
+    /// **No tap may be computed from a screen size the phone did not report.**
+    ///
+    /// Every geometry constant in this module is a *fraction*. The screen size is the
+    /// multiplier that turns a fraction into a point on glass, so a wrong multiplier keeps
+    /// the fraction perfectly valid and moves the tap somewhere else entirely. Nothing
+    /// downstream can detect it: the tap succeeds, the gesture is recorded, and the action
+    /// lands on whatever control happened to be there.
+    ///
+    /// Six call sites wrote `window_size().await.unwrap_or((375.0, 667.0))`. That fallback is
+    /// this file's only calibrated layout, an iPhone 8; the Android fleet reports 1080x2220,
+    /// measured 27/08/2026. So one failed `window_size()` moved every derived point to roughly
+    /// 35% across and 30% down from where it belonged. Two of the six then tapped composer and
+    /// Send, which is a comment published against an unknown control on a real account.
+    ///
+    /// `run_session` had already been fixed to refuse unknown geometry, and
+    /// `docs/agents/10-thiet-bi-moi.md` recorded that refusal as covering the whole product.
+    /// It did not — the Interaction entry points took their own geometry after that check.
+    /// An independent review found them; this gate is what stops the seventh.
+    ///
+    /// A source scan rather than a type, for the same reason `wda.rs` scans for
+    /// `Client::new()`: the danger is a constructor that exists and is easy to reach for, not
+    /// a shape the compiler can rule out.
+    #[test]
+    fn no_tap_geometry_comes_from_a_fabricated_screen_size() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if entry.file_name() != "target" {
+                        walk(&path, out);
+                    }
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("the repo root resolves from the crate manifest");
+        let mut files = Vec::new();
+        walk(&repo.join("crates"), &mut files);
+        walk(&repo.join("apps/desktop/src-tauri/src"), &mut files);
+
+        let mut scanned = 0usize;
+        let mut sizes_read = 0usize;
+        let mut fabricated: Vec<String> = Vec::new();
+
+        for path in &files {
+            let rel = path
+                .strip_prefix(&repo)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let Ok(body) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            scanned += 1;
+            for (idx, line) in body.lines().enumerate() {
+                let code = line.trim_start();
+                // Doc comments here quote the forbidden shape on purpose.
+                if code.starts_with("//") {
+                    continue;
+                }
+                if !line.contains("window_size()") {
+                    continue;
+                }
+                sizes_read += 1;
+                // The whole point is that a failure must not become a value. `?`, `map_err`,
+                // an `else` arm and a `match` all keep the failure; `unwrap_or*` and
+                // `unwrap_or_default` do not.
+                if line.contains("unwrap_or") {
+                    fabricated.push(format!("{rel}:{}", idx + 1));
+                }
+            }
+        }
+
+        // A scanner that reads nothing passes every assertion below it.
+        assert!(
+            scanned >= 40,
+            "only {scanned} source files scanned; the walk is broken"
+        );
+        assert!(
+            sizes_read >= 8,
+            "only {sizes_read} `window_size()` sites found; the scan is broken"
+        );
+        assert!(
+            fabricated.is_empty(),
+            "these substitute a screen size the phone never reported, so every tap derived \
+             from them lands somewhere nobody chose: {fabricated:?}\n\
+             \n\
+             Use `screen::measured_screen_size`, which refuses and says why. A refused attempt \
+             costs one retry; a fabricated tap costs an action on a real account."
+        );
     }
 }

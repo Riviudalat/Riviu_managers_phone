@@ -468,34 +468,53 @@ impl AdbProgram {
     /// unstable reading is worth (see [`DeviceListReading::stable`]).
     pub async fn devices_stable(&self, settle: Duration, deadline: Duration) -> DeviceListReading {
         let started = tokio::time::Instant::now();
+        // Only a *successful* read is eligible to be one half of an agreeing pair. A
+        // failed read is not a fleet of zero phones, and letting it stand in for one is
+        // how two errors in a row used to produce `stable: true, devices: []`.
         let mut previous: Option<Vec<AdbDeviceLine>> = None;
         let mut attempts = 0u32;
+        // The last thing actually read from adb, so a failure reports the fleet it knew
+        // rather than an empty one it invented.
+        let mut last_good: Option<Vec<AdbDeviceLine>> = None;
+        // No initialiser: both match arms below assign it before the deadline check
+        // reads it, so an initial `None` would be a dead write -- and clippy runs with
+        // `-D warnings` here.
+        let mut failure: Option<String>;
         loop {
             attempts += 1;
-            let reading = match self.run(&["devices", "-l"], DEFAULT_TIMEOUT).await {
-                Ok(stdout) => parse_devices(&stdout),
+            match self.run(&["devices", "-l"], DEFAULT_TIMEOUT).await {
+                Ok(stdout) => {
+                    let reading = parse_devices(&stdout);
+                    failure = None;
+                    if let Some(before) = previous.as_ref() {
+                        if same_fleet(before, &reading) {
+                            return DeviceListReading {
+                                devices: reading,
+                                stable: true,
+                                attempts,
+                                failure: None,
+                            };
+                        }
+                    }
+                    last_good = Some(reading.clone());
+                    previous = Some(reading);
+                }
                 Err(error) => {
                     tracing::warn!(%error, "adb devices failed while waiting for a stable list");
-                    Vec::new()
-                }
-            };
-            if let Some(before) = previous.as_ref() {
-                if same_fleet(before, &reading) {
-                    return DeviceListReading {
-                        devices: reading,
-                        stable: true,
-                        attempts,
-                    };
+                    failure = Some(error.to_string());
+                    // Drop the pending comparison: the next successful read has nothing
+                    // trustworthy to agree *with*, so it must not short-circuit to stable.
+                    previous = None;
                 }
             }
             if started.elapsed() >= deadline {
                 return DeviceListReading {
-                    devices: reading,
+                    devices: last_good.unwrap_or_default(),
                     stable: false,
                     attempts,
+                    failure,
                 };
             }
-            previous = Some(reading);
             tokio::time::sleep(settle).await;
         }
     }
@@ -746,10 +765,27 @@ pub fn classify_fault(message: &str) -> AdbFault {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceListReading {
     pub devices: Vec<AdbDeviceLine>,
-    /// Two consecutive reads agreed. `false` means the deadline passed while the
-    /// fleet was still changing — the list is the last thing seen, not a promise.
+    /// Two consecutive **successful** reads agreed. `false` means the deadline passed
+    /// while the fleet was still changing, or a read failed — the list is the last
+    /// thing seen, not a promise.
     pub stable: bool,
     pub attempts: u32,
+    /// Why the last read could not be trusted, when it could not.
+    ///
+    /// **Separate from `stable` because an empty fleet and a failed read are not the
+    /// same claim, and the old code could not tell them apart.** `Err` from `adb
+    /// devices` became `Vec::new()`, so two consecutive failures compared equal and
+    /// returned `stable: true` with zero devices — a *confident* report that every
+    /// phone had been unplugged. `list_devices` then handed that to
+    /// `DeviceRegistry::upsert_many`, which replaces the whole vector, and the entire
+    /// fleet vanished from the grid on a transient adb hiccup. The `!stable` warning
+    /// that was supposed to catch this never fired, because nothing was unstable:
+    /// both readings agreed, and both were fabricated.
+    ///
+    /// Found by an independent review on 27/08/2026, in a function whose own comment
+    /// already reasoned about "an unstable reading" — the case it had not considered
+    /// is a reading that never happened.
+    pub failure: Option<String>,
 }
 
 /// Whether two readings describe the same fleet, ignoring the order adb happens

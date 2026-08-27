@@ -2133,7 +2133,10 @@ async fn open_comment_for_ocr(
     // layout-1 card would then bookmark instead of opening comments).
     let rail = crate::screen::locate_action_rail(&image)
         .context("không định vị được action rail để mở comment")?;
-    let screen_size = session.window_size().await.unwrap_or((375.0, 667.0));
+    // The comment two lines up already refuses to tap the rail blind. The multiplier
+    // deserves the same treatment: a fabricated size turns a correctly located rail into a
+    // tap somewhere else, which on a layout-1 card bookmarks the video instead.
+    let screen_size = crate::screen::measured_screen_size(session).await?;
     {
         let _guard = gestures.lock().await;
         session
@@ -2708,7 +2711,14 @@ async fn stable_parent_match(
 }
 
 async fn dismiss_comment_drawer(session: &dyn crate::UiSession, gestures: &tokio::sync::Mutex<()>) {
-    let screen_size = session.window_size().await.unwrap_or((375.0, 667.0));
+    // Best-effort, so a failure here is not fatal — but a *fabricated* dismiss point is not
+    // a no-op. On a 1080x2220 phone the iPhone 8 fallback lands in the middle of the feed,
+    // where a stray tap can open a profile or register on the video itself. Skipping leaves
+    // the drawer open, which the next step can see and handle; tapping blind cannot be undone.
+    let Ok(screen_size) = crate::screen::measured_screen_size(session).await else {
+        tracing::warn!("bỏ qua việc đóng drawer: không đọc được kích thước màn hình");
+        return;
+    };
     let _guard = gestures.lock().await;
     let _ = session
         .tap(TapPoint {

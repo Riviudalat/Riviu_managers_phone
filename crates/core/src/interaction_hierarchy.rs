@@ -2594,7 +2594,15 @@ pub async fn photograph_photo_post(
     let Some(comments) = labels.label(crate::tiktok_labels::TikTokControl::Comments) else {
         return PhotoWalk { frames, counters };
     };
-    let (width, height) = session.window_size().await.unwrap_or((1_080.0, 2_220.0));
+    // This fallback was **correct by coincidence**: 1080x2220 is exactly what today's S8/S8+
+    // fleet reports, so a failed read produced the right number and nothing ever went wrong.
+    // That is worse than a wrong constant, not better -- it is a landmine that only arms when
+    // the fleet gains a phone of another size, and it arms silently, on the swipe path.
+    // Same rule as everywhere else: a size the phone did not report is not a size.
+    let Ok((width, height)) = crate::screen::measured_screen_size(session).await else {
+        tracing::warn!("bỏ qua đi bài ảnh: không đọc được kích thước màn hình");
+        return PhotoWalk { frames, counters };
+    };
     let mut reported_total = None;
 
     // Bounded by **swipes**, not by frames collected. A stream that stops delivering leaves

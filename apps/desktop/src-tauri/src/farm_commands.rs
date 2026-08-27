@@ -11,6 +11,30 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
+/// Delete a file this app owns, and refuse if it is still there afterwards.
+///
+/// **A delete that did not delete is not a success.** Both callers used to write
+/// `let _ = std::fs::remove_file(&item.path);` and then drop the database row
+/// regardless, so a file held open by another process, marked read-only, or blocked
+/// by antivirus left the library row gone and the bytes on disk forever — with the
+/// UI reporting the delete as done. On a farm machine the orphans are APKs and
+/// videos, so this is measured in gigabytes, not tidiness.
+///
+/// `NotFound` is success: the row is what the operator asked to remove, and a file
+/// that is already gone has nothing left to fail at. Every other error is reported
+/// with the path, because "which file" is the first thing anyone needs.
+///
+/// Found by an independent review on 27/08/2026.
+fn remove_managed_file(path: &str) -> Result<(), CommandError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(CommandError::operation(format!(
+            "không xoá được {path}: {error}"
+        ))),
+    }
+}
+
 fn err(e: impl std::fmt::Display) -> CommandError {
     CommandError::operation(e)
 }
@@ -139,7 +163,7 @@ pub fn delete_material(state: State<'_, AppState>, id: String) -> Result<(), Com
         .into_iter()
         .find(|m| m.id == id)
     {
-        let _ = std::fs::remove_file(&item.path);
+        remove_managed_file(&item.path)?;
     }
     state.db.delete_material(&id).map_err(err)?;
     log(&state, "material.delete", &id);
@@ -248,7 +272,7 @@ pub fn delete_app_library(state: State<'_, AppState>, id: String) -> Result<(), 
         .into_iter()
         .find(|a| a.id == id)
     {
-        let _ = std::fs::remove_file(&item.path);
+        remove_managed_file(&item.path)?;
     }
     state.db.delete_app_library(&id).map_err(err)?;
     log(&state, "app.delete", &id);

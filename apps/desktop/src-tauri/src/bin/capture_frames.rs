@@ -200,7 +200,9 @@ async fn explore_feed(
     use riviu_core::{SwipeGesture, TapPoint};
 
     let session = control.streaming_session(context)?;
-    let size = session.window_size().await.unwrap_or((375.0, 667.0));
+    // A probe, but it taps and swipes, so the same rule applies: a fabricated multiplier
+    // does not produce a failed capture, it produces a real gesture in the wrong place.
+    let size = riviu_core::screen::measured_screen_size(session.as_ref()).await?;
     let mut written = 0u32;
     let mut live_captured = false;
     // The reddest heart seen while the heart is still an outline. This is the

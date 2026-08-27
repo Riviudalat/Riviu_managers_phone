@@ -873,7 +873,28 @@ impl DeviceDriver for AndroidDriver {
             .adb
             .devices_stable(Duration::from_millis(250), Duration::from_millis(1500))
             .await;
-        if !reading.stable {
+        // **A scan that could not run is not a fleet of zero phones.** Refusing here is
+        // the one case where raising beats returning: `upsert_many` replaces the whole
+        // vector, so handing back an empty list deletes every Android row, and the
+        // operator sees twenty phones unplug themselves. An `Err` leaves the previous
+        // roster alone.
+        //
+        // Only when the reading is *also* empty — a successful read of an empty fleet is
+        // still the truth, and so is a partial list from an unsettled one.
+        if let Some(reason) = reading.failure.as_deref() {
+            if reading.devices.is_empty() {
+                anyhow::bail!(
+                    "không đọc được danh sách máy sau {} lần thử: {reason}",
+                    reading.attempts
+                );
+            }
+            tracing::warn!(
+                attempts = reading.attempts,
+                devices = reading.devices.len(),
+                %reason,
+                "adb devices failed on the last attempt; using the last good reading"
+            );
+        } else if !reading.stable {
             tracing::warn!(
                 attempts = reading.attempts,
                 devices = reading.devices.len(),

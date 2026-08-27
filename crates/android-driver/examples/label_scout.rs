@@ -97,7 +97,9 @@ async fn main() -> anyhow::Result<()> {
     // A vertical swipe, in the same direction and shape the nurture loop uses, so that
     // "does this phone advance at all" can be asked without running a whole session.
     if args.iter().any(|arg| arg == "--swipe") {
-        let (width, height) = session.window_size().await.unwrap_or((1_080.0, 2_220.0));
+        // A probe, but `--swipe` performs a real gesture on a real feed, and the fallback
+        // being right for today's fleet is coincidence rather than a guarantee.
+        let (width, height) = riviu_core::screen::measured_screen_size(&session).await?;
         say(&format!("swiping up on {width}x{height}"));
         session
             .swipe(riviu_core::types::SwipeGesture {
