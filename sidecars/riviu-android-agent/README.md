@@ -26,7 +26,7 @@ See `AGENTS.md` §9.51 / §9.52.
 The manifest in `sidecars/android/` pins **bytes + SHA-256**. Inventing those
 numbers for a file that was never assembled — or pinning a debug APK from a
 local assemble without recording it — is a lie the CI gate exists to catch. The
-current pin is agent 0.3.0; see root `NOTICE` §2c.
+current pin is agent **0.4.0**; see root `NOTICE` §2c, which is the copy CI verifies.
 
 ## Build
 
@@ -86,17 +86,39 @@ Do not retry `adb install` / `pm install` / install-session.
 
 ## Protocol
 
-Loopback only. Host reaches it with `adb forward tcp:0 tcp:17980`.
+Loopback only — the host reaches it with `adb forward tcp:0 tcp:17980` — **and loopback
+is not the security model.** Every endpoint except `/status` requires the shared token in
+`X-Riviu-Token`; without it the service does not bind at all (`AgentService`), and a
+request without the header, or with the wrong one, gets `401`. `/status` stays exempt on
+purpose: it is how the host tells "helper too old" apart from "phone cannot", and that
+answer has to be readable *before* a token has been provisioned.
+
+This section said "Loopback only" and nothing else for as long as the token existed, which
+is a load-bearing omission rather than a missing detail — AGENTS.md §9.97 flagged that exact
+sentence as *"một giả định chịu lực và nó sai"*. Verified on hardware: 19/19 phones,
+`no-token=401 / wrong=401 / right=200` per device
+(`docs/verification/security-hardening-20260822/`).
 
 | Method | Path | Body | Success |
 |---|---|---|---|
-| GET | `/status` | — | `ok`, `agentVersion=0.1.0`, `protocolVersion=1`, `features` |
+| GET | `/status` | — | `ok`, `agentVersion=0.4.0`, `protocolVersion=1`, `features` |
 | POST | `/v1/clipboard/set` | `{"text":"…"}` | `{"ok":true}` |
 | POST | `/v1/clipboard/get` | `{}` | `{"ok":true,"text":"…"}` |
 | POST | `/v1/media/import` | `{"relativePath":"01.png","displayName":"01.png"}` | `id`, `pendingModel` |
-| POST | `/v1/media/delete` | `{"id":"123"}` | `{"ok":true,"id":"123"}` |
+| POST | `/v1/wallpaper/set` | `{"relativePath":"01.png"}` | `{"ok":true}` |
+| POST | `/v1/location/set` | `{"lat":…,"lng":…}` | `{"ok":true}` |
+| POST | `/v1/location/stop` | `{}` | `{"ok":true}` |
+| POST | `/v1/apps/describe` | `{"packages":["…"]}` | labels + 48 px PNG icons |
+
+`features` advertises six: `clipboard`, `pushMedia`, `wallpaper`, `mockLocation`,
+`appLabels`, `auth`. `auth` is advertised rather than inferred from the version because that
+is how the host decides to reinstall — a phone still carrying the tokenless helper is
+missing `auth` and gets replaced once, instead of sitting there serving the whole device.
+
+**`/v1/media/delete` is gone.** It used to be documented here and was removed from
+`HttpServer` in the 0.4.0 hardening; the verification log records `delete=not_found`. Do not
+reintroduce it from this table's history.
 
 Staged images live in the app's external files dir, `inbox/<relativePath>`.
 Push there with `adb push` (from PowerShell or Rust — Git Bash mangles
 `/sdcard`, §9.12). `relativePath` is one segment: letters, digits, `.`, `_`, `-`.
-Delete is by MediaStore `_id` only.

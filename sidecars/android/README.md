@@ -13,6 +13,9 @@ accepted, unreviewed** risk, not as a cleared one.
 android-tools-manifest.json      bytes + SHA-256 for every file below
 noarch/minicap.apk               JPEG evidence stream, pushed and run in place
 noarch/scrcpy-server             H.264 view stream (scrcpy 3.3.4), not evidence
+noarch/appium-uiautomator2-server.apk       the instrumentation control talks HTTP to
+noarch/appium-uiautomator2-server-test.apk  its androidTest half; `am instrument` names this one
+noarch/riviu-agent.apk           clipboard, media import, wallpaper, mock GPS, app labels
 win-x86_64/adb.exe               platform-tools 37.0.1
 win-x86_64/AdbWinApi.dll         must sit beside adb.exe
 win-x86_64/AdbWinUsbApi.dll      must sit beside adb.exe
@@ -62,17 +65,25 @@ machine other than the one that wrote them.
 
 ## These are not the only Android prerequisites
 
-Two things still cannot come from here:
+**This file is the single owner of "what is bundled".** The root `README.md` and
+`AGENTS.md` used to restate it and two of the three copies went stale; they now
+point here instead.
 
-- the per-model USB driver and the on-device *Allow USB debugging* prompt, and
-- `io.appium.uiautomator2.server` + `.test`, which the hierarchy control path
-  talks HTTP to. Bundling those is **not** done.
+One thing still cannot come from here: the per-model USB driver and the on-device
+*Allow USB debugging* prompt. That is it.
 
-Without the uiautomator2 pair a phone still appears in the fleet and still
-streams; every label-based read or tap fails. See the README at the repo root.
+`io.appium.uiautomator2.server` + `.test` **are** bundled — `noarch/appium-uiautomator2-server.apk`
+(17,948,327 B) and `noarch/appium-uiautomator2-server-test.apk` (197,183 B), pinned
+in the manifest with `role: agentServerApk` / `agentTestApk`, and installed by
+`install_agent_apks` (`pm install -r -g -t`). Both halves are required: the runner
+lives in the `-test` one and `am instrument` names it, so a phone with only the
+server refuses every tap exactly as a phone with neither does.
 
-A fourth payload, the Riviu helper APK (`com.riviu.agent`), is **source** under
-`sidecars/riviu-android-agent/` and is not in this tree until someone builds it
-and pins `noarch/riviu-agent.apk` with `role: riviuAgentApk`. Clipboard on
-Android 10+ needs that APK; uiautomator2 must not advertise an empty
-`get_clipboard`. See `AGENTS.md` §9.52.
+The Riviu helper APK (`com.riviu.agent`) **is** bundled too:
+`noarch/riviu-agent.apk`, `role: riviuAgentApk`. Its source is under
+`sidecars/riviu-android-agent/`, and the built artifact is gitignored — only the
+pinned copy here ships. Clipboard on Android 10+ needs it; uiautomator2 must not
+advertise an empty `get_clipboard`.
+
+The manifest pins **nine** files. The Layout section above lists them; if that list
+and the manifest ever disagree, the manifest is the one the loader reads.

@@ -8,9 +8,15 @@ và macOS Intel.
 Phần mềm của người khác đi kèm trong bộ cài được liệt kê ở [`NOTICE`](NOTICE),
 gồm cả một mục ghi rõ chỗ giấy phép **chưa được thẩm định**.
 
-Trạng thái công việc — cái gì chạy được, cái gì chưa, và **vì sao chưa** —
-ở [`docs/PLAN_STATUS_2026-08-13.md`](docs/PLAN_STATUS_2026-08-13.md).
-Số đo chi tiết ở `AGENTS.md` mục 9.
+Trạng thái công việc — cái gì chạy được, cái gì chưa, và **vì sao chưa** — ở nhật ký
+mục 9, đọc từ mục **mới nhất** trở lên. Đó là nơi duy nhất được cập nhật theo từng đợt:
+[`docs/agents/README.md`](docs/agents/README.md) là bản mục lục, và
+[`AGENTS.md`](AGENTS.md) là cửa vào.
+
+[`docs/PLAN_STATUS_2026-08-13.md`](docs/PLAN_STATUS_2026-08-13.md) là **một bản chụp
+của 13/08/2026**, không phải trạng thái hiện tại: file này từng bán nó là nguồn sự
+thật, và tới lúc đọc lại nó đã lệch hai minor version và ghi “106 test frontend / 19
+file” khi con số thật là hơn 700 trên hơn 80 file.
 
 ## Cài bản dựng
 
@@ -69,17 +75,21 @@ Các prerequisite thuộc hệ điều hành/nhà cung cấp:
 
 ### Máy Android còn cần làm tay
 
-Hai thứ này bộ cài **không** mang, và không có cách nào đóng gói được:
+Chỉ còn **một** thứ bộ cài không mang được, và nó là thứ không có cách nào đóng gói:
 
-- **USB driver theo từng model.** `adb devices` có thể rỗng dù adb hoàn toàn
-  bình thường. Bật **USB debugging** trong Developer options, cắm dây, rồi chấp
-  nhận hộp thoại *Allow USB debugging* hiện trên điện thoại. Chưa chấp nhận thì
-  adb báo `unauthorized`; dây/hub sạc-only thì báo `offline`.
-- **Hai APK `io.appium.uiautomator2.server{,.test}`.** Đường điều khiển theo cây
-  giao diện (nurture, tương tác, đăng bài trên Android) nói HTTP với một
-  `appium-uiautomator2-server` chạy trên máy. Chưa cài hai APK đó thì máy vẫn
-  hiện trong fleet và vẫn stream được, nhưng mọi thao tác đọc/chạm theo nhãn đều
-  thất bại. Việc đóng gói hai APK này **chưa** làm.
+- **USB driver theo từng model, và cái hộp thoại trên máy.** `adb devices` có thể
+  rỗng dù adb hoàn toàn bình thường. Bật **USB debugging** trong Developer options,
+  cắm dây, rồi chấp nhận hộp thoại *Allow USB debugging* hiện trên điện thoại. Chưa
+  chấp nhận thì adb báo `unauthorized`; dây/hub sạc-only thì báo `offline`.
+
+Mục này từng có một gạch đầu dòng thứ hai nói **hai APK `io.appium.uiautomator2.server{,.test}`
+"chưa đóng gói"** và bảo người vận hành tự cài. Điều đó **đã sai từ 16/08/2026**: cả hai
+APK nằm trong `sidecars/android/noarch/`, được ghim trong
+`android-tools-manifest.json` với `role: agentServerApk` / `agentTestApk`, và
+`install_agent_apks` **tự cài chúng** lên từng máy. Ai làm theo hướng dẫn cũ sẽ cài
+tay đúng thứ bộ cài đã ship. Trạng thái đóng gói giờ có **một chủ sở hữu duy nhất** —
+`sidecars/android/README.md` — và cả file này lẫn AGENTS.md trỏ tới đó thay vì tự
+nhắc lại.
 
 ### Thứ tự tìm adb
 
@@ -105,10 +115,35 @@ Trên macOS, thay `py -3.12` bằng `python3.12`; các lệnh còn lại giữ n
 
 1. Cắm iPhone và chọn **Trust This Computer**.
 2. iOS 17+ cần tunnel `pymobiledevice3` phù hợp với phiên thiết bị.
-3. Trong Control Center, chọn **Refresh devices**.
-4. Dùng **Cài / Re-sign Riviumanagersphone** khi cần chuẩn bị agent.
+3. Trên thanh công cụ, bấm nút có tooltip **“Quét lại thiết bị”**.
+4. Dùng nút **“Cài / re-sign agent”** khi cần chuẩn bị agent.
+
+Hai bước cuối trước đây ghi là *“Trong Control Center, chọn Refresh devices”* và
+*“Cài / Re-sign Riviumanagersphone”*. **Không nhãn nào trong đó tồn tại**: không có
+trang nào tên Control Center (trang là “Quản lý cửa sổ”), không có nút nào tên
+“Refresh devices”, và tên sản phẩm cũ đã bỏ khỏi UI từ 13/08/2026. Một hướng dẫn
+nêu tên một nút không có ở đó là một hướng dẫn người mới không đi qua được.
 
 Mock farm chỉ dùng khi phát triển: `RIVIU_MOCK_DEVICES=1`.
+
+### yt-dlp: bộ cài có, chạy từ source thì chưa
+
+Đường lấy caption / slide / lời thoại của một link TikTok gọi `yt-dlp`. **Bộ cài
+mang sẵn nó** (CI tải bản release mới nhất theo nền tảng lúc dựng và fail build nếu
+không tải được), nhưng repo **không commit** binary đó — nên một checkout chạy từ
+source không có nó, và mọi lượt tra trả `NoBinary` một cách im lặng.
+
+Muốn đường đó chạy khi dev, tải một bản vào `sidecars/yt-dlp/`:
+
+```powershell
+# Windows
+curl -L -o sidecars/yt-dlp/yt-dlp.exe https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe
+```
+
+Cố ý **không ghim theo hash**: TikTok phá extractor theo lịch của nó và cách sửa duy
+nhất là một bản yt-dlp mới hơn, nên một bản ghim là một thất bại được ghim. Đây là
+ngoại lệ duy nhất trong bộ cài — mọi thứ khác ghim theo byte. Chi tiết:
+`sidecars/yt-dlp/README.md`.
 
 ## Build bộ cài local
 
@@ -145,24 +180,84 @@ Luồng re-sign legacy trên Mac dùng source WDA 16.0.0 và asset đã khóa ha
 bundle, sau đó copy sang cache người dùng để build. Nó không tải source upstream
 không pin và không ghi vào app đã ký.
 
+## Chạy cổng
+
+Mọi mục §9 trong [nhật ký](docs/agents/README.md#nhật-ký-9x) kết thúc bằng một dòng
+“Cổng” phát biểu bằng đúng những lệnh dưới đây, và file này chưa từng liệt kê chúng —
+nên một người mới không tái hiện được một cổng nào từ README.
+
+```powershell
+# Rust: format, lint, test. Workspace nếu máy chạy được; nếu Smart App Control chặn
+# binary vừa link thì chạy từng crate — xem AGENTS.md, mục về Smart App Control.
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+
+# Frontend: kiểu, lint, test, build. `tsc -b` bắt những thứ vitest không thấy, vì
+# vitest xoá kiểu — nên nó phải chạy sau MỖI file mới, không phải sau mỗi đợt.
+cd apps/desktop
+npx tsc -b
+npx oxlint --deny-warnings
+npx vitest run
+npx vite build
+npx playwright test        # cần `npx playwright install chromium` một lần
+
+# Python: sidecar, script đóng gói, và probe Gate 0
+cd ../..
+python -m unittest scripts.test_collect_desktop_ci_artifacts `
+                  sidecars.pymobiledevice3.test_app_control `
+                  sidecars.pymobiledevice3.test_rtmmo_lifecycle `
+                  sidecars.signer.test_riviu_signer `
+                  sidecars.wda.test_build_and_install
+python -m unittest discover -s tools/interaction-gate0 -p "test_probe.py"
+
+# Phụ thuộc: advisory + giấy phép
+cargo deny check
+cd apps/desktop && npm audit --audit-level=high
+```
+
+Trên máy này `python` là 3.14 còn CI dùng **3.12.10**; nếu một test Python báo thiếu
+module (`tidevice`), chạy bằng `python3` — đó là bản 3.12 khớp CI.
+
+CI chạy đúng bộ trên, cộng ba job dựng bộ cài cho ba nền tảng. **Push một nhánh
+thường không kích hoạt CI** (workflow chỉ nghe `main`, tag `v*`, `pull_request` và
+`workflow_dispatch`); chạy đủ cổng trên một nhánh mà không mở PR:
+
+```powershell
+gh workflow run "Desktop CI/CD" --ref <tên-nhánh>
+```
+
 ## Workspace
 
 ```text
-apps/desktop/          Tauri + React UI
-crates/core/           registry, SQLite, nurture/interaction/Flow
-crates/ios-driver/     pymobiledevice3 + WDA (+ mock)
-crates/signing/        credential store và luồng ký agent
-crates/script-engine/  JSON/Flow runtime
-sidecars/wda/          agent IPA + manifest
+apps/desktop/            Tauri + React UI (README riêng trong đó)
+crates/core/             registry, SQLite, nurture/interaction/Flow
+crates/android-driver/   adb, scrcpy, minicap, agent HTTP — đường lái Android
+crates/ios-driver/       pymobiledevice3 + WDA (+ mock)
+crates/signing/          credential store và luồng ký agent
+crates/script-engine/    JSON/Flow runtime
+sidecars/android/        adb + APK, ghim theo byte (chủ sở hữu trạng thái đóng gói)
+sidecars/riviu-android-agent/  nguồn helper APK
+sidecars/yt-dlp/         chỉ trong bộ cài, KHÔNG commit — xem mục trên
+sidecars/wda/            agent IPA + manifest
 sidecars/pymobiledevice3/
 sidecars/signer/
-scripts/               build/attestation/CI artifact tooling
+scripts/                 build/attestation/CI artifact tooling
+tools/                   probe và tiện ích khảo sát, ngoài đường chạy của app
+docs/agents/             nội dung AGENTS.md, chia theo chủ đề + nhật ký §9
+docs/re/                 khảo sát genfarmer / xiaowei / rtmmo
+docs/verification/       log nghiệm thu trên phần cứng thật
 ```
+
+`crates/android-driver/` **thiếu hẳn trong bảng này** cho tới 27/08/2026, dù nó là
+crate lái cả 20/20 máy trong trại — bảng chỉ kể iOS. Ba thư mục `sidecars/android*`,
+`tools/` và `docs/` cũng vắng.
 
 Production oracle vẫn là `sidecars/wda/RiviuAgent.ipa`; bản Full dùng candidate
 kết hợp `sidecars/wda/RiviuAgent-candidate.ipa` với `text` và `pushMedia` đã build
-theo transaction. Xem `AGENTS.md` trước
-khi sửa runtime, WDA, IPA hoặc các gate thiết bị thật.
+theo transaction. **Đọc [`docs/agents/02-wda-doc-truoc-khi-sua.md`](docs/agents/02-wda-doc-truoc-khi-sua.md)
+trước khi sửa runtime, WDA, IPA hoặc các gate thiết bị thật** — đó là mục duy nhất mà bỏ
+qua có thể làm hỏng thiết bị thật.
 
 ## Đăng carousel ảnh
 

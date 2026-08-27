@@ -529,7 +529,7 @@ impl PmdIosDriver {
         }
         // Exit 2 is still tolerated, and for the reason it always was: it makes
         // `verifiedProcessControl` fail *closed* — keep the driver, drop the contract
-        // (AGENTS.md 968-973). What is new is that the reason no longer vanishes.
+        // (AGENTS.md §3.14). What is new is that the reason no longer vanishes.
         let health = classify_sidecar_ping(&output.stdout, &output.stderr, output.status.code());
         if let Some(reason) = &health.degraded_reason {
             tracing::warn!("{reason}");
@@ -3943,7 +3943,7 @@ print(json.dumps({'ok': True, 'note': 'terminate best-effort'}), flush=True)
     #[test]
     fn exit_two_keeps_a_usable_driver_while_naming_the_missing_contract() {
         // Exit 2 is still tolerated on purpose — it makes `verifiedProcessControl` fail
-        // closed rather than blocking startup (AGENTS.md 968-973). What changed is that
+        // closed rather than blocking startup (AGENTS.md §3.14). What changed is that
         // the reason is now carried out instead of discarded.
         let health = classify_sidecar_ping(
             br#"{"ok": true, "pymobiledevice3": true, "sidecarProtocolVersion": 2,

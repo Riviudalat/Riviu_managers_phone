@@ -1435,4 +1435,236 @@ mod tests {
             "strip = symbols is why the hook must say enough on its own"
         );
     }
+    /// Every `§x` citation resolves to a real section in `docs/agents/`.
+    ///
+    /// `AGENTS.md` was one 10,385-line file until 27/08/2026, and the split moved every
+    /// section into `docs/agents/`. The section numbers are the permanent identifier — 261
+    /// citation sites in this repo name them — so the split is only safe for as long as
+    /// every cited number still exists somewhere. Nothing but this test checks that.
+    ///
+    /// It also catches the failure that made the split necessary. Line-number citations
+    /// had *already* drifted 29-33 lines before anyone touched the file, and one landed in
+    /// a paragraph about a different subject entirely. Two more line numbers had been
+    /// written as if they were section numbers -- 691-692 and 4525, in a document whose
+    /// highest section is 9.119 -- and so pointed at nothing at all. A number far above
+    /// the real range is what that mistake looks like, and it is what this reports.
+    ///
+    /// Citations to *other* documents are exempt by number, each carrying the document it
+    /// belongs to: the genfarmer survey in `docs/re/` numbers its own sections, and a
+    /// comment citing it is correct. An exemption is checked from both ends -- it may not
+    /// name a number that is also a real section here, and it may not outlive the
+    /// citations it was added for.
+    #[test]
+    fn every_agents_section_citation_resolves() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            const SKIP: [&str; 6] = [
+                "node_modules",
+                "target",
+                ".git",
+                "dist",
+                "re",
+                "WebDriverAgent",
+            ];
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if path.is_dir() {
+                    if !SKIP.contains(&name.as_str()) {
+                        walk(&path, out);
+                    }
+                } else if matches!(
+                    path.extension().and_then(|e| e.to_str()),
+                    Some("rs" | "ts" | "tsx" | "py" | "yml" | "md" | "java" | "css" | "toml")
+                ) {
+                    out.push(path);
+                }
+            }
+        }
+
+        /// `§` followed by a number, which is how this repo cites a section everywhere.
+        fn sections_in(line: &str) -> Vec<String> {
+            let mut found = Vec::new();
+            let mut rest = line;
+            while let Some(at) = rest.find('\u{a7}') {
+                rest = &rest[at + '\u{a7}'.len_utf8()..];
+                let after = rest.trim_start();
+                let digits: String = after
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '.')
+                    .collect();
+                let num = digits.trim_end_matches('.');
+                // A letter straight after the number means another document's scheme:
+                // `NOTICE` numbers its entries 2b, 2c, 2d. Reading that as section 2
+                // would resolve by accident, which is worse than not reading it.
+                let suffixed = after[digits.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphanumeric());
+                if !num.is_empty() && !suffixed && num.contains(|c: char| c.is_ascii_digit()) {
+                    found.push(num.to_string());
+                }
+            }
+            found
+        }
+
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .expect("the repo root resolves from the crate manifest");
+        let agents = repo.join("docs/agents");
+
+        // What exists: every numbered heading in the split files. The index is excluded —
+        // it is generated *from* these headings, so counting it would let the index
+        // vouch for itself.
+        let mut present = std::collections::BTreeSet::new();
+        let mut section_files = 0usize;
+        let mut agent_docs = Vec::new();
+        walk(&agents, &mut agent_docs);
+        for path in &agent_docs {
+            if path.file_name().and_then(|n| n.to_str()) == Some("README.md") {
+                continue;
+            }
+            section_files += 1;
+            let body = std::fs::read_to_string(path).expect("a split doc is readable");
+            let mut fenced = false;
+            for line in body.lines() {
+                if line.trim_start().starts_with("```") {
+                    fenced = !fenced;
+                    continue;
+                }
+                if fenced {
+                    continue;
+                }
+                let Some(rest) = line.strip_prefix("##") else {
+                    continue;
+                };
+                let heading = rest.trim_start_matches('#').trim_start();
+                let heading = heading.strip_prefix('\u{a7}').unwrap_or(heading);
+                let num: String = heading
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '.')
+                    .collect();
+                let num = num.trim_end_matches('.');
+                if !num.is_empty() {
+                    present.insert(num.to_string());
+                }
+            }
+        }
+
+        // A scanner that reads nothing passes every assertion below it.
+        assert!(
+            section_files >= 15,
+            "only {section_files} split docs scanned; the walk is broken"
+        );
+        assert!(
+            present.len() >= 150,
+            "only {} sections found in docs/agents; the heading parse is broken",
+            present.len()
+        );
+
+        // Numbers that belong to another document. The survey in `docs/re/genfarmer/`
+        // numbers its own sections, and this repo cites it by number wherever it took a
+        // lesson from it.
+        const OTHER_DOCUMENT: [(&str, &str); 6] = [
+            ("4.2", "docs/re/genfarmer: frame-change detection"),
+            ("4.5", "docs/re/genfarmer: renderer under app.asar"),
+            ("12.1", "docs/re/genfarmer: two-tier adb queue"),
+            ("12.2", "docs/re/genfarmer: windowed cooldown on recovery"),
+            ("12.3", "docs/re/genfarmer: no path waits forever"),
+            ("12.6", "docs/re/genfarmer: the cost of its own shortcuts"),
+        ];
+
+        // An exemption naming a real section here would silently stop checking it.
+        for (num, owner) in OTHER_DOCUMENT {
+            assert!(
+                !present.contains(num),
+                "\u{a7}{num} is exempt as belonging to {owner}, but docs/agents/ now has a \
+                 section {num}: citations to it are no longer checked"
+            );
+        }
+
+        let mut files = Vec::new();
+        walk(&repo, &mut files);
+        let mut cited = 0usize;
+        let mut exempt_used: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        let mut dangling: Vec<String> = Vec::new();
+        for path in &files {
+            let rel = path
+                .strip_prefix(&repo)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            // The index lists every section by number, including both halves of the
+            // numbers used twice; it is the map, not a caller.
+            if rel == "docs/agents/README.md" {
+                continue;
+            }
+            let Ok(body) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            for (idx, line) in body.lines().enumerate() {
+                for num in sections_in(line) {
+                    if let Some((owned, _)) = OTHER_DOCUMENT.iter().find(|(n, _)| *n == num) {
+                        exempt_used.insert(owned);
+                        continue;
+                    }
+                    cited += 1;
+                    if !present.contains(&num) {
+                        dangling.push(format!("{rel}:{}: \u{a7}{num}", idx + 1));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            cited >= 200,
+            "only {cited} section citations scanned; the sweep is broken"
+        );
+        let stale: Vec<&str> = OTHER_DOCUMENT
+            .iter()
+            .map(|(num, _)| *num)
+            .filter(|num| !exempt_used.contains(num))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "these numbers are exempt as another document's, but nothing cites them any \
+             more: {stale:?} -- drop the exemption"
+        );
+        assert!(
+            dangling.is_empty(),
+            "these citations name a section that does not exist in docs/agents/:\n  {}\n\
+             \n\
+             A number nobody wrote is usually a line number: write \u{a7}<section>, and look it \
+             up in docs/agents/README.md.",
+            dangling.join("\n  ")
+        );
+    }
+
+    /// `AGENTS.md` stays a door, because nothing stopped it growing the first time.
+    ///
+    /// It reached 10,385 lines and 754 KB with no table of contents and its section
+    /// numbers out of file order, and in that state it misled the people writing it: a
+    /// constant was read as 2048 from one entry while another entry 150 lines above
+    /// recorded the real value of 128, and a shipped helper APK was believed unpinned.
+    /// Size was the mechanism, so size is what this pins.
+    #[test]
+    fn agents_md_stays_a_door() {
+        let door = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../AGENTS.md"),
+        )
+        .expect("AGENTS.md is readable");
+        let lines = door.lines().count();
+        assert!(
+            lines <= 120,
+            "AGENTS.md is {lines} lines; it is the entry point, not the content. \
+             Put new material in the right file under docs/agents/ and link it."
+        );
+        assert!(
+            door.contains("docs/agents/README.md"),
+            "AGENTS.md must link the index, or the split content is unreachable from the door"
+        );
+    }
 }

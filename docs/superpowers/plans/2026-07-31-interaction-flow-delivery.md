@@ -1,6 +1,14 @@
 # Interaction Campaign And Flow V2 Delivery Plan
 
-**Status:** Active delivery plan, approved scope 31/07/2026.
+**Status: SHIPPED. Historical record, not an active plan** (label corrected 27/08/2026).
+
+Both halves of this plan landed and run live: the Interaction workflow drives a 20-phone
+fleet, and the Flow V2 editor ships as `apps/desktop/src/components/flow/FlowWorkspace.tsx`
+against `crates/core/src/flow/`. It read `**Status:** Active delivery plan, approved scope
+31/07/2026.` for the four weeks after it was delivered — the one file in this directory
+that carried a status line was the one whose status line was wrong.
+
+Current state of anything named here: `AGENTS.md` section 9, newest entry first.
 
 **Goal:** Ship the operator-facing TikTok Interaction workflow and Flow V2 visual
 editor without weakening the existing per-UDID owner, stream budget, durable

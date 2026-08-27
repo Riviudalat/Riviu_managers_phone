@@ -97,7 +97,7 @@ jobs:
       - name: Check Python tooling
         shell: pwsh
         run: |
-          python -m py_compile scripts/build_desktop_sidecar.py scripts/collect_desktop_ci_artifacts.py scripts/test_collect_desktop_ci_artifacts.py sidecars/pymobiledevice3/pyinstaller_runtime_hook.py sidecars/signer/riviu_signer.py sidecars/wda/build_and_install.py sidecars/wda/test_build_and_install.py tools/interaction-gate0/probe.py tools/interaction-gate0/test_probe.py
+          python -m py_compile scripts/build_desktop_sidecar.py scripts/collect_desktop_ci_artifacts.py scripts/test_collect_desktop_ci_artifacts.py sidecars/pymobiledevice3/pyinstaller_runtime_hook.py sidecars/signer/riviu_signer.py sidecars/wda/build_and_install.py sidecars/wda/test_build_and_install.py tools/interaction-gate0/probe.py tools/interaction-gate0/test_probe.py scripts/build_agents_index.py
           node scripts/run_python.mjs scripts/build_desktop_sidecar.py --help
           python scripts/collect_desktop_ci_artifacts.py verify-version
           python -m unittest -v scripts.test_collect_desktop_ci_artifacts sidecars.pymobiledevice3.test_app_control sidecars.pymobiledevice3.test_rtmmo_lifecycle sidecars.signer.test_riviu_signer sidecars.wda.test_build_and_install
@@ -112,6 +112,12 @@ jobs:
           # unused `vision_ocr.swift` beside them is macOS-specific. A suite that green in a
           # minute is worth a minute.
           python -m unittest discover -s tools/interaction-gate0 -p "test_probe.py" -v
+
+          # `docs/agents/README.md` is the only way to resolve a `§9.5` citation after
+          # AGENTS.md was split, and the repo holds 200+ of them. It is generated from the
+          # headings, so a hand edit or a forgotten regeneration is exactly the drift that
+          # made the split necessary -- and the one thing a doc index cannot survive.
+          python scripts/build_agents_index.py --check
 
       # Repo-side digest check for the bundled Android tools. Deliberately in the
       # quality job as well as in the packaged verification: a PR that replaces a

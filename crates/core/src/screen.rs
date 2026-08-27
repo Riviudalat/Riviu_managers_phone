@@ -45,7 +45,7 @@ const LAYOUT_MATCH_SLACK: f64 = 0.5;
 ///
 /// `None` must mean refuse. Multiplying these fractions against an unmeasured
 /// screen produces tap points that look plausible and land on the wrong
-/// controls — the failure AGENTS.md 691-692 names directly: *"chua qualify
+/// controls — the failure AGENTS.md §3.12 names directly: *"chua qualify
 /// profile moi thi fail closed ... khong tap toa do iPhone 8 len may moi"*.
 pub fn calibrated_layout(
     logical_width: f64,

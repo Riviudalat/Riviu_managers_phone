@@ -612,7 +612,7 @@ impl NurtureEngine {
     /// * a text-comment run on an agent with no text channel would tap Send into nothing;
     /// * a screen size that cannot be read used to fall back to `(375.0, 667.0)`, so every
     ///   tap afterwards was computed from a fabricated iPhone 8 — which is exactly what
-    ///   AGENTS.md 691-692 forbids.
+    ///   AGENTS.md §3.12 forbids.
     ///
     /// **The statement order is the content here, not the layout.** The control session is
     /// created and primed *before* the stream is attached, because both live in the same
@@ -716,7 +716,7 @@ impl NurtureEngine {
         // (`device_control.rs` negotiate), but nurture went straight from
         // `window_size()` to multiplying iPhone 8 fractions — so a phone of any
         // other size would have been tapped with iPhone 8 coordinates, which is
-        // exactly what AGENTS.md 691-692 forbids.
+        // exactly what AGENTS.md §3.12 forbids.
         let screen_size = match session.window_size().await {
             Ok(size) if size.0 > 0.0 && size.1 > 0.0 => size,
             Ok(size) => {

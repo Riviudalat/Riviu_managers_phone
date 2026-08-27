@@ -1,3 +1,12 @@
+> **STATUS: bản chụp 13/08/2026, không phải trạng thái hiện tại.**
+>
+> Giữ làm hồ sơ. Mọi con số trong đây là của commit `165d65e`, version 0.1.1 — dòng
+> cổng của nó ghi "874 test Rust, 106 test frontend / 19 file", và con số thật giờ lại
+> lớn hơn nhiều lần. Nó cũng trỏ tới "AGENTS.md mục 9.18–9.44" trong khi nhật ký đó nay
+> đã qua §9.119.
+>
+> Trạng thái hiện tại: `AGENTS.md` mục 9, đọc từ mục mới nhất trở lên.
+
 # Kế hoạch và trạng thái — 13/08/2026
 
 Viết để bàn giao: ai đọc file này phải biết được **cái gì chạy được**, **cái gì chưa**, và

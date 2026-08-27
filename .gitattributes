@@ -2,7 +2,7 @@
 #
 # There is deliberately NO `* text=auto` rule here. `legacy-wda-source-lock.json`
 # records digests over source that has already been normalised CRLF -> LF (see
-# AGENTS.md 1470-1472); a blanket normalisation rule would re-normalise the files
+# AGENTS.md §3.18.1); a blanket normalisation rule would re-normalise the files
 # those digests are taken over and skew every one of them. A rule that fixes one
 # class of file by breaking another is not an improvement.
 #

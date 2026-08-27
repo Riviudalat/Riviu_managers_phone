@@ -26,7 +26,7 @@ drift from this file fails instead of shipping quietly.
 
 
 1. Android platform-tools — adb (Google) — LICENCE NOT REVIEWED
----------------------------------------------------------------
+----------------------------------------------------------------
 
     sidecars/android/win-x86_64/adb.exe
       revision 37.0.1 (adb 1.0.41, build 37.0.1-15733141)
@@ -138,6 +138,33 @@ exists to catch. Runtime override: `RIVIU_ANDROID_AGENT_APK`, then the bundled
 copy.
 
 
+2d. appium-uiautomator2-server (appium) — Apache-2.0
+---------------------------------------------------
+
+    sidecars/android/noarch/appium-uiautomator2-server.apk
+      17,948,327 bytes
+      sha256 7d74eee1536e949d92b026fcd2c5c885cea2518b55b158bf00a84a972d3f5e22
+
+    sidecars/android/noarch/appium-uiautomator2-server-test.apk
+      197,183 bytes
+      sha256 8300fc764611b4c8ffba4d779f9fa4b3f3d902b92181f38725500c6eea725fa2
+
+appium/appium-uiautomator2-server v10.6.2, redistributed unmodified. Licensed
+under the Apache License, Version 2.0
+(https://www.apache.org/licenses/LICENSE-2.0).
+
+Both halves ship and both are required: the instrumentation runner lives in the
+`-test` APK and `am instrument` names it, so a phone carrying only the server
+refuses every tap exactly as a phone carrying neither does. `install_agent_apks`
+installs them with `pm install -r -g -t` on every phone the app drives.
+
+**This entry was missing while both files shipped.** Section 2 and 2b exist on
+exactly this reasoning — Apache-2.0 requires the notice to travel with the
+binary — and the largest binary in the tree, at nearly 18 MB, had no entry at
+all. Found by an audit of what the installer carries against what this file
+lists, which is the check this section now answers.
+
+
 3. WebDriverAgent (Facebook / Meta, appium) — BSD-3-Clause
 ----------------------------------------------------------
 
@@ -167,7 +194,7 @@ item in this file, and it predates the decisions in section 1.
 4. pymobiledevice3 and tidevice — frozen into the iOS sidecar
 -------------------------------------------------------------
 
-The Windows installer ships `riviu-pmd.exe`, a PyInstaller onefile build of
+The Windows installer ships `riviu-pmd.exe`, a PyInstaller **onedir** build of
 `sidecars/pymobiledevice3/riviu_pmd.py`. That executable **embeds** the
 following, pinned in `sidecars/pymobiledevice3/requirements.txt` and locked by
 `requirements-lock.txt`:
@@ -218,3 +245,49 @@ the intent exists, but the text it refers to does not. Shipping other people's
 code while your own licence is a single word in a manifest is the worst of both
 positions, and adding that file is recommended — it is a decision for whoever
 owns this project, not something this NOTICE can settle.
+
+
+7. Noto Sans and Noto Sans Mono (Google) — SIL Open Font License 1.1
+-------------------------------------------------------------------
+
+    apps/desktop/src/assets/fonts/NotoSans-latin-ext.woff2
+    apps/desktop/src/assets/fonts/NotoSans-latin.woff2
+    apps/desktop/src/assets/fonts/NotoSans-vietnamese.woff2
+    apps/desktop/src/assets/fonts/NotoSansMono-latin-ext.woff2
+    apps/desktop/src/assets/fonts/NotoSansMono-latin.woff2
+    apps/desktop/src/assets/fonts/NotoSansMono-vietnamese.woff2
+
+Vendored into the repository and shipped inside the installer as
+`dist/assets/NotoSans*.woff2`. Licensed under the SIL Open Font License,
+Version 1.1 (https://openfontlicense.org/), which requires this notice to
+travel with the files.
+
+Subset to the ranges this app actually renders, Vietnamese included — the
+reasoning is written out in `apps/desktop/src/assets/fonts/fonts.css`, and until
+now that CSS comment was the **only** record anywhere that these files are
+third-party. They are vendored rather than fetched so the app renders identically
+on a farm machine with no network, which is the normal state of one.
+
+
+8. Frontend dependencies compiled into the shipped bundle
+---------------------------------------------------------
+
+`dist/assets/index-*.js` is a bundle, so these ship inside the installer as
+compiled code rather than as named files:
+
+    react, react-dom            MIT      (Meta)
+    @xyflow/react               MIT      (webkid GmbH)
+    lucide-react                ISC      (Lucide Contributors)
+    @tauri-apps/api             MIT / Apache-2.0  (Tauri Programme)
+    @tauri-apps/plugin-*        MIT / Apache-2.0  (Tauri Programme)
+
+Exact versions are pinned in `apps/desktop/package-lock.json`, which is the
+authoritative list; the names above are the ones whose code reaches the bundle
+rather than the build. `npm audit --audit-level=high` runs on every CI build.
+
+This section did not exist while the bundle shipped, even though the opening
+scope of this file is "material authored by other people that ships inside the
+Riviu Manager installer" — which a bundled dependency is, as much as a `.apk`
+is. Added for the same reason as 2d: a permissive licence still asks for the
+notice, and a notice nobody wrote is not made true by the licence being
+permissive.
