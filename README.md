@@ -219,6 +219,25 @@ cd apps/desktop && npm audit --audit-level=high
 Trên máy này `python` là 3.14 còn CI dùng **3.12.10**; nếu một test Python báo thiếu
 module (`tidevice`), chạy bằng `python3` — đó là bản 3.12 khớp CI.
 
+### Nghiệm thu trên máy thật
+
+Một số thứ không test nào bắt được — ROM in `ls` kiểu khác, một lease bị lấy trên serial thật.
+Chạy **headless**, gọi thậng hàm production, không lái UI bằng chuột (một lần lái chuột đã
+đăng nhầm một bình luận thật):
+
+```powershell
+# Trình quản lý tệp: thư mục bị từ chối nói là bị từ chối, tên có dấu nháy đọc nguyên văn,
+# size đúng từng byte, đẩy/kéo/xoá đều đọc-lại xác nhận. Ghi/xoá một file /sdcard/Download.
+cargo run -p riviu-android-driver --example device_files_gate -- <serial>
+
+# Lease: máy đang bị giữ thì lệnh khác **bị từ chối**, và lồi **nêu tên việc đang giữ máy**.
+# Chỉ đọc — không đổi gì trên máy, chạy được giữa ca.
+cargo run -p riviu-android-driver --example lease_conflict_gate -- <serial>
+```
+
+Cả hai in `adb` nào đã giải được và từ đâu trước khi làm gì khác: `0 device(s)` vì
+"không thấy máy" và vì "không có adb nào" đã từng bị đọc lẫn nhau một lần.
+
 CI chạy đúng bộ trên, cộng ba job dựng bộ cài cho ba nền tảng. **Push một nhánh
 thường không kích hoạt CI** (workflow chỉ nghe `main`, tag `v*`, `pull_request` và
 `workflow_dispatch`); chạy đủ cổng trên một nhánh mà không mở PR:
