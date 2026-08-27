@@ -65,12 +65,6 @@ pub enum LinkErrorCode {
     UnresolvedShortLink,
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum LinkParseError {
-    #[error("line {line}: {code:?}")]
-    Line { line: usize, code: LinkErrorCode },
-}
-
 /// Parse direct TikTok post URLs. Short links are surfaced as a typed preview
 /// error until the injectable redirect resolver resolves them server-side.
 pub fn parse_tiktok_links(raw: &str) -> Vec<TikTokLinkLine> {
@@ -814,21 +808,6 @@ pub fn discover_comment_identity(
         locator_version: locator_version.into(),
         frame_sha256: frame_sha256.into(),
     })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CommentArtifact {
-    pub id: String,
-    pub target_key: String,
-    pub ordinal: u8,
-    pub actor_udid: String,
-    pub parent_artifact_id: Option<String>,
-    pub normalized_text: String,
-    pub text_sha256: String,
-    pub identity: CommentLocatorIdentity,
-    pub sent_at: String,
-    pub screenshot_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

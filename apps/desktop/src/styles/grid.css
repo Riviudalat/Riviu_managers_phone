@@ -10,24 +10,11 @@
   color: var(--text-inverse);
   pointer-events: none;
 }
-.dev-phone-index-row {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
 .dev-phone-index {
   font-size: clamp(18px, 14cqw, 44px);
   font-weight: 700;
   line-height: 1.05;
   text-shadow: 0 1px 8px rgb(0 0 0 / 70%);
-}
-.dev-phone-index-row input {
-  margin: 0;
-  width: 13px;
-  height: 13px;
-  accent-color: var(--text-inverse);
-  pointer-events: auto;
-  cursor: pointer;
 }
 .dev-phone-name {
   max-width: 100%;

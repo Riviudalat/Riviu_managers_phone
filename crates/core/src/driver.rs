@@ -849,10 +849,6 @@ pub enum ElementQuery<'a> {
 }
 
 impl<'a> ElementQuery<'a> {
-    pub fn exact_description(value: &'a str) -> Self {
-        Self::Description { value, exact: true }
-    }
-
     pub fn description_contains(value: &'a str) -> Self {
         Self::Description {
             value,

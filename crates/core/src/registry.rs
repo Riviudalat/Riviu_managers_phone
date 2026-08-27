@@ -102,13 +102,6 @@ impl DeviceRegistry {
         });
         true
     }
-
-    pub fn selected_ready(&self, udids: &[String]) -> Vec<DeviceInfo> {
-        self.list()
-            .into_iter()
-            .filter(|d| udids.contains(&d.udid))
-            .collect()
-    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { describeError } from "../toastStore";
+import { describeError } from "../describeError";
 import { createPortal } from "react-dom";
 import {
   filterDeviceMenu,

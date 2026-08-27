@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { localApiGetConfig, localApiSetConfig, type LocalApiConfig } from "../../api";
-import { describeError } from "../../toastStore";
+import { describeError } from "../../describeError";
 
 /** The loopback HTTP API: whether it listens, on what port, behind what token. */
 export function LocalApiSection() {

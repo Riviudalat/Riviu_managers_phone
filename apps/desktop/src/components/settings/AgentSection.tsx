@@ -7,7 +7,7 @@ import {
   agentSaveSettings,
 } from "../../api";
 import { agentStatusView } from "../../agentStatus";
-import { describeError } from "../../toastStore";
+import { describeError } from "../../describeError";
 import { EmptyState } from "../States";
 import { IconPhone } from "../Icons";
 import type { AgentRuntimeView, AgentStatus, DeviceInfo } from "../../types";

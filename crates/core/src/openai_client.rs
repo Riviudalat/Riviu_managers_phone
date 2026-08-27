@@ -437,44 +437,6 @@ async fn chat(
     Ok((text, prompt_tokens, completion_tokens, cost, model))
 }
 
-/// One comment for the video currently on screen.
-pub async fn generate_vision_comment(
-    settings: &NurtureSettings,
-    jpeg_bytes: &[u8],
-    direction: Option<&str>,
-) -> anyhow::Result<VisionCommentResult> {
-    let b64 = B64.encode(jpeg_bytes);
-    let max_words = settings.max_comment_words.max(4) as usize;
-    let lang = language_label(&settings.comment_lang);
-    let prompt = vision_prompt(&lang, max_words, direction);
-
-    let body = json!({
-        "model": settings.model,
-        "temperature": 0.9,
-        "max_tokens": 400,
-        "stream": false,
-        "messages": [{
-            "role": "user",
-            "content": [
-                { "type": "image_url",
-                  "image_url": { "url": format!("data:image/jpeg;base64,{b64}") } },
-                { "type": "text", "text": prompt }
-            ]
-        }]
-    });
-
-    let (raw, prompt_tokens, completion_tokens, _cost, model) = chat(settings, body).await?;
-    let text = sanitize_comment(&raw, max_words)
-        .ok_or_else(|| anyhow!("model trả comment không dùng được: {:.60}", raw))?;
-    Ok(VisionCommentResult {
-        text,
-        prompt_tokens,
-        completion_tokens,
-        model,
-        base_url_host: host_of(&settings.base_url),
-    })
-}
-
 /// Generate and independently validate one comment from a small frame set.
 ///
 /// The frame set is turned into one contact sheet so OpenAI-compatible gateways
@@ -2088,99 +2050,10 @@ fn make_contact_sheet(frames: &[Vec<u8>], kind: EvidenceKind) -> anyhow::Result<
     })
 }
 
-/// Legacy generic-comment helper kept for offline fixtures. The nurture engine
-/// does not call it for production text comments because an ungrounded sentence
-/// must never be posted under an account.
-pub async fn generate_comment_pool(settings: &NurtureSettings, count: usize) -> Vec<String> {
-    let count = count.clamp(5, 60);
-    let max_words = settings.max_comment_words.max(4) as usize;
-    let directions: Vec<&str> = settings
-        .ai_directions
-        .split('|')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    let body = json!({
-        "model": settings.model,
-        "temperature": 1.0,
-        "max_tokens": 1200,
-        "stream": false,
-        "messages": [{ "role": "user", "content": pool_prompt(count, max_words, &directions) }]
-    });
-
-    match chat(settings, body).await {
-        Ok((raw, _, _, _, _)) => {
-            let mut pool: Vec<String> = raw
-                .lines()
-                .filter_map(|line| sanitize_comment(line, max_words))
-                .collect();
-            pool.dedup();
-            if pool.len() < 5 {
-                builtin_pool()
-            } else {
-                pool
-            }
-        }
-        Err(_) => builtin_pool(),
-    }
-}
-
 /// Pick one comment from a pool at random.
 pub fn pick_from_pool(pool: &[String]) -> Option<String> {
     let mut rng = rand::thread_rng();
     pool.choose(&mut rng).cloned()
-}
-
-fn vision_prompt(lang: &str, max_words: usize, direction: Option<&str>) -> String {
-    let direction_block = match direction.map(str::trim).filter(|d| !d.is_empty()) {
-        Some(d) => format!(
-            "\nĐỊNH HƯỚNG GIỌNG ĐIỆU (chỉ áp dụng khi tương thích với bằng chứng): \"{d}\".\n\
-             Nội dung nhìn thấy và caption luôn có ưu tiên cao hơn định hướng. Ý mời mua, hỏi giá/link, \
-             tăng tương tác hoặc cảm xúc chỉ được dùng khi không thêm chi tiết chưa xuất hiện trong frame.\n"
-        ),
-        None => String::new(),
-    };
-    format!(
-        "Bạn là người Việt Nam Gen Z đang lướt TikTok thật, vừa xem xong video này.\n\
-         {direction_block}\n\
-         Nhìn ảnh chụp màn hình và viết đúng 1 comment bằng tiếng {lang}, tối đa {max_words} từ. Viết như phản ứng đời thường ngay sau khi xem: ưu tiên 2-10 từ, thân mật, ngắn và có cảm xúc vừa phải; không viết kiểu tóm tắt hay báo cáo.\n\n\
-         QUY TẮC:\n\
-         - Phản hồi đúng nội dung video, không khen chung chung.\n\
-         - Bỏ qua chữ trên ảnh mà là tên người đăng, nút bấm UI hay tên bài nhạc.\n\
-         - KHÔNG dùng: \"nội dung hay\", \"chất lượng\", \"tuyệt vời\", \"cảm ơn đã chia sẻ\".\n\
-         - KHÔNG giải thích, KHÔNG đặt trong ngoặc kép, CHỈ trả về đúng 1 dòng comment."
-    )
-}
-
-fn pool_prompt(count: usize, max_words: usize, directions: &[&str]) -> String {
-    let direction_block = if directions.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "Mỗi comment phải theo đúng 1 trong các định hướng sau, phân bố đều, \
-             không lặp cùng định hướng quá 3 lần liên tiếp:\n{}\n\n",
-            directions
-                .iter()
-                .map(|d| format!("- {d}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )
-    };
-    format!(
-        "Bạn là người Việt Nam Gen Z đang lướt TikTok thật. Viết comment như người thật, không phải bot.\n\n\
-         Tạo đúng {count} comment tiếng Việt.\n\n\
-         {direction_block}\
-         Trộn đều các kiểu: phản ứng cảm xúc rất ngắn (1–3 từ); câu hỏi tự nhiên \
-         (nhạc gì vậy / quay ở đâu / mua ở đâu); khen cụ thể chứ không sáo rỗng; \
-         bình luận hài hước.\n\n\
-         YÊU CẦU BẮT BUỘC:\n\
-         - Chỉ trả về đúng {count} dòng, mỗi dòng 1 comment.\n\
-         - KHÔNG đánh số, KHÔNG gạch đầu dòng, KHÔNG giải thích.\n\
-         - KHÔNG dùng: \"nội dung hay\", \"chất lượng\", \"tuyệt vời\", \"cảm ơn đã chia sẻ\".\n\
-         - Khoảng một nửa có emoji, một nửa không.\n\
-         - Độ dài đa dạng, không quá {max_words} từ."
-    )
 }
 
 /// Turn raw model output into something safe to type, or `None` if it cannot be
@@ -2296,35 +2169,6 @@ fn sounds_like_report(text: &str) -> bool {
     ]
     .iter()
     .any(|marker| lower.contains(marker))
-}
-
-/// Offline fallback so a session can still comment with no API at all.
-fn builtin_pool() -> Vec<String> {
-    [
-        "Hay quá 🔥",
-        "đỉnh thật",
-        "xem lại lần 2 rồi 😭",
-        "ôi trời ơi",
-        "chill quá",
-        "ủa thật không",
-        "bao giờ ra phần 2",
-        "lưu lại xem sau",
-        "relate quá đi",
-        "vibe quá",
-        "ghim lại xem sau",
-        "làm theo ngay thôi",
-        "xem mãi không chán",
-        "đúng quá bạn ơi",
-        "clip này hay ghê",
-        "mình cũng vậy 😭",
-        "thích cái này",
-        "không thể tin nổi",
-        "đỉnh vậy 👏",
-        "nhạc gì vậy bạn?",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect()
 }
 
 /// Draft one grounded comment from post frames, whichever provider is configured.
@@ -2598,26 +2442,6 @@ mod tests {",
     }
 
     #[test]
-    fn the_builtin_pool_is_usable_without_any_api() {
-        let pool = builtin_pool();
-        assert!(pool.len() >= 10);
-        assert!(pick_from_pool(&pool).is_some());
-        assert!(pool.iter().all(|c| !c.trim().is_empty()));
-        assert!(pool.iter().all(|c| c.split_whitespace().count() <= 12));
-    }
-
-    #[test]
-    fn the_vision_prompt_carries_the_direction_when_given() {
-        let with = vision_prompt("Việt", 12, Some("bán hàng"));
-        assert!(with.contains("bán hàng"));
-        assert!(with.contains("tối đa 12 từ"));
-        assert!(with.contains("Nội dung nhìn thấy và caption luôn có ưu tiên cao hơn"));
-        assert!(with.contains("phản ứng đời thường"));
-        let without = vision_prompt("Việt", 12, Some("   "));
-        assert!(!without.contains("ĐỊNH HƯỚNG"));
-    }
-
-    #[test]
     fn formal_comment_style_is_retried_or_rejected() {
         assert!(sounds_like_report(
             "Nội dung về IELTS được trình bày rõ ràng quá ạ"
@@ -2645,14 +2469,6 @@ mod tests {",
             ..accepted
         }
         .retryable());
-    }
-
-    #[test]
-    fn the_pool_prompt_lists_every_direction() {
-        let p = pool_prompt(30, 12, &["Gen z", "Tự nhiên"]);
-        assert!(p.contains("- Gen z"));
-        assert!(p.contains("- Tự nhiên"));
-        assert!(p.contains("đúng 30 comment"));
     }
 
     #[test]

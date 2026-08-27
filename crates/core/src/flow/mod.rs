@@ -1,12 +1,8 @@
 pub mod artifact_store;
-#[allow(dead_code)]
 pub(crate) mod cancellation;
 pub mod catalog;
-#[allow(dead_code)]
 pub(crate) mod device_context;
-#[allow(dead_code)]
 pub mod evidence;
-#[allow(dead_code)]
 pub(crate) mod executor;
 pub mod model;
 pub mod runtime;
@@ -16,7 +12,6 @@ pub(crate) use cancellation::FlowCancellation;
 pub use catalog::*;
 pub(crate) use device_context::*;
 pub use evidence::*;
-#[allow(unused_imports)]
 pub(crate) use executor::*;
 pub use model::*;
 pub use runtime::*;

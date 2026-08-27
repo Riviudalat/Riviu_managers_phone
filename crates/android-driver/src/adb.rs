@@ -456,49 +456,6 @@ impl AdbProgram {
         Ok(String::from_utf8_lossy(&bytes).to_string())
     }
 
-    /// Run a **read-only or otherwise idempotent** command, retrying a transport
-    /// blip instead of surfacing it.
-    ///
-    /// Deliberately *not* folded into [`Self::run_bytes`]. `pm install`,
-    /// `am start`, `am force-stop` and `input` are not idempotent, and a blind
-    /// retry after a first attempt that actually landed installs twice or
-    /// launches twice — the failure is invisible because both attempts "succeed".
-    /// Retry is therefore opt-in per call site, and only [`AdbFault::Transient`]
-    /// and [`AdbFault::Timeout`] are retried: an unaccepted USB-debugging prompt
-    /// or an unknown serial needs a human or a rescan, not another attempt.
-    pub async fn run_bytes_idempotent(
-        &self,
-        args: &[&str],
-        timeout: Duration,
-        attempts: u32,
-    ) -> anyhow::Result<Vec<u8>> {
-        let attempts = attempts.max(1);
-        let mut last: Option<anyhow::Error> = None;
-        for attempt in 1..=attempts {
-            match self.run_bytes(args, timeout).await {
-                Ok(bytes) => return Ok(bytes),
-                Err(error) => {
-                    let fault = classify_fault(&error.to_string());
-                    if !fault.is_worth_retrying() || attempt == attempts {
-                        return Err(error.context(format!(
-                            "adb {} gave up after {attempt} attempt(s) ({fault:?})",
-                            args.join(" ")
-                        )));
-                    }
-                    tracing::warn!(
-                        args = %args.join(" "),
-                        attempt,
-                        ?fault,
-                        "retrying a transient adb failure"
-                    );
-                    last = Some(error);
-                    tokio::time::sleep(retry_backoff(attempt)).await;
-                }
-            }
-        }
-        Err(last.unwrap_or_else(|| anyhow!("adb {} failed with no error", args.join(" "))))
-    }
-
     /// Read `adb devices -l` until two consecutive reads agree.
     ///
     /// "adb is healthy" is not "one command returned" — a wedged or
@@ -541,19 +498,6 @@ impl AdbProgram {
             previous = Some(reading);
             tokio::time::sleep(settle).await;
         }
-    }
-
-    /// `adb kill-server`.
-    ///
-    /// **Global, and never called automatically.** It drops the adb connection
-    /// of every other tool on the machine — another farm app mid-run included
-    /// (`docs/re/genfarmer/README.md` §9) — and every `adb forward` on the host
-    /// dies with it, so each device has to be re-forwarded afterwards. Reach for
-    /// it only when an operator asked for it, and log that you did.
-    pub async fn kill_server(&self) -> anyhow::Result<()> {
-        tracing::warn!("adb kill-server: every tool on this machine loses its adb connection");
-        self.run(&["kill-server"], DEFAULT_TIMEOUT).await?;
-        Ok(())
     }
 
     /// Run `adb -s <serial> <args>` and return raw stdout bytes.
@@ -798,12 +742,6 @@ pub fn classify_fault(message: &str) -> AdbFault {
     AdbFault::Terminal
 }
 
-/// Backoff before retrying attempt `attempt` (1-based). Short on purpose: a USB
-/// blip clears in milliseconds, and a lifecycle call already costs 1–2 s.
-fn retry_backoff(attempt: u32) -> Duration {
-    Duration::from_millis(250u64.saturating_mul(1u64 << (attempt.min(4) - 1)))
-}
-
 /// One `adb devices -l` reading, with whether it settled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceListReading {
@@ -858,14 +796,6 @@ pub fn parse_devices(stdout: &str) -> Vec<AdbDeviceLine> {
             })
         })
         .collect()
-}
-
-/// Screen geometry as the device reports it.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ScreenGeometry {
-    pub width: u32,
-    pub height: u32,
-    pub density: u32,
 }
 
 /// Parse `wm size`, preferring the override when one is set.
@@ -2402,15 +2332,6 @@ drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
         assert!(!same_fleet(&authorizing, &ready));
         let gained = parse_devices("List of devices attached\na device\nb device\n");
         assert!(!same_fleet(&ready, &gained));
-    }
-
-    #[test]
-    fn retry_backoff_grows_and_stays_bounded() {
-        assert_eq!(retry_backoff(1), Duration::from_millis(250));
-        assert_eq!(retry_backoff(2), Duration::from_millis(500));
-        assert_eq!(retry_backoff(3), Duration::from_millis(1000));
-        // Clamped, so a large attempt count cannot shift its way to a stall.
-        assert_eq!(retry_backoff(9), retry_backoff(4));
     }
 
     #[test]

@@ -583,17 +583,6 @@ pub struct FlowNodeAttemptRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct FlowEventRecord {
-    pub id: i64,
-    pub run_id: Uuid,
-    pub revision: u64,
-    pub kind: String,
-    pub payload: Value,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FlowRunDetail {
     pub run: FlowRunRecord,
     pub device_runs: Vec<FlowDeviceRunRecord>,

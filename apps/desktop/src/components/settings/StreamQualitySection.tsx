@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { getStreamSettings, setStreamSettings } from "../../api";
-import { describeError } from "../../toastStore";
+import { describeError } from "../../describeError";
 import type { StreamSettings } from "../../types";
 
 /// Pinned to `MIN_VIEW_FPS` and `MAX_SETTABLE_VIEW_FPS` on the Rust side by

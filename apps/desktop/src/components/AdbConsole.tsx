@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { describeError } from "../toastStore";
+import { describeError } from "../describeError";
 import { deviceShell } from "../api";
 import type { DeviceInfo } from "../types";
 

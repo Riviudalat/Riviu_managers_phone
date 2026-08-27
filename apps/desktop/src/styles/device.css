@@ -89,10 +89,6 @@
   overflow-y: auto;
   overscroll-behavior: contain;
 }
-.device-menu-branch {
-  display: flex;
-  flex-direction: column;
-}
 /* A submenu's rows, in a panel beside the row that owns it — opened by hovering, and
    positioned in viewport coordinates by the component. It is portalled to `body`, so it is a
    sibling of every menu rather than a child of one, and it must out-stack both the tile menu

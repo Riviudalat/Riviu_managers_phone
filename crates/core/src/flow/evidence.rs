@@ -531,6 +531,21 @@ pub(crate) async fn evaluate_postcondition(
     Ok(result)
 }
 
+/// `evaluate_postcondition`, and an error rather than a `matched: false` result.
+///
+/// **Test-only, and `#[cfg(test)]` rather than `#[allow(dead_code)]` on purpose.** Production
+/// calls `evaluate_postcondition` and reads `matched` itself (`executor.rs`, the
+/// `match evaluate_postcondition(..)` arm), because a postcondition that did not match is a
+/// node outcome to record rather than an error to propagate. This composition exists so the
+/// tests below can assert "and it must not match" in one line.
+///
+/// It was invisible until now: `flow/mod.rs` carried `#[allow(dead_code)]` on four whole
+/// modules, and a module-wide allow hides everything inside it. Removing those four attributes
+/// surfaced exactly two items -- this and `executor::last_launch_bundle_before` -- and both turned
+/// out to be test helpers rather than dead code. The lesson is about the attribute, not the
+/// functions: an allow scoped to a module cannot say which item it is forgiving, so it forgives
+/// every future one too.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn verify_postcondition(
     source: &dyn GenerationFrameSource,

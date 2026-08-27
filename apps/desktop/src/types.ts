@@ -212,9 +212,6 @@ export type PageId =
   | "api"
   | "settings";
 
-/** @deprecated use PageId */
-export type TabId = PageId;
-
 export interface DeviceMeta {
   udid: string;
   notes: string;
@@ -507,10 +504,17 @@ export interface NurtureSettings {
 
 /// Which settings a **running** session picks up on its next post.
 ///
-/// The same split as `NurtureSettings::absorb_live_changes` on the Rust side, and it has to
-/// stay the same split: this list is what the UI promises, that one is what the loop does.
-/// Anything not here needs the session stopped and started again, and the form says so
-/// rather than letting the operator wonder why a change did nothing.
+/// The same split as `NurtureSettings::absorb_live_changes` on the Rust side, and it has to stay
+/// the same split: this list is the declaration, that one is the behaviour.
+///
+/// **Read by two tests and by no component, and that is worth stating plainly** — an earlier
+/// version of this comment said the badges read it, and they do not:
+/// `NurturePopup` renders from `RESTART_REQUIRED_REASONS`, which is the other half of the same
+/// split, written independently. So this constant looks unused from inside TypeScript while
+/// `crates/core/src/types.rs` asserts on it via `include_str!` — delete it and `cargo test`
+/// goes red from a change made entirely here. `nurtureLiveFields.test.ts` reads it from this
+/// side too, both to make that visible and to keep the two lists from ever naming the same
+/// field.
 export const LIVE_TUNABLE_FIELDS = new Set<keyof NurtureSettings>([
   "likeProb",
   "commentProb",
@@ -1071,8 +1075,6 @@ export interface PortDefinition {
   required: boolean;
 }
 
-export type FlowPortDefinition = PortDefinition;
-
 export interface ActionDefinition {
   kind: ActionKind;
   schemaVersion: number;
@@ -1217,8 +1219,6 @@ export interface FlowContextPlan {
   requiresFreshTextSession: boolean;
   initialBundleId: string | null;
 }
-
-export type ContextPlan = FlowContextPlan;
 
 export interface CompiledFlowPlanV2 {
   schemaVersion: 2;
@@ -1466,15 +1466,6 @@ export interface FlowRunDetail {
   deviceRuns: FlowDeviceRunRecord[];
   attempts: FlowNodeAttemptRecord[];
   artifacts: FlowArtifactRecord[];
-}
-
-export interface FlowEventRecord {
-  id: number;
-  runId: string;
-  revision: number;
-  kind: string;
-  payload: JsonValue;
-  createdAt: string;
 }
 
 export interface RevisionConflict {

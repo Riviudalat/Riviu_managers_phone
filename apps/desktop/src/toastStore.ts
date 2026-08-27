@@ -81,7 +81,6 @@ export function toastError(title: string, cause: unknown) {
   pushToast("error", title, describeError(cause));
 }
 
-export { describeError } from "./describeError";
 
 export function useToasts(): ToastRecord[] {
   return useSyncExternalStore(

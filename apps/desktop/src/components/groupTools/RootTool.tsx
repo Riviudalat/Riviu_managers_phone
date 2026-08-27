@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { factoryReset, isRooted, rootShell, setDeviceIdentity } from "../../api";
 import { requestConfirm } from "../../confirmStore";
-import { describeError, pushToast } from "../../toastStore";
+import { describeError } from "../../describeError";
+import { pushToast } from "../../toastStore";
 import { fanOutReasons } from "../../fanout";
 import { randomAndroidId, randomMac, randomSerial } from "./randomIdentity";
 

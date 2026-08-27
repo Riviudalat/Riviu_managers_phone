@@ -193,15 +193,6 @@
 
 /* "Chức năng khác": where the overlay's own icon rows end and the shared per-phone catalog
    begins. A heading rather than a rule, so the operator can tell the two apart while
-   searching one list. */
-.focus-menu-label {
-  margin: 0.5rem 0 0.1rem;
-  padding: 0 0.9rem;
-  color: #94a3b8;
-  font-size: var(--text-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
 /* The shared list's own chrome inside this panel: the rows are styled by
    `.focus-menu-list button` above, so only the search box and the notes need saying. */
 .focus-menu-list .device-menu-search {
@@ -342,25 +333,6 @@
   cursor: not-allowed;
 }
 
-.settings-card {
-  margin-top: 0.85rem;
-  padding: 0.9rem 1rem;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--bg-muted);
-}
-.settings-card h3 {
-  margin: 0 0 0.45rem;
-  font-size: var(--text-base);
-}
-.settings-card label {
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-  margin: 0.55rem 0;
-  font-size: var(--text-md);
-  color: var(--text-2);
-}
 .menu-item .mi svg {
   display: block;
 }

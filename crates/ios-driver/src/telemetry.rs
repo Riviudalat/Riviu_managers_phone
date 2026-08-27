@@ -117,14 +117,6 @@ pub struct Percentiles {
     pub max: u32,
 }
 
-pub fn percentiles(endpoint: &str) -> Percentiles {
-    let g = inner().lock();
-    let Some(bucket) = g.per_endpoint.get(endpoint) else {
-        return Percentiles::default();
-    };
-    pct(&bucket.samples)
-}
-
 fn pct(samples: &[u32]) -> Percentiles {
     if samples.is_empty() {
         return Percentiles::default();

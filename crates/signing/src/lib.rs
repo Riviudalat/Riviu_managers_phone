@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use chrono::{DateTime, Duration, Utc};
-use riviu_core::{AppleIdConfig, WdaStatus};
+use riviu_core::AppleIdConfig;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
@@ -25,14 +25,6 @@ fn background_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
         command.creation_flags(CREATE_NO_WINDOW);
     }
     command
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SignRequest {
-    pub udid: String,
-    pub wda_ipa_or_app: PathBuf,
-    pub output_ipa: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,17 +213,6 @@ impl SigningService {
             results.push(self.sign_and_install_wda(udid, wda_source).await?);
         }
         Ok(results)
-    }
-
-    pub fn wda_status(udid: &str, expires_at: Option<DateTime<Utc>>, running: bool) -> WdaStatus {
-        let days_remaining = expires_at.map(|exp| (exp - Utc::now()).num_days());
-        WdaStatus {
-            udid: udid.to_string(),
-            installed: expires_at.is_some(),
-            running,
-            expires_at,
-            days_remaining,
-        }
     }
 }
 

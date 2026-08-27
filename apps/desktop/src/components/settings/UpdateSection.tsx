@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { updateCheck, updateInstall } from "../../api";
-import { describeError } from "../../toastStore";
+import { describeError } from "../../describeError";
 import { updateView } from "../../updateView";
 import type { UpdateStatus } from "../../types";
 

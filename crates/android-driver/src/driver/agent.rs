@@ -610,19 +610,6 @@ impl AndroidDriver {
         self.agents.lock().insert(serial.to_string(), agent.clone());
         Ok(agent)
     }
-    /// Drop and delete the cached session for one device.
-    ///
-    /// Awaits, so it cannot be called from `invalidate_ui_session`, which is
-    /// synchronous. That one only forgets the entry; this is the path that also
-    /// tells the device.
-    pub async fn close_agent(&self, serial: &str) {
-        let agent = self.agents.lock().remove(serial);
-        if let Some(agent) = agent {
-            if let Err(error) = agent.close().await {
-                tracing::warn!(serial, %error, "could not delete the agent session");
-            }
-        }
-    }
     /// Start the instrumentation runner and let it keep running.
     ///
     /// `am instrument -w` blocks for the life of the server, so the child is

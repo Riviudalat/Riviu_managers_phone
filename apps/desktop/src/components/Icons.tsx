@@ -37,14 +37,6 @@ export function IconChevronRight({ size = 18, className }: IconProps) {
   );
 }
 
-export function IconChevronLeft({ size = 18, className }: IconProps) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
-      <path d="M14.5 5.5 8 12l6.5 6.5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
 export function IconCheck({ size = 18, className }: IconProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
@@ -160,10 +152,6 @@ export function IconChart({ size = 18, className }: IconProps) {
       <path d="M8 15V10M12 15V7M16 15v-5" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
     </svg>
   );
-}
-
-export function IconTeam({ size = 18, className }: IconProps) {
-  return <IconUsers size={size} className={className} />;
 }
 
 export function IconLog({ size = 18, className }: IconProps) {

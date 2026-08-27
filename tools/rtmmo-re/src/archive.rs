@@ -58,10 +58,6 @@ impl ArchiveData {
     pub fn entry_bytes(&self, path: &str) -> Option<&[u8]> {
         self.entry_bytes.get(path).map(Vec::as_slice)
     }
-
-    pub fn regular_entry_paths(&self) -> impl Iterator<Item = &str> {
-        self.entry_bytes.keys().map(String::as_str)
-    }
 }
 
 pub fn macho_candidates(archive: &ArchiveData) -> Vec<(&str, &[u8])> {

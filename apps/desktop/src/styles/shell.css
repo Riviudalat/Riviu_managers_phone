@@ -224,12 +224,6 @@
   padding-left: 0.5rem;
   white-space: nowrap;
 }
-.topbar-sub {
-  display: none;
-}
-.topbar-spacer {
-  display: none;
-}
 .topbar-actions {
   display: flex;
   align-items: center;

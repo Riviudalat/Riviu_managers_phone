@@ -97,10 +97,21 @@ jobs:
       - name: Check Python tooling
         shell: pwsh
         run: |
-          python -m py_compile scripts/build_desktop_sidecar.py scripts/collect_desktop_ci_artifacts.py scripts/test_collect_desktop_ci_artifacts.py sidecars/pymobiledevice3/pyinstaller_runtime_hook.py sidecars/signer/riviu_signer.py sidecars/wda/build_and_install.py sidecars/wda/test_build_and_install.py
+          python -m py_compile scripts/build_desktop_sidecar.py scripts/collect_desktop_ci_artifacts.py scripts/test_collect_desktop_ci_artifacts.py sidecars/pymobiledevice3/pyinstaller_runtime_hook.py sidecars/signer/riviu_signer.py sidecars/wda/build_and_install.py sidecars/wda/test_build_and_install.py tools/interaction-gate0/probe.py tools/interaction-gate0/test_probe.py
           node scripts/run_python.mjs scripts/build_desktop_sidecar.py --help
           python scripts/collect_desktop_ci_artifacts.py verify-version
           python -m unittest -v scripts.test_collect_desktop_ci_artifacts sidecars.pymobiledevice3.test_app_control sidecars.pymobiledevice3.test_rtmmo_lifecycle sidecars.signer.test_riviu_signer sidecars.wda.test_build_and_install
+          # The Gate 0 probe: 37 tests over the iOS interaction transport contract -- auth
+          # 401/401/200 on every control route and on MJPEG, the exact `POST /url` bodies for
+          # direct-video, short-link and photo, and the action-completion boundary that stops a
+          # queued pre-action frame becoming evidence.
+          #
+          # **Added here because it was the only Python in the repo that CI never ran**, which
+          # made it the only Python free to rot. It was nominated for deletion as a "macOS-only
+          # one-off"; measured, all 37 pass on the Windows runner in ~24 s and nothing but the
+          # unused `vision_ocr.swift` beside them is macOS-specific. A suite that green in a
+          # minute is worth a minute.
+          python -m unittest discover -s tools/interaction-gate0 -p "test_probe.py" -v
 
       # Repo-side digest check for the bundled Android tools. Deliberately in the
       # quality job as well as in the packaged verification: a PR that replaces a

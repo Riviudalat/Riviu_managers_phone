@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { arpScan, wifiAdbConnect, type ArpEntry } from "../../api";
-import { describeError } from "../../toastStore";
+import { describeError } from "../../describeError";
 
 /** Connecting a phone over Wi-Fi adb, and scanning ARP to find one. */
 export function WifiAdbSection() {

@@ -282,10 +282,6 @@ impl HumanBehavior {
         let unit = rng.gen_range(0.0..1.0_f64).powf(0.7);
         (280.0 + 480.0 * unit).round() as u64
     }
-
-    pub fn reset_swipe_streak(&mut self) {
-        self.consecutive_swipes = 0;
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,19 +308,6 @@ pub fn roll_feed_action(like_prob: u32, comment_prob: u32) -> FeedAction {
 pub fn roll_bool(prob_percent: u32) -> bool {
     let mut rng = rand::thread_rng();
     rng.gen_range(0..100) < prob_percent.min(100)
-}
-
-pub fn pick_direction(raw: &str) -> Option<String> {
-    let parts: Vec<_> = raw
-        .split('|')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .collect();
-    if parts.is_empty() {
-        return None;
-    }
-    let mut rng = rand::thread_rng();
-    Some(parts[rng.gen_range(0..parts.len())].to_string())
 }
 
 /// Deterministic direction selection for a prepared comment. A retry for the

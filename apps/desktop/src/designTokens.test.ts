@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import appManifestRaw from "./App.css?raw";
 import fontsCssRaw from "./assets/fonts/fonts.css?raw";
 import indexCssRaw from "./index.css?raw";
+import indexHtmlRaw from "../index.html?raw";
 
 // `App.css` is a manifest of `@import`s now, so reading it alone reads no rules at all — which
 // is how a source-scanning test goes green while checking nothing. The count below is the
@@ -231,5 +232,82 @@ describe("colours", () => {
         `${gone} is back, and it has a token`,
       ).not.toContain(gone);
     }
+  });
+});
+
+/**
+ * **A class nothing renders is a rule nobody can see and everybody has to read.**
+ *
+ * Thirteen of them had accumulated, including three `.nurture-cost-*` rules left behind when a
+ * cost panel was removed without its stylesheet, and `.settings-card` and `.topbar-*` from
+ * layouts that changed shape. None of them break anything. All of them make the next person
+ * wonder what renders them.
+ *
+ * Written as a scan rather than a one-time sweep because that is the difference between the list
+ * being clean today and staying clean.
+ *
+ * **The interesting part is what counts as a use, and the first draft of this got it wrong.**
+ * A bare-word search reported `banner-info` and `banner-error` as dead. They are rendered — by
+ * `` className={`banner banner-${tone}`} `` in `States.tsx`, where `tone` is
+ * `"info" | "warn" | "error"`. Deleting them on that report would have taken out the styling of
+ * every info and error banner in the app, which is a considerably worse outcome than the tidiness
+ * it was buying.
+ *
+ * So a class counts as used if it appears as a bare word **or** if it begins with a prefix that
+ * the TypeScript interpolates into — every `` `foo-${ `` in the source makes `foo-anything` a
+ * possible class. That is deliberately generous: a scan of this kind should err towards leaving
+ * a rule alone, because a false positive here is a deletion and a false negative is a comment
+ * nobody reads.
+ */
+const CLASS_ALLOWLIST = new Set([
+  // Styled as a companion to bare `button` selectors (`button, .btn { ... }`), so the rules stay
+  // useful for a non-`<button>` element that opts in. Removing the `.btn` half would leave the
+  // rules intact and take away that opt-in.
+  "btn",
+  // Rendered by `@xyflow/react`, not by this app. The rules here override the library's own
+  // styling, so nothing in `src/` will ever name it and it is emphatically not dead.
+  "react-flow",
+]);
+
+describe("the stylesheets", () => {
+  it("has no rule for a class nothing renders", () => {
+    const sources = Object.values(
+      import.meta.glob("./**/*.{ts,tsx}", { eager: true, query: "?raw", import: "default" }),
+    ) as string[];
+    const markup = [...sources, indexHtmlRaw].join("\n");
+
+    const selectors = new Set<string>();
+    for (const [, css] of styleSheets) {
+      for (const match of code(css).matchAll(/\.(-?[_a-zA-Z][\w-]*)/g)) {
+        selectors.add(match[1]);
+      }
+    }
+
+    // Every `foo-${` in the source: a class beginning with `foo-` may be built at runtime.
+    const interpolatedPrefixes = [
+      ...markup.matchAll(/([A-Za-z][\w-]*-)\$\{/g),
+    ].map((match) => match[1]);
+
+    const unused = [...selectors]
+      .filter((name) => !CLASS_ALLOWLIST.has(name))
+      .filter((name) => !new RegExp(`\\b${name}\\b`).test(markup))
+      .filter((name) => !interpolatedPrefixes.some((prefix) => name.startsWith(prefix)))
+      .sort();
+
+    expect(
+      unused,
+      "these classes are styled and never rendered; delete the rules or render them",
+    ).toEqual([]);
+  });
+
+  /** Anti-rot: a glob that matched nothing would make the assertion above vacuous. */
+  it("scanned a believable number of selectors", () => {
+    const selectors = new Set<string>();
+    for (const [, css] of styleSheets) {
+      for (const match of code(css).matchAll(/\.(-?[_a-zA-Z][\w-]*)/g)) {
+        selectors.add(match[1]);
+      }
+    }
+    expect(selectors.size).toBeGreaterThan(300);
   });
 });

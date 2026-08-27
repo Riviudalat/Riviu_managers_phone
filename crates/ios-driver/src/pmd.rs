@@ -669,6 +669,16 @@ impl PmdIosDriver {
     }
 
     /// Inspect metadata through an already-established RSD endpoint.
+    ///
+    /// **Kept deliberately, and it is the only thing that constructs
+    /// `InteractionInspectionTransport::Rsd`.**
+    ///
+    /// It has no caller, so a reference count calls it dead. Deleting it says otherwise: the
+    /// `Rsd` variant then has no constructor, and removing *that* means deleting the RSD
+    /// branch from `interaction_inspection_args` -- which is not removing dead code, it is
+    /// removing the ability to inspect a device over RSD at all. The decision for this pass was
+    /// to leave iOS alone, and this is iOS. Found by deleting it and reading what the compiler
+    /// said next.
     pub async fn inspect_interaction_device_over_rsd(
         &self,
         udid: &str,

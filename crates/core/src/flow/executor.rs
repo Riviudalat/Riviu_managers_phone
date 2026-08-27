@@ -2132,6 +2132,12 @@ fn target_bundle_id(plan: &CompiledFlowPlanV2) -> Option<&str> {
     })
 }
 
+/// Test-only: the bundle id of the last `launch` node before `end`.
+///
+/// `#[cfg(test)]` rather than an allow, for the same reason as
+/// `evidence::verify_postcondition` -- see the note there. Surfaced by removing the module-wide
+/// `#[allow(dead_code)]` in `flow/mod.rs`.
+#[cfg(test)]
 fn last_launch_bundle_before(plan: &CompiledFlowPlanV2, end: usize) -> Option<&str> {
     plan.execution_order
         .get(..end)?

@@ -187,7 +187,11 @@ Trước và sau vòng final: **1 `wda-proxy`, 1 `tidevice relay` (18100), 1 `ti
 
 ## 4. Đối chiếu tiêu chí
 
-| Tiêu chí (note.md) | Kết quả |
+> Các tiêu chí dưới đây đến từ `note.md`, bản giao việc đã **xoá khỏi repo 27/08/2026** cùng
+> `docs/claude/` — hai thứ duy nhất còn trích nó. Nội dung yêu cầu được giữ nguyên trong bảng
+> này, và git history giữ phần còn lại. Đổi tiêu đề cột để không ai đi tìm một file không còn ở đó.
+
+| Tiêu chí (bản giao việc 26/07/2026) | Kết quả |
 |---|---|
 | 10 video liên tục | ✅ 18 |
 | ≥3 tap like thành công | ⚠️ 4 ở smoke10, 2 ở final (xem §5.2) |

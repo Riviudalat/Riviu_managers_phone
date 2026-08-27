@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { clearAppleId, getAppleId, setAppleId } from "../../api";
-import { describeError } from "../../toastStore";
+import { describeError } from "../../describeError";
 
 /** Apple ID for the legacy stock-agent path. */
 export function LegacyAgentSection() {

@@ -515,16 +515,6 @@ impl AgentStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WdaStatus {
-    pub udid: String,
-    pub installed: bool,
-    pub running: bool,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub days_remaining: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct DeviceMeta {
     pub udid: String,
     pub notes: String,
@@ -1687,9 +1677,15 @@ mod nurture_tuning_tests {
         // `absorb_live_changes` is documented as "this list and that list are the same
         // list". They were not: this function copies `human_limits`, and the frontend's
         // LIVE_TUNABLE_FIELDS had never listed it. Nothing showed, because nothing read the
-        // frontend list -- three restart badges hardcoded their reason strings instead. Now
-        // the badges read the list, so the drift would have become a badge telling the
-        // operator to restart for a field the loop picks up on its own.
+        // frontend list -- three restart badges hardcoded their reason strings instead.
+        //
+        // **The old version of this comment then claimed "now the badges read the list", and
+        // that is not what happened.** The badges read `RESTART_REQUIRED_REASONS`, a separate
+        // map keyed by field. So this test is still the *only* consumer of
+        // LIVE_TUNABLE_FIELDS on the Rust side, which is exactly why it looks deletable from
+        // TypeScript. `nurtureLiveFields.test.ts` now reads it from that side as well, and
+        // asserts the two frontend lists never name the same field -- a field in both would
+        // show a restart badge for a value this function had already absorbed.
         let types_ts = include_str!("../../../apps/desktop/src/types.ts");
         let declared: std::collections::BTreeSet<String> = types_ts
             .lines()

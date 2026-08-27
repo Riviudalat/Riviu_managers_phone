@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { deviceDeletePath, deviceListDir, devicePullPath, devicePushFile } from "../api";
 import { requestConfirm } from "../confirmStore";
-import { describeError, pushToast, toastError } from "../toastStore";
+import { describeError } from "../describeError";
+import { pushToast, toastError } from "../toastStore";
 import { pickDirectory, pickFile } from "../pickFile";
 import {
   deviceCrumbs,

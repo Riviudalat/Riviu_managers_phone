@@ -437,10 +437,6 @@ impl AndroidDriver {
         drop(claim);
         started.map(|_| ())
     }
-    /// Stop the feed for one device, if we own one.
-    pub async fn stop_minicap(&self, serial: &str) {
-        self.take_and_stop_producer(serial).await;
-    }
     fn view_sink(&self) -> anyhow::Result<Arc<dyn crate::view::ViewSink>> {
         self.view_sink.lock().clone().ok_or_else(|| {
             anyhow!(

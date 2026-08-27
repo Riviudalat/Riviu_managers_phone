@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { exampleScript, listScripts, saveScript } from "../api";
-import { describeError } from "../toastStore";
+import { describeError } from "../describeError";
 
 interface Props {
   onUseInJobs: (json: string) => void;

@@ -101,14 +101,6 @@
   font-size: var(--text-base);
   color: var(--primary);
 }
-.nurture-float-live {
-  margin: 0 0 0.45rem;
-  font-size: var(--text-sm);
-  color: var(--text-2);
-  background: var(--primary-50);
-  border-radius: 4px;
-  padding: 0.35rem 0.45rem;
-}
 .nurture-float-log {
   display: flex;
   flex-direction: column;
@@ -205,17 +197,6 @@
   background: var(--danger-soft);
   border-radius: 4px;
   padding: 0.35rem 0.45rem;
-}
-.nurture-sect-toggle {
-  width: 100%;
-  text-align: left;
-  border: none;
-  background: transparent;
-  padding: 0.35rem 0;
-  font-size: var(--text-sm);
-  font-weight: 600;
-  color: var(--text-1);
-  cursor: pointer;
 }
 .nurture-sect {
   display: flex;
@@ -569,13 +550,6 @@
   border-style: dashed;
   color: var(--text-3);
 }
-.nu-summary {
-  margin: 0.1rem 0 0;
-  color: var(--text-3);
-  font-size: var(--text-2xs);
-  line-height: 1.45;
-}
-
 /* A switch, not a checkbox. `appearance: none` keeps it a checkbox to the accessibility
    tree and to every test that finds it by label. */
 .nu-pane .nu-switch {
@@ -729,29 +703,6 @@
   font-size: var(--text-md);
   color: var(--text-1);
   font-weight: 500;
-}
-.nurture-cost-mini {
-  margin-top: 0.35rem;
-}
-.nurture-cost-head {
-  font-size: var(--text-sm);
-  font-weight: 600;
-  margin-bottom: 0.3rem;
-  color: var(--text-1);
-}
-.nurture-cost-row {
-  display: grid;
-  grid-template-columns: 64px 48px 1fr;
-  gap: 0.35rem;
-  font-size: var(--text-sm);
-  padding: 0.2rem 0;
-  border-bottom: 1px solid var(--line);
-  color: var(--text-2);
-}
-.nurture-cost-row span:last-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .mono {
   font-family: var(--font-mono);
@@ -1099,9 +1050,4 @@
 .group-chip-num {
   font-weight: 600;
   flex: 0 0 auto;
-}
-.group-chip-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }

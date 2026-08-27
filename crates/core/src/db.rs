@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use uuid::Uuid;
 
-use crate::types::{JobRecord, JobStatus, JobStepRecord, StepStatus};
+use crate::types::{JobRecord, JobStatus, JobStepRecord};
 
 mod fleet;
 mod flow_runs;
@@ -61,11 +61,6 @@ impl Database {
         };
         db.migrate()?;
         Ok(db)
-    }
-
-    pub fn default_path() -> anyhow::Result<PathBuf> {
-        let base = dirs::data_dir().context("no data dir")?;
-        Ok(base.join("riviu-managers-phone").join("riviu.db"))
     }
 
     /// Attach the place secrets live. Without one, secrets stay in the SQLite blob as before.
@@ -300,16 +295,6 @@ impl JobRow {
             steps: serde_json::from_str::<Vec<JobStepRecord>>(&self.steps_json).unwrap_or_default(),
             error: self.error,
         })
-    }
-}
-
-pub fn step_label(status: &StepStatus) -> &'static str {
-    match status {
-        StepStatus::Pending => "pending",
-        StepStatus::Running => "running",
-        StepStatus::Succeeded => "succeeded",
-        StepStatus::Failed => "failed",
-        StepStatus::Skipped => "skipped",
     }
 }
 

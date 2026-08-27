@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { launchDeviceApp, listInstalledApps } from "../api";
-import { describeError, pushToast, toastError } from "../toastStore";
+import { describeError } from "../describeError";
+import { pushToast, toastError } from "../toastStore";
 import { IconRefresh } from "./Icons";
 import {
   installedAppsFootnote,

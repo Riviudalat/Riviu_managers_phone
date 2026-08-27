@@ -154,9 +154,6 @@ const FOLLOW_TO_COMMENT: f64 = 113.0 / 667.0;
 const FOLLOW_Y_LAYOUT1: f64 = 223.0 / 667.0;
 const FOLLOW_Y_LAYOUT2: f64 = 259.0 / 667.0;
 
-/// Fallback when the badge cannot be located: layout 2, the one this device
-/// showed in every capture.
-pub const FOLLOW_Y: f64 = FOLLOW_Y_LAYOUT2;
 /// Centre y of the like heart, layout 2.
 pub const LIKE_Y: f64 = FOLLOW_Y_LAYOUT2 + FOLLOW_TO_LIKE;
 
@@ -174,9 +171,6 @@ pub const LIKE_Y: f64 = FOLLOW_Y_LAYOUT2 + FOLLOW_TO_LIKE;
 /// genuine fill to 60 read as "no change", while an outline over red at 58.7
 /// tripped the old `> 45` "already liked" check and skipped the like entirely.
 pub const LIKE_FILLED_REDNESS: f64 = 90.0;
-/// Centre y of the comment bubble, layout 2.
-pub const COMMENT_Y: f64 = FOLLOW_Y_LAYOUT2 + FOLLOW_TO_COMMENT;
-
 /// The author "+ Follow" pill a LIVE room shows top-left, in screen fractions.
 const LIVE_FOLLOW_PILL: (f64, f64, f64, f64) = (0.36, 0.052, 0.55, 0.088);
 /// Colour margins for that pill. Measured: LIVE rooms R−G 152–176 and R−B

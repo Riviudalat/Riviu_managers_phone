@@ -375,14 +375,6 @@ export function detachViewCanvas(udid: string, surfaceId: string) {
   worker?.postMessage({ type: "detach", udid, surfaceId });
 }
 
-export function peekViewSize(udid: string): ViewSize | undefined {
-  return sizes.get(udid);
-}
-
-export function peekViewLive(udid: string): boolean {
-  return live.has(udid);
-}
-
 export function exportViewJpeg(udid: string): Promise<Uint8Array | null> {
   const target = ensureWorker();
   if (!target) return Promise.resolve(null);
