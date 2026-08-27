@@ -1457,11 +1457,19 @@ async fn reserve_context(
         match driver.stop_owned_stream(&revoked_udid).await {
             Ok(proof) => proof,
             Err(error) => {
+                // **Give the slot back before returning.** `ForegroundTransfer` has no
+                // `Drop`, and both the victim's `Revoking` and a freshly reserved
+                // `ForegroundReserved` occupy capacity -- so dropping it here left the slot
+                // counted for the life of the process, and `release_reserved` could not
+                // clean it up because `Revoking` is not releasable. Repeating this on
+                // distinct producers walked the fleet's capacity down to nothing while the
+                // quarantine count only said that *something* had failed.
+                streams.abandon_transfer(transfer, std::time::Instant::now());
                 return Err(ContextTransitionFailure {
                     error: driver_error(&revoked_udid, "stopOwnedStream", error),
                     context,
                     quarantine: true,
-                })
+                });
             }
         }
     } else {
@@ -1470,11 +1478,15 @@ async fn reserve_context(
     let reservation = match streams.complete_transfer(transfer, proof) {
         Ok(reservation) => reservation,
         Err(error) => {
+            // `complete_transfer` consumed the transfer, so the record has to be released
+            // by udid rather than by handing the transfer back. Same leak, same reason as
+            // the stop path above.
+            let _ = streams.release_reserved_by_udid(&udid);
             return Err(ContextTransitionFailure {
                 error: error.into(),
                 context,
                 quarantine: true,
-            })
+            });
         }
     };
     context.ui_capacity_token = Some(reservation.token());

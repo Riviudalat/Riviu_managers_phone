@@ -516,6 +516,55 @@ impl StreamBudgetManager {
         Ok(())
     }
 
+    /// Give back a transfer that will never complete.
+    ///
+    /// **Without this the slot was counted forever.** `begin_foreground_transfer` puts the
+    /// victim into `Revoking` with a `pending_transfer`, or inserts a fresh
+    /// `ForegroundReserved` record. `ForegroundTransfer` has no `Drop`, and both states
+    /// occupy capacity — so when `stop_owned_stream` failed, or `complete_transfer` rejected
+    /// the proof, `reserve_context` returned a quarantined context and the record simply
+    /// stayed. `release_reserved` could not clean it up either: `Revoking` is not a releasable
+    /// state and `pending_transfer` was still set. The quarantine count reported that
+    /// *something* failed; the stream slot was gone regardless, and repeating it on distinct
+    /// producers walked the fleet's configured capacity down to nothing.
+    ///
+    /// Two shapes to undo, and they are not symmetric:
+    ///
+    /// * **A fresh slot** (`revoked_udid == None`) was invented for this transfer and nothing
+    ///   was ever started on it, so it is removed outright.
+    /// * **A victim** is put into `FailedBackoff` rather than back into
+    ///   `BackgroundRunning`. This path is only reached when the stop failed or its proof was
+    ///   rejected, so the producer's real state is unknown — claiming it is running again
+    ///   would be a guess, and a confident one. `FailedBackoff` does not occupy capacity
+    ///   (`ProducerState::occupies_capacity`), which fixes the leak, and it is the state the
+    ///   sampler already knows how to recover from after the backoff expires.
+    ///
+    /// Found by an independent review on 27/08/2026.
+    pub fn abandon_transfer(&self, transfer: ForegroundTransfer, now: Instant) {
+        let mut state = self.inner.lock();
+        let Some(record) = state.records.get_mut(&transfer.slot_token) else {
+            return;
+        };
+        // Only undo *this* transfer. A newer one may already own the record.
+        if record
+            .pending_transfer
+            .as_ref()
+            .is_some_and(|pending| pending.transfer_id != transfer.transfer_id)
+        {
+            return;
+        }
+        record.pending_transfer = None;
+        if transfer.revoked_udid.is_none() {
+            state.remove(transfer.slot_token);
+            return;
+        }
+        record.state = ProducerState::FailedBackoff {
+            until: now + self.failure_backoff,
+        };
+        record.producer_running = false;
+        record.turn_deadline = None;
+    }
+
     pub fn release_reserved(&self, token: Uuid) -> Result<(), StreamBudgetError> {
         let mut state = self.inner.lock();
         let record = state.record(token)?;
@@ -933,6 +982,60 @@ mod tests {
             .is_ok());
     }
 
+    /// **An abandoned transfer gives its slot back, on both shapes.**
+    ///
+    /// `ForegroundTransfer` has no `Drop`, and both states it can leave behind occupy
+    /// capacity: the victim sits at `Revoking` and a freshly invented slot at
+    /// `ForegroundReserved`. So when `stop_owned_stream` failed or `complete_transfer`
+    /// rejected the proof, `reserve_context` returned a quarantined context and the record
+    /// simply stayed -- `release_reserved` could not clean it either, because `Revoking` is
+    /// not a releasable state and `pending_transfer` was still set. Repeating it on distinct
+    /// producers walked the configured capacity down to nothing, while the quarantine count
+    /// only reported that *something* had failed.
+    ///
+    /// The victim goes to `FailedBackoff` rather than back to `BackgroundRunning`: this path
+    /// is reached only when the stop failed, so the producer's real state is unknown and
+    /// claiming it runs again would be a guess. `FailedBackoff` does not occupy capacity,
+    /// which is what actually frees the slot.
+    #[test]
+    fn an_abandoned_transfer_gives_its_slot_back() {
+        // Shape one: a victim was revoked.
+        let budget = StreamBudgetManager::new(1).unwrap();
+        let start = Instant::now();
+        let victim = budget.reserve_background_at("tile-a", start).unwrap();
+        budget.mark_running(victim.token()).unwrap();
+        assert_eq!(budget.reserved_capacity(), 1);
+
+        let transfer = budget
+            .begin_foreground_transfer("tile-b", DeviceWorkOwner::ManualControl)
+            .unwrap();
+        assert!(
+            transfer.revoked_udid().is_some(),
+            "tile-a should be the victim"
+        );
+        budget.abandon_transfer(transfer, start);
+        assert_eq!(
+            budget.reserved_capacity(),
+            0,
+            "an abandoned transfer must not keep the slot"
+        );
+        // And the freed slot is usable again, which is the whole point.
+        assert!(budget
+            .reserve_background_at("tile-c", start + Duration::from_secs(1))
+            .is_ok());
+
+        // Shape two: no victim, so a fresh record was invented and must disappear.
+        let budget = StreamBudgetManager::new(2).unwrap();
+        let transfer = budget
+            .begin_foreground_transfer("tile-x", DeviceWorkOwner::ManualControl)
+            .unwrap();
+        assert!(transfer.revoked_udid().is_none(), "nothing to revoke here");
+        assert_eq!(budget.reserved_capacity(), 1);
+        budget.abandon_transfer(transfer, Instant::now());
+        assert_eq!(budget.reserved_capacity(), 0);
+        // Removed outright, not backed off: nothing was ever started on it.
+        assert!(budget.reserve_background("tile-x").is_ok());
+    }
     #[test]
     fn foreground_preempts_only_background_and_never_another_foreground() {
         let budget = StreamBudgetManager::new(2).unwrap();
