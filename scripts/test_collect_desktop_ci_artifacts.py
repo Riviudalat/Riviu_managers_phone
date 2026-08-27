@@ -999,5 +999,35 @@ class UpdaterManifestTests(unittest.TestCase):
         self.assertIn("not a checksummed release asset", str(caught.exception))
 
 
+
+class DeclaredResourcesAreVerified(unittest.TestCase):
+    """The drift that failed all three platform builds, caught in a second instead.
+
+    `assert_every_sidecar_resource_is_verified` already existed and already worked -- it is what
+    found the problem. But it only runs inside a full bundle build, so the answer arrived from
+    CI twenty minutes after the push. This is the same comparison against the same two sources
+    of truth, with no bundle needed.
+    """
+
+    def test_every_declared_resource_is_named(self):
+        artifacts.assert_every_sidecar_resource_is_verified(artifacts.VERIFIED_SIDECAR_TARGETS)
+
+    def test_the_list_does_not_name_resources_the_config_stopped_shipping(self):
+        """The other direction: a stale entry is a check nobody performs any more.
+
+        Not fatal the way a missing one is -- an extra name cannot let something ship
+        unverified -- but it makes the list read as covering more than it does.
+        """
+        resources = artifacts.load_json(artifacts.TAURI_CONFIG).get("bundle", {}).get("resources", {})
+        declared = {
+            target.rstrip("/")
+            for target in resources.values()
+            if isinstance(target, str) and target.startswith("sidecars/")
+        }
+        stale = sorted(artifacts.VERIFIED_SIDECAR_TARGETS - declared)
+        self.assertEqual(
+            stale, [], "these are named as verified but no longer declared in bundle.resources"
+        )
+
 if __name__ == "__main__":
     unittest.main()

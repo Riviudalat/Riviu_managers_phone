@@ -810,6 +810,42 @@ def verify_android_tools(root: Path) -> dict[str, Any]:
     return {"root": str(root), "files": verified}
 
 
+# Every `bundle.resources` target a check in `verify_packaged_resources` actually looks at.
+#
+# **Hand-written on purpose, and hoisted here so a test can read it.** The value of the
+# completeness assertion is that a human has to name a resource for it to count as verified --
+# accumulating it automatically would make it agree with itself. But while this list lived inside
+# `verify_packaged_resources`, the only thing that could compare it against the config was a
+# full bundle build, which happens in CI's three platform jobs and nowhere else. So when
+# `sidecars/yt-dlp/` was added to `bundle.resources` without a check, the drift was invisible
+# locally and failed all three builds twenty minutes in. `test_every_declared_resource_is_named`
+# now catches the same mistake in about a second.
+VERIFIED_SIDECAR_TARGETS = {
+    "sidecars/pymobiledevice3/requirements.txt",
+    "sidecars/pymobiledevice3/requirements-lock.txt",
+    "sidecars/pymobiledevice3/riviu_pmd.py",
+    "sidecars/signer/requirements.txt",
+    "sidecars/signer/riviu_signer.py",
+    "sidecars/wda/logo.jpg",
+    "sidecars/wda/AppIcon.appiconset",
+    "sidecars/wda/WebDriverAgent",
+    "sidecars/wda/build_and_install.py",
+    "sidecars/wda/legacy-wda-source-lock.json",
+    "sidecars/wda/agent-manifest.json",
+    "sidecars/wda/candidate-manifest.json",
+    "sidecars/wda/text-manifest.json",
+    "sidecars/wda/interaction-capabilities.json",
+    "sidecars/wda/interaction-capabilities.schema.json",
+    "sidecars/wda/interaction_vision_ocr.swift",
+    "sidecars/wda/RiviuAgent.ipa",
+    "sidecars/wda/RiviuAgent-candidate.ipa",
+    "sidecars/wda/RiviuAgent-text.ipa",
+    "sidecars/wda/Riviumanagersphone.ipa",
+    "sidecars/android",
+    "sidecars/yt-dlp",
+}
+
+
 def assert_every_sidecar_resource_is_verified(checked_targets: set[str]) -> None:
     """Fail when `bundle.resources` ships something no check above looks at.
 
@@ -887,6 +923,37 @@ def verify_packaged_resources(
         "wda/interaction_vision_ocr.swift",
     ):
         assert_same_file(REPOSITORY_ROOT / "sidecars" / relative, sidecars_root / relative)
+
+    # **yt-dlp: the one bundled binary that cannot be byte-pinned, so it is run instead.**
+    #
+    # Everything else here is compared against a committed copy. yt-dlp deliberately is not:
+    # TikTok breaks extractors on its own schedule and the only fix is a newer yt-dlp, so a
+    # pinned copy is a pinned failure (`sidecars/yt-dlp/README.md`). CI fetches the latest
+    # release per platform at build time, and the binary is gitignored.
+    #
+    # That leaves nothing to diff -- but it leaves something better to do: **run the copy that
+    # is actually in the package.** The fetch step already ran `--version` on the download; this
+    # runs it on what shipped, which is the difference that matters. This feature shipped inert
+    # once already, with the binary fetched by nobody and the app returning `NoBinary` for every
+    # lookup in silence.
+    #
+    # Found by `assert_every_sidecar_resource_is_verified` rather than by review: the resource
+    # was added to `bundle.resources` and no check here was, so the completeness gate failed all
+    # three platform builds. That is exactly the drift it was written for.
+    packaged_ytdlp_root = sidecars_root / "yt-dlp"
+    assert_same_file(
+        REPOSITORY_ROOT / "sidecars" / "yt-dlp" / "README.md",
+        packaged_ytdlp_root / "README.md",
+    )
+    packaged_ytdlp = packaged_ytdlp_root / ("yt-dlp.exe" if os.name == "nt" else "yt-dlp")
+    if not packaged_ytdlp.is_file():
+        raise ArtifactError(
+            f"the bundle has no yt-dlp at {packaged_ytdlp}; without it every TikTok web "
+            "lookup returns NoBinary and the app says nothing"
+        )
+    if packaged_ytdlp.stat().st_size == 0:
+        raise ArtifactError(f"{packaged_ytdlp} is empty")
+    ytdlp_version = run_checked([str(packaged_ytdlp), "--version"], timeout=120).stdout.strip()
 
     # The bundled Android tools: the tree is compared whole, then each file is checked
     # against its own manifest. The tree comparison is what gives completeness — a
@@ -1009,38 +1076,13 @@ def verify_packaged_resources(
             f"packaged signing resource contract failed: {signing_payload!r}"
         )
 
-    # Last, so it runs after every check above has declared what it covers. The set is
-    # written out here rather than accumulated, because the value of the assertion is
-    # that a human has to name a resource for it to count as verified.
-    assert_every_sidecar_resource_is_verified(
-        {
-            "sidecars/pymobiledevice3/requirements.txt",
-            "sidecars/pymobiledevice3/requirements-lock.txt",
-            "sidecars/pymobiledevice3/riviu_pmd.py",
-            "sidecars/signer/requirements.txt",
-            "sidecars/signer/riviu_signer.py",
-            "sidecars/wda/logo.jpg",
-            "sidecars/wda/AppIcon.appiconset",
-            "sidecars/wda/WebDriverAgent",
-            "sidecars/wda/build_and_install.py",
-            "sidecars/wda/legacy-wda-source-lock.json",
-            "sidecars/wda/agent-manifest.json",
-            "sidecars/wda/candidate-manifest.json",
-            "sidecars/wda/text-manifest.json",
-            "sidecars/wda/interaction-capabilities.json",
-            "sidecars/wda/interaction-capabilities.schema.json",
-            "sidecars/wda/interaction_vision_ocr.swift",
-            "sidecars/wda/RiviuAgent.ipa",
-            "sidecars/wda/RiviuAgent-candidate.ipa",
-            "sidecars/wda/RiviuAgent-text.ipa",
-            "sidecars/wda/Riviumanagersphone.ipa",
-            "sidecars/android",
-        }
-    )
+    # Last, so it runs after every check above has declared what it covers.
+    assert_every_sidecar_resource_is_verified(VERIFIED_SIDECAR_TARGETS)
 
     return {
         "resourceTree": "PASS",
         "androidTools": android_tools["files"],
+        "ytDlpVersion": ytdlp_version,
         "ping": "PASS",
         "embeddedTidevice": "PASS",
         "embeddedSigner": "PASS",
