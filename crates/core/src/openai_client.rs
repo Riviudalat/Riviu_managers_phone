@@ -236,6 +236,37 @@ pub fn spend_of_failure(error: &anyhow::Error) -> Option<CommentSpend> {
     error.downcast_ref::<FailedAttempt>().map(|f| f.spend)
 }
 
+/// An error for a call the gateway **already billed**, carrying what it cost.
+///
+/// **Every parse failure after a successful `chat()` used to throw the price away.** `chat`
+/// returns `(raw, prompt_tokens, completion_tokens, cost, model)`; the callers then parsed
+/// `raw` and, when the body was malformed or missing its field, returned a bare `anyhow!`.
+/// The request had been sent and charged, `prepare_grounded_comment` retried and was charged
+/// again, and because neither error was a `FailedAttempt`, `spend_of_failure` found nothing:
+/// the persisted attempt recorded zero tokens and no USD for a comment that cost money twice.
+///
+/// Measured shape of the failure: a truncated body with
+/// `usage={prompt_tokens: 475, completion_tokens: 1200, cost: 0.0012}` — the usage block is
+/// intact and readable, and it was being discarded because the *content* would not parse.
+///
+/// `record_context_skip_attempt` hard-coding `prompt_tokens: 0` was the same class, fixed
+/// earlier. Found by an independent review on 27/08/2026.
+fn billed_failure(
+    detail: String,
+    prompt: u32,
+    completion: u32,
+    cost: Option<f64>,
+) -> anyhow::Error {
+    anyhow!(FailedAttempt {
+        detail,
+        spend: CommentSpend {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            cost_usd: cost,
+        },
+    })
+}
+
 impl CommentSpend {
     fn add(&mut self, prompt: u32, completion: u32, cost: Option<f64>) {
         self.prompt_tokens = self.prompt_tokens.saturating_add(prompt);
@@ -833,15 +864,26 @@ async fn grounded_generate(
     let prompt = format!("{}{prompt}", post_text_note(text));
     let body = vision_body(settings, &sheet.jpeg, prompt, 0.75, 1200);
     let (raw, p, c, cost, _) = chat(settings, body).await?;
-    let value =
-        json_object(&raw).ok_or_else(|| anyhow!("malformed_model_output: {}", model_said(&raw)))?;
+    let value = json_object(&raw).ok_or_else(|| {
+        billed_failure(
+            format!("malformed_model_output: {}", model_said(&raw)),
+            p,
+            c,
+            cost,
+        )
+    })?;
     let comment = value
         .get("comment")
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
     if comment.trim().is_empty() {
-        return Err(anyhow!("empty_comment_field: {}", model_said(&raw)));
+        return Err(billed_failure(
+            format!("empty_comment_field: {}", model_said(&raw)),
+            p,
+            c,
+            cost,
+        ));
     }
     let model_caption = value
         .get("caption")
@@ -1333,8 +1375,14 @@ async fn grounded_generate_batch(
     let prompt = format!("{}{prompt}", post_text_note(text));
     let body = vision_body(settings, &sheet.jpeg, prompt, 0.9, budget);
     let (raw, p, c, cost, _) = chat(settings, body).await?;
-    let value =
-        json_object(&raw).ok_or_else(|| anyhow!("malformed_model_output: {}", model_said(&raw)))?;
+    let value = json_object(&raw).ok_or_else(|| {
+        billed_failure(
+            format!("malformed_model_output: {}", model_said(&raw)),
+            p,
+            c,
+            cost,
+        )
+    })?;
     let comments: Vec<String> = value
         .get("comments")
         .and_then(|v| v.as_array())
@@ -1431,29 +1479,36 @@ async fn grounded_verify(
     let prompt = format!("{}{prompt}", post_text_note(text));
     let body = vision_body(settings, &sheet.jpeg, prompt, 0.0, 300);
     let (raw, p, c, cost, model) = chat(settings, body).await?;
-    let value = json_object(&raw).ok_or_else(|| anyhow!("malformed_model_output"))?;
-    Ok(GroundedVerification {
-        relevance: score(value.get("relevance"))?,
-        evidence_support: score(value.get("evidenceSupport"))?,
-        instruction_fit: score(value.get("instructionFit"))?,
-        genericity: score(value.get("genericity"))?,
-        contradiction: value
-            .get("contradiction")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        unsupported_claim: value
-            .get("unsupportedClaim")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        ui_text_confusion: value
-            .get("uiTextConfusion")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
-        prompt_tokens: p,
-        completion_tokens: c,
-        cost_usd: cost,
-        model,
-    })
+    // Wrapped so that **every** way this body can fail to parse -- a malformed object or any
+    // of the four `score` fields -- carries the price of the call that produced it. Written as
+    // one closure rather than four `map_err`s so a fifth field added later cannot quietly
+    // reintroduce the leak.
+    let parsed = (|| -> anyhow::Result<GroundedVerification> {
+        let value = json_object(&raw).ok_or_else(|| anyhow!("malformed_model_output"))?;
+        Ok(GroundedVerification {
+            relevance: score(value.get("relevance"))?,
+            evidence_support: score(value.get("evidenceSupport"))?,
+            instruction_fit: score(value.get("instructionFit"))?,
+            genericity: score(value.get("genericity"))?,
+            contradiction: value
+                .get("contradiction")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            unsupported_claim: value
+                .get("unsupportedClaim")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            ui_text_confusion: value
+                .get("uiTextConfusion")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            prompt_tokens: p,
+            completion_tokens: c,
+            cost_usd: cost,
+            model,
+        })
+    })();
+    parsed.map_err(|error| billed_failure(error.to_string(), p, c, cost))
 }
 
 /// Ask the gateway not to spend the answer on hidden reasoning.

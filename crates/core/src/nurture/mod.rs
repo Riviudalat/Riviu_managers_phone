@@ -553,6 +553,19 @@ impl NurtureEngine {
     /// excludes named frames, not every frame older than the gesture. Callers
     /// must still read their baseline from the frame they act on, immediately
     /// before acting, rather than leaning on this to catch a stale screen.
+    /// Returns the **encoded bytes** (the same `Arc` the frame source holds, so no copy)
+    /// alongside the decoded image, and that is the point.
+    ///
+    /// Two callers persist a digest of "the frame that proved the send". They used to discard
+    /// this return value and then call `frames.latest(udid)` for a *second* read — so the
+    /// verdict came from frame N while the stored `cleared_frame_sha256` hashed whatever had
+    /// arrived by the time of that second call. On a stream a beat behind, or when the drawer
+    /// closed or a popup appeared in between, the record pointed at a screen that does not
+    /// show the delivered comment, and an audit could not reproduce the proof.
+    ///
+    /// Handing back the bytes makes that structural rather than a convention: the only frame
+    /// a caller can hash is the one the predicate accepted. Found by an independent review on
+    /// 27/08/2026.
     pub(in crate::nurture) async fn wait_for_frame_after<F>(
         &self,
         udid: &str,
@@ -560,7 +573,7 @@ impl NurtureEngine {
         stop: &AtomicBool,
         watermarks: &[u64],
         mut pred: F,
-    ) -> Option<image::RgbImage>
+    ) -> Option<(std::sync::Arc<Vec<u8>>, image::RgbImage)>
     where
         F: FnMut(&image::RgbImage) -> bool,
     {
@@ -573,7 +586,7 @@ impl NurtureEngine {
                 if !watermarks.contains(&frame_digest(&frame)) {
                     if let Some(img) = image::load_from_memory(&frame).ok().map(|i| i.to_rgb8()) {
                         if pred(&img) {
-                            return Some(img);
+                            return Some((frame, img));
                         }
                     }
                 }

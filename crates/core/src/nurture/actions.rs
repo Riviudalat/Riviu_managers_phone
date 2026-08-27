@@ -297,7 +297,10 @@ impl NurtureEngine {
         // here than in the nurture path: this frame's digest is persisted as
         // `cleared_frame_sha256`, so an unexcluded replay writes the
         // *pre-typing* screen into the record as evidence the comment posted.
-        let _cleared = self
+        // The bytes of the frame that satisfied the predicate, not a fresh read. A second
+        // `frames.latest()` here used to hash whatever had arrived by then, so the verdict and
+        // the stored evidence could describe different screens.
+        let (cleared_bytes, _cleared) = self
             .wait_for_frame_after(
                 udid,
                 Duration::from_secs(6),
@@ -307,10 +310,6 @@ impl NurtureEngine {
             )
             .await
             .ok_or_else(|| anyhow!("send_clear_not_confirmed"))?;
-        let cleared_bytes = self
-            .frames
-            .latest(udid)
-            .ok_or_else(|| anyhow!("cleared_frame_missing"))?;
         self.close_comment_ui(udid, session, gestures, screen_size, stop)
             .await;
         Ok(ThreadSendEvidence {
@@ -427,19 +426,17 @@ impl NurtureEngine {
         }
         // Same rule as the top-level comment: a frame already seen cannot be
         // the proof, and this one is persisted as evidence.
-        self.wait_for_frame_after(
-            udid,
-            Duration::from_secs(6),
-            stop,
-            &[before_send, frame_digest(&before_typing)],
-            |img| screen::comment_drawer_state(img).0 == CommentDrawer::Open,
-        )
-        .await
-        .ok_or_else(|| anyhow!("reply_clear_not_confirmed"))?;
-        let cleared_bytes = self
-            .frames
-            .latest(udid)
-            .ok_or_else(|| anyhow!("reply_cleared_frame_missing"))?;
+        // Same rule, same reason as the root path above.
+        let (cleared_bytes, _cleared) = self
+            .wait_for_frame_after(
+                udid,
+                Duration::from_secs(6),
+                stop,
+                &[before_send, frame_digest(&before_typing)],
+                |img| screen::comment_drawer_state(img).0 == CommentDrawer::Open,
+            )
+            .await
+            .ok_or_else(|| anyhow!("reply_clear_not_confirmed"))?;
         {
             let _guard = gestures.lock().await;
             let _ = session
