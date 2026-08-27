@@ -1667,4 +1667,165 @@ mod tests {
             "AGENTS.md must link the index, or the split content is unreachable from the door"
         );
     }
+    /// **No HTTP client anywhere in the workspace may be built without a deadline.**
+    ///
+    /// `wda.rs` carries this gate for its own file, and it is there because of a real bug:
+    /// `build().unwrap_or_else(|_| Client::new())` looked like graceful degradation and was
+    /// in fact a client with no request timeout at all, so a WDA call could hang forever
+    /// while holding a device lease, a stream reservation and a capacity slot.
+    ///
+    /// That gate could not see the other six builders in the workspace -- three in
+    /// `android-driver`, three in `core`. All six were measured on 27/08/2026 and all six
+    /// were already correct, so this is a gate against regression rather than a fix. It is
+    /// worth having anyway: the failure it prevents is invisible at the call site, the
+    /// tempting shape (`.build().unwrap_or_else(..)`) reads as defensive, and the cost lands
+    /// on a phone mid-campaign rather than on the developer.
+    ///
+    /// Two rules, because a timeout that exists is not the same as a timeout that is taken:
+    /// no `Client::new()` in production code, and every `Client::builder()` reaches a
+    /// `.timeout(` before its `.build()`.
+    #[test]
+    fn no_http_client_in_the_workspace_is_built_without_a_deadline() {
+        /// Remove every `#[cfg(test)] mod … { … }` block, keeping the rest.
+        ///
+        /// The repo's older scanners cut the source at the first `#[cfg(test)]` that is
+        /// followed by `mod `, and that is a truncation rather than a filter. It was already
+        /// known to be lossy — `agent_commands.rs` carries an item-level `#[cfg(test)]` on
+        /// line 1 and the cut hid all six of its commands — but the measured spread is wider
+        /// than the note describing it: **27 files** in this workspace have a first
+        /// `#[cfg(test)]` that is not the trailing test module, and several are inline test
+        /// modules early in a long file. `driver/mod.rs` opens `mod dialog_tests` on line 103
+        /// of 2,400, so a truncating scan of that file reads 4% of it and reports green.
+        ///
+        /// A scanner that silently reads 4% of a file is worse than no scanner: it answers
+        /// the question it was asked with the wrong evidence.
+        ///
+        /// The closing brace is found by indentation, which holds because `cargo fmt
+        /// --all -- --check` is itself a gate: rustfmt closes a module at the same column it
+        /// opened. Matching is newline-agnostic for the reason `all_commands` writes out —
+        /// this repo is developed on Windows with `core.autocrlf=true`, so a needle
+        /// containing a hard-coded newline finds nothing in a fresh checkout.
+        fn strip_test_modules(source: &str) -> String {
+            let mut kept: Vec<&str> = Vec::new();
+            let mut lines = source.lines().peekable();
+            while let Some(line) = lines.next() {
+                if line.trim() != "#[cfg(test)]" {
+                    kept.push(line);
+                    continue;
+                }
+                // Only a module is skipped. An item-level `#[cfg(test)]` marks a test-only
+                // helper that is still production-shaped code, and hiding it would recreate
+                // the blind spot this function exists to close.
+                let Some(next) = lines.peek() else {
+                    kept.push(line);
+                    continue;
+                };
+                if !next.trim_start().starts_with("mod ") {
+                    kept.push(line);
+                    continue;
+                }
+                let indent = line.len() - line.trim_start().len();
+                let closing = format!("{}}}", " ".repeat(indent));
+                for inner in lines.by_ref() {
+                    if inner == closing {
+                        break;
+                    }
+                }
+            }
+            kept.join("\n")
+        }
+
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if entry.file_name() != "target" {
+                        walk(&path, out);
+                    }
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .expect("the repo root resolves from the crate manifest");
+        let mut files = Vec::new();
+        walk(&repo.join("crates"), &mut files);
+        walk(&repo.join("apps/desktop/src-tauri/src"), &mut files);
+
+        let mut scanned = 0usize;
+        let mut builders = 0usize;
+        let mut deadline_free: Vec<String> = Vec::new();
+        let mut defaults: Vec<String> = Vec::new();
+
+        for path in &files {
+            let rel = path
+                .strip_prefix(&repo)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let Ok(whole) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            // Test modules are removed rather than truncated at -- see strip_test_modules.
+            let source = strip_test_modules(&whole);
+            let source = source.as_str();
+            scanned += 1;
+
+            let lines: Vec<&str> = source.lines().collect();
+            for (idx, line) in lines.iter().enumerate() {
+                let code = line.trim_start();
+                if code.starts_with("//") {
+                    continue;
+                }
+                if code.contains("Client::new()") {
+                    defaults.push(format!("{rel}:{}", idx + 1));
+                }
+                if !line.contains("Client::builder()") {
+                    continue;
+                }
+                builders += 1;
+                // A builder chain is short. Look ahead until it is built, and require the
+                // deadline to have been set by then.
+                let mut has_timeout = false;
+                for follow in lines.iter().skip(idx).take(12) {
+                    if follow.contains(".timeout(") {
+                        has_timeout = true;
+                    }
+                    if follow.contains(".build()") {
+                        break;
+                    }
+                }
+                if !has_timeout {
+                    deadline_free.push(format!("{rel}:{}", idx + 1));
+                }
+            }
+        }
+
+        // A scanner that reads nothing passes every assertion below it.
+        assert!(
+            scanned >= 40,
+            "only {scanned} source files scanned; the walk is broken"
+        );
+        assert!(
+            builders >= 7,
+            "only {builders} client builders found; the scan is broken"
+        );
+        assert!(
+            deadline_free.is_empty(),
+            "these HTTP clients are built without a `.timeout(`, so they hang instead of \
+             failing: {deadline_free:?}"
+        );
+        assert!(
+            defaults.is_empty(),
+            "`Client::new()` has no request timeout at all -- reqwest's default config sets \
+             none. Build one with an explicit deadline instead: {defaults:?}"
+        );
+    }
 }

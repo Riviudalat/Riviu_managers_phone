@@ -3092,4 +3092,178 @@ drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
             }
         }
     }
+    /// **Every short adb call goes through the two-tier queue; the long-lived ones must not.**
+    ///
+    /// The queue is per-serial ×1 inside a global ceiling, and it exists for two separate
+    /// reasons: two adb commands interleaving on one phone is a correctness bug, and twelve
+    /// 300 s transfers holding all twelve global permits made the whole fleet look hung.
+    /// Both are invisible from a call site -- a direct `Command::new(adb.path())` compiles,
+    /// runs, and works fine until a second caller shows up.
+    ///
+    /// Three sites spawn adb directly, and all three are right to: they start children that
+    /// **never exit on their own**. This is the reasoning already written at the top of this
+    /// file for scrcpy -- a permit held by a process that does not return is a permit that
+    /// never comes back, and the fleet deadlocks at the twelfth phone. So the rule is not "no
+    /// direct spawns" but "no *undeclared* direct spawns", and each exemption says which
+    /// long-lived child it starts.
+    ///
+    /// Checked from both ends: a new spawn site fails until it is either queued or declared,
+    /// and a declaration that no longer matches a real site fails too.
+    #[test]
+    fn nothing_spawns_adb_outside_the_queue_without_saying_why() {
+        /// Sites that start a child which runs until something stops it, so they must not
+        /// hold a queue permit while it does.
+        const LONG_LIVED: [(&str, &str); 3] = [
+            (
+                "driver/agent.rs",
+                "am instrument -w blocks for the life of the uiautomator2 server",
+            ),
+            (
+                "driver/stream.rs",
+                "minicap and the scrcpy server both run until the stream is stopped",
+            ),
+            (
+                "adb.rs",
+                "this file is the queue: enter_adb_slot is taken before the spawn",
+            ),
+        ];
+
+        /// Remove every `#[cfg(test)] mod … { … }` block, keeping the rest.
+        ///
+        /// The repo's older scanners cut the source at the first `#[cfg(test)]` that is
+        /// followed by `mod `, and that is a truncation rather than a filter. It was already
+        /// known to be lossy — `agent_commands.rs` carries an item-level `#[cfg(test)]` on
+        /// line 1 and the cut hid all six of its commands — but the measured spread is wider
+        /// than the note describing it: **27 files** in this workspace have a first
+        /// `#[cfg(test)]` that is not the trailing test module, and several are inline test
+        /// modules early in a long file. `driver/mod.rs` opens `mod dialog_tests` on line 103
+        /// of 2,400, so a truncating scan of that file reads 4% of it and reports green.
+        ///
+        /// A scanner that silently reads 4% of a file is worse than no scanner: it answers
+        /// the question it was asked with the wrong evidence.
+        ///
+        /// The closing brace is found by indentation, which holds because `cargo fmt
+        /// --all -- --check` is itself a gate: rustfmt closes a module at the same column it
+        /// opened. Matching is newline-agnostic for the reason `all_commands` writes out —
+        /// this repo is developed on Windows with `core.autocrlf=true`, so a needle
+        /// containing a hard-coded newline finds nothing in a fresh checkout.
+        fn strip_test_modules(source: &str) -> String {
+            let mut kept: Vec<&str> = Vec::new();
+            let mut lines = source.lines().peekable();
+            while let Some(line) = lines.next() {
+                if line.trim() != "#[cfg(test)]" {
+                    kept.push(line);
+                    continue;
+                }
+                // Only a module is skipped. An item-level `#[cfg(test)]` marks a test-only
+                // helper that is still production-shaped code, and hiding it would recreate
+                // the blind spot this function exists to close.
+                let Some(next) = lines.peek() else {
+                    kept.push(line);
+                    continue;
+                };
+                if !next.trim_start().starts_with("mod ") {
+                    kept.push(line);
+                    continue;
+                }
+                let indent = line.len() - line.trim_start().len();
+                let closing = format!("{}}}", " ".repeat(indent));
+                for inner in lines.by_ref() {
+                    if inner == closing {
+                        break;
+                    }
+                }
+            }
+            kept.join("\n")
+        }
+
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&src, &mut files);
+
+        let mut scanned = 0usize;
+        let mut spawns = 0usize;
+        let mut declared: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        let mut undeclared: Vec<String> = Vec::new();
+
+        for path in &files {
+            let rel = path
+                .strip_prefix(&src)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let Ok(whole) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            // Test modules are removed rather than truncated at -- see strip_test_modules.
+            // This file is exactly why: it carries an item-level `#[cfg(test)]` on
+            // `unrunnable_for_test` at line 371, so a truncating cut hid its own spawn at 377
+            // and the both-ends check below went red on the first run.
+            let source = strip_test_modules(&whole);
+            let source = source.as_str();
+            scanned += 1;
+
+            for (idx, line) in source.lines().enumerate() {
+                let code = line.trim_start();
+                if code.starts_with("//") || !line.contains("Command::new(") {
+                    continue;
+                }
+                // Only spawns of the adb binary itself. `sh -c`, `arp` and the yt-dlp path
+                // are different tools with different budgets.
+                if !line.contains("adb.path()") && !line.contains("&self.path") {
+                    continue;
+                }
+                spawns += 1;
+                match LONG_LIVED.iter().find(|(file, _)| *file == rel) {
+                    Some((file, _)) => {
+                        declared.insert(file);
+                    }
+                    None => undeclared.push(format!("{rel}:{}", idx + 1)),
+                }
+            }
+        }
+
+        // A scanner that reads nothing passes every assertion below it.
+        assert!(
+            scanned >= 10,
+            "only {scanned} source files scanned; the walk is broken"
+        );
+        assert!(
+            spawns >= 3,
+            "only {spawns} adb spawn sites found; the scan is broken"
+        );
+        assert!(
+            undeclared.is_empty(),
+            "these spawn adb without going through the queue and without declaring why: \
+             {undeclared:?}\n\
+             \n\
+             Short calls belong in `run`/`shell`, which take a slot. Only a child that never \
+             exits on its own may bypass the queue, and it has to be named in LONG_LIVED \
+             with the reason -- a held permit that never returns deadlocks the fleet."
+        );
+        let stale: Vec<&str> = LONG_LIVED
+            .iter()
+            .map(|(file, _)| *file)
+            .filter(|file| !declared.contains(file))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "these files are declared as spawning a long-lived adb child but no longer do: \
+             {stale:?} -- drop the declaration"
+        );
+    }
 }
