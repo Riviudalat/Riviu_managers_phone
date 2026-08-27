@@ -528,9 +528,35 @@ impl AndroidDriver {
     }
     /// Start the runner and wait for a session that can actually read the screen.
     async fn instrument_and_wait(&self, serial: &str, base: &str) -> anyhow::Result<AgentClient> {
-        self.spawn_instrumentation(serial)?;
+        // **Hold this phone's adb queue for the whole startup.** The child outlives the call
+        // so it must not hold a global slot, but while `am instrument -w` is taking
+        // `UiAutomation` a concurrent gesture that finds the queue free would open a second
+        // transport to the same phone and land on a session that is half-created or dead.
+        // Cannot deadlock: everything awaited below is HTTP over the forward established
+        // before this, never adb. See `adb::AdbDeviceHold`.
+        let _startup = crate::adb::hold_device_queue(serial).await;
+        let mut child = self.spawn_instrumentation(serial)?;
         // The server binds its port a beat after the runner starts.
         for _ in 0..AGENT_READY_POLLS {
+            // A runner or package `am instrument` refuses exits at once and says why on
+            // stderr. Ten seconds of polling a port nothing will ever bind is the slow way to
+            // find that out, and it loses the reason.
+            if let Ok(Some(status)) = child.try_wait() {
+                let mut said = String::new();
+                if let Some(mut stderr) = child.stderr.take() {
+                    use tokio::io::AsyncReadExt;
+                    let _ = stderr.read_to_string(&mut said).await;
+                }
+                let said = said.trim();
+                anyhow::bail!(
+                    "`am instrument` trên {serial} thoát ngay ({status}){}",
+                    if said.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {said}")
+                    }
+                );
+            }
             if AgentClient::is_ready(base).await {
                 let agent = self.open_and_cache_agent(serial, base).await?;
                 if agent.is_alive().await {
@@ -629,7 +655,16 @@ impl AndroidDriver {
     ///
     /// `am instrument -w` blocks for the life of the server, so the child is
     /// detached deliberately rather than awaited.
-    fn spawn_instrumentation(&self, serial: &str) -> anyhow::Result<()> {
+    ///
+    /// **Returns the child, and keeps its stderr, because a refusal used to be thrown away.**
+    /// `stderr(Stdio::null())` meant that `am instrument` rejecting the runner or the package
+    /// -- the two things most likely to be wrong on a phone that has just been re-imaged --
+    /// produced an immediate process exit with the reason on stderr, and the caller learned
+    /// nothing until ten seconds of HTTP polling ran out and reported "did not answer /status".
+    /// The actual sentence explaining why was discarded.
+    ///
+    /// Found by an independent review on 27/08/2026.
+    fn spawn_instrumentation(&self, serial: &str) -> anyhow::Result<tokio::process::Child> {
         let mut command = tokio::process::Command::new(self.adb.path());
         command
             .args([
@@ -646,13 +681,13 @@ impl AndroidDriver {
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            // Piped, not null: this is where `am instrument` says what it refused.
+            .stderr(Stdio::piped());
         #[cfg(windows)]
         command.creation_flags(0x0800_0000);
         command
             .spawn()
-            .with_context(|| format!("start the agent on {serial}"))?;
-        Ok(())
+            .with_context(|| format!("start the agent on {serial}"))
     }
 }
 

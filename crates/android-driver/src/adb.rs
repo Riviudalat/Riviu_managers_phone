@@ -140,6 +140,49 @@ fn adb_device_queues() -> &'static parking_lot::Mutex<HashMap<String, Arc<Semaph
     QUEUES.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
 }
 
+/// One phone's adb queue, held without taking a global slot.
+///
+/// **For the three callers that start a child which outlives the call.** `spawn_instrumentation`,
+/// minicap and the scrcpy server must not hold an [`AdbSlot`], because the child never returns
+/// and a permit it holds never comes back -- that is the deadlock the two-tier queue exists to
+/// avoid, and `nothing_spawns_adb_outside_the_queue_without_saying_why` declares them exempt
+/// for exactly that reason.
+///
+/// But "must not hold the global slot" is not "may interleave on the phone". Startup is the
+/// window where interleaving hurts most: while `am instrument -w` is acquiring `UiAutomation`,
+/// a concurrent gesture that finds the serial's queue free opens a second adb transport to the
+/// same phone, and the gesture then reaches a session that is half-created or already dead.
+/// This is the middle ground: mutual exclusion per phone, no global slot, released as soon as
+/// the child has crossed its readiness check.
+///
+/// Safe to hold across an await **only** if nothing in that window takes an adb permit for the
+/// same serial -- otherwise it deadlocks the phone. Traced for the instrumentation path on
+/// 27/08/2026: `is_ready`, `connect`, `is_alive` and `close` are all `reqwest` over the
+/// already-established forward, so no adb call happens between the spawn and readiness.
+///
+/// Found by an independent review on 27/08/2026.
+pub struct AdbDeviceHold {
+    _device: tokio::sync::OwnedSemaphorePermit,
+}
+
+/// Take one phone's adb queue and nothing else. See [`AdbDeviceHold`].
+pub async fn hold_device_queue(serial: &str) -> AdbDeviceHold {
+    let queue = {
+        let mut queues = adb_device_queues().lock();
+        Arc::clone(
+            queues
+                .entry(serial.to_string())
+                .or_insert_with(|| Arc::new(Semaphore::new(1))),
+        )
+    };
+    AdbDeviceHold {
+        _device: queue
+            .acquire_owned()
+            .await
+            .expect("a per-device adb queue is never closed"),
+    }
+}
+
 /// Everything one adb call holds while it runs. Dropping it releases all of them.
 struct AdbSlot {
     _device: Option<tokio::sync::OwnedSemaphorePermit>,
@@ -1526,8 +1569,32 @@ fn looks_like_ls_number(token: &str, max_len: usize) -> bool {
 /// which is right only when the link-count column is present. Without it `tokens[4]` is the
 /// *date*, `parse::<u64>()` fails, and `unwrap_or(0)` turned every file in the browser into
 /// **0 B** -- silently, because a size of zero reads as a fact rather than as a failure.
+/// Where the timestamp can start, and nowhere else.
+///
+/// **The scan used to run over every token, and a filename can contain a date.** `ls -la`
+/// prints `mode links owner group size date time name`, so the date is at index 5; ROMs that
+/// omit the link-count column put it at 4. Those are the only two layouts this parser handles
+/// -- the `?`-metadata branch below already hard-codes 4 and 6 on the same assumption.
+///
+/// Unbounded, a row whose metadata is unreadable could resynchronise *inside* the name:
+///
+/// ```text
+/// -r????????? ? ? ? ? ? report 2026-08-27 12:00 final.jpg
+/// ```
+///
+/// The scanner found `2026-08-27 12:00` at index 7, took `report` for the size, and returned
+/// the name `final.jpg` -- when the real remainder is `report 2026-08-27 12:00 final.jpg`. A
+/// fabricated name is not a cosmetic bug here: it goes on to `pull` and to `rm -rf`.
+///
+/// Bounded tightly on purpose. A row this rejects is pushed onto `unreadable` and shown to the
+/// operator as a line that could not be read, which is safe; a row it accepts wrongly produces
+/// a filename nobody has. Found by an independent review on 27/08/2026.
+const LS_TIMESTAMP_FIRST: usize = 4;
+const LS_TIMESTAMP_LAST: usize = 5;
+
 fn ls_timestamp(tokens: &[(usize, &str)]) -> Option<(usize, usize, String)> {
-    for index in 0..tokens.len() {
+    let last = LS_TIMESTAMP_LAST.min(tokens.len().saturating_sub(1));
+    for index in LS_TIMESTAMP_FIRST..=last {
         let token = tokens[index].1;
         // `2026-07-26 20:29`
         if looks_like_ls_date(token) {
@@ -1920,6 +1987,55 @@ drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
         assert_eq!(rows[0].modified.as_deref(), Some("Jul 11 11:16"));
     }
 
+    /// **A date inside a filename is not the row's timestamp.**
+    ///
+    /// The scan used to run over every token, so an unstattable row whose name happens to
+    /// contain a date resynchronised *inside* the name: it took `2026-08-27 12:00` at index 7
+    /// for the metadata, `report` for the size, and returned `final.jpg` as the name -- when
+    /// the real remainder is `report 2026-08-27 12:00 final.jpg`. That invented name is what
+    /// `pull` and `rm -rf` would be handed, which is the same blast radius as
+    /// `a_bsd_dated_row_is_read_instead_of_inventing_a_filename` above.
+    ///
+    /// With the bound in place the row falls to the `?`-metadata branch, which knows the
+    /// name starts at token 6 -- so the **whole** name comes back and the unreadable columns
+    /// say they are unreadable. That is a better outcome than rejecting the row, and better
+    /// than this test first asserted: the first draft expected `unreadable.len() == 1` and
+    /// failed, because the parser recovered the real filename instead of merely refusing to
+    /// invent one.
+    #[test]
+    fn a_date_in_a_filename_is_not_mistaken_for_the_timestamp() {
+        let (rows, unreadable) =
+            read_ls_listing("-r????????? ? ? ? ? ? report 2026-08-27 12:00 final.jpg");
+        assert!(unreadable.is_empty(), "{unreadable:?}");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].name, "report 2026-08-27 12:00 final.jpg",
+            "the name must be the whole remainder, not the part after a date inside it"
+        );
+        // The columns really are unreadable on this row, and both say so rather than
+        // reporting a plausible number.
+        assert_eq!(rows[0].modified, None);
+        assert_eq!(rows[0].size, 0);
+    }
+
+    /// Both supported layouts still parse, so the bound did not simply reject everything.
+    ///
+    /// The timestamp lives at index 5 when the ROM prints a link count and at 4 when it does
+    /// not. A bound that was one tighter would make every row on one of the two shapes
+    /// "unreadable" -- honest, but useless -- so this pins that both are still read.
+    #[test]
+    fn both_column_layouts_still_find_their_timestamp() {
+        let (with_links, bad) =
+            read_ls_listing("-rw-r--r-- 1 root root 138078 2026-08-27 12:00 a.jpg");
+        assert!(bad.is_empty(), "{bad:?}");
+        assert_eq!(with_links[0].name, "a.jpg");
+        assert_eq!(with_links[0].size, 138_078);
+
+        let (no_links, bad) = read_ls_listing("-rw-r--r-- root root 4096 2026-08-27 12:00 b.jpg");
+        assert!(bad.is_empty(), "{bad:?}");
+        assert_eq!(no_links[0].name, "b.jpg");
+        assert_eq!(no_links[0].size, 4_096);
+    }
     /// Older than six months and `ls` prints the year where the time goes. Same row, one
     /// different column, and it must not fall back to the guessing path either.
     #[test]
