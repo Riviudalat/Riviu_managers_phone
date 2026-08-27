@@ -28,7 +28,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 AGENTS_DIR = os.path.join(ROOT, "docs", "agents")
 INDEX = os.path.join(AGENTS_DIR, "README.md")
-NL = "\r\n"
+# LF, deliberately, and `--check` compares with line endings normalised.
+#
+# The first version wrote CRLF and CI went red on the very first run: the quality job
+# runs on `windows-2025`, `actions/checkout` leaves the file at LF, and a byte comparison
+# then fails for a reason that has nothing to do with the index being wrong. Git stores
+# this file as LF either way (`core.autocrlf` is on locally and there is no `text=auto`
+# rule), so LF is also what a diff will show.
+NL = "\n"
 
 # A heading that opens a numbered section: `## 3. Kiến trúc`, `## §9.117 …`.
 HEADING = re.compile(r"^(#{2,4})\s+§?\s*(\d+(?:\.\d+)*)[.\s—]")
@@ -234,7 +241,9 @@ def main() -> int:
     rendered = render(sections)
     if args.check:
         current = io.open(INDEX, encoding="utf-8", newline="").read()
-        if current != rendered:
+        # Compare content, not line endings: a Windows worktree with `core.autocrlf` on
+        # holds CRLF while CI holds LF, and neither means the index is stale.
+        if current.replace("\r\n", "\n") != rendered.replace("\r\n", "\n"):
             print(
                 "docs/agents/README.md is out of date: run "
                 "`python scripts/build_agents_index.py`",
