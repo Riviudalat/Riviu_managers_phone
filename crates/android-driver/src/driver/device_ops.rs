@@ -252,7 +252,39 @@ impl AndroidDriver {
     // (Magisk `su`); on a non-rooted phone `is_rooted` returns false and the mutating calls
     // report that rather than half-applying. Only android_id can be set without root (adb
     // carries WRITE_SECURE_SETTINGS). ---
-    /// True when `su` grants uid 0 — i.e. the phone is rooted (Magisk) and has authorised adb.
+    /// True when **`su` grants uid 0** — which is not the same question as "can this phone run
+    /// privileged commands".
+    ///
+    /// **Measured on the whole fleet, 27/08/2026, and the two answers disagree on 9 of 20
+    /// phones:**
+    ///
+    /// ```text
+    ///   model        n    id -u   su binary   ls /data/data
+    ///   SM-G950F     9    0       no          yes
+    ///   SM-G955F/N/U1 11  2000    no          no
+    /// ```
+    ///
+    /// On the nine S8s `adbd` itself runs as uid 0 (`context=u:r:su:s0`) and there is **no `su`
+    /// binary at all**. So `su -c id` fails, this function answers `false`, and every gate
+    /// below it refuses — on phones where the command would have worked run plainly.
+    ///
+    /// Two consequences, and the second is the one that matters:
+    ///
+    /// 1. `root_shell`, `factory_reset` and the `serialno`/`mac` half of `set_device_identity`
+    ///    refuse on those nine with "máy chưa root (không có su)". The message is true and
+    ///    misleading: they do not need `su`.
+    /// 2. **"Not rooted" is being read as "protected paths are out of reach", and on those nine
+    ///    it is not.** `ls /data/data` succeeds there, so the file manager can list — and
+    ///    delete — under `/data/` on nine phones while this function reports them unprivileged.
+    ///    Nothing in the code says so; `examples/device_files_gate` is the only place that
+    ///    reports it, and only as a note.
+    ///
+    /// **Left gating exactly as before, on purpose.** Answering `true` when the shell is
+    /// already root would make remote `factory_reset` reachable on nine phones that currently
+    /// refuse it — a destructive capability appearing without anybody asking for it. That is
+    /// the operator's call, not a cleanup. If it is ever taken, the honest shape is two
+    /// questions (`has_su` and `shell_is_root`) rather than one overloaded `is_rooted`, and the
+    /// UI needs to say which one it is showing.
     pub async fn is_rooted(&self, serial: &str) -> bool {
         match self.adb.shell(serial, "su -c id").await {
             Ok(out) => out.contains("uid=0"),
