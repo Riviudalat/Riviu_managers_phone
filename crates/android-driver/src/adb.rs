@@ -1779,11 +1779,35 @@ fn is_ls_complaint(line: &str) -> bool {
         || line.contains("Not a directory")
 }
 
+/// True when the phone's complaint is "there is nothing here", rather than "I will not tell
+/// you".
+///
+/// **The same `ls` output means opposite things to different callers, which is why this is a
+/// separate question.** Listing a directory that does not exist is a failure. Listing a path
+/// *immediately after deleting it* and being told it does not exist is the confirmation the
+/// delete worked -- it is the only positive proof available, since `rm -rf` is silent about
+/// success.
+///
+/// Measured on 27/08/2026, on all 20 phones: routing the delete read-back through
+/// `classify_ls_output` correctly stopped reading a refusal as an absence, and then rejected
+/// `ls: <path>: No such file or directory` as unverifiable -- turning a working delete into a
+/// reported failure on every phone in the fleet. The hardware gate caught it; no unit test
+/// would have, because the distinction only exists in what the caller was hoping for.
+fn says_the_path_is_gone(reason: &str) -> bool {
+    let reason = reason.to_ascii_lowercase();
+    reason.contains("no such file or directory") || reason.contains("not found")
+}
+
 /// Read one `ls -la` result the way the caller has to act on it.
 ///
 /// Pure, and separate from the command that produces it, because the interesting cases are
 /// combinations of three inputs that are awkward to reach against a real phone -- and each one
 /// of them was, until now, drawn as a fact.
+/// [`says_the_path_is_gone`], for callers outside this module that delete and then read back.
+pub fn ls_reason_means_absent(reason: &str) -> bool {
+    says_the_path_is_gone(reason)
+}
+
 pub fn classify_ls_output(stdout: &str, stderr: &str, exit_code: i32) -> LsOutcome {
     let (entries, unreadable) = read_ls_listing(stdout);
 
@@ -1987,6 +2011,42 @@ drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
         assert_eq!(rows[0].modified.as_deref(), Some("Jul 11 11:16"));
     }
 
+    /// **"Nothing here" and "I will not tell you" are opposite answers.**
+    ///
+    /// Both arrive as an `ls` complaint on stderr, and the delete read-back has to act on
+    /// them differently: `No such file or directory` is the only positive proof `rm -rf`
+    /// worked, while `Permission denied` means the check itself was refused and the file may
+    /// still be there.
+    ///
+    /// Pinned because I got this wrong in the direction that *looks* safe. Routing the
+    /// read-back through `classify_ls_output` fixed a real bug -- a refusal used to read as an
+    /// absence -- and introduced this one, which reported a working delete as unverifiable on
+    /// **all 20 phones**. Only the hardware gate caught it. A unit test could not have, until
+    /// this one, because nothing in the `ls` output distinguishes the two cases: what
+    /// separates them is what the caller was hoping to find.
+    #[test]
+    fn absent_and_refused_are_told_apart_by_reason() {
+        for gone in [
+            "ls: /sdcard/Download/x.txt: No such file or directory",
+            "ls: /sdcard/x: not found",
+            "No such file or directory",
+        ] {
+            assert!(
+                ls_reason_means_absent(gone),
+                "should read as absent: {gone}"
+            );
+        }
+        for refused in [
+            "ls: /data/data/: Permission denied",
+            "ls: /sdcard/x: Not a directory",
+            "ls: reading directory: Input/output error",
+        ] {
+            assert!(
+                !ls_reason_means_absent(refused),
+                "must NOT read as absent -- the file may still be there: {refused}"
+            );
+        }
+    }
     /// **A date inside a filename is not the row's timestamp.**
     ///
     /// The scan used to run over every token, so an unstattable row whose name happens to

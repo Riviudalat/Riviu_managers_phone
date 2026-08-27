@@ -569,6 +569,17 @@ impl AndroidDriver {
             adb::LsOutcome::Partial { entries, reason } if !entries.is_empty() => {
                 anyhow::bail!("{path} vẫn còn trên máy sau khi xoá ({reason})")
             }
+            // **"There is nothing here" is the proof, not a failure to check.** `rm -rf` says
+            // nothing on success, so `ls` answering `No such file or directory` is the only
+            // positive evidence the path is gone. Routing this read-back through
+            // `classify_ls_output` without that distinction reported a working delete as
+            // unverifiable on all 20 phones -- caught by the hardware gate, on the same run
+            // that proved the refusal fix itself. Any *other* complaint really is a refusal.
+            adb::LsOutcome::Partial { reason, .. } | adb::LsOutcome::Refused(reason)
+                if adb::ls_reason_means_absent(&reason) =>
+            {
+                Ok(())
+            }
             adb::LsOutcome::Partial { reason, .. } => {
                 anyhow::bail!("xoá {path} rồi nhưng không kiểm lại được: {reason}")
             }
