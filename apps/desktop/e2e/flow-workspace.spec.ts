@@ -57,6 +57,19 @@ async function insertActionOnFirstEdge(page: Page, action: string): Promise<Loca
     const transfer = new DataTransfer();
     const targetRect = target.getBoundingClientRect();
     const sourceRect = element.getBoundingClientRect();
+    // **Set the payload before `dragstart`, not after, and check it survived.**
+    //
+    // A `DataTransfer` is only guaranteed writable while its drag is in the read/write state.
+    // Writing after the synthetic `dragstart` has been dispatched relies on Chromium leaving
+    // it writable, and when that does not hold `setData` fails silently -- `getData` in
+    // `FlowCanvas.drop` then returns `""`, the drop is refused, and the assertion sees zero
+    // new nodes with a perfectly healthy-looking DOM. That is one CI failure spent on a
+    // 5-second timeout and a screenshot that showed nothing wrong (run 33069434865).
+    //
+    // The palette's own `onDragStart` sets the same key, so this is belt and braces -- but
+    // belt and braces is the point: neither path is guaranteed to run in a synthetic drag,
+    // and the assert below turns "silently empty" into a named failure.
+    transfer.setData("application/riviu-flow-action", payload.kind);
     element.dispatchEvent(new DragEvent("dragstart", {
       bubbles: true,
       cancelable: true,
@@ -65,7 +78,13 @@ async function insertActionOnFirstEdge(page: Page, action: string): Promise<Loca
       clientY: sourceRect.top + sourceRect.height / 2,
       dataTransfer: transfer,
     }));
-    transfer.setData("application/riviu-flow-action", payload.kind);
+    if (transfer.getData("application/riviu-flow-action") !== payload.kind) {
+      throw new Error(
+        `drag payload lost before drop: getData -> ${JSON.stringify(
+          transfer.getData("application/riviu-flow-action"),
+        )}. The DataTransfer went read-only, so the drop would be refused with no node.`,
+      );
+    }
     for (const type of ["dragenter", "dragover", "drop"] as const) {
       target.dispatchEvent(new DragEvent(type, {
         bubbles: true,
@@ -105,6 +124,36 @@ test.beforeEach(async ({ page }, testInfo) => {
   }));
   await page.route("https://fonts.gstatic.com/**", (route) => route.abort("blockedbyclient"));
   await installTauriMock(page);
+});
+
+test("says why it refused a drop instead of doing nothing", async ({ page }) => {
+  await openFlow(page);
+  const before = await page.locator(FLOW_NODE_TITLE).count();
+
+  // A drag that carries nothing — a file, a text selection, a link from another window. The
+  // real palette always sets the payload, so this branch is only reachable from outside it.
+  await page.getByTestId("flow-canvas").evaluate((canvas) => {
+    const target = canvas.querySelector<HTMLElement>(".react-flow");
+    if (!target) throw new Error("Flow canvas drop target is missing");
+    const rect = target.getBoundingClientRect();
+    for (const type of ["dragenter", "dragover", "drop"] as const) {
+      target.dispatchEvent(new DragEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        clientX: rect.left + rect.width / 2,
+        clientY: rect.top + rect.height / 2,
+        dataTransfer: new DataTransfer(),
+      }));
+    }
+  });
+
+  // The point of the change: a refused gesture produces a sentence, not silence.
+  await expect(
+    page.getByRole("region", { name: "Thông báo" }).getByText("Không nhận ra thứ được kéo vào"),
+  ).toBeVisible();
+  // And it stays a refusal — no node is invented to make the drag look like it worked.
+  await expect(page.locator(FLOW_NODE_TITLE)).toHaveCount(before);
 });
 
 test("authors, saves, runs, and reloads a selected-device flow", async ({ page }) => {

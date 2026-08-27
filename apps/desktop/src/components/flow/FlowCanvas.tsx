@@ -26,6 +26,7 @@ import { createFlowNode } from "../../flow/model";
 import { toCanvas, type FlowCanvasEdge, type FlowCanvasNode } from "../../flow/graph";
 import { FlowActionNode } from "./FlowActionNode";
 import { FLOW_ACTION_MIME } from "./FlowPalette";
+import { pushToast } from "../../toastStore";
 
 const NODE_TYPES: NodeTypes = { flowAction: FlowActionNode };
 
@@ -134,14 +135,56 @@ function FlowCanvasInner(props: FlowCanvasProps) {
     );
   };
 
+  /**
+   * A drop that does nothing has to say why it did nothing.
+   *
+   * All three refusals below used to be a bare `return`. Dragging an action onto the canvas
+   * and getting **no node, no message and no log** is the exact complaint this whole review
+   * pass started from, and it is worse here than elsewhere: the operator has just performed a
+   * deliberate gesture, so silence reads as "the app is broken" rather than "that action is
+   * not available".
+   *
+   * It is also what made a CI failure unreadable. A Playwright drag that lost its
+   * `DataTransfer` payload produced `0` nodes with nothing to explain it, and the DOM snapshot
+   * showed a perfectly enabled palette button — so the evidence pointed nowhere. A refusal
+   * that names itself would have said which of the three it was in one line.
+   */
   const drop = (event: DragEvent) => {
     event.preventDefault();
     const kind = event.dataTransfer.getData(FLOW_ACTION_MIME) as ActionKind;
-    if (!props.catalog.some((action) => action.kind === kind && action.disabledReason === null)) {
+    if (!kind) {
+      // The drag carried no action. Reachable from a real drag only when something outside the
+      // palette is dropped on the canvas — a file, a selection, a link.
+      pushToast(
+        "warn",
+        "Không nhận ra thứ được kéo vào",
+        "Kéo một hành động từ bảng bên trái; thứ vừa thả không mang hành động nào.",
+      );
+      return;
+    }
+    const offered = props.catalog.find((action) => action.kind === kind);
+    if (!offered) {
+      pushToast("warn", "Hành động không có trong danh mục", `Kind: ${kind}`);
+      return;
+    }
+    if (offered.disabledReason !== null) {
+      // The palette already sets `disabled` and shows this text as a tooltip, but a tooltip is
+      // not an answer to a gesture that just failed.
+      pushToast("warn", `Chưa dùng được: ${offered.label}`, offered.disabledReason);
       return;
     }
     const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
-    if (!Number.isFinite(position.x) || !Number.isFinite(position.y)) return;
+    if (!Number.isFinite(position.x) || !Number.isFinite(position.y)) {
+      // React Flow computes this from the viewport transform, which is measured by a
+      // ResizeObserver. Before the first measurement lands the transform can be degenerate,
+      // and then every dropped coordinate is `NaN`.
+      pushToast(
+        "warn",
+        "Khung Flow chưa đo xong",
+        "Thả lại sau một nhịp, hoặc bấm Fit View rồi thả.",
+      );
+      return;
+    }
     const node = createFlowNode(kind, position);
     const exact = selectedEdges.size === 1 ? [...selectedEdges][0] : null;
     const edgeId = exact ?? nearestEdge(position, nodes, edges);
