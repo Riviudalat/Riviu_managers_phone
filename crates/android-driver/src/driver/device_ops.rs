@@ -212,7 +212,17 @@ impl AndroidDriver {
             Ok(None) => Err(anyhow::anyhow!("Riviu helper không sẵn sàng trên máy này")),
             Err(error) => Err(error),
         };
-        let _ = self
+        // **The revoke is the security-relevant half, so its failure has to be said out
+        // loud.** This was `let _ = ...`: the helper could remove its test provider, the
+        // `appops deny` could then be refused by the ROM or lost to a dropped transport, and
+        // the method still returned `Ok(())`. `com.riviu.agent` stays the phone's selected
+        // mock-location app -- a permission that normally needs a human in Developer Options
+        // -- with the API reporting that it had been revoked. The doc comment above promises
+        // the revoke; this makes the promise checkable.
+        //
+        // Still best-effort in the sense that matters: it runs even when the helper is
+        // unreachable, because the appop is granted by adb rather than by the helper.
+        let revoked = self
             .adb
             .shell(
                 serial,
@@ -222,7 +232,20 @@ impl AndroidDriver {
                 ),
             )
             .await;
-        stopped
+        match (stopped, revoked) {
+            (Ok(()), Ok(_)) => Ok(()),
+            // The provider is gone but the grant is not. That is the dangerous half, so it
+            // wins over a clean stop.
+            (Ok(()), Err(error)) => Err(anyhow!(
+                "đã bỏ vị trí giả nhưng KHÔNG thu hồi được quyền mock_location của \
+                 {}: {error}",
+                crate::riviu_agent::PACKAGE
+            )),
+            (Err(stop_error), Ok(_)) => Err(stop_error),
+            (Err(stop_error), Err(revoke_error)) => Err(anyhow!(
+                "{stop_error}; và cũng không thu hồi được quyền mock_location: {revoke_error}"
+            )),
+        }
     }
 
     // --- Root tier (feature C, xiaowei "ROOT 模式 / 一键新机"). These need a rooted phone
@@ -526,10 +549,33 @@ impl AndroidDriver {
                 Duration::from_secs(20),
             )
             .await?;
-        if !adb::parse_ls_listing(&check.stdout).is_empty() {
-            anyhow::bail!("{path} vẫn còn trên máy sau khi xoá");
+        // **The read-back has to be a reading, not a guess.** This used to be
+        // `parse_ls_listing(&check.stdout)`, which sees stdout only. A ROM that answers
+        // `ls: <path>: Permission denied` on stderr with exit 0 and nothing on stdout then
+        // produces an empty listing, the condition is false, and the delete is reported as
+        // confirmed -- when what actually happened is that the *verification* was refused and
+        // the file may still be there.
+        //
+        // `classify_ls_output` exists precisely to tell those three cases apart and was
+        // already used by `list_device_dir`; this site was missed when it landed. Found by an
+        // independent review on 27/08/2026.
+        match adb::classify_ls_output(&check.stdout, &check.stderr, check.exit_code) {
+            // Nothing there, and the phone said so cleanly. This is the success case.
+            adb::LsOutcome::Complete(entries) if entries.is_empty() => Ok(()),
+            adb::LsOutcome::Complete(_) => {
+                anyhow::bail!("{path} vẫn còn trên máy sau khi xoá")
+            }
+            // A row we could read means it survived, whatever else was unreadable.
+            adb::LsOutcome::Partial { entries, reason } if !entries.is_empty() => {
+                anyhow::bail!("{path} vẫn còn trên máy sau khi xoá ({reason})")
+            }
+            adb::LsOutcome::Partial { reason, .. } => {
+                anyhow::bail!("xoá {path} rồi nhưng không kiểm lại được: {reason}")
+            }
+            adb::LsOutcome::Refused(reason) => {
+                anyhow::bail!("xoá {path} rồi nhưng không kiểm lại được: {reason}")
+            }
         }
-        Ok(())
     }
     /// Turn the phone's own Wi-Fi radio on or off (xiaowei ADB submenu "Turn on/off WIFI"),
     /// and report the state it actually settled at.
@@ -553,11 +599,19 @@ impl AndroidDriver {
         // one and makes a working toggle look like it did nothing. Two seconds because that
         // is what the slower direction (on) needed when measured, not because it looks safe.
         tokio::time::sleep(Duration::from_millis(2000)).await;
+        // **An unread state is not a state.** This was `.unwrap_or_default()`, so a phone
+        // that dropped its transport during the two-second settle -- which is exactly what a
+        // wireless-adb phone does when told to turn its own Wi-Fi off -- returned `Ok(false)`.
+        // For `disable` that is indistinguishable from a confirmed success, and for `enable`
+        // it reports the toggle as having done nothing. The function's own contract is "report
+        // the state it actually settled at", and a failed read cannot do that.
         let read = self
             .adb
             .shell(serial, "settings get global wifi_on")
             .await
-            .unwrap_or_default();
+            .with_context(|| {
+                format!("đã gửi `svc wifi {verb}` cho {serial} nhưng không đọc lại được trạng thái")
+            })?;
         Ok(read.trim() == "1")
     }
     /// Put the display back to the resolution and density the phone shipped with (xiaowei

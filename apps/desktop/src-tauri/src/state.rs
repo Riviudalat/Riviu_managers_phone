@@ -575,6 +575,25 @@ impl riviu_core::db::SecretStore for KeyringSecrets {
     }
 }
 
+/// A borrowed overlay session that keeps its lease alive while the borrower works.
+///
+/// Holding this is what makes `end_overlay_session` wait: it releases the ManualControl
+/// lease only when every borrower has dropped its `Arc<UiSessionContext>`. Drop it as soon
+/// as the device work finishes, and not before.
+pub struct OverlayHold {
+    /// Never read — its `Arc` count is the entire mechanism.
+    _context: Arc<UiSessionContext>,
+    session: Arc<dyn UiSession>,
+}
+
+impl OverlayHold {
+    /// The session to drive. The returned `Arc` does **not** extend the lease; keep the
+    /// `OverlayHold` itself alive for as long as the work runs.
+    pub fn session(&self) -> Arc<dyn UiSession> {
+        Arc::clone(&self.session)
+    }
+}
+
 impl AppState {
     pub async fn bootstrap(resource_dir: Option<PathBuf>) -> anyhow::Result<Self> {
         let mock_requested = std::env::var("RIVIU_MOCK_DEVICES")
@@ -895,7 +914,29 @@ impl AppState {
         Ok(())
     }
 
+    /// Close the overlay's session, if this is the last holder.
+    ///
+    /// **Takes the same per-device gate as `begin_overlay_session`, and that is not
+    /// symmetry for its own sake.** Only begin used to take it. So: begin observes no entry,
+    /// awaits `open_manual_session` — which on Android can reach `install_agent_apks` at
+    /// 180 s per APK — and has acquired the lease but not yet inserted it. An end arriving in
+    /// that window locks only the map, finds nothing, and returns `Ok(())`. Begin then
+    /// inserts. The UI believes the overlay closed; the phone stays held by ManualControl
+    /// until the app shuts down, refusing Nurture, Interaction and Script the whole time.
+    ///
+    /// The refusal itself is honest — it names ManualControl — which is what makes this hard
+    /// to spot: the phone looks legitimately busy forever.
     pub async fn end_overlay_session(&self, udid: &str) -> Result<(), CommandError> {
+        let gate = {
+            let mut gates = self.overlay_gates.lock().await;
+            Arc::clone(
+                gates
+                    .entry(udid.to_string())
+                    .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+            )
+        };
+        let _closing = gate.lock().await;
+
         let context = {
             let mut sessions = self.overlay_sessions.lock().await;
             sessions.remove(udid)
@@ -915,10 +956,31 @@ impl AppState {
         Ok(())
     }
 
-    pub async fn overlay_ui_session(&self, udid: &str) -> Option<Arc<dyn UiSession>> {
-        let sessions = self.overlay_sessions.lock().await;
-        let context = sessions.get(udid)?;
-        self.control.session(context.as_ref()).ok()
+    /// The overlay's session **and** a hold on the lease behind it.
+    ///
+    /// **The hold is the whole point.** `end_overlay_session` decides whether to release the
+    /// ManualControl lease with `Arc::into_inner` on the context: if anybody else still owns
+    /// an `Arc<UiSessionContext>`, the release is skipped and "whoever is last to let go
+    /// releases it" holds. This method used to return the `Arc<dyn UiSession>` alone, which
+    /// keeps the *session object* alive and contributes **nothing** to that count. So closing
+    /// the overlay while a gesture was in flight released the lease under the running work,
+    /// another owner could acquire the same phone, and two pieces of work drove one device
+    /// while each believed it was exclusive — the exact failure the lease exists to prevent.
+    ///
+    /// Eleven commands reach this through `with_manual_session`, plus group-sync and
+    /// text-distribution. Found by an independent review on 27/08/2026; the comment in
+    /// `end_overlay_session` describing the protection was correct, and correct only for
+    /// `DeviceLease::Overlay`, which does clone the context.
+    pub async fn overlay_ui_session(&self, udid: &str) -> Option<OverlayHold> {
+        let context = {
+            let sessions = self.overlay_sessions.lock().await;
+            Arc::clone(sessions.get(udid)?)
+        };
+        let session = self.control.session(context.as_ref()).ok()?;
+        Some(OverlayHold {
+            _context: context,
+            session,
+        })
     }
 
     /// The lease a command should run under: the overlay's if it has one, otherwise its own.

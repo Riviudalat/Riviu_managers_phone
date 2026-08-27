@@ -13,6 +13,38 @@ const sizes = new Map<string, ViewSize>();
 const live = new Set<string>();
 const listeners = new Map<string, Set<Listener>>();
 const pendingExports = new Map<number, (bytes: Uint8Array | null) => void>();
+
+/**
+ * How long an export request may go unanswered before it is treated as lost.
+ *
+ * **Every one of these used to be able to hang forever.** `exportViewJpeg` created a promise,
+ * put its resolver in `pendingExports`, and settled only if the worker sent `exportResult`
+ * back. There was no timeout, no `onerror`, and no cleanup when the worker was replaced — so a
+ * decode worker that died after receiving the request left the promise pending for the life of
+ * the window. The screenshot fallback awaits it inside `runBusy`, so the focus UI stayed busy
+ * with no way out, and the Nurture "Test API" path waited the same way.
+ *
+ * Five seconds: an export is one `convertToBlob` on a frame the worker already holds. If it has
+ * not answered by then it is not going to.
+ *
+ * Found by an independent review on 27/08/2026.
+ */
+const EXPORT_DEADLINE_MS = 5000;
+
+/**
+ * Answer every waiting export with `null`, because nothing is going to answer them.
+ *
+ * Called when the worker errors or is replaced. `null` rather than a rejection: every caller
+ * already handles "this device produced no frame" — that is the normal case for a device on
+ * the JPEG hub path — and a rejection would turn a lost worker into an unhandled error in
+ * paths that legitimately expect an empty answer.
+ */
+function failPendingExports(reason: string) {
+  if (!pendingExports.size) return;
+  console.warn(`viewStore: ${pendingExports.size} export(s) abandoned — ${reason}`);
+  for (const resolve of pendingExports.values()) resolve(null);
+  pendingExports.clear();
+}
 /// The beat at which each udid last actually drew, and the newest beat of any kind.
 const lastPaintBeat = new Map<string, ViewBeat>();
 const latestBeat = new Map<string, ViewBeat>();
@@ -196,6 +228,19 @@ function ensureWorker(): Worker | null {
   // worker.
   // Always on: the counters are only emitted on a beat that is already being sent, and
   // they are only printed when a device is reported stalled, so the cost is a few fields.
+  // A dead worker is the other way an export never answers, and nothing used to notice:
+  // there was no `onerror` at all, so the worker stayed assigned, every later `ensureWorker`
+  // handed back the corpse, and each new request joined the ones already stranded.
+  worker.onerror = (event) => {
+    const detail = event instanceof ErrorEvent ? event.message : "lỗi không rõ";
+    console.error(`viewStore: decode worker died — ${detail}`);
+    failPendingExports(`worker died: ${detail}`);
+    // Drop it so the next call builds a fresh one instead of posting into the corpse.
+    worker = null;
+  };
+  worker.onmessageerror = () => {
+    failPendingExports("worker sent a message that could not be deserialised");
+  };
   worker.postMessage({ type: "diag", enabled: true });
   worker.onmessage = (event: MessageEvent<{ type: string; udid?: string; width?: number; height?: number; generation?: number; requestId?: number; bytes?: Uint8Array | null; frames?: number; received?: number; diag?: ViewDiag; codecs?: string[]; codec?: string; accel?: number; candidate?: number; errorMessage?: string }>) => {
     const message = event.data;
@@ -381,7 +426,19 @@ export function exportViewJpeg(udid: string): Promise<Uint8Array | null> {
   const requestId = exportId;
   exportId += 1;
   return new Promise((resolve) => {
-    pendingExports.set(requestId, resolve);
+    // Settle exactly once, whichever arrives first: the worker's answer or the deadline.
+    // The timer is cleared by the answer and the entry is removed by the timer, so neither
+    // path can leave the other holding a stale resolver.
+    const timer = setTimeout(() => {
+      if (pendingExports.delete(requestId)) {
+        console.warn(`viewStore: export ${requestId} for ${udid} timed out`);
+        resolve(null);
+      }
+    }, EXPORT_DEADLINE_MS);
+    pendingExports.set(requestId, (bytes) => {
+      clearTimeout(timer);
+      resolve(bytes);
+    });
     target.postMessage({ type: "export", udid, requestId });
   });
 }

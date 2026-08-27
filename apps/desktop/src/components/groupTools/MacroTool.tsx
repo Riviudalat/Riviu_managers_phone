@@ -1,6 +1,8 @@
 import { useRef, useState } from "react";
 import { groupInput } from "../../api";
 import { getGroupSync } from "../../groupSync";
+import { groupInputOutcome } from "../../groupInput";
+import type { GroupInputReport } from "../../types";
 import { expand, stepSummary, totalWaitMs, type Macro } from "../../macro";
 import {
   clearRecording,
@@ -44,12 +46,27 @@ export function MacroTool({ targets, scopeLabel }: { targets: string[]; scopeLab
     setPlaying(macro.id);
     stopRef.current = false;
     let failed = 0;
+    // **A step that reached no phone is a failed step.** `failed` only ever counted a
+    // rejected invocation, and `groupInput` does not reject when every phone is skipped --
+    // it resolves with them all in `report.skipped`. So running a macro against twenty
+    // phones that were all busy with nurture reported "Đã chạy macro" having performed
+    // nothing at all. `QuickActionsTool` and `QuickReplyTool` already read the report
+    // through `groupInputOutcome`; this tool and `PeripheralsTool` were the two that did
+    // not. Found by an independent review on 27/08/2026.
+    let unreached = 0;
+    let lastOutcome: string | null = null;
+    const account = (report: GroupInputReport) => {
+      const outcome = groupInputOutcome(report);
+      if (outcome.kind === "ok") return;
+      unreached += 1;
+      lastOutcome = outcome.detail;
+    };
     try {
       for (const step of plan) {
         if (stopRef.current) break;
         try {
           if (step.kind === "tap") {
-            await groupInput({
+            account(await groupInput({
               udids: targets,
               kind: "tap",
               x: step.x,
@@ -57,9 +74,9 @@ export function MacroTool({ targets, scopeLabel }: { targets: string[]; scopeLab
               imageW: step.iw,
               imageH: step.ih,
               sync: getGroupSync(),
-            });
+            }));
           } else if (step.kind === "swipe") {
-            await groupInput({
+            account(await groupInput({
               udids: targets,
               kind: "swipe",
               x: step.x,
@@ -69,9 +86,16 @@ export function MacroTool({ targets, scopeLabel }: { targets: string[]; scopeLab
               imageW: step.iw,
               imageH: step.ih,
               sync: getGroupSync(),
-            });
+            }));
           } else if (step.kind === "key") {
-            await groupInput({ udids: targets, kind: "key", key: step.key, sync: getGroupSync() });
+            account(
+              await groupInput({
+                udids: targets,
+                kind: "key",
+                key: step.key,
+                sync: getGroupSync(),
+              }),
+            );
           }
         } catch {
           failed += 1;
@@ -79,7 +103,18 @@ export function MacroTool({ targets, scopeLabel }: { targets: string[]; scopeLab
         if (step.afterMs > 0 && !stopRef.current) await sleep(step.afterMs);
       }
       if (stopRef.current) pushToast("warn", "Đã dừng macro", macro.name);
-      else if (failed) pushToast("warn", "Macro chạy xong (có lỗi)", `${failed} bước lỗi`);
+      else if (failed || unreached)
+        pushToast(
+          "warn",
+          "Macro chạy xong (có lỗi)",
+          [
+            failed ? `${failed} bước lỗi` : null,
+            unreached ? `${unreached} bước không tới được máy nào hoặc bị bỏ qua` : null,
+            lastOutcome,
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        );
       else pushToast("ok", "Đã chạy macro", `${macro.name} × ${loops}`);
     } finally {
       setPlaying(null);

@@ -613,8 +613,10 @@ pub async fn group_input(
         if plan.delay_ms > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(plan.delay_ms)).await;
         }
-        let overlay_session = state.overlay_ui_session(&udid).await;
-        let owned = if overlay_session.is_none() {
+        // Bound for the whole iteration, not consumed here: dropping it early would let the
+        // overlay close mid-gesture and hand this phone to another owner.
+        let overlay_hold = state.overlay_ui_session(&udid).await;
+        let owned = if overlay_hold.is_none() {
             match state
                 .control
                 .open_manual_session(&udid, DeviceWorkOwner::GroupSync)
@@ -633,8 +635,8 @@ pub async fn group_input(
         };
         // The same rule as the open above: a lookup that fails is this phone's problem,
         // not the batch's. `?` here threw away every phone already actioned.
-        let session = match overlay_session {
-            Some(session) => session,
+        let session = match overlay_hold.as_ref() {
+            Some(hold) => hold.session(),
             None => match state.control.session(
                 owned
                     .as_ref()
@@ -776,8 +778,10 @@ pub async fn distribute_text(
     };
     for item in assignments {
         let DistributeTextItem { udid, text } = item;
-        let overlay_session = state.overlay_ui_session(&udid).await;
-        let owned = if overlay_session.is_none() {
+        // Bound for the whole iteration, not consumed here: dropping it early would let the
+        // overlay close mid-gesture and hand this phone to another owner.
+        let overlay_hold = state.overlay_ui_session(&udid).await;
+        let owned = if overlay_hold.is_none() {
             match state
                 .control
                 .open_manual_session(&udid, DeviceWorkOwner::GroupSync)
@@ -794,8 +798,8 @@ pub async fn distribute_text(
         } else {
             None
         };
-        let session = match overlay_session {
-            Some(session) => session,
+        let session = match overlay_hold.as_ref() {
+            Some(hold) => hold.session(),
             None => match state.control.session(
                 owned
                     .as_ref()

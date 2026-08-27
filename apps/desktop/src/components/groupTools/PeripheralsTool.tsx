@@ -1,4 +1,11 @@
 import { useEffect, useRef, useState } from "react";
+
+/// How long between two complaints about the same fleet refusing input.
+///
+/// A gamepad polls per frame, so an unthrottled warning would push a toast sixty times a
+/// second at a fleet that is entirely held by another owner. Three seconds is long enough
+/// that the operator reads one message, short enough that it reappears if they keep pressing.
+const COMPLAIN_THROTTLE_MS = 3000;
 import {
   groupInput,
   listSerialPorts,
@@ -15,6 +22,9 @@ import {
   type PeripheralAction,
 } from "../../peripheralMap";
 import { getGroupSync } from "../../groupSync";
+import { groupInputOutcome } from "../../groupInput";
+import { describeError } from "../../describeError";
+import type { GroupInputReport } from "../../types";
 import { pushToast, toastError } from "../../toastStore";
 
 /** Human label for a peripheral action, shown as "vừa gửi …" feedback. */
@@ -48,6 +58,16 @@ export function PeripheralsTool({ targets, scopeLabel }: { targets: string[]; sc
   const [padOn, setPadOn] = useState(false);
   const [padId, setPadId] = useState<string | null>(null);
   const [lastFired, setLastFired] = useState<string | null>(null);
+  /// The last time a gamepad press reached no phone, or the call itself failed.
+  ///
+  /// **"Sent" used to be claimed unconditionally.** `fire` dispatched with `void groupInput(..)`
+  /// and immediately set `lastFired`, rendered as "vừa gửi". `groupInput` does not reject when
+  /// every phone is skipped -- it resolves with them all in `report.skipped` -- so pressing Home
+  /// with the whole fleet held by another owner showed "vừa gửi phím home" having sent nothing.
+  /// An IPC rejection was equally invisible: nothing local handled it.
+  ///
+  /// Found by an independent review on 27/08/2026.
+  const [lastProblem, setLastProblem] = useState<string | null>(null);
 
   // The poll loop reads the selection through a ref so it need not restart on every
   // selection change (which would reset edge-detection mid-press).
@@ -107,37 +127,68 @@ export function PeripheralsTool({ targets, scopeLabel }: { targets: string[]; sc
     let previous: boolean[] = [];
     let frame = 0;
 
+    // A gamepad fires at frame rate, so the dispatch stays non-blocking -- awaiting each
+    // press would put fleet latency into the stick. What changes is that the *outcome* is
+    // now read, and a bad one is throttled rather than dropped: without a throttle a fleet
+    // that rejects everything would push a toast every frame.
+    let lastComplaint = 0;
+    const complain = (title: string, detail: string) => {
+      setLastProblem(title);
+      const now = performance.now();
+      if (now - lastComplaint < COMPLAIN_THROTTLE_MS) return;
+      lastComplaint = now;
+      pushToast("warn", title, detail);
+    };
+    const watch = (sent: Promise<GroupInputReport>, what: string) => {
+      sent
+        .then((report) => {
+          const outcome = groupInputOutcome(report);
+          if (outcome.kind !== "ok") complain(`${what}: ${outcome.title}`, outcome.detail);
+        })
+        .catch((error) => complain(`${what} thất bại`, describeError(error)));
+    };
+
     const fire = (action: PeripheralAction) => {
       const udids = targetsRef.current;
       if (!udids.length) return;
       const sync = getGroupSync();
       if (action.kind === "key") {
-        void groupInput({ udids, kind: "key", key: action.key, sync });
+        watch(groupInput({ udids, kind: "key", key: action.key, sync }), describeAction(action));
       } else if (action.kind === "tap") {
-        void groupInput({
+        watch(
+          groupInput({
           udids,
           kind: "tap",
-          x: toReference(action.fx),
-          y: toReference(action.fy),
-          imageW: REFERENCE,
-          imageH: REFERENCE,
-          sync,
-        });
+            x: toReference(action.fx),
+            y: toReference(action.fy),
+            imageW: REFERENCE,
+            imageH: REFERENCE,
+            sync,
+          }),
+          describeAction(action),
+        );
       } else if (action.kind === "swipe") {
-        void groupInput({
+        watch(
+          groupInput({
           udids,
           kind: "swipe",
-          x: toReference(action.fx1),
-          y: toReference(action.fy1),
-          toX: toReference(action.fx2),
-          toY: toReference(action.fy2),
-          imageW: REFERENCE,
-          imageH: REFERENCE,
-          sync,
-        });
+            x: toReference(action.fx1),
+            y: toReference(action.fy1),
+            toX: toReference(action.fx2),
+            toY: toReference(action.fy2),
+            imageW: REFERENCE,
+            imageH: REFERENCE,
+            sync,
+          }),
+          describeAction(action),
+        );
       }
       // macro bindings are not in the default set; nothing to fire here.
+      //
+      // This records that the press was **dispatched**, which is all that is known
+      // synchronously. Whether a phone took it arrives later, in `watch`.
       setLastFired(describeAction(action));
+      setLastProblem(null);
     };
 
     const poll = () => {
@@ -240,6 +291,7 @@ export function PeripheralsTool({ targets, scopeLabel }: { targets: string[]; sc
           <p className="hint">
             {padId ? `Đã nhận: ${padId}` : "Chưa thấy tay cầm — bấm một nút để trình duyệt nhận."}
             {lastFired ? ` · vừa gửi ${lastFired}` : ""}
+            {lastProblem ? ` · ⚠ ${lastProblem}` : ""}
           </p>
         )}
       </fieldset>

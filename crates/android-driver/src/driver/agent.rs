@@ -357,11 +357,22 @@ impl AndroidDriver {
             }
             self.helpers.lock().remove(serial);
         }
+        // **"I could not ask" is not "it is not installed".** This was
+        // `.unwrap_or_default().contains("package:")`, so a phone that had gone `offline`,
+        // lost authorisation, or timed out on `pm path` reported the helper absent -- and with
+        // no bundled APK configured the method then returned `Ok(None)`, which callers render
+        // as "máy chưa có Riviu helper" or silently disable clipboard. The helper was there the
+        // whole time; the transport was not.
+        //
+        // §9.97 already recorded the operator-facing half of this confusion: a phone with the
+        // helper installed showed "chưa có helper" because the service had not been reached.
+        // The note said the message should say "chưa với tới được"; this is the same
+        // distinction, one layer down, where it can actually be made.
         let installed = self
             .adb
             .shell(serial, &format!("pm path {}", crate::riviu_agent::PACKAGE))
             .await
-            .unwrap_or_default()
+            .with_context(|| format!("không hỏi được máy {serial} xem đã có Riviu helper chưa"))?
             .contains("package:");
         if !installed && self.riviu_agent_apk.is_none() {
             return Ok(None);
@@ -488,11 +499,15 @@ impl AndroidDriver {
             return recovered;
         }
 
+        // Same rule: a failed query must not read as "not installed". Here the consequence
+        // is worse than a wrong message -- the next branch *installs the APK*, so a phone
+        // whose real condition is a dead transport gets an install attempt instead of a
+        // reason.
         let installed = self
             .adb
             .shell(serial, &format!("pm list packages {AGENT_PACKAGE}"))
             .await
-            .unwrap_or_default();
+            .with_context(|| format!("không hỏi được máy {serial} xem đã có agent chưa"))?;
         if !installed.contains(AGENT_PACKAGE) {
             self.install_agent_apks(serial).await?;
         }

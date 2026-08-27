@@ -397,17 +397,39 @@ pub struct MinicapStream {
     banner: MinicapBanner,
 }
 
+/// How long the minicap handshake may take before it is a hang rather than a slow start.
+///
+/// **Neither half of this handshake used to be bounded, and the retry loop above it could not
+/// rescue it.** `spawn_producer` retries `connect` up to forty times over ten seconds, but a
+/// retry only helps if the attempt *returns*: a stale `adb forward` pointing at a wedged
+/// process accepts the TCP connection and then sends none of the 24 banner bytes, so
+/// `read_exact` waits forever, the loop never reaches its next iteration, the child is never
+/// killed and the forward is never removed. No minicap producer for that phone again until
+/// the app restarts.
+///
+/// It holds no adb permit, so it does not eat one of the twelve global slots — which is
+/// exactly why nothing else notices.
+///
+/// Two seconds, matching `scrcpy`'s `DUMMY_DEADLINE`: this is loopback to a process that has
+/// already been observed alive, so the only reason for silence is that it is not going to
+/// answer. Found by an independent review on 27/08/2026.
+const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(2);
+
 impl MinicapStream {
     /// Connect to an already-forwarded minicap and read its banner.
     pub async fn connect(local_port: u16) -> anyhow::Result<Self> {
-        let stream = TcpStream::connect(("127.0.0.1", local_port))
-            .await
-            .with_context(|| format!("connect to minicap on 127.0.0.1:{local_port}"))?;
+        let stream = tokio::time::timeout(
+            HANDSHAKE_DEADLINE,
+            TcpStream::connect(("127.0.0.1", local_port)),
+        )
+        .await
+        .with_context(|| format!("minicap on 127.0.0.1:{local_port} không nhận kết nối trong 2s"))?
+        .with_context(|| format!("connect to minicap on 127.0.0.1:{local_port}"))?;
         let mut reader = BufReader::new(stream);
         let mut raw = [0u8; BANNER_BYTES];
-        reader
-            .read_exact(&mut raw)
+        tokio::time::timeout(HANDSHAKE_DEADLINE, reader.read_exact(&mut raw))
             .await
+            .context("minicap nhận kết nối rồi im: banner không tới trong 2s")?
             .context("read the minicap banner")?;
         let banner = parse_banner(&raw)?;
         Ok(Self { reader, banner })

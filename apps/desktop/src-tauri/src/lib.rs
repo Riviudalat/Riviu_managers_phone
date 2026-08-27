@@ -1828,4 +1828,78 @@ mod tests {
              none. Build one with an explicit deadline instead: {defaults:?}"
         );
     }
+    /// **A borrowed overlay session must carry the lease it is borrowing.**
+    ///
+    /// `end_overlay_session` decides whether to release the ManualControl lease with
+    /// `Arc::into_inner` on the `UiSessionContext`. That is a refcount, so the protection only
+    /// works for borrowers that actually own an `Arc` of it. `overlay_ui_session` used to hand
+    /// back the `Arc<dyn UiSession>` alone — which keeps the session *object* alive and
+    /// contributes nothing to the count — so closing the overlay while a gesture was in flight
+    /// released the phone under running work and let a second owner acquire it. Eleven commands
+    /// take that path through `with_manual_session`, plus group-sync and text-distribution.
+    ///
+    /// Three facts encode the fix, and none of them is something the compiler will complain
+    /// about if it goes away:
+    ///
+    /// 1. `overlay_ui_session` returns the guard, not a bare session.
+    /// 2. The guard owns an `Arc<UiSessionContext>` — the refcount *is* the mechanism.
+    /// 3. `end_overlay_session` takes the same per-device gate `begin_overlay_session` takes,
+    ///    or a begin still awaiting `open_manual_session` races an end that finds no map entry,
+    ///    returns success, and leaves the phone held by ManualControl until the app exits.
+    ///
+    /// Found by an independent review on 27/08/2026. The comment in `end_overlay_session`
+    /// describing "whoever is last to let go releases it" was true — and true only for
+    /// `DeviceLease::Overlay`, which does clone the context.
+    #[test]
+    fn a_borrowed_overlay_session_keeps_its_lease_alive() {
+        let state = include_str!("state.rs");
+        let commands = include_str!("commands/mod.rs");
+
+        let signature = state
+            .lines()
+            .find(|line| line.contains("fn overlay_ui_session"))
+            .expect("state.rs still has overlay_ui_session");
+        assert!(
+            signature.contains("OverlayHold"),
+            "overlay_ui_session must return the guard that holds the lease, not a bare \
+             session: {signature}"
+        );
+
+        let guard = state
+            .split("pub struct OverlayHold {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("OverlayHold is still declared");
+        assert!(
+            guard.contains("Arc<UiSessionContext>"),
+            "OverlayHold must own an Arc<UiSessionContext> -- that refcount is the entire \
+             mechanism `end_overlay_session` relies on. Fields now: {guard}"
+        );
+
+        // Both halves of the lifecycle serialise on the same per-device gate.
+        for name in ["begin_overlay_session", "end_overlay_session"] {
+            let body = state
+                .split(&format!("fn {name}"))
+                .nth(1)
+                .expect("both overlay lifecycle methods exist");
+            let head = body.split("\n    }").next().unwrap_or(body);
+            assert!(
+                head.contains("overlay_gates"),
+                "{name} must take the per-device overlay gate; without it a begin still \
+                 awaiting open_manual_session races an end that sees no map entry"
+            );
+        }
+
+        // And the borrow has to outlive the work, which is a scope, not a type.
+        let helper = commands
+            .split("async fn with_manual_session")
+            .nth(1)
+            .and_then(|rest| rest.split("\nasync fn ").next())
+            .expect("with_manual_session is still here");
+        assert!(
+            helper.contains("hold.session()") && helper.contains("drop(hold)"),
+            "with_manual_session must keep the OverlayHold bound across `f` and drop it \
+             afterwards; taking the session and letting the guard go is the original bug"
+        );
+    }
 }

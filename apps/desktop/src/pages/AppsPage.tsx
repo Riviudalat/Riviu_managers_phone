@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { describeError } from "../describeError";
 import {
   addAppLibrary,
   deleteAppLibrary,
@@ -166,7 +167,10 @@ export function AppsPage({ devices, selected, onSelectUdids }: SelProps) {
                       try {
                         await installLibraryApp(u, a.id);
                       } catch (e) {
-                        errors.push(`${u.slice(0, 8)}: ${e}`);
+                        // `${e}` on a Tauri rejection ({ code, message }) renders as
+                        // "[object Object]", which loses the only actionable half of the
+                        // message. `describeError` exists for exactly this.
+                        errors.push(`${u.slice(0, 8)}: ${describeError(e)}`);
                       }
                     }
                     if (errors.length) flash(`Một số máy lỗi:\n${errors.join("\n")}`);

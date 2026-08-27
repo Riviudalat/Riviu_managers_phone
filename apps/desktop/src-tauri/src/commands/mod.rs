@@ -124,8 +124,12 @@ where
     F: FnOnce(Arc<dyn UiSession>) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<()>>,
 {
-    if let Some(session) = state.overlay_ui_session(udid).await {
-        return f(session).await.map_err(CommandError::operation);
+    // `hold` stays bound until after `f` completes: it is what stops `end_overlay_session`
+    // releasing the lease out from under the work this function is about to do.
+    if let Some(hold) = state.overlay_ui_session(udid).await {
+        let result = f(hold.session()).await;
+        drop(hold);
+        return result.map_err(CommandError::operation);
     }
     let context = state
         .control
