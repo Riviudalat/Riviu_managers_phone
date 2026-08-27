@@ -1070,11 +1070,41 @@ async fn pre_prepare_standalone_texts(
         .await;
         let from_batch = batched.accepted_from_batch();
         let mut written = 0usize;
+        // **Uniqueness is enforced here, not requested from the model.**
+        //
+        // The batch prompt asks for different comments and each candidate is then scored
+        // and gated *independently*. Nothing compared them to each other. So a batch that
+        // came back "Đẹp quá" four times passed four high relevance scores, and the loop
+        // below handed one to each assignment -- four phones publishing the same sentence
+        // under the same post, which is the exact signature of a bot farm and the thing
+        // §9.112 records having already happened once for a different reason.
+        //
+        // Fan-out gives each task one assignment, which stops two phones *claiming* one
+        // target. It says nothing about the text. Found by an independent review on
+        // 27/08/2026.
+        //
+        // Compared on whitespace-collapsed lowercase: two phones posting "Đẹp quá" and
+        // "đẹp quá" is one visible duplicate, not two comments.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut collisions = 0usize;
         for (row, result) in wanted.iter().zip(batched.results) {
             if let Ok(comment) = result {
+                let key = crate::interaction::normalize_comment_text(&comment.text).to_lowercase();
+                if !seen.insert(key) {
+                    // Dropped rather than rewritten: this row simply gets no pre-composed
+                    // comment, and the per-device path generates its own later. One phone
+                    // posting and three writing their own beats four posting the same line.
+                    collisions += 1;
+                    continue;
+                }
                 out.insert(row.id.clone(), comment.text);
                 written += 1;
             }
+        }
+        if collisions > 0 {
+            tracing::warn!(
+                "interaction {target_key}: bỏ {collisions} câu trùng nhau trong lượt nháp gộp",
+            );
         }
         tracing::info!(
             "interaction {target_key}: soạn trước {written}/{} câu, {from_batch} câu từ lượt nháp gộp              (ảnh từ {}, {} khung, caption {})",

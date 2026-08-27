@@ -56,8 +56,20 @@ impl Database {
             "SELECT {} FROM device_meta",
             Self::DEVICE_META_COLUMNS
         ))?;
+        // **`filter_map(|row| row.ok())` made corruption look like absence.** A phone whose
+        // `tags_json` is malformed, or whose `number` is outside the target type, produced an
+        // error from `device_meta_from_row`; discarding it returned `Ok` with every *other*
+        // phone, and the UI then treated that phone as simply having no stored metadata and
+        // fell back to device-reported values. Its notes, tags, group, handle and alias were
+        // silently ignored while the row sat in the database intact.
+        //
+        // That also defeats `narrow`, which exists in this file specifically to fail closed on
+        // an out-of-range integer rather than truncate it.
+        //
+        // Found by an independent review on 27/08/2026.
         let rows = stmt.query_map([], Self::device_meta_from_row)?;
-        Ok(rows.filter_map(|row| row.ok()).collect())
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("đọc device_meta: có dòng không đọc được")
     }
     pub fn upsert_device_meta(&self, meta: &crate::types::DeviceMeta) -> anyhow::Result<()> {
         let conn = self.conn()?;

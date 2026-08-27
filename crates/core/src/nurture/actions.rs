@@ -942,10 +942,23 @@ impl NurtureEngine {
             carousel_slides: None,
             created_at: Utc::now().to_rfc3339(),
         };
-        if let Err(error) = self.db.add_nurture_comment_attempt(&attempt) {
-            tracing::warn!("[nurture {udid}] không ghi được comment attempt: {error}");
-        }
-        prepared.attempt_id = Some(attempt.id);
+        // **An id is only handed out when the row exists.** This used to warn and then set
+        // `attempt_id` regardless, so the completion path later updated a row that had never
+        // been inserted -- a zero-row `UPDATE` that reported success. The comment still gets
+        // posted, deliberately: the model call is already paid for and the operator asked for
+        // the comment, so refusing over a failed audit write would waste both. What must not
+        // happen is the code believing an audit row is there.
+        prepared.attempt_id = match self.db.add_nurture_comment_attempt(&attempt) {
+            Ok(()) => Some(attempt.id),
+            Err(error) => {
+                tracing::warn!(
+                    "[nurture {udid}] KHÔNG ghi được comment attempt ({error}) — bình luận vẫn \
+                     đăng, nhưng lượt này sẽ không có dòng audit, không có token và không có \
+                     giá tiền"
+                );
+                None
+            }
+        };
 
         // AI/OCR preparation can take several seconds; reacquire the rail from
         // the newest frame before opening the drawer so we never tap a stale
@@ -1333,15 +1346,23 @@ impl NurtureEngine {
             carousel_slides: Some(slides_offered),
             created_at: Utc::now().to_rfc3339(),
         };
-        let attempt_id = attempt.id.clone();
-        if let Err(error) = self.db.add_nurture_comment_attempt(&attempt) {
-            tracing::warn!("[nurture {udid}] không ghi được comment attempt: {error}");
-        }
+        // Same rule as the pixel path: the id travels only if the row does.
+        let attempt_id = match self.db.add_nurture_comment_attempt(&attempt) {
+            Ok(()) => Some(attempt.id.clone()),
+            Err(error) => {
+                tracing::warn!(
+                    "[nurture {udid}] KHÔNG ghi được comment attempt ({error}) — bình luận vẫn \
+                     đăng, nhưng lượt này sẽ không có dòng audit, không có token và không có \
+                     giá tiền"
+                );
+                None
+            }
+        };
         Some(super::hierarchy::PreparedComment {
             text: comment.text,
             prompt_tokens: comment.prompt_tokens,
             completion_tokens: comment.completion_tokens,
-            attempt_id: Some(attempt_id),
+            attempt_id,
         })
     }
 

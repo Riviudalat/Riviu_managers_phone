@@ -410,11 +410,10 @@ pub(crate) async fn post_publish_campaign_inner(
     if detail.assignments.is_empty() || detail.bundles.is_empty() {
         anyhow::bail!("publish campaign has no imported assignment");
     }
+    // Read once for the message; the authority is the claim below, not this check.
     if !matches!(
         detail.campaign.state,
         riviu_core::PublishCampaignState::Imported
-            | riviu_core::PublishCampaignState::Posting
-            | riviu_core::PublishCampaignState::Verifying
     ) {
         anyhow::bail!(
             "campaign must be imported before post: {:?}",
@@ -444,11 +443,16 @@ pub(crate) async fn post_publish_campaign_inner(
             without_push_media.join(", ")
         );
     }
-    db.update_publish_campaign_state(
-        &campaign_id,
-        riviu_core::PublishCampaignState::Posting,
-        None,
-    )?;
+    // **Claim it, and stop if somebody else already did.** This used to be an
+    // unconditional write, so two commands that both read `Imported` both proceeded and both
+    // posted the same bundles -- serialised on the device lease, therefore invisible, and a
+    // carousel post cannot be taken back.
+    if !db.claim_publish_campaign_for_posting(&campaign_id)? {
+        anyhow::bail!(
+            "chiến dịch này đang được đăng bởi một lượt khác, hoặc đã đăng xong -- \
+             không đăng lại"
+        );
+    }
 
     let mut failures = Vec::new();
     for assignment in &detail.assignments {
@@ -460,12 +464,20 @@ pub(crate) async fn post_publish_campaign_inner(
             failures.push(format!("bundle {} missing", assignment.bundle_id));
             continue;
         };
-        db.update_publish_assignment_state(
+        // The same rule per assignment, and this is the one that stops the worst case: an
+        // assignment already `Succeeded` is not walked back to `Posting` and posted again.
+        // `detail.assignments` was read before the claim above, so it can be stale even for
+        // the winner -- a retry of an interrupted run sees rows the first run finished.
+        if !db.claim_publish_assignment_for_posting(
             &assignment.id,
-            riviu_core::PublishCampaignState::Posting,
-            None,
-            Some(&serde_json::json!({"effectIntent":"post_carousel"}).to_string()),
-        )?;
+            &serde_json::json!({"effectIntent":"post_carousel"}).to_string(),
+        )? {
+            failures.push(format!(
+                "{} đã đăng hoặc đang được đăng, bỏ qua",
+                assignment.udid
+            ));
+            continue;
+        }
         let result = post_one_assignment(
             &control,
             &db,

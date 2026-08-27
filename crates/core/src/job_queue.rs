@@ -1,3 +1,4 @@
+use anyhow::Context;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -162,7 +163,9 @@ impl JobQueue {
 
         job.status = JobStatus::Running;
         job.updated_at = Utc::now();
-        self.persist(&job);
+        // Before any phone is touched. If this cannot be written, a crash later would leave a
+        // `queued` row for work that had actually run, and the job could be picked up again.
+        self.persist(&job)?;
 
         let mut first_error: Option<String> = None;
 
@@ -170,7 +173,7 @@ impl JobQueue {
             if self.is_cancelled(job_id) {
                 job.status = JobStatus::Cancelled;
                 job.updated_at = Utc::now();
-                self.persist(&job);
+                self.persist_outcome(&mut job);
                 return Ok(());
             }
 
@@ -185,7 +188,7 @@ impl JobQueue {
                 _ = &mut cancelled => {
                     job.status = JobStatus::Cancelled;
                     job.updated_at = Utc::now();
-                    self.persist(&job);
+                    self.persist_outcome(&mut job);
                     return Ok(());
                 }
                 result = &mut acquire => result?,
@@ -218,7 +221,7 @@ impl JobQueue {
         };
         job.error = first_error;
         job.updated_at = Utc::now();
-        self.persist(&job);
+        self.persist_outcome(&mut job);
         Ok(())
     }
 
@@ -244,7 +247,8 @@ impl JobQueue {
                     step.status = StepStatus::Running;
                 }
                 job.updated_at = Utc::now();
-                self.persist(job);
+                // The per-step intent, written before `execute_step` reaches the device.
+                self.persist(job)?;
 
                 let result = self
                     .execute_step(job.id, action, &context, session.as_ref(), &run_dir)
@@ -269,12 +273,14 @@ impl JobQueue {
                             }
                         }
                         job.updated_at = Utc::now();
-                        self.persist(job);
+                        self.persist_outcome(job);
                         return Err(err);
                     }
                 }
                 job.updated_at = Utc::now();
-                self.persist(job);
+                // The step already ran, so this is a report rather than a checkpoint. A
+                // persistent database failure is caught by the next step's checkpoint above.
+                self.persist_outcome(job);
             }
             Ok(())
         }
@@ -350,9 +356,45 @@ impl JobQueue {
         }
     }
 
-    fn persist(&self, job: &JobRecord) {
-        if let Err(err) = self.db.save_job(job) {
-            tracing::error!("persist job: {err:#}");
+    /// Record the job's state **before** acting on it, and refuse to act if that fails.
+    ///
+    /// **This used to log and continue.** `save_job` returning `Err` -- disk full, an I/O
+    /// error, a lock held past the five-second busy timeout -- was written to the log and the
+    /// runner carried on driving phones. Two things went wrong from there. The UI received
+    /// `JobUpdated` built from the in-memory record, so it showed `Succeeded` while SQLite
+    /// still held `queued` or `running`; after a restart the operator saw the stale row with
+    /// nothing to say the reported completion had never been stored. And worse, an
+    /// irreversible device action could execute even though the checkpoint recording the
+    /// intent to execute it had not landed -- so a restart cannot tell "never started" from
+    /// "already done".
+    ///
+    /// A checkpoint that cannot be written is a reason not to proceed: if the intent to touch
+    /// a phone cannot be recorded, the phone must not be touched. Callers that have *already*
+    /// acted use [`Self::persist_outcome`] instead, because refusing to report a finished
+    /// action is worse than reporting one the database is behind on.
+    ///
+    /// Found by an independent review on 27/08/2026.
+    fn persist(&self, job: &JobRecord) -> anyhow::Result<()> {
+        self.db
+            .save_job(job)
+            .with_context(|| format!("ghi trạng thái job {} vào DB", job.id))?;
+        self.events.emit(AppEvent::JobUpdated { job: job.clone() });
+        Ok(())
+    }
+
+    /// Report an outcome that already happened, saying so if it could not be stored.
+    ///
+    /// The mirror of [`Self::persist`]: the work is done, so silence would be the worse
+    /// failure. The operator is told the result **and** told that the durable record is behind,
+    /// in the record itself rather than only in a log file nobody reads mid-campaign.
+    fn persist_outcome(&self, job: &mut JobRecord) {
+        if let Err(error) = self.db.save_job(job) {
+            tracing::error!("persist job {} outcome: {error:#}", job.id);
+            let note = format!("(chưa lưu được trạng thái này vào DB: {error})");
+            job.error = Some(match job.error.take() {
+                Some(existing) => format!("{existing} {note}"),
+                None => note,
+            });
         }
         self.events.emit(AppEvent::JobUpdated { job: job.clone() });
     }

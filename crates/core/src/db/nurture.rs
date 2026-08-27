@@ -49,15 +49,24 @@ impl Database {
             return Ok(());
         };
         if !settings.api_key.is_empty() {
-            // Legacy row: the key is still in SQLite. Blank the blob first, *then* write the
-            // real key — because `save_nurture_settings` writes the secret too, so storing it
-            // before the save would immediately be overwritten by the blank we are saving.
-            // Found by the migration test rather than by reading: the store ended up holding
-            // an empty string and the key was gone from both places.
-            let moved = std::mem::take(&mut settings.api_key);
+            // Legacy row: the key is still in SQLite. **One call does the whole migration,
+            // and that is the fix.**
+            //
+            // This used to `mem::take` the key, save the now-blank settings, and then write
+            // the real key back to the store — three steps with a window in the middle where
+            // the key was absent from *both* places. If that second store write failed
+            // (locked keyring, revoked access, a transient DPAPI error) the only copy was
+            // gone, and after a restart there was nothing left to recover from. The comment
+            // here explained the ordering as necessary; it was necessary only because of the
+            // `mem::take`.
+            //
+            // `save_nurture_settings` already performs exactly this migration when the key is
+            // present: it writes `settings.api_key` to the secret store, then persists a blob
+            // with the key field cleared. So leaving the key in place and calling it once
+            // stores the key before anything blanks it, and there is no window at all.
+            //
+            // Found by an independent review on 27/08/2026.
             self.save_nurture_settings(settings)?;
-            store.set_secret(SECRET_AI_API_KEY, &moved)?;
-            settings.api_key = moved;
             return Ok(());
         }
         if let Some(key) = store.get_secret(SECRET_AI_API_KEY)? {
@@ -182,16 +191,30 @@ impl Database {
         )?;
         Ok(())
     }
+    /// Record how a comment attempt ended.
+    ///
+    /// **Reports a miss, because a zero-row `UPDATE` used to be indistinguishable from
+    /// success.** The insert side logs a warning and carries on when it fails, so the caller
+    /// could hold an `attempt_id` for a row that was never written; this `UPDATE` then matched
+    /// nothing, returned `Ok(())`, and the session went on believing the audit trail had been
+    /// closed out. Token counts, cost, evidence and the final outcome were simply absent, for
+    /// a comment that had actually been posted and paid for.
+    ///
+    /// Found by an independent review on 27/08/2026.
     pub fn update_nurture_comment_attempt_outcome(
         &self,
         id: &str,
         outcome: &str,
     ) -> anyhow::Result<()> {
         let conn = self.conn()?;
-        conn.execute(
+        let changed = conn.execute(
             "UPDATE nurture_comment_attempts SET outcome=?2 WHERE id=?1",
             params![id, outcome],
         )?;
+        anyhow::ensure!(
+            changed > 0,
+            "không có dòng comment attempt nào mang id {id} — dòng audit chưa từng được ghi"
+        );
         Ok(())
     }
     pub fn list_nurture_comment_attempts(

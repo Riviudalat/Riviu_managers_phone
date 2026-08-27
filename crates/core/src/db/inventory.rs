@@ -91,7 +91,20 @@ impl Database {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 script_name: row.get(2)?,
-                udids: serde_json::from_str(&udids_json).unwrap_or_default(),
+                // **An unreadable target list is not an empty one.** `unwrap_or_default()`
+                // turned malformed `udids_json` — an older build, a hand-edited recovery, disk
+                // corruption — into `vec![]`, leaving the schedule enabled and otherwise valid
+                // while targeting no devices. Nothing downstream could tell that apart from a
+                // schedule the operator had deliberately emptied.
+                //
+                // Found by an independent review on 27/08/2026.
+                udids: serde_json::from_str(&udids_json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        3,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
                 every_minutes: narrow(row.get::<_, i64>(4)?, "every_minutes")?,
                 enabled: row.get::<_, i64>(5)? != 0,
                 last_run_at: row.get(6)?,
