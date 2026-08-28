@@ -15,7 +15,11 @@ import { randomAndroidId, randomMac, randomSerial } from "./randomIdentity";
  */
 export function RootTool({ targets, scopeLabel }: { targets: string[]; scopeLabel: string }) {
   const [rootStatus, setRootStatus] = useState<"idle" | "checking" | "done">("idle");
-  const [rootedCount, setRootedCount] = useState(0);
+  // Two counts, not one. `factory_reset` needs `su`; everything else in this panel accepts
+  // an adb shell that is already root. Nine phones in this fleet have the second and not the
+  // first, so a single "đã root" number would promise a wipe that the button will refuse.
+  const [suCount, setSuCount] = useState(0);
+  const [shellRootCount, setShellRootCount] = useState(0);
   const [changeAndroidId, setChangeAndroidId] = useState(true);
   const [changeSerial, setChangeSerial] = useState(true);
   const [changeMac, setChangeMac] = useState(true);
@@ -34,7 +38,9 @@ export function RootTool({ targets, scopeLabel }: { targets: string[]; scopeLabe
     setRootStatus("checking");
     const results = await Promise.allSettled(targets.map((u) => isRooted(u)));
     setBusy(null);
-    setRootedCount(results.filter((r) => r.status === "fulfilled" && r.value).length);
+    const answered = results.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
+    setSuCount(answered.filter((status) => status.hasSu).length);
+    setShellRootCount(answered.filter((status) => status.shellIsRoot).length);
     setRootStatus("done");
     // **A phone that could not be asked is not a phone that answered no.** The count above
     // treated both the same, so "3/20 đã root" could equally have meant seventeen unrooted
@@ -78,7 +84,7 @@ export function RootTool({ targets, scopeLabel }: { targets: string[]; scopeLabe
     const sure = await requestConfirm({
       title: `Khôi phục gốc ${targets.length} máy?`,
       message:
-        "Toàn bộ dữ liệu trên các máy đã chọn sẽ bị xoá sạch và KHÔNG THỂ hoàn tác. Chỉ máy đã root mới thực thi được.",
+        "Toàn bộ dữ liệu trên các máy đã chọn sẽ bị xoá sạch và KHÔNG THỂ hoàn tác. Chỉ máy có `su` mới thực thi được — một máy mà adb shell đã là root nhưng không có su sẽ bị từ chối.",
       confirmLabel: "Khôi phục gốc",
       danger: true,
     });
@@ -141,7 +147,13 @@ export function RootTool({ targets, scopeLabel }: { targets: string[]; scopeLabe
         </button>
         {rootStatus === "done" && (
           <span className="hint">
-            {rootedCount}/{targets.length} máy đã root
+            {suCount}/{targets.length} máy có <code>su</code>
+            {shellRootCount > 0
+              ? ` · ${shellRootCount} máy adb shell đã là root (không có su)`
+              : ""}
+            {suCount === 0 && shellRootCount > 0
+              ? " — đổi định danh và lệnh root chạy được; KHÔI PHỤC GỐC thì không, nó đòi su"
+              : ""}
           </span>
         )}
       </div>

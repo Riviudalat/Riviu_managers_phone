@@ -56,6 +56,7 @@ import type {
   InstalledApp,
   ShellOutcome,
   UpdateStatus,
+  DeviceRootStatus,
 } from "./types";
 import { asAppEvent } from "./types";
 
@@ -305,12 +306,16 @@ export async function stopMockLocation(udid: string) {
   return invoke<void>("stop_mock_location", { udid });
 }
 
-// --- Root tier (C, xiaowei "ROOT 模式"). These gate on a rooted (Magisk `su`) phone;
-// the UI hides them unless `isRooted` returns true. ---
+// --- Root tier (C, xiaowei "ROOT 模式"). Two different privilege routes, and this fleet
+// disagrees on nine of twenty phones -- see `DeviceRootStatus`. ---
 
-/// Whether an Android phone is rooted (has `su` granting uid 0). Gates the root-tier UI (C).
+/// The two separate answers to "is this phone rooted": `hasSu`, and `shellIsRoot`.
+///
+/// Used to return a single boolean meaning `hasSu`, which reported nine phones as unrooted
+/// while their adb shell was already uid 0. `factory_reset` is still gated on `hasSu`
+/// specifically, so the panel has to show both rather than collapse them.
 export async function isRooted(udid: string) {
-  return invoke<boolean>("is_rooted", { udid });
+  return invoke<DeviceRootStatus>("is_rooted", { udid });
 }
 
 /// Overwrite the app-visible device fingerprint (C, xiaowei 一键新机). `androidId` applies

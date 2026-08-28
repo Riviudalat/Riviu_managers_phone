@@ -1564,6 +1564,19 @@ export interface DeviceFileEntry {
  * A refusal never arrives here — the command rejects instead, because there is no listing to
  * draw. So `entries: []` with `incomplete: null` means the directory really is empty.
  */
+/**
+ * The two separate answers to "is this phone rooted".
+ *
+ * Nine of this fleet's twenty phones run their adb shell as uid 0 with **no `su` binary**, so
+ * `shellIsRoot` is true and `hasSu` is false — and `factory_reset` is gated on `hasSu`. A
+ * single "rooted" flag had to pick one meaning and mislead about the other, which is why the
+ * root panel shows both.
+ */
+export interface DeviceRootStatus {
+  hasSu: boolean;
+  shellIsRoot: boolean;
+}
+
 export interface DeviceDirListing {
   entries: DeviceFileEntry[];
   incomplete: string | null;

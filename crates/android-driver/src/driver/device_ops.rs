@@ -279,29 +279,68 @@ impl AndroidDriver {
     ///    Nothing in the code says so; `examples/device_files_gate` is the only place that
     ///    reports it, and only as a note.
     ///
-    /// **Left gating exactly as before, on purpose.** Answering `true` when the shell is
-    /// already root would make remote `factory_reset` reachable on nine phones that currently
-    /// refuse it — a destructive capability appearing without anybody asking for it. That is
-    /// the operator's call, not a cleanup. If it is ever taken, the honest shape is two
-    /// questions (`has_su` and `shell_is_root`) rather than one overloaded `is_rooted`, and the
-    /// UI needs to say which one it is showing.
+    /// **Split into two questions, 28/08/2026, by operator decision.** `is_rooted` keeps
+    /// meaning exactly what it always did — *there is a `su` that grants uid 0* — because
+    /// `factory_reset` is gated on it and widening that gate would make an irreversible remote
+    /// operation reachable on nine phones as a side effect of a cleanup. [`Self::can_run_privileged`]
+    /// is the other question, and it is the one `root_shell` and `set_device_identity` actually
+    /// need.
     pub async fn is_rooted(&self, serial: &str) -> bool {
         match self.adb.shell(serial, "su -c id").await {
             Ok(out) => out.contains("uid=0"),
             Err(_) => false,
         }
     }
-    /// Run a command as root (`su -c`). Errors if the phone is not rooted, rather than
-    /// silently running it unprivileged.
-    pub async fn root_shell(&self, serial: &str, command: &str) -> anyhow::Result<String> {
-        if !self.is_rooted(serial).await {
-            anyhow::bail!("máy chưa root (không có su)");
+
+    /// Can this phone run a privileged command **at all** — by any route?
+    ///
+    /// True when `adbd` itself is uid 0, or when `su` grants it. That is the question
+    /// `root_shell` and the `serialno`/`mac` half of `set_device_identity` were asking all
+    /// along; they just had only [`Self::is_rooted`] to ask with, so on the nine S8s they
+    /// refused a command that would have run.
+    ///
+    /// **Reads `id -u`, not `id`.** The full `id` output on a rooted shell contains
+    /// `uid=0(root)` *and* a groups list that also contains the string `uid=0` on some ROMs;
+    /// matching a substring of it is how a parser starts agreeing with things it did not
+    /// measure. `id -u` answers one number.
+    pub async fn can_run_privileged(&self, serial: &str) -> bool {
+        if let Ok(out) = self.adb.shell(serial, "id -u").await {
+            if out.trim() == "0" {
+                return true;
+            }
         }
-        // Double quotes so the caller's command keeps its own single quotes; callers here
-        // pass fixed commands, not operator free-text.
-        self.adb
-            .shell(serial, &format!("su -c \"{command}\""))
-            .await
+        self.is_rooted(serial).await
+    }
+
+    /// Wrap a command for the privilege route this phone actually has.
+    ///
+    /// `su -c "…"` where there is a `su`; the bare command where the shell is already root.
+    /// Nine phones in this fleet are the second case and have **no `su` binary at all**, so
+    /// wrapping there fails with `su: not found` on a shell that could have run it directly.
+    async fn as_privileged(&self, serial: &str, command: &str) -> Option<String> {
+        if self.is_rooted(serial).await {
+            // Double quotes so the caller's command keeps its own single quotes.
+            return Some(format!("su -c \"{command}\""));
+        }
+        if let Ok(out) = self.adb.shell(serial, "id -u").await {
+            if out.trim() == "0" {
+                return Some(command.to_string());
+            }
+        }
+        None
+    }
+    /// Run a command with privilege, by whichever route this phone has. Errors if it has
+    /// neither, rather than silently running it unprivileged.
+    ///
+    /// Used to demand `su` specifically, which refused on the nine phones whose adb shell is
+    /// already uid 0 and which carry no `su` binary — the command would have run.
+    pub async fn root_shell(&self, serial: &str, command: &str) -> anyhow::Result<String> {
+        let Some(wrapped) = self.as_privileged(serial, command).await else {
+            anyhow::bail!(
+                "máy này không chạy được lệnh đặc quyền: không có su, và adb shell không phải root"
+            );
+        };
+        self.adb.shell(serial, &wrapped).await
     }
     /// One-click new identity (xiaowei 一键新机): overwrite the app-visible device fingerprint.
     /// `android_id` applies without root (adb WRITE_SECURE_SETTINGS); `serialno` and `mac`
@@ -335,7 +374,8 @@ impl AndroidDriver {
             .transpose()
             .map_err(|error| anyhow::anyhow!("địa chỉ MAC không hợp lệ: {error}"))?;
 
-        let rooted = self.is_rooted(serial).await;
+        // The broader question: `serialno` and `mac` need privilege, not `su` specifically.
+        let rooted = self.can_run_privileged(serial).await;
         let mut done: Vec<String> = Vec::new();
         let mut failed: Vec<String> = Vec::new();
 
@@ -990,6 +1030,12 @@ impl AndroidDriver {
     }
     /// Factory-reset the phone (xiaowei 恢复出厂). Needs root; sends the system MASTER_CLEAR
     /// broadcast. Irreversible — the UI gates this behind an explicit confirm.
+    /// **Deliberately still gated on `su`, not on [`Self::can_run_privileged`].**
+    ///
+    /// Nine phones in this fleet have a root adb shell and no `su`. Widening this gate the way
+    /// `root_shell` was widened would make an irreversible remote wipe reachable on all nine as
+    /// a side effect of a cleanup nobody asked for. Operator's decision, 28/08/2026: keep the
+    /// narrow gate here and nowhere else.
     pub async fn factory_reset(&self, serial: &str) -> anyhow::Result<()> {
         if !self.is_rooted(serial).await {
             anyhow::bail!("máy chưa root (không có su) — không thể khôi phục gốc từ xa");

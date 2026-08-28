@@ -180,12 +180,25 @@ pub async fn set_wallpaper_bytes(
 
 /// Whether an Android phone is rooted (Magisk `su`), for gating the root-tier UI (feature C).
 #[tauri::command]
-pub async fn is_rooted(state: State<'_, AppState>, udid: String) -> Result<bool, CommandError> {
+pub async fn is_rooted(
+    state: State<'_, AppState>,
+    udid: String,
+) -> Result<riviu_core::DeviceRootStatus, CommandError> {
     let _admission = state.ensure_accepting_work()?;
     let Some(android) = &state.android else {
-        return Ok(false);
+        return Ok(riviu_core::DeviceRootStatus {
+            has_su: false,
+            shell_is_root: false,
+        });
     };
-    Ok(android.is_rooted(&udid).await)
+    // Read-only, so no lease: this asks the phone a question and changes nothing.
+    let has_su = android.is_rooted(&udid).await;
+    Ok(riviu_core::DeviceRootStatus {
+        has_su,
+        // `can_run_privileged` is true whenever `has_su` is, so subtract it to report the
+        // route rather than the union -- the panel needs to name which one this phone has.
+        shell_is_root: !has_su && android.can_run_privileged(&udid).await,
+    })
 }
 
 /// Overwrite the app-visible device fingerprint (feature C, xiaowei 一键新机). android_id

@@ -233,6 +233,11 @@ cargo run -p riviu-android-driver --example device_files_gate -- <serial>
 # Lease: máy đang bị giữ thì lệnh khác **bị từ chối**, và lồi **nêu tên việc đang giữ máy**.
 # Chỉ đọc — không đổi gì trên máy, chạy được giữa ca.
 cargo run -p riviu-android-driver --example lease_conflict_gate -- <serial>
+
+# Lối đặc quyền: mỗi máy báo đúng lối nó có (su, hay adb shell đã là root), và
+# KHÔI PHỤC GỐC chỉ mở khi có `su`. Chỉ đọc — chạy một lệnh vô hại, không bao giờ
+# gọi factory_reset.
+cargo run -p riviu-android-driver --example root_route_gate -- [serial]
 ```
 
 Cả hai in `adb` nào đã giải được và từ đâu trước khi làm gì khác: `0 device(s)` vì

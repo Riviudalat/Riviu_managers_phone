@@ -641,6 +641,25 @@ pub struct DeviceDirListing {
     pub incomplete: Option<String>,
 }
 
+/// The two separate answers to "is this phone rooted", because they are not the same
+/// question and this fleet disagrees on nine of twenty phones.
+///
+/// Measured 27/08/2026: the nine SM-G950F have `adbd` running as uid 0 (`context=u:r:su:s0`)
+/// and **no `su` binary at all**; the eleven SM-G955F/N/U1 run as uid 2000 and also have no
+/// `su`. So "can run a privileged command" is true on nine of them while "has `su`" is true on
+/// none — and a single boolean had to pick one meaning and mislead about the other.
+///
+/// `factory_reset` is gated on `has_su` specifically, so the UI must not present a phone as
+/// simply "rooted" when the wipe button will still refuse it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceRootStatus {
+    /// A `su` that grants uid 0. This is what `factory_reset` requires.
+    pub has_su: bool,
+    /// The adb shell is already uid 0, so a privileged command runs without `su`.
+    pub shell_is_root: bool,
+}
+
 /// Whether an app came with the phone or was installed onto it.
 ///
 /// **Tagged, never inferred, and never used as a filter.** Listing only third-party
