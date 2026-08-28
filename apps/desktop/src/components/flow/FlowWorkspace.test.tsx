@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ActionDefinition,
@@ -373,6 +373,13 @@ describe("FlowWorkspace editing", () => {
     expect(screen.getByTestId("canvas-kinds")).toHaveTextContent("start,end");
     expect(screen.getByTestId("canvas-kinds")).not.toHaveTextContent("wait");
     expect(screen.getByRole("button", { name: "Làm lại" })).toBeEnabled();
+
+    // Asserting only that the node disappeared is what let `dirty` stay true through an undo back
+    // to the saved document: Run stayed disabled, Save stayed enabled, and autosave kept writing a
+    // draft identical to the server copy. The document is the saved one again, so the workspace has
+    // to say so — the buttons are how the operator finds out.
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(false));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Chạy Flow" })).toBeEnabled());
   });
 
   it("enables Save only after current validation, then enables Run after a clean saved revision", async () => {
@@ -391,6 +398,27 @@ describe("FlowWorkspace editing", () => {
     await waitFor(() => expect(run).toBeEnabled());
     expect(save).toBeDisabled();
 
+    // The monitor is what the operator watches after pressing Run, so it has to be able to show
+    // the run that was just started.
+    api.flowGetRun.mockResolvedValue({
+      run: { ...runRecord({ ...savedDocument, revision: 3 }), state: "running" },
+      deviceRuns: [
+        {
+          id: "device-run-a",
+          runId: "run-a",
+          udid: device.udid,
+          state: "running",
+          capabilitySnapshot: null,
+          releaseProof: null,
+          error: null,
+          startedAt: "2026-07-31T01:00:00.000Z",
+          finishedAt: null,
+        },
+      ],
+      attempts: [],
+      artifacts: [],
+    });
+
     fireEvent.click(run);
     fireEvent.click(screen.getByRole("button", { name: "Chạy trên thiết bị" }));
     await waitFor(() => expect(api.flowRun).toHaveBeenCalledWith(
@@ -398,5 +426,17 @@ describe("FlowWorkspace editing", () => {
       3,
       { mode: "selected", udids: [device.udid] },
     ));
+
+    // Asserting the call and stopping there was the gap: nothing checked that the run became
+    // something the operator can see. It has to reach the history and then the monitor.
+    const history = screen.getByTestId("flow-run-history");
+    await waitFor(() =>
+      expect(within(history).getByRole("option", { name: /run-a/ })).toBeInTheDocument(),
+    );
+    fireEvent.change(within(history).getByRole("combobox"), { target: { value: "run-a" } });
+    await waitFor(() => expect(api.flowGetRun).toHaveBeenCalledWith("run-a"));
+    const monitor = screen.getByTestId("flow-monitor");
+    await waitFor(() => expect(within(monitor).getByText(device.udid)).toBeInTheDocument());
+    expect(within(monitor).queryByText("Chưa có lượt chạy")).toBeNull();
   });
 });
