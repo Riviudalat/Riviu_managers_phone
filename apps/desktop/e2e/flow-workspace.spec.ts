@@ -196,6 +196,46 @@ test("deleting a node keeps the path it was standing in", async ({ page }) => {
   await expect(edges).toHaveCount(edgesBefore + 1);
 });
 
+test("moving a node with the keyboard reaches the document", async ({ page }) => {
+  // React Flow moves a selected node with the arrow keys through `moveSelectedNodes`, which emits
+  // a position change and **no drag-stop event**. Positions were committed only by
+  // `onNodeDragStop`, so the node visibly moved and the document never heard: the draft stayed
+  // clean, a reload restored the old coordinates, and a save that happened for another reason
+  // wrote the old ones back so the node snapped.
+  //
+  // Only e2e can see this. `FlowCanvas` is mocked in the unit suite, and the behaviour lives
+  // entirely in React Flow's key handling plus the change it emits.
+  await openFlow(page);
+  const node = page.locator("[data-testid='flow-node']").first();
+  const before = await node.boundingBox();
+  expect(before).not.toBeNull();
+
+  await node.click();
+  await expect(page.locator("[data-testid='flow-node'][data-selected='true']")).toHaveCount(1);
+  // Dirty is what says the document heard. The toolbar's Save is the visible proof of it.
+  await expect(page.getByRole("button", { name: "Xuất Flow" })).toBeEnabled();
+
+  for (let press = 0; press < 4; press += 1) {
+    await page.keyboard.press("ArrowRight");
+  }
+
+  const after = await node.boundingBox();
+  expect(after).not.toBeNull();
+  expect(after!.x).toBeGreaterThan(before!.x);
+
+  // The document is dirty now, which it was not before, and Export is gated on a clean flow —
+  // so its going disabled is the document saying it took the move.
+  await expect(page.getByRole("button", { name: "Xuất Flow" })).toBeDisabled();
+
+  // One history entry per press, not two: four presses, four Undos, back where it started.
+  for (let undo = 0; undo < 4; undo += 1) {
+    await page.getByRole("button", { name: "Hoàn tác" }).click();
+  }
+  const restored = await node.boundingBox();
+  expect(restored).not.toBeNull();
+  expect(Math.abs(restored!.x - before!.x)).toBeLessThan(1);
+});
+
 test("authors, saves, runs, and reloads a selected-device flow", async ({ page }) => {
   await openFlow(page, true);
   await page.getByRole("button", { name: "Flow mới" }).click();

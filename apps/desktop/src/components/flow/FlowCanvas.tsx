@@ -111,12 +111,32 @@ function FlowCanvasInner(props: FlowCanvasProps) {
   }));
 
   const replaceAfterNodeChanges = (changes: NodeChange<FlowCanvasNode>[]) => {
-    setTransientNodes((current) => applyNodeChanges(changes, current));
+    const next = applyNodeChanges(changes, transientNodes);
+    setTransientNodes(next);
     const selected = changes.find(
       (change): change is Extract<NodeChange<FlowCanvasNode>, { type: "select" }> =>
         change.type === "select" && change.selected,
     );
     if (selected) props.onSelectNode(selected.id);
+    // **A position change that is not part of a drag is already final, so commit it.**
+    //
+    // Positions used to be committed only by `onNodeDragStop`, and React Flow moves a selected
+    // node with the arrow keys through `moveSelectedNodes` -> `updateNodePositions(items)`, which
+    // emits a position change and no drag-stop event. The node visibly moved, the document never
+    // heard about it: the draft stayed clean, a reload restored the old coordinates, and a save
+    // that happened for some other reason wrote the old ones back so the node snapped.
+    //
+    // `dragging` is the discriminator and it is reliable in both directions: the drag handler
+    // passes `true` while the pointer is down, and `updateNodePositions`'s second parameter
+    // defaults to `false` — which is what the keyboard path relies on. React Flow also emits one
+    // final change with `dragging: false` at drag end, *before* `onNodeDragStop`, and only when
+    // the positions actually changed. So this one path covers mouse and keyboard both, and it is
+    // one history entry per gesture rather than two — which is why `onNodeDragStop` no longer
+    // commits anything.
+    const settled = changes.some(
+      (change) => change.type === "position" && change.dragging !== true,
+    );
+    if (settled) props.onReplaceCanvas(next, edges);
   };
 
   const changeEdges = (changes: EdgeChange<FlowCanvasEdge>[]) => {
@@ -236,14 +256,6 @@ function FlowCanvasInner(props: FlowCanvasProps) {
         onEdgesChange={changeEdges}
         onConnect={connect}
         onNodeClick={(_, node) => props.onSelectNode(node.id)}
-        onNodeDragStop={(_, node) => {
-          props.onReplaceCanvas(
-            transientNodes.map((candidate) =>
-              candidate.id === node.id ? { ...candidate, position: { ...node.position } } : candidate,
-            ),
-            edges,
-          );
-        }}
         onPaneClick={() => props.onSelectNode(null)}
         onBeforeDelete={({ nodes: removing, edges: removingEdges }) => {
           // Returning false cancels React Flow's own removal entirely, which is the only way to
