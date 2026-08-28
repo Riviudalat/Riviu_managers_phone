@@ -1189,16 +1189,24 @@ impl Database {
                     && current.capability_snapshot.is_some(),
                 "StateConflict: device success requires a qualified running device"
             );
-            let queued_attempts: i64 = transaction.query_row(
-                "SELECT COUNT(*) FROM flow_node_attempts
-                 WHERE device_run_id=?1 AND state='queued'",
-                [device_run_id.to_string()],
-                |row| row.get(0),
-            )?;
-            ensure!(
-                queued_attempts == 0,
-                "StateConflict: a successful device still has queued successors"
-            );
+            // Deliberately no blanket "no queued attempts remain" check here.
+            //
+            // There used to be one, and it made every branching flow impossible to complete.
+            // `initialize_flow_device_attempts` creates a `queued` attempt for *every* node in
+            // `execution_order`, both branches of an `IfVision` included, while the executor walks
+            // only the taken path. So a run that executed its chosen branch correctly and reached
+            // `End` still had the untaken branch sitting at `queued`, the check fired, and
+            // `mark_device_terminal(Succeeded)` returned `StateConflict: a successful device still
+            // has queued successors` — with the device context already closed. The device stayed
+            // `Running` with no task behind it, and on restart recovery could not classify it and
+            // turned it into `RecoveryFailed`.
+            //
+            // The check also contradicted the two comments either side of it: the executor's
+            // ("off-path attempts stay Queued and are ignored by the path-aware success
+            // projection") and `validate_device_success_projection`'s own ("off-path nodes never
+            // ran and are intentionally ignored"). That projection is the path-aware form of the
+            // same question and is the one answer kept: every node **on the taken path** must have
+            // succeeded, which a queued node on the path fails.
             validate_device_success_projection(&transaction, &current)?;
         }
         if let Some(error) = &error {
@@ -1639,14 +1647,17 @@ fn validate_device_attempt_projection(
                 "persisted terminal Flow device still owns an active attempt"
             );
         }
-        if device.state == FlowDeviceRunState::Succeeded {
-            ensure!(
-                device_attempts
-                    .iter()
-                    .all(|attempt| attempt.state.is_terminal()),
-                "persisted successful Flow device has unfinished attempts"
-            );
-        }
+        // No blanket "every attempt is terminal" check for a succeeded device, for the same
+        // reason there is none in `mark_device_terminal`: the branch an `IfVision` did not take
+        // keeps its queued attempts forever, and `Queued` is not terminal. This check made every
+        // branching run fail its own projection immediately after succeeding -- so the device
+        // could not be marked succeeded, and once it was, the run could not be projected.
+        //
+        // Both callers of this function follow it with `validate_device_success_projection` for
+        // exactly the devices that claim success, and that is the path-aware form of the same
+        // question: every node **on the taken path** must have succeeded, which a queued node on
+        // the path fails. The check above it -- no terminal device still owns an *active*
+        // context -- is unaffected and stays, because `Queued` owns no context.
         if device.state == FlowDeviceRunState::Skipped {
             ensure!(
                 matches!(run.selection.requested, FlowTargetSelection::AllEligible)
@@ -3638,6 +3649,93 @@ mod tests {
         (revision, node)
     }
 
+    /// Start -> IfVision -> (matched: Wait) | (notMatched: Home) -> End.
+    ///
+    /// No plan fixture in this module had a non-empty `successors` map before, so nothing here ever
+    /// exercised a branch -- which is how a blanket "no queued attempts remain" check on device
+    /// success survived while contradicting the two comments either side of it.
+    fn save_branching_revision(
+        database: &Database,
+    ) -> (crate::FlowRevisionRecord, [CompiledFlowNode; 5]) {
+        let mut document = FlowDocumentV2::empty("Branch fixture");
+        document.revision = 1;
+        let start = CompiledFlowNode {
+            id: Uuid::new_v4(),
+            kind: ActionKind::Start,
+            config: CompiledActionConfig::Empty,
+            postcondition: None,
+        };
+        let branch = CompiledFlowNode {
+            id: Uuid::new_v4(),
+            kind: ActionKind::IfVision,
+            config: CompiledActionConfig::Empty,
+            postcondition: None,
+        };
+        let matched = CompiledFlowNode {
+            id: Uuid::new_v4(),
+            kind: ActionKind::Wait,
+            config: CompiledActionConfig::Wait { duration_ms: 10 },
+            postcondition: None,
+        };
+        let unmatched = CompiledFlowNode {
+            id: Uuid::new_v4(),
+            kind: ActionKind::Home,
+            config: CompiledActionConfig::Empty,
+            postcondition: None,
+        };
+        let end = CompiledFlowNode {
+            id: Uuid::new_v4(),
+            kind: ActionKind::End,
+            config: CompiledActionConfig::Empty,
+            postcondition: None,
+        };
+        let plan = CompiledFlowPlanV2 {
+            schema_version: FLOW_SCHEMA_VERSION,
+            flow_id: document.id,
+            revision: document.revision,
+            nodes: BTreeMap::from([
+                (start.id, start.clone()),
+                (branch.id, branch.clone()),
+                (matched.id, matched.clone()),
+                (unmatched.id, unmatched.clone()),
+                (end.id, end.clone()),
+            ]),
+            execution_order: vec![start.id, branch.id, matched.id, unmatched.id, end.id],
+            successors: BTreeMap::from([
+                (start.id, BTreeMap::from([("flow".to_string(), branch.id)])),
+                (
+                    branch.id,
+                    BTreeMap::from([
+                        ("matched".to_string(), matched.id),
+                        ("notMatched".to_string(), unmatched.id),
+                    ]),
+                ),
+                (matched.id, BTreeMap::from([("flow".to_string(), end.id)])),
+                (unmatched.id, BTreeMap::from([("flow".to_string(), end.id)])),
+            ]),
+            context_plan: ContextPlan {
+                requires_exclusive: false,
+                requires_ui_session: false,
+                requires_stream: false,
+                requires_fresh_text_session: false,
+                initial_bundle_id: None,
+            },
+            action_definition_versions: BTreeMap::from([
+                (ActionKind::Start, 1),
+                (ActionKind::IfVision, 1),
+                (ActionKind::Wait, 1),
+                (ActionKind::Home, 1),
+                (ActionKind::End, 1),
+            ]),
+            required_capabilities: BTreeSet::new(),
+        };
+        let hash = compiled_plan_sha256(&plan).expect("plan hash");
+        let revision = database
+            .save_flow_revision(None, &document, &plan, &hash)
+            .expect("save branch revision");
+        (revision, [start, branch, matched, unmatched, end])
+    }
+
     fn save_two_wait_revision(
         database: &Database,
     ) -> (crate::FlowRevisionRecord, [CompiledFlowNode; 2]) {
@@ -4065,6 +4163,171 @@ mod tests {
         assert_eq!((run_count, device_count), (0, 0));
         drop(connection);
         cleanup(&path);
+    }
+
+    #[test]
+    fn a_device_that_took_one_branch_can_succeed_with_the_other_still_queued() {
+        // `initialize_flow_device_attempts` queues an attempt for *every* node in
+        // `execution_order`, both branches included, while the executor walks only the taken path.
+        // A blanket "no queued attempts remain" check on device success therefore made every
+        // branching flow impossible to finish: the run executed its chosen branch, reached `End`,
+        // and then `mark_device_terminal(Succeeded)` was refused -- after the device context had
+        // already been closed. The device stayed `Running` with no task behind it, and a restart
+        // handed it to recovery, which cannot classify a device that was never terminalized.
+        let (database, path) = database_fixture();
+        let (revision, nodes) = save_branching_revision(&database);
+        let [start, branch, matched, unmatched, end] = nodes;
+        let (run, devices) = database
+            .create_flow_run_with_devices(&revision, selection(&["branch-device"]))
+            .expect("create branching run");
+        let device_run_id = devices[0].id;
+
+        ready_device(&database, device_run_id);
+        let attempts = database
+            .initialize_flow_device_attempts(device_run_id)
+            .expect("initialize branch attempts");
+        assert_eq!(
+            attempts.len(),
+            5,
+            "one queued attempt per node, both branches"
+        );
+        let attempt_for = |node_id| {
+            attempts
+                .iter()
+                .find(|attempt| attempt.node_id == node_id)
+                .expect("attempt for node")
+                .id
+        };
+
+        // The taken path: Start -> IfVision(matched) -> Wait -> End.
+        set_attempt_state(
+            &database,
+            attempt_for(start.id),
+            FlowAttemptState::Succeeded,
+        );
+        set_attempt_chosen_port(&database, attempt_for(branch.id), "matched");
+        set_attempt_state(
+            &database,
+            attempt_for(branch.id),
+            FlowAttemptState::Succeeded,
+        );
+        set_attempt_state(
+            &database,
+            attempt_for(matched.id),
+            FlowAttemptState::Succeeded,
+        );
+        set_attempt_state(&database, attempt_for(end.id), FlowAttemptState::Succeeded);
+        // The branch not taken never ran, and stays exactly as it was queued.
+        assert_eq!(
+            attempt_state(&database, attempt_for(unmatched.id)),
+            FlowAttemptState::Queued
+        );
+
+        database
+            .mark_device_terminal(
+                device_run_id,
+                &[FlowDeviceRunState::Running],
+                FlowDeviceRunState::Succeeded,
+                None,
+                release_proof("branch-device"),
+            )
+            .expect("a device that finished its branch must be allowed to succeed");
+        assert_eq!(
+            database
+                .recompute_run_projection(run.id)
+                .expect("project branching run")
+                .state,
+            FlowAggregateState::Succeeded
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_queued_node_on_the_taken_path_still_blocks_success() {
+        // The blanket check was removed, not the guarantee. The path-aware projection is what
+        // answers the real question, and it must still refuse a device whose *own* path is
+        // unfinished -- otherwise dropping the blanket check would have traded one bug for a worse
+        // one, a device reporting success over work it never did.
+        let (database, path) = database_fixture();
+        let (revision, nodes) = save_branching_revision(&database);
+        let [start, branch, matched, _unmatched, end] = nodes;
+        let (_run, devices) = database
+            .create_flow_run_with_devices(&revision, selection(&["unfinished-device"]))
+            .expect("create branching run");
+        let device_run_id = devices[0].id;
+
+        ready_device(&database, device_run_id);
+        let attempts = database
+            .initialize_flow_device_attempts(device_run_id)
+            .expect("initialize branch attempts");
+        let attempt_for = |node_id| {
+            attempts
+                .iter()
+                .find(|attempt| attempt.node_id == node_id)
+                .expect("attempt for node")
+                .id
+        };
+
+        set_attempt_state(
+            &database,
+            attempt_for(start.id),
+            FlowAttemptState::Succeeded,
+        );
+        set_attempt_chosen_port(&database, attempt_for(branch.id), "matched");
+        set_attempt_state(
+            &database,
+            attempt_for(branch.id),
+            FlowAttemptState::Succeeded,
+        );
+        // `matched` is on the taken path and is still queued; `end` never ran either.
+        assert_eq!(
+            attempt_state(&database, attempt_for(matched.id)),
+            FlowAttemptState::Queued
+        );
+        assert_eq!(
+            attempt_state(&database, attempt_for(end.id)),
+            FlowAttemptState::Queued
+        );
+
+        let refused = database
+            .mark_device_terminal(
+                device_run_id,
+                &[FlowDeviceRunState::Running],
+                FlowDeviceRunState::Succeeded,
+                None,
+                release_proof("unfinished-device"),
+            )
+            .expect_err("a device with unfinished work on its own path cannot succeed");
+        assert!(
+            refused.to_string().contains("taken path"),
+            "expected the path-aware refusal, got: {refused}"
+        );
+        cleanup(&path);
+    }
+
+    /// Record the branch an IfVision attempt chose, the way the executor does at
+    /// `EffectDispatched -> Verifying`.
+    fn set_attempt_chosen_port(database: &Database, attempt_id: Uuid, port: &str) {
+        let connection = database.conn().expect("connection");
+        let changed = connection
+            .execute(
+                "UPDATE flow_node_attempts SET chosen_port=?2 WHERE id=?1",
+                params![attempt_id.to_string(), port],
+            )
+            .expect("record chosen port");
+        assert_eq!(changed, 1);
+    }
+
+    fn attempt_state(database: &Database, attempt_id: Uuid) -> FlowAttemptState {
+        let connection = database.conn().expect("connection");
+        let state: String = connection
+            .query_row(
+                "SELECT state FROM flow_node_attempts WHERE id=?1",
+                [attempt_id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("read attempt state");
+        parse_enum_name::<FlowAttemptState>(&state, "Flow attempt state").expect("parse state")
     }
 
     #[test]

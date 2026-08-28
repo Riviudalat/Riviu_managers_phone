@@ -503,14 +503,14 @@ fn compile_config(kind: ActionKind, value: &Value) -> Result<CompiledActionConfi
         }
         ActionKind::LaunchApp => {
             let config = decode::<LaunchAppConfig>(value)?;
-            validate_chars("bundleId", &config.bundle_id, 1, 255)?;
+            validate_bundle_id("bundleId", &config.bundle_id)?;
             Ok(CompiledActionConfig::LaunchApp {
                 bundle_id: config.bundle_id,
             })
         }
         ActionKind::TerminateApp => {
             let config = decode::<TerminateAppConfig>(value)?;
-            validate_chars("bundleId", &config.bundle_id, 1, 255)?;
+            validate_bundle_id("bundleId", &config.bundle_id)?;
             Ok(CompiledActionConfig::TerminateApp {
                 bundle_id: config.bundle_id,
             })
@@ -642,6 +642,25 @@ fn decode<T: for<'de> Deserialize<'de>>(value: &Value) -> Result<T, ConfigError>
     serde_json::from_value(value.clone()).map_err(|error| ConfigError::invalid(error.to_string()))
 }
 
+/// A bundle id the runtime will also accept.
+///
+/// `validate_chars("bundleId", .., 1, 255)` counted characters, so a single space passed
+/// compilation and saved fine — and then `evidence.rs::validate_bundle` rejected it at run time
+/// (`bundle_id.trim().is_empty() || bundle_id.trim() != bundle_id`), after the process baseline had
+/// already been read. A `TerminateApp` node configured with `" "` compiled, saved, and could never
+/// dispatch; the operator had a flow that failed on every device with nothing pointing at the
+/// field. Refuse it where the field is, and say which field.
+fn validate_bundle_id(field: &'static str, value: &str) -> Result<(), ConfigError> {
+    validate_chars(field, value, 1, 255)?;
+    if value.trim().is_empty() || value.trim() != value {
+        return Err(ConfigError::range(
+            field,
+            format!("{field} must not be blank or padded with spaces"),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_chars(
     field: &'static str,
     value: &str,
@@ -749,6 +768,25 @@ fn validate_evidence(
         return;
     }
 
+    // Refuse evidence the runtime is *guaranteed* to refuse, here, where the field is named.
+    //
+    // Compilation checked the kind/action pairing and nothing about the numbers, so
+    // `frameRegionChanged` with a zero width or height compiled and saved — and then
+    // `evidence.rs::validate_region` rejected it while capturing the baseline, which happens
+    // *before* the intent is committed. Every run of that flow failed before the tap ever went
+    // out, with the node attempt left queued and no issue pointing at the postcondition. Same for a
+    // blank or padded bundle id inside `activeAppEquals`/`processAbsent`, which
+    // `evidence.rs::validate_bundle` refuses.
+    if let Some(unsatisfiable) = unsatisfiable_evidence(evidence) {
+        errors.push(FlowCompileError::node(
+            "EvidenceUnsatisfiable",
+            unsatisfiable,
+            node.id,
+            Some("postcondition"),
+        ));
+        return;
+    }
+
     let matches_config = match (node.kind, config, evidence) {
         (
             ActionKind::LaunchApp,
@@ -792,6 +830,32 @@ fn validate_evidence(
             node.id,
             Some("postcondition"),
         ));
+    }
+}
+
+/// The reason this postcondition can never be satisfied, if there is one.
+///
+/// Mirrors the runtime's own refusals in `riviu_core::flow::evidence`; anything this returns would
+/// otherwise surface as a run that fails identically on every device.
+fn unsatisfiable_evidence(evidence: &EvidenceSpec) -> Option<String> {
+    match evidence {
+        EvidenceSpec::FrameRegionChanged { width, height, .. } => {
+            if *width == 0 || *height == 0 {
+                Some(format!(
+                    "frame region {width}x{height} has no area, so no change can ever be measured"
+                ))
+            } else {
+                None
+            }
+        }
+        EvidenceSpec::ActiveAppEquals { bundle_id } | EvidenceSpec::ProcessAbsent { bundle_id } => {
+            if bundle_id.trim().is_empty() || bundle_id.trim() != bundle_id {
+                Some("bundle id must not be blank or padded with spaces".to_string())
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 
@@ -1948,6 +2012,105 @@ mod tests {
             let document = linear_document(vec![start(), FlowNode::new(kind, json!({})), end()]);
             assert_error(&document, "FeatureNotEnabled");
         }
+    }
+
+    #[test]
+    fn a_postcondition_the_runtime_can_never_satisfy_fails_compilation() {
+        // `validate_evidence` checked the kind/action pairing and nothing about the numbers, so a
+        // zero-area region compiled and saved — and then `evidence.rs::validate_region` refused it
+        // while capturing the baseline, which happens *before* the intent is committed. Every run
+        // of that flow failed before the tap ever went out, with the attempt left queued and no
+        // issue pointing at the postcondition.
+        let catalog = release_one_catalog();
+        for (label, width, height) in [
+            ("zero width", 0u32, 10u32),
+            ("zero height", 10, 0),
+            ("no area at all", 0, 0),
+        ] {
+            let mut node = FlowNode::new(
+                ActionKind::Tap,
+                json!({ "point": { "x": 10, "y": 20, "imageWidth": 100, "imageHeight": 200,
+                                   "orientation": "portrait", "profileId": "a".repeat(64) } }),
+            );
+            node.postcondition = Some(EvidenceSpec::FrameRegionChanged {
+                x: 0,
+                y: 0,
+                width,
+                height,
+                minimum_distance: 1,
+            });
+            let document = linear_document(vec![start(), node, end()]);
+            let errors =
+                compile_flow(&document, &catalog).expect_err(&format!("{label} must not compile"));
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.code == "EvidenceUnsatisfiable"
+                        && error.field.as_deref() == Some("postcondition")),
+                "{label}: {errors:?}"
+            );
+        }
+
+        // The same region with area compiles, so the gate refuses the impossible and nothing else.
+        let mut ok = FlowNode::new(
+            ActionKind::Tap,
+            json!({ "point": { "x": 10, "y": 20, "imageWidth": 100, "imageHeight": 200,
+                               "orientation": "portrait", "profileId": "a".repeat(64) } }),
+        );
+        ok.postcondition = Some(EvidenceSpec::FrameRegionChanged {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 10,
+            minimum_distance: 1,
+        });
+        // A Tap needs a UI session, and a UI-session plan has to open with Launch App.
+        let mut launch = FlowNode::new(
+            ActionKind::LaunchApp,
+            json!({ "bundleId": "com.example.fixture" }),
+        );
+        launch.postcondition = Some(EvidenceSpec::ActiveAppEquals {
+            bundle_id: "com.example.fixture".into(),
+        });
+        compile_flow(&linear_document(vec![start(), launch, ok, end()]), &catalog)
+            .expect("a region with area is satisfiable");
+    }
+
+    #[test]
+    fn a_bundle_id_the_runtime_will_reject_fails_compilation() {
+        // `validate_chars("bundleId", .., 1, 255)` counted characters, so a single space passed and
+        // `evidence.rs::validate_bundle` refused it at run time — after the process baseline had
+        // been read. A Terminate App node configured with `" "` compiled, saved, and could never
+        // dispatch on any device.
+        let catalog = release_one_catalog();
+        for blank in [" ", "  ", " com.example.padded", "com.example.padded "] {
+            let mut node = FlowNode::new(ActionKind::TerminateApp, json!({ "bundleId": blank }));
+            node.postcondition = Some(EvidenceSpec::ProcessAbsent {
+                bundle_id: blank.to_string(),
+            });
+            let document = linear_document(vec![start(), node, end()]);
+            let errors = compile_flow(&document, &catalog)
+                .expect_err(&format!("bundle {blank:?} must not compile"));
+            // Named against the field the operator typed in, not just "something was wrong".
+            // Accepting the postcondition's own refusal here as well made this case vacuous: the
+            // evidence gate covered for the config gate, so the config gate went untested.
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.field.as_deref() == Some("bundleId")),
+                "bundle {blank:?}: {errors:?}"
+            );
+        }
+
+        let mut ok = FlowNode::new(
+            ActionKind::TerminateApp,
+            json!({ "bundleId": "com.example.fixture" }),
+        );
+        ok.postcondition = Some(EvidenceSpec::ProcessAbsent {
+            bundle_id: "com.example.fixture".into(),
+        });
+        compile_flow(&linear_document(vec![start(), ok, end()]), &catalog)
+            .expect("a trimmed bundle id compiles");
     }
 
     #[test]

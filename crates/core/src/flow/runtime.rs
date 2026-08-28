@@ -1547,7 +1547,69 @@ impl FlowRuntime {
         let result = executor.run_device(device.id, plan).await;
         self.emit_run_updated(run_id)?;
         if let Err(error) = result {
-            tracing::debug!(run_id = %run_id, udid = %device.udid, code = error.code(), "Flow device terminalized with failure");
+            // `run_device` returning an error usually means it already wrote the failure itself
+            // through `finish_failed`, and then `debug!` is the right level. But it can also mean
+            // the terminal write is exactly what failed — `finish_failed` could not close the
+            // context, or the success transition was refused — and in that case the device is left
+            // non-terminal with no task behind it. Nothing else would notice: the worker completes
+            // normally, the run stays `Running` forever, and a restart hands it to recovery, which
+            // cannot classify a device that was never terminalized and marks it `RecoveryFailed`.
+            //
+            // So ask the database what actually happened rather than assuming.
+            let settled = self
+                .inner
+                .database
+                .get_flow_run(run_id)
+                .ok()
+                .flatten()
+                .and_then(|detail| {
+                    detail
+                        .device_runs
+                        .into_iter()
+                        .find(|record| record.id == device.id)
+                })
+                .map(|record| record.state.is_terminal())
+                .unwrap_or(false);
+            if settled {
+                tracing::debug!(run_id = %run_id, udid = %device.udid, code = error.code(), "Flow device terminalized with failure");
+            } else {
+                tracing::warn!(
+                    run_id = %run_id,
+                    udid = %device.udid,
+                    code = error.code(),
+                    "Flow device did not terminalize; forcing it failed so the run cannot hang"
+                );
+                let record = FlowErrorRecord {
+                    code: error.code().to_string(),
+                    message: format!("device did not terminalize: {}", error),
+                    node_id: None,
+                    field: None,
+                    udid: Some(device.udid.clone()),
+                    attempt_id: None,
+                };
+                if let Err(forced) = self.inner.database.mark_device_terminal(
+                    device.id,
+                    &[
+                        FlowDeviceRunState::Queued,
+                        FlowDeviceRunState::Preflight,
+                        FlowDeviceRunState::Running,
+                    ],
+                    FlowDeviceRunState::Failed,
+                    Some(record),
+                    empty_release_proof(&device.udid),
+                ) {
+                    // Now there is nothing left to try, so say so at a level someone reads. A
+                    // silent return here is what turned this into "the run just sits there".
+                    tracing::error!(
+                        run_id = %run_id,
+                        udid = %device.udid,
+                        error = %forced,
+                        "Flow device is stuck non-terminal and could not be forced failed"
+                    );
+                } else {
+                    self.emit_run_updated(run_id)?;
+                }
+            }
         }
         Ok(())
     }
