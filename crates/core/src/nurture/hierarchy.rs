@@ -1397,6 +1397,10 @@ pub(super) async fn run_feed(
         // Set when the comment was charged for but held until the slides have been paged.
         let mut deferred_comment = false;
 
+        // Whether this post's comment went out on the *immediate* path. The deferred path
+        // refreshes `before` itself; this one could not, because `before` is not mutable until
+        // the shadow below.
+        let mut comment_sent = false;
         match roll_feed_action_in_mood(settings.like_prob, settings.comment_prob, mood) {
             FeedAction::Like
                 if !policy.can_interact_with_post() || !policy.can_attempt(PolicyAction::Like) =>
@@ -1471,7 +1475,9 @@ pub(super) async fn run_feed(
                     );
                     deferred_comment = true;
                 } else {
-                    post_rolled_comment(&mut run, source, &settings, stop, status, report).await;
+                    comment_sent =
+                        post_rolled_comment(&mut run, source, &settings, stop, status, report)
+                            .await;
                 }
             }
             FeedAction::None => {}
@@ -1521,6 +1527,26 @@ pub(super) async fn run_feed(
         // folded in for the pixel engine, and this path applies the portion to the post's
         // real image count. Using it here would apply the percentage twice.
         let mut before = before;
+        if comment_sent {
+            // **A sent comment changes this card's own comment count, and that count is part
+            // of the fingerprint the next vertical swipe is judged against.** The deferred
+            // path already refreshes for exactly this reason (see below); the immediate path
+            // discarded `post_rolled_comment`'s answer and never did.
+            //
+            // Left stale, the sequence is: card reads Comments=12 into `before`, the comment
+            // posts and the card now reads 13, the vertical swipe is swallowed by the UI, and
+            // `swipe_next` compares 13 against 12 and reports **advanced**. So `videos_done`
+            // counts a post the session never left — and worse, `stuck_swipes` resets to 0, so
+            // the stuck-swipe recovery that exists to catch exactly this never fires. The loop
+            // can keep watching and acting on the same post while reporting progress.
+            //
+            // The comment forty lines up says the inverse of this: "judging a swipe against a
+            // stale card is how a working swipe reads as stuck". This is the other direction —
+            // a stuck swipe reading as working — and it is the more expensive one.
+            //
+            // Found by an independent review on 28/08/2026.
+            before = fingerprint(run.session, run.labels).await;
+        }
         if ceiling > 0 {
             let slides = run
                 .traverse_carousel(

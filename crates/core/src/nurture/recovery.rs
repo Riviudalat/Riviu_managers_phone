@@ -16,6 +16,7 @@ use crate::screen_watch::SessionHandle;
 use crate::types::{InteractionSessionKind, NurturePhase, NurtureSessionStatus};
 
 use super::{NurtureEngine, TextCommentHealth};
+use crate::DeviceControlError;
 
 /// Soft recovery budget: drop the session and make a new one.
 pub(super) const SOFT_RECOVERY_BUDGET: Duration = Duration::from_secs(15);
@@ -125,10 +126,35 @@ impl NurtureEngine {
         } else {
             InteractionSessionKind::Ordinary
         };
-        let soft = self
-            .control
-            .recover_streaming_session(context, bundle_id, session_kind, false)
-            .await;
+        // **The budget is enforced, not just printed.** Both constants carried careful
+        // reasoning about their values and neither was ever passed to a timeout, so
+        // `recover_streaming_session` could wait forever: the nurture loop then never reached
+        // its session-duration check, the operator stop check, hard-recovery escalation, or
+        // lease cleanup, and the phone sat in `Recovering` while the status promised 15s.
+        //
+        // Safe to cancel, and by design rather than by luck. `recover_streaming_session`
+        // documents it: the destructive sequence runs on the cleanup worker, so dropping this
+        // future only drops the `oneshot` — the worker still owns the in-flight stops and the
+        // lease, activity permit and reservation inside the ticket, and releases them. The
+        // caller is left holding a context whose ticket was taken; that drops as a no-op
+        // (`take_ticket` yields `None`), and any later call on it fails cleanly with "device
+        // context has been consumed" rather than reaching the `expect`. Checked all three
+        // before wiring this, because turning a hang into a panic across twenty phones would
+        // be the worse trade.
+        //
+        // Found by an independent review on 28/08/2026.
+        let soft = match tokio::time::timeout(
+            SOFT_RECOVERY_BUDGET,
+            self.control
+                .recover_streaming_session(context, bundle_id, session_kind, false),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(DeviceControlError::InvalidContext {
+                reason: "soft recovery quá ngân sách",
+            }),
+        };
         let soft_failure = match soft {
             Ok(s) => {
                 let stream: anyhow::Result<()> = Ok(());
@@ -182,10 +208,21 @@ impl NurtureEngine {
             HARD_RECOVERY_BUDGET.as_secs()
         );
         on_status(status.clone());
-        let hard = self
-            .control
-            .recover_streaming_session(context, bundle_id, session_kind, true)
-            .await;
+        // Same rule, the longer budget. 150s is deliberately generous — killing the
+        // device-side runner and waiting for iOS to reap it before a fresh XCTest start
+        // measured ~70–90s — so a recovery that is genuinely progressing is not aborted.
+        let hard = match tokio::time::timeout(
+            HARD_RECOVERY_BUDGET,
+            self.control
+                .recover_streaming_session(context, bundle_id, session_kind, true),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(DeviceControlError::InvalidContext {
+                reason: "hard recovery quá ngân sách",
+            }),
+        };
         budget.spent += hard_started.elapsed();
         match hard {
             Ok(s) => {
