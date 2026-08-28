@@ -1547,71 +1547,94 @@ impl FlowRuntime {
         let result = executor.run_device(device.id, plan).await;
         self.emit_run_updated(run_id)?;
         if let Err(error) = result {
-            // `run_device` returning an error usually means it already wrote the failure itself
-            // through `finish_failed`, and then `debug!` is the right level. But it can also mean
-            // the terminal write is exactly what failed — `finish_failed` could not close the
-            // context, or the success transition was refused — and in that case the device is left
-            // non-terminal with no task behind it. Nothing else would notice: the worker completes
-            // normally, the run stays `Running` forever, and a restart hands it to recovery, which
-            // cannot classify a device that was never terminalized and marks it `RecoveryFailed`.
-            //
-            // So ask the database what actually happened rather than assuming.
-            let settled = self
-                .inner
-                .database
-                .get_flow_run(run_id)
-                .ok()
-                .flatten()
-                .and_then(|detail| {
-                    detail
-                        .device_runs
-                        .into_iter()
-                        .find(|record| record.id == device.id)
-                })
-                .map(|record| record.state.is_terminal())
-                .unwrap_or(false);
-            if settled {
-                tracing::debug!(run_id = %run_id, udid = %device.udid, code = error.code(), "Flow device terminalized with failure");
-            } else {
-                tracing::warn!(
-                    run_id = %run_id,
-                    udid = %device.udid,
-                    code = error.code(),
-                    "Flow device did not terminalize; forcing it failed so the run cannot hang"
-                );
-                let record = FlowErrorRecord {
-                    code: error.code().to_string(),
-                    message: format!("device did not terminalize: {}", error),
-                    node_id: None,
-                    field: None,
-                    udid: Some(device.udid.clone()),
-                    attempt_id: None,
-                };
-                if let Err(forced) = self.inner.database.mark_device_terminal(
-                    device.id,
-                    &[
-                        FlowDeviceRunState::Queued,
-                        FlowDeviceRunState::Preflight,
-                        FlowDeviceRunState::Running,
-                    ],
-                    FlowDeviceRunState::Failed,
-                    Some(record),
-                    empty_release_proof(&device.udid),
-                ) {
-                    // Now there is nothing left to try, so say so at a level someone reads. A
-                    // silent return here is what turned this into "the run just sits there".
-                    tracing::error!(
-                        run_id = %run_id,
-                        udid = %device.udid,
-                        error = %forced,
-                        "Flow device is stuck non-terminal and could not be forced failed"
-                    );
-                } else {
-                    self.emit_run_updated(run_id)?;
-                }
-            }
+            self.settle_device_after_failure(
+                run_id,
+                device.id,
+                &device.udid,
+                error.code(),
+                &error.to_string(),
+            )?;
         }
         Ok(())
+    }
+
+    /// Make sure a device the executor gave up on is actually terminal.
+    ///
+    /// `run_device` returning an error usually means it already wrote the failure itself through
+    /// `finish_failed`, and then `debug!` is the right level. But it can also mean the terminal
+    /// write is exactly what failed — `finish_failed` could not close the context, or the success
+    /// transition was refused — and in that case the device is left non-terminal with no task
+    /// behind it. Nothing else would notice: the worker completes normally, the run stays
+    /// `Running` forever, and a restart hands it to recovery, which cannot classify a device that
+    /// was never terminalized and marks it `RecoveryFailed`.
+    ///
+    /// So ask the database what actually happened rather than assuming. Split out of the caller
+    /// because a safety net nobody can pull on is not a net: this is the only way a test can put a
+    /// device in the stuck state and check that it comes out of it.
+    fn settle_device_after_failure(
+        &self,
+        run_id: Uuid,
+        device_run_id: Uuid,
+        udid: &str,
+        code: &str,
+        message: &str,
+    ) -> anyhow::Result<()> {
+        let settled = self
+            .inner
+            .database
+            .get_flow_run(run_id)
+            .ok()
+            .flatten()
+            .and_then(|detail| {
+                detail
+                    .device_runs
+                    .into_iter()
+                    .find(|record| record.id == device_run_id)
+            })
+            .map(|record| record.state.is_terminal())
+            .unwrap_or(false);
+        if settled {
+            tracing::debug!(run_id = %run_id, udid = %udid, code = %code, "Flow device terminalized with failure");
+            return Ok(());
+        }
+        tracing::warn!(
+            run_id = %run_id,
+            udid = %udid,
+            code = %code,
+            "Flow device did not terminalize; forcing it failed so the run cannot hang"
+        );
+        let record = FlowErrorRecord {
+            code: code.to_string(),
+            message: format!("device did not terminalize: {message}"),
+            node_id: None,
+            field: None,
+            udid: Some(udid.to_string()),
+            attempt_id: None,
+        };
+        match self.inner.database.mark_device_terminal(
+            device_run_id,
+            &[
+                FlowDeviceRunState::Queued,
+                FlowDeviceRunState::Preflight,
+                FlowDeviceRunState::Running,
+            ],
+            FlowDeviceRunState::Failed,
+            Some(record),
+            empty_release_proof(udid),
+        ) {
+            Ok(_) => self.emit_run_updated(run_id),
+            Err(forced) => {
+                // Nothing left to try, so say so at a level someone reads. A silent return here is
+                // what turned this into "the run just sits there".
+                tracing::error!(
+                    run_id = %run_id,
+                    udid = %udid,
+                    error = %forced,
+                    "Flow device is stuck non-terminal and could not be forced failed"
+                );
+                Ok(())
+            }
+        }
     }
 
     fn emit_run_updated(&self, run_id: Uuid) -> anyhow::Result<()> {
@@ -3459,6 +3482,173 @@ mod tests {
             .find(|device| device.udid == udid)
             .expect("device run")
             .state
+    }
+
+    /// **A device the executor gave up on must not be left `Running`.**
+    ///
+    /// `run_device` can return an error *because the terminal write is what failed* — the context
+    /// close was refused, or the success transition was. The device is then non-terminal with no
+    /// task behind it, and the old code logged that at `debug!` and returned `Ok(())`: the worker
+    /// finished normally, the run stayed `Running` forever, and a restart handed it to recovery,
+    /// which cannot classify a device that was never terminalized and marks it `RecoveryFailed`.
+    #[tokio::test]
+    async fn a_device_the_executor_abandoned_is_forced_terminal() {
+        let fixture = RuntimeFixture::new(&["iphone-a"], wait_plan(10)).await;
+        let run = fixture
+            .database
+            .create_flow_run(
+                &fixture.revision,
+                FlowSelectionSnapshot {
+                    requested: FlowTargetSelection::One {
+                        udid: "iphone-a".into(),
+                    },
+                    target_udids: vec!["iphone-a".into()],
+                },
+            )
+            .expect("create run");
+        let device = fixture
+            .database
+            .create_flow_device_run(run.id, "iphone-a")
+            .expect("create device run");
+        fixture
+            .database
+            .transition_flow_device_run(
+                device.id,
+                FlowDeviceRunState::Queued,
+                FlowDeviceRunState::Preflight,
+                None,
+            )
+            .expect("preflight");
+        fixture
+            .database
+            .transition_flow_device_run(
+                device.id,
+                FlowDeviceRunState::Preflight,
+                FlowDeviceRunState::Running,
+                Some(FlowCapabilitySnapshot {
+                    scope: FlowPreflightScope::TargetQualified {
+                        bundle_id: TARGET.into(),
+                    },
+                    device: Some(capability_snapshot(TARGET)),
+                    agent_status: None,
+                    capability_ids: BTreeSet::from(["app.terminate".to_string()]),
+                }),
+            )
+            .expect("running");
+
+        // Exactly the state the old code walked away from: Running, no task, and the executor has
+        // already returned an error.
+        fixture
+            .runtime
+            .settle_device_after_failure(
+                run.id,
+                device.id,
+                "iphone-a",
+                "DeviceControl",
+                "context close refused",
+            )
+            .expect("settle a stuck device");
+
+        let detail = fixture
+            .database
+            .get_flow_run(run.id)
+            .expect("load run")
+            .expect("run");
+        assert_eq!(
+            device_state(&detail, "iphone-a"),
+            FlowDeviceRunState::Failed
+        );
+        let error = detail.device_runs[0]
+            .error
+            .as_ref()
+            .expect("a forced failure records why");
+        assert_eq!(error.code, "DeviceControl");
+        assert!(
+            error.message.contains("did not terminalize"),
+            "the message has to say this was forced, not ordinary: {}",
+            error.message
+        );
+        // And the run itself must not be left Running behind it.
+        assert!(
+            fixture
+                .database
+                .recompute_run_projection(run.id)
+                .expect("project run")
+                .state
+                .is_terminal(),
+            "a run whose only device was forced failed is finished"
+        );
+    }
+
+    /// A device that *did* terminalize is left exactly as it is -- the net must not overwrite a
+    /// real outcome with a synthetic one.
+    #[tokio::test]
+    async fn a_device_that_already_settled_is_not_touched_again() {
+        let fixture = RuntimeFixture::new(&["iphone-a"], wait_plan(10)).await;
+        let run = fixture
+            .database
+            .create_flow_run(
+                &fixture.revision,
+                FlowSelectionSnapshot {
+                    requested: FlowTargetSelection::One {
+                        udid: "iphone-a".into(),
+                    },
+                    target_udids: vec!["iphone-a".into()],
+                },
+            )
+            .expect("create run");
+        let device = fixture
+            .database
+            .create_flow_device_run(run.id, "iphone-a")
+            .expect("create device run");
+        let cancelled = FlowErrorRecord {
+            code: "Cancelled".into(),
+            message: "operator cancelled the run".into(),
+            node_id: None,
+            field: None,
+            udid: Some("iphone-a".into()),
+            attempt_id: None,
+        };
+        fixture
+            .database
+            .mark_device_terminal(
+                device.id,
+                &[FlowDeviceRunState::Queued],
+                FlowDeviceRunState::Cancelled,
+                Some(cancelled),
+                super::empty_release_proof("iphone-a"),
+            )
+            .expect("cancel the device");
+
+        fixture
+            .runtime
+            .settle_device_after_failure(
+                run.id,
+                device.id,
+                "iphone-a",
+                "Cancelled",
+                "operator cancelled the run",
+            )
+            .expect("settling a settled device is a no-op");
+
+        let detail = fixture
+            .database
+            .get_flow_run(run.id)
+            .expect("load run")
+            .expect("run");
+        assert_eq!(
+            device_state(&detail, "iphone-a"),
+            FlowDeviceRunState::Cancelled,
+            "a real outcome is not overwritten with a forced failure"
+        );
+        assert_eq!(
+            detail.device_runs[0]
+                .error
+                .as_ref()
+                .expect("cancellation reason")
+                .code,
+            "Cancelled"
+        );
     }
 
     struct RuntimeFixture {
