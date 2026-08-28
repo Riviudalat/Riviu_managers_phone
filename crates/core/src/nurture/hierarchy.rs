@@ -690,11 +690,25 @@ impl<'a> HierarchyRun<'a> {
             let position = self.carousel_position().await;
             // **After `CAROUSEL_SETTLE` and a full hierarchy dump**, which is the most settled
             // this loop ever is, so it needs no new wait and costs no new round trip. Offered
-            // in **both** arms below: the `None` arm is the only one reached on a post whose
-            // counter never renders, and that was 6 of 10 photo posts on one fleet run — a
-            // sink fed only where the counter is readable would miss the majority case.
-            if let Some(evidence) = evidence {
-                evidence.note_slide();
+            // in the advancing arm and in the `None` arm: the `None` arm is the only one reached
+            // on a post whose counter never renders, and that was 6 of 10 photo posts on one
+            // fleet run — a sink fed only where the counter is readable would miss the majority
+            // case.
+            //
+            // **But not when the counter is readable and did not move.** That arm is the one
+            // place this loop holds *proof* the page did not turn, and offering the slide before
+            // reading the counter spent that proof: the same image went to the comment evidence
+            // twice and `seen` counted a turn that provably did not happen, so a comment could be
+            // published as carousel-grounded over one duplicated image. The two arms that keep
+            // `note_slide` are the ones with no such proof.
+            let advanced_or_unreadable = match position {
+                Some((now, _)) => at != Some(now),
+                None => true,
+            };
+            if advanced_or_unreadable {
+                if let Some(evidence) = evidence {
+                    evidence.note_slide();
+                }
             }
             match position {
                 Some((now, post_total)) => {
@@ -1370,6 +1384,7 @@ pub(super) async fn run_feed(
             );
             status.swipe_attempts += 1;
             let before = fingerprint(run.session, run.labels).await;
+            sleep_interruptible(Duration::from_millis(human.think_pause_ms()), stop).await;
             if run
                 .swipe_next(human.swipe_duration_ms(false), &before, stop)
                 .await
@@ -1377,6 +1392,7 @@ pub(super) async fn run_feed(
             {
                 status.videos_done += 1;
             }
+            sleep_interruptible(Duration::from_millis(human.after_swipe_pause_ms()), stop).await;
             continue;
         }
 
@@ -1640,6 +1656,19 @@ pub(super) async fn run_feed(
         }
 
         status.swipe_attempts += 1;
+        // **The two `HumanBehavior` pauses this module's own header promises are shared.**
+        //
+        // It claimed `HumanBehavior` was taken whole from the pixel engine so the two backends
+        // could not "drift into behaving like two different users" — and then never called
+        // `think_pause_ms` before the swipe or `after_swipe_pause_ms` after it, both of which the
+        // pixel engine does call. Android sessions went straight from the last action into the
+        // swipe and straight out of the swipe into the next watch.
+        //
+        // The after-swipe one matters beyond its own duration: it takes `&mut self` and increments
+        // `consecutive_swipes`, which is what arms the persona's long rest after
+        // `pause_after_swipes` swipes. Never calling it left that setting **inert on Android** —
+        // switched on in the UI, doing nothing on the twenty phones that actually run.
+        sleep_interruptible(Duration::from_millis(human.think_pause_ms()), stop).await;
         let advanced = run
             .swipe_next(
                 human.swipe_duration_ms(roll_bool(settings.frenzy_prob)),
@@ -1648,6 +1677,7 @@ pub(super) async fn run_feed(
             )
             .await
             .unwrap_or(false);
+        sleep_interruptible(Duration::from_millis(human.after_swipe_pause_ms()), stop).await;
         if advanced {
             stuck_swipes = 0;
             status.videos_done += 1;
@@ -2881,6 +2911,159 @@ mod tests {
             PagerPhone::TOTAL as usize,
             "a seven-image post offers seven slides"
         );
+    }
+
+    /// A pager whose counter renders and never moves: TikTok ignored the flick.
+    #[derive(Default)]
+    struct StuckPagerPhone {
+        drags: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl UiSession for StuckPagerPhone {
+        async fn tap(&self, _point: TapPoint) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn swipe(&self, _gesture: crate::types::SwipeGesture) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn swipe_path(&self, _path: crate::types::SwipePath) -> anyhow::Result<()> {
+            self.drags.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn type_text(&self, _text: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn home(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn find_and_tap(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn assert_visible(&self, _accessibility_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn stream_url(&self) -> Option<String> {
+            None
+        }
+
+        async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            match query {
+                ElementQuery::Text { value: "Ảnh", .. } => Ok(Some(PagerPhone::node("Ảnh"))),
+                _ => Ok(None),
+            }
+        }
+
+        /// Readable, and stuck on image two of seven no matter how often it is flicked.
+        async fn locate_all_described(
+            &self,
+            query: ElementQuery<'_>,
+        ) -> anyhow::Result<Vec<ElementBox>> {
+            let ElementQuery::ClassName(name) = query else {
+                return Ok(Vec::new());
+            };
+            if name != "android.widget.TextView" {
+                return Ok(Vec::new());
+            }
+            Ok(vec![
+                PagerPhone::node("2"),
+                PagerPhone::node(" / "),
+                PagerPhone::node(&PagerPhone::TOTAL.to_string()),
+            ])
+        }
+    }
+
+    /// A readable counter that does not move is **proof** the page did not turn, and the
+    /// traversal must not spend that proof by having already offered the slide.
+    #[tokio::test]
+    async fn a_carousel_that_did_not_turn_offers_no_further_slide() {
+        let phone = StuckPagerPhone::default();
+        let screen = (1_080.0, 2_220.0);
+        let mut run = HierarchyRun {
+            session: &phone,
+            labels: vietnamese(),
+            screen,
+            planner: TouchPointPlanner::new(screen),
+        };
+        let stop = AtomicBool::new(false);
+        let mut status = NurtureSessionStatus {
+            running: true,
+            last_message: String::new(),
+            ..NurtureSessionStatus::new("stuck-pager")
+        };
+        let report = |status: &mut NurtureSessionStatus, message: String| {
+            status.last_message = message;
+        };
+        let sink = SlideCounter::default();
+
+        let seen = run
+            .traverse_carousel(100, 20, &stop, &mut status, &report, Some(&sink))
+            .await;
+
+        // Slide one arrived with the card and is offered before the loop. The turn did not
+        // happen, and the counter says so, so nothing further is claimed: not another `seen`,
+        // and not another image handed to the comment evidence. Offering it anyway published
+        // comments as carousel-grounded over one duplicated picture.
+        assert_eq!(seen, 1, "one image was actually observed");
+        assert_eq!(
+            sink.slides.load(Ordering::Relaxed),
+            1,
+            "a flick the counter says was ignored is not another slide"
+        );
+    }
+
+    /// **The module header promises `HumanBehavior` is shared; this is the part that was not.**
+    ///
+    /// `think_pause_ms` (before the feed swipe) and `after_swipe_pause_ms` (after it) are both
+    /// consumed by the pixel engine and were consumed by nothing here, so Android sessions went
+    /// straight from the last action into the swipe and straight out of it into the next watch.
+    /// The second one is worse than its own duration: it takes `&mut self` and increments
+    /// `consecutive_swipes`, which is what arms the persona's long rest after `pause_after_swipes`
+    /// swipes — so that setting was switched on in the UI and inert on the twenty phones that run.
+    ///
+    /// A source scan, because the values are randomised sleeps: what needs guarding is that the
+    /// calls exist at all, which is what silently went missing.
+    #[test]
+    fn the_hierarchy_loop_consumes_the_same_human_pauses_as_the_pixel_loop() {
+        let source = include_str!("hierarchy.rs").replace("\r\n", "\n");
+        let production = source
+            .split_once("#[cfg(test)]")
+            .map(|(before, _)| before)
+            .unwrap_or(&source);
+        // **Counted, not merely present.** This loop swipes in two places -- the live-card
+        // shortcut and the main feed step -- and a gate that only asked whether the call appeared
+        // anywhere stayed green with one of the two sites stripped out. That is the failure mode a
+        // source scan invites, so the count is the assertion.
+        // `.swipe_next(` counts calls; a bare `swipe_next(` would also count the definition
+        // and quietly demand one more pause than there are swipes.
+        let swipes = production.matches(".swipe_next(").count();
+        assert!(
+            swipes >= 2,
+            "expected at least two swipe sites in the hierarchy loop, found {swipes}"
+        );
+        for call in ["human.think_pause_ms()", "human.after_swipe_pause_ms()"] {
+            let found = production.matches(call).count();
+            assert!(
+                found >= swipes,
+                "{found} of {swipes} swipe sites consume {call}; the pixel loop consumes it at \
+                 every swipe, and this module's header claims the pacing is shared"
+            );
+        }
+        let pixel = include_str!("mod.rs").replace("\r\n", "\n");
+        for call in ["human.think_pause_ms()", "human.after_swipe_pause_ms()"] {
+            assert!(
+                pixel.contains(call),
+                "the pixel loop stopped calling {call}; this gate compares the two backends, so \
+                 it has to fail rather than quietly compare nothing"
+            );
+        }
     }
 
     /// A sink that hands back a fixed comment and remembers when it was asked.
