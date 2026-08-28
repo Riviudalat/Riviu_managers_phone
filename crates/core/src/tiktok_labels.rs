@@ -987,26 +987,37 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // shifts with how much caption is expanded, and cards 13 and 14 of one sweep were
         // the *same post* at two different heights.
         //
-        // **Measured on 46.2.1 only, and 46.2.42 is blocked on the network rather than on
-        // anything in this repo.** ce0517155ab38c390d is the only 46.2.42 phone on the farm
-        // (surveyed 23/08/2026: eleven `trill` 38.3.2, two `musically` 46.2.1, this one). Its
-        // feed will not advance because it has no internet — associated to `Riviu 3 Ruijie 5G`
-        // with an address and a 4 ms round trip to its own gateway, but 100% loss to 1.1.1.1
-        // and to 8.8.8.8, `unknown host www.tiktok.com`, and `everValidated{false}`. All three
-        // phones on that SSID fail the same way; all eleven on the other three SSIDs resolve
-        // and ping the internet. A force-stop and relaunch plus 22 swipes produced 22
-        // identical trees (123,827 bytes each) — the earlier guess that this was a stuck card
-        // needing a force-stop was wrong.
+        // **Measured on 46.2.1, and now on 46.2.42 as well.**
         //
-        // To finish it once that AP has upstream:
-        // `.claude/skills/run-riviu-managers-phone/hunt_badge_4642.ps1 -ForceStop`
-        // — it dumps the tree per card and keeps a
-        // frame of any card carrying the badge, so the claim stays checkable by eye.
+        // 28/08/2026 on ce0517155ab38c390d, the farm's only 46.2.42 phone (surveyed 23/08/2026:
+        // eleven `trill` 38.3.2, two `musically` 46.2.1, this one), locale `en`, via
+        // `.claude/skills/run-riviu-managers-phone/hunt_badge_4642.ps1 -ForceStop`. The badge is
+        // there and it is the same shape: **one** `android.widget.TextView`, `text="Photo"`,
+        // `resource-id=com.zhiliaoapp.musically:id/zxh`, `bounds=[277,1544][370,1597]` — inside
+        // the y range the 46.2.1 sightings spanned (1332/1566/1698/1704/1887). Nothing else in
+        // the tree carries the word: `text` containing `Photo` matched exactly once. The kept
+        // frame shows a real seven-slide carousel with the badge beside the author name, so the
+        // claim is checkable by eye and not only by grep.
         //
-        // This table is keyed by package and language, not version, so the label already
-        // applies there — and that is safe in the only direction that matters: if 46.2.42 does
-        // not render the badge, that phone simply keeps not paging carousels, exactly as it did
-        // before.
+        // The five other rail labels a feed card can carry were read off the same dump and all
+        // match this set: `Like`, `Read or add comments. 1 comments`, `Share video. 3 shares`,
+        // `Follow Bích Vân`, `Bích Vân profile`, `Like video. 20 likes`. The four that did not
+        // appear are absent for state, not for build — the post was not liked, it was not a LIVE
+        // card, and the comment drawer was closed.
+        //
+        // That closes the question an independent review raised: the concern was not that the
+        // badge might be *absent* on this build (harmless — the phone just keeps not paging
+        // carousels) but that it might be present meaning something else. It is not.
+        //
+        // Two things the run measured that are worth keeping. The card rendered **page dots, not
+        // digits**, so it is one of the majority that no counter can page — consistent with 6 of
+        // 10 photo posts on an earlier fleet sweep. And `uiautomator dump` failed with
+        // `could not get idle state` on 21 of 22 rounds: a playing video never goes idle, which
+        // is the same property that once nearly got this badge written down as absent.
+        //
+        // The network blocker is gone: that phone is on `VNPT Riviu Dalat_5G` now, 0% loss to
+        // 1.1.1.1 at 54 ms and `www.tiktok.com` resolving. The old note said `Riviu 3 Ruijie 5G`
+        // had no upstream, and that stays true of the SSID rather than of the phone.
         //
         // Read on a video montage first and nearly written down as "this build has no badge
         // at all": the card looped a ~10 s `SeekBar` and changed picture constantly, which

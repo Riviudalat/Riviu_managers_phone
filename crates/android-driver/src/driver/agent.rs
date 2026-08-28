@@ -724,6 +724,40 @@ mod instrumentation_tests {
         );
     }
 
+    /// The listing off a real fleet phone, which carries **three** foreign tools, not one.
+    ///
+    /// Read 28/08/2026 from ce0517155ab38c390d with `pm list instrumentation`. The synthetic
+    /// fixture above pairs our agent with GenFarmer's because that is the conflict GenFarmer's own
+    /// survey warns about; the phone turned out to carry openatx's `com.github.uiautomator` and a
+    /// leftover AOSP sample as well. None of the three was *running* at the time — only our agent
+    /// was — so this is a loaded gun rather than a live fault, and naming all three is the point:
+    /// an operator told "an automation tool is holding UiAutomation" has three packages to look
+    /// at, and a message that named one of them would send them to the wrong phone next time.
+    #[test]
+    fn a_real_fleet_listing_names_every_foreign_tool() {
+        let listing = "instrumentation:com.example.android.testing.uiautomator.BasicSample.test/android.support.test.runner.AndroidJUnitRunner (target=com.example.android.testing.uiautomator.BasicSample)\n\
+             instrumentation:com.genfarmer.uiautomator.test/androidx.test.runner.AndroidJUnitRunner (target=com.genfarmer.uiautomator)\n\
+             instrumentation:com.github.uiautomator.test/androidx.test.runner.AndroidJUnitRunner (target=com.github.uiautomator)\n\
+             instrumentation:io.appium.uiautomator2.server.test/androidx.test.runner.AndroidJUnitRunner (target=io.appium.uiautomator2.server)\n";
+
+        let foreign = AndroidDriver::foreign_instrumentations(
+            listing,
+            &[
+                "io.appium.uiautomator2.server",
+                "io.appium.uiautomator2.server.test",
+            ],
+        );
+        assert_eq!(
+            foreign,
+            vec![
+                "com.example.android.testing.uiautomator.BasicSample.test/android.support.test.runner.AndroidJUnitRunner".to_string(),
+                "com.genfarmer.uiautomator.test/androidx.test.runner.AndroidJUnitRunner".to_string(),
+                "com.github.uiautomator.test/androidx.test.runner.AndroidJUnitRunner".to_string(),
+            ],
+            "all three foreign tools are named, in listing order, and ours is not"
+        );
+    }
+
     /// A clean phone reports nothing, so the message can rule the cause out rather than repeat it.
     #[test]
     fn a_phone_carrying_only_our_agent_is_clean() {

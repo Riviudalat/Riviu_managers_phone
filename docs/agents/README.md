@@ -69,7 +69,7 @@ nếu một trích dẫn nêu số con.
 
 ## Nhật ký §9.x
 
-142 mục, trong 6 file dưới `diary/`. **Thứ tự trong file là thứ tự viết, không phải thứ
+143 mục, trong 6 file dưới `diary/`. **Thứ tự trong file là thứ tự viết, không phải thứ
 tự số và cũng không phải thứ tự thời gian** — trong bản gốc §9.43 nằm giữa §9.20 và
 §9.21, và §9.4 nằm sau §9.17. Đó là lý do bảng này sắp theo **số**: để tra được.
 
@@ -259,6 +259,7 @@ thật của việc các mục không được viết theo thứ tự, không ph
 | §9.122 | [Một chữ "đã root" trả lời hai câu hỏi, và 9/20 máy trả lời ngược nhau (28/08/2026)](diary/06-2408-2708.md#9122-một-chữ-đã-root-trả-lời-hai-câu-hỏi-và-920-máy-trả-lời-ngược-nhau-28082026) | `diary/06-2408-2708.md` |
 | §9.123 | [Codex bốn lượt cho vùng Flow: 19 lỗi, và ba lần test của tôi là test rỗng (28/08/2026)](diary/06-2408-2708.md#9123-codex-bốn-lượt-cho-vùng-flow-19-lỗi-và-ba-lần-test-của-tôi-là-test-rỗng-28082026) | `diary/06-2408-2708.md` |
 | §9.124 | [Một lượt review "thất bại" nằm chờ trên đĩa 26 KB, và ba đường mất việc chưa lưu (28/08/2026)](diary/06-2408-2708.md#9124-một-lượt-review-thất-bại-nằm-chờ-trên-đĩa-26-kb-và-ba-đường-mất-việc-chưa-lưu-28082026) | `diary/06-2408-2708.md` |
+| §9.125 | [Fleet cắm lại: ba cổng đạt, badge 46.2.42 đo được, và ba tool lạ trên một máy (28/08/2026)](diary/06-2408-2708.md#9125-fleet-cắm-lại-ba-cổng-đạt-badge-46242-đo-được-và-ba-tool-lạ-trên-một-máy-28082026) | `diary/06-2408-2708.md` |
 
 ---
 
