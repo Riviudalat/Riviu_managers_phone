@@ -879,3 +879,147 @@ fn hex_sha256(bytes: &[u8]) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect()
 }
+
+#[cfg(test)]
+mod graph_walk_tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::*;
+    use crate::{ActionKind, CompiledActionConfig, ContextPlan};
+
+    /// `Start -> IfVision -> (matched: Wait | notMatched: Home) -> End`, the shape every branching
+    /// flow has: two tails rejoining one `End`.
+    fn branching_plan() -> (CompiledFlowPlanV2, [NodeId; 5]) {
+        let ids: [NodeId; 5] = [
+            Uuid::from_u128(1),
+            Uuid::from_u128(2),
+            Uuid::from_u128(3),
+            Uuid::from_u128(4),
+            Uuid::from_u128(5),
+        ];
+        let [start, branch, matched, unmatched, end] = ids;
+        let node = |id: NodeId, kind: ActionKind| CompiledFlowNode {
+            id,
+            kind,
+            config: CompiledActionConfig::Empty,
+            postcondition: None,
+        };
+        let plan = CompiledFlowPlanV2 {
+            schema_version: FLOW_SCHEMA_VERSION,
+            flow_id: Uuid::from_u128(100),
+            revision: 1,
+            nodes: BTreeMap::from([
+                (start, node(start, ActionKind::Start)),
+                (branch, node(branch, ActionKind::IfVision)),
+                (matched, node(matched, ActionKind::Wait)),
+                (unmatched, node(unmatched, ActionKind::Home)),
+                (end, node(end, ActionKind::End)),
+            ]),
+            execution_order: vec![start, branch, matched, unmatched, end],
+            successors: BTreeMap::from([
+                (start, BTreeMap::from([("flow".to_string(), branch)])),
+                (
+                    branch,
+                    BTreeMap::from([
+                        ("matched".to_string(), matched),
+                        ("notMatched".to_string(), unmatched),
+                    ]),
+                ),
+                (matched, BTreeMap::from([("flow".to_string(), end)])),
+                (unmatched, BTreeMap::from([("flow".to_string(), end)])),
+            ]),
+            context_plan: ContextPlan {
+                requires_exclusive: false,
+                requires_ui_session: false,
+                requires_stream: false,
+                requires_fresh_text_session: false,
+                initial_bundle_id: None,
+            },
+            action_definition_versions: BTreeMap::new(),
+            required_capabilities: BTreeSet::new(),
+        };
+        (plan, ids)
+    }
+
+    /// The same nodes with **no** `successors` map: a plan compiled before branching existed, where
+    /// both walkers fall back to `execution_order`.
+    fn legacy_plan() -> (CompiledFlowPlanV2, [NodeId; 5]) {
+        let (mut plan, ids) = branching_plan();
+        plan.successors = BTreeMap::new();
+        (plan, ids)
+    }
+
+    /// **`predecessors` is the intent-claim gate**, and it had no test anywhere in the workspace.
+    ///
+    /// `validate_attempt_claim` lets a node claim intent once *at least one* of its
+    /// graph-predecessors has succeeded. Get the set wrong for a rejoin node and the gate either
+    /// blocks a legitimate claim — the run stalls with no explanation — or admits an out-of-order
+    /// one, which is a device acting on a step whose predecessor never ran.
+    #[test]
+    fn a_rejoin_node_names_both_branch_tails_as_predecessors() {
+        let (plan, [start, branch, matched, unmatched, end]) = branching_plan();
+
+        assert!(
+            plan.predecessors(start).is_empty(),
+            "Start has none, so it is always claimable"
+        );
+        assert_eq!(plan.predecessors(branch), vec![start]);
+        assert_eq!(plan.predecessors(matched), vec![branch]);
+        assert_eq!(plan.predecessors(unmatched), vec![branch]);
+
+        // The rejoin. Only the branch actually taken will have succeeded, which is exactly why the
+        // gate asks for *any* rather than *all*.
+        let mut rejoin = plan.predecessors(end);
+        rejoin.sort();
+        let mut expected = vec![matched, unmatched];
+        expected.sort();
+        assert_eq!(rejoin, expected);
+    }
+
+    #[test]
+    fn a_branch_walk_follows_the_port_the_runtime_chose() {
+        let (plan, [start, branch, matched, unmatched, end]) = branching_plan();
+
+        assert_eq!(plan.successor_on_path(start, None), Some(branch));
+        assert_eq!(
+            plan.successor_on_path(branch, Some("matched")),
+            Some(matched)
+        );
+        assert_eq!(
+            plan.successor_on_path(branch, Some("notMatched")),
+            Some(unmatched)
+        );
+        // A branch with no recorded choice has no successor: recovery must not guess a path.
+        assert_eq!(plan.successor_on_path(branch, None), None);
+        assert_eq!(plan.successor_on_path(branch, Some("flow")), None);
+        assert_eq!(plan.successor_on_path(matched, None), Some(end));
+        assert_eq!(plan.successor_on_path(end, None), None, "End is the sink");
+    }
+
+    #[test]
+    fn a_legacy_plan_walks_its_execution_order_in_both_directions() {
+        // `successors` is `skip_serializing_if = "is_empty"` precisely so plans frozen before
+        // branching keep their canonical JSON, and therefore their plan hash. Their walk has to
+        // keep working.
+        let (plan, [start, branch, matched, unmatched, end]) = legacy_plan();
+
+        assert!(plan.predecessors(start).is_empty());
+        assert_eq!(plan.predecessors(branch), vec![start]);
+        assert_eq!(plan.predecessors(matched), vec![branch]);
+        assert_eq!(plan.predecessors(unmatched), vec![matched]);
+        assert_eq!(plan.predecessors(end), vec![unmatched]);
+
+        assert_eq!(plan.successor_on_path(start, None), Some(branch));
+        // No adjacency to consult, so the chosen port is ignored rather than obeyed.
+        assert_eq!(
+            plan.successor_on_path(branch, Some("matched")),
+            Some(matched)
+        );
+        assert_eq!(plan.successor_on_path(end, None), None);
+
+        // A node that is not in the order at all belongs to no path.
+        let stranger = Uuid::from_u128(999);
+        assert!(plan.predecessors(stranger).is_empty());
+        assert_eq!(plan.successor_on_path(stranger, None), None);
+    }
+}
