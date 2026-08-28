@@ -69,7 +69,7 @@ nếu một trích dẫn nêu số con.
 
 ## Nhật ký §9.x
 
-139 mục, trong 6 file dưới `diary/`. **Thứ tự trong file là thứ tự viết, không phải thứ
+140 mục, trong 6 file dưới `diary/`. **Thứ tự trong file là thứ tự viết, không phải thứ
 tự số và cũng không phải thứ tự thời gian** — trong bản gốc §9.43 nằm giữa §9.20 và
 §9.21, và §9.4 nằm sau §9.17. Đó là lý do bảng này sắp theo **số**: để tra được.
 
@@ -256,6 +256,7 @@ thật của việc các mục không được viết theo thứ tự, không ph
 | §9.119 | [Pha 1: hết lỗi đã biết — và bốn chỗ tôi nói quá, ghi lại cho đúng (26–27/08/2026)](diary/06-2408-2708.md#9119-pha-1-hết-lỗi-đã-biết-và-bốn-chỗ-tôi-nói-quá-ghi-lại-cho-đúng-2627082026) | `diary/06-2408-2708.md` |
 | §9.120 | [Tài liệu: một file 10.385 dòng thành một kho, và bảy khẳng định trái với mã (27/08/2026)](diary/06-2408-2708.md#9120-tài-liệu-một-file-10385-dòng-thành-một-kho-và-bảy-khẳng-định-trái-với-mã-27082026) | `diary/06-2408-2708.md` |
 | §9.121 | [Codex review sáu lượt: 20 lỗi, và ba lần tôi tự bắt mình (27/08/2026)](diary/06-2408-2708.md#9121-codex-review-sáu-lượt-20-lỗi-và-ba-lần-tôi-tự-bắt-mình-27082026) | `diary/06-2408-2708.md` |
+| §9.122 | [Một chữ "đã root" trả lời hai câu hỏi, và 9/20 máy trả lời ngược nhau (28/08/2026)](diary/06-2408-2708.md#9122-một-chữ-đã-root-trả-lời-hai-câu-hỏi-và-920-máy-trả-lời-ngược-nhau-28082026) | `diary/06-2408-2708.md` |
 
 ---
 
