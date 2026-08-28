@@ -156,6 +156,46 @@ test("says why it refused a drop instead of doing nothing", async ({ page }) => 
   await expect(page.locator(FLOW_NODE_TITLE)).toHaveCount(before);
 });
 
+test("deleting a node keeps the path it was standing in", async ({ page }) => {
+  // The one level where this is a real test. `FlowCanvas` is mocked in the unit suite, so nothing
+  // below e2e exercises React Flow's actual deletion sequence -- and that sequence is the bug:
+  // `deleteElements` fires `onEdgesChange` for the incident edges *before* `onNodesDelete`, so
+  // while those two callbacks committed separately, the node delete ran on a document that had
+  // already lost the edges it needed in order to reconnect. One Delete keypress on `Start -> Chờ
+  // -> End` left Start and End with no path between them, and the operator's next save wrote that
+  // broken graph.
+  await openFlow(page);
+  const nodes = page.locator("[data-testid='flow-node']");
+  const edges = page.locator(".react-flow__edge");
+  const waits = page.locator(FLOW_NODE_TITLE).filter({ hasText: "Chờ" });
+  const nodesBefore = await nodes.count();
+  const edgesBefore = await edges.count();
+  // The fixture flow already contains a Chờ node, so the inserted one is counted, not named.
+  const waitsBefore = await waits.count();
+
+  const inserted = await insertActionOnFirstEdge(page, "Chờ");
+  await expect(nodes).toHaveCount(nodesBefore + 1);
+  await expect(edges).toHaveCount(edgesBefore + 1);
+  // A real click, not a dispatched one: React Flow listens for the delete key on `document`, and
+  // the synthetic click `insertActionOnFirstEdge` uses selects the node without moving focus, so
+  // the keypress never reaches the handler. The operator's click does both.
+  await inserted.click();
+  await expect(page.locator("[data-testid='flow-node'][data-selected='true']")).toHaveCount(1);
+
+  await page.keyboard.press("Delete");
+
+  await expect(waits).toHaveCount(waitsBefore);
+  await expect(nodes).toHaveCount(nodesBefore);
+  // The assertion that matters: the graph is back to the path it had, not one edge short of it.
+  await expect(edges).toHaveCount(edgesBefore);
+
+  // And it cost one history entry, so one Undo brings back the node *and* its wiring. Two
+  // separate mutations meant the first Undo restored a node with nothing attached to it.
+  await page.getByRole("button", { name: "Hoàn tác" }).click();
+  await expect(waits).toHaveCount(waitsBefore + 1);
+  await expect(edges).toHaveCount(edgesBefore + 1);
+});
+
 test("authors, saves, runs, and reloads a selected-device flow", async ({ page }) => {
   await openFlow(page, true);
   await page.getByRole("button", { name: "Flow mới" }).click();

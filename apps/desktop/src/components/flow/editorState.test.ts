@@ -72,6 +72,7 @@ describe("flow editor graph", () => {
       type: "insertNode",
       edgeId: document.edges[0].id,
       node: wait,
+      sourcePort: "flow",
       idFactory: ids,
     });
     expect(state.document.nodes.map((node) => node.id)).toEqual([start.id, end.id, wait.id]);
@@ -92,9 +93,21 @@ describe("flow editor graph", () => {
       targetNodeId: end.id,
     });
 
-    state = reduce(state, { type: "deleteNode", nodeId: wait.id, idFactory: ids });
+    state = reduce(state, {
+      type: "deleteSelection",
+      nodeIds: [wait.id],
+      edgeIds: [],
+      idFactory: ids,
+    });
     expect(state.document.nodes.some((node) => node.id === wait.id)).toBe(false);
     expect(state.document.nodes.map((node) => node.id)).toEqual([start.id, end.id]);
+    // The point of the delete is the path it leaves behind, not the node it removes. Asserting
+    // only the disappearance is what let the edge-first callback order go unnoticed.
+    expect(state.document.edges).toHaveLength(1);
+    expect(state.document.edges[0]).toMatchObject({
+      sourceNodeId: start.id,
+      targetNodeId: end.id,
+    });
   });
 
   it("duplicates a flow with no shared domain identifiers", () => {

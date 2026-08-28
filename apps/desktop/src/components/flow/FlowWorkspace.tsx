@@ -485,9 +485,13 @@ export function FlowWorkspace({
           selectedNodeId={state.selectedNodeId}
           onSelectNode={(nodeId) => dispatch({ type: "selectNode", nodeId })}
           onReplaceCanvas={(nodes, edges) => dispatch({ type: "replaceCanvas", nodes, edges })}
-          onInsertNode={(edgeId, node) => dispatch({ type: "insertNode", edgeId, node })}
+          onInsertNode={(edgeId, node, sourcePort) =>
+            dispatch({ type: "insertNode", edgeId, node, sourcePort })
+          }
           onAppendNode={(node) => dispatch({ type: "appendNode", node })}
-          onDeleteNode={(nodeId) => dispatch({ type: "deleteNode", nodeId })}
+          onDeleteSelection={(nodeIds, edgeIds) =>
+            dispatch({ type: "deleteSelection", nodeIds, edgeIds })
+          }
           onViewport={(viewport) => dispatch({ type: "setViewport", viewport })}
         />
         <div className="flow-inspector-shell" data-open={String(inspectorOpen)}>

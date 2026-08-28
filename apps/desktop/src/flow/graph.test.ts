@@ -42,6 +42,7 @@ describe("Flow graph mapping", () => {
       document,
       document.edges[0].id,
       node,
+      "flow",
       sequentialIds("insert-edge"),
     );
 

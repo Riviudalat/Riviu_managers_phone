@@ -8,22 +8,37 @@ import type {
 } from "../types";
 import { describeError } from "../describeError";
 
-const ACTION_KINDS = new Set<ActionKind>([
-  "start",
-  "end",
-  "launchApp",
-  "terminateApp",
-  "wait",
-  "tap",
-  "swipe",
-  "typeText",
-  "screenshot",
-  "home",
-  "assertVisible",
-  "rawHttp",
-  "rawWda",
-  "shell",
-]);
+// Exhaustive by construction, and that is the whole point of the shape.
+//
+// This was `new Set<ActionKind>([...])` listing fourteen of the sixteen kinds: `tapVision` and
+// `ifVision` were missing, and TypeScript could not say so, because a `Set<ActionKind>` built from
+// a *subset* of `ActionKind` is perfectly well typed. The cost was not cosmetic. `isFlowNode`
+// rejected every vision node, so `isFlowDocumentV2` rejected the document, so
+// `FlowDraftWriter.schedule` threw `TypeError` — from inside the autosave `useEffect` in
+// `FlowWorkspace`, which unmounts the editor. Adding a Tap Vision node crashed the Flow editor.
+//
+// `Record<ActionKind, true>` makes the same omission a compile error: add a variant to `ActionKind`
+// and this object stops type-checking until it is listed here too.
+const ACTION_KIND_MEMBERS: Record<ActionKind, true> = {
+  start: true,
+  end: true,
+  launchApp: true,
+  terminateApp: true,
+  wait: true,
+  tap: true,
+  swipe: true,
+  typeText: true,
+  screenshot: true,
+  home: true,
+  assertVisible: true,
+  tapVision: true,
+  ifVision: true,
+  rawHttp: true,
+  rawWda: true,
+  shell: true,
+};
+
+const ACTION_KINDS = new Set<ActionKind>(Object.keys(ACTION_KIND_MEMBERS) as ActionKind[]);
 
 export interface NumberInputOptions {
   integer?: boolean;

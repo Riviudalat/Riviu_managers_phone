@@ -55,6 +55,16 @@ export interface FlowEditorState {
   compiled: ValidatedCompilation | null;
   saveRequest: DocumentRequestIdentity | null;
   notice: FlowEditorNotice;
+  /**
+   * Fingerprint of the last *clean* document, or null when there is no clean point to return to.
+   *
+   * `dirty` used to be set to `true` by every history step unconditionally, so undoing back to the
+   * saved document left the editor claiming unsaved work: Run stayed disabled (it requires a clean
+   * draft), Save stayed enabled, and autosave kept writing a draft identical to the server copy.
+   * With a savepoint the reducer can answer the real question -- is what is on screen the same
+   * authored content as what was saved -- instead of counting gestures.
+   */
+  savepoint: string | null;
 }
 
 export type FlowEditorAction =
@@ -63,7 +73,13 @@ export type FlowEditorAction =
   | { type: "setViewport"; viewport: FlowViewport }
   | { type: "moveNode"; nodeId: string; position: { x: number; y: number } }
   | { type: "replaceCanvas"; nodes: FlowCanvasNode[]; edges: FlowCanvasEdge[] }
-  | { type: "insertNode"; edgeId: string; node: FlowNode; idFactory?: IdFactory }
+  | {
+      type: "insertNode";
+      edgeId: string;
+      node: FlowNode;
+      sourcePort: string;
+      idFactory?: IdFactory;
+    }
   | { type: "appendNode"; node: FlowNode }
   | {
       type: "reconnectEdge";
@@ -71,7 +87,7 @@ export type FlowEditorAction =
       sourceNodeId: string;
       targetNodeId: string;
     }
-  | { type: "deleteNode"; nodeId: string; idFactory?: IdFactory }
+  | { type: "deleteSelection"; nodeIds: string[]; edgeIds: string[]; idFactory?: IdFactory }
   | { type: "updateNodeConfig"; nodeId: string; config: JsonObject }
   | { type: "updateNodePostcondition"; nodeId: string; postcondition: EvidenceSpec | null }
   | {
@@ -109,6 +125,7 @@ export function initialEditorState(
     compiled: null,
     saveRequest: null,
     notice: null,
+    savepoint: dirty ? null : documentFingerprint(document),
   };
 }
 
@@ -153,7 +170,13 @@ export function reduceFlowEditor(
       if (!finiteNode(action.node)) return state;
       return mutate(
         state,
-        insertNodeOnEdge(state.document, action.edgeId, action.node, action.idFactory),
+        insertNodeOnEdge(
+          state.document,
+          action.edgeId,
+          action.node,
+          action.sourcePort,
+          action.idFactory,
+        ),
       );
     }
     case "appendNode":
@@ -170,8 +193,25 @@ export function reduceFlowEditor(
           action.targetNodeId,
         ),
       );
-    case "deleteNode":
-      return mutate(state, deleteExecutableNode(state.document, action.nodeId, action.idFactory));
+    case "deleteSelection": {
+      // One gesture, one mutation, applied to the document as it stands *before* anything is
+      // removed. React Flow's `deleteElements` fires `onEdgesChange` with the incident edges
+      // before it calls `onNodesDelete`, so committing those two callbacks separately meant
+      // `deleteExecutableNode` ran on a document whose incident edges were already gone: it saw
+      // 0 in / 0 out, skipped the reconnect, and one Delete keypress silently left `Start` and
+      // `End` with no path between them. It also cost two history entries, so the first Undo
+      // restored a node with none of its wiring.
+      let document = state.document;
+      if (action.edgeIds.length > 0) {
+        const removing = new Set(action.edgeIds);
+        const edges = document.edges.filter((edge) => !removing.has(edge.id));
+        if (edges.length !== document.edges.length) document = { ...document, edges };
+      }
+      for (const nodeId of action.nodeIds) {
+        document = deleteExecutableNode(document, nodeId, action.idFactory);
+      }
+      return mutate(state, document);
+    }
     case "updateNodeConfig":
       return isFiniteJsonObject(action.config)
         ? mutate(state, withNodeConfig(state.document, action.nodeId, action.config))
@@ -248,7 +288,7 @@ function mutate(state: FlowEditorState, document: FlowDocumentV2): FlowEditorSta
   return invalidatedState(state, document, {
     past,
     future: [],
-    dirty: true,
+    dirty: dirtyAgainstSavepoint(state, document),
     selectedNodeId: document.nodes.some((node) => node.id === state.selectedNodeId)
       ? state.selectedNodeId
       : null,
@@ -266,6 +306,9 @@ function replaceDocument(
     dirty,
     selectedNodeId: null,
     notice: null,
+    // A server copy is the clean point; an import, a new flow, or a duplicate is unsaved work with
+    // nothing behind it to return to.
+    savepoint: dirty ? null : documentFingerprint(document),
   });
 }
 
@@ -275,7 +318,7 @@ function undo(state: FlowEditorState): FlowEditorState {
   return invalidatedState(state, document, {
     past: state.past.slice(0, -1),
     future: [cloneFlowDocument(state.document), ...state.future].slice(0, HISTORY_LIMIT),
-    dirty: true,
+    dirty: dirtyAgainstSavepoint(state, document),
     selectedNodeId: document.nodes.some((node) => node.id === state.selectedNodeId)
       ? state.selectedNodeId
       : null,
@@ -288,7 +331,7 @@ function redo(state: FlowEditorState): FlowEditorState {
   return invalidatedState(state, document, {
     past: [...state.past, cloneFlowDocument(state.document)].slice(-HISTORY_LIMIT),
     future: state.future.slice(1),
-    dirty: true,
+    dirty: dirtyAgainstSavepoint(state, document),
     selectedNodeId: document.nodes.some((node) => node.id === state.selectedNodeId)
       ? state.selectedNodeId
       : null,
@@ -302,12 +345,29 @@ function completeSave(
 ): FlowEditorState {
   if (!sameIdentity(identity, state.saveRequest)) return state;
   if (!identityMatchesState(identity, state)) {
+    // The operator edited while the save was in flight. Keeping their newer edits is right -- that
+    // is what this branch is for -- but the *revision* those edits carry is now stale: the server
+    // committed the snapshot as `record.document.revision`, and what is on screen is a descendant
+    // of it.
+    //
+    // Left un-rebased, the document kept the pre-save number, so `save` sent that number as the
+    // expected revision and the backend answered `RevisionConflict` -- on every retry, forever,
+    // because event invalidation deliberately skips dirty documents and so can never rebase it.
+    // And autosave wrote the stale number as `baseRevision`, so on restart the draft no longer
+    // matched the server revision, restoration refused it, and the edit made during the save was
+    // gone with no message. History is rebased along with it, so undoing back through those edits
+    // does not walk into the same stale number.
+    const revision = record.document.revision;
     return {
       ...state,
+      ...rebasedHistory(state, revision),
+      document: { ...state.document, revision },
       saveRequest: null,
+      // What the server now holds is the clean point, so undoing the post-save edits lands on it.
+      savepoint: documentFingerprint(record.document),
       notice: {
         code: "SaveCompletedForOlderDraft",
-        savedRevision: record.document.revision,
+        savedRevision: revision,
       },
     };
   }
@@ -315,6 +375,7 @@ function completeSave(
     past: [],
     future: [],
     dirty: false,
+    savepoint: documentFingerprint(record.document),
     selectedNodeId: null,
     saveRequest: null,
     notice: null,
@@ -335,6 +396,47 @@ function invalidatedState(
     validationRequest: null,
     compiled: null,
   };
+}
+
+/**
+ * Authored content of a document, as a comparable string.
+ *
+ * Deliberately excludes `viewport` and `revision`. The viewport is a view preference --
+ * `setViewport` already refuses to mark the document dirty, and including it here would undo that
+ * decision. `revision` is a server label, not authoring: history snapshots taken before a rebase
+ * carry the older number, and comparing it would report a document as changed when only its label
+ * moved.
+ */
+function documentFingerprint(document: FlowDocumentV2): string {
+  return JSON.stringify({
+    name: document.name,
+    entryNodeId: document.entryNodeId,
+    nodes: document.nodes.map((node) => ({
+      id: node.id,
+      kind: node.kind,
+      position: node.position,
+      config: node.config,
+      postcondition: node.postcondition ?? null,
+    })),
+    edges: document.edges.map((edge) => ({
+      id: edge.id,
+      sourceNodeId: edge.sourceNodeId,
+      sourcePort: edge.sourcePort,
+      targetNodeId: edge.targetNodeId,
+      targetPort: edge.targetPort,
+    })),
+  });
+}
+
+/** True when `document` differs from the savepoint, or when there is no savepoint to compare to. */
+function dirtyAgainstSavepoint(state: FlowEditorState, document: FlowDocumentV2): boolean {
+  return state.savepoint === null || documentFingerprint(document) !== state.savepoint;
+}
+
+/** History snapshots with `revision` moved to a newer one the server has committed. */
+function rebasedHistory(state: FlowEditorState, revision: number): Partial<FlowEditorState> {
+  const rebase = (document: FlowDocumentV2): FlowDocumentV2 => ({ ...document, revision });
+  return { past: state.past.map(rebase), future: state.future.map(rebase) };
 }
 
 function identityMatchesState(

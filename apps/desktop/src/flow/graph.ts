@@ -73,10 +73,20 @@ export function withCanvasLayout(
   };
 }
 
+/**
+ * Split `edgeId` and put `node` in the middle, wiring the new node's output through `sourcePort`.
+ *
+ * `sourcePort` is a parameter and not the literal `"flow"` because that literal was wrong for
+ * `ifVision`, whose outputs are `matched` and `notMatched`. Dropping an If Vision onto an edge
+ * therefore always drew a graph the compiler rejected (`InvalidPort` plus `InvalidDegree`), so the
+ * gesture produced something the operator could not save and could only undo. The caller knows the
+ * real port names -- they are on the action's catalog entry -- so it passes one in.
+ */
 export function insertNodeOnEdge(
   document: FlowDocumentV2,
   edgeId: string,
   node: FlowNode,
+  sourcePort: string,
   idFactory: IdFactory = createFlowId,
 ): FlowDocumentV2 {
   if (document.nodes.some((candidate) => candidate.id === node.id)) return document;
@@ -95,7 +105,7 @@ export function insertNodeOnEdge(
     {
       id: idFactory(),
       sourceNodeId: node.id,
-      sourcePort: "flow",
+      sourcePort,
       targetNodeId: selected.targetNodeId,
       targetPort: selected.targetPort,
     },

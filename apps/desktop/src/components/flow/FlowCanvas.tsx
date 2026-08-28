@@ -37,9 +37,9 @@ interface FlowCanvasProps {
   selectedNodeId: string | null;
   onSelectNode: (nodeId: string | null) => void;
   onReplaceCanvas: (nodes: FlowCanvasNode[], edges: FlowCanvasEdge[]) => void;
-  onInsertNode: (edgeId: string, node: FlowNode) => void;
+  onInsertNode: (edgeId: string, node: FlowNode, sourcePort: string) => void;
   onAppendNode: (node: FlowNode) => void;
-  onDeleteNode: (nodeId: string) => void;
+  onDeleteSelection: (nodeIds: string[], edgeIds: string[]) => void;
   onViewport: (viewport: FlowViewport) => void;
 }
 
@@ -188,7 +188,26 @@ function FlowCanvasInner(props: FlowCanvasProps) {
     const node = createFlowNode(kind, position);
     const exact = selectedEdges.size === 1 ? [...selectedEdges][0] : null;
     const edgeId = exact ?? nearestEdge(position, nodes, edges);
-    if (edgeId) props.onInsertNode(edgeId, node);
+    const [only] = offered.outputPorts;
+    if (edgeId !== null && offered.outputPorts.length !== 1) {
+      // Splitting an edge wires the new node's output to whatever the edge used to reach, and that
+      // only has one answer when the action has exactly one output. `ifVision` has two (`matched`,
+      // `notMatched`) and `end` has none, so the split has no honest source port -- it used to
+      // assume `"flow"` and draw a graph the compiler rejects. Drop it in unconnected instead and
+      // say why, so the operator wires both branches themselves.
+      pushToast(
+        "warn",
+        `${offered.label} không chèn được vào một cạnh`,
+        offered.outputPorts.length === 0
+          ? "Hành động này không có cổng ra."
+          : `Hành động này có ${offered.outputPorts.length} cổng ra (${offered.outputPorts
+              .map((port) => port.name)
+              .join(", ")}) — đã thả vào canvas, hãy tự nối từng cổng.`,
+      );
+      props.onAppendNode(node);
+      return;
+    }
+    if (edgeId !== null && only) props.onInsertNode(edgeId, node, only.name);
     else props.onAppendNode(node);
   };
 
@@ -211,7 +230,24 @@ function FlowCanvasInner(props: FlowCanvasProps) {
           );
         }}
         onPaneClick={() => props.onSelectNode(null)}
-        onNodesDelete={(deleted) => deleted.forEach((node) => props.onDeleteNode(node.id))}
+        onBeforeDelete={({ nodes: removing, edges: removingEdges }) => {
+          // Returning false cancels React Flow's own removal entirely, which is the only way to
+          // get the whole gesture as one mutation: it fires `onEdgesChange` for the incident edges
+          // *before* `onNodesDelete`, so letting it proceed meant the node delete ran on a
+          // document that had already lost the edges it needed in order to reconnect the path.
+          // Pure edge deletions have no such ordering problem and go through unchanged.
+          if (removing.length === 0) return Promise.resolve(true);
+          const nodeIds = new Set(removing.map((node) => node.id));
+          props.onDeleteSelection(
+            [...nodeIds],
+            // Edges React Flow included only because they touch a deleted node are that node's
+            // business; the rest were selected in their own right and must still go.
+            removingEdges
+              .filter((edge) => !nodeIds.has(edge.source) && !nodeIds.has(edge.target))
+              .map((edge) => edge.id),
+          );
+          return Promise.resolve(false);
+        }}
         onDrop={drop}
         onDragOver={(event) => {
           event.preventDefault();

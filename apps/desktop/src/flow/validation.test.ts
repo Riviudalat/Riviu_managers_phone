@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { ActionKind } from "../types";
 import { newFlowDocument } from "./model";
 import {
   acceptFiniteValueAsNumber,
@@ -42,5 +43,54 @@ describe("Flow input validation", () => {
     expect(normalizeFlowIssues(new Error("network failed"))).toEqual([
       { code: "ValidationTransportFailed", message: "network failed" },
     ]);
+  });
+});
+
+describe("the local document shape knows every action kind", () => {
+  // `ACTION_KINDS` listed fourteen of the sixteen `ActionKind` variants. TypeScript could not see
+  // it -- a `Set<ActionKind>` built from a subset is well typed -- and the cost was that adding a
+  // Tap Vision or If Vision node made `isFlowDocumentV2` reject the document, which made
+  // `FlowDraftWriter.schedule` throw out of the autosave effect, which unmounted the editor.
+  it.each(["tapVision", "ifVision", "assertVisible", "shell", "rawWda"] as ActionKind[])(
+    "accepts a document whose node kind is %s",
+    (kind) => {
+      const document = newFlowDocument("Vision");
+      document.nodes.push({
+        id: "node-vision",
+        kind,
+        position: { x: 10, y: 20 },
+        config: {},
+      });
+      expect(isFlowDocumentV2(document)).toBe(true);
+    },
+  );
+
+  it("covers the whole ActionKind union, so a new kind cannot be forgotten here", () => {
+    // The union itself is the fixture: every variant the catalog can offer must be a kind this
+    // module will accept, or drafts of flows using it cannot be stored.
+    const everyKind: ActionKind[] = [
+      "start",
+      "end",
+      "launchApp",
+      "terminateApp",
+      "wait",
+      "tap",
+      "swipe",
+      "typeText",
+      "screenshot",
+      "home",
+      "assertVisible",
+      "tapVision",
+      "ifVision",
+      "rawHttp",
+      "rawWda",
+      "shell",
+    ];
+    const rejected = everyKind.filter((kind) => {
+      const document = newFlowDocument("Coverage");
+      document.nodes.push({ id: "n", kind, position: { x: 0, y: 0 }, config: {} });
+      return !isFlowDocumentV2(document);
+    });
+    expect(rejected).toEqual([]);
   });
 });
