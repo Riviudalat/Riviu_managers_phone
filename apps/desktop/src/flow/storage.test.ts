@@ -68,3 +68,49 @@ describe("Flow draft storage", () => {
     expect(loadDraft(first.id)?.document.name).toBe("Latest");
   });
 });
+
+describe("a draft write that fails on a timer", () => {
+  /** A Storage whose `setItem` always throws, the way a full WebView quota does. */
+  function refusingStorage(): Storage {
+    const inner = new Map<string, string>();
+    return {
+      get length() {
+        return inner.size;
+      },
+      clear: () => inner.clear(),
+      getItem: (key: string) => inner.get(key) ?? null,
+      key: (index: number) => [...inner.keys()][index] ?? null,
+      removeItem: (key: string) => void inner.delete(key),
+      setItem: () => {
+        throw new DOMException("QuotaExceededError", "QuotaExceededError");
+      },
+    } satisfies Storage;
+  }
+
+  it("reports the failure instead of losing it inside the timer", () => {
+    // `schedule` returns void and the write happens later, so a throw had no caller to reach: the
+    // graph stayed dirty on screen, nothing said the recovery draft was never written, and it was
+    // gone after a shutdown.
+    vi.useFakeTimers();
+    const failures: unknown[] = [];
+    const writer = new FlowDraftWriter(refusingStorage(), 10, (reason) => failures.push(reason));
+    writer.schedule(newFlowDocument("Quota"));
+    vi.advanceTimersByTime(20);
+
+    expect(failures).toHaveLength(1);
+    expect(String(failures[0])).toContain("QuotaExceededError");
+  });
+
+  it("does not report the same failure again on the next flush", () => {
+    // Clearing `pending` before the write, not after, is what stops one bad document from being
+    // retried by every later flush and reporting forever.
+    vi.useFakeTimers();
+    const failures: unknown[] = [];
+    const writer = new FlowDraftWriter(refusingStorage(), 10, (reason) => failures.push(reason));
+    writer.schedule(newFlowDocument("Quota"));
+    vi.advanceTimersByTime(20);
+    writer.flush();
+    writer.flush();
+    expect(failures).toHaveLength(1);
+  });
+});

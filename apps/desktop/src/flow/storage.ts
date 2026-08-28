@@ -60,13 +60,24 @@ export class FlowDraftWriter {
   private pending: FlowDocumentV2 | null = null;
   private readonly storage: Storage;
   private readonly delayMs: number;
+  private readonly onError: (reason: unknown) => void;
 
+  /**
+   * `onError` exists because the debounced write happens on a timer, long after `schedule` returned
+   * `void`. A quota error or a storage exception therefore escaped into nothing: the graph stayed
+   * dirty on screen, nobody was told the recovery draft had not been written, and it was gone after
+   * a shutdown. The default keeps that path from being silent even when a caller does not pass one.
+   */
   constructor(
     storage: Storage = localStorage,
     delayMs = 300,
+    onError: (reason: unknown) => void = (reason) => {
+      console.error("Flow draft autosave failed", reason);
+    },
   ) {
     this.storage = storage;
     this.delayMs = delayMs;
+    this.onError = onError;
   }
 
   schedule(document: FlowDocumentV2): void {
@@ -81,8 +92,15 @@ export class FlowDraftWriter {
   flush(): void {
     this.cancelTimer();
     if (this.pending === null) return;
-    saveDraft(this.pending, this.storage);
+    const document = this.pending;
+    // Cleared before the write, not after: a write that throws every time would otherwise be
+    // retried by the next flush with the same document and report the same failure forever.
     this.pending = null;
+    try {
+      saveDraft(document, this.storage);
+    } catch (reason) {
+      this.onError(reason);
+    }
   }
 
   cancel(): void {

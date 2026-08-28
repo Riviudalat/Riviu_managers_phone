@@ -477,6 +477,31 @@
   font-size: var(--text-sm);
 }
 
+/* Two alerts in the monitor header and one marker in its table.
+ *
+ * `.flow-monitor-stalled` says the projection stopped being readable -- the refresh loop used to
+ * swallow its failures, so a run sat on a stale "Running" table with nothing to say the numbers
+ * had stopped moving. `.flow-monitor-error` carries the run error's message, not just its code,
+ * because the backend maps several distinct device failures onto one code. */
+.flow-monitor-stalled,
+.flow-monitor-error {
+  padding: 1px 6px;
+  border: 1px solid var(--danger-line);
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: var(--danger-strong);
+  font-size: var(--text-sm);
+  max-width: 46ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Which output port an If Vision node took, next to the action name. */
+.flow-monitor-branch {
+  color: var(--text-3);
+}
+
 .flow-monitor table {
   width: 100%;
   min-width: 920px;

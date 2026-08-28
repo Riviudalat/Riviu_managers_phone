@@ -1226,6 +1226,12 @@ export interface CompiledFlowPlanV2 {
   revision: number;
   nodes: Record<string, CompiledFlowNode>;
   executionOrder: string[];
+  /**
+   * Per-node adjacency keyed by output port (`flow`, or `matched`/`notMatched` for `ifVision`).
+   * Absent for legacy plans compiled before branching existed, which is why Rust marks it
+   * `skip_serializing_if` — their canonical JSON, and so their frozen plan hash, must not change.
+   */
+  successors?: Record<string, Record<string, string>>;
   contextPlan: FlowContextPlan;
   actionDefinitionVersions: Partial<Record<ActionKind, number>>;
   requiredCapabilities: string[];
@@ -1434,6 +1440,11 @@ export interface FlowNodeAttemptRecord {
   canonicalInput: JsonValue | null;
   evidenceBaseline: JsonValue | null;
   evidenceResult: JsonValue | null;
+  /**
+   * For an `ifVision` node, the output port the runtime match selected. Absent for every other
+   * kind and for attempts recorded before branching existed.
+   */
+  chosenPort?: string;
   retryAllowed: boolean;
   error: FlowErrorRecord | null;
   startedAt: string | null;

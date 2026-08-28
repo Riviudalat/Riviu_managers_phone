@@ -586,10 +586,20 @@ function EvidenceFields({
   );
 }
 
+/**
+ * Every number this renders is a `u32` on the Rust side.
+ *
+ * `x`, `y`, `width`, `height` and `minimumDistance` are all `u32` in `EvidenceSpec`, but this input
+ * used `step="any"` with no minimum, so `0.5` and `-1` were accepted, stored in the draft, and then
+ * failed *deserialization* at the Tauri command boundary — a whole-document refusal with nothing
+ * naming the field, instead of a node issue pointing at the box the operator typed in. Integer and
+ * non-negative are properties of the wire type, so they are this component's defaults, not a caller's
+ * responsibility to remember.
+ */
 function FiniteEvidenceInput({
   label,
   value,
-  minimum,
+  minimum = 0,
   onChange,
 }: {
   label: string;
@@ -602,14 +612,14 @@ function FiniteEvidenceInput({
       <span>{label}</span>
       <input
         type="number"
-        step="any"
+        step={1}
         min={minimum}
         value={Number.isFinite(value) ? value : ""}
         onChange={(event) => {
           const next = acceptFiniteValueAsNumber(
             event.currentTarget.value,
             event.currentTarget.valueAsNumber,
-            { minimum },
+            { integer: true, minimum },
           );
           if (next !== null) onChange(next);
         }}

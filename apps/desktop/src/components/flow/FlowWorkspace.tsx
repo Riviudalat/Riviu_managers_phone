@@ -119,8 +119,16 @@ export function FlowWorkspace({
     revision: state.document.revision,
     dirty: state.dirty,
   };
+  const [draftError, setDraftError] = useState<string | null>(null);
   const draftWriter = useRef<FlowDraftWriter | null>(null);
-  if (draftWriter.current === null) draftWriter.current = new FlowDraftWriter();
+  if (draftWriter.current === null) {
+    // The debounced write runs on a timer, so its failure has no caller to return to. Without a
+    // channel a quota error simply vanished: the graph stayed dirty on screen and the recovery
+    // draft that was supposed to survive a shutdown had never been written.
+    draftWriter.current = new FlowDraftWriter(localStorage, 300, (reason) =>
+      setDraftError(describeError(reason)),
+    );
+  }
 
   const replaceFromRecord = useCallback((record: FlowRevisionRecord) => {
     const draft = loadDraft(record.document.id);
@@ -171,10 +179,22 @@ export function FlowWorkspace({
 
   useEffect(() => {
     onDirtyChange(state.dirty);
-    if (state.dirty) draftWriter.current?.schedule(state.document);
-    else {
+    if (state.dirty) {
+      try {
+        draftWriter.current?.schedule(state.document);
+        setDraftError(null);
+      } catch (reason) {
+        // `schedule` throws synchronously on a document it will not store, and this is an effect
+        // body: an escaping throw unmounts the whole editor. That is exactly what happened when
+        // the local shape check did not know about the vision action kinds -- adding a Tap Vision
+        // node crashed the editor. The kinds are fixed, but the *shape* of the mistake is what
+        // needs closing: autosave must never be able to take the editor down with it.
+        setDraftError(describeError(reason));
+      }
+    } else {
       draftWriter.current?.cancel();
       clearDraft(state.document.id);
+      setDraftError(null);
     }
   }, [onDirtyChange, state.dirty, state.document]);
 
@@ -461,6 +481,12 @@ export function FlowWorkspace({
           <div className="flow-operation-error" role="alert">
             <span>{operationError}</span>
             <button type="button" onClick={() => setOperationError(null)}>Bỏ qua</button>
+          </div>
+        )}
+        {draftError && (
+          <div className="flow-operation-error" role="alert">
+            <span>Bản nháp cục bộ không lưu được: {draftError} — Lưu lên máy chủ trước khi đóng.</span>
+            <button type="button" onClick={() => setDraftError(null)}>Bỏ qua</button>
           </div>
         )}
         {state.notice && (

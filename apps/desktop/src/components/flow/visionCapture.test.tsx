@@ -5,6 +5,7 @@ import type {
   ActionDefinition,
   ActionKind,
   DeviceInfo,
+  EvidenceSpec,
   FlowCoordinateFrame,
   FlowNode,
   JsonObject,
@@ -325,5 +326,65 @@ describe("the canvas summary of a vision node", () => {
       .toContain("0.854");
     expect(summarizeAction("tapVision", { templatePngBase64: "AA", threshold: 0.85 }))
       .toContain("0.85");
+  });
+});
+
+describe("evidence numbers stay inside what the wire type can hold", () => {
+  /** A Tap node with a frame-region postcondition, which is where all five u32 fields live. */
+  function tapWithRegion(onEvidence: (spec: EvidenceSpec | null) => void) {
+    const node: FlowNode = {
+      id: "node-tap",
+      kind: "tap",
+      position: { x: 0, y: 0 },
+      config: {},
+      postcondition: {
+        kind: "frameRegionChanged",
+        x: 4,
+        y: 8,
+        width: 20,
+        height: 30,
+        minimumDistance: 2,
+      },
+    };
+    const action: ActionDefinition = {
+      ...definition("tap"),
+      configSchema: { type: "object", properties: {} },
+      evidenceRequirement: "frame",
+      allowedEvidence: ["frameRegionChanged"],
+    };
+    render(
+      <FlowInspector
+        node={node}
+        definition={action}
+        issues={[]}
+        onConfigChange={() => undefined}
+        onPostconditionChange={onEvidence}
+      />,
+    );
+  }
+
+  it.each([
+    ["a fraction", "0.5"],
+    ["a negative", "-1"],
+  ])("refuses %s where Rust declares u32", (_label, typed) => {
+    // `x`, `y`, `width`, `height` and `minimumDistance` are all `u32` in `EvidenceSpec`. The input
+    // used `step="any"` with no minimum, so these were accepted, stored in the draft, and then
+    // failed *deserialization* at the Tauri command boundary -- a whole-document refusal with
+    // nothing naming the field the operator had typed in.
+    const onEvidence = vi.fn();
+    tapWithRegion(onEvidence);
+    fireEvent.change(screen.getByLabelText("Khoảng cách tối thiểu"), {
+      target: { value: typed },
+    });
+    expect(onEvidence).not.toHaveBeenCalled();
+  });
+
+  it("still accepts a whole number", () => {
+    const onEvidence = vi.fn();
+    tapWithRegion(onEvidence);
+    fireEvent.change(screen.getByLabelText("Khoảng cách tối thiểu"), { target: { value: "7" } });
+    expect(onEvidence).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "frameRegionChanged", minimumDistance: 7 }),
+    );
   });
 });

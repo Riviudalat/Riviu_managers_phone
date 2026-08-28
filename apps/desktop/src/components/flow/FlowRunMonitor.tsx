@@ -189,7 +189,15 @@ export function FlowRunMonitor({
             return (
               <tr key={attempt.id}>
                 <td>{device.udid}</td>
-                <td>{displayFlowState(attempt.actionKind)}</td>
+                <td>
+                  {displayFlowState(attempt.actionKind)}
+                  {/* Which branch an If Vision picked is the whole question when a vision flow
+                      does the wrong thing, and it was on the wire all along -- TypeScript just
+                      had no field for it. */}
+                  {attempt.chosenPort && (
+                    <span className="flow-monitor-branch"> → {attempt.chosenPort}</span>
+                  )}
+                </td>
                 <td>{attempt.attemptNo}</td>
                 <td>{displayFlowState(attempt.state)}</td>
                 <td>{attemptDurationMs(attempt)} ms</td>

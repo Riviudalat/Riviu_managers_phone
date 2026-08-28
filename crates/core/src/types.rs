@@ -2064,6 +2064,67 @@ mod wire_shape_tests {
         out
     }
 
+    /// **The same gate again, for the Flow models — which also had none.**
+    ///
+    /// `the_frontend_types_describe_the_same_fields_the_backend_sends` reads this file and
+    /// `..._the_interaction_types_too` reads `interaction.rs`; the Flow wire shapes live in
+    /// `flow/model.rs` and were compared by nothing. Two fields had already drifted when this was
+    /// written — `CompiledFlowPlanV2.successors` and `FlowNodeAttemptRecord.chosenPort`, both live
+    /// on the Rust side and both missing from TypeScript, which is why the run monitor had no typed
+    /// way to say which branch an `IfVision` actually took.
+    ///
+    /// A third sibling rather than an extra `include_str!` in one of the others, for the reason
+    /// given above: a single test reading three files reports drift without saying which half is
+    /// ungated.
+    #[test]
+    fn the_frontend_types_match_the_flow_models_too() {
+        /// Pairs whose two halves carry different names, so matching by name alone skips them.
+        /// Listed rather than ignored: each is a shape that really does cross the wire, and an
+        /// unmatched pair means this gate covers less than its count suggests.
+        const RENAMED: [(&str, &str); 1] = [("ContextPlan", "FlowContextPlan")];
+
+        let rust = rust_structs(&include_str!("flow/model.rs").replace("\r\n", "\n"));
+        let ts = ts_interfaces(
+            &include_str!("../../../apps/desktop/src/types.ts").replace("\r\n", "\n"),
+        );
+
+        let mut shared = 0;
+        let mut drift = Vec::new();
+        for (name, rust_fields) in &rust {
+            let counterpart = RENAMED
+                .iter()
+                .find(|(from, _)| from == name)
+                .map(|(_, to)| *to)
+                .unwrap_or(name.as_str());
+            let Some((_, ts_fields)) = ts.iter().find(|(n, _)| n == counterpart) else {
+                continue;
+            };
+            shared += 1;
+            let only_rust: Vec<_> = rust_fields.difference(ts_fields).cloned().collect();
+            let only_ts: Vec<_> = ts_fields.difference(rust_fields).cloned().collect();
+            if !only_rust.is_empty() || !only_ts.is_empty() {
+                drift.push(format!(
+                    "{name}: only in Rust {only_rust:?}, only in TypeScript {only_ts:?}"
+                ));
+            }
+        }
+
+        // 22 matched when this was written, of 24 serde structs in the file. A scanner that reads
+        // nothing passes the assertion below it.
+        assert!(
+            shared >= 20,
+            "only {shared} Flow models matched a TypeScript interface; the scanner has stopped \
+             reading one of the two files (Rust structs seen: {}, TS interfaces seen: {})",
+            rust.len(),
+            ts.len()
+        );
+        assert!(
+            drift.is_empty(),
+            "the two halves of the Flow wire disagree:\n  {}",
+            drift.join("\n  ")
+        );
+    }
+
     /// **The same gate, for the Interaction types — which had none at all.**
     ///
     /// `the_frontend_types_describe_the_same_fields_the_backend_sends` scans only this file, and
