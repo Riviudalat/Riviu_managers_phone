@@ -2112,6 +2112,135 @@ mod wire_shape_tests {
         );
     }
 
+    /// **A field Rust may omit must be a field TypeScript knows can be missing.**
+    ///
+    /// `the_frontend_types_describe_the_same_fields_the_backend_sends` compares field *names*.
+    /// That catches a field added on one side and forgotten on the other, and it cannot see
+    /// the other half of the contract: whether the two halves agree that a value may be
+    /// absent. `Option<String>` on the wire against a required `string` in TypeScript passes
+    /// the name check and then renders `undefined` into the UI, or reads it as a value.
+    ///
+    /// Measured 28/08/2026, after an independent review pointed at the gap: **31** `Option<>`
+    /// fields in the 25 shared shapes have a TypeScript counterpart, and **all 31 already
+    /// declare it nullable**. So this gate lands green and its job is to keep it that way —
+    /// which is the only moment a gate like this is cheap to add.
+    ///
+    /// The **other** direction is deliberately not checked. Fourteen fields are optional in
+    /// TypeScript and required in Rust — every one of them backed by `#[serde(default)]`,
+    /// which is exactly what makes omitting them on the wire correct. Asserting symmetry there
+    /// would flag fourteen correct declarations, and a gate that has to be argued with is a
+    /// gate people switch off.
+    #[test]
+    fn a_field_rust_can_omit_is_nullable_in_typescript() {
+        /// `Option<T>` fields, by struct, from a `pub struct` block.
+        fn rust_optional_fields(source: &str) -> Vec<(String, String)> {
+            let mut out = Vec::new();
+            let lines: Vec<&str> = source.lines().collect();
+            let mut current: Option<String> = None;
+            for line in &lines {
+                let trimmed = line.trim();
+                if let Some(rest) = trimmed.strip_prefix("pub struct ") {
+                    if let Some(name) = rest.split_whitespace().next() {
+                        current = Some(name.trim_end_matches('{').trim().to_string());
+                    }
+                    continue;
+                }
+                if trimmed == "}" {
+                    current = None;
+                    continue;
+                }
+                let Some(struct_name) = current.as_ref() else {
+                    continue;
+                };
+                let Some(rest) = trimmed.strip_prefix("pub ") else {
+                    continue;
+                };
+                let Some((field, ty)) = rest.split_once(':') else {
+                    continue;
+                };
+                if ty.trim().starts_with("Option<") {
+                    out.push((struct_name.clone(), field.trim().to_string()));
+                }
+            }
+            out
+        }
+
+        /// Field name -> whether TypeScript says it can be absent, by interface.
+        fn ts_nullable_fields(source: &str) -> Vec<(String, String, bool)> {
+            let mut out = Vec::new();
+            let mut current: Option<String> = None;
+            for line in source.lines() {
+                let trimmed = line.trim();
+                if let Some(rest) = trimmed.strip_prefix("export interface ") {
+                    if let Some(name) = rest.split_whitespace().next() {
+                        current = Some(name.trim_end_matches('{').trim().to_string());
+                    }
+                    continue;
+                }
+                if trimmed == "}" {
+                    current = None;
+                    continue;
+                }
+                let Some(interface) = current.as_ref() else {
+                    continue;
+                };
+                let code = trimmed.split("//").next().unwrap_or(trimmed).trim();
+                if code.is_empty() || code.starts_with('*') || code.starts_with('/') {
+                    continue;
+                }
+                let Some((name, ty)) = code.split_once(':') else {
+                    continue;
+                };
+                let optional = name.trim().ends_with('?');
+                let field = name.trim().trim_end_matches('?').trim();
+                if field.is_empty() || field.contains(' ') {
+                    continue;
+                }
+                let nullable = optional
+                    || ty.contains("| null")
+                    || ty.contains("|null")
+                    || ty.contains("| undefined");
+                out.push((interface.clone(), field.to_string(), nullable));
+            }
+            out
+        }
+
+        let rust = rust_optional_fields(&include_str!("types.rs").replace("\r\n", "\n"));
+        let ts = ts_nullable_fields(
+            &include_str!("../../../apps/desktop/src/types.ts").replace("\r\n", "\n"),
+        );
+
+        let mut compared = 0usize;
+        let mut drift = Vec::new();
+        for (struct_name, field) in &rust {
+            let wanted = camel(field);
+            let Some((_, _, nullable)) = ts
+                .iter()
+                .find(|(interface, name, _)| interface == struct_name && *name == wanted)
+            else {
+                // No TypeScript counterpart at all is the *other* gate's business.
+                continue;
+            };
+            compared += 1;
+            if !nullable {
+                drift.push(format!(
+                    "{struct_name}.{field} is Option<..> in Rust but required in TypeScript"
+                ));
+            }
+        }
+
+        // A scanner that matched nothing would pass the assertion below it.
+        assert!(
+            compared >= 25,
+            "only {compared} Option<> fields matched a TypeScript field; the parse is broken \
+             (31 matched when this was written)"
+        );
+        assert!(
+            drift.is_empty(),
+            "TypeScript will read these as always present, and Rust may send null:\n  {}",
+            drift.join("\n  ")
+        );
+    }
     #[test]
     fn the_frontend_types_describe_the_same_fields_the_backend_sends() {
         // Same reason as `fields_absorbed_live`: a line-anchored scan against bytes that may
