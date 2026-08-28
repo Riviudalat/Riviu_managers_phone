@@ -36,6 +36,7 @@ export type { IdFactory } from "../../flow/model";
 export {
   appendUnconnectedNode,
   deleteExecutableNode,
+  initialLaunchBundleId,
   insertNodeOnEdge,
   reconnectEdge,
   toCanvas,

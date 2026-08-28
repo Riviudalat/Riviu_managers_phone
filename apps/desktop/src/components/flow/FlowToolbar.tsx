@@ -51,11 +51,14 @@ interface FlowToolbarProps {
 
 function IconCommand({
   label,
+  hint,
   disabled = false,
   onClick,
   children,
 }: PropsWithChildren<{
   label: string;
+  /** Tooltip text when it needs to say more than the name -- usually why the command is off. */
+  hint?: string;
   disabled?: boolean;
   onClick: () => void;
 }>) {
@@ -63,7 +66,7 @@ function IconCommand({
     <button
       type="button"
       className="flow-icon-command"
-      title={label}
+      title={hint ?? label}
       aria-label={label}
       disabled={disabled}
       onClick={onClick}
@@ -153,7 +156,15 @@ export function FlowToolbar(props: FlowToolbarProps) {
       </IconCommand>
       <IconCommand
         label="Xuất Flow"
-        disabled={!props.currentFlowId}
+        // The backend exports a *saved* revision, so a dirty graph exported the stored copy and
+        // reported success -- the downloaded file was missing the edits on screen, under the name
+        // on screen, with nothing saying so. Gate it like Run, and say why it is off.
+        hint={
+          props.dirty
+            ? "Xuất Flow — bản xuất là bản đã lưu; hãy Lưu bản trước"
+            : "Xuất Flow"
+        }
+        disabled={!props.currentFlowId || props.dirty}
         onClick={props.onExport}
       >
         <Download size={16} />
@@ -175,7 +186,13 @@ export function FlowToolbar(props: FlowToolbarProps) {
       </IconCommand>
       {previewOpen && (
         <section role="dialog" aria-label="Xem trước biên dịch" className="flow-compile-preview">
-          <strong>{props.compiled ? "Valid" : "Invalid"}</strong>
+          {/* Three states, not two: every edit clears `compiled` before the debounced request
+              goes out, so equating `compiled === null` with invalid announced "Invalid" over a
+              document that had not been checked yet -- and kept announcing it for as long as
+              validation took. */}
+          <strong>
+            {props.validationPending ? "Đang kiểm…" : props.compiled ? "Valid" : "Invalid"}
+          </strong>
           <code>
             {props.compiled
               ? JSON.stringify(props.compiled.plan.contextPlan)

@@ -189,8 +189,11 @@ export function FlowRunMonitor({
             return (
               <tr key={attempt.id}>
                 <td>{device.udid}</td>
-                <td>
+                {/* The action kind alone made two Tap nodes indistinguishable -- both read
+                    "Tap / attempt 1", so the row that failed named no node on the canvas. */}
+                <td title={attempt.nodeId}>
                   {displayFlowState(attempt.actionKind)}
+                  <span className="flow-monitor-node"> {attempt.nodeId.slice(0, 8)}</span>
                   {/* Which branch an If Vision picked is the whole question when a vision flow
                       does the wrong thing, and it was on the wire all along -- TypeScript just
                       had no field for it. */}

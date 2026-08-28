@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type {
   ActionDefinition,
   EvidenceKind,
@@ -37,7 +37,8 @@ export interface FlowInspectorProps {
   node: FlowNode | null;
   definition: ActionDefinition | null;
   issues: FlowValidationIssue[];
-  onConfigChange: (config: JsonObject) => void;
+  /** `postcondition` is written in the same mutation when the config edit implies it. */
+  onConfigChange: (config: JsonObject, postcondition?: EvidenceSpec | null) => void;
   onPostconditionChange: (postcondition: EvidenceSpec | null) => void;
   coordinateDeviceUdid?: string | null;
   launchBundleId?: string | null;
@@ -358,6 +359,7 @@ function CoordinateFields({
     title: string,
     integer: boolean,
     minimum?: number,
+    maximum?: number,
   ) => (
     <label className="flow-field">
       <span>{title}</span>
@@ -365,12 +367,13 @@ function CoordinateFields({
         type="number"
         step={integer ? 1 : "any"}
         min={minimum}
+        max={maximum}
         value={coordinate[name]}
         onChange={(event) => {
           const next = acceptFiniteValueAsNumber(
             event.currentTarget.value,
             event.currentTarget.valueAsNumber,
-            { integer, minimum },
+            { integer, minimum, maximum },
           );
           if (next !== null) onChange({ ...coordinate, [name]: next });
         }}
@@ -382,8 +385,11 @@ function CoordinateFields({
     <fieldset className="flow-coordinate-fields">
       <legend>{label}</legend>
       <div className="flow-coordinate-pair">
-        {numericField("x", "X", false)}
-        {numericField("y", "Y", false)}
+        {/* Bounded to the frame the point was measured in. Unbounded, an edited X of 1000 on a
+            375-wide frame was accepted, compiled, and then clamped by iOS to the screen edge --
+            the graph said one thing and the phone did another. */}
+        {numericField("x", "X", false, 0, Math.max(0, coordinate.imageWidth - 1))}
+        {numericField("y", "Y", false, 0, Math.max(0, coordinate.imageHeight - 1))}
       </div>
       <div className="flow-coordinate-pair">
         {numericField("imageWidth", "Image width", true, 1)}
@@ -422,6 +428,9 @@ function availableEvidence(definition: ActionDefinition): EvidenceKind[] {
   );
 }
 
+/** The only value `script-engine`'s compiler accepts as `home`'s active-app evidence. */
+const SPRINGBOARD_BUNDLE_ID = "com.apple.springboard";
+
 function defaultEvidence(
   kind: EvidenceKind,
   node: FlowNode,
@@ -432,6 +441,11 @@ function defaultEvidence(
     typeof node.config[name] === "string" ? (node.config[name] as string) : "";
   switch (kind) {
     case "activeAppEquals":
+      // `home` is the one action whose only allowed evidence has a *fixed* right answer: the
+      // compiler accepts nothing but `com.apple.springboard` for it. Falling through to the launch
+      // bundle -- which is null right after an insert, because the insert invalidated the compiled
+      // plan -- produced an empty bundle id and left the operator to guess a hidden constant.
+      if (definition.kind === "home") return { kind, bundleId: SPRINGBOARD_BUNDLE_ID };
       return { kind, bundleId: stringConfig("bundleId") || launchBundleId || "" };
     case "processAbsent":
       return { kind, bundleId: stringConfig("bundleId") };
@@ -656,6 +670,10 @@ export function FlowInspector({
   const [visionFrame, setVisionFrame] = useState<
     { nodeId: string; frame: FlowCoordinateFrame } | null
   >(null);
+  // The node as of the latest render, readable from an async handler whose closure captured an
+  // older one. Assigned unconditionally so it is correct even on the early return below.
+  const current = useRef(node);
+  current.current = node;
 
   if (node === null || definition === null) {
     return (
@@ -671,17 +689,26 @@ export function FlowInspector({
     loadCoordinateFrame !== undefined ||
     (coordinateDeviceUdid !== null && launchBundleId !== null);
 
+  /**
+   * One field edit, one mutation -- config and the evidence that mirrors it, together.
+   *
+   * These used to be two calls, so the reducer took two actions and history gained two entries. The
+   * entry in between was never on screen: the new config beside the old evidence, which the compiler
+   * rejects as `EvidenceMismatch`. Undoing one edit needed two Undos, and the first one landed on an
+   * invalid document.
+   */
   const commitConfig = (config: JsonObject) => {
-    onConfigChange(config);
     const bundleId = typeof config.bundleId === "string" ? config.bundleId : "";
     if (node.postcondition?.kind === "processAbsent") {
-      onPostconditionChange({ kind: "processAbsent", bundleId });
+      onConfigChange(config, { kind: "processAbsent", bundleId });
     } else if (node.postcondition?.kind === "activeAppEquals") {
-      onPostconditionChange({ kind: "activeAppEquals", bundleId });
+      onConfigChange(config, { kind: "activeAppEquals", bundleId });
     } else if (node.postcondition?.kind === "textReadBackEquals") {
       const locator = locatorFromValue(config.readBackLocator);
       const value = typeof config.text === "string" ? config.text : "";
-      onPostconditionChange({ kind: "textReadBackEquals", locator, value });
+      onConfigChange(config, { kind: "textReadBackEquals", locator, value });
+    } else {
+      onConfigChange(config);
     }
   };
 
@@ -725,11 +752,18 @@ export function FlowInspector({
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = "";
     if (!file) return;
+    const nodeId = node.id;
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
+      // Reading a large file takes time, and `node` here is the value this closure captured. The
+      // commit used to spread that stale config, so a threshold changed while the file was being
+      // read was silently undone -- and if the selection had moved, the template landed on another
+      // node entirely.
+      const latest = current.current;
+      if (!latest || latest.id !== nodeId) return;
       let binary = "";
       for (const byte of bytes) binary += String.fromCharCode(byte);
-      const next: JsonObject = { ...node.config, templatePngBase64: btoa(binary) };
+      const next: JsonObject = { ...latest.config, templatePngBase64: btoa(binary) };
       delete next.region;
       commitConfig(next);
     } catch (error) {

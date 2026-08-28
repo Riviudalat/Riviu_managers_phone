@@ -86,6 +86,21 @@ function FlowCanvasInner(props: FlowCanvasProps) {
   const graph = useMemo(() => toCanvas(props.document, props.issues), [props.document, props.issues]);
   const [transientNodes, setTransientNodes] = useState(graph.nodes);
   useEffect(() => setTransientNodes(graph.nodes), [graph.nodes]);
+  // Drop the ids of edges that no longer exist.
+  //
+  // The drop handler prefers a single selected edge over geometric hit testing, and this set was
+  // never pruned. So: select an edge, insert a Wait on it (the edge becomes two new ones), then drop
+  // another action anywhere -- the stale id won, `insertNodeOnEdge` could not find it, the reducer
+  // returned the same document, and the dropped node simply vanished with no message.
+  useEffect(() => {
+    setSelectedEdges((current) => {
+      if (current.size === 0) return current;
+      const alive = new Set(
+        [...current].filter((id) => graph.edges.some((edge) => edge.id === id)),
+      );
+      return alive.size === current.size ? current : alive;
+    });
+  }, [graph.edges]);
   const nodes = transientNodes.map((node) => ({
     ...node,
     selected: node.id === props.selectedNodeId,

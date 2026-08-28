@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createFlowNode, newFlowDocument, type IdFactory } from "./model";
 import {
   deleteExecutableNode,
+  initialLaunchBundleId,
   insertNodeOnEdge,
   reconnectEdge,
   toCanvas,
@@ -75,5 +76,45 @@ describe("Flow graph mapping", () => {
     const withThird = { ...document, nodes: [...document.nodes, third] };
     const reconnected = reconnectEdge(withThird, edgeId, third.id, document.nodes[1].id);
     expect(reconnected.edges[0].sourceNodeId).toBe(third.id);
+  });
+});
+
+describe("the bundle the picker needs comes from the document", () => {
+  it("reads the launch bundle one hop from the entry node", () => {
+    // It used to come from `compiled.plan.contextPlan.initialBundleId`, and every edit clears
+    // `compiled` — so the coordinate picker was disabled exactly when it was needed: a fresh Swipe
+    // has no from/to, cannot compile without them, and the button that fills them in was off
+    // because compilation had failed.
+    const document = newFlowDocument("Launch", sequentialIds("base"));
+    const launch = createFlowNode("launchApp", { x: 100, y: 0 }, sequentialIds("launch"));
+    launch.config = { bundleId: "com.example.fixture" };
+    const inserted = insertNodeOnEdge(
+      document,
+      document.edges[0].id,
+      launch,
+      "flow",
+      sequentialIds("split"),
+    );
+    expect(initialLaunchBundleId(inserted)).toBe("com.example.fixture");
+  });
+
+  it("answers null when the first action is not a launch, or the bundle is blank", () => {
+    const document = newFlowDocument("No launch", sequentialIds("base"));
+    expect(initialLaunchBundleId(document)).toBeNull();
+
+    const wait = createFlowNode("wait", { x: 100, y: 0 }, sequentialIds("wait"));
+    expect(
+      initialLaunchBundleId(
+        insertNodeOnEdge(document, document.edges[0].id, wait, "flow", sequentialIds("a")),
+      ),
+    ).toBeNull();
+
+    const blank = createFlowNode("launchApp", { x: 100, y: 0 }, sequentialIds("blank"));
+    blank.config = { bundleId: "   " };
+    expect(
+      initialLaunchBundleId(
+        insertNodeOnEdge(document, document.edges[0].id, blank, "flow", sequentialIds("b")),
+      ),
+    ).toBeNull();
   });
 });

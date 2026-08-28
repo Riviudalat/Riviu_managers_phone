@@ -88,7 +88,21 @@ export type FlowEditorAction =
       targetNodeId: string;
     }
   | { type: "deleteSelection"; nodeIds: string[]; edgeIds: string[]; idFactory?: IdFactory }
-  | { type: "updateNodeConfig"; nodeId: string; config: JsonObject }
+  | {
+      type: "updateNodeConfig";
+      nodeId: string;
+      config: JsonObject;
+      /**
+       * Evidence to write in the *same* mutation. `undefined` leaves the postcondition alone.
+       *
+       * The inspector keeps some evidence in step with the config it mirrors -- a Launch App bundle
+       * and its `activeAppEquals` bundle, for instance. Committing those as two reducer actions gave
+       * one field edit two history entries, and the entry in between was a state the operator never
+       * saw: config B with evidence A, which the compiler then rejects as `EvidenceMismatch`. One
+       * Undo landed on it; undoing one edit took two.
+       */
+      postcondition?: EvidenceSpec | null;
+    }
   | { type: "updateNodePostcondition"; nodeId: string; postcondition: EvidenceSpec | null }
   | {
       type: "replaceDocument";
@@ -212,10 +226,21 @@ export function reduceFlowEditor(
       }
       return mutate(state, document);
     }
-    case "updateNodeConfig":
-      return isFiniteJsonObject(action.config)
-        ? mutate(state, withNodeConfig(state.document, action.nodeId, action.config))
-        : state;
+    case "updateNodeConfig": {
+      if (!isFiniteJsonObject(action.config)) return state;
+      if (
+        action.postcondition !== undefined &&
+        action.postcondition !== null &&
+        !isFiniteJsonValue(action.postcondition)
+      ) {
+        return state;
+      }
+      let document = withNodeConfig(state.document, action.nodeId, action.config);
+      if (action.postcondition !== undefined) {
+        document = withNodePostcondition(document, action.nodeId, action.postcondition);
+      }
+      return mutate(state, document);
+    }
     case "updateNodePostcondition":
       return action.postcondition === null || isFiniteJsonValue(action.postcondition)
         ? mutate(

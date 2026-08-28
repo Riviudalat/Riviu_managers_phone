@@ -497,8 +497,10 @@
   white-space: nowrap;
 }
 
-/* Which output port an If Vision node took, next to the action name. */
-.flow-monitor-branch {
+/* Which output port an If Vision node took, and which node the row is -- both next to the action
+ * name, both muted, because the action kind is what the eye scans for. */
+.flow-monitor-branch,
+.flow-monitor-node {
   color: var(--text-3);
 }
 

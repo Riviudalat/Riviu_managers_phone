@@ -26,6 +26,7 @@ import {
   canStartSave,
   duplicateDocument,
   initialEditorState,
+  initialLaunchBundleId,
   isCompilationCurrent,
   newFlowDocument,
   reduceFlowEditor,
@@ -245,7 +246,10 @@ export function FlowWorkspace({
     : null;
   const saved = flows.some((flow) => flow.id === state.document.id);
   const coordinateUdid = selectedUdids.length === 1 ? selectedUdids[0] : null;
-  const launchBundleId = compiled?.plan.contextPlan.initialBundleId ?? null;
+  // Read from the document first: `compiled` is null after every edit, and that is precisely when
+  // the operator needs the coordinate picker.
+  const launchBundleId =
+    initialLaunchBundleId(state.document) ?? compiled?.plan.contextPlan.initialBundleId ?? null;
 
   const refreshFlows = useCallback(async () => {
     const next = await flowList();
@@ -357,6 +361,12 @@ export function FlowWorkspace({
   const archive = useCallback(() => {
     if (!saved) return;
     void (async () => {
+      // The archive confirmation talks about the flow leaving the active list; it says nothing
+      // about unsaved work, and the handler then calls `clearDraft` and opens another flow. So an
+      // operator who added three actions and pressed Archive before Save lost those actions to a
+      // dialog that never mentioned them. `New`, `Duplicate` and picking another flow all ask
+      // first; this did not.
+      if (!(await confirmDiscard())) return;
       const proceed = await requestConfirm({
         title: `Lưu trữ «${state.document.name}»?`,
         message: "Flow sẽ được đưa khỏi danh sách đang dùng. Các bản chạy đã ghi vẫn giữ nguyên.",
@@ -375,7 +385,15 @@ export function FlowWorkspace({
         setOperationError(describeError(error));
       }
     })();
-  }, [openSavedFlow, refreshFlows, replaceWithNew, saved, state.document.id, state.document.name]);
+  }, [
+    confirmDiscard,
+    openSavedFlow,
+    refreshFlows,
+    replaceWithNew,
+    saved,
+    state.document.id,
+    state.document.name,
+  ]);
 
   const startRun = useCallback((selection: FlowTargetSelection) => {
     if (!saved || state.dirty || compiled === null) return;
@@ -461,9 +479,16 @@ export function FlowWorkspace({
         onArchive={archive}
         onSave={save}
         onRun={() => setDialog("run")}
-        onImport={() => setDialog("import")}
+        onImport={() => {
+          // A successful import replaces the open document outright, so it is the same discard as
+          // New and Duplicate -- which both ask. This one did not, and on a never-saved flow the
+          // old draft became unreachable through the UI.
+          void confirmDiscard().then((ok) => {
+            if (ok) setDialog("import");
+          });
+        }}
         onExport={() => {
-          if (!saved) return;
+          if (!saved || state.dirty) return;
           void flowExport(state.document.id, state.document.revision).then(
             (body) => downloadJson(state.document.name, body),
             (error) => setOperationError(describeError(error)),
@@ -527,11 +552,14 @@ export function FlowWorkspace({
             issues={state.validation}
             coordinateDeviceUdid={coordinateUdid}
             launchBundleId={launchBundleId}
-            onConfigChange={(config) => {
+            onConfigChange={(config, postcondition) => {
+              // One dispatch, so one history entry: the evidence the inspector keeps in step with
+              // this config rides along instead of landing as a second mutation.
               if (selectedNode) dispatch({
                 type: "updateNodeConfig",
                 nodeId: selectedNode.id,
                 config,
+                postcondition,
               });
             }}
             onPostconditionChange={(postcondition) => {

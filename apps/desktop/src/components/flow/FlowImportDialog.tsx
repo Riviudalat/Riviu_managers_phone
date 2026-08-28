@@ -23,8 +23,15 @@ export function FlowImportDialog({
   // editable. Without a guard, clicking Import and then Hủy still replaced the open document when
   // the backend answered -- an explicitly cancelled import applying itself.
   const live = useRef(true);
-  useEffect(() => () => {
-    live.current = false;
+  // Set on mount as well as cleared on unmount. Only clearing it is wrong under StrictMode, which
+  // mounts, unmounts and remounts every effect: the cleanup ran, nothing set the flag back, and the
+  // guard then rejected every result for the rest of the component's life. The e2e import stopped
+  // applying entirely; jsdom tests do not wrap in StrictMode, so they never saw it.
+  useEffect(() => {
+    live.current = true;
+    return () => {
+      live.current = false;
+    };
   }, []);
 
   const close = () => {

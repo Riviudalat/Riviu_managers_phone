@@ -699,6 +699,23 @@ fn validate_coordinate(
     if !coordinate.x.is_finite() || !coordinate.y.is_finite() {
         return Err(ConfigError::range(field, "coordinates must be finite"));
     }
+    // A point outside the frame it was measured in is not a tap target, and nothing downstream
+    // says so: iOS clamps it to the screen edge and taps *there*, so the graph reads `x: 1000` while
+    // the phone touches the right-hand edge, and the run reports success. Refuse it where the number
+    // is, with the field named.
+    if coordinate.x < 0.0
+        || coordinate.y < 0.0
+        || coordinate.x >= f64::from(coordinate.image_width)
+        || coordinate.y >= f64::from(coordinate.image_height)
+    {
+        return Err(ConfigError::range(
+            field,
+            format!(
+                "point ({}, {}) is outside the {}x{} frame it was measured in",
+                coordinate.x, coordinate.y, coordinate.image_width, coordinate.image_height
+            ),
+        ));
+    }
     if coordinate.image_width == 0 || coordinate.image_height == 0 {
         return Err(ConfigError::range(
             field,
@@ -838,11 +855,37 @@ fn validate_evidence(
 /// Mirrors the runtime's own refusals in `riviu_core::flow::evidence`; anything this returns would
 /// otherwise surface as a run that fails identically on every device.
 fn unsatisfiable_evidence(evidence: &EvidenceSpec) -> Option<String> {
+    /// The frame distance is the **mean of `u8` luma differences**, so 255 is its ceiling by
+    /// construction (`evidence.rs::mean_luma_delta`). A larger threshold is a `u32` the compiler was
+    /// happy with and a postcondition no frame can ever satisfy: the action fires on the phone and
+    /// verification always fails.
+    const MAX_LUMA_DISTANCE: u32 = 255;
+
     match evidence {
-        EvidenceSpec::FrameRegionChanged { width, height, .. } => {
+        EvidenceSpec::FrameDigestChanged { minimum_distance } => {
+            if *minimum_distance > MAX_LUMA_DISTANCE {
+                Some(format!(
+                    "minimum distance {minimum_distance} is above the {MAX_LUMA_DISTANCE} a mean \
+                     luma difference can reach"
+                ))
+            } else {
+                None
+            }
+        }
+        EvidenceSpec::FrameRegionChanged {
+            width,
+            height,
+            minimum_distance,
+            ..
+        } => {
             if *width == 0 || *height == 0 {
                 Some(format!(
                     "frame region {width}x{height} has no area, so no change can ever be measured"
+                ))
+            } else if *minimum_distance > MAX_LUMA_DISTANCE {
+                Some(format!(
+                    "minimum distance {minimum_distance} is above the {MAX_LUMA_DISTANCE} a mean \
+                     luma difference can reach"
                 ))
             } else {
                 None
@@ -2074,6 +2117,117 @@ mod tests {
         });
         compile_flow(&linear_document(vec![start(), launch, ok, end()]), &catalog)
             .expect("a region with area is satisfiable");
+    }
+
+    #[test]
+    fn a_tap_point_outside_its_own_frame_fails_compilation() {
+        // `validate_coordinate` checked finiteness and positive dimensions and never that the point
+        // was inside the frame it was measured in. iOS clamps an out-of-range point to the screen
+        // edge and taps *there*, so the graph read `x: 1000` while the phone touched the edge and
+        // the run reported success.
+        let catalog = release_one_catalog();
+        let inside = |x: f64, y: f64| {
+            json!({ "point": { "x": x, "y": y, "imageWidth": 375, "imageHeight": 667,
+                               "orientation": "portrait", "profileId": "a".repeat(64) } })
+        };
+        for (label, x, y) in [
+            ("past the right edge", 1000.0, 100.0),
+            ("past the bottom", 10.0, 5000.0),
+            ("exactly the width", 375.0, 100.0),
+            ("negative", -1.0, 100.0),
+        ] {
+            let mut node = FlowNode::new(ActionKind::Tap, inside(x, y));
+            node.postcondition = Some(EvidenceSpec::FrameRegionChanged {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+                minimum_distance: 1,
+            });
+            let document = linear_document(vec![start(), node, end()]);
+            let errors =
+                compile_flow(&document, &catalog).expect_err(&format!("{label} must not compile"));
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.field.as_deref() == Some("point")),
+                "{label}: {errors:?}"
+            );
+        }
+
+        // The last addressable pixel still compiles, so the bound refuses only what is outside.
+        let mut ok = FlowNode::new(ActionKind::Tap, inside(374.0, 666.0));
+        ok.postcondition = Some(EvidenceSpec::FrameRegionChanged {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 10,
+            minimum_distance: 1,
+        });
+        let mut launch = FlowNode::new(
+            ActionKind::LaunchApp,
+            json!({ "bundleId": "com.example.fixture" }),
+        );
+        launch.postcondition = Some(EvidenceSpec::ActiveAppEquals {
+            bundle_id: "com.example.fixture".into(),
+        });
+        compile_flow(&linear_document(vec![start(), launch, ok, end()]), &catalog)
+            .expect("the last pixel inside the frame is a valid target");
+    }
+
+    #[test]
+    fn an_evidence_threshold_above_the_measurable_maximum_fails_compilation() {
+        // The frame distance is the mean of `u8` luma differences, so 255 is its ceiling by
+        // construction. A larger threshold is a valid `u32` and a postcondition no frame can ever
+        // satisfy: the action fires on the phone and verification always fails.
+        let catalog = release_one_catalog();
+        for (label, evidence) in [
+            (
+                "digest",
+                EvidenceSpec::FrameDigestChanged {
+                    minimum_distance: 256,
+                },
+            ),
+            (
+                "region",
+                EvidenceSpec::FrameRegionChanged {
+                    x: 0,
+                    y: 0,
+                    width: 10,
+                    height: 10,
+                    minimum_distance: 300,
+                },
+            ),
+        ] {
+            let kind = if label == "digest" {
+                ActionKind::Swipe
+            } else {
+                ActionKind::Tap
+            };
+            let config = if kind == ActionKind::Swipe {
+                json!({ "from": { "x": 10.0, "y": 10.0, "imageWidth": 375,
+                                  "imageHeight": 667, "orientation": "portrait",
+                                  "profileId": "a".repeat(64) },
+                        "to": { "x": 10.0, "y": 300.0, "imageWidth": 375,
+                                "imageHeight": 667, "orientation": "portrait",
+                                "profileId": "a".repeat(64) },
+                        "durationMs": 200 })
+            } else {
+                json!({ "point": { "x": 10.0, "y": 20.0, "imageWidth": 375, "imageHeight": 667,
+                                   "orientation": "portrait", "profileId": "a".repeat(64) } })
+            };
+            let mut node = FlowNode::new(kind, config);
+            node.postcondition = Some(evidence);
+            let document = linear_document(vec![start(), node, end()]);
+            let errors = compile_flow(&document, &catalog)
+                .expect_err(&format!("{label} threshold must not compile"));
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.code == "EvidenceUnsatisfiable"),
+                "{label}: {errors:?}"
+            );
+        }
     }
 
     #[test]

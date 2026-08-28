@@ -312,7 +312,11 @@ test("imports supported legacy JSON and preserves the draft on diagnostics", asy
   await expect(page.getByLabel("Tên Flow")).toHaveValue("Imported legacy flow");
   const nodeCount = await page.locator("[data-testid='flow-node']").count();
 
+  // The imported flow is unsaved work, and a second import would replace it — so this click now
+  // asks first, the same way Flow mới and Nhân bản do. Confirming is what an operator does; the
+  // point of the prompt is that it exists at all.
   await page.getByRole("button", { name: "Nhập Flow" }).click();
+  await page.getByRole("button", { name: "Bỏ thay đổi" }).click();
   dialog = page.getByRole("dialog", { name: "Nhập Flow cũ" });
   await dialog.getByLabel("JSON script cũ").fill(JSON.stringify({
     version: 1,

@@ -449,3 +449,55 @@ describe("inserting a node on an edge uses the node's real output port", () => {
     expect(outgoing?.sourcePort).toBe("matched");
   });
 });
+
+describe("one field edit costs one history entry", () => {
+  it("writes config and the evidence that mirrors it in the same mutation", () => {
+    // These arrived as two reducer actions, so one edit gained two history entries — and the entry
+    // in between was never on screen: the new config beside the old evidence, which the compiler
+    // rejects as EvidenceMismatch. Undoing one edit took two Undos, the first landing on a document
+    // that could not compile.
+    const document = newFlowDocument("Coupled", sequentialIds("base"));
+    const launch = createFlowNode("launchApp", { x: 100, y: 0 }, sequentialIds("launch"));
+    launch.config = { bundleId: "com.first" };
+    launch.postcondition = { kind: "activeAppEquals", bundleId: "com.first" };
+    let state = initialEditorState(
+      { ...document, nodes: [...document.nodes, launch] },
+      false,
+    );
+    const epochBefore = state.documentEpoch;
+
+    state = reduceFlowEditor(state, {
+      type: "updateNodeConfig",
+      nodeId: launch.id,
+      config: { bundleId: "com.second" },
+      postcondition: { kind: "activeAppEquals", bundleId: "com.second" },
+    });
+
+    const edited = state.document.nodes.find((node) => node.id === launch.id);
+    expect(edited?.config).toEqual({ bundleId: "com.second" });
+    expect(edited?.postcondition).toEqual({ kind: "activeAppEquals", bundleId: "com.second" });
+    expect(state.documentEpoch).toBe(epochBefore + 1);
+    expect(state.past).toHaveLength(1);
+
+    // One Undo, and both halves go back together — no state in between.
+    const undone = reduceFlowEditor(state, { type: "undo" });
+    const restored = undone.document.nodes.find((node) => node.id === launch.id);
+    expect(restored?.config).toEqual({ bundleId: "com.first" });
+    expect(restored?.postcondition).toEqual({ kind: "activeAppEquals", bundleId: "com.first" });
+    expect(undone.dirty).toBe(false);
+  });
+
+  it("leaves the postcondition alone when the edit does not imply one", () => {
+    const document = newFlowDocument("Uncoupled", sequentialIds("base"));
+    const wait = createFlowNode("wait", { x: 100, y: 0 }, sequentialIds("wait"));
+    wait.postcondition = { kind: "frameDigestChanged", minimumDistance: 4 };
+    let state = initialEditorState({ ...document, nodes: [...document.nodes, wait] }, false);
+    state = reduceFlowEditor(state, {
+      type: "updateNodeConfig",
+      nodeId: wait.id,
+      config: { durationMs: 250 },
+    });
+    const edited = state.document.nodes.find((node) => node.id === wait.id);
+    expect(edited?.postcondition).toEqual({ kind: "frameDigestChanged", minimumDistance: 4 });
+  });
+});

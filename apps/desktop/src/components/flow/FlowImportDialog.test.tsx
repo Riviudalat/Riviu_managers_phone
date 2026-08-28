@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { FlowImportDialog } from "./FlowImportDialog";
@@ -126,5 +127,35 @@ describe("an import the operator cancelled", () => {
     open(importLegacy);
     fireEvent.click(screen.getByRole("button", { name: /Import/ }));
     expect(await screen.findByText(/Step 2: không nhập được/)).toBeInTheDocument();
+  });
+});
+
+describe("the lifetime guard survives a StrictMode remount", () => {
+  it("still applies a successful import when React double-mounts the effect", async () => {
+    // The guard was written as `useEffect(() => () => { live.current = false }, [])` -- cleanup
+    // only. StrictMode mounts, unmounts and remounts every effect, so the cleanup ran and nothing
+    // set the flag back: the guard then rejected every result for the rest of the component's life
+    // and Import silently stopped working. jsdom tests do not wrap in StrictMode, so only the e2e
+    // suite caught it. This case closes that gap for all three dialogs that use the pattern.
+    const importLegacy = vi.fn(async (): Promise<LegacyImportResult> => ({
+      document,
+      diagnostics: [],
+    }));
+    const onImport = vi.fn();
+    render(
+      <StrictMode>
+        <FlowImportDialog
+          onImport={onImport}
+          onClose={() => undefined}
+          importLegacy={importLegacy}
+        />
+      </StrictMode>,
+    );
+    fireEvent.change(screen.getByLabelText("JSON script cũ"), {
+      target: { value: '{"version":1,"steps":[]}' },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Import/ }));
+
+    await waitFor(() => expect(onImport).toHaveBeenCalledWith(document));
   });
 });

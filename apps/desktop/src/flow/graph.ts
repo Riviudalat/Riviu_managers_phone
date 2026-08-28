@@ -121,6 +121,29 @@ export function insertNodeOnEdge(
   };
 }
 
+/**
+ * The bundle id the session will open with, read from the document rather than from a compiled plan.
+ *
+ * The inspector's device-frame picker needs a bundle to launch, and it used to take it from
+ * `compiled.plan.contextPlan.initialBundleId`. Every edit invalidates `compiled`, so the picker was
+ * disabled exactly when it was needed: a freshly inserted Swipe has no `from`/`to`, cannot compile
+ * without them, and the button that would fill them in was off because compilation had failed. A
+ * closed loop.
+ *
+ * The compiler requires a UI-session plan to open with Launch App, so the answer is one hop from the
+ * entry node -- available while the document is dirty, which is the whole point.
+ */
+export function initialLaunchBundleId(document: FlowDocumentV2): string | null {
+  const first = document.edges.find(
+    (edge) => edge.sourceNodeId === document.entryNodeId && edge.sourcePort === "flow",
+  );
+  if (!first) return null;
+  const node = document.nodes.find((candidate) => candidate.id === first.targetNodeId);
+  if (!node || node.kind !== "launchApp") return null;
+  const bundleId = node.config.bundleId;
+  return typeof bundleId === "string" && bundleId.trim() !== "" ? bundleId : null;
+}
+
 export function appendUnconnectedNode(
   document: FlowDocumentV2,
   node: FlowNode,

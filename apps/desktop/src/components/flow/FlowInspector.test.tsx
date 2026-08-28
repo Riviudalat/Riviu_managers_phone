@@ -102,9 +102,16 @@ function InspectorHarness({
         definition={action}
         issues={issues}
         loadCoordinateFrame={loadCoordinateFrame}
-        onConfigChange={(config) => {
+        onConfigChange={(config, postcondition) => {
           onConfig(config);
-          setCurrent((value) => ({ ...value, config }));
+          // The workspace applies both halves in one dispatch, so the harness has to as well --
+          // otherwise these tests watch a state the app never produces.
+          if (postcondition !== undefined) onEvidence(postcondition);
+          setCurrent((value) => ({
+            ...value,
+            config,
+            ...(postcondition === undefined ? {} : { postcondition }),
+          }));
         }}
         onPostconditionChange={(postcondition) => {
           onEvidence(postcondition);
