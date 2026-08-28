@@ -72,8 +72,11 @@ export function summarizeAction(kind: ActionKind, config: JsonObject): string {
     case "tapVision":
     case "ifVision": {
       const hasTemplate = text("templatePngBase64").length > 0;
+      // Not `toFixed(2)`. The field accepts any number in [0, 1], so a stored 0.854 rendered as
+      // "0.85" -- and then a match score of 0.852 fails while the summary on the canvas implies it
+      // passes. Print what is stored.
       const threshold =
-        typeof config.threshold === "number" ? config.threshold.toFixed(2) : "?";
+        typeof config.threshold === "number" ? String(config.threshold) : "?";
       return hasTemplate ? `vision ≥ ${threshold}` : "no template";
     }
     default:

@@ -1,6 +1,7 @@
 import { Ban, RotateCcw } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { flowGetRun, listenRiviuEvents } from "../../api";
+import { describeError } from "../../describeError";
 import type {
   FlowAggregateState,
   FlowDeviceRunRecord,
@@ -47,6 +48,11 @@ export function FlowRunMonitor({
   onOpenArtifact?: (artifactId: string) => void;
 }) {
   const [detail, setDetail] = useState(run);
+  // A refresh that keeps failing used to be invisible: `refresh` had a `finally` and no `catch`, so
+  // every 750 ms rejection went to the global unhandled-rejection handler while the table sat on
+  // the last projection it managed to read -- still saying "Running", with nothing to say the
+  // number under it had stopped moving.
+  const [stallReason, setStallReason] = useState<string | null>(null);
   useEffect(() => setDetail(run), [run]);
 
   useEffect(() => {
@@ -60,11 +66,14 @@ export function FlowRunMonitor({
       try {
         const next = await flowGetRun(detail.run.id);
         if (disposed || !next || next.run.eventRevision < minimumRevision) return;
+        setStallReason(null);
         setDetail((current) =>
           next.run.eventRevision > current.run.eventRevision || next.run.state !== current.run.state
             ? next
             : current,
         );
+      } catch (reason) {
+        if (!disposed) setStallReason(describeError(reason));
       } finally {
         refreshing = false;
       }
@@ -73,10 +82,17 @@ export function FlowRunMonitor({
     void listenRiviuEvents((event) => {
       if (event.type !== "flowRunUpdated") return;
       if (event.runId === detail.run.id) void refresh(event.revision);
-    }).then((unlisten) => {
-      if (disposed) unlisten();
-      else stop = unlisten;
-    });
+    }).then(
+      (unlisten) => {
+        if (disposed) unlisten();
+        else stop = unlisten;
+      },
+      (reason: unknown) => {
+        // Without this the projection would fall back to the 750 ms poll with no sign that live
+        // updates were never wired up at all.
+        if (!disposed) setStallReason(describeError(reason));
+      },
+    );
 
     // Runtime events are projection invalidations. Node commits that precede a
     // run projection event are covered by this bounded poll while nonterminal.
@@ -111,6 +127,16 @@ export function FlowRunMonitor({
         <div>
           <strong>{displayFlowState(detail.run.state)}</strong>
           <span>{detail.run.selection.targetUdids.length} devices</span>
+          {stallReason && (
+            <span role="alert" className="flow-monitor-stalled">
+              Không đọc được tiến trình: {stallReason}
+            </span>
+          )}
+          {detail.run.error && (
+            <span role="alert" className="flow-monitor-error" title={detail.run.error.message}>
+              {detail.run.error.code}: {detail.run.error.message}
+            </span>
+          )}
         </div>
         <button
           type="button"
@@ -148,7 +174,13 @@ export function FlowRunMonitor({
                   <td />
                   <td />
                   <td />
-                  <td>{device.error?.code ?? ""}</td>
+                  {/* The code alone is not actionable: the backend maps several distinct WDA and
+                      device failures onto `DeviceControl` and keeps what separates them in the
+                      message. Showing only the code hid the difference between a timeout, a dead
+                      session, and the wrong app in the foreground. */}
+                  <td title={device.error?.message ?? ""}>
+                    {device.error ? `${device.error.code}: ${device.error.message}` : ""}
+                  </td>
                   <td />
                 </tr>
               );
@@ -171,7 +203,9 @@ export function FlowRunMonitor({
                     </button>
                   ) : null}
                 </td>
-                <td>{attempt.error?.code ?? ""}</td>
+                <td title={attempt.error?.message ?? ""}>
+                  {attempt.error ? `${attempt.error.code}: ${attempt.error.message}` : ""}
+                </td>
                 <td>
                   {attempt.retryAllowed && (
                     <button

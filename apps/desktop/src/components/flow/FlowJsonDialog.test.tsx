@@ -34,11 +34,13 @@ const document: FlowDocumentV2 = {
 };
 
 function open(overrides: Partial<Parameters<typeof FlowJsonDialog>[0]> = {}) {
-  render(
+  // Returns the render result: the cases below re-render with a newer document to stand in for an
+  // external revision arriving while the dialog is open.
+  return render(
     <FlowJsonDialog
-      document={document}
+      document={overrides.document ?? document}
       onApply={overrides.onApply ?? (() => undefined)}
-      onClose={() => undefined}
+      onClose={overrides.onClose ?? (() => undefined)}
       validate={overrides.validate ?? (async () => ({}) as CompiledRevision)}
       exportFlow={overrides.exportFlow ?? (async () => "{}")}
     />,
@@ -119,5 +121,97 @@ describe("FlowJsonDialog", () => {
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("NotFound: revision 3 không còn trong DB");
     expect(alert.textContent).not.toContain("[object Object]");
+  });
+});
+
+describe("a validation that lands after the operator moved on", () => {
+  it("does not apply the click-time JSON once the textarea has changed", async () => {
+    // Validation is asynchronous while the textarea stays live. With nothing binding the result to
+    // the text that was submitted, the older request applied its own snapshot and the newer visible
+    // edits disappeared.
+    // A deferred resolver on an object, not a `let`: TypeScript narrows a `let`
+    // assigned only inside a closure to `never` at the call site.
+    const gate: { release?: (value: CompiledRevision) => void } = {};
+    const validate = vi.fn(
+      () => new Promise<CompiledRevision>((resolve) => {
+        gate.release = resolve;
+      }),
+    );
+    const onApply = vi.fn();
+    open({ onApply, validate });
+
+    const editor = screen.getByLabelText("JSON tài liệu");
+    const first = JSON.stringify({ ...document, name: "first" });
+    fireEvent.change(editor, { target: { value: first } });
+    fireEvent.click(applyButton());
+    await waitFor(() => expect(validate).toHaveBeenCalledTimes(1));
+
+    fireEvent.change(editor, { target: { value: JSON.stringify({ ...document, name: "second" }) } });
+    gate.release?.({} as CompiledRevision);
+
+    await waitFor(() => expect(screen.getByRole("alert")).toBeVisible());
+    expect(onApply).not.toHaveBeenCalled();
+  });
+
+  it("does not apply after the dialog is closed", async () => {
+    // A deferred resolver on an object, not a `let`: TypeScript narrows a `let`
+    // assigned only inside a closure to `never` at the call site.
+    const gate: { release?: (value: CompiledRevision) => void } = {};
+    const validate = vi.fn(
+      () => new Promise<CompiledRevision>((resolve) => {
+        gate.release = resolve;
+      }),
+    );
+    const onApply = vi.fn();
+    const onClose = vi.fn();
+    open({ onApply, onClose, validate });
+    fireEvent.change(screen.getByLabelText("JSON tài liệu"), {
+      target: { value: JSON.stringify(document) },
+    });
+    fireEvent.click(applyButton());
+    await waitFor(() => expect(validate).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Đóng hộp thoại JSON" }));
+    gate.release?.({} as CompiledRevision);
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(onApply).not.toHaveBeenCalled();
+  });
+
+  it("keeps the operator's text when the flow changes underneath, and says so", () => {
+    // The reset effect used to follow the document unconditionally, so a `flowUpdated`
+    // invalidation arriving mid-edit wiped the textarea with no message.
+    const view = open({});
+    const editor = screen.getByLabelText("JSON tài liệu");
+    fireEvent.change(editor, { target: { value: JSON.stringify({ ...document, name: "mine" }) } });
+
+    view.rerender(
+      <FlowJsonDialog
+        document={{ ...document, revision: document.revision + 1, name: "theirs" }}
+        onApply={vi.fn()}
+        onClose={vi.fn()}
+        validate={vi.fn()}
+        exportFlow={vi.fn()}
+      />,
+    );
+
+    expect((screen.getByLabelText("JSON tài liệu") as HTMLTextAreaElement).value)
+      .toContain('"mine"');
+    expect(screen.getByRole("alert").textContent).toContain("cập nhật ở nơi khác");
+  });
+
+  it("still follows the document when the operator has not typed anything", () => {
+    const view = open({});
+    view.rerender(
+      <FlowJsonDialog
+        document={{ ...document, revision: document.revision + 1, name: "theirs" }}
+        onApply={vi.fn()}
+        onClose={vi.fn()}
+        validate={vi.fn()}
+        exportFlow={vi.fn()}
+      />,
+    );
+    expect((screen.getByLabelText("JSON tài liệu") as HTMLTextAreaElement).value)
+      .toContain('"theirs"');
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

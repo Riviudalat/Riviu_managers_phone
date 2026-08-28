@@ -29,7 +29,14 @@ export function FlowRunDialog({
   onClose?: () => void;
 }) {
   const [mode, setMode] = useState<RunMode>("selected");
-  const [oneUdid, setOneUdid] = useState(devices[0]?.udid ?? "");
+  const [chosenUdid, setChosenUdid] = useState(devices[0]?.udid ?? "");
+  // `oneUdid` was initialised once from `devices[0]` and never reconciled. When that phone dropped
+  // off the list the `<select>` fell back to displaying the first remaining option while the state
+  // still held the departed one -- so Run submitted a device the operator could not see chosen, and
+  // the backend refused or terminalised it instead of running the visible one.
+  const oneUdid = devices.some((device) => device.udid === chosenUdid)
+    ? chosenUdid
+    : devices[0]?.udid ?? "";
   const selection = targetSelection(mode, oneUdid, selectedUdids);
 
   return (
@@ -67,7 +74,7 @@ export function FlowRunDialog({
         <select
           aria-label="Thiết bị"
           value={oneUdid}
-          onChange={(event) => setOneUdid(event.target.value)}
+          onChange={(event) => setChosenUdid(event.target.value)}
         >
           {devices.map((device) => (
             <option key={device.udid} value={device.udid}>

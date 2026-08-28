@@ -81,3 +81,50 @@ describe("FlowImportDialog", () => {
     expect(onImport).not.toHaveBeenCalled();
   });
 });
+
+describe("an import the operator cancelled", () => {
+  it("does not replace the open document when the backend answers after Hủy", async () => {
+    // Both close controls stay enabled while the conversion runs, and the textarea stays editable.
+    // With no lifetime guard, clicking Import and then Hủy still replaced the document the moment
+    // the backend answered -- an explicitly cancelled import applying itself.
+    // A deferred resolver on an object, not a `let`: TypeScript narrows a `let`
+    // assigned only inside a closure to `never` at the call site.
+    const gate: { release?: (value: LegacyImportResult) => void } = {};
+    const importLegacy = vi.fn(
+      () => new Promise<LegacyImportResult>((resolve) => {
+        gate.release = resolve;
+      }),
+    );
+    const onImport = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <FlowImportDialog onImport={onImport} onClose={onClose} importLegacy={importLegacy} />,
+    );
+    fireEvent.change(screen.getByLabelText("JSON script cũ"), {
+      target: { value: '{"version":1,"steps":[]}' },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Import/ }));
+    await waitFor(() => expect(importLegacy).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Hủy" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+
+    gate.release?.({ document, diagnostics: [] });
+    await waitFor(() => expect(importLegacy).toHaveBeenCalledTimes(1));
+    expect(onImport).not.toHaveBeenCalled();
+  });
+
+  it("numbers diagnostics the way the operator counts steps", async () => {
+    // `step_index` comes from `enumerate()`, so it is zero-based. Printed raw, an error in the
+    // second step read "Step 1" and sent the operator to the step before the broken one.
+    const importLegacy = vi.fn(async (): Promise<LegacyImportResult> => ({
+      document: null,
+      diagnostics: [
+        { stepIndex: 1, code: "LegacyShapeUnsupported", message: "không nhập được", field: "action" },
+      ],
+    }));
+    open(importLegacy);
+    fireEvent.click(screen.getByRole("button", { name: /Import/ }));
+    expect(await screen.findByText(/Step 2: không nhập được/)).toBeInTheDocument();
+  });
+});

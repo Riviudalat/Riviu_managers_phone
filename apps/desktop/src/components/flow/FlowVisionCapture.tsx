@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { describeError } from "../../describeError";
 import type { FlowCoordinateFrame, VisionRegion } from "../../types";
@@ -49,8 +49,23 @@ export function FlowVisionCapture({
 }) {
   const [first, setFirst] = useState<{ x: number; y: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Decoding a device frame is asynchronous, and nothing used to invalidate it. Pressing Hủy after
+  // the second click only called `onCancel`; when the decode finished, `onCapture` still wrote the
+  // template and region into whatever node the inspector was showing by then. A second click while
+  // a crop was already running started another one, and whichever resolved last won.
+  const live = useRef(true);
+  const cropping = useRef(false);
+  useEffect(() => () => {
+    live.current = false;
+  }, []);
+
+  const cancel = () => {
+    live.current = false;
+    onCancel();
+  };
 
   const handleClick = (event: React.MouseEvent<HTMLImageElement>) => {
+    if (cropping.current) return;
     const point = projectContainedImageClick(
       frame,
       event.currentTarget.getBoundingClientRect(),
@@ -73,8 +88,10 @@ export function FlowVisionCapture({
       setError("Vùng chọn quá nhỏ — chọn lại hai góc.");
       return;
     }
+    cropping.current = true;
     void cropToPngBase64(frame.jpegBase64, x0, y0, width, height)
       .then((base64) => {
+        if (!live.current) return;
         onCapture(base64, {
           x0: x0 / frame.imageWidth,
           y0: y0 / frame.imageHeight,
@@ -82,7 +99,12 @@ export function FlowVisionCapture({
           y1: y1 / frame.imageHeight,
         });
       })
-      .catch((cropError: unknown) => setError(describeError(cropError)));
+      .catch((cropError: unknown) => {
+        if (live.current) setError(describeError(cropError));
+      })
+      .finally(() => {
+        cropping.current = false;
+      });
   };
 
   return (
@@ -100,7 +122,7 @@ export function FlowVisionCapture({
         ({frame.imageWidth} x {frame.imageHeight})
       </output>
       {error && <p role="alert">{error}</p>}
-      <button type="button" onClick={onCancel}>
+      <button type="button" onClick={cancel}>
         Hủy
       </button>
     </div>

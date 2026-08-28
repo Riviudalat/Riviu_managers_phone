@@ -126,7 +126,9 @@ describe("FlowRunMonitor retry policy", () => {
     const uncertainRow = screen.getByText("Uncertain").closest("tr");
     if (uncertainRow === null) throw new Error("uncertain row missing");
     expect(within(uncertainRow).queryByRole("button", { name: /Retry/ })).not.toBeInTheDocument();
-    expect(within(uncertainRow).getByText("EffectUncertain")).toBeInTheDocument();
+    // The cell reads `code: message` now -- the code alone was not enough to tell a timeout from
+    // a dead session, because the backend maps several device failures onto one code.
+    expect(within(uncertainRow).getByText(/^EffectUncertain:/)).toBeInTheDocument();
 
     const safeRetry = screen.getByRole("button", { name: "Retry Wait" });
     fireEvent.click(safeRetry);
@@ -206,5 +208,51 @@ describe("FlowRunMonitor refresh", () => {
       await Promise.resolve();
     });
     expect(api.flowGetRun).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("FlowRunMonitor says when it stopped being able to read the run", () => {
+  it("reports a refresh failure instead of leaving a stale Running table", async () => {
+    // `refresh` had a `finally` and no `catch`, so every rejection went to the global
+    // unhandled-rejection handler while the table sat on the last projection it could read --
+    // still saying Running, with nothing to say the numbers had stopped moving.
+    vi.useFakeTimers();
+    api.flowGetRun.mockRejectedValue(new Error("DeviceControl: bridge gone"));
+    render(
+      <FlowRunMonitor
+        run={detail()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+    await act(async () => {
+      vi.advanceTimersByTime(800);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const alerts = screen.getAllByRole("alert").map((node) => node.textContent ?? "");
+    expect(alerts.some((text) => text.includes("Không đọc được tiến trình"))).toBe(true);
+  });
+
+  it("shows the message behind a run error, not only its code", () => {
+    // The backend maps several distinct WDA and device failures onto one code and keeps what
+    // separates them in the message, so a code-only cell hid the difference between a timeout, a
+    // dead session, and the wrong app in the foreground.
+    const stalled = detail();
+    stalled.run = {
+      ...stalled.run,
+      state: "failed",
+      error: {
+        code: "DeviceControl",
+        message: "phiên WDA đã chết",
+        nodeId: null,
+        field: null,
+        udid: "device-a",
+        attemptId: null,
+      },
+    };
+    render(<FlowRunMonitor run={stalled} onCancel={vi.fn()} onRetry={vi.fn()} />);
+    expect(screen.getByText(/DeviceControl: phiên WDA đã chết/)).toBeInTheDocument();
   });
 });

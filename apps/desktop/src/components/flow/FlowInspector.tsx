@@ -628,13 +628,24 @@ export function FlowInspector({
   launchBundleId = null,
   loadCoordinateFrame,
 }: FlowInspectorProps) {
+  // Every one of these carries the node it belongs to.
+  //
+  // They used to be keyed to nothing while `node` is a prop, so a device frame requested for node A
+  // was applied to whichever node was selected when it arrived: start a template capture on A,
+  // click B on the canvas, crop -- and A's captured template and region were written into B's
+  // config, silently, under B's name. The coordinate picker had the same shape. Rendering is gated
+  // on `nodeId === node.id`, so changing the selection closes the popover instead of re-pointing
+  // it, and a frame that lands late for the old node is ignored.
   const [picker, setPicker] = useState<{
+    nodeId: string;
     field: CoordinateFieldName;
     frame: FlowCoordinateFrame;
   } | null>(null);
-  const [pickerError, setPickerError] = useState<string | null>(null);
-  const [pickerLoading, setPickerLoading] = useState(false);
-  const [visionFrame, setVisionFrame] = useState<FlowCoordinateFrame | null>(null);
+  const [pickerError, setPickerError] = useState<{ nodeId: string; message: string } | null>(null);
+  const [pickerLoading, setPickerLoading] = useState<string | null>(null);
+  const [visionFrame, setVisionFrame] = useState<
+    { nodeId: string; frame: FlowCoordinateFrame } | null
+  >(null);
 
   if (node === null || definition === null) {
     return (
@@ -669,32 +680,34 @@ export function FlowInspector({
   };
 
   const requestCoordinate = async (field: CoordinateFieldName) => {
+    const nodeId = node.id;
     setPickerError(null);
-    setPickerLoading(true);
+    setPickerLoading(nodeId);
     try {
       const frame = loadCoordinateFrame
         ? await loadCoordinateFrame()
         : await flowCoordinateFrame(coordinateDeviceUdid ?? "", launchBundleId ?? "");
-      setPicker({ field, frame });
+      setPicker({ nodeId, field, frame });
     } catch (error) {
-      setPickerError(describeError(error));
+      setPickerError({ nodeId, message: describeError(error) });
     } finally {
-      setPickerLoading(false);
+      setPickerLoading((current) => (current === nodeId ? null : current));
     }
   };
 
   const requestVisionFrame = async () => {
+    const nodeId = node.id;
     setPickerError(null);
-    setPickerLoading(true);
+    setPickerLoading(nodeId);
     try {
       const frame = loadCoordinateFrame
         ? await loadCoordinateFrame()
         : await flowCoordinateFrame(coordinateDeviceUdid ?? "", launchBundleId ?? "");
-      setVisionFrame(frame);
+      setVisionFrame({ nodeId, frame });
     } catch (error) {
-      setPickerError(describeError(error));
+      setPickerError({ nodeId, message: describeError(error) });
     } finally {
-      setPickerLoading(false);
+      setPickerLoading((current) => (current === nodeId ? null : current));
     }
   };
 
@@ -710,7 +723,7 @@ export function FlowInspector({
       delete next.region;
       commitConfig(next);
     } catch (error) {
-      setPickerError(describeError(error));
+      setPickerError({ nodeId: node.id, message: describeError(error) });
     }
   };
 
@@ -754,7 +767,7 @@ export function FlowInspector({
             <div className="flow-vision-template-actions">
               <button
                 type="button"
-                disabled={!coordinateAvailable || pickerLoading}
+                disabled={!coordinateAvailable || pickerLoading !== null}
                 onClick={() => void requestVisionFrame()}
               >
                 Chụp mẫu từ thiết bị
@@ -873,12 +886,12 @@ export function FlowInspector({
         launchBundleId={launchBundleId}
         onChange={onPostconditionChange}
       />
-      {pickerLoading && <p role="status">Loading device frame...</p>}
-      {pickerError && <p role="alert">{pickerError}</p>}
-      {visionFrame && (
+      {pickerLoading === node.id && <p role="status">Loading device frame...</p>}
+      {pickerError?.nodeId === node.id && <p role="alert">{pickerError.message}</p>}
+      {visionFrame?.nodeId === node.id && (
         <section className="flow-coordinate-popover" aria-label="Chụp ảnh mẫu">
           <FlowVisionCapture
-            frame={visionFrame}
+            frame={visionFrame.frame}
             onCapture={(templatePngBase64, region) => {
               commitConfig({
                 ...node.config,
@@ -891,7 +904,7 @@ export function FlowInspector({
           />
         </section>
       )}
-      {picker && (
+      {picker?.nodeId === node.id && (
         <section className="flow-coordinate-popover" aria-label={`Pick ${picker.field}`}>
           <FlowCoordinatePicker
             frame={picker.frame}

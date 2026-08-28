@@ -1,5 +1,5 @@
 import { Upload, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { flowImportLegacy } from "../../api";
 import { describeError } from "../../describeError";
 import type { FlowDocumentV2, LegacyImportResult } from "../../types";
@@ -19,6 +19,18 @@ export function FlowImportDialog({
   const [result, setResult] = useState<LegacyImportResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Both close controls stay enabled while the conversion is running, and the textarea stays
+  // editable. Without a guard, clicking Import and then Hủy still replaced the open document when
+  // the backend answered -- an explicitly cancelled import applying itself.
+  const live = useRef(true);
+  useEffect(() => () => {
+    live.current = false;
+  }, []);
+
+  const close = () => {
+    live.current = false;
+    onClose();
+  };
 
   const submit = async () => {
     setBusy(true);
@@ -26,6 +38,7 @@ export function FlowImportDialog({
     setResult(null);
     try {
       const imported = await importLegacy(raw);
+      if (!live.current) return;
       setResult(imported);
       if (imported.document !== null && imported.diagnostics.length === 0) {
         onImport(imported.document);
@@ -33,9 +46,9 @@ export function FlowImportDialog({
     } catch (reason) {
       // `flow_import_legacy` rejects with a `CommandError` object (`flow_commands.rs:111`), so
       // `String(reason)` printed `[object Object]` over the reason the JSON was refused.
-      setError(describeError(reason));
+      if (live.current) setError(describeError(reason));
     } finally {
-      setBusy(false);
+      if (live.current) setBusy(false);
     }
   };
 
@@ -43,7 +56,7 @@ export function FlowImportDialog({
     <section role="dialog" aria-modal="true" aria-label="Nhập Flow cũ" className="flow-dialog">
       <header>
         <strong>Nhập Flow cũ</strong>
-        <button type="button" aria-label="Đóng hộp thoại nhập" title="Đóng" onClick={onClose}>
+        <button type="button" aria-label="Đóng hộp thoại nhập" title="Đóng" onClick={close}>
           <X aria-hidden="true" size={16} />
         </button>
       </header>
@@ -65,7 +78,9 @@ export function FlowImportDialog({
               <li key={`${diagnostic.stepIndex}-${diagnostic.code}-${index}`}>
                 <strong>{diagnostic.code}</strong>
                 <span>
-                  Step {diagnostic.stepIndex}: {diagnostic.message}
+                  {/* `step_index` comes from `enumerate()`, so it is zero-based. Printing it raw
+                      sent the operator to the step before the broken one. */}
+                  Step {diagnostic.stepIndex + 1}: {diagnostic.message}
                   {diagnostic.field ? ` (${diagnostic.field})` : ""}
                 </span>
               </li>
@@ -74,7 +89,7 @@ export function FlowImportDialog({
         </section>
       )}
       <footer>
-        <button type="button" onClick={onClose}>Hủy</button>
+        <button type="button" onClick={close}>Hủy</button>
         <button type="button" disabled={busy || raw.trim() === ""} onClick={() => void submit()}>
           <Upload aria-hidden="true" size={15} />
           {busy ? "Importing..." : "Import"}

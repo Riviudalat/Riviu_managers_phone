@@ -522,6 +522,7 @@ export function FlowWorkspace({
       <div className="flow-lower-band">
         <FlowDiagnostics
           issues={state.validation}
+          pending={state.validationRequest !== null}
           onSelectNode={(nodeId) => dispatch({ type: "selectNode", nodeId })}
         />
         <div className="flow-run-history" data-testid="flow-run-history">
