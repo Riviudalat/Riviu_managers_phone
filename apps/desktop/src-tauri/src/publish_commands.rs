@@ -201,6 +201,10 @@ pub(crate) async fn transfer_publish_campaign_inner(
             .map(|assignment| assignment.udid.as_str()),
         |udid| control.reports_element_bounds(udid),
     )?;
+    // And the same argument for the bundle rather than the device: an image count this
+    // composer's grid cannot reach fails at `post_one_assignment`, which is *after* the media
+    // is on the phone and visible to TikTok.
+    refuse_bundles_this_composer_cannot_post(detail.bundles.iter(), IOS_PIXEL_GRID_MAX_IMAGES)?;
     db.update_publish_campaign_state(
         &campaign_id,
         riviu_core::PublishCampaignState::Transferring,
@@ -350,6 +354,18 @@ const CAPTION_FIELD: TapPoint = TapPoint { x: 180.0, y: 240.0 };
 const POST_BUTTON: TapPoint = TapPoint { x: 330.0, y: 42.0 };
 const PUBLIC_POST_CONFIRM: TapPoint = TapPoint { x: 275.0, y: 444.0 };
 
+/// How many images this path can select, and **why that number**.
+///
+/// `grid_x` has three columns and `grid_y` four rows, so there are twelve tap points and the
+/// twelfth image is the last one that can be reached. Eleven is the guard that keeps a
+/// thirteenth image from indexing `grid_y[4]` and panicking mid-post, on a real account, with
+/// media already imported.
+///
+/// It lives here rather than in the scanner because it is a fact about *this composer's
+/// coordinates*, not about TikTok: a carousel may hold 35 images and a hierarchy-driven
+/// composer that locates its cells is not bound by a grid nobody measured.
+pub(crate) const IOS_PIXEL_GRID_MAX_IMAGES: usize = 11;
+
 /// Refuse a campaign holding a device this module has no coordinates for.
 ///
 /// Every tap constant above is an **iOS logical coordinate** and `TIKTOK_BUNDLE_ID` is the
@@ -378,6 +394,34 @@ fn refuse_devices_this_path_cannot_drive<'a>(
          toạ độ ở đây là toạ độ logic của iOS — chạy tiếp là bấm bừa lên một màn hình chưa ai \
          đo. Composer cho Android chưa được dựng.",
         by_label.join(", ")
+    );
+    Ok(())
+}
+
+/// Refuse a bundle this composer has no tap point for, **before its media leaves the desktop**.
+///
+/// `post_one_assignment` already refuses one too large, but it refuses at the last possible
+/// moment: by then `stage`/`prepare`/`import` have put tens of megabytes into a real phone's
+/// gallery and made them visible to TikTok, and the failure leaves them there with no cleanup
+/// owner. The scanner cannot make this check — the ceiling belongs to the composer's grid, and
+/// a hierarchy-driven composer is not bound by it — so the campaign is the first place that
+/// knows both the bundle and the path it is bound for.
+///
+/// Takes the count rather than reading a constant, for the same reason the sibling above takes
+/// a predicate: it is testable without a fleet, and the Android path will pass its own number.
+fn refuse_bundles_this_composer_cannot_post<'a>(
+    bundles: impl IntoIterator<Item = &'a riviu_core::PublishBundle>,
+    max_images: usize,
+) -> anyhow::Result<()> {
+    let oversized: Vec<String> = bundles
+        .into_iter()
+        .filter(|bundle| bundle.images.len() > max_images)
+        .map(|bundle| format!("{} ({} ảnh)", bundle.name, bundle.images.len()))
+        .collect();
+    anyhow::ensure!(
+        oversized.is_empty(),
+        "đường Đăng bài này chọn ảnh trên một lưới {max_images} ô, nên không đăng được: {}.          Bỏ những bài đó ra khỏi chiến dịch, hoặc đợi composer điều khiển theo cây giao diện —          nó định vị từng ô nên không bị lưới này bó.",
+        oversized.join(", ")
     );
     Ok(())
 }
@@ -542,7 +586,7 @@ async fn post_one_assignment(
     assignment: &riviu_core::PublishAssignmentRecord,
     bundle: &riviu_core::PublishBundle,
 ) -> anyhow::Result<serde_json::Value> {
-    if bundle.images.is_empty() || bundle.images.len() > 11 {
+    if bundle.images.is_empty() || bundle.images.len() > IOS_PIXEL_GRID_MAX_IMAGES {
         anyhow::bail!("bundle {} has an invalid image count", bundle.id);
     }
     if bundle.caption.chars().count() > 2200 {
@@ -1040,7 +1084,9 @@ fn parse_run_at(raw: &str) -> Result<NaiveDateTime, CommandError> {
 mod tests {
     use super::account_status_text_is_locked;
     use super::bundle_for_assignment;
+    use super::refuse_bundles_this_composer_cannot_post;
     use super::refuse_devices_this_path_cannot_drive;
+    use super::IOS_PIXEL_GRID_MAX_IMAGES;
     use std::fs;
     use uuid::Uuid;
 
@@ -1186,6 +1232,66 @@ mod tests {
         // operator hunting through sixteen phones.
         assert!(message.contains("ce0617164585646f0d7e"), "{message}");
         assert!(!message.contains("00008030-iphone"), "{message}");
+    }
+
+    /// **The composer's grid, refused before the media leaves the desktop.**
+    ///
+    /// `post_one_assignment` already refuses an over-sized bundle, but it refuses after
+    /// `stage`/`prepare`/`import` have put the images into a real phone's gallery and made
+    /// them visible to TikTok — where they stay, with no cleanup owner, because the campaign
+    /// never reached a state that owns cleanup.
+    #[test]
+    fn a_bundle_too_wide_for_the_tap_grid_is_refused_before_transfer() {
+        let bundles = [
+            bundle_of("set1 13 spotlight", 11),
+            bundle_of("set1 19 spotlightv3", 13),
+        ];
+        let error =
+            refuse_bundles_this_composer_cannot_post(bundles.iter(), IOS_PIXEL_GRID_MAX_IMAGES)
+                .expect_err("thirteen images cannot be reached by a twelve-cell grid");
+        let message = format!("{error:#}");
+        // Names the offending bundle and its count: an operator with twenty-one folders
+        // needs to know which one and by how much.
+        assert!(message.contains("set1 19 spotlightv3"), "{message}");
+        assert!(message.contains("13"), "{message}");
+        // And does not accuse the one that fits.
+        assert!(!message.contains("set1 13 spotlight"), "{message}");
+    }
+
+    #[test]
+    fn a_bundle_that_fits_the_grid_passes() {
+        // Exactly at the limit is inside it: eleven images is what the guard has always
+        // allowed, and moving the constant must not move the boundary.
+        refuse_bundles_this_composer_cannot_post(
+            [bundle_of("eleven", 11)].iter(),
+            IOS_PIXEL_GRID_MAX_IMAGES,
+        )
+        .expect("eleven is the limit, not one past it");
+    }
+
+    /// A bundle with `count` images and nothing else that matters here.
+    fn bundle_of(name: &str, count: usize) -> riviu_core::PublishBundle {
+        riviu_core::PublishBundle {
+            id: format!("{name}-id"),
+            source_path: String::new(),
+            name: name.to_string(),
+            media_kind: riviu_core::PublishMediaKind::Image,
+            images: (1..=count)
+                .map(|order| riviu_core::PublishImage {
+                    path: format!("{order:02}-slide.png"),
+                    file_name: format!("{order:02}-slide.png"),
+                    order: order as u32,
+                    sha256: "11".repeat(32),
+                    byte_len: 1,
+                    width: 995,
+                    height: 1405,
+                })
+                .collect(),
+            caption_path: String::new(),
+            caption: String::new(),
+            caption_sha256: "00".repeat(32),
+            total_bytes: count as u64,
+        }
     }
 
     #[test]

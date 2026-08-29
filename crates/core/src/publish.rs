@@ -13,7 +13,20 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const DEFAULT_MAX_IMAGES: usize = 11;
+/// TikTok's own ceiling for a photo carousel.
+///
+/// **This used to be 11, and 11 was never a property of TikTok or of scanning.** It was the
+/// iOS pixel composer's 3x4 tap grid — twelve cells, so a twelfth image would have indexed
+/// `grid_y[4]` and panicked — expressed in the one place that could not know that. The cost
+/// showed up the first time an operator pointed the scanner at a real batch: `scan_bundle`
+/// returns `TooManyImages` and `scan_publish_folder` propagates it, so **one** thirteen-slide
+/// folder made all twenty-one unscannable, with an error naming a post the operator had not
+/// selected.
+///
+/// The composer's limit now lives with the grid that produces it
+/// (`publish_commands::IOS_PIXEL_GRID_MAX_IMAGES`), and is checked before media leaves the
+/// desktop rather than after it has been imported onto a phone.
+const DEFAULT_MAX_IMAGES: usize = 35;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -792,6 +805,61 @@ mod tests {
         assert_eq!(manifest.bundles[0].caption, "Mở bài\n\n#tag");
         assert_eq!(manifest.ignored_partner_files, 1);
         assert_eq!(manifest.ignored_hidden_files, 1);
+    }
+
+    /// **One over-sized folder used to make every other folder unscannable.**
+    ///
+    /// `scan_bundle` returns `TooManyImages` and `scan_publish_folder` propagates it, so the
+    /// operator's real batch — twenty-one posts, three of them thirteen slides — failed at the
+    /// scan with an error naming a post they had not selected. The eleven was never TikTok's
+    /// number nor the scanner's; it was the iOS composer's 3x4 tap grid, and it now lives with
+    /// that grid.
+    #[test]
+    fn a_thirteen_slide_carousel_scans_and_does_not_take_its_neighbours_down() {
+        let root = TempDir::new();
+
+        let big = root.path().join("set1 19 spotlightv3");
+        fs::create_dir(&big).expect("bundle");
+        for order in 1..=13u32 {
+            write_png(
+                &big.join(format!("{order:02}-slide.png")),
+                [order as u8, order as u8, order as u8],
+            );
+        }
+        fs::write(big.join("caption-set1.txt"), "Mở bài\n\n#dalat").expect("caption");
+
+        let small = root.path().join("set1 03 budget-72h-summary");
+        fs::create_dir(&small).expect("bundle");
+        write_png(&small.join("01-cover.png"), [1, 1, 1]);
+        write_png(&small.join("02-tail.png"), [2, 2, 2]);
+        fs::write(small.join("caption-set1.txt"), "Ngắn").expect("caption");
+
+        let manifest =
+            scan_publish_folder(root.path(), PublishScanOptions::default()).expect("scan");
+        assert_eq!(manifest.bundles.len(), 2, "both folders survive the scan");
+        let widest = manifest
+            .bundles
+            .iter()
+            .map(|bundle| bundle.images.len())
+            .max()
+            .expect("bundles");
+        assert_eq!(widest, 13);
+    }
+
+    /// The ceiling did not vanish, it moved: TikTok's own is 35, and it still refuses.
+    #[test]
+    fn a_carousel_past_tiktoks_own_ceiling_is_still_refused() {
+        let root = TempDir::new();
+        let bundle = root.path().join("too many");
+        fs::create_dir(&bundle).expect("bundle");
+        for order in 1..=36u32 {
+            write_png(&bundle.join(format!("{order:02}-slide.png")), [1, 1, 1]);
+        }
+        fs::write(bundle.join("caption.txt"), "x").expect("caption");
+        assert!(matches!(
+            scan_publish_folder(root.path(), PublishScanOptions::default()),
+            Err(PublishScanError::TooManyImages { .. })
+        ));
     }
 
     #[test]

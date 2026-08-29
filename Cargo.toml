@@ -48,6 +48,10 @@ dirs = "6"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 base64 = "0.22"
 sha2 = "0.10"
+# Already in the graph twice over (tools/rtmmo-re and tauri-plugin-updater), so this adds
+# no crate and no licence for cargo-deny to approve.  keeps out
+# the encryption and bzip2 backends nothing here reads.
+zip = { version = "4.2", default-features = false, features = ["deflate"] }
 riviu-android-driver = { path = "crates/android-driver" }
 riviu-core = { path = "crates/core" }
 riviu-ios-driver = { path = "crates/ios-driver" }
