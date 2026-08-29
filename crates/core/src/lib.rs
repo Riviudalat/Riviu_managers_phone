@@ -24,6 +24,7 @@ pub mod nurture;
 pub mod openai_client;
 pub mod publish;
 pub mod publish_partners;
+pub mod publish_sheet;
 pub mod registry;
 pub mod screen;
 pub mod screen_match;

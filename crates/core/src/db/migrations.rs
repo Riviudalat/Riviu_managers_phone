@@ -131,6 +131,12 @@ const MIGRATIONS: &[Migration] = &[
         apply: apply_migration_16,
         rebuilds_tables: false,
     },
+    Migration {
+        version: 17,
+        name: "publish-sheet-outbox",
+        apply: apply_migration_17,
+        rebuilds_tables: false,
+    },
 ];
 
 const LEDGER_SQL: &str = r#"
@@ -973,6 +979,60 @@ DROP TABLE publish_dispatch;
 DROP TABLE publish_tasks;
 DROP TABLE nurture_comment_costs;
 ALTER TABLE device_meta DROP COLUMN proxy_id;
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_migration_17(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    // **A table, because "post the link to a Sheet" is a second delivery and must be able to
+    // fail on its own.**
+    //
+    // The operator's requirement is that every published carousel puts its link in column D of
+    // a partners sheet, `bot` as the poster, and the partner names from the campaign's
+    // `partners-setN.xlsx` from column K onward. The naive shape is an HTTP call at the end of
+    // the post step. That shape is wrong in a way this project has already paid for once: a
+    // network error would then make a **published** post look like a failed one, and a failed
+    // post is the thing the operator retries.
+    //
+    // So the row is written here first, in the same transaction that records the post, and
+    // pushed afterwards. `state` distinguishes the two deliveries, and the push can be retried
+    // by itself without touching the post.
+    //
+    // # Why `assignment_id` is the primary key
+    //
+    // One assignment publishes at most one carousel, so it can owe the sheet at most one row.
+    // Making that the key rather than a fresh id means a retry that re-inserts cannot create a
+    // second row for the same post — the operator would see the same link twice in column D
+    // and have no way to tell which one to delete.
+    //
+    // # `ON DELETE CASCADE`, deliberately
+    //
+    // A campaign deleted from the app takes its unsent outbox rows with it. A row already
+    // `sent` is *history that lives in the sheet*, not here, so losing this copy loses nothing
+    // an operator can act on.
+    //
+    // `partners_json` is a JSON array of the names read out of the workbook. Stored as text
+    // rather than one row per name because the sheet wants them spread across columns K
+    // onward in their original order, which is an array, not a set.
+    transaction.execute_batch(
+        r#"
+CREATE TABLE publish_sheet_outbox (
+  assignment_id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL,
+  post_url TEXT NOT NULL,
+  poster TEXT NOT NULL,
+  partners_json TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending','sent','failed')),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (assignment_id) REFERENCES publish_assignments(id) ON DELETE CASCADE,
+  FOREIGN KEY (campaign_id) REFERENCES publish_campaigns(id) ON DELETE CASCADE
+);
+CREATE INDEX publish_sheet_outbox_pending
+  ON publish_sheet_outbox(state) WHERE state <> 'sent';
 "#,
     )?;
     Ok(())

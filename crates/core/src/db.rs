@@ -16,9 +16,11 @@ mod jobs;
 mod migrations;
 mod nurture;
 mod publish;
+mod publish_sheet;
 
 pub use flow_runs::{AttemptTransitionPatch, FlowStateConflict};
 pub(crate) use flow_runs::{FlowAttemptExecutionContext, FlowRecoveryRunContext};
+pub use publish_sheet::SheetOutboxRow;
 
 /// Somewhere to keep a secret that is **not** the SQLite file.
 ///
