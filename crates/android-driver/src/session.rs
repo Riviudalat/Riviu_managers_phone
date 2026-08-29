@@ -712,15 +712,11 @@ impl UiSession for AndroidUiSession {
                 .ok()
                 .flatten(),
         );
-        Ok(Some(riviu_core::ElementBox {
-            x: rect.x,
-            y: rect.y,
-            width: rect.width,
-            height: rect.height,
+        Ok(Some(located_box(
+            rect,
             description,
-            enabled,
-            clickable,
-        }))
+            ArmedFlags { enabled, clickable },
+        )))
     }
 
     /// Bounds for **every** match, geometry only.
@@ -880,6 +876,41 @@ fn keys_payload(text: &str) -> anyhow::Result<String> {
     Ok(text.replace(' ', "%s"))
 }
 
+/// The two armed flags of one element, read and defaulted.
+///
+/// A named pair rather than two positional `bool`s, and that is the whole reason it exists:
+/// the two are the same type and mean opposite things, so `located_box(rect, desc, a, b)`
+/// with the arguments swapped compiles, runs, and — on the measured picker, where `enabled`
+/// is always `"true"` — reports every element as clickable. `ElementBox.clickable` would then
+/// say "images are selected" before any were.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ArmedFlags {
+    enabled: bool,
+    clickable: bool,
+}
+
+/// Assemble the box, so the field assignment is testable without a device.
+///
+/// Split out because a source-scanning gate can only see that both attribute names and both
+/// helper names appear in `locate`; it cannot see which read feeds which field. A review
+/// named the exact mutation that stayed green: pass the `clickable` response to
+/// `enabled_from_attribute` and vice versa. This function is where that becomes a unit test.
+fn located_box(
+    rect: crate::agent::Rect,
+    description: Option<String>,
+    flags: ArmedFlags,
+) -> riviu_core::ElementBox {
+    riviu_core::ElementBox {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+        description,
+        enabled: flags.enabled,
+        clickable: flags.clickable,
+    }
+}
+
 /// Read the `enabled` attribute, **defaulting to enabled** when it cannot be read.
 ///
 /// The default is the whole content of this function. TikTok's comment Send button
@@ -956,6 +987,48 @@ mod tests {
         assert!(!clickable_from_attribute(Some(String::new())));
     }
 
+    /// **Each flag lands in its own field.**
+    ///
+    /// The gap a review named: the source-scanning gate below sees that both attribute names
+    /// and both helpers appear in `locate`, and cannot see which read feeds which field.
+    /// Swapping them compiles and passes every other test — and on the measured picker, where
+    /// `enabled` is always `"true"`, it makes every element report `clickable`, which the
+    /// composer reads as "images are selected" before any are.
+    #[test]
+    fn the_two_armed_flags_do_not_land_in_each_others_fields() {
+        let rect = crate::agent::Rect {
+            x: 1.0,
+            y: 2.0,
+            width: 3.0,
+            height: 4.0,
+        };
+        // Deliberately opposite, so a swap cannot pass by coincidence.
+        let element = located_box(
+            rect,
+            Some("Next".into()),
+            ArmedFlags {
+                enabled: false,
+                clickable: true,
+            },
+        );
+        assert!(!element.enabled, "the clickable flag landed in `enabled`");
+        assert!(element.clickable, "the enabled flag landed in `clickable`");
+        assert_eq!((element.x, element.y), (1.0, 2.0));
+        assert_eq!((element.width, element.height), (3.0, 4.0));
+        assert_eq!(element.description.as_deref(), Some("Next"));
+
+        let mirrored = located_box(
+            rect,
+            None,
+            ArmedFlags {
+                enabled: true,
+                clickable: false,
+            },
+        );
+        assert!(mirrored.enabled);
+        assert!(!mirrored.clickable);
+    }
+
     /// `locate` must actually ask for both attributes, on the real element.
     ///
     /// The helpers above are pure and provable, but a caller that never calls them is
@@ -1001,6 +1074,32 @@ mod tests {
             body.contains("enabled_from_attribute(") && body.contains("clickable_from_attribute("),
             "`locate` parses the attributes inline again, so the defaults tested above are dead"
         );
+
+        // **And each attribute goes into the helper that belongs to it.** Presence alone was
+        // the gate's whole content, and a review named the mutation that survived it: feed
+        // the `clickable` response to `enabled_from_attribute` and vice versa. Both helpers
+        // still appear, both attribute names still appear, every unit test still passes — and
+        // on the measured picker, where `enabled` is always `"true"`, every element comes back
+        // `clickable`, which reads as "images are selected" before any are.
+        //
+        // Matched by cutting each helper's call and requiring its own attribute name inside.
+        for (helper, attribute) in [
+            ("enabled_from_attribute(", "\"enabled\""),
+            ("clickable_from_attribute(", "\"clickable\""),
+        ] {
+            let start = body
+                .find(helper)
+                .unwrap_or_else(|| panic!("{helper} is no longer called in `locate`"));
+            let call = &body[start..];
+            let end = call
+                .find(");")
+                .unwrap_or_else(|| panic!("{helper} call does not terminate"));
+            assert!(
+                call[..end].contains(attribute),
+                "{helper} is fed something other than {attribute}; the two flags mean opposite \
+                 things and swapping them is invisible on a build where `enabled` never moves"
+            );
+        }
 
         // The list paths deliberately pay for neither, and their boxes say so. Counted
         // over the module only — this test's own source is in the same file, and a gate

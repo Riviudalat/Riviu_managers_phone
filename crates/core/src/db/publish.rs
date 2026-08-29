@@ -346,12 +346,39 @@ impl Database {
                  WHERE campaign_id=?1 AND state='transferring'",
                 params![campaign_id, now],
             )?;
+            // **The campaign follows its worst child, and `cancelled` is not one of the
+            // answers.** It used to be, and it stranded exactly the work this function
+            // labels retryable: an assignment moved to `failed_before_dispatch` sits under a
+            // campaign, the run starts by claiming the campaign, and a cancelled campaign is
+            // terminal. The child said "retry me" and the parent said "there is nothing to
+            // retry".
+            //
+            // So: `uncertain` when some phone may already have published — which needs a
+            // person, not a retry — and `failed_before_dispatch` when nothing did, which the
+            // claim accepts.
+            let anything_may_be_live: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM publish_assignments
+                 WHERE campaign_id=?1 AND state='uncertain'",
+                params![campaign_id],
+                |row| row.get(0),
+            )?;
+            let (state, reason) = if anything_may_be_live > 0 {
+                (
+                    "uncertain",
+                    "publish_worker_lost: app đóng khi đang đăng — có máy không xác nhận được",
+                )
+            } else {
+                (
+                    "failed_before_dispatch",
+                    "publish_worker_lost: app đóng trước khi có gì rời máy tính — chạy lại được",
+                )
+            };
             transaction.execute(
                 "UPDATE publish_campaigns
-                 SET state='cancelled',revision=revision+1,updated_at=?2,
-                     error_code=COALESCE(error_code,'publish_worker_lost: app đóng khi chiến dịch đang chạy')
+                 SET state=?3,revision=revision+1,updated_at=?2,
+                     error_code=COALESCE(error_code,?4)
                  WHERE id=?1",
-                params![campaign_id, now],
+                params![campaign_id, now, state, reason],
             )?;
         }
         transaction.commit()?;
@@ -369,18 +396,30 @@ impl Database {
         let revision = current_revision + 1;
         let now = Utc::now().to_rfc3339();
         let posting = crate::publish::PublishCampaignState::Posting;
-        // The predicate is the claim: only a campaign still sitting at `Imported` moves, and
-        // SQLite does this row update atomically inside an IMMEDIATE transaction, so exactly
-        // one of two racing callers sees a non-zero count.
+        // The predicate is the claim: SQLite does this row update atomically inside an
+        // IMMEDIATE transaction, so exactly one of two racing callers sees a non-zero count.
+        //
+        // **Two states, matching [`Self::claim_publish_assignment_for_posting`] exactly.**
+        // `Imported` alone was a real trap: startup recovery settles an interrupted campaign
+        // to `FailedBeforeDispatch` — the name is the guarantee, nothing reached a phone —
+        // and marks its assignments claimable, and then this refused to start the run. The
+        // work was labelled retryable and was not reachable, which is worse than either
+        // answer on its own, because the operator sees rows saying "retry me" and a button
+        // that will not.
+        //
+        // `Uncertain` stays excluded here for the same reason it is excluded one level down:
+        // a campaign lands there only when some phone may already have published, and that
+        // needs a person looking at the phone rather than a second dispatch.
         let claimed = transaction.execute(
             "UPDATE publish_campaigns SET state=?1,error_code=NULL,revision=?2,updated_at=?3 \
-             WHERE id=?4 AND state=?5",
+             WHERE id=?4 AND state IN (?5,?6)",
             params![
                 posting.as_str(),
                 revision,
                 now,
                 id,
-                crate::publish::PublishCampaignState::Imported.as_str()
+                crate::publish::PublishCampaignState::Imported.as_str(),
+                crate::publish::PublishCampaignState::FailedBeforeDispatch.as_str()
             ],
         )?;
         if claimed == 0 {
@@ -632,53 +671,108 @@ mod claim_tests {
             .state
     }
 
-    /// **A crash mid-post must strand nothing, and the two halves must land differently.**
-    ///
-    /// The row that was `posting` may already be a carousel on a real account — nobody can
-    /// tell from here — so it becomes `uncertain`, which the claim refuses. The row that was
-    /// `transferring` never reached TikTok, so it becomes `failed_before_dispatch`, which the
-    /// claim accepts. Collapsing the two into one state would either strand a retryable post
-    /// or re-publish a live one, and there is no delete path on Android to undo the second.
-    #[test]
-    fn a_crash_mid_post_leaves_one_half_retryable_and_the_other_permanently_not() {
-        let (db, path) = fixture();
-        let record = campaign(
-            &db,
-            &["phone-posting", "phone-transferring", "phone-imported"],
-        );
-
+    /// Drive every assignment of a campaign into a named state, then settle.
+    fn seed_and_settle(
+        db: &Database,
+        record: &crate::publish::PublishCampaignRecord,
+        states: &[(&str, crate::publish::PublishCampaignState)],
+    ) {
         db.update_publish_campaign_state(
             &record.id,
             crate::publish::PublishCampaignState::Posting,
             None,
         )
-        .expect("the campaign was mid-post when the app died");
+        .expect("the campaign was mid-flight when the app died");
         let assignments = db
             .get_publish_campaign(&record.id)
             .expect("read back")
             .expect("campaign exists")
             .assignments;
         for assignment in &assignments {
-            let state = match assignment.udid.as_str() {
-                "phone-posting" => crate::publish::PublishCampaignState::Posting,
-                "phone-transferring" => crate::publish::PublishCampaignState::Transferring,
-                // The third stays `Imported`: the crash cost it nothing.
-                _ => continue,
-            };
-            db.update_publish_assignment_state(&assignment.id, state, None, None)
-                .expect("seed the mid-flight state");
+            if let Some((_, state)) = states.iter().find(|(udid, _)| *udid == assignment.udid) {
+                db.update_publish_assignment_state(&assignment.id, state.clone(), None, None)
+                    .expect("seed the mid-flight state");
+            }
         }
+    }
 
-        let settled = db
-            .interrupt_orphaned_publish_campaigns()
-            .expect("settle the stranded campaign");
-        assert_eq!(settled, 1);
+    fn assignment_id(db: &Database, campaign_id: &str, udid: &str) -> String {
+        db.get_publish_campaign(campaign_id)
+            .expect("read back")
+            .expect("campaign exists")
+            .assignments
+            .into_iter()
+            .find(|assignment| assignment.udid == udid)
+            .expect("assignment")
+            .id
+    }
+
+    /// **A crash mid-post must strand nothing, and the halves must land differently.**
+    ///
+    /// The row that was `posting` — or `verifying`, which is the same risk one step later —
+    /// may already be a carousel on a real account, so it becomes `uncertain`, which the claim
+    /// refuses. The row that was `transferring` never reached TikTok, so it becomes
+    /// `failed_before_dispatch`, which the claim accepts. Collapsing the two would either
+    /// strand a retryable post or re-publish a live one, and there is no delete path on
+    /// Android to undo the second.
+    ///
+    /// **All four states are seeded**, including `verifying`. The earlier version of this test
+    /// seeded only `posting` and still passed with `verifying` deleted from both recovery
+    /// predicates — so the state that means "the tap went out and we were checking" was
+    /// covered by a name in a SQL string and nothing else.
+    #[test]
+    fn a_crash_mid_post_leaves_one_half_retryable_and_the_other_permanently_not() {
+        let (db, path) = fixture();
+        let record = campaign(
+            &db,
+            &[
+                "phone-posting",
+                "phone-verifying",
+                "phone-transferring",
+                "phone-imported",
+            ],
+        );
+        seed_and_settle(
+            &db,
+            &record,
+            &[
+                (
+                    "phone-posting",
+                    crate::publish::PublishCampaignState::Posting,
+                ),
+                (
+                    "phone-verifying",
+                    crate::publish::PublishCampaignState::Verifying,
+                ),
+                (
+                    "phone-transferring",
+                    crate::publish::PublishCampaignState::Transferring,
+                ),
+                // The fourth stays `Imported`: the crash cost it nothing.
+            ],
+        );
 
         assert_eq!(
-            state_of(&db, &record.id, "phone-posting"),
-            crate::publish::PublishCampaignState::Uncertain,
-            "a post that may have gone out must never be re-dispatched"
+            db.interrupt_orphaned_publish_campaigns()
+                .expect("settle the stranded campaign"),
+            1
         );
+
+        for udid in ["phone-posting", "phone-verifying"] {
+            assert_eq!(
+                state_of(&db, &record.id, udid),
+                crate::publish::PublishCampaignState::Uncertain,
+                "{udid}: a post that may have gone out must never be re-dispatched"
+            );
+            assert!(
+                !db.claim_publish_assignment_for_posting(
+                    &assignment_id(&db, &record.id, udid),
+                    INTENT
+                )
+                .expect("claim query"),
+                "{udid}: uncertain must be permanently unclaimable"
+            );
+        }
         assert_eq!(
             state_of(&db, &record.id, "phone-transferring"),
             crate::publish::PublishCampaignState::FailedBeforeDispatch,
@@ -687,30 +781,82 @@ mod claim_tests {
         assert_eq!(
             state_of(&db, &record.id, "phone-imported"),
             crate::publish::PublishCampaignState::Imported,
-            "an assignment the crash did not touch is left exactly where Post expects it"
+            "an assignment the crash did not touch is left where Post expects it"
         );
 
-        // And the claim agrees with the states, which is the point of choosing them.
-        let by_udid = |udid: &str| {
+        // Something may be live, so the campaign says so and needs a person, not a retry.
+        assert_eq!(
             db.get_publish_campaign(&record.id)
                 .expect("read back")
                 .expect("campaign exists")
-                .assignments
-                .into_iter()
-                .find(|assignment| assignment.udid == udid)
-                .expect("assignment")
-                .id
-        };
-        assert!(
-            !db.claim_publish_assignment_for_posting(&by_udid("phone-posting"), INTENT)
-                .expect("claim query"),
-            "uncertain is permanently unclaimable"
+                .campaign
+                .state,
+            crate::publish::PublishCampaignState::Uncertain
         );
         assert!(
-            db.claim_publish_assignment_for_posting(&by_udid("phone-transferring"), INTENT)
+            !db.claim_publish_campaign_for_posting(&record.id)
                 .expect("claim query"),
-            "failed_before_dispatch is what makes a retry possible"
+            "a campaign that may hold a live post must not restart on its own"
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// **A crash where nothing reached a phone is retryable end to end, not just on paper.**
+    ///
+    /// The failure this pins is the one that made the previous version dishonest: recovery
+    /// marked the assignments `failed_before_dispatch` — claimable — and then cancelled the
+    /// campaign, and a real run starts by claiming the *campaign*. So every row said "retry
+    /// me" under a parent that could never be claimed again, and the earlier test never
+    /// noticed because it only ever claimed the child directly.
+    ///
+    /// This one claims what the app claims, in the order the app claims it.
+    #[test]
+    fn a_crash_before_anything_left_the_desktop_can_actually_be_run_again() {
+        let (db, path) = fixture();
+        let record = campaign(&db, &["phone-a", "phone-b"]);
+        seed_and_settle(
+            &db,
+            &record,
+            &[
+                (
+                    "phone-a",
+                    crate::publish::PublishCampaignState::Transferring,
+                ),
+                (
+                    "phone-b",
+                    crate::publish::PublishCampaignState::Transferring,
+                ),
+            ],
+        );
+        assert_eq!(
+            db.interrupt_orphaned_publish_campaigns().expect("settle"),
+            1
+        );
+
+        assert_eq!(
+            db.get_publish_campaign(&record.id)
+                .expect("read back")
+                .expect("campaign exists")
+                .campaign
+                .state,
+            crate::publish::PublishCampaignState::FailedBeforeDispatch,
+            "nothing reached a phone, so the campaign must not be terminal"
+        );
+        assert!(
+            db.claim_publish_campaign_for_posting(&record.id)
+                .expect("claim query"),
+            "the campaign is labelled retryable and the claim refuses it — work stranded"
+        );
+        for udid in ["phone-a", "phone-b"] {
+            assert!(
+                db.claim_publish_assignment_for_posting(
+                    &assignment_id(&db, &record.id, udid),
+                    INTENT
+                )
+                .expect("claim query"),
+                "{udid} cannot be re-dispatched even though nothing left the desktop"
+            );
+        }
         let _ = std::fs::remove_file(path);
     }
 

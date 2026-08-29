@@ -229,14 +229,16 @@ pub fn validate_publish_mapping(
         .collect())
 }
 
-/// What one auto-assignment dealt, and where the next one should start.
+/// What one auto-assignment dealt.
+///
+/// No cursor. An earlier version handed one back for the caller to persist, and the position
+/// it encoded turned out to be a worse answer than the history it stood in for — see
+/// [`auto_assign_bundles`]. Nothing has to be stored between runs now: the bundle ids that
+/// already have assignments *are* the state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoAssignment {
     pub plan: Vec<PublishAssignmentPlan>,
-    /// Where the next deal begins. Passed back in so this function stays pure and the
-    /// operator's rotation survives a restart in the `settings` table rather than in memory.
-    pub next_cursor: u64,
 }
 
 /// Why a deal was refused. None of these degrades into a smaller run.
@@ -249,39 +251,61 @@ pub enum PublishAssignError {
     NotEnoughPhones { wanted: usize, available: usize },
     #[error("cần {wanted} bài khác nhau, thư mục chỉ có {available}")]
     NotEnoughBundles { wanted: usize, available: usize },
+    /// The folder holds enough posts; not enough of them are **unpublished**.
+    ///
+    /// Kept apart from `NotEnoughBundles` because the operator's next move differs: this one
+    /// means the run is finished, not that the folder is short.
+    #[error("cần {wanted} bài chưa đăng, chỉ còn {available} bài chưa đăng")]
+    NotEnoughFreshBundles { wanted: usize, available: usize },
+    /// Two folders claim the same id, which is a scanner defect rather than a short run.
+    #[error("hai thư mục cùng mang id {0} — một trong hai sắp bị đăng dưới caption của cái kia")]
+    DuplicateBundleInSource(String),
     #[error("không chia được 0 bài")]
     Empty,
     #[error(transparent)]
     Mapping(#[from] PublishPlanError),
 }
 
-/// Deal `wanted` distinct bundles onto `wanted` phones, one each.
+/// Deal `wanted` **not-yet-published** bundles onto `wanted` phones, one each.
 ///
 /// **It ends by calling [`validate_publish_mapping`], and that is the point.** This function
 /// only *chooses*; the bijection between a bundle and a phone stays enforced in the one place
 /// that already earned nine tests for it. A second implementation of the pairing would be a
-/// second thing to get wrong in the one function whose job is to stop one account's photographs
-/// going out under another account's caption.
+/// second thing to get wrong in the one function whose job is to stop one account's
+/// photographs going out under another account's caption.
+///
+/// # Why the history, and not a cursor
+///
+/// The first version took a rotating cursor: deal `wanted` from position `cursor`, hand back
+/// `cursor + wanted`, and two consecutive runs were disjoint. A review took it apart, and the
+/// arithmetic was a **proxy for a fact** — which post has already gone out — that is worse
+/// than the fact in three separate ways:
+///
+/// * with five bundles and `wanted = 5`, `next_cursor` was `5`, `5 % 5 == 0`, and the second
+///   run dealt **exactly the same five**. The promise held only while the inventory was at
+///   least twice the deal, and nothing said so;
+/// * a duplicate id anywhere outside the selected window slipped past
+///   [`validate_publish_mapping`], which only ever sees the chosen subset — so `["A","B","C","A"]`
+///   dealt `A` twice across two runs;
+/// * the cursor is positional. Inserting one folder ahead of it shifts every later window, and
+///   `wrapping_add` at `u64::MAX` lands on a residue that is not the circular successor.
+///
+/// So the caller passes the bundle ids it has **already published**, and the pool is what is
+/// left. That is keyed by identity rather than position, which makes all three of those
+/// impossible rather than unlikely — and it is the thing the operator actually means.
 ///
 /// # Refusing rather than dealing fewer
 ///
-/// `NotEnoughBundles` is the variant that matters. The operator asked for *different* posts;
-/// reusing one puts the same carousel on two live accounts, which is the shape a bot farm has
-/// and a person does not. Dealing four when five were asked for is a silent change of plan, so
-/// too few phones refuses as well.
-///
-/// # Why a cursor and not "the first N"
-///
-/// Twenty-one posts and a fixed head means every run burns the same first few, and after four
-/// runs the operator has re-posted all of them. The cursor makes two consecutive runs disjoint,
-/// which is what a test run should be able to demonstrate. Sorting by content hash was the
-/// obvious alternative and is not one: `bundle.id` already changes with content, so a
-/// content-derived order is "always the same five" wearing a different hat.
+/// [`PublishAssignError::NotEnoughFreshBundles`] is the variant that matters, and it fires
+/// when the *remaining* pool is short, not the whole folder. The operator asked for
+/// *different* posts; reusing one puts the same carousel on two live accounts, which is the
+/// shape a bot farm has and a person does not. Dealing four when five were asked for is a
+/// silent change of plan, so too few phones refuses as well.
 pub fn auto_assign_bundles(
     bundle_ids: &[String],
+    already_published: &[String],
     udids: &[String],
     wanted: usize,
-    cursor: u64,
 ) -> Result<AutoAssignment, PublishAssignError> {
     if wanted == 0 {
         return Err(PublishAssignError::Empty);
@@ -292,30 +316,37 @@ pub fn auto_assign_bundles(
             available: udids.len(),
         });
     }
-    if bundle_ids.len() < wanted {
-        return Err(PublishAssignError::NotEnoughBundles {
+    // A duplicate in the *source* is a scanner defect, and refusing it here is cheap insurance:
+    // two folders claiming one id mean one of them is about to be published under the other's
+    // caption, and nothing downstream would notice.
+    let mut seen = std::collections::BTreeSet::new();
+    for id in bundle_ids {
+        if !seen.insert(id.as_str()) {
+            return Err(PublishAssignError::DuplicateBundleInSource(id.clone()));
+        }
+    }
+
+    let published: std::collections::BTreeSet<&str> =
+        already_published.iter().map(String::as_str).collect();
+    let fresh: Vec<String> = bundle_ids
+        .iter()
+        .filter(|id| !published.contains(id.as_str()))
+        .cloned()
+        .collect();
+    if fresh.len() < wanted {
+        return Err(PublishAssignError::NotEnoughFreshBundles {
             wanted,
-            available: bundle_ids.len(),
+            available: fresh.len(),
         });
     }
 
-    let total = bundle_ids.len() as u64;
-    let start = cursor % total;
-    let chosen_bundles: Vec<String> = (0..wanted)
-        .map(|offset| {
-            let index = (start + offset as u64) % total;
-            bundle_ids[index as usize].clone()
-        })
-        .collect();
+    let chosen_bundles: Vec<String> = fresh.into_iter().take(wanted).collect();
     // The phones as given: the caller filtered them to idle and eligible, and their order is
     // the operator's fleet order, which is the order the mapping preview renders.
     let chosen_udids: Vec<String> = udids.iter().take(wanted).cloned().collect();
 
     let plan = validate_publish_mapping(&chosen_bundles, &chosen_udids)?;
-    Ok(AutoAssignment {
-        plan,
-        next_cursor: cursor.wrapping_add(wanted as u64),
-    })
+    Ok(AutoAssignment { plan })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -879,13 +910,16 @@ mod tests {
         (1..=count).map(|n| format!("{prefix}-{n:02}")).collect()
     }
 
+    fn dealt(deal: &AutoAssignment) -> Vec<&str> {
+        deal.plan.iter().map(|row| row.bundle_id.as_str()).collect()
+    }
+
     /// The operator's run: twenty-one posts, five phones, five different posts.
     #[test]
     fn five_phones_get_five_different_posts() {
-        let deal = auto_assign_bundles(&ids("bundle", 21), &ids("phone", 5), 5, 0).expect("deal");
+        let deal = auto_assign_bundles(&ids("bundle", 21), &[], &ids("phone", 5), 5).expect("deal");
         assert_eq!(deal.plan.len(), 5);
-        let chosen: std::collections::BTreeSet<&str> =
-            deal.plan.iter().map(|row| row.bundle_id.as_str()).collect();
+        let chosen: std::collections::BTreeSet<&str> = dealt(&deal).into_iter().collect();
         assert_eq!(
             chosen.len(),
             5,
@@ -898,59 +932,116 @@ mod tests {
         }
     }
 
-    /// **A second run must not deal the same five.**
+    /// **A second run never re-deals a post that already went out.**
     ///
-    /// Twenty-one posts with a fixed head means four runs re-post everything. The cursor is
-    /// what makes a test run demonstrable rather than a repeat.
+    /// The old version of this test passed for the wrong reason. It rotated a cursor over
+    /// twenty-one bundles, and twenty-one happens to be more than twice five — so the windows
+    /// could not overlap and nothing was being proved. Five bundles and five phones is the
+    /// case that broke it: `next_cursor` was 5, `5 % 5` is 0, and the second run dealt the
+    /// same five carousels onto five live accounts.
+    ///
+    /// Keyed on what was published rather than on where a counter is, the case cannot arise:
+    /// the pool is what is left, and when nothing is left the deal refuses.
     #[test]
-    fn a_second_run_does_not_deal_the_same_five() {
+    fn a_run_never_deals_a_post_that_already_went_out() {
         let bundles = ids("bundle", 21);
         let phones = ids("phone", 5);
-        let first = auto_assign_bundles(&bundles, &phones, 5, 0).expect("first deal");
-        let second =
-            auto_assign_bundles(&bundles, &phones, 5, first.next_cursor).expect("second deal");
-        let a: std::collections::BTreeSet<&str> = first
-            .plan
-            .iter()
-            .map(|row| row.bundle_id.as_str())
-            .collect();
-        let b: std::collections::BTreeSet<&str> = second
-            .plan
-            .iter()
-            .map(|row| row.bundle_id.as_str())
-            .collect();
+        let first = auto_assign_bundles(&bundles, &[], &phones, 5).expect("first deal");
+        let published: Vec<String> = dealt(&first).into_iter().map(str::to_string).collect();
+        let second = auto_assign_bundles(&bundles, &published, &phones, 5).expect("second deal");
+        let a: std::collections::BTreeSet<&str> = dealt(&first).into_iter().collect();
+        let b: std::collections::BTreeSet<&str> = dealt(&second).into_iter().collect();
         assert!(
             a.is_disjoint(&b),
             "two consecutive runs share a post: {a:?} vs {b:?}"
         );
+
+        // **The case the cursor got wrong**, at every inventory size where it could: an
+        // inventory smaller than two deals.
+        for total in 5..=9usize {
+            let bundles = ids("bundle", total);
+            let first = auto_assign_bundles(&bundles, &[], &phones, 5).expect("first deal");
+            let published: Vec<String> = dealt(&first).into_iter().map(str::to_string).collect();
+            let second = auto_assign_bundles(&bundles, &published, &phones, 5);
+            match second {
+                Ok(second) => {
+                    let a: std::collections::BTreeSet<&str> = dealt(&first).into_iter().collect();
+                    let b: std::collections::BTreeSet<&str> = dealt(&second).into_iter().collect();
+                    assert!(
+                        a.is_disjoint(&b),
+                        "with {total} posts the second run re-published {:?}",
+                        a.intersection(&b).collect::<Vec<_>>()
+                    );
+                }
+                // Refusing is the right answer once there is nothing fresh left.
+                Err(PublishAssignError::NotEnoughFreshBundles { wanted, available }) => {
+                    assert_eq!(wanted, 5);
+                    assert_eq!(available, total - 5);
+                }
+                Err(other) => panic!("unexpected refusal with {total} posts: {other:?}"),
+            }
+        }
     }
 
-    /// Wrapping past the end still deals five *distinct* posts.
+    /// The whole folder gets published exactly once across successive runs.
     #[test]
-    fn the_cursor_wraps_without_repeating_inside_one_deal() {
-        let deal = auto_assign_bundles(&ids("bundle", 21), &ids("phone", 5), 5, 19).expect("deal");
-        let chosen: Vec<&str> = deal.plan.iter().map(|row| row.bundle_id.as_str()).collect();
+    fn every_post_goes_out_once_and_then_the_deals_run_out() {
+        let bundles = ids("bundle", 21);
+        let phones = ids("phone", 5);
+        let mut published: Vec<String> = Vec::new();
+        for _ in 0..4 {
+            let deal = auto_assign_bundles(&bundles, &published, &phones, 5).expect("deal");
+            published.extend(dealt(&deal).into_iter().map(str::to_string));
+        }
+        assert_eq!(published.len(), 20);
+        let distinct: std::collections::BTreeSet<&String> = published.iter().collect();
+        assert_eq!(distinct.len(), 20, "a post went out twice");
+        // One left, so a fifth run of five refuses rather than reaching back.
+        assert!(matches!(
+            auto_assign_bundles(&bundles, &published, &phones, 5),
+            Err(PublishAssignError::NotEnoughFreshBundles {
+                wanted: 5,
+                available: 1
+            })
+        ));
+        // And a run of one still works.
         assert_eq!(
-            chosen,
-            vec![
-                "bundle-20",
-                "bundle-21",
-                "bundle-01",
-                "bundle-02",
-                "bundle-03"
-            ]
+            auto_assign_bundles(&bundles, &published, &phones, 1)
+                .expect("one left")
+                .plan
+                .len(),
+            1
         );
     }
 
-    /// Refusing rather than dealing fewer, in both directions.
+    /// **A duplicate id in the folder is refused, wherever it sits.**
+    ///
+    /// `validate_publish_mapping` only ever sees the chosen subset, so a duplicate outside the
+    /// window used to slip past it entirely — `["A","B","C","A"]` dealt `A` on one run and `A`
+    /// again on the next, each deal internally fine.
+    #[test]
+    fn two_folders_claiming_one_id_are_refused_rather_than_dealt_twice() {
+        let bundles = vec![
+            "A".to_string(),
+            "B".to_string(),
+            "C".to_string(),
+            "A".to_string(),
+        ];
+        assert!(matches!(
+            auto_assign_bundles(&bundles, &[], &ids("phone", 1), 1),
+            Err(PublishAssignError::DuplicateBundleInSource(id)) if id == "A"
+        ));
+    }
+
+    /// Refusing rather than dealing fewer, in every direction.
     #[test]
     fn too_few_of_either_side_is_refused_rather_than_shrunk() {
         // More posts than phones is normal — twenty-one posts, five phones.
-        auto_assign_bundles(&ids("bundle", 21), &ids("phone", 5), 5, 0)
+        auto_assign_bundles(&ids("bundle", 21), &[], &ids("phone", 5), 5)
             .expect("more posts is fine");
 
         assert!(matches!(
-            auto_assign_bundles(&ids("bundle", 21), &ids("phone", 3), 5, 0),
+            auto_assign_bundles(&ids("bundle", 21), &[], &ids("phone", 3), 5),
             Err(PublishAssignError::NotEnoughPhones {
                 wanted: 5,
                 available: 3
@@ -959,16 +1050,29 @@ mod tests {
         // The one that matters: four posts cannot fill five phones without repeating one, and
         // the same carousel on two live accounts is the thing this refuses to do.
         assert!(matches!(
-            auto_assign_bundles(&ids("bundle", 4), &ids("phone", 5), 5, 0),
-            Err(PublishAssignError::NotEnoughBundles {
+            auto_assign_bundles(&ids("bundle", 4), &[], &ids("phone", 5), 5),
+            Err(PublishAssignError::NotEnoughFreshBundles {
                 wanted: 5,
                 available: 4
             })
         ));
         assert!(matches!(
-            auto_assign_bundles(&ids("bundle", 21), &ids("phone", 5), 0, 0),
+            auto_assign_bundles(&ids("bundle", 21), &[], &ids("phone", 5), 0),
             Err(PublishAssignError::Empty)
         ));
+        // A published id that is not in the folder at all changes nothing.
+        assert_eq!(
+            auto_assign_bundles(
+                &ids("bundle", 21),
+                &["not-in-this-folder".to_string()],
+                &ids("phone", 5),
+                5
+            )
+            .expect("deal")
+            .plan
+            .len(),
+            5
+        );
     }
 
     /// The bijection stays enforced by `validate_publish_mapping`, not by a second copy here.
@@ -980,7 +1084,7 @@ mod tests {
             "phone-03".to_string(),
         ];
         assert!(matches!(
-            auto_assign_bundles(&ids("bundle", 21), &phones, 3, 0),
+            auto_assign_bundles(&ids("bundle", 21), &[], &phones, 3),
             Err(PublishAssignError::Mapping(
                 PublishPlanError::DuplicateUdid(_)
             ))
@@ -1050,17 +1154,36 @@ mod tests {
     /// The ceiling did not vanish, it moved: TikTok's own is 35, and it still refuses.
     #[test]
     fn a_carousel_past_tiktoks_own_ceiling_is_still_refused() {
-        let root = TempDir::new();
-        let bundle = root.path().join("too many");
-        fs::create_dir(&bundle).expect("bundle");
-        for order in 1..=36u32 {
-            write_png(&bundle.join(format!("{order:02}-slide.png")), [1, 1, 1]);
-        }
-        fs::write(bundle.join("caption.txt"), "x").expect("caption");
+        // **Both sides of the boundary, so the constant is pinned and not merely exceeded.**
+        // Testing 13 and 36 left every value in between unclaimed — the suite stayed green
+        // with the cap set anywhere from 13 to 35, including back at the old 11-slide iOS
+        // grid limit, which is the value that once made all twenty-one folders unscannable.
+        let build = |count: u32| {
+            let root = TempDir::new();
+            let bundle = root.path().join("carousel");
+            fs::create_dir(&bundle).expect("bundle");
+            for order in 1..=count {
+                write_png(&bundle.join(format!("{order:02}-slide.png")), [1, 1, 1]);
+            }
+            fs::write(bundle.join("caption.txt"), "x").expect("caption");
+            root
+        };
+        let at_the_cap = build(DEFAULT_MAX_IMAGES as u32);
+        let scanned = scan_publish_folder(at_the_cap.path(), PublishScanOptions::default())
+            .expect("exactly the cap must be accepted");
+        assert_eq!(scanned.bundles[0].images.len(), DEFAULT_MAX_IMAGES);
+
+        let one_past = build(DEFAULT_MAX_IMAGES as u32 + 1);
         assert!(matches!(
-            scan_publish_folder(root.path(), PublishScanOptions::default()),
+            scan_publish_folder(one_past.path(), PublishScanOptions::default()),
             Err(PublishScanError::TooManyImages { .. })
         ));
+
+        // And the cap is TikTok's, not the iOS tap grid's. The 11 below is the number that
+        // made a single 13-slide folder refuse all twenty-one.
+        // 35 is TikTok's own ceiling. 11 was the iOS tap grid's, and it is the number that
+        // once made a single 13-slide folder refuse all twenty-one.
+        assert_eq!(DEFAULT_MAX_IMAGES, 35);
     }
 
     #[test]

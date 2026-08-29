@@ -232,6 +232,27 @@ pub(crate) async fn transfer_publish_campaign_inner(
         let device_scope = device_campaign_id(&campaign_id, assignment.ordinal);
         let device_scope = device_scope.as_str();
 
+        // **Recorded before the device work, so a crash during it is recoverable.**
+        //
+        // Without this the assignment stayed at whatever it was — `queued`, usually — for the
+        // whole transfer, and startup recovery's `transferring -> failed_before_dispatch`
+        // branch never fired on a real database: the only row that ever said `transferring`
+        // was the campaign. A crash mid-transfer left a child nobody would settle, under a
+        // campaign that got cancelled, and the media on the phone with no record of it.
+        //
+        // A failure to write it is not a reason to abandon the transfer: the row is for
+        // recovery, and losing recovery is better than losing the run.
+        if let Err(error) = db.update_publish_assignment_state(
+            &assignment.id,
+            riviu_core::PublishCampaignState::Transferring,
+            None,
+            None,
+        ) {
+            log::warn!(
+                "could not mark {} in flight before its transfer: {error}",
+                assignment.udid
+            );
+        }
         let context = match control
             .acquire_exclusive(&assignment.udid, DeviceWorkOwner::Script)
             .await
