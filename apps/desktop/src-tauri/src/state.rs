@@ -1719,20 +1719,33 @@ impl AppState {
                 if publish_background_stop.load(Ordering::Acquire) {
                     break;
                 }
-                let Ok(campaigns) = publish_db.list_publish_campaigns(200) else {
+                // **Asked for by state, not taken from the newest page.** This used to read
+                // two hundred campaigns and pick the scheduled ones out of them — so once two
+                // hundred newer rows existed, an older scheduled campaign fell off the end of
+                // every page and was never run and never marked missed. It just sat there,
+                // scheduled, forever.
+                let Ok(scheduled) = publish_db.scheduled_publish_campaigns() else {
                     continue;
                 };
                 let now = chrono::Local::now().naive_local();
-                for campaign in campaigns {
-                    if campaign.state != riviu_core::PublishCampaignState::Scheduled {
-                        continue;
-                    }
-                    let Some(raw_run_at) = campaign.run_at.as_deref() else {
+                for (campaign_id, raw) in scheduled {
+                    let Some(raw_run_at) = raw
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    else {
                         let _ = publish_db.update_publish_campaign_state(
-                            &campaign.id,
+                            &campaign_id,
                             riviu_core::PublishCampaignState::FailedBeforeDispatch,
                             Some("missing_run_at"),
                         );
+                        // Every settle in this loop is a state change the page should see.
+                        publish_events.emit(riviu_core::events::AppEvent::PublishUpdated {
+                            campaign_id: campaign_id.clone(),
+                            revision: publish_db
+                                .publish_campaign_revision(&campaign_id)
+                                .unwrap_or_default(),
+                        });
                         continue;
                     };
                     let Ok(run_at) =
@@ -1745,7 +1758,7 @@ impl AppState {
                             })
                     else {
                         let _ = publish_db.update_publish_campaign_state(
-                            &campaign.id,
+                            &campaign_id,
                             riviu_core::PublishCampaignState::FailedBeforeDispatch,
                             Some("invalid_run_at"),
                         );
@@ -1753,11 +1766,11 @@ impl AppState {
                     };
                     if run_at < publish_started_at {
                         let _ = publish_db.update_publish_campaign_state(
-                            &campaign.id,
+                            &campaign_id,
                             riviu_core::PublishCampaignState::Missed,
                             Some("app_opened_after_deadline"),
                         );
-                        let _ = publish_db.log_op("publish.missed", &campaign.id);
+                        let _ = publish_db.log_op("publish.missed", &campaign_id);
                         continue;
                     }
                     if run_at > now {
@@ -1771,14 +1784,12 @@ impl AppState {
                         publish_db.clone(),
                         publish_events.clone(),
                         publish_agent_bundle.clone(),
-                        campaign.id.clone(),
+                        campaign_id.clone(),
                     )
                     .await
                     {
-                        let _ = publish_db.log_op(
-                            "publish.schedule.error",
-                            &format!("{}: {error}", campaign.id),
-                        );
+                        let _ = publish_db
+                            .log_op("publish.schedule.error", &format!("{campaign_id}: {error}"));
                         continue;
                     }
                     if let Err(error) = crate::publish_commands::post_publish_campaign_inner(
@@ -1786,13 +1797,13 @@ impl AppState {
                         publish_db.clone(),
                         publish_frames.clone(),
                         publish_events.clone(),
-                        campaign.id.clone(),
+                        campaign_id.clone(),
                     )
                     .await
                     {
                         let _ = publish_db.log_op(
                             "publish.schedule.post_error",
-                            &format!("{}: {error}", campaign.id),
+                            &format!("{campaign_id}: {error}"),
                         );
                     }
                 }
@@ -2160,6 +2171,30 @@ fn resolve_sidecar_root_from(
 
 #[cfg(test)]
 mod tests {
+    /// **The publish scheduler asks for scheduled campaigns, not for a page of recent ones.**
+    ///
+    /// It used to read two hundred rows newest-first and pick the `scheduled` ones out of them.
+    /// Once two hundred newer campaigns existed, an older scheduled one fell off the end of
+    /// every page and was never run and never marked missed — it sat there, scheduled, for
+    /// good. A source gate because the loop needs a running app to exercise.
+    #[test]
+    fn the_publish_scheduler_queries_by_state_rather_than_paging() {
+        let source = include_str!("state.rs");
+        let module = &source[..source
+            .rfind("#[cfg(test)]")
+            .expect("this file still has a test module")];
+        let scheduler = &module[module
+            .find("let publish_started_at")
+            .expect("the publish scheduler is still in this file")..];
+        assert!(
+            scheduler.contains("scheduled_publish_campaigns()"),
+            "the scheduler is back to filtering a page of recent campaigns"
+        );
+        assert!(
+            !scheduler.contains("list_publish_campaigns("),
+            "the scheduler still pages through recent campaigns, which loses old scheduled rows"
+        );
+    }
 
     use super::*;
 

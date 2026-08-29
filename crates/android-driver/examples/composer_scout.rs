@@ -194,5 +194,13 @@ async fn main() -> anyhow::Result<()> {
             "CHƯA — kiểm tra máy"
         }
     ));
-    verdict.map(|_| ())
+    verdict?;
+    // **Not backing out is a failure of this run**, even when the walk itself went fine. It
+    // used to print the warning and exit 0, so a script saw success while the phone sat on the
+    // edit step with a carousel selected — and the next thing to run started from there.
+    anyhow::ensure!(
+        out,
+        "không lùi được về feed: máy còn đang ở trong composer với ảnh đã chọn. Kiểm tra tay          trước khi chạy tiếp bất cứ thứ gì trên máy này."
+    );
+    Ok(())
 }

@@ -131,7 +131,17 @@ impl Screen {
 /// [`Self::may_retry`] is the single question a caller must ask before dispatching again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposerVerdict {
-    /// Published, and the feed came back to prove the composer let go of the screen.
+    /// The Post button was tapped and the **bottom tab bar came back**.
+    ///
+    /// Read that as what it is. It proves the composer let go of the screen, which is the
+    /// strongest signal this path has and is *not* the same as "the carousel is on the
+    /// account": TikTok returns to the feed and uploads in the background, so a post can still
+    /// fail on the network or be rejected after this. What it does rule out is the composer
+    /// still sitting there with the images in it.
+    ///
+    /// Closing the remaining gap means reading the post back from the account, which needs the
+    /// route to our own post page — unmeasured on every build, and the same thing blocking the
+    /// link capture.
     Posted,
     /// Post was tapped, or may have been, and the result could not be read. **Never
     /// retried.**
@@ -165,6 +175,12 @@ pub enum ComposerVerdict {
     MoreCellsThanTheGridShows,
     /// The cells were tapped and `Next` never armed, so **no** cell took.
     NeverArmed,
+    /// The picker states how many images are selected, and it is not how many were asked for.
+    ///
+    /// Only reachable on a build whose `Next` renders a count. Where none is rendered the
+    /// hierarchy cannot answer at all, and the run proceeds on the taps it sent — see
+    /// [`Selection::Armed`].
+    NotEnoughSelected,
     /// `Next` was tapped and the edit step never appeared.
     EditStepDidNotOpen,
     /// The edit step's Next was tapped and the post screen never appeared.
@@ -212,6 +228,7 @@ impl ComposerVerdict {
             Self::NoTabsToAnchorTo => "không thấy hàng tab của picker — không có mốc cho lưới ảnh",
             Self::MoreCellsThanTheGridShows => "số ảnh cần nhiều hơn số ô lưới hiện ra",
             Self::NeverArmed => "đã bấm các ô ảnh nhưng nút Tiếp không sáng — không ô nào ăn",
+            Self::NotEnoughSelected => "picker báo số ảnh đã chọn khác số ảnh bài này cần",
             Self::EditStepDidNotOpen => "bấm Tiếp mà bước chỉnh sửa không mở",
             Self::PostScreenDidNotOpen => "bấm Tiếp ở bước chỉnh sửa mà màn đăng không mở",
             Self::PostUnmeasured => "chưa đo nút Đăng trên bản build này — không bấm gì cả",
@@ -225,7 +242,8 @@ impl ComposerVerdict {
         }
     }
 
-    /// Whether the caller should treat this as "the carousel is on the account".
+    /// Whether the composer completed its side of the post — see [`Self::Posted`] for the
+    /// gap between that and the carousel being live on the account.
     pub fn is_posted(self) -> bool {
         self == Self::Posted
     }
@@ -316,6 +334,16 @@ pub struct ComposerPlan {
     tabs: ElementQuery<'static>,
     multi_select: ElementQuery<'static>,
     picker_next: ElementQuery<'static>,
+    /// The edit step's own control, when it is measured, used **only to prove arrival**.
+    ///
+    /// Separate from the publishing tail below, and a review is why: keying the arrival proof
+    /// on `publish` meant a build with a measured `ComposerNext` but no measured Post button
+    /// fell back to the weak proof — and that build is exactly the one a measuring run is on.
+    /// The strong evidence was available and discarded, so the tool could dump an error screen
+    /// and call it the edit step.
+    ///
+    /// Navigation and publication are different questions; this answers the first.
+    edit_step_marker: Option<ElementQuery<'static>>,
     /// The publishing tail, resolved **all or nothing**.
     ///
     /// One `Option` around three locators rather than three `Option`s, and the difference is
@@ -357,6 +385,7 @@ impl ComposerPlan {
             tabs: query(TikTokControl::PickerTabPhotos),
             multi_select: query(TikTokControl::PickerMultiSelect),
             picker_next: query(TikTokControl::PickerNext),
+            edit_step_marker: optional(TikTokControl::ComposerNext),
             publish: match (
                 optional(TikTokControl::ComposerNext),
                 optional(TikTokControl::ComposerCaption),
@@ -444,7 +473,11 @@ impl GalleryEntry {
         // 75/1080 and 240/1080 at the measured resolution.
         let margin = screen.width() * (75.0 / 1080.0);
         let size = screen.width() * (240.0 / 1080.0);
-        if !shutter.y.is_finite() || !shutter.height.is_finite() {
+        // The anchor itself has to be a real rectangle on this screen. Validating only the
+        // *derived* entry let a shutter reported at `height = -100` produce a plausible,
+        // fully on-screen tap point — arithmetic from nonsense, which is the thing anchoring
+        // was supposed to replace.
+        if !on_screen(shutter, screen) {
             return None;
         }
         let entry = Self {
@@ -471,6 +504,24 @@ impl GalleryEntry {
             clickable: false,
         }
     }
+}
+
+/// Whether a located element is a real rectangle on this screen.
+///
+/// Both geometric anchors go through this. The point of anchoring is that the numbers come
+/// from the screen in front of us rather than from another phone — and an anchor with a
+/// negative height or one lying off screen is not that, however finite its arithmetic is.
+fn on_screen(element: &ElementBox, screen: Screen) -> bool {
+    element.x.is_finite()
+        && element.y.is_finite()
+        && element.width.is_finite()
+        && element.height.is_finite()
+        && element.width > 0.0
+        && element.height > 0.0
+        && element.x >= 0.0
+        && element.y >= 0.0
+        && element.x + element.width <= screen.width()
+        && element.y + element.height <= screen.height()
 }
 
 /// The picker's unlabelled image grid, in device pixels.
@@ -589,17 +640,22 @@ impl PhotoGrid {
 /// `Posted` from the middle of the picker is one refactor away from a caller believing it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Selection {
-    /// `Next` armed, which proves **at least one** cell took — and nothing more.
+    /// `Next` armed, which proves **at least one** cell took.
     ///
-    /// Read that literally. There is no per-cell numeral on this build, so the hierarchy
-    /// cannot say *how many* cells are selected or *which*; a run that asked for five and
-    /// landed four arms exactly the same way as one that landed five. The count this module
-    /// can guarantee is the count of taps it *sent*, which is not the same thing.
+    /// Read that literally. There is no per-cell numeral on the measured build, so the
+    /// hierarchy cannot say *which* cells are selected; a run that asked for five and landed
+    /// four arms exactly the same way as one that landed five.
     ///
-    /// Closing that gap needs a signal nobody has found yet — a numeral, a count in a
-    /// `content-desc`, anything the picker renders per selection. Until then a caller that
-    /// needs the count proved cannot get it here, and should not pretend otherwise.
-    Armed(ElementBox),
+    /// `counted` is the one thing that can sometimes be recovered: some builds render the
+    /// number of selected images in the `Next` control's own text. When it is `Some`, it is
+    /// authoritative and [`ComposerVerdict::NotEnoughSelected`] is what a mismatch becomes.
+    /// When it is `None` the build states no count, and the run proceeds on the count of taps
+    /// it *sent* — which is weaker, and is why this variant names the difference instead of
+    /// hiding it.
+    Armed {
+        next: ElementBox,
+        counted: Option<usize>,
+    },
     /// Asked for more cells than this screen's grid shows, or for none.
     MoreCellsThanTheGridShows,
     /// The cells were tapped and `Next` stayed unarmed — so **no** tap landed.
@@ -611,7 +667,7 @@ pub enum Selection {
 /// What typing the caption achieved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptionOutcome {
-    /// The field holds the caption, read back through the same locator.
+    /// The caption field holds **exactly** the caption, and only one node matched.
     Typed,
     /// The bundle's caption file was empty, so nothing was typed.
     NothingToSay,
@@ -648,6 +704,18 @@ pub fn human_taps(screen: Screen) -> impl TapPlanner {
 }
 
 /// One composer session, driven a step at a time.
+///
+/// # The steps are private, and that is the safety
+///
+/// Only [`Composer::new`] and [`Composer::leave`] are public; every step between them is
+/// reachable only through [`publish_carousel`] and [`reach_edit_step`], which walk them in
+/// order and check each one.
+///
+/// A review found what the public surface admitted: `post` took nothing but a stop flag, so a
+/// caller standing on the post screen could publish without a caption ever being typed — and
+/// `advance_to_edit_step` took a caller-supplied rectangle and tapped it before checking where
+/// it led, so handing it the Post button published too. Both made the claim on
+/// [`Composer::post`] that it is the only function here that can publish simply false.
 pub struct Composer<'a, P: TapPlanner> {
     session: &'a dyn UiSession,
     plan: ComposerPlan,
@@ -682,7 +750,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// The signal is the composer opener's own disappearance: it lives on the bottom tab bar,
     /// which the composer replaces with its own mode row. A control this plan already
     /// carries, and one no other screen can fake.
-    pub async fn open(&mut self, stop: &AtomicBool) -> anyhow::Result<bool> {
+    async fn open(&mut self, stop: &AtomicBool) -> anyhow::Result<bool> {
         let Some(opener) = self.session.locate(self.plan.open).await? else {
             return Ok(false);
         };
@@ -696,7 +764,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// Two steps in one call because they are one decision: without the anchor there is no
     /// entry to tap, and the alternative — remembered coordinates — is what puts a tap on the
     /// effects panel.
-    pub async fn tap_gallery_entry(
+    async fn tap_gallery_entry(
         &mut self,
         screen: Screen,
         stop: &AtomicBool,
@@ -720,7 +788,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// taken while the picker is open still contains the camera screen's nodes underneath it,
     /// so "the shutter is gone" is never true and "the shutter is present" never means the
     /// picker is closed. The only sound test is a node the picker alone contributes.
-    pub async fn await_picker(&self, stop: &AtomicBool) -> anyhow::Result<bool> {
+    async fn await_picker(&self, stop: &AtomicBool) -> anyhow::Result<bool> {
         Ok(self
             .await_condition(PICKER_WINDOW, self.plan.multi_select, stop, |_| true)
             .await?
@@ -747,7 +815,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// fine, and publishes **another album's images**. So the pill is read back: it shows the
     /// current album, which is the one thing on this screen that says which album we are
     /// actually in.
-    pub async fn select_album(
+    async fn select_album(
         &mut self,
         album: &str,
         stop: &AtomicBool,
@@ -772,23 +840,54 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         };
         let row = row.clone();
         self.tap_inside(&row).await?;
-        // The pill carries the album name, so this is the readback that says which album the
-        // grid below now belongs to.
-        let confirmed = self
-            .await_condition(PICKER_WINDOW, self.plan.album_menu, stop, |pill| {
-                pill.description.as_deref() == Some(album)
-            })
-            .await?
-            .is_some();
-        Ok(if confirmed {
+        Ok(if self.pill_reads(album, stop).await? {
             AlbumChoice::Confirmed
         } else {
             AlbumChoice::NotConfirmed
         })
     }
 
+    /// Whether the album pill now names `album`.
+    ///
+    /// # This has to read `text`, and reading the wrong attribute made it always fail
+    ///
+    /// [`UiSession::locate`] fills `ElementBox::description` from **`content-desc`**, whatever
+    /// the query matched on — the query decides which node, not which attribute comes back.
+    /// The pill is found by its resource id and its name lives in `text`; measured on
+    /// `com.ss.android.ugc.trill` 38.3.2, *no* control in the picker carries a `content-desc`
+    /// at all. So comparing `description` compared `None` against the album name, on every
+    /// build, and every walk stopped at [`AlbumChoice::NotConfirmed`] before selecting an
+    /// image.
+    ///
+    /// [`UiSession::locate_all_described`] is the one that reads `text`, which is why the
+    /// readback goes through it and the tap above does not.
+    async fn pill_reads(&self, album: &str, stop: &AtomicBool) -> anyhow::Result<bool> {
+        let deadline = Instant::now() + PICKER_WINDOW;
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                return Ok(false);
+            }
+            let pills = self
+                .session
+                .locate_all_described(self.plan.album_menu)
+                .await
+                .unwrap_or_default();
+            if pills.iter().any(|pill| {
+                pill.description
+                    .as_deref()
+                    .is_some_and(|text| text.trim() == album)
+            }) {
+                return Ok(true);
+            }
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            sleep(POLL, stop).await;
+        }
+    }
+
     /// Turn on multi-selection, which a carousel needs.
-    pub async fn enable_multi_select(&mut self, stop: &AtomicBool) -> anyhow::Result<bool> {
+    async fn enable_multi_select(&mut self, stop: &AtomicBool) -> anyhow::Result<bool> {
         let Some(control) = self
             .await_condition(PICKER_WINDOW, self.plan.multi_select, stop, |_| true)
             .await?
@@ -803,17 +902,19 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     ///
     /// `None` when the tab row is not on screen — the anchor is required rather than
     /// defaulted, so a picker that did not render cannot be tapped at remembered coordinates.
-    pub async fn grid(
-        &self,
-        screen: Screen,
-        stop: &AtomicBool,
-    ) -> anyhow::Result<Option<PhotoGrid>> {
+    async fn grid(&self, screen: Screen, stop: &AtomicBool) -> anyhow::Result<Option<PhotoGrid>> {
         let Some(tabs) = self
             .await_condition(PICKER_WINDOW, self.plan.tabs, stop, |_| true)
             .await?
         else {
             return Ok(None);
         };
+        // Same rule as the gallery entry's anchor: a tab row that is not a rectangle on this
+        // screen cannot fix where the grid starts, even when the arithmetic happens to land
+        // somewhere plausible.
+        if !on_screen(&tabs, screen) {
+            return Ok(None);
+        }
         Ok(PhotoGrid::below_tabs(screen, tabs.y + tabs.height))
     }
 
@@ -824,7 +925,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// strongest available.
     ///
     /// Refuses a `count` past this screen's visible capacity instead of scrolling.
-    pub async fn select(
+    async fn select(
         &mut self,
         grid: &PhotoGrid,
         count: usize,
@@ -847,10 +948,42 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             sleep(POLL, stop).await;
         }
         match self.await_armed(stop).await? {
-            Some(next) => Ok(Selection::Armed(next)),
+            Some(next) => {
+                let counted = self.counted_selection().await;
+                Ok(Selection::Armed { next, counted })
+            }
             None if stop.load(Ordering::Relaxed) => Ok(Selection::Stopped),
             None => Ok(Selection::NeverArmed),
         }
+    }
+
+    /// How many images the picker says are selected, when it says so at all.
+    ///
+    /// Read out of the `Next` control's own rendered text, because that is where a build that
+    /// states a count puts it (`Next (5)`, `Tiếp 5`). Measured on
+    /// `com.ss.android.ugc.trill` 38.3.2 the text is a bare `Next` and this returns `None` —
+    /// which is a fact about that build, not a failure.
+    ///
+    /// Through `locate_all_described` rather than `locate` for the reason the album pill
+    /// needed the same: `locate` returns `content-desc`, and the picker's controls carry only
+    /// `text`.
+    async fn counted_selection(&self) -> Option<usize> {
+        let rows = self
+            .session
+            .locate_all_described(self.plan.picker_next)
+            .await
+            .ok()?;
+        rows.iter()
+            .filter_map(|row| row.description.as_deref())
+            .filter_map(|text| {
+                let digits: String = text
+                    .chars()
+                    .skip_while(|character| !character.is_ascii_digit())
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                digits.parse::<usize>().ok()
+            })
+            .next()
     }
 
     /// Wait for `Next` to arm, and return it so the caller can tap it.
@@ -858,7 +991,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// Reads `clickable`, **not** `enabled`. On this build `enabled` is `true` both before
     /// and after a selection, so a version of this that read it would return immediately with
     /// nothing selected — and the next step would advance out of the picker empty-handed.
-    pub async fn await_armed(&self, stop: &AtomicBool) -> anyhow::Result<Option<ElementBox>> {
+    async fn await_armed(&self, stop: &AtomicBool) -> anyhow::Result<Option<ElementBox>> {
         self.await_condition(ARM_WINDOW, self.plan.picker_next, stop, |element| {
             element.clickable
         })
@@ -880,13 +1013,13 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     ///
     /// The weaker proof is never enough to publish: [`ComposerPlan::can_publish`] is false on
     /// exactly the builds that fall back to it.
-    pub async fn advance_to_edit_step(
+    async fn advance_to_edit_step(
         &mut self,
         next: &ElementBox,
         stop: &AtomicBool,
     ) -> anyhow::Result<bool> {
         self.tap_inside(next).await?;
-        match self.plan.publish.map(|tail| tail.edit_next) {
+        match self.plan.edit_step_marker {
             Some(edit_next) => Ok(self
                 .await_condition(COMPOSER_WINDOW, edit_next, stop, |_| true)
                 .await?
@@ -908,7 +1041,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     ///
     /// Proved by the Post button arriving, so a build without it measured cannot call this —
     /// which is correct: that build has nothing to advance toward.
-    pub async fn advance_to_post_screen(&mut self, stop: &AtomicBool) -> anyhow::Result<bool> {
+    async fn advance_to_post_screen(&mut self, stop: &AtomicBool) -> anyhow::Result<bool> {
         let Some(tail) = self.plan.publish else {
             return Ok(false);
         };
@@ -946,7 +1079,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     ///
     /// The scan requires exactly one `caption*.txt` per bundle; it does not require the file
     /// to have anything in it. An operator who wants a bare carousel gets one.
-    pub async fn type_caption(
+    async fn type_caption(
         &mut self,
         caption: &str,
         stop: &AtomicBool,
@@ -967,10 +1100,21 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         self.tap_inside(&field).await?;
         self.session.type_text(caption).await?;
 
-        // Read back through the same locator. A prefix rather than the whole string, because
-        // the field may wrap, trim trailing whitespace, or render a hashtag as a token — none
-        // of which means the caption did not take.
-        let needle: String = caption.trim().chars().take(24).collect();
+        // **Equality on exactly one field, not a prefix on any field.**
+        //
+        // The first version compared `text.contains(first 24 characters)` across every match,
+        // and a review took it apart in two directions at once. It accepted a field that had
+        // kept only the first 24 characters — publishing a truncated caption that Android
+        // cannot delete. And because the focus tap uses `locate` (the first match) while the
+        // readback used `locate_all_described` (any match), a non-unique or placeholder
+        // locator could focus one node and confirm a different one: a placeholder reading
+        // `Describe your post…` confirms a caption that starts with those words even though
+        // the write never landed.
+        //
+        // So: exactly one node must match the locator, and its text must equal the caption.
+        // A build that reformats what it stores fails closed here — which is a measurement to
+        // take, not a post to publish on a guess.
+        let wanted = caption.trim();
         let deadline = Instant::now() + COMPOSER_WINDOW;
         loop {
             let rows = self
@@ -978,12 +1122,14 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
                 .locate_all_described(query)
                 .await
                 .unwrap_or_default();
-            if rows.iter().any(|row| {
-                row.description
+            if let [only] = rows.as_slice() {
+                if only
+                    .description
                     .as_deref()
-                    .is_some_and(|text| text.contains(needle.as_str()))
-            }) {
-                return Ok(CaptionOutcome::Typed);
+                    .is_some_and(|text| text.trim() == wanted)
+                {
+                    return Ok(CaptionOutcome::Typed);
+                }
             }
             if Instant::now() >= deadline || stop.load(Ordering::Relaxed) {
                 return Ok(CaptionOutcome::NotConfirmed);
@@ -1017,7 +1163,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// expected to raise between the tap and the feed. If it appears, the feed does not come
     /// back, and this returns `PostNotConfirmed` — the safe answer, not a correct one.
     /// Closing that is a measurement, not a code change.
-    pub async fn post(&mut self, stop: &AtomicBool) -> anyhow::Result<ComposerVerdict> {
+    async fn post(&mut self, stop: &AtomicBool) -> anyhow::Result<ComposerVerdict> {
         let Some(query) = self.plan.publish.map(|tail| tail.post_button) else {
             return Ok(ComposerVerdict::PostUnmeasured);
         };
@@ -1041,13 +1187,12 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
         // **Deliberately not passing `stop`.** Cancelling cannot un-publish, and a stop set
         // here would end the wait early and downgrade a good post to `PostNotConfirmed`,
         // which is permanently unclaimable.
-        let quiet = AtomicBool::new(false);
-        let back_on_the_feed = self
-            .await_condition(POST_CONFIRM_WINDOW, self.plan.open, &quiet, |_| true)
-            .await
-            .ok()
-            .flatten()
-            .is_some();
+        //
+        // **And one dropped hierarchy read must not end it either.** `await_condition`
+        // propagates the first error, which this used to swallow with `.ok().flatten()` — so a
+        // single transient agent failure on the first poll turned a live post into
+        // `PostNotConfirmed`, permanently unclaimable, twenty seconds early.
+        let back_on_the_feed = self.await_feed(POST_CONFIRM_WINDOW).await;
         Ok(if back_on_the_feed {
             ComposerVerdict::Posted
         } else {
@@ -1110,6 +1255,24 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             .ok()
             .flatten()
             .is_some()
+    }
+
+    /// Wait for the bottom tab bar to come back, ignoring reads that fail on the way.
+    ///
+    /// The one wait in this module that must not give up on a transport error: it runs after
+    /// the Post tap, where "I could not read the screen" and "the post did not go" are
+    /// different facts and only the second is worth reporting.
+    async fn await_feed(&self, window: Duration) -> bool {
+        let deadline = Instant::now() + window;
+        loop {
+            if matches!(self.session.locate(self.plan.open).await, Ok(Some(_))) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(POLL).await;
+        }
     }
 
     /// Wait for an element to be **absent**, which is a different question from
@@ -1202,10 +1365,19 @@ pub async fn publish_carousel(
     }
     let mut composer = Composer::new(session, plan, plan_tap);
     let outcome = drive(&mut composer, request, stop, true).await;
-    // Closed on the way out whatever happened, including on an error: every step can fail
-    // with `?`, and each of those failures would otherwise leave the phone standing in a
-    // composer with a campaign's images selected.
-    composer.leave().await;
+    // Closed on the way out whatever happened, including on an error: every step can fail with
+    // `?`, and each of those failures would otherwise leave the phone standing in a composer
+    // with a campaign's images selected.
+    //
+    // **Except when the post is unconfirmed.** That verdict means a screen we do not recognise
+    // is up after the Post tap, and the one this build is expected to raise is a
+    // public/private confirmation sheet — which is *the thing that commits the post*. Pressing
+    // Back there dismisses it: the carousel definitely does not go out, and the assignment is
+    // still marked permanently unclaimable, so the run sacrifices a post it could have had.
+    // Leaving the phone as it is hands an operator a screen they can act on.
+    if !matches!(outcome, Ok(ComposerVerdict::PostNotConfirmed)) {
+        composer.leave().await;
+    }
     outcome
 }
 
@@ -1285,7 +1457,15 @@ async fn drive<P: TapPlanner>(
         return Ok(ComposerVerdict::NoTabsToAnchorTo);
     };
     let next = match composer.select(&grid, request.images, stop).await? {
-        Selection::Armed(next) => next,
+        // **A stated count is believed, and a mismatch stops the run.** `Next` arming proves
+        // only that *something* is selected; a build that also renders the number is the one
+        // chance to prove the rest, and taking it is the difference between publishing five
+        // images and publishing whichever of the five taps happened to land.
+        Selection::Armed {
+            counted: Some(counted),
+            ..
+        } if counted != request.images => return Ok(ComposerVerdict::NotEnoughSelected),
+        Selection::Armed { next, .. } => next,
         Selection::MoreCellsThanTheGridShows => {
             return Ok(ComposerVerdict::MoreCellsThanTheGridShows)
         }
@@ -1330,8 +1510,9 @@ mod tests {
     use super::*;
     use crate::driver::ElementBox;
     use crate::tiktok_labels::{
-        controls_for, every_publish_control_but_post_measured, every_publish_control_measured,
-        nothing_measured, TIKTOK_LABEL_SETS,
+        controls_for, every_publish_control_but_caption_measured,
+        every_publish_control_but_post_measured, every_publish_control_measured, nothing_measured,
+        TIKTOK_LABEL_SETS,
     };
     use crate::types::TapPoint;
     use parking_lot::Mutex;
@@ -1384,7 +1565,24 @@ mod tests {
     /// what gets tapped there is the unlabelled gallery entry, so there is no key to name.
     struct Scene {
         elements: HashMap<String, ElementBox>,
+        /// The **rendered `text`** of a node, which is a different attribute from the
+        /// `content-desc` `elements` carries.
+        ///
+        /// Modelled separately because Android's two read paths return different attributes
+        /// for the same node, and a fake that conflated them hid a blocking bug: the album
+        /// pill's name lives in `text`, `UiSession::locate` returns `content-desc`, and the
+        /// confirmation compared the wrong one — so every walk stopped before selecting an
+        /// image while every test passed.
+        texts: HashMap<String, String>,
+        /// Which element's tap navigates off this screen.
         exit: Option<String>,
+        /// A rectangle a tap must land **inside** to navigate, for screens whose exit is
+        /// unlabelled geometry.
+        ///
+        /// `exit: None` used to mean "any tap navigates", which erased the wrong-control
+        /// failure this module treats as consequential: tapping the shutter, or the effects
+        /// circles beside it, counted as opening the gallery.
+        exit_rect: Option<ElementBox>,
     }
 
     fn scene(elements: Vec<(&str, ElementBox)>, exit: Option<&str>) -> Scene {
@@ -1393,7 +1591,23 @@ mod tests {
                 .into_iter()
                 .map(|(key, value)| (key.to_string(), value))
                 .collect(),
+            texts: HashMap::new(),
             exit: exit.map(str::to_string),
+            exit_rect: None,
+        }
+    }
+
+    impl Scene {
+        /// Give a node a rendered `text`, distinct from its `content-desc`.
+        fn texted(mut self, key: &str, text: &str) -> Self {
+            self.texts.insert(key.to_string(), text.to_string());
+            self
+        }
+
+        /// Navigate only when a tap lands inside this rectangle.
+        fn leaving_by(mut self, rect: ElementBox) -> Self {
+            self.exit_rect = Some(rect);
+            self
         }
     }
 
@@ -1407,25 +1621,30 @@ mod tests {
         )
     }
     fn camera() -> Scene {
-        scene(
-            vec![(
-                "fixture-shutter",
-                labelled("Record video", 375.0, 1545.0, 330.0, 330.0),
-            )],
-            // The gallery entry is arithmetic, so there is no key to match on.
-            None,
-        )
+        let shutter = labelled("Record video", 375.0, 1545.0, 330.0, 330.0);
+        let entry = GalleryEntry::beside_shutter(screen(), &shutter)
+            .expect("the measured entry is on screen")
+            .rect();
+        // **Only a tap inside the gallery entry opens the picker.** The shutter records video
+        // and the circles beside it open the effects panel, which is the failure this module
+        // exists to avoid — a fake where any tap navigates cannot see it.
+        scene(vec![("fixture-shutter", shutter)], None).leaving_by(entry)
     }
-    fn picker_elements(album: &str) -> Vec<(&str, ElementBox)> {
+    fn picker_elements() -> Vec<(&'static str, ElementBox)> {
         vec![
             ("fixture-multi-select", box_at(126.0, 1937.0)),
             (
                 "fixture-tab-photos",
                 labelled("Photos", 824.0, 255.0, 152.0, 57.0),
             ),
+            // **No `content-desc`.** Measured: not one control in this picker has one, which
+            // is why the album pill has to be read through `locate_all_described`.
             (
                 "fixture-album-menu",
-                labelled(album, 483.0, 115.0, 60.0, 57.0),
+                ElementBox {
+                    description: None,
+                    ..labelled("", 483.0, 115.0, 60.0, 57.0)
+                },
             ),
             (
                 "fixture-picker-next",
@@ -1436,9 +1655,9 @@ mod tests {
             ),
         ]
     }
-    /// The picker, with the control that leaves it named.
+    /// The picker, with the album its pill currently names and the control that leaves it.
     fn picker(album: &str, exit: Option<&str>) -> Scene {
-        scene(picker_elements(album), exit)
+        scene(picker_elements(), exit).texted("fixture-album-menu", album)
     }
     fn edit_step() -> Scene {
         scene(
@@ -1476,8 +1695,16 @@ mod tests {
         /// that step exists, and a fake whose field never changes cannot tell a caption that
         /// took from one that silently did not.
         typed: Mutex<Option<String>>,
-        /// Make the caption field keep its placeholder, i.e. never show the typed text.
+        /// Make the caption field keep whatever `caption_placeholder` holds, i.e. never show
+        /// the typed text. `None` there models a field that vanishes; `Some` models the far
+        /// more likely case — a placeholder that is still on screen.
         caption_never_takes: bool,
+        caption_placeholder: Option<String>,
+        /// Put a second node in front of the caption locator.
+        ///
+        /// A locator that is not unique can focus one node and confirm another; only a fixture
+        /// with two matches can tell "read back the field" from "read back something".
+        caption_has_a_twin: bool,
         /// Fail every tap from this one onward. Counting rather than a flag because the
         /// interesting failure is **mid-flow**: a run that dies before its first tap never
         /// opened anything, so it proves nothing about closing what it opened.
@@ -1486,6 +1713,13 @@ mod tests {
         stuck_at: Option<usize>,
         /// Refuse every Back, so the give-up path is exercised.
         backs_fail: bool,
+        /// Fail the `locate` at this call index, then answer normally.
+        ///
+        /// An index rather than a flag because *where* the read drops decides what is correct:
+        /// before the Post tap, propagating is right — nothing has been published. After it,
+        /// "I could not read the screen" and "the post did not go" are different facts.
+        locate_fails_at: Option<usize>,
+        locates: Mutex<usize>,
     }
 
     impl FakeSession {
@@ -1508,8 +1742,10 @@ mod tests {
                 camera(),
                 // Opening the album menu.
                 picker("All", Some("fixture-album-menu")),
-                // The menu is open; tapping the row (unregistered geometry) leaves it.
-                picker("All", None),
+                // The menu is open. Only a tap **on the matching row** leaves it — an
+                // `exit: None` that accepted any tap could not tell choosing the album from
+                // missing it.
+                picker("All", None).leaving_by(box_at(0.0, 400.0)),
                 // The album took: the pill now names it. Multi-select is what leaves.
                 picker(album, Some("fixture-multi-select")),
                 // Where the grid taps land, and none of them navigates.
@@ -1533,6 +1769,27 @@ mod tests {
                 .unwrap_or_default()
         }
 
+        /// What `locate_all_described` sees: the same nodes, carrying their **`text`**.
+        fn current_texts(&self) -> HashMap<String, ElementBox> {
+            let at = *self.at.lock();
+            let Some(scene) = self.screens.get(at) else {
+                return HashMap::new();
+            };
+            scene
+                .elements
+                .iter()
+                .map(|(key, element)| {
+                    (
+                        key.clone(),
+                        ElementBox {
+                            description: scene.texts.get(key).cloned(),
+                            ..element.clone()
+                        },
+                    )
+                })
+                .collect()
+        }
+
         fn on_screen(&self) -> usize {
             *self.at.lock()
         }
@@ -1553,16 +1810,19 @@ mod tests {
             // **Only a tap on this screen's exit control navigates.** A grid cell is tapped
             // where no element is registered, so it changes nothing — which is what the real
             // picker does, and what a counter-based fake got wrong.
+            let inside = |element: &ElementBox| {
+                x >= element.x
+                    && x <= element.x + element.width
+                    && y >= element.y
+                    && y <= element.y + element.height
+            };
             let navigates = match self.screens.get(*at) {
                 None => false,
-                Some(scene) => match &scene.exit {
-                    None => true,
-                    Some(key) => scene.elements.get(key).is_some_and(|element| {
-                        x >= element.x
-                            && x <= element.x + element.width
-                            && y >= element.y
-                            && y <= element.y + element.height
-                    }),
+                Some(scene) => match (&scene.exit, &scene.exit_rect) {
+                    (Some(key), _) => scene.elements.get(key).is_some_and(inside),
+                    (None, Some(rect)) => inside(rect),
+                    // No exit at all: this screen does not lead anywhere in the fixture.
+                    (None, None) => false,
                 },
             };
             if navigates {
@@ -1605,6 +1865,14 @@ mod tests {
             true
         }
         async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
+            {
+                let mut seen = self.locates.lock();
+                let at = *seen;
+                *seen += 1;
+                if self.locate_fails_at == Some(at) {
+                    anyhow::bail!("the agent dropped one hierarchy read");
+                }
+            }
             let wanted = match query {
                 ElementQuery::Description { value, .. }
                 | ElementQuery::Text { value, .. }
@@ -1623,16 +1891,41 @@ mod tests {
                 | ElementQuery::ClassName(value)
                 | ElementQuery::ResourceIdSuffix(value) => value,
             };
-            // The caption field reports the text it holds, the way a real one does.
-            if wanted == "fixture-caption" && !self.caption_never_takes {
-                if let Some(typed) = self.typed.lock().clone() {
-                    return Ok(vec![ElementBox {
-                        description: Some(typed),
-                        ..box_at(100.0, 300.0)
-                    }]);
+            // The caption field reports the text it holds, the way a real one does — or the
+            // placeholder it kept, when the write did not land.
+            if wanted == "fixture-caption" {
+                let held = match (self.caption_never_takes, self.typed.lock().clone()) {
+                    (true, _) => self.caption_placeholder.clone(),
+                    (false, typed) => typed,
+                };
+                let mut rows: Vec<ElementBox> = held
+                    .map(|text| {
+                        vec![ElementBox {
+                            description: Some(text),
+                            ..box_at(100.0, 300.0)
+                        }]
+                    })
+                    .unwrap_or_default();
+                if self.caption_has_a_twin {
+                    rows.push(ElementBox {
+                        description: Some("một ô khác cũng khớp".into()),
+                        ..box_at(100.0, 900.0)
+                    });
                 }
+                return Ok(rows);
             }
-            Ok(self.rows.lock().get(wanted).cloned().unwrap_or_default())
+            if let Some(rows) = self.rows.lock().get(wanted) {
+                return Ok(rows.clone());
+            }
+            // Everything else answers with its rendered `text`, which is the attribute this
+            // call reads and the one `locate` does not.
+            Ok(self
+                .current_texts()
+                .get(wanted)
+                .filter(|element| element.description.is_some())
+                .cloned()
+                .into_iter()
+                .collect())
         }
     }
 
@@ -1844,13 +2137,21 @@ mod tests {
             "this test is about the publish tail being unmeasured"
         );
 
-        // Scenes keyed by what the **catalogue** says, not by fixture strings.
+        // Scenes keyed by what the **catalogue** says, not by fixture strings — and carrying
+        // the album name in `text`, because that is where the measured picker puts it and
+        // nothing in it has a `content-desc` at all.
         let picker_real = |album: &str, exit: Option<&str>| {
             scene(
                 vec![
                     ("Select multiple", box_at(126.0, 1937.0)),
                     ("Photos", labelled("Photos", 824.0, 255.0, 152.0, 57.0)),
-                    ("snr", labelled(album, 483.0, 115.0, 60.0, 57.0)),
+                    (
+                        ":id/snr",
+                        ElementBox {
+                            description: None,
+                            ..labelled("", 483.0, 115.0, 60.0, 57.0)
+                        },
+                    ),
                     (
                         "Next",
                         ElementBox {
@@ -1861,21 +2162,21 @@ mod tests {
                 ],
                 exit,
             )
+            .texted(":id/snr", album)
         };
+        let shutter = labelled("Record video", 375.0, 1545.0, 330.0, 330.0);
+        let entry = GalleryEntry::beside_shutter(screen(), &shutter)
+            .expect("the measured entry is on screen")
+            .rect();
         let session = FakeSession::with(vec![
             scene(
                 vec![("Create", labelled("Create", 432.0, 1929.0, 216.0, 147.0))],
                 Some("Create"),
             ),
-            scene(
-                vec![(
-                    "Record video",
-                    labelled("Record video", 375.0, 1545.0, 330.0, 330.0),
-                )],
-                None,
-            ),
-            picker_real("All", Some("snr")),
-            picker_real("All", None),
+            // Only a tap inside the gallery entry leaves the camera.
+            scene(vec![("Record video", shutter)], None).leaving_by(entry),
+            picker_real("All", Some(":id/snr")),
+            picker_real("All", None).leaving_by(box_at(0.0, 400.0)),
             picker_real("riviu-abc", Some("Select multiple")),
             picker_real("riviu-abc", Some("Next")),
             // The edit step, carrying nothing this catalogue knows — which is the whole
@@ -2011,7 +2312,7 @@ mod tests {
     async fn an_ambiguous_album_name_refuses_rather_than_taking_the_first() {
         let session = FakeSession::with(vec![
             picker("All", Some("fixture-album-menu")),
-            picker("All", None),
+            picker("All", None).leaving_by(box_at(0.0, 400.0)),
         ])
         .rows("riviu-abc", vec![box_at(0.0, 400.0), box_at(0.0, 500.0)]);
         let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
@@ -2063,7 +2364,7 @@ mod tests {
             feed(),
             camera(),
             picker("All", Some("fixture-album-menu")),
-            picker("All", None),
+            picker("All", None).leaving_by(box_at(0.0, 400.0)),
             // The album tap did not take: the pill still reads `All`.
             picker("All", None),
             picker("All", None),
@@ -2096,7 +2397,7 @@ mod tests {
         let row = box_at(0.0, 400.0);
         let session = FakeSession::with(vec![
             picker("All", Some("fixture-album-menu")),
-            picker("riviu-abc", None),
+            picker("riviu-abc", None).leaving_by(row.clone()),
         ])
         .rows("riviu-abc", vec![row.clone()]);
         let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
@@ -2295,6 +2596,38 @@ mod tests {
         );
     }
 
+    /// **A measured edit-step control is used even when the build cannot publish.**
+    ///
+    /// Arrival at the edit step and permission to publish are different questions, and keying
+    /// the first on the second threw away the strong evidence on exactly the build a measuring
+    /// run is made on: `ComposerNext` measured, Post button not. The weak proof — the picker
+    /// disappearing — then accepted an error screen, a permission modal, or the feed as "the
+    /// edit step", and the measurement written from that dump would be of the wrong screen.
+    #[tokio::test(start_paused = true)]
+    async fn a_measured_edit_control_is_believed_even_on_a_build_that_cannot_publish() {
+        let plan = measuring_plan();
+        assert!(!plan.can_publish(), "this test is about that being false");
+
+        // The picker goes away and the edit step never arrives.
+        let session = FakeSession::with(vec![
+            picker("riviu-abc", Some("fixture-picker-next")),
+            scene(vec![("something-else", box_at(0.0, 0.0))], None),
+        ]);
+        let mut composer = Composer::new(&session, plan, |element: &ElementBox| element.centre());
+        let stop = AtomicBool::new(false);
+        let next = ElementBox {
+            clickable: true,
+            ..box_at(552.0, 1896.0)
+        };
+        assert!(
+            !composer
+                .advance_to_edit_step(&next, &stop)
+                .await
+                .expect("no error"),
+            "the picker merely disappearing was accepted as arrival at the edit step"
+        );
+    }
+
     // ---------------------------------------------------------------- caption
 
     /// **A caption that silently did not take must not become a published post.**
@@ -2344,6 +2677,102 @@ mod tests {
         );
     }
 
+    /// **A field still showing its placeholder is not a typed caption.**
+    ///
+    /// The likely cause of a failed write, and the readback used to accept it: the check was
+    /// `contains(first 24 characters)` across *any* matching node, so a placeholder reading
+    /// `Describe your post…` confirmed a caption that begins with those words. The write had
+    /// not landed and the post went out blank.
+    #[tokio::test(start_paused = true)]
+    async fn a_placeholder_that_survives_the_write_is_not_mistaken_for_the_caption() {
+        let session = FakeSession {
+            caption_never_takes: true,
+            caption_placeholder: Some("Describe your post to viewers".into()),
+            ..FakeSession::with(vec![post_screen()])
+        };
+        let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            composer
+                .type_caption("Describe your post to viewers: ngày ra mắt", &stop)
+                .await
+                .expect("no error"),
+            CaptionOutcome::NotConfirmed,
+            "the placeholder contains the caption's opening words and was accepted"
+        );
+    }
+
+    /// **A field that kept only part of the caption is not a typed caption either.**
+    ///
+    /// The other half of the same defect: a prefix check accepts truncation, and a truncated
+    /// caption on a live post cannot be edited from here.
+    #[tokio::test(start_paused = true)]
+    async fn a_truncated_caption_is_refused_rather_than_published() {
+        let session = FakeSession {
+            caption_never_takes: true,
+            caption_placeholder: Some("đi Đà Lạt thật đã, lưu lại".into()),
+            ..FakeSession::with(vec![post_screen()])
+        };
+        let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            composer
+                .type_caption("đi Đà Lạt thật đã, lưu lại thôi! #dalat #review", &stop)
+                .await
+                .expect("no error"),
+            CaptionOutcome::NotConfirmed
+        );
+    }
+
+    /// **A field holding more than the caption is not the caption.**
+    ///
+    /// The prefix check accepted it: a leftover draft, or a field that appends its own
+    /// footer, contains the requested text and was confirmed. The published caption is then
+    /// something the operator never wrote.
+    #[tokio::test(start_paused = true)]
+    async fn a_field_holding_more_than_the_caption_is_refused() {
+        let session = FakeSession {
+            caption_never_takes: true,
+            caption_placeholder: Some(
+                "đi Đà Lạt thật đã, lưu lại thôi! #dalat — bản nháp cũ".into(),
+            ),
+            ..FakeSession::with(vec![post_screen()])
+        };
+        let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            composer
+                .type_caption("đi Đà Lạt thật đã, lưu lại thôi! #dalat", &stop)
+                .await
+                .expect("no error"),
+            CaptionOutcome::NotConfirmed,
+            "the field contains the caption and is not the caption"
+        );
+    }
+
+    /// **Two nodes matching the caption locator is a refusal, not a coin flip.**
+    ///
+    /// The focus tap uses the first match and the readback used any match, so a non-unique
+    /// locator could type into one node and confirm another — publishing whatever the first
+    /// node actually holds.
+    #[tokio::test(start_paused = true)]
+    async fn a_caption_locator_that_matches_twice_is_refused() {
+        let session = FakeSession {
+            caption_has_a_twin: true,
+            ..FakeSession::with(vec![post_screen()])
+        };
+        let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            composer
+                .type_caption("đi Đà Lạt thật đã", &stop)
+                .await
+                .expect("no error"),
+            CaptionOutcome::NotConfirmed,
+            "one of two matching nodes was accepted as the caption field"
+        );
+    }
+
     /// The caption is typed into the field and read back through the same locator.
     #[tokio::test(start_paused = true)]
     async fn the_caption_reaches_the_field_and_is_proved_there() {
@@ -2388,14 +2817,178 @@ mod tests {
         );
     }
 
-    /// A build with no measured caption field refuses rather than posting a bare carousel.
-    #[tokio::test(start_paused = true)]
-    async fn a_build_without_a_measured_caption_field_cannot_publish_at_all() {
+    /// **A build with a Post button and no caption field cannot publish.**
+    ///
+    /// The state that could put a bare carousel on an account, and the test that claimed to
+    /// cover it used the *no-Post* fixture — its assertion checked `PostButton`, so relaxing
+    /// `resolve` to make the caption optional would have left the suite green.
+    #[test]
+    fn a_build_with_a_post_button_but_no_caption_field_cannot_publish() {
+        let controls = every_publish_control_but_caption_measured();
+        assert_eq!(
+            ComposerPlan::missing_to_publish(&controls),
+            vec![TikTokControl::ComposerCaption],
+            "this fixture exists to be missing exactly the caption"
+        );
+        assert!(
+            controls.label(TikTokControl::PostButton).is_some(),
+            "and to have the Post button, or it proves nothing"
+        );
+        let plan =
+            ComposerPlan::resolve(&controls).expect("everything up to the edit step is measured");
+        assert!(
+            !plan.can_publish(),
+            "a build that cannot type a caption must not be able to publish"
+        );
+        assert!(plan.post_button().is_none());
+    }
+
+    /// And the no-Post build is still refused, for its own reason.
+    #[test]
+    fn a_build_without_a_measured_post_button_cannot_publish_either() {
         let controls = every_publish_control_but_post_measured();
         assert!(!ComposerPlan::resolve(&controls)
             .expect("the pre-publish path is measured")
             .can_publish());
         assert!(ComposerPlan::missing_to_publish(&controls).contains(&TikTokControl::PostButton));
+    }
+
+    /// **The picker's own count is believed when it states one.**
+    ///
+    /// `Next` arming proves at least one cell took and nothing about the rest; a build that
+    /// also renders the number is the only chance to prove the count, and taking it is the
+    /// difference between publishing five images and publishing whichever taps landed.
+    #[tokio::test(start_paused = true)]
+    async fn a_stated_count_that_disagrees_stops_the_run() {
+        // The picker says two are selected; the run asked for three.
+        let session = FakeSession::with(vec![
+            feed(),
+            camera(),
+            picker("All", Some("fixture-album-menu")),
+            picker("All", None).leaving_by(box_at(0.0, 400.0)),
+            picker("riviu-abc", Some("fixture-multi-select")),
+            picker("riviu-abc", Some("fixture-picker-next"))
+                .texted("fixture-picker-next", "Next (2)"),
+            edit_step(),
+            post_screen(),
+            feed(),
+        ])
+        .rows("riviu-abc", vec![box_at(0.0, 400.0)]);
+        let request = CarouselRequest {
+            album: "riviu-abc",
+            images: 3,
+            caption: "đi Đà Lạt thật đã",
+            screen: screen(),
+        };
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            publish_carousel(
+                &session,
+                plan(),
+                |element: &ElementBox| element.centre(),
+                &request,
+                &stop
+            )
+            .await
+            .expect("no transport error"),
+            ComposerVerdict::NotEnoughSelected
+        );
+    }
+
+    /// A build that states no count runs on the taps it sent, which is the measured case.
+    #[tokio::test(start_paused = true)]
+    async fn a_build_that_states_no_count_still_publishes() {
+        let session = FakeSession::full_walk("riviu-abc");
+        let request = CarouselRequest {
+            album: "riviu-abc",
+            images: 3,
+            caption: "đi Đà Lạt thật đã",
+            screen: screen(),
+        };
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            publish_carousel(
+                &session,
+                plan(),
+                |element: &ElementBox| element.centre(),
+                &request,
+                &stop
+            )
+            .await
+            .expect("no transport error"),
+            ComposerVerdict::Posted
+        );
+    }
+
+    /// **One dropped hierarchy read must not shorten the post-confirmation window.**
+    ///
+    /// After the Post tap, "I could not read the screen" and "the post did not go" are
+    /// different facts and only the second is worth reporting. Propagating the first error
+    /// turned a live post into `PostNotConfirmed` — permanently unclaimable — on the first
+    /// poll of a twenty-second wait.
+    #[tokio::test(start_paused = true)]
+    async fn a_transient_read_after_the_post_tap_does_not_end_the_wait() {
+        // Call 0 finds the Post button; call 1 is the first confirmation read, which is the
+        // one that must survive a drop.
+        let session = FakeSession {
+            locate_fails_at: Some(1),
+            ..FakeSession::with(vec![post_screen(), feed()])
+        };
+        let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+        let stop = AtomicBool::new(false);
+        // The first read fails; the Post button is found on the retry, tapped, and the feed
+        // comes back.
+        assert_eq!(
+            composer.post(&stop).await.expect("no error"),
+            ComposerVerdict::Posted
+        );
+    }
+
+    /// **An unconfirmed post is left on screen, not backed out of.**
+    ///
+    /// The verdict means an unrecognised screen is up after the Post tap, and the one this
+    /// build is expected to raise is the confirmation sheet that *commits* the post. Pressing
+    /// Back there cancels it — and the assignment is still permanently unclaimable, so the run
+    /// throws away a post it could have had.
+    #[tokio::test(start_paused = true)]
+    async fn an_unconfirmed_post_is_not_dismissed_on_the_way_out() {
+        let session = FakeSession::with(vec![
+            feed(),
+            camera(),
+            picker("All", Some("fixture-album-menu")),
+            picker("All", None).leaving_by(box_at(0.0, 400.0)),
+            picker("riviu-abc", Some("fixture-multi-select")),
+            picker("riviu-abc", Some("fixture-picker-next")),
+            edit_step(),
+            post_screen(),
+            // Whatever is up after Post is not the feed.
+            scene(vec![("an-unmeasured-sheet", box_at(0.0, 0.0))], None),
+        ])
+        .rows("riviu-abc", vec![box_at(0.0, 400.0)]);
+        let request = CarouselRequest {
+            album: "riviu-abc",
+            images: 3,
+            caption: "đi Đà Lạt thật đã",
+            screen: screen(),
+        };
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            publish_carousel(
+                &session,
+                plan(),
+                |element: &ElementBox| element.centre(),
+                &request,
+                &stop
+            )
+            .await
+            .expect("no transport error"),
+            ComposerVerdict::PostNotConfirmed
+        );
+        assert_eq!(
+            *session.backs.lock(),
+            0,
+            "Back was pressed on a screen that may be the one committing the post"
+        );
     }
 
     // ------------------------------------------------------------------ leave
@@ -2509,6 +3102,64 @@ mod tests {
         }
     }
 
+    /// **An anchor that is not a rectangle on this screen is refused.**
+    ///
+    /// Validating only the *derived* rectangle let a shutter reported at `height = -100`
+    /// produce a plausible, fully on-screen tap point — arithmetic from nonsense, which is the
+    /// thing anchoring was supposed to replace.
+    #[test]
+    fn a_located_anchor_that_is_not_a_rectangle_anchors_nothing() {
+        for broken in [
+            ElementBox {
+                height: -100.0,
+                ..labelled("Record video", 375.0, 1000.0, 330.0, 330.0)
+            },
+            ElementBox {
+                width: 0.0,
+                ..labelled("Record video", 375.0, 1545.0, 330.0, 330.0)
+            },
+            // Off the bottom of the screen, but its centre still computes.
+            labelled("Record video", 375.0, 3000.0, 330.0, 330.0),
+            ElementBox {
+                x: -50.0,
+                ..labelled("Record video", 0.0, 1545.0, 330.0, 330.0)
+            },
+        ] {
+            assert!(
+                GalleryEntry::beside_shutter(screen(), &broken).is_none(),
+                "anchored on {broken:?}"
+            );
+        }
+        // The measured one still works, or the rule above is refusing everything.
+        assert!(GalleryEntry::beside_shutter(
+            screen(),
+            &labelled("Record video", 375.0, 1545.0, 330.0, 330.0)
+        )
+        .is_some());
+    }
+
+    /// The same rule for the grid's anchor, through the step that locates it.
+    #[tokio::test(start_paused = true)]
+    async fn a_tab_row_that_is_not_a_rectangle_builds_no_grid() {
+        let broken = ElementBox {
+            height: -688.0,
+            ..labelled("Photos", 824.0, 1000.0, 152.0, 57.0)
+        };
+        // `1000 + (-688)` is 312 — the exact anchor the measured screen has, from a node that
+        // is not on it.
+        let session = FakeSession::with(vec![scene(vec![("fixture-tab-photos", broken)], None)]);
+        let composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+        let stop = AtomicBool::new(false);
+        assert!(
+            composer
+                .grid(screen(), &stop)
+                .await
+                .expect("no error")
+                .is_none(),
+            "a tab row with a negative height anchored the grid anyway"
+        );
+    }
+
     /// A nonsense anchor is refused rather than turned into coordinates.
     #[test]
     fn an_anchor_that_is_not_on_the_screen_builds_no_grid() {
@@ -2576,6 +3227,13 @@ mod tests {
             ComposerVerdict::PostScreenDidNotOpen,
             ComposerVerdict::PostUnmeasured,
             ComposerVerdict::NoPostButton,
+            // Both caption failures happen **before** the Post tap, so both stay retryable.
+            // The table omitted them, and making them permanently unclaimable kept it green.
+            ComposerVerdict::NoCaptionField,
+            ComposerVerdict::CaptionNotConfirmed,
+            ComposerVerdict::NotEnoughSelected,
+            ComposerVerdict::NoShutterToAnchorTo,
+            ComposerVerdict::NoTabsToAnchorTo,
             ComposerVerdict::Stopped,
         ] {
             assert!(

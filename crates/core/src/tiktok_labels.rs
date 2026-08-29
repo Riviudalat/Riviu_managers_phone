@@ -453,6 +453,8 @@ pub enum LabelAttribute {
     /// string — so a label using it must be keyed by app version, which is what
     /// [`TikTokResourceLabels`] is for.
     ResourceId,
+    /// The widget class. Language-proof, build-proof, and **not unique**.
+    ClassName,
 }
 
 /// How a label is matched: which attribute, and exactly or as a substring.
@@ -467,7 +469,19 @@ pub enum LabelMatch {
     Text(&'static str),
     /// Substring match on `text`.
     TextContains(&'static str),
-    /// The suffix of the node's `resource-id`, e.g. `snr` for `com.…:id/snr`.
+    /// The node's widget class, e.g. `android.widget.EditText`.
+    ///
+    /// The third thing a control can be identified by, and the only one that works for an
+    /// **input field**: its `text` is the placeholder until somebody types, at which point the
+    /// locator that found it stops matching. The comment drawer already located its field this
+    /// way for exactly that reason; [`TikTokControl::ComposerCaption`] needs the same and,
+    /// until now, the catalogue had no way to say it — the documentation demanded a strategy
+    /// that could not be written down.
+    ///
+    /// Weaker than an id and stronger than a string: a class is language-proof and
+    /// build-proof, and it is not unique. A caller that needs one node must check.
+    ClassName(&'static str),
+    /// The suffix of the node's `resource-id`, e.g. `:id/snr` for `com.…:id/snr`.
     ///
     /// # Only for controls whose strings genuinely cannot work
     ///
@@ -497,13 +511,15 @@ impl LabelMatch {
             | Self::Contains(value)
             | Self::Text(value)
             | Self::TextContains(value)
+            | Self::ClassName(value)
             | Self::ResourceId(value) => value,
         }
     }
 
     pub fn is_exact(&self) -> bool {
         // A resource-id suffix identifies one control, so it belongs with the exact forms
-        // rather than with the substring ones.
+        // rather than with the substring ones. A class deliberately does **not**: several
+        // nodes share one, which is the whole reason a caller has to check.
         matches!(self, Self::Exact(_) | Self::Text(_) | Self::ResourceId(_))
     }
 
@@ -512,6 +528,7 @@ impl LabelMatch {
             Self::Exact(_) | Self::Contains(_) => LabelAttribute::Description,
             Self::Text(_) | Self::TextContains(_) => LabelAttribute::Text,
             Self::ResourceId(_) => LabelAttribute::ResourceId,
+            Self::ClassName(_) => LabelAttribute::ClassName,
         }
     }
 
@@ -534,6 +551,7 @@ impl LabelMatch {
                 exact: false,
             },
             Self::ResourceId(value) => crate::driver::ElementQuery::ResourceIdSuffix(value),
+            Self::ClassName(value) => crate::driver::ElementQuery::ClassName(value),
         }
     }
 }
@@ -759,7 +777,11 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         // Distinct from the media-type tab row directly below it (`…:id/slq`), whose leftmost
         // entry also reads `All`. Two nodes, one string, different jobs — so `Text("All")`
         // could never have picked between them either.
-        picker_album_menu: Some(LabelMatch::ResourceId("snr")),
+        // **`:id/snr`, not `snr`.** The driver turns this into the Java regex `.*<suffix>`,
+        // so a bare three-character suffix also matches `…:id/asnr` — and an obfuscated build
+        // names controls with exactly those. The `:id/` keeps the match on a resource-id
+        // boundary, which is the difference between naming a control and naming a substring.
+        picker_album_menu: Some(LabelMatch::ResourceId(":id/snr")),
     },
     TikTokResourceLabels {
         package: "com.zhiliaoapp.musically",
@@ -869,6 +891,53 @@ pub(crate) fn nothing_measured() -> TikTokControls {
     }
 }
 
+/// The label set behind [`every_publish_control_measured`].
+///
+/// At module scope so a second constructor can pair it with **no** resource table — which is
+/// the only way to express "a language set that does carry an album-pill string", the case a
+/// fallback would resolve and every real set cannot.
+#[cfg(test)]
+static ALL: TikTokLabels = TikTokLabels {
+    package: "com.example.fully-measured",
+    language: "zz",
+    measured_on: "nothing — this set exists so the success path has a fixture",
+    measured_app_version: "",
+    feed_tab: Some(LabelMatch::Exact("fixture-feed-tab")),
+    home_tab: Some(LabelMatch::Exact("fixture-home-tab")),
+    dialog_dismiss: None,
+    journey_skip: None,
+    journey_done: None,
+    folded_comments: None,
+    sound_link: None,
+    photo_badge: None,
+    like: None,
+    liked: None,
+    comments: None,
+    share: Some(LabelMatch::Exact("fixture-share")),
+    bookmark: None,
+    follow: None,
+    live_room: None,
+    comment_send: None,
+    comment_reply: None,
+    composer_open: Some(LabelMatch::Exact("fixture-composer-open")),
+    composer_shutter: Some(LabelMatch::Exact("fixture-shutter")),
+    // **A string, deliberately, and the resolver must never use it.**
+    picker_album_menu: Some(LabelMatch::Text("fixture-album-menu")),
+    picker_tab_all: Some(LabelMatch::Text("fixture-tab-all")),
+    picker_tab_photos: Some(LabelMatch::Text("fixture-tab-photos")),
+    picker_multi_select: Some(LabelMatch::Text("fixture-multi-select")),
+    picker_next: Some(LabelMatch::Text("fixture-picker-next")),
+    author_profile_link: None,
+    like_count: None,
+    profile_tab: None,
+    composer_caption: Some(LabelMatch::ClassName("fixture-caption")),
+    composer_next: Some(LabelMatch::Text("fixture-edit-next")),
+    post_button: Some(LabelMatch::Text("fixture-post")),
+    post_delete_menu: None,
+    post_delete: None,
+    post_delete_confirm: None,
+};
+
 /// A set where every control the publish path needs **is** measured.
 ///
 /// The mirror of [`nothing_measured`], and it exists for the mirror reason. That one
@@ -885,45 +954,6 @@ pub(crate) fn nothing_measured() -> TikTokControls {
 /// `#[cfg(test)]`: nothing in the product may reach for a set nobody measured.
 #[cfg(test)]
 pub(crate) fn every_publish_control_measured() -> TikTokControls {
-    static ALL: TikTokLabels = TikTokLabels {
-        package: "com.example.fully-measured",
-        language: "zz",
-        measured_on: "nothing — this set exists so the success path has a fixture",
-        measured_app_version: "",
-        feed_tab: Some(LabelMatch::Exact("fixture-feed-tab")),
-        home_tab: Some(LabelMatch::Exact("fixture-home-tab")),
-        dialog_dismiss: None,
-        journey_skip: None,
-        journey_done: None,
-        folded_comments: None,
-        sound_link: None,
-        photo_badge: None,
-        like: None,
-        liked: None,
-        comments: None,
-        share: Some(LabelMatch::Exact("fixture-share")),
-        bookmark: None,
-        follow: None,
-        live_room: None,
-        comment_send: None,
-        comment_reply: None,
-        composer_open: Some(LabelMatch::Exact("fixture-composer-open")),
-        composer_shutter: Some(LabelMatch::Exact("fixture-shutter")),
-        picker_album_menu: Some(LabelMatch::Text("fixture-album-menu")),
-        picker_tab_all: Some(LabelMatch::Text("fixture-tab-all")),
-        picker_tab_photos: Some(LabelMatch::Text("fixture-tab-photos")),
-        picker_multi_select: Some(LabelMatch::Text("fixture-multi-select")),
-        picker_next: Some(LabelMatch::Text("fixture-picker-next")),
-        author_profile_link: None,
-        like_count: None,
-        profile_tab: None,
-        composer_caption: Some(LabelMatch::Text("fixture-caption")),
-        composer_next: Some(LabelMatch::Text("fixture-edit-next")),
-        post_button: Some(LabelMatch::Text("fixture-post")),
-        post_delete_menu: None,
-        post_delete: None,
-        post_delete_confirm: None,
-    };
     // The album pill resolves through `TIKTOK_RESOURCE_SETS` only — see
     // `LabelMatch::ResourceId` — so a fixture claiming "everything measured" needs a resource
     // set as well as a language set, or the one control that cannot be a string stays absent.
@@ -937,6 +967,19 @@ pub(crate) fn every_publish_control_measured() -> TikTokControls {
     TikTokControls {
         translated: &ALL,
         resources: Some(&ALL_RESOURCES),
+    }
+}
+
+/// The same language set with **no resource table at all**.
+///
+/// Its language row carries a string for the album pill, which the resolver must ignore. That
+/// is the only shape that can catch a fallback being put back: every *real* set has `None`
+/// there, so a sweep over the catalogue stays green whether the fallback exists or not.
+#[cfg(test)]
+pub(crate) fn an_album_pill_string_the_resolver_must_ignore() -> TikTokControls {
+    TikTokControls {
+        translated: &ALL,
+        resources: None,
     }
 }
 
@@ -982,7 +1025,9 @@ pub(crate) fn every_publish_control_but_post_measured() -> TikTokControls {
         author_profile_link: None,
         like_count: None,
         profile_tab: None,
-        composer_caption: Some(LabelMatch::Text("fixture-caption")),
+        // A class, because that is what this control's contract allows — a `Text` fixture
+        // trained every composer test on the one strategy the documentation forbids.
+        composer_caption: Some(LabelMatch::ClassName("fixture-caption")),
         composer_next: Some(LabelMatch::Text("fixture-edit-next")),
         post_button: None,
         post_delete_menu: None,
@@ -999,6 +1044,68 @@ pub(crate) fn every_publish_control_but_post_measured() -> TikTokControls {
     TikTokControls {
         translated: &NO_POST,
         resources: Some(&NO_POST_RESOURCES),
+    }
+}
+
+/// The publish tail measured **except the caption field**.
+///
+/// A third fixture rather than a reuse, because the test that claimed to cover this state used
+/// the no-Post one — its assertion checked `PostButton`, and no test exercised a missing
+/// caption at all. A build with a measured edit step and Post button but no caption field is
+/// exactly the state that could publish a bare carousel.
+///
+/// `#[cfg(test)]`: nothing in the product may reach for a set nobody measured.
+#[cfg(test)]
+pub(crate) fn every_publish_control_but_caption_measured() -> TikTokControls {
+    static NO_CAPTION: TikTokLabels = TikTokLabels {
+        package: "com.example.no-caption-field",
+        language: "zz",
+        measured_on: "nothing — this set exists so the missing-caption state has a fixture",
+        measured_app_version: "",
+        feed_tab: Some(LabelMatch::Exact("fixture-feed-tab")),
+        home_tab: Some(LabelMatch::Exact("fixture-home-tab")),
+        dialog_dismiss: None,
+        journey_skip: None,
+        journey_done: None,
+        folded_comments: None,
+        sound_link: None,
+        photo_badge: None,
+        like: None,
+        liked: None,
+        comments: None,
+        share: Some(LabelMatch::Exact("fixture-share")),
+        bookmark: None,
+        follow: None,
+        live_room: None,
+        comment_send: None,
+        comment_reply: None,
+        composer_open: Some(LabelMatch::Exact("fixture-composer-open")),
+        composer_shutter: Some(LabelMatch::Exact("fixture-shutter")),
+        picker_album_menu: None,
+        picker_tab_all: Some(LabelMatch::Text("fixture-tab-all")),
+        picker_tab_photos: Some(LabelMatch::Text("fixture-tab-photos")),
+        picker_multi_select: Some(LabelMatch::Text("fixture-multi-select")),
+        picker_next: Some(LabelMatch::Text("fixture-picker-next")),
+        author_profile_link: None,
+        like_count: None,
+        profile_tab: None,
+        composer_caption: None,
+        composer_next: Some(LabelMatch::Text("fixture-edit-next")),
+        post_button: Some(LabelMatch::Text("fixture-post")),
+        post_delete_menu: None,
+        post_delete: None,
+        post_delete_confirm: None,
+    };
+    static NO_CAPTION_RESOURCES: TikTokResourceLabels = TikTokResourceLabels {
+        package: "com.example.no-caption-field",
+        app_version: "0",
+        measured_on: "nothing — this set exists so the missing-caption state has a fixture",
+        comment_send: None,
+        picker_album_menu: Some(LabelMatch::ResourceId("fixture-album-menu")),
+    };
+    TikTokControls {
+        translated: &NO_CAPTION,
+        resources: Some(&NO_CAPTION_RESOURCES),
     }
 }
 
@@ -1108,9 +1215,24 @@ impl TikTokControls {
                 "; nút Gửi theo resource id, đo trên app {} ({})",
                 resources.app_version, resources.measured_on
             )),
-            (_, _, Some(_)) => {
-                line.push_str("; nút Gửi đọc theo chữ — bản build này không cần resource id")
+            // **Two different situations, and the old sentence claimed the safe one for
+            // both.** A resource row that explicitly records `comment_send: None` is a
+            // measurement: somebody looked at that build and found a rendered string. No
+            // resource row at all is the absence of one — the string comes from the language
+            // set, which was measured on some *other* version of this app, and whether this
+            // one renders the button is unknown.
+            (_, Some(_), Some(_)) => {
+                line.push_str("; nút Gửi đọc theo chữ — đã đo trên đúng bản build này")
             }
+            (_, None, Some(_)) => line.push_str(&format!(
+                "; nút Gửi đọc theo chữ, nhưng CHƯA đo trên bản app này — chuỗi lấy từ bộ \
+                 ngôn ngữ đo trên app {}",
+                if measured_app_version.is_empty() {
+                    "(không ghi)"
+                } else {
+                    measured_app_version
+                }
+            )),
             (_, _, None) => line.push_str(
                 "; CHƯA đo được nút Gửi cho bản app này — phiên sẽ bỏ bình luận cả phiên",
             ),
@@ -2279,6 +2401,170 @@ mod tests {
         }
     }
 
+    /// **Every resource entry is a bounded resource id, not just non-`None`.**
+    ///
+    /// The empty-label sweep read the language table and, of the resource table, only
+    /// `comment_send`. So `picker_album_menu: Some(ResourceId(""))` was green — and an empty
+    /// suffix becomes the regex `.*`, which matches the first node on screen carrying any
+    /// resource id at all. `Some(Text("snr"))` was green too, silently turning an id lookup
+    /// into a search of rendered text.
+    #[test]
+    fn every_resource_entry_is_a_bounded_resource_id() {
+        let mut checked = 0;
+        for set in TIKTOK_RESOURCE_SETS {
+            assert!(!set.package.is_empty() && !set.app_version.is_empty());
+            assert!(
+                !set.measured_on.is_empty(),
+                "{} needs provenance",
+                set.package
+            );
+            for control in TikTokControl::ALL {
+                let Some(label) = set.resource(control) else {
+                    continue;
+                };
+                assert!(
+                    !label.value().trim().is_empty(),
+                    "{} / {} gives {control:?} an empty locator; the driver turns that into \
+                     `.*`, which matches the first node carrying any resource id",
+                    set.package,
+                    set.app_version
+                );
+                // `comment_send` is measured as a `content-desc` that happens to be an
+                // unresolved `@2131…` reference; everything else in this table is a real
+                // `resource-id` and has to say so.
+                if control != TikTokControl::CommentSend {
+                    assert!(
+                        matches!(label, LabelMatch::ResourceId(_)),
+                        "{} / {} gives {control:?} a {:?} locator; this table is keyed by app \
+                         version because resource ids move, and a string does not belong in it",
+                        set.package,
+                        set.app_version,
+                        label.attribute()
+                    );
+                    assert!(
+                        label.value().contains(":id/"),
+                        "{} / {} stores {control:?} as {:?}; without the `:id/` boundary the \
+                         regex `.*{}` also matches an id that merely ends in those characters",
+                        set.package,
+                        set.app_version,
+                        label.value(),
+                        label.value()
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked >= 4, "only {checked} resource entries scanned");
+    }
+
+    /// **A resource set belongs to one package as well as one version.**
+    ///
+    /// Dropping the package from the lookup left every case in the version test green, because
+    /// they all use `trill`. A `musically` phone whose `versionName` happens to equal a `trill`
+    /// row would then borrow the other app's ids.
+    #[test]
+    fn a_resource_set_is_not_shared_between_two_packages() {
+        // `trill` 38.3.2 has an album pill; `musically` at the same version string has no row
+        // at all, and must not inherit one.
+        assert!(controls_for("com.ss.android.ugc.trill", "en", "38.3.2")
+            .expect("catalogued")
+            .label(TikTokControl::PickerAlbumMenu)
+            .is_some());
+        assert_eq!(
+            controls_for("com.zhiliaoapp.musically", "en", "38.3.2")
+                .expect("the language set exists")
+                .label(TikTokControl::PickerAlbumMenu),
+            None,
+            "a musically phone borrowed a trill resource id"
+        );
+        // And the reverse, on a version only `musically` has.
+        assert!(controls_for("com.zhiliaoapp.musically", "en", "46.2.1")
+            .expect("catalogued")
+            .label(TikTokControl::CommentSend)
+            .is_some());
+    }
+
+    /// **The album pill has no fallback, proved by a set that carries a string.**
+    ///
+    /// The sweep over the catalogue is true and stays true whether the fallback exists or not,
+    /// because every real language set has `None` there. This fixture is the only shape that
+    /// can tell: a language row with a string and no resource table at all.
+    #[test]
+    fn a_language_string_for_the_album_pill_is_ignored_even_when_present() {
+        let with_a_string = an_album_pill_string_the_resolver_must_ignore();
+        assert_eq!(
+            with_a_string.label(TikTokControl::PickerAlbumMenu),
+            None,
+            "the resolver fell back to a language string; that string names the album that              happens to be showing and stops being true one tap later"
+        );
+        // The rest of the same set still resolves, so this is not measuring an empty fixture.
+        assert!(with_a_string.label(TikTokControl::ComposerOpen).is_some());
+    }
+
+    /// **The caption field is never located by a string.**
+    ///
+    /// Its own documentation says so — a placeholder stops matching the moment a character is
+    /// typed, so the readback that proves the caption took would report that it had not. The
+    /// rule had no test, and both success fixtures used `Text`, training every composer test
+    /// on the one strategy the control forbids.
+    #[test]
+    fn the_caption_field_is_never_located_by_a_string() {
+        let mut checked = 0;
+        for set in TIKTOK_LABEL_SETS {
+            if let Some(label) = set.translated(TikTokControl::ComposerCaption) {
+                assert!(
+                    matches!(label, LabelMatch::ClassName(_) | LabelMatch::ResourceId(_)),
+                    "{} / {} locates the caption field by {:?}; a placeholder stops matching                      as soon as a character is typed",
+                    set.package,
+                    set.language,
+                    label.attribute()
+                );
+                checked += 1;
+            }
+        }
+        // And the fixtures, which are what the composer's tests actually run against.
+        for controls in [
+            every_publish_control_measured(),
+            every_publish_control_but_post_measured(),
+        ] {
+            let label = controls
+                .label(TikTokControl::ComposerCaption)
+                .expect("these fixtures measure the caption");
+            assert!(
+                matches!(label, LabelMatch::ClassName(_) | LabelMatch::ResourceId(_)),
+                "a fixture locates the caption by {:?}, which teaches the wrong strategy",
+                label.attribute()
+            );
+            checked += 1;
+        }
+        assert!(checked >= 2, "only {checked} caption locators scanned");
+    }
+
+    /// **The album pill has no fallback, proved with a set that would use one.**
+    ///
+    /// The existing sweep asserts no language set carries a string — true, and it stays true
+    /// if the resolver regains its `or_else`. This one gives a fixture *both* a language string
+    /// and no resource entry, so a fallback is the only way it could resolve.
+    #[test]
+    fn the_album_pill_never_falls_back_to_a_language_string() {
+        // `every_publish_control_but_caption_measured` has `picker_album_menu: None` in its
+        // language set and a resource entry; strip the version and the id goes away.
+        let with_id = every_publish_control_but_caption_measured();
+        assert!(with_id.label(TikTokControl::PickerAlbumMenu).is_some());
+
+        // The Vietnamese set is the real case: it once had `Text("Gần đây")`, and it has no
+        // resource row on any version.
+        for version in ["", "46.3.3", "99.9.9"] {
+            assert_eq!(
+                controls_for("com.ss.android.ugc.trill", "vi", version)
+                    .expect("the language set exists")
+                    .label(TikTokControl::PickerAlbumMenu),
+                None,
+                "the album pill resolved from somewhere other than the resource table"
+            );
+        }
+    }
+
     #[test]
     fn no_entry_carries_an_empty_label() {
         for set in TIKTOK_LABEL_SETS {
@@ -2387,9 +2673,27 @@ mod provenance_tests {
             !line.contains("CHƯA"),
             "nothing is missing on this build, so nothing may shout: {line}"
         );
+        // **The sentence now distinguishes two situations the old one conflated.** This build
+        // has a resource row that explicitly records `comment_send: None`, which is a
+        // *measurement* — somebody looked and found a rendered string. A build with no row at
+        // all gets a different sentence, because there the string comes from a language set
+        // measured on some other version and nobody has checked this one.
         assert!(
-            line.contains("không cần resource id"),
-            "it should say why no id is needed: {line}"
+            line.contains("đã đo trên đúng bản build này"),
+            "it should say the string was measured on this build: {line}"
+        );
+        assert!(
+            !line.contains("CHƯA đo trên bản app này"),
+            "this build has a resource row, so it is not the unknown case: {line}"
+        );
+
+        // And an English build with no resource row says so instead of claiming the
+        // measurement — the sentence that sent a reader looking at the wrong thing.
+        let unknown = controls_for("com.ss.android.ugc.trill", "en", "99.9.9").expect("set");
+        let line = unknown.provenance();
+        assert!(
+            line.contains("CHƯA đo trên bản app này"),
+            "an unmeasured version must not claim its Send button was checked: {line}"
         );
         // The field that had no reader until this line existed.
         assert!(

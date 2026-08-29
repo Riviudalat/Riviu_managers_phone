@@ -36,6 +36,7 @@ fn to_android_locator(label: LabelMatch) -> Locator {
         LabelMatch::TextContains(value) => Locator::TextContains(value.to_string()),
         // Escaped, not interpolated: the agent takes a Java regex here, and a resource-id
         // suffix is a **literal**. The production translation in `session.rs` does the same.
+        LabelMatch::ClassName(value) => Locator::ClassName(value.to_string()),
         LabelMatch::ResourceId(value) => Locator::ResourceIdMatches(format!(
             ".*{}",
             riviu_android_driver::agent::escape_java_regex(value)
@@ -708,6 +709,8 @@ struct Node {
     class: String,
     desc: String,
     text: String,
+    /// Kept so a `ResourceId` label can be matched the way the driver matches it.
+    resource_id: String,
     bounds: String,
     clickable: bool,
     enabled: bool,
@@ -743,6 +746,7 @@ fn scan_source(source: &str) -> Vec<Node> {
             class,
             desc: attribute("content-desc"),
             text: attribute("text"),
+            resource_id: attribute("resource-id"),
             bounds: attribute("bounds"),
             clickable: attribute("clickable") == "true",
             enabled: attribute("enabled") == "true",
@@ -2368,14 +2372,36 @@ async fn measure_gallery_entry(
     //
     // Asking the catalogue also makes the probe agree with production: `tiktok_composer`
     // anchors the gallery entry on exactly this control.
+    // **Matched the way the catalogue says to match**, not by an exact compare against both
+    // string attributes. The manual version missed a `Contains`, a `TextContains` and a
+    // `ResourceId` entry outright — and then fell through to "the widest clickable Button",
+    // which on a screen carrying a permission dialog is an unrelated control that the
+    // candidate geometry is then measured against.
     let catalogued = labels
         .label(TikTokControl::ComposerShutter)
         .and_then(|label| {
-            let needle = label.value();
-            nodes
-                .iter()
-                .find(|node| node.desc == needle || node.text == needle)
-                .and_then(|node| parse_bounds(&node.bounds))
+            let matches = |node: &Node| match label {
+                LabelMatch::Exact(value) => node.desc == value,
+                LabelMatch::Contains(value) => node.desc.contains(value),
+                LabelMatch::Text(value) => node.text == value,
+                LabelMatch::TextContains(value) => node.text.contains(value),
+                LabelMatch::ClassName(value) => node.class == value,
+                LabelMatch::ResourceId(value) => node.resource_id.ends_with(value),
+            };
+            let found: Vec<&Node> = nodes.iter().filter(|node| matches(node)).collect();
+            match found.as_slice() {
+                [only] => parse_bounds(&only.bounds),
+                [] => None,
+                // More than one match is not an anchor: the whole point of anchoring is that
+                // the rectangle came from *the* control, and picking the first is a guess.
+                many => {
+                    println!(
+                        "  ! {} nodes match the shutter label; not anchoring",
+                        many.len()
+                    );
+                    None
+                }
+            }
         });
     let shutter = match catalogued {
         Some(bounds) => {

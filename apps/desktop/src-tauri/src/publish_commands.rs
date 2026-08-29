@@ -120,7 +120,10 @@ pub fn publish_create_campaign(
         source_root,
         bundle_ids: managed_bundle_ids,
         udids,
-        run_at,
+        // Trimmed here as well as in `parse_run_at`, or the scheduler re-parses the
+        // untrimmed original and rejects a value this command just accepted — moving a
+        // campaign the operator scheduled to `failed_before_dispatch` for a leading space.
+        run_at: run_at.map(|value| value.trim().to_string()),
         visibility: PublishVisibility::Public,
         cleanup_policy: PublishCleanupPolicy::DeleteImportedAssetsAfterVerified,
     };
@@ -174,14 +177,20 @@ pub fn publish_prepare(
         .get_publish_campaign(&campaign_id)
         .map_err(err)?
         .ok_or_else(|| "publish campaign not found".to_string())?;
+    // **`Posting` and `Verifying` are in this list now.** Prepare walks a campaign back to
+    // `Ready`, which is a state Transfer accepts — so a campaign with phones currently inside
+    // TikTok's composer could be pushed back to the start of the pipeline and re-transferred
+    // underneath the run that was still going.
     if matches!(
         detail.campaign.state,
         riviu_core::PublishCampaignState::Cancelled
             | riviu_core::PublishCampaignState::Succeeded
             | riviu_core::PublishCampaignState::Uncertain
+            | riviu_core::PublishCampaignState::Posting
+            | riviu_core::PublishCampaignState::Verifying
     ) {
         return Err(err(format!(
-            "campaign is already terminal: {:?}",
+            "campaign is already terminal or in flight: {:?}",
             detail.campaign.state
         )));
     }
@@ -258,14 +267,33 @@ pub(crate) async fn transfer_publish_campaign_inner(
                 })
         },
     ))?;
-    db.update_publish_campaign_state(
-        &campaign_id,
-        riviu_core::PublishCampaignState::Transferring,
-        None,
-    )?;
+    // **Claimed, not written.** Transfer used to move the campaign to `Transferring`
+    // unconditionally and then walk every assignment back to `Imported` — so a second Transfer
+    // on a campaign that had already *succeeded* rebuilt exactly the state the posting claim
+    // accepts, and the next Post published the same carousels again. Every compare-and-swap
+    // downstream was sound only while nothing could manufacture a claimable state.
+    if !db.claim_publish_campaign_for_transfer(&campaign_id)? {
+        anyhow::bail!(
+            "chiến dịch này không ở trạng thái chuyển được: {:?}. Chuyển lại một chiến dịch đã \
+             đăng xong là dựng lại đúng trạng thái để nó đăng lần nữa.",
+            detail.campaign.state
+        );
+    }
     announce(&events, &db, &campaign_id);
 
     for assignment in &detail.assignments {
+        // An assignment that already reached a phone is not re-imported. The campaign claim
+        // above makes this unreachable today; it stays because the two guards answer different
+        // questions, and a path that claimed the campaign some other way would still need it.
+        if matches!(
+            assignment.state,
+            riviu_core::PublishCampaignState::Succeeded
+                | riviu_core::PublishCampaignState::Posting
+                | riviu_core::PublishCampaignState::Verifying
+                | riviu_core::PublishCampaignState::Uncertain
+        ) {
+            continue;
+        }
         // **Each phone gets its own bundle, and only its own.**
         //
         // This used to take one `source_root` for the whole campaign —
@@ -441,11 +469,22 @@ pub(crate) const IOS_PIXEL_GRID_MAX_IMAGES: usize = 11;
 /// app exactly the way an interaction task does.
 const PUBLISH_FAN_OUT_STAGGER: Duration = Duration::from_secs(2);
 
-/// One phone's whole posting attempt, from the permit to the state write.
+/// Why one phone did not post, and **whether anything may be live because of it**.
 ///
-/// Returns `Err(reason)` for anything the operator should read, and `Ok(())` when the carousel
-/// is on the account. The empty string is reserved for "this campaign has no bundle for this
-/// assignment", which the caller turns into a message naming the bundle it does have.
+/// The empty-string sentinel this replaces was a real trap: the caller told a missing bundle
+/// apart from every other failure by testing `reason.is_empty()`, so any failure whose message
+/// happened to be empty became "bundle missing" — and, worse, the campaign could not tell a
+/// phone that refused before opening anything from one that tapped Post and lost the answer.
+enum PhoneFailure {
+    /// This campaign holds no bundle for this assignment. Nothing was opened.
+    NoBundle,
+    /// The run stopped and **nothing reached TikTok**.
+    NothingPublished(String),
+    /// A tap may have gone out and the result is unknown.
+    MayBeLive(String),
+}
+
+/// One phone's whole posting attempt, from the permit to the state write.
 ///
 /// **The cancel check is inside, before the claim.** A campaign the operator stopped must not
 /// start another phone — and a phone already inside the composer must not be abandoned there,
@@ -461,22 +500,28 @@ async fn post_one_phone(
     campaign_id: String,
     assignment: riviu_core::PublishAssignmentRecord,
     bundle: riviu_core::PublishBundle,
-) -> Result<(), String> {
+) -> Result<(), PhoneFailure> {
     tokio::time::sleep(stagger).await;
-    let _permit = gate
-        .acquire()
-        .await
-        .map_err(|error| format!("{}: hết chỗ stream ({error})", assignment.udid))?;
+    let _permit = gate.acquire().await.map_err(|error| {
+        PhoneFailure::NothingPublished(format!("{}: hết chỗ stream ({error})", assignment.udid))
+    })?;
 
     // Read the operator's cancel **before** claiming, and only here. Stopping between phones
     // costs nothing and leaves every untouched assignment still `Imported`, which is where a
     // later run expects to find it. Stopping a phone already in the composer would produce the
     // `uncertain` state that can never be retried.
-    if matches!(
-        db.publish_campaign_state(&campaign_id),
-        Ok(Some(riviu_core::PublishCampaignState::Cancelled))
-    ) {
-        return Ok(());
+    //
+    // A read that *fails* is not "not cancelled": stopping here costs nothing, and carrying on
+    // because the database did not answer is how a stopped run keeps posting.
+    match db.publish_campaign_state(&campaign_id) {
+        Ok(Some(riviu_core::PublishCampaignState::Cancelled)) | Ok(None) => return Ok(()),
+        Ok(Some(_)) => {}
+        Err(error) => {
+            return Err(PhoneFailure::NothingPublished(format!(
+                "{}: không đọc được trạng thái chiến dịch ({error}) — dừng thay vì đăng tiếp",
+                assignment.udid
+            )))
+        }
     }
 
     // The same rule per assignment, and this is the one that stops the worst case: an
@@ -487,16 +532,21 @@ async fn post_one_phone(
     ) {
         Ok(true) => {}
         Ok(false) => {
-            return Err(format!(
-                "{} đã đăng hoặc đang được đăng, bỏ qua",
+            return Err(PhoneFailure::NothingPublished(format!(
+                "{} đã đăng, đang được đăng, hoặc chiến dịch đã dừng — bỏ qua",
                 assignment.udid
-            ))
+            )))
         }
-        Err(error) => return Err(format!("{}: {error}", assignment.udid)),
+        Err(error) => {
+            return Err(PhoneFailure::NothingPublished(format!(
+                "{}: {error}",
+                assignment.udid
+            )))
+        }
     }
     announce(&events, &db, &campaign_id);
 
-    let result = post_one_assignment(
+    let outcome = post_one_assignment(
         &control,
         &db,
         frames.as_ref(),
@@ -505,12 +555,6 @@ async fn post_one_phone(
         &bundle,
     )
     .await;
-    let outcome = match result {
-        Ok(outcome) => outcome,
-        // A transport error, which is the same class as `Unknown`: the request may have been
-        // delivered and its answer lost.
-        Err(error) => PostOutcome::Unknown(error.to_string()),
-    };
     let (state, code) = state_for_outcome(&outcome);
     let (message, evidence) = match &outcome {
         PostOutcome::Posted(evidence) => (None, evidence.to_string()),
@@ -522,12 +566,23 @@ async fn post_one_phone(
     if let Err(error) =
         db.update_publish_assignment_state(&assignment.id, state, code, Some(&evidence))
     {
-        return Err(format!("{}: {error}", assignment.udid));
+        // The state write failed *after* the attempt, so what the phone did is unknown to the
+        // database whatever it did on screen.
+        return Err(PhoneFailure::MayBeLive(format!(
+            "{}: {error}",
+            assignment.udid
+        )));
     }
     announce(&events, &db, &campaign_id);
-    match message {
-        Some(reason) => Err(format!("{}: {reason}", assignment.udid)),
-        None => Ok(()),
+    match (message, &outcome) {
+        (None, _) => Ok(()),
+        (Some(reason), PostOutcome::NothingPublished(_)) => Err(PhoneFailure::NothingPublished(
+            format!("{}: {reason}", assignment.udid),
+        )),
+        (Some(reason), _) => Err(PhoneFailure::MayBeLive(format!(
+            "{}: {reason}",
+            assignment.udid
+        ))),
     }
 }
 
@@ -768,9 +823,13 @@ pub(crate) async fn post_publish_campaign_inner(
         anyhow::bail!("publish campaign has no imported assignment");
     }
     // Read once for the message; the authority is the claim below, not this check.
+    // The same two states the claim below accepts. Reading only `Imported` here refused a
+    // campaign that startup recovery had correctly settled to `failed_before_dispatch` —
+    // labelled retryable and unreachable, which is the pairing this whole path keeps closing.
     if !matches!(
         detail.campaign.state,
         riviu_core::PublishCampaignState::Imported
+            | riviu_core::PublishCampaignState::FailedBeforeDispatch
     ) {
         anyhow::bail!(
             "campaign must be imported before post: {:?}",
@@ -835,7 +894,7 @@ pub(crate) async fn post_publish_campaign_inner(
             .iter()
             .find(|bundle| bundle.id == assignment.bundle_id)
         else {
-            running.push(tokio::spawn(async move { Err(String::new()) }));
+            running.push(tokio::spawn(async move { Err(PhoneFailure::NoBundle) }));
             continue;
         };
         running.push(tokio::spawn(post_one_phone(
@@ -852,15 +911,28 @@ pub(crate) async fn post_publish_campaign_inner(
     }
 
     let mut failures = Vec::new();
+    // **Whether anything may be live, tracked separately from whether anything failed.**
+    // Collapsing the two made a run where every phone refused before opening anything end as
+    // `uncertain` — permanently unclaimable — with children correctly marked retryable
+    // underneath it.
+    let mut may_be_live = false;
     for (assignment, task) in detail.assignments.iter().zip(running) {
         match task.await {
             Ok(Ok(())) => {}
-            Ok(Err(reason)) if reason.is_empty() => {
+            Ok(Err(PhoneFailure::NoBundle)) => {
                 failures.push(format!("bundle {} missing", assignment.bundle_id))
             }
-            Ok(Err(reason)) => failures.push(reason),
-            // A panic in one phone's task must not lose the other four.
-            Err(join) => failures.push(format!("{}: task hỏng ({join})", assignment.udid)),
+            Ok(Err(PhoneFailure::NothingPublished(reason))) => failures.push(reason),
+            Ok(Err(PhoneFailure::MayBeLive(reason))) => {
+                may_be_live = true;
+                failures.push(reason);
+            }
+            // A panic in one phone's task must not lose the other four — and it is the one
+            // failure that says nothing about where the phone got to, so it counts as live.
+            Err(join) => {
+                may_be_live = true;
+                failures.push(format!("{}: task hỏng ({join})", assignment.udid));
+            }
         }
     }
     // A cancel that landed mid-run is honoured by the tasks themselves, and read back here for
@@ -873,7 +945,14 @@ pub(crate) async fn post_publish_campaign_inner(
     // Conditional on the campaign still being `Posting`, in SQL — see
     // `Database::finish_publish_campaign`. An unconditional write here is what used to erase
     // a cancel that landed while the run was going.
-    db.finish_publish_campaign(&campaign_id, !failures.is_empty())?;
+    db.finish_publish_campaign(
+        &campaign_id,
+        match (failures.is_empty(), may_be_live) {
+            (true, _) => riviu_core::db::PublishRunOutcome::AllPosted,
+            (false, false) => riviu_core::db::PublishRunOutcome::NothingPublished,
+            (false, true) => riviu_core::db::PublishRunOutcome::SomethingMayBeLive,
+        },
+    )?;
     announce(&events, &db, &campaign_id);
     let output = db
         .get_publish_campaign(&campaign_id)?
@@ -914,23 +993,53 @@ async fn post_one_assignment(
     campaign_id: &str,
     assignment: &riviu_core::PublishAssignmentRecord,
     bundle: &riviu_core::PublishBundle,
-) -> anyhow::Result<PostOutcome> {
+) -> PostOutcome {
+    // **Everything before the phone opens is a refusal, not an unknown.** These used to be
+    // `bail!`s that the caller turned into `uncertain` — permanently unclaimable — for a
+    // caption nobody could have posted and a phone nobody had touched.
     if bundle.images.is_empty() {
-        anyhow::bail!("bundle {} has no images", bundle.id);
+        return PostOutcome::NothingPublished(format!("bundle {} has no images", bundle.id));
     }
     if bundle.caption.chars().count() > 2200 {
-        anyhow::bail!(
+        return PostOutcome::NothingPublished(format!(
             "caption for {} exceeds TikTok's 2200 character limit",
             bundle.id
-        );
+        ));
     }
-    let import = assignment
+    let Some(import) = assignment
         .evidence_json
         .as_deref()
         .and_then(import_id_from_evidence)
-        .ok_or_else(|| anyhow::anyhow!("native import proof is missing for {}", assignment.udid))?;
-    let context = open_publish_context(control, &assignment.udid).await?;
-    let session = control.streaming_session(&context)?;
+    else {
+        return PostOutcome::NothingPublished(format!(
+            "native import proof is missing for {}",
+            assignment.udid
+        ));
+    };
+    let context = match open_publish_context(control, &assignment.udid).await {
+        Ok(context) => context,
+        // The lease, the capacity reservation and the app launch all live in here. None of
+        // them reaches TikTok's composer, so a failure means nothing was published — and the
+        // media is still on the phone with no context to clean it from, which the operator
+        // needs told rather than hidden inside `uncertain`.
+        Err(error) => {
+            return PostOutcome::NothingPublished(format!(
+                "{}: không mở được phiên ({error}); ảnh vẫn còn trên máy",
+                assignment.udid
+            ))
+        }
+    };
+    let session = match control.streaming_session(&context) {
+        Ok(session) => session,
+        Err(error) => {
+            let cleanup =
+                tidy_up_the_imported_media(control, context, &assignment.udid, &import).await;
+            return fold_cleanup_into(
+                PostOutcome::NothingPublished(format!("{}: {error}", assignment.udid)),
+                cleanup,
+            );
+        }
+    };
     // **The one place the two composers meet**, and the partition is the same signal the
     // interaction path uses. A device that reports element bounds is driven by measured
     // labels; one that does not is driven by the pixel coordinates below.
@@ -955,9 +1064,11 @@ async fn post_one_assignment(
         )
         .await
     };
-    let outcome = action_result?;
+    // **Cleanup runs whatever the route said.** It used to sit behind `action_result?`, so
+    // every error path left the campaign's images in a real phone's gallery with nothing
+    // owning them — including the Android build gate, which refuses *before its first tap*.
     let cleanup = tidy_up_the_imported_media(control, context, &assignment.udid, &import).await;
-    Ok(fold_cleanup_into(outcome, cleanup))
+    fold_cleanup_into(action_result, cleanup)
 }
 
 /// Attach the cleanup result to a posting outcome **without changing what the post did**.
@@ -1414,22 +1525,29 @@ async fn post_through_the_pixel_grid(
     udid: &str,
     bundle: &riviu_core::PublishBundle,
     import: &str,
-) -> anyhow::Result<PostOutcome> {
+) -> PostOutcome {
     if bundle.images.len() > IOS_PIXEL_GRID_MAX_IMAGES {
-        anyhow::bail!(
+        return PostOutcome::NothingPublished(format!(
             "bundle {} has {} images and this composer has {IOS_PIXEL_GRID_MAX_IMAGES} tap points",
             bundle.id,
             bundle.images.len()
-        );
+        ));
     }
     let evidence = async {
         let before = wait_for_frame(frames, udid, Duration::from_secs(8)).await?;
         let before_sha = frame_sha256(&before);
 
-        tap_transition(frames, udid, session, PLUS_BUTTON, &before_sha).await?;
-        tap_transition(frames, udid, session, GALLERY_BUTTON, &before_sha).await?;
-        tap_transition(frames, udid, session, ALBUM_PICKER, &before_sha).await?;
-        tap_transition(frames, udid, session, ALBUM_ROW, &before_sha).await?;
+        // **Each tap is proved against the frame *it* started from, not against the first
+        // one.** All four compared with `before_sha`, so once the composer opened every later
+        // wait was already satisfied — a dropped gallery tap "succeeded" because the screen
+        // differed from the *feed*, and the fixed album and grid coordinates then landed on
+        // the wrong screen. On this route that publishes unrelated photographs under the
+        // requested caption.
+        let mut previous = before_sha;
+        for point in [PLUS_BUTTON, GALLERY_BUTTON, ALBUM_PICKER, ALBUM_ROW] {
+            previous =
+                frame_sha256(&tap_transition(frames, udid, session, point, &previous).await?);
+        }
 
         let grid_x = [105.0, 230.0, 355.0];
         let grid_y = [131.0, 255.0, 380.0, 505.0];
@@ -1444,9 +1562,13 @@ async fn post_through_the_pixel_grid(
         let selected = wait_for_frame(frames, udid, Duration::from_secs(5)).await?;
         let selected_sha = frame_sha256(&selected);
         session.tap(COMPOSER_NEXT).await?;
-        wait_for_changed_frame(frames, udid, &selected_sha, Duration::from_secs(8)).await?;
+        // Same chaining as the entry taps: both of these compared with `selected_sha`, so the
+        // second wait was already satisfied by the first screen change.
+        let after_next = frame_sha256(
+            &wait_for_changed_frame(frames, udid, &selected_sha, Duration::from_secs(8)).await?,
+        );
         session.tap(EDIT_NEXT).await?;
-        wait_for_changed_frame(frames, udid, &selected_sha, Duration::from_secs(8)).await?;
+        wait_for_changed_frame(frames, udid, &after_next, Duration::from_secs(8)).await?;
 
         if !session.supports_text_input() {
             anyhow::bail!("combined Agent text capability is not active for this session");
@@ -1496,8 +1618,14 @@ async fn post_through_the_pixel_grid(
             "postButtonRednessBefore": post_red_before,
         }))
     }
-    .await?;
-    Ok(PostOutcome::Posted(evidence))
+    .await;
+    // Every failure on this route is unknown, and that is not pessimism: it has no signal that
+    // separates "the tap never went out" from "it went out and the frame did not change the
+    // way we expected".
+    match evidence {
+        Ok(evidence) => PostOutcome::Posted(evidence),
+        Err(error) => PostOutcome::Unknown(error.to_string()),
+    }
 }
 
 /// Android: drive the measured composer, and report what it proved.
@@ -1523,31 +1651,45 @@ async fn post_through_the_composer(
     udid: &str,
     bundle: &riviu_core::PublishBundle,
     import: &str,
-) -> anyhow::Result<PostOutcome> {
+) -> PostOutcome {
     use riviu_core::tiktok_composer::{
         publish_carousel, CarouselRequest, ComposerPlan, ComposerVerdict, Screen,
     };
 
-    let package = control
-        .resolve_tiktok_package(udid)
-        .await
-        .map_err(anyhow::Error::new)?;
+    // **Every refusal in this block happens before the first tap**, so each is
+    // `NothingPublished` rather than `Unknown`. They used to be `?`, which the caller turned
+    // into `uncertain` — permanently unclaimable — for builds that had simply never been
+    // measured, which today is all of them.
+    let refuse = |reason: String| PostOutcome::NothingPublished(format!("{udid}: {reason}"));
+
+    let package = match control.resolve_tiktok_package(udid).await {
+        Ok(package) => package,
+        Err(error) => return refuse(format!("không xác định được bản TikTok ({error})")),
+    };
     let language = session.ui_language().await.unwrap_or_default();
     let version = session.app_version(&package).await.unwrap_or_default();
-    let labels = riviu_core::tiktok_labels::controls_for(&package, &language, &version)
-        .ok_or_else(|| {
-            anyhow::anyhow!("chưa đo nhãn TikTok cho {package} / {language:?} trên {udid}")
-        })?;
-    let plan = ComposerPlan::resolve(&labels).map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
-    anyhow::ensure!(
-        plan.can_publish(),
-        "bản build trên {udid} chưa đo {:?} — không đăng",
-        ComposerPlan::missing_to_publish(&labels)
-    );
+    let Some(labels) = riviu_core::tiktok_labels::controls_for(&package, &language, &version)
+    else {
+        return refuse(format!("chưa đo nhãn TikTok cho {package} / {language:?}"));
+    };
+    let plan = match ComposerPlan::resolve(&labels) {
+        Ok(plan) => plan,
+        Err(refusal) => return refuse(refusal.to_string()),
+    };
+    if !plan.can_publish() {
+        return refuse(format!(
+            "bản build này chưa đo {:?}",
+            ComposerPlan::missing_to_publish(&labels)
+        ));
+    }
 
-    let (width, height) = riviu_core::screen::measured_screen_size(session).await?;
-    let screen = Screen::new(width, height)
-        .ok_or_else(|| anyhow::anyhow!("{udid} reported a {width}x{height} screen"))?;
+    let (width, height) = match riviu_core::screen::measured_screen_size(session).await {
+        Ok(size) => size,
+        Err(error) => return refuse(format!("không đo được kích thước màn hình ({error})")),
+    };
+    let Some(screen) = Screen::new(width, height) else {
+        return refuse(format!("máy báo màn hình {width}x{height}"));
+    };
 
     // The same human-looking touch planner every other session uses, built by the crate that
     // owns the policy rather than assembled here.
@@ -1560,7 +1702,12 @@ async fn post_through_the_composer(
         screen,
     };
     let stop = std::sync::atomic::AtomicBool::new(false);
-    let verdict = publish_carousel(session, plan, plan_tap, &request, &stop).await?;
+    // A transport error from inside the walk is genuinely unknown: it can land either side of
+    // the Post tap, and the composer cannot tell the caller which.
+    let verdict = match publish_carousel(session, plan, plan_tap, &request, &stop).await {
+        Ok(verdict) => verdict,
+        Err(error) => return PostOutcome::Unknown(format!("{udid}: {error}")),
+    };
     let evidence = serde_json::json!({
         "state": if verdict.is_posted() { "posted" } else { "not_posted" },
         "route": "hierarchy",
@@ -1572,11 +1719,11 @@ async fn post_through_the_composer(
         "captionSha256": bundle.caption_sha256,
         "labels": labels.provenance(),
     });
-    Ok(match verdict {
+    match verdict {
         ComposerVerdict::Posted => PostOutcome::Posted(evidence),
         other if other.may_retry() => PostOutcome::NothingPublished(other.reason().to_string()),
         other => PostOutcome::Unknown(other.reason().to_string()),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -1752,6 +1899,20 @@ mod tests {
                 .as_str()
                 .is_some_and(|text| text.contains("adb went away")));
         }
+
+        // **And the production path routes through it**, which testing the helper alone
+        // cannot show: `let _ = cleanup; Ok(outcome)` at the call site left this green.
+        let body = code_of("async fn post_one_assignment(");
+        assert!(
+            body.iter()
+                .any(|line| line.contains("fold_cleanup_into(action_result, cleanup)")),
+            "the posting path stopped folding the cleanup result into its outcome"
+        );
+        assert!(
+            body.iter()
+                .any(|line| line.contains("tidy_up_the_imported_media")),
+            "the imported media is no longer cleaned up at all"
+        );
     }
 
     /// **Three outcomes, three states — and the retryable one must not be stranded.**
@@ -1794,19 +1955,11 @@ mod tests {
     /// a stream permit, reads the cancel, claims the row, and only then touches a phone.
     #[test]
     fn a_cancel_is_read_before_the_claim_and_not_after_the_composer_opens() {
-        // Read line by line rather than by byte offsets: `lines()` handles CRLF on its own,
-        // and the column-zero `}` is what ends a top-level item. An earlier version sliced on
-        // literal newline escapes and was quietly measuring a different span.
-        let lines: Vec<&str> = include_str!("publish_commands.rs").lines().collect();
-        let start = lines
-            .iter()
-            .position(|line| line.starts_with("async fn post_one_phone("))
-            .expect("`post_one_phone` is still called that");
-        let length = lines[start..]
-            .iter()
-            .position(|line| *line == "}")
-            .expect("the function terminates at column zero");
-        let body = &lines[start..start + length];
+        // **Comments are stripped before anything is searched.** The first version counted
+        // token occurrences over the raw lines, so writing
+        // `// PublishCampaignState::Cancelled` above the claim satisfied it while the real
+        // check was deleted — the gate measured the file's prose, not its behaviour.
+        let body = code_of("async fn post_one_phone(");
         let at = |needle: &str| body.iter().position(|line| line.contains(needle));
 
         let cancel = at("PublishCampaignState::Cancelled")
@@ -1832,6 +1985,42 @@ mod tests {
             1,
             "the cancel is read more than once; the later read stops a phone mid-post"
         );
+
+        // The two helpers this function must actually route through, rather than merely
+        // mention. Hard-coding either one's answer inline left the pure tests green.
+        assert!(
+            at("state_for_outcome(&outcome)").is_some(),
+            "the assignment state is decided somewhere other than `state_for_outcome`"
+        );
+        assert!(
+            at("gate.acquire()").is_some(),
+            "the fan-out permit is never acquired, so the semaphore bounds nothing"
+        );
+        assert!(
+            at("tokio::time::sleep(stagger)").is_some(),
+            "the stagger argument is not what delays the task"
+        );
+    }
+
+    /// The lines of one top-level function, **with comments and blank lines removed**.
+    ///
+    /// Every source gate in this module goes through here. A gate that reads raw lines is
+    /// satisfied by a comment saying the right words, which is the opposite of what it is for.
+    fn code_of(signature: &str) -> Vec<&'static str> {
+        let lines: Vec<&str> = include_str!("publish_commands.rs").lines().collect();
+        let start = lines
+            .iter()
+            .position(|line| line.starts_with(signature))
+            .unwrap_or_else(|| panic!("{signature} is no longer in this file"));
+        let length = lines[start..]
+            .iter()
+            .position(|line| *line == "}")
+            .expect("the function terminates at column zero");
+        lines[start..start + length]
+            .iter()
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty() && !line.starts_with("//"))
+            .collect()
     }
 
     /// **The fan-out is bounded by the stream budget and staggered.**
@@ -1869,17 +2058,32 @@ mod tests {
     }
 
     #[test]
+    fn the_transfer_path_claims_the_campaign_instead_of_writing_it() {
+        let body = code_of("pub(crate) async fn transfer_publish_campaign_inner(");
+        assert!(
+            body.iter()
+                .any(|line| line.contains("claim_publish_campaign_for_transfer")),
+            "transfer writes `Transferring` unconditionally again — which on a campaign that              already succeeded rebuilds exactly the state the posting claim accepts"
+        );
+        // And it must not go back to the unconditional write.
+        assert!(
+            !body
+                .iter()
+                .any(|line| line.contains("PublishCampaignState::Transferring")
+                    && line.contains("update_publish_campaign_state")),
+            "the unconditional write is back"
+        );
+        // A finished assignment is skipped, so the two guards do not depend on each other.
+        assert!(
+            body.iter()
+                .any(|line| line.contains("PublishCampaignState::Succeeded")),
+            "the loop no longer skips assignments that already reached a phone"
+        );
+    }
+
+    #[test]
     fn the_publish_session_targets_the_device_own_tiktok_build() {
-        let lines: Vec<&str> = include_str!("publish_commands.rs").lines().collect();
-        let start = lines
-            .iter()
-            .position(|line| line.starts_with("async fn open_publish_context("))
-            .expect("`open_publish_context` is still called that");
-        let length = lines[start..]
-            .iter()
-            .position(|line| *line == "}")
-            .expect("the function terminates at column zero");
-        let body = &lines[start..start + length];
+        let body = code_of("async fn open_publish_context(");
         assert!(
             body.iter()
                 .any(|line| line.contains("resolve_tiktok_package")),
@@ -1889,6 +2093,18 @@ mod tests {
             !body.iter().any(|line| line.contains("IOS_TIKTOK_BUNDLE")),
             "the publish context is back to assuming the iOS bundle on every backend"
         );
+        // **And the answer has to reach both calls.** Resolving the package and then passing a
+        // literal to `terminate_app` satisfies the two checks above while doing exactly what
+        // they exist to prevent.
+        for call in [
+            "terminate_app(&exclusive, &target_package)",
+            "start_interaction_session(exclusive, &target_package",
+        ] {
+            assert!(
+                body.iter().any(|line| line.contains(call)),
+                "the resolved package does not reach `{call}`"
+            );
+        }
     }
 
     #[test]

@@ -2,6 +2,20 @@
 
 use super::*;
 
+/// How a posting run ended, as far as the **campaign** is concerned.
+///
+/// Three answers, not two. The middle one is the whole point: a run where every phone refused
+/// before opening anything published nothing, and a campaign that says so stays claimable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishRunOutcome {
+    /// Every assignment posted.
+    AllPosted,
+    /// Some assignments failed, and **none of them may have published**.
+    NothingPublished,
+    /// At least one assignment may be live and could not be confirmed.
+    SomethingMayBeLive,
+}
+
 impl Database {
     pub fn create_publish_campaign(
         &self,
@@ -457,15 +471,58 @@ impl Database {
         intent_json: &str,
     ) -> anyhow::Result<bool> {
         let conn = self.conn()?;
+        // **And the parent has to still be posting.** The campaign state and this claim used
+        // to be two statements with a gap between them, and the gap is where a cancel lands: a
+        // task read `Posting`, the operator cancelled, and the task then claimed its row and
+        // opened a phone that published after the run was stopped. One statement closes it —
+        // SQLite evaluates the `EXISTS` inside the same update.
         let changed = conn.execute(
             "UPDATE publish_assignments SET state=?1,error_code=NULL,evidence_json=?2,\
-             revision=revision+1,updated_at=?3 WHERE id=?4 AND state IN (?5,?6)",
+             revision=revision+1,updated_at=?3 WHERE id=?4 AND state IN (?5,?6) \
+             AND EXISTS (SELECT 1 FROM publish_campaigns c \
+                         WHERE c.id = publish_assignments.campaign_id AND c.state = ?7)",
             params![
                 crate::publish::PublishCampaignState::Posting.as_str(),
                 intent_json,
                 Utc::now().to_rfc3339(),
                 assignment_id,
                 crate::publish::PublishCampaignState::Imported.as_str(),
+                crate::publish::PublishCampaignState::FailedBeforeDispatch.as_str(),
+                crate::publish::PublishCampaignState::Posting.as_str(),
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Move one campaign into `Transferring`, and answer whether it was this caller's to move.
+    ///
+    /// **Transfer had no claim at all**, and that was the hole underneath every other guard.
+    /// `transfer_publish_campaign_inner` wrote `Transferring` unconditionally and then walked
+    /// its assignments to `Imported` — so running Transfer a second time on a campaign that
+    /// had already **succeeded** put every row back into the one state the posting claim
+    /// accepts, and the next Post published the same carousels again. Every compare-and-swap
+    /// downstream is sound only while nothing can manufacture a claimable state; this could.
+    ///
+    /// The states it accepts are the ones where nothing has reached a phone:
+    ///
+    /// * `Queued` / `Scheduled` — never started.
+    /// * `Ready` — prepared, not transferred.
+    /// * `FailedBeforeDispatch` — the name is the guarantee.
+    ///
+    /// `Imported` is excluded on purpose too: the media is already on the phones and the next
+    /// step is Post, not another transfer.
+    pub fn claim_publish_campaign_for_transfer(&self, id: &str) -> anyhow::Result<bool> {
+        let conn = self.conn()?;
+        let changed = conn.execute(
+            "UPDATE publish_campaigns SET state=?1,error_code=NULL,revision=revision+1,\
+             updated_at=?2 WHERE id=?3 AND state IN (?4,?5,?6,?7)",
+            params![
+                crate::publish::PublishCampaignState::Transferring.as_str(),
+                Utc::now().to_rfc3339(),
+                id,
+                crate::publish::PublishCampaignState::Queued.as_str(),
+                crate::publish::PublishCampaignState::Scheduled.as_str(),
+                crate::publish::PublishCampaignState::Ready.as_str(),
                 crate::publish::PublishCampaignState::FailedBeforeDispatch.as_str(),
             ],
         )?;
@@ -506,26 +563,67 @@ impl Database {
         Ok(state.as_deref().map(publish_state_from_str))
     }
 
-    /// Bundle ids that have already been dispatched to a phone, in any run.
+    /// Source bundle ids that some campaign has already **spoken for**.
     ///
-    /// **The input to [`crate::publish::auto_assign_bundles`], and the reason it needs no
-    /// cursor.** "Already published" is deliberately wider than `succeeded`: an assignment
-    /// sitting at `posting`, `verifying` or `uncertain` may be a live carousel that nobody can
-    /// confirm, and dealing its bundle again would put the same images on a second account.
+    /// The input to [`crate::publish::auto_assign_bundles`], and the reason it needs no cursor.
     ///
-    /// `failed_before_dispatch` is **not** in the list — the name is the guarantee, nothing
-    /// reached a phone — so a bundle whose run died before transfer comes back into the pool,
-    /// which is exactly what should happen to it.
+    /// # Two mistakes this used to make, and the second one made it answer nothing
+    ///
+    /// **It compared two different id namespaces.** Campaign creation namespaces every staged
+    /// bundle as `"{request_id}:{source_bundle_id}"`, so that is what the assignment rows hold
+    /// — while the auto-deal rescans the folder and offers the scanner's own
+    /// `source_bundle_id`. `req-1:bo1-abc` never equals `bo1-abc`, so the pool excluded
+    /// *nothing* and every press of the deal button could re-publish posts that had already
+    /// gone out. The prefix is stripped here, which is exact: a request id is a UUID and
+    /// carries no colon.
+    ///
+    /// **And it only counted assignments that had reached a phone.** Everything from `queued`
+    /// to `imported` is a campaign the operator has already committed this bundle to — an
+    /// `imported` one has its images sitting in a phone's gallery — so leaving them in the pool
+    /// let a second campaign be planned for the same carousel while the first was still on its
+    /// way. Only the states that *released* the bundle come back:
+    ///
+    /// * `failed_before_dispatch` — the name is the guarantee, nothing reached a phone;
+    /// * `cancelled` and `missed` — the operator stopped it, or its hour passed unrun.
     pub fn bundle_ids_already_dispatched(&self) -> anyhow::Result<Vec<String>> {
         let conn = self.conn()?;
         let mut statement = conn.prepare(
-            "SELECT DISTINCT bundle_id FROM publish_assignments
-             WHERE state IN ('posting','verifying','succeeded','uncertain')",
+            // **The parent counts too.** Cancelling a campaign changes only the campaign
+            // row, so its assignments keep whatever state they had — and reserving on the
+            // assignment alone would hold those bundles out of the pool forever.
+            "SELECT DISTINCT a.bundle_id FROM publish_assignments a
+             JOIN publish_campaigns c ON c.id = a.campaign_id
+             WHERE a.state NOT IN ('failed_before_dispatch','cancelled','missed')
+               AND c.state NOT IN ('failed_before_dispatch','cancelled','missed')",
         )?;
         let ids = statement
-            .query_map([], |row| row.get(0))?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .map(|id| {
+                id.map(|id| {
+                    id.split_once(':')
+                        .map(|(_request, source)| source.to_string())
+                        .unwrap_or(id)
+                })
+            })
             .collect::<Result<Vec<String>, _>>()?;
         Ok(ids)
+    }
+
+    /// Every campaign still waiting for its scheduled time.
+    ///
+    /// **By state, not by taking the newest page and filtering it.** The scheduler asked for
+    /// two hundred campaigns each tick and picked the `scheduled` ones out — so once two
+    /// hundred newer rows existed, an older scheduled campaign fell off the end of every page
+    /// and was never run and never marked missed. It simply sat there.
+    pub fn scheduled_publish_campaigns(&self) -> anyhow::Result<Vec<(String, Option<String>)>> {
+        let conn = self.conn()?;
+        let mut statement = conn.prepare(
+            "SELECT id,run_at FROM publish_campaigns WHERE state='scheduled' ORDER BY run_at ASC",
+        )?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// The campaign's revision, for an event payload.
@@ -564,12 +662,21 @@ impl Database {
     pub fn finish_publish_campaign(
         &self,
         id: &str,
-        had_failures: bool,
+        outcome: PublishRunOutcome,
     ) -> anyhow::Result<Option<crate::publish::PublishCampaignState>> {
-        let wanted = if had_failures {
-            crate::publish::PublishCampaignState::Uncertain
-        } else {
-            crate::publish::PublishCampaignState::Succeeded
+        let wanted = match outcome {
+            PublishRunOutcome::AllPosted => crate::publish::PublishCampaignState::Succeeded,
+            // **Nothing may be live, so the campaign stays claimable.** It used to become
+            // `uncertain` for *any* failure, which the claim refuses forever — so a run where
+            // every phone refused before opening anything (an unmeasured build, an album that
+            // was not there) sent an operator to look at phones where nothing had happened,
+            // and could not be run again.
+            PublishRunOutcome::NothingPublished => {
+                crate::publish::PublishCampaignState::FailedBeforeDispatch
+            }
+            PublishRunOutcome::SomethingMayBeLive => {
+                crate::publish::PublishCampaignState::Uncertain
+            }
         };
         let conn = self.conn()?;
         conn.execute(
@@ -578,7 +685,11 @@ impl Database {
              WHERE id=?4 AND state=?5",
             params![
                 wanted.as_str(),
-                had_failures.then_some("post_or_cleanup_failed"),
+                match outcome {
+                    PublishRunOutcome::AllPosted => None,
+                    PublishRunOutcome::NothingPublished => Some("post_refused_before_dispatch"),
+                    PublishRunOutcome::SomethingMayBeLive => Some("post_or_cleanup_failed"),
+                },
                 Utc::now().to_rfc3339(),
                 id,
                 crate::publish::PublishCampaignState::Posting.as_str(),
@@ -652,11 +763,19 @@ mod claim_tests {
     }
 
     fn campaign(db: &Database, udids: &[&str]) -> crate::publish::PublishCampaignRecord {
-        let bundle_ids: Vec<String> = udids.iter().map(|udid| format!("b-{udid}")).collect();
+        // **Namespaced, the way `publish_create_campaign` stores them.** The fixture used a
+        // bare `b-<udid>`, so nothing here could see that the auto-deal reads a different id
+        // namespace than the one the database holds — the defect that made the pool exclude
+        // nothing at all.
+        let request_id = Uuid::new_v4().to_string();
+        let bundle_ids: Vec<String> = udids
+            .iter()
+            .map(|udid| format!("{request_id}:b-{udid}"))
+            .collect();
         let bundles: Vec<crate::publish::PublishBundle> =
             bundle_ids.iter().map(|id| bundle(id)).collect();
         let request = crate::publish::PublishCampaignRequest {
-            request_id: Uuid::new_v4().to_string(),
+            request_id: request_id.clone(),
             source_root: "C:/fixture".into(),
             bundle_ids,
             udids: udids.iter().map(|udid| udid.to_string()).collect(),
@@ -694,6 +813,8 @@ mod claim_tests {
         }
         record
     }
+
+    use super::PublishRunOutcome;
 
     const INTENT: &str = r#"{"effectIntent":"post_carousel"}"#;
 
@@ -902,14 +1023,20 @@ mod claim_tests {
         let _ = std::fs::remove_file(path);
     }
 
-    /// **What counts as "already published" for the auto-deal, and what deliberately does not.**
+    /// **What a bundle must be released by before it can be dealt again.**
     ///
-    /// Wider than `succeeded`: an assignment at `posting`, `verifying` or `uncertain` may be a
-    /// live carousel nobody can confirm, and dealing its bundle again puts the same images on a
-    /// second account. Narrower at the other end: `failed_before_dispatch` means nothing
-    /// reached a phone, so that bundle belongs back in the pool.
+    /// Two things this could not see before, and the second made the whole pool useless.
+    ///
+    /// It only excluded assignments that had reached a phone, so a bundle committed to a
+    /// campaign that was merely `queued` or `imported` — images already in a phone's gallery —
+    /// stayed on offer and could be planned into a second campaign.
+    ///
+    /// And it compared the wrong ids. Campaign creation namespaces bundles as
+    /// `"{request_id}:{source}"`; the deal rescans the folder and offers `source`. The two sets
+    /// never intersected, so **nothing was ever excluded** — the fixture hid it by reading its
+    /// expected ids back out of the same rows.
     #[test]
-    fn a_bundle_counts_as_dispatched_exactly_when_it_might_be_live() {
+    fn a_bundle_is_offered_again_only_after_a_campaign_lets_go_of_it() {
         let (db, path) = fixture();
         let record = campaign(
             &db,
@@ -919,6 +1046,7 @@ mod claim_tests {
                 "p-uncertain",
                 "p-failed",
                 "p-imported",
+                "p-cancelled",
             ],
         );
         let by_udid: std::collections::HashMap<String, (String, String)> = db
@@ -948,6 +1076,11 @@ mod claim_tests {
                 "p-failed",
                 crate::publish::PublishCampaignState::FailedBeforeDispatch,
             ),
+            (
+                "p-cancelled",
+                crate::publish::PublishCampaignState::Cancelled,
+            ),
+            // `p-imported` keeps whatever `campaign()` left it at, which is `Imported`.
         ] {
             let (id, _) = &by_udid[udid];
             db.update_publish_assignment_state(id, state, None, None)
@@ -955,21 +1088,51 @@ mod claim_tests {
         }
 
         let dispatched = db.bundle_ids_already_dispatched().expect("read");
-        let bundle_of = |udid: &str| by_udid[udid].1.clone();
-        for udid in ["p-succeeded", "p-posting", "p-uncertain"] {
+        // **The stored id is namespaced and the pool speaks the scanner's language.** Asserted
+        // on the raw row, so a test that read its expectation back out of the same rows cannot
+        // pass by agreeing with itself.
+        let stored = &by_udid["p-succeeded"].1;
+        assert!(
+            stored.contains(':'),
+            "the fixture stopped namespacing bundle ids, so this test proves nothing: {stored}"
+        );
+        let source_of = |udid: &str| {
+            by_udid[udid]
+                .1
+                .split_once(':')
+                .map(|(_, source)| source.to_string())
+                .expect("namespaced")
+        };
+        for udid in ["p-succeeded", "p-posting", "p-uncertain", "p-imported"] {
             assert!(
-                dispatched.contains(&bundle_of(udid)),
-                "{udid}: its bundle may be live and must not be dealt again"
+                dispatched.contains(&source_of(udid)),
+                "{udid}: a campaign still holds this bundle and it was offered again"
             );
         }
+        for udid in ["p-failed", "p-cancelled"] {
+            assert!(
+                !dispatched.contains(&source_of(udid)),
+                "{udid}: this campaign let the bundle go and it stayed out of the pool"
+            );
+        }
+        // And nothing namespaced leaks out, which is what made every comparison fail.
         assert!(
-            !dispatched.contains(&bundle_of("p-failed")),
-            "nothing reached a phone, so this bundle belongs back in the pool"
+            dispatched.iter().all(|id| !id.contains(':')),
+            "the pool still speaks the database's id namespace: {dispatched:?}"
         );
-        assert!(
-            !dispatched.contains(&bundle_of("p-imported")),
-            "an imported assignment has not been posted"
-        );
+
+        // **Cancelling the campaign gives every one of its bundles back.** Cancel touches only
+        // the campaign row, so reserving on the assignment alone would hold them out of the
+        // pool for good — the operator would stop a run and never be able to deal those posts
+        // again.
+        db.cancel_publish_campaign(&record.id).expect("cancel");
+        let after_cancel = db.bundle_ids_already_dispatched().expect("read");
+        for udid in ["p-succeeded", "p-posting", "p-uncertain", "p-imported"] {
+            assert!(
+                !after_cancel.contains(&source_of(udid)),
+                "{udid}: its campaign was cancelled and the bundle is still held"
+            );
+        }
         let _ = std::fs::remove_file(path);
     }
 
@@ -1057,6 +1220,165 @@ mod claim_tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// **A finished campaign cannot be transferred again.**
+    ///
+    /// The hole underneath every other guard. Transfer wrote `Transferring` unconditionally and
+    /// walked its assignments back to `Imported` — so a second Transfer on a campaign that had
+    /// already succeeded rebuilt exactly the state the posting claim accepts, and the next Post
+    /// published the same carousels a second time. Compare-and-swap protects nothing while
+    /// another path can manufacture a claimable state.
+    #[test]
+    fn a_campaign_that_already_posted_cannot_be_transferred_again() {
+        let (db, path) = fixture();
+        let record = campaign(&db, &["phone-a"]);
+
+        // The states a transfer may start from. (`campaign()` leaves the fixture `Imported`,
+        // which is deliberately not one of them — the media is already on the phones.)
+        db.update_publish_campaign_state(
+            &record.id,
+            crate::publish::PublishCampaignState::Queued,
+            None,
+        )
+        .expect("seed");
+        assert!(db
+            .claim_publish_campaign_for_transfer(&record.id)
+            .expect("queued is transferable"));
+        for start in [
+            crate::publish::PublishCampaignState::Ready,
+            crate::publish::PublishCampaignState::Scheduled,
+            crate::publish::PublishCampaignState::FailedBeforeDispatch,
+        ] {
+            db.update_publish_campaign_state(&record.id, start.clone(), None)
+                .expect("seed");
+            assert!(
+                db.claim_publish_campaign_for_transfer(&record.id)
+                    .expect("claim runs"),
+                "{start:?} should be transferable"
+            );
+        }
+
+        // And the ones it must not.
+        for finished in [
+            crate::publish::PublishCampaignState::Succeeded,
+            crate::publish::PublishCampaignState::Posting,
+            crate::publish::PublishCampaignState::Verifying,
+            crate::publish::PublishCampaignState::Uncertain,
+            crate::publish::PublishCampaignState::Cancelled,
+            // Already on the phones; the next step is Post, not another transfer.
+            crate::publish::PublishCampaignState::Imported,
+        ] {
+            db.update_publish_campaign_state(&record.id, finished.clone(), None)
+                .expect("seed");
+            assert!(
+                !db.claim_publish_campaign_for_transfer(&record.id)
+                    .expect("claim runs"),
+                "{finished:?} was re-transferred, which rebuilds a claimable state"
+            );
+            assert_eq!(
+                db.publish_campaign_state(&record.id).expect("read"),
+                Some(finished),
+                "and the refusal must not move the row"
+            );
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// **A run where nothing was published leaves a campaign that can run again.**
+    ///
+    /// The campaign used to take `uncertain` for *any* failure, which the claim refuses
+    /// forever — while its children were correctly marked retryable underneath it. An operator
+    /// was sent to look at phones where nothing had happened.
+    #[test]
+    fn a_campaign_ends_where_its_children_say_it_should() {
+        let (db, path) = fixture();
+        for (outcome, expected) in [
+            (
+                PublishRunOutcome::AllPosted,
+                crate::publish::PublishCampaignState::Succeeded,
+            ),
+            (
+                PublishRunOutcome::NothingPublished,
+                crate::publish::PublishCampaignState::FailedBeforeDispatch,
+            ),
+            (
+                PublishRunOutcome::SomethingMayBeLive,
+                crate::publish::PublishCampaignState::Uncertain,
+            ),
+        ] {
+            let record = campaign(&db, &[&format!("phone-{outcome:?}")]);
+            assert!(db
+                .claim_publish_campaign_for_posting(&record.id)
+                .expect("claim"));
+            assert_eq!(
+                db.finish_publish_campaign(&record.id, outcome)
+                    .expect("finish"),
+                Some(expected.clone()),
+                "{outcome:?} must end as {expected:?}"
+            );
+        }
+        // And the retryable one really is claimable again, which is the whole point.
+        let record = campaign(&db, &["phone-retry"]);
+        assert!(db
+            .claim_publish_campaign_for_posting(&record.id)
+            .expect("claim"));
+        db.finish_publish_campaign(&record.id, PublishRunOutcome::NothingPublished)
+            .expect("finish");
+        assert!(
+            db.claim_publish_campaign_for_posting(&record.id)
+                .expect("claim"),
+            "a campaign that published nothing must be runnable again"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// **A cancel that lands between the read and the claim still stops the phone.**
+    ///
+    /// The task read the campaign state and claimed its row in two separate statements, and
+    /// the gap between them is exactly where the operator's Cancel arrives: the task saw
+    /// `Posting`, the campaign became `Cancelled`, and the task then claimed a row and opened a
+    /// phone that published after the run was stopped. On Android that post cannot be taken
+    /// down.
+    ///
+    /// The claim names the parent's state in its own `UPDATE`, so there is no gap left.
+    #[test]
+    fn a_cancel_that_lands_after_the_state_read_still_stops_the_claim() {
+        let (db, path) = fixture();
+        let record = campaign(&db, &["phone-a"]);
+        let assignment = db
+            .get_publish_campaign(&record.id)
+            .expect("read back")
+            .expect("campaign exists")
+            .assignments
+            .into_iter()
+            .next()
+            .expect("one assignment")
+            .id;
+        let intent = "{\"effectIntent\":\"post_carousel\"}";
+        assert!(db
+            .claim_publish_campaign_for_posting(&record.id)
+            .expect("claim the campaign"));
+
+        // What the task saw.
+        assert_eq!(
+            db.publish_campaign_state(&record.id).expect("read"),
+            Some(crate::publish::PublishCampaignState::Posting)
+        );
+        // What the operator did next.
+        db.cancel_publish_campaign(&record.id).expect("cancel");
+        // What the task tried to do with what it saw.
+        assert!(
+            !db.claim_publish_assignment_for_posting(&assignment, intent)
+                .expect("claim runs"),
+            "a phone was claimed after the run was cancelled"
+        );
+        assert_eq!(
+            state_of(&db, &record.id, "phone-a"),
+            crate::publish::PublishCampaignState::Imported,
+            "and the row is untouched, which is where a later run expects it"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
     /// An assignment that already succeeded is never posted again.
     ///
     /// And neither is an `Uncertain` one, which is the sharper half: uncertain means the post
@@ -1078,6 +1400,18 @@ mod claim_tests {
             .id
             .clone();
         let intent = "{\"effectIntent\":\"post_carousel\"}";
+
+        // **The parent has to be posting.** The claim now names its campaign's state in the
+        // same statement, so a run that has not started — or has been cancelled — cannot have
+        // its rows taken.
+        assert!(
+            !db.claim_publish_assignment_for_posting(&assignment, intent)
+                .expect("claim runs"),
+            "an assignment was claimed under a campaign that is not posting"
+        );
+        assert!(db
+            .claim_publish_campaign_for_posting(&record.id)
+            .expect("claim the campaign"));
 
         assert!(
             db.claim_publish_assignment_for_posting(&assignment, intent)
