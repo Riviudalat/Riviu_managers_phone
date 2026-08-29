@@ -55,6 +55,10 @@ vi.mock("../api", () => ({
   exampleScript: vi.fn(async () => "{}"),
   installIpaToGroup: vi.fn(async () => []),
   installLibraryApp: vi.fn(async () => undefined),
+  // The page follows a live run now, so it subscribes. Returning a no-op unsubscriber keeps
+  // the effect's cleanup honest without the test caring about events.
+  listenRiviuEvents: vi.fn(async () => () => undefined),
+  publishAutoAssign: vi.fn(async () => ({ plan: [] })),
   listAppsLibrary: vi.fn(async () => []),
   listGroups: vi.fn(async () => []),
   listMaterials: vi.fn(async () => []),

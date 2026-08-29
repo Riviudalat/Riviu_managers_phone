@@ -1075,6 +1075,7 @@ mod tests {
             E::FlowUpdated { .. } => "flowUpdated",
             E::FlowRunUpdated { .. } => "flowRunUpdated",
             E::InteractionUpdated { .. } => "interactionUpdated",
+            E::PublishUpdated { .. } => "publishUpdated",
             E::WdaExpiryWarning { .. } => "wdaExpiryWarning",
             E::NurtureStatus { .. } => "nurtureStatus",
         }
@@ -1086,13 +1087,14 @@ mod tests {
     /// the compiler already made someone write next to the variant, and
     /// `the_tag_names_are_the_ones_serde_writes` checks the naming convention against real
     /// serialised output rather than against this list.
-    const EVERY_EVENT_TAG: [&str; 8] = [
+    const EVERY_EVENT_TAG: [&str; 9] = [
         "devicesUpdated",
         "deviceUpdated",
         "jobUpdated",
         "flowUpdated",
         "flowRunUpdated",
         "interactionUpdated",
+        "publishUpdated",
         "wdaExpiryWarning",
         "nurtureStatus",
     ];

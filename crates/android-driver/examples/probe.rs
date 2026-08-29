@@ -2356,24 +2356,55 @@ async fn measure_gallery_entry(
 
     let source = session.agent().source().await?;
     let nodes = scan_source(&source);
-    // The shutter is the anchor: a clickable Button with a resource-id label, and the
-    // widest one on screen. Widest rather than "the one at these coordinates", so the
-    // anchor survives a different screen size.
-    let shutter = nodes
-        .iter()
-        .filter(|node| {
-            node.class.ends_with("Button") && node.clickable && node.desc.starts_with('@')
-        })
-        .filter_map(|node| parse_bounds(&node.bounds))
-        .max_by(|a, b| (a.2 - a.0).total_cmp(&(b.2 - b.0)))
-        .ok_or_else(|| anyhow::anyhow!("no labelled shutter to anchor on"))?;
+    // **The catalogued shutter first, and a shape guess only when there is none.**
+    //
+    // The guess used to be the whole of it: "a clickable Button whose `content-desc` starts
+    // with `@`". That is a build whose labels are *unresolved resource references*, which the
+    // two phones this was written on happened to be — and `com.ss.android.ugc.trill` 38.3.2,
+    // the build sixteen of the twenty phones run, renders its shutter as the words
+    // `Record video`. So on the fleet's own build the filter matched nothing and the command
+    // failed with "no labelled shutter to anchor on", on a screen where the shutter was right
+    // there.
+    //
+    // Asking the catalogue also makes the probe agree with production: `tiktok_composer`
+    // anchors the gallery entry on exactly this control.
+    let catalogued = labels
+        .label(TikTokControl::ComposerShutter)
+        .and_then(|label| {
+            let needle = label.value();
+            nodes
+                .iter()
+                .find(|node| node.desc == needle || node.text == needle)
+                .and_then(|node| parse_bounds(&node.bounds))
+        });
+    let shutter = match catalogued {
+        Some(bounds) => {
+            println!("  shutter from the catalogue");
+            bounds
+        }
+        None => {
+            println!("  shutter not catalogued on this build; guessing by shape");
+            nodes
+                .iter()
+                .filter(|node| node.class.ends_with("Button") && node.clickable)
+                .filter_map(|node| parse_bounds(&node.bounds))
+                .max_by(|a, b| (a.2 - a.0).total_cmp(&(b.2 - b.0)))
+                .ok_or_else(|| anyhow::anyhow!("no clickable Button to anchor on"))?
+        }
+    };
     let (sx, sy, sright, sbottom) = shutter;
     println!("  shutter anchor at {sx:.0},{sy:.0}..{sright:.0},{sbottom:.0}");
 
-    // Clickable, unlabelled, to the right of the shutter, on the shutter's row.
+    // Unlabelled, to the right of the shutter, on the shutter's row.
+    //
+    // **`clickable` is no longer required**, and the measurement is why: the gallery entry on
+    // `trill` 38.3.2 is a bare `FrameLayout` (`…:id/bos`), and a container whose parent carries
+    // the click is the ordinary shape for one. Requiring the flag dropped the very control
+    // this command exists to find. Clickable candidates are still listed first, because they
+    // are the likelier ones.
     let mut candidates: Vec<(f64, f64, f64, f64)> = nodes
         .iter()
-        .filter(|node| node.clickable && node.desc.trim().is_empty() && node.text.trim().is_empty())
+        .filter(|node| node.desc.trim().is_empty() && node.text.trim().is_empty())
         .filter_map(|node| parse_bounds(&node.bounds))
         // Filter on the *centre* being right of the shutter, not the left edge. The
         // control immediately beside the shutter overlaps it by ~50 px, so a left-edge

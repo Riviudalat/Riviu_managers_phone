@@ -1708,6 +1708,7 @@ impl AppState {
         let publish_control = self.control.clone();
         let publish_frames = Arc::new(self.streams.clone());
         let publish_agent_bundle = self.active_agent_bundle_id.clone();
+        let publish_events = self.events.clone();
         let publish_admission = self.command_admission.clone();
         let publish_background_stop = self.background_stop.clone();
         let publish_started_at = chrono::Local::now().naive_local();
@@ -1768,6 +1769,7 @@ impl AppState {
                     if let Err(error) = crate::publish_commands::transfer_publish_campaign_inner(
                         publish_control.clone(),
                         publish_db.clone(),
+                        publish_events.clone(),
                         publish_agent_bundle.clone(),
                         campaign.id.clone(),
                     )
@@ -1783,6 +1785,7 @@ impl AppState {
                         publish_control.clone(),
                         publish_db.clone(),
                         publish_frames.clone(),
+                        publish_events.clone(),
                         campaign.id.clone(),
                     )
                     .await

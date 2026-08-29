@@ -47,6 +47,18 @@ pub enum AppEvent {
         campaign_id: String,
         revision: u64,
     },
+    /// One publish campaign changed, once per state write.
+    ///
+    /// The same shape as [`Self::InteractionUpdated`] and for the same reason: an id and a
+    /// revision, so the page re-reads the row rather than trusting a payload that may have
+    /// been overtaken. Publish emitted **nothing** before this — a run that took twenty
+    /// minutes across five phones showed the operator a page frozen at the moment they
+    /// pressed the button, and the only way to see progress was to leave the page and come
+    /// back.
+    PublishUpdated {
+        campaign_id: String,
+        revision: u64,
+    },
     WdaExpiryWarning {
         udid: String,
         days_remaining: i64,

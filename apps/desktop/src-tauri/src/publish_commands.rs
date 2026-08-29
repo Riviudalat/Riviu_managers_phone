@@ -31,6 +31,38 @@ pub fn publish_scan_folder(
     scan_publish_folder(PathBuf::from(source_root), PublishScanOptions::default()).map_err(err)
 }
 
+/// Deal `wanted` not-yet-published bundles onto the first `wanted` selected phones.
+///
+/// **The operator used to tick boxes.** With twenty-one folders and twenty phones that is a
+/// pairing done by hand every run, and the pairing is positional all the way down — a mistake
+/// there posts one account's photographs under another's caption, silently, with no delete.
+///
+/// The pool is what has **not** been dispatched, read from the assignment rows rather than
+/// from a counter: see [`riviu_core::publish::auto_assign_bundles`] for the three ways a
+/// counter got that wrong.
+///
+/// Returns the plan for the page to show. Nothing is created here — the operator still presses
+/// the button that creates the campaign, with the pairing in front of them.
+#[tauri::command]
+pub fn publish_auto_assign(
+    state: State<'_, AppState>,
+    source_root: String,
+    udids: Vec<String>,
+    wanted: usize,
+) -> Result<riviu_core::publish::AutoAssignment, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let manifest = scan_publish_folder(PathBuf::from(source_root), PublishScanOptions::default())
+        .map_err(err)?;
+    let all: Vec<String> = manifest
+        .bundles
+        .iter()
+        .map(|bundle| bundle.id.clone())
+        .collect();
+    let already = state.db.bundle_ids_already_dispatched().map_err(err)?;
+    riviu_core::publish::auto_assign_bundles(&all, &already, &udids, wanted)
+        .map_err(|error| err(anyhow::anyhow!("{error}")))
+}
+
 #[tauri::command]
 pub fn publish_create_campaign(
     state: State<'_, AppState>,
@@ -173,6 +205,7 @@ pub async fn publish_transfer(
     transfer_publish_campaign_inner(
         state.control.clone(),
         state.db.clone(),
+        state.events.clone(),
         state.active_agent_bundle_id.clone(),
         campaign_id,
     )
@@ -183,6 +216,7 @@ pub async fn publish_transfer(
 pub(crate) async fn transfer_publish_campaign_inner(
     control: Arc<DeviceControlPlane>,
     db: Arc<Database>,
+    events: riviu_core::events::EventBus,
     agent_bundle_id: String,
     campaign_id: String,
 ) -> anyhow::Result<PublishCampaignDetail> {
@@ -229,6 +263,7 @@ pub(crate) async fn transfer_publish_campaign_inner(
         riviu_core::PublishCampaignState::Transferring,
         None,
     )?;
+    announce(&events, &db, &campaign_id);
 
     for assignment in &detail.assignments {
         // **Each phone gets its own bundle, and only its own.**
@@ -397,6 +432,123 @@ const PUBLIC_POST_CONFIRM: TapPoint = TapPoint { x: 275.0, y: 444.0 };
 /// coordinates*, not about TikTok: a carousel may hold 35 images and a hierarchy-driven
 /// composer that locates its cells is not bound by a grid nobody measured.
 pub(crate) const IOS_PIXEL_GRID_MAX_IMAGES: usize = 11;
+
+/// How far apart the fanned-out publish tasks start.
+///
+/// The same two seconds the interaction path measured on this fleet, and for the same reason
+/// rather than by imitation: twenty cold starts at once share one USB bus and one host, and the
+/// tail of that contention runs past the 40-second foreground window. A publish task opens the
+/// app exactly the way an interaction task does.
+const PUBLISH_FAN_OUT_STAGGER: Duration = Duration::from_secs(2);
+
+/// One phone's whole posting attempt, from the permit to the state write.
+///
+/// Returns `Err(reason)` for anything the operator should read, and `Ok(())` when the carousel
+/// is on the account. The empty string is reserved for "this campaign has no bundle for this
+/// assignment", which the caller turns into a message naming the bundle it does have.
+///
+/// **The cancel check is inside, before the claim.** A campaign the operator stopped must not
+/// start another phone — and a phone already inside the composer must not be abandoned there,
+/// which is why this is the only place it is checked.
+#[allow(clippy::too_many_arguments)]
+async fn post_one_phone(
+    stagger: Duration,
+    gate: Arc<tokio::sync::Semaphore>,
+    control: Arc<DeviceControlPlane>,
+    db: Arc<Database>,
+    frames: Arc<dyn FrameSource>,
+    events: riviu_core::events::EventBus,
+    campaign_id: String,
+    assignment: riviu_core::PublishAssignmentRecord,
+    bundle: riviu_core::PublishBundle,
+) -> Result<(), String> {
+    tokio::time::sleep(stagger).await;
+    let _permit = gate
+        .acquire()
+        .await
+        .map_err(|error| format!("{}: hết chỗ stream ({error})", assignment.udid))?;
+
+    // Read the operator's cancel **before** claiming, and only here. Stopping between phones
+    // costs nothing and leaves every untouched assignment still `Imported`, which is where a
+    // later run expects to find it. Stopping a phone already in the composer would produce the
+    // `uncertain` state that can never be retried.
+    if matches!(
+        db.publish_campaign_state(&campaign_id),
+        Ok(Some(riviu_core::PublishCampaignState::Cancelled))
+    ) {
+        return Ok(());
+    }
+
+    // The same rule per assignment, and this is the one that stops the worst case: an
+    // assignment already `Succeeded` is not walked back to `Posting` and posted again.
+    match db.claim_publish_assignment_for_posting(
+        &assignment.id,
+        &serde_json::json!({"effectIntent":"post_carousel"}).to_string(),
+    ) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(format!(
+                "{} đã đăng hoặc đang được đăng, bỏ qua",
+                assignment.udid
+            ))
+        }
+        Err(error) => return Err(format!("{}: {error}", assignment.udid)),
+    }
+    announce(&events, &db, &campaign_id);
+
+    let result = post_one_assignment(
+        &control,
+        &db,
+        frames.as_ref(),
+        &campaign_id,
+        &assignment,
+        &bundle,
+    )
+    .await;
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        // A transport error, which is the same class as `Unknown`: the request may have been
+        // delivered and its answer lost.
+        Err(error) => PostOutcome::Unknown(error.to_string()),
+    };
+    let (state, code) = state_for_outcome(&outcome);
+    let (message, evidence) = match &outcome {
+        PostOutcome::Posted(evidence) => (None, evidence.to_string()),
+        PostOutcome::NothingPublished(reason) | PostOutcome::Unknown(reason) => (
+            Some(reason.clone()),
+            serde_json::json!({"message": reason, "effectIntent":"post_carousel"}).to_string(),
+        ),
+    };
+    if let Err(error) =
+        db.update_publish_assignment_state(&assignment.id, state, code, Some(&evidence))
+    {
+        return Err(format!("{}: {error}", assignment.udid));
+    }
+    announce(&events, &db, &campaign_id);
+    match message {
+        Some(reason) => Err(format!("{}: {reason}", assignment.udid)),
+        None => Ok(()),
+    }
+}
+
+/// Tell the UI that a campaign moved, once per state write.
+///
+/// An id and a revision, never the row itself: the page re-reads, so a payload that was
+/// already stale by the time it arrived cannot be rendered as current. Same shape as the
+/// interaction path's event, and for the same reason.
+///
+/// **Best effort, and deliberately silent on failure.** Nothing about a post depends on the
+/// screen having heard about it, and turning a broadcast error into a failed publish would be
+/// the same mistake as letting a Sheets write fail one.
+fn announce(events: &riviu_core::events::EventBus, db: &Database, campaign_id: &str) {
+    let revision = db
+        .publish_campaign_revision(campaign_id)
+        .unwrap_or_default();
+    events.emit(riviu_core::events::AppEvent::PublishUpdated {
+        campaign_id: campaign_id.to_string(),
+        revision,
+    });
+}
 
 /// Which composer drives a given device.
 ///
@@ -595,6 +747,7 @@ pub async fn publish_post(
         state.control.clone(),
         state.db.clone(),
         Arc::new(state.streams.clone()),
+        state.events.clone(),
         campaign_id,
     )
     .await
@@ -605,6 +758,7 @@ pub(crate) async fn post_publish_campaign_inner(
     control: Arc<DeviceControlPlane>,
     db: Arc<Database>,
     frames: Arc<dyn FrameSource>,
+    events: riviu_core::events::EventBus,
     campaign_id: String,
 ) -> anyhow::Result<PublishCampaignDetail> {
     let detail = db
@@ -657,111 +811,70 @@ pub(crate) async fn post_publish_campaign_inner(
              không đăng lại"
         );
     }
+    announce(&events, &db, &campaign_id);
 
-    let mut failures = Vec::new();
-    let mut cancelled = false;
-    for assignment in &detail.assignments {
-        // **Read the operator's cancel, between phones and only between phones.**
-        //
-        // Before this, `publish_cancel` wrote `cancelled` into the campaign row and nothing
-        // in the run ever looked at it: the loop carried on posting to every remaining
-        // phone, and the last statement of the run wrote `succeeded` over the cancel. The
-        // operator saw a button that did nothing and a campaign that claimed to have
-        // finished cleanly.
-        //
-        // Checked here — after the previous phone finished, before the next one is claimed —
-        // and deliberately nowhere else. A cancel must **never** interrupt a post already in
-        // flight: that phone is somewhere inside TikTok's composer, and abandoning it there
-        // produces exactly the `uncertain` state that can never be retried. Stopping between
-        // phones costs the operator nothing and leaves every untouched assignment still
-        // `Imported`, which is where a later run expects to find it.
-        if matches!(
-            db.publish_campaign_state(&campaign_id)?,
-            Some(riviu_core::PublishCampaignState::Cancelled)
-        ) {
-            cancelled = true;
-            break;
-        }
+    // **Fanned out, bounded by the stream budget, staggered.** The same three properties the
+    // interaction path measured its way to, for the same fleet and the same reasons.
+    //
+    // Sequential was the shape before, and its cost is arithmetic: five phones inside TikTok's
+    // composer take about as long each, so a run took five times one phone and four phones sat
+    // idle throughout. Nothing required that — every assignment is claimed by compare-and-swap
+    // (`claim_publish_assignment_for_posting`), so two tasks cannot reach the same row, and the
+    // device control plane already serialises per device.
+    //
+    // The permit count is `stream_capacity`, because each post holds a UI-with-stream context.
+    // Running past it does not queue, it fails — which on this path means a phone with media
+    // already in its gallery.
+    let gate = Arc::new(tokio::sync::Semaphore::new(
+        control.stream_capacity().max(1),
+    ));
+    let mut running = Vec::with_capacity(detail.assignments.len());
+    for (index, assignment) in detail.assignments.iter().enumerate() {
         let Some(bundle) = detail
             .bundles
             .iter()
             .find(|bundle| bundle.id == assignment.bundle_id)
         else {
-            failures.push(format!("bundle {} missing", assignment.bundle_id));
+            running.push(tokio::spawn(async move { Err(String::new()) }));
             continue;
         };
-        // The same rule per assignment, and this is the one that stops the worst case: an
-        // assignment already `Succeeded` is not walked back to `Posting` and posted again.
-        // `detail.assignments` was read before the claim above, so it can be stale even for
-        // the winner -- a retry of an interrupted run sees rows the first run finished.
-        if !db.claim_publish_assignment_for_posting(
-            &assignment.id,
-            &serde_json::json!({"effectIntent":"post_carousel"}).to_string(),
-        )? {
-            failures.push(format!(
-                "{} đã đăng hoặc đang được đăng, bỏ qua",
-                assignment.udid
-            ));
-            continue;
-        }
-        let result = post_one_assignment(
-            &control,
-            &db,
-            frames.as_ref(),
-            &campaign_id,
-            assignment,
-            bundle,
-        )
-        .await;
-        match result {
-            Ok(PostOutcome::Posted(evidence)) => {
-                db.update_publish_assignment_state(
-                    &assignment.id,
-                    riviu_core::PublishCampaignState::Succeeded,
-                    None,
-                    Some(&evidence.to_string()),
-                )?;
+        running.push(tokio::spawn(post_one_phone(
+            PUBLISH_FAN_OUT_STAGGER * index as u32,
+            gate.clone(),
+            control.clone(),
+            db.clone(),
+            frames.clone(),
+            events.clone(),
+            campaign_id.clone(),
+            assignment.clone(),
+            bundle.clone(),
+        )));
+    }
+
+    let mut failures = Vec::new();
+    for (assignment, task) in detail.assignments.iter().zip(running) {
+        match task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(reason)) if reason.is_empty() => {
+                failures.push(format!("bundle {} missing", assignment.bundle_id))
             }
-            // The state each outcome earns is decided by `state_for_outcome`, so the rule
-            // lives somewhere a test can reach it.
-            Ok(
-                ref outcome @ (PostOutcome::NothingPublished(ref reason)
-                | PostOutcome::Unknown(ref reason)),
-            ) => {
-                failures.push(format!("{}: {reason}", assignment.udid));
-                let (state, code) = state_for_outcome(outcome);
-                db.update_publish_assignment_state(
-                    &assignment.id,
-                    state,
-                    code,
-                    Some(
-                        &serde_json::json!({"message": reason, "effectIntent":"post_carousel"})
-                            .to_string(),
-                    ),
-                )?;
-            }
-            // A transport error, which is the same class as `Unknown`: the request may have
-            // been delivered and its answer lost.
-            Err(error) => {
-                let message = error.to_string();
-                failures.push(format!("{}: {}", assignment.udid, message));
-                db.update_publish_assignment_state(
-                    &assignment.id,
-                    riviu_core::PublishCampaignState::Uncertain,
-                    Some("post_or_cleanup_failed"),
-                    Some(
-                        &serde_json::json!({"message": message, "effectIntent":"post_carousel"})
-                            .to_string(),
-                    ),
-                )?;
-            }
+            Ok(Err(reason)) => failures.push(reason),
+            // A panic in one phone's task must not lose the other four.
+            Err(join) => failures.push(format!("{}: task hỏng ({join})", assignment.udid)),
         }
     }
+    // A cancel that landed mid-run is honoured by the tasks themselves, and read back here for
+    // the message.
+    let cancelled = matches!(
+        db.publish_campaign_state(&campaign_id)?,
+        Some(riviu_core::PublishCampaignState::Cancelled)
+    );
 
     // Conditional on the campaign still being `Posting`, in SQL — see
     // `Database::finish_publish_campaign`. An unconditional write here is what used to erase
     // a cancel that landed while the run was going.
     db.finish_publish_campaign(&campaign_id, !failures.is_empty())?;
+    announce(&events, &db, &campaign_id);
     let output = db
         .get_publish_campaign(&campaign_id)?
         .ok_or_else(|| anyhow::anyhow!("campaign disappeared after post"))?;
@@ -1477,8 +1590,10 @@ mod tests {
     use super::state_for_outcome;
     use super::PostOutcome;
     use super::IOS_PIXEL_GRID_MAX_IMAGES;
+    use super::PUBLISH_FAN_OUT_STAGGER;
     use super::{PublishReadiness, PublishRoute};
     use std::fs;
+    use std::time::Duration;
     use uuid::Uuid;
 
     fn test_bundle(id: &str) -> riviu_core::PublishBundle {
@@ -1668,30 +1783,110 @@ mod tests {
         );
     }
 
-    /// **The publish session is opened against the device's own TikTok, not the iOS bundle.**
+    /// **A phone already inside the composer is never abandoned there.**
     ///
-    /// A source gate because the alternative needs a fleet: `open_publish_context` terminates
-    /// and relaunches the app before every post, and it did that with the *iOS* bundle id on
-    /// every backend — so on Android it stopped a package that is not installed and opened a
-    /// session against nothing. The interaction path fixed this in its own helper and left
-    /// this one behind.
+    /// The cancel is read once, *before the claim*, and nowhere else. Checking it later would
+    /// stop a phone mid-post and leave the `uncertain` state that can never be retried;
+    /// checking it not at all is what the button did before — it wrote `cancelled` to the
+    /// database and every remaining phone posted anyway.
+    ///
+    /// A source gate because the ordering it pins lives in device code: the function acquires
+    /// a stream permit, reads the cancel, claims the row, and only then touches a phone.
+    #[test]
+    fn a_cancel_is_read_before_the_claim_and_not_after_the_composer_opens() {
+        // Read line by line rather than by byte offsets: `lines()` handles CRLF on its own,
+        // and the column-zero `}` is what ends a top-level item. An earlier version sliced on
+        // literal newline escapes and was quietly measuring a different span.
+        let lines: Vec<&str> = include_str!("publish_commands.rs").lines().collect();
+        let start = lines
+            .iter()
+            .position(|line| line.starts_with("async fn post_one_phone("))
+            .expect("`post_one_phone` is still called that");
+        let length = lines[start..]
+            .iter()
+            .position(|line| *line == "}")
+            .expect("the function terminates at column zero");
+        let body = &lines[start..start + length];
+        let at = |needle: &str| body.iter().position(|line| line.contains(needle));
+
+        let cancel = at("PublishCampaignState::Cancelled")
+            .expect("the cancel is no longer read; the button writes a flag nobody honours");
+        let claim = at("claim_publish_assignment_for_posting")
+            .expect("the claim is what stops a second run posting the same carousel");
+        let post = at("post_one_assignment(").expect("this is what touches the phone");
+        assert!(
+            cancel < claim,
+            "the cancel is read after the row is claimed, so a stopped run still claims phones"
+        );
+        assert!(
+            claim < post,
+            "a phone is driven before its row is claimed, which is how two runs post the same \
+             carousel"
+        );
+        // And exactly once: a second check further down is the one that would abandon a phone
+        // inside the composer, in the `uncertain` state that can never be retried.
+        assert_eq!(
+            body.iter()
+                .filter(|line| line.contains("PublishCampaignState::Cancelled"))
+                .count(),
+            1,
+            "the cancel is read more than once; the later read stops a phone mid-post"
+        );
+    }
+
+    /// **The fan-out is bounded by the stream budget and staggered.**
+    ///
+    /// Both measured facts about this fleet rather than preferences. Each post holds a
+    /// UI-with-stream context, and running past `stream_capacity` does not queue — it fails, on
+    /// a phone whose gallery already holds the campaign's images. The stagger is the same two
+    /// seconds the interaction path measured: twenty cold starts at once share one USB bus, and
+    /// the tail runs past the 40-second foreground window.
+    #[test]
+    fn the_publish_fan_out_is_bounded_and_staggered() {
+        // **Scoped to the module, not the file.** Two reversals proved why: this searched the
+        // whole source, and the strings it looks for are written out again in its own
+        // assertions — so removing them from the code left the test green on the strength of
+        // its own text. The same shape once let `locate` stop reading an attribute.
+        let source = include_str!("publish_commands.rs");
+        let module = &source[..source
+            .find("#[cfg(test)]")
+            .expect("this file still has a test module")];
+        assert!(
+            // Two facts, matched separately, because `cargo fmt` decides where the line
+            // breaks go and a gate that pins the whole expression breaks on reformatting
+            // rather than on a real change. This one already did once.
+            module.contains("Semaphore::new(") && module.contains("stream_capacity().max(1)"),
+            "the fan-out no longer bounds itself by the stream budget"
+        );
+        assert!(
+            module.contains("PUBLISH_FAN_OUT_STAGGER * index"),
+            "the fan-out starts every phone at once again"
+        );
+        assert!(
+            PUBLISH_FAN_OUT_STAGGER >= Duration::from_secs(1),
+            "a stagger this short does not separate twenty cold starts"
+        );
+    }
+
     #[test]
     fn the_publish_session_targets_the_device_own_tiktok_build() {
-        let source = include_str!("publish_commands.rs").replace(
-            "
-", "
-",
-        );
-        let start = source
-            .find("async fn open_publish_context(")
+        let lines: Vec<&str> = include_str!("publish_commands.rs").lines().collect();
+        let start = lines
+            .iter()
+            .position(|line| line.starts_with("async fn open_publish_context("))
             .expect("`open_publish_context` is still called that");
-        let body = &source[start..start + 2_000];
+        let length = lines[start..]
+            .iter()
+            .position(|line| *line == "}")
+            .expect("the function terminates at column zero");
+        let body = &lines[start..start + length];
         assert!(
-            body.contains("resolve_tiktok_package"),
+            body.iter()
+                .any(|line| line.contains("resolve_tiktok_package")),
             "the publish context stopped asking the device which TikTok it runs"
         );
         assert!(
-            !body.contains("IOS_TIKTOK_BUNDLE"),
+            !body.iter().any(|line| line.contains("IOS_TIKTOK_BUNDLE")),
             "the publish context is back to assuming the iOS bundle on every backend"
         );
     }

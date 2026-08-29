@@ -1618,6 +1618,7 @@ export type AppEvent =
   | { type: "flowUpdated"; flowId: string; revision: number }
   | { type: "flowRunUpdated"; runId: string; revision: number }
   | { type: "interactionUpdated"; campaignId: string; revision: number }
+  | { type: "publishUpdated"; campaignId: string; revision: number }
   | { type: "wdaExpiryWarning"; udid: string; daysRemaining: number }
   | { type: "nurtureStatus"; status: NurtureSessionStatus };
 
@@ -1644,6 +1645,7 @@ export const APP_EVENT_TYPES = [
   "flowUpdated",
   "flowRunUpdated",
   "interactionUpdated",
+  "publishUpdated",
   "wdaExpiryWarning",
   "nurtureStatus",
 ] as const;

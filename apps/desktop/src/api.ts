@@ -33,6 +33,7 @@ import type {
   MaterialItem,
   PublishCampaignDetail,
   PublishCampaignRecord,
+  PublishAssignmentPlan,
   PublishFolderManifest,
   ScheduleItem,
   StreamSettings,
@@ -820,6 +821,21 @@ export async function saveSchedule(schedule: ScheduleItem) {
 
 export async function deleteSchedule(id: string) {
   return invoke<void>("delete_schedule", { id });
+}
+
+/**
+ * Deal not-yet-published bundles onto the selected phones.
+ *
+ * Returns the pairing for the operator to look at; it creates nothing. The pool is what the
+ * database says has not been dispatched, so pressing this twice does not re-deal the same
+ * posts — see `auto_assign_bundles`.
+ */
+export async function publishAutoAssign(sourceRoot: string, udids: string[], wanted: number) {
+  return invoke<{ plan: PublishAssignmentPlan[] }>("publish_auto_assign", {
+    sourceRoot,
+    udids,
+    wanted,
+  });
 }
 
 export async function publishScanFolder(sourceRoot: string) {

@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
+  listenRiviuEvents,
+  publishAutoAssign,
   publishCancel,
   publishCreateCampaign,
   publishList,
@@ -31,6 +34,29 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
   const reload = () => publishList().then(setCampaigns).catch((e) => setMsg(describeError(e)));
   useEffect(() => {
     reload();
+    // **Follow a run while it runs.** Publish emitted no event at all before, so a campaign
+    // that took twenty minutes across five phones left this page frozen at the moment the
+    // button was pressed — the only way to see progress was to navigate away and back.
+    //
+    // The payload carries an id and a revision and this re-reads the list rather than
+    // trusting it: a broadcast that lost a race would otherwise render a state the database
+    // has already moved past.
+    let unlisten: UnlistenFn | undefined;
+    let live = true;
+    listenRiviuEvents((event) => {
+      if (event.type === "publishUpdated") reload();
+    })
+      .then((off) => {
+        // StrictMode double-invokes effects, so the cleanup of the first run can arrive
+        // before this resolves; without the flag that listener is never detached.
+        if (live) unlisten = off;
+        else off();
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+      unlisten?.();
+    };
   }, []);
 
   const selectedBundles =
@@ -174,6 +200,32 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
           ))}
           {!selectedBundles.length && <p className="hint">Chọn bundle để tạo mapping.</p>}
         </div>
+        {/*
+          Ticking twenty-one checkboxes against twenty phones is a pairing done by hand every
+          run, and the pairing is positional all the way down — a slip there posts one
+          account's photographs under another's caption, with no delete. This asks the
+          database which bundles have not gone out yet and fills the boxes in that order.
+        */}
+        <button
+          type="button"
+          disabled={busy || !manifest || targets.length === 0}
+          onClick={async () => {
+            if (!manifest) return;
+            setBusy(true);
+            setMsg(null);
+            try {
+              const deal = await publishAutoAssign(sourceRoot.trim(), targets, targets.length);
+              setBundleIds(deal.plan.map((row) => row.bundleId));
+              setMsg(`Đã chia ${deal.plan.length} bài chưa đăng cho ${targets.length} máy.`);
+            } catch (e) {
+              setMsg(describeError(e));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          Chia tự động ({targets.length} máy)
+        </button>
       </section>
       <label style={{ marginTop: 12 }}>
         Lịch chạy một lần (để trống = chạy ngay)

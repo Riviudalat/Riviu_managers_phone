@@ -506,6 +506,48 @@ impl Database {
         Ok(state.as_deref().map(publish_state_from_str))
     }
 
+    /// Bundle ids that have already been dispatched to a phone, in any run.
+    ///
+    /// **The input to [`crate::publish::auto_assign_bundles`], and the reason it needs no
+    /// cursor.** "Already published" is deliberately wider than `succeeded`: an assignment
+    /// sitting at `posting`, `verifying` or `uncertain` may be a live carousel that nobody can
+    /// confirm, and dealing its bundle again would put the same images on a second account.
+    ///
+    /// `failed_before_dispatch` is **not** in the list — the name is the guarantee, nothing
+    /// reached a phone — so a bundle whose run died before transfer comes back into the pool,
+    /// which is exactly what should happen to it.
+    pub fn bundle_ids_already_dispatched(&self) -> anyhow::Result<Vec<String>> {
+        let conn = self.conn()?;
+        let mut statement = conn.prepare(
+            "SELECT DISTINCT bundle_id FROM publish_assignments
+             WHERE state IN ('posting','verifying','succeeded','uncertain')",
+        )?;
+        let ids = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(ids)
+    }
+
+    /// The campaign's revision, for an event payload.
+    ///
+    /// A separate read for the same reason [`Self::publish_campaign_state`] is one: the caller
+    /// runs once per phone and `get_publish_campaign` pulls the whole manifest — every bundle,
+    /// every image — to answer with one integer.
+    ///
+    /// `0` for a campaign that is gone, which is the right answer for a subscriber: it means
+    /// "re-read", and the re-read will find nothing.
+    pub fn publish_campaign_revision(&self, id: &str) -> anyhow::Result<u64> {
+        let conn = self.conn()?;
+        let revision: Option<i64> = conn
+            .query_row(
+                "SELECT revision FROM publish_campaigns WHERE id=?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(revision.unwrap_or_default().max(0) as u64)
+    }
+
     /// Settle a finished run — **without overwriting a cancel that landed while it ran.**
     ///
     /// The bug this closes: the post loop ended with an unconditional write of `Succeeded`
@@ -857,6 +899,104 @@ mod claim_tests {
                 "{udid} cannot be re-dispatched even though nothing left the desktop"
             );
         }
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// **What counts as "already published" for the auto-deal, and what deliberately does not.**
+    ///
+    /// Wider than `succeeded`: an assignment at `posting`, `verifying` or `uncertain` may be a
+    /// live carousel nobody can confirm, and dealing its bundle again puts the same images on a
+    /// second account. Narrower at the other end: `failed_before_dispatch` means nothing
+    /// reached a phone, so that bundle belongs back in the pool.
+    #[test]
+    fn a_bundle_counts_as_dispatched_exactly_when_it_might_be_live() {
+        let (db, path) = fixture();
+        let record = campaign(
+            &db,
+            &[
+                "p-succeeded",
+                "p-posting",
+                "p-uncertain",
+                "p-failed",
+                "p-imported",
+            ],
+        );
+        let by_udid: std::collections::HashMap<String, (String, String)> = db
+            .get_publish_campaign(&record.id)
+            .expect("read back")
+            .expect("campaign exists")
+            .assignments
+            .into_iter()
+            .map(|assignment| {
+                (
+                    assignment.udid.clone(),
+                    (assignment.id, assignment.bundle_id),
+                )
+            })
+            .collect();
+        for (udid, state) in [
+            (
+                "p-succeeded",
+                crate::publish::PublishCampaignState::Succeeded,
+            ),
+            ("p-posting", crate::publish::PublishCampaignState::Posting),
+            (
+                "p-uncertain",
+                crate::publish::PublishCampaignState::Uncertain,
+            ),
+            (
+                "p-failed",
+                crate::publish::PublishCampaignState::FailedBeforeDispatch,
+            ),
+        ] {
+            let (id, _) = &by_udid[udid];
+            db.update_publish_assignment_state(id, state, None, None)
+                .expect("seed");
+        }
+
+        let dispatched = db.bundle_ids_already_dispatched().expect("read");
+        let bundle_of = |udid: &str| by_udid[udid].1.clone();
+        for udid in ["p-succeeded", "p-posting", "p-uncertain"] {
+            assert!(
+                dispatched.contains(&bundle_of(udid)),
+                "{udid}: its bundle may be live and must not be dealt again"
+            );
+        }
+        assert!(
+            !dispatched.contains(&bundle_of("p-failed")),
+            "nothing reached a phone, so this bundle belongs back in the pool"
+        );
+        assert!(
+            !dispatched.contains(&bundle_of("p-imported")),
+            "an imported assignment has not been posted"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The revision an event carries moves whenever the campaign does.
+    #[test]
+    fn the_event_revision_moves_with_every_state_write() {
+        let (db, path) = fixture();
+        let record = campaign(&db, &["phone-a"]);
+        let first = db.publish_campaign_revision(&record.id).expect("read");
+        db.update_publish_campaign_state(
+            &record.id,
+            crate::publish::PublishCampaignState::Transferring,
+            None,
+        )
+        .expect("write");
+        let second = db.publish_campaign_revision(&record.id).expect("read");
+        assert!(
+            second > first,
+            "a subscriber cannot tell two events apart: {first} then {second}"
+        );
+        // A campaign that is gone reads 0, which tells a subscriber to re-read and find
+        // nothing — rather than failing the emit.
+        assert_eq!(
+            db.publish_campaign_revision("no-such-campaign")
+                .expect("read"),
+            0
+        );
         let _ = std::fs::remove_file(path);
     }
 

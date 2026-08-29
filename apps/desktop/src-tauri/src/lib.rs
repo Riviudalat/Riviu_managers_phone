@@ -421,6 +421,7 @@ pub fn run() {
             nurture_commands::nurture_start,
             nurture_commands::nurture_stop,
             publish_commands::publish_scan_folder,
+            publish_commands::publish_auto_assign,
             publish_commands::publish_create_campaign,
             publish_commands::publish_list,
             publish_commands::publish_get,
