@@ -162,7 +162,11 @@ impl Locator {
 /// Separate from [`quote_java`] because the two protect against different things: that one stops
 /// a quote from ending the Java string, this one stops a `.` from matching any character. A
 /// resource-id suffix like `:id/desc` needs neither today, and the next one will.
-pub(crate) fn escape_java_regex(value: &str) -> String {
+/// Public because the examples need the *same* escaping the production path uses.
+///
+/// A resource-id suffix is a literal and the agent takes a Java regex, so a probe that
+/// interpolated it raw would be testing a different locator than the one the app sends.
+pub fn escape_java_regex(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
         if matches!(

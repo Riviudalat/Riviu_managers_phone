@@ -34,6 +34,12 @@ fn to_android_locator(label: LabelMatch) -> Locator {
         LabelMatch::Contains(value) => Locator::DescriptionContains(value.to_string()),
         LabelMatch::Text(value) => Locator::Text(value.to_string()),
         LabelMatch::TextContains(value) => Locator::TextContains(value.to_string()),
+        // Escaped, not interpolated: the agent takes a Java regex here, and a resource-id
+        // suffix is a **literal**. The production translation in `session.rs` does the same.
+        LabelMatch::ResourceId(value) => Locator::ResourceIdMatches(format!(
+            ".*{}",
+            riviu_android_driver::agent::escape_java_regex(value)
+        )),
     }
 }
 

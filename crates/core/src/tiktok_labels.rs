@@ -277,6 +277,20 @@ pub enum TikTokControl {
     /// **Not measured.** Everything after `Tiếp` is unmeasured — see AGENTS.md 9.10, the
     /// picker labels stop there.
     ComposerNext,
+    /// The caption input on the post screen.
+    ///
+    /// **Not measured on any build**, and the publish path refuses without it — a carousel
+    /// that goes out with an empty caption is wrong in a way nothing here can correct
+    /// afterwards, because there is no delete on Android.
+    ///
+    /// # What this label must be, and what it must not
+    ///
+    /// It has to be a **class or a resource id, never the placeholder string**. The publish
+    /// path types the caption and then reads it back through the same locator to prove the
+    /// text took; a placeholder like `Add a caption…` stops matching the instant a character
+    /// is typed, so a placeholder-based entry would type correctly and then report that it had
+    /// not. The comment drawer hit the same wall and is located by class for the same reason.
+    ComposerCaption,
     /// The button that actually publishes the post.
     ///
     /// **Not measured**, and the most consequential of the three: without it the composer
@@ -338,7 +352,7 @@ impl TikTokControl {
     /// are here now, the ordinals run 0–28 with no holes, and `every_control_appears_in_all`
     /// is finally strong enough to notice: with `seen` sized from this array, a variant
     /// whose ordinal exceeds it now panics on the index instead of passing quietly.
-    pub const ALL: [Self; 32] = [
+    pub const ALL: [Self; 33] = [
         Self::FeedTab,
         Self::PhotoBadge,
         Self::Like,
@@ -361,6 +375,7 @@ impl TikTokControl {
         Self::AuthorProfileLink,
         Self::LikeCount,
         Self::ComposerNext,
+        Self::ComposerCaption,
         Self::PostButton,
         Self::PostDeleteMenu,
         Self::PostDelete,
@@ -413,6 +428,7 @@ impl TikTokControl {
             Self::AuthorProfileLink => 29,
             Self::LikeCount => 30,
             Self::ComposerShutter => 31,
+            Self::ComposerCaption => 32,
         }
     }
 }
@@ -430,6 +446,13 @@ pub enum LabelAttribute {
     Description,
     /// The rendered `text` of the node.
     Text,
+    /// The suffix of the fully-qualified `resource-id`.
+    ///
+    /// The third attribute, and the one that only earns its place when the other two cannot
+    /// work. It is **language-proof and build-specific** — the exact opposite trade to a
+    /// string — so a label using it must be keyed by app version, which is what
+    /// [`TikTokResourceLabels`] is for.
+    ResourceId,
 }
 
 /// How a label is matched: which attribute, and exactly or as a substring.
@@ -444,6 +467,27 @@ pub enum LabelMatch {
     Text(&'static str),
     /// Substring match on `text`.
     TextContains(&'static str),
+    /// The suffix of the node's `resource-id`, e.g. `snr` for `com.…:id/snr`.
+    ///
+    /// # Only for controls whose strings genuinely cannot work
+    ///
+    /// Measured 29/08/2026, and the album pill in TikTok's image picker is the case that
+    /// forced it. Its `text` is **the album currently showing** — `All` before a choice, and
+    /// the campaign's own import id after one — so a text locator names a value that changes
+    /// the moment it is used. And `All` **also** belongs to the media-type tab one row below,
+    /// so the string is ambiguous on screen before anything is chosen at all.
+    ///
+    /// Its `resource-id` has neither problem: `…:id/snr` is the same node whatever it is
+    /// displaying.
+    ///
+    /// # And the price, which is why this is not the default
+    ///
+    /// Resource ids are **reassigned on every app rebuild**. This project already measured
+    /// that on its own fleet: the comment drawer's Send button is `@2131823284` on TikTok
+    /// 46.3.3 and `@2131823293` on 46.4.3. So a label of this kind is only ever valid for the
+    /// exact `versionName` it was read from, and belongs in [`TIKTOK_RESOURCE_SETS`] rather
+    /// than in a language set — a build this table does not name gets `None` and refuses.
+    ResourceId(&'static str),
 }
 
 impl LabelMatch {
@@ -452,18 +496,22 @@ impl LabelMatch {
             Self::Exact(value)
             | Self::Contains(value)
             | Self::Text(value)
-            | Self::TextContains(value) => value,
+            | Self::TextContains(value)
+            | Self::ResourceId(value) => value,
         }
     }
 
     pub fn is_exact(&self) -> bool {
-        matches!(self, Self::Exact(_) | Self::Text(_))
+        // A resource-id suffix identifies one control, so it belongs with the exact forms
+        // rather than with the substring ones.
+        matches!(self, Self::Exact(_) | Self::Text(_) | Self::ResourceId(_))
     }
 
     pub fn attribute(&self) -> LabelAttribute {
         match self {
             Self::Exact(_) | Self::Contains(_) => LabelAttribute::Description,
             Self::Text(_) | Self::TextContains(_) => LabelAttribute::Text,
+            Self::ResourceId(_) => LabelAttribute::ResourceId,
         }
     }
 
@@ -485,6 +533,7 @@ impl LabelMatch {
                 value,
                 exact: false,
             },
+            Self::ResourceId(value) => crate::driver::ElementQuery::ResourceIdSuffix(value),
         }
     }
 }
@@ -570,6 +619,7 @@ pub struct TikTokLabels {
     /// The composer opener in the bottom bar.
     composer_open: Option<LabelMatch>,
     composer_shutter: Option<LabelMatch>,
+    composer_caption: Option<LabelMatch>,
     /// The gallery picker's own controls.
     ///
     /// Measured 11/08/2026 on both fleet phones. What is **not** here, and cannot be:
@@ -640,6 +690,7 @@ impl TikTokLabels {
             TikTokControl::ProfileTab => self.profile_tab,
             TikTokControl::AuthorProfileLink => self.author_profile_link,
             TikTokControl::LikeCount => self.like_count,
+            TikTokControl::ComposerCaption => self.composer_caption,
             TikTokControl::ComposerNext => self.composer_next,
             TikTokControl::PostButton => self.post_button,
             TikTokControl::PostDeleteMenu => self.post_delete_menu,
@@ -664,12 +715,16 @@ pub struct TikTokResourceLabels {
     pub app_version: &'static str,
     pub measured_on: &'static str,
     comment_send: Option<LabelMatch>,
+    /// The picker's album pill — see [`LabelMatch::ResourceId`] for why this control is here
+    /// and not in a language set.
+    picker_album_menu: Option<LabelMatch>,
 }
 
 impl TikTokResourceLabels {
     fn resource(&self, control: TikTokControl) -> Option<LabelMatch> {
         match control {
             TikTokControl::CommentSend => self.comment_send,
+            TikTokControl::PickerAlbumMenu => self.picker_album_menu,
             _ => None,
         }
     }
@@ -686,11 +741,32 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
     // `enabled` is **false with the field empty and true once it holds text**. The other
     // three stay enabled throughout, and the probe's own guess — the first thing to appear
     // alongside the text — picked an emoji tile.
+    // **`trill` 38.3.2 — the build sixteen of the twenty phones run.** Its comment Send
+    // button resolves to a rendered string, so `comment_send` stays `None` here and
+    // `label()` falls through to the language set. The album pill is the opposite case: it
+    // has no usable string at all, so the id is the only way to reach it.
+    TikTokResourceLabels {
+        package: "com.ss.android.ugc.trill",
+        app_version: "38.3.2",
+        measured_on: "SM-G950F 98895a3355424e484f, Android 9, 29/08/2026 (example label_scout)",
+        // Rendered on this build, so the language set describes it. See `label()`.
+        comment_send: None,
+        // `TextView`, `resource-id=com.ss.android.ugc.trill:id/snr`, `[483,115][543,172]`,
+        // reading `All` at the moment it was measured — which is exactly why the id and not
+        // the text: that string is the album currently showing, and it becomes the campaign's
+        // own import id one tap later.
+        //
+        // Distinct from the media-type tab row directly below it (`…:id/slq`), whose leftmost
+        // entry also reads `All`. Two nodes, one string, different jobs — so `Text("All")`
+        // could never have picked between them either.
+        picker_album_menu: Some(LabelMatch::ResourceId("snr")),
+    },
     TikTokResourceLabels {
         package: "com.zhiliaoapp.musically",
         app_version: "46.2.1",
         measured_on: "SM-G950F ce0517152c898c6f0d, Android 9, 18/08/2026 (probe --measure-comment)",
         comment_send: Some(LabelMatch::Exact("@2131823247")),
+        picker_album_menu: None,
     },
     TikTokResourceLabels {
         package: "com.zhiliaoapp.musically",
@@ -701,6 +777,7 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         // table exists for; the id *not* moving between two other versions is not evidence
         // that it never does, and a lookup keyed by version cannot guess.
         comment_send: Some(LabelMatch::Exact("@2131823247")),
+        picker_album_menu: None,
     },
     TikTokResourceLabels {
         package: "com.ss.android.ugc.trill",
@@ -709,6 +786,7 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         // `android.widget.Button` at [904,1379][1047,1467] whose `enabled` went
         // false -> true the moment the field held text.
         comment_send: Some(LabelMatch::Exact("@2131823284")),
+        picker_album_menu: None,
     },
     TikTokResourceLabels {
         package: "com.ss.android.ugc.trill",
@@ -720,6 +798,7 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         // `@2131823284` does not appear anywhere in this build's tree, so a
         // language-keyed lookup would have refused a working phone.
         comment_send: Some(LabelMatch::Exact("@2131823293")),
+        picker_album_menu: None,
     },
 ];
 
@@ -777,6 +856,7 @@ pub(crate) fn nothing_measured() -> TikTokControls {
         author_profile_link: None,
         like_count: None,
         profile_tab: None,
+        composer_caption: None,
         composer_next: None,
         post_button: None,
         post_delete_menu: None,
@@ -837,15 +917,26 @@ pub(crate) fn every_publish_control_measured() -> TikTokControls {
         author_profile_link: None,
         like_count: None,
         profile_tab: None,
+        composer_caption: Some(LabelMatch::Text("fixture-caption")),
         composer_next: Some(LabelMatch::Text("fixture-edit-next")),
         post_button: Some(LabelMatch::Text("fixture-post")),
         post_delete_menu: None,
         post_delete: None,
         post_delete_confirm: None,
     };
+    // The album pill resolves through `TIKTOK_RESOURCE_SETS` only — see
+    // `LabelMatch::ResourceId` — so a fixture claiming "everything measured" needs a resource
+    // set as well as a language set, or the one control that cannot be a string stays absent.
+    static ALL_RESOURCES: TikTokResourceLabels = TikTokResourceLabels {
+        package: "com.example.fully-measured",
+        app_version: "0",
+        measured_on: "nothing — this set exists so the success path has a fixture",
+        comment_send: None,
+        picker_album_menu: Some(LabelMatch::ResourceId("fixture-album-menu")),
+    };
     TikTokControls {
         translated: &ALL,
-        resources: None,
+        resources: Some(&ALL_RESOURCES),
     }
 }
 
@@ -891,15 +982,23 @@ pub(crate) fn every_publish_control_but_post_measured() -> TikTokControls {
         author_profile_link: None,
         like_count: None,
         profile_tab: None,
+        composer_caption: Some(LabelMatch::Text("fixture-caption")),
         composer_next: Some(LabelMatch::Text("fixture-edit-next")),
         post_button: None,
         post_delete_menu: None,
         post_delete: None,
         post_delete_confirm: None,
     };
+    static NO_POST_RESOURCES: TikTokResourceLabels = TikTokResourceLabels {
+        package: "com.example.no-post-button",
+        app_version: "0",
+        measured_on: "nothing — this set exists so the pre-publish steps have a fixture",
+        comment_send: None,
+        picker_album_menu: Some(LabelMatch::ResourceId("fixture-album-menu")),
+    };
     TikTokControls {
         translated: &NO_POST,
-        resources: None,
+        resources: Some(&NO_POST_RESOURCES),
     }
 }
 
@@ -912,10 +1011,22 @@ impl TikTokControls {
             // string is not. Falling through to the translation is what lets a build that
             // *resolved* the reference — 38.3.2 renders `Post comment` — be described at all,
             // rather than refusing every phone in the fleet because no `@2131…` was found.
+            // Two controls read the resource table first, for opposite reasons.
+            //
+            // `CommentSend` falls **through** to the translation: a build that resolved the
+            // reference — 38.3.2 renders `Post comment` — must still be describable, rather
+            // than refusing every phone in the fleet because no `@2131…` was found.
+            //
+            // `PickerAlbumMenu` deliberately does **not** have a translation to fall through
+            // to, on any set, and it must not grow one: the pill's text is the album it is
+            // currently showing, so a string there names a value that changes the moment it is
+            // used — and `All` is ambiguous with the media-type tab besides. The id or
+            // nothing.
             TikTokControl::CommentSend => self
                 .resources
                 .and_then(|set| set.resource(control))
                 .or_else(|| self.translated.translated(control)),
+            TikTokControl::PickerAlbumMenu => self.resources.and_then(|set| set.resource(control)),
             other => self.translated.translated(other),
         }
     }
@@ -976,18 +1087,31 @@ impl TikTokControls {
         if !measured_app_version.is_empty() {
             line.push_str(&format!(", nhãn đo trên app {measured_app_version}"));
         }
+        // **Which Send button this build uses, decided by where the label actually came
+        // from** — not by whether a resource set exists at all.
+        //
+        // The earlier version keyed on `self.resources.is_some()`, and that was true for as
+        // long as the only reason to have a resource set *was* the Send button. It stopped
+        // being true the moment a second control needed one: `trill` 38.3.2 now has a set for
+        // the picker's album pill while its Send button is a rendered string, and the line
+        // told the operator the opposite — pointing a debugging session at a resource id that
+        // is not involved.
+        let send_from_resource = self
+            .resources
+            .and_then(|resources| resources.resource(TikTokControl::CommentSend));
         match (
+            send_from_resource,
             self.resources,
             self.translated.translated(TikTokControl::CommentSend),
         ) {
-            (Some(resources), _) => line.push_str(&format!(
+            (Some(_), Some(resources), _) => line.push_str(&format!(
                 "; nút Gửi theo resource id, đo trên app {} ({})",
                 resources.app_version, resources.measured_on
             )),
-            (None, Some(_)) => {
+            (_, _, Some(_)) => {
                 line.push_str("; nút Gửi đọc theo chữ — bản build này không cần resource id")
             }
-            (None, None) => line.push_str(
+            (_, _, None) => line.push_str(
                 "; CHƯA đo được nút Gửi cho bản app này — phiên sẽ bỏ bình luận cả phiên",
             ),
         }
@@ -1193,6 +1317,7 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // the refusal — the composer stops before opening and the delete driver is not
         // offered at all, which is the only safe order for an action with no undo.
         profile_tab: None,
+        composer_caption: None,
         composer_next: None,
         post_button: None,
         post_delete_menu: None,
@@ -1256,7 +1381,14 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // 46.3.3 and SM-N950F / app 46.4.3 — the strings agree). The two tabs carry a
         // real `content-desc`; the album name and the two buttons carry only `text`,
         // which is why both attributes exist in `LabelMatch`.
-        picker_album_menu: Some(LabelMatch::Text("Gần đây")),
+        // **Was `Text("Gần đây")`, and that was wrong for the same reason the English set's
+        // `All` was**: the pill shows the album *currently selected*, so `Gần đây` names the
+        // default album and stops being true the moment the publish path chooses the
+        // campaign's own. A locator that is correct only until it is used is not a locator.
+        //
+        // Left `None` rather than deleted: this control now resolves through
+        // `TIKTOK_RESOURCE_SETS` only, and no resource id has been read off this build.
+        picker_album_menu: None,
         picker_tab_all: Some(LabelMatch::Exact("Tất cả")),
         picker_tab_photos: Some(LabelMatch::Exact("Ảnh")),
         picker_multi_select: Some(LabelMatch::Text("Chọn nhiều")),
@@ -1281,6 +1413,7 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // The rest of the publish tail and the whole delete path: declared, not measured.
         // `None` is the refusal — the composer stops before opening and the delete driver
         // is not offered at all, which is the only safe order for an action with no undo.
+        composer_caption: None,
         composer_next: None,
         post_button: None,
         post_delete_menu: None,
@@ -1513,6 +1646,7 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // rail — `Like` and `Video liked` do not contain it.
         like_count: Some(LabelMatch::Contains("likes")),
         profile_tab: Some(LabelMatch::Exact("Profile")),
+        composer_caption: None,
         composer_next: None,
         post_button: None,
         post_delete_menu: None,
@@ -1876,13 +2010,68 @@ mod tests {
         assert!(line.contains("bỏ bình luận"), "{line}");
     }
 
+    /// **No language set may carry a string for the album pill, ever.**
+    ///
+    /// The invariant behind `label()` reading this control out of the resource table alone.
+    /// Both sets that once had one were wrong in the same way: the pill shows the album
+    /// *currently selected*, so `All` and `Gần đây` each named a default that stopped being
+    /// true one tap later — and `All` was ambiguous with the media-type tab besides.
+    ///
+    /// Written as a sweep over the catalogue rather than as a comment, because the tempting
+    /// edit is to "fix" a refusing build by putting its visible string back.
+    #[test]
+    fn no_language_set_describes_the_album_pill_with_a_string() {
+        for set in TIKTOK_LABEL_SETS {
+            assert_eq!(
+                set.translated(TikTokControl::PickerAlbumMenu),
+                None,
+                "{} / {} gives the album pill a string locator; that string is the album it                  happens to be showing, so it stops being true the moment the publish path                  chooses the campaign's own. Measure the `resource-id` instead.",
+                set.package,
+                set.language
+            );
+        }
+        // And at least one build does reach it, or the rule above is vacuous.
+        assert!(
+            controls_for("com.ss.android.ugc.trill", "en", "38.3.2")
+                .expect("the fleet's build")
+                .label(TikTokControl::PickerAlbumMenu)
+                .is_some(),
+            "no build can reach the album pill at all, so nothing can publish anywhere"
+        );
+    }
+
+    /// **A phone whose app version was not read borrows nobody's resource ids.**
+    ///
+    /// Resource ids are reassigned on every app rebuild — measured on this fleet: the comment
+    /// drawer's Send button is `@2131823284` on 46.3.3 and `@2131823293` on 46.4.3. So an
+    /// unread `versionName` has to mean *absent*, not *any set for this package*, or a phone
+    /// gets a locator pointing at whatever control that id belongs to now.
+    #[test]
+    fn an_unread_app_version_does_not_fall_back_to_another_builds_ids() {
+        let known = controls_for("com.ss.android.ugc.trill", "en", "38.3.2").expect("known");
+        assert!(known.label(TikTokControl::PickerAlbumMenu).is_some());
+
+        for version in ["", "  ", "38.3.1", "99.0.0"] {
+            let set = controls_for("com.ss.android.ugc.trill", "en", version)
+                .expect("the language set still resolves");
+            assert_eq!(
+                set.label(TikTokControl::PickerAlbumMenu),
+                None,
+                "app version {version:?} borrowed a resource id measured on another build"
+            );
+            // The language-based labels are untouched: an unknown version costs the ids and
+            // nothing else, so the phone can still watch and read.
+            assert!(set.label(TikTokControl::FeedTab).is_some());
+        }
+    }
+
     #[test]
     fn the_picker_controls_are_measured_and_split_across_both_attributes() {
         // Read off the picker on both fleet phones, 11/08/2026. Worth pinning because the
         // split across attributes is measured, not incidental: the two tabs carry a real
-        // `content-desc` while the album name and the buttons carry only `text`, and a
-        // locator that reads the wrong attribute finds nothing at all — which the publish
-        // path would read as "this control is not on screen".
+        // `content-desc` while the buttons carry only `text`, and a locator that reads the
+        // wrong attribute finds nothing at all — which the publish path would read as "this
+        // control is not on screen".
         let set = redmi();
         assert_eq!(
             set.label(TikTokControl::PickerTabAll),
@@ -1893,11 +2082,16 @@ mod tests {
             set.label(TikTokControl::PickerTabAll).unwrap().attribute(),
             LabelAttribute::Description
         );
-        for control in [
-            TikTokControl::PickerAlbumMenu,
-            TikTokControl::PickerMultiSelect,
-            TikTokControl::PickerNext,
-        ] {
+        // **The album pill is no longer in this list, and its absence is the finding.** It
+        // used to be `Text("Gần đây")`, which named the album that happened to be selected
+        // when somebody looked — and stopped being true one tap later. It now resolves only
+        // through a version-keyed resource id, and none has been read off this build.
+        assert_eq!(
+            set.label(TikTokControl::PickerAlbumMenu),
+            None,
+            "a text locator for the album pill is a locator for a value that changes"
+        );
+        for control in [TikTokControl::PickerMultiSelect, TikTokControl::PickerNext] {
             assert_eq!(
                 set.label(control).unwrap().attribute(),
                 LabelAttribute::Text,
@@ -2044,6 +2238,7 @@ mod tests {
         for set in TIKTOK_LABEL_SETS {
             for control in [
                 TikTokControl::ComposerNext,
+                TikTokControl::ComposerCaption,
                 TikTokControl::PostButton,
                 TikTokControl::PostDeleteMenu,
                 TikTokControl::PostDelete,

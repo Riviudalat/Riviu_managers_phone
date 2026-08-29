@@ -173,6 +173,19 @@ pub enum ComposerVerdict {
     PostUnmeasured,
     /// The post screen opened and the measured Post button was not on it.
     NoPostButton,
+    /// The post screen opened and the caption field was not on it.
+    NoCaptionField,
+    /// The caption was typed and could not be read back out of the field.
+    ///
+    /// Refuses rather than posting, and the asymmetry with the rest of the module is
+    /// deliberate: **an unverified caption is worse than an unverified tap**, because the tap
+    /// either worked or is caught one step later, while a caption that silently did not take
+    /// publishes a carousel with somebody else's words — or none.
+    ///
+    /// The most likely cause is a catalogue entry that names the field's *placeholder*: it
+    /// stops matching the moment a character is typed, so the readback finds nothing. See
+    /// [`TikTokControl::ComposerCaption`].
+    CaptionNotConfirmed,
     /// The caller asked to stop, and it was still safe to obey.
     ///
     /// Only ever returned from before the Post tap. Once that tap is dispatched, stopping is
@@ -203,6 +216,11 @@ impl ComposerVerdict {
             Self::PostScreenDidNotOpen => "bấm Tiếp ở bước chỉnh sửa mà màn đăng không mở",
             Self::PostUnmeasured => "chưa đo nút Đăng trên bản build này — không bấm gì cả",
             Self::NoPostButton => "không thấy nút Đăng ở màn cuối",
+            Self::NoCaptionField => "không thấy ô caption ở màn cuối",
+            Self::CaptionNotConfirmed => {
+                "gõ caption xong mà đọc lại không thấy — KHÔNG đăng, vì bài sẽ lên với caption \
+                 rỗng hoặc caption của bài khác"
+            }
             Self::Stopped => "dừng lại trước khi bấm Đăng",
         }
     }
@@ -223,7 +241,7 @@ impl ComposerVerdict {
     }
 }
 
-/// The controls the path cannot run without — navigation **and** geometry anchors.
+/// The controls needed to **reach the edit step**, navigation and geometry anchors alike.
 ///
 /// The two anchors are here for a reason that is easy to miss: this module reaches two
 /// controls by arithmetic rather than by label, and arithmetic is only trustworthy when it
@@ -236,14 +254,31 @@ impl ComposerVerdict {
 /// [`TikTokControl::PickerTabAll`] is **not** here: the album addresses the campaign's own
 /// directory, which holds nothing but its images, so filtering by media type inside it
 /// changes nothing.
-pub const REQUIRED: [TikTokControl; 7] = [
+///
+/// The publish tail lives in [`REQUIRED_TO_PUBLISH`] instead — see there for why.
+pub const REQUIRED: [TikTokControl; 6] = [
     TikTokControl::ComposerOpen,
     TikTokControl::ComposerShutter,
     TikTokControl::PickerAlbumMenu,
     TikTokControl::PickerTabPhotos,
     TikTokControl::PickerMultiSelect,
     TikTokControl::PickerNext,
+];
+
+/// The controls that turn a reachable edit step into a published post.
+///
+/// **Kept out of [`REQUIRED`], and the split is not a convenience.** The first version put
+/// `ComposerNext` in the required set, which made [`drive_to_edit_step`] — the instrument
+/// written to *measure* `ComposerNext` — refuse to run without it. A tool that demands the
+/// reading it exists to take is no tool at all, and the plan for this work had named that
+/// exact trap in `probe`'s two composer commands before reproducing it here.
+///
+/// Everything [`REQUIRED`] unlocks is reversible: Back walks out of it and nothing has left
+/// the phone. Everything this list unlocks is not.
+pub const REQUIRED_TO_PUBLISH: [TikTokControl; 3] = [
     TikTokControl::ComposerNext,
+    TikTokControl::ComposerCaption,
+    TikTokControl::PostButton,
 ];
 
 /// Why this build cannot be driven, named control by control.
@@ -281,8 +316,25 @@ pub struct ComposerPlan {
     tabs: ElementQuery<'static>,
     multi_select: ElementQuery<'static>,
     picker_next: ElementQuery<'static>,
+    /// The publishing tail, resolved **all or nothing**.
+    ///
+    /// One `Option` around three locators rather than three `Option`s, and the difference is
+    /// the point: with three, "two of the three are measured" is a state the code can be in,
+    /// and every place that asks "can this build publish?" has to remember to check all three.
+    /// A reversal proved that was not hypothetical — dropping one of the three conjuncts from
+    /// `can_publish` left every test green, and the build it then claimed could publish would
+    /// have reached the post screen and typed nothing into a caption field it could not find.
+    ///
+    /// With one `Option` the partial state does not exist.
+    publish: Option<PublishTail>,
+}
+
+/// The three locators that turn a reachable edit step into a published post.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PublishTail {
     edit_next: ElementQuery<'static>,
-    post_button: Option<ElementQuery<'static>>,
+    caption: ElementQuery<'static>,
+    post_button: ElementQuery<'static>,
 }
 
 impl ComposerPlan {
@@ -297,6 +349,7 @@ impl ComposerPlan {
         }
         let query =
             |control: TikTokControl| labels.label(control).expect("checked above").to_query();
+        let optional = |control: TikTokControl| labels.label(control).map(|label| label.to_query());
         Ok(Self {
             open: query(TikTokControl::ComposerOpen),
             shutter: query(TikTokControl::ComposerShutter),
@@ -304,26 +357,44 @@ impl ComposerPlan {
             tabs: query(TikTokControl::PickerTabPhotos),
             multi_select: query(TikTokControl::PickerMultiSelect),
             picker_next: query(TikTokControl::PickerNext),
-            edit_next: query(TikTokControl::ComposerNext),
-            post_button: labels
-                .label(TikTokControl::PostButton)
-                .map(|label| label.to_query()),
+            publish: match (
+                optional(TikTokControl::ComposerNext),
+                optional(TikTokControl::ComposerCaption),
+                optional(TikTokControl::PostButton),
+            ) {
+                (Some(edit_next), Some(caption), Some(post_button)) => Some(PublishTail {
+                    edit_next,
+                    caption,
+                    post_button,
+                }),
+                _ => None,
+            },
         })
     }
 
-    /// The Post control, or `None` on a build where it has never been measured.
+    /// The Post control, or `None` on a build that cannot publish.
     pub fn post_button(&self) -> Option<ElementQuery<'static>> {
-        self.post_button
+        self.publish.map(|tail| tail.post_button)
     }
 
     /// Whether this build can be driven all the way to a published post.
     ///
-    /// [`publish_carousel`] refuses **before its first tap** when this is false. It is not in
-    /// [`REQUIRED`] because a plan without it is still useful — see [`drive_to_edit_step`],
-    /// which is how the missing measurement gets taken — but that use has its own entry point
-    /// and its own name, rather than being what happens by default.
+    /// [`publish_carousel`] refuses **before its first tap** when this is false. These are not
+    /// in [`REQUIRED`] because a plan without them is still useful — see
+    /// [`drive_to_edit_step`], which is how the missing measurements get taken — but that use
+    /// has its own entry point and its own name, rather than being what happens by default.
     pub fn can_publish(&self) -> bool {
-        self.post_button.is_some()
+        self.publish.is_some()
+    }
+
+    /// Which of [`REQUIRED_TO_PUBLISH`] this build is still missing.
+    ///
+    /// For the operator, and for the measuring session: every entry is one dump away.
+    pub fn missing_to_publish(labels: &TikTokControls) -> Vec<TikTokControl> {
+        REQUIRED_TO_PUBLISH
+            .into_iter()
+            .filter(|control| labels.label(*control).is_none())
+            .collect()
     }
 }
 
@@ -535,6 +606,21 @@ pub enum Selection {
     NeverArmed,
     /// The caller asked to stop partway through.
     Stopped,
+}
+
+/// What typing the caption achieved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptionOutcome {
+    /// The field holds the caption, read back through the same locator.
+    Typed,
+    /// The bundle's caption file was empty, so nothing was typed.
+    NothingToSay,
+    /// This build's caption field was never measured.
+    Unmeasured,
+    /// The field was not on the post screen.
+    NoField,
+    /// The text was set and could not be read back.
+    NotConfirmed,
 }
 
 /// What choosing the campaign's album achieved.
@@ -767,16 +853,36 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     }
 
     /// Tap the picker's `Next` and wait for the edit step.
+    ///
+    /// # Two proofs, and the weaker one is what makes the measuring trip possible
+    ///
+    /// When `ComposerNext` is measured, arrival is proved by that control appearing — a
+    /// positive signal about the screen we wanted.
+    ///
+    /// When it is not, arrival is proved by the **picker's** multi-select control going away.
+    /// That is weaker: it says we left the picker, not that we arrived at the edit step. It is
+    /// also the only thing available, and refusing to accept it is what made the first version
+    /// of this module unable to take its own measurement — `drive_to_edit_step` waited for
+    /// `ComposerNext`, which is the label the trip exists to read.
+    ///
+    /// The weaker proof is never enough to publish: [`ComposerPlan::can_publish`] is false on
+    /// exactly the builds that fall back to it.
     pub async fn advance_to_edit_step(
         &mut self,
         next: &ElementBox,
         stop: &AtomicBool,
     ) -> anyhow::Result<bool> {
         self.tap_inside(next).await?;
-        Ok(self
-            .await_condition(COMPOSER_WINDOW, self.plan.edit_next, stop, |_| true)
-            .await?
-            .is_some())
+        match self.plan.publish.map(|tail| tail.edit_next) {
+            Some(edit_next) => Ok(self
+                .await_condition(COMPOSER_WINDOW, edit_next, stop, |_| true)
+                .await?
+                .is_some()),
+            None => {
+                self.await_absent(COMPOSER_WINDOW, self.plan.multi_select, stop)
+                    .await
+            }
+        }
     }
 
     /// Tap the **edit step's** Next and wait for the post screen.
@@ -790,11 +896,12 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// Proved by the Post button arriving, so a build without it measured cannot call this —
     /// which is correct: that build has nothing to advance toward.
     pub async fn advance_to_post_screen(&mut self, stop: &AtomicBool) -> anyhow::Result<bool> {
-        let Some(post) = self.plan.post_button else {
+        let Some(tail) = self.plan.publish else {
             return Ok(false);
         };
+        let (post, edit_next) = (tail.post_button, tail.edit_next);
         let Some(next) = self
-            .await_condition(COMPOSER_WINDOW, self.plan.edit_next, stop, |_| true)
+            .await_condition(COMPOSER_WINDOW, edit_next, stop, |_| true)
             .await?
         else {
             return Ok(false);
@@ -804,6 +911,72 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
             .await_condition(COMPOSER_WINDOW, post, stop, |_| true)
             .await?
             .is_some())
+    }
+
+    /// Type the caption into the post screen's field, and read it back.
+    ///
+    /// # Why the readback, when nothing else in this module verifies a keystroke
+    ///
+    /// Because the failure is silent and the result is permanent. `type_text` targets the
+    /// **focused** text field, and the post screen has more than one — the comment drawer's
+    /// equivalent mistake wrote into the collapsed bar behind the real one, succeeding at the
+    /// API level while the screen stayed empty. Here that would publish a carousel with an
+    /// empty caption, and there is no delete path on Android to correct it.
+    ///
+    /// So the field is tapped to focus it, the text is set, and the same locator is asked what
+    /// the field now holds. That last part is why
+    /// [`TikTokControl::ComposerCaption`] must be a class or a resource id rather than the
+    /// placeholder string: a placeholder stops matching as soon as a character arrives, and a
+    /// placeholder-based entry would type correctly and then report that it had not.
+    ///
+    /// # An empty caption types nothing and is not a failure
+    ///
+    /// The scan requires exactly one `caption*.txt` per bundle; it does not require the file
+    /// to have anything in it. An operator who wants a bare carousel gets one.
+    pub async fn type_caption(
+        &mut self,
+        caption: &str,
+        stop: &AtomicBool,
+    ) -> anyhow::Result<CaptionOutcome> {
+        let Some(query) = self.plan.publish.map(|tail| tail.caption) else {
+            return Ok(CaptionOutcome::Unmeasured);
+        };
+        if caption.trim().is_empty() {
+            return Ok(CaptionOutcome::NothingToSay);
+        }
+        let Some(field) = self
+            .await_condition(COMPOSER_WINDOW, query, stop, |_| true)
+            .await?
+        else {
+            return Ok(CaptionOutcome::NoField);
+        };
+        // Focusing is not optional: `type_text` writes into whichever field has focus.
+        self.tap_inside(&field).await?;
+        self.session.type_text(caption).await?;
+
+        // Read back through the same locator. A prefix rather than the whole string, because
+        // the field may wrap, trim trailing whitespace, or render a hashtag as a token — none
+        // of which means the caption did not take.
+        let needle: String = caption.trim().chars().take(24).collect();
+        let deadline = Instant::now() + COMPOSER_WINDOW;
+        loop {
+            let rows = self
+                .session
+                .locate_all_described(query)
+                .await
+                .unwrap_or_default();
+            if rows.iter().any(|row| {
+                row.description
+                    .as_deref()
+                    .is_some_and(|text| text.contains(needle.as_str()))
+            }) {
+                return Ok(CaptionOutcome::Typed);
+            }
+            if Instant::now() >= deadline || stop.load(Ordering::Relaxed) {
+                return Ok(CaptionOutcome::NotConfirmed);
+            }
+            sleep(POLL, stop).await;
+        }
     }
 
     /// Publish, or refuse because this build's Post button was never measured.
@@ -832,7 +1005,7 @@ impl<'a, P: TapPlanner> Composer<'a, P> {
     /// back, and this returns `PostNotConfirmed` — the safe answer, not a correct one.
     /// Closing that is a measurement, not a code change.
     pub async fn post(&mut self, stop: &AtomicBool) -> anyhow::Result<ComposerVerdict> {
-        let Some(query) = self.plan.post_button else {
+        let Some(query) = self.plan.publish.map(|tail| tail.post_button) else {
             return Ok(ComposerVerdict::PostUnmeasured);
         };
         if stop.load(Ordering::Relaxed) {
@@ -988,6 +1161,8 @@ pub struct CarouselRequest<'a> {
     pub album: &'a str,
     /// How many images to select.
     pub images: usize,
+    /// The bundle's caption, verbatim. Empty is allowed and types nothing.
+    pub caption: &'a str,
     pub screen: Screen,
 }
 
@@ -1039,9 +1214,28 @@ pub async fn drive_to_edit_step(
     stop: &AtomicBool,
 ) -> anyhow::Result<ComposerVerdict> {
     let mut composer = Composer::new(session, plan, plan_tap);
-    let outcome = drive(&mut composer, request, stop, false).await;
+    let outcome = reach_edit_step(&mut composer, request, stop).await;
     composer.leave().await;
     outcome
+}
+
+/// The same walk, **without backing out at the end**.
+///
+/// Exists for one caller: the measuring tool, which has to dump the screen it arrived at. The
+/// convenience above closes the composer immediately, which is right for every other use and
+/// exactly wrong for the one that came to look at it.
+///
+/// The caller owns the [`Composer`] and **must** call [`Composer::leave`] itself — including on
+/// the error paths, which is why this is not the default shape.
+///
+/// Publishes nothing: it never taps the edit step's Next and never looks for a Post button, so
+/// there is no sequence of failures inside it that puts a carousel on an account.
+pub async fn reach_edit_step<P: TapPlanner>(
+    composer: &mut Composer<'_, P>,
+    request: &CarouselRequest<'_>,
+    stop: &AtomicBool,
+) -> anyhow::Result<ComposerVerdict> {
+    drive(composer, request, stop, false).await
 }
 
 /// The steps that need an open composer, split out so both entry points close it on every
@@ -1094,6 +1288,14 @@ async fn drive<P: TapPlanner>(
     }
     if !composer.advance_to_post_screen(stop).await? {
         return Ok(ComposerVerdict::PostScreenDidNotOpen);
+    }
+    // **Before Post, and its failures stop the run.** A carousel that goes out with the wrong
+    // caption — or none — cannot be corrected from here.
+    match composer.type_caption(request.caption, stop).await? {
+        CaptionOutcome::Typed | CaptionOutcome::NothingToSay => {}
+        CaptionOutcome::Unmeasured => return Ok(ComposerVerdict::PostUnmeasured),
+        CaptionOutcome::NoField => return Ok(ComposerVerdict::NoCaptionField),
+        CaptionOutcome::NotConfirmed => return Ok(ComposerVerdict::CaptionNotConfirmed),
     }
     composer.post(stop).await
 }
@@ -1233,7 +1435,11 @@ mod tests {
     }
     fn post_screen() -> Scene {
         scene(
-            vec![("fixture-post", box_at(900.0, 2000.0))],
+            vec![
+                ("fixture-caption", box_at(100.0, 300.0)),
+                ("fixture-post", box_at(900.0, 2000.0)),
+            ],
+            // Only Post leaves this screen; tapping the caption field focuses it.
             Some("fixture-post"),
         )
     }
@@ -1251,6 +1457,14 @@ mod tests {
         taps: Mutex<Vec<TapPoint>>,
         backs: Mutex<usize>,
         rows: Mutex<HashMap<String, Vec<ElementBox>>>,
+        /// What `type_text` last wrote, which is what the caption field then holds.
+        ///
+        /// Modelled rather than ignored: the readback in `type_caption` is the whole reason
+        /// that step exists, and a fake whose field never changes cannot tell a caption that
+        /// took from one that silently did not.
+        typed: Mutex<Option<String>>,
+        /// Make the caption field keep its placeholder, i.e. never show the typed text.
+        caption_never_takes: bool,
         /// Fail every tap from this one onward. Counting rather than a flag because the
         /// interesting failure is **mid-flow**: a run that dies before its first tap never
         /// opened anything, so it proves nothing about closing what it opened.
@@ -1349,7 +1563,8 @@ mod tests {
         async fn swipe(&self, _gesture: crate::types::SwipeGesture) -> anyhow::Result<()> {
             Ok(())
         }
-        async fn type_text(&self, _text: &str) -> anyhow::Result<()> {
+        async fn type_text(&self, text: &str) -> anyhow::Result<()> {
+            *self.typed.lock() = Some(text.to_string());
             Ok(())
         }
         async fn home(&self) -> anyhow::Result<()> {
@@ -1395,52 +1610,105 @@ mod tests {
                 | ElementQuery::ClassName(value)
                 | ElementQuery::ResourceIdSuffix(value) => value,
             };
+            // The caption field reports the text it holds, the way a real one does.
+            if wanted == "fixture-caption" && !self.caption_never_takes {
+                if let Some(typed) = self.typed.lock().clone() {
+                    return Ok(vec![ElementBox {
+                        description: Some(typed),
+                        ..box_at(100.0, 300.0)
+                    }]);
+                }
+            }
             Ok(self.rows.lock().get(wanted).cloned().unwrap_or_default())
         }
     }
 
     // ------------------------------------------------------------------ readiness
 
-    /// **Not one shipped build can be driven to a post today, and the refusal names why.**
+    /// **Not one shipped build can publish today, whatever else it can reach.**
     ///
-    /// The single most important assertion in this module. Every set in the catalogue is
-    /// missing at least `composer_next` and `post_button` — nobody has read either off a
-    /// phone, on any build — so `resolve` must refuse for all of them. If a later edit fills
-    /// a label in without measuring it, or relaxes `REQUIRED`, this is what fails, and it
-    /// fails *before* anything could open a composer on a live account.
+    /// The single most important assertion in this module, and the split between the two gates
+    /// is what it now has to say twice. Every catalogued set is missing at least one of
+    /// [`REQUIRED_TO_PUBLISH`] — `ComposerNext`, `ComposerCaption` and `PostButton` have never
+    /// been read off a phone, on any build — so `can_publish` is false everywhere and
+    /// [`publish_carousel`] refuses before its first tap. If a later edit fills one of those in
+    /// without measuring it, this is what fails.
     #[test]
-    fn no_build_in_the_catalogue_can_reach_a_post_yet_and_each_refusal_names_its_gaps() {
+    fn no_build_in_the_catalogue_can_publish_yet_and_each_gap_is_named() {
         let mut checked = 0;
         for set in TIKTOK_LABEL_SETS {
-            let controls = controls_for(set.package, set.language, "")
-                .expect("every catalogued set resolves to controls");
-            let refusal = ComposerPlan::resolve(&controls).expect_err(&format!(
-                "{} / {} claims it can publish; measure the controls first, then this assertion",
-                set.package, set.language
-            ));
-            assert!(
-                refusal.missing.contains(&TikTokControl::ComposerNext),
-                "{} / {} resolves everything up to the edit step; if that is now measured, \
-                 this assertion is what should change: {:?}",
-                set.package,
-                set.language,
-                refusal.missing
-            );
-            assert!(refusal.to_string().contains("ComposerNext"));
-            // Separately, because `PostButton` is deliberately not in `REQUIRED` and so never
-            // shows up in `missing`. Nobody has read it off any phone.
-            assert!(
-                controls.label(TikTokControl::PostButton).is_none(),
-                "{} / {} claims a measured Post button; the catalogue records none",
-                set.package,
-                set.language
-            );
-            checked += 1;
+            for version in ["", set.measured_app_version] {
+                let Some(controls) = controls_for(set.package, set.language, version) else {
+                    continue;
+                };
+                let missing = ComposerPlan::missing_to_publish(&controls);
+                assert!(
+                    !missing.is_empty(),
+                    "{} / {} (app {version:?}) claims it can publish; measure the controls \
+                     first, then this assertion",
+                    set.package,
+                    set.language
+                );
+                if let Ok(plan) = ComposerPlan::resolve(&controls) {
+                    assert!(
+                        !plan.can_publish(),
+                        "{} / {} resolved a plan that claims it can publish",
+                        set.package,
+                        set.language
+                    );
+                }
+                checked += 1;
+            }
         }
         assert!(
-            checked >= 3,
+            checked >= 4,
             "only {checked} sets scanned; the sweep is broken"
         );
+    }
+
+    /// **The fleet's own build can now be driven as far as the measurement, and that is the
+    /// point of the whole exercise.**
+    ///
+    /// `com.ss.android.ugc.trill` 38.3.2 runs on sixteen of the twenty phones. Every control
+    /// needed to reach the edit step is measured on it — including the album pill, which
+    /// resolves through its version-keyed resource id because its text is the album it happens
+    /// to be showing.
+    ///
+    /// Without that id the whole trip was impossible, and with `ComposerNext` still in
+    /// `REQUIRED` it was impossible twice over: the instrument demanded the reading it exists
+    /// to take.
+    #[test]
+    fn the_build_sixteen_phones_run_can_reach_the_edit_step_but_not_publish() {
+        let controls = controls_for("com.ss.android.ugc.trill", "en", "38.3.2")
+            .expect("the fleet's build is catalogued");
+        let plan = ComposerPlan::resolve(&controls).unwrap_or_else(|refusal| {
+            panic!("the measuring trip is blocked on {:?}", refusal.missing)
+        });
+        assert!(
+            !plan.can_publish(),
+            "this build must not be able to publish"
+        );
+        assert_eq!(
+            ComposerPlan::missing_to_publish(&controls),
+            vec![
+                TikTokControl::ComposerNext,
+                TikTokControl::ComposerCaption,
+                TikTokControl::PostButton
+            ],
+            "exactly the three the measuring trip is for"
+        );
+
+        // **And the album pill is keyed to the version, not to the language.** Resource ids are
+        // reassigned on every app rebuild, so a phone whose `versionName` was not read must not
+        // borrow another build's id — it refuses instead.
+        let unknown_version =
+            controls_for("com.ss.android.ugc.trill", "en", "").expect("the language set exists");
+        assert_eq!(
+            unknown_version.label(TikTokControl::PickerAlbumMenu),
+            None,
+            "an unread app version borrowed another build's resource id"
+        );
+        assert!(ComposerPlan::resolve(&unknown_version).is_err());
     }
 
     /// A set with nothing measured refuses every required control, not just the first.
@@ -1487,6 +1755,7 @@ mod tests {
         let request = CarouselRequest {
             album: "riviu-abc",
             images: 3,
+            caption: "đi Đà Lạt thật đã",
             screen: screen(),
         };
         let stop = AtomicBool::new(false);
@@ -1520,6 +1789,7 @@ mod tests {
         let request = CarouselRequest {
             album: "riviu-abc",
             images: 3,
+            caption: "đi Đà Lạt thật đã",
             screen: screen(),
         };
         let stop = AtomicBool::new(false);
@@ -1541,6 +1811,88 @@ mod tests {
         );
     }
 
+    /// **The fleet's real labels walk to the edit step, with `ComposerNext` still unmeasured.**
+    ///
+    /// Every other walk test runs on a fixture where all three tail controls exist. This one
+    /// runs on `com.ss.android.ugc.trill` 38.3.2 exactly as catalogued — sixteen of the twenty
+    /// phones — and it is the case the measuring trip actually takes.
+    ///
+    /// Two things only this test can see. Arrival at the edit step is proved by the **picker
+    /// going away**, because the control that would prove it positively is the one being
+    /// measured; and the album pill is reached by its version-keyed resource id, because its
+    /// text is the album it happens to be showing.
+    #[tokio::test(start_paused = true)]
+    async fn the_fleets_own_labels_reach_the_edit_step_without_the_label_being_measured() {
+        let controls = controls_for("com.ss.android.ugc.trill", "en", "38.3.2")
+            .expect("the fleet's build is catalogued");
+        let plan = ComposerPlan::resolve(&controls).expect("the walk is reachable");
+        assert!(
+            !plan.can_publish(),
+            "this test is about the publish tail being unmeasured"
+        );
+
+        // Scenes keyed by what the **catalogue** says, not by fixture strings.
+        let picker_real = |album: &str, exit: Option<&str>| {
+            scene(
+                vec![
+                    ("Select multiple", box_at(126.0, 1937.0)),
+                    ("Photos", labelled("Photos", 824.0, 255.0, 152.0, 57.0)),
+                    ("snr", labelled(album, 483.0, 115.0, 60.0, 57.0)),
+                    (
+                        "Next",
+                        ElementBox {
+                            clickable: true,
+                            ..box_at(552.0, 1896.0)
+                        },
+                    ),
+                ],
+                exit,
+            )
+        };
+        let session = FakeSession::with(vec![
+            scene(
+                vec![("Create", labelled("Create", 432.0, 1929.0, 216.0, 147.0))],
+                Some("Create"),
+            ),
+            scene(
+                vec![(
+                    "Record video",
+                    labelled("Record video", 375.0, 1545.0, 330.0, 330.0),
+                )],
+                None,
+            ),
+            picker_real("All", Some("snr")),
+            picker_real("All", None),
+            picker_real("riviu-abc", Some("Select multiple")),
+            picker_real("riviu-abc", Some("Next")),
+            // The edit step, carrying nothing this catalogue knows — which is the whole
+            // reason the trip is being made.
+            scene(vec![("something-unmeasured", box_at(0.0, 0.0))], None),
+        ])
+        .rows("riviu-abc", vec![box_at(0.0, 400.0)]);
+
+        let request = CarouselRequest {
+            album: "riviu-abc",
+            images: 3,
+            caption: "",
+            screen: screen(),
+        };
+        let stop = AtomicBool::new(false);
+        let mut composer = Composer::new(&session, plan, |element: &ElementBox| element.centre());
+        assert_eq!(
+            reach_edit_step(&mut composer, &request, &stop)
+                .await
+                .expect("no transport error"),
+            ComposerVerdict::Stopped,
+            "the measuring walk must reach the edit step and stop there"
+        );
+        assert_eq!(
+            session.on_screen(),
+            6,
+            "the phone did not end on the edit step"
+        );
+    }
+
     // ----------------------------------------------------------------- the walk
 
     /// The whole happy path, ending `Posted` because the feed came back.
@@ -1550,6 +1902,7 @@ mod tests {
         let request = CarouselRequest {
             album: "riviu-abc",
             images: 3,
+            caption: "đi Đà Lạt thật đã",
             screen: screen(),
         };
         let stop = AtomicBool::new(false);
@@ -1579,6 +1932,7 @@ mod tests {
         let request = CarouselRequest {
             album: "riviu-abc",
             images: 3,
+            caption: "đi Đà Lạt thật đã",
             screen: screen(),
         };
         let stop = AtomicBool::new(false);
@@ -1614,6 +1968,7 @@ mod tests {
         let request = CarouselRequest {
             album: "riviu-abc",
             images: 3,
+            caption: "đi Đà Lạt thật đã",
             screen: screen(),
         };
         let stop = AtomicBool::new(false);
@@ -1704,6 +2059,7 @@ mod tests {
         let request = CarouselRequest {
             album: "riviu-abc",
             images: 3,
+            caption: "đi Đà Lạt thật đã",
             screen: screen(),
         };
         let stop = AtomicBool::new(false);
@@ -1926,6 +2282,109 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------- caption
+
+    /// **A caption that silently did not take must not become a published post.**
+    ///
+    /// `type_text` writes into whichever field has focus, and the post screen has more than
+    /// one — the comment drawer's version of this mistake wrote into the collapsed bar behind
+    /// the real field, succeeding at the API level while the screen stayed empty. Here that
+    /// publishes a carousel with no words on it, and there is no delete on Android.
+    ///
+    /// The fixture is the realistic cause: a catalogue entry naming the field's *placeholder*,
+    /// which stops matching the moment a character arrives.
+    #[tokio::test(start_paused = true)]
+    async fn a_caption_that_cannot_be_read_back_stops_the_run_before_post() {
+        let session = FakeSession {
+            caption_never_takes: true,
+            ..FakeSession::full_walk("riviu-abc")
+        };
+        let request = CarouselRequest {
+            album: "riviu-abc",
+            images: 3,
+            caption: "đi Đà Lạt thật đã",
+            screen: screen(),
+        };
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            publish_carousel(
+                &session,
+                plan(),
+                |element: &ElementBox| element.centre(),
+                &request,
+                &stop
+            )
+            .await
+            .expect("no transport error"),
+            ComposerVerdict::CaptionNotConfirmed
+        );
+        // The Post button's own centre, not a y threshold: the composer tab sits at y=2002 on
+        // this fixture, so a threshold catches the wrong tap and passes for the wrong reason.
+        let post = box_at(900.0, 2000.0).centre();
+        assert!(
+            !session
+                .taps
+                .lock()
+                .iter()
+                .any(|tap| (tap.x, tap.y) == (post.x, post.y)),
+            "Post was tapped with an unconfirmed caption"
+        );
+    }
+
+    /// The caption is typed into the field and read back through the same locator.
+    #[tokio::test(start_paused = true)]
+    async fn the_caption_reaches_the_field_and_is_proved_there() {
+        let session = FakeSession::with(vec![post_screen()]);
+        let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            composer
+                .type_caption("đi Đà Lạt thật đã #dalat", &stop)
+                .await
+                .expect("no error"),
+            CaptionOutcome::Typed
+        );
+        assert_eq!(
+            session.typed.lock().as_deref(),
+            Some("đi Đà Lạt thật đã #dalat"),
+            "the caption must go in verbatim — the hashtag is part of what the operator wrote"
+        );
+        assert!(
+            !session.taps.lock().is_empty(),
+            "the field must be focused before typing, or the text lands elsewhere"
+        );
+    }
+
+    /// An empty caption file types nothing and is not a failure.
+    #[tokio::test(start_paused = true)]
+    async fn an_empty_caption_types_nothing_and_lets_the_post_through() {
+        let session = FakeSession::with(vec![post_screen()]);
+        let mut composer = Composer::new(&session, plan(), |element: &ElementBox| element.centre());
+        let stop = AtomicBool::new(false);
+        assert_eq!(
+            composer.type_caption("   ", &stop).await.expect("no error"),
+            CaptionOutcome::NothingToSay
+        );
+        assert!(
+            session.typed.lock().is_none(),
+            "nothing should have been typed"
+        );
+        assert!(
+            session.taps.lock().is_empty(),
+            "nothing should have been tapped"
+        );
+    }
+
+    /// A build with no measured caption field refuses rather than posting a bare carousel.
+    #[tokio::test(start_paused = true)]
+    async fn a_build_without_a_measured_caption_field_cannot_publish_at_all() {
+        let controls = every_publish_control_but_post_measured();
+        assert!(!ComposerPlan::resolve(&controls)
+            .expect("the pre-publish path is measured")
+            .can_publish());
+        assert!(ComposerPlan::missing_to_publish(&controls).contains(&TikTokControl::PostButton));
+    }
+
     // ------------------------------------------------------------------ leave
 
     /// **The composer is closed behind every exit, and the phone reaches the feed.**
@@ -1942,6 +2401,7 @@ mod tests {
         let request = CarouselRequest {
             album: "riviu-abc",
             images: 3,
+            caption: "đi Đà Lạt thật đã",
             screen: screen(),
         };
         let stop = AtomicBool::new(false);
