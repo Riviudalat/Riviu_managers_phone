@@ -499,7 +499,29 @@ pub(crate) async fn post_publish_campaign_inner(
     }
 
     let mut failures = Vec::new();
+    let mut cancelled = false;
     for assignment in &detail.assignments {
+        // **Read the operator's cancel, between phones and only between phones.**
+        //
+        // Before this, `publish_cancel` wrote `cancelled` into the campaign row and nothing
+        // in the run ever looked at it: the loop carried on posting to every remaining
+        // phone, and the last statement of the run wrote `succeeded` over the cancel. The
+        // operator saw a button that did nothing and a campaign that claimed to have
+        // finished cleanly.
+        //
+        // Checked here — after the previous phone finished, before the next one is claimed —
+        // and deliberately nowhere else. A cancel must **never** interrupt a post already in
+        // flight: that phone is somewhere inside TikTok's composer, and abandoning it there
+        // produces exactly the `uncertain` state that can never be retried. Stopping between
+        // phones costs the operator nothing and leaves every untouched assignment still
+        // `Imported`, which is where a later run expects to find it.
+        if matches!(
+            db.publish_campaign_state(&campaign_id)?,
+            Some(riviu_core::PublishCampaignState::Cancelled)
+        ) {
+            cancelled = true;
+            break;
+        }
         let Some(bundle) = detail
             .bundles
             .iter()
@@ -556,22 +578,18 @@ pub(crate) async fn post_publish_campaign_inner(
         }
     }
 
-    if failures.is_empty() {
-        db.update_publish_campaign_state(
-            &campaign_id,
-            riviu_core::PublishCampaignState::Succeeded,
-            None,
-        )?;
-    } else {
-        db.update_publish_campaign_state(
-            &campaign_id,
-            riviu_core::PublishCampaignState::Uncertain,
-            Some("post_or_cleanup_failed"),
-        )?;
-    }
+    // Conditional on the campaign still being `Posting`, in SQL — see
+    // `Database::finish_publish_campaign`. An unconditional write here is what used to erase
+    // a cancel that landed while the run was going.
+    db.finish_publish_campaign(&campaign_id, !failures.is_empty())?;
     let output = db
         .get_publish_campaign(&campaign_id)?
         .ok_or_else(|| anyhow::anyhow!("campaign disappeared after post"))?;
+    if cancelled {
+        // Not an error: the phones that posted, posted, and the rest were never touched.
+        // Reporting a failure here would push the operator toward a retry they do not need.
+        return Ok(output);
+    }
     if !failures.is_empty() {
         anyhow::bail!("{}", failures.join("; "));
     }

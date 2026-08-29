@@ -446,6 +446,66 @@ impl Database {
         )?;
         Ok(())
     }
+    /// The campaign's own state, without loading its bundles and assignments.
+    ///
+    /// A light read because the one caller is inside the post loop, checking between phones
+    /// whether the operator has cancelled. `get_publish_campaign` pulls the whole manifest —
+    /// every bundle, every image, every assignment — which is a lot of work to ask for once
+    /// per phone to read one column.
+    pub fn publish_campaign_state(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<crate::publish::PublishCampaignState>> {
+        let conn = self.conn()?;
+        let state: Option<String> = conn
+            .query_row(
+                "SELECT state FROM publish_campaigns WHERE id=?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(state.as_deref().map(publish_state_from_str))
+    }
+
+    /// Settle a finished run — **without overwriting a cancel that landed while it ran.**
+    ///
+    /// The bug this closes: the post loop ended with an unconditional write of `Succeeded`
+    /// or `Uncertain`, so an operator who pressed Cancel mid-run watched the campaign come
+    /// back reading `succeeded`. Their cancel was recorded, honoured for the phones that had
+    /// not started, and then erased by the last statement of the run.
+    ///
+    /// So the write is conditional **in SQL**, on the campaign still being `Posting` — the
+    /// state the claim put it in. Guarding in Rust instead would mean re-reading and then
+    /// writing, with the cancel free to land in between.
+    ///
+    /// Returns the state the campaign actually ended in, which is not always the one asked
+    /// for; the caller reports that rather than assuming.
+    pub fn finish_publish_campaign(
+        &self,
+        id: &str,
+        had_failures: bool,
+    ) -> anyhow::Result<Option<crate::publish::PublishCampaignState>> {
+        let wanted = if had_failures {
+            crate::publish::PublishCampaignState::Uncertain
+        } else {
+            crate::publish::PublishCampaignState::Succeeded
+        };
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE publish_campaigns
+             SET state=?1,error_code=?2,revision=revision+1,updated_at=?3
+             WHERE id=?4 AND state=?5",
+            params![
+                wanted.as_str(),
+                had_failures.then_some("post_or_cleanup_failed"),
+                Utc::now().to_rfc3339(),
+                id,
+                crate::publish::PublishCampaignState::Posting.as_str(),
+            ],
+        )?;
+        self.publish_campaign_state(id)
+    }
+
     pub fn cancel_publish_campaign(&self, id: &str) -> anyhow::Result<()> {
         self.update_publish_campaign_state(
             id,

@@ -191,6 +191,19 @@ pub enum TikTokControl {
     /// path uses it to reach the gallery picker rather than the camera. Do not
     /// "correct" it to something that reads better — it is a measured string.
     ComposerOpen,
+    /// The composer's own shutter button — the big round one that takes a photo.
+    ///
+    /// **Never tapped by the publish path**, and that is the point of it: it is the *anchor*
+    /// the unlabelled gallery entry is measured against. The entry beside it carries no
+    /// `content-desc` and no `text`, so it can only be reached by arithmetic, and arithmetic
+    /// from a located element survives a screen size the numbers were not taken on — while
+    /// arithmetic from a remembered coordinate does not.
+    ///
+    /// Requiring it is therefore a *provenance* rule rather than a navigation one: a build
+    /// that has not had this measured has no anchor, so its gallery entry would be reached
+    /// by numbers copied off another phone, and the two controls next to it open the effects
+    /// panel.
+    ComposerShutter,
     /// The album dropdown at the top of the gallery picker, showing the current album.
     ///
     /// Opening it lists albums **by directory name**, which is how the publish path
@@ -325,7 +338,7 @@ impl TikTokControl {
     /// are here now, the ordinals run 0–28 with no holes, and `every_control_appears_in_all`
     /// is finally strong enough to notice: with `seen` sized from this array, a variant
     /// whose ordinal exceeds it now panics on the index instead of passing quietly.
-    pub const ALL: [Self; 31] = [
+    pub const ALL: [Self; 32] = [
         Self::FeedTab,
         Self::PhotoBadge,
         Self::Like,
@@ -338,6 +351,7 @@ impl TikTokControl {
         Self::CommentSend,
         Self::CommentReply,
         Self::ComposerOpen,
+        Self::ComposerShutter,
         Self::PickerAlbumMenu,
         Self::PickerTabAll,
         Self::PickerTabPhotos,
@@ -398,6 +412,7 @@ impl TikTokControl {
             Self::JourneyDone => 28,
             Self::AuthorProfileLink => 29,
             Self::LikeCount => 30,
+            Self::ComposerShutter => 31,
         }
     }
 }
@@ -554,6 +569,7 @@ pub struct TikTokLabels {
     comment_reply: Option<LabelMatch>,
     /// The composer opener in the bottom bar.
     composer_open: Option<LabelMatch>,
+    composer_shutter: Option<LabelMatch>,
     /// The gallery picker's own controls.
     ///
     /// Measured 11/08/2026 on both fleet phones. What is **not** here, and cannot be:
@@ -615,6 +631,7 @@ impl TikTokLabels {
             TikTokControl::LiveRoom => self.live_room,
             TikTokControl::CommentReply => self.comment_reply,
             TikTokControl::ComposerOpen => self.composer_open,
+            TikTokControl::ComposerShutter => self.composer_shutter,
             TikTokControl::PickerAlbumMenu => self.picker_album_menu,
             TikTokControl::PickerTabAll => self.picker_tab_all,
             TikTokControl::PickerTabPhotos => self.picker_tab_photos,
@@ -751,6 +768,7 @@ pub(crate) fn nothing_measured() -> TikTokControls {
         comment_send: None,
         comment_reply: None,
         composer_open: None,
+        composer_shutter: None,
         picker_album_menu: None,
         picker_tab_all: None,
         picker_tab_photos: None,
@@ -810,6 +828,7 @@ pub(crate) fn every_publish_control_measured() -> TikTokControls {
         comment_send: None,
         comment_reply: None,
         composer_open: Some(LabelMatch::Exact("fixture-composer-open")),
+        composer_shutter: Some(LabelMatch::Exact("fixture-shutter")),
         picker_album_menu: Some(LabelMatch::Text("fixture-album-menu")),
         picker_tab_all: Some(LabelMatch::Text("fixture-tab-all")),
         picker_tab_photos: Some(LabelMatch::Text("fixture-tab-photos")),
@@ -863,6 +882,7 @@ pub(crate) fn every_publish_control_but_post_measured() -> TikTokControls {
         comment_send: None,
         comment_reply: None,
         composer_open: Some(LabelMatch::Exact("fixture-composer-open")),
+        composer_shutter: Some(LabelMatch::Exact("fixture-shutter")),
         picker_album_menu: Some(LabelMatch::Text("fixture-album-menu")),
         picker_tab_all: Some(LabelMatch::Text("fixture-tab-all")),
         picker_tab_photos: Some(LabelMatch::Text("fixture-tab-photos")),
@@ -1155,6 +1175,7 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // about the Send button, so agreement here is a fact rather than a rule.
         comment_reply: Some(LabelMatch::Text("Reply")),
         composer_open: None,
+        composer_shutter: None,
         // The S8+ fleet work never opened the composer on this build.
         picker_album_menu: None,
         picker_tab_all: None,
@@ -1230,6 +1251,7 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // clickable, at x 432..648 y 2135 on a 1080x2400 screen — the middle of five
         // tabs (`Trang chủ`, `Cửa hàng`, this, `Hộp thư`, `Hồ sơ`).
         composer_open: Some(LabelMatch::Exact("Quay")),
+        composer_shutter: None,
         // Read off the picker on 11/08/2026, on both fleet phones (Redmi Note 12 / app
         // 46.3.3 and SM-N950F / app 46.4.3 — the strings agree). The two tabs carry a
         // real `content-desc`; the album name and the two buttons carry only `text`,
@@ -1427,6 +1449,18 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // `ComposerOpen` and bail without it, so the instrument for the next step was itself
         // locked behind this label.
         composer_open: Some(LabelMatch::Exact("Create")),
+        // **Measured 29/08/2026, same session and same phone as `composer_open` above.**
+        // `android.widget.Button`, `content-desc="Record video"`, `bounds=[375,1545][705,1875]`
+        // — 330x330, horizontally centred on a 1080-wide screen.
+        //
+        // Catalogued because it anchors the thing that cannot be catalogued. The gallery
+        // entry is an unlabelled `FrameLayout` at `[765,1590][1005,1830]`
+        // (`resource-id=…:id/bos`), and the measurement that matters is the *relationship*:
+        // it shares the shutter's vertical centre exactly (both at y=1710) and sits one
+        // margin in from the right edge. Two other unlabelled circles sit to the shutter's
+        // left, `resource-id=…:id/egr`, and they open the effects panel — which is what an
+        // earlier note's "bottom-left" guess would have tapped.
+        composer_shutter: Some(LabelMatch::Exact("Record video")),
         // **The picker, measured 29/08/2026 on SM-G950F `98895a3355424e484f`, app 38.3.2,
         // locale `en-US`, 1080x2220.** Reached by tapping `Create`, then the gallery entry
         // described below. Every string here is `text`; not one of these controls carries a
