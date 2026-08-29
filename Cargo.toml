@@ -30,6 +30,10 @@ all = { level = "deny", priority = -1 }
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
+# Already in the tree (reqwest pulls it); made direct because hand-rolled authority
+# parsing is exactly what a review found accepting `https://.tiktok.com/` and rejecting
+# `https://www.tiktok.com:443/...`.
+url = "2.5"
 serde_json = "1"
 thiserror = "2"
 anyhow = "1"
