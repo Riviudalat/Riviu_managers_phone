@@ -1960,6 +1960,7 @@ mod tests {
             height: 120.0,
             description: Some("Thích".into()),
             enabled: true,
+            clickable: true,
         };
         let centre = element.centre();
         assert_eq!((centre.x, centre.y), (1_060.0, 1_460.0));
@@ -1986,6 +1987,7 @@ mod tests {
             height: 0.0,
             description: None,
             enabled: true,
+            clickable: true,
         };
         assert_eq!(sliver.jitter_radius(), (1.0, 1.0));
     }
@@ -2074,6 +2076,7 @@ mod tests {
                 height: 96.0,
                 description: None,
                 enabled: true,
+                clickable: true,
             }))
         }
     }
@@ -2178,6 +2181,7 @@ mod tests {
                 height: 80.0,
                 description: None,
                 enabled: true,
+                clickable: true,
             }))
         }
     }
@@ -2279,6 +2283,7 @@ mod tests {
                     height: 40.0,
                     description: None,
                     enabled: true,
+                    clickable: true,
                 }),
             )
         }
@@ -2355,6 +2360,7 @@ mod tests {
                 height: 80.0,
                 description: Some(format!("{prefix} {generation}")),
                 enabled: true,
+                clickable: true,
             })
         }
     }
@@ -2420,6 +2426,7 @@ mod tests {
                     height: 40.0,
                     description: None,
                     enabled: true,
+                    clickable: true,
                 }),
                 "comments" => self.card("comments"),
                 "Share video" => self.card("Share video"),
@@ -2585,6 +2592,7 @@ mod tests {
                     height: 80.0,
                     description: Some(format!("{prefix} {generation}")),
                     enabled: true,
+                    clickable: true,
                 })
             };
             // The bottom bar is on screen wherever we are; the rail is only on the feed.
@@ -2596,6 +2604,7 @@ mod tests {
                     height: 60.0,
                     description: None,
                     enabled: true,
+                    clickable: true,
                 }));
             }
             if !self.here() {
@@ -2609,6 +2618,7 @@ mod tests {
                     height: 40.0,
                     description: None,
                     enabled: true,
+                    clickable: true,
                 }),
                 "Like" => card("Like"),
                 "comments" => card("comments"),
@@ -2718,6 +2728,7 @@ mod tests {
                 height: 39.0,
                 description: Some(text.to_string()),
                 enabled: true,
+                clickable: true,
             }
         }
     }

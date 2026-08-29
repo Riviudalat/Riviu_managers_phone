@@ -671,13 +671,15 @@ impl UiSession for AndroidUiSession {
         Ok(png)
     }
 
-    /// Bounds, label, and enabled state, from one hierarchy query.
+    /// Bounds, label, and both armed flags, from one hierarchy query.
     ///
     /// The attribute read-backs are extra round trips rather than fields of the
     /// first response, because the agent's find reply carries only the element id.
-    /// Both are still worth it: the comment control's own text is what tells two
-    /// posts apart — that is what proves a swipe advanced — and the Send button's
-    /// `enabled` flag is what proves the comment is armed.
+    /// All three are still worth it: the comment control's own text is what tells two
+    /// posts apart — that is what proves a swipe advanced — the Send button's
+    /// `enabled` flag is what proves the comment is armed, and the image picker's
+    /// `Next` moves `clickable` instead, which is what proves images were selected
+    /// before anything is posted.
     async fn locate(
         &self,
         query: riviu_core::ElementQuery<'_>,
@@ -696,17 +698,20 @@ impl UiSession for AndroidUiSession {
             .await
             .ok()
             .flatten();
-        // Default to enabled when the attribute cannot be read. The alternative —
-        // defaulting to disabled — would report a live Send button as unarmed and
-        // silently drop every comment.
-        let enabled = self
-            .agent
-            .attribute(&element, "enabled")
-            .await
-            .ok()
-            .flatten()
-            .map(|value| value != "false")
-            .unwrap_or(true);
+        let enabled = enabled_from_attribute(
+            self.agent
+                .attribute(&element, "enabled")
+                .await
+                .ok()
+                .flatten(),
+        );
+        let clickable = clickable_from_attribute(
+            self.agent
+                .attribute(&element, "clickable")
+                .await
+                .ok()
+                .flatten(),
+        );
         Ok(Some(riviu_core::ElementBox {
             x: rect.x,
             y: rect.y,
@@ -714,12 +719,13 @@ impl UiSession for AndroidUiSession {
             height: rect.height,
             description,
             enabled,
+            clickable,
         }))
     }
 
     /// Bounds for **every** match, geometry only.
     ///
-    /// Deliberately skips the `content-desc` and `enabled` read-backs that
+    /// Deliberately skips the `content-desc`, `enabled` and `clickable` read-backs that
     /// [`Self::locate`] performs. Those are two extra HTTP round trips *per element*,
     /// and this is called against a comment list: on a drawer with a dozen rows the
     /// attribute reads would dominate, and the caller that needs them
@@ -744,6 +750,9 @@ impl UiSession for AndroidUiSession {
                     height: rect.height,
                     description: None,
                     enabled: true,
+                    // Constant, like `enabled` above, and for the same reason: this
+                    // path reads no attributes. `false` is the refusing direction.
+                    clickable: false,
                 }),
                 Err(error) => {
                     tracing::debug!(%error, "skipping an element whose rect could not be read")
@@ -796,6 +805,7 @@ impl UiSession for AndroidUiSession {
                 height: rect.height,
                 description,
                 enabled: true,
+                clickable: false,
             });
         }
         Ok(found)
@@ -870,9 +880,138 @@ fn keys_payload(text: &str) -> anyhow::Result<String> {
     Ok(text.replace(' ', "%s"))
 }
 
+/// Read the `enabled` attribute, **defaulting to enabled** when it cannot be read.
+///
+/// The default is the whole content of this function. TikTok's comment Send button
+/// exists in the drawer the entire time and flips `enabled=false` → `true` when the
+/// field holds text, so this flag is what proves a comment is armed. Guessing
+/// *disabled* on a failed attribute read would report a live button as unarmed and
+/// silently drop every comment — a failure that costs nothing but looks like the app
+/// simply not working. Guessing *enabled* costs at worst one tap that does nothing.
+///
+/// Anything that is not the literal `false` counts as enabled, matching the way the
+/// hierarchy renders the attribute.
+fn enabled_from_attribute(raw: Option<String>) -> bool {
+    raw.map(|value| value != "false").unwrap_or(true)
+}
+
+/// Read the `clickable` attribute, **defaulting to not-clickable** when it cannot be read.
+///
+/// The mirror image of [`enabled_from_attribute`], and the asymmetry is the point.
+/// Measured 29/08/2026 on `com.ss.android.ugc.trill` 38.3.2 — the build sixteen of the
+/// twenty phones run — TikTok's image picker arms its `Next` button by moving
+/// `clickable` while `enabled` stays `true` throughout:
+///
+/// ```text
+///   nothing selected   clickable=false  enabled=true
+///   one image selected clickable=true   enabled=true
+/// ```
+///
+/// So this flag is the only evidence that images were actually selected, and what it
+/// gates is a **post**. Guessing *armed* on a failed attribute read would advance out
+/// of the picker with nothing chosen, and further down that path there is no delete
+/// on Android to undo the result. Unknown therefore refuses.
+///
+/// And unlike `enabled`, only the literal `true` counts — an unreadable or unexpected
+/// value is not permission to post.
+fn clickable_from_attribute(raw: Option<String>) -> bool {
+    raw.map(|value| value == "true").unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The two armed flags default in opposite directions, and that is deliberate.**
+    ///
+    /// Both read a boolean attribute off the same hierarchy, so the temptation to write
+    /// one helper for the pair is real — and it would be wrong, because they guard
+    /// different things. `enabled` guards sending a comment: refusing on doubt loses a
+    /// message. `clickable` guards leaving the image picker: accepting on doubt posts a
+    /// carousel that nothing in this project can take down again.
+    ///
+    /// If a later edit unifies them, this test is what fails.
+    #[test]
+    fn the_unreadable_case_refuses_for_a_post_and_permits_for_a_comment() {
+        assert!(
+            enabled_from_attribute(None),
+            "an unreadable `enabled` must not report a live Send button as unarmed"
+        );
+        assert!(
+            !clickable_from_attribute(None),
+            "an unreadable `clickable` must never be read as `enough images are selected`"
+        );
+
+        // The measured values, both ways round.
+        assert!(enabled_from_attribute(Some("true".into())));
+        assert!(!enabled_from_attribute(Some("false".into())));
+        assert!(clickable_from_attribute(Some("true".into())));
+        assert!(!clickable_from_attribute(Some("false".into())));
+
+        // A value neither helper was measured against. `enabled` is permissive by
+        // design; `clickable` accepts nothing but the literal, because the cost of
+        // being wrong is a published post.
+        assert!(enabled_from_attribute(Some("TRUE".into())));
+        assert!(!clickable_from_attribute(Some("TRUE".into())));
+        assert!(!clickable_from_attribute(Some(String::new())));
+    }
+
+    /// `locate` must actually ask for both attributes, on the real element.
+    ///
+    /// The helpers above are pure and provable, but a caller that never calls them is
+    /// what a pure test cannot see: deleting the `clickable` read-back would leave every
+    /// box `false` and every picker permanently "not armed", which reads as a phone
+    /// problem rather than a missing line. Only `locate` pays for the round trips —
+    /// `locate_all` and `locate_all_described` skip both on purpose — so this counts
+    /// sites rather than asking whether the string appears anywhere in the file.
+    #[test]
+    fn locate_reads_both_armed_flags_and_the_list_paths_still_read_neither() {
+        let source = include_str!("session.rs").replace("\r\n", "\n");
+        let body = {
+            let start = source
+                .find("    async fn locate(")
+                .expect("`locate` is still called that");
+            let open = start + source[start..].find('{').expect("a body");
+            let mut depth = 0usize;
+            let mut end = open;
+            for (offset, character) in source[open..].char_indices() {
+                match character {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = open + offset;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            &source[open..end]
+        };
+        assert!(
+            body.contains(r#"attribute(&element, "enabled")"#),
+            "`locate` stopped reading `enabled`; the comment path can no longer tell armed from not"
+        );
+        assert!(
+            body.contains(r#"attribute(&element, "clickable")"#),
+            "`locate` stopped reading `clickable`; the image picker can no longer prove a selection"
+        );
+        assert!(
+            body.contains("enabled_from_attribute(") && body.contains("clickable_from_attribute("),
+            "`locate` parses the attributes inline again, so the defaults tested above are dead"
+        );
+
+        // The list paths deliberately pay for neither, and their boxes say so. Counted
+        // over the module only — this test's own source is in the same file, and a gate
+        // that counts its own assertion text passes no matter what the module does.
+        let module = &source[..source.find("#[cfg(test)]").expect("a test module")];
+        assert_eq!(
+            module.matches("clickable: false,").count(),
+            2,
+            "`locate_all` and `locate_all_described` must keep declaring that they did not read it"
+        );
+    }
 
     #[test]
     fn accessibility_id_maps_to_content_desc() {

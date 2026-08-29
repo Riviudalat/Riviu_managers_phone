@@ -1146,6 +1146,7 @@ async fn measure_comment_list(
                     height: bottom - y,
                     description: Some(node.text.clone()),
                     enabled: node.enabled,
+                    clickable: node.clickable,
                 })
             })
             .collect()

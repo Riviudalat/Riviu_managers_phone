@@ -369,6 +369,7 @@ mod tests {
             height: 88.0,
             description: Some("@2131823284".into()),
             enabled,
+            clickable: true,
         }
     }
 

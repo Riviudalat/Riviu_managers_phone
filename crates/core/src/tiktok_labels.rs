@@ -1293,12 +1293,72 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // every reply refused with `reply_control_unmeasured`. Threading was unreachable
         // on the whole fleet.
         comment_reply: Some(LabelMatch::Text("Reply")),
-        composer_open: None,
+        // **Measured 29/08/2026 on SM-G950F `98895a3355424e484f`, app 38.3.2, locale `en-US`**
+        // (`label_scout`, read-only). `android.widget.Button`, `content-desc="Create"`, empty
+        // `text`, `clickable=true`, `bounds=[432,1929][648,2076]`,
+        // `resource-id=com.ss.android.ugc.trill:id/jmh`. The bar is five 216x147 tabs on a
+        // 1080x2076 usable area: `Home`, `Shop`, `Create`, `Inbox`, `Profile`.
+        //
+        // `Exact`, and the string occurs **exactly once in the whole tree** — 184 elements
+        // checked, no other node carries `Create` in either `content-desc` or `text`. That
+        // check is the point of writing it down: `Contains` on a five-tab bar is how a locator
+        // starts matching a caption.
+        //
+        // Same shape as the Vietnamese build's `Quay`, and the same warning applies — this is a
+        // measured string, not a translation to correct. It opens the camera; the gallery lives
+        // inside, behind an unlabelled control.
+        //
+        // **Measuring this does not enable posting**, and that is deliberate: the five picker
+        // controls below and the whole tail are still `None`, so `Composer::readiness` refuses
+        // before anything opens. What it unblocks is the *measurement*: `probe
+        // --measure-composer` and `--measure-gallery-entry` both begin by locating
+        // `ComposerOpen` and bail without it, so the instrument for the next step was itself
+        // locked behind this label.
+        composer_open: Some(LabelMatch::Exact("Create")),
+        // **The picker, measured 29/08/2026 on SM-G950F `98895a3355424e484f`, app 38.3.2,
+        // locale `en-US`, 1080x2220.** Reached by tapping `Create`, then the gallery entry
+        // described below. Every string here is `text`; not one of these controls carries a
+        // `content-desc`, which is the opposite split from the action rail on the same build.
+        //
+        // **The album menu is measured and still `None`, and that is not an oversight.** It is
+        // the pill at the top of the picker, `TextView [483,115][543,172]`,
+        // `resource-id=…:id/snr` — and its text is *the album currently showing*, `All` right
+        // now and the campaign's `riviu-…` id once one is chosen. So a text locator for it is
+        // wrong twice over: it names a value that changes the moment it is used, and `All`
+        // **also** belongs to the media-type tab at `[151,255][209,312]` (`…:id/slq`), so the
+        // string is ambiguous on screen before anything is chosen. This catalogue matches on
+        // `text`/`content-desc` only, so the menu needs a locator this file cannot express;
+        // until the driver has one, the publish path refuses here.
         picker_album_menu: None,
+        // Ambiguous for the same reason, and left refusing for it: two nodes read `All`.
         picker_tab_all: None,
-        picker_tab_photos: None,
-        picker_multi_select: None,
-        picker_next: None,
+        // Unique on screen. The tab order differs from the Vietnamese build (All, Videos,
+        // Photos here), which is why the tabs are measured per build rather than translated.
+        picker_tab_photos: Some(LabelMatch::Text("Photos")),
+        // `TextView [126,1937][422,1991]`, `…:id/k6p`, and `clickable=false` on the text node
+        // itself — the clickable wrapper is its parent, the same shape the Vietnamese build had.
+        picker_multi_select: Some(LabelMatch::Text("Select multiple")),
+        // `TextView [552,1896][1044,2028]`, `…:id/q4g`.
+        //
+        // **The armed signal is `clickable`, and `enabled` is useless for it here.** Measured
+        // both states on this phone:
+        //
+        // ```text
+        //   nothing selected   clickable=false  enabled=true
+        //   one image selected clickable=true   enabled=true
+        // ```
+        //
+        // That matters beyond this label. `ElementBox` (`driver.rs`) carries `enabled` and not
+        // `clickable`, and `AndroidUiSession::locate` reads exactly two attributes — so the
+        // primitive this project has **cannot see this flag**, and an `await_armed` written
+        // against `enabled` would read "armed" before a single image was chosen. The composer
+        // driver needs `ElementBox` to grow `clickable` before it can prove a selection took.
+        //
+        // Also measured, and it closes off a tempting alternative: with one image selected the
+        // grid renders **no per-cell numeral** — no single-digit text appears anywhere on
+        // screen. So slide *order* cannot be read back from the picker on this build, and grid
+        // scrolling cannot be made safe by re-identifying cells after a flick.
+        picker_next: Some(LabelMatch::Text("Next")),
         // Measured 24/08/2026 — `Đà Lạt Gói Mang Về profile`, and it survives following the
         // creator while `Follow ` does not. English puts the name first, so the needle is a
         // suffix; the leading space keeps it off the bare `Profile` tab.

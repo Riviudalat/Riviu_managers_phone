@@ -437,6 +437,7 @@ mod tests {
                 height: 100.0,
                 description: None,
                 enabled: true,
+                clickable: true,
             }))
         }
     }

@@ -891,6 +891,39 @@ pub struct ElementBox {
     /// transition is the same "send is armed" evidence the iOS engine has to
     /// detect by pixel colour, available here as an attribute.
     pub enabled: bool,
+    /// Whether the control accepts a tap.
+    ///
+    /// A second armed-flag, carried for the same reason as [`Self::enabled`] and
+    /// **not** interchangeable with it. Measured 29/08/2026 on the build sixteen of
+    /// the twenty phones run (`com.ss.android.ugc.trill` 38.3.2), on TikTok's image
+    /// picker: the `Next` button that advances out of the picker reads
+    ///
+    /// ```text
+    ///   nothing selected   clickable=false  enabled=true
+    ///   one image selected clickable=true   enabled=true
+    /// ```
+    ///
+    /// so `enabled` is constant across the transition and proves nothing there, while
+    /// the comment drawer's Send button on another build moves `enabled` and not this.
+    /// Two different apps' idea of "armed", and a caller must ask for the one its own
+    /// screen was measured to move.
+    ///
+    /// # Only [`UiSession::locate`] fills this in
+    ///
+    /// [`UiSession::locate_all`] and [`UiSession::locate_all_described`] leave it
+    /// `false`, exactly as they leave `enabled` at a constant: both skip the
+    /// per-element attribute round trips on purpose, and they are called against
+    /// list screens where the cost is per row. Do not filter a list by this field —
+    /// you would drop every row.
+    ///
+    /// # Unreadable means `false`, which is the opposite of `enabled`'s default
+    ///
+    /// `enabled` defaults to `true` when the attribute cannot be read, because
+    /// reporting a live Send button as unarmed would silently drop every comment. The
+    /// safe direction here is the other one: this flag gates a **post**, and reading
+    /// "armed" from a failed attribute read would tap `Next` with nothing selected —
+    /// or, further along, publish. Unknown therefore refuses.
+    pub clickable: bool,
 }
 
 impl ElementBox {

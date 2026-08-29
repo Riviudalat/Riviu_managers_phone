@@ -3641,6 +3641,7 @@ mod tests {
             height: 88.0,
             description: Some(SEND_ID.into()),
             enabled,
+            clickable: true,
         }
     }
 
@@ -4036,6 +4037,7 @@ mod tests {
             height,
             description: Some(label.to_string()),
             enabled: true,
+            clickable: true,
         }
     }
 
