@@ -820,6 +820,18 @@ impl AppState {
             // Not fatal: the app is more useful with a stale row than not at all.
             Err(error) => log::warn!("không dọn được chiến dịch tương tác dở: {error:#}"),
         }
+        // Same argument again for publish, and the stakes are higher: a row left at
+        // `posting` is a carousel that may already be on a real account, and nothing
+        // re-enters it. Settling it as `uncertain` is what makes it permanently
+        // unclaimable, which is the only safe answer when nobody can tell whether the post
+        // went out.
+        match db.interrupt_orphaned_publish_campaigns() {
+            Ok(0) => {}
+            Ok(count) => log::warn!(
+                "{count} chiến dịch đăng bài còn dở từ lần chạy trước đã được đánh dấu là đã dừng"
+            ),
+            Err(error) => log::warn!("không dọn được chiến dịch đăng bài dở: {error:#}"),
+        }
         let committed_artifacts = db.list_committed_flow_artifacts()?;
         for failure in flow_artifacts.reconcile(&committed_artifacts)? {
             log::warn!(

@@ -229,6 +229,95 @@ pub fn validate_publish_mapping(
         .collect())
 }
 
+/// What one auto-assignment dealt, and where the next one should start.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoAssignment {
+    pub plan: Vec<PublishAssignmentPlan>,
+    /// Where the next deal begins. Passed back in so this function stays pure and the
+    /// operator's rotation survives a restart in the `settings` table rather than in memory.
+    pub next_cursor: u64,
+}
+
+/// Why a deal was refused. None of these degrades into a smaller run.
+///
+/// Derives match [`PublishPlanError`], which it wraps: `Debug` and `Error`, nothing more.
+/// Callers match on the shape rather than compare values.
+#[derive(Debug, thiserror::Error)]
+pub enum PublishAssignError {
+    #[error("cần {wanted} máy rảnh, chỉ có {available}")]
+    NotEnoughPhones { wanted: usize, available: usize },
+    #[error("cần {wanted} bài khác nhau, thư mục chỉ có {available}")]
+    NotEnoughBundles { wanted: usize, available: usize },
+    #[error("không chia được 0 bài")]
+    Empty,
+    #[error(transparent)]
+    Mapping(#[from] PublishPlanError),
+}
+
+/// Deal `wanted` distinct bundles onto `wanted` phones, one each.
+///
+/// **It ends by calling [`validate_publish_mapping`], and that is the point.** This function
+/// only *chooses*; the bijection between a bundle and a phone stays enforced in the one place
+/// that already earned nine tests for it. A second implementation of the pairing would be a
+/// second thing to get wrong in the one function whose job is to stop one account's photographs
+/// going out under another account's caption.
+///
+/// # Refusing rather than dealing fewer
+///
+/// `NotEnoughBundles` is the variant that matters. The operator asked for *different* posts;
+/// reusing one puts the same carousel on two live accounts, which is the shape a bot farm has
+/// and a person does not. Dealing four when five were asked for is a silent change of plan, so
+/// too few phones refuses as well.
+///
+/// # Why a cursor and not "the first N"
+///
+/// Twenty-one posts and a fixed head means every run burns the same first few, and after four
+/// runs the operator has re-posted all of them. The cursor makes two consecutive runs disjoint,
+/// which is what a test run should be able to demonstrate. Sorting by content hash was the
+/// obvious alternative and is not one: `bundle.id` already changes with content, so a
+/// content-derived order is "always the same five" wearing a different hat.
+pub fn auto_assign_bundles(
+    bundle_ids: &[String],
+    udids: &[String],
+    wanted: usize,
+    cursor: u64,
+) -> Result<AutoAssignment, PublishAssignError> {
+    if wanted == 0 {
+        return Err(PublishAssignError::Empty);
+    }
+    if udids.len() < wanted {
+        return Err(PublishAssignError::NotEnoughPhones {
+            wanted,
+            available: udids.len(),
+        });
+    }
+    if bundle_ids.len() < wanted {
+        return Err(PublishAssignError::NotEnoughBundles {
+            wanted,
+            available: bundle_ids.len(),
+        });
+    }
+
+    let total = bundle_ids.len() as u64;
+    let start = cursor % total;
+    let chosen_bundles: Vec<String> = (0..wanted)
+        .map(|offset| {
+            let index = (start + offset as u64) % total;
+            bundle_ids[index as usize].clone()
+        })
+        .collect();
+    // The phones as given: the caller filtered them to idle and eligible, and their order is
+    // the operator's fleet order, which is the order the mapping preview renders.
+    let chosen_udids: Vec<String> = udids.iter().take(wanted).cloned().collect();
+
+    let plan = validate_publish_mapping(&chosen_bundles, &chosen_udids)?;
+    Ok(AutoAssignment {
+        plan,
+        next_cursor: cursor.wrapping_add(wanted as u64),
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishImage {
@@ -784,6 +873,118 @@ mod tests {
     fn write_png(path: &Path, color: [u8; 3]) {
         let image = image::RgbImage::from_pixel(8, 10, image::Rgb(color));
         image.save(path).expect("png");
+    }
+
+    fn ids(prefix: &str, count: usize) -> Vec<String> {
+        (1..=count).map(|n| format!("{prefix}-{n:02}")).collect()
+    }
+
+    /// The operator's run: twenty-one posts, five phones, five different posts.
+    #[test]
+    fn five_phones_get_five_different_posts() {
+        let deal = auto_assign_bundles(&ids("bundle", 21), &ids("phone", 5), 5, 0).expect("deal");
+        assert_eq!(deal.plan.len(), 5);
+        let chosen: std::collections::BTreeSet<&str> =
+            deal.plan.iter().map(|row| row.bundle_id.as_str()).collect();
+        assert_eq!(
+            chosen.len(),
+            5,
+            "five distinct posts, not one post five times"
+        );
+        // Positional identity is the whole invariant: row n's bundle goes to row n's phone.
+        for (index, row) in deal.plan.iter().enumerate() {
+            assert_eq!(row.ordinal, index as u32);
+            assert_eq!(row.udid, format!("phone-{:02}", index + 1));
+        }
+    }
+
+    /// **A second run must not deal the same five.**
+    ///
+    /// Twenty-one posts with a fixed head means four runs re-post everything. The cursor is
+    /// what makes a test run demonstrable rather than a repeat.
+    #[test]
+    fn a_second_run_does_not_deal_the_same_five() {
+        let bundles = ids("bundle", 21);
+        let phones = ids("phone", 5);
+        let first = auto_assign_bundles(&bundles, &phones, 5, 0).expect("first deal");
+        let second =
+            auto_assign_bundles(&bundles, &phones, 5, first.next_cursor).expect("second deal");
+        let a: std::collections::BTreeSet<&str> = first
+            .plan
+            .iter()
+            .map(|row| row.bundle_id.as_str())
+            .collect();
+        let b: std::collections::BTreeSet<&str> = second
+            .plan
+            .iter()
+            .map(|row| row.bundle_id.as_str())
+            .collect();
+        assert!(
+            a.is_disjoint(&b),
+            "two consecutive runs share a post: {a:?} vs {b:?}"
+        );
+    }
+
+    /// Wrapping past the end still deals five *distinct* posts.
+    #[test]
+    fn the_cursor_wraps_without_repeating_inside_one_deal() {
+        let deal = auto_assign_bundles(&ids("bundle", 21), &ids("phone", 5), 5, 19).expect("deal");
+        let chosen: Vec<&str> = deal.plan.iter().map(|row| row.bundle_id.as_str()).collect();
+        assert_eq!(
+            chosen,
+            vec![
+                "bundle-20",
+                "bundle-21",
+                "bundle-01",
+                "bundle-02",
+                "bundle-03"
+            ]
+        );
+    }
+
+    /// Refusing rather than dealing fewer, in both directions.
+    #[test]
+    fn too_few_of_either_side_is_refused_rather_than_shrunk() {
+        // More posts than phones is normal — twenty-one posts, five phones.
+        auto_assign_bundles(&ids("bundle", 21), &ids("phone", 5), 5, 0)
+            .expect("more posts is fine");
+
+        assert!(matches!(
+            auto_assign_bundles(&ids("bundle", 21), &ids("phone", 3), 5, 0),
+            Err(PublishAssignError::NotEnoughPhones {
+                wanted: 5,
+                available: 3
+            })
+        ));
+        // The one that matters: four posts cannot fill five phones without repeating one, and
+        // the same carousel on two live accounts is the thing this refuses to do.
+        assert!(matches!(
+            auto_assign_bundles(&ids("bundle", 4), &ids("phone", 5), 5, 0),
+            Err(PublishAssignError::NotEnoughBundles {
+                wanted: 5,
+                available: 4
+            })
+        ));
+        assert!(matches!(
+            auto_assign_bundles(&ids("bundle", 21), &ids("phone", 5), 0, 0),
+            Err(PublishAssignError::Empty)
+        ));
+    }
+
+    /// The bijection stays enforced by `validate_publish_mapping`, not by a second copy here.
+    #[test]
+    fn a_duplicate_phone_is_still_refused_through_the_shared_check() {
+        let phones = vec![
+            "phone-01".to_string(),
+            "phone-01".to_string(),
+            "phone-03".to_string(),
+        ];
+        assert!(matches!(
+            auto_assign_bundles(&ids("bundle", 21), &phones, 3, 0),
+            Err(PublishAssignError::Mapping(
+                PublishPlanError::DuplicateUdid(_)
+            ))
+        ));
     }
 
     #[test]

@@ -290,6 +290,74 @@ impl Database {
     /// ever claimed. This is the claim, done with a conditional `UPDATE` instead of a table.
     ///
     /// Found by an independent review on 27/08/2026.
+    /// Settle every campaign the process died in the middle of.
+    ///
+    /// Called once at startup, **before** commands are accepted, exactly like
+    /// `interrupt_orphaned_interaction_campaigns`. Without it a crash during a post leaves rows
+    /// reading `posting` forever: nothing re-enters them, nothing cleans up the media already
+    /// on the phone, and the operator's only signal is a campaign that never finishes.
+    ///
+    /// # The states this touches, and the ones it must not
+    ///
+    /// Only `preparing`, `transferring`, `posting`, `verifying` are mid-flight. `queued`,
+    /// `scheduled`, `ready` and `imported` are **at rest** and waiting for someone: the
+    /// operator's Prepare, the `run_at` the scheduler will pick up next launch, Transfer, Post.
+    /// Interaction's `queued` means "a worker is about to take this", which is a different
+    /// thing — copying its state list here would cancel every campaign the operator had lined
+    /// up.
+    ///
+    /// # Why the two assignment updates differ, and why that asymmetry is the safety
+    ///
+    /// An assignment that was `posting` or `verifying` may have reached TikTok. Nobody can tell
+    /// from here, so it becomes **`uncertain`** — which
+    /// [`Self::claim_publish_assignment_for_posting`] deliberately refuses to claim, making the
+    /// row permanently unclaimable. That is correct: re-posting would publish a second carousel
+    /// to a real account, and there is no delete path on Android to undo it.
+    ///
+    /// An assignment that was `transferring` never reached TikTok — the media had not finished
+    /// leaving the desktop — so it becomes **`failed_before_dispatch`**, which *is* claimable.
+    /// The name is the guarantee.
+    ///
+    /// `imported` assignments are untouched: the crash cost them nothing and they are still
+    /// exactly where Post expects to find them.
+    pub fn interrupt_orphaned_publish_campaigns(&self) -> anyhow::Result<usize> {
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = Utc::now().to_rfc3339();
+        let stranded: Vec<String> = transaction
+            .prepare(
+                "SELECT id FROM publish_campaigns
+                 WHERE state IN ('preparing','transferring','posting','verifying')",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        for campaign_id in &stranded {
+            transaction.execute(
+                "UPDATE publish_assignments
+                 SET state='uncertain',revision=revision+1,updated_at=?2,
+                     error_code=COALESCE(error_code,'publish_worker_lost: app đóng khi bài này đang đăng — không xác nhận được là đã lên hay chưa, nên không đăng lại')
+                 WHERE campaign_id=?1 AND state IN ('posting','verifying')",
+                params![campaign_id, now],
+            )?;
+            transaction.execute(
+                "UPDATE publish_assignments
+                 SET state='failed_before_dispatch',revision=revision+1,updated_at=?2,
+                     error_code=COALESCE(error_code,'publish_worker_lost: app đóng trước khi ảnh rời máy tính — vẫn đăng lại được')
+                 WHERE campaign_id=?1 AND state='transferring'",
+                params![campaign_id, now],
+            )?;
+            transaction.execute(
+                "UPDATE publish_campaigns
+                 SET state='cancelled',revision=revision+1,updated_at=?2,
+                     error_code=COALESCE(error_code,'publish_worker_lost: app đóng khi chiến dịch đang chạy')
+                 WHERE id=?1",
+                params![campaign_id, now],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(stranded.len())
+    }
+
     pub fn claim_publish_campaign_for_posting(&self, id: &str) -> anyhow::Result<bool> {
         let mut conn = self.conn()?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -484,6 +552,128 @@ mod claim_tests {
             .expect("assignments are imported with their campaign");
         }
         record
+    }
+
+    const INTENT: &str = r#"{"effectIntent":"post_carousel"}"#;
+
+    /// Read one assignment's state back, by udid.
+    fn state_of(
+        db: &Database,
+        campaign_id: &str,
+        udid: &str,
+    ) -> crate::publish::PublishCampaignState {
+        db.get_publish_campaign(campaign_id)
+            .expect("read back")
+            .expect("campaign exists")
+            .assignments
+            .into_iter()
+            .find(|assignment| assignment.udid == udid)
+            .expect("assignment for udid")
+            .state
+    }
+
+    /// **A crash mid-post must strand nothing, and the two halves must land differently.**
+    ///
+    /// The row that was `posting` may already be a carousel on a real account — nobody can
+    /// tell from here — so it becomes `uncertain`, which the claim refuses. The row that was
+    /// `transferring` never reached TikTok, so it becomes `failed_before_dispatch`, which the
+    /// claim accepts. Collapsing the two into one state would either strand a retryable post
+    /// or re-publish a live one, and there is no delete path on Android to undo the second.
+    #[test]
+    fn a_crash_mid_post_leaves_one_half_retryable_and_the_other_permanently_not() {
+        let (db, path) = fixture();
+        let record = campaign(
+            &db,
+            &["phone-posting", "phone-transferring", "phone-imported"],
+        );
+
+        db.update_publish_campaign_state(
+            &record.id,
+            crate::publish::PublishCampaignState::Posting,
+            None,
+        )
+        .expect("the campaign was mid-post when the app died");
+        let assignments = db
+            .get_publish_campaign(&record.id)
+            .expect("read back")
+            .expect("campaign exists")
+            .assignments;
+        for assignment in &assignments {
+            let state = match assignment.udid.as_str() {
+                "phone-posting" => crate::publish::PublishCampaignState::Posting,
+                "phone-transferring" => crate::publish::PublishCampaignState::Transferring,
+                // The third stays `Imported`: the crash cost it nothing.
+                _ => continue,
+            };
+            db.update_publish_assignment_state(&assignment.id, state, None, None)
+                .expect("seed the mid-flight state");
+        }
+
+        let settled = db
+            .interrupt_orphaned_publish_campaigns()
+            .expect("settle the stranded campaign");
+        assert_eq!(settled, 1);
+
+        assert_eq!(
+            state_of(&db, &record.id, "phone-posting"),
+            crate::publish::PublishCampaignState::Uncertain,
+            "a post that may have gone out must never be re-dispatched"
+        );
+        assert_eq!(
+            state_of(&db, &record.id, "phone-transferring"),
+            crate::publish::PublishCampaignState::FailedBeforeDispatch,
+            "media that never left the desktop is safe to send again"
+        );
+        assert_eq!(
+            state_of(&db, &record.id, "phone-imported"),
+            crate::publish::PublishCampaignState::Imported,
+            "an assignment the crash did not touch is left exactly where Post expects it"
+        );
+
+        // And the claim agrees with the states, which is the point of choosing them.
+        let by_udid = |udid: &str| {
+            db.get_publish_campaign(&record.id)
+                .expect("read back")
+                .expect("campaign exists")
+                .assignments
+                .into_iter()
+                .find(|assignment| assignment.udid == udid)
+                .expect("assignment")
+                .id
+        };
+        assert!(
+            !db.claim_publish_assignment_for_posting(&by_udid("phone-posting"), INTENT)
+                .expect("claim query"),
+            "uncertain is permanently unclaimable"
+        );
+        assert!(
+            db.claim_publish_assignment_for_posting(&by_udid("phone-transferring"), INTENT)
+                .expect("claim query"),
+            "failed_before_dispatch is what makes a retry possible"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A campaign at rest is not stranded, and settling it would cancel the operator's plan.
+    #[test]
+    fn a_campaign_waiting_for_the_operator_is_left_alone() {
+        let (db, path) = fixture();
+        // `campaign()` leaves it `Imported`, i.e. waiting for Post.
+        let waiting = campaign(&db, &["phone-a"]);
+        assert_eq!(
+            db.interrupt_orphaned_publish_campaigns()
+                .expect("nothing to settle"),
+            0
+        );
+        assert_eq!(
+            db.get_publish_campaign(&waiting.id)
+                .expect("read back")
+                .expect("campaign exists")
+                .campaign
+                .state,
+            crate::publish::PublishCampaignState::Imported
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     /// **Only one caller may start posting a campaign.**
