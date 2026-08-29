@@ -634,6 +634,19 @@ pub enum AlbumChoice {
     NotConfirmed,
 }
 
+/// A tap planner that lands inside the control rather than dead centre every time.
+///
+/// Offered here because [`crate::nurture::touch::TouchPointPlanner`] is crate-private, and the
+/// alternative was to make it public so one caller outside this crate could build its own — which
+/// would let two callers build *different* ones. A publish run that tapped exact centres would
+/// stand out from every other session this project drives, and the jitter policy is not the
+/// publish path's to choose.
+pub fn human_taps(screen: Screen) -> impl TapPlanner {
+    let mut planner =
+        crate::nurture::touch::TouchPointPlanner::new((screen.width(), screen.height()));
+    move |element: &ElementBox| planner.next(element.centre(), element.jitter_radius())
+}
+
 /// One composer session, driven a step at a time.
 pub struct Composer<'a, P: TapPlanner> {
     session: &'a dyn UiSession,

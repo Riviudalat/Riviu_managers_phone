@@ -46,18 +46,21 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
   // TikTok account: the cost is one account posting another's photographs under another's
   // caption, with no error, no discrepancy in the evidence, and no delete path to undo it.
   const orderedBundleIds = selectedBundles.map((bundle) => bundle.id);
-  // Refuse before dispatch; do **not** silently drop the Android targets. The
-  // bundle -> device mapping is positional (`targets[index]` below), so removing a
-  // target re-indexes the rest and would post the wrong caption to the wrong
-  // account. Android's `stage_publish_media` is also still unimplemented, so a
-  // mixed selection half-succeeds and leaves partial campaign rows behind.
+  // **Android is no longer refused here, and the reason is that this is the wrong place to
+  // ask.** The old gate refused every Android target outright, correctly, because there was
+  // no composer for them. There is one now — driven by measured labels — so the real question
+  // is per *build*: has this phone's TikTok had the publish controls read off it? That needs
+  // the device's package, language and app version, which only the backend can read, so the
+  // backend refuses by name and this page reports what it said.
+  //
+  // Nothing is silently dropped either way: the bundle -> device mapping is positional
+  // (`targets[index]` below), so removing a target would re-index the rest and post the wrong
+  // caption to the wrong account.
   const androidTargets = targets.filter(
     (udid) => devices.find((device) => device.udid === udid)?.platform === "android",
   );
   const mappingReady =
-    selectedBundles.length > 0 &&
-    selectedBundles.length === targets.length &&
-    androidTargets.length === 0;
+    selectedBundles.length > 0 && selectedBundles.length === targets.length;
 
   const scan = async (path: string) => {
     setBusy(true);
@@ -178,21 +181,16 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
       </label>
       <p className="hint">Public · âm thanh mặc định · xoá asset sau khi có bằng chứng đăng thành công.</p>
       {androidTargets.length > 0 && (
-        <p className="error">
-          {androidTargets.length} máy Android trong danh sách: đường publish (đẩy ảnh vào
-          thư viện rồi lái composer TikTok) hiện chỉ có trên iPhone. Bỏ chúng khỏi lựa
-          chọn — ghép bundle với máy theo thứ tự, nên không thể tự bỏ qua mà giữ đúng cặp.
+        <p className="hint">
+          {androidTargets.length} máy Android trong danh sách. Composer Android điều khiển
+          theo nhãn đã đo, nên máy nào chạy bản TikTok chưa đo sẽ bị từ chối kèm tên —
+          trước khi ảnh rời máy tính. Đo bằng <code>composer_scout</code>.
         </p>
       )}
       <button
         type="button"
         className="primary"
         disabled={!mappingReady || busy}
-        title={
-          androidTargets.length > 0
-            ? "Publish chưa hỗ trợ máy Android"
-            : undefined
-        }
         onClick={async () => {
           setBusy(true);
           setMsg(null);

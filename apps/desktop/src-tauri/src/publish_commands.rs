@@ -194,17 +194,36 @@ pub(crate) async fn transfer_publish_campaign_inner(
     }
     // Refused here too, not only before posting. Transferring first would push media onto a
     // phone that can never be posted from, and then leave it there.
-    refuse_devices_this_path_cannot_drive(
-        detail
-            .assignments
-            .iter()
-            .map(|assignment| assignment.udid.as_str()),
-        |udid| control.reports_element_bounds(udid),
-    )?;
+    let mut reports = Vec::new();
+    for assignment in &detail.assignments {
+        reports.push((
+            assignment.udid.as_str(),
+            readiness_of(&control, &assignment.udid).await,
+        ));
+    }
+    refuse_devices_whose_composer_is_not_measured(reports)?;
     // And the same argument for the bundle rather than the device: an image count this
     // composer's grid cannot reach fails at `post_one_assignment`, which is *after* the media
     // is on the phone and visible to TikTok.
-    refuse_bundles_this_composer_cannot_post(detail.bundles.iter(), IOS_PIXEL_GRID_MAX_IMAGES)?;
+    //
+    // **Per device now, not one number for the campaign.** The two routes have different
+    // ceilings — twelve tap points somebody wrote down, against however many grid cells fit on
+    // the screen — and using the smaller for both refused Android bundles that post fine.
+    refuse_assignments_whose_bundle_is_too_large(detail.assignments.iter().filter_map(
+        |assignment| {
+            detail
+                .bundles
+                .iter()
+                .find(|bundle| bundle.id == assignment.bundle_id)
+                .map(|bundle| {
+                    (
+                        assignment.udid.as_str(),
+                        bundle,
+                        max_images_for(route_of(&control, &assignment.udid)),
+                    )
+                })
+        },
+    ))?;
     db.update_publish_campaign_state(
         &campaign_id,
         riviu_core::PublishCampaignState::Transferring,
@@ -357,14 +376,6 @@ pub(crate) async fn transfer_publish_campaign_inner(
         .ok_or_else(|| anyhow::anyhow!("campaign disappeared after transfer"))
 }
 
-/// The publish path is iOS-only, and [`refuse_devices_this_path_cannot_drive`] enforces it.
-///
-/// Not a resolved value. The previous version of this comment claimed the Publish page
-/// refuses an Android target before dispatch; it did not, and neither did anything else —
-/// an Android phone could be mapped into a campaign and posted, which meant pressing iOS
-/// logical coordinates against a different app's layout. Kept as the shared constant so
-/// nobody mistakes it for a per-device answer.
-const TIKTOK_BUNDLE_ID: &str = riviu_core::tiktok_target::IOS_TIKTOK_BUNDLE;
 const PLUS_BUTTON: TapPoint = TapPoint { x: 187.0, y: 640.0 };
 const GALLERY_BUTTON: TapPoint = TapPoint { x: 32.0, y: 632.0 };
 const ALBUM_PICKER: TapPoint = TapPoint { x: 187.0, y: 47.0 };
@@ -387,36 +398,156 @@ const PUBLIC_POST_CONFIRM: TapPoint = TapPoint { x: 275.0, y: 444.0 };
 /// composer that locates its cells is not bound by a grid nobody measured.
 pub(crate) const IOS_PIXEL_GRID_MAX_IMAGES: usize = 11;
 
-/// Refuse a campaign holding a device this module has no coordinates for.
+/// Which composer drives a given device.
 ///
-/// Every tap constant above is an **iOS logical coordinate** and `TIKTOK_BUNDLE_ID` is the
-/// iOS bundle, so an Android assignment would press arbitrary places in a layout nobody
-/// measured — the exact thing the label-driven Android work exists to avoid, and worse here
-/// because posting cannot be undone.
+/// The partition is `reports_element_bounds`, the same signal the interaction path uses: a
+/// device that reports bounds is driven **by label**, and one that does not is driven by
+/// pixel. They are not interchangeable, and running the wrong one presses arbitrary places in
+/// a layout nobody measured — on a screen where the result cannot be taken down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublishRoute {
+    /// iOS: fixed logical coordinates, verified frame by frame.
+    PixelGrid,
+    /// Android: `tiktok_composer`, every control located by a measured label.
+    Hierarchy,
+}
+
+/// What a device can actually do, as far as publishing is concerned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PublishReadiness {
+    /// Driven by pixel, which this module has coordinates for.
+    PixelGrid,
+    /// Driven by label, and every label the publish path needs is measured on its build.
+    HierarchyReady,
+    /// Driven by label, and its build is missing these controls.
+    HierarchyMissing(Vec<riviu_core::tiktok_labels::TikTokControl>),
+    /// Driven by label, and its (package, language) pair has never been measured at all.
+    HierarchyUnknownBuild(String),
+}
+
+/// Refuse a campaign holding a device whose composer is not measured.
 ///
-/// `supports_push_media` does not catch this. The Android driver answers `true` there,
-/// correctly: pushing media into the gallery is the part it really does implement. What is
-/// missing is the composer, and there is no capability that says so.
+/// **Android is no longer refused outright**, which is what this used to do. It is refused
+/// *per build*, which is a different and much narrower statement: the label-driven composer
+/// exists now, so the question is whether this phone's TikTok has had the controls read off
+/// it — and a phone whose build is unmeasured must still be refused **before** its media is
+/// transferred, because that is the last moment refusing is free.
 ///
-/// So the gate is `reports_element_bounds`, the same signal that partitions the interaction
-/// path: a device that reports bounds is driven by label, and this module drives by pixel.
-/// Taking a predicate rather than the control plane keeps it testable without a fleet.
-fn refuse_devices_this_path_cannot_drive<'a>(
-    udids: impl IntoIterator<Item = &'a str>,
-    driven_by_label: impl Fn(&str) -> bool,
+/// Taking the readings rather than the control plane keeps it testable without a fleet.
+fn refuse_devices_whose_composer_is_not_measured<'a>(
+    reports: impl IntoIterator<Item = (&'a str, PublishReadiness)>,
 ) -> anyhow::Result<()> {
-    let by_label: Vec<&str> = udids
-        .into_iter()
-        .filter(|udid| driven_by_label(udid))
-        .collect();
+    let mut refusals = Vec::new();
+    for (udid, readiness) in reports {
+        match readiness {
+            PublishReadiness::PixelGrid | PublishReadiness::HierarchyReady => {}
+            PublishReadiness::HierarchyMissing(missing) => refusals.push(format!(
+                "{udid}: bản TikTok trên máy này chưa đo {} nhãn cần cho việc đăng ({})",
+                missing.len(),
+                missing
+                    .iter()
+                    .map(|control| format!("{control:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            PublishReadiness::HierarchyUnknownBuild(detail) => {
+                refusals.push(format!("{udid}: {detail}"))
+            }
+        }
+    }
     anyhow::ensure!(
-        by_label.is_empty(),
-        "đường Đăng bài này chỉ chạy trên iPhone. {} điều khiển theo cây giao diện, còn mọi \
-         toạ độ ở đây là toạ độ logic của iOS — chạy tiếp là bấm bừa lên một màn hình chưa ai \
-         đo. Composer cho Android chưa được dựng.",
-        by_label.join(", ")
+        refusals.is_empty(),
+        "không đăng được trên {} máy, vì composer của bản build đó chưa đo:\n  {}\n\nĐo bằng \
+         `cargo run -p riviu-android-driver --example composer_scout -- <serial> --album \"<album>\"`.",
+        refusals.len(),
+        refusals.join("\n  ")
     );
     Ok(())
+}
+
+/// What one device can do, read without holding a lease.
+///
+/// **Two gates, at two depths, and both refuse before anything irreversible.** This is the
+/// shallow one: it answers "is there a composer for this device at all", which is a question
+/// about the *package*, and `resolve_tiktok_package` already refuses an Android phone whose
+/// TikTok is not one of the measured builds.
+///
+/// The deep one lives in [`post_through_the_composer`] and asks whether that build's *labels*
+/// are measured — which needs a session, so it cannot run here, and runs before the first tap
+/// instead.
+async fn readiness_of(control: &DeviceControlPlane, udid: &str) -> PublishReadiness {
+    if !control.reports_element_bounds(udid) {
+        return PublishReadiness::PixelGrid;
+    }
+    let package = match control.resolve_tiktok_package(udid).await {
+        Ok(package) => package,
+        Err(error) => {
+            return PublishReadiness::HierarchyUnknownBuild(format!(
+                "không xác định được bản TikTok trên máy này: {error}"
+            ))
+        }
+    };
+    // **A necessary condition that can be checked without a lease**, and today it refuses the
+    // whole fleet: if *no* catalogued language set for this package has the publishing tail
+    // measured, then this phone cannot publish whichever language it is in — so its media must
+    // not be transferred at all. When some set can, the phone's own language and app version
+    // decide, and that check needs a session, so it runs in `post_through_the_composer` before
+    // the first tap.
+    let missing = shortest_publish_gap_for(&package);
+    match missing {
+        Some(missing) if !missing.is_empty() => PublishReadiness::HierarchyMissing(missing),
+        Some(_) => PublishReadiness::HierarchyReady,
+        None => PublishReadiness::HierarchyUnknownBuild(format!(
+            "chưa đo bộ nhãn nào cho gói {package}"
+        )),
+    }
+}
+
+/// The smallest set of unmeasured publish controls across every language set for a package.
+///
+/// "Smallest" because the phone is in **one** language and this cannot tell which: reporting
+/// the union would refuse a phone whose own set is complete. `None` when the package has no
+/// catalogued set at all.
+fn shortest_publish_gap_for(
+    package: &str,
+) -> Option<Vec<riviu_core::tiktok_labels::TikTokControl>> {
+    riviu_core::tiktok_labels::TIKTOK_LABEL_SETS
+        .iter()
+        .filter(|set| set.package == package)
+        .filter_map(|set| {
+            let controls = riviu_core::tiktok_labels::controls_for(
+                set.package,
+                set.language,
+                set.measured_app_version,
+            )?;
+            Some(riviu_core::tiktok_composer::ComposerPlan::missing_to_publish(&controls))
+        })
+        .min_by_key(Vec::len)
+}
+
+/// The route a device is driven by, from the same signal the gate uses.
+fn route_of(control: &DeviceControlPlane, udid: &str) -> PublishRoute {
+    if control.reports_element_bounds(udid) {
+        PublishRoute::Hierarchy
+    } else {
+        PublishRoute::PixelGrid
+    }
+}
+
+/// How many images each route's composer can select.
+///
+/// Two different facts, and neither is TikTok's own ceiling of 35. The pixel path is bound by
+/// the twelve tap points somebody wrote down; the hierarchy path is bound by how many grid
+/// cells fit on the screen, which it computes per device — this is only the ceiling used
+/// **before transfer**, when no session exists to ask.
+pub(crate) fn max_images_for(route: PublishRoute) -> usize {
+    match route {
+        PublishRoute::PixelGrid => IOS_PIXEL_GRID_MAX_IMAGES,
+        PublishRoute::Hierarchy => {
+            riviu_core::tiktok_composer::GRID_COLUMNS
+                * riviu_core::tiktok_composer::GRID_MEASURED_ROWS
+        }
+    }
 }
 
 /// Refuse a bundle this composer has no tap point for, **before its media leaves the desktop**.
@@ -430,19 +561,26 @@ fn refuse_devices_this_path_cannot_drive<'a>(
 ///
 /// Takes the count rather than reading a constant, for the same reason the sibling above takes
 /// a predicate: it is testable without a fleet, and the Android path will pass its own number.
-fn refuse_bundles_this_composer_cannot_post<'a>(
-    bundles: impl IntoIterator<Item = &'a riviu_core::PublishBundle>,
-    max_images: usize,
+fn refuse_assignments_whose_bundle_is_too_large<'a>(
+    rows: impl IntoIterator<Item = (&'a str, &'a riviu_core::PublishBundle, usize)>,
 ) -> anyhow::Result<()> {
-    let oversized: Vec<String> = bundles
+    let oversized: Vec<String> = rows
         .into_iter()
-        .filter(|bundle| bundle.images.len() > max_images)
-        .map(|bundle| format!("{} ({} ảnh)", bundle.name, bundle.images.len()))
+        .filter(|(_, bundle, max_images)| bundle.images.len() > *max_images)
+        .map(|(udid, bundle, max_images)| {
+            format!(
+                "{} ({} ảnh) trên {udid}, composer ở đó chọn được {max_images}",
+                bundle.name,
+                bundle.images.len()
+            )
+        })
         .collect();
     anyhow::ensure!(
         oversized.is_empty(),
-        "đường Đăng bài này chọn ảnh trên một lưới {max_images} ô, nên không đăng được: {}.          Bỏ những bài đó ra khỏi chiến dịch, hoặc đợi composer điều khiển theo cây giao diện —          nó định vị từng ô nên không bị lưới này bó.",
-        oversized.join(", ")
+        "những bài này nhiều ảnh hơn composer của chính máy đó chọn được: {}. Bỏ chúng ra \
+         khỏi chiến dịch, hoặc gán vào máy điều khiển theo cây giao diện — composer đó định vị \
+         từng ô nên lưới của nó rộng hơn.",
+        oversized.join("; ")
     );
     Ok(())
 }
@@ -485,13 +623,14 @@ pub(crate) async fn post_publish_campaign_inner(
             detail.campaign.state
         );
     }
-    refuse_devices_this_path_cannot_drive(
-        detail
-            .assignments
-            .iter()
-            .map(|assignment| assignment.udid.as_str()),
-        |udid| control.reports_element_bounds(udid),
-    )?;
+    let mut reports = Vec::new();
+    for assignment in &detail.assignments {
+        reports.push((
+            assignment.udid.as_str(),
+            readiness_of(&control, &assignment.udid).await,
+        ));
+    }
+    refuse_devices_whose_composer_is_not_measured(reports)?;
     // Asked per device, not once for the campaign. A campaign spans several
     // phones and a fleet can be mixed, so a single fleet-wide answer would
     // report one device's agent on behalf of the rest. Still fails fast, before
@@ -575,7 +714,7 @@ pub(crate) async fn post_publish_campaign_inner(
         )
         .await;
         match result {
-            Ok(evidence) => {
+            Ok(PostOutcome::Posted(evidence)) => {
                 db.update_publish_assignment_state(
                     &assignment.id,
                     riviu_core::PublishCampaignState::Succeeded,
@@ -583,6 +722,26 @@ pub(crate) async fn post_publish_campaign_inner(
                     Some(&evidence.to_string()),
                 )?;
             }
+            // The state each outcome earns is decided by `state_for_outcome`, so the rule
+            // lives somewhere a test can reach it.
+            Ok(
+                ref outcome @ (PostOutcome::NothingPublished(ref reason)
+                | PostOutcome::Unknown(ref reason)),
+            ) => {
+                failures.push(format!("{}: {reason}", assignment.udid));
+                let (state, code) = state_for_outcome(outcome);
+                db.update_publish_assignment_state(
+                    &assignment.id,
+                    state,
+                    code,
+                    Some(
+                        &serde_json::json!({"message": reason, "effectIntent":"post_carousel"})
+                            .to_string(),
+                    ),
+                )?;
+            }
+            // A transport error, which is the same class as `Unknown`: the request may have
+            // been delivered and its answer lost.
             Err(error) => {
                 let message = error.to_string();
                 failures.push(format!("{}: {}", assignment.udid, message));
@@ -617,6 +776,24 @@ pub(crate) async fn post_publish_campaign_inner(
     Ok(output)
 }
 
+/// What one assignment's posting attempt achieved, and **whether it may be tried again**.
+///
+/// The distinction the campaign loop could not make before: every failure became `Uncertain`,
+/// which is permanently unclaimable. That is the right answer when a tap may have reached
+/// TikTok and the wrong one when the run refused before opening anything — and refusing early
+/// is what the composer does most of the time, so most of what got stranded never needed to be.
+enum PostOutcome {
+    /// The carousel is on the account.
+    Posted(serde_json::Value),
+    /// Nothing was published, and that is *known* rather than assumed.
+    ///
+    /// Only produced where the driver can prove it — `ComposerVerdict::may_retry`. The pixel
+    /// path has no equivalent, so its failures all land in [`Self::Unknown`].
+    NothingPublished(String),
+    /// A tap may have reached TikTok and the result could not be read.
+    Unknown(String),
+}
+
 async fn post_one_assignment(
     control: &DeviceControlPlane,
     _db: &Database,
@@ -624,9 +801,9 @@ async fn post_one_assignment(
     campaign_id: &str,
     assignment: &riviu_core::PublishAssignmentRecord,
     bundle: &riviu_core::PublishBundle,
-) -> anyhow::Result<serde_json::Value> {
-    if bundle.images.is_empty() || bundle.images.len() > IOS_PIXEL_GRID_MAX_IMAGES {
-        anyhow::bail!("bundle {} has an invalid image count", bundle.id);
+) -> anyhow::Result<PostOutcome> {
+    if bundle.images.is_empty() {
+        anyhow::bail!("bundle {} has no images", bundle.id);
     }
     if bundle.caption.chars().count() > 2200 {
         anyhow::bail!(
@@ -641,136 +818,118 @@ async fn post_one_assignment(
         .ok_or_else(|| anyhow::anyhow!("native import proof is missing for {}", assignment.udid))?;
     let context = open_publish_context(control, &assignment.udid).await?;
     let session = control.streaming_session(&context)?;
-    let action_result = async {
-        let before = wait_for_frame(frames, &assignment.udid, Duration::from_secs(8)).await?;
-        let before_sha = frame_sha256(&before);
+    // **The one place the two composers meet**, and the partition is the same signal the
+    // interaction path uses. A device that reports element bounds is driven by measured
+    // labels; one that does not is driven by the pixel coordinates below.
+    let action_result = if session.supports_element_bounds() {
+        post_through_the_composer(
+            control,
+            session.as_ref(),
+            campaign_id,
+            &assignment.udid,
+            bundle,
+            &import,
+        )
+        .await
+    } else {
+        post_through_the_pixel_grid(
+            frames,
+            session.as_ref(),
+            campaign_id,
+            &assignment.udid,
+            bundle,
+            &import,
+        )
+        .await
+    };
+    let outcome = action_result?;
+    let cleanup = tidy_up_the_imported_media(control, context, &assignment.udid, &import).await;
+    Ok(fold_cleanup_into(outcome, cleanup))
+}
 
-        tap_transition(
-            frames,
-            &assignment.udid,
-            session.as_ref(),
-            PLUS_BUTTON,
-            &before_sha,
-        )
-        .await?;
-        tap_transition(
-            frames,
-            &assignment.udid,
-            session.as_ref(),
-            GALLERY_BUTTON,
-            &before_sha,
-        )
-        .await?;
-        tap_transition(
-            frames,
-            &assignment.udid,
-            session.as_ref(),
-            ALBUM_PICKER,
-            &before_sha,
-        )
-        .await?;
-        tap_transition(
-            frames,
-            &assignment.udid,
-            session.as_ref(),
-            ALBUM_ROW,
-            &before_sha,
-        )
-        .await?;
-
-        let grid_x = [105.0, 230.0, 355.0];
-        let grid_y = [131.0, 255.0, 380.0, 505.0];
-        for index in 0..bundle.images.len() {
-            let point = TapPoint {
-                x: grid_x[index % 3],
-                y: grid_y[index / 3],
-            };
-            session.tap(point).await?;
-            tokio::time::sleep(Duration::from_millis(180)).await;
+/// Attach the cleanup result to a posting outcome **without changing what the post did**.
+///
+/// A pure function because the rule it encodes was unreachable by any test while it lived
+/// inside `post_one_assignment`, and a reversal proved it: making a cleanup failure downgrade
+/// a published post to `Unknown` left the whole suite green. That downgrade is the exact bug
+/// the rest of this path is built to prevent — `Unknown` is permanently unclaimable, so a
+/// carousel that went out cleanly and left some files behind would need a person to look at a
+/// phone where the only problem is disk space.
+fn fold_cleanup_into(
+    outcome: PostOutcome,
+    cleanup: anyhow::Result<serde_json::Value>,
+) -> PostOutcome {
+    let note = match &cleanup {
+        Ok(value) => value.clone(),
+        Err(error) => serde_json::json!({"state": "not_cleaned", "message": error.to_string()}),
+    };
+    match outcome {
+        PostOutcome::Posted(evidence) => {
+            PostOutcome::Posted(serde_json::json!({"post": evidence, "cleanup": note}))
         }
-        let selected = wait_for_frame(frames, &assignment.udid, Duration::from_secs(5)).await?;
-        let selected_sha = frame_sha256(&selected);
-        session.tap(COMPOSER_NEXT).await?;
-        wait_for_changed_frame(
-            frames,
-            &assignment.udid,
-            &selected_sha,
-            Duration::from_secs(8),
-        )
-        .await?;
-        session.tap(EDIT_NEXT).await?;
-        wait_for_changed_frame(
-            frames,
-            &assignment.udid,
-            &selected_sha,
-            Duration::from_secs(8),
-        )
-        .await?;
-
-        if !session.supports_text_input() {
-            anyhow::bail!("combined Agent text capability is not active for this session");
-        }
-        session.tap_native(CAPTION_FIELD).await?;
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        session.type_text(&bundle.caption).await?;
-        let typed = wait_for_frame(frames, &assignment.udid, Duration::from_secs(5)).await?;
-        let typed_sha = frame_sha256(&typed);
-        let post_red_before = bottom_right_redness(&typed);
-        session.tap_native(POST_BUTTON).await?;
-        let after_post_tap =
-            wait_for_changed_frame(frames, &assignment.udid, &typed_sha, Duration::from_secs(8))
-                .await?;
-        if frame_reports_account_lock(&after_post_tap).await {
-            anyhow::bail!("TikTok account status blocked the post: account_locked");
-        }
-        let confirmation_sha = if is_public_post_confirmation(&after_post_tap) {
-            session.tap_native(PUBLIC_POST_CONFIRM).await?;
-            frame_sha256(
-                &wait_for_changed_frame(
-                    frames,
-                    &assignment.udid,
-                    &frame_sha256(&after_post_tap),
-                    Duration::from_secs(8),
-                )
-                .await?,
-            )
-        } else {
-            frame_sha256(&after_post_tap)
-        };
-        let posted = wait_for_post_frame(
-            frames,
-            &assignment.udid,
-            &confirmation_sha,
-            post_red_before,
-            Duration::from_secs(15),
-        )
-        .await?;
-        Ok::<serde_json::Value, anyhow::Error>(serde_json::json!({
-            "state":"posted",
-            "campaignId": campaign_id,
-            "bundleId": bundle.id,
-            "importId": import,
-            "imageCount": bundle.images.len(),
-            "captionSha256": bundle.caption_sha256,
-            "frameSha256": frame_sha256(&posted),
-            "postButtonRednessBefore": post_red_before,
-        }))
+        // Nothing was published, so a cleanup failure is worth saying out loud — and still
+        // does not change *what happened to the post*.
+        PostOutcome::NothingPublished(reason) => PostOutcome::NothingPublished(match cleanup {
+            Ok(_) => reason,
+            Err(error) => format!("{reason}; ảnh còn lại trên máy: {error}"),
+        }),
+        PostOutcome::Unknown(reason) => PostOutcome::Unknown(match cleanup {
+            Ok(_) => reason,
+            Err(error) => format!("{reason}; ảnh còn lại trên máy: {error}"),
+        }),
     }
-    .await;
-    let evidence = action_result?;
+}
+
+/// The assignment state one outcome earns, and the code that goes with it.
+///
+/// **The whole point is that these are three answers, not two.** Every failure used to become
+/// `Uncertain`, which [`riviu_core::db::Database::claim_publish_assignment_for_posting`]
+/// refuses forever — correct when a tap may have reached TikTok, and wrong when the run
+/// refused before opening anything. The composer can tell those apart
+/// ([`riviu_core::tiktok_composer::ComposerVerdict::may_retry`]), so the loop must stop
+/// throwing that away.
+fn state_for_outcome(
+    outcome: &PostOutcome,
+) -> (riviu_core::PublishCampaignState, Option<&'static str>) {
+    match outcome {
+        PostOutcome::Posted(_) => (riviu_core::PublishCampaignState::Succeeded, None),
+        PostOutcome::NothingPublished(_) => (
+            riviu_core::PublishCampaignState::FailedBeforeDispatch,
+            Some("post_refused_before_dispatch"),
+        ),
+        PostOutcome::Unknown(_) => (
+            riviu_core::PublishCampaignState::Uncertain,
+            Some("post_or_cleanup_failed"),
+        ),
+    }
+}
+
+/// Take the campaign's images back off the phone, with one retry on a fresh lease.
+///
+/// Split out of `post_one_assignment` so the outcome above can be decided without this
+/// function's four failure modes in the same block. Returns the cleanup evidence or the reason
+/// it could not — never a reason to change what the post did.
+async fn tidy_up_the_imported_media(
+    control: &DeviceControlPlane,
+    context: riviu_core::UiWithStreamContext,
+    udid: &str,
+    import: &str,
+) -> anyhow::Result<serde_json::Value> {
     let cleanup_while_live = control
-        .cleanup_publish_media_with_ui(&context, &import)
+        .cleanup_publish_media_with_ui(&context, import)
         .await;
-    let close_result = control.close_ui_context(context).await;
-    close_result.map_err(anyhow::Error::new)?;
+    control
+        .close_ui_context(context)
+        .await
+        .map_err(anyhow::Error::new)?;
     let cleanup = match cleanup_while_live {
         Ok(cleanup) => cleanup,
         Err(first_error) => {
             let retry_context = control
-                .acquire_exclusive(&assignment.udid, DeviceWorkOwner::Script)
+                .acquire_exclusive(udid, DeviceWorkOwner::Script)
                 .await
                 .map_err(anyhow::Error::new)?;
-            let retry_result = control.cleanup_publish_media(&retry_context, &import).await;
+            let retry_result = control.cleanup_publish_media(&retry_context, import).await;
             let close_retry = control.close_exclusive_context(retry_context);
             close_retry.map_err(anyhow::Error::new)?;
             retry_result.map_err(|retry_error| {
@@ -780,16 +939,14 @@ async fn post_one_assignment(
             })?
         }
     };
-    if cleanup
+    let cleaned = cleanup
         .get("value")
         .and_then(|value| value.get("state"))
         .and_then(serde_json::Value::as_str)
-        != Some("cleaned")
-        && cleanup.get("state").and_then(serde_json::Value::as_str) != Some("cleaned")
-    {
-        anyhow::bail!("native media cleanup did not return cleaned");
-    }
-    Ok(serde_json::json!({"post": evidence, "cleanup": cleanup}))
+        == Some("cleaned")
+        || cleanup.get("state").and_then(serde_json::Value::as_str) == Some("cleaned");
+    anyhow::ensure!(cleaned, "native media cleanup did not return cleaned");
+    Ok(cleanup)
 }
 
 async fn open_publish_context(
@@ -809,8 +966,16 @@ async fn open_publish_context(
     // terminate only the target bundle while the exclusive lease is held;
     // start_interaction_session then launches a clean process before creating
     // the fresh WDA session.
+    // **Per device, not a module constant.** The publish path handed the *iOS* bundle to
+    // every backend, so on Android this terminated a package that does not exist there and
+    // the session that followed was opened against nothing. The interaction path fixed the
+    // same defect in its own helper; this one kept it.
+    let target_package = control
+        .resolve_tiktok_package(exclusive.udid())
+        .await
+        .map_err(anyhow::Error::new)?;
     control
-        .terminate_app(&exclusive, TIKTOK_BUNDLE_ID)
+        .terminate_app(&exclusive, &target_package)
         .await
         .map_err(anyhow::Error::new)?;
     let kind = if control.requires_fresh_text_session(udid) {
@@ -819,7 +984,7 @@ async fn open_publish_context(
         InteractionSessionKind::Ordinary
     };
     let session = control
-        .start_interaction_session(exclusive, TIKTOK_BUNDLE_ID, kind)
+        .start_interaction_session(exclusive, &target_package, kind)
         .await
         .map_err(anyhow::Error::new)?;
     control
@@ -1119,13 +1284,200 @@ fn parse_run_at(raw: &str) -> Result<NaiveDateTime, CommandError> {
     Ok(parsed)
 }
 
+/// iOS: press the composer at coordinates somebody measured once, checking each frame changed.
+///
+/// Unchanged behaviour, lifted out of `post_one_assignment` so the hierarchy route can sit
+/// beside it rather than inside an `if` in the middle of a function that also opens leases and
+/// cleans up media.
+///
+/// **Every failure here is [`PostOutcome::Unknown`]**, and that is not pessimism: this path
+/// has no signal that separates "the tap never went out" from "it went out and the frame did
+/// not change in the way we expected". The hierarchy route does, which is why it can report
+/// the difference and this one cannot.
+async fn post_through_the_pixel_grid(
+    frames: &dyn FrameSource,
+    session: &dyn riviu_core::driver::UiSession,
+    campaign_id: &str,
+    udid: &str,
+    bundle: &riviu_core::PublishBundle,
+    import: &str,
+) -> anyhow::Result<PostOutcome> {
+    if bundle.images.len() > IOS_PIXEL_GRID_MAX_IMAGES {
+        anyhow::bail!(
+            "bundle {} has {} images and this composer has {IOS_PIXEL_GRID_MAX_IMAGES} tap points",
+            bundle.id,
+            bundle.images.len()
+        );
+    }
+    let evidence = async {
+        let before = wait_for_frame(frames, udid, Duration::from_secs(8)).await?;
+        let before_sha = frame_sha256(&before);
+
+        tap_transition(frames, udid, session, PLUS_BUTTON, &before_sha).await?;
+        tap_transition(frames, udid, session, GALLERY_BUTTON, &before_sha).await?;
+        tap_transition(frames, udid, session, ALBUM_PICKER, &before_sha).await?;
+        tap_transition(frames, udid, session, ALBUM_ROW, &before_sha).await?;
+
+        let grid_x = [105.0, 230.0, 355.0];
+        let grid_y = [131.0, 255.0, 380.0, 505.0];
+        for index in 0..bundle.images.len() {
+            let point = TapPoint {
+                x: grid_x[index % 3],
+                y: grid_y[index / 3],
+            };
+            session.tap(point).await?;
+            tokio::time::sleep(Duration::from_millis(180)).await;
+        }
+        let selected = wait_for_frame(frames, udid, Duration::from_secs(5)).await?;
+        let selected_sha = frame_sha256(&selected);
+        session.tap(COMPOSER_NEXT).await?;
+        wait_for_changed_frame(frames, udid, &selected_sha, Duration::from_secs(8)).await?;
+        session.tap(EDIT_NEXT).await?;
+        wait_for_changed_frame(frames, udid, &selected_sha, Duration::from_secs(8)).await?;
+
+        if !session.supports_text_input() {
+            anyhow::bail!("combined Agent text capability is not active for this session");
+        }
+        session.tap_native(CAPTION_FIELD).await?;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        session.type_text(&bundle.caption).await?;
+        let typed = wait_for_frame(frames, udid, Duration::from_secs(5)).await?;
+        let typed_sha = frame_sha256(&typed);
+        let post_red_before = bottom_right_redness(&typed);
+        session.tap_native(POST_BUTTON).await?;
+        let after_post_tap =
+            wait_for_changed_frame(frames, udid, &typed_sha, Duration::from_secs(8)).await?;
+        if frame_reports_account_lock(&after_post_tap).await {
+            anyhow::bail!("TikTok account status blocked the post: account_locked");
+        }
+        let confirmation_sha = if is_public_post_confirmation(&after_post_tap) {
+            session.tap_native(PUBLIC_POST_CONFIRM).await?;
+            frame_sha256(
+                &wait_for_changed_frame(
+                    frames,
+                    udid,
+                    &frame_sha256(&after_post_tap),
+                    Duration::from_secs(8),
+                )
+                .await?,
+            )
+        } else {
+            frame_sha256(&after_post_tap)
+        };
+        let posted = wait_for_post_frame(
+            frames,
+            udid,
+            &confirmation_sha,
+            post_red_before,
+            Duration::from_secs(15),
+        )
+        .await?;
+        Ok::<serde_json::Value, anyhow::Error>(serde_json::json!({
+            "state":"posted",
+            "campaignId": campaign_id,
+            "bundleId": bundle.id,
+            "importId": import,
+            "imageCount": bundle.images.len(),
+            "captionSha256": bundle.caption_sha256,
+            "frameSha256": frame_sha256(&posted),
+            "postButtonRednessBefore": post_red_before,
+        }))
+    }
+    .await?;
+    Ok(PostOutcome::Posted(evidence))
+}
+
+/// Android: drive the measured composer, and report what it proved.
+///
+/// # The verdict is carried through rather than flattened into an error
+///
+/// [`riviu_core::tiktok_composer::ComposerVerdict::may_retry`] is the one question that
+/// matters after a failed post, and it is answerable here and nowhere else — the composer
+/// knows whether it refused before opening anything or tapped Post and lost the answer. The
+/// campaign loop used to turn every failure into `uncertain`, which is permanently
+/// unclaimable; most of what it stranded had published nothing at all.
+///
+/// # Refusing on an unmeasured build, again, here
+///
+/// The campaign already refused these devices before transferring anything. This checks a
+/// second time because the two checks answer at different moments and the phone can change in
+/// between: an app that updated between transfer and post has a `versionName` this catalogue
+/// may not know, and the resource ids it keys on are reassigned on every rebuild.
+async fn post_through_the_composer(
+    control: &DeviceControlPlane,
+    session: &dyn riviu_core::driver::UiSession,
+    campaign_id: &str,
+    udid: &str,
+    bundle: &riviu_core::PublishBundle,
+    import: &str,
+) -> anyhow::Result<PostOutcome> {
+    use riviu_core::tiktok_composer::{
+        publish_carousel, CarouselRequest, ComposerPlan, ComposerVerdict, Screen,
+    };
+
+    let package = control
+        .resolve_tiktok_package(udid)
+        .await
+        .map_err(anyhow::Error::new)?;
+    let language = session.ui_language().await.unwrap_or_default();
+    let version = session.app_version(&package).await.unwrap_or_default();
+    let labels = riviu_core::tiktok_labels::controls_for(&package, &language, &version)
+        .ok_or_else(|| {
+            anyhow::anyhow!("chưa đo nhãn TikTok cho {package} / {language:?} trên {udid}")
+        })?;
+    let plan = ComposerPlan::resolve(&labels).map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+    anyhow::ensure!(
+        plan.can_publish(),
+        "bản build trên {udid} chưa đo {:?} — không đăng",
+        ComposerPlan::missing_to_publish(&labels)
+    );
+
+    let (width, height) = riviu_core::screen::measured_screen_size(session).await?;
+    let screen = Screen::new(width, height)
+        .ok_or_else(|| anyhow::anyhow!("{udid} reported a {width}x{height} screen"))?;
+
+    // The same human-looking touch planner every other session uses, built by the crate that
+    // owns the policy rather than assembled here.
+    let plan_tap = riviu_core::tiktok_composer::human_taps(screen);
+
+    let request = CarouselRequest {
+        album: import,
+        images: bundle.images.len(),
+        caption: &bundle.caption,
+        screen,
+    };
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let verdict = publish_carousel(session, plan, plan_tap, &request, &stop).await?;
+    let evidence = serde_json::json!({
+        "state": if verdict.is_posted() { "posted" } else { "not_posted" },
+        "route": "hierarchy",
+        "verdict": format!("{verdict:?}"),
+        "campaignId": campaign_id,
+        "bundleId": bundle.id,
+        "importId": import,
+        "imageCount": bundle.images.len(),
+        "captionSha256": bundle.caption_sha256,
+        "labels": labels.provenance(),
+    });
+    Ok(match verdict {
+        ComposerVerdict::Posted => PostOutcome::Posted(evidence),
+        other if other.may_retry() => PostOutcome::NothingPublished(other.reason().to_string()),
+        other => PostOutcome::Unknown(other.reason().to_string()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::account_status_text_is_locked;
     use super::bundle_for_assignment;
-    use super::refuse_bundles_this_composer_cannot_post;
-    use super::refuse_devices_this_path_cannot_drive;
+    use super::fold_cleanup_into;
+    use super::max_images_for;
+    use super::refuse_assignments_whose_bundle_is_too_large;
+    use super::refuse_devices_whose_composer_is_not_measured;
+    use super::state_for_outcome;
+    use super::PostOutcome;
     use super::IOS_PIXEL_GRID_MAX_IMAGES;
+    use super::{PublishReadiness, PublishRoute};
     use std::fs;
     use uuid::Uuid;
 
@@ -1256,21 +1608,136 @@ mod tests {
         );
     }
 
+    /// **A phone whose build is unmeasured is refused; Android as such is not.**
+    ///
+    /// This gate used to refuse every device that reported element bounds, because there was
+    /// no composer for them. There is one now, so the question narrowed: not "is this
+    /// Android" but "has this phone's TikTok had the controls read off it". A mixed fleet
+    /// must run the phones that are measured and refuse only the ones that are not.
+    /// **A cleanup failure never turns a published post into a failed one.**
+    ///
+    /// `Unknown` is permanently unclaimable, so downgrading a good post to it means a person
+    /// has to go and look at a phone whose only problem is some files left in a folder. The
+    /// reversal that found this gap made exactly that change and every test stayed green.
     #[test]
-    fn a_campaign_holding_an_android_phone_is_refused_before_anything_is_touched() {
-        // The hazard is not abstract: `supports_push_media` answers true for Android, so
-        // the only pre-existing gate waved it through and the module would then press iOS
-        // logical coordinates against TikTok's Android layout.
-        let error = refuse_devices_this_path_cannot_drive(
-            ["00008030-iphone", "ce0617164585646f0d7e"],
-            |udid| udid == "ce0617164585646f0d7e",
-        )
-        .expect_err("an Android target must be refused");
+    fn files_left_on_the_phone_do_not_unpublish_a_carousel() {
+        let posted = PostOutcome::Posted(serde_json::json!({"state": "posted"}));
+        let folded = fold_cleanup_into(posted, Err(anyhow::anyhow!("adb went away")));
+        assert!(
+            matches!(folded, PostOutcome::Posted(_)),
+            "a cleanup failure downgraded a published post"
+        );
+        let (state, code) = state_for_outcome(&folded);
+        assert_eq!(state, riviu_core::PublishCampaignState::Succeeded);
+        assert_eq!(code, None);
+        // And the problem is still recorded, rather than swallowed.
+        if let PostOutcome::Posted(evidence) = folded {
+            assert_eq!(evidence["cleanup"]["state"], "not_cleaned");
+            assert!(evidence["cleanup"]["message"]
+                .as_str()
+                .is_some_and(|text| text.contains("adb went away")));
+        }
+    }
+
+    /// **Three outcomes, three states — and the retryable one must not be stranded.**
+    ///
+    /// Every failure used to become `uncertain`, which the claim refuses forever. Most of what
+    /// that stranded had refused before opening anything: an unmeasured build, a picker that
+    /// would not arm, an album that was not there. Those need another run, not a person.
+    #[test]
+    fn only_an_outcome_that_may_have_published_is_made_unclaimable() {
+        assert_eq!(
+            state_for_outcome(&PostOutcome::NothingPublished("album not found".into())),
+            (
+                riviu_core::PublishCampaignState::FailedBeforeDispatch,
+                Some("post_refused_before_dispatch")
+            ),
+            "a run that published nothing must stay claimable"
+        );
+        assert_eq!(
+            state_for_outcome(&PostOutcome::Unknown("tapped Post, lost the answer".into())),
+            (
+                riviu_core::PublishCampaignState::Uncertain,
+                Some("post_or_cleanup_failed")
+            )
+        );
+        // The two must not be the same state, which is the whole content of this test.
+        assert_ne!(
+            state_for_outcome(&PostOutcome::NothingPublished(String::new())).0,
+            state_for_outcome(&PostOutcome::Unknown(String::new())).0
+        );
+    }
+
+    /// **The publish session is opened against the device's own TikTok, not the iOS bundle.**
+    ///
+    /// A source gate because the alternative needs a fleet: `open_publish_context` terminates
+    /// and relaunches the app before every post, and it did that with the *iOS* bundle id on
+    /// every backend — so on Android it stopped a package that is not installed and opened a
+    /// session against nothing. The interaction path fixed this in its own helper and left
+    /// this one behind.
+    #[test]
+    fn the_publish_session_targets_the_device_own_tiktok_build() {
+        let source = include_str!("publish_commands.rs").replace(
+            "
+", "
+",
+        );
+        let start = source
+            .find("async fn open_publish_context(")
+            .expect("`open_publish_context` is still called that");
+        let body = &source[start..start + 2_000];
+        assert!(
+            body.contains("resolve_tiktok_package"),
+            "the publish context stopped asking the device which TikTok it runs"
+        );
+        assert!(
+            !body.contains("IOS_TIKTOK_BUNDLE"),
+            "the publish context is back to assuming the iOS bundle on every backend"
+        );
+    }
+
+    #[test]
+    fn a_phone_whose_build_is_unmeasured_is_refused_and_its_neighbours_are_not() {
+        let error = refuse_devices_whose_composer_is_not_measured([
+            ("00008030-iphone", PublishReadiness::PixelGrid),
+            ("ce0617164585646f0d7e", PublishReadiness::HierarchyReady),
+            (
+                "ce9917160000000000",
+                PublishReadiness::HierarchyUnknownBuild("bản TikTok lạ".into()),
+            ),
+        ])
+        .expect_err("the unmeasured phone must be refused");
         let message = format!("{error:#}");
         // Names the offending device: a fleet is mixed, and "some device" sends the
         // operator hunting through sixteen phones.
-        assert!(message.contains("ce0617164585646f0d7e"), "{message}");
+        assert!(message.contains("ce9917160000000000"), "{message}");
         assert!(!message.contains("00008030-iphone"), "{message}");
+        assert!(!message.contains("ce0617164585646f0d7e"), "{message}");
+        // And it says how to close the gap, because the reader is the person who would.
+        assert!(message.contains("composer_scout"), "{message}");
+    }
+
+    /// A build missing labels is refused **by name**, so the measuring run knows what to get.
+    #[test]
+    fn a_build_missing_labels_is_refused_and_the_missing_ones_are_listed() {
+        let error = refuse_devices_whose_composer_is_not_measured([(
+            "ce0617164585646f0d7e",
+            PublishReadiness::HierarchyMissing(vec![
+                riviu_core::tiktok_labels::TikTokControl::PostButton,
+            ]),
+        )])
+        .expect_err("a build without a Post button cannot publish");
+        assert!(format!("{error:#}").contains("PostButton"), "{error:#}");
+    }
+
+    /// **Both routes pass when they are ready**, which is the case that must not regress.
+    #[test]
+    fn a_mixed_fleet_that_is_fully_measured_runs() {
+        refuse_devices_whose_composer_is_not_measured([
+            ("a-iphone", PublishReadiness::PixelGrid),
+            ("an-android", PublishReadiness::HierarchyReady),
+        ])
+        .expect("both routes are measured");
     }
 
     /// **The composer's grid, refused before the media leaves the desktop.**
@@ -1281,30 +1748,60 @@ mod tests {
     /// never reached a state that owns cleanup.
     #[test]
     fn a_bundle_too_wide_for_the_tap_grid_is_refused_before_transfer() {
-        let bundles = [
-            bundle_of("set1 13 spotlight", 11),
-            bundle_of("set1 19 spotlightv3", 13),
-        ];
-        let error =
-            refuse_bundles_this_composer_cannot_post(bundles.iter(), IOS_PIXEL_GRID_MAX_IMAGES)
-                .expect_err("thirteen images cannot be reached by a twelve-cell grid");
+        let fits = bundle_of("set1 13 spotlight", 11);
+        let too_wide = bundle_of("set1 19 spotlightv3", 13);
+        let error = refuse_assignments_whose_bundle_is_too_large([
+            ("an-iphone", &fits, IOS_PIXEL_GRID_MAX_IMAGES),
+            ("an-iphone-2", &too_wide, IOS_PIXEL_GRID_MAX_IMAGES),
+        ])
+        .expect_err("thirteen images cannot be reached by a twelve-cell grid");
         let message = format!("{error:#}");
-        // Names the offending bundle and its count: an operator with twenty-one folders
-        // needs to know which one and by how much.
+        // Names the offending bundle, its count and the phone: an operator with twenty-one
+        // folders and twenty phones needs all three.
         assert!(message.contains("set1 19 spotlightv3"), "{message}");
         assert!(message.contains("13"), "{message}");
+        assert!(message.contains("an-iphone-2"), "{message}");
         // And does not accuse the one that fits.
         assert!(!message.contains("set1 13 spotlight"), "{message}");
+    }
+
+    /// **The ceiling is the device's, not the campaign's.**
+    ///
+    /// One number for the whole run refused Android bundles that its own composer selects
+    /// fine — it locates each cell rather than tapping twelve coordinates somebody wrote
+    /// down, so its grid is wider. The same twelve-image bundle passes on one route and
+    /// refuses on the other, and that is the point.
+    #[test]
+    fn each_device_is_measured_against_its_own_composer() {
+        let twelve = bundle_of("twelve", 12);
+        assert!(refuse_assignments_whose_bundle_is_too_large([(
+            "an-iphone",
+            &twelve,
+            max_images_for(PublishRoute::PixelGrid)
+        )])
+        .is_err());
+        refuse_assignments_whose_bundle_is_too_large([(
+            "an-android",
+            &twelve,
+            max_images_for(PublishRoute::Hierarchy),
+        )])
+        .expect("the hierarchy composer reaches twelve cells");
+        assert!(
+            max_images_for(PublishRoute::Hierarchy) > max_images_for(PublishRoute::PixelGrid),
+            "if these are equal the split above proves nothing"
+        );
     }
 
     #[test]
     fn a_bundle_that_fits_the_grid_passes() {
         // Exactly at the limit is inside it: eleven images is what the guard has always
         // allowed, and moving the constant must not move the boundary.
-        refuse_bundles_this_composer_cannot_post(
-            [bundle_of("eleven", 11)].iter(),
+        let eleven = bundle_of("eleven", 11);
+        refuse_assignments_whose_bundle_is_too_large([(
+            "an-iphone",
+            &eleven,
             IOS_PIXEL_GRID_MAX_IMAGES,
-        )
+        )])
         .expect("eleven is the limit, not one past it");
     }
 
@@ -1334,16 +1831,10 @@ mod tests {
     }
 
     #[test]
-    fn an_all_iphone_campaign_still_runs() {
-        refuse_devices_this_path_cannot_drive(["a-iphone", "b-iphone"], |_| false)
-            .expect("the pixel path is what this module is for");
-    }
-
-    #[test]
     fn an_empty_assignment_list_is_not_the_refusal_this_gate_is_for() {
         // Emptiness is checked by its own error with its own message; this gate must not
         // steal that case and report a platform problem instead.
-        refuse_devices_this_path_cannot_drive(std::iter::empty(), |_| true)
+        refuse_devices_whose_composer_is_not_measured(std::iter::empty())
             .expect("nothing to refuse");
     }
 
