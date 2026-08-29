@@ -137,6 +137,12 @@ const MIGRATIONS: &[Migration] = &[
         apply: apply_migration_17,
         rebuilds_tables: false,
     },
+    Migration {
+        version: 18,
+        name: "sheet-outbox-outlives-its-parents",
+        apply: apply_migration_18,
+        rebuilds_tables: true,
+    },
 ];
 
 const LEDGER_SQL: &str = r#"
@@ -1033,6 +1039,78 @@ CREATE TABLE publish_sheet_outbox (
 );
 CREATE INDEX publish_sheet_outbox_pending
   ON publish_sheet_outbox(state) WHERE state <> 'sent';
+"#,
+    )?;
+    Ok(())
+}
+
+fn apply_migration_18(transaction: &Transaction<'_>) -> anyhow::Result<()> {
+    // **The obligation is about a post that exists in the world, so it must not be a child of
+    // rows in this database.**
+    //
+    // Migration 17 gave the outbox `ON DELETE CASCADE` on both `publish_campaigns` and
+    // `publish_assignments`, with a comment arguing that losing an unsent row costs nothing.
+    // A review took that apart and it is wrong in the one direction that matters: a carousel
+    // publishes, the webhook is down, the row sits `failed` — and the operator deletes the
+    // campaign. SQLite quietly removes the only record that a live, undeletable post still
+    // owes the sheet a link. Nothing can ever add it, and its absence is exactly what would
+    // encourage publishing it again.
+    //
+    // So the parents go. `campaign_id` stays as plain text, for grouping and for the
+    // operator's eye; it no longer decides whether the row lives. That also removes the
+    // mismatch a separate finding named — two independent keys let (assignment A, campaign B)
+    // insert cleanly, so deleting B took A's obligation with it.
+    //
+    // # Three more things the rebuild is the moment to fix
+    //
+    // * **`post_url` becomes unique.** One URL is one post is one row. Without it, a restored
+    //   campaign that hands a new assignment id to an already-captured link writes the same
+    //   link into column D twice, and both rows look ordinary.
+    // * **`revision`**, bumped whenever the row's content changes. A sweep that read version 3
+    //   and delivered it must not mark version 4 sent — which is what "update by id" did, and
+    //   the newer URL then never travelled.
+    // * **Empty text is refused.** `NOT NULL` was doing nothing about `""`, and an empty
+    //   `post_url` is a row that is eligible forever and rejected by the script every time.
+    //
+    // `rebuilds_tables: true`, and the window it opens is not needed for a cascade — this
+    // table is nobody's parent — but it is the honest declaration for a `DROP TABLE`.
+    transaction.execute_batch(
+        r#"
+CREATE TABLE publish_sheet_outbox_new (
+  assignment_id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL,
+  post_url TEXT NOT NULL,
+  poster TEXT NOT NULL,
+  partners_json TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending','sent','failed')),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (length(trim(assignment_id)) > 0),
+  CHECK (length(trim(campaign_id)) > 0),
+  CHECK (length(trim(post_url)) > 0),
+  CHECK (length(trim(poster)) > 0)
+);
+INSERT INTO publish_sheet_outbox_new(
+  assignment_id,campaign_id,post_url,poster,partners_json,state,attempts,revision,
+  last_error,created_at,updated_at
+)
+SELECT assignment_id,campaign_id,post_url,poster,partners_json,state,attempts,0,
+       last_error,created_at,updated_at
+FROM publish_sheet_outbox
+WHERE length(trim(assignment_id)) > 0
+  AND length(trim(campaign_id)) > 0
+  AND length(trim(post_url)) > 0
+  AND length(trim(poster)) > 0
+GROUP BY post_url;
+DROP TABLE publish_sheet_outbox;
+ALTER TABLE publish_sheet_outbox_new RENAME TO publish_sheet_outbox;
+CREATE UNIQUE INDEX publish_sheet_outbox_one_row_per_post
+  ON publish_sheet_outbox(post_url);
+CREATE INDEX publish_sheet_outbox_pending
+  ON publish_sheet_outbox(created_at) WHERE state <> 'sent';
 "#,
     )?;
     Ok(())

@@ -16,6 +16,19 @@
 //! the sheet. The layout it writes is theirs, verbatim: the post link in **column D**, the
 //! poster as `bot`, and the partner names from the workbook spread **from column K**.
 //!
+//! # Nothing calls this yet, and the reason is a measurement
+//!
+//! Stated here rather than left for a reader to discover: no production path constructs a
+//! [`SheetRow`] or calls [`push_row`]. The chain that would — publish, read the link back,
+//! queue the row, sweep — is complete except for its middle, and that middle is
+//! [`crate::tiktok_share::capture_post_link`], which needs the caller to be standing on the
+//! post it just published. **The route from a just-published carousel back to its own post
+//! page is not measured on any build.**
+//!
+//! So this is finished code waiting on a dump, not code somebody forgot to wire. What it must
+//! not become in the meantime is a path that reports a failed *sheet write* as a failed
+//! *post* — see [`crate::db::publish_sheet`] for the half that guarantees that.
+//!
 //! # The secret is a real one
 //!
 //! An Apps Script web app deployed so the desktop can reach it is reachable by anyone who
@@ -75,10 +88,59 @@ pub struct SheetReply {
     pub error: Option<String>,
 }
 
+/// Whether the script's answer means the sheet now holds the row.
+///
+/// A named function rather than three lines inside `push_row`, because what it decides cannot
+/// be tested through an HTTP call without standing up a server — and the mistake it exists to
+/// prevent was invisible to every test that did not.
+///
+/// **`duplicate` only counts alongside `ok`.** Checking it first accepted
+/// `{"ok":false,"duplicate":true,"error":"write failed"}` as a success: a reply the current
+/// script never sends, but an older deployment or a proxy in front of it can, and the row
+/// would then be marked delivered against a sheet holding nothing.
+fn interpret(reply: SheetReply) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        reply.ok,
+        "webhook Sheet từ chối: {}",
+        reply.error.unwrap_or_else(|| "không nói lý do".into())
+    );
+    Ok(())
+}
+
+/// The `LIMIT` a sweep may ask SQLite for.
+///
+/// Clamped, and the reason is not tidiness: `usize::MAX as i64` is `-1`, and SQLite reads a
+/// negative `LIMIT` as **no limit** — so the argument meant to bound the sweep is the one that
+/// would have unbounded it, and a long outage's whole backlog would materialise at once.
+pub fn sweep_limit(limit: usize) -> i64 {
+    limit.min(1_000) as i64
+}
+
 fn client() -> anyhow::Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .timeout(WEBHOOK_TIMEOUT)
+        // **No redirects.** The token is a bearer credential in the body, and `reqwest`
+        // follows redirects with the body intact by default — so an endpoint that is later
+        // pointed somewhere else, or a mistyped host that redirects, hands the token to
+        // whoever answers. An Apps Script `/exec` endpoint answers directly.
+        .redirect(reqwest::redirect::Policy::none())
         .build()?)
+}
+
+/// Whether a webhook URL is one this client will send a credential to.
+///
+/// **HTTPS only.** The token, the post link, the poster and every partner name travel in the
+/// body; over `http://` they travel in the clear, and whoever reads the token can write
+/// arbitrary rows into the operator's sheet from then on. A settings field is exactly the
+/// place a `http://` typo survives unnoticed, which is why this is checked rather than
+/// documented.
+///
+/// The host is not pinned to Google: a proxy in front of the script is a reasonable setup and
+/// refusing it would push the operator toward turning the check off entirely.
+pub fn is_acceptable_webhook(url: &str) -> bool {
+    url::Url::parse(url.trim()).is_ok_and(|parsed| {
+        parsed.scheme() == "https" && parsed.host_str().is_some_and(|host| !host.is_empty())
+    })
 }
 
 /// Push one row, and say plainly whether the sheet now has it.
@@ -95,9 +157,20 @@ pub async fn push_row(webhook_url: &str, row: &SheetRow) -> anyhow::Result<()> {
         "chưa đặt webhook Apps Script — điền URL trong cài đặt trước khi đẩy link lên Sheet"
     );
     anyhow::ensure!(
+        is_acceptable_webhook(webhook_url),
+        "webhook Sheet phải là https:// — token và link bài đi trong thân request, và qua \
+         http:// thì đi công khai: {webhook_url}"
+    );
+    anyhow::ensure!(
         !row.token.trim().is_empty(),
         "chưa đặt token cho webhook — URL Apps Script không tự xác thực người gọi, nên thiếu \
          token là bỏ ngỏ cả sheet"
+    );
+    // A blank link or key is a row the script rejects on every attempt, forever. Refusing here
+    // says so once, in the place that can name which field is missing.
+    anyhow::ensure!(
+        !row.post_url.trim().is_empty() && !row.assignment_id.trim().is_empty(),
+        "thiếu link bài hoặc assignmentId — script sẽ từ chối mãi mà không ai biết vì sao"
     );
     let response = client()?
         .post(webhook_url)
@@ -123,20 +196,93 @@ pub async fn push_row(webhook_url: &str, row: &SheetRow) -> anyhow::Result<()> {
             body.chars().take(200).collect::<String>()
         )
     })?;
-    if reply.duplicate {
-        return Ok(());
-    }
-    anyhow::ensure!(
-        reply.ok,
-        "webhook Sheet từ chối: {}",
-        reply.error.unwrap_or_else(|| "không nói lý do".into())
-    );
-    Ok(())
+    interpret(reply)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A credential never goes out over plaintext, and never follows a redirect.**
+    ///
+    /// The token, the post link and every partner name are in the body. Over `http://` they
+    /// are readable by anything on the path, and whoever reads the token can write arbitrary
+    /// rows into the operator's sheet from then on — which is a settings-field typo away.
+    #[test]
+    fn only_an_https_webhook_is_acceptable() {
+        assert!(is_acceptable_webhook(
+            "https://script.google.com/macros/s/AKf/exec"
+        ));
+        assert!(is_acceptable_webhook("  https://proxy.example/hook  "));
+        for bad in [
+            "http://script.google.com/macros/s/AKf/exec",
+            "script.google.com/macros/s/AKf/exec",
+            "ftp://example/x",
+            "https://",
+            "",
+            "javascript:alert(1)",
+        ] {
+            assert!(!is_acceptable_webhook(bad), "{bad} should be refused");
+        }
+    }
+
+    /// **`duplicate` does not override an explicit failure.**
+    ///
+    /// Checking it first accepted `{"ok":false,"duplicate":true,"error":"write failed"}` as a
+    /// success, and the row would be marked delivered against a sheet holding nothing. Tested
+    /// through `interpret` rather than through `push_row`, because the decision is otherwise
+    /// only reachable behind an HTTP call — which is exactly why no test saw it.
+    #[test]
+    fn a_reply_that_claims_a_duplicate_and_a_failure_is_a_failure() {
+        let contradictory: SheetReply =
+            serde_json::from_str(r#"{"ok":false,"duplicate":true,"error":"write failed"}"#)
+                .expect("parses");
+        let error = interpret(contradictory).expect_err("a failed write is not a success");
+        assert!(error.to_string().contains("write failed"), "{error}");
+
+        // The shape the current script sends for a row it already has.
+        let real: SheetReply =
+            serde_json::from_str(r#"{"ok":true,"duplicate":true}"#).expect("parses");
+        interpret(real).expect("an already-written row is done, not owed");
+
+        let refused: SheetReply =
+            serde_json::from_str(r#"{"ok":false,"error":"token sai"}"#).expect("parses");
+        assert!(interpret(refused)
+            .expect_err("a refusal is a refusal")
+            .to_string()
+            .contains("token sai"));
+    }
+
+    /// **A limit that wraps negative would unbound the sweep, not bound it.**
+    #[test]
+    fn a_sweep_limit_is_never_negative_however_absurd_the_request() {
+        assert_eq!(sweep_limit(5), 5);
+        assert_eq!(sweep_limit(0), 0);
+        assert!(sweep_limit(usize::MAX) > 0, "usize::MAX became `no limit`");
+        assert!(sweep_limit(usize::MAX) <= 1_000);
+        for request in [1usize, 999, 1_000, 1_001, usize::MAX / 2, usize::MAX] {
+            assert!(
+                sweep_limit(request) >= 0,
+                "{request} produced a negative LIMIT, which SQLite reads as unbounded"
+            );
+        }
+    }
+
+    /// A blank link is refused before a request that would be rejected forever.
+    #[tokio::test]
+    async fn a_blank_link_or_key_refuses_rather_than_queueing_a_permanent_rejection() {
+        let row = SheetRow {
+            token: "t".into(),
+            post_url: "   ".into(),
+            poster: "bot".into(),
+            partners: vec![],
+            assignment_id: "assign-1".into(),
+        };
+        let error = push_row("https://example/hook", &row)
+            .await
+            .expect_err("must refuse");
+        assert!(error.to_string().contains("link bài"), "{error}");
+    }
 
     /// **A row cannot travel without a token, and the check is not the URL's job.**
     ///
@@ -153,11 +299,16 @@ mod tests {
             partners: vec!["Quán A".into()],
             assignment_id: "assign-1".into(),
         };
-        // A URL that would fail loudly if it were ever reached.
-        let error = push_row("http://127.0.0.1:1/never", &row)
+        // **https**, and a port nothing listens on: the scheme check now runs first, so an
+        // `http://` fixture here would fail for the wrong reason — and that message happens to
+        // contain the word `token`, so the assertion below would have passed anyway.
+        let error = push_row("https://127.0.0.1:1/never", &row)
             .await
             .expect_err("an empty token must refuse");
-        assert!(error.to_string().contains("token"), "{error}");
+        assert!(
+            error.to_string().contains("chưa đặt token"),
+            "refused for some other reason: {error}"
+        );
 
         let with_token = SheetRow {
             token: "t".into(),
