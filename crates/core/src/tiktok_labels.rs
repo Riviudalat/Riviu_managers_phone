@@ -771,6 +771,118 @@ pub(crate) fn nothing_measured() -> TikTokControls {
     }
 }
 
+/// A set where every control the publish path needs **is** measured.
+///
+/// The mirror of [`nothing_measured`], and it exists for the mirror reason. That one
+/// keeps a refusal's coverage alive after a label gets measured; this one keeps the
+/// *success* path testable while the real catalogue still refuses. Today no shipped set
+/// resolves a composer plan — `composer_next` and `post_button` have never been read off
+/// any phone — so without this the only reachable branch of
+/// `tiktok_composer::ComposerPlan::resolve` would be the error, and every step past it
+/// would be untested code that first runs on a live account.
+///
+/// The strings are **not** measurements and must never be copied into a real set: they
+/// are named so that anything matching them on a real screen would be a coincidence.
+///
+/// `#[cfg(test)]`: nothing in the product may reach for a set nobody measured.
+#[cfg(test)]
+pub(crate) fn every_publish_control_measured() -> TikTokControls {
+    static ALL: TikTokLabels = TikTokLabels {
+        package: "com.example.fully-measured",
+        language: "zz",
+        measured_on: "nothing — this set exists so the success path has a fixture",
+        measured_app_version: "",
+        feed_tab: Some(LabelMatch::Exact("fixture-feed-tab")),
+        home_tab: Some(LabelMatch::Exact("fixture-home-tab")),
+        dialog_dismiss: None,
+        journey_skip: None,
+        journey_done: None,
+        folded_comments: None,
+        sound_link: None,
+        photo_badge: None,
+        like: None,
+        liked: None,
+        comments: None,
+        share: Some(LabelMatch::Exact("fixture-share")),
+        bookmark: None,
+        follow: None,
+        live_room: None,
+        comment_send: None,
+        comment_reply: None,
+        composer_open: Some(LabelMatch::Exact("fixture-composer-open")),
+        picker_album_menu: Some(LabelMatch::Text("fixture-album-menu")),
+        picker_tab_all: Some(LabelMatch::Text("fixture-tab-all")),
+        picker_tab_photos: Some(LabelMatch::Text("fixture-tab-photos")),
+        picker_multi_select: Some(LabelMatch::Text("fixture-multi-select")),
+        picker_next: Some(LabelMatch::Text("fixture-picker-next")),
+        author_profile_link: None,
+        like_count: None,
+        profile_tab: None,
+        composer_next: Some(LabelMatch::Text("fixture-edit-next")),
+        post_button: Some(LabelMatch::Text("fixture-post")),
+        post_delete_menu: None,
+        post_delete: None,
+        post_delete_confirm: None,
+    };
+    TikTokControls {
+        translated: &ALL,
+        resources: None,
+    }
+}
+
+/// The same fixture with the Post button unmeasured, which is the state every real
+/// build is in today.
+///
+/// Kept as its own helper rather than a mutated copy because `TikTokControls` holds a
+/// `&'static`, and because the *distinction* is the thing under test: a build can be
+/// driven as far as the edit step and still refuse to publish.
+#[cfg(test)]
+pub(crate) fn every_publish_control_but_post_measured() -> TikTokControls {
+    // Written out rather than derived from the fixture above: a `static` needs a const
+    // initialiser, and functional-update syntax is not one.
+    static NO_POST: TikTokLabels = TikTokLabels {
+        package: "com.example.no-post-button",
+        language: "zz",
+        measured_on: "nothing — this set exists so the pre-publish steps have a fixture",
+        measured_app_version: "",
+        feed_tab: Some(LabelMatch::Exact("fixture-feed-tab")),
+        home_tab: Some(LabelMatch::Exact("fixture-home-tab")),
+        dialog_dismiss: None,
+        journey_skip: None,
+        journey_done: None,
+        folded_comments: None,
+        sound_link: None,
+        photo_badge: None,
+        like: None,
+        liked: None,
+        comments: None,
+        share: Some(LabelMatch::Exact("fixture-share")),
+        bookmark: None,
+        follow: None,
+        live_room: None,
+        comment_send: None,
+        comment_reply: None,
+        composer_open: Some(LabelMatch::Exact("fixture-composer-open")),
+        picker_album_menu: Some(LabelMatch::Text("fixture-album-menu")),
+        picker_tab_all: Some(LabelMatch::Text("fixture-tab-all")),
+        picker_tab_photos: Some(LabelMatch::Text("fixture-tab-photos")),
+        picker_multi_select: Some(LabelMatch::Text("fixture-multi-select")),
+        picker_next: Some(LabelMatch::Text("fixture-picker-next")),
+        author_profile_link: None,
+        like_count: None,
+        profile_tab: None,
+        composer_next: Some(LabelMatch::Text("fixture-edit-next")),
+        post_button: None,
+        post_delete_menu: None,
+        post_delete: None,
+        post_delete_confirm: None,
+    };
+    TikTokControls {
+        translated: &NO_POST,
+        resources: None,
+    }
+}
+
 impl TikTokControls {
     /// The label for a control, or `None` when it was never measured for this
     /// device. `None` means refuse — do not substitute another language or version.

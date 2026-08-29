@@ -30,6 +30,7 @@ pub mod screen_match;
 pub mod screen_watch;
 pub mod session_log;
 pub mod stream_budget;
+pub mod tiktok_composer;
 pub mod tiktok_drawer;
 pub mod tiktok_labels;
 pub mod tiktok_like;
