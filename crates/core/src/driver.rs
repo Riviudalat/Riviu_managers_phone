@@ -333,6 +333,21 @@ pub trait DeviceDriver: Send + Sync {
     async fn resolve_tiktok_package(&self, _udid: &str) -> anyhow::Result<String> {
         Ok(crate::tiktok_target::IOS_TIKTOK_BUNDLE.to_string())
     }
+    /// The `(package, versionName, locale)` triple a label lookup is keyed by.
+    ///
+    /// Read from the device rather than assumed, because the catalogue is keyed on all
+    /// three and two of them move underneath the fleet: TikTok updates itself, and a
+    /// resource id measured on one `versionName` is not the same control on the next. A
+    /// caller that has only the package is answering a question about the *package* — which
+    /// is the right shape for a refusal ("no set for this package is complete") and the
+    /// wrong shape for a claim ("this phone is ready").
+    ///
+    /// The default refuses rather than inventing a version: a backend that cannot read the
+    /// installed build must not hand back an empty string that `controls_for` would then
+    /// treat as "unmeasured" — the two are different answers and only the device knows.
+    async fn tiktok_build(&self, _udid: &str) -> anyhow::Result<(String, String, String)> {
+        anyhow::bail!("backend này không đọc được (gói, versionName, locale) của TikTok")
+    }
     fn supports_verified_app_termination(&self, _udid: &str) -> bool {
         false
     }

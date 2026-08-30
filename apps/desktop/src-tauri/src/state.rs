@@ -48,6 +48,23 @@ const VIEW_EVIDENCE_LOG_EVERY: Duration = Duration::from_secs(30);
 /// update check.
 const BUSY_JOB_SCAN_LIMIT: usize = 500;
 
+/// Why the Sheet sweeper is standing still, or `None` when it may deliver.
+///
+/// Pure, and named, because it is the one decision in that loop worth arguing about in a
+/// test rather than against a live webhook — and because "unconfigured" is a message an
+/// operator acts on: they go and paste a webhook. A half-configured pair (a URL with no
+/// token, or the reverse) must say which half is missing rather than reporting the generic
+/// state, and a read failure must never reach this function at all — the caller keeps that
+/// distinction, because a database that would not answer is not a configuration choice.
+fn sheet_delivery_blocked(webhook_url: &str, token: &str) -> Option<&'static str> {
+    match (webhook_url.trim().is_empty(), token.trim().is_empty()) {
+        (true, true) => Some("chưa cấu hình publish_sheet_webhook_url và token"),
+        (true, false) => Some("có token nhưng chưa có publish_sheet_webhook_url"),
+        (false, true) => Some("có webhook nhưng chưa có publish_sheet_webhook_token"),
+        (false, false) => None,
+    }
+}
+
 fn preview_fps_for_device_count(count: usize) -> u32 {
     (PREVIEW_TOTAL_FPS / count.max(1) as u32).clamp(1, PREVIEW_MAX_FPS_PER_DEVICE)
 }
@@ -1875,35 +1892,52 @@ impl AppState {
             let mut interval = tokio::time::interval(Duration::from_secs(45));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut said_unconfigured = false;
+            // How many of the oldest owed rows have failed every attempt so far. A batch of
+            // permanently poisoned rows — a link the script rejects, say — would otherwise
+            // be re-tried for the whole window on every tick and the fifty-first row would
+            // never be reached, so each pass skips past what the previous one could not
+            // deliver and comes back to it after the newer rows have had their turn.
+            let mut skip_poisoned = 0usize;
             loop {
                 interval.tick().await;
-                let webhook = sheet_db
-                    .get_setting(riviu_core::publish_sheet::WEBHOOK_URL_SETTING)
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default();
-                let token = sheet_db
-                    .get_setting(riviu_core::publish_sheet::WEBHOOK_TOKEN_SETTING)
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default();
-                if webhook.trim().is_empty() || token.trim().is_empty() {
+                let config = match (
+                    sheet_db.get_setting(riviu_core::publish_sheet::WEBHOOK_URL_SETTING),
+                    sheet_db.get_setting(riviu_core::publish_sheet::WEBHOOK_TOKEN_SETTING),
+                ) {
+                    (Ok(url), Ok(token)) => (url.unwrap_or_default(), token.unwrap_or_default()),
+                    // **A database that would not answer is not "unconfigured".** Reading
+                    // the error away made a locked DB print the one message an operator
+                    // reads as "you forgot to paste the webhook" — and then, once the lock
+                    // cleared, print it again as if the config had just been removed.
+                    (Err(error), _) | (_, Err(error)) => {
+                        log::warn!("outbox Sheet: không đọc được cấu hình ({error:#})");
+                        continue;
+                    }
+                };
+                let (webhook, token) = config;
+                if let Some(reason) = sheet_delivery_blocked(&webhook, &token) {
                     if !said_unconfigured {
-                        log::info!(
-                            "outbox Sheet đứng yên: chưa cấu hình publish_sheet_webhook_url/token"
-                        );
+                        log::info!("outbox Sheet đứng yên: {reason}");
                         said_unconfigured = true;
                     }
                     continue;
                 }
                 said_unconfigured = false;
-                let rows = match sheet_db.pending_publish_sheet_rows(50) {
+                let rows = match sheet_db.pending_publish_sheet_rows(50 + skip_poisoned) {
                     Ok(rows) => rows,
                     Err(error) => {
                         log::warn!("outbox Sheet: không đọc được hàng chờ ({error:#})");
                         continue;
                     }
                 };
+                let rows: Vec<_> = rows.into_iter().skip(skip_poisoned).collect();
+                if rows.is_empty() && skip_poisoned > 0 {
+                    // Nothing behind the poisoned block; start over so those rows are tried
+                    // again rather than left owed forever.
+                    skip_poisoned = 0;
+                    continue;
+                }
+                let mut failed_this_pass = 0usize;
                 for row in rows {
                     let payload = riviu_core::publish_sheet::SheetRow {
                         token: token.clone(),
@@ -1937,9 +1971,14 @@ impl AppState {
                                 "outbox Sheet: đẩy {} thất bại — {reason}",
                                 row.assignment_id
                             );
+                            failed_this_pass += 1;
                         }
                     }
                 }
+                // Rows that failed at the head of the queue are stepped over next pass, so a
+                // block of poisoned links cannot hold the newer ones hostage; when there is
+                // nothing behind them the offset resets and they are tried again.
+                skip_poisoned = failed_this_pass;
             }
         });
 
@@ -2357,6 +2396,39 @@ mod tests {
     /// a fixture that forgets `with_clock`) degrades back to the 26/08 shape — slow but
     /// green — instead of flaking at 25 ms.
     const PAST_THE_TURN_DEADLINE: Duration = Duration::from_millis(250);
+
+    /// **A half-configured webhook says which half, and a configured one never blocks.**
+    ///
+    /// The message is what an operator acts on: "chưa cấu hình" sends them to paste a
+    /// webhook, so a pair holding a token but no URL must not print it — they would paste
+    /// the thing that is already there. The loop's other refusal, a database that would not
+    /// answer, deliberately never reaches this function: it is not a configuration choice,
+    /// and reading it as one is how a locked DB came to be reported as an empty setting.
+    #[test]
+    fn a_half_configured_sheet_names_the_missing_half() {
+        assert_eq!(
+            sheet_delivery_blocked("", ""),
+            Some("chưa cấu hình publish_sheet_webhook_url và token")
+        );
+        assert_eq!(
+            sheet_delivery_blocked("   ", "  "),
+            Some("chưa cấu hình publish_sheet_webhook_url và token"),
+            "whitespace is not configuration"
+        );
+        assert_eq!(
+            sheet_delivery_blocked("", "secret"),
+            Some("có token nhưng chưa có publish_sheet_webhook_url")
+        );
+        assert_eq!(
+            sheet_delivery_blocked("https://script.google.com/x/exec", ""),
+            Some("có webhook nhưng chưa có publish_sheet_webhook_token")
+        );
+        assert_eq!(
+            sheet_delivery_blocked("https://script.google.com/x/exec", "secret"),
+            None,
+            "a complete pair must not be blocked"
+        );
+    }
 
     #[test]
     fn the_stream_budget_follows_the_fleet_that_is_plugged_in() {

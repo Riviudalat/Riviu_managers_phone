@@ -123,6 +123,26 @@ pub fn sweep_limit(limit: usize) -> i64 {
     limit.min(1_000) as i64
 }
 
+/// The first 200 characters of a response, with the bearer token taken out.
+///
+/// **The body belongs to whoever answers the URL.** An endpoint that echoes the request —
+/// a debug handler, a proxy, a host typed one character wrong — puts the token in it, and
+/// this slice is stored in the outbox's `last_error` and written to the app log. A
+/// credential in a log has to be re-issued, so it is removed before the evidence is kept
+/// rather than after somebody notices.
+///
+/// The redaction runs before the truncation: a token straddling the 200-character boundary
+/// would otherwise survive in halves. An empty token redacts nothing — replacing the empty
+/// string would rewrite the whole body.
+fn redact_token(body: &str, token: &str) -> String {
+    let cleaned = if token.trim().is_empty() {
+        body.to_string()
+    } else {
+        body.replace(token, "«token»")
+    };
+    cleaned.chars().take(200).collect()
+}
+
 fn client() -> anyhow::Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .timeout(WEBHOOK_TIMEOUT)
@@ -191,16 +211,22 @@ pub async fn push_row(webhook_url: &str, row: &SheetRow) -> anyhow::Result<()> {
     // Apps Script answers 200 with a JSON body for its own refusals — a non-2xx here is
     // Google's infrastructure, not the script, and the body is an HTML error page. Quoting a
     // slice of it is what tells the two apart in a log.
+    //
+    // **The slice is redacted first, and that is not paranoia about our own script.** The
+    // body comes from whatever host the URL points at; an endpoint that echoes the request
+    // — a debug handler, a proxy, a mistyped host — puts the bearer token in it, and this
+    // string is stored in `last_error` and written to the app log. A credential that
+    // reaches a log has to be re-issued, so the quoted evidence never carries it.
     anyhow::ensure!(
         status.is_success(),
         "webhook Sheet trả {status}: {}",
-        body.chars().take(200).collect::<String>()
+        redact_token(&body, &row.token)
     );
     let reply: SheetReply = serde_json::from_str(&body).map_err(|error| {
         anyhow::anyhow!(
             "webhook Sheet trả thứ không phải JSON ({error}) — thường là do URL trỏ vào bản \
              deploy cũ hoặc chưa đặt quyền truy cập: {}",
-            body.chars().take(200).collect::<String>()
+            redact_token(&body, &row.token)
         )
     })?;
     interpret(reply)

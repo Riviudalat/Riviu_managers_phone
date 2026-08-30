@@ -259,9 +259,26 @@ fn assignment_may_hold_the_post(state: &riviu_core::PublishCampaignState) -> boo
 /// `None` through the plain state write. An empty or whitespace `postUrl` is `None`: the
 /// outbox schema refuses blank links (migration 18's CHECK), and a post whose link was
 /// never read owes the sheet nothing yet.
+///
+/// # It reads through the fold, and the first version did not
+///
+/// By the time this runs, the evidence has been through [`fold_cleanup_into`], which wraps a
+/// posted outcome as `{"post": …, "cleanup": …}` — so the link the composer wrote at the top
+/// level lives one layer down. The first version looked only at the top level, which meant
+/// the `Some` arm was **unreachable**: a captured link would have been recorded in
+/// `evidence_json` and never written to the outbox, leaving a debt the sweeper cannot see —
+/// exactly the failure the one-transaction write exists to prevent. Nothing caught it because
+/// no path sets `postUrl` yet (see the `Posted` arm's note on the M7 route) and the test fed
+/// this function **unfolded** evidence. Found by an independent review on 31/08/2026; the
+/// test now folds through the real function, so the two shapes cannot drift apart again.
+///
+/// The unfolded level stays readable because the fold is one caller's shape, not this
+/// function's contract, and an outcome that reaches here unfolded is still owed.
 fn post_url_owed(evidence: &serde_json::Value) -> Option<&str> {
     evidence
-        .get("postUrl")
+        .get("post")
+        .and_then(|post| post.get("postUrl"))
+        .or_else(|| evidence.get("postUrl"))
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|url| !url.is_empty())
@@ -697,8 +714,18 @@ async fn post_one_phone(
     // link recorded in evidence with no outbox row behind it is a debt the sweeper can never
     // see. Everything else (no link yet — which before the M7 measurement is every run — or
     // any non-posted outcome) keeps the plain state write.
+    // **Keyed on the settled state, not merely on a link being present.**
+    //
+    // `record_publish_success_with_sheet_row` writes `succeeded` unconditionally, so routing
+    // by "evidence carries a link" would let any future outcome that kept a captured link
+    // while settling to something else — an `Unknown` that may be live, say — be recorded as
+    // a clean success, erasing the one state this path treats as permanently unclaimable.
+    // The two agree today (only `Posted` maps to `Succeeded`); this makes them agree by
+    // construction rather than by coincidence.
     let owed = match &outcome {
-        PostOutcome::Posted(value) => post_url_owed(value).map(str::to_string),
+        PostOutcome::Posted(value) if state == riviu_core::PublishCampaignState::Succeeded => {
+            post_url_owed(value).map(str::to_string)
+        }
         _ => None,
     };
     let written = match owed {
@@ -839,50 +866,48 @@ async fn readiness_of(control: &DeviceControlPlane, udid: &str) -> PublishReadin
     if !control.reports_element_bounds(udid) {
         return PublishReadiness::PixelGrid;
     }
-    let package = match control.resolve_tiktok_package(udid).await {
-        Ok(package) => package,
-        Err(error) => {
-            return PublishReadiness::HierarchyUnknownBuild(format!(
-                "không xác định được bản TikTok trên máy này: {error}"
-            ))
-        }
-    };
-    // **A necessary condition that can be checked without a lease**, and today it refuses the
-    // whole fleet: if *no* catalogued language set for this package has the publishing tail
-    // measured, then this phone cannot publish whichever language it is in — so its media must
-    // not be transferred at all. When some set can, the phone's own language and app version
-    // decide, and that check needs a session, so it runs in `post_through_the_composer` before
-    // the first tap.
-    let missing = shortest_publish_gap_for(&package);
-    match missing {
-        Some(missing) if !missing.is_empty() => PublishReadiness::HierarchyMissing(missing),
-        Some(_) => PublishReadiness::HierarchyReady,
-        None => PublishReadiness::HierarchyUnknownBuild(format!(
-            "chưa đo bộ nhãn nào cho gói {package}"
+    // **Ask the phone which build it is, and then ask the catalogue about THAT build.**
+    //
+    // This used to take the shortest gap across every catalogued (language, version) set for
+    // the package — a question about the package, not about the phone. As a refusal that was
+    // sound (if no set is complete, this phone cannot publish whichever one it is in), and
+    // for one screenful of text it was fine. Turning the same answer into a positive claim
+    // on the page is what made it wrong: a phone whose TikTok self-updates keeps a green
+    // chip while `post_through_the_composer` refuses it on the exact pair, because
+    // `composer_caption` is keyed to the version. So readiness now reads the pair and looks
+    // it up, and a mismatch is `HierarchyUnknownBuild` — which is a state the strip could
+    // not previously reach for a real build change.
+    //
+    // The reading is three adb round trips (package, dumpsys, getprop), which is why the
+    // page asks per udid-set and offers a manual re-ask rather than polling.
+    match control.tiktok_build(udid).await {
+        Ok((package, version, locale)) => readiness_of_build(&package, &locale, &version),
+        Err(error) => PublishReadiness::HierarchyUnknownBuild(format!(
+            "không đọc được bản TikTok trên máy này: {error}"
         )),
     }
 }
 
-/// The smallest set of unmeasured publish controls across every language set for a package.
+/// The readiness verdict for one measured build triple.
 ///
-/// "Smallest" because the phone is in **one** language and this cannot tell which: reporting
-/// the union would refuse a phone whose own set is complete. `None` when the package has no
-/// catalogued set at all.
-fn shortest_publish_gap_for(
-    package: &str,
-) -> Option<Vec<riviu_core::tiktok_labels::TikTokControl>> {
-    riviu_core::tiktok_labels::TIKTOK_LABEL_SETS
-        .iter()
-        .filter(|set| set.package == package)
-        .filter_map(|set| {
-            let controls = riviu_core::tiktok_labels::controls_for(
-                set.package,
-                set.language,
-                set.measured_app_version,
-            )?;
-            Some(riviu_core::tiktok_composer::ComposerPlan::missing_to_publish(&controls))
-        })
-        .min_by_key(Vec::len)
+/// Pure and named, because the decision was otherwise reachable only through three adb round
+/// trips — and a decision buried in I/O is a decision no test can argue with, which is the
+/// fourth time this file has had to learn that. It is also where the version-keying is
+/// visible: the catalogue is asked about **this** `(package, locale, version)`, so a phone
+/// whose TikTok updated lands on `HierarchyUnknownBuild` instead of keeping a green chip
+/// from some other version's complete set.
+fn readiness_of_build(package: &str, locale: &str, version: &str) -> PublishReadiness {
+    let Some(controls) = riviu_core::tiktok_labels::controls_for(package, locale, version) else {
+        return PublishReadiness::HierarchyUnknownBuild(format!(
+            "chưa đo bộ nhãn cho {package} / {locale} / {version}"
+        ));
+    };
+    let missing = riviu_core::tiktok_composer::ComposerPlan::missing_to_publish(&controls);
+    if missing.is_empty() {
+        PublishReadiness::HierarchyReady
+    } else {
+        PublishReadiness::HierarchyMissing(missing)
+    }
 }
 
 /// The route a device is driven by, from the same signal the gate uses.
@@ -1044,13 +1069,32 @@ pub fn publish_sheet_get_config(
     publish_sheet_config_of(&state.db)
 }
 
-/// Save the webhook URL, and the token only when one was typed.
+/// Whether saving this config would hand one endpoint's credential to another.
 ///
-/// `token: None` keeps the stored one — so the operator can correct a URL without
-/// re-pasting a credential they may no longer have on the clipboard. An empty string
-/// clears it on purpose. The URL is refused unless `is_acceptable_webhook` takes it
-/// (HTTPS with a host) or it is empty — empty is the off switch the sweeper honours,
-/// not an error.
+/// **A token belongs to the endpoint it was issued for.** `token: None` means "keep the
+/// stored one", which is what lets an operator fix a typo in the URL without re-pasting a
+/// credential — but the same convenience, applied to a *different* endpoint, sends webhook
+/// A's bearer token to webhook B in the request body. Whoever answers at B then holds a
+/// token that writes into the operator's sheet. So the pairing is a refusal, not a warning:
+/// changing the URL requires saying what the token for that URL is (or clearing it).
+///
+/// Pure, and separate from the command, because it is the one decision here worth a test —
+/// the rest is two `set_setting` calls.
+fn token_must_be_restated(stored_url: &str, new_url: &str, token: Option<&str>) -> bool {
+    token.is_none() && stored_url.trim() != new_url.trim()
+}
+
+/// Save the webhook URL and the token **together**.
+///
+/// `token: None` keeps the stored one, and is accepted only while the URL is unchanged —
+/// see [`token_must_be_restated`]. An empty string clears the token on purpose. The URL is
+/// refused unless `is_acceptable_webhook` takes it (HTTPS with a host) or it is empty:
+/// empty is the off switch the sweeper honours, not an error.
+///
+/// **Both writes go in one transaction.** They were two `set_setting` calls, and the sweeper
+/// reads the pair every tick — so a crash between them, or a tick landing in the gap, could
+/// see a new URL beside an old token. One transaction removes the window entirely rather
+/// than making it small.
 #[tauri::command]
 pub fn publish_sheet_save_config(
     state: State<'_, AppState>,
@@ -1065,19 +1109,18 @@ pub fn publish_sheet_save_config(
              body, http:// là gửi chúng trần trụi ({webhook_url})"
         )));
     }
+    let stored = publish_sheet_config_of(&state.db)?;
+    if token_must_be_restated(&stored.webhook_url, &webhook_url, token.as_deref()) {
+        return Err(err(
+            "đổi webhook thì phải nhập lại token: token là của endpoint cũ, gửi nó sang \
+             endpoint mới là trao cho bên đó quyền ghi vào sheet. Điền token của webhook \
+             mới, hoặc để trống ô token và bấm Xoá token nếu endpoint mới không cần.",
+        ));
+    }
     state
         .db
-        .set_setting(riviu_core::publish_sheet::WEBHOOK_URL_SETTING, &webhook_url)
+        .set_publish_sheet_config(&webhook_url, token.as_deref().map(str::trim))
         .map_err(err)?;
-    if let Some(token) = token {
-        state
-            .db
-            .set_setting(
-                riviu_core::publish_sheet::WEBHOOK_TOKEN_SETTING,
-                token.trim(),
-            )
-            .map_err(err)?;
-    }
     publish_sheet_config_of(&state.db)
 }
 
@@ -2198,10 +2241,12 @@ mod tests {
     use super::max_images_for;
     use super::post_url_owed;
     use super::poster_identity;
+    use super::readiness_of_build;
     use super::refuse_assignments_whose_bundle_is_too_large;
     use super::refuse_devices_whose_composer_is_not_measured;
     use super::refuse_when_the_route_authorities_disagree;
     use super::state_for_outcome;
+    use super::token_must_be_restated;
     use super::LockScreening;
     use super::PostOutcome;
     use super::IOS_PIXEL_GRID_MAX_IMAGES;
@@ -2316,14 +2361,33 @@ mod tests {
     /// `Some` means state and outbox row go in as one transaction; `None` means the plain
     /// state write. The empty shapes matter because migration 18's CHECK refuses a blank
     /// link — a `Some("")` here would turn a successful post into a failed recording.
+    ///
+    /// **The evidence is folded through the real function, not hand-shaped.** The first
+    /// version of this test built its input by hand, at the top level, while every caller
+    /// passes what `fold_cleanup_into` produced — one layer down. So it passed on a
+    /// `post_url_owed` that could never find a link in production, and the `Some` arm was
+    /// dead. A fixture that models the caller's shape is the only kind that can catch that,
+    /// and folding through the real function is what keeps the two from drifting.
     #[test]
     fn only_a_real_link_owes_the_sheet_a_row() {
+        let folded = |evidence: serde_json::Value| match fold_cleanup_into(
+            PostOutcome::Posted(evidence),
+            Ok(serde_json::json!({"state": "cleaned"})),
+        ) {
+            PostOutcome::Posted(value) => value,
+            _ => panic!("folding a posted outcome must stay posted"),
+        };
+
+        let link = folded(serde_json::json!({
+            "state": "posted",
+            "postUrl": "https://www.tiktok.com/@a/photo/1"
+        }));
         assert_eq!(
-            post_url_owed(&serde_json::json!({
-                "postUrl": "https://www.tiktok.com/@a/photo/1"
-            })),
-            Some("https://www.tiktok.com/@a/photo/1")
+            post_url_owed(&link),
+            Some("https://www.tiktok.com/@a/photo/1"),
+            "the link the composer wrote is one layer down after the fold: {link}"
         );
+
         for evidence in [
             serde_json::json!({}),
             serde_json::json!({"postUrl": ""}),
@@ -2331,7 +2395,10 @@ mod tests {
             serde_json::json!({"postUrl": 7}),
             serde_json::json!({"linkCaptureReason": "chưa đo nút Chia sẻ trên bản build này"}),
         ] {
-            assert_eq!(post_url_owed(&evidence), None, "{evidence}");
+            let folded_evidence = folded(evidence.clone());
+            assert_eq!(post_url_owed(&folded_evidence), None, "folded {evidence}");
+            // And the unfolded level still reads, for any caller that has not folded yet.
+            assert_eq!(post_url_owed(&evidence), None, "unfolded {evidence}");
         }
     }
 
@@ -2345,13 +2412,132 @@ mod tests {
     /// capture may only return to this function together with the M7-measured route that
     /// first stands the phone on its own post; when that lands, this test is updated to
     /// demand the route call BEFORE the capture instead of banning the capture outright.
+    ///
+    /// **Scoped to the whole file, not to one function.** Scanning only
+    /// `post_through_the_composer` was bypassable three ways a review constructed: a helper
+    /// called from that arm, an aliased import (`… as grab`), or the capture moving to the
+    /// pixel route or `post_one_assignment`. The symbol is what matters, wherever it sits,
+    /// so the scan is the module minus its own test text — the same `#[cfg(test)]` cut the
+    /// fan-out gate uses, for the same reason: this assertion writes the needle out itself.
     #[test]
     fn no_link_is_read_off_the_feed_until_the_route_is_measured() {
+        let source = include_str!("publish_commands.rs");
+        let module = &source[..source
+            .find("#[cfg(test)]")
+            .expect("this file still has a test module")];
+        // **Comments are not code, and this gate proved it the hard way on itself.** The
+        // `Posted` arm's note has to name `capture_post_link` — the whole point of the note
+        // is to say why that call is not there — and the first version of this scan read
+        // its own explanation as the hazard. The mirror of the catalogued bypass where a
+        // comment *satisfies* a gate: here it broke one. Strip the prose, scan the code.
+        let code: String = module
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let module = code.as_str();
+        assert!(
+            !module.contains("capture_post_link"),
+            "capture_post_link is back in the publish path without the M7 route in front of \
+             it — that reads a stranger's link off the feed and files it as ours"
+        );
+        assert!(
+            !module.contains("tiktok_share::"),
+            "something in the publish path reaches into tiktok_share again; the link capture \
+             and the measured route arrive together or not at all"
+        );
         let body = code_of("async fn post_through_the_composer(");
         assert!(
             !body.iter().any(|line| line.contains("capture_post_link")),
             "capture_post_link is back on the Posted arm without the M7 route in front of \
              it — that reads a stranger's link off the feed and files it as ours"
+        );
+    }
+
+    /// **Readiness answers about the build in front of it, not about the package.**
+    ///
+    /// The old computation took the shortest gap across every catalogued set for the
+    /// package. As a refusal that was sound; as the page's positive claim it was a lie a
+    /// TikTok self-update could tell: `composer_caption` is keyed to `versionName`, so the
+    /// fleet's measured 38.3.2 set would have kept a phone on 46.x reading "ready" while
+    /// the composer refused it before the first tap. The version-blind lookup and the
+    /// version-keyed one differ on exactly that input, which is what this pins.
+    #[test]
+    fn readiness_asks_the_catalogue_about_this_phones_build() {
+        // The one build measured end to end (§9.132).
+        assert!(matches!(
+            readiness_of_build("com.ss.android.ugc.trill", "en", "38.3.2"),
+            PublishReadiness::HierarchyReady
+        ));
+        // Same phone, same language, after TikTok updated itself. The language set still
+        // describes the strings — they are rendered text, not ids — so this does not become
+        // "unknown build"; what drops out is the one control keyed to `versionName`. The
+        // answer therefore NAMES `ComposerCaption`, which is both a refusal and the
+        // instruction for closing it. (I expected `HierarchyUnknownBuild` here and the code
+        // was more informative than the expectation; the assertion follows the code.)
+        let updated = readiness_of_build("com.ss.android.ugc.trill", "en", "46.9.9");
+        assert!(
+            matches!(&updated, PublishReadiness::HierarchyMissing(missing)
+                if missing.contains(&riviu_core::tiktok_labels::TikTokControl::ComposerCaption)),
+            "an unmeasured version must lose its version-keyed control, not inherit another \
+             version's verdict: {updated:?}"
+        );
+        // A version that was never read (the empty string a failed `dumpsys` leaves) is the
+        // same answer for the same reason — it is not a licence to use another version's ids.
+        assert!(matches!(
+            readiness_of_build("com.ss.android.ugc.trill", "en", ""),
+            PublishReadiness::HierarchyMissing(missing)
+                if missing.contains(&riviu_core::tiktok_labels::TikTokControl::ComposerCaption)
+        ));
+        // A package nobody has catalogued at all is the one case that really is unknown.
+        assert!(matches!(
+            readiness_of_build("com.example.never-measured", "en", "1.0"),
+            PublishReadiness::HierarchyUnknownBuild(_)
+        ));
+        // A build whose reach-the-picker labels are measured but whose tail is not names
+        // what is missing rather than refusing wholesale.
+        assert!(matches!(
+            readiness_of_build("com.zhiliaoapp.musically", "en", "46.2.1"),
+            PublishReadiness::HierarchyMissing(missing) if !missing.is_empty()
+        ));
+    }
+
+    /// **A token belongs to the endpoint it was issued for.**
+    ///
+    /// `token: None` means "keep the stored one" — the convenience that lets an operator fix
+    /// a typo in the URL without re-pasting a credential. Applied to a *different* endpoint
+    /// it becomes: send webhook A's bearer token to webhook B, in the request body, where
+    /// whoever answers at B can then write into the operator's sheet. So the same-URL case
+    /// keeps the token and the changed-URL case demands it be restated. Trimming matters
+    /// because the field is typed by hand and a trailing space is not a new endpoint.
+    #[test]
+    fn changing_the_webhook_demands_the_token_for_that_webhook() {
+        let a = "https://script.google.com/macros/s/AAA/exec";
+        let b = "https://script.google.com/macros/s/BBB/exec";
+
+        assert!(
+            token_must_be_restated(a, b, None),
+            "a new endpoint must not inherit the old endpoint's credential"
+        );
+        assert!(
+            !token_must_be_restated(a, b, Some("fresh")),
+            "restating the token is exactly what makes the change safe"
+        );
+        assert!(
+            !token_must_be_restated(a, b, Some("")),
+            "clearing it is also an answer: the new endpoint gets no credential"
+        );
+        assert!(
+            !token_must_be_restated(a, a, None),
+            "an unchanged URL keeps its token — the typo-fix path this exists for"
+        );
+        assert!(
+            !token_must_be_restated(a, "  https://script.google.com/macros/s/AAA/exec  ", None),
+            "whitespace around the same URL is not a new endpoint"
+        );
+        assert!(
+            token_must_be_restated("", a, None),
+            "configuring for the first time still has to say what the token is"
         );
     }
 

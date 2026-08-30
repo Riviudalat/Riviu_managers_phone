@@ -1445,6 +1445,13 @@ impl DeviceDriver for AndroidDriver {
         Ok(apps)
     }
 
+    /// The trait's view of the inherent `tiktok_build` this driver already has — so a
+    /// lease-free caller with only a `DeviceControlPlane` can key a label lookup on the
+    /// phone's real (package, version, locale) instead of on the package alone.
+    async fn tiktok_build(&self, udid: &str) -> anyhow::Result<(String, String, String)> {
+        AndroidDriver::tiktok_build(self, udid).await
+    }
+
     async fn resolve_tiktok_package(&self, udid: &str) -> anyhow::Result<String> {
         if let Some(known) = self.tiktok_packages.lock().get(udid) {
             return Ok(known.clone());

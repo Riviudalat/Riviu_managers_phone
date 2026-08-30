@@ -29,6 +29,19 @@ impl DeviceControlPlane {
             .await
             .map_err(|error| driver_error(udid, "resolveTikTokPackage", error))
     }
+    /// The `(package, versionName, locale)` a label lookup is keyed by — see
+    /// [`DeviceDriver::tiktok_build`]. Lease-free for the same reason as the line above:
+    /// it reads and changes nothing, and a readiness panel must not be able to evict a
+    /// running session.
+    pub async fn tiktok_build(
+        &self,
+        udid: &str,
+    ) -> Result<(String, String, String), DeviceControlError> {
+        self.driver
+            .tiktok_build(udid)
+            .await
+            .map_err(|error| driver_error(udid, "tiktokBuild", error))
+    }
     /// Every app the phone reports as present.
     ///
     /// Lease-free on purpose, following `resolve_tiktok_package` directly above: this

@@ -44,6 +44,38 @@ impl Database {
     /// carousel.
     ///
     /// Re-queuing the same assignment replaces the pending row rather than adding one.
+    /// Store the webhook URL and its token as **one** value.
+    ///
+    /// They were two `set_setting` calls, and the sweeper reads the pair on every tick — so
+    /// a crash between the writes, or a tick landing in the gap, could pair a new endpoint
+    /// with the previous endpoint's bearer token and send it there. The credential belongs
+    /// to the URL it was issued for, so the two move together or not at all.
+    ///
+    /// `token: None` leaves the stored token untouched (the caller decides whether that is
+    /// allowed for this URL change); `Some("")` clears it.
+    pub fn set_publish_sheet_config(
+        &self,
+        webhook_url: &str,
+        token: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![crate::publish_sheet::WEBHOOK_URL_SETTING, webhook_url],
+        )?;
+        if let Some(token) = token {
+            transaction.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![crate::publish_sheet::WEBHOOK_TOKEN_SETTING, token],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// `assignment_id` is the primary key precisely so this cannot produce two rows for one
     /// post — the operator would see the same link twice in column D with no way to tell
     /// which to remove. An already-`sent` row is left alone: it is not owed again.
