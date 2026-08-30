@@ -189,6 +189,14 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
     }
 
     /// Wait for Send to arm, and return it so the caller can tap it.
+    ///
+    /// "Armed" is the located element's `enabled` flag, and on Android that flag reads
+    /// as enabled when the attribute cannot be read at all — a deliberate fail-open in
+    /// the driver, because guessing *disabled* on a flaky read would silently drop every
+    /// comment on a build whose dump lacks the attribute. What keeps that default from
+    /// fabricating a success lives downstream of here: the tap only counts as sent once
+    /// [`Self::tap_send_and_confirm_disarm`] observes the disarm, and TikTok clears the
+    /// field on send, so re-tapping an already-sent comment has nothing left to send.
     pub async fn await_armed(&self, stop: &AtomicBool) -> anyhow::Result<Option<ElementBox>> {
         let Some(send) = self.send_query() else {
             return Ok(None);
@@ -266,12 +274,19 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
     ) -> anyhow::Result<Option<ElementBox>> {
         let deadline = Instant::now() + window;
         loop {
+            // Stop first, before the screen is even read. This loop's answer is what
+            // authorises the Send tap, and checking stop only *after* a ready element
+            // meant a stop landing mid-poll could still be followed by one more armed
+            // element — and one more comment from a live account after the hand went up.
+            if stop.load(Ordering::Relaxed) {
+                return Ok(None);
+            }
             if let Some(element) = self.session.locate(query).await? {
                 if ready(&element) {
                     return Ok(Some(element));
                 }
             }
-            if Instant::now() >= deadline || stop.load(Ordering::Relaxed) {
+            if Instant::now() >= deadline {
                 return Ok(None);
             }
             sleep(DRAWER_POLL, stop).await;
@@ -496,7 +511,10 @@ mod tests {
     async fn a_drawer_that_never_shows_a_field_is_not_a_comment() {
         let session = FakeSession::with(vec![("bình luận", Some(element(true)))]);
         let mut planner = centre_planner();
-        let stop = AtomicBool::new(true); // stop immediately so the poll does not spin
+        // Paused clock: the poll window elapses instantly, no stop shortcut needed. A
+        // pre-set stop now short-circuits *before* the first read — its own test below —
+        // so it can no longer stand in for "the element never shows".
+        let stop = AtomicBool::new(false);
         let verdict = post_comment(&session, vietnamese(), &mut planner, "hi", &stop)
             .await
             .expect("verdict");
@@ -516,7 +534,7 @@ mod tests {
             ("android.widget.EditText", Some(element(true))),
         ]);
         let mut planner = centre_planner();
-        let stop = AtomicBool::new(true);
+        let stop = AtomicBool::new(false);
         let verdict = post_comment(&session, vietnamese(), &mut planner, "hi", &stop)
             .await
             .expect("verdict");
@@ -543,6 +561,25 @@ mod tests {
         assert_eq!(session.typed.lock().as_slice(), ["hi"]);
         // Two taps: the opener and the field. Not the Send button.
         assert_eq!(session.taps.lock().len(), 2);
+    }
+
+    /// **A stop set before the poll beats an armed Send.**
+    ///
+    /// The two race exactly once per poll, and the loop used to read the element first —
+    /// so a stop landing mid-wait could still be answered with a tappable Send, and one
+    /// more comment left a live account after the hand went up. Stop is checked before
+    /// the screen is read, which makes it authoritative at the last boundary before the
+    /// irreversible tap.
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_set_before_the_poll_beats_an_armed_send() {
+        let session = FakeSession::default().sticking("@2131823284", element(true));
+        let drawer = CommentDrawer::new(&session, vietnamese(), centre_planner());
+        let stop = AtomicBool::new(true);
+        let armed = drawer.await_armed(&stop).await.expect("no transport error");
+        assert!(
+            armed.is_none(),
+            "a stopped wait must not hand back a tappable Send"
+        );
     }
 
     #[tokio::test(start_paused = true)]

@@ -1794,8 +1794,21 @@ fn is_ls_complaint(line: &str) -> bool {
 /// reported failure on every phone in the fleet. The hardware gate caught it; no unit test
 /// would have, because the distinction only exists in what the caller was hoping for.
 fn says_the_path_is_gone(reason: &str) -> bool {
+    // Classified by the complaint's *kind*, not by a substring of the whole sentence. The
+    // complaint embeds the path (`ls: <path>: Permission denied`), and phone-side names are
+    // not ours: `/sdcard/Download/not found.jpg` under a refused check would otherwise read
+    // as an absence, and the delete read-back would confirm a file that may still be there.
+    // Both canonical shapes end with the kind, so take the text after the last separator;
+    // a ROM that prints the bare sentence with no path keeps the whole-line fallback. When
+    // several complaints arrive joined with `; `, every one of them has to say "gone" —
+    // one refusal poisons the proof.
     let reason = reason.to_ascii_lowercase();
-    reason.contains("no such file or directory") || reason.contains("not found")
+    reason.split("; ").all(|complaint| {
+        let kind = complaint
+            .rsplit_once(": ")
+            .map_or(complaint, |(_, kind)| kind);
+        kind.contains("no such file or directory") || kind.contains("not found")
+    })
 }
 
 /// Read one `ls -la` result the way the caller has to act on it.
@@ -2040,6 +2053,14 @@ drwxr-xr-x  32 root   root       788 2009-01-01 07:00 ..\n";
             "ls: /data/data/: Permission denied",
             "ls: /sdcard/x: Not a directory",
             "ls: reading directory: Input/output error",
+            // The complaint carries the path, and the path is the phone's to choose. A
+            // filename that *contains* an absence phrase must not turn a refusal into a
+            // confirmation — this is the shape that let a Permission denied on
+            // `not found.jpg` report a delete as verified.
+            "ls: /sdcard/Download/not found.jpg: Permission denied",
+            "ls: /sdcard/No such file or directory/a.png: Permission denied",
+            // A refusal riding along with an absence is still a refusal.
+            "ls: /sdcard/x: No such file or directory; ls: /sdcard/y: Permission denied",
         ] {
             assert!(
                 !ls_reason_means_absent(refused),

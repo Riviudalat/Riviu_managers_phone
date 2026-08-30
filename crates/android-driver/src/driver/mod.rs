@@ -856,6 +856,32 @@ fn unusable_device(serial: &str, model: Option<String>, state: AdbDeviceState) -
     }
 }
 
+/// Whether one `adb devices` reading may **replace** the roster, or must be raised instead.
+///
+/// The only readings refused are the empty ones that prove nothing: a failed scan, and an
+/// empty list that never settled. Pure, because the inputs are awkward to stage against a
+/// real adb server — the last regression in this decision (a fabricated empty fleet from two
+/// failed reads) lived exactly where no test could reach.
+fn trust_reading_for_roster(reading: &crate::adb::DeviceListReading) -> Result<(), String> {
+    if !reading.devices.is_empty() {
+        return Ok(());
+    }
+    if let Some(reason) = reading.failure.as_deref() {
+        return Err(format!(
+            "không đọc được danh sách máy sau {} lần thử: {reason}",
+            reading.attempts
+        ));
+    }
+    if !reading.stable {
+        return Err(format!(
+            "danh sách máy đọc ra rỗng nhưng chưa kịp ổn định sau {} lần thử — không coi \
+             một lần trống là cả dàn máy đã rút",
+            reading.attempts
+        ));
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl DeviceDriver for AndroidDriver {
     async fn list_devices(&self) -> anyhow::Result<Vec<DeviceInfo>> {
@@ -879,15 +905,18 @@ impl DeviceDriver for AndroidDriver {
         // operator sees twenty phones unplug themselves. An `Err` leaves the previous
         // roster alone.
         //
-        // Only when the reading is *also* empty — a successful read of an empty fleet is
-        // still the truth, and so is a partial list from an unsettled one.
+        // And an empty reading that never *settled* is refused too, even when its last
+        // read succeeded. `devices_stable` keeps only the newest successful read, so
+        // `Ok(20 phones) → Err → Ok(nothing yet)` reaches the deadline as an unstable
+        // empty with no failure attached — one transient blank from a restarting server,
+        // standing in for a fleet of zero. Only two consecutive empty reads may empty
+        // the roster: a genuinely unplugged fleet answers that way on the very next
+        // 3-second scan, a restarting server does not. A *partial* unsettled list still
+        // passes through, as before — showing some of the fleet beats hiding it.
+        if let Err(reason) = trust_reading_for_roster(&reading) {
+            anyhow::bail!("{reason}");
+        }
         if let Some(reason) = reading.failure.as_deref() {
-            if reading.devices.is_empty() {
-                anyhow::bail!(
-                    "không đọc được danh sách máy sau {} lần thử: {reason}",
-                    reading.attempts
-                );
-            }
             tracing::warn!(
                 attempts = reading.attempts,
                 devices = reading.devices.len(),
@@ -1808,6 +1837,59 @@ mod tests {
     use super::*;
 
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// **One transient blank must not empty the roster.**
+    ///
+    /// `Ok(20 phones) → Err → Ok(nothing yet)` reaches the deadline as `devices: [],
+    /// stable: false, failure: None` — the empty success clobbered `last_good`, and the
+    /// old refusal only looked at `failure`. `upsert_many` replaces the whole vector and
+    /// the view hub forgets a channel per device, so accepting that reading unplugs the
+    /// fleet on screen and tears down twenty live streams over one server restart.
+    #[test]
+    fn an_unsettled_empty_reading_may_not_replace_the_roster() {
+        let unsettled_empty = crate::adb::DeviceListReading {
+            devices: Vec::new(),
+            stable: false,
+            attempts: 3,
+            failure: None,
+        };
+        assert!(
+            trust_reading_for_roster(&unsettled_empty).is_err(),
+            "one transient blank read as a fleet of zero phones"
+        );
+
+        // A failed scan stays refused whether or not anything was read before it.
+        let failed_empty = crate::adb::DeviceListReading {
+            devices: Vec::new(),
+            stable: false,
+            attempts: 5,
+            failure: Some("adb: device offline".into()),
+        };
+        assert!(trust_reading_for_roster(&failed_empty).is_err());
+
+        // Two consecutive empty reads are the truth: the fleet really is unplugged.
+        let settled_empty = crate::adb::DeviceListReading {
+            devices: Vec::new(),
+            stable: true,
+            attempts: 2,
+            failure: None,
+        };
+        assert!(trust_reading_for_roster(&settled_empty).is_ok());
+
+        // A *partial* unsettled list still passes through: showing some of the fleet
+        // beats hiding all of it, and the registry merge keeps what it already knows.
+        let partial = crate::adb::DeviceListReading {
+            devices: vec![crate::adb::AdbDeviceLine {
+                serial: "ce06".into(),
+                state: AdbDeviceState::Device,
+                model: Some("SM-G950F".into()),
+            }],
+            stable: false,
+            attempts: 4,
+            failure: Some("adb: transport reset".into()),
+        };
+        assert!(trust_reading_for_roster(&partial).is_ok());
+    }
 
     #[test]
     fn a_phone_adb_can_see_but_not_drive_gets_a_row_and_a_reason() {

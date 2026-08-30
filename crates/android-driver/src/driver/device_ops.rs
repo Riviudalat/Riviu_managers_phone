@@ -355,9 +355,9 @@ impl AndroidDriver {
         mac: Option<&str>,
     ) -> anyhow::Result<String> {
         // Validated **before** anything touches the phone, and validated together: all three
-        // are pasted into `su -c "…"` below, where `$(…)` and a backtick still substitute
-        // inside the double quotes, so an unchecked value here is root code execution on the
-        // device. Checking up front rather than per-field is deliberate — a partially applied
+        // are pasted into a privileged command line below — `su -c "…"` on the phones that
+        // have su — where `$(…)` and a backtick still substitute inside the double quotes,
+        // so an unchecked value here is root code execution on the device. Checking up front rather than per-field is deliberate — a partially applied
         // identity is worse than a refused one, and the doc comment two functions up
         // ("callers here pass fixed commands, not operator free-text") was true of
         // `factory_reset` and never true of this function.
@@ -374,27 +374,32 @@ impl AndroidDriver {
             .transpose()
             .map_err(|error| anyhow::anyhow!("địa chỉ MAC không hợp lệ: {error}"))?;
 
-        // The broader question: `serialno` and `mac` need privilege, not `su` specifically.
-        let rooted = self.can_run_privileged(serial).await;
+        // One authority for "how does privilege run here", not two. This used to gate on
+        // [`Self::can_run_privileged`] — su *or* uid-0 adbd — and then hard-code `su -c`
+        // in every branch, so the nine phones whose adb shell is already root and which
+        // carry no `su` binary at all passed the gate and died on `sh: su: not found`.
+        // Worse than a refusal: on a transport that does not propagate remote exit codes
+        // that failure exits 0, and "wifi_mac" lands in `done` for a MAC that never
+        // changed. `as_privileged` answers the route question per command; `None` is the
+        // honest "(cần root)".
         let mut done: Vec<String> = Vec::new();
         let mut failed: Vec<String> = Vec::new();
 
         if let Some(id) = android_id {
-            // Try plain first (adb has WRITE_SECURE_SETTINGS); fall back to root.
+            // Try plain first (adb has WRITE_SECURE_SETTINGS); fall back to privilege.
             let plain = self
                 .adb
                 .shell(serial, &format!("settings put secure android_id {id}"))
                 .await;
-            let ok = plain.is_ok()
-                || (rooted
-                    && self
-                        .adb
-                        .shell(
-                            serial,
-                            &format!("su -c \"settings put secure android_id {id}\""),
-                        )
-                        .await
-                        .is_ok());
+            let mut ok = plain.is_ok();
+            if !ok {
+                if let Some(wrapped) = self
+                    .as_privileged(serial, &format!("settings put secure android_id {id}"))
+                    .await
+                {
+                    ok = self.adb.shell(serial, &wrapped).await.is_ok();
+                }
+            }
             if ok {
                 done.push("android_id".into());
             } else {
@@ -403,40 +408,42 @@ impl AndroidDriver {
         }
 
         if let Some(sn) = serialno {
-            if rooted {
-                let a = self
-                    .adb
-                    .shell(serial, &format!("su -c \"resetprop ro.serialno {sn}\""))
-                    .await;
-                let b = self
-                    .adb
-                    .shell(
-                        serial,
-                        &format!("su -c \"resetprop ro.boot.serialno {sn}\""),
-                    )
-                    .await;
-                if a.is_ok() || b.is_ok() {
-                    done.push("serialno".into());
-                } else {
-                    failed.push("serialno".into());
+            let mut applied = false;
+            let mut had_route = false;
+            for prop in ["ro.serialno", "ro.boot.serialno"] {
+                let Some(wrapped) = self
+                    .as_privileged(serial, &format!("resetprop {prop} {sn}"))
+                    .await
+                else {
+                    continue;
+                };
+                had_route = true;
+                if self.adb.shell(serial, &wrapped).await.is_ok() {
+                    applied = true;
                 }
+            }
+            if applied {
+                done.push("serialno".into());
+            } else if had_route {
+                failed.push("serialno".into());
             } else {
                 failed.push("serialno(cần root)".into());
             }
         }
 
         if let Some(m) = mac {
-            if rooted {
-                let cmd = format!(
-                    "su -c \"ip link set wlan0 down; ip link set wlan0 address {m}; ip link set wlan0 up\""
-                );
-                if self.adb.shell(serial, &cmd).await.is_ok() {
-                    done.push("wifi_mac".into());
-                } else {
-                    failed.push("wifi_mac".into());
+            let chain = format!(
+                "ip link set wlan0 down; ip link set wlan0 address {m}; ip link set wlan0 up"
+            );
+            match self.as_privileged(serial, &chain).await {
+                Some(wrapped) => {
+                    if self.adb.shell(serial, &wrapped).await.is_ok() {
+                        done.push("wifi_mac".into());
+                    } else {
+                        failed.push("wifi_mac".into());
+                    }
                 }
-            } else {
-                failed.push("wifi_mac(cần root)".into());
+                None => failed.push("wifi_mac(cần root)".into()),
             }
         }
 

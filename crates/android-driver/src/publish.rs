@@ -176,6 +176,12 @@ pub struct MediaRow {
 /// `Row: 0 _id=1000011139, _data=/storage/emulated/0/DCIM/Camera/x.png, date_added=…`.
 /// `No result found.` is an empty list, not an error — an absent row is the expected
 /// answer after a successful cleanup.
+///
+/// An `_id` that is not a plain number never leaves this parser. The id goes back to the
+/// device inside `content update/delete --uri …/{id}`, and the module's own header rule —
+/// every identifier that reaches `adb shell` is code, not data — does not stop applying
+/// just because the device said it first. MediaStore's `_id` is an integer; anything else
+/// is output this module must not act on (and [`unreadable_query_line`] reports it).
 pub fn parse_media_rows(stdout: &str) -> Vec<MediaRow> {
     stdout
         .lines()
@@ -188,7 +194,8 @@ pub fn parse_media_rows(stdout: &str) -> Vec<MediaRow> {
             };
             let id = field("_id=")?;
             let data = field("_data=")?;
-            (!id.is_empty() && !data.is_empty()).then_some(MediaRow { id, data })
+            (!id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()) && !data.is_empty())
+                .then_some(MediaRow { id, data })
         })
         .collect()
 }
@@ -212,6 +219,45 @@ pub fn content_error(output: &str) -> Option<&str> {
             || line.starts_with("Error: ")
             || line.starts_with("Unsupported argument")
     })
+}
+
+/// The first line of a `content query` answer this module cannot read, if any.
+///
+/// A query's answer is evidence: "no pending rows" is what lets an import call itself
+/// visible, and "no rows before and after" is what lets a cleanup call itself done. Zero
+/// parsed rows and zero *readable* rows are therefore opposite findings — a permission
+/// complaint, a locale-translated error, a provider failure in a shape [`content_error`]
+/// has never seen, all used to parse as an empty library and sail through both gates.
+///
+/// So every non-empty line has to be one of the three shapes this module knows: a
+/// `Row: ` line whose `_id` is a plain number, the `No result found.` empty answer, or a
+/// recognised error line (which the caller has already turned into a failure). Anything
+/// else is returned here so the caller can refuse instead of concluding.
+pub fn unreadable_query_line(stdout: &str) -> Option<&str> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .find(|line| {
+            if *line == "No result found." || content_error(line).is_some() {
+                return false;
+            }
+            let Some(row) = line.strip_prefix("Row: ") else {
+                return true;
+            };
+            // Every projection this module issues asks for `_id`; a row line without a
+            // numeric one is an answer nothing here can act on.
+            !row_carries_numeric_id(row)
+        })
+}
+
+fn row_carries_numeric_id(row: &str) -> bool {
+    let Some(start) = row.find("_id=") else {
+        return false;
+    };
+    let rest = &row[start + "_id=".len()..];
+    let value = rest[..rest.find(',').unwrap_or(rest.len())].trim();
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// Whether this MediaStore has the scoped-storage `is_pending` column at all.
@@ -401,6 +447,11 @@ pub async fn pull_media(
             .await
         {
             tracing::warn!(serial, path = %item.path, %error, "could not pull one media file");
+            // A failed pull can still have written part of the file, and this
+            // destination name is deterministic: a later export would find the stale
+            // partial, see "non-empty", and count it as fetched. Remove the evidence
+            // of the attempt, not just the attempt.
+            let _ = std::fs::remove_file(&dest);
             continue;
         }
         match std::fs::metadata(&dest) {
@@ -979,6 +1030,12 @@ async fn rows_under(
     if let Some(detail) = content_error(&stdout) {
         anyhow::bail!("content query failed while exiting 0: {detail}");
     }
+    // And neither must an answer in a shape nothing here can read — a permission
+    // complaint, a translated error, a row without a numeric id. Zero rows parsed out of
+    // unreadable text is not zero rows.
+    if let Some(line) = unreadable_query_line(&stdout) {
+        anyhow::bail!("content query answered in a shape this module cannot read: {line}");
+    }
     // `/sdcard` is a symlink; MediaStore reports the resolved path.
     //
     // The trailing slash is load-bearing: a bare prefix test also matches a *sibling*
@@ -1121,6 +1178,56 @@ mod tests {
         // This is the expected answer after a cleanup, so it must not look like an error.
         assert!(parse_media_rows("No result found.\n").is_empty());
         assert!(parse_media_rows("").is_empty());
+    }
+
+    /// **Zero rows parsed out of unreadable text is not zero rows.**
+    ///
+    /// The import's visibility gate and the cleanup's before/after count both act on an
+    /// empty list as a fact about the library. A permission complaint or a translated
+    /// error used to parse as exactly that empty list — the query answered nothing and
+    /// both gates heard "nothing there".
+    #[test]
+    fn an_answer_the_parser_cannot_read_is_named_not_flattened_to_empty() {
+        for garbage in [
+            "Permission denied\n",
+            "Zugriff verweigert\n", // a locale this fleet has never printed — the point
+            "java.lang.NullPointerException at android.provider\n",
+            // A row line in a shape the parser would silently drop.
+            "Row: 0 _data=/storage/emulated/0/DCIM/x.png\n",
+        ] {
+            assert!(
+                unreadable_query_line(garbage).is_some(),
+                "must refuse to read: {garbage:?}"
+            );
+        }
+        // The three shapes this module knows stay readable.
+        assert!(unreadable_query_line("No result found.\n").is_none());
+        assert!(unreadable_query_line("").is_none());
+        assert!(unreadable_query_line(
+            "Row: 0 _id=1000011139, _data=/storage/emulated/0/DCIM/Camera/a.png\n"
+        )
+        .is_none());
+        // A recognised error line is *readable* — `content_error` already turns it into
+        // a failure with a better message, so this classifier stays out of its way.
+        assert!(unreadable_query_line("Error while accessing provider: media\n").is_none());
+    }
+
+    /// **A MediaStore `_id` is a number, and anything else never reaches a shell line.**
+    ///
+    /// The id is interpolated into `content update/delete --uri …/{id}`. The module's
+    /// header rule — identifiers that reach `adb shell` are code, not data — applies to
+    /// values the device printed just as much as to values the operator typed.
+    #[test]
+    fn a_non_numeric_id_is_dropped_by_the_parser_and_named_by_the_classifier() {
+        let forged = "Row: 0 _id=1;rm -rf /sdcard, _data=/storage/emulated/0/DCIM/x.png\n";
+        assert!(
+            parse_media_rows(forged).is_empty(),
+            "a forged id must not come out of the parser"
+        );
+        assert!(
+            unreadable_query_line(forged).is_some(),
+            "and the row must be reported as unreadable, not silently skipped"
+        );
     }
 
     #[test]

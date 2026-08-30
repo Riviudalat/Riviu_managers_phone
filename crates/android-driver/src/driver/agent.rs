@@ -535,6 +535,23 @@ impl AndroidDriver {
         // Cannot deadlock: everything awaited below is HTTP over the forward established
         // before this, never adb. See `adb::AdbDeviceHold`.
         let _startup = crate::adb::hold_device_queue(serial).await;
+        // A queued second starter usually got here because it read "not ready" *before*
+        // the caller ahead of it finished booting the server. Instrumenting again now
+        // would have ActivityManager kill that fresh server out from under its caller,
+        // so ask once more with the queue in hand and join the running one instead.
+        // Everything awaited here is HTTP (`is_ready`, connect, `is_alive`), so the
+        // no-adb-under-the-hold rule above still holds.
+        if AgentClient::is_ready(base).await {
+            if let Ok(agent) = self.open_and_cache_agent(serial, base).await {
+                if agent.is_alive().await {
+                    return Ok(agent);
+                }
+                // Listening but blind: fall through to a clean restart — starting our
+                // own instrumentation replaces it, which is what this function is for.
+                let _ = agent.close().await;
+                self.agents.lock().remove(serial);
+            }
+        }
         let mut child = self.spawn_instrumentation(serial)?;
         // The server binds its port a beat after the runner starts.
         for _ in 0..AGENT_READY_POLLS {
