@@ -390,26 +390,49 @@ mod take_and_restore_tests {
             blocks.len()
         );
 
-        /// The body of an `Err(failure) => { .. }` arm, by matching its braces.
+        /// The body of every `Err(<binding>) => { .. }` arm, by matching its braces.
         ///
         /// Asking whether the *function* restores anywhere is not enough, and that is not a
         /// hypothetical: the first version of this gate stayed green with `upgrade_session`'s
         /// error-arm restore deleted, because the success path's `*self = Self::Session(session)`
         /// satisfied it. The arm is what has to be read.
+        ///
+        /// And the arm has to be found however its binding is spelt. A review constructed the
+        /// blind spot the first matcher had: it looked for the literal `Err(failure) => {`, so
+        /// renaming one binding — `Err(refused)`, `Err(e)`, even `Err(_)`, which drops the
+        /// context by construction — made that arm invisible, and the only thing left catching
+        /// it was an exact-count floor sitting at exactly the current count.
         fn error_arms(body: &str) -> Vec<String> {
+            fn is_binding(pattern: &str) -> bool {
+                let pattern = pattern.trim().trim_start_matches("ref ").trim();
+                !pattern.is_empty()
+                    && pattern
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            }
             let mut arms = Vec::new();
             let mut rest = body;
-            while let Some(at) = rest.find("Err(failure) => {") {
-                let open = at + "Err(failure) => ".len();
+            while let Some(at) = rest.find("Err(") {
+                let after_paren = &rest[at + "Err(".len()..];
+                let Some(close) = after_paren.find(')') else {
+                    break;
+                };
+                let binding = &after_paren[..close];
+                let tail = &after_paren[close + 1..];
+                if !is_binding(binding) || !tail.starts_with(" => {") {
+                    rest = &rest[at + "Err(".len()..];
+                    continue;
+                }
+                let open_offset = at + "Err(".len() + close + 1 + " => ".len();
                 let mut depth = 0usize;
                 let mut end = None;
-                for (offset, character) in rest[open..].char_indices() {
+                for (offset, character) in rest[open_offset..].char_indices() {
                     match character {
                         '{' => depth += 1,
                         '}' => {
                             depth -= 1;
                             if depth == 0 {
-                                end = Some(open + offset + 1);
+                                end = Some(open_offset + offset + 1);
                                 break;
                             }
                         }
@@ -417,7 +440,7 @@ mod take_and_restore_tests {
                     }
                 }
                 let Some(end) = end else { break };
-                arms.push(rest[open..end].to_string());
+                arms.push(rest[open_offset..end].to_string());
                 rest = &rest[end..];
             }
             arms
@@ -425,6 +448,16 @@ mod take_and_restore_tests {
 
         let mut leaking = Vec::new();
         let mut arms_seen = 0usize;
+        // The restore comes in exactly two shapes, and the gate reads them apart rather than
+        // blind-counting `*self = Self::`. The unconditional shape holds a failure whose
+        // context is not optional; the conditional shape (`if let Some(context) =
+        // <binding>.context`) belongs to the two capacity/stream upgrades whose failure may
+        // arrive with the context already consumed — its `None` branch legitimately restores
+        // nothing, because there is nothing left to restore. A conditional restore appearing
+        // where an unconditional one stood would still satisfy a blind count while quietly
+        // making the restore optional; these two floors are what notice.
+        let mut unconditional_restores = 0usize;
+        let mut conditional_restores = 0usize;
         for (name, body) in takers {
             // `close` is the one place `Closed` is the intended end state.
             if name == "close" {
@@ -433,19 +466,35 @@ mod take_and_restore_tests {
             let arms = error_arms(body);
             assert!(
                 !arms.is_empty(),
-                "{name} takes the context but has no `Err(failure)` arm; either the control-plane \
+                "{name} takes the context but has no `Err(..)` arm; either the control-plane \
                  call stopped being fallible or this parser has stopped finding the arm"
             );
             arms_seen += arms.len();
             for arm in arms {
                 if !arm.contains("*self = Self::") {
                     leaking.push(name.clone());
+                } else if arm.contains("if let Some(") && arm.contains(".context") {
+                    conditional_restores += 1;
+                } else {
+                    unconditional_restores += 1;
                 }
             }
         }
         assert!(
             arms_seen >= 4,
             "only {arms_seen} error arms were read; the parser is not seeing this file"
+        );
+        assert!(
+            unconditional_restores >= 2,
+            "only {unconditional_restores} unconditional restores were read; the session \
+             upgrades' failures carry a context that is not optional, and restoring it must \
+             not have become conditional"
+        );
+        assert!(
+            conditional_restores >= 2,
+            "only {conditional_restores} conditional restores were read; the capacity and \
+             stream upgrades restore through `if let Some(context) = failure.context`, and \
+             this gate has to keep seeing that shape as itself"
         );
         assert!(
             leaking.is_empty(),

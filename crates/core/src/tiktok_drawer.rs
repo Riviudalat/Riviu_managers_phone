@@ -167,6 +167,21 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
     /// open drawer has two of them — the collapsed bar behind it and the real field
     /// inside. Setting text on the wrong one succeeds at the API level while the
     /// screen stays empty.
+    /// # The button must be dark before the field holds anything
+    ///
+    /// The measured contract (`driver.rs`, `ElementBox::enabled`) is a **flip**: Send sits
+    /// `enabled=false` while the field is empty and turns `true` when it holds text. This
+    /// is the one moment that flip can be demanded, and a button already lit here has only
+    /// two explanations, both of which mean "do not send":
+    ///
+    /// * the field still holds a **draft from an earlier run** — tapping Send after typing
+    ///   would post that draft glued to this run's text, on a real account;
+    /// * the `enabled` read failed and the driver's deliberate fail-open default is
+    ///   standing in for a reading — in which case nothing downstream of the arm wait is
+    ///   measuring what it claims to.
+    ///
+    /// An error rather than a quiet `false`, because `false` here means "no Send control",
+    /// and this is the opposite: a Send control saying something impossible.
     pub async fn focus_and_type(
         &mut self,
         field: &ElementBox,
@@ -177,12 +192,15 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
         let Some(send) = self.send_query() else {
             return Ok(false);
         };
-        if self
-            .await_element(DRAWER_WINDOW, send, stop)
-            .await?
-            .is_none()
-        {
+        let Some(button) = self.await_element(DRAWER_WINDOW, send, stop).await? else {
             return Ok(false);
+        };
+        if button.enabled {
+            anyhow::bail!(
+                "nút Gửi đã sáng TRƯỚC khi gõ chữ nào — hoặc ô còn draft của lượt trước \
+                 (gửi lúc này là đăng chữ không phải của lượt này), hoặc thuộc tính enabled \
+                 đọc hỏng và mặc định fail-open đang che nó. Từ chối thay vì gửi."
+            );
         }
         self.session.type_text(text).await?;
         Ok(true)
@@ -194,9 +212,18 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
     /// as enabled when the attribute cannot be read at all — a deliberate fail-open in
     /// the driver, because guessing *disabled* on a flaky read would silently drop every
     /// comment on a build whose dump lacks the attribute. What keeps that default from
-    /// fabricating a success lives downstream of here: the tap only counts as sent once
-    /// [`Self::tap_send_and_confirm_disarm`] observes the disarm, and TikTok clears the
-    /// field on send, so re-tapping an already-sent comment has nothing left to send.
+    /// fabricating a success is fenced on both sides of here: **upstream**,
+    /// [`Self::focus_and_type`] refuses a button that reads armed before a character was
+    /// typed — the measured contract is a `false → true` flip across the typing, so a
+    /// pre-lit button is last run's draft or a masked read; **downstream**, the tap only
+    /// counts as sent once [`Self::tap_send_and_confirm_disarm`] observes the disarm, and
+    /// TikTok clears the field on send, so re-tapping an already-sent comment has nothing
+    /// left to send.
+    ///
+    /// One read is load-bearing about *which* locate answers: `locate` re-reads the
+    /// attribute on every poll, while the driver's `locate_all*` list paths fabricate
+    /// `enabled: true` without asking the device — nothing that feeds this wait may ever
+    /// come from a list result.
     pub async fn await_armed(&self, stop: &AtomicBool) -> anyhow::Result<Option<ElementBox>> {
         let Some(send) = self.send_query() else {
             return Ok(None);
@@ -563,6 +590,42 @@ mod tests {
         assert_eq!(session.taps.lock().len(), 2);
     }
 
+    /// **A Send that is lit before a single character was typed is a refusal, not a run.**
+    ///
+    /// The measured contract is a flip — dark over an empty field, lit once it holds
+    /// text — so a pre-lit button is either last run's draft (sending would post someone
+    /// else's words glued to ours) or the fail-open `enabled` default standing in for a
+    /// failed read. Both end the same way: nothing typed, nothing tapped past the field,
+    /// and the drawer closed on the way out.
+    #[tokio::test(start_paused = true)]
+    async fn a_send_lit_before_typing_refuses_instead_of_sending() {
+        let session = FakeSession::with(vec![
+            ("bình luận", Some(element(true))),
+            ("android.widget.EditText", Some(element(true))),
+            // Armed with the field still empty — the impossible pre-state.
+            ("@2131823284", Some(element(true))),
+        ]);
+        let mut planner = centre_planner();
+        let stop = AtomicBool::new(false);
+        let refused = post_comment(&session, vietnamese(), &mut planner, "hi", &stop)
+            .await
+            .expect_err("a pre-lit Send must refuse, loudly");
+        assert!(
+            refused.to_string().contains("TRƯỚC khi gõ"),
+            "the reason must name the pre-typing flip: {refused}"
+        );
+        assert!(
+            session.typed.lock().is_empty(),
+            "nothing may be typed over a suspect field"
+        );
+        // Opener and field only — the Send button is never approached.
+        assert_eq!(session.taps.lock().len(), 2);
+        assert!(
+            *session.backs.lock() > 0,
+            "the drawer is still closed on the refusal path"
+        );
+    }
+
     /// **A stop set before the poll beats an armed Send.**
     ///
     /// The two race exactly once per poll, and the loop used to read the element first —
@@ -611,6 +674,9 @@ mod tests {
         let session = FakeSession::with(vec![
             ("bình luận", Some(element(true))),
             ("android.widget.EditText", Some(element(true))),
+            // Dark before typing, the way a real empty field reads — the pre-type check
+            // now demands the flip, so a fixture born armed would refuse before Send.
+            ("@2131823284", Some(element(false))),
         ])
         .sticking("@2131823284", element(true));
         let mut planner = centre_planner();

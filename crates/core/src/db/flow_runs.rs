@@ -1517,6 +1517,28 @@ impl Database {
         Ok(records)
     }
 
+    /// IDs of runs the database still calls live, oldest first.
+    ///
+    /// The outer query of [`Self::load_flow_recovery_contexts`] on its own: the in-process
+    /// orphan sweep needs the candidate list every tick, and the full loader validates each
+    /// run's whole compiled plan — work that is right once at startup and waste sixty times
+    /// an hour. The sweep re-reads each candidate through `get_flow_run` anyway before it
+    /// writes anything, so nothing here has to be more than an id.
+    pub fn list_unsettled_flow_run_ids(&self) -> anyhow::Result<Vec<Uuid>> {
+        let connection = self.conn()?;
+        let mut statement = connection.prepare(
+            "SELECT id FROM flow_runs
+             WHERE state IN ('queued','running')
+             ORDER BY created_at ASC,id ASC",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut run_ids = Vec::new();
+        for row in rows {
+            run_ids.push(parse_uuid(&row?, "Flow unsettled run ID")?);
+        }
+        Ok(run_ids)
+    }
+
     pub(crate) fn load_flow_recovery_contexts(
         &self,
     ) -> anyhow::Result<Vec<FlowRecoveryRunContext>> {
@@ -2934,28 +2956,55 @@ fn validate_attempt_claim(
     // succeeded predecessor inductively implies the whole chain back to Start
     // succeeded, since a node only succeeds after itself passing this gate.
     // Start (no predecessors) is always claimable.
+    //
+    // **A succeeded `IfVision` authorizes only the branch it took.** Its success
+    // alone used to admit both branch heads — the untaken tail's predecessor is
+    // the very same succeeded node — so this layer, which exists to refuse
+    // out-of-order intents from *any* caller, could not refuse an intent on the
+    // branch the vision predicate rejected; only the executor's own walk stood
+    // in the way. Found by an independent review on 30/08/2026. The recorded
+    // `chosen_port` routes the authorization the same way `successor_on_path`
+    // routes the walk, and a port still `NULL` — an undecided branch — routes
+    // nowhere, so it authorizes nothing.
     let predecessors = identity.plan.predecessors(identity.node.id);
     if !predecessors.is_empty() {
         let mut any_succeeded = false;
         for predecessor_id in predecessors {
-            let predecessor_state: Option<String> = transaction
+            let predecessor: Option<(String, Option<String>)> = transaction
                 .query_row(
-                    "SELECT state FROM flow_node_attempts
+                    "SELECT state,chosen_port FROM flow_node_attempts
                      WHERE device_run_id=?1 AND node_id=?2
                      ORDER BY attempt_no DESC LIMIT 1",
                     params![
                         identity.device_run_id.to_string(),
                         predecessor_id.to_string()
                     ],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?;
-            if predecessor_state
-                .as_deref()
-                .map(|state| parse_enum_name::<FlowAttemptState>(state, "predecessor state"))
-                .transpose()?
-                == Some(FlowAttemptState::Succeeded)
+            let Some((state, chosen_port)) = predecessor else {
+                continue;
+            };
+            if parse_enum_name::<FlowAttemptState>(&state, "predecessor state")?
+                != FlowAttemptState::Succeeded
             {
+                continue;
+            }
+            let authorizes_this_branch = match identity
+                .plan
+                .nodes
+                .get(&predecessor_id)
+                .map(|node| node.kind)
+            {
+                Some(crate::ActionKind::IfVision) => {
+                    identity
+                        .plan
+                        .successor_on_path(predecessor_id, chosen_port.as_deref())
+                        == Some(identity.node.id)
+                }
+                _ => true,
+            };
+            if authorizes_this_branch {
                 any_succeeded = true;
                 break;
             }
@@ -4330,6 +4379,181 @@ mod tests {
         assert!(
             refused.to_string().contains("taken path"),
             "expected the path-aware refusal, got: {refused}"
+        );
+        cleanup(&path);
+    }
+
+    /// **A succeeded IfVision authorizes only the branch it took.**
+    ///
+    /// Its success alone used to admit both branch heads — the untaken tail's predecessor
+    /// is the very same succeeded node — so this layer, which exists to refuse
+    /// out-of-order intents from any caller, could not refuse an intent on the branch the
+    /// vision predicate rejected. Only the executor's own walk stood in the way, and a
+    /// defense that exists in one place is not defense in depth.
+    #[test]
+    fn intent_claim_follows_the_recorded_branch_not_just_predecessor_success() {
+        let (database, path) = database_fixture();
+        let (revision, nodes) = save_branching_revision(&database);
+        let [start, branch, matched, unmatched, _end] = nodes;
+        let (_run, devices) = database
+            .create_flow_run_with_devices(&revision, selection(&["branch-claims"]))
+            .expect("create branching run");
+        let device_run_id = devices[0].id;
+        ready_device(&database, device_run_id);
+        let attempts = database
+            .initialize_flow_device_attempts(device_run_id)
+            .expect("initialize branch attempts");
+        let attempt_for = |node_id| {
+            attempts
+                .iter()
+                .find(|attempt| attempt.node_id == node_id)
+                .expect("attempt for node")
+                .id
+        };
+
+        set_attempt_state(
+            &database,
+            attempt_for(start.id),
+            FlowAttemptState::Succeeded,
+        );
+        set_attempt_chosen_port(&database, attempt_for(branch.id), "matched");
+        set_attempt_state(
+            &database,
+            attempt_for(branch.id),
+            FlowAttemptState::Succeeded,
+        );
+
+        let claim = |attempt_id: Uuid, node: &CompiledFlowNode| {
+            database.transition_attempt(
+                attempt_id,
+                FlowAttemptState::Queued,
+                FlowAttemptState::IntentCommitted,
+                crate::db::AttemptTransitionPatch {
+                    canonical_input: Some(serde_json::to_value(&node.config).expect("input")),
+                    evidence_baseline: Some(
+                        serde_json::to_value(EvidenceBaseline::None).expect("baseline"),
+                    ),
+                    ..Default::default()
+                },
+            )
+        };
+
+        let refused = claim(attempt_for(unmatched.id), &unmatched)
+            .expect_err("the notMatched head must not claim intent on a matched branch");
+        assert!(
+            refused
+                .to_string()
+                .contains("no succeeded predecessor authorizes"),
+            "expected the predecessor refusal, got: {refused}"
+        );
+        claim(attempt_for(matched.id), &matched)
+            .expect("the taken branch head claims exactly as before");
+        cleanup(&path);
+    }
+
+    /// An IfVision that succeeded without recording a port routes nowhere — an undecided
+    /// branch authorizes neither head, rather than both.
+    #[test]
+    fn an_ifvision_with_no_recorded_port_authorizes_neither_branch() {
+        let (database, path) = database_fixture();
+        let (revision, nodes) = save_branching_revision(&database);
+        let [start, branch, matched, unmatched, _end] = nodes;
+        let (_run, devices) = database
+            .create_flow_run_with_devices(&revision, selection(&["branch-undecided"]))
+            .expect("create branching run");
+        let device_run_id = devices[0].id;
+        ready_device(&database, device_run_id);
+        let attempts = database
+            .initialize_flow_device_attempts(device_run_id)
+            .expect("initialize branch attempts");
+        let attempt_for = |node_id| {
+            attempts
+                .iter()
+                .find(|attempt| attempt.node_id == node_id)
+                .expect("attempt for node")
+                .id
+        };
+
+        set_attempt_state(
+            &database,
+            attempt_for(start.id),
+            FlowAttemptState::Succeeded,
+        );
+        // Succeeded with `chosen_port` still NULL — a combination the transition machine
+        // never writes, seeded raw because the gate has to hold against any caller.
+        set_attempt_state(
+            &database,
+            attempt_for(branch.id),
+            FlowAttemptState::Succeeded,
+        );
+
+        for (attempt_id, node) in [
+            (attempt_for(matched.id), &matched),
+            (attempt_for(unmatched.id), &unmatched),
+        ] {
+            let refused = database
+                .transition_attempt(
+                    attempt_id,
+                    FlowAttemptState::Queued,
+                    FlowAttemptState::IntentCommitted,
+                    crate::db::AttemptTransitionPatch {
+                        canonical_input: Some(serde_json::to_value(&node.config).expect("input")),
+                        evidence_baseline: Some(
+                            serde_json::to_value(EvidenceBaseline::None).expect("baseline"),
+                        ),
+                        ..Default::default()
+                    },
+                )
+                .expect_err("an undecided branch must authorize neither head");
+            assert!(
+                refused
+                    .to_string()
+                    .contains("no succeeded predecessor authorizes"),
+                "expected the predecessor refusal, got: {refused}"
+            );
+        }
+        cleanup(&path);
+    }
+
+    /// The sweep's candidate query answers with ids only, and only for live states.
+    #[test]
+    fn list_unsettled_flow_run_ids_returns_only_queued_and_running() {
+        let (database, path) = database_fixture();
+        let (revision, node) = save_revision(
+            &database,
+            ActionKind::Wait,
+            CompiledActionConfig::Wait { duration_ms: 10 },
+        );
+        let _ = node;
+        let queued = database
+            .create_flow_run(&revision, selection(&["fixture-udid"]))
+            .expect("queued run");
+        let settled = database
+            .create_flow_run(&revision, selection(&["fixture-udid"]))
+            .expect("settled run");
+        let device = database
+            .create_flow_device_run(settled.id, "fixture-udid")
+            .expect("settled device");
+        database
+            .mark_device_terminal(
+                device.id,
+                &[FlowDeviceRunState::Queued],
+                FlowDeviceRunState::Failed,
+                Some(error("Fixture", None)),
+                release_proof("fixture-udid"),
+            )
+            .expect("fail the settled run's device");
+        database
+            .recompute_run_projection(settled.id)
+            .expect("settle the run");
+
+        let unsettled = database
+            .list_unsettled_flow_run_ids()
+            .expect("list unsettled");
+        assert!(unsettled.contains(&queued.id), "a queued run is live");
+        assert!(
+            !unsettled.contains(&settled.id),
+            "a terminal run is nobody's to sweep"
         );
         cleanup(&path);
     }

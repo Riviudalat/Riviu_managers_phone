@@ -83,6 +83,27 @@ pub enum FlowRuntimeError {
     CancellationOwnerMissing { run_id: Uuid },
 }
 
+/// One pass of the in-process orphaned-run sweep, counted — so the ticker can log
+/// something an operator can act on, and so a test can assert a pass changed nothing.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct FlowSweepReport {
+    /// Tracked tasks whose handle had finished without retiring itself (a panic
+    /// unwound past the closure tail); removed from the map by this pass.
+    pub dead_tasks_retired: usize,
+    /// Runs settled to a terminal projection by this pass.
+    pub runs_settled: usize,
+    /// Runs this pass tried to settle and could not; logged, retried next tick.
+    pub runs_unsettleable: usize,
+    /// Device runs forced `Failed`/`WorkerLost` by this pass.
+    pub devices_settled: usize,
+    /// Orphaned attempts that had committed intent and dispatched nothing.
+    pub attempts_failed_before_dispatch: usize,
+    /// Orphaned attempts that may have touched the phone; never auto-retried.
+    pub attempts_marked_uncertain: usize,
+    /// Orphaned attempts walked out of `Interrupted`, the state's only legal exit.
+    pub attempts_requeued_from_interrupted: usize,
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum FlowSelectionError {
     #[error("selected devices are empty")]
@@ -1648,6 +1669,211 @@ impl FlowRuntime {
         }
     }
 
+    /// Settle runs the database calls live that no live in-process worker owns.
+    ///
+    /// The third leg of the settlement tripod, and the only one on a clock:
+    /// `settle_device_after_failure` covers a worker whose own error path still runs,
+    /// startup recovery covers a process that died — and nothing covered a worker task
+    /// that vanished mid-run while the process lived (a panic unwinding past
+    /// `retire_tracked_task`, an abort). Such a run read `running` forever, its stale
+    /// cancellation entry made `retry_attempt` answer `AlreadyRunning`, and only an app
+    /// restart cleared it.
+    ///
+    /// DB-only, deliberately: a janitor must never drive phones. Attempts settle through
+    /// [`Database::transition_attempt`] — the same CAS, validators and ledger event every
+    /// worker write uses — because `recompute_run_projection` re-validates every persisted
+    /// attempt and the ledger's contiguity, so a raw UPDATE here would have to re-implement
+    /// exactly the machinery it bypassed.
+    ///
+    /// The caller owns the clock (a ticker in the desktop layer, with its own kill switch);
+    /// this method is one pass, callable directly by a test with no timer at all.
+    pub async fn sweep_orphaned_runs(&self) -> anyhow::Result<FlowSweepReport> {
+        let mut report = FlowSweepReport::default();
+        if self.lifecycle() != FlowRuntimeLifecycle::Ready {
+            return Ok(report);
+        }
+        // Belt for the window inside `recover_startup`'s worker between the lifecycle CAS
+        // to Ready and `recovery_active.store(false)`: recovery may still be writing.
+        if self.inner.recovery_active.load(Ordering::Acquire) {
+            return Ok(report);
+        }
+        // Under `admission` there is no "row in the database, entry not yet in the map"
+        // window: every worker-creating path writes the DB and inserts its task while
+        // holding this lock, and the worker body cannot run before the insert (it waits on
+        // the registration oneshot). Hold time is milliseconds of SQLite writes at a
+        // once-a-minute cadence, sharing `shutdown`'s deadline budget.
+        let _admission = self.inner.admission.lock().await;
+        if self.lifecycle() != FlowRuntimeLifecycle::Ready {
+            return Ok(report);
+        }
+        let (live_runs, dead_tasks) = {
+            let tasks = self.inner.tasks.lock();
+            let mut live = BTreeSet::new();
+            let mut dead = Vec::new();
+            for (task_id, task) in tasks.iter() {
+                if task.handle.is_finished() {
+                    // Finished but still tracked can only mean the worker unwound without
+                    // reaching `retire_tracked_task` — its runs are nobody's now.
+                    dead.push(*task_id);
+                } else {
+                    live.extend(task.run_ids.iter().copied());
+                }
+            }
+            (live, dead)
+        };
+        for task_id in dead_tasks {
+            let _ = self.retire_tracked_task(task_id);
+            report.dead_tasks_retired += 1;
+        }
+        let candidates = self
+            .inner
+            .database
+            .list_unsettled_flow_run_ids()?
+            .into_iter()
+            .filter(|run_id| !live_runs.contains(run_id))
+            .collect::<Vec<_>>();
+        for run_id in candidates {
+            // `stop_all` can flip the lifecycle while this loop runs. Every settled run
+            // left a legal persisted state, so bailing between runs is safe — the next
+            // tick, or the next process, finishes the job.
+            if self.lifecycle() != FlowRuntimeLifecycle::Ready {
+                break;
+            }
+            if let Err(error) = self.settle_orphaned_run(run_id, &mut report) {
+                report.runs_unsettleable += 1;
+                tracing::warn!(
+                    %run_id,
+                    error = %format!("{error:#}"),
+                    "orphaned Flow run could not be settled this pass"
+                );
+            }
+        }
+        Ok(report)
+    }
+
+    /// Attempts → device → projection → emit, for one run no worker owns.
+    ///
+    /// Attempts first, and the order is load-bearing twice over: `mark_device_terminal`
+    /// refuses a device that still owns an active attempt, and the transition validators
+    /// want the device still `Running` for anything leaving the dispatched family. The
+    /// settlement map is startup recovery's, applied cold:
+    ///
+    /// * `IntentCommitted → FailedBeforeDispatch` — nothing was dispatched; the name is
+    ///   the guarantee, and retry stays open.
+    /// * `EffectDispatched`/`Verifying → Uncertain` — the phone may have been touched;
+    ///   never re-dispatched, automatically or manually.
+    /// * `Interrupted → Queued` — the state's only legal exit. The device then fails and
+    ///   the run goes terminal, so the queued attempt is permanently inert: the recovery
+    ///   loader only reads live runs.
+    fn settle_orphaned_run(
+        &self,
+        run_id: Uuid,
+        report: &mut FlowSweepReport,
+    ) -> anyhow::Result<()> {
+        let Some(detail) = self.inner.database.get_flow_run(run_id)? else {
+            // A benign lost race: the run vanished between the candidate list and here.
+            return Ok(());
+        };
+        if detail.run.state.is_terminal() {
+            // Same: someone settled it first. Not counted — this pass changed nothing.
+            return Ok(());
+        }
+        for device in &detail.device_runs {
+            if device.state.is_terminal() {
+                continue;
+            }
+            let mut non_requeued: Vec<Uuid> = Vec::new();
+            for attempt in detail
+                .attempts
+                .iter()
+                .filter(|attempt| attempt.device_run_id == device.id)
+            {
+                let (next, counter) = match attempt.state {
+                    FlowAttemptState::IntentCommitted => (
+                        FlowAttemptState::FailedBeforeDispatch,
+                        &mut report.attempts_failed_before_dispatch,
+                    ),
+                    FlowAttemptState::EffectDispatched | FlowAttemptState::Verifying => (
+                        FlowAttemptState::Uncertain,
+                        &mut report.attempts_marked_uncertain,
+                    ),
+                    FlowAttemptState::Interrupted => (
+                        FlowAttemptState::Queued,
+                        &mut report.attempts_requeued_from_interrupted,
+                    ),
+                    // Queued owns no active context and does not block the device settle;
+                    // terminal states are already where they belong.
+                    _ => continue,
+                };
+                let error = (next != FlowAttemptState::Queued).then(|| FlowErrorRecord {
+                    code: "WorkerLost".to_string(),
+                    message: "the in-process Flow worker vanished mid-run; the sweep \
+                              settled this attempt without touching the phone"
+                        .to_string(),
+                    node_id: Some(attempt.node_id),
+                    field: None,
+                    udid: Some(device.udid.clone()),
+                    attempt_id: Some(attempt.id),
+                });
+                self.inner.database.transition_attempt(
+                    attempt.id,
+                    attempt.state,
+                    next,
+                    crate::db::AttemptTransitionPatch {
+                        error,
+                        ..Default::default()
+                    },
+                )?;
+                if next != FlowAttemptState::Queued {
+                    non_requeued.push(attempt.id);
+                }
+                *counter += 1;
+            }
+            // The device error points at the one attempt this sweep settled when there is
+            // exactly one — the same attribution rule recovery uses — and at nothing when
+            // the story is wider than a single attempt.
+            let attempt_id = match non_requeued.as_slice() {
+                [only] => Some(*only),
+                _ => None,
+            };
+            self.inner.database.mark_device_terminal(
+                device.id,
+                &[
+                    FlowDeviceRunState::Queued,
+                    FlowDeviceRunState::Preflight,
+                    FlowDeviceRunState::Running,
+                ],
+                FlowDeviceRunState::Failed,
+                Some(FlowErrorRecord {
+                    code: "WorkerLost".to_string(),
+                    message: "the in-process Flow worker vanished mid-run; the sweep \
+                              settled this device without touching the phone"
+                        .to_string(),
+                    node_id: None,
+                    field: None,
+                    udid: Some(device.udid.clone()),
+                    attempt_id,
+                }),
+                empty_release_proof(&device.udid),
+            )?;
+            report.devices_settled += 1;
+        }
+        // The run has to say so too — matching startup recovery, not
+        // `settle_device_after_failure`, whose missing recompute is one of the ways a run
+        // used to stay `Running` with every device terminal. Only reached for a candidate
+        // that was really non-terminal, so a healthy ledger never grows a tick-shaped event.
+        self.inner.database.recompute_run_projection(run_id)?;
+        // A vanished worker skipped its closure tail, so its cancellation entry leaks —
+        // and a stale entry makes `retry_attempt` answer `AlreadyRunning` forever.
+        self.inner.cancellations.lock().remove(&run_id);
+        let _ = self.emit_run_updated(run_id);
+        // No task will ever retire this run's emitted-revision entry; drop it here or it
+        // leaks one map slot per swept run for the life of the process.
+        self.inner.emitted_revisions.lock().remove(&run_id);
+        report.runs_settled += 1;
+        Ok(())
+    }
+
     fn emit_run_updated(&self, run_id: Uuid) -> anyhow::Result<()> {
         let Some(detail) = self.inner.database.get_flow_run(run_id)? else {
             return Ok(());
@@ -2172,7 +2398,7 @@ mod tests {
         fixture.shutdown().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn run_update_events_are_post_commit_monotonic_and_end_at_the_persisted_revision() {
         let fixture = RuntimeFixture::new(&["iphone-a", "iphone-b"], single_wait_plan()).await;
         let mut events = fixture.events.subscribe();
@@ -2204,6 +2430,308 @@ mod tests {
         assert!(!revisions.is_empty());
         assert!(revisions.windows(2).all(|pair| pair[0] < pair[1]));
         assert_eq!(revisions.last().copied(), Some(detail.run.event_revision));
+        fixture.shutdown().await;
+    }
+
+    // ------------------------------------------------------------- orphan sweep
+
+    /// **A dispatched attempt whose worker vanished settles as what it is: uncertain.**
+    ///
+    /// The sweep is the third leg of the settlement tripod — the worker's own error path
+    /// and startup recovery are the other two — and this is its worst case: the phone may
+    /// have been tapped, so the attempt must land in the one state nothing retries.
+    #[tokio::test]
+    async fn sweep_settles_orphaned_dispatched_attempt_as_uncertain() {
+        let fixture = RuntimeFixture::new(&["iphone-a"], single_wait_plan()).await;
+        let (run_id, attempt_id) =
+            fixture.seed_wait_recovery_run(FlowAttemptState::EffectDispatched);
+        let mut events = fixture.events.subscribe();
+
+        let report = fixture.runtime.sweep_orphaned_runs().await.expect("sweep");
+        assert_eq!(report.runs_settled, 1);
+        assert_eq!(report.devices_settled, 1);
+        assert_eq!(report.attempts_marked_uncertain, 1);
+        assert_eq!(report.attempts_failed_before_dispatch, 0);
+
+        let detail = fixture
+            .database
+            .get_flow_run(run_id)
+            .expect("load swept run")
+            .expect("swept run");
+        assert!(
+            detail.run.state.is_terminal(),
+            "the projection must be recomputed, not left running: {:?}",
+            detail.run.state
+        );
+        let attempt = detail
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .expect("swept attempt");
+        assert_eq!(attempt.state, FlowAttemptState::Uncertain);
+        assert!(
+            !attempt.retry_allowed,
+            "a swept dispatched attempt must never be retryable"
+        );
+        let device = &detail.device_runs[0];
+        assert_eq!(device.state, FlowDeviceRunState::Failed);
+        let device_error = device.error.as_ref().expect("device error");
+        assert_eq!(device_error.code, "WorkerLost");
+        assert_eq!(
+            device_error.attempt_id,
+            Some(attempt_id),
+            "exactly one settled attempt, so the device error names it"
+        );
+
+        let mut saw_update = false;
+        while let Ok(event) = events.try_recv() {
+            if matches!(event, AppEvent::FlowRunUpdated { run_id: id, .. } if id == run_id) {
+                saw_update = true;
+            }
+        }
+        assert!(saw_update, "the Flow page must hear about a swept run");
+        assert_eq!(
+            fixture.runtime.emitted_revision_count(),
+            0,
+            "no worker will ever retire a swept run's emitted-revision entry"
+        );
+
+        let second = fixture
+            .runtime
+            .sweep_orphaned_runs()
+            .await
+            .expect("second sweep");
+        assert_eq!(
+            second,
+            FlowSweepReport::default(),
+            "a second pass over a settled run changes nothing"
+        );
+        fixture.shutdown().await;
+    }
+
+    /// An intent nothing dispatched fails with the name that is the guarantee — and stays
+    /// retryable, because nothing reached the phone.
+    #[tokio::test]
+    async fn sweep_turns_undispatched_intent_into_retryable_failure() {
+        let fixture = RuntimeFixture::new(&["iphone-a"], single_wait_plan()).await;
+        let (run_id, attempt_id) =
+            fixture.seed_wait_recovery_run(FlowAttemptState::IntentCommitted);
+
+        let report = fixture.runtime.sweep_orphaned_runs().await.expect("sweep");
+        assert_eq!(report.runs_settled, 1);
+        assert_eq!(report.attempts_failed_before_dispatch, 1);
+        assert_eq!(report.attempts_marked_uncertain, 0);
+
+        let detail = fixture
+            .database
+            .get_flow_run(run_id)
+            .expect("load swept run")
+            .expect("swept run");
+        let attempt = detail
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .expect("swept attempt");
+        assert_eq!(attempt.state, FlowAttemptState::FailedBeforeDispatch);
+        assert!(
+            attempt.retry_allowed,
+            "nothing was dispatched, so the operator may run this again"
+        );
+        assert!(detail.run.state.is_terminal());
+        fixture.shutdown().await;
+    }
+
+    /// `Interrupted` leaves by its only legal exit; the failed device and terminal run
+    /// leave the requeued attempt permanently inert.
+    #[tokio::test]
+    async fn sweep_requeues_interrupted_attempt_and_fails_the_device() {
+        let fixture = RuntimeFixture::new(&["iphone-a"], single_wait_plan()).await;
+        let (run_id, attempt_id) = fixture.seed_wait_recovery_run(FlowAttemptState::Interrupted);
+
+        let report = fixture.runtime.sweep_orphaned_runs().await.expect("sweep");
+        assert_eq!(report.attempts_requeued_from_interrupted, 1);
+        assert_eq!(report.runs_settled, 1);
+
+        let detail = fixture
+            .database
+            .get_flow_run(run_id)
+            .expect("load swept run")
+            .expect("swept run");
+        let attempt = detail
+            .attempts
+            .iter()
+            .find(|attempt| attempt.id == attempt_id)
+            .expect("swept attempt");
+        assert_eq!(attempt.state, FlowAttemptState::Queued);
+        let device = &detail.device_runs[0];
+        assert_eq!(device.state, FlowDeviceRunState::Failed);
+        assert_eq!(
+            device.error.as_ref().expect("device error").attempt_id,
+            None,
+            "a requeued attempt is not the story the device error should point at"
+        );
+        assert!(detail.run.state.is_terminal());
+        fixture.shutdown().await;
+    }
+
+    /// A run whose worker is alive is nobody's to sweep — and the same run settles the
+    /// moment its worker dies without retiring itself.
+    #[tokio::test]
+    async fn sweep_leaves_a_live_worker_alone() {
+        let fixture = RuntimeFixture::new(&["iphone-a"], single_wait_plan()).await;
+        let (run_id, _) = fixture.seed_wait_recovery_run(FlowAttemptState::EffectDispatched);
+        let (release, parked) = tokio::sync::oneshot::channel::<()>();
+        let task_id = Uuid::new_v4();
+        fixture.runtime.inner.tasks.lock().insert(
+            task_id,
+            TrackedFlowTask {
+                run_ids: BTreeSet::from([run_id]),
+                handle: tokio::spawn(async move {
+                    let _ = parked.await;
+                    Ok(())
+                }),
+            },
+        );
+
+        let report = fixture.runtime.sweep_orphaned_runs().await.expect("sweep");
+        assert_eq!(
+            report,
+            FlowSweepReport::default(),
+            "a tracked, unfinished worker owns its run"
+        );
+        let untouched = fixture
+            .database
+            .get_flow_run(run_id)
+            .expect("load live run")
+            .expect("live run");
+        assert!(!untouched.run.state.is_terminal());
+
+        release.send(()).expect("release the parked worker");
+        for _ in 0..1_000 {
+            let finished = fixture
+                .runtime
+                .inner
+                .tasks
+                .lock()
+                .get(&task_id)
+                .map(|task| task.handle.is_finished())
+                .unwrap_or(true);
+            if finished {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let second = fixture
+            .runtime
+            .sweep_orphaned_runs()
+            .await
+            .expect("second sweep");
+        assert_eq!(second.dead_tasks_retired, 1);
+        assert_eq!(second.runs_settled, 1);
+        fixture.shutdown().await;
+    }
+
+    /// A finished-but-tracked handle is a worker that unwound past its own cleanup: the
+    /// sweep retires it, settles its run, and clears the leaked cancellation entry that
+    /// would otherwise make `retry_attempt` answer `AlreadyRunning` forever.
+    #[tokio::test]
+    async fn sweep_retires_a_dead_tracked_task_and_settles_its_run() {
+        let fixture = RuntimeFixture::new(&["iphone-a"], single_wait_plan()).await;
+        let (run_id, _) = fixture.seed_wait_recovery_run(FlowAttemptState::IntentCommitted);
+        fixture
+            .runtime
+            .inner
+            .cancellations
+            .lock()
+            .insert(run_id, FlowCancellation::default());
+        let mut handle = tokio::spawn(async { Ok(()) });
+        (&mut handle)
+            .await
+            .expect("join the already-finished worker")
+            .expect("worker result");
+        fixture.runtime.inner.tasks.lock().insert(
+            Uuid::new_v4(),
+            TrackedFlowTask {
+                run_ids: BTreeSet::from([run_id]),
+                handle,
+            },
+        );
+
+        let report = fixture.runtime.sweep_orphaned_runs().await.expect("sweep");
+        assert_eq!(report.dead_tasks_retired, 1);
+        assert_eq!(report.runs_settled, 1);
+        assert_eq!(fixture.runtime.active_task_count().await, 0);
+        assert!(
+            !fixture
+                .runtime
+                .inner
+                .cancellations
+                .lock()
+                .contains_key(&run_id),
+            "the leaked cancellation entry must go with the run"
+        );
+        fixture.shutdown().await;
+    }
+
+    /// Outside `Ready` the sweep is a silent no-op: recovery owns the runs before it, and
+    /// a stopping runtime owns nothing any more.
+    #[tokio::test]
+    async fn sweep_is_a_noop_outside_ready() {
+        let recovering = RuntimeFixture::new_recovering(&["iphone-a"], single_wait_plan());
+        let (run_id, _) = recovering.seed_wait_recovery_run(FlowAttemptState::EffectDispatched);
+        let report = recovering
+            .runtime
+            .sweep_orphaned_runs()
+            .await
+            .expect("sweep while recovering");
+        assert_eq!(report, FlowSweepReport::default());
+        assert!(
+            !recovering
+                .database
+                .get_flow_run(run_id)
+                .expect("load run")
+                .expect("run")
+                .run
+                .state
+                .is_terminal(),
+            "a recovering runtime's runs are recovery's to settle"
+        );
+
+        let stopped = RuntimeFixture::new(&["iphone-a"], single_wait_plan()).await;
+        let (stopped_run, _) = stopped.seed_wait_recovery_run(FlowAttemptState::EffectDispatched);
+        stopped.runtime.shutdown().await.expect("shutdown");
+        let report = stopped
+            .runtime
+            .sweep_orphaned_runs()
+            .await
+            .expect("sweep after shutdown");
+        assert_eq!(report, FlowSweepReport::default());
+        assert!(
+            !stopped
+                .database
+                .get_flow_run(stopped_run)
+                .expect("load run")
+                .expect("run")
+                .run
+                .state
+                .is_terminal(),
+            "a stopping runtime must not keep writing"
+        );
+    }
+
+    /// An empty, healthy runtime sweeps to nothing — and emits nothing, because a healthy
+    /// ledger must not grow a tick-shaped event.
+    #[tokio::test]
+    async fn sweep_reports_clean_on_an_empty_ready_runtime() {
+        let fixture = RuntimeFixture::new(&["iphone-a"], single_wait_plan()).await;
+        let mut events = fixture.events.subscribe();
+        let report = fixture.runtime.sweep_orphaned_runs().await.expect("sweep");
+        assert_eq!(report, FlowSweepReport::default());
+        assert!(
+            events.try_recv().is_err(),
+            "a clean pass must not touch the ledger or the event bus"
+        );
         fixture.shutdown().await;
     }
 
@@ -2361,7 +2889,7 @@ mod tests {
         fixture.shutdown().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn shutdown_tracks_and_joins_a_retry_worker_waiting_for_device_ownership() {
         let fixture = RuntimeFixture::new(&["iphone-a"], terminate_wait_plan()).await;
         let (_run_id, _terminate_id, wait_id, _end_id) = fixture.seed_wait_retry_run();
@@ -2552,7 +3080,7 @@ mod tests {
         fixture.shutdown().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn in_flight_device_effect_is_not_aborted_by_cancellation() {
         let fixture = RuntimeFixture::new(&["iphone-a"], terminate_plan()).await;
         fixture.driver.block_terminate_for("iphone-a");

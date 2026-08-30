@@ -130,6 +130,11 @@ pub struct StreamBudgetManager {
     configured_limit: usize,
     turn_timeout: Duration,
     failure_backoff: Duration,
+    /// Where "now" comes from. Production is `Instant::now`; tests may hand in a closure
+    /// mapped onto tokio's paused clock, which is what finally lets the three desktop
+    /// sampler tests stop sleeping six real seconds. Every `_at` seam below already took a
+    /// caller-supplied instant; this field is only the public entry points catching up.
+    clock: Arc<dyn Fn() -> Instant + Send + Sync>,
 }
 
 impl Default for StreamBudgetManager {
@@ -140,6 +145,19 @@ impl Default for StreamBudgetManager {
 
 impl StreamBudgetManager {
     pub fn new(configured_limit: usize) -> Result<Self, StreamBudgetError> {
+        Self::with_clock(configured_limit, Arc::new(Instant::now))
+    }
+
+    /// A budget whose sense of time belongs to the caller.
+    ///
+    /// **A test seam, not a feature.** Production constructs with [`Self::new`] and the real
+    /// clock; the one legitimate other caller is a test that pins the clock to tokio's
+    /// paused time so turn deadlines and backoffs advance virtually. The closure must be
+    /// monotonic — the arithmetic below subtracts instants.
+    pub fn with_clock(
+        configured_limit: usize,
+        clock: Arc<dyn Fn() -> Instant + Send + Sync>,
+    ) -> Result<Self, StreamBudgetError> {
         if !(1..=MAXIMUM_STREAM_LIMIT).contains(&configured_limit) {
             return Err(StreamBudgetError::InvalidLimit {
                 requested: configured_limit,
@@ -151,7 +169,12 @@ impl StreamBudgetManager {
             configured_limit,
             turn_timeout: BACKGROUND_TURN_TIMEOUT,
             failure_backoff: BACKGROUND_FAILURE_BACKOFF,
+            clock,
         })
+    }
+
+    fn now(&self) -> Instant {
+        (self.clock)()
     }
 
     pub fn configured_limit(&self) -> usize {
@@ -175,18 +198,18 @@ impl StreamBudgetManager {
     }
 
     pub fn background_turn_due(&self, token: Uuid) -> Result<bool, StreamBudgetError> {
-        self.background_turn_due_at(token, Instant::now())
+        self.background_turn_due_at(token, self.now())
     }
 
     pub fn mark_background_failed(&self, token: Uuid) -> Result<(), StreamBudgetError> {
-        self.fail_start_at(token, Instant::now())
+        self.fail_start_at(token, self.now())
     }
 
     pub fn reserve_background(
         &self,
         udid: impl Into<String>,
     ) -> Result<BackgroundStreamLease, StreamBudgetError> {
-        self.reserve_background_at(udid, Instant::now())
+        self.reserve_background_at(udid, self.now())
     }
 
     fn reserve_background_at(
@@ -235,7 +258,7 @@ impl StreamBudgetManager {
     }
 
     pub fn mark_running(&self, token: Uuid) -> Result<(), StreamBudgetError> {
-        self.mark_running_at(token, Instant::now())
+        self.mark_running_at(token, self.now())
     }
 
     fn mark_running_at(&self, token: Uuid, now: Instant) -> Result<(), StreamBudgetError> {
@@ -268,7 +291,7 @@ impl StreamBudgetManager {
     ) -> Result<ForegroundTransfer, StreamBudgetError> {
         let udid = udid.into();
         let mut state = self.inner.lock();
-        state.remove_expired_backoff(&udid, Instant::now());
+        state.remove_expired_backoff(&udid, self.now());
         let background_backoff = state.by_udid.get(&udid).copied().filter(|token| {
             state
                 .records
@@ -440,11 +463,11 @@ impl StreamBudgetManager {
                 .revoked_udid
                 .clone()
                 .unwrap_or_else(|| transfer.target_udid.clone());
-            state.abandon_pending_transfer(&transfer, self.failure_backoff, Instant::now());
+            state.abandon_pending_transfer(&transfer, self.failure_backoff, self.now());
             return Err(StreamBudgetError::StopNotConfirmed { udid });
         }
         if !transfer.stop_required && !proof.is_not_required() {
-            state.abandon_pending_transfer(&transfer, self.failure_backoff, Instant::now());
+            state.abandon_pending_transfer(&transfer, self.failure_backoff, self.now());
             return Err(StreamBudgetError::UnexpectedStopProof);
         }
 

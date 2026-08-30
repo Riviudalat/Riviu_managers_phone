@@ -13,7 +13,7 @@ import {
   type NodeTypes,
   useReactFlow,
 } from "@xyflow/react";
-import { useEffect, useMemo, useState, type DragEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import type {
   ActionDefinition,
   ActionKind,
@@ -85,7 +85,31 @@ function FlowCanvasInner(props: FlowCanvasProps) {
   const [selectedEdges, setSelectedEdges] = useState<Set<string>>(new Set());
   const graph = useMemo(() => toCanvas(props.document, props.issues), [props.document, props.issues]);
   const [transientNodes, setTransientNodes] = useState(graph.nodes);
-  useEffect(() => setTransientNodes(graph.nodes), [graph.nodes]);
+  // **The refs are the handlers' source of truth; the state is the render's.**
+  //
+  // Every handler below both reads the current nodes/edge-selection and, on some calls,
+  // commits them to the document in the same breath — so it needs a value that is correct
+  // *synchronously*. Reading the render-captured state gave it last render's copy: two
+  // `onNodesChange` calls batched into one React tick (a keyboard move during a selection
+  // change, a drag settling as another change lands) both read the same stale array, the
+  // second `applyNodeChanges` silently discarded the first call's movement, and
+  // `onReplaceCanvas` wrote that half-merged canvas into the document. A functional
+  // `setState` alone cannot fix the commit half — it has nothing synchronous to hand to
+  // `onReplaceCanvas` — hence the ref beside the state, written together, always.
+  const transientNodesRef = useRef(graph.nodes);
+  const selectedEdgesRef = useRef(selectedEdges);
+  const writeNodes = (value: FlowCanvasNode[]) => {
+    transientNodesRef.current = value;
+    setTransientNodes(value);
+  };
+  const writeSelectedEdges = (value: Set<string>) => {
+    selectedEdgesRef.current = value;
+    setSelectedEdges(value);
+  };
+  useEffect(() => {
+    transientNodesRef.current = graph.nodes;
+    setTransientNodes(graph.nodes);
+  }, [graph.nodes]);
   // Drop the ids of edges that no longer exist.
   //
   // The drop handler prefers a single selected edge over geometric hit testing, and this set was
@@ -93,13 +117,15 @@ function FlowCanvasInner(props: FlowCanvasProps) {
   // another action anywhere -- the stale id won, `insertNodeOnEdge` could not find it, the reducer
   // returned the same document, and the dropped node simply vanished with no message.
   useEffect(() => {
-    setSelectedEdges((current) => {
-      if (current.size === 0) return current;
-      const alive = new Set(
-        [...current].filter((id) => graph.edges.some((edge) => edge.id === id)),
-      );
-      return alive.size === current.size ? current : alive;
-    });
+    const current = selectedEdgesRef.current;
+    if (current.size === 0) return;
+    const alive = new Set(
+      [...current].filter((id) => graph.edges.some((edge) => edge.id === id)),
+    );
+    if (alive.size !== current.size) {
+      selectedEdgesRef.current = alive;
+      setSelectedEdges(alive);
+    }
   }, [graph.edges]);
   const nodes = transientNodes.map((node) => ({
     ...node,
@@ -109,10 +135,23 @@ function FlowCanvasInner(props: FlowCanvasProps) {
     ...edge,
     selected: selectedEdges.has(edge.id),
   }));
+  // The commit-time twins of the render decorations above, computed from the refs so a
+  // handler committing mid-tick hands the document what is true *now*, not what was true
+  // when this component last rendered.
+  const nodesNow = () =>
+    transientNodesRef.current.map((node) => ({
+      ...node,
+      selected: node.id === props.selectedNodeId,
+    }));
+  const edgesNow = () =>
+    graph.edges.map((edge) => ({
+      ...edge,
+      selected: selectedEdgesRef.current.has(edge.id),
+    }));
 
   const replaceAfterNodeChanges = (changes: NodeChange<FlowCanvasNode>[]) => {
-    const next = applyNodeChanges(changes, transientNodes);
-    setTransientNodes(next);
+    const next = applyNodeChanges(changes, transientNodesRef.current);
+    writeNodes(next);
     const selected = changes.find(
       (change): change is Extract<NodeChange<FlowCanvasNode>, { type: "select" }> =>
         change.type === "select" && change.selected,
@@ -136,28 +175,28 @@ function FlowCanvasInner(props: FlowCanvasProps) {
     const settled = changes.some(
       (change) => change.type === "position" && change.dragging !== true,
     );
-    if (settled) props.onReplaceCanvas(next, edges);
+    if (settled) props.onReplaceCanvas(next, edgesNow());
   };
 
   const changeEdges = (changes: EdgeChange<FlowCanvasEdge>[]) => {
-    const selected = new Set(selectedEdges);
+    const selected = new Set(selectedEdgesRef.current);
     for (const change of changes) {
       if (change.type === "select") {
         if (change.selected) selected.add(change.id);
         else selected.delete(change.id);
       }
     }
-    setSelectedEdges(selected);
+    writeSelectedEdges(selected);
     const structural = changes.filter((change) => change.type !== "select");
     if (structural.length > 0) {
-      props.onReplaceCanvas(nodes, applyEdgeChanges(structural, edges));
+      props.onReplaceCanvas(nodesNow(), applyEdgeChanges(structural, edgesNow()));
     }
   };
 
   const connect = (connection: Connection) => {
     if (!connection.source || !connection.target || connection.source === connection.target) return;
     props.onReplaceCanvas(
-      nodes,
+      nodesNow(),
       addEdge(
         {
           ...connection,
@@ -165,7 +204,7 @@ function FlowCanvasInner(props: FlowCanvasProps) {
           sourceHandle: connection.sourceHandle ?? "flow",
           targetHandle: connection.targetHandle ?? "flow",
         },
-        edges,
+        edgesNow(),
       ),
     );
   };

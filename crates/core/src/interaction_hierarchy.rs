@@ -3475,6 +3475,9 @@ mod tests {
         /// swipe closed it. A map that always answers cannot say that, and a queue that
         /// empties silently would make every other element look absent too.
         singles: Mutex<Vec<(String, ElementBox, Option<usize>)>>,
+        /// `locate` answers that change once: `first` for the initial read, `rest` ever
+        /// after. Consulted before `singles`.
+        single_thens: Mutex<Vec<(String, Option<ElementBox>, ElementBox)>>,
         /// `locate_all` / `locate_all_described` answers, by query value.
         multiples: Mutex<Vec<(String, Vec<ElementBox>)>>,
         /// Replacement answers installed after the first read of a key.
@@ -3514,6 +3517,16 @@ mod tests {
         /// nothing, which is exactly the confusion the code under test exists to resolve.
         fn with_many_queue(self, key: &str, answers: Vec<Vec<ElementBox>>) -> Self {
             self.queues.lock().push((key.to_string(), answers));
+            self
+        }
+        /// Answers `first` once, then `rest` for ever — the single-element mirror of
+        /// [`Self::with_many_then`]. The drawer's pre-typing disarm check made this state
+        /// mandatory to express: a real Send is dark over an empty field and lit once it
+        /// holds text, and a fixture born lit is now (correctly) refused before typing.
+        fn with_single_then(self, key: &str, first: ElementBox, rest: ElementBox) -> Self {
+            self.single_thens
+                .lock()
+                .push((key.to_string(), Some(first), rest));
             self
         }
         /// Answers `first` once, then `rest` for ever after.
@@ -3571,6 +3584,12 @@ mod tests {
         }
         async fn locate(&self, query: ElementQuery<'_>) -> anyhow::Result<Option<ElementBox>> {
             let wanted = query_value(query);
+            {
+                let mut thens = self.single_thens.lock();
+                if let Some((_, first, rest)) = thens.iter_mut().find(|(key, _, _)| key == wanted) {
+                    return Ok(Some(first.take().unwrap_or_else(|| rest.clone())));
+                }
+            }
             let mut singles = self.singles.lock();
             let Some((_, element, remaining)) =
                 singles.iter_mut().find(|(key, _, _)| key == wanted)
@@ -3862,8 +3881,10 @@ mod tests {
         let session = DrawerSession::default()
             .with_single("bình luận", node(880.0, 900.0, 120.0, 120.0, "bình luận"))
             .with_single(EDIT, node(199.0, 1175.0, 700.0, 100.0, ""))
-            // Stays armed forever: tapped, never disarmed, never vanished.
-            .with_single(SEND_ID, send_button(true));
+            // Dark before typing — the way a real empty field reads, and what the drawer's
+            // pre-type check now demands — then armed forever: tapped, never disarmed,
+            // never vanished.
+            .with_single_then(SEND_ID, send_button(false), send_button(true));
 
         let mut shas = vec!["armed".to_string(), "cleared".to_string()].into_iter();
         let outcome = send_root_by_hierarchy(
