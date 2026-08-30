@@ -345,6 +345,32 @@ mod take_and_restore_tests {
             .split_once("#[cfg(test)]")
             .map(|(before, _)| before)
             .unwrap_or(&source);
+        // **Comments are not code, and this gate learnt that the expensive way.** A review
+        // pointed out that `// *self = Self::Exclusive(failure.context);` satisfied the
+        // restore check while the arm below it dropped the context -- the same
+        // comment-counts-as-code shape `code_of()` strips for the scanners in `lib.rs`. The
+        // doc comments in this very file quote the shapes being hunted, so scanning them is
+        // scanning the description instead of the thing described. `://` is spared so a URL
+        // in a string is not mistaken for the start of a comment.
+        let production: String = production
+            .lines()
+            .map(|line| {
+                let mut search_from = 0;
+                loop {
+                    let Some(pos) = line[search_from..].find("//") else {
+                        return line;
+                    };
+                    let at = search_from + pos;
+                    if at > 0 && line.as_bytes()[at - 1] == b':' {
+                        search_from = at + 2;
+                        continue;
+                    }
+                    return &line[..at];
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let production = production.as_str();
 
         // Split into `impl`-level functions: a line starting with exactly four spaces and a
         // `fn`/`pub(crate) fn`/`pub(crate) async fn` declaration begins a new one.
@@ -402,7 +428,14 @@ mod take_and_restore_tests {
         /// renaming one binding — `Err(refused)`, `Err(e)`, even `Err(_)`, which drops the
         /// context by construction — made that arm invisible, and the only thing left catching
         /// it was an exact-count floor sitting at exactly the current count.
-        fn error_arms(body: &str) -> Vec<String> {
+        ///
+        /// **An arm this parser cannot read is reported, not skipped**, which is the third
+        /// bypass a review built: `Err(failure) if failure.context.is_none() => {` has a guard
+        /// between the binding and the arrow, so the old matcher walked past it. Added *beside*
+        /// a conforming arm it changed no count and the gate stayed green while the new arm
+        /// leaked. Anything arm-shaped that does not parse now fails the test by name, so a
+        /// shape this gate has never seen can never be silently absent.
+        fn error_arms(body: &str) -> (Vec<String>, Vec<String>) {
             fn is_binding(pattern: &str) -> bool {
                 let pattern = pattern.trim().trim_start_matches("ref ").trim();
                 !pattern.is_empty()
@@ -411,6 +444,7 @@ mod take_and_restore_tests {
                         .all(|c| c.is_ascii_alphanumeric() || c == '_')
             }
             let mut arms = Vec::new();
+            let mut unreadable = Vec::new();
             let mut rest = body;
             while let Some(at) = rest.find("Err(") {
                 let after_paren = &rest[at + "Err(".len()..];
@@ -419,11 +453,31 @@ mod take_and_restore_tests {
                 };
                 let binding = &after_paren[..close];
                 let tail = &after_paren[close + 1..];
-                if !is_binding(binding) || !tail.starts_with(" => {") {
+                let trimmed = tail.trim_start();
+                // `Err(failure.error)` and `Err(SomeType { .. })` are values, not arms; and a
+                // bare `Err(failure)` in a `return` is a value too — only an arrow or a guard
+                // after the binding makes this a match arm.
+                let is_arm = is_binding(binding)
+                    && (trimmed.starts_with("=>") || trimmed.starts_with("if "));
+                if !is_arm {
                     rest = &rest[at + "Err(".len()..];
                     continue;
                 }
-                let open_offset = at + "Err(".len() + close + 1 + " => ".len();
+                // Whitespace-tolerant on purpose: `cargo fmt` is free to wrap between the
+                // binding and the brace, and a gate that a reformat can blind is one of the
+                // five bypass shapes this repo has already paid for.
+                if !trimmed.starts_with("=> {") {
+                    unreadable.push(format!(
+                        "Err({binding}){}",
+                        trimmed.chars().take(48).collect::<String>()
+                    ));
+                    rest = &rest[at + "Err(".len()..];
+                    continue;
+                }
+                let Some(brace_in_tail) = tail.find('{') else {
+                    break;
+                };
+                let open_offset = at + "Err(".len() + close + 1 + brace_in_tail;
                 let mut depth = 0usize;
                 let mut end = None;
                 for (offset, character) in rest[open_offset..].char_indices() {
@@ -443,7 +497,22 @@ mod take_and_restore_tests {
                 arms.push(rest[open_offset..end].to_string());
                 rest = &rest[end..];
             }
-            arms
+            (arms, unreadable)
+        }
+
+        /// Whether an arm puts a context back, rather than merely assigning *some* variant.
+        ///
+        /// **`Self::Closed` is not a restore, and it was the likeliest accident.** The old
+        /// check asked for the substring `*self = Self::`, which `*self = Self::Closed;`
+        /// satisfies — while restoring nothing and releasing the lease exactly as a missing
+        /// arm would. `Closed` is not an exotic spelling either: it is the value
+        /// `mem::replace(self, Self::Closed)` writes four lines above every one of these
+        /// arms, so an edit that "kept the assignment" would have reached for it first. Only
+        /// the three variants that carry a context count.
+        fn restores_a_context(arm: &str) -> bool {
+            ["Exclusive(", "Session(", "Streaming("]
+                .iter()
+                .any(|variant| arm.contains(&format!("*self = Self::{variant}")))
         }
 
         let mut leaking = Vec::new();
@@ -458,20 +527,22 @@ mod take_and_restore_tests {
         // making the restore optional; these two floors are what notice.
         let mut unconditional_restores = 0usize;
         let mut conditional_restores = 0usize;
+        let mut unreadable_arms: Vec<String> = Vec::new();
         for (name, body) in takers {
             // `close` is the one place `Closed` is the intended end state.
             if name == "close" {
                 continue;
             }
-            let arms = error_arms(body);
+            let (arms, unreadable) = error_arms(body);
             assert!(
                 !arms.is_empty(),
                 "{name} takes the context but has no `Err(..)` arm; either the control-plane \
                  call stopped being fallible or this parser has stopped finding the arm"
             );
+            unreadable_arms.extend(unreadable.into_iter().map(|arm| format!("{name}: {arm}")));
             arms_seen += arms.len();
             for arm in arms {
-                if !arm.contains("*self = Self::") {
+                if !restores_a_context(&arm) {
                     leaking.push(name.clone());
                 } else if arm.contains("if let Some(") && arm.contains(".context") {
                     conditional_restores += 1;
@@ -480,6 +551,17 @@ mod take_and_restore_tests {
                 }
             }
         }
+        // **An arm shape this parser cannot read fails the test rather than lowering a
+        // count.** The floor below still catches a parser that has gone entirely blind; this
+        // catches the narrower and more likely case — one new arm, written in a shape the
+        // matcher does not know — which used to pass by leaving the old arms' count intact.
+        assert!(
+            unreadable_arms.is_empty(),
+            "these look like `Err(..)` arms but this gate could not read them, so it cannot \
+             say whether they restore anything — teach the matcher the shape or write the arm \
+             the way the others are written: {}",
+            unreadable_arms.join(", ")
+        );
         assert!(
             arms_seen >= 4,
             "only {arms_seen} error arms were read; the parser is not seeing this file"

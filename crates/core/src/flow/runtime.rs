@@ -44,6 +44,17 @@ struct FlowRuntimeInner {
     cancellations: Mutex<HashMap<Uuid, FlowCancellation>>,
     tasks: Mutex<HashMap<Uuid, TrackedFlowTask>>,
     emitted_revisions: Mutex<HashMap<Uuid, u64>>,
+    /// How many consecutive sweeps have failed to settle a run, by run id.
+    ///
+    /// **A refusal is said once, then counted.** The sweep runs once a minute, and a run
+    /// whose ledger or plan will not validate is exactly the population it cannot fix — so
+    /// without this it wrote the same warning every sixty seconds for the life of the
+    /// process, and the operator learnt to scroll past the one line that mattered. The
+    /// same "say it once" shape `IdleSweeper` and the Sheets outbox sweeper already use;
+    /// the count is what turns the repeat into information ("still stuck after N passes")
+    /// on the rare occasions it is worth re-saying. An entry disappears the moment the run
+    /// settles or leaves the unsettled list, so a run that recovers starts fresh.
+    stuck_runs: Mutex<HashMap<Uuid, u32>>,
     lifecycle: AtomicU8,
     recovery_active: AtomicBool,
     admission: tokio::sync::Mutex<()>,
@@ -153,6 +164,7 @@ impl FlowRuntime {
                 cancellations: Mutex::new(HashMap::new()),
                 tasks: Mutex::new(HashMap::new()),
                 emitted_revisions: Mutex::new(HashMap::new()),
+                stuck_runs: Mutex::new(HashMap::new()),
                 lifecycle: AtomicU8::new(FlowRuntimeLifecycle::Recovering as u8),
                 recovery_active: AtomicBool::new(false),
                 admission: tokio::sync::Mutex::new(()),
@@ -1732,6 +1744,14 @@ impl FlowRuntime {
             .into_iter()
             .filter(|run_id| !live_runs.contains(run_id))
             .collect::<Vec<_>>();
+        // A run that is no longer a candidate — settled, resumed by a worker, or deleted —
+        // stops being stuck, so its counter goes. Pruning here rather than on the settle
+        // path covers every way a run can leave the list, including the ones this sweep did
+        // not cause.
+        {
+            let mut stuck = self.inner.stuck_runs.lock();
+            stuck.retain(|run_id, _| candidates.contains(run_id));
+        }
         for run_id in candidates {
             // `stop_all` can flip the lifecycle while this loop runs. Every settled run
             // left a legal persisted state, so bailing between runs is safe — the next
@@ -1739,13 +1759,31 @@ impl FlowRuntime {
             if self.lifecycle() != FlowRuntimeLifecycle::Ready {
                 break;
             }
-            if let Err(error) = self.settle_orphaned_run(run_id, &mut report) {
-                report.runs_unsettleable += 1;
-                tracing::warn!(
-                    %run_id,
-                    error = %format!("{error:#}"),
-                    "orphaned Flow run could not be settled this pass"
-                );
+            match self.settle_orphaned_run(run_id, &mut report) {
+                Ok(()) => {
+                    self.inner.stuck_runs.lock().remove(&run_id);
+                }
+                Err(error) => {
+                    report.runs_unsettleable += 1;
+                    let passes = {
+                        let mut stuck = self.inner.stuck_runs.lock();
+                        let passes = stuck.entry(run_id).or_insert(0);
+                        *passes += 1;
+                        *passes
+                    };
+                    // Said on the first pass, and then only when the number of passes is
+                    // itself news. A minute-by-minute repeat of a refusal this code cannot
+                    // fix buries everything else in the log.
+                    if passes == 1 || passes % 60 == 0 {
+                        tracing::warn!(
+                            %run_id,
+                            passes,
+                            error = %format!("{error:#}"),
+                            "orphaned Flow run could not be settled; it needs a person, not \
+                             another pass"
+                        );
+                    }
+                }
             }
         }
         Ok(report)
@@ -2718,6 +2756,77 @@ mod tests {
                 .is_terminal(),
             "a stopping runtime must not keep writing"
         );
+    }
+
+    /// **A run the sweep cannot fix is said once and then counted, not shouted every pass.**
+    ///
+    /// The sweep runs once a minute, and the runs it cannot settle are exactly the ones it
+    /// will never settle — a persisted shape that fails revalidation needs a person. Warning
+    /// on every pass buries the rest of the log within a day, which is why `IdleSweeper` and
+    /// the Sheets outbox sweeper both say a standing refusal once. The counter is the part
+    /// worth asserting: it must climb per pass (so a re-say can carry "still stuck after N")
+    /// and it must disappear the moment the run stops being a candidate, or a run that
+    /// recovers would carry a stale count forever.
+    ///
+    /// The poison is honest rather than injected — see `seed_unsettleable_run`: a run whose
+    /// frozen selection names two devices while only one device run exists, which is what a
+    /// process that died mid-creation leaves behind and what `recompute_run_projection`
+    /// refuses by design.
+    #[tokio::test]
+    async fn an_unsettleable_run_is_warned_once_and_counted_thereafter() {
+        let fixture = RuntimeFixture::new(&["iphone-a", "iphone-b"], single_wait_plan()).await;
+        let run_id = fixture.seed_unsettleable_run();
+
+        for pass in 1..=3u32 {
+            let report = fixture.runtime.sweep_orphaned_runs().await.expect("sweep");
+            assert_eq!(
+                report.runs_unsettleable, 1,
+                "pass {pass} must report the run it could not settle"
+            );
+            assert_eq!(
+                report.runs_settled, 0,
+                "pass {pass} settled a run it cannot settle"
+            );
+            assert_eq!(
+                fixture
+                    .runtime
+                    .inner
+                    .stuck_runs
+                    .lock()
+                    .get(&run_id)
+                    .copied(),
+                Some(pass),
+                "the stuck count must climb once per pass, so a re-say can name it"
+            );
+        }
+
+        // And the moment the run stops being a candidate, the entry goes. A worker picking
+        // it up is the reachable way that happens without a public state mutator — and it is
+        // the case that matters, because a run that gets rescued must not carry a stale
+        // count into the pass after it.
+        let (release, parked) = tokio::sync::oneshot::channel::<()>();
+        fixture.runtime.inner.tasks.lock().insert(
+            Uuid::new_v4(),
+            TrackedFlowTask {
+                run_ids: BTreeSet::from([run_id]),
+                handle: tokio::spawn(async move {
+                    let _ = parked.await;
+                    Ok(())
+                }),
+            },
+        );
+        let report = fixture.runtime.sweep_orphaned_runs().await.expect("sweep");
+        assert_eq!(
+            report,
+            FlowSweepReport::default(),
+            "a run with a live worker is not the sweep's to settle or to count"
+        );
+        assert!(
+            fixture.runtime.inner.stuck_runs.lock().is_empty(),
+            "a run that left the unsettled list must leave the stuck map with it"
+        );
+        release.send(()).expect("release the parked worker");
+        fixture.shutdown().await;
     }
 
     /// An empty, healthy runtime sweeps to nothing — and emits nothing, because a healthy
@@ -5187,6 +5296,83 @@ mod tests {
                 }
             }
             (run.id, attempt.id)
+        }
+
+        /// A run whose persisted shape will not revalidate: the frozen selection names two
+        /// devices and only one device run exists.
+        ///
+        /// Not a contrived corruption — it is what a run half-written by a process that died
+        /// between `create_flow_run` and its second `create_flow_device_run` looks like, and
+        /// `recompute_run_projection` refuses it by design ("Flow device projection does not
+        /// match its frozen selection"). The sweep therefore settles every attempt and
+        /// device it can and still cannot finish the run, which is the population the
+        /// stuck-run counter exists for.
+        fn seed_unsettleable_run(&self) -> Uuid {
+            let run = self
+                .database
+                .create_flow_run(
+                    &self.revision,
+                    FlowSelectionSnapshot {
+                        requested: FlowTargetSelection::Selected {
+                            udids: vec!["iphone-a".into(), "iphone-b".into()],
+                        },
+                        target_udids: vec!["iphone-a".into(), "iphone-b".into()],
+                    },
+                )
+                .expect("create half-written run");
+            let device = self
+                .database
+                .create_flow_device_run(run.id, "iphone-a")
+                .expect("create the one device that made it");
+            self.database
+                .transition_flow_device_run(
+                    device.id,
+                    FlowDeviceRunState::Queued,
+                    FlowDeviceRunState::Preflight,
+                    None,
+                )
+                .expect("preflight");
+            self.database
+                .transition_flow_device_run(
+                    device.id,
+                    FlowDeviceRunState::Preflight,
+                    FlowDeviceRunState::Running,
+                    Some(FlowCapabilitySnapshot {
+                        scope: FlowPreflightScope::TargetFree,
+                        device: None,
+                        agent_status: None,
+                        capability_ids: BTreeSet::new(),
+                    }),
+                )
+                .expect("running");
+            let attempt = self
+                .database
+                .initialize_flow_device_attempts(device.id)
+                .expect("initialize attempt")
+                .into_iter()
+                .next()
+                .expect("attempt");
+            let node = self
+                .revision
+                .compiled_plan
+                .nodes
+                .get(&attempt.node_id)
+                .expect("Wait node");
+            self.database
+                .transition_attempt(
+                    attempt.id,
+                    FlowAttemptState::Queued,
+                    FlowAttemptState::IntentCommitted,
+                    crate::db::AttemptTransitionPatch {
+                        canonical_input: Some(serde_json::to_value(&node.config).expect("input")),
+                        evidence_baseline: Some(
+                            serde_json::to_value(EvidenceBaseline::None).expect("baseline"),
+                        ),
+                        ..Default::default()
+                    },
+                )
+                .expect("intent");
+            run.id
         }
 
         fn seed_ambiguous_recovery_run(&self) -> (Uuid, Uuid) {
