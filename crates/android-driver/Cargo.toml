@@ -32,3 +32,11 @@ workspace = true
 name = "probe"
 path = "examples/probe.rs"
 test = true
+
+# `composer_scout --images` decides how many photos get selected on a phone holding a real
+# account, and a wrong count is invisible to the operator. Two repairs of that argument both
+# ended in a silent default, so the parsing is pure and tested.
+[[example]]
+name = "composer_scout"
+path = "examples/composer_scout.rs"
+test = true

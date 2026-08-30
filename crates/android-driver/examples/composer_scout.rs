@@ -86,6 +86,53 @@ fn dump_elements(source: &str) {
     }
 }
 
+/// What a command line says about one flag.
+#[derive(Debug, Clone, PartialEq)]
+enum Flag {
+    /// The flag is not there at all — the caller did not ask for this.
+    Absent,
+    /// The flag is there and its value cannot be used: nothing follows it, or what follows is
+    /// another flag. **Not the same as absent**, and the difference is the whole point of this
+    /// enum: `--images --album x` collapsing into "absent" is how the silent default came back.
+    Unusable,
+    Value(String),
+}
+
+fn flag_value(args: &[String], flag: &str) -> Flag {
+    let Some(at) = args.iter().position(|arg| arg == flag) else {
+        return Flag::Absent;
+    };
+    match args.get(at + 1) {
+        Some(value) if !value.starts_with("--") => Flag::Value(value.clone()),
+        _ => Flag::Unusable,
+    }
+}
+
+/// How many cells the picker should tap, or what to tell the operator instead.
+///
+/// # Absent is three; anything else unreadable is a refusal
+///
+/// This number decides how many photos get selected on a real phone, and the operator does not
+/// see it go wrong — the run just selects a different number and carries on. `--images abc`,
+/// `--images -1`, `--images 0` and `--images --album x` all used to become **three**.
+///
+/// The first repair swapped the parse for one that skipped a flag-shaped value, which turned
+/// `--images --album x` back into "absent" and defaulted it to three again — the same silent
+/// three by a different road. So the two states are kept apart: nothing asked for (three), and
+/// something asked for that cannot be read (refuse).
+fn how_many_images(args: &[String]) -> Result<usize, String> {
+    match flag_value(args, "--images") {
+        Flag::Absent => Ok(3),
+        Flag::Unusable => Err("--images cần một số từ 1 đến 12 đi ngay sau nó".to_string()),
+        Flag::Value(raw) => match raw.parse::<usize>() {
+            Ok(count) if (1..=12).contains(&count) => Ok(count),
+            _ => Err(format!(
+                "--images {raw:?} không đọc được; cần một số từ 1 đến 12"
+            )),
+        },
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -93,33 +140,23 @@ async fn main() -> anyhow::Result<()> {
         say("usage: composer_scout <serial> --album \"<tên album>\" [--images 3]");
         return Ok(());
     };
-    // The value after a flag, unless that value is itself a flag — `--images --album x` used
-    // to read `--album` as the count and then default silently.
-    let value = |flag: &str| -> Option<String> {
-        args.iter()
-            .position(|arg| arg == flag)
-            .and_then(|at| args.get(at + 1))
-            .filter(|value| !value.starts_with("--"))
-            .cloned()
+    let album = match flag_value(&args, "--album") {
+        Flag::Value(album) => album,
+        Flag::Absent => {
+            say("--album is required: the name of an album this phone's picker already shows");
+            return Ok(());
+        }
+        Flag::Unusable => {
+            say("--album needs a name after it, not another flag");
+            return Ok(());
+        }
     };
-    let Some(album) = value("--album") else {
-        say("--album is required: the name of an album this phone's picker already shows");
-        return Ok(());
-    };
-    // **A value this cannot read is refused, not defaulted.** `--images abc`, `--images -1`
-    // and `--images --album …` all became three, which is the wrong number silently — and the
-    // number decides how many cells get tapped on a real phone.
-    let images: usize = match value("--images") {
-        None => 3,
-        Some(raw) => match raw.parse::<usize>() {
-            Ok(count) if (1..=12).contains(&count) => count,
-            _ => {
-                say(&format!(
-                    "--images {raw:?} không đọc được; cần một số từ 1 đến 12"
-                ));
-                return Ok(());
-            }
-        },
+    let images = match how_many_images(&args) {
+        Ok(images) => images,
+        Err(complaint) => {
+            say(&complaint);
+            return Ok(());
+        }
     };
 
     let driver = AndroidDriver::new(&common::repo_config())?;
@@ -218,4 +255,70 @@ async fn main() -> anyhow::Result<()> {
         "không lùi được về feed: máy còn đang ở trong composer với ảnh đã chọn. Kiểm tra tay          trước khi chạy tiếp bất cứ thứ gì trên máy này."
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    /// **Nothing asked for is three; asked-for-and-unreadable is a refusal.**
+    ///
+    /// The number decides how many cells get tapped on a phone holding a real account, and a
+    /// wrong one is invisible: the run selects four photos instead of eleven and prints nothing
+    /// about it.
+    #[test]
+    fn an_unreadable_image_count_is_refused_rather_than_defaulted() {
+        assert_eq!(how_many_images(&line(&["SN"])), Ok(3), "not asked for");
+        assert_eq!(how_many_images(&line(&["SN", "--images", "7"])), Ok(7));
+        for bad in ["abc", "-1", "0", "13", "3.5", ""] {
+            assert!(
+                how_many_images(&line(&["SN", "--images", bad])).is_err(),
+                "--images {bad:?} must refuse, not silently mean three"
+            );
+        }
+    }
+
+    /// **A flag whose value is the next flag is unreadable, not absent.**
+    ///
+    /// This is the one the first repair got wrong. Skipping a flag-shaped value made
+    /// `--images --album x` indistinguishable from not passing `--images` at all, so it
+    /// defaulted to three — the exact behaviour the repair was written to remove.
+    #[test]
+    fn a_flag_swallowing_the_next_flag_is_not_the_same_as_an_absent_flag() {
+        let swallowed = line(&["SN", "--images", "--album", "riviu-import-1"]);
+        assert_eq!(flag_value(&swallowed, "--images"), Flag::Unusable);
+        assert!(
+            how_many_images(&swallowed).is_err(),
+            "--images --album must refuse; defaulting to three is how this bug returns"
+        );
+        // And the album it swallowed is still read correctly, so the message the operator
+        // gets is about the flag that is actually wrong.
+        assert_eq!(
+            flag_value(&swallowed, "--album"),
+            Flag::Value("riviu-import-1".into())
+        );
+    }
+
+    /// A trailing flag has nothing after it at all.
+    #[test]
+    fn a_flag_at_the_end_of_the_line_is_unusable() {
+        assert_eq!(
+            flag_value(&line(&["SN", "--album"]), "--album"),
+            Flag::Unusable
+        );
+        assert_eq!(flag_value(&line(&["SN"]), "--album"), Flag::Absent);
+    }
+
+    /// An album name is taken whole, including one that looks like a sentence.
+    #[test]
+    fn an_album_name_is_taken_as_written() {
+        assert_eq!(
+            flag_value(&line(&["SN", "--album", "Ảnh chụp màn hình"]), "--album"),
+            Flag::Value("Ảnh chụp màn hình".into())
+        );
+    }
 }
