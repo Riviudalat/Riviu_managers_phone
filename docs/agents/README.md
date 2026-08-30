@@ -69,7 +69,7 @@ nếu một trích dẫn nêu số con.
 
 ## Nhật ký §9.x
 
-151 mục, trong 6 file dưới `diary/`. **Thứ tự trong file là thứ tự viết, không phải thứ
+152 mục, trong 6 file dưới `diary/`. **Thứ tự trong file là thứ tự viết, không phải thứ
 tự số và cũng không phải thứ tự thời gian** — trong bản gốc §9.43 nằm giữa §9.20 và
 §9.21, và §9.4 nằm sau §9.17. Đó là lý do bảng này sắp theo **số**: để tra được.
 
@@ -268,6 +268,7 @@ thật của việc các mục không được viết theo thứ tự, không ph
 | §9.131 | [Mười người review song song — năm vùng, mỗi vùng hai người không đọc bài nhau (30/08/2026)](diary/06-2408-2708.md#9131-mười-người-review-song-song-năm-vùng-mỗi-vùng-hai-người-không-đọc-bài-nhau-30082026) | `diary/06-2408-2708.md` |
 | §9.132 | [Fleet cắm lại: 20/20 qua cổng phần cứng, và ba nhãn cuối của đường đăng bài đo xong (30/08/2026)](diary/06-2408-2708.md#9132-fleet-cắm-lại-2020-qua-cổng-phần-cứng-và-ba-nhãn-cuối-của-đường-đăng-bài-đo-xong-30082026) | `diary/06-2408-2708.md` |
 | §9.133 | [Đợt cải thiện toàn hệ thống: nối đường Sheet, dọn nợ, và hai chỗ máy thật bác lại kế hoạch (31/08/2026)](diary/06-2408-2708.md#9133-đợt-cải-thiện-toàn-hệ-thống-nối-đường-sheet-dọn-nợ-và-hai-chỗ-máy-thật-bác-lại-kế-hoạch-31082026) | `diary/06-2408-2708.md` |
+| §9.134 | [Vòng review mười người lần hai: cái tôi vừa viết hôm nay sai ở đâu (31/08/2026)](diary/06-2408-2708.md#9134-vòng-review-mười-người-lần-hai-cái-tôi-vừa-viết-hôm-nay-sai-ở-đâu-31082026) | `diary/06-2408-2708.md` |
 
 ---
 
