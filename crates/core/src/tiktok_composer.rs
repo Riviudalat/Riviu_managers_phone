@@ -239,7 +239,9 @@ impl ComposerVerdict {
             Self::NeverArmed => "đã bấm các ô ảnh nhưng nút Tiếp không sáng — không ô nào ăn",
             Self::MultiSelectDidNotEngage => {
                 "bấm 'Chọn nhiều' không ăn — ô đầu tiên mở thẳng trình sửa đơn, nên không bấm \
-                 thêm ô nào vào màn hình lạ"
+                 thêm ô nào vào màn hình lạ. Nguyên nhân đã đo: nút đó là công tắc HAI CHIỀU và \
+                 TikTok nhớ trạng thái giữa các lượt, nên một cú bấm mù sẽ TẮT chế độ nhiều ảnh \
+                 khi lượt trước đã bật nó — chạy lại lượt nữa là vào đúng"
             }
             Self::NotEnoughSelected => "picker báo số ảnh đã chọn khác số ảnh bài này cần",
             Self::EditStepDidNotOpen => "bấm Tiếp mà bước chỉnh sửa không mở",
