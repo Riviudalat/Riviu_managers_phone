@@ -40,3 +40,8 @@ test = true
 name = "composer_scout"
 path = "examples/composer_scout.rs"
 test = true
+
+[[example]]
+name = "share_scout"
+path = "examples/share_scout.rs"
+test = true

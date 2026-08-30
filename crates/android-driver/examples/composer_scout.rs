@@ -157,41 +157,49 @@ fn how_many_images(args: &[String]) -> Result<usize, String> {
     }
 }
 
+/// Print the refusal for the operator, then leave with a non-zero exit for the script.
+///
+/// Every arm here used to `return Ok(())` — a refused command line exited 0, so a
+/// multi-serial loop sailed past a typo and reported a measuring run that never ran.
+/// The same shape §9.129 fixed for a stranded phone, one layer earlier.
+fn refuse_usage(complaint: &str) -> anyhow::Error {
+    say(complaint);
+    anyhow::anyhow!("dòng lệnh bị từ chối — xem thông báo ở trên")
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(serial) = args.first().filter(|arg| !arg.starts_with("--")) else {
-        say("usage: composer_scout <serial> --album \"<tên album>\" [--images 3] [--visit-caption-step]");
-        return Ok(());
+        return Err(refuse_usage(
+            "usage: composer_scout <serial> --album \"<tên album>\" [--images 3] [--visit-caption-step]",
+        ));
     };
     let album = match flag_value(&args, "--album") {
         Flag::Value(album) => album,
         Flag::Absent => {
-            say("--album is required: the name of an album this phone's picker already shows");
-            return Ok(());
+            return Err(refuse_usage(
+                "--album is required: the name of an album this phone's picker already shows",
+            ));
         }
         Flag::Unusable => {
-            say("--album needs a name after it, not another flag");
-            return Ok(());
+            return Err(refuse_usage(
+                "--album needs a name after it, not another flag",
+            ));
         }
         Flag::Repeated => {
-            say("--album appears more than once; pass it once — neither occurrence is guessed at");
-            return Ok(());
+            return Err(refuse_usage(
+                "--album appears more than once; pass it once — neither occurrence is guessed at",
+            ));
         }
     };
     let images = match how_many_images(&args) {
         Ok(images) => images,
-        Err(complaint) => {
-            say(&complaint);
-            return Ok(());
-        }
+        Err(complaint) => return Err(refuse_usage(&complaint)),
     };
     let visit_caption_step = match switch(&args, "--visit-caption-step") {
         Ok(on) => on,
-        Err(complaint) => {
-            say(&complaint);
-            return Ok(());
-        }
+        Err(complaint) => return Err(refuse_usage(&complaint)),
     };
 
     let driver = AndroidDriver::new(&common::repo_config())?;

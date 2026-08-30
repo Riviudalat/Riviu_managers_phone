@@ -1489,9 +1489,20 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // rather than assumed from it: the two builds disagree about the sound strip and
         // about the Send button, so agreement here is a fact rather than a rule.
         comment_reply: Some(LabelMatch::Text("Reply")),
-        composer_open: None,
+        // `Create`, on the bottom bar — read off ce11171beb408a1501's feed on 30/08/2026
+        // (`label_scout`, m1-feed dump), the same string the `trill` set carries and now
+        // measured here rather than borrowed from there.
+        composer_open: Some(LabelMatch::Exact("Create")),
+        // Deliberately still `None` in the LANGUAGE set: this build renders the shutter as
+        // an **unresolved resource reference** (`@2131823287` on 46.2.1), and a reference is
+        // reassigned on every rebuild — it lives in the version table, where
+        // `TikTokControls::label` reads first. See `TikTokResourceLabels::composer_shutter`.
         composer_shutter: None,
-        // The S8+ fleet work never opened the composer on this build.
+        // The S8+ fleet work never opened the composer on this build; 30/08/2026 did, and
+        // stopped at the gallery entry: `beside_shutter` geometry is measured on `trill`,
+        // while this build keeps its upload entry BOTTOM-LEFT (`…:id/upload_hot_area`,
+        // [0,1891][179,2070]) — right of the shutter is the effects rail. The picker labels
+        // below stay unmeasured until the walk can reach the picker on this layout.
         picker_album_menu: None,
         picker_tab_all: None,
         picker_tab_photos: None,

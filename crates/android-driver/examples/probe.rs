@@ -151,8 +151,14 @@ async fn main() -> anyhow::Result<()> {
              than trying another language's strings",
             TIKTOK.as_str()
         );
-        println!("\nG1 probe finished (label probes skipped).");
-        return Ok(());
+        // A refusal, so it exits like one. This used to print "finished (label probes
+        // skipped)" and return 0 — the same silent-success shape §9.129 closed for a
+        // stranded phone and 8999d5b closed for a malformed flag: a multi-serial script
+        // read "measured" off a run that measured nothing.
+        anyhow::bail!(
+            "bộ nhãn chưa đo cho build này — chạy label_scout trước; các bước phía trên \
+             (list/launch/session) đã chạy xong"
+        );
     };
     println!("  using {}", labels.provenance());
     // Keyed on whether the Send button actually resolved, not on whether a resource set
