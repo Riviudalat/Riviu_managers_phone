@@ -781,9 +781,22 @@ where
             None,
         ));
     };
-    if !drawer.focus_and_type(&field, text, stop).await? {
+    // **A refusal here is settled as a verdict, never as a transport error.** Both answers
+    // mean nothing was typed and nothing was tapped; routing either through `?` would send
+    // it down the interaction path's after-effect channel, which retires the assignment
+    // `Uncertain` — unretryable — for a message that never reached the field.
+    let typed = drawer.focus_and_type(&field, text, stop).await?;
+    if typed != crate::tiktok_drawer::TypedInto::Typed {
+        // Nothing to read back on a refusal, and a drawer left open with a lit draft makes
+        // the next assignment on this phone refuse for the same reason. Interaction does
+        // not close the drawer on its success path (it reads the posted comment out of the
+        // still-open list); a refusal is the opposite case.
+        drawer.leave(stop).await;
         return Ok(outcome(
-            CommentVerdict::NoSendControl,
+            match typed {
+                crate::tiktok_drawer::TypedInto::SendPreArmed => CommentVerdict::SendPreArmed,
+                _ => CommentVerdict::NoSendControl,
+            },
             String::new(),
             String::new(),
             None,
@@ -1866,9 +1879,16 @@ where
     let Some(field) = session.locate(ElementQuery::ClassName(EDIT_TEXT)).await? else {
         return Ok(Err(ReplyRefusal::NoComposer));
     };
-    if !drawer.focus_and_type(&field, text, stop).await? {
+    // Same rule as the opening comment's path: a refusal is a verdict, not a transport
+    // error, and a refused drawer is closed because there is nothing to read back out of it.
+    let typed = drawer.focus_and_type(&field, text, stop).await?;
+    if typed != crate::tiktok_drawer::TypedInto::Typed {
+        drawer.leave(stop).await;
         return Ok(Ok(HierarchySendOutcome {
-            verdict: CommentVerdict::NoSendControl,
+            verdict: match typed {
+                crate::tiktok_drawer::TypedInto::SendPreArmed => CommentVerdict::SendPreArmed,
+                _ => CommentVerdict::NoSendControl,
+            },
             // Replies never re-tag: only the opening comment carries the mentions.
             mention_note: None,
             parent_was_folded: false,

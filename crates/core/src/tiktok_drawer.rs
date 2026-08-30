@@ -74,6 +74,15 @@ pub enum CommentVerdict {
     NoSendControl,
     /// The text went in and Send never armed.
     NotArmed,
+    /// Send was **already lit before a character was typed**, so nothing was typed.
+    ///
+    /// Two explanations, both meaning "do not send": the field still holds a draft from an
+    /// earlier run (Send after typing would post that draft glued to this run's text, on a
+    /// real account), or the `enabled` read failed and the driver's deliberate fail-open
+    /// default is standing in for a reading — in which case nothing downstream of the arm
+    /// wait measures what it claims to. A verdict and not an error: nothing was typed and
+    /// nothing was tapped, so the assignment stays retryable.
+    SendPreArmed,
     /// The text source had nothing worth saying about this post.
     ContextSkipped,
 }
@@ -89,6 +98,11 @@ impl CommentVerdict {
             Self::NoDrawer => "drawer bình luận không mở ra ô nhập",
             Self::NoSendControl => "không thấy nút Gửi trong drawer",
             Self::NotArmed => "đã nhập chữ nhưng nút Gửi không sáng",
+            Self::SendPreArmed => {
+                "nút Gửi đã sáng TRƯỚC khi gõ chữ nào — hoặc ô còn draft của lượt trước (gửi \
+                 lúc này là đăng chữ không phải của lượt này), hoặc thuộc tính enabled đọc \
+                 hỏng và mặc định fail-open đang che nó. Chưa gõ gì, chưa bấm gì"
+            }
             Self::ContextSkipped => "ngữ cảnh không đủ để nói gì",
         }
     }
@@ -97,6 +111,22 @@ impl CommentVerdict {
     pub fn is_sent(self) -> bool {
         self == Self::Sent
     }
+}
+
+/// What happened at the field, for a caller that must classify a refusal.
+///
+/// Three answers because the two refusals mean different things and the old `bool` could
+/// only carry one: `NoSendControl` is "this drawer has no Send", `SendPreArmed` is "Send is
+/// saying something impossible". Neither is an error — nothing was typed, nothing was
+/// tapped — and the difference between them is what the operator reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypedInto {
+    /// The text is in the field.
+    Typed,
+    /// The drawer opened but the Send control was not in it.
+    NoSendControl,
+    /// Send was lit before anything was typed — see [`CommentVerdict::SendPreArmed`].
+    SendPreArmed,
 }
 
 /// Where a tap should land inside a located control.
@@ -180,30 +210,35 @@ impl<'a, P: TapPlanner> CommentDrawer<'a, P> {
     ///   standing in for a reading — in which case nothing downstream of the arm wait is
     ///   measuring what it claims to.
     ///
-    /// An error rather than a quiet `false`, because `false` here means "no Send control",
-    /// and this is the opposite: a Send control saying something impossible.
+    /// # A refusal here is a VERDICT, not an error, and the first version got that wrong
+    ///
+    /// The refusal fires **before `type_text`, before any Send tap** — the textbook
+    /// before-effect. Raised as `anyhow::bail!`, it travelled the interaction path's
+    /// transport-error channel (`SendFailure::after`, reserved for "a Send tap went out"),
+    /// which settles the assignment `Uncertain` — the one state
+    /// `retryable_assignments` excludes forever. So a single masked `enabled` read would
+    /// have retired a message that was never typed, on a phone that never sent anything.
+    /// Returning an answer the caller can classify keeps it where it belongs: a
+    /// before-effect refusal, retryable, named. Found by an independent review on
+    /// 31/08/2026.
     pub async fn focus_and_type(
         &mut self,
         field: &ElementBox,
         text: &str,
         stop: &AtomicBool,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<TypedInto> {
         self.tap_inside(field).await?;
         let Some(send) = self.send_query() else {
-            return Ok(false);
+            return Ok(TypedInto::NoSendControl);
         };
         let Some(button) = self.await_element(DRAWER_WINDOW, send, stop).await? else {
-            return Ok(false);
+            return Ok(TypedInto::NoSendControl);
         };
         if button.enabled {
-            anyhow::bail!(
-                "nút Gửi đã sáng TRƯỚC khi gõ chữ nào — hoặc ô còn draft của lượt trước \
-                 (gửi lúc này là đăng chữ không phải của lượt này), hoặc thuộc tính enabled \
-                 đọc hỏng và mặc định fail-open đang che nó. Từ chối thay vì gửi."
-            );
+            return Ok(TypedInto::SendPreArmed);
         }
         self.session.type_text(text).await?;
-        Ok(true)
+        Ok(TypedInto::Typed)
     }
 
     /// Wait for Send to arm, and return it so the caller can tap it.
@@ -359,8 +394,10 @@ async fn post_into_drawer<P: TapPlanner>(
     let Some(field) = drawer.open(stop).await? else {
         return Ok(CommentVerdict::NoDrawer);
     };
-    if !drawer.focus_and_type(&field, text, stop).await? {
-        return Ok(CommentVerdict::NoSendControl);
+    match drawer.focus_and_type(&field, text, stop).await? {
+        TypedInto::Typed => {}
+        TypedInto::NoSendControl => return Ok(CommentVerdict::NoSendControl),
+        TypedInto::SendPreArmed => return Ok(CommentVerdict::SendPreArmed),
     }
     let Some(send) = drawer.await_armed(stop).await? else {
         return Ok(CommentVerdict::NotArmed);
@@ -597,6 +634,11 @@ mod tests {
     /// else's words glued to ours) or the fail-open `enabled` default standing in for a
     /// failed read. Both end the same way: nothing typed, nothing tapped past the field,
     /// and the drawer closed on the way out.
+    ///
+    /// **A verdict, not an error, and that distinction is the whole finding.** Raised as an
+    /// error, this refusal travelled interaction's transport channel and retired the
+    /// assignment `Uncertain` — the one state nothing retries — for a message that was
+    /// never typed. `SendPreArmed` settles as a before-effect refusal instead.
     #[tokio::test(start_paused = true)]
     async fn a_send_lit_before_typing_refuses_instead_of_sending() {
         let session = FakeSession::with(vec![
@@ -609,10 +651,20 @@ mod tests {
         let stop = AtomicBool::new(false);
         let refused = post_comment(&session, vietnamese(), &mut planner, "hi", &stop)
             .await
-            .expect_err("a pre-lit Send must refuse, loudly");
+            .expect("a pre-lit Send is a verdict, never a transport error");
+        assert_eq!(
+            refused,
+            CommentVerdict::SendPreArmed,
+            "the refusal must be the named verdict, so the caller settles it retryable"
+        );
         assert!(
-            refused.to_string().contains("TRƯỚC khi gõ"),
-            "the reason must name the pre-typing flip: {refused}"
+            refused.reason().contains("TRƯỚC khi gõ"),
+            "the reason must name the pre-typing flip: {}",
+            refused.reason()
+        );
+        assert!(
+            !refused.is_sent(),
+            "a refusal must never read as a delivered comment"
         );
         assert!(
             session.typed.lock().is_empty(),
