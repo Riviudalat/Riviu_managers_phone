@@ -36,9 +36,10 @@ use std::sync::atomic::AtomicBool;
 use riviu_android_driver::AndroidDriver;
 use riviu_core::driver::{DeviceDriver, UiSession};
 use riviu_core::tiktok_composer::{
-    reach_edit_step, CarouselRequest, Composer, ComposerPlan, Screen, REQUIRED_TO_PUBLISH,
+    reach_edit_step, CarouselRequest, Composer, ComposerPlan, ComposerVerdict, Screen,
+    REQUIRED_TO_PUBLISH,
 };
-use riviu_core::tiktok_labels::{controls_for, TikTokControl};
+use riviu_core::tiktok_labels::{controls_for, TikTokControl, TikTokControls};
 
 #[path = "common/mod.rs"]
 mod common;
@@ -117,6 +118,17 @@ fn flag_value(args: &[String], flag: &str) -> Flag {
     }
 }
 
+/// A boolean switch: off, on, or passed twice — which is refused like every other repeat.
+fn switch(args: &[String], flag: &str) -> Result<bool, String> {
+    match args.iter().filter(|arg| *arg == flag).count() {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(format!(
+            "{flag} xuất hiện nhiều lần — không đoán lần nào là thật"
+        )),
+    }
+}
+
 /// How many cells the picker should tap, or what to tell the operator instead.
 ///
 /// # Absent is three; anything else unreadable is a refusal
@@ -149,7 +161,7 @@ fn how_many_images(args: &[String]) -> Result<usize, String> {
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(serial) = args.first().filter(|arg| !arg.starts_with("--")) else {
-        say("usage: composer_scout <serial> --album \"<tên album>\" [--images 3]");
+        say("usage: composer_scout <serial> --album \"<tên album>\" [--images 3] [--visit-caption-step]");
         return Ok(());
     };
     let album = match flag_value(&args, "--album") {
@@ -169,6 +181,13 @@ async fn main() -> anyhow::Result<()> {
     };
     let images = match how_many_images(&args) {
         Ok(images) => images,
+        Err(complaint) => {
+            say(&complaint);
+            return Ok(());
+        }
+    };
+    let visit_caption_step = match switch(&args, "--visit-caption-step") {
+        Ok(on) => on,
         Err(complaint) => {
             say(&complaint);
             return Ok(());
@@ -252,6 +271,23 @@ async fn main() -> anyhow::Result<()> {
         Err(error) => say(&format!("  (không đọc được hierarchy: {error})")),
     }
 
+    // **One screen further, only when asked, and only ever to look.** The caption step is
+    // one tap from Post, which is exactly why `reach_edit_step` refuses to own it — so this
+    // block taps the one measured `ComposerNext` and nothing else, dumps what appears, and
+    // hands straight back to the walk-out below. It types nothing; the dump is the harvest,
+    // and `ComposerCaption`/`PostButton` get measured from the file it writes.
+    if visit_caption_step {
+        if matches!(&verdict, Ok(ComposerVerdict::Stopped)) {
+            // `stop` is never set in this tool, so `Stopped` here can only be the measuring
+            // terminus: standing on the edit step, before its Next.
+            if let Err(error) = peek_at_the_caption_step(&session, labels).await {
+                say(&format!("\n--visit-caption-step lỗi: {error:#}"));
+            }
+        } else {
+            say("\n--visit-caption-step: chưa đứng ở bước chỉnh sửa nên không đi tiếp");
+        }
+    }
+
     // The caller owns the walk-back — see `reach_edit_step`.
     let out = composer.leave().await;
     say(&format!(
@@ -273,12 +309,59 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Tap the edit step's measured Next, dump the caption screen, and touch nothing else.
+///
+/// Errors are the caller's to print, not to propagate out of `main` — the walk-back below
+/// this must run whatever happened here, or the phone is left one tap from Post.
+async fn peek_at_the_caption_step(
+    session: &riviu_android_driver::AndroidUiSession,
+    labels: TikTokControls,
+) -> anyhow::Result<()> {
+    let Some(next) = labels.label(TikTokControl::ComposerNext) else {
+        anyhow::bail!(
+            "build này chưa đo ComposerNext — đo nó từ dump bước chỉnh sửa ở trên trước, \
+             rồi chạy lại với cờ này"
+        );
+    };
+    let Some(element) = session.locate(next.to_query()).await? else {
+        anyhow::bail!("không thấy nút Next của bước chỉnh sửa trên màn hình");
+    };
+    session.tap(element.centre()).await?;
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    say("\n--- màn hình caption (một tap trước Đăng — tool KHÔNG bấm gì ở đây) ---");
+    let source = session.agent().source().await?;
+    let path = std::path::Path::new("target").join("composer-caption.xml");
+    let _ = std::fs::create_dir_all("target");
+    let _ = std::fs::write(&path, &source);
+    dump_elements(&source);
+    say(&format!("\n(XML đầy đủ: {})", path.display()));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn line(args: &[&str]) -> Vec<String> {
         args.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    /// The switch has three states and the third is a refusal, like every other repeat.
+    #[test]
+    fn a_repeated_switch_is_refused_not_first_wins() {
+        assert_eq!(switch(&line(&["SN"]), "--visit-caption-step"), Ok(false));
+        assert_eq!(
+            switch(
+                &line(&["SN", "--visit-caption-step"]),
+                "--visit-caption-step"
+            ),
+            Ok(true)
+        );
+        assert!(switch(
+            &line(&["SN", "--visit-caption-step", "--visit-caption-step"]),
+            "--visit-caption-step"
+        )
+        .is_err());
     }
 
     /// **Nothing asked for is three; asked-for-and-unreadable is a refusal.**

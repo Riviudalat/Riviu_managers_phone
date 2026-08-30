@@ -769,6 +769,15 @@ pub struct TikTokResourceLabels {
     /// The picker's album pill — see [`LabelMatch::ResourceId`] for why this control is here
     /// and not in a language set.
     picker_album_menu: Option<LabelMatch>,
+    /// The post screen's caption field — here and not in a language set because on the one
+    /// build measured so far (`trill` 38.3.2, 30/08/2026) neither of a field's usable
+    /// strategies works: its `text` is a placeholder that mutates the moment the caption is
+    /// typed, and `ClassName` names **two** nodes — the screen carries a title field
+    /// (`…:id/eek`, `Add a catchy title`) directly above the description (`…:id/eej`), both
+    /// `android.widget.EditText`. A class locator resolves the title, and a caption typed
+    /// there publishes a carousel whose description — the thing the operator wrote — is
+    /// empty. The id or nothing, keyed to the build like every other id.
+    composer_caption: Option<LabelMatch>,
 }
 
 impl TikTokResourceLabels {
@@ -776,6 +785,7 @@ impl TikTokResourceLabels {
         match control {
             TikTokControl::CommentSend => self.comment_send,
             TikTokControl::PickerAlbumMenu => self.picker_album_menu,
+            TikTokControl::ComposerCaption => self.composer_caption,
             _ => None,
         }
     }
@@ -815,6 +825,15 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         // names controls with exactly those. The `:id/` keeps the match on a resource-id
         // boundary, which is the difference between naming a control and naming a substring.
         picker_album_menu: Some(LabelMatch::ResourceId(":id/snr")),
+        // `EditText …:id/eej [42,652][1038,986]`, placeholder `Writing a long description
+        // can help get 3x more views…`. Measured 30/08/2026 on ce051715ac247a3f01 via
+        // `composer_scout --visit-caption-step`, standing on the post screen with three
+        // Camera photos through the composer and nothing tapped there. The id and not the
+        // class, because the same screen carries a second `EditText` directly above it —
+        // the TITLE field (`…:id/eek`, `Add a catchy title`) — and a class locator resolves
+        // that one first: the caption would land in the title and the description would
+        // publish empty. See the field's doc on this struct.
+        composer_caption: Some(LabelMatch::ResourceId(":id/eej")),
     },
     TikTokResourceLabels {
         package: "com.zhiliaoapp.musically",
@@ -822,6 +841,7 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         measured_on: "SM-G950F ce0517152c898c6f0d, Android 9, 18/08/2026 (probe --measure-comment)",
         comment_send: Some(LabelMatch::Exact("@2131823247")),
         picker_album_menu: None,
+        composer_caption: None,
     },
     TikTokResourceLabels {
         package: "com.zhiliaoapp.musically",
@@ -833,6 +853,7 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         // that it never does, and a lookup keyed by version cannot guess.
         comment_send: Some(LabelMatch::Exact("@2131823247")),
         picker_album_menu: None,
+        composer_caption: None,
     },
     TikTokResourceLabels {
         package: "com.ss.android.ugc.trill",
@@ -842,6 +863,7 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         // false -> true the moment the field held text.
         comment_send: Some(LabelMatch::Exact("@2131823284")),
         picker_album_menu: None,
+        composer_caption: None,
     },
     TikTokResourceLabels {
         package: "com.ss.android.ugc.trill",
@@ -854,6 +876,7 @@ pub const TIKTOK_RESOURCE_SETS: &[TikTokResourceLabels] = &[
         // language-keyed lookup would have refused a working phone.
         comment_send: Some(LabelMatch::Exact("@2131823293")),
         picker_album_menu: None,
+        composer_caption: None,
     },
 ];
 
@@ -975,9 +998,10 @@ static ALL: TikTokLabels = TikTokLabels {
 ///
 /// The mirror of [`nothing_measured`], and it exists for the mirror reason. That one
 /// keeps a refusal's coverage alive after a label gets measured; this one keeps the
-/// *success* path testable while the real catalogue still refuses. Today no shipped set
-/// resolves a composer plan — `composer_next` and `post_button` have never been read off
-/// any phone — so without this the only reachable branch of
+/// *success* path testable while the real catalogue still refuses. As of 30/08/2026 the
+/// `trill` 38.3.2 `en` set reaches the edit step and carries a measured `composer_next`,
+/// but `post_button` remains unmeasured on every shipped set — so without this the only
+/// fully-resolving publish tail would still be a fixture, and the only reachable branch of
 /// `tiktok_composer::ComposerPlan::resolve` would be the error, and every step past it
 /// would be untested code that first runs on a live account.
 ///
@@ -996,6 +1020,7 @@ pub(crate) fn every_publish_control_measured() -> TikTokControls {
         measured_on: "nothing — this set exists so the success path has a fixture",
         comment_send: None,
         picker_album_menu: Some(LabelMatch::ResourceId("fixture-album-menu")),
+        composer_caption: None,
     };
     TikTokControls {
         translated: &ALL,
@@ -1073,6 +1098,7 @@ pub(crate) fn every_publish_control_but_post_measured() -> TikTokControls {
         measured_on: "nothing — this set exists so the pre-publish steps have a fixture",
         comment_send: None,
         picker_album_menu: Some(LabelMatch::ResourceId("fixture-album-menu")),
+        composer_caption: None,
     };
     TikTokControls {
         translated: &NO_POST,
@@ -1135,6 +1161,7 @@ pub(crate) fn every_publish_control_but_caption_measured() -> TikTokControls {
         measured_on: "nothing — this set exists so the missing-caption state has a fixture",
         comment_send: None,
         picker_album_menu: Some(LabelMatch::ResourceId("fixture-album-menu")),
+        composer_caption: None,
     };
     TikTokControls {
         translated: &NO_CAPTION,
@@ -1167,6 +1194,15 @@ impl TikTokControls {
                 .and_then(|set| set.resource(control))
                 .or_else(|| self.translated.translated(control)),
             TikTokControl::PickerAlbumMenu => self.resources.and_then(|set| set.resource(control)),
+            // The caption field reads the version table first for the reason its field there
+            // documents: on 38.3.2 the post screen carries TWO `EditText`s, so a class can
+            // resolve the wrong one and a placeholder string stops matching once typed. The
+            // fall-through stays for a build whose caption really is class-unique — the
+            // fixtures model that build, and a future measurement may find a real one.
+            TikTokControl::ComposerCaption => self
+                .resources
+                .and_then(|set| set.resource(control))
+                .or_else(|| self.translated.translated(control)),
             other => self.translated.translated(other),
         }
     }
@@ -1802,8 +1838,23 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         like_count: Some(LabelMatch::Contains("likes")),
         profile_tab: Some(LabelMatch::Exact("Profile")),
         composer_caption: None,
-        composer_next: None,
-        post_button: None,
+        // `LinearLayout …:id/kl7 [545,1954][1048,2070]`, whose only text child reads `Next`
+        // (`…:id/kl_ [755,1985][849,2038]`). Measured 30/08/2026 on ce051715ac247a3f01 via
+        // `composer_scout --album Camera --images 3`, standing on the edit step; `Next` is
+        // the only node carrying that text on the whole screen (counted in the dump, not
+        // assumed). The neighbour matters more than the target: bottom-LEFT of the same bar
+        // is `Your Story` (`…:id/mw4`) — a one-tap publish. Text rather than the id for the
+        // same reason `picker_next` is text: this build renders the string, and the id table
+        // is reserved for controls whose strings cannot work.
+        composer_next: Some(LabelMatch::Text("Next")),
+        // `Button desc="Post" …:id/mr_ [550,1946][1048,2062]` (its text child `…:id/ms9`
+        // also reads `Post`). Measured 30/08/2026 on ce051715ac247a3f01 via
+        // `composer_scout --visit-caption-step`, on the post screen, tapping nothing.
+        // `Exact` on the description, and the neighbour is again the reason precision
+        // matters: the same bar's LEFT half is `Save to drafts` (`…:id/e0_`) — harmless —
+        // but this button is the one control in the whole catalogue whose tap cannot be
+        // taken back, and `Contains` would also match a hypothetical `Post comment`.
+        post_button: Some(LabelMatch::Exact("Post")),
         post_delete_menu: None,
         post_delete: None,
         post_delete_confirm: None,
@@ -2390,7 +2441,16 @@ mod tests {
         // undone. These six are declared so the code can name them and refuse; measuring
         // them is a device task. If a future edit fills one in without a measurement in
         // AGENTS.md, this test is what fails.
+        //
+        // **One build has now made the trip.** `trill` 38.3.2 `en` was measured on
+        // 30/08/2026 (`composer_scout`, then `--visit-caption-step`; AGENTS.md §9.132):
+        // `ComposerNext` and `PostButton` in this language set, `ComposerCaption` in the
+        // version table — see `publish_tail_is_version_keyed_except_where_the_build_renders_it`
+        // below for what pins those three. Everything else here stays refused.
         for set in TIKTOK_LABEL_SETS {
+            let measured_trip = set.package == "com.ss.android.ugc.trill"
+                && set.language == "en"
+                && set.measured_app_version == "38.3.2";
             for control in [
                 TikTokControl::ComposerNext,
                 TikTokControl::ComposerCaption,
@@ -2399,6 +2459,14 @@ mod tests {
                 TikTokControl::PostDelete,
                 TikTokControl::PostDeleteConfirm,
             ] {
+                if measured_trip
+                    && matches!(
+                        control,
+                        TikTokControl::ComposerNext | TikTokControl::PostButton
+                    )
+                {
+                    continue;
+                }
                 assert!(
                     set.translated(control).is_none(),
                     "{} {control:?} claims a measurement that AGENTS.md does not record;                      add the measurement first, then this assertion",
@@ -2406,6 +2474,50 @@ mod tests {
                 );
             }
         }
+        // And the version table stays empty of the tail everywhere the trip has not gone.
+        for set in TIKTOK_RESOURCE_SETS {
+            if set.package == "com.ss.android.ugc.trill" && set.app_version == "38.3.2" {
+                continue;
+            }
+            assert!(
+                set.resource(TikTokControl::ComposerCaption).is_none(),
+                "{} {} claims a caption field no trip has measured",
+                set.package,
+                set.app_version
+            );
+        }
+    }
+
+    /// **The measured publish tail lives where each locator's nature demands.**
+    ///
+    /// The strings (`Next`, `Post`) are rendered by the build and language-stable, so they
+    /// sit in the language set like `picker_next` does. The caption field is the opposite:
+    /// its screen carries a second `EditText` (the title) and its own text is a placeholder
+    /// that mutates when typed, so only the build-keyed id can name it — and ids must never
+    /// sit in a language set, which serves every version of the package.
+    #[test]
+    fn publish_tail_is_version_keyed_except_where_the_build_renders_it() {
+        let controls = controls_for("com.ss.android.ugc.trill", "en", "38.3.2")
+            .expect("the fleet's build is catalogued");
+        assert_eq!(
+            controls.label(TikTokControl::ComposerNext),
+            Some(LabelMatch::Text("Next"))
+        );
+        assert_eq!(
+            controls.label(TikTokControl::PostButton),
+            Some(LabelMatch::Exact("Post"))
+        );
+        assert_eq!(
+            controls.label(TikTokControl::ComposerCaption),
+            Some(LabelMatch::ResourceId(":id/eej")),
+            "the caption must resolve through the version table — a class would find the \
+             title field first"
+        );
+        // The same package on a version nobody measured refuses the caption — the id table
+        // is what keys the tail to the build, and this is the refusal doing its job.
+        let unmeasured = controls_for("com.ss.android.ugc.trill", "en", "39.9.9")
+            .expect("language set still serves");
+        assert_eq!(unmeasured.label(TikTokControl::ComposerCaption), None);
     }
 
     /// A set that can *recognise* the feed must also be able to *reach* it.

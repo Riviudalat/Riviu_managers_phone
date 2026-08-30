@@ -1931,77 +1931,80 @@ mod tests {
 
     // ------------------------------------------------------------------ readiness
 
-    /// **Not one shipped build can publish today, whatever else it can reach.**
+    /// **Exactly one shipped build can publish, and it is the one that made the trip.**
     ///
-    /// The single most important assertion in this module, and the split between the two gates
-    /// is what it now has to say twice. Every catalogued set is missing at least one of
-    /// [`REQUIRED_TO_PUBLISH`] — `ComposerNext`, `ComposerCaption` and `PostButton` have never
-    /// been read off a phone, on any build — so `can_publish` is false everywhere and
-    /// [`publish_carousel`] refuses before its first tap. If a later edit fills one of those in
-    /// without measuring it, this is what fails.
+    /// The single most important assertion in this module, in both directions. Until
+    /// 30/08/2026 it said *no* build publishes, because `ComposerNext`, `ComposerCaption`
+    /// and `PostButton` had never been read off a phone. Two `composer_scout` trips on
+    /// `trill` 38.3.2 `en` closed that (AGENTS.md §9.132) — and only there: every other
+    /// catalogued set, and the same set on a version whose caption id nobody read, still
+    /// refuses before the first tap. A second build showing up publishable here without its
+    /// own trip is a copied id, which is exactly what this table exists to forbid.
     #[test]
-    fn no_build_in_the_catalogue_can_publish_yet_and_each_gap_is_named() {
+    fn exactly_one_catalogued_build_can_publish_and_the_rest_still_refuse() {
         let mut checked = 0;
+        let mut publishable = Vec::new();
         for set in TIKTOK_LABEL_SETS {
             for version in ["", set.measured_app_version] {
                 let Some(controls) = controls_for(set.package, set.language, version) else {
                     continue;
                 };
                 let missing = ComposerPlan::missing_to_publish(&controls);
-                assert!(
-                    !missing.is_empty(),
-                    "{} / {} (app {version:?}) claims it can publish; measure the controls \
-                     first, then this assertion",
+                let resolves_publishable = ComposerPlan::resolve(&controls)
+                    .map(|plan| plan.can_publish())
+                    .unwrap_or(false);
+                assert_eq!(
+                    missing.is_empty(),
+                    resolves_publishable,
+                    "{} / {} (app {version:?}): the two publish gates disagree",
                     set.package,
                     set.language
                 );
-                if let Ok(plan) = ComposerPlan::resolve(&controls) {
-                    assert!(
-                        !plan.can_publish(),
-                        "{} / {} resolved a plan that claims it can publish",
-                        set.package,
-                        set.language
-                    );
+                if resolves_publishable {
+                    publishable.push(format!(
+                        "{} / {} (app {version:?})",
+                        set.package, set.language
+                    ));
                 }
                 checked += 1;
             }
         }
+        assert_eq!(
+            publishable,
+            vec![r#"com.ss.android.ugc.trill / en (app "38.3.2")"#.to_string()],
+            "the measured trip covers exactly this build; anything else publishing here \
+             claims a measurement AGENTS.md does not record"
+        );
         assert!(
             checked >= 4,
             "only {checked} sets scanned; the sweep is broken"
         );
     }
 
-    /// **The fleet's own build can now be driven as far as the measurement, and that is the
-    /// point of the whole exercise.**
+    /// **The fleet's own build carries the whole publish tail, measured, and can publish.**
     ///
-    /// `com.ss.android.ugc.trill` 38.3.2 runs on sixteen of the twenty phones. Every control
-    /// needed to reach the edit step is measured on it — including the album pill, which
-    /// resolves through its version-keyed resource id because its text is the album it happens
-    /// to be showing.
-    ///
-    /// Without that id the whole trip was impossible, and with `ComposerNext` still in
-    /// `REQUIRED` it was impossible twice over: the instrument demanded the reading it exists
-    /// to take.
+    /// `com.ss.android.ugc.trill` 38.3.2 runs on sixteen of the twenty phones. The
+    /// reach-the-edit-step half was measured 29/08/2026 (the album pill's version-keyed id
+    /// was the unlock), and the tail — `ComposerNext`, then `ComposerCaption` and
+    /// `PostButton` from the caption screen — came back on 30/08/2026's two `composer_scout`
+    /// trips (AGENTS.md §9.132). This assertion has flipped twice on purpose: it pinned
+    /// "cannot publish" while the trip was owed, and it pins "can publish" now that the
+    /// readings exist — either drift is a lie about what was measured.
     #[test]
-    fn the_build_sixteen_phones_run_can_reach_the_edit_step_but_not_publish() {
+    fn the_build_sixteen_phones_run_has_its_whole_publish_tail_measured() {
         let controls = controls_for("com.ss.android.ugc.trill", "en", "38.3.2")
             .expect("the fleet's build is catalogued");
         let plan = ComposerPlan::resolve(&controls).unwrap_or_else(|refusal| {
             panic!("the measuring trip is blocked on {:?}", refusal.missing)
         });
         assert!(
-            !plan.can_publish(),
-            "this build must not be able to publish"
+            plan.can_publish(),
+            "every tail control is measured; a plan that still refuses is dropping one"
         );
         assert_eq!(
             ComposerPlan::missing_to_publish(&controls),
-            vec![
-                TikTokControl::ComposerNext,
-                TikTokControl::ComposerCaption,
-                TikTokControl::PostButton
-            ],
-            "exactly the three the measuring trip is for"
+            Vec::<TikTokControl>::new(),
+            "nothing is owed on this build any more"
         );
 
         // **And the album pill is keyed to the version, not to the language.** Resource ids are
@@ -2117,24 +2120,26 @@ mod tests {
         );
     }
 
-    /// **The fleet's real labels walk to the edit step, with `ComposerNext` still unmeasured.**
+    /// **The fleet's real labels walk to the edit step and STOP, tail measured or not.**
     ///
-    /// Every other walk test runs on a fixture where all three tail controls exist. This one
-    /// runs on `com.ss.android.ugc.trill` 38.3.2 exactly as catalogued — sixteen of the twenty
+    /// Every other walk test runs on a fixture set. This one runs on
+    /// `com.ss.android.ugc.trill` 38.3.2 exactly as catalogued — sixteen of the twenty
     /// phones — and it is the case the measuring trip actually takes.
     ///
-    /// Two things only this test can see. Arrival at the edit step is proved by the **picker
-    /// going away**, because the control that would prove it positively is the one being
-    /// measured; and the album pill is reached by its version-keyed resource id, because its
-    /// text is the album it happens to be showing.
+    /// It began life proving the walk was possible with `ComposerNext` unmeasured (arrival
+    /// was proved by the picker going away). Since 30/08/2026 the whole tail is measured, so
+    /// the property it pins hardened: a plan that **can** publish, driven by the measuring
+    /// entry point, still stops on the edit step — the marker is awaited, never tapped. The
+    /// on-screen assertion at the bottom is what holds that: one tap past the stop would
+    /// leave the fake on a later scene.
     #[tokio::test(start_paused = true)]
-    async fn the_fleets_own_labels_reach_the_edit_step_without_the_label_being_measured() {
+    async fn the_fleets_own_labels_reach_the_edit_step_and_stop_there() {
         let controls = controls_for("com.ss.android.ugc.trill", "en", "38.3.2")
             .expect("the fleet's build is catalogued");
         let plan = ComposerPlan::resolve(&controls).expect("the walk is reachable");
         assert!(
-            !plan.can_publish(),
-            "this test is about the publish tail being unmeasured"
+            plan.can_publish(),
+            "the whole tail is measured now; see §9.132 — and the walk below must stop anyway"
         );
 
         // Scenes keyed by what the **catalogue** says, not by fixture strings — and carrying
@@ -2179,9 +2184,21 @@ mod tests {
             picker_real("All", None).leaving_by(box_at(0.0, 400.0)),
             picker_real("riviu-abc", Some("Select multiple")),
             picker_real("riviu-abc", Some("Next")),
-            // The edit step, carrying nothing this catalogue knows — which is the whole
-            // reason the trip is being made.
-            scene(vec![("something-unmeasured", box_at(0.0, 0.0))], None),
+            // The edit step, carrying exactly what the measured screen carries: its own
+            // `Next` (`:id/kl7`, whose only text child reads `Next` — measured 30/08/2026).
+            // With `composer_next` in the catalogue, `advance_to_edit_step` proves arrival
+            // by this marker *appearing* — and the measuring walk still never taps it, which
+            // is what the on-screen assertion below holds the fake to.
+            scene(
+                vec![(
+                    "Next",
+                    ElementBox {
+                        clickable: true,
+                        ..box_at(545.0, 1954.0)
+                    },
+                )],
+                None,
+            ),
         ])
         .rows("riviu-abc", vec![box_at(0.0, 400.0)]);
 
