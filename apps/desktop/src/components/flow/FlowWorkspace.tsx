@@ -114,11 +114,17 @@ export function FlowWorkspace({
     flowId: state.document.id,
     revision: state.document.revision,
     dirty: state.dirty,
+    // The open ticket compares epochs, not `dirty`: a blank document is born dirty
+    // (`revision === 0`), so "is it dirty now" cannot tell an edit made during a fetch from
+    // a document that was simply new when the fetch started. The epoch moves only on real
+    // edits — panning does not bump it, and neither does time.
+    epoch: state.documentEpoch,
   });
   invalidationState.current = {
     flowId: state.document.id,
     revision: state.document.revision,
     dirty: state.dirty,
+    epoch: state.documentEpoch,
   };
   const [draftError, setDraftError] = useState<string | null>(null);
   const draftWriter = useRef<FlowDraftWriter | null>(null);
@@ -141,10 +147,25 @@ export function FlowWorkspace({
     });
   }, []);
 
+  // Every path that replaces the document takes a ticket, and only the newest ticket's
+  // response may replace. Without it `flowGet` resolved whenever it resolved: a slower
+  // older open could land after a newer one and win, and — worse — an edit typed while the
+  // request was in flight was silently destroyed together with its undo history, because
+  // the discard confirmation had been answered before the typing existed. The invalidation
+  // effect below already lives by this rule; these are the two doors that did not.
+  const openSequence = useRef(0);
+
   const openSavedFlow = useCallback(async (id: string) => {
     setOperationError(null);
+    const ticket = ++openSequence.current;
+    // Captured at issue time: whatever discard the operator confirmed covered the document
+    // as it stood THEN. An epoch that moved while the request was in flight is typing that
+    // answer never covered, so the response is dropped rather than the keystrokes.
+    const epochAtIssue = invalidationState.current.epoch;
     const record = await flowGet(id);
     if (record === null) throw new Error("FlowNotFound");
+    if (ticket !== openSequence.current) return;
+    if (invalidationState.current.epoch !== epochAtIssue) return;
     draftWriter.current?.cancel();
     replaceFromRecord(record);
   }, [replaceFromRecord]);
@@ -163,8 +184,20 @@ export function FlowWorkspace({
         setFlows(nextFlows);
         setRuns(nextRuns);
         if (nextFlows.length > 0) {
+          const ticket = ++openSequence.current;
+          const epochAtIssue = invalidationState.current.epoch;
           const record = await flowGet(nextFlows[0].id);
-          if (!disposed && record !== null) replaceFromRecord(record);
+          // The workspace is already editable while this first request runs, so it obeys
+          // the same two rules as any open: newest ticket wins, and typing that happened
+          // during the fetch must not be replaced away.
+          if (
+            !disposed &&
+            record !== null &&
+            ticket === openSequence.current &&
+            invalidationState.current.epoch === epochAtIssue
+          ) {
+            replaceFromRecord(record);
+          }
         }
       } catch (error) {
         if (!disposed) setOperationError(describeError(error));
@@ -274,6 +307,9 @@ export function FlowWorkspace({
   }, [confirmDiscard, openSavedFlow]);
 
   const replaceWithNew = useCallback((document: FlowDocumentV2, source: "new" | "duplicate") => {
+    // A new or duplicated document is the newest intent, so it retires every open still in
+    // flight — otherwise a late `flowGet` response would replace the document just created.
+    openSequence.current += 1;
     draftWriter.current?.cancel();
     setOperationError(null);
     setActiveRun(null);

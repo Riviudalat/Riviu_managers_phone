@@ -43,6 +43,25 @@ function open(importLegacy: (scriptJson: string) => Promise<LegacyImportResult>,
 const importButton = () => screen.getByRole("button", { name: /Import/ });
 
 describe("FlowImportDialog", () => {
+  it("refuses an oversized paste before it ever reaches the backend", async () => {
+    // The V2 dialog has had this ceiling all along; the legacy door did not, so a huge
+    // paste was held by React, copied across IPC and parsed in full before anything could
+    // say no. Same limit, same code, refused here first.
+    const importLegacy = vi.fn(async () => ({ document, diagnostics: [] }));
+    render(
+      <FlowImportDialog onImport={vi.fn()} onClose={() => undefined} importLegacy={importLegacy} />,
+    );
+    fireEvent.change(screen.getByLabelText("JSON script cũ"), {
+      target: { value: `{"version":1,"steps":["${"a".repeat(1_048_576)}"]}` },
+    });
+
+    fireEvent.click(importButton());
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("FlowImportTooLarge");
+    expect(importLegacy).not.toHaveBeenCalled();
+  });
+
   it("reads the reason out of a Tauri rejection instead of stringifying the object", async () => {
     open(async () => {
       throw { code: "InvalidArgument", message: "legacy script JSON is invalid" };
@@ -88,8 +107,8 @@ describe("an import the operator cancelled", () => {
     // Both close controls stay enabled while the conversion runs, and the textarea stays editable.
     // With no lifetime guard, clicking Import and then Hủy still replaced the document the moment
     // the backend answered -- an explicitly cancelled import applying itself.
-    // A deferred resolver on an object, not a `let`: TypeScript narrows a `let`
-    // assigned only inside a closure to `never` at the call site.
+    // A deferred resolver on an object, not a `let`: TypeScript narrows a `let`
+    // assigned only inside a closure to `never` at the call site.
     const gate: { release?: (value: LegacyImportResult) => void } = {};
     const importLegacy = vi.fn(
       () => new Promise<LegacyImportResult>((resolve) => {

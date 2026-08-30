@@ -321,6 +321,77 @@ describe("FlowWorkspace startup", () => {
   });
 });
 
+describe("FlowWorkspace open races", () => {
+  // `flowGet` resolves whenever it resolves. Before the open ticket, a slower older open
+  // could land after a newer one and win, and an edit typed while a request was in flight
+  // was destroyed together with its undo history — the discard confirmation had been
+  // answered before that typing existed.
+  const secondDocument: FlowDocumentV2 = {
+    ...structuredClone(savedDocument),
+    id: "flow-second",
+    name: "Second flow",
+  };
+
+  function deferSecondFlowGet() {
+    let release: (record: FlowRevisionRecord) => void = () => undefined;
+    api.flowList.mockResolvedValue([
+      savedSummaryForTest(savedDocument),
+      savedSummaryForTest(secondDocument),
+    ]);
+    api.flowGet.mockImplementation(async (id: string) => {
+      if (id === secondDocument.id) {
+        return new Promise<FlowRevisionRecord>((resolve) => {
+          release = resolve;
+        });
+      }
+      return revisionRecord(savedDocument);
+    });
+    return () => release;
+  }
+
+  it("lets the newest open win when an older response resolves last", async () => {
+    const releaseSecond = deferSecondFlowGet();
+    await renderReadyWorkspace();
+
+    const picker = screen.getByRole("combobox", { name: "Flow" });
+    fireEvent.change(picker, { target: { value: secondDocument.id } });
+    await waitFor(() => expect(api.flowGet).toHaveBeenCalledWith(secondDocument.id));
+    fireEvent.change(picker, { target: { value: savedDocument.id } });
+    await waitFor(() =>
+      expect(api.flowGet.mock.calls.filter(([id]) => id === savedDocument.id)).toHaveLength(2),
+    );
+
+    await act(async () => {
+      releaseSecond()(revisionRecord(secondDocument));
+      await Promise.resolve();
+    });
+
+    expect(screen.getByDisplayValue("Saved flow")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("Second flow")).not.toBeInTheDocument();
+  });
+
+  it("drops an open whose fetch outlived a fresh edit instead of destroying the edit", async () => {
+    const releaseSecond = deferSecondFlowGet();
+    await renderReadyWorkspace();
+
+    const picker = screen.getByRole("combobox", { name: "Flow" });
+    fireEvent.change(picker, { target: { value: secondDocument.id } });
+    await waitFor(() => expect(api.flowGet).toHaveBeenCalledWith(secondDocument.id));
+    // The operator types while the request is in flight; the discard they confirmed (a
+    // clean document needs no dialog) never covered this keystroke.
+    fireEvent.click(screen.getByRole("button", { name: "Append Wait fixture" }));
+
+    await act(async () => {
+      releaseSecond()(revisionRecord(secondDocument));
+      await Promise.resolve();
+    });
+
+    expect(screen.getByDisplayValue("Saved flow")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("Second flow")).not.toBeInTheDocument();
+    expect(screen.getByTestId("canvas-kinds")).toHaveTextContent("start,end,wait");
+  });
+});
+
 describe("FlowWorkspace editing", () => {
   it("reloads a clean document after a Flow invalidation", async () => {
     await renderReadyWorkspace();

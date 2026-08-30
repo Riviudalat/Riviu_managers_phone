@@ -4,6 +4,10 @@ import { flowImportLegacy } from "../../api";
 import { describeError } from "../../describeError";
 import type { FlowDocumentV2, LegacyImportResult } from "../../types";
 
+// The same ceiling `FlowJsonDialog.tsx` enforces for V2 documents, refused before the string
+// crosses IPC: the backend re-checks, but by then React has already held the whole paste.
+const MAX_LEGACY_JSON_BYTES = 1_048_576;
+
 export interface FlowImportDialogProps {
   onImport: (document: FlowDocumentV2) => void;
   onClose: () => void;
@@ -44,6 +48,9 @@ export function FlowImportDialog({
     setError(null);
     setResult(null);
     try {
+      if (new TextEncoder().encode(raw).byteLength > MAX_LEGACY_JSON_BYTES) {
+        throw new Error("FlowImportTooLarge");
+      }
       const imported = await importLegacy(raw);
       if (!live.current) return;
       setResult(imported);

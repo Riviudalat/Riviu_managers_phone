@@ -231,9 +231,19 @@ impl FlowRuntime {
             let message = format!("{error:#}");
             tracing::error!(%run_id, error = %message, "Flow run could not be recovered");
             for (device_id, udid) in pending {
+                // `Queued` belongs in this list because recovery itself puts devices there:
+                // `reopen_device_for_resume` writes `queued`, and every resume validation
+                // error returns before the Queued→Preflight transition. Without it, a failed
+                // recovery left the device Queued, this catch was refused with StateConflict,
+                // the projection stayed non-terminal — and the same run re-failed the same
+                // way at every startup, forever.
                 if let Err(mark) = self.inner.database.mark_device_terminal(
                     device_id,
-                    &[FlowDeviceRunState::Preflight, FlowDeviceRunState::Running],
+                    &[
+                        FlowDeviceRunState::Queued,
+                        FlowDeviceRunState::Preflight,
+                        FlowDeviceRunState::Running,
+                    ],
                     FlowDeviceRunState::Failed,
                     Some(FlowErrorRecord {
                         code: "RecoveryFailed".to_string(),
@@ -476,11 +486,10 @@ impl FlowRuntime {
                 continue;
             }
 
-            let latest = latest_attempts(&refreshed.plan, &refreshed.device_attempts)?;
-            if latest
-                .iter()
-                .all(|attempt| attempt.state == FlowAttemptState::Succeeded)
-            {
+            // Path-aware, not blanket: `taken_path_succeeded` mirrors
+            // `validate_device_success_projection`, so a branching device whose taken path
+            // finished clean is recognised even though its untaken branch sits at `queued`.
+            if taken_path_succeeded(&refreshed.plan, &refreshed.device_attempts) {
                 self.inner.database.mark_device_terminal(
                     refreshed.device.id,
                     &[FlowDeviceRunState::Preflight, FlowDeviceRunState::Running],
@@ -490,6 +499,8 @@ impl FlowRuntime {
                 )?;
                 continue;
             }
+
+            let latest = latest_attempts(&refreshed.plan, &refreshed.device_attempts)?;
 
             if let Some(failed) = latest.iter().find(|attempt| {
                 matches!(
@@ -1722,6 +1733,44 @@ fn first_reclaimable_attempt(
         }
     }
     None
+}
+
+/// Whether every node **on the taken path** has a succeeded latest attempt.
+///
+/// The recovery-side twin of `validate_device_success_projection` in `db/flow_runs.rs`, built
+/// from the same two authorities (`entry_node`, `successor_on_path`) so the two cannot answer
+/// differently. The blanket "every node's latest attempt succeeded" question was retired from
+/// two DB sites because a branching plan keeps its untaken branch at `queued` forever — and
+/// recovery kept asking it here: a device that crashed after its taken path fully succeeded
+/// matched neither the success arm nor the failed arm, hit "no deterministic recovery
+/// target", and collateral-failed every pending sibling device.
+///
+/// A node on the path with no attempt, or a succeeded `IfVision` with no recorded branch,
+/// ends the walk without claiming success — recovery must not guess a path.
+fn taken_path_succeeded(
+    plan: &super::CompiledFlowPlanV2,
+    attempts: &[FlowNodeAttemptRecord],
+) -> bool {
+    let mut current = plan.entry_node();
+    let mut guard = 0usize;
+    while let Some(node_id) = current {
+        guard += 1;
+        if guard > plan.nodes.len() + 1 {
+            return false;
+        }
+        let Some(latest) = attempts
+            .iter()
+            .filter(|attempt| attempt.node_id == node_id)
+            .max_by_key(|attempt| attempt.attempt_no)
+        else {
+            return false;
+        };
+        if latest.state != FlowAttemptState::Succeeded {
+            return false;
+        }
+        current = plan.successor_on_path(node_id, latest.chosen_port.as_deref());
+    }
+    true
 }
 
 fn latest_attempts(
@@ -2958,6 +3007,241 @@ mod tests {
             .expect("a reason on the failed device");
         assert_eq!(failure.code, "RecoveryFailed");
         assert!(failure.message.contains("disappeared"), "{failure:?}");
+
+        fixture.shutdown().await;
+    }
+
+    /// **A failed recovery must terminalize a device it left `Queued`, not skip it.**
+    ///
+    /// The catch in `recover_startup_contexts` named `[Preflight, Running]` as the states a
+    /// pending device could be in — but recovery itself reopens devices to `queued`, and
+    /// every resume validation error returns before the Queued→Preflight transition. So a
+    /// deterministic recovery failure left the device `Queued`, `mark_device_terminal` was
+    /// refused with StateConflict, the projection stayed non-terminal, and the same run
+    /// re-failed the same way at every startup, forever.
+    #[tokio::test]
+    async fn a_failed_recovery_terminalizes_a_device_it_left_queued() {
+        let fixture = RuntimeFixture::new_recovering(&["iphone-a"], single_wait_plan());
+        let (run, devices) = fixture
+            .database
+            .create_flow_run_with_devices(
+                &fixture.revision,
+                FlowSelectionSnapshot {
+                    requested: FlowTargetSelection::One {
+                        udid: "iphone-a".into(),
+                    },
+                    target_udids: vec!["iphone-a".into()],
+                },
+            )
+            .expect("seed run");
+        // The device stays `Queued` on purpose: this is the state a failed resume leaves
+        // behind, and the state the old catch could not settle.
+        let mut contexts = fixture
+            .database
+            .load_flow_recovery_contexts()
+            .expect("load recovery contexts");
+        assert_eq!(contexts.len(), 1, "one queued run to recover");
+        assert_eq!(contexts[0].devices[0].state, FlowDeviceRunState::Queued);
+        let node_id = *fixture
+            .revision
+            .compiled_plan
+            .execution_order
+            .first()
+            .expect("a node");
+        // The same poisoned row the test above uses: recovery loads the attempt to
+        // normalise the device and finds nothing behind it, so the run cannot recover.
+        contexts[0].attempts.push(FlowNodeAttemptRecord {
+            id: Uuid::new_v4(),
+            device_run_id: devices[0].id,
+            node_id,
+            action_kind: ActionKind::Wait,
+            attempt_no: 1,
+            side_effect_class: SideEffectClass::None,
+            state: FlowAttemptState::Queued,
+            canonical_input: None,
+            evidence_baseline: None,
+            evidence_result: None,
+            chosen_port: None,
+            retry_allowed: true,
+            error: None,
+            started_at: None,
+            updated_at: chrono::Utc::now(),
+            finished_at: None,
+        });
+
+        fixture
+            .runtime
+            .recover_startup_contexts(contexts)
+            .await
+            .expect("an unrecoverable run must not abort startup recovery");
+
+        let broken = fixture
+            .database
+            .get_flow_run(run.id)
+            .expect("load run")
+            .expect("run");
+        assert_eq!(
+            broken.device_runs[0].state,
+            FlowDeviceRunState::Failed,
+            "a queued device under a failed recovery must end terminal, not retry forever"
+        );
+        assert_eq!(
+            broken.device_runs[0]
+                .error
+                .as_ref()
+                .expect("a reason on the failed device")
+                .code,
+            "RecoveryFailed"
+        );
+        assert_eq!(
+            broken.run.state,
+            FlowAggregateState::Failed,
+            "the projection must settle terminal so the next startup does not repeat this"
+        );
+
+        fixture.shutdown().await;
+    }
+
+    /// **Recovery recognises a branching device whose taken path finished clean.**
+    ///
+    /// The classifier used to ask the blanket question — every node's latest attempt
+    /// Succeeded — which a branching plan can never answer yes: its untaken branch sits at
+    /// `queued` forever. A device that crashed after its taken path fully succeeded matched
+    /// neither the success arm nor the failed arm, recovery bailed with "no deterministic
+    /// recovery target", and the whole run (sibling devices included) was collateral-failed.
+    /// The same question was already made path-aware in two `flow_runs.rs` sites; this pins
+    /// the third asker.
+    #[tokio::test]
+    async fn recovery_classifies_a_succeeded_branching_device_by_its_taken_path() {
+        let vision_id = Uuid::new_v4();
+        let taken_id = Uuid::new_v4();
+        let untaken_id = Uuid::new_v4();
+        let mut plan = compiled_plan(
+            vec![
+                CompiledFlowNode {
+                    id: vision_id,
+                    kind: ActionKind::IfVision,
+                    config: CompiledActionConfig::IfVision {
+                        template_png_base64: "Zml4dHVyZQ==".to_string(),
+                        threshold: 0.9,
+                        region: None,
+                    },
+                    postcondition: None,
+                },
+                CompiledFlowNode {
+                    id: taken_id,
+                    kind: ActionKind::Wait,
+                    config: CompiledActionConfig::Wait { duration_ms: 1 },
+                    postcondition: None,
+                },
+                CompiledFlowNode {
+                    id: untaken_id,
+                    kind: ActionKind::Wait,
+                    config: CompiledActionConfig::Wait { duration_ms: 1 },
+                    postcondition: None,
+                },
+            ],
+            ContextPlan {
+                requires_exclusive: false,
+                requires_ui_session: false,
+                requires_stream: false,
+                requires_fresh_text_session: false,
+                initial_bundle_id: None,
+            },
+            &[],
+        );
+        plan.successors = BTreeMap::from([
+            (
+                vision_id,
+                BTreeMap::from([
+                    ("matched".to_string(), taken_id),
+                    ("notMatched".to_string(), untaken_id),
+                ]),
+            ),
+            (taken_id, BTreeMap::new()),
+            (untaken_id, BTreeMap::new()),
+        ]);
+        let fixture = RuntimeFixture::new_recovering(&["iphone-a"], plan);
+        let run = fixture
+            .database
+            .create_flow_run(
+                &fixture.revision,
+                FlowSelectionSnapshot {
+                    requested: FlowTargetSelection::One {
+                        udid: "iphone-a".into(),
+                    },
+                    target_udids: vec!["iphone-a".into()],
+                },
+            )
+            .expect("create recovery run");
+        let device = fixture
+            .database
+            .create_flow_device_run(run.id, "iphone-a")
+            .expect("create recovery device");
+        fixture
+            .database
+            .transition_flow_device_run(
+                device.id,
+                FlowDeviceRunState::Queued,
+                FlowDeviceRunState::Preflight,
+                None,
+            )
+            .expect("recovery preflight");
+        fixture
+            .database
+            .transition_flow_device_run(
+                device.id,
+                FlowDeviceRunState::Preflight,
+                FlowDeviceRunState::Running,
+                Some(FlowCapabilitySnapshot {
+                    scope: FlowPreflightScope::TargetFree,
+                    device: None,
+                    agent_status: None,
+                    capability_ids: BTreeSet::new(),
+                }),
+            )
+            .expect("recovery running");
+        let attempts = fixture
+            .database
+            .initialize_flow_device_attempts(device.id)
+            .expect("initialize recovery attempts");
+        // Seeded the way a crash leaves them: the vision node carries its branch and the
+        // taken node succeeded, while the untaken branch keeps its initial `queued` attempt.
+        for attempt in &attempts {
+            if attempt.node_id == vision_id {
+                fixture
+                    .database
+                    .seed_flow_attempt_state_for_test(
+                        attempt.id,
+                        FlowAttemptState::Succeeded,
+                        Some("matched"),
+                    )
+                    .expect("seed vision attempt");
+            } else if attempt.node_id == taken_id {
+                fixture
+                    .database
+                    .seed_flow_attempt_state_for_test(attempt.id, FlowAttemptState::Succeeded, None)
+                    .expect("seed taken attempt");
+            }
+        }
+
+        fixture
+            .runtime
+            .recover_startup()
+            .await
+            .expect("recover startup");
+
+        let detail = fixture
+            .database
+            .get_flow_run(run.id)
+            .expect("load recovered run")
+            .expect("recovered run");
+        assert_eq!(
+            detail.device_runs[0].state,
+            FlowDeviceRunState::Succeeded,
+            "a clean taken path is a success even though the untaken branch stays queued"
+        );
+        assert_eq!(detail.run.state, FlowAggregateState::Succeeded);
 
         fixture.shutdown().await;
     }

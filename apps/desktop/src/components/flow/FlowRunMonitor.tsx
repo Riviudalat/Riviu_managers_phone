@@ -53,7 +53,19 @@ export function FlowRunMonitor({
   // the last projection it managed to read -- still saying "Running", with nothing to say the
   // number under it had stopped moving.
   const [stallReason, setStallReason] = useState<string | null>(null);
-  useEffect(() => setDetail(run), [run]);
+  // Monotonic on eventRevision, both here and in `refresh` below: a `flowGetRun` started
+  // before a run finished can resolve after it, and the parent then hands down a projection
+  // that is older than what is on screen. Accepting it painted `Running` over a terminal
+  // state, re-enabled Hủy, and restarted the poll — until the next poll healed it, or did
+  // not, if IPC was stalling. A different run id always replaces: that is a new subject,
+  // not a stale reading of this one.
+  useEffect(() => {
+    setDetail((current) =>
+      run.run.id !== current.run.id || run.run.eventRevision >= current.run.eventRevision
+        ? run
+        : current,
+    );
+  }, [run]);
 
   useEffect(() => {
     let disposed = false;
@@ -67,10 +79,11 @@ export function FlowRunMonitor({
         const next = await flowGetRun(detail.run.id);
         if (disposed || !next || next.run.eventRevision < minimumRevision) return;
         setStallReason(null);
+        // Strictly greater only. The old `|| state differs` arm was meant for a state flip
+        // at the same revision, but what it actually admitted was any stale projection whose
+        // state disagreed — including `running` at revision 2 over `succeeded` at revision 4.
         setDetail((current) =>
-          next.run.eventRevision > current.run.eventRevision || next.run.state !== current.run.state
-            ? next
-            : current,
+          next.run.eventRevision > current.run.eventRevision ? next : current,
         );
       } catch (reason) {
         if (!disposed) setStallReason(describeError(reason));

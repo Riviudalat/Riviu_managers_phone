@@ -211,6 +211,70 @@ describe("FlowRunMonitor refresh", () => {
   });
 });
 
+describe("FlowRunMonitor keeps a terminal projection monotonic", () => {
+  // A `flowGetRun` started before the run finished can resolve after it, so a projection
+  // older than the one on screen arrives through both doors: the parent's prop and this
+  // component's own refresh. Accepting it painted Running over Succeeded, re-enabled Hủy,
+  // and restarted polling.
+  it("ignores a stale lower-revision prop instead of repainting Running over a terminal state", async () => {
+    vi.useFakeTimers();
+    const terminal = detail({
+      revision: 4,
+      state: "succeeded",
+      attempts: [attempt("attempt-a", "succeeded", false)],
+    });
+    const view = render(<FlowRunMonitor run={terminal} onCancel={vi.fn()} onRetry={vi.fn()} />);
+    expect(screen.getAllByText("Succeeded")).toHaveLength(2);
+
+    view.rerender(
+      <FlowRunMonitor run={detail({ revision: 2, state: "running" })} onCancel={vi.fn()} onRetry={vi.fn()} />,
+    );
+
+    expect(screen.getAllByText("Succeeded")).toHaveLength(2);
+    expect(screen.queryByText("Running")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Hủy/ })).toBeDisabled();
+    // And polling stays stopped: a terminal state must not start the 750 ms interval.
+    await act(async () => {
+      vi.advanceTimersByTime(3_000);
+      await Promise.resolve();
+    });
+    expect(api.flowGetRun).not.toHaveBeenCalled();
+  });
+
+  it("drops a stale refresh result whose revision is behind the screen", async () => {
+    let handler: EventHandler | null = null;
+    api.listenRiviuEvents.mockImplementation(async (next: EventHandler) => {
+      handler = next;
+      return vi.fn();
+    });
+    // A late, duplicated runtime event points the refresh at a projection the database has
+    // since moved past; the fetch legitimately returns revision 2, running.
+    api.flowGetRun.mockResolvedValue(detail({ revision: 2, state: "running" }));
+    render(
+      <FlowRunMonitor
+        run={detail({
+          revision: 4,
+          state: "succeeded",
+          attempts: [attempt("attempt-a", "succeeded", false)],
+        })}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(api.listenRiviuEvents).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      handler?.({ type: "flowRunUpdated", runId: "run-a", revision: 2 });
+      await Promise.resolve();
+    });
+
+    expect(api.flowGetRun).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByText("Succeeded")).toHaveLength(2);
+    expect(screen.queryByText("Running")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Hủy/ })).toBeDisabled();
+  });
+});
+
 describe("FlowRunMonitor says when it stopped being able to read the run", () => {
   it("reports a refresh failure instead of leaving a stale Running table", async () => {
     // `refresh` had a `finally` and no `catch`, so every rejection went to the global

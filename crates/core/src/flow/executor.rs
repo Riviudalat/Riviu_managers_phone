@@ -2152,31 +2152,39 @@ fn last_launch_bundle_before(plan: &CompiledFlowPlanV2, end: usize) -> Option<&s
         })
 }
 
+/// Whether this node's compiled config is the one its kind pairs with.
+///
+/// **Exhaustive over `ActionKind` on purpose — this function is the third authority and it
+/// drifted.** The catalog admits a kind, the `riviu-script-engine` compiler emits its config,
+/// and this matcher decides in preflight whether the pair is corrupt. It used to be a
+/// `matches!` over the pairs someone remembered, and when `TapVision`/`IfVision` were added
+/// the first two authorities learned them and this one did not: every saved vision flow
+/// validated green in the editor and then died at run start with `CompiledPlanCorrupt`,
+/// before any device work. A `match` with no catch-all on the kind side makes the next new
+/// kind a compile error here instead of a silent refusal at preflight.
 fn compiled_config_matches(node: &CompiledFlowNode) -> bool {
-    matches!(
-        (&node.kind, &node.config),
-        (
-            ActionKind::Start | ActionKind::End | ActionKind::Home,
-            CompiledActionConfig::Empty
-        ) | (
-            ActionKind::LaunchApp,
-            CompiledActionConfig::LaunchApp { .. }
-        ) | (
-            ActionKind::TerminateApp,
-            CompiledActionConfig::TerminateApp { .. }
-        ) | (ActionKind::Wait, CompiledActionConfig::Wait { .. })
-            | (ActionKind::Tap, CompiledActionConfig::Tap { .. })
-            | (ActionKind::Swipe, CompiledActionConfig::Swipe { .. })
-            | (ActionKind::TypeText, CompiledActionConfig::TypeText { .. })
-            | (
-                ActionKind::Screenshot,
-                CompiledActionConfig::Screenshot { .. }
-            )
-            | (
-                ActionKind::AssertVisible,
-                CompiledActionConfig::AssertVisible { .. }
-            )
-    )
+    match node.kind {
+        ActionKind::Start | ActionKind::End | ActionKind::Home => {
+            matches!(node.config, CompiledActionConfig::Empty)
+        }
+        ActionKind::LaunchApp => matches!(node.config, CompiledActionConfig::LaunchApp { .. }),
+        ActionKind::TerminateApp => {
+            matches!(node.config, CompiledActionConfig::TerminateApp { .. })
+        }
+        ActionKind::Wait => matches!(node.config, CompiledActionConfig::Wait { .. }),
+        ActionKind::Tap => matches!(node.config, CompiledActionConfig::Tap { .. }),
+        ActionKind::Swipe => matches!(node.config, CompiledActionConfig::Swipe { .. }),
+        ActionKind::TypeText => matches!(node.config, CompiledActionConfig::TypeText { .. }),
+        ActionKind::Screenshot => matches!(node.config, CompiledActionConfig::Screenshot { .. }),
+        ActionKind::AssertVisible => {
+            matches!(node.config, CompiledActionConfig::AssertVisible { .. })
+        }
+        ActionKind::TapVision => matches!(node.config, CompiledActionConfig::TapVision { .. }),
+        ActionKind::IfVision => matches!(node.config, CompiledActionConfig::IfVision { .. }),
+        // The compiler refuses these outright ("raw actions are not enabled"), so no compiled
+        // plan carries them; one that does is corrupt no matter what config it claims.
+        ActionKind::RawHttp | ActionKind::RawWda | ActionKind::Shell => false,
+    }
 }
 
 fn validate_compiled_plan(plan: &CompiledFlowPlanV2) -> Result<(), FlowExecutionError> {
@@ -3743,6 +3751,129 @@ mod tests {
             "CompiledPlanCorrupt"
         );
         fixture.shutdown().await;
+    }
+
+    /// **Every config the compiler can emit passes the preflight matcher.**
+    ///
+    /// Three authorities answer "is this kind/config pair valid": the catalog, the
+    /// `riviu-script-engine` compiler, and `compiled_config_matches`. The third one drifted
+    /// once — `TapVision`/`IfVision` compiled and saved, and then every vision flow died at
+    /// run start with `CompiledPlanCorrupt` after validating green in the editor. This walks
+    /// one node per `CompiledActionConfig` variant, paired the way the compiler pairs them,
+    /// so narrowing the matcher goes red here instead of in an operator's first vision run.
+    #[test]
+    fn every_config_the_compiler_emits_passes_the_preflight_matcher() {
+        let locator = crate::QualifiedElementLocator {
+            strategy: crate::ElementLocatorStrategy::AccessibilityId,
+            value: "SearchField".to_string(),
+        };
+        let coordinate = ImageCoordinateTarget {
+            x: 1.0,
+            y: 1.0,
+            image_width: 4,
+            image_height: 4,
+            orientation: ScreenOrientation::Portrait,
+            profile_id: "fixture-profile".to_string(),
+        };
+        let pairs: Vec<(ActionKind, CompiledActionConfig)> = vec![
+            (ActionKind::Start, CompiledActionConfig::Empty),
+            (ActionKind::End, CompiledActionConfig::Empty),
+            (ActionKind::Home, CompiledActionConfig::Empty),
+            (
+                ActionKind::LaunchApp,
+                CompiledActionConfig::LaunchApp {
+                    bundle_id: TARGET.to_string(),
+                },
+            ),
+            (
+                ActionKind::TerminateApp,
+                CompiledActionConfig::TerminateApp {
+                    bundle_id: TARGET.to_string(),
+                },
+            ),
+            (
+                ActionKind::Wait,
+                CompiledActionConfig::Wait { duration_ms: 50 },
+            ),
+            (
+                ActionKind::Tap,
+                CompiledActionConfig::Tap {
+                    target: CompiledTapTarget::Point {
+                        target: coordinate.clone(),
+                    },
+                },
+            ),
+            (
+                ActionKind::Swipe,
+                CompiledActionConfig::Swipe {
+                    from: coordinate.clone(),
+                    to: coordinate,
+                    duration_ms: 200,
+                },
+            ),
+            (
+                ActionKind::TypeText,
+                CompiledActionConfig::TypeText {
+                    text: "xin chao".to_string(),
+                    read_back_locator: locator,
+                },
+            ),
+            (
+                ActionKind::Screenshot,
+                CompiledActionConfig::Screenshot {
+                    label: "after".to_string(),
+                    format: "png".to_string(),
+                },
+            ),
+            (
+                ActionKind::AssertVisible,
+                CompiledActionConfig::AssertVisible {
+                    accessibility_id: "SearchField".to_string(),
+                },
+            ),
+            (
+                ActionKind::TapVision,
+                CompiledActionConfig::TapVision {
+                    template_png_base64: "Zml4dHVyZQ==".to_string(),
+                    threshold: 0.9,
+                    region: None,
+                },
+            ),
+            (
+                ActionKind::IfVision,
+                CompiledActionConfig::IfVision {
+                    template_png_base64: "Zml4dHVyZQ==".to_string(),
+                    threshold: 0.9,
+                    region: None,
+                },
+            ),
+        ];
+        for (kind, config) in pairs {
+            let node = CompiledFlowNode {
+                id: Uuid::new_v4(),
+                kind,
+                config,
+                postcondition: None,
+            };
+            assert!(
+                compiled_config_matches(&node),
+                "{kind:?}: the compiler emits this pair and preflight refuses it"
+            );
+        }
+        // The compiler refuses raw actions outright, so a plan carrying one is corrupt no
+        // matter which config it claims.
+        for kind in [ActionKind::RawHttp, ActionKind::RawWda, ActionKind::Shell] {
+            let node = CompiledFlowNode {
+                id: Uuid::new_v4(),
+                kind,
+                config: CompiledActionConfig::Empty,
+                postcondition: None,
+            };
+            assert!(
+                !compiled_config_matches(&node),
+                "{kind:?}: never compiled, must never validate"
+            );
+        }
     }
 
     #[tokio::test]

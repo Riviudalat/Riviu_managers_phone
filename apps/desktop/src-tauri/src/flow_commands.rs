@@ -107,8 +107,28 @@ pub fn flow_archive(state: State<'_, AppState>, id: String) -> Result<(), Comman
     })
 }
 
+/// The same ceiling the V2 JSON dialog enforces (`MAX_FLOW_JSON_BYTES` in
+/// `FlowJsonDialog.tsx`). The two import doors must refuse at the same size, or the one
+/// without the cap becomes the way around it.
+const MAX_LEGACY_SCRIPT_BYTES: usize = 1_048_576;
+
+/// Whether a legacy script is too large to accept at all.
+///
+/// Asked before `serde_json::from_str`, because by the time serde answers, the whole string
+/// has already been held by React, copied across IPC and walked by the parser — a pasted
+/// hundred-megabyte `steps` array froze the desktop before any validation could refuse it.
+fn legacy_script_too_large(script_json: &str) -> bool {
+    script_json.len() > MAX_LEGACY_SCRIPT_BYTES
+}
+
 #[tauri::command]
 pub fn flow_import_legacy(script_json: String) -> Result<LegacyImportResult, CommandError> {
+    if legacy_script_too_large(&script_json) {
+        return Err(CommandError::code(
+            "FlowImportTooLarge",
+            "legacy script exceeds 1 MiB; export it in smaller parts",
+        ));
+    }
     let script: AutomationScript = serde_json::from_str(&script_json)
         .map_err(|_| CommandError::invalid_argument("legacy script JSON is invalid"))?;
     Ok(import_legacy_v1(&script))
@@ -469,6 +489,26 @@ mod tests {
 
     const FIXTURE_JPEG: &[u8] =
         include_bytes!("../../../../crates/core/tests/fixtures/feed-iphone8.jpg");
+
+    /// **The refusal sits at the byte boundary, and exactly there.** One byte under the V2
+    /// dialog's ceiling parses; one byte over is refused before serde ever runs. A cap that
+    /// triggered early would refuse real scripts; one that triggered late is no cap.
+    #[test]
+    fn legacy_import_refuses_oversized_scripts_at_the_shared_ceiling() {
+        assert!(!legacy_script_too_large(
+            &"a".repeat(MAX_LEGACY_SCRIPT_BYTES)
+        ));
+        assert!(legacy_script_too_large(
+            &"a".repeat(MAX_LEGACY_SCRIPT_BYTES + 1)
+        ));
+        // And the command itself answers with the code the dialogs already speak.
+        let oversized = "x".repeat(MAX_LEGACY_SCRIPT_BYTES + 1);
+        let error = flow_import_legacy(oversized).expect_err("oversized script must be refused");
+        assert!(
+            format!("{error:?}").contains("FlowImportTooLarge"),
+            "refusal must carry the shared code: {error:?}"
+        );
+    }
 
     #[test]
     fn flow_commands_catalog_exposes_only_release_one_actions() {

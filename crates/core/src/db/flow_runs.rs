@@ -1136,6 +1136,86 @@ impl Database {
         Ok(record)
     }
 
+    /// Test-only: write an attempt's state, branch and durable-boundary columns directly,
+    /// bypassing the validated transitions.
+    ///
+    /// Recovery tests need to reconstruct what a **crash** leaves behind — states the
+    /// transition machine would never hand out in one call (a succeeded `IfVision` with its
+    /// recorded branch, next to an untouched `queued` sibling). The row it writes is
+    /// loader-consistent: a state past intent carries a canonical input, a baseline shaped
+    /// by the node's evidence requirement, and the timestamps terminality demands, because
+    /// the recovery loader refuses anything less. The `db` module's own `set_attempt_state`
+    /// delegates here so the two cannot drift.
+    #[cfg(test)]
+    pub fn seed_flow_attempt_state_for_test(
+        &self,
+        attempt_id: Uuid,
+        state: FlowAttemptState,
+        chosen_port: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let state_name = serde_json::to_value(state)?
+            .as_str()
+            .context("attempt state serialises to a string")?
+            .to_string();
+        let connection = self.conn()?;
+        let identity = query_attempt_identity(&connection, attempt_id)?
+            .context("seeded attempt does not exist")?;
+        let baseline = match contracts(identity.action_kind).2 {
+            EvidenceRequirement::None | EvidenceRequirement::ActiveApp => json!({"kind":"none"}),
+            EvidenceRequirement::Process => {
+                let CompiledActionConfig::TerminateApp { bundle_id } = identity.node.config else {
+                    anyhow::bail!("process fixture requires Terminate App");
+                };
+                json!({"kind":"process","bundleId":bundle_id,"pid":42})
+            }
+            EvidenceRequirement::Frame
+            | EvidenceRequirement::TextOrQualifiedFrame
+            | EvidenceRequirement::Artifact => json!({
+                "kind":"frame",
+                "generation":1,
+                "jpegSha256":"a".repeat(64),
+                "imageWidth":1,
+                "imageHeight":1,
+                "rgbBase64":"AAAA"
+            }),
+        };
+        let now = now_text();
+        let finished_at = state.is_terminal().then_some(now.clone());
+        let error_json = (state == FlowAttemptState::FailedVerified)
+            .then(|| {
+                serde_json::to_string(&FlowErrorRecord {
+                    code: "EvidenceMismatch".to_string(),
+                    message: "fixture verification failure".to_string(),
+                    node_id: None,
+                    field: None,
+                    udid: None,
+                    attempt_id: Some(attempt_id),
+                })
+            })
+            .transpose()?;
+        // COALESCE, not overwrite: `None` means "leave the branch alone", so a test that
+        // recorded a port with `set_attempt_chosen_port` first keeps it.
+        let changed = connection.execute(
+            "UPDATE flow_node_attempts SET
+                state=?2,canonical_input_json=?3,evidence_baseline_json=?4,
+                started_at=?5,finished_at=?6,error_json=?7,
+                chosen_port=COALESCE(?8,chosen_port)
+             WHERE id=?1",
+            params![
+                attempt_id.to_string(),
+                state_name,
+                serde_json::to_string(&json!({"fixture":true}))?,
+                serde_json::to_string(&baseline)?,
+                now,
+                finished_at,
+                error_json,
+                chosen_port,
+            ],
+        )?;
+        ensure!(changed == 1, "seeded attempt does not exist");
+        Ok(())
+    }
+
     pub fn mark_device_terminal(
         &self,
         device_run_id: Uuid,
@@ -3945,59 +4025,8 @@ mod tests {
     }
 
     fn set_attempt_state(database: &Database, attempt_id: Uuid, state: FlowAttemptState) {
-        let state = serde_json::to_value(state)
-            .expect("state JSON")
-            .as_str()
-            .expect("state string")
-            .to_string();
-        let connection = database.conn().expect("connection");
-        let identity = query_attempt_identity(&connection, attempt_id)
-            .expect("attempt identity query")
-            .expect("attempt identity");
-        let baseline = match contracts(identity.action_kind).2 {
-            EvidenceRequirement::None | EvidenceRequirement::ActiveApp => json!({"kind":"none"}),
-            EvidenceRequirement::Process => {
-                let CompiledActionConfig::TerminateApp { bundle_id } = identity.node.config else {
-                    panic!("process fixture requires Terminate App");
-                };
-                json!({"kind":"process","bundleId":bundle_id,"pid":42})
-            }
-            EvidenceRequirement::Frame
-            | EvidenceRequirement::TextOrQualifiedFrame
-            | EvidenceRequirement::Artifact => json!({
-                "kind":"frame",
-                "generation":1,
-                "jpegSha256":"a".repeat(64),
-                "imageWidth":1,
-                "imageHeight":1,
-                "rgbBase64":"AAAA"
-            }),
-        };
-        let now = now_text();
-        let finished_at = parse_enum_name::<FlowAttemptState>(&state, "fixture state")
-            .expect("fixture state enum")
-            .is_terminal()
-            .then_some(now.clone());
-        let error_json = (state == "failedVerified").then(|| {
-            serde_json::to_string(&error("EvidenceMismatch", Some(attempt_id)))
-                .expect("failed verification error")
-        });
-        connection
-            .execute(
-                "UPDATE flow_node_attempts SET
-                    state=?2,canonical_input_json=?3,evidence_baseline_json=?4,
-                    started_at=?5,finished_at=?6,error_json=?7
-                 WHERE id=?1",
-                params![
-                    attempt_id.to_string(),
-                    state,
-                    serde_json::to_string(&json!({"fixture":true})).expect("canonical input"),
-                    serde_json::to_string(&baseline).expect("baseline"),
-                    now,
-                    finished_at,
-                    error_json,
-                ],
-            )
+        database
+            .seed_flow_attempt_state_for_test(attempt_id, state, None)
             .expect("seed attempt state");
     }
 
