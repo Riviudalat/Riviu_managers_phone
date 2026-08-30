@@ -1819,6 +1819,130 @@ impl AppState {
             }
         });
 
+        // Flow orphan sweep. Startup recovery settles what it finds at boot; this loop is
+        // for the run whose WORKER died while the app stayed up — a panicked task skips
+        // `retire_tracked_task` and its run sat `running` forever until the next restart.
+        // The mechanism lives in `FlowRuntime::sweep_orphaned_runs` (DB-only, never touches
+        // a phone, no-op outside `Ready`); this is just the tick, in the same split every
+        // other janitor here uses. `RIVIU_FLOW_SWEEP=off|0|false|no` turns it off — an env
+        // switch and not a setting, so it works even when the DB will not open.
+        let sweep_flows = self.flows.clone();
+        tauri::async_runtime::spawn(async move {
+            let off = std::env::var("RIVIU_FLOW_SWEEP")
+                .map(|value| {
+                    matches!(
+                        value.trim().to_ascii_lowercase().as_str(),
+                        "off" | "0" | "false" | "no"
+                    )
+                })
+                .unwrap_or(false);
+            if off {
+                log::info!("flow orphan sweep off (RIVIU_FLOW_SWEEP)");
+                return;
+            }
+            let mut ticker = tokio::time::interval(Duration::from_secs(60));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                match sweep_flows.sweep_orphaned_runs().await {
+                    Ok(report) if report.runs_settled > 0 || report.dead_tasks_retired > 0 => {
+                        log::warn!(
+                            "flow orphan sweep: settled {} run(s), retired {} dead task(s), \
+                             {} unsettleable",
+                            report.runs_settled,
+                            report.dead_tasks_retired,
+                            report.runs_unsettleable
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => log::warn!("flow orphan sweep failed: {error:#}"),
+                }
+            }
+        });
+
+        // Sheets outbox sweeper. The outbox itself has been finished and tested since
+        // 29/08 (§9.127) — this loop is the delivery half that was deliberately unwired
+        // until the link capture existed. It is DB-and-HTTP only: no admission, no lease,
+        // no device — a row can be owed while every phone is unplugged, and delivering it
+        // must not care.
+        //
+        // Unconfigured is the off switch, and it is re-read every tick: the operator can
+        // paste the webhook into settings while the app runs and the backlog starts moving
+        // on the next tick, no restart. The one-time log line is so an operator staring at
+        // a stuck `pending` row finds the reason without grepping.
+        let sheet_db = self.db.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(45));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut said_unconfigured = false;
+            loop {
+                interval.tick().await;
+                let webhook = sheet_db
+                    .get_setting(riviu_core::publish_sheet::WEBHOOK_URL_SETTING)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                let token = sheet_db
+                    .get_setting(riviu_core::publish_sheet::WEBHOOK_TOKEN_SETTING)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                if webhook.trim().is_empty() || token.trim().is_empty() {
+                    if !said_unconfigured {
+                        log::info!(
+                            "outbox Sheet đứng yên: chưa cấu hình publish_sheet_webhook_url/token"
+                        );
+                        said_unconfigured = true;
+                    }
+                    continue;
+                }
+                said_unconfigured = false;
+                let rows = match sheet_db.pending_publish_sheet_rows(50) {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        log::warn!("outbox Sheet: không đọc được hàng chờ ({error:#})");
+                        continue;
+                    }
+                };
+                for row in rows {
+                    let payload = riviu_core::publish_sheet::SheetRow {
+                        token: token.clone(),
+                        post_url: row.post_url.clone(),
+                        poster: row.poster.clone(),
+                        partners: row.partners.clone(),
+                        assignment_id: row.assignment_id.clone(),
+                    };
+                    match riviu_core::publish_sheet::push_row(&webhook, &payload).await {
+                        Ok(()) => {
+                            // Marked by the revision that was DELIVERED — a row edited
+                            // between read and send keeps owing its newer content.
+                            if let Err(error) =
+                                sheet_db.mark_publish_sheet_sent(&row.assignment_id, row.revision)
+                            {
+                                log::warn!(
+                                    "outbox Sheet: gửi được nhưng không ghi được 'sent' cho {} \
+                                     ({error:#}) — lượt sau sẽ gửi lại và script sẽ trả duplicate",
+                                    row.assignment_id
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            let reason = format!("{error:#}");
+                            let _ = sheet_db.mark_publish_sheet_failed(
+                                &row.assignment_id,
+                                row.revision,
+                                &reason,
+                            );
+                            log::warn!(
+                                "outbox Sheet: đẩy {} thất bại — {reason}",
+                                row.assignment_id
+                            );
+                        }
+                    }
+                }
+            }
+        });
+
         // TikTok nurture schedule ticks
         let db = self.db.clone();
         let nurture = self.nurture.clone();
@@ -2217,22 +2341,21 @@ mod tests {
 
     /// How far past the five-second bookkeeping deadline these tests step.
     ///
-    /// **A virtual clock does not work here, and that was worth finding out rather than
-    /// assuming.** `#[tokio::test(start_paused = true)]` is the right answer for
-    /// `flow::evidence`, whose deadlines are tokio timers it owns end to end. These three tests
-    /// are a different shape: `tick()` asks `control.background_turn_due(..)`, and that lives in
-    /// `riviu-core`'s control plane on its own clock. Pausing tokio's timers advances the
-    /// `sleep` and not the turn, so the sampler reports `Sampling` where the test expects
-    /// `Stale` -- measured, one test red. And the pipeline waits on real work either way:
-    /// converted, `keeps_both_desktop_tiles_live` ran for **over sixty seconds** instead of six.
-    /// Making it work would mean moving the whole control plane onto tokio's clock, which is a
-    /// change to production timing for every phone, not a test fix.
+    /// **The virtual clock works here now, and the doc that said otherwise is why this one
+    /// names the seam.** The 26/08 finding stands as history: pausing tokio advanced the
+    /// `sleep` and not the turn, because the budget read `std::time::Instant::now()`
+    /// internally — the sampler reported `Sampling` where the test expected `Stale`, and a
+    /// converted test crawled past sixty seconds. What changed on 31/08 is not the
+    /// diagnosis but the missing half: `StreamBudgetManager::with_clock` lets the fixture
+    /// pin the budget's clock to tokio's (see `tokio_pinned_clock`), so the three sampler
+    /// tests below run `start_paused = true` and their six-second sleeps cost milliseconds
+    /// — measured, 0.32s for the turn-staleness case that used to sleep 5.25s. The control
+    /// plane's production timing is untouched: the seam is a constructor, not a behavior.
     ///
-    /// So the flake is addressed the plain way instead: the margin was **25 ms**, which is a bet
-    /// against scheduler jitter on a Windows CI runner that is running the rest of a 778-test
-    /// crate single-threaded alongside. 250 ms is still far below any interval that would make
-    /// the assertion vacuous -- the deadline it steps past is five seconds -- and costs 225 ms
-    /// per test.
+    /// The margin survives the conversion on purpose. Under a paused clock it costs
+    /// nothing and bets on nothing; keeping it means a future revert of `start_paused` (or
+    /// a fixture that forgets `with_clock`) degrades back to the 26/08 shape — slow but
+    /// green — instead of flaking at 25 ms.
     const PAST_THE_TURN_DEADLINE: Duration = Duration::from_millis(250);
 
     #[test]
@@ -2376,6 +2499,20 @@ mod tests {
         sampler_fixture_with_limit(1).await
     }
 
+    /// A budget clock pinned to tokio's time, so a `start_paused` test's `sleep` advances
+    /// the turn deadlines with it.
+    ///
+    /// The 26/08 decision record below (`PAST_THE_TURN_DEADLINE`) measured why pausing
+    /// alone was not enough: the budget read `std::time::Instant::now()` internally, so
+    /// virtual sleeps moved the test and not the turn. `StreamBudgetManager::with_clock`
+    /// is the seam that closes that half; this closure maps tokio's (possibly paused)
+    /// clock onto the `std::time::Instant` arithmetic the budget keeps.
+    fn tokio_pinned_clock() -> std::sync::Arc<dyn Fn() -> std::time::Instant + Send + Sync> {
+        let base_std = std::time::Instant::now();
+        let base_tokio = tokio::time::Instant::now();
+        std::sync::Arc::new(move || base_std + base_tokio.elapsed())
+    }
+
     async fn sampler_fixture_with_limit(
         limit: usize,
     ) -> (
@@ -2389,7 +2526,10 @@ mod tests {
         let control = Arc::new(DeviceControlPlane::new(
             Arc::new(driver.clone()),
             Arc::new(DeviceWorkCoordinator::new()),
-            Arc::new(StreamBudgetManager::new(limit).expect("valid stream capacity")),
+            Arc::new(
+                StreamBudgetManager::with_clock(limit, tokio_pinned_clock())
+                    .expect("valid stream capacity"),
+            ),
         ));
         let registry = DeviceRegistry::new(EventBus::new(32));
         registry.upsert_many(control.list_devices().await.expect("list mock devices"));
@@ -2434,7 +2574,7 @@ mod tests {
         control.shutdown_cleanup().await.expect("shutdown control");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn background_stream_sampler_keeps_both_desktop_tiles_live() {
         let (driver, control, registry, mut sampler) = sampler_fixture_with_limit(2).await;
 
@@ -2461,7 +2601,7 @@ mod tests {
         control.shutdown_cleanup().await.expect("shutdown control");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn background_stream_sampler_does_not_recycle_at_a_healthy_turn_boundary() {
         let (driver, control, _registry, mut sampler) = sampler_fixture_with_limit(2).await;
         driver.set_mock_stream_static("MOCK-IPHONE-01", true);
@@ -2551,7 +2691,7 @@ mod tests {
         control.shutdown_cleanup().await.expect("shutdown control");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn background_stream_sampler_marks_a_five_second_turn_without_a_new_frame_stale() {
         let (driver, control, registry, mut sampler) = sampler_fixture().await;
         driver.set_mock_stream_static("MOCK-IPHONE-01", true);

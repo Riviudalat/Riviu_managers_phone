@@ -62,7 +62,14 @@ pub struct SheetRow {
     pub token: String,
     /// The link to the published post — column D.
     pub post_url: String,
-    /// Who posted it. `bot` for everything this app publishes.
+    /// Who posted it: the device account's handle when the fleet has one on file
+    /// (`device_meta.handle`, typed in by the operator), else the literal `bot`.
+    ///
+    /// Two legal values, not one, since 31/08/2026 — twenty accounts publish through this
+    /// app, and a column that always reads `bot` cannot tell the operator whose post a row
+    /// is. The script keeps its own `|| 'bot'` fallback, and migration 18's CHECK refuses an
+    /// empty poster, which is why the fallback lives on this side too rather than trusting
+    /// every handle to have been typed in.
     pub poster: String,
     /// Partner names in workbook order, written from column K onward.
     pub partners: Vec<String>,
@@ -326,13 +333,15 @@ mod tests {
         let row = SheetRow {
             token: "secret".into(),
             post_url: "https://www.tiktok.com/@a/photo/1".into(),
-            poster: "bot".into(),
+            // A device handle travels verbatim; `bot` is only the fallback for a phone whose
+            // handle was never typed in (see the field's doc — the script falls back too).
+            poster: "@cn.qut.lt4".into(),
             partners: vec!["Quán A".into(), "Quán B".into()],
             assignment_id: "assign-1".into(),
         };
         let json = serde_json::to_value(&row).expect("serialises");
         assert_eq!(json["postUrl"], "https://www.tiktok.com/@a/photo/1");
-        assert_eq!(json["poster"], "bot");
+        assert_eq!(json["poster"], "@cn.qut.lt4");
         assert_eq!(json["assignmentId"], "assign-1");
         assert_eq!(json["partners"][1], "Quán B");
         // Order is meaning here: the names go across columns K, L, M… in this order, so a

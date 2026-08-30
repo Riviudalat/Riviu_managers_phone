@@ -7,7 +7,7 @@
  * ─── Bố cục nó ghi ────────────────────────────────────────────────────────────
  *
  *   cột D   link bài đăng
- *   cột B   người đăng, luôn là `bot`      ← cột duy nhất tôi tự chọn, xem CONFIG
+ *   cột B   người đăng — handle của máy khi app biết, `bot` khi chưa nhập  ← cột duy nhất tôi tự chọn, xem CONFIG
  *   cột K+  tên đối tác, trải ngang theo đúng thứ tự trong partners-setN.xlsx
  *   cột Z   assignmentId — KHOÁ CHỐNG TRÙNG, xem mục 2
  *

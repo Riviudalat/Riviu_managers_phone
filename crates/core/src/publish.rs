@@ -373,6 +373,16 @@ pub struct PublishBundle {
     pub caption: String,
     pub caption_sha256: String,
     pub total_bytes: u64,
+    /// Partner names from the bundle's own `partners-*.xlsx`, in workbook order.
+    ///
+    /// Read at scan time and carried on the bundle, because post time is too late to go
+    /// looking: the sheet row is queued in the same transaction that records the post, and
+    /// a re-glob there would read whatever the folder holds *then*, not what the operator
+    /// scanned and approved. `default` because manifests written before 31/08/2026 do not
+    /// carry the field, and a bundle without a workbook legitimately has none — both read
+    /// back as an empty list.
+    #[serde(default)]
+    pub partners: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -543,6 +553,7 @@ fn scan_bundle(
     let mut files = read_dir_sorted(path)?;
     let mut images = Vec::new();
     let mut captions = Vec::new();
+    let mut partner_files: Vec<std::path::PathBuf> = Vec::new();
     let mut notices = Vec::new();
     let mut ignored_partner_files = 0;
     let mut ignored_hidden_files = 0;
@@ -561,7 +572,11 @@ fn scan_bundle(
         if file_name.starts_with('.') {
             ignored_hidden_files += 1;
         } else if is_partner_file(&file_name) {
+            // Still counted as "not an image or caption" — the manifest field keeps its
+            // meaning — but no longer discarded: the path is kept so the names can ride
+            // the bundle.
             ignored_partner_files += 1;
+            partner_files.push(file_path);
         } else if is_caption_file(&file_name) {
             captions.push(file_path);
         } else if is_supported_image(&file_name) {
@@ -659,6 +674,38 @@ fn scan_bundle(
     let total_bytes = ordered.iter().map(|image| image.byte_len).sum();
     let bundle_id = format!("{}-{}", slug(&bundle_name), short_hash(&ordered, &caption));
 
+    // **Partner names are read here or never.** Exactly one workbook is believed; two is a
+    // question for the operator, not a guess (the sheet writes these names across live
+    // columns). An unreadable one degrades to an empty list with a notice — the names
+    // decorate the sheet row, and decoration must never block a scan.
+    let partners = match partner_files.as_slice() {
+        [] => Vec::new(),
+        [only] => match crate::publish_partners::read_partner_row(only) {
+            Ok(row) => row.names,
+            Err(error) => {
+                notices.push(PublishScanNotice {
+                    severity: PublishScanSeverity::Warning,
+                    path: only.display().to_string(),
+                    message: format!(
+                        "không đọc được file đối tác, bundle đi tiếp không có tên: {error}"
+                    ),
+                });
+                Vec::new()
+            }
+        },
+        many => {
+            notices.push(PublishScanNotice {
+                severity: PublishScanSeverity::Warning,
+                path: path.display().to_string(),
+                message: format!(
+                    "{} file đối tác trong một bundle — không đoán file nào là thật, bỏ qua cả",
+                    many.len()
+                ),
+            });
+            Vec::new()
+        }
+    };
+
     Ok((
         PublishBundle {
             id: bundle_id,
@@ -670,6 +717,7 @@ fn scan_bundle(
             caption_sha256: sha256_bytes(caption.as_bytes()),
             caption,
             total_bytes,
+            partners,
         },
         notices,
         ignored_partner_files,
@@ -1110,6 +1158,99 @@ mod tests {
         assert_eq!(manifest.bundles[0].caption, "Mở bài\n\n#tag");
         assert_eq!(manifest.ignored_partner_files, 1);
         assert_eq!(manifest.ignored_hidden_files, 1);
+    }
+
+    /// **Partner names ride the bundle out of the scan, or degrade loudly — never block.**
+    ///
+    /// Three folders in one scan: a real workbook (both names arrive, workbook order), a
+    /// corrupt one (empty list plus a notice, scan survives), and two workbooks in one
+    /// folder (a guess the sheet would print live, so: empty list plus a notice naming the
+    /// count). `ignored_partner_files` keeps its old meaning — counted, not vanished.
+    #[test]
+    fn partner_names_ride_the_bundle_and_bad_workbooks_degrade_loudly() {
+        fn write_workbook(path: &Path, first_name: &str) {
+            let file = fs::File::create(path).expect("workbook file");
+            let mut writer = zip::ZipWriter::new(file);
+            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            let sheet = format!(
+                r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>{first_name}</t></is></c><c r="B1" t="inlineStr"><is><t>Quán B</t></is></c></row></sheetData></worksheet>"#
+            );
+            let parts: [(&str, &[u8]); 3] = [
+                (
+                    "xl/workbook.xml",
+                    br#"<workbook><sheets><sheet name="Doi tac" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+                ),
+                (
+                    "xl/_rels/workbook.xml.rels",
+                    br#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>"#,
+                ),
+                ("xl/worksheets/sheet1.xml", sheet.as_bytes()),
+            ];
+            for (name, bytes) in parts {
+                writer.start_file(name, options).expect("start part");
+                writer.write_all(bytes).expect("write part");
+            }
+            writer.finish().expect("finish archive");
+        }
+        fn folder(root: &Path, name: &str) -> std::path::PathBuf {
+            let path = root.join(name);
+            fs::create_dir(&path).expect("bundle");
+            write_png(&path.join("01-cover.png"), [1, 1, 1]);
+            fs::write(path.join("caption-set1.txt"), "Mở bài").expect("caption");
+            path
+        }
+
+        let root = TempDir::new();
+        let good = folder(root.path(), "bo1 co doi tac");
+        write_workbook(&good.join("partners-set1.xlsx"), "Quán A");
+        let corrupt = folder(root.path(), "bo2 file hong");
+        fs::write(corrupt.join("partners-set1.xlsx"), b"not a workbook").expect("corrupt");
+        let doubled = folder(root.path(), "bo3 hai file");
+        write_workbook(&doubled.join("partners-set1.xlsx"), "Quán C");
+        write_workbook(&doubled.join("partners-set2.xlsx"), "Quán D");
+
+        let manifest =
+            scan_publish_folder(root.path(), PublishScanOptions::default()).expect("scan");
+        let by_name = |name: &str| {
+            manifest
+                .bundles
+                .iter()
+                .find(|bundle| bundle.name == name)
+                .expect("bundle exists")
+        };
+        assert_eq!(
+            by_name("bo1 co doi tac").partners,
+            vec!["Quán A".to_string(), "Quán B".to_string()],
+            "the names arrive in workbook order"
+        );
+        assert_eq!(
+            by_name("bo2 file hong").partners,
+            Vec::<String>::new(),
+            "a corrupt workbook degrades to no names"
+        );
+        assert!(
+            manifest.notices.iter().any(|notice| {
+                notice.message.contains("không đọc được file đối tác")
+                    && notice.path.contains("bo2 file hong")
+            }),
+            "and it degrades LOUDLY: {:?}",
+            manifest.notices
+        );
+        assert_eq!(
+            by_name("bo3 hai file").partners,
+            Vec::<String>::new(),
+            "two workbooks are a question, not a guess"
+        );
+        assert!(
+            manifest
+                .notices
+                .iter()
+                .any(|notice| notice.message.contains("2 file đối tác")),
+            "{:?}",
+            manifest.notices
+        );
+        assert_eq!(manifest.ignored_partner_files, 4, "counted, not vanished");
     }
 
     /// **One over-sized folder used to make every other folder unscannable.**

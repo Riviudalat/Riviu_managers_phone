@@ -1535,6 +1535,7 @@ mod publish_tests {
             caption_sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                 .into(),
             total_bytes: 3,
+            partners: Vec::new(),
         }
     }
 

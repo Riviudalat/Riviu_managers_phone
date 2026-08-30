@@ -270,6 +270,7 @@ mod tests {
             caption: "caption".into(),
             caption_sha256: "b".repeat(64),
             total_bytes: 3,
+            partners: Vec::new(),
         }
     }
 

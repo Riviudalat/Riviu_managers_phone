@@ -1047,6 +1047,7 @@ mod claim_tests {
             caption: "caption".into(),
             caption_sha256: "0".repeat(64),
             total_bytes: 1,
+            partners: Vec::new(),
         }
     }
 

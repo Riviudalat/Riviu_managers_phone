@@ -252,6 +252,35 @@ fn assignment_may_hold_the_post(state: &riviu_core::PublishCampaignState) -> boo
     )
 }
 
+/// The link a posted assignment owes the sheet, when its evidence carries one.
+///
+/// Pure, because it is the fork in the road below: `Some` routes the settle through
+/// `record_publish_success_with_sheet_row` — state and outbox row in one transaction — and
+/// `None` through the plain state write. An empty or whitespace `postUrl` is `None`: the
+/// outbox schema refuses blank links (migration 18's CHECK), and a post whose link was
+/// never read owes the sheet nothing yet.
+fn post_url_owed(evidence: &serde_json::Value) -> Option<&str> {
+    evidence
+        .get("postUrl")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+}
+
+/// Who the sheet says posted: the device's own handle when the fleet knows it, else `bot`.
+///
+/// `device_meta.handle` defaults to an empty string for every phone nobody typed a handle
+/// in for, and migration 18's CHECK refuses a blank poster — so the fallback lives here,
+/// beside the decision, rather than trusting twenty rows of operator data entry.
+fn poster_identity(handle: &str) -> &str {
+    let handle = handle.trim();
+    if handle.is_empty() {
+        "bot"
+    } else {
+        handle
+    }
+}
+
 /// Whether this assignment's carousel is already up, settled, done.
 ///
 /// The post fan-out used to run every assignment and count the claim's "already succeeded"
@@ -663,9 +692,33 @@ async fn post_one_phone(
             serde_json::json!({"message": reason, "effectIntent":"post_carousel"}).to_string(),
         ),
     };
-    if let Err(error) =
-        db.update_publish_assignment_state(&assignment.id, state, code, Some(&evidence))
-    {
+    // A posted assignment whose evidence carries a link settles through the one-transaction
+    // write: state **and** the sheet's obligation row go in together, or neither does — a
+    // link recorded in evidence with no outbox row behind it is a debt the sweeper can never
+    // see. Everything else (no link yet — which before the M7 measurement is every run — or
+    // any non-posted outcome) keeps the plain state write.
+    let owed = match &outcome {
+        PostOutcome::Posted(value) => post_url_owed(value).map(str::to_string),
+        _ => None,
+    };
+    let written = match owed {
+        Some(post_url) => {
+            let handle = db
+                .get_device_meta(&assignment.udid)
+                .map(|meta| meta.handle)
+                .unwrap_or_default();
+            db.record_publish_success_with_sheet_row(
+                &assignment.id,
+                &evidence,
+                &campaign_id,
+                &post_url,
+                poster_identity(&handle),
+                &bundle.partners,
+            )
+        }
+        None => db.update_publish_assignment_state(&assignment.id, state, code, Some(&evidence)),
+    };
+    if let Err(error) = written {
         // The state write failed *after* the attempt, so what the phone did is unknown to the
         // database whatever it did on screen.
         return Err(PhoneFailure::MayBeLive(format!(
@@ -890,6 +943,142 @@ fn refuse_assignments_whose_bundle_is_too_large<'a>(
         oversized.join("; ")
     );
     Ok(())
+}
+
+/// One device's readiness, in wire shape, for the Publish page's per-device chips.
+///
+/// A serializable mirror of [`PublishReadiness`] rather than serde on the original: that
+/// enum carries `TikTokControl`, which has no serde on purpose (the catalogue is not a wire
+/// type), so the missing labels travel as their debug names — the same names
+/// `composer_scout` prints and the refusal message already shows the operator.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(
+    rename_all = "camelCase",
+    tag = "kind",
+    rename_all_fields = "camelCase"
+)]
+pub enum PublishReadinessWire {
+    PixelGrid,
+    HierarchyReady,
+    HierarchyMissing { labels: Vec<String> },
+    HierarchyUnknownBuild { version: String },
+}
+
+impl From<PublishReadiness> for PublishReadinessWire {
+    fn from(readiness: PublishReadiness) -> Self {
+        match readiness {
+            PublishReadiness::PixelGrid => Self::PixelGrid,
+            PublishReadiness::HierarchyReady => Self::HierarchyReady,
+            PublishReadiness::HierarchyMissing(labels) => Self::HierarchyMissing {
+                labels: labels
+                    .into_iter()
+                    .map(|label| format!("{label:?}"))
+                    .collect(),
+            },
+            PublishReadiness::HierarchyUnknownBuild(version) => {
+                Self::HierarchyUnknownBuild { version }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevicePublishReadiness {
+    pub udid: String,
+    pub readiness: PublishReadinessWire,
+}
+
+/// The same answer the preflight refusal is built from, offered per device **before** the
+/// operator presses anything — so the page can say which phone would refuse and why,
+/// instead of the whole campaign learning it as one thrown error string.
+///
+/// Read-only: no admission, no lease, no session — the same posture as `is_rooted`, and the
+/// reason it belongs in lib.rs's `ADMISSION_EXEMPT` list (registration and exemption live in
+/// lib.rs).
+#[tauri::command]
+pub async fn publish_readiness(
+    state: State<'_, AppState>,
+    udids: Vec<String>,
+) -> Result<Vec<DevicePublishReadiness>, CommandError> {
+    let mut out = Vec::with_capacity(udids.len());
+    for udid in udids {
+        let readiness = readiness_of(&state.control, &udid).await.into();
+        out.push(DevicePublishReadiness { udid, readiness });
+    }
+    Ok(out)
+}
+
+/// What the Sheet delivery is configured with — minus the token itself.
+///
+/// `has_token` and never the token: the value is a bearer credential, and a screen that can
+/// display it is a screen that screenshots, logs and support photos leak it from. The page
+/// only needs to know whether one is set.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishSheetConfig {
+    pub webhook_url: String,
+    pub has_token: bool,
+}
+
+fn publish_sheet_config_of(db: &Database) -> Result<PublishSheetConfig, CommandError> {
+    let webhook_url = db
+        .get_setting(riviu_core::publish_sheet::WEBHOOK_URL_SETTING)
+        .map_err(err)?
+        .unwrap_or_default();
+    let has_token = db
+        .get_setting(riviu_core::publish_sheet::WEBHOOK_TOKEN_SETTING)
+        .map_err(err)?
+        .map(|token| !token.trim().is_empty())
+        .unwrap_or(false);
+    Ok(PublishSheetConfig {
+        webhook_url,
+        has_token,
+    })
+}
+
+#[tauri::command]
+pub fn publish_sheet_get_config(
+    state: State<'_, AppState>,
+) -> Result<PublishSheetConfig, CommandError> {
+    publish_sheet_config_of(&state.db)
+}
+
+/// Save the webhook URL, and the token only when one was typed.
+///
+/// `token: None` keeps the stored one — so the operator can correct a URL without
+/// re-pasting a credential they may no longer have on the clipboard. An empty string
+/// clears it on purpose. The URL is refused unless `is_acceptable_webhook` takes it
+/// (HTTPS with a host) or it is empty — empty is the off switch the sweeper honours,
+/// not an error.
+#[tauri::command]
+pub fn publish_sheet_save_config(
+    state: State<'_, AppState>,
+    webhook_url: String,
+    token: Option<String>,
+) -> Result<PublishSheetConfig, CommandError> {
+    let _admission = state.ensure_accepting_work()?;
+    let webhook_url = webhook_url.trim().to_string();
+    if !webhook_url.is_empty() && !riviu_core::publish_sheet::is_acceptable_webhook(&webhook_url) {
+        return Err(err(format!(
+            "webhook không nhận được: cần HTTPS kèm host thật — token và link bài đi trong \
+             body, http:// là gửi chúng trần trụi ({webhook_url})"
+        )));
+    }
+    state
+        .db
+        .set_setting(riviu_core::publish_sheet::WEBHOOK_URL_SETTING, &webhook_url)
+        .map_err(err)?;
+    if let Some(token) = token {
+        state
+            .db
+            .set_setting(
+                riviu_core::publish_sheet::WEBHOOK_TOKEN_SETTING,
+                token.trim(),
+            )
+            .map_err(err)?;
+    }
+    publish_sheet_config_of(&state.db)
 }
 
 #[tauri::command]
@@ -1956,7 +2145,7 @@ async fn post_through_the_composer(
         Ok(verdict) => verdict,
         Err(error) => return PostOutcome::Unknown(format!("{udid}: {error}")),
     };
-    let evidence = serde_json::json!({
+    let mut evidence = serde_json::json!({
         "state": if verdict.is_posted() { "posted" } else { "not_posted" },
         "route": "hierarchy",
         "verdict": format!("{verdict:?}"),
@@ -1968,7 +2157,32 @@ async fn post_through_the_composer(
         "labels": labels.provenance(),
     });
     match verdict {
-        ComposerVerdict::Posted => PostOutcome::Posted(evidence),
+        ComposerVerdict::Posted => {
+            // **No link capture here yet, on purpose — and not because the capture would
+            // refuse.** The first wiring called `capture_post_link` right on this arm, with
+            // the comment claiming it would fail closed until M7. It would not have: after
+            // Post, TikTok returns to the FEED and uploads in the background, and the
+            // capture taps whatever Share is on screen — on the fleet's own build Share IS
+            // measured (off a feed dump) and the copy row matches the English needles, so
+            // it would have read back a STRANGER'S post link, which passes
+            // `looks_like_a_post_link` because it is one. A wrong link is the one shape the
+            // outbox schema (UNIQUE `post_url`, non-empty CHECKs) cannot tell from a right
+            // one. `tiktok_share`'s own contract says the caller must already be standing
+            // ON the intended post; the route that gets there is exactly the unmeasured M7
+            // trip, so the capture and that route arrive together — see
+            // `no_link_is_read_off_the_feed_until_the_route_is_measured`, which is the
+            // tripwire against re-wiring this early.
+            //
+            // `postUrl` therefore never appears yet; the downstream halves that consume it
+            // (`post_url_owed`, the one-transaction outbox write, the sweeper) are live and
+            // tested, waiting on a link that is really ours.
+            evidence["linkCaptureReason"] = serde_json::Value::String(
+                "đường từ bài vừa đăng về trang bài của nó chưa đo (M7) — không đọc link \
+                 từ feed, vì Share trên feed là của video người khác"
+                    .to_string(),
+            );
+            PostOutcome::Posted(evidence)
+        }
         other if other.may_retry() => PostOutcome::NothingPublished(other.reason().to_string()),
         other => PostOutcome::Unknown(other.reason().to_string()),
     }
@@ -1982,6 +2196,8 @@ mod tests {
     use super::bundle_for_assignment;
     use super::fold_cleanup_into;
     use super::max_images_for;
+    use super::post_url_owed;
+    use super::poster_identity;
     use super::refuse_assignments_whose_bundle_is_too_large;
     use super::refuse_devices_whose_composer_is_not_measured;
     use super::refuse_when_the_route_authorities_disagree;
@@ -2095,6 +2311,59 @@ mod tests {
         );
     }
 
+    /// **The fork in the settle road: only a real link routes through the sheet-row write.**
+    ///
+    /// `Some` means state and outbox row go in as one transaction; `None` means the plain
+    /// state write. The empty shapes matter because migration 18's CHECK refuses a blank
+    /// link — a `Some("")` here would turn a successful post into a failed recording.
+    #[test]
+    fn only_a_real_link_owes_the_sheet_a_row() {
+        assert_eq!(
+            post_url_owed(&serde_json::json!({
+                "postUrl": "https://www.tiktok.com/@a/photo/1"
+            })),
+            Some("https://www.tiktok.com/@a/photo/1")
+        );
+        for evidence in [
+            serde_json::json!({}),
+            serde_json::json!({"postUrl": ""}),
+            serde_json::json!({"postUrl": "   "}),
+            serde_json::json!({"postUrl": 7}),
+            serde_json::json!({"linkCaptureReason": "chưa đo nút Chia sẻ trên bản build này"}),
+        ] {
+            assert_eq!(post_url_owed(&evidence), None, "{evidence}");
+        }
+    }
+
+    /// **No link is read off the feed until the route to our own post is measured.**
+    ///
+    /// The first wiring called `capture_post_link` straight on the `Posted` arm, believing
+    /// it would refuse until M7. It would not have: after Post the screen is the FEED,
+    /// Share there belongs to whoever's video is playing, that Share IS measured on the
+    /// fleet's build, and a stranger's post link passes `looks_like_a_post_link` because
+    /// it is one — a wrong link the outbox schema cannot tell from a right one. The
+    /// capture may only return to this function together with the M7-measured route that
+    /// first stands the phone on its own post; when that lands, this test is updated to
+    /// demand the route call BEFORE the capture instead of banning the capture outright.
+    #[test]
+    fn no_link_is_read_off_the_feed_until_the_route_is_measured() {
+        let body = code_of("async fn post_through_the_composer(");
+        assert!(
+            !body.iter().any(|line| line.contains("capture_post_link")),
+            "capture_post_link is back on the Posted arm without the M7 route in front of \
+             it — that reads a stranger's link off the feed and files it as ours"
+        );
+    }
+
+    /// The poster fallback is migration 18's CHECK made visible at the decision point.
+    #[test]
+    fn a_blank_handle_posts_as_bot_and_a_real_one_travels_verbatim() {
+        assert_eq!(poster_identity(""), "bot");
+        assert_eq!(poster_identity("   "), "bot");
+        assert_eq!(poster_identity("@cn.qut.lt4"), "@cn.qut.lt4");
+        assert_eq!(poster_identity(" @hi.m.lt "), "@hi.m.lt");
+    }
+
     /// The two participant filters, pinned variant by variant.
     ///
     /// Mostly a typo pin, but the relationship at the end is the real contract: everything
@@ -2151,6 +2420,7 @@ mod tests {
             caption: String::new(),
             caption_sha256: String::new(),
             total_bytes: 0,
+            partners: Vec::new(),
         }
     }
 
@@ -2751,6 +3021,7 @@ mod tests {
             caption: String::new(),
             caption_sha256: "00".repeat(32),
             total_bytes: count as u64,
+            partners: Vec::new(),
         }
     }
 
