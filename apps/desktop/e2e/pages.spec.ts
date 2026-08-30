@@ -33,6 +33,17 @@ async function open(page: Page, name: string): Promise<void> {
   if (name !== "Quản lý cửa sổ") {
     await page.locator("[data-testid='nav-item']").getByText(name, { exact: true }).click();
   }
+  // **Loaded before pixels, and the Flow baseline is why this line exists.** Waiting for
+  // the fleet says the shell is up; it says nothing about a page that fetches its own
+  // content afterwards. The Flow page shows `LoadingState` while it does, and the committed
+  // baseline had captured exactly that — a spinner, blessed as "the Flow page". It proved
+  // nothing about the page, and it made the test a race: whoever won it decided whether CI
+  // was green. It went red the first time a runner loaded faster than the machine the
+  // baseline was taken on.
+  //
+  // `.loading-state` is the shared component every page uses, so this covers the pages that
+  // grow one later rather than only the one that has it today.
+  await expect(page.locator(".loading-state")).toHaveCount(0);
   // Fonts before pixels: a screenshot taken while a face is still loading captures the
   // fallback, which is what made the two Flow baselines racy before they were bundled.
   await page.evaluate(() => document.fonts.ready);
