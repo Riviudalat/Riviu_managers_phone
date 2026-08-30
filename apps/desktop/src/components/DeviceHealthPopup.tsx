@@ -94,6 +94,13 @@ export function DeviceHealthPopup({
             </li>
             <li>
               <strong>Riviu helper:</strong>{" "}
+              {/*
+                Three states, not two. `null` here is "chưa ai hỏi" — the client cache is
+                only written when a session attaches, so on a freshly opened app every
+                phone is unasked, and calling that "chưa với tới được" accused a healthy
+                helper of a transport fault. What is installed is still worth saying in
+                that case, because it is the half that WAS asked.
+              */}
               {mark(
                 report.helperReachable,
                 "đang chạy",
@@ -102,18 +109,28 @@ export function DeviceHealthPopup({
                   : report.helperInstalled === false
                     ? "chưa cài"
                     : "chưa với tới được (không hỏi được là đã cài hay chưa)",
-                "backend không phải Android",
+                report.helperInstalled === true
+                  ? "chưa ai hỏi (đã cài) — mở một phiên rồi kiểm lại"
+                  : report.helperInstalled === false
+                    ? "chưa ai hỏi, và máy chưa cài helper"
+                    : "chưa ai hỏi, và cũng không hỏi được là đã cài hay chưa",
               )}
             </li>
             <li>
               <strong>Root:</strong>{" "}
+              {/*
+                `null` is "máy không trả lời", never "không root": the driver's own
+                `is_rooted` collapses an offline phone to false because refusing a
+                privileged command is the safe default there, and a panel that repeats
+                that collapse sends the operator to re-root a phone with a cable problem.
+              */}
               {report.root
                 ? report.root.hasSu
                   ? "✓ có su (Magisk)"
                   : report.root.shellIsRoot
                     ? "✓ adb shell là root (không có su)"
                     : "✗ không root"
-                : "? backend không phải Android"}
+                : "? không hỏi được (máy không trả lời hoặc backend không phải Android)"}
             </li>
             <li>
               <strong>TikTok:</strong>{" "}

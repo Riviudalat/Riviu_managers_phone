@@ -162,6 +162,30 @@ fn how_many_images(args: &[String]) -> Result<usize, String> {
 /// Every arm here used to `return Ok(())` — a refused command line exited 0, so a
 /// multi-serial loop sailed past a typo and reported a measuring run that never ran.
 /// The same shape §9.129 fixed for a stranded phone, one layer earlier.
+/// Every flag this tool defines. A `--word` outside this list is refused.
+const KNOWN_FLAGS: &[&str] = &["--album", "--images", "--visit-caption-step"];
+
+/// Refuse a flag this tool does not define, instead of running a different stage.
+///
+/// A misspelled `--visit-caption-step` reads as "not asked for", so the run stops at the edit
+/// step and exits 0 — reporting a measurement the operator asked for and did not get. The
+/// same silent-downgrade shape `--images --album x` had. Values never start with `--` (every
+/// parser here refuses a `--`-shaped value), so anything that does is a flag position.
+fn refuse_unknown_flags(args: &[String]) -> Result<(), String> {
+    let unknown: Vec<&str> = args
+        .iter()
+        .map(String::as_str)
+        .filter(|arg| arg.starts_with("--") && !KNOWN_FLAGS.contains(arg))
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "không hiểu cờ {unknown:?}; tool này chỉ có {KNOWN_FLAGS:?} — gõ sai một cờ là chạy \
+         một nấc khác mà vẫn báo thành công"
+    ))
+}
+
 fn refuse_usage(complaint: &str) -> anyhow::Error {
     say(complaint);
     anyhow::anyhow!("dòng lệnh bị từ chối — xem thông báo ở trên")
@@ -175,6 +199,9 @@ async fn main() -> anyhow::Result<()> {
             "usage: composer_scout <serial> --album \"<tên album>\" [--images 3] [--visit-caption-step]",
         ));
     };
+    if let Err(complaint) = refuse_unknown_flags(&args) {
+        return Err(refuse_usage(&complaint));
+    }
     let album = match flag_value(&args, "--album") {
         Flag::Value(album) => album,
         Flag::Absent => {
@@ -213,7 +240,10 @@ async fn main() -> anyhow::Result<()> {
 
     let Some(labels) = controls_for(&package, &language, &version) else {
         say("no measured label set for this (package, language) — run label_scout first");
-        return Ok(());
+        // A refusal exits like one. `refuse_usage` closed this shape for the argument arms;
+        // these three are the same shape one step later — a run that reached the phone,
+        // measured nothing, and told a multi-serial loop it had succeeded.
+        anyhow::bail!("bộ nhãn chưa đo cho ({package}, {language})");
     };
     say(&format!("labels   {}", labels.provenance()));
 
@@ -230,14 +260,14 @@ async fn main() -> anyhow::Result<()> {
         Ok(plan) => plan,
         Err(refusal) => {
             say(&format!("\nkhông đi được tới bước chỉnh sửa: {refusal}"));
-            return Ok(());
+            anyhow::bail!("thiếu nhãn để tới bước chỉnh sửa: {refusal}");
         }
     };
 
     let (width, height) = riviu_core::screen::measured_screen_size(&session).await?;
     let Some(screen) = Screen::new(width, height) else {
         say(&format!("screen {width}x{height} is not a screen"));
-        return Ok(());
+        anyhow::bail!("kích thước màn hình đọc ra không dùng được: {width}x{height}");
     };
     say(&format!("screen   {width}x{height}\n"));
 
@@ -284,15 +314,30 @@ async fn main() -> anyhow::Result<()> {
     // block taps the one measured `ComposerNext` and nothing else, dumps what appears, and
     // hands straight back to the walk-out below. It types nothing; the dump is the harvest,
     // and `ComposerCaption`/`PostButton` get measured from the file it writes.
+    //
+    // **A requested stage that fails is a failed run.** Its error is printed and then
+    // carried past the walk-out below rather than thrown here, because the phone is one tap
+    // from Post and the Back walk has to happen whatever the peek did — but it must not
+    // vanish: the operator asked for this stage, and exiting 0 without it tells a script the
+    // measurement happened.
+    let mut peek_failure: Option<String> = None;
     if visit_caption_step {
         if matches!(&verdict, Ok(ComposerVerdict::Stopped)) {
             // `stop` is never set in this tool, so `Stopped` here can only be the measuring
             // terminus: standing on the edit step, before its Next.
             if let Err(error) = peek_at_the_caption_step(&session, labels).await {
                 say(&format!("\n--visit-caption-step lỗi: {error:#}"));
+                peek_failure = Some(format!("{error:#}"));
             }
         } else {
             say("\n--visit-caption-step: chưa đứng ở bước chỉnh sửa nên không đi tiếp");
+            peek_failure = Some(format!(
+                "không đứng ở bước chỉnh sửa (verdict: {})",
+                match &verdict {
+                    Ok(reached) => reached.reason().to_string(),
+                    Err(error) => format!("{error:#}"),
+                }
+            ));
         }
     }
 
@@ -314,6 +359,9 @@ async fn main() -> anyhow::Result<()> {
         out,
         "không lùi được về feed: máy còn đang ở trong composer với ảnh đã chọn. Kiểm tra tay          trước khi chạy tiếp bất cứ thứ gì trên máy này."
     );
+    if let Some(reason) = peek_failure {
+        anyhow::bail!("--visit-caption-step không đo được: {reason}");
+    }
     Ok(())
 }
 
@@ -352,6 +400,30 @@ mod tests {
 
     fn line(args: &[&str]) -> Vec<String> {
         args.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    /// **A misspelled flag refuses; it does not quietly run a shorter trip.**
+    ///
+    /// `--visit-caption-stpe` read as "not asked for", so the run stopped at the edit step
+    /// and exited 0 — the caption screen the operator went out to measure never opened, and
+    /// nothing said so.
+    #[test]
+    fn a_misspelled_flag_is_refused_rather_than_silently_skipping_its_stage() {
+        assert_eq!(
+            refuse_unknown_flags(&line(&["SN", "--album", "Camera", "--images", "3"])),
+            Ok(())
+        );
+        assert_eq!(
+            refuse_unknown_flags(&line(&["SN", "--album", "Camera", "--visit-caption-step"])),
+            Ok(())
+        );
+        for typo in ["--visit-caption-stpe", "--albums", "--image", "--capture"] {
+            let refused = refuse_unknown_flags(&line(&["SN", "--album", "Camera", typo]));
+            assert!(
+                refused.as_ref().is_err_and(|why| why.contains(typo)),
+                "{typo} must be refused by name, not ignored: {refused:?}"
+            );
+        }
     }
 
     /// The switch has three states and the third is a refusal, like every other repeat.

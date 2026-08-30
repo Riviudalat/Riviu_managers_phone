@@ -292,6 +292,30 @@ impl AndroidDriver {
         }
     }
 
+    /// Both root questions at once, with "could not ask" kept apart from "no".
+    ///
+    /// [`Self::is_rooted`] and [`Self::can_run_privileged`] answer `false` for an offline,
+    /// unauthorised or timed-out phone, and that is right where they are used: `as_privileged`
+    /// and `root_shell` must refuse a route they could not confirm, and refusing costs one
+    /// command. A health panel is the opposite job — it *describes* the phone — and there a
+    /// collapsed `false` reads as `✗ không root`, which sends the operator to re-root a phone
+    /// whose only problem is a cable.
+    ///
+    /// `None` when **neither** question could be put. One answer arriving is proof the
+    /// transport works, so the other's failure is then a real "no": on the nine S8s with no
+    /// `su` binary, `su -c id` fails while `id -u` answers `0`, and that pair is a measurement,
+    /// not a silence.
+    pub async fn root_status_or_unknown(
+        &self,
+        serial: &str,
+    ) -> Option<riviu_core::DeviceRootStatus> {
+        let su = self.adb.shell(serial, "su -c id").await;
+        // `id -u`, not `id`: the full output on a rooted shell carries a groups list that also
+        // contains `uid=0` on some ROMs — the same substring trap `can_run_privileged` documents.
+        let shell_uid = self.adb.shell(serial, "id -u").await;
+        root_status_from_answers(su.ok().as_deref(), shell_uid.ok().as_deref())
+    }
+
     /// Can this phone run a privileged command **at all** — by any route?
     ///
     /// True when `adbd` itself is uid 0, or when `su` grants it. That is the question
@@ -1054,6 +1078,81 @@ impl AndroidDriver {
             )
             .await?;
         Ok(())
+    }
+}
+
+/// Read two root answers, where `None` is "the phone did not answer that question".
+///
+/// Pure, and separate from the two shells that produce it, because the whole finding lives in
+/// the combinations: a rooted phone that has gone offline answers neither question, and
+/// reporting that as `has_su: false, shell_is_root: false` is indistinguishable from a
+/// measured "not rooted". Inside an `async fn` full of adb calls no test could reach that
+/// distinction, which is the shape this repo keeps pulling out into functions with names.
+fn root_status_from_answers(
+    su: Option<&str>,
+    shell_uid: Option<&str>,
+) -> Option<riviu_core::DeviceRootStatus> {
+    // One answer arriving proves the transport works, so the other's silence is then a real
+    // "no". Only when BOTH questions went unanswered is the phone itself unknown — on the
+    // nine S8s with no `su` binary, `su -c id` fails while `id -u` says `0`, and that pair is
+    // a measurement.
+    if su.is_none() && shell_uid.is_none() {
+        return None;
+    }
+    let has_su = su.is_some_and(|out| out.contains("uid=0"));
+    let shell_is_root = shell_uid.is_some_and(|out| out.trim() == "0");
+    Some(riviu_core::DeviceRootStatus {
+        // The same subtraction the caller used to do: name the route, not the union.
+        shell_is_root: !has_su && shell_is_root,
+        has_su,
+    })
+}
+
+#[cfg(test)]
+mod root_answer_tests {
+    use super::root_status_from_answers;
+
+    /// **A phone that did not answer is not a phone without root.**
+    ///
+    /// `is_rooted` maps every adb failure to `false`, which is right where a privileged
+    /// command is about to run — refusing costs one command. A health panel repeating that
+    /// collapse tells the operator to re-root a phone whose only problem is a cable.
+    #[test]
+    fn silence_from_both_questions_is_unknown_not_unrooted() {
+        assert_eq!(root_status_from_answers(None, None), None);
+    }
+
+    /// One answer proves the transport, so the other's failure is a measurement.
+    #[test]
+    fn one_answer_makes_the_others_silence_a_real_no() {
+        // The nine S8s: no `su` binary at all, adbd itself is uid 0.
+        let shell_root = root_status_from_answers(None, Some("0\n")).expect("transport answered");
+        assert!(!shell_root.has_su);
+        assert!(shell_root.shell_is_root);
+
+        // Magisk: `su` answers, the plain shell is not root.
+        let magisk = root_status_from_answers(Some("uid=0(root) gid=0(root)"), Some("2000\n"))
+            .expect("answered");
+        assert!(magisk.has_su);
+        assert!(
+            !magisk.shell_is_root,
+            "the routes are named by subtraction, not unioned"
+        );
+
+        // Answered, and genuinely not rooted by either route.
+        let plain = root_status_from_answers(None, Some("2000\n")).expect("answered");
+        assert!(!plain.has_su && !plain.shell_is_root);
+    }
+
+    /// `id -u` and not `id`: a groups list can carry `uid=0` on a shell that is not root.
+    #[test]
+    fn the_shell_route_reads_a_number_not_a_substring() {
+        let noisy =
+            root_status_from_answers(None, Some("2000 groups=0(root),uid=0")).expect("answered");
+        assert!(
+            !noisy.shell_is_root,
+            "matching a substring of `id` is how a parser agrees with what it did not measure"
+        );
     }
 }
 

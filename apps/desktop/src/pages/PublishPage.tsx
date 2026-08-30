@@ -36,11 +36,18 @@ import type { SelProps } from "./pageProps";
  * One readiness answer as pill text. The `default` arm is deliberate wire-defence: this
  * union mirrors a Rust enum, and a variant this page has not heard of must render as its
  * raw JSON rather than as nothing — an empty chip would read as "fine".
+ *
+ * **`hierarchyReady` is not a promise about this phone.** The backend answers it from the
+ * shortest gap across every catalogued (language, version) set for the package, without
+ * reading the build the phone is actually running — while Post refuses unless that exact
+ * pair is catalogued. So a phone whose TikTok updated itself keeps a green chip and is
+ * refused at the first tap. Until the command reads the phone's own version and locale
+ * (see the note on the refresh button), the wording says what was really checked.
  */
 function readinessText(info: PublishReadinessInfo): string {
   switch (info.kind) {
     case "hierarchyReady":
-      return "sẵn sàng";
+      return "bản đo có đủ nhãn (chưa đối chiếu build máy)";
     case "pixelGrid":
       return "pixel route";
     case "hierarchyMissing":
@@ -142,6 +149,10 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
     .map((device) => device.udid)
     .sort()
     .join(",");
+  // Bumped by the refresh button. A phone whose TikTok updates in place keeps the same
+  // udid, so the key above cannot notice it — and that is exactly the change readiness is
+  // keyed on a build for. Without a way to re-ask, the only cure was to unplug the phone.
+  const [readinessNonce, setReadinessNonce] = useState(0);
   useEffect(() => {
     if (androidKey === "") {
       setReadiness([]);
@@ -156,12 +167,17 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
         setReadinessNote(null);
       })
       .catch((error) => {
-        if (live) setReadinessNote(describeError(error));
+        if (!live) return;
+        // The rows that are on screen described the fleet at the last successful answer;
+        // leaving them up beside an error is the same "stale answer shown as current"
+        // shape the chips' own wording is being fixed for.
+        setReadiness([]);
+        setReadinessNote(describeError(error));
       });
     return () => {
       live = false;
     };
-  }, [androidKey]);
+  }, [androidKey, readinessNonce]);
 
   const selectedBundles =
     manifest?.bundles.filter((bundle) => bundleIds.includes(bundle.id)) ?? [];
@@ -357,6 +373,17 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
               {readinessText(info)}
             </span>
           ))}
+          {/*
+            A phone that updates TikTok in place keeps its udid, so nothing re-asks on its
+            own. This is the operator's way to say "I just changed that phone".
+          */}
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => setReadinessNonce((nonce) => nonce + 1)}
+          >
+            Hỏi lại
+          </button>
         </div>
       )}
       {sheetConfig && (!sheetConfig.webhookUrl || !sheetConfig.hasToken) && (

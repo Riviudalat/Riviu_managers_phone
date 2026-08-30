@@ -395,20 +395,42 @@ impl AndroidDriver {
         Ok(Some(helper))
     }
 
-    /// One read-only look at the Riviu helper: `(reachable now, installed at all)`.
+    /// One read-only look at the Riviu helper.
     ///
     /// The first two rungs of [`Self::try_attach_helper`] without its ensure/install
-    /// tail — a health check must not change the phone it is describing. `installed` is
-    /// `Option<bool>` because "I could not ask" is not "it is not installed" (§9.97):
-    /// `None` means the `pm path` question itself failed, and the caller says that
-    /// instead of guessing either way.
-    pub async fn helper_probe(&self, serial: &str) -> (bool, Option<bool>) {
+    /// tail — a health check must not change the phone it is describing. Both answers are
+    /// `Option<bool>` because "I could not ask" is not "no" (§9.97), and this probe has
+    /// **two** ways of not being able to ask.
+    ///
+    /// # Never-asked is its own answer, and reporting it as unreachable was wrong
+    ///
+    /// The only writer of the client cache is [`Self::try_attach_helper`], which runs from
+    /// `open_session`. So on a freshly started app — the most common state of the
+    /// diagnostics panel — every phone missed the cache and this returned "not reachable",
+    /// which the operator reads as a transport fault on a helper that is installed, running
+    /// and perfectly well. That is §9.97's confusion re-made one rung up: the note there
+    /// separated "chưa với tới được" from "chưa cài", and this collapsed a third state,
+    /// "chưa ai hỏi", into the first.
+    ///
+    /// Answering `None` for it is honest and cheap. Answering *reachable* would mean
+    /// attaching, and attaching is [`crate::riviu_agent::HelperClient::ensure`], which
+    /// enables the IME and starts the service — mutations a health check may not make. The
+    /// missing rung is a non-installing attach; see the note on [`HelperProbe::reachable`].
+    pub async fn helper_probe(&self, serial: &str) -> HelperProbe {
         let cached = self.helpers.lock().get(serial).cloned();
+        // Carried out of the branch below rather than re-derived from the cache, because
+        // the `remove` empties it either way: after that, "nobody had attached" and "the
+        // client we had went quiet" look identical from the outside.
+        let mut reachable = None;
         if let Some(helper) = cached {
             if helper.is_alive().await {
-                return (true, Some(true));
+                return HelperProbe {
+                    reachable: Some(true),
+                    installed: Some(true),
+                };
             }
             self.helpers.lock().remove(serial);
+            reachable = Some(false);
         }
         let installed = self
             .adb
@@ -416,7 +438,10 @@ impl AndroidDriver {
             .await
             .map(|out| out.contains("package:"))
             .ok();
-        (false, installed)
+        HelperProbe {
+            reachable,
+            installed,
+        }
     }
 
     /// Make sure the agent is installed, running and forwarded.
@@ -737,6 +762,31 @@ impl AndroidDriver {
             .spawn()
             .with_context(|| format!("start the agent on {serial}"))
     }
+}
+
+/// What one read-only look at the Riviu helper could establish — see
+/// [`AndroidDriver::helper_probe`].
+///
+/// Two `Option<bool>`s rather than two `bool`s, and neither `None` means "no": this probe
+/// has two separate ways of not being able to answer, and §9.97 is the record of what it
+/// costs to let either of them render as a negative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HelperProbe {
+    /// `Some(true)`: a client answered `/status` just now. `Some(false)`: the client this
+    /// process held has stopped answering — a real silence. `None`: no session has attached
+    /// this phone yet, so nothing has ever asked it.
+    ///
+    /// **`None` is not a gap waiting to be closed by guessing.** Turning it into a live
+    /// answer means attaching without installing, and the only constructor
+    /// [`crate::riviu_agent::HelperClient`] offers is `ensure`, which enables the IME and
+    /// starts the service — mutations a health check may not make. A
+    /// `HelperClient::attach(adb, serial) -> Result<Option<Self>>` that forwards, builds the
+    /// client and asks `/status` without any of the install rungs would let a healthy helper
+    /// read as healthy here; until that exists, saying "nobody asked" is the honest answer.
+    pub reachable: Option<bool>,
+    /// Helper APK installed at all; `None` means the `pm path` question itself failed — not
+    /// "absent" (§9.97).
+    pub installed: Option<bool>,
 }
 
 #[cfg(test)]

@@ -1602,9 +1602,15 @@ export interface DeviceHealthReport {
   rosterStatus?: DeviceStatus | null;
   agent: AgentStatus;
   agentReadyNow?: boolean | null;
+  /**
+   * `null` means **nobody has asked this phone yet** — no session has attached it this run
+   * — which is neither reachable nor unreachable. Rendering it as unreachable accused a
+   * healthy helper of a transport fault on every freshly started app.
+   */
   helperReachable?: boolean | null;
   /** `null` means the question failed — not "absent" (§9.97). */
   helperInstalled?: boolean | null;
+  /** `null` means neither root question could be put; an offline phone is not an unrooted one. */
   root?: DeviceRootStatus | null;
   tiktokPackage?: string | null;
   tiktokVersion?: string | null;

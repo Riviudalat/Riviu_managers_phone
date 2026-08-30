@@ -568,7 +568,18 @@ impl StreamBudgetManager {
     ///   sampler already knows how to recover from after the backoff expires.
     ///
     /// Found by an independent review on 27/08/2026.
-    pub fn abandon_transfer(&self, transfer: ForegroundTransfer, now: Instant) {
+    /// **Reads the injected clock, like every other public entry.** It used to take `now`
+    /// from its caller, which passed `std::time::Instant::now()` — so the `FailedBackoff`
+    /// deadline this writes was stamped on the real clock while every later comparison
+    /// (`remove_expired_backoff`, `reserve_background_at`) reads the injected one. Two bases
+    /// for the same instant is exactly what injecting a clock was meant to remove: under a
+    /// test clock the backoff reads as already expired, or as lasting far longer than
+    /// `failure_backoff`. Found by an independent review on 31/08/2026.
+    pub fn abandon_transfer(&self, transfer: ForegroundTransfer) {
+        self.abandon_transfer_at(transfer, self.now());
+    }
+
+    fn abandon_transfer_at(&self, transfer: ForegroundTransfer, now: Instant) {
         let mut state = self.inner.lock();
         state.abandon_pending_transfer(&transfer, self.failure_backoff, now);
     }
@@ -1081,7 +1092,7 @@ mod tests {
             transfer.revoked_udid().is_some(),
             "tile-a should be the victim"
         );
-        budget.abandon_transfer(transfer, start);
+        budget.abandon_transfer_at(transfer, start);
         assert_eq!(
             budget.reserved_capacity(),
             0,
@@ -1099,10 +1110,59 @@ mod tests {
             .unwrap();
         assert!(transfer.revoked_udid().is_none(), "nothing to revoke here");
         assert_eq!(budget.reserved_capacity(), 1);
-        budget.abandon_transfer(transfer, Instant::now());
+        budget.abandon_transfer(transfer);
         assert_eq!(budget.reserved_capacity(), 0);
         // Removed outright, not backed off: nothing was ever started on it.
         assert!(budget.reserve_background("tile-x").is_ok());
+    }
+
+    /// **The backoff `abandon_transfer` writes is stamped on the same clock that reads it.**
+    ///
+    /// It used to take `now` from its caller — production passed `Instant::now()` — while
+    /// every comparison against the deadline reads the injected clock. Under a test clock
+    /// the two bases differ by however long the fixture has been alive, so the backoff read
+    /// as already expired (or as lasting minutes). This pins the property that catches that:
+    /// with a clock the test drives, the victim is refused for exactly `failure_backoff` and
+    /// reservable one tick after it.
+    #[test]
+    fn an_abandoned_victim_backs_off_on_the_injected_clock() {
+        let base = Instant::now();
+        let ticks = Arc::new(Mutex::new(Duration::ZERO));
+        let reader = ticks.clone();
+        let budget =
+            StreamBudgetManager::with_clock(1, Arc::new(move || base + *reader.lock())).unwrap();
+        let backoff = budget.failure_backoff();
+
+        let victim = budget.reserve_background("tile-a").unwrap();
+        budget.mark_running(victim.token()).unwrap();
+        let transfer = budget
+            .begin_foreground_transfer("tile-b", DeviceWorkOwner::ManualControl)
+            .unwrap();
+        assert!(transfer.revoked_udid().is_some());
+
+        // Stamped at "now" as the budget sees it, not as the wall clock sees it.
+        budget.abandon_transfer(transfer);
+        assert_eq!(
+            budget.reserved_capacity(),
+            0,
+            "the slot is freed either way"
+        );
+
+        // One tick short of the deadline the victim is still in backoff...
+        *ticks.lock() = backoff - Duration::from_secs(1);
+        assert!(
+            matches!(
+                budget.reserve_background("tile-a"),
+                Err(StreamBudgetError::FailedBackoff { .. })
+            ),
+            "a backoff stamped on another clock would already have expired here"
+        );
+        // ...and at the deadline it is reservable again.
+        *ticks.lock() = backoff;
+        assert!(
+            budget.reserve_background("tile-a").is_ok(),
+            "a backoff stamped on another clock would still be running here"
+        );
     }
     #[test]
     fn foreground_preempts_only_background_and_never_another_foreground() {

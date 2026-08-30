@@ -45,6 +45,7 @@ function deps(over: Partial<DeviceActionDeps> = {}): DeviceActionDeps {
     setFilesFor: vi.fn(),
     setAdbFor: vi.fn(),
     setSyslogFor: vi.fn(),
+    setHealthFor: vi.fn(),
     ...over,
   };
 }

@@ -116,6 +116,34 @@ fn switch(args: &[String], flag: &str) -> Result<bool, String> {
     }
 }
 
+/// Every flag this tool defines. A `--word` outside this list is refused.
+const KNOWN_FLAGS: &[&str] = &["--open", "--capture"];
+
+/// Refuse a flag this tool does not define, instead of running a different stage.
+///
+/// **A typo silently downgraded the run.** `--captuer` is not `--capture`, so the switch read
+/// `false`, the staging guard had nothing to guard, and the tool opened a post page, skipped
+/// the capture the operator asked for, walked out and exited 0 — reporting a measurement that
+/// never happened. The same shape `--images --album x` had before it was made to refuse: an
+/// unreadable instruction must not become a different, quieter one.
+///
+/// Values are not flags: every parser here already refuses a `--`-shaped value, so anything
+/// starting with `--` is a flag position and must be one this tool knows.
+fn refuse_unknown_flags(args: &[String]) -> Result<(), String> {
+    let unknown: Vec<&str> = args
+        .iter()
+        .map(String::as_str)
+        .filter(|arg| arg.starts_with("--") && !KNOWN_FLAGS.contains(arg))
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "không hiểu cờ {unknown:?}; tool này chỉ có {KNOWN_FLAGS:?} — gõ sai một cờ là chạy \
+         một nấc khác mà vẫn báo thành công"
+    ))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -123,6 +151,10 @@ async fn main() -> anyhow::Result<()> {
         say("usage: share_scout <serial> [--open <x>,<y>] [--capture]");
         anyhow::bail!("thiếu serial");
     };
+    if let Err(complaint) = refuse_unknown_flags(&args) {
+        say(&complaint);
+        anyhow::bail!("{complaint}");
+    }
     let open = match open_point(&args) {
         Ok(open) => open,
         Err(complaint) => {
@@ -160,51 +192,20 @@ async fn main() -> anyhow::Result<()> {
     driver.launch_app(serial, &package).await?;
     tokio::time::sleep(std::time::Duration::from_secs(4)).await;
 
-    // Stage 1 — the profile grid. ProfileTab is measured on every set this fleet runs.
-    let Some(profile) = labels.label(TikTokControl::ProfileTab) else {
-        say("ProfileTab chưa đo trên bộ nhãn này — không có đường vào profile");
-        anyhow::bail!("ProfileTab chưa đo");
-    };
-    let Some(tab) = session.locate(profile.to_query()).await? else {
-        say("không thấy tab Profile trên màn hình hiện tại");
-        anyhow::bail!("không thấy tab Profile");
-    };
-    session.tap(tab.centre()).await?;
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    say("\n--- màn profile (tìm ô bài MỚI NHẤT trên lưới, ghi bounds cho --open) ---");
-    let grid = session.agent().source().await?;
-    let _ = std::fs::create_dir_all("target");
-    let _ = std::fs::write("target/share-scout-profile.xml", &grid);
-    dump_elements(&grid);
-    say("\n(XML đầy đủ: target/share-scout-profile.xml)");
-
-    let mut capture_outcome: Option<String> = None;
-    if let Some(point) = open {
-        // Stage 2 — the post page.
-        session.tap(point).await?;
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        say("\n--- trang bài (xác nhận share control + so với nhãn Share đo trên feed) ---");
-        let post_page = session.agent().source().await?;
-        let _ = std::fs::write("target/share-scout-post.xml", &post_page);
-        dump_elements(&post_page);
-        say("\n(XML đầy đủ: target/share-scout-post.xml)");
-
-        if capture {
-            // Stage 3 — the real capture, exactly the code the publish path will call.
-            say("\n--- capture_post_link (production code, không phải bản chép) ---");
-            let outcome = capture_post_link(&session, &labels).await;
-            match outcome.link() {
-                Some(link) => say(&format!("LINK: {link}")),
-                None => say(&format!("không lấy được link: {}", outcome.reason())),
-            }
-            capture_outcome = Some(outcome.reason());
-            say("\n--- màn hình sau capture ---");
-            let after = session.agent().source().await?;
-            let _ = std::fs::write("target/share-scout-after.xml", &after);
-            dump_elements(&after);
-            say("\n(XML đầy đủ: target/share-scout-after.xml)");
+    // **Every `?` past this line used to skip the walk-out.** The stages tap into a post
+    // page and read the hierarchy three times; a read that failed after the tap landed
+    // exited straight out with the phone standing on the post page — the exact stale screen
+    // the walk-out exists to prevent, and the final `ensure!` never ran to say so. Owning
+    // the fallible region the way `composer_scout` owns its walk-back is the fix: run the
+    // stages, walk out **whatever** they did, then report.
+    let staged = run_the_stages(&session, labels, open, capture).await;
+    let capture_outcome = match &staged {
+        Ok(reason) => reason.clone(),
+        Err(error) => {
+            say(&format!("\nlỗi giữa đường: {error:#}"));
+            None
         }
-    }
+    };
 
     // Walk out. A measuring phone left inside a post page or a share sheet is the stale
     // screen every next command trips over, so not getting back is a failure of THIS run.
@@ -246,7 +247,69 @@ async fn main() -> anyhow::Result<()> {
         "không lùi được về feed: máy còn đứng trong profile/trang bài/share sheet. Kiểm tra \
          tay trước khi chạy tiếp bất cứ thứ gì trên máy này."
     );
+    // The stages' own failure, reported after the phone is safe — never instead of it.
+    staged?;
     Ok(())
+}
+
+/// The stages that touch the phone, so the walk-out can own every exit from them.
+///
+/// Returns the capture's reason when stage three ran. Split out for the reason
+/// `post_into_drawer` and `read_the_gallery_candidates` are split out in their files: a `?`
+/// in here must not be able to jump over the Back walk that puts the phone back on the feed.
+async fn run_the_stages(
+    session: &riviu_android_driver::AndroidUiSession,
+    labels: riviu_core::tiktok_labels::TikTokControls,
+    open: Option<TapPoint>,
+    capture: bool,
+) -> anyhow::Result<Option<String>> {
+    // Stage 1 — the profile grid. ProfileTab is measured on every set this fleet runs.
+    let Some(profile) = labels.label(TikTokControl::ProfileTab) else {
+        anyhow::bail!("ProfileTab chưa đo trên bộ nhãn này — không có đường vào profile");
+    };
+    let Some(tab) = session.locate(profile.to_query()).await? else {
+        anyhow::bail!("không thấy tab Profile trên màn hình hiện tại");
+    };
+    session.tap(tab.centre()).await?;
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    say("\n--- màn profile (tìm ô bài MỚI NHẤT trên lưới, ghi bounds cho --open) ---");
+    let grid = session.agent().source().await?;
+    let _ = std::fs::create_dir_all("target");
+    let _ = std::fs::write("target/share-scout-profile.xml", &grid);
+    dump_elements(&grid);
+    say("\n(XML đầy đủ: target/share-scout-profile.xml)");
+
+    let Some(point) = open else {
+        return Ok(None);
+    };
+
+    // Stage 2 — the post page.
+    session.tap(point).await?;
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    say("\n--- trang bài (xác nhận share control + so với nhãn Share đo trên feed) ---");
+    let post_page = session.agent().source().await?;
+    let _ = std::fs::write("target/share-scout-post.xml", &post_page);
+    dump_elements(&post_page);
+    say("\n(XML đầy đủ: target/share-scout-post.xml)");
+
+    if !capture {
+        return Ok(None);
+    }
+
+    // Stage 3 — the real capture, exactly the code the publish path will call.
+    say("\n--- capture_post_link (production code, không phải bản chép) ---");
+    let outcome = capture_post_link(session, &labels).await;
+    match outcome.link() {
+        Some(link) => say(&format!("LINK: {link}")),
+        None => say(&format!("không lấy được link: {}", outcome.reason())),
+    }
+    let reason = outcome.reason();
+    say("\n--- màn hình sau capture ---");
+    let after = session.agent().source().await?;
+    let _ = std::fs::write("target/share-scout-after.xml", &after);
+    dump_elements(&after);
+    say("\n(XML đầy đủ: target/share-scout-after.xml)");
+    Ok(Some(reason))
 }
 
 #[cfg(test)]
@@ -303,5 +366,31 @@ mod tests {
         // guarantees is that the two flags read independently and repeats refuse.
         assert_eq!(switch(&line(&["SN", "--capture"]), "--capture"), Ok(true));
         assert!(switch(&line(&["SN", "--capture", "--capture"]), "--capture").is_err());
+    }
+
+    /// **A misspelled stage flag refuses; it does not quietly become a different stage.**
+    ///
+    /// `--captuer` read as "capture not asked for", so the run opened a post page, skipped
+    /// the capture, walked out and exited 0 — a measurement reported that never happened.
+    /// The staging guard only guards flags spelled the way this tool spells them.
+    #[test]
+    fn a_misspelled_flag_is_refused_rather_than_silently_skipping_its_stage() {
+        assert_eq!(refuse_unknown_flags(&line(&["SN"])), Ok(()));
+        assert_eq!(
+            refuse_unknown_flags(&line(&["SN", "--open", "540,760", "--capture"])),
+            Ok(())
+        );
+        for typo in ["--captuer", "--Capture", "--opne", "--visit-caption-step"] {
+            let refused = refuse_unknown_flags(&line(&["SN", "--open", "1,2", typo]));
+            assert!(
+                refused.as_ref().is_err_and(|why| why.contains(typo)),
+                "{typo} must be refused by name, not ignored: {refused:?}"
+            );
+        }
+        // A flag's *value* is not a flag, and must not be mistaken for one.
+        assert_eq!(
+            refuse_unknown_flags(&line(&["SN", "--open", "540,760"])),
+            Ok(())
+        );
     }
 }

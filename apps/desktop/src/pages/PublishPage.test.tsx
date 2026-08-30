@@ -317,9 +317,46 @@ describe("publish, bundle to phone", () => {
       />,
     );
 
-    await screen.findByText(/sẵn sàng/);
+    // The positive chip says what was actually checked. `hierarchyReady` comes from the
+    // shortest gap across the catalogue for that package — not from this phone's own
+    // build — so a chip promising "sẵn sàng" outright would be a claim the backend never
+    // made, and the phone would still be refused at the first tap after a TikTok update.
+    await screen.findByText(/bản đo có đủ nhãn/);
+    expect(screen.getByText(/chưa đối chiếu build máy/)).toBeTruthy();
     expect(screen.getByText(/thiếu ComposerCaption, PostButton/)).toBeTruthy();
     expect(ready).toHaveBeenCalledWith(["ANDROID-A", "ANDROID-B"]);
+  });
+
+  /**
+   * A phone whose TikTok updates in place keeps its udid, so the effect's key cannot
+   * notice the one change readiness is keyed on a build for. Without this button the only
+   * way to re-ask was to unplug the phone.
+   */
+  it("re-asks readiness when the operator presses Hỏi lại", async () => {
+    const ready = vi.mocked(publishReadiness);
+    ready.mockReset();
+    ready.mockResolvedValue([
+      { udid: "ANDROID-A", readiness: { kind: "hierarchyReady" } },
+    ] as never);
+    const android = (udid: string) =>
+      ({ ...iphone(udid), platform: "android" }) as DeviceInfo;
+    const user = userEvent.setup();
+
+    render(
+      <PublishPage
+        devices={[android("ANDROID-A")]}
+        selected={[]}
+        onSelectUdids={() => {}}
+      />,
+    );
+    await screen.findByText(/bản đo có đủ nhãn/);
+    const beforeClick = ready.mock.calls.length;
+
+    await user.click(screen.getByRole("button", { name: "Hỏi lại" }));
+    await waitFor(() => expect(ready.mock.calls.length).toBe(beforeClick + 1));
+
+    ready.mockReset();
+    ready.mockResolvedValue([] as never);
   });
 
   /**
@@ -395,11 +432,12 @@ describe("publish, bundle to phone", () => {
       hasToken: true,
     });
     render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
-    // The configured answer has to have LANDED before the absence proves anything —
-    // asserting immediately would pass on the loading state too.
-    await waitFor(() => expect(getConfig).toHaveBeenCalled());
-    await waitFor(() =>
-      expect(screen.queryByText(/Sheet chưa cấu hình/)).toBeNull(),
-    );
+    // **The anchor has to come from the second answer itself.** Waiting on
+    // `getConfig` having been called proved nothing — the first render already called it,
+    // so the assertion was satisfied by stale history while the page was still loading,
+    // and during loading the badge is absent anyway. The page writes the config's URL into
+    // the webhook field, so finding that value is proof this answer landed.
+    await screen.findByDisplayValue("https://script.google.com/macros/s/x/exec");
+    expect(screen.queryByText(/Sheet chưa cấu hình/)).toBeNull();
   });
 });

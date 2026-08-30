@@ -1493,10 +1493,16 @@ pub const TIKTOK_LABEL_SETS: &[TikTokLabels] = &[
         // (`label_scout`, m1-feed dump), the same string the `trill` set carries and now
         // measured here rather than borrowed from there.
         composer_open: Some(LabelMatch::Exact("Create")),
-        // Deliberately still `None` in the LANGUAGE set: this build renders the shutter as
-        // an **unresolved resource reference** (`@2131823287` on 46.2.1), and a reference is
-        // reassigned on every rebuild — it lives in the version table, where
-        // `TikTokControls::label` reads first. See `TikTokResourceLabels::composer_shutter`.
+        // Deliberately `None`, and **not yet catalogueable anywhere**: this build renders the
+        // shutter as an unresolved resource reference (`@2131823287` on 46.2.1), which is
+        // reassigned on every rebuild — so it must not go in this language set, which serves
+        // every version of the package. The version table is where a per-build id belongs,
+        // and it has **no field for this control**: `TikTokResourceLabels` carries
+        // `comment_send`, `picker_album_menu` and `composer_caption`, and
+        // `TikTokControls::label` routes only those three to it — `ComposerShutter` falls
+        // through to the language set. Measuring the shutter therefore starts by adding the
+        // field and its routing arm; writing `@2131823287` here instead is the cross-build
+        // id leak the version table exists to prevent.
         composer_shutter: None,
         // The S8+ fleet work never opened the composer on this build; 30/08/2026 did, and
         // stopped at the gallery entry: `beside_shutter` geometry is measured on `trill`,

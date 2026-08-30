@@ -1464,7 +1464,7 @@ async fn reserve_context(
                 // clean it up because `Revoking` is not releasable. Repeating this on
                 // distinct producers walked the fleet's capacity down to nothing while the
                 // quarantine count only said that *something* had failed.
-                streams.abandon_transfer(transfer, std::time::Instant::now());
+                streams.abandon_transfer(transfer);
                 return Err(ContextTransitionFailure {
                     error: driver_error(&revoked_udid, "stopOwnedStream", error),
                     context,

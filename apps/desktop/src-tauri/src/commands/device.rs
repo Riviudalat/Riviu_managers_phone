@@ -943,10 +943,15 @@ pub struct DeviceHealthReport {
     pub agent: riviu_core::AgentStatus,
     /// A live `/status` probe, `None` when the active backend is not Android.
     pub agent_ready_now: Option<bool>,
-    /// Riviu helper reachable right now (cached client answered).
+    /// Riviu helper reachable right now. `None` means **nobody has asked this phone yet**
+    /// — no session has attached it this run — which is neither "reachable" nor "not
+    /// reachable", and rendering it as the latter accused a healthy helper of a transport
+    /// fault on every freshly started app.
     pub helper_reachable: Option<bool>,
     /// Helper APK installed; `None` means the question itself failed — not "absent" (§9.97).
     pub helper_installed: Option<bool>,
+    /// Root routes, or `None` when neither root question could be put to the phone at all.
+    /// A phone that is offline is not a phone that is unrooted.
     pub root: Option<riviu_core::DeviceRootStatus>,
     pub tiktok_package: Option<String>,
     pub tiktok_version: Option<String>,
@@ -989,22 +994,32 @@ pub async fn device_health(
         return Ok(report);
     };
     report.agent_ready_now = Some(android.agent_ready(&udid).await);
-    let (helper_reachable, helper_installed) = android.helper_probe(&udid).await;
-    report.helper_reachable = Some(helper_reachable);
-    report.helper_installed = helper_installed;
-    if helper_installed.is_none() {
+    let helper = android.helper_probe(&udid).await;
+    report.helper_reachable = helper.reachable;
+    report.helper_installed = helper.installed;
+    if helper.installed.is_none() {
         report.notes.push(
             "Không hỏi được máy về Riviu helper — chưa với tới được, không phải chưa cài."
                 .to_string(),
         );
     }
-    // The same two questions `is_rooted` answers, and the same subtraction: name the
-    // route, not the union.
-    let has_su = android.is_rooted(&udid).await;
-    report.root = Some(riviu_core::DeviceRootStatus {
-        has_su,
-        shell_is_root: !has_su && android.can_run_privileged(&udid).await,
-    });
+    if helper.reachable.is_none() {
+        report.notes.push(
+            "Chưa phiên nào gắn Riviu helper trên máy này từ lúc mở app, nên chưa ai hỏi nó \
+             — đây không phải 'với tới không được'."
+                .to_string(),
+        );
+    }
+    // "Could not ask" is kept out of the answer: `is_rooted` collapses an offline phone to
+    // `false`, which is the safe default where a command is about to run and the wrong one
+    // here — a panel that says `không root` sends the operator to re-root a phone whose
+    // only problem is a cable.
+    report.root = android.root_status_or_unknown(&udid).await;
+    if report.root.is_none() {
+        report
+            .notes
+            .push("Không hỏi được máy về quyền root (máy không trả lời).".to_string());
+    }
     match android.tiktok_build(&udid).await {
         Ok((package, version, locale)) => {
             report.tiktok_package = Some(package);

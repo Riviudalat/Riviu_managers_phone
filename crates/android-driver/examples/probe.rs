@@ -72,9 +72,55 @@ macro_rules! timed {
     }};
 }
 
+/// Every flag this probe defines. A `--word` outside this list is refused.
+const KNOWN_FLAGS: &[&str] = &[
+    "--terminate",
+    "--feed",
+    "--measure-liked",
+    "--measure-comment",
+    "--copy-link",
+    "--measure-mention",
+    "--measure-comment-list",
+    "--measure-reply",
+    "--measure-target-open",
+    "--measure-carousel",
+    "--measure-feed-carousel",
+    "--gate-standalone",
+    "--measure-tab-bar",
+    "--measure-own-post",
+    "--measure-composer",
+    "--measure-gallery",
+];
+
+/// Refuse a flag this probe does not define, instead of skipping the step it names.
+///
+/// Every measuring step here is opt-in, which means a typo is indistinguishable from not
+/// asking: `--measure-gallry` runs the default probe, prints nothing about the gallery, and
+/// exits 0 — so a script and an operator both read a measurement that never ran. Values do
+/// not start with `--` (serials, urls, comment text, counts), so anything that does is a flag
+/// position and must be one this file knows.
+fn refuse_unknown_flags(args: &[String]) -> Result<(), String> {
+    let unknown: Vec<&str> = args
+        .iter()
+        .map(String::as_str)
+        .filter(|arg| arg.starts_with("--") && !KNOWN_FLAGS.contains(arg))
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "không hiểu cờ {unknown:?}; probe chỉ có {KNOWN_FLAGS:?} — gõ sai một cờ là bỏ qua \
+         đúng bước muốn đo mà vẫn thoát 0"
+    ))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Err(complaint) = refuse_unknown_flags(&args) {
+        println!("{complaint}");
+        anyhow::bail!("{complaint}");
+    }
     let terminate = args.iter().any(|arg| arg == "--terminate");
     let wanted = args.iter().find(|arg| !arg.starts_with("--")).cloned();
 
@@ -525,6 +571,9 @@ async fn main() -> anyhow::Result<()> {
         );
         if url.is_empty() || text.is_empty() {
             println!("  usage: --gate-standalone <url> <comment text>");
+            // A gate the operator asked for and that never ran is a failed step, not a
+            // skipped one: exiting 0 here tells a script the gate passed.
+            failed_steps += 1;
         } else {
             match gate_standalone(ui, labels, size, &url, &text).await {
                 Ok(()) => {}
@@ -1487,7 +1536,15 @@ async fn gate_standalone(
                 refusal.message()
             );
             println!("  nothing was typed. Gate H4 did not run.");
-            return Ok(());
+            // **A gate that did not run did not pass.** Returning `Ok(())` here put the
+            // caller on its success arm, so a refusal to even reach the post — a dead link,
+            // a target that never loaded — read as a green gate. Nothing was typed either
+            // way; what changes is only whether the exit code says so.
+            anyhow::bail!(
+                "gate H4 không chạy: không tới được bài ({} — {})",
+                refusal.code(),
+                refusal.message()
+            );
         }
     }
 
@@ -3052,6 +3109,44 @@ mod tests {
             !ranked.list().iter().any(|c| c.right - c.x == 0.0),
             "a zero-width rectangle would sort first on clickable and be tapped"
         );
+    }
+
+    /// **A misspelled step flag is refused, not read as "not asked for".**
+    ///
+    /// Every step here is opt-in, so a typo and an absence look identical from inside: the
+    /// probe runs its default sweep, says nothing about the step, and exits 0. The operator
+    /// reads that as a measurement.
+    #[test]
+    fn a_misspelled_step_flag_is_refused_rather_than_read_as_absent() {
+        let line =
+            |args: &[&str]| -> Vec<String> { args.iter().map(|arg| arg.to_string()).collect() };
+        assert_eq!(refuse_unknown_flags(&line(&["SERIAL"])), Ok(()));
+        assert_eq!(
+            refuse_unknown_flags(&line(&["SERIAL", "--measure-gallery", "4", "--terminate"])),
+            Ok(())
+        );
+        // A flag's value is never mistaken for a flag.
+        assert_eq!(
+            refuse_unknown_flags(&line(&[
+                "SERIAL",
+                "--gate-standalone",
+                "https://www.tiktok.com/@a/photo/1",
+                "hay quá"
+            ])),
+            Ok(())
+        );
+        for typo in [
+            "--measure-gallry",
+            "--measure_gallery",
+            "--Feed",
+            "--capture",
+        ] {
+            let refused = refuse_unknown_flags(&line(&["SERIAL", typo]));
+            assert!(
+                refused.as_ref().is_err_and(|why| why.contains(typo)),
+                "{typo} must be refused by name, not ignored: {refused:?}"
+            );
+        }
     }
 
     /// **Asked-for-and-unreadable is a complaint, not a silent skip.** (D-10, probe edition.)
