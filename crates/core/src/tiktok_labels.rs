@@ -727,24 +727,36 @@ impl TikTokLabels {
 /// copied the id out. A version with no entry makes those controls [`None`] — the flow refuses
 /// rather than tapping an id that may since have been reassigned to another button.
 ///
-/// **`versionName` is a weaker key than it looks, and this is deliberate.** The identity of an
-/// Android build is `versionName` *plus* `versionCode` — [`parse_version_code`] exists, and a
-/// [`crate::DeviceCapabilitySnapshot`] records both for exactly this reason: a hot fix can ship
-/// under an unchanged `versionName`. This table keys on the name alone, so a phone running a
-/// rebuild of `38.3.2` matches a row measured on a different `38.3.2` and is handed ids that may
-/// have moved.
+/// **`versionName` is a weaker key than it looks, and this is deliberate.** `versionName` plus
+/// `versionCode` is a much better lookup key than the name alone — [`parse_version_code`]
+/// exists, and a [`crate::DeviceCapabilitySnapshot`] records both, because a hot fix can ship
+/// under an unchanged `versionName`. It is still **not a build identity**: both numbers are
+/// declared by the app, and a rebuilt or sideloaded APK can reuse either. Only a hash over the
+/// package (and its splits) identifies a build. This table keys on the name alone, so a phone
+/// running a different `38.3.2` matches a row measured on some other `38.3.2` and is handed ids
+/// that may have moved.
 ///
 /// The alternative was a `version_code` field on every row set to `None`, because the fleet's
 /// dumps were taken before the code was being recorded and nobody can now say which build each
-/// row came from. A field that is always `None` is not a check; it is the appearance of one. So
-/// the key stays as measured, and the exposure is written down here instead:
+/// row came from. Such a field is a real check **only if it fails closed** — a row with no code
+/// treated as unmeasured — and that would make `comment_send` refuse on all twenty phones until
+/// somebody re-measures them, which stops the nurture path this week to reduce a risk that has
+/// not yet been observed once. A field that instead falls *through* when it is `None` is not a
+/// check at all; it is the appearance of one.
 ///
-/// * The blast radius is one wrong tap on a control whose id moved, not a wrong post — every
-///   resource-keyed control today (`comment_send`, `picker_album_menu`) sits *before* anything
-///   irreversible, and the publish path confirms the album by reading it back.
-/// * Re-measuring is the fix, not a wider key: [`crate::tiktok_labels::parse_version_code`] is
-///   already called on the fleet, so a future row can record the code it was read on and this
-///   note can shrink to those rows that still cannot.
+/// So the key stays as measured, and the exposure is written down here instead:
+///
+/// * `picker_album_menu` is protected downstream: the publish path taps the pill and then
+///   **reads the album name back** ([`crate::tiktok_composer`]), so a reassigned id refuses
+///   before any image is chosen.
+/// * `comment_send` is **not** protected that way, and an earlier version of this note claiming
+///   every resource-keyed control sits before something irreversible was simply wrong. That
+///   control *is* the Send button: [`crate::tiktok_drawer`] locates it and taps it, and what
+///   follows is a comment on somebody else's video from a real account. A reassigned id here is
+///   a wrong tap on a live screen, not a refusal.
+/// * Re-measuring is the fix, and it is cheap: [`parse_version_code`] already runs on the
+///   fleet, so a row measured from today on can record the code it was read at and this note
+///   can shrink to the rows that still cannot.
 #[derive(Debug, Clone, Copy)]
 pub struct TikTokResourceLabels {
     pub package: &'static str,

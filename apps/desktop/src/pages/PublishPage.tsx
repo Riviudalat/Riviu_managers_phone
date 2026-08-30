@@ -296,7 +296,23 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
               {campaign.runAt ? ` · ${campaign.runAt}` : ""}
             </p>
             <div className="row">
-              {campaign.state === "ready" && (
+              {/*
+                **`failedBeforeDispatch` belongs here, and leaving it out stranded campaigns.**
+
+                Every refusal that happens after the phone is claimed — a route disagreement, a
+                session that would not open, an unmeasured build — ends the campaign in
+                `failedBeforeDispatch`, which the backend calls retryable and
+                `claim_publish_campaign_for_transfer` really does accept. But the retry has to
+                start at Transfer, not Post: claiming an assignment overwrites its
+                `evidence_json` with the run intent, so the `nativeImport.importId` the post
+                path needs is gone, and Post refuses with "native import proof is missing".
+
+                With this button hidden for that state, the screen offered Transfer only on
+                `ready` and Post only on `imported` — so a campaign in the one state the
+                backend was built to let an operator retry had no button at all, and the
+                retryability was true in the database and false on the screen.
+              */}
+              {(campaign.state === "ready" || campaign.state === "failedBeforeDispatch") && (
                 <button
                   type="button"
                   className="primary"
@@ -314,7 +330,7 @@ export function PublishPage({ devices, selected, onSelectUdids }: SelProps) {
                     }
                   }}
                 >
-                  Transfer media
+                  {campaign.state === "ready" ? "Transfer media" : "Chuyển lại media"}
                 </button>
               )}
               {campaign.state === "imported" && (

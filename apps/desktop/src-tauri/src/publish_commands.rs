@@ -1309,7 +1309,7 @@ async fn wait_for_post_frame(
     loop {
         if let Some(frame) = frames.latest(udid) {
             if frame_sha256(&frame) != baseline_sha {
-                if frame_reports_account_lock(&frame).await {
+                if frame_reports_account_lock(&frame).await.is_locked() {
                     anyhow::bail!("TikTok account status blocked the post: account_locked");
                 }
                 let after_redness = bottom_right_redness(&frame);
@@ -1325,52 +1325,96 @@ async fn wait_for_post_frame(
     }
 }
 
+/// What reading the account-status alert off a frame actually produced.
+///
+/// Three states, because the difference between them is what the evidence has to record.
+/// Collapsing `Unavailable` into `NotLocked` is what let a run on a host with no reader write
+/// `accountLockScreened: true`.
+// On a host with no OCR the reader only ever produces `Unavailable`, so the other two
+// variants are unconstructed in that build. They stay because the *type* is the contract:
+// dropping them off non-macOS would put the host back inside the verdict, which is the bug
+// this enum replaced.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockScreening {
+    /// The frame was read and carries no account-status alert.
+    NotLocked,
+    /// The frame was read and it is an account-status alert.
+    Locked,
+    /// **Nobody read it.** No OCR on this host, or the reader failed on this frame.
+    Unavailable,
+}
+
+impl LockScreening {
+    fn is_locked(self) -> bool {
+        matches!(self, Self::Locked)
+    }
+
+    /// What goes in the evidence, so a run can be told apart afterwards.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotLocked => "not_locked",
+            Self::Locked => "locked",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
 /// A post leaving the composer is only a transport transition. TikTok can
 /// replace that transition with an account-status alert, which must remain an
 /// uncertain effect rather than being reported as a successful post.
 ///
 /// # This screen is only ever read on macOS, and the caller's success is a colour guess
 ///
-/// **Off macOS this returns `false` for every frame, including a frame that is an
-/// account-status alert.** The reader is Vision OCR, which exists on no other host, and there
-/// is no iOS hardware on this fleet to measure a replacement against. So on the Windows machine
-/// this project is developed and run on, the check is not a check.
+/// **Off macOS nothing reads the frame at all**, including a frame that is an account-status
+/// alert: the reader is Vision OCR, which exists on no other host, and there is no iOS hardware
+/// on this fleet to measure a replacement against. On macOS the reader can also simply fail on
+/// a given frame. Both of those are [`LockScreening::Unavailable`] — **not** `NotLocked`, which
+/// is a positive statement that somebody looked. Returning `false` for "nobody looked" is how
+/// the evidence came to claim a screening that never happened.
 ///
 /// That matters because of what the caller does with it. [`wait_for_post_frame`] decides a post
 /// succeeded from two signals — the frame changed, and the red of the Post button left the
-/// bottom-right corner — and an account-status alert satisfies both: it is a different screen,
-/// and it has no red Post button on it. With OCR unavailable, a blocked post is recorded as
-/// `Posted`, with a `frameSha256` of the alert.
+/// bottom-right corner. **Any** screen that satisfies both is accepted: an account-status
+/// alert, an error modal, a network sheet, a system permission dialog. The known alert text is
+/// the only one anything screens for, and only where OCR runs. With screening unavailable, a
+/// blocked post is recorded as `Posted`, with a `frameSha256` of whatever screen stopped it.
 ///
-/// Two things keep that from being silent rather than fixing it, and neither is a fix:
+/// What this does and does not do about that:
 ///
-/// * The evidence written by the pixel route names how the verdict was reached
-///   (`postConfirmedBy`) and whether the alert was screened for at all
-///   (`accountLockScreened`), so a run on this host is distinguishable afterwards from a run on
-///   a host that could read the screen.
-/// * The route is unreachable for this fleet's twenty phones: they are Android, and
-///   [`route_of`] sends them through the measured composer, which confirms a post by locating
-///   controls rather than by counting red pixels.
+/// * The evidence names how the verdict was reached (`postConfirmedBy`) and what the screening
+///   actually produced (`accountLockScreened`: `not_locked` / `unavailable`), so a run that was
+///   never screened is distinguishable afterwards from one that passed.
+/// * It does **not** refuse. Failing closed here — declining the pixel route on a host with no
+///   reader — is a real option and costs this fleet nothing, because its twenty phones are
+///   Android and [`route_of`] sends them through the measured composer instead. It is left
+///   undone deliberately: it would disable iOS publishing outright on every non-macOS host, and
+///   that is the operator's call to make, not a side effect of a review fix.
 ///
 /// Measuring a text-free signal for the alert — its layout, or a button label read through the
 /// element tree rather than OCR — is the real fix, and it needs an iOS device to measure on.
-async fn frame_reports_account_lock(frame: &[u8]) -> bool {
+async fn frame_reports_account_lock(frame: &[u8]) -> LockScreening {
     #[cfg(target_os = "macos")]
     {
+        // A reader that errored did not say "no alert". It said nothing.
         let Ok(observations) = crate::interaction_ocr::recognize(frame).await else {
-            return false;
+            return LockScreening::Unavailable;
         };
         let text = observations
             .iter()
             .map(|observation| observation.text.to_lowercase())
             .collect::<Vec<_>>()
             .join(" ");
-        account_status_text_is_locked(&text)
+        if account_status_text_is_locked(&text) {
+            LockScreening::Locked
+        } else {
+            LockScreening::NotLocked
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = frame;
-        false
+        LockScreening::Unavailable
     }
 }
 
@@ -1641,7 +1685,8 @@ async fn post_through_the_pixel_grid(
         session.tap_native(POST_BUTTON).await?;
         let after_post_tap =
             wait_for_changed_frame(frames, udid, &typed_sha, Duration::from_secs(8)).await?;
-        if frame_reports_account_lock(&after_post_tap).await {
+        let screening = frame_reports_account_lock(&after_post_tap).await;
+        if screening.is_locked() {
             anyhow::bail!("TikTok account status blocked the post: account_locked");
         }
         let confirmation_sha = if is_public_post_confirmation(&after_post_tap) {
@@ -1676,10 +1721,12 @@ async fn post_through_the_pixel_grid(
             "frameSha256": frame_sha256(&posted),
             "postButtonRednessBefore": post_red_before,
             // **Say what this verdict is made of.** It is not a located control; it is a frame
-            // that changed and lost its red corner, and on a host without OCR nothing screened
-            // out an account-status alert. See [`frame_reports_account_lock`].
+            // that changed and lost its red corner. `accountLockScreened` reports what the
+            // reader actually produced — `unavailable` covers both "no OCR on this host" and
+            // "OCR failed on this frame", and it used to be `cfg!(target_os = "macos")`, which
+            // answered a question about the build rather than about this run.
             "postConfirmedBy": "frame_change_and_redness_drop",
-            "accountLockScreened": cfg!(target_os = "macos"),
+            "accountLockScreened": screening.as_str(),
         }))
     }
     .await;
@@ -1800,6 +1847,7 @@ mod tests {
     use super::refuse_devices_whose_composer_is_not_measured;
     use super::refuse_when_the_route_authorities_disagree;
     use super::state_for_outcome;
+    use super::LockScreening;
     use super::PostOutcome;
     use super::IOS_PIXEL_GRID_MAX_IMAGES;
     use super::PUBLISH_FAN_OUT_STAGGER;
@@ -1859,6 +1907,42 @@ mod tests {
                 "agreeing on {both} is the ordinary case"
             );
         }
+    }
+
+    /// **"Nobody looked" is not "there was nothing to see".**
+    ///
+    /// The screening used to be a `bool`, so a host with no OCR and a frame that OCR failed on
+    /// both came back `false` — the same value as a frame that was read and found clean. The
+    /// evidence then recorded `accountLockScreened: cfg!(target_os = "macos")`, which answers a
+    /// question about the build rather than about the run.
+    #[test]
+    fn an_unread_frame_is_not_a_frame_that_passed() {
+        assert!(!LockScreening::Unavailable.is_locked());
+        assert!(!LockScreening::NotLocked.is_locked());
+        assert!(LockScreening::Locked.is_locked());
+        // The three have to be distinguishable in the evidence, or the distinction only exists
+        // in memory and the run cannot be judged afterwards.
+        let written = [
+            LockScreening::NotLocked.as_str(),
+            LockScreening::Locked.as_str(),
+            LockScreening::Unavailable.as_str(),
+        ];
+        assert_eq!(written, ["not_locked", "locked", "unavailable"]);
+    }
+
+    /// And the evidence reports the run's screening, not the build's capabilities.
+    #[test]
+    fn the_pixel_evidence_records_what_the_screening_produced() {
+        let body = code_of("async fn post_through_the_pixel_grid(");
+        assert!(
+            body.iter()
+                .any(|line| line.contains("\"accountLockScreened\": screening.as_str()")),
+            "the evidence must carry this run's screening result"
+        );
+        assert!(
+            !body.iter().any(|line| line.contains("cfg!(target_os")),
+            "a compile-time constant cannot say whether this frame was read"
+        );
     }
 
     fn test_bundle(id: &str) -> riviu_core::PublishBundle {
@@ -2164,6 +2248,24 @@ mod tests {
             "the check is at line {asks} of the body and the branch at {branches}; \
              a check after the branch has nothing left to refuse"
         );
+        // **And the answer has to leave the function.**
+        //
+        // Ordering alone was too weak, and the review found the stub that passes it:
+        //
+        // ```rust
+        // let _ignored = refuse_when_the_route_authorities_disagree(...);
+        // let _cleanup = tidy_up_the_imported_media(...).await;
+        // let action_result = if session.supports_element_bounds() { /* still posts */ };
+        // ```
+        //
+        // Both tokens, in the right order, and the phone posts anyway. A `return` between the
+        // question and the branch is what makes the refusal a refusal.
+        assert!(
+            body[asks..branches].iter().any(
+                |line| line.starts_with("return ") || line.contains("return fold_cleanup_into")
+            ),
+            "the refusal has to return; asking and discarding the answer is not a check"
+        );
         // And the media is taken back off the phone on that path — it was imported before any
         // of this ran, and a refusal that leaves the campaign's images in the gallery is a
         // refusal the operator has to clean up by hand on twenty phones.
@@ -2172,6 +2274,18 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("tidy_up_the_imported_media")),
             "a route refusal still has to clear the imported media"
+        );
+        // The session has to exist before the question is asked: `supports_element_bounds` is
+        // the session's own answer, and there is nothing to compare the preflight against until
+        // `streaming_session` has handed one over.
+        let opens = body
+            .iter()
+            .position(|line| line.contains("control.streaming_session("))
+            .expect("post_one_assignment must still open a session");
+        assert!(
+            opens < asks,
+            "the session opens at line {opens} and the question is asked at {asks}; \
+             the question needs both answers to exist"
         );
     }
 

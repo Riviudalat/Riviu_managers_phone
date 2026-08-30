@@ -2354,8 +2354,16 @@ async fn measure_gallery_entry(
         .locate(opener.to_query())
         .await?
         .ok_or_else(|| anyhow::anyhow!("the composer opener is not on screen"))?;
-    ui.tap(element.centre()).await?;
-    tokio::time::sleep(Duration::from_millis(4_000)).await;
+    // **The tap is inside the protected region too, not before it.**
+    //
+    // `ui.tap(...).await?` sat here with a `?` on it. A tap whose acknowledgement is lost —
+    // the command reached the phone, the reply did not — returned an error from a screen that
+    // had just become the composer, past every Back press below. That is the same stranded
+    // phone the split was written to prevent, one line above where the protection starts.
+    let opened = ui.tap(element.centre()).await;
+    if opened.is_ok() {
+        tokio::time::sleep(Duration::from_millis(4_000)).await;
+    }
 
     // **Past this line the composer is open, so every exit walks back out.**
     //
@@ -2364,7 +2372,15 @@ async fn measure_gallery_entry(
     // returned straight past the Back loop at the end, leaving the phone sitting in the
     // composer — and the next command an operator runs starts from a screen it does not expect.
     // Backing out is the one part that has to happen whatever the reading did.
-    let measured = read_the_gallery_candidates(session, ui, labels, which).await;
+    let measured = match opened {
+        // A tap that did not report back may still have opened the composer, so the walk is
+        // skipped and the back-out is not.
+        Err(error) => Err(anyhow::anyhow!(
+            "the composer opener did not acknowledge the tap ({error}); \
+             backing out in case it opened anyway"
+        )),
+        Ok(()) => read_the_gallery_candidates(session, ui, labels, which).await,
+    };
     if let Err(error) = &measured {
         println!("  ! {error:#}");
     }
@@ -2578,10 +2594,23 @@ struct Candidate {
 /// * **The size** must be within twice the shutter's height in both directions. A rectangle
 ///   the size of the screen is an ancestor, whatever its centre says.
 /// * **Clickable first**, then left to right.
+///
+/// # Both filters are one screen's arithmetic, and they can be wrong on another
+///
+/// The ratios come from a single portrait dump of one build on a 1080x2220 phone. A layout that
+/// puts the gallery entry somewhere else — landscape, a tablet, a large-text accessibility
+/// setting, a future redesign — can put the real control outside either filter: a wide tile
+/// exceeds the size ceiling, and an entry left of or above the shutter fails the centre test.
+///
+/// So a filter that removes **everything** is treated as a wrong filter rather than as an
+/// answer. The unfiltered list comes back with a printed warning, because on a screen nobody
+/// has measured the operator wants to see the rectangles and judge, not be told there are none.
+/// A filter that removes *some* candidates is still trusted — there is no way to tell a wrongly
+/// dropped entry from a correctly dropped ancestor without another measurement.
 fn rank_gallery_candidates(shutter: (f64, f64, f64, f64), nodes: &[Node]) -> Vec<Candidate> {
     let (_, sy, sright, sbottom) = shutter;
     let ceiling = (sbottom - sy) * 2.0;
-    let mut candidates: Vec<Candidate> = nodes
+    let unlabelled: Vec<Candidate> = nodes
         .iter()
         .filter(|node| node.desc.trim().is_empty() && node.text.trim().is_empty())
         .filter_map(|node| {
@@ -2593,12 +2622,27 @@ fn rank_gallery_candidates(shutter: (f64, f64, f64, f64), nodes: &[Node]) -> Vec
                 bottom,
             })
         })
+        // A rectangle with no area is not a tappable point on any screen, measured or not, so
+        // this one is not part of the fallback.
+        .filter(|c| c.right - c.x > 0.0 && c.bottom - c.y > 0.0)
+        .collect();
+    let mut candidates: Vec<Candidate> = unlabelled
+        .iter()
+        .copied()
         .filter(|c| {
             let (width, height) = (c.right - c.x, c.bottom - c.y);
-            width > 0.0 && height > 0.0 && width <= ceiling && height <= ceiling
+            width <= ceiling && height <= ceiling
         })
         .filter(|c| (c.x + c.right) / 2.0 >= sright && c.bottom > sy && c.y < sbottom)
         .collect();
+    if candidates.is_empty() && !unlabelled.is_empty() {
+        println!(
+            "  ! the shape filters left nothing of {} unlabelled rectangle(s) — this screen does \
+             not match the one they were measured on; showing all of them",
+            unlabelled.len()
+        );
+        candidates = unlabelled;
+    }
     candidates.sort_by(|a, b| b.clickable.cmp(&a.clickable).then(a.x.total_cmp(&b.x)));
     candidates
 }
@@ -2777,6 +2821,64 @@ mod tests {
         assert!(
             ranked.iter().any(|c| c.x < shutter.2),
             "690 is left of the shutter's right edge at 705, and it still counts"
+        );
+    }
+
+    /// **On a screen the filters were not measured on, showing nothing is the wrong answer.**
+    ///
+    /// Both filters are ratios taken from one portrait dump. A landscape or tablet layout can
+    /// put the real gallery entry outside either of them, and an empty list tells the operator
+    /// "there is nothing here" about a screen that has the control on it — the worst outcome
+    /// for a command whose whole job is to find something nobody has measured yet.
+    #[test]
+    fn a_screen_that_matches_no_filter_still_shows_its_rectangles() {
+        // A wide landscape-ish layout: everything is left of the shutter and wider than the
+        // ceiling, so both filters reject every candidate.
+        let shutter = (1500.0, 400.0, 1700.0, 600.0);
+        let nodes = vec![Node {
+            class: "android.widget.FrameLayout".into(),
+            desc: String::new(),
+            text: String::new(),
+            resource_id: "com.ss.android.ugc.trill:id/bos".into(),
+            bounds: "[100,300][900,700]".into(),
+            clickable: true,
+            enabled: true,
+        }];
+        let ranked = rank_gallery_candidates(shutter, &nodes);
+        assert_eq!(
+            ranked.len(),
+            1,
+            "a filter that removes everything is a wrong filter, not an empty screen"
+        );
+    }
+
+    /// The fallback does not resurrect rectangles with no area.
+    #[test]
+    fn the_fallback_still_refuses_a_rectangle_with_no_area() {
+        let shutter = (1500.0, 400.0, 1700.0, 600.0);
+        let nodes = vec![Node {
+            class: "android.view.View".into(),
+            desc: String::new(),
+            text: String::new(),
+            resource_id: String::new(),
+            bounds: "[100,300][100,300]".into(),
+            clickable: true,
+            enabled: true,
+        }];
+        assert!(
+            rank_gallery_candidates(shutter, &nodes).is_empty(),
+            "a zero-area rectangle is not a tap point on any screen"
+        );
+    }
+
+    /// And the fallback stays out of the way when the filters do find something.
+    #[test]
+    fn a_screen_the_filters_understand_does_not_get_the_fallback() {
+        let (shutter, nodes) = the_fleets_own_camera_screen();
+        assert_eq!(
+            rank_gallery_candidates(shutter, &nodes).len(),
+            7,
+            "the screen-tall container must still be dropped, not handed back by the fallback"
         );
     }
 

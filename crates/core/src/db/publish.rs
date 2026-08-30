@@ -1378,6 +1378,13 @@ mod claim_tests {
                 "uncertain",
                 serde_json::Value::String("post_or_cleanup_failed".into()),
             ),
+            // The retryable ending is the one an operator acts on, and it was missing here:
+            // code that skipped or mislabelled *this* event passed the other two cases.
+            (
+                PublishRunOutcome::NothingPublished,
+                "failed_before_dispatch",
+                serde_json::Value::String("post_refused_before_dispatch".into()),
+            ),
         ] {
             let record = campaign(&db, &[&format!("phone-{outcome:?}")]);
             assert!(db
@@ -1410,6 +1417,64 @@ mod claim_tests {
                 "{outcome:?} event revision matches the campaign"
             );
         }
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// **The state and the event go in together, or neither goes in.**
+    ///
+    /// The two tests above pass on an implementation that commits the state first and inserts
+    /// the event afterwards on another connection — as long as both statements succeed. The
+    /// reason the transaction exists is the case where the second one does not, so this forces
+    /// that: a trigger refuses the insert, and the campaign must still read `posting` at the
+    /// revision it had.
+    ///
+    /// The alternative — state advanced to `succeeded`, no event, revision bumped — is the
+    /// worst of the three possible outcomes: the campaign looks finished, its history says it
+    /// never was, and the terminal state of an irreversible run cannot be reconstructed.
+    #[test]
+    fn a_finish_whose_event_cannot_be_written_leaves_the_campaign_where_it_was() {
+        let (db, path) = fixture();
+        let record = campaign(&db, &["phone-a"]);
+        assert!(db
+            .claim_publish_campaign_for_posting(&record.id)
+            .expect("claim"));
+        let before = db.publish_campaign_revision(&record.id).expect("revision");
+
+        db.conn()
+            .expect("conn")
+            .execute_batch(
+                "CREATE TRIGGER refuse_events BEFORE INSERT ON publish_events \
+                 BEGIN SELECT RAISE(ABORT, 'no events today'); END;",
+            )
+            .expect("trigger");
+
+        assert!(
+            db.finish_publish_campaign(&record.id, PublishRunOutcome::AllPosted)
+                .is_err(),
+            "a finish that could not record itself must not report success"
+        );
+        assert_eq!(
+            db.publish_campaign_state(&record.id).expect("state"),
+            Some(crate::publish::PublishCampaignState::Posting),
+            "the state moved without an event behind it"
+        );
+        assert_eq!(
+            db.publish_campaign_revision(&record.id).expect("revision"),
+            before,
+            "the revision moved without an event behind it"
+        );
+
+        db.conn()
+            .expect("conn")
+            .execute_batch("DROP TRIGGER refuse_events;")
+            .expect("drop");
+        // And with the obstruction gone it finishes normally, so the rollback left nothing
+        // half-written behind it.
+        assert_eq!(
+            db.finish_publish_campaign(&record.id, PublishRunOutcome::AllPosted)
+                .expect("finish"),
+            Some(crate::publish::PublishCampaignState::Succeeded)
+        );
         let _ = std::fs::remove_file(path);
     }
 

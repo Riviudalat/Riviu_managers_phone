@@ -2,7 +2,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { listenRiviuEvents, publishList } from "../api";
+import { listenRiviuEvents, publishList, publishTransfer } from "../api";
 import { PublishPage } from "./PublishPage";
 import { resetToasts } from "../toastStore";
 import type { AppEvent, DeviceInfo, PublishBundle, PublishFolderManifest } from "../types";
@@ -234,5 +234,50 @@ describe("publish, bundle to phone", () => {
     list.mockResolvedValue([] as never);
     listen.mockReset();
     listen.mockImplementation(async () => () => undefined);
+  });
+
+  /**
+   * **A campaign the backend will re-transfer has to have a button that re-transfers it.**
+   *
+   * Every refusal after the phone is claimed — a route disagreement, a session that would not
+   * open, an unmeasured build — ends the campaign in `failedBeforeDispatch`, and
+   * `claim_publish_campaign_for_transfer` accepts exactly that state. The retry has to start at
+   * Transfer rather than Post, because claiming an assignment overwrites its `evidence_json`
+   * with the run intent and the `nativeImport.importId` that Post needs is gone.
+   *
+   * With Transfer shown only for `ready` and Post only for `imported`, the one state the
+   * backend was built to let an operator retry had no button at all: the campaign was
+   * retryable in the database and finished on the screen.
+   */
+  it("offers a re-transfer for a campaign that failed before dispatch", async () => {
+    const user = userEvent.setup();
+    const list = vi.mocked(publishList);
+    const transfer = vi.mocked(publishTransfer);
+    list.mockReset();
+    transfer.mockClear();
+    list.mockResolvedValue([
+      {
+        id: "campaign-1",
+        requestId: "req-1",
+        sourceRoot: "C:/carousels",
+        state: "failedBeforeDispatch",
+        runAt: null,
+        visibility: "public",
+        cleanupPolicy: "afterPost",
+        assignments: [],
+        createdAt: "2026-08-18T00:00:00.000Z",
+        updatedAt: "2026-08-18T00:00:00.000Z",
+        errorCode: "post_refused_before_dispatch",
+      },
+    ] as never);
+
+    render(<PublishPage devices={devices} selected={[]} onSelectUdids={() => {}} />);
+
+    const retry = await screen.findByRole("button", { name: "Chuyển lại media" });
+    await user.click(retry);
+    await waitFor(() => expect(transfer).toHaveBeenCalledWith("campaign-1"));
+
+    list.mockReset();
+    list.mockResolvedValue([] as never);
   });
 });
